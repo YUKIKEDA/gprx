@@ -9,3 +9,6 @@ fmt:
 
 test:
     cargo test
+
+bench:
+    cargo bench --bench exact

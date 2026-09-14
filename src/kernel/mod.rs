@@ -11,7 +11,7 @@ pub use compiled::CompiledKernel;
 pub use rbf::RbfKernel;
 pub use spec::{KernelSpec, ParameterBinding};
 
-use crate::error::GpError;
+use crate::error::GprError;
 use faer::{MatMut, MatRef};
 
 /// Which triangle of a symmetric kernel matrix to write.
@@ -51,9 +51,9 @@ pub(crate) fn visit_triangle(n: usize, uplo: Triangle, mut visit: impl FnMut(usi
     }
 }
 
-fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usize, GpError> {
+fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usize, GprError> {
     if dist.nrows() != dist.ncols() {
-        return Err(GpError::InvalidHyperparameter {
+        return Err(GprError::InvalidHyperparameter {
             reason: format!(
                 "distance matrix must be square, got {}x{}",
                 dist.nrows(),
@@ -62,7 +62,7 @@ fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<us
         });
     }
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-        return Err(GpError::InvalidHyperparameter {
+        return Err(GprError::InvalidHyperparameter {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -73,17 +73,59 @@ fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<us
         });
     }
     if dist.nrows() == 0 {
-        return Err(GpError::EmptyInput);
+        return Err(GprError::EmptyInput);
     }
     Ok(dist.nrows())
+}
+
+fn require_same_shape(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(), GprError> {
+    if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                out.nrows(),
+                out.ncols(),
+                dist.nrows(),
+                dist.ncols()
+            ),
+        });
+    }
+    if dist.nrows() == 0 || dist.ncols() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    Ok(())
+}
+
+fn write_dense(
+    dist: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    mut kernel: impl FnMut(f64) -> Result<f64, GprError>,
+) -> Result<(), GprError> {
+    require_same_shape(dist, out.as_ref())?;
+    let mut err = None;
+    for col in 0..dist.ncols() {
+        for row in 0..dist.nrows() {
+            if err.is_some() {
+                continue;
+            }
+            match kernel(dist[(row, col)]) {
+                Ok(value) => out[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        }
+    }
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 fn write_triangle(
     dist: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
-    mut kernel: impl FnMut(f64) -> Result<f64, GpError>,
-) -> Result<(), GpError> {
+    mut kernel: impl FnMut(f64) -> Result<f64, GprError>,
+) -> Result<(), GprError> {
     let n = require_square_pair(dist, out.as_ref())?;
     let mut err = None;
     visit_triangle(n, uplo, |row, col| {
@@ -102,10 +144,10 @@ fn write_triangle(
     }
 }
 
-fn finite_dist(d: f64) -> Result<f64, GpError> {
+fn finite_dist(d: f64) -> Result<f64, GprError> {
     if d.is_finite() {
         Ok(d)
     } else {
-        Err(GpError::NonFiniteInput)
+        Err(GprError::NonFiniteInput)
     }
 }

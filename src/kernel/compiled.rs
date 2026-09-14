@@ -1,7 +1,7 @@
 //! Execution-layer kernel: static dispatch over built-in leaves.
 
 use super::{RbfKernel, Triangle, visit_triangle};
-use crate::error::GpError;
+use crate::error::GprError;
 use crate::kernel::KernelSpec;
 use faer::{Mat, MatMut, MatRef};
 
@@ -9,7 +9,7 @@ use faer::{Mat, MatMut, MatRef};
 ///
 /// [`Self::apply`] and [`Self::grad`] take a scratch buffer of the same size
 /// as `out`. A lone RBF does not write it. Nested rest terms that are
-/// themselves sums or products may allocate one extra `n×n` buffer. ExactGP
+/// themselves sums or products may allocate one extra `n×n` buffer. Fit
 /// will pass Workspace storage for the caller scratch. Cloning copies the
 /// whole tree.
 ///
@@ -18,7 +18,7 @@ use faer::{Mat, MatMut, MatRef};
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let spec = KernelSpec::from(RbfKernel::new(1.0)?)
 ///     + KernelSpec::from(RbfKernel::new(2.0)?);
 /// let compiled = spec.compile();
@@ -67,8 +67,8 @@ impl CompiledKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `out` is the wrong length.
-    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GpError> {
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         require_len(out.len(), self.num_params())?;
         let mut offset = 0;
         self.write_params(out, &mut offset);
@@ -79,9 +79,9 @@ impl CompiledKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
     /// length or a leaf rejects its slice.
-    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GpError> {
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         require_len(params.len(), self.num_params())?;
         let mut next = self.clone();
         let mut offset = 0;
@@ -97,7 +97,7 @@ impl CompiledKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError`] if shapes mismatch, `scratch` is the wrong size, a
+    /// Returns [`GprError`] if shapes mismatch, `scratch` is the wrong size, a
     /// leaf fails, or a sum/product has no terms.
     pub fn apply(
         &self,
@@ -105,7 +105,7 @@ impl CompiledKernel {
         mut out: MatMut<'_, f64>,
         uplo: Triangle,
         mut scratch: MatMut<'_, f64>,
-    ) -> Result<(), GpError> {
+    ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.apply(dist, out, uplo),
@@ -128,14 +128,76 @@ impl CompiledKernel {
         }
     }
 
+    /// Writes rectangular `k(dist)` (train × test) into `out`.
+    ///
+    /// `scratch` must match `out` and be a distinct buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same shape errors as [`Self::apply`].
+    pub fn apply_cross(
+        &self,
+        dist: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::Rbf(leaf) => leaf.apply_cross(dist, out),
+            Self::Sum(terms) => fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), add_rect),
+            Self::Product(terms) => {
+                fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), mul_rect)
+            }
+        }
+    }
+
+    /// Writes the diagonal `k(x, x)` into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
+    /// terms.
+    pub fn fill_diag(&self, out: &mut [f64]) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::Sum(terms) => {
+                let (first, rest) = split_terms(terms)?;
+                first.fill_diag(out)?;
+                let mut tmp = vec![0.0; out.len()];
+                for term in rest {
+                    term.fill_diag(&mut tmp)?;
+                    for (dst, src) in out.iter_mut().zip(&tmp) {
+                        *dst += *src;
+                    }
+                }
+                Ok(())
+            }
+            Self::Product(terms) => {
+                let (first, rest) = split_terms(terms)?;
+                first.fill_diag(out)?;
+                let mut tmp = vec![0.0; out.len()];
+                for term in rest {
+                    term.fill_diag(&mut tmp)?;
+                    for (dst, src) in out.iter_mut().zip(&tmp) {
+                        *dst *= *src;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Writes `∂K/∂θ_{param_idx}` into `d_k`. `scratch` must match `d_k`.
     ///
     /// `scratch` must be a distinct buffer from `d_k`.
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `param_idx` is out of
-    /// range, [`GpError::WorkspaceTooSmall`] if `scratch` is the wrong size, or
+    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
+    /// range, [`GprError::WorkspaceTooSmall`] if `scratch` is the wrong size, or
     /// the same shape errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -144,7 +206,7 @@ impl CompiledKernel {
         param_idx: usize,
         uplo: Triangle,
         mut scratch: MatMut<'_, f64>,
-    ) -> Result<(), GpError> {
+    ) -> Result<(), GprError> {
         require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
@@ -172,7 +234,7 @@ impl CompiledKernel {
         }
     }
 
-    fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GpError> {
+    fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
                 let n = leaf.num_params();
@@ -219,28 +281,28 @@ fn flatten_product(spec: &KernelSpec, out: &mut Vec<CompiledKernel>) {
     }
 }
 
-fn require_len(actual: usize, expected: usize) -> Result<(), GpError> {
+fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
     if actual == expected {
         Ok(())
     } else {
-        Err(GpError::InvalidHyperparameter {
+        Err(GprError::InvalidHyperparameter {
             reason: format!("expected {expected} kernel parameters, got {actual}"),
         })
     }
 }
 
-fn require_scratch_shape(out: MatRef<'_, f64>, scratch: MatRef<'_, f64>) -> Result<(), GpError> {
+fn require_scratch_shape(out: MatRef<'_, f64>, scratch: MatRef<'_, f64>) -> Result<(), GprError> {
     if scratch.nrows() == out.nrows() && scratch.ncols() == out.ncols() {
         Ok(())
     } else {
-        Err(GpError::WorkspaceTooSmall)
+        Err(GprError::WorkspaceTooSmall)
     }
 }
 
-fn split_terms(terms: &[CompiledKernel]) -> Result<(&CompiledKernel, &[CompiledKernel]), GpError> {
+fn split_terms(terms: &[CompiledKernel]) -> Result<(&CompiledKernel, &[CompiledKernel]), GprError> {
     terms
         .split_first()
-        .ok_or(GpError::UnsupportedKernelOperation {
+        .ok_or(GprError::UnsupportedKernelOperation {
             reason: "sum/product has no terms".to_owned(),
         })
 }
@@ -248,7 +310,7 @@ fn split_terms(terms: &[CompiledKernel]) -> Result<(&CompiledKernel, &[CompiledK
 fn term_for_param(
     terms: &[CompiledKernel],
     param_idx: usize,
-) -> Result<(&CompiledKernel, usize), GpError> {
+) -> Result<(&CompiledKernel, usize), GprError> {
     let mut offset = 0;
     for term in terms {
         let n = term.num_params();
@@ -257,7 +319,7 @@ fn term_for_param(
         }
         offset += n;
     }
-    Err(GpError::InvalidHyperparameter {
+    Err(GprError::InvalidHyperparameter {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })
 }
@@ -281,7 +343,7 @@ fn fold_terms(
     uplo: Triangle,
     mut scratch: MatMut<'_, f64>,
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
-) -> Result<(), GpError> {
+) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
     first.apply(dist, out.as_mut(), uplo, scratch.as_mut())?;
     let n = out.nrows();
@@ -309,12 +371,72 @@ fn apply_into(
     uplo: Triangle,
     extra: &mut Option<Mat<f64>>,
     n: usize,
-) -> Result<(), GpError> {
+) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
         term.apply(dist, dest, uplo, buf.as_mut())
     } else {
         term.apply(dist, dest, uplo, fallback_scratch)
+    }
+}
+
+fn add_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
+    for col in 0..acc.ncols() {
+        for row in 0..acc.nrows() {
+            acc[(row, col)] += src[(row, col)];
+        }
+    }
+}
+
+fn mul_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
+    for col in 0..acc.ncols() {
+        for row in 0..acc.nrows() {
+            acc[(row, col)] *= src[(row, col)];
+        }
+    }
+}
+
+fn fold_rect(
+    terms: &[CompiledKernel],
+    dist: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    mut scratch: MatMut<'_, f64>,
+    combine: fn(MatMut<'_, f64>, MatRef<'_, f64>),
+) -> Result<(), GprError> {
+    let (first, rest) = split_terms(terms)?;
+    first.apply_cross(dist, out.as_mut(), scratch.as_mut())?;
+    let nrows = out.nrows();
+    let ncols = out.ncols();
+    let mut extra = None;
+    for term in rest {
+        apply_into_cross(
+            term,
+            dist,
+            scratch.as_mut(),
+            out.as_mut(),
+            &mut extra,
+            nrows,
+            ncols,
+        )?;
+        combine(out.as_mut(), scratch.as_ref());
+    }
+    Ok(())
+}
+
+fn apply_into_cross(
+    term: &CompiledKernel,
+    dist: MatRef<'_, f64>,
+    dest: MatMut<'_, f64>,
+    fallback_scratch: MatMut<'_, f64>,
+    extra: &mut Option<Mat<f64>>,
+    nrows: usize,
+    ncols: usize,
+) -> Result<(), GprError> {
+    if term.needs_internal_scratch() {
+        let buf = extra.get_or_insert_with(|| Mat::zeros(nrows, ncols));
+        term.apply_cross(dist, dest, buf.as_mut())
+    } else {
+        term.apply_cross(dist, dest, fallback_scratch)
     }
 }
 
@@ -325,7 +447,7 @@ fn product_grad(
     param_idx: usize,
     uplo: Triangle,
     mut scratch: MatMut<'_, f64>,
-) -> Result<(), GpError> {
+) -> Result<(), GprError> {
     let mut offset = 0;
     let mut owner = None;
     for (i, term) in terms.iter().enumerate() {
@@ -336,7 +458,7 @@ fn product_grad(
         }
         offset += n;
     }
-    let (owner_i, local) = owner.ok_or_else(|| GpError::InvalidHyperparameter {
+    let (owner_i, local) = owner.ok_or_else(|| GprError::InvalidHyperparameter {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })?;
 
@@ -658,12 +780,12 @@ mod tests {
                 Triangle::Lower,
                 scratch.as_mut()
             ),
-            Err(crate::error::GpError::InvalidHyperparameter { .. })
+            Err(crate::error::GprError::InvalidHyperparameter { .. })
         ));
         let mut small = fill(1, 0.0);
         assert!(matches!(
             compiled.apply(dist.as_ref(), dk.as_mut(), Triangle::Full, small.as_mut()),
-            Err(crate::error::GpError::WorkspaceTooSmall)
+            Err(crate::error::GprError::WorkspaceTooSmall)
         ));
     }
 
@@ -680,7 +802,44 @@ mod tests {
                 Triangle::Full,
                 scratch.as_mut()
             ),
-            Err(crate::error::GpError::UnsupportedKernelOperation { .. })
+            Err(crate::error::GprError::UnsupportedKernelOperation { .. })
         ));
+    }
+
+    #[test]
+    fn fill_diag_adds_rbf_leaves() {
+        let compiled = (rbf(1.0) + rbf(2.0)).compile();
+        let mut diag = [0.0, 0.0];
+        compiled.fill_diag(&mut diag).expect("two terms");
+        assert_close(diag[0], 2.0);
+        assert_close(diag[1], 2.0);
+    }
+
+    #[test]
+    fn apply_cross_matches_full_block() {
+        let compiled = rbf(1.0).compile();
+        let train = sq_dist_1d(&[0.0, 1.0]);
+        let mut k_nn = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply(
+                train.as_ref(),
+                k_nn.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("square");
+        let dist_cross = faer::mat![[0.0, 1.0], [1.0, 0.0]];
+        let mut k_cross = fill(2, 0.0);
+        let mut scratch_cross = fill(2, 0.0);
+        compiled
+            .apply_cross(
+                dist_cross.as_ref(),
+                k_cross.as_mut(),
+                scratch_cross.as_mut(),
+            )
+            .expect("rect");
+        assert_close(k_cross[(0, 0)], k_nn[(0, 0)]);
+        assert_close(k_cross[(0, 1)], k_nn[(0, 1)]);
     }
 }

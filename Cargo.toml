@@ -27,5 +27,10 @@ faer = "0.24.4"
 thiserror = "2.0.20"
 
 [dev-dependencies]
+criterion = "0.5"
 dyn-stack = "0.13"
 faer = "0.24.4"
+
+[[bench]]
+name = "exact"
+harness = false
