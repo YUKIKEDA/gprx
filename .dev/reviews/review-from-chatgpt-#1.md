@@ -4,7 +4,7 @@ Rust製Gaussian Process Regression（GPR）ライブラリ `gprx` の設計書�
 
 総評：方向性は良いですが、現状は「実装可能な設計仕様」よりも「高性能GPRの技術構想」に近いです。
 
-特に、`faer`を中心とした線形代数、Exact GP / Sparse GPの抽象化、カーネルのコンパイル、オンライン更新、混合精度まで考慮している点は評価できます。一方で、GPRの数値計算として重要な前提の誤りや、実装時に破綻する可能性のあるAPI・メモリ設計が残っています。
+特に、`faer`を中心とした線形代数、Exact GPR / Sparse GPRの抽象化、カーネルのコンパイル、オンライン更新、混合精度まで考慮している点は評価できます。一方で、GPRの数値計算として重要な前提の誤りや、実装時に破綻する可能性のあるAPI・メモリ設計が残っています。
 
 以下、設計書の内容を基に、優先度の高い順に指摘します。
 
@@ -28,7 +28,7 @@ Cholesky更新APIの前提、削除後の順序、alpha更新を検証する必�
 
 P1
 
-Exact GP / Sparse GPの抽象化
+Exact GPR / Sparse GPRの抽象化
 
 `Inference` traitでは、実際の尤度・勾配・予測分散の差異を十分表現できていません。
 
@@ -68,7 +68,7 @@ r = y - K_f64 @ alpha_0
 
 しかし、f32 Choleskyの近似解 `alpha_0` が何を解いているかで、残差の計算は変わります。
 
-通常のExact GPでは、
+通常のExact GPRでは、
 
 (K+σI)α=y(K+\sigma I)\alpha=y(K+σI)α=y
 
@@ -337,14 +337,14 @@ Rust
 
 ```
 trait OnlineInference<T> {
-    fn insert(&mut self, x: &[T], y: T) -> Result<PointId, GpError>;
+    fn insert(&mut self, x: &[T], y: T) -> Result<PointId, GprError>;
 
-    fn delete(&mut self, id: PointId) -> Result<(), GpError>;
+    fn delete(&mut self, id: PointId) -> Result<(), GprError>;
 
     fn refit_hyperparameters(
         &mut self,
         optimizer: &mut dyn Optimizer<T>,
-    ) -> Result<(), GpError>;
+    ) -> Result<(), GprError>;
 }
 ```
 
@@ -515,7 +515,7 @@ struct WorkspacePlan {
 
 「深さ3以内」などの経験則を、設計上の保証のように書かない方がよいです。
 
-## 4. Exact GP / Sparse GPの抽象化は、もう一段整理が必要
+## 4. Exact GPR / Sparse GPRの抽象化は、もう一段整理が必要
 
 対象：§6、§6.1（222〜264行）
 
@@ -529,11 +529,11 @@ trait Inference<T: Scalar> {
 }
 ```
 
-という形は理解しやすいですが、実際のGPRではExact GPとSparse GPの内部構造がかなり異なります。
+という形は理解しやすいですが、実際のGPRではExact GPRとSparse GPRの内部構造がかなり異なります。
 
 ### 4.1 `objective()`をtraitに含めるのは結合が強い
 
-Exact GPとSparse GPでは、尤度の計算方法や勾配の構造が異なります。
+Exact GPRとSparse GPRでは、尤度の計算方法や勾配の構造が異なります。
 
 `Inference`が直接、
 
@@ -567,12 +567,12 @@ trait Inference<T: Scalar> {
         &mut self,
         x: MatRef<T>,
         y: &[T],
-    ) -> Result<(), GpError>;
+    ) -> Result<(), GprError>;
 
     fn predict(
         &self,
         xs: MatRef<T>,
-    ) -> Result<Prediction<T>, GpError>;
+    ) -> Result<Prediction<T>, GprError>;
 }
 ```
 
@@ -582,20 +582,20 @@ Rust
 
 ```
 trait Objective<T: Scalar> {
-    fn value(&mut self, params: &[T]) -> Result<T, GpError>;
+    fn value(&mut self, params: &[T]) -> Result<T, GprError>;
 
     fn gradient(
         &mut self,
         params: &[T],
-    ) -> Result<Option<Vec<T>>, GpError>;
+    ) -> Result<Option<Vec<T>>, GprError>;
 }
 ```
 
 と分離する方がよいです。
 
-### 4.2 Sparse GPの予測分散が未定義
+### 4.2 Sparse GPRの予測分散が未定義
 
-Exact GP / Sparse GPのpredictは、単に
+Exact GPR / Sparse GPRのpredictは、単に
 
 Rust
 
@@ -605,7 +605,7 @@ Rust
 
 だけでは不十分な可能性があります。
 
-Sparse GPでは、
+Sparse GPRでは、
 
 * 近似手法
 
@@ -645,7 +645,7 @@ enum Covariance {
 
 のような拡張を検討してもよいと思います。
 
-ただし、最初からフル共分散を実装する必要はありません。Exact GPの対角予測分散を最初の完成目標にするのが現実的です。
+ただし、最初からフル共分散を実装する必要はありません。Exact GPRの対角予測分散を最初の完成目標にするのが現実的です。
 
 ## 5. メモリ設計：単一アリーナの思想は良いが、実装上の不整合がある
 
@@ -895,7 +895,7 @@ recompute_relative_cost = d as f64 / n as f64;
 
 例えば、RBFとPeriodicでは、同じd/nでも`exp`と三角関数のコストが大きく異なります。
 
-また、`n=5000,d=100,f64`で20GBになるという例は正しいですが、通常のExact GPのK行列自体が約200MBです。
+また、`n=5000,d=100,f64`で20GBになるという例は正しいですが、通常のExact GPRのK行列自体が約200MBです。
 
 したがって、距離テンソルをキャッシュするより、Kの構築中に距離を計算する方が良い場合も多いです。
 
@@ -973,12 +973,12 @@ trait Objective<T: Scalar> {
     fn value(
         &mut self,
         params: &[T],
-    ) -> Result<T, GpError>;
+    ) -> Result<T, GprError>;
 
     fn value_and_gradient(
         &mut self,
         params: &[T],
-    ) -> Result<(T, Option<Vec<T>>), GpError>;
+    ) -> Result<(T, Option<Vec<T>>), GprError>;
 }
 ```
 
@@ -1003,7 +1003,7 @@ fn gradient(
     &mut self,
     params: &[T],
     out: &mut [T],
-) -> Result<(), GpError>;
+) -> Result<(), GprError>;
 ```
 
 とする方がよいです。
@@ -1016,7 +1016,7 @@ fn gradient(
 
 対象：§10（344〜376行）
 
-`GpError`を設計している点は良いです。
+`GprError`を設計している点は良いです。
 
 特に、
 
@@ -1041,7 +1041,7 @@ fn gradient(
 Rust
 
 ```
-enum GpError {
+enum GprError {
     EmptyInput,
     NonFiniteInput,
     NonFiniteKernelValue,
@@ -1200,7 +1200,7 @@ P1
 
 |
 
-Exact / Sparse GPのAPIを整理
+Exact / Sparse GPRのAPIを整理
 
 |
 |
@@ -1275,7 +1275,7 @@ P2
 
 * 混合精度
 
-* Sparse GP
+* Sparse GPR
 
 * オンライン学習
 
@@ -1287,7 +1287,7 @@ P2
 
 を一度に進めると、どこに問題があるのか分からなくなりやすいです。
 
-### Phase 1：正しいExact GP
+### Phase 1：正しいExact GPR
 
 * f64のみ
 
@@ -1329,7 +1329,7 @@ P2
 
 * フル再fitとの比較テスト
 
-### Phase 4：Sparse GP
+### Phase 4：Sparse GPR
 
 * VFEまたはFITCのどちらか一つ
 
@@ -1363,7 +1363,7 @@ P2
 
 * オンライン更新
 
-* Exact / Sparse GPの差し替え
+* Exact / Sparse GPRの差し替え
 
 * Rustらしい所有権・静的ディスパッチ
 
@@ -1375,8 +1375,8 @@ P2
 
 2. オンラインCholesky更新を実装前に小規模行列で検証する。
 
-3. f64 Exact GPを正しいリファレンス実装として先に完成させる。
+3. f64 Exact GPRを正しいリファレンス実装として先に完成させる。
 
-この3つができれば、その後の高速化・Sparse GP・オンライン学習を安心して積み上げられる設計になります。
+この3つができれば、その後の高速化・Sparse GPR・オンライン学習を安心して積み上げられる設計になります。
 
 レビュー対象：gprx-design.md（全442行）

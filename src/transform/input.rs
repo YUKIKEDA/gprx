@@ -1,7 +1,7 @@
 //! Input (`X`) transforms: identity and per-feature standardize.
 
 use super::{column_major_len, population_std, require_finite, require_len, require_nonempty};
-use crate::error::GpError;
+use crate::error::GprError;
 
 /// Maps feature matrices in place before kernel evaluation.
 ///
@@ -11,21 +11,21 @@ pub trait Transform: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError`] when `x` is empty, packed incorrectly, or contains
+    /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
     /// a non-finite value.
-    fn fit(&mut self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError>;
+    fn fit(&mut self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 
     /// Applies the fitted map to a feature matrix in place.
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::NotFitted`] when [`Self::fit`] has not succeeded,
-    /// [`GpError::DimensionMismatch`] when `n_cols` differs from the fit, or
-    /// [`GpError::NonFiniteInput`] when `x` contains `NaN` or `Inf`.
-    fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GpError>;
+    /// Returns [`GprError::NotFitted`] when [`Self::fit`] has not succeeded,
+    /// [`GprError::DimensionMismatch`] when `n_cols` differs from the fit, or
+    /// [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`.
+    fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 }
 
-fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> {
+fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
     let expected = column_major_len(n_rows, n_cols)?;
     require_len(x, expected)
 }
@@ -37,7 +37,7 @@ fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> 
 /// ```rust
 /// use gprx::transform::{IdentityInput, Transform};
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let mut t = IdentityInput;
 /// let mut x = [1.0, 2.0, 3.0, 4.0];
 /// t.fit(&x, 2, 2)?;
@@ -50,12 +50,12 @@ fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> 
 pub struct IdentityInput;
 
 impl Transform for IdentityInput {
-    fn fit(&mut self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> {
+    fn fit(&mut self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_pack(x, n_rows, n_cols)?;
         require_finite(x)
     }
 
-    fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> {
+    fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_pack(x, n_rows, n_cols)?;
         require_finite(x)
     }
@@ -70,7 +70,7 @@ impl Transform for IdentityInput {
 /// ```rust
 /// use gprx::transform::{StandardizeInput, Transform};
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let mut t = StandardizeInput::new();
 /// let mut x = [0.0, 2.0, 10.0, 30.0];
 /// t.fit(&x, 2, 2)?;
@@ -128,7 +128,7 @@ impl Default for StandardizeInput {
 }
 
 impl Transform for StandardizeInput {
-    fn fit(&mut self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> {
+    fn fit(&mut self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_pack(x, n_rows, n_cols)?;
         require_finite(x)?;
         self.mean = Vec::with_capacity(n_cols);
@@ -143,10 +143,10 @@ impl Transform for StandardizeInput {
         Ok(())
     }
 
-    fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> {
-        let expected_cols = self.n_cols().ok_or(GpError::NotFitted)?;
+    fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+        let expected_cols = self.n_cols().ok_or(GprError::NotFitted)?;
         if n_cols != expected_cols {
-            return Err(GpError::DimensionMismatch {
+            return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
                 expected_dim: expected_cols,
             });
@@ -169,7 +169,7 @@ impl Transform for StandardizeInput {
 #[cfg(test)]
 mod tests {
     use super::{IdentityInput, StandardizeInput, Transform};
-    use crate::error::GpError;
+    use crate::error::GprError;
 
     const TOL: f64 = 1e-10;
 
@@ -228,7 +228,7 @@ mod tests {
         let mut other = [0.0, 1.0];
         assert!(matches!(
             t.apply(&mut other, 2, 1),
-            Err(GpError::DimensionMismatch {
+            Err(GprError::DimensionMismatch {
                 x_dim: 1,
                 expected_dim: 2
             })
@@ -238,11 +238,14 @@ mod tests {
     #[test]
     fn standardize_rejects_empty_and_unfitted() {
         let mut t = StandardizeInput::new();
-        assert!(matches!(t.fit(&[], 0, 1), Err(GpError::EmptyInput)));
-        assert!(matches!(t.apply(&mut [1.0], 1, 1), Err(GpError::NotFitted)));
+        assert!(matches!(t.fit(&[], 0, 1), Err(GprError::EmptyInput)));
+        assert!(matches!(
+            t.apply(&mut [1.0], 1, 1),
+            Err(GprError::NotFitted)
+        ));
         assert!(matches!(
             t.fit(&[1.0, f64::NAN], 1, 2),
-            Err(GpError::NonFiniteInput)
+            Err(GprError::NonFiniteInput)
         ));
     }
 }

@@ -1,7 +1,7 @@
 //! Smoke test for faer 0.24 in-place LLT (`cholesky_in_place`).
 //!
 //! Pins the `MemStack` + `LltRegularization` calling convention used later by
-//! Exact GP. This is not a Gaussian process test.
+//! Exact GPR. This is not a Gaussian process test.
 
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;

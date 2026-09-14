@@ -1,6 +1,6 @@
 //! Declaration-layer kernel tree: leaves, sums, and products.
 
-use crate::error::GpError;
+use crate::error::GprError;
 use crate::kernel::RbfKernel;
 use std::ops::{Add, Mul};
 
@@ -25,7 +25,7 @@ pub struct ParameterBinding {
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let spec = KernelSpec::from(RbfKernel::new(1.0)?)
 ///     + KernelSpec::from(RbfKernel::new(2.0)?);
 /// assert_eq!(spec.num_params(), 2);
@@ -79,8 +79,8 @@ impl KernelSpec {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `out` is the wrong length.
-    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GpError> {
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         require_len(out.len(), self.num_params())?;
         let mut offset = 0;
         self.write_params(out, &mut offset);
@@ -91,9 +91,9 @@ impl KernelSpec {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
     /// length or a leaf rejects its slice.
-    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GpError> {
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         require_len(params.len(), self.num_params())?;
         let mut next = self.clone();
         let mut offset = 0;
@@ -121,7 +121,7 @@ impl KernelSpec {
     /// ```rust
     /// use gprx::kernel::{CompiledKernel, KernelSpec, RbfKernel};
     ///
-    /// # fn main() -> Result<(), gprx::GpError> {
+    /// # fn main() -> Result<(), gprx::GprError> {
     /// let spec = (KernelSpec::from(RbfKernel::new(1.0)?)
     ///     + KernelSpec::from(RbfKernel::new(2.0)?))
     ///     + KernelSpec::from(RbfKernel::new(3.0)?);
@@ -146,7 +146,7 @@ impl KernelSpec {
         }
     }
 
-    fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GpError> {
+    fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
                 let n = leaf.num_params();
@@ -188,11 +188,11 @@ impl KernelSpec {
     }
 }
 
-fn require_len(actual: usize, expected: usize) -> Result<(), GpError> {
+fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
     if actual == expected {
         Ok(())
     } else {
-        Err(GpError::InvalidHyperparameter {
+        Err(GprError::InvalidHyperparameter {
             reason: format!("expected {expected} kernel parameters, got {actual}"),
         })
     }

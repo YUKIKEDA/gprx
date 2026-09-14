@@ -12,7 +12,7 @@
 
 - [ ] `just lint`
 - [ ] `just test`
-- [ ] `just bench` if this PR touches a hot path (`kernel/`, workspace, exact, objective, online)
+- [ ] `just bench` if this PR touches a hot path (`kernel/`, workspace, gpr, objective, online)
 
 ## Verification
 

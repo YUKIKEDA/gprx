@@ -1,4 +1,4 @@
-//! Criterion benches for the Exact GP path.
+//! Criterion benches for the Exact GPR path.
 //!
 //! P1A-8 adds `predict_100`. P1A-18 adds `kernel_rbf` and `cholesky_alpha`
 //! on the same fixed problem.
@@ -7,7 +7,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gp};
+use gprx::{GaussianLikelihood, Gpr};
 
 const N: usize = 256;
 const D: usize = 8;
@@ -34,23 +34,23 @@ fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
     x
 }
 
-fn fitted_model() -> (Gp, Vec<f64>) {
+fn fitted_model() -> (Gpr, Vec<f64>) {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(0.1).expect("valid noise");
-    let mut gp = Gp::new(kernel, likelihood);
+    let mut gpr = Gpr::new(kernel, likelihood);
     let x = fill_column_major(N, D, SEED);
     let mut state = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
     let y: Vec<f64> = (0..N).map(|_| splitmix64(&mut state)).collect();
-    gp.fit(&x, N, D, &y).expect("training Cholesky");
+    gpr.fit(&x, N, D, &y).expect("training Cholesky");
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
-    (gp, xs)
+    (gpr, xs)
 }
 
 fn predict_100(c: &mut Criterion) {
-    let (gp, xs) = fitted_model();
+    let (gpr, xs) = fitted_model();
     c.bench_function("predict_100", |b| {
         b.iter(|| {
-            let pred = gp.predict(std::hint::black_box(&xs), M, D);
+            let pred = gpr.predict(std::hint::black_box(&xs), M, D);
             std::hint::black_box(pred)
         });
     });

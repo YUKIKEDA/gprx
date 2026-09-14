@@ -1,6 +1,6 @@
 //! Gaussian observation noise, stored as `θ = log(σn²)`.
 
-use crate::error::GpError;
+use crate::error::GprError;
 
 /// Gaussian likelihood with observation noise variance `σn²`.
 ///
@@ -17,7 +17,7 @@ use crate::error::GpError;
 /// ```rust
 /// use gprx::GaussianLikelihood;
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let lik = GaussianLikelihood::new(0.25)?;
 /// let mut diag = [1.0, 1.0];
 /// lik.add_noise_diag(&mut diag);
@@ -35,9 +35,9 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidNoiseVariance`] if `noise_variance` is not
+    /// Returns [`GprError::InvalidNoiseVariance`] if `noise_variance` is not
     /// finite or not strictly positive.
-    pub fn new(noise_variance: f64) -> Result<Self, GpError> {
+    pub fn new(noise_variance: f64) -> Result<Self, GprError> {
         if !noise_variance.is_finite() {
             return Err(invalid_noise("noise variance must be finite"));
         }
@@ -53,10 +53,10 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidNoiseVariance`] if `θ` is not finite, if
+    /// Returns [`GprError::InvalidNoiseVariance`] if `θ` is not finite, if
     /// `exp(θ)` overflows to a non-finite variance, or if `exp(θ)` underflows
     /// to zero.
-    pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GpError> {
+    pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GprError> {
         Ok(Self {
             log_noise_variance: validate_log_noise_variance(log_noise_variance)?,
         })
@@ -81,8 +81,8 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `out` is not length 1.
-    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GpError> {
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len())?;
         out[0] = self.log_noise_variance;
         Ok(())
@@ -92,9 +92,9 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `params` is not length 1,
-    /// or [`GpError::InvalidNoiseVariance`] if the new `θ` is invalid.
-    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GpError> {
+    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1,
+    /// or [`GprError::InvalidNoiseVariance`] if the new `θ` is invalid.
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len())?;
         self.log_noise_variance = validate_log_noise_variance(params[0])?;
         Ok(())
@@ -112,10 +112,10 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `param_idx` is not 0.
-    pub fn noise_grad_diag(&self, dk_diag: &mut [f64], param_idx: usize) -> Result<(), GpError> {
+    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0.
+    pub fn noise_grad_diag(&self, dk_diag: &mut [f64], param_idx: usize) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GpError::InvalidHyperparameter {
+            return Err(GprError::InvalidHyperparameter {
                 reason: "likelihood has a single parameter at index 0".to_owned(),
             });
         }
@@ -127,13 +127,13 @@ impl GaussianLikelihood {
     }
 }
 
-fn invalid_noise(reason: &'static str) -> GpError {
-    GpError::InvalidNoiseVariance {
+fn invalid_noise(reason: &'static str) -> GprError {
+    GprError::InvalidNoiseVariance {
         reason: reason.to_owned(),
     }
 }
 
-fn validate_log_noise_variance(theta: f64) -> Result<f64, GpError> {
+fn validate_log_noise_variance(theta: f64) -> Result<f64, GprError> {
     if !theta.is_finite() {
         return Err(invalid_noise("log noise variance must be finite"));
     }
@@ -149,11 +149,11 @@ fn validate_log_noise_variance(theta: f64) -> Result<f64, GpError> {
     Ok(theta)
 }
 
-fn expect_one_param(len: usize) -> Result<(), GpError> {
+fn expect_one_param(len: usize) -> Result<(), GprError> {
     if len == 1 {
         Ok(())
     } else {
-        Err(GpError::InvalidHyperparameter {
+        Err(GprError::InvalidHyperparameter {
             reason: format!("expected 1 likelihood parameter, got {len}"),
         })
     }
@@ -162,7 +162,7 @@ fn expect_one_param(len: usize) -> Result<(), GpError> {
 #[cfg(test)]
 mod tests {
     use super::GaussianLikelihood;
-    use crate::error::GpError;
+    use crate::error::GprError;
 
     const TOL: f64 = 1e-10;
 
@@ -235,28 +235,28 @@ mod tests {
     fn rejects_non_positive_and_non_finite_variance() {
         assert!(matches!(
             GaussianLikelihood::new(0.0),
-            Err(GpError::InvalidNoiseVariance { .. })
+            Err(GprError::InvalidNoiseVariance { .. })
         ));
         assert!(matches!(
             GaussianLikelihood::new(-1.0),
-            Err(GpError::InvalidNoiseVariance { .. })
+            Err(GprError::InvalidNoiseVariance { .. })
         ));
         assert!(matches!(
             GaussianLikelihood::new(f64::NAN),
-            Err(GpError::InvalidNoiseVariance { .. })
+            Err(GprError::InvalidNoiseVariance { .. })
         ));
         assert!(matches!(
             GaussianLikelihood::from_log_noise_variance(f64::INFINITY),
-            Err(GpError::InvalidNoiseVariance { .. })
+            Err(GprError::InvalidNoiseVariance { .. })
         ));
         assert!(matches!(
             GaussianLikelihood::from_log_noise_variance(-800.0),
-            Err(GpError::InvalidNoiseVariance { .. })
+            Err(GprError::InvalidNoiseVariance { .. })
         ));
         let mut lik = GaussianLikelihood::new(1.0).expect("valid");
         assert!(matches!(
             lik.set_params(&[-800.0]),
-            Err(GpError::InvalidNoiseVariance { .. })
+            Err(GprError::InvalidNoiseVariance { .. })
         ));
     }
 
@@ -266,7 +266,7 @@ mod tests {
         let mut diag = [0.0];
         assert!(matches!(
             lik.noise_grad_diag(&mut diag, 1),
-            Err(GpError::InvalidHyperparameter { .. })
+            Err(GprError::InvalidHyperparameter { .. })
         ));
     }
 }

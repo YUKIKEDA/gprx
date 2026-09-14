@@ -1,4 +1,4 @@
-//! Reusable buffers for one batch GP fit of size `n`.
+//! Reusable buffers for one batch GPR fit of size `n`.
 //!
 //! Allocated once when fit starts. Later optimizer iterations overwrite the
 //! same storage. Crate-private; faer types are not re-exported.
@@ -7,10 +7,10 @@ use dyn_stack::{MemBuffer, StackReq};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, Par};
 
-use crate::error::GpError;
+use crate::error::GprError;
 use crate::precision::{DoublePrecision, PrecisionPolicy};
 
-/// Dense buffers for a batch GP of a fixed `n`.
+/// Dense buffers for a batch GPR of a fixed `n`.
 pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,
@@ -40,10 +40,10 @@ impl Workspace<DoublePrecision> {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::EmptyInput`] if `n` is zero.
-    pub(crate) fn new(n: usize) -> Result<Self, GpError> {
+    /// Returns [`GprError::EmptyInput`] if `n` is zero.
+    pub(crate) fn new(n: usize) -> Result<Self, GprError> {
         if n == 0 {
-            return Err(GpError::EmptyInput);
+            return Err(GprError::EmptyInput);
         }
         Ok(Self {
             k_matrix: Mat::<f64>::zeros(n, n),
@@ -64,8 +64,8 @@ impl Workspace<DoublePrecision> {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::EmptyInput`] if `n` is zero.
-    pub(crate) fn ensure(&mut self, n: usize) -> Result<(), GpError> {
+    /// Returns [`GprError::EmptyInput`] if `n` is zero.
+    pub(crate) fn ensure(&mut self, n: usize) -> Result<(), GprError> {
         if n == self.n() {
             return Ok(());
         }
@@ -77,7 +77,7 @@ impl Workspace<DoublePrecision> {
 #[cfg(test)]
 mod tests {
     use super::{Workspace, faer_scratch_req};
-    use crate::error::GpError;
+    use crate::error::GprError;
     use crate::precision::DoublePrecision;
 
     fn assert_send_sync<T: Send + Sync>() {}
@@ -91,7 +91,7 @@ mod tests {
     fn new_rejects_empty() {
         assert_eq!(
             Workspace::<DoublePrecision>::new(0).err(),
-            Some(GpError::EmptyInput)
+            Some(GprError::EmptyInput)
         );
     }
 
@@ -117,6 +117,6 @@ mod tests {
         ws.ensure(6).expect("grow");
         assert_eq!(ws.n(), 6);
         assert_square(&ws.k_matrix, 6);
-        assert_eq!(ws.ensure(0).err(), Some(GpError::EmptyInput));
+        assert_eq!(ws.ensure(0).err(), Some(GprError::EmptyInput));
     }
 }
