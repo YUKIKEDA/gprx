@@ -7,6 +7,7 @@
 | ファイル                                 | 内容                                          |
 | ---------------------------------------- | --------------------------------------------- |
 | `.cursor/rules/conventional-commits.mdc` | コミットメッセージ                            |
+| `.cursor/rules/git.mdc`                  | 破壊的 git。質問は許可ではない                |
 | `.cursor/rules/pull-requests.mdc`        | PR タイトルと本文                             |
 | `.cursor/rules/workflow.mdc`             | Issue → ブランチ → PR。品質ゲート。フェーズ順 |
 | `.cursor/rules/layout.mdc`               | ディレクトリと公開 API                        |
