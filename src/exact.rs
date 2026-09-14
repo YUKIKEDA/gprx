@@ -11,14 +11,50 @@ use crate::error::{CholeskyStage, GpError};
 use crate::kernel::{CompiledKernel, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::DoublePrecision;
+use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
 use crate::workspace::Workspace;
+
+/// Which predictive variance [`Prediction`] reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VarianceKind {
+    /// Variance of the latent function `f*`, without observation noise.
+    Latent,
+    /// Variance of a new observation `y*`, including `σn²`. This is the default.
+    Observation,
+}
+
+/// Options for [`ExactGP::predict`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PredictOptions {
+    /// Which variance to return. Defaults to [`VarianceKind::Observation`].
+    pub variance_kind: VarianceKind,
+}
+
+impl Default for PredictOptions {
+    fn default() -> Self {
+        Self {
+            variance_kind: VarianceKind::Observation,
+        }
+    }
+}
+
+/// Predictive mean and (diagonal) variance at the query points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prediction {
+    /// Predictive mean on the original target scale.
+    pub mean: Vec<f64>,
+    /// Predictive variance on the original target scale.
+    pub variance: Vec<f64>,
+    /// Whether [`Self::variance`] is latent or observation variance.
+    pub variance_kind: VarianceKind,
+}
 
 /// Exact GP with fixed hyperparameters.
 ///
 /// [`Self::fit`] builds the lower triangle of `A = K + σn² I`, factors it
 /// in place as `L Lᵀ`, and solves `A α = y`. `L` lives in the workspace;
-/// `α` is kept on the model. Prediction and the marginal likelihood wait for
-/// later issues. Transforms are not applied here.
+/// `α` is kept on the model. [`Self::predict`] returns the mean and a
+/// diagonal variance. Input and target transforms default to identity.
 ///
 /// # Examples
 ///
@@ -32,19 +68,20 @@ use crate::workspace::Workspace;
 /// let mut gp = ExactGP::new(kernel, likelihood);
 /// // Column-major `X` with n = 2 points and d = 1 feature.
 /// gp.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-/// assert!(gp.is_fitted());
+/// let pred = gp.predict(&[0.5], 1, 1)?;
+/// assert_eq!(pred.mean.len(), 1);
 /// # Ok(())
 /// # }
 /// ```
 pub struct ExactGP {
     kernel: KernelSpec,
-    #[allow(dead_code)] // predict (P1A-8)
     compiled: Option<CompiledKernel>,
     likelihood: GaussianLikelihood,
+    x_transform: Box<dyn Transform>,
+    y_transform: Box<dyn TargetTransform>,
     workspace: Option<Workspace<DoublePrecision>>,
-    #[allow(dead_code)] // predict (P1A-8)
     x: Option<Mat<f64>>,
-    #[allow(dead_code)] // predict (P1A-8)
+    #[allow(dead_code)] // MLL (P1A-9)
     y: Option<Vec<f64>>,
     alpha: Option<Vec<f64>>,
     fitted: bool,
@@ -66,11 +103,17 @@ impl fmt::Debug for ExactGP {
 
 impl ExactGP {
     /// Builds an unfitted model that owns the kernel and observation noise.
+    ///
+    /// Input and target maps default to identity. Call
+    /// [`Self::with_input_transform`] / [`Self::with_target_transform`] before
+    /// [`Self::fit`] to standardize.
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
             kernel,
             compiled: None,
             likelihood,
+            x_transform: Box::new(IdentityInput),
+            y_transform: Box::new(IdentityTarget),
             workspace: None,
             x: None,
             y: None,
@@ -79,6 +122,18 @@ impl ExactGP {
             n: 0,
             d: 0,
         }
+    }
+
+    /// Replaces the input (`X`) transform. Intended to be called before fit.
+    pub fn with_input_transform(mut self, transform: impl Transform + 'static) -> Self {
+        self.x_transform = Box::new(transform);
+        self
+    }
+
+    /// Replaces the target (`y`) transform. Intended to be called before fit.
+    pub fn with_target_transform(mut self, transform: impl TargetTransform + 'static) -> Self {
+        self.y_transform = Box::new(transform);
+        self
     }
 
     /// Returns whether the last [`Self::fit`] produced `L` and `α`.
@@ -138,7 +193,13 @@ impl ExactGP {
         validate_training(x, n_rows, n_cols, y)?;
         self.clear_solution();
         self.prepare_workspace(n_rows)?;
-        let x_mat = pack_points(x, n_rows, n_cols);
+        let mut x_buf = x.to_vec();
+        self.x_transform.fit(&x_buf, n_rows, n_cols)?;
+        self.x_transform.apply(&mut x_buf, n_rows, n_cols)?;
+        let mut y_buf = y.to_vec();
+        self.y_transform.fit(&y_buf)?;
+        self.y_transform.transform(&mut y_buf)?;
+        let x_mat = pack_points(&x_buf, n_rows, n_cols);
         let compiled = self.kernel.compile();
         {
             let ws = workspace_mut(&mut self.workspace)?;
@@ -151,7 +212,7 @@ impl ExactGP {
             )?;
             add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
         }
-        let mut rhs = Mat::from_fn(n_rows, 1, |i, _| y[i]);
+        let mut rhs = Mat::from_fn(n_rows, 1, |i, _| y_buf[i]);
         {
             let ws = workspace_mut(&mut self.workspace)?;
             cholesky_and_solve(
@@ -164,12 +225,108 @@ impl ExactGP {
         }
         self.compiled = Some(compiled);
         self.x = Some(x_mat);
-        self.y = Some(y.to_vec());
+        self.y = Some(y_buf);
         self.alpha = Some((0..n_rows).map(|i| rhs[(i, 0)]).collect());
         self.n = n_rows;
         self.d = n_cols;
         self.fitted = true;
         Ok(())
+    }
+
+    /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
+    ///
+    /// `xs` is column-major with `n_rows` query points and `n_cols` features.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpError::NotFitted`] if [`Self::fit`] has not succeeded,
+    /// [`GpError::DimensionMismatch`] if `n_cols` differs from the training
+    /// features, [`GpError::EmptyInput`] if a dimension is zero, or
+    /// [`GpError::InvalidHyperparameter`] / [`GpError::NonFiniteInput`] for a
+    /// badly packed or non-finite `xs`.
+    pub fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize) -> Result<Prediction, GpError> {
+        self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
+    }
+
+    /// Predicts at `xs` with an explicit variance kind.
+    ///
+    /// Latent variance is `k(x*, x*) - ‖L⁻¹ k_*‖²`. Observation variance adds
+    /// `σn²` in the transformed space, then both mean and variance are mapped
+    /// back by the target transform.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    pub fn predict_with(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction, GpError> {
+        if !self.fitted {
+            return Err(GpError::NotFitted);
+        }
+        if n_cols != self.d {
+            return Err(GpError::DimensionMismatch {
+                x_dim: n_cols,
+                expected_dim: self.d,
+            });
+        }
+        validate_query(xs, n_rows, n_cols)?;
+        let compiled = self.compiled.as_ref().ok_or(GpError::NotFitted)?;
+        let x_train = self.x.as_ref().ok_or(GpError::NotFitted)?;
+        let alpha = self.alpha.as_deref().ok_or(GpError::NotFitted)?;
+        let ws = self.workspace.as_ref().ok_or(GpError::NotFitted)?;
+        let mut xs_buf = xs.to_vec();
+        self.x_transform.apply(&mut xs_buf, n_rows, n_cols)?;
+        let x_test = pack_points(&xs_buf, n_rows, n_cols);
+        let n = self.n;
+        let m = n_rows;
+        let mut dist = Mat::zeros(n, m);
+        let mut k_star = Mat::zeros(n, m);
+        let mut scratch = Mat::zeros(n, m);
+        fill_squared_euclidean_cross(x_train.as_ref(), x_test.as_ref(), dist.as_mut());
+        compiled.apply_cross(dist.as_ref(), k_star.as_mut(), scratch.as_mut())?;
+        let mut mean = vec![0.0; m];
+        for col in 0..m {
+            let mut sum = 0.0;
+            for row in 0..n {
+                sum += k_star[(row, col)] * alpha[row];
+            }
+            mean[col] = sum;
+        }
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            ws.k_matrix.as_ref(),
+            k_star.as_mut(),
+            Par::Seq,
+        );
+        let mut kss = vec![0.0; m];
+        compiled.fill_diag(&mut kss)?;
+        let noise = self.likelihood.noise_variance();
+        let mut variance = vec![0.0; m];
+        for col in 0..m {
+            let mut vnorm = 0.0;
+            for row in 0..n {
+                let v = k_star[(row, col)];
+                vnorm += v * v;
+            }
+            let mut latent = kss[col] - vnorm;
+            if latent < 0.0 {
+                latent = 0.0;
+            }
+            variance[col] = match options.variance_kind {
+                VarianceKind::Latent => latent,
+                VarianceKind::Observation => latent + noise,
+            };
+        }
+        self.y_transform.inverse_transform_mean(&mut mean)?;
+        self.y_transform.inverse_transform_variance(&mut variance)?;
+        Ok(Prediction {
+            mean,
+            variance,
+            variance_kind: options.variance_kind,
+        })
     }
 
     fn clear_solution(&mut self) {
@@ -220,6 +377,22 @@ fn validate_training(x: &[f64], n_rows: usize, n_cols: usize, y: &[f64]) -> Resu
     Ok(())
 }
 
+fn validate_query(xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GpError> {
+    if n_rows == 0 || n_cols == 0 {
+        return Err(GpError::EmptyInput);
+    }
+    let expected = n_rows.checked_mul(n_cols).ok_or(GpError::EmptyInput)?;
+    if xs.len() != expected {
+        return Err(GpError::InvalidHyperparameter {
+            reason: format!("expected {expected} feature values, got {}", xs.len()),
+        });
+    }
+    if xs.iter().any(|v| !v.is_finite()) {
+        return Err(GpError::NonFiniteInput);
+    }
+    Ok(())
+}
+
 fn pack_points(x: &[f64], n_rows: usize, n_cols: usize) -> Mat<f64> {
     Mat::from_fn(n_rows, n_cols, |row, col| x[col * n_rows + row])
 }
@@ -236,6 +409,26 @@ fn fill_squared_euclidean(x: MatRef<'_, f64>, mut dist: MatMut<'_, f64>) {
             }
             dist[(row, col)] = sum;
             dist[(col, row)] = sum;
+        }
+    }
+}
+
+fn fill_squared_euclidean_cross(
+    x_train: MatRef<'_, f64>,
+    x_test: MatRef<'_, f64>,
+    mut dist: MatMut<'_, f64>,
+) {
+    let n = x_train.nrows();
+    let m = x_test.nrows();
+    let d = x_train.ncols();
+    for col in 0..m {
+        for row in 0..n {
+            let mut sum = 0.0;
+            for dim in 0..d {
+                let diff = x_train[(row, dim)] - x_test[(col, dim)];
+                sum += diff * diff;
+            }
+            dist[(row, col)] = sum;
         }
     }
 }
@@ -293,6 +486,7 @@ mod tests {
     use crate::kernel::{KernelSpec, RbfKernel, Triangle};
     use crate::likelihood::GaussianLikelihood;
     use crate::precision::DoublePrecision;
+    use crate::transform::{StandardizeTarget, TargetTransform};
     use crate::workspace::Workspace;
     use faer::Mat;
 
@@ -348,6 +542,9 @@ mod tests {
     #[test]
     fn is_send_sync() {
         assert_send_sync::<ExactGP>();
+        assert_send_sync::<super::Prediction>();
+        assert_send_sync::<super::VarianceKind>();
+        assert_send_sync::<super::PredictOptions>();
     }
 
     #[test]
@@ -465,5 +662,71 @@ mod tests {
         let gp = rbf_gp(1.0, 0.1);
         assert!(matches!(gp.alpha(), Err(GpError::NotFitted)));
         assert!(!gp.is_fitted());
+    }
+
+    #[test]
+    fn predict_rejects_unfitted_and_wrong_dim() {
+        let mut gp = rbf_gp(1.0, 0.1);
+        assert!(matches!(gp.predict(&[0.0], 1, 1), Err(GpError::NotFitted)));
+        gp.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        assert!(matches!(
+            gp.predict(&[0.0, 1.0], 1, 2),
+            Err(GpError::DimensionMismatch {
+                x_dim: 2,
+                expected_dim: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn predict_n_one_matches_closed_form() {
+        let noise = 0.25;
+        let mut gp = rbf_gp(1.0, noise);
+        gp.fit(&[0.0], 1, 1, &[2.0]).expect("spd");
+        let pred = gp
+            .predict_with(
+                &[0.0],
+                1,
+                1,
+                super::PredictOptions {
+                    variance_kind: super::VarianceKind::Latent,
+                },
+            )
+            .expect("fitted");
+        let a = 1.0 + noise;
+        assert_close(pred.mean[0], 2.0 / a);
+        assert_close(pred.variance[0], 1.0 - 1.0 / a);
+        let obs = gp.predict(&[0.0], 1, 1).expect("fitted");
+        assert_eq!(obs.variance_kind, super::VarianceKind::Observation);
+        assert_close(obs.variance[0], pred.variance[0] + noise);
+    }
+
+    #[test]
+    fn observation_variance_is_latent_plus_noise_after_inverse() {
+        let noise = 0.16;
+        let mut gp = rbf_gp(1.0, noise).with_target_transform(StandardizeTarget::new());
+        let y = [0.0, 4.0];
+        gp.fit(&[0.0, 1.0], 2, 1, &y).expect("spd");
+        let mut t = StandardizeTarget::new();
+        t.fit(&y).expect("finite");
+        let scale = t.std().expect("fitted");
+        let scale_sq = scale * scale;
+        let lat = gp
+            .predict_with(
+                &[0.5],
+                1,
+                1,
+                super::PredictOptions {
+                    variance_kind: super::VarianceKind::Latent,
+                },
+            )
+            .expect("fitted");
+        let obs = gp.predict(&[0.5], 1, 1).expect("fitted");
+        assert_close(obs.variance[0], lat.variance[0] + scale_sq * noise);
+        let mut recovered = y;
+        t.transform(&mut recovered).expect("fitted");
+        t.inverse_transform_mean(&mut recovered).expect("fitted");
+        assert_close(recovered[0], y[0]);
+        assert_close(recovered[1], y[1]);
     }
 }

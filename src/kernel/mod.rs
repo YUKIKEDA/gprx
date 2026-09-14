@@ -78,6 +78,48 @@ fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<us
     Ok(dist.nrows())
 }
 
+fn require_same_shape(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(), GpError> {
+    if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
+        return Err(GpError::InvalidHyperparameter {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                out.nrows(),
+                out.ncols(),
+                dist.nrows(),
+                dist.ncols()
+            ),
+        });
+    }
+    if dist.nrows() == 0 || dist.ncols() == 0 {
+        return Err(GpError::EmptyInput);
+    }
+    Ok(())
+}
+
+fn write_dense(
+    dist: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    mut kernel: impl FnMut(f64) -> Result<f64, GpError>,
+) -> Result<(), GpError> {
+    require_same_shape(dist, out.as_ref())?;
+    let mut err = None;
+    for col in 0..dist.ncols() {
+        for row in 0..dist.nrows() {
+            if err.is_some() {
+                continue;
+            }
+            match kernel(dist[(row, col)]) {
+                Ok(value) => out[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        }
+    }
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 fn write_triangle(
     dist: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,

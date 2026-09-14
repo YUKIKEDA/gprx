@@ -1,6 +1,6 @@
 //! Isotropic squared-exponential (RBF) kernel.
 
-use super::{Triangle, finite_dist, write_triangle};
+use super::{Triangle, finite_dist, write_dense, write_triangle};
 use crate::error::GpError;
 use faer::{MatMut, MatRef};
 
@@ -104,10 +104,23 @@ impl RbfKernel {
         uplo: Triangle,
     ) -> Result<(), GpError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        write_triangle(dist, out, uplo, |d| {
-            let d = finite_dist(d)?;
-            Ok((-d * inv_two_ell_sq).exp())
-        })
+        write_triangle(dist, out, uplo, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+    }
+
+    /// Writes rectangular `k(dist)` into `out` (train × test).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpError`] if the matrices are empty, size mismatched, or if
+    /// `dist` contains a non-finite value.
+    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GpError> {
+        let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
+        write_dense(dist, out, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+    }
+
+    /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    pub fn fill_diag(&self, out: &mut [f64]) {
+        out.fill(1.0);
     }
 
     /// Writes `∂K/∂θ` for `θ = log(ℓ)` into `d_k`.
@@ -139,6 +152,11 @@ impl RbfKernel {
             Ok(k * d * inv_ell_sq)
         })
     }
+}
+
+fn rbf_from_sq_dist(d: f64, inv_two_ell_sq: f64) -> Result<f64, GpError> {
+    let d = finite_dist(d)?;
+    Ok((-d * inv_two_ell_sq).exp())
 }
 
 fn invalid_length(reason: &'static str) -> GpError {

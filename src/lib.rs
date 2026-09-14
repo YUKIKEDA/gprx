@@ -13,7 +13,7 @@ pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GpError};
-pub use exact::ExactGP;
+pub use exact::{ExactGP, PredictOptions, Prediction, VarianceKind};
 pub use likelihood::GaussianLikelihood;
 pub use precision::{DoublePrecision, PrecisionPolicy};
 
