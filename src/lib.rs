@@ -5,6 +5,7 @@
 //! `AGENTS.md` and `.dev/roadmap.md` for the current milestone.
 
 mod error;
+pub mod kernel;
 mod likelihood;
 mod precision;
 pub mod transform;
