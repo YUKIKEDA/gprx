@@ -7,6 +7,7 @@
 mod error;
 mod likelihood;
 mod precision;
+pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GpError};
