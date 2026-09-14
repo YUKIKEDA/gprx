@@ -6,6 +6,7 @@
   {"title":"[feat] P1A-3: GaussianLikelihood","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-3","design":"§4.0","depends":"P1A-1","dod":"θ=log(σn²)、∂K/∂θ=σn² I。add_noise_diag / noise_grad_diag の単体テスト。"},
   {"title":"[feat] P1A-4: TargetTransform と X Transform","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-4","design":"§5.5","depends":"P1A-1","dod":"Identity / Standardize。平均・分散の逆変換。§12-8。"},
   {"title":"[feat] P1A-5: RBF カーネル","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-5","design":"§5.1","depends":"P1A-1","dod":"apply/grad、uplo=Lower。対称性、対角、既知値、数値微分。Lower と Full の一致。"},
+  {"title":"[feat] P1A-20: RBF ARD","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-20","design":"§5.1 §5.2","depends":"P1A-5","dod":"次元ごとの ℓ。θ_d=log(ℓ_d)。等方と一致するケース。数値微分。Lower と Full。"},
   {"title":"[feat] P1A-6: KernelSpec / CompiledKernel","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-6","design":"§5.1","depends":"P1A-5","dod":"RBF + Sum/Product + param flatten。get/set_params がリーフに届く。組み込みは enum。"},
   {"title":"[feat] P1A-7: ExactGP の A / LLT / alpha","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-7","design":"§6.2 §6.3","depends":"P1A-2, P1A-3, P1A-6","dod":"A=K+σn²I。小規模で Aα=y。Cholesky 失敗時 fitted=false。"},
   {"title":"[feat] P1A-8: predict mean と分散種別","labels":["type:feat","phase:1a"],"milestone":"Phase 1a","id":"P1A-8","design":"§6","depends":"P1A-7, P1A-4","dod":"Latent / Observation。観測分散は潜在+σn²（逆変換後）。未学習は NotFitted。"},
