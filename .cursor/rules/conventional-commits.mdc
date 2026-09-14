@@ -1,0 +1,56 @@
+---
+description: Conventional Commits format for all git commits in this repo
+alwaysApply: true
+---
+
+# Conventional Commits
+
+All commit messages MUST follow Conventional Commits.
+
+## Format
+
+```text
+type(optional-scope): subject
+
+optional body
+
+optional footer
+```
+
+## Types (English)
+
+Use one of: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `build`, `ci`.
+
+## Scope
+
+- English, kebab or short noun (examples: `protocol`, `instrumentation`, `analyzer`, `sample`, `smoke`, `build`, `deps`).
+- Recommended when the change targets a clear area; not mandatory for tiny chores.
+- New scopes are allowed; the example list is not a closed whitelist.
+
+## Subject
+
+- Japanese is allowed (and preferred when it communicates intent better).
+- Type and scope stay in English.
+- Imperative / concise; no trailing period required.
+- Focus on why when helpful; avoid dumping file lists.
+
+## Breaking changes
+
+Use `type(scope)!: subject` and/or a footer:
+
+```text
+BREAKING CHANGE: description
+```
+
+## Examples
+
+```text
+feat(protocol): 長さプレフィックス付きフレーミングを追加
+fix(instrumentation): GRAFT_ENABLE 未設定時にパイプを立てない
+chore(deps): StyleCop.Analyzers を導入
+docs: M0 タスク分解を更新
+```
+
+## Agent behavior
+
+When creating commits in this repository, draft messages in this format. Do not use free-form subjects without a type prefix.

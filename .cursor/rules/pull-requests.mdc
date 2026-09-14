@@ -1,0 +1,27 @@
+---
+description: PR title/body must follow the repo pull request template
+alwaysApply: true
+---
+
+# Pull requests
+
+## Title
+
+Same as Conventional Commits: `type(optional-scope): subject`  
+(Japanese subject OK; type/scope English.)
+
+## Body
+
+Follow `.github/pull_request_template.md` exactly — same section headings:
+
+1. `## Summary`
+2. `## Related`
+3. `## Test plan`
+4. `## Verification`
+5. `## Risk / Rollback`
+6. `## Checklist`
+
+- Headings stay in **English**; bullet text may be Japanese.
+- Empty optional fields: write `N/A`, do not delete the section.
+- When using `gh pr create`, pass a body that matches this template (PowerShell here-string; see `powershell-shell` rule).
+- Do not invent alternate section names (`## 概要`, etc.).
