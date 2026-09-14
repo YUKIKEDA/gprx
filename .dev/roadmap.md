@@ -82,7 +82,7 @@ M0 → 1a → 1b → 2
 | P1A-4  | Feat | `TargetTransform` と X の `Transform`（Identity / Standardize）                       | P1A-1               | 平均・分散の逆変換。§12-8                                                                                |
 | P1A-5  | Feat | RBF カーネル（`apply`/`grad`, `uplo=Lower`）                                          | P1A-1               | 対称性、対角、既知値、数値微分。Lower と Full の一致                                                     |
 | P1A-6  | Feat | `KernelSpec` / `CompiledKernel`（RBF + Sum/Product + param flatten）                  | P1A-5               | `get/set_params` がリーフに届く。組み込みは enum                                                         |
-| P1A-7  | Feat | ExactGP: `A=K+σn²I`、LLT、`α`                                                         | P1A-2, P1A-3, P1A-6 | 小規模で `A α = y`。失敗時 `fitted=false`。P1A-18 から crate 内で同じ経路をベンチできる                  |
+| P1A-7  | Feat | `Gp`: `A=K+σn²I`、LLT、`α`                                                             | P1A-2, P1A-3, P1A-6 | 小規模で `A α = y`。失敗時 `fitted=false`。P1A-18 から crate 内で同じ経路をベンチできる                  |
 | P1A-8  | Feat | `predict`（mean, `VarianceKind::{Latent,Observation}`）                               | P1A-7, P1A-4        | 観測分散 = 潜在 + σn²（逆変換後）。`benches/exact.rs` に `predict_100` を足す                            |
 | P1A-9  | Feat | 負の MLL                                                                              | P1A-7               | `log det K = 2Σ log L_ii`。既知の小問題と一致                                                            |
 | P1A-10 | Feat | `W=ααᵀ-K⁻¹` による勾配                                                                | P1A-9               | `value_and_gradient_into` が L/α/W を共有。数値微分一致。bench に `mll_and_grad` を足す                  |
@@ -112,9 +112,9 @@ M0 → 1a → 1b → 2
 
 | ID    | 種別 | タイトル                          | 依存          | DoD                                                                                  |
 | ----- | ---- | --------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
-| P1B-1 | Feat | `Objective` と `ExactGpObjective` | P1A-10        | `set_params` が kernel+likelihood の連結配列                                         |
+| P1B-1 | Feat | `Objective` と `GpObjective`      | P1A-10        | `set_params` が kernel+likelihood の連結配列                                         |
 | P1B-2 | Feat | argmin L-BFGS アダプタ            | P1B-1         | `value_and_gradient_into` を1回の評価で使う                                          |
-| P1B-3 | Feat | `ExactGP::fit` が最適化する       | P1B-2, P1A-8  | 未学習 `predict` は `NotFitted`。成功後は L と α を保持。bench に `fit_lbfgs` を足す |
+| P1B-3 | Feat | `Gp::fit` が最適化する            | P1B-2, P1A-8  | 未学習 `predict` は `NotFitted`。成功後は L と α を保持。bench に `fit_lbfgs` を足す |
 | P1B-4 | Task | パラメータ回収テスト              | P1B-3         | 合成データで lengthscale とノイズが真値の近くに戻る。LML が初期より下がる            |
 | P1B-5 | Docs | README, rustdoc, `examples/`      | P1B-4, P1A-17 | 英語 rustdoc。最短例で fit→predict                                                   |
 
@@ -157,7 +157,7 @@ M0 → 1a → 1b → 2
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
 | P4-1 | Spike | VFE か FITC か一つ選ぶ                   | 1b   | 選択理由を `.dev/` に1ページ                  |
-| P4-2 | Feat  | SparseGP、誘導点固定                     | P4-1 | m≪n で fit が終わる                           |
+| P4-2 | Feat  | `SparseGp`、誘導点固定                   | P4-1 | m≪n で fit が終わる                           |
 | P4-3 | Feat  | 対角予測と MLL                           | P4-2 | 小問題で Exact に近い（完全一致は要求しない） |
 | P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3 | 1b と同じ Optimizer 経路                      |
 

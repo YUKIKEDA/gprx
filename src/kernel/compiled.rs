@@ -9,7 +9,7 @@ use faer::{Mat, MatMut, MatRef};
 ///
 /// [`Self::apply`] and [`Self::grad`] take a scratch buffer of the same size
 /// as `out`. A lone RBF does not write it. Nested rest terms that are
-/// themselves sums or products may allocate one extra `n×n` buffer. ExactGP
+/// themselves sums or products may allocate one extra `n×n` buffer. Fit
 /// will pass Workspace storage for the caller scratch. Cloning copies the
 /// whole tree.
 ///

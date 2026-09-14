@@ -23,7 +23,7 @@ pub enum VarianceKind {
     Observation,
 }
 
-/// Options for [`ExactGP::predict`].
+/// Options for [`Gp::predict`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PredictOptions {
     /// Which variance to return. Defaults to [`VarianceKind::Observation`].
@@ -49,7 +49,7 @@ pub struct Prediction {
     pub variance_kind: VarianceKind,
 }
 
-/// Exact GP with fixed hyperparameters.
+/// Gaussian process with fixed hyperparameters.
 ///
 /// [`Self::fit`] builds the lower triangle of `A = K + σn² I`, factors it
 /// in place as `L Lᵀ`, and solves `A α = y`. `L` lives in the workspace;
@@ -60,12 +60,12 @@ pub struct Prediction {
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{ExactGP, GaussianLikelihood};
+/// use gprx::{Gp, GaussianLikelihood};
 ///
 /// # fn main() -> Result<(), gprx::GpError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let mut gp = ExactGP::new(kernel, likelihood);
+/// let mut gp = Gp::new(kernel, likelihood);
 /// // Column-major `X` with n = 2 points and d = 1 feature.
 /// gp.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
 /// let pred = gp.predict(&[0.5], 1, 1)?;
@@ -73,7 +73,7 @@ pub struct Prediction {
 /// # Ok(())
 /// # }
 /// ```
-pub struct ExactGP {
+pub struct Gp {
     kernel: KernelSpec,
     compiled: Option<CompiledKernel>,
     likelihood: GaussianLikelihood,
@@ -89,9 +89,9 @@ pub struct ExactGP {
     d: usize,
 }
 
-impl fmt::Debug for ExactGP {
+impl fmt::Debug for Gp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExactGP")
+        f.debug_struct("Gp")
             .field("fitted", &self.fitted)
             .field("n", &self.n)
             .field("d", &self.d)
@@ -101,7 +101,7 @@ impl fmt::Debug for ExactGP {
     }
 }
 
-impl ExactGP {
+impl Gp {
     /// Builds an unfitted model that owns the kernel and observation noise.
     ///
     /// Input and target maps default to identity. Call
@@ -442,7 +442,7 @@ fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
 
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
 ///
-/// P1A-18 can call this on the same `Workspace` buffers as [`ExactGP::fit`].
+/// P1A-18 can call this on the same `Workspace` buffers as [`Gp::fit`].
 pub(crate) fn cholesky_and_solve(
     a: &mut Mat<f64>,
     rhs: &mut Mat<f64>,
@@ -481,7 +481,7 @@ pub(crate) fn cholesky_and_solve(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExactGP, cholesky_and_solve, pack_points};
+    use super::{Gp, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GpError};
     use crate::kernel::{KernelSpec, RbfKernel, Triangle};
     use crate::likelihood::GaussianLikelihood;
@@ -502,8 +502,8 @@ mod tests {
 
     fn assert_send_sync<T: Send + Sync>() {}
 
-    fn rbf_gp(ell: f64, noise: f64) -> ExactGP {
-        ExactGP::new(
+    fn rbf_gp(ell: f64, noise: f64) -> Gp {
+        Gp::new(
             KernelSpec::from(RbfKernel::new(ell).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         )
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn is_send_sync() {
-        assert_send_sync::<ExactGP>();
+        assert_send_sync::<Gp>();
         assert_send_sync::<super::Prediction>();
         assert_send_sync::<super::VarianceKind>();
         assert_send_sync::<super::PredictOptions>();

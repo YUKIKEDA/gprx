@@ -16,10 +16,10 @@
   → TargetTransform (yの標準化等。predict時にmean/varianceを逆変換)
   → Likelihood (観測ノイズσn²、モデルパラメータとして独立管理)
   → CompiledKernel<T> (KernelSpecをコンパイルした実行計画 + Workspace)
-  → Inference (ExactGP / SparseGP など、差し替え)
+  → Inference (Gp / SparseGp など、差し替え)
        → Objective (尤度・勾配、Optimizerへ提供、アロケーションフリー)
        → Optimizer (L-BFGS / Nelder-Mead 等、勾配要否で分岐)
-       → OnlineInference (ExactGPのみ: データ点の増分追加削除)
+       → OnlineInference (`Gp` のみ: データ点の増分追加削除)
   → 予測 (mean, variance。潜在分散 / 観測分散を明示)
 ```
 
@@ -369,7 +369,7 @@ struct PredictOptions {
 
 初期実装は対角分散のみ。フル共分散は将来拡張(§13 Phase 4以降)。`predict`は`PredictOptions`で分散の意味を切り替える。未指定時は`Observation`(ユーザーが欲しいのは多くの場合ノイズ込みの予測分散)。
 
-`ExactGP`(n≲1万)と`SparseGP`(FITC/VFE)が`Inference`を実装。ハイパラ最適化は`Objective`(§9)を介して別途扱う。
+`Gp`(n≲1万)と`SparseGp`(FITC/VFE)が`Inference`を実装。ハイパラ最適化は`Objective`(§9)を介して別途扱う。
 
 ### 6.1 Sparse GPの誘導点キャッシュ問題
 
@@ -381,7 +381,7 @@ struct PredictOptions {
 
 Sparse GPのオンライン学習は誘導点ZとデータXの非対称性のためスコープ外(§14)。
 
-### 6.2 ExactGPのMLLと勾配(P0追加)
+### 6.2 `Gp` のMLLと勾配(P0追加)
 
 ハイパーパラメータ勾配のアルゴリズムと必要なメモリが無いと、勾配ループで一時行列を確保してアロケーション方針に違反するか、パラメータごとに線形ソルブを繰り返してO(p n³)になる。
 
@@ -410,22 +410,22 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 メモリ節約の代替(オプトイン、後付け可): 最適化ループ中はLを`K⁻¹`/`W`で上書きし、fit終了時にCholeskyを1回やり直してpredict用のLを復元する。Phase 1は`w_matrix`を独立確保し、Lを保持する。
 
-### 6.3 ExactGPの所有権とfitの状態
+### 6.3 `Gp` の所有権とfitの状態
 
 `Inference`と`Objective`を分離したため、モデルパラメータの所有者を明示する。
 
 ```rust
-struct ExactGP<T: Scalar, P: PrecisionPolicy> {
+struct Gp<T: Scalar, P: PrecisionPolicy> {
     kernel: KernelSpec,                          // ハイパラの所有者
     compiled: Option<CompiledKernel<T>>,
     likelihood: GaussianLikelihood<T>,           // ノイズパラメータの所有者
     x_transforms: Pipeline,
     y_transform: Box<dyn TargetTransform<T>>,
     workspace: Workspace<P>,
-    state: ExactGpState<T>,
+    state: GpState<T>,
 }
 
-struct ExactGpState<T: Scalar> {
+struct GpState<T: Scalar> {
     fitted: bool,
     n: usize,
     d: usize,
@@ -435,10 +435,10 @@ struct ExactGpState<T: Scalar> {
     // L は workspace.k_matrix に置く(fit後も保持)
 }
 
-/// Objective は ExactGP を &mut で借り、set_params → MLL/勾配 を中継するだけ。
-/// パラメータの正本は ExactGP.kernel / ExactGP.likelihood。
-struct ExactGpObjective<'a, T: Scalar, P: PrecisionPolicy> {
-    model: &'a mut ExactGP<T, P>,
+/// Objective は `Gp` を &mut で借り、set_params → MLL/勾配 を中継するだけ。
+/// パラメータの正本は Gp.kernel / Gp.likelihood。
+struct GpObjective<'a, T: Scalar, P: PrecisionPolicy> {
+    model: &'a mut Gp<T, P>,
 }
 ```
 
@@ -470,7 +470,7 @@ struct Workspace<P: PrecisionPolicy> {
 
 各バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 
-Rayon並列クロージャ内での新規確保は厳禁。`thread_scratch`を事前分割し、**並列領域に入る直前に`Workspace`から切り離して**分配する。`&mut self`(Objective/ExactGP)をRayonクロージャに渡さない。
+Rayon並列クロージャ内での新規確保は厳禁。`thread_scratch`を事前分割し、**並列領域に入る直前に`Workspace`から切り離して**分配する。`&mut self`(Objective/`Gp`)をRayonクロージャに渡さない。
 
 ```rust
 // 並列領域に入る前:
@@ -541,7 +541,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`ExactGP`の`ExactGpObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を伝播させ、`IncrementalRecompute`と接続する(Phase 5)。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`Gp`の`GpObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を伝播させ、`IncrementalRecompute`と接続する(Phase 5)。
 
 ## 10. エラー型 GpError
 
@@ -592,7 +592,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 ## 11. オンライン学習(データ点の追加削除)
 
-GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、ExactGP向けに専用の`OnlineWorkspace`・更新経路を用意する。
+GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、`Gp`向けに専用の`OnlineWorkspace`・更新経路を用意する。
 
 ### コスト比較
 
