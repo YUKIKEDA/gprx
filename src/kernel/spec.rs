@@ -1,0 +1,278 @@
+//! Declaration-layer kernel tree: leaves, sums, and products.
+
+use crate::error::GpError;
+use crate::kernel::RbfKernel;
+use std::ops::{Add, Mul};
+
+/// Maps a flat optimizer index to a leaf-local parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParameterBinding {
+    /// Index in the concatenated kernel parameter vector.
+    pub index: usize,
+    /// Leaf index in depth-first, left-to-right order.
+    pub leaf_id: usize,
+    /// Parameter index inside that leaf.
+    pub local_index: usize,
+}
+
+/// User-facing kernel expression. Parameters stay `f64` until compile.
+///
+/// Built-in leaves are stored directly. Sum and product nest until
+/// [`Self::compile`] flattens associative chains into [`super::CompiledKernel`].
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+///
+/// # fn main() -> Result<(), gprx::GpError> {
+/// let spec = KernelSpec::from(RbfKernel::new(1.0)?)
+///     + KernelSpec::from(RbfKernel::new(2.0)?);
+/// assert_eq!(spec.num_params(), 2);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub enum KernelSpec {
+    /// Isotropic RBF leaf.
+    Rbf(RbfKernel),
+    /// `k = k_left + k_right`.
+    Sum(Box<KernelSpec>, Box<KernelSpec>),
+    /// `k = k_left * k_right` (Hadamard product).
+    Product(Box<KernelSpec>, Box<KernelSpec>),
+}
+
+impl From<RbfKernel> for KernelSpec {
+    fn from(kernel: RbfKernel) -> Self {
+        Self::Rbf(kernel)
+    }
+}
+
+impl Add for KernelSpec {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self::Sum(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Mul for KernelSpec {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        Self::Product(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl KernelSpec {
+    /// Returns the number of flattened kernel parameters.
+    pub fn num_params(&self) -> usize {
+        match self {
+            Self::Rbf(leaf) => leaf.num_params(),
+            Self::Sum(left, right) | Self::Product(left, right) => {
+                left.num_params() + right.num_params()
+            }
+        }
+    }
+
+    /// Writes flattened `θ` in depth-first, left-to-right leaf order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpError::InvalidHyperparameter`] if `out` is the wrong length.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GpError> {
+        require_len(out.len(), self.num_params())?;
+        let mut offset = 0;
+        self.write_params(out, &mut offset);
+        Ok(())
+    }
+
+    /// Replaces flattened `θ`. All leaves are updated or none are.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpError::InvalidHyperparameter`] if `params` is the wrong
+    /// length or a leaf rejects its slice.
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GpError> {
+        require_len(params.len(), self.num_params())?;
+        let mut next = self.clone();
+        let mut offset = 0;
+        next.apply_params(params, &mut offset)?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Returns the mapping from flat indices to leaves.
+    pub fn parameter_bindings(&self) -> Vec<ParameterBinding> {
+        let mut out = Vec::new();
+        let mut index = 0;
+        let mut leaf_id = 0;
+        self.collect_bindings(&mut out, &mut index, &mut leaf_id);
+        out
+    }
+
+    /// Compiles this tree. Associative sums and products become a single list.
+    ///
+    /// Mixed operators keep their grouping: `(A + B) * C` is a product of a
+    /// flattened sum and `C`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{CompiledKernel, KernelSpec, RbfKernel};
+    ///
+    /// # fn main() -> Result<(), gprx::GpError> {
+    /// let spec = (KernelSpec::from(RbfKernel::new(1.0)?)
+    ///     + KernelSpec::from(RbfKernel::new(2.0)?))
+    ///     + KernelSpec::from(RbfKernel::new(3.0)?);
+    /// assert!(matches!(spec.compile(), CompiledKernel::Sum(terms) if terms.len() == 3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn compile(&self) -> crate::kernel::CompiledKernel {
+        crate::kernel::CompiledKernel::from_spec(self)
+    }
+
+    fn write_params(&self, out: &mut [f64], offset: &mut usize) {
+        match self {
+            Self::Rbf(leaf) => {
+                out[*offset] = leaf.log_lengthscale();
+                *offset += 1;
+            }
+            Self::Sum(left, right) | Self::Product(left, right) => {
+                left.write_params(out, offset);
+                right.write_params(out, offset);
+            }
+        }
+    }
+
+    fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GpError> {
+        match self {
+            Self::Rbf(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::Sum(left, right) | Self::Product(left, right) => {
+                left.apply_params(params, offset)?;
+                right.apply_params(params, offset)
+            }
+        }
+    }
+
+    fn collect_bindings(
+        &self,
+        out: &mut Vec<ParameterBinding>,
+        index: &mut usize,
+        leaf_id: &mut usize,
+    ) {
+        match self {
+            Self::Rbf(leaf) => {
+                let id = *leaf_id;
+                *leaf_id += 1;
+                for local_index in 0..leaf.num_params() {
+                    out.push(ParameterBinding {
+                        index: *index,
+                        leaf_id: id,
+                        local_index,
+                    });
+                    *index += 1;
+                }
+            }
+            Self::Sum(left, right) | Self::Product(left, right) => {
+                left.collect_bindings(out, index, leaf_id);
+                right.collect_bindings(out, index, leaf_id);
+            }
+        }
+    }
+}
+
+fn require_len(actual: usize, expected: usize) -> Result<(), GpError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(GpError::InvalidHyperparameter {
+            reason: format!("expected {expected} kernel parameters, got {actual}"),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KernelSpec;
+    use crate::kernel::RbfKernel;
+
+    const TOL: f64 = 1e-12;
+
+    fn assert_close(actual: f64, expected: f64) {
+        let scale = expected.abs().max(1.0);
+        assert!(
+            (actual - expected).abs() <= TOL * scale,
+            "actual={actual}, expected={expected}"
+        );
+    }
+
+    fn rbf(ell: f64) -> KernelSpec {
+        KernelSpec::from(RbfKernel::new(ell).expect("valid"))
+    }
+
+    #[test]
+    fn sum_flattens_params_left_to_right() {
+        let mut spec = (rbf(1.0) + rbf(2.0)) + rbf(3.0);
+        assert_eq!(spec.num_params(), 3);
+        let mut params = [0.0; 3];
+        spec.get_params(&mut params).expect("len 3");
+        assert_close(params[0], 1.0_f64.ln());
+        assert_close(params[1], 2.0_f64.ln());
+        assert_close(params[2], 3.0_f64.ln());
+        params[1] = 4.0_f64.ln();
+        spec.set_params(&params).expect("len 3");
+        spec.get_params(&mut params).expect("len 3");
+        assert_close(params[1], 4.0_f64.ln());
+        match spec.compile() {
+            crate::kernel::CompiledKernel::Sum(terms) => assert_eq!(terms.len(), 3),
+            other => panic!("expected flattened sum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_keeps_sum_nested() {
+        let spec = rbf(1.0) * (rbf(2.0) + rbf(3.0));
+        match spec.compile() {
+            crate::kernel::CompiledKernel::Product(factors) => {
+                assert_eq!(factors.len(), 2);
+                assert!(matches!(factors[1], crate::kernel::CompiledKernel::Sum(_)));
+            }
+            other => panic!("expected product, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_flattens_three_factors() {
+        let spec = (rbf(1.0) * rbf(2.0)) * rbf(3.0);
+        match spec.compile() {
+            crate::kernel::CompiledKernel::Product(factors) => assert_eq!(factors.len(), 3),
+            other => panic!("expected flattened product, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_params_is_atomic() {
+        let mut spec = rbf(1.0) + rbf(2.0);
+        let before = spec.clone();
+        assert!(spec.set_params(&[0.0, f64::INFINITY]).is_err());
+        assert_eq!(spec, before);
+    }
+
+    #[test]
+    fn bindings_follow_leaves() {
+        let spec = rbf(1.0) + rbf(2.0);
+        let b = spec.parameter_bindings();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].leaf_id, 0);
+        assert_eq!(b[1].leaf_id, 1);
+        assert_eq!(b[0].local_index, 0);
+        assert_eq!(b[1].index, 1);
+    }
+}

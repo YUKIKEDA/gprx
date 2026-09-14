@@ -1,11 +1,15 @@
-//! Kernel leaves. Composition (`KernelSpec`) starts at P1A-6.
+//! Kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
 //!
 //! Phase 1 evaluates isotropic RBF from a squared-Euclidean distance matrix.
 //! Callers pass faer views; this module does not re-export faer types.
 
+mod compiled;
 mod rbf;
+mod spec;
 
+pub use compiled::CompiledKernel;
 pub use rbf::RbfKernel;
+pub use spec::{KernelSpec, ParameterBinding};
 
 use crate::error::GpError;
 use faer::{MatMut, MatRef};
@@ -21,7 +25,7 @@ pub enum Triangle {
     Full,
 }
 
-fn visit_triangle(n: usize, uplo: Triangle, mut visit: impl FnMut(usize, usize)) {
+pub(crate) fn visit_triangle(n: usize, uplo: Triangle, mut visit: impl FnMut(usize, usize)) {
     match uplo {
         Triangle::Lower => {
             for col in 0..n {
