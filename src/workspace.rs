@@ -3,8 +3,6 @@
 //! Allocated once when fit starts. Later optimizer iterations overwrite the
 //! same storage. Crate-private; faer types are not re-exported.
 
-#![allow(dead_code)] // ExactGP (P1A-7) holds this type.
-
 use dyn_stack::{MemBuffer, StackReq};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, Par};
@@ -17,12 +15,14 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,
     /// `W = ααᵀ - K⁻¹` for the MLL gradient trace term.
+    #[allow(dead_code)]
     pub(crate) w_matrix: Mat<P::Storage>,
     /// Cached pairwise distances (squared Euclidean for Phase 1 RBF).
     pub(crate) dist_cache: Mat<P::Storage>,
     /// Kernel values and `∂K/∂θ` scratch.
     pub(crate) exp_buf: Mat<P::Storage>,
     /// Residual buffer for mixed-precision refinement. `None` in Phase 1.
+    #[allow(dead_code)]
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
