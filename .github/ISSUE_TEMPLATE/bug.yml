@@ -1,0 +1,41 @@
+name: Bug
+description: Something is wrong
+title: "[bug] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, in one or two sentences. Japanese is OK.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Command, snippet, or test name.
+    validations:
+      required: true
+  - type: input
+    id: design
+    attributes:
+      label: Design section
+      description: Optional. Example - `.dev/gprx-design.md` §6.2
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS, rustc, faer version"

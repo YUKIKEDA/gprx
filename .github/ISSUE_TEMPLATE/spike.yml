@@ -1,0 +1,37 @@
+name: Spike
+description: Time-boxed question. No GPR feature work unless listed in DoD.
+title: "[spike] "
+labels: ["type:spike"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What must be true or false when this spike ends. Japanese is OK.
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      placeholder: M0-2
+    validations:
+      required: true
+  - type: input
+    id: timebox
+    attributes:
+      label: Time box
+      description: Example - half day, 1 day
+      value: 1 day
+  - type: textarea
+    id: exit
+    attributes:
+      label: Exit criteria
+      description: Tests, notes in .dev/, or a follow-up Issue.
+    validations:
+      required: true
+  - type: textarea
+    id: followup
+    attributes:
+      label: Follow-up
+      description: Which roadmap row starts if the spike succeeds or fails.

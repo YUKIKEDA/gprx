@@ -1,0 +1,21 @@
+---
+description: Issue/PR flow, phase order, and local quality gates
+alwaysApply: true
+---
+
+# Workflow
+
+- Work only the current roadmap row. Now: **M0**. No GPR until M0-2 is done. Do not start 1b, 2, 3, 4, or 5 early.
+- Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge.
+- One Issue = one PR. Related: `Closes #N`.
+- Issue templates: Bug / Feat / Task / Spike. Spike commits use `chore` or `test`.
+- Identifiers, rustdoc, and `GpError` are English. Issues and commit subjects may be Japanese.
+- Local gates (CI runners may be limited; do not treat cloud CI as the DoD):
+  - `just lint` = `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  - `just test` = `cargo test` (must not invoke Python)
+  - `just gen-goldens` = regenerate sklearn JSON under `compare/goldens/` (manual)
+- Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
+- Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in composition only; do not enable both at large values.
+- Optimizer is argmin L-BFGS. Do not write a custom L-BFGS.
+- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io in Phase 1.
+- `just bench` = criterion. See `.cursor/rules/bench.mdc`. Speed work without a number is out of scope.

@@ -708,8 +708,12 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GP・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-- **Phase 1(正しいExact GP)**: f64のみ、RBF/Matern、faer LLT、§6.2のMLLと勾配(`w_matrix`)、`TargetTransform`、`Prediction`の分散種別、基本Optimizer、カーネル/ノイズパラメータのflatten、§12のテスト(オンライン以外)
-- **Phase 2(高速化)**: 組み込みカーネルの静的ディスパッチ、距離キャッシュ、Workspace再利用、Rayon、§15のベンチマーク。SIMDは測定後にボトルネックなら導入
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は M0（faer Spike）。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）に切る。
+
+- **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
+- **Phase 1a(固定ハイパラ Exact GP)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
+- **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
+- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。SIMDは `kernel_rbf` がボトルネックなときだけ
 - **Phase 3(オンライン学習)**: 自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GP)**: VFEまたはFITCのどちらか一つ、**誘導点Zは固定**、対角予測、ハイパラ最適化(Zは含めない)
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
@@ -722,17 +726,65 @@ trait OnlineInference<T: Scalar> {
 4. **`ldlt::update::delete_rows_and_cols_clobber`の実測**: 任意インデックス・複数行・更新後LDの正しさをPhase 3着手時に小規模行列で確認する。失敗時は§11のフォールバック(末尾削除+フル再分解、またはGivens downdate)
 5. **Sparse GPの誘導点Zの最適化**: Phase 4では固定。同時最適化か交互最適化かは後続で決める
 
-## 15. ベンチマーク指標
+## 15. ベンチマーク戦略
 
-「最も高速」を検証するため、Phase 2の最初に基準を取る。目標値は基準実装(Phase 1のf64 Exact GP)との比で後から置く。
+「最も高速」「アロケーション最小」は Phase 2 で突然測り始めても絵になる。**正しさの次に、同じ経路を測りながら積む。** Phase 2 は最適化のフェーズであり、計測の開始点ではない。詳細な運用は `.cursor/rules/bench.mdc`。
 
-| 指標             | 内容                                                                         |
-| ---------------- | ---------------------------------------------------------------------------- |
-| Fit時間          | n, d, カーネル別。最適化イタレーション込み / 1回のMLL+勾配のみ、を分けて測る |
-| Predict時間      | テスト点数別。潜在分散 / 観測分散                                            |
-| メモリ           | Workspace込みのピーク。`w_matrix`を含む                                      |
-| Allocations      | fit/predict中の新規確保回数(ゼロが目標)                                      |
-| 並列スケーリング | スレッド数別。faerとの二重並列に注意                                         |
-| f32/f64          | 精度(LML, mean, varianceの誤差)と速度                                        |
-| Online insert    | 1点追加。フル再fitとの時間比                                                 |
-| Online delete    | 任意点削除。フル再fitとの時間比                                              |
+### 15.1 二系統
+
+| 系統 | 道具 | いつ回す | 見るもの |
+|---|---|---|---|
+| 時間 | criterion、`benches/exact.rs` | `just bench`（ローカル）。既定 CI では回さない（ノイズ） | 壁時計。グループを分けて測る |
+| 確保 | `tests/alloc.rs` | `just test`（必須） | Workspace 確保**後**の新規確保回数。上限は ratchet（減ることはあっても、Issue なしに増えない） |
+
+時間と確保を一つの数字に混ぜない。L-BFGS 全体と「MLL+勾配 1回」も混ぜない。
+
+### 15.2 固定問題（回帰の単位）
+
+毎回同じ入力でないと、速くなったのかデータが変わったのか分からない。
+
+- RNG seed `0`、`d = 8`、RBF + `GaussianLikelihood`、ハイパラ固定
+- `n = 256` を P1A-18 から必須。`512` / `1024` は数秒で終わるようになってから足す
+- グループ（存在する経路だけ。無いものはまだ書かない）:
+  1. `kernel_rbf` — K の下三角構築
+  2. `cholesky_alpha` — `A` の LLT と `α`
+  3. `mll_and_grad` — §6.2 の 1 評価（P1A-10 から）
+  4. `predict_100` — テスト点 100（P1A-8 から）
+  5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）
+  6. `online_insert` / `online_delete` — Phase 3
+
+### 15.3 いつ何を足す
+
+| 時点 | やること |
+|---|---|
+| M0 | 箱だけ。空の `benches/` は置かない |
+| P1A-7 の直後（P1A-18） | criterion と `just bench`。`kernel_rbf` と `cholesky_alpha` |
+| P1A-8 / P1A-10 | 同じファイルに `predict_100` / `mll_and_grad` を足す。P1A-19 で確保 ratchet |
+| 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
+| 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
+| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。SIMD は `kernel_rbf` が支配的なときだけ |
+| Phase 3+ | insert/delete などを同じ問題定義で足す |
+
+ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。
+
+### 15.4 指標
+
+目標比は `phase-1b` を取ってから置く。それまでは「前より悪くない」がゲート。
+
+| 指標 | 内容 |
+|---|---|
+| MLL+grad 1回 | n, カーネル別。最適化ループとは別 |
+| Fit（L-BFGS） | イタレーション込み。1b から |
+| Predict | テスト点数別。潜在 / 観測 |
+| ピークメモリ | Workspace 込み。`w_matrix` を含む |
+| Allocations | セットアップ後の回数。ratchet → 最終的にホットパス 0 |
+| 並列 | スレッド数別。faer との二重並列に注意。Phase 2 |
+| f32/f64 | 精度と速度。Phase 5 |
+| Online insert/delete | 1点 vs フル再 fit。Phase 3 |
+
+### 15.5 やらないこと
+
+- 測らずに「速くなるはず」で Rayon / SIMD / 近似 exp を入れる
+- CI の criterion を赤/緑のゲートにする（マシン差でフレークする）
+- 確保 0 を 1a 初日のテストで要求する（まず数え、上限を段階的に下げる）
+

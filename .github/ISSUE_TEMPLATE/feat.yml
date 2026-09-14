@@ -1,0 +1,42 @@
+name: Feat
+description: User-visible behavior or API
+title: "[feat] "
+labels: ["type:feat"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What to add. Japanese is OK.
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: Example - P1A-5
+      placeholder: P1A-5
+    validations:
+      required: true
+  - type: input
+    id: design
+    attributes:
+      label: Design section
+      placeholder: ".dev/gprx-design.md §5.1"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "P1A-1 or #12"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: Checkable outcomes. Tests, rustdoc, and just test as needed.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Optional. Out of scope, White vs Likelihood, etc.

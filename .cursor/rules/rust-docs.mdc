@@ -1,0 +1,38 @@
+---
+description: rustdoc comments for public gprx items
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# rustdoc
+
+Sources: [rustdoc book](https://doc.rust-lang.org/stable/rustdoc/how-to-write-documentation.html), RFC 505 / 1574, API Guidelines C-EXAMPLE, C-QUESTION-MARK, C-FAILURE, C-LINK.
+
+- English. `//!` only for crate/module docs. `///` on items. Line comments, not `/** */`.
+- First line: one punctuated sentence, third-person singular (“Returns…”, not “Return…”). rustdoc uses it as the search summary.
+- Then: why/when, then sections. Common headings (plural `Examples` even for one): `# Examples`, `# Errors`, `# Panics`, `# Safety`.
+- `# Errors` on every public `Result`. `# Panics` only if it can panic (gprx library paths should not). `# Safety` on every `unsafe`.
+- Public user-facing types and methods need an example, or a link to one (C-EXAMPLE “within reason”). Getters that only return a field can skip a code block.
+- Doc tests compile. Use `?`, not `unwrap`. Hide setup with `# ` lines. Fence with ` ```rust `.
+- Link types with `[`ExactGP`]`. Do not restate the signature; rustdoc already shows it.
+- `missing_docs` deny on the lib crate (M0-1). `pub(crate)` items do not need rustdoc. `#[doc(hidden)]` for impls users cannot name (C-HIDDEN).
+- Crate-level `//!` in `lib.rs` (1b): one-line role, then a copy-paste fit→predict example.
+
+```rust
+/// Returns the predictive mean and variance at `xs`.
+///
+/// Applies trained input transforms, then inverse-transforms the target.
+///
+/// # Errors
+///
+/// Returns [`GpError::NotFitted`] if [`ExactGP::fit`] has not succeeded.
+///
+/// # Examples
+///
+/// ```rust
+/// # fn main() -> Result<(), gprx::GpError> {
+/// let pred = model.predict(&xs)?;
+/// # Ok(())
+/// # }
+/// ```
+```

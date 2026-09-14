@@ -1,0 +1,32 @@
+---
+description: Crate layout, module paths, and public API surface
+alwaysApply: true
+---
+
+# Layout
+
+Single crate `gprx`. Not a Cargo workspace. Do not create empty files ahead of the Issue that needs them.
+
+```
+src/lib.rs          # small public re-exports
+src/error.rs        # P1A-1
+src/workspace.rs    # P1A-2
+src/likelihood.rs   # P1A-3
+src/kernel/         # all kernel leaves; never at src/*.rs
+src/transform/      # target.rs, input.rs
+src/exact.rs        # ExactGP
+src/objective.rs    # Phase 1b
+tests/              # analytic.rs, goldens.rs, alloc.rs; M0: cholesky_smoke.rs
+benches/            # criterion; from P1A-18 (after first ExactGP path)
+compare/            # uv + sklearn + goldens/*.json
+examples/           # Phase 1b
+.dev/               # design, roadmap, bench-log.md
+```
+
+Add later, not now: `src/online.rs` (Phase 3), `src/sparse.rs` (Phase 4).
+
+M0 creates root crate files and `src/lib.rs` only. `src/kernel/` starts at P1A-5.
+
+Public at Phase 1b: `ExactGP`, `Prediction`, `VarianceKind`, `PredictOptions`, `kernel`, `GaussianLikelihood`, `transform`, `GpError`. Keep `Workspace`, `Objective`, and faer types crate-private.
+
+Unit tests: `#[cfg(test)]` in the module. Integration tests: `tests/`. Golden files only under `compare/goldens/`.

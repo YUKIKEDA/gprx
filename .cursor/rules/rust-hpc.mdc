@@ -1,0 +1,28 @@
+---
+description: HPC / numerical Rust practices for gprx hot paths
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# HPC
+
+Sources: faer (views + `MemStack` scratch, defer alloc to the caller), [Numerical Computing with Rust on CPU](https://numerical-rust-cpu-81b2c3.pages.in2p3.fr/22-parasol.html) (layout, no nested Rayon), gprx design §7–§8.
+
+- Own buffers in `Workspace`. Algorithms take `MatRef`/`MatMut` plus faer’s `MemStack`. Do not `Mat::zeros` / `Vec::new` inside the MLL/grad/predict loop. Count with `tests/alloc.rs`.
+- Match faer layout: column-major. Walk columns (or blocks of columns), not rows. Kernel `uplo = Lower` so we do not fill both triangles.
+- No `clone` / `to_owned` / `collect::<Vec<_>>()` on hot paths. If you need a temp, it already lives in `Workspace`.
+- Do not hide `O(n²)` copies behind convenience APIs. A function that must allocate is named `to_*` and is not used in `fit` after setup.
+- One Rayon pool, shared with faer. No `par_iter` inside a faer-parallel region. Split `thread_scratch` before the parallel region (design §7.1).
+- `#[inline]` only after `just bench` shows it matters. Do not hand-roll SIMD until P2-5 says `kernel_rbf` is the bottleneck (`bench.mdc`).
+- Keep indices `usize`. Do not iterate with `i32` to “be like BLAS” in Rust.
+- Parallel / SIMD may change bitwise results. Tests compare with tolerances, not bit-identity, unless a test is explicitly sequential.
+- `f32`/`f64` mixing only at documented `PrecisionPolicy` boundaries. Do not silently `as f64` in a kernel loop.
+
+```rust
+// BAD — alloc + row-wise scrape in the optimizer loop
+let k = dist.to_owned();
+for i in 0..n { for j in 0..n { out[(i, j)] = f(k[(i, j)]); } }
+
+// GOOD — reuse Workspace, lower triangle, column-friendly
+kernel.apply(dist, out.rb_mut(), Triangle::Lower);
+```

@@ -1,0 +1,40 @@
+name: Task
+description: Engineering work that is not a user-facing feature
+title: "[task] "
+labels: ["type:task"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Japanese is OK.
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      placeholder: M0-1
+    validations:
+      required: true
+  - type: input
+    id: design
+    attributes:
+      label: Design section
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: Verification
+      value: |
+        - `just lint`
+        - `just test`
