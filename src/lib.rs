@@ -5,10 +5,12 @@
 //! `AGENTS.md` and `.dev/roadmap.md` for the current milestone.
 
 mod error;
+mod likelihood;
 mod precision;
 mod workspace;
 
 pub use error::{CholeskyStage, GpError};
+pub use likelihood::GaussianLikelihood;
 pub use precision::{DoublePrecision, PrecisionPolicy};
 
 #[cfg(test)]
