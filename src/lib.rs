@@ -4,6 +4,12 @@
 //! Phase 1 (`ExactGP`, kernels, and `fit` / `predict`). See the repository
 //! `AGENTS.md` and `.dev/roadmap.md` for the current milestone.
 
+mod error;
+mod precision;
+
+pub use error::{CholeskyStage, GpError};
+pub use precision::{DoublePrecision, PrecisionPolicy};
+
 #[cfg(test)]
 mod tests {
     #[test]
