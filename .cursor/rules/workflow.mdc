@@ -6,7 +6,7 @@ alwaysApply: true
 # Workflow
 
 - Work only the current roadmap row. Now: **M0**. No GPR until M0-2 is done. Do not start 1b, 2, 3, 4, or 5 early.
-- Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge.
+- Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge. History rewrite and “is it OK to delete?”: `.cursor/rules/git.mdc`.
 - One Issue = one PR. Related: `Closes #N`.
 - Issue templates: Bug / Feat / Task / Spike. Spike commits use `chore` or `test`.
 - Identifiers, rustdoc, and `GpError` are English. Issues and commit subjects may be Japanese.

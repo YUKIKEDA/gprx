@@ -1,0 +1,47 @@
+---
+description: Questions are not git consent; destructive commands need an imperative that names the operation and SHA
+alwaysApply: true
+---
+
+# Git (destructive)
+
+A question is not permission. Do not run history-changing git in the same turn as a yes/no.
+
+## Stop. Do not execute
+
+Treat as a question. Reply only. Do not `reset`, `rebase`, `push --force`, `--force-with-lease`, `branch -D`, or discard work:
+
+- 「消していい？」「戻していい？」「force push していい？」
+- 「これ不要では？」「取り消さない？」
+- Any yes/no about deleting commits, rewriting the branch, or moving the remote
+
+The reply must include, then wait for a later message:
+
+1. Current `HEAD` SHA (restore point)
+2. Target SHA and what disappears
+3. The exact commands, including force-push if the branch was already pushed
+
+## Execute only on an imperative that names both
+
+Required in **that** message: the operation (`hard reset`, `force-with-lease`, …) **and** the target SHA or ref.
+
+```text
+# BAD — do not run git
+消していい？
+いらない。消して
+戻して
+PR があるから push して
+
+# GOOD — may run the named commands
+c6f2091 まで hard reset して、force-with-lease で push して
+```
+
+「直せ」「入れて」「PR に載せろ」are the working tree and the PR discussion. They are not `git commit`, `git push`, or a rewrite.
+
+## Commit and push
+
+Commit only when that message asks to commit. Push only when it asks to push. An open PR is not consent. Do not commit or push as “the natural next step”.
+
+## If a rewrite already ran
+
+The first line of the reply is the pre-rewrite SHA. Do not hide it.
