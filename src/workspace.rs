@@ -1,4 +1,4 @@
-//! Reusable buffers for one Exact GP fit of size `n`.
+//! Reusable buffers for one batch GP fit of size `n`.
 //!
 //! Allocated once when fit starts. Later optimizer iterations overwrite the
 //! same storage. Crate-private; faer types are not re-exported.
@@ -10,7 +10,7 @@ use faer::{Mat, Par};
 use crate::error::GpError;
 use crate::precision::{DoublePrecision, PrecisionPolicy};
 
-/// Dense buffers for batch Exact GP of a fixed `n`.
+/// Dense buffers for a batch GP of a fixed `n`.
 pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,

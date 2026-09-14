@@ -7,7 +7,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{ExactGP, GaussianLikelihood};
+use gprx::{GaussianLikelihood, Gp};
 
 const N: usize = 256;
 const D: usize = 8;
@@ -34,10 +34,10 @@ fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
     x
 }
 
-fn fitted_model() -> (ExactGP, Vec<f64>) {
+fn fitted_model() -> (Gp, Vec<f64>) {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(0.1).expect("valid noise");
-    let mut gp = ExactGP::new(kernel, likelihood);
+    let mut gp = Gp::new(kernel, likelihood);
     let x = fill_column_major(N, D, SEED);
     let mut state = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
     let y: Vec<f64> = (0..N).map(|_| splitmix64(&mut state)).collect();
