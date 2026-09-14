@@ -1,0 +1,39 @@
+---
+description: Questions are not decisions; do not settle scope, issues, or roadmap without an imperative
+alwaysApply: true
+---
+
+# Consent (planning)
+
+A question is not a decision. Do not close a design choice, GitHub Issue, or PR in the same turn as a question.
+
+## Stop. Reply only
+
+These are questions. Do not create, edit, close, or retitle Issues/PRs. Do not rewrite `.dev/roadmap.md` or `.dev/gprx-design.md` to “settle” them:
+
+- 「必須ですよね？」「RBFだけなの？」
+- 「これでいい？」「載せていないの？」
+- Any yes/no about scope, which kernels, which phase, or whether a row exists
+
+The reply lists the options and stops. Wait for a later message that names the artifact and the action.
+
+```text
+# BAD — do not run gh / edit roadmap
+必須機能ですよね？
+RBFだけなの？
+これで閉じていい？
+
+# GOOD — may change that artifact
+#54 の対象を RBF / Matern / RQ にして、roadmap の P1A-14 と P1A-16 の DoD を ARD 込みに更新して
+Issue は切るな。先に選択肢だけ書いて
+```
+
+「次に進んで」is the current roadmap row only. It is not consent to add rows, file extra Issues, or expand an open design question.
+
+## Do not close
+
+Do not `gh issue close`, `gh pr close`, or mark a discussion as decided by landing docs/code that pick one option. Closing needs the same imperative as git history: the operation and the target (`#54 を close して`).
+
+## Git history
+
+Destructive git: `.cursor/rules/git.mdc`.
