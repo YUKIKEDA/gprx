@@ -95,11 +95,11 @@ M0 → 1a → 1b → 2
 
 | ID     | 種別 | タイトル                  | 依存       | DoD                                                                     |
 | ------ | ---- | ------------------------- | ---------- | ----------------------------------------------------------------------- |
-| P1A-20 | Feat | RBF ARD（次元ごとの `ℓ`） | P1A-5      | `θ_d=log(ℓ_d)`。等方と一致するケース。数値微分。Lower と Full。次元ごとの差が要る（等方 `dist` だけでは足りない） |
+| P1A-20 | Feat | ARD lengthscale（まず RBF） | P1A-5      | `θ_d=log(ℓ_d)` を葉の共通の口にする。RBF で等方と一致。数値微分。Lower と Full。次元ごとの差が要る |
 | P1A-13 | Feat | Constant, Linear, White   | P1A-6      | 各リーフの対称性・勾配。White と Likelihood の二重計上を rustdoc で禁止 |
-| P1A-14 | Feat | Matern ν=1/2, 3/2, 5/2    | P1A-6      | ν ごとの既知値または数値微分                                            |
-| P1A-15 | Feat | Periodic                  | P1A-6      | 周期距離は二乗ユークリッドではない（§5.2）                              |
-| P1A-16 | Feat | Rational Quadratic        | P1A-6      | 数値微分一致                                                            |
+| P1A-14 | Feat | Matern ν=1/2, 3/2, 5/2    | P1A-6, P1A-20 | 等方と ARD。ν ごとの既知値または数値微分                                      |
+| P1A-15 | Feat | Periodic                  | P1A-6      | 周期距離は二乗ユークリッドではない（§5.2）。lengthscale はスカラーのまま     |
+| P1A-16 | Feat | Rational Quadratic        | P1A-6, P1A-20 | 等方と ARD。数値微分一致                                                    |
 | P1A-17 | Task | 合成カーネルと追加 golden | P1A-12〜16 | Sum/Product の flatten と sklearn または解析の照合                      |
 
 **1a 完了:** P1A-1…20 がマージ済み。`just test` が Python なしで緑。`.dev/bench-log.md` に `phase-1a` がある。
