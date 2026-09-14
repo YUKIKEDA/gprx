@@ -1,151 +1,176 @@
-# Rust製GPRライブラリ (gprx) 設計ドキュメント
+# gprx 設計ドキュメント
 
 ## 1. 目的・スコープ
 
 最も柔軟かつ最も高速なGaussian Process Regressionライブラリを、Rustで構築する。「柔軟」はユーザー定義カーネル・前処理・厳密/疎推論・最適化器の差し替え可能性、および**データ点の逐次追加削除(オンライン学習)**を指し、「高速」はアロケーション最小化・SIMD/マルチスレッド活用・精度切り替えによる計算量/メモリ最適化を指す。
+
+**改訂履歴**: ChatGPT・Geminiによる設計レビューを受け、数理的な誤り(混合精度の残差式、jitterとノイズ分散の混同)および実装上の不整合(アロケーション方針違反、精度ジェネリクスの欠落)を修正。妥当と判断した指摘はP0(致命的)→P2(改善)の優先度で全て反映し、実装順序は§13のロードマップに従う。
 
 ## 2. 全体アーキテクチャ概要
 
 ```
 入力 X, y
   → Transform Pipeline (前処理: MinMax, Standardize等)
-  → CompiledKernel (KernelSpecをコンパイルした実行計画 + Workspace)
+  → Likelihood (観測ノイズσn²、モデルパラメータとして独立管理)
+  → CompiledKernel<T> (KernelSpecをコンパイルした実行計画 + Workspace)
   → Inference (ExactGP / SparseGP など、GPModel trait経由で差し替え)
-       → Objective (尤度・勾配、Optimizerへ提供)
+       → Objective (尤度・勾配、Optimizerへ提供、アロケーションフリー)
        → Optimizer (L-BFGS / Nelder-Mead 等、勾配要否で分岐)
        → OnlineInference (ExactGPのみ: データ点の増分追加削除)
   → 予測 (mean, variance)
 ```
 
 主要な設計原則:
-- **静的ディスパッチを基本に、拡張点のみ`dyn`を許容**(カーネルのリーフ項、前処理、数学バックエンドなど頻度の低い呼び出しは`dyn`可)
-- **バッチfitのアロケーションはfit開始時の1回のみ**。イテレーション内で新規確保しない(オンライン学習は§11で別方式)
-- **精度はコンパイル時ジェネリクスで固定**(実行時分岐は挟まない)
+- **静的ディスパッチを基本に、拡張点のみ`dyn`を許容**
+- **gprx内部のホットパスでは新規アロケーションを行わない**(「fit中アロケーションゼロ」はユーザー定義カーネル実装まで強制できないため、この表現に修正)
+- **精度はコンパイル時ジェネリクスで固定**
+- **数値安定化(jitter)とモデルパラメータ(観測ノイズ)を明確に分離する**
 
 ## 3. 線形代数バックエンド: faer
 
-Pure Rustで、OpenBLAS/LAPACK/Eigenと同等以上の性能を達成しており、RayonベースでOpenMP/TBB相当の並列化性能を持つ。FFI依存がなくビルドが単純な点もメリット。
+Pure Rustで、OpenBLAS/LAPACK/Eigenと同等以上の性能を達成しており、RayonベースでOpenMP/TBB相当の並列化性能を持つ。
 
-- `Mat<T>`は**列優先(column-major)**、行ストライドは常に1、列末尾にアライメント用パディングが入りうる。自前ループ・入力データXの持ち方もこれに揃える(§7.2)
-- Cholesky分解は`llt::factor::cholesky_in_place(a: MatMut<T>, regularization, par, stack, params)`で**in-place**。独立した`chol_factor`バッファは不要、`k_matrix`をそのまま上書きする
-- 動的正則化(jitter)は`LltRegularization { dynamic_regularization_delta, dynamic_regularization_epsilon }`としてAPI組み込み済み。自前実装は不要
-- `cholesky_in_place`はfaer側のスクラッチ領域(`MemStack`)を要求する。`cholesky_in_place_scratch::<T>(dim, par, params)`でサイズ照会し、これも自前アリーナの一部として確保する(§7.1)
-- `Mat`は`reserve_exact(row_capacity, col_capacity)`による容量ベース確保をサポート。オンライン学習(§11)で活用する
-- `llt::update::{insert,delete}_rows_and_cols_clobber`: 分解済みLに対し指定インデックスの行/列を追加/削除するAPI。データ点の増分追加削除(§11)に使う
-- `ldlt_diagonal::update::rank_r_update_clobber`: ランクr更新(`A' = A + αww^T`)。ハイパーパラメータ変更が低ランクな`ΔK`をもたらす特殊ケースでのみ利用可(§5.4-1)
+- `Mat<T>`は列優先(column-major)、行ストライドは常に1
+- Cholesky分解は`llt::factor::cholesky_in_place(a: MatMut<T>, regularization, par, stack, params)`でin-place
+- 動的正則化(jitter)は`LltRegularization`としてAPI組み込み済み。**ただしこれは純粋な数値安定化用であり、GPRの観測ノイズ(モデルパラメータ)とは別物として扱う**(§4.0)
+- `Mat`は`reserve_exact`による容量ベース確保をサポート(§11のオンライン学習で活用)
+- `llt::update::{insert,delete}_rows_and_cols_clobber`: データ点の増分追加削除用(§11)。**実装前に小規模行列(例: 2x2)でフルCholeskyとの一致を検証するテストを書くこと**(§12)
+- `ldlt_diagonal::update::rank_r_update_clobber`: ランクr更新、低ランクΔKの場合のみ利用可(§5.4.1)
 
-## 4. 精度ポリシー: f32/f64/混合精度
+## 4. 精度ポリシーとノイズ/Jitterの分離
 
-目的は「メモリ削減」と「計算速度」の両方。単純な二層分離(構築はf32、Cholesky直前でf64にpromote)だと、コスト支配的なO(n³)のCholesky部分がf64のままになり速度メリットを取り逃す。そのため**混合精度反復改良(mixed-precision iterative refinement)**を採用する。
+### 4.0 観測ノイズとJitterの分離(P0修正)
+
+レビュー指摘により、当初の設計は「観測ノイズσn²」(GPRのモデルパラメータ、最適化対象)と「Jitter」(Choleskyを正定値に保つための数値安定化オフセット)を`LltRegularization`に混同していた。これを分離する。
+
+```rust
+/// モデルの尤度。観測ノイズはここで管理し、最適化対象として扱う
+trait Likelihood<T: Scalar>: Send + Sync {
+    fn add_noise_diag(&self, k_diag: &mut [T]);      // K += σn²・I (対角への加算)
+    fn noise_params(&self) -> &[T];
+    fn noise_grad_diag(&self, dK_diag: &mut [T], param_idx: usize); // ∂K/∂σn² = 2σn・I
+}
+
+struct GaussianLikelihood<T: Scalar> { log_noise_variance: T } // 正値制約はlogパラメータ化で担保
+
+/// 純粋な数値安定化。モデルには影響しない
+struct NumericalStability {
+    jitter: f64,      // cholesky_in_place呼び出し時のLltRegularizationにのみ使う
+    max_jitter: f64,  // これを超えて増やしてもCholeskyが成立しなければCholeskyFailedを返す
+}
+```
+
+`A = K + Likelihood.noise_diag`が**実際に解きたい線形システムの行列**(GPRのモデル)であり、`jitter`は`cholesky_in_place`内部でのみ一時的に加わる分解用の摂動として扱う。反復改良の残差計算(§4.1)は`A`に対して行い、jitterは含めない。
+
+### 4.1 精度ポリシー: f32/f64/混合精度
+
+目的は「メモリ削減」と「計算速度」の両方。混合精度反復改良(mixed-precision iterative refinement)を採用するが、**適用範囲をfit時とpredict時で分ける**(P0修正、Gemini指摘)。
 
 ```rust
 trait PrecisionPolicy {
-    type Storage: Scalar;  // カーネル行列・距離キャッシュ・Cholesky分解の精度
-    type Refine: Scalar;   // 残差計算の精度
+    type Storage: Scalar;
+    type Refine: Scalar;
 }
-
-struct MixedPrecision;  // Storage=f32, Refine=f64 (推奨デフォルト)
-struct SinglePrecision; // Storage=f32, Refine=f32 (改良なし)
+struct MixedPrecision;  // Storage=f32, Refine=f64
+struct SinglePrecision; // Storage=f32, Refine=f32
 struct DoublePrecision; // Storage=f64, Refine=f64
 ```
 
-手順:
-1. `K`をf32のまま`cholesky_in_place::<f32>`で分解(SIMDレーン2倍、最も重いO(n³)部分がf32速度)
-2. f32の`L`で`alpha_0 = solve(L, y)`(近似解)
-3. 残差`r = y - K_f64 @ alpha_0`をf64精度でO(n²)計算(`K`はf32保持のまま都度f64キャストしてGEMV、恒常的なf64バッファは不要)
+**適用範囲の制限**: 周辺対数尤度(MLL)の`log|K| = 2Σlog(L_ii)`および勾配のトレース項`Tr(K⁻¹∂K/∂θ)`は、`α=K⁻¹y`の反復改良では高精度化されない(f32のLの対角値そのものに依存するため)。これらの項を含むfit時(ハイパーパラメータ最適化ループ)のデフォルトは**`DoublePrecision`**とする。`MixedPrecision`は`α`の線形ソルブのみで完結するpredict時(ハイパーパラメータ固定後の推論)を主対象とする。fit時にMixedPrecisionを使う場合は、log|K|・トレース項の精度検証を別途行うことを前提とする(§14未解決事項)。
+
+手順(predict時、または固定カーネルでのソルブ):
+1. `A = K + Likelihood.noise_diag`をf32のまま`cholesky_in_place::<f32>`で分解(内部でjitterによる正則化のみ適用)
+2. f32の`L`で`alpha_0 = solve(L, y)`
+3. **残差`r = y - A_f64 @ alpha_0`をf64精度でO(n²)計算**(`A`はjitterを含まない真のモデル行列。jitterは分解時の内部的な摂動に留め、反復改良の目標には含めない)
 4. f32の`L`で`delta = solve(L, r)`、`alpha_1 = alpha_0 + delta`
-5. 収束するまで3〜5を数回(通常2〜3回)繰り返す
+5. 収束するまで数回繰り返す
 
-追加コストはO(n²)の残差計算を数回だけなので、O(n³)全体に対しては無視できる。**安全弁**として、混合精度モードでは`LltRegularization`のjitterをやや大きめにデフォルト設定し、規定回数内に残差ノルムが縮小しなければ`GpError`を返す。
+実装優先度: `DoublePrecision`をデフォルトとし、`MixedPrecision`はオプション機能として後付け(§13 Phase 5)。
 
-実装優先度: まず`DoublePrecision`をデフォルト実装として提供し、`MixedPrecision`はオプション機能として後付けする。trait設計は両方を同じ枠組みに収めているため手戻りは小さい。
+### 4.2 混合精度反復改良の収束判定パラメータ
 
-### 4.1 混合精度反復改良の収束判定パラメータ
-
-古典的な反復改良理論(Higham)より、分解精度u_f(f32、単位丸め誤差≈1.19×10⁻⁷)と改良精度u_r(f64、≈2.22×10⁻¹⁶)を使う場合、収束可否と速度は`κ(K)·u_f`で決まる(収束条件`κ(K)·u_f<1`、収束すれば1反復あたりの誤差縮小率はおおよそ`κ(K)·u_f`)。`LltRegularization`のjitter σは`κ(K+σI) ≤ λ_max/σ+1`という上限を与えるため、**jitterの値が反復改良の収束可否を事実上決める**(前述の安全弁と直結)。
+古典的な反復改良理論(Higham)より、分解精度u_f(f32≈1.19×10⁻⁷)と改良精度u_r(f64≈2.22×10⁻¹⁶)を使う場合、収束速度はκ(A)·u_fに依存する。**ただし実際の収束判定は理論値ではなく実測残差で行う**(P0修正、ChatGPT指摘: 理論条件だけでは分解誤差・対称性・正定値性など多くの要因を捉えきれない)。
 
 ```rust
 struct RefinementConfig {
-    max_iterations: usize,   // デフォルト10。収束する場合は通常3反復以内で機械精度近くに達する
-    tolerance_factor: f64,   // デフォルト10.0。判定式: τ = tolerance_factor × n × u_r
-    stagnation_ratio: f64,   // デフォルト0.9。前回残差との比がこれを超えたら停滞とみなし早期中断
+    max_iterations: usize,   // デフォルト10
+    relative_tolerance: f64, // デフォルト: 10.0 × n × u_r。判定は実測残差ノルムで行う
+    stagnation_ratio: f64,   // デフォルト0.9
+    fallback: RefinementFallback,
 }
-```
 
-収束判定: `||r_k||∞ / (||K||∞ ||alpha_k||∞ + ||y||∞) < tolerance_factor × n × u_r`。`stagnation_ratio`超過が2回連続で発生したら`RefinementNotConverged`(§10)を返す。
-
-自動リトライ: `RefinementNotConverged`時はjitterを10倍にしてf32分解からやり直す(最大3回)。f64への全面フォールバックよりコストが低く、多くのケースをカバーできる想定。
-
-```rust
 enum RefinementFallback {
-    IncreaseJitterAndRetry { max_retries: usize }, // 推奨デフォルト: 3
+    IncreaseNumericalJitter { max_retries: usize }, // §4.0のjitterのみ変更、noise_varianceは不変
     FallbackToDoublePrecision,
     ReturnError,
 }
 ```
 
-**位置づけ**: 理論的妥当性はあるが、実際のGPRワークロード(典型的なκ(K)の分布、n・dの規模)での最適値検証は今後の課題として残る(§12参照)。
+収束判定: `||r_k||∞ / (||A||∞ ||alpha_k||∞ + ||y||∞) < relative_tolerance`。`stagnation_ratio`超過が2回連続で発生したら`RefinementNotConverged`(§10)。
+
+**jitterを増やす際の注意(P0修正、ChatGPT/Gemini共通指摘)**: リトライ時に増やすのは§4.0の`NumericalStability.jitter`のみであり、`Likelihood.noise_variance`(モデルパラメータ)には触れない。jitterを増やすことは「別のGPモデルを解く」ことを意味しないよう、数値安定化とモデルを厳密に分離する。
+
+**位置づけ**: 理論的妥当性はあるが、実ワークロードでのパラメータ検証は今後の課題(§14)。
 
 ## 5. カーネル設計
 
-### 5.1 Spec(宣言層)/ Evaluator(実行層)の分離
+### 5.1 Spec(宣言層)/ Evaluator(実行層)の分離、および精度ジェネリクス
 
-合成のたびのヒープアロケーションを避けるため三層構造にする。
+`KernelSpec`(宣言層)は精度に依存しない型消去された表現とし、パラメータは常に`f64`で保持する(ユーザーが書く・読む値は精度非依存であるべきため)。`CompiledKernel<T>`(実行層)は`PrecisionPolicy::Storage`ごとにコンパイルされ、内部計算は`T`で行う(P1修正、ChatGPT指摘: KernelTermが`MatRef<f64>`固定でPrecisionPolicyと矛盾していた)。
 
 ```rust
 enum KernelSpec {
-    Leaf(Box<dyn KernelTerm>),
+    Leaf(Box<dyn KernelTermSpec>),      // 宣言層: paramsはf64固定
     Sum(Box<KernelSpec>, Box<KernelSpec>),
     Product(Box<KernelSpec>, Box<KernelSpec>),
 }
-
-trait KernelTerm {
-    fn distance_kind(&self) -> DistanceKind;
-    fn apply(&self, dist: MatRef<f64>, out: MatMut<f64>);
+trait KernelTermSpec: Send + Sync {
     fn params(&self) -> &[f64];
-    fn grad(&self, dist: MatRef<f64>, dK: MatMut<f64>, param_idx: usize);
+    fn compile<T: Scalar>(&self) -> Box<dyn KernelTerm<T>>; // 実行層への変換
+}
+
+trait KernelTerm<T: Scalar>: Send + Sync {
+    fn distance_kind(&self) -> DistanceKind;
+    fn apply(&self, dist: MatRef<T>, out: MatMut<T>);
+    fn grad(&self, dist: MatRef<T>, dK: MatMut<T>, param_idx: usize);
+    fn rank_structure(&self) -> KRankStructure { KRankStructure::Dense } // §5.4.1
+    fn grad_wrt_coords(&self, x1: MatRef<T>, x2: MatRef<T>, dK: MatMut<T>, coord_idx: (usize, usize)) -> Result<(), GpError> {
+        Err(GpError::CoordGradientUnsupported)
+    }
 }
 ```
 
-`KernelSpec`は演算子オーバーロード(`Add`/`Mul`)でユーザーが自然に合成できる。`KernelTerm`はobject-safeなので**ユーザー定義カーネルはこれを実装するだけで組み込める**(必須要件)。`KernelSpec → CompiledKernel`への変換をfit開始時に一度だけ行い、以降は`Workspace`内の既存バッファへの書き込みのみにする。
+`KernelSpec`は演算子オーバーロードでユーザーが自然に合成でき、`KernelTermSpec`はobject-safeなのでユーザー定義カーネルはこれを実装するだけで組み込める。`CompiledKernel<T>`への変換をfit開始時に一度だけ行う。
 
-### 5.2 距離キャッシュ
+### 5.2 距離キャッシュとキャッシュポリシー
 
-等方カーネル(RBF, Matern等)は生の座標差`(x_i-x_j)²`がfit中不変で、lengthscaleは後段のスケーリングに過ぎない。**生の距離テンソルは1回計算してfit中使い回す**。
+等方カーネルは生の座標差がfit中不変のため、距離テンソルは1回計算して使い回す。
 
 ```rust
 enum DistanceKind { SqEuclidean, SqEuclideanARD, Periodic { period: usize } }
 ```
 
-`CompiledKernel`構築時に合成木を走査し、必要な`DistanceKind`集合を重複排除して計算する。同じ`DistanceKind`を要求する複数の項があれば共有する。
-
-#### 5.2.1 ARDキャッシュ閾値
-
-判断基準は「メモリコスト」と「Choleskyコストに対する再計算コストの相対的な重さ」の比較。
-
-- メモリコスト: `(n,n,d)`テンソルは`n² × d × sizeof(T)`バイト。n=5000, d=100, f64なら20GBに達するなど、n・dの積で急増する
-- 再計算コスト: キャッシュなしの場合、毎イテレーションの再計算はO(n²d)。CholeskyはO(n³)で支配的。**両者の比はd/n**
-  - d≪n(典型的GPR: d=10〜20、n=数千〜万)ではCholeskyに対し再計算コストが無視できるほど小さく、キャッシュの投資対効果が薄い
-  - dがnに対し相対的に大きい高次元ARD(特徴選択目的でd=100〜1000クラス)では再計算コストが無視できなくなり、キャッシュの効果が出る
+**キャッシュ方針はベンチマークベースのポリシーとして抽象化する**(P2修正、ChatGPT指摘: d/nだけの式はカーネル種別・SIMD効率・メモリ帯域などを考慮できておらず、決定基準としては不十分)。
 
 ```rust
-fn should_cache_ard(n: usize, d: usize, elem_size: usize, mem_budget_bytes: usize) -> bool {
-    let cache_bytes = n * n * d * elem_size;
-    let recompute_relative_cost = d as f64 / n as f64;
-    cache_bytes <= mem_budget_bytes && recompute_relative_cost > RECOMPUTE_THRESHOLD
+enum DistanceCachePolicy {
+    Never,
+    Always,
+    Auto { memory_budget_bytes: usize }, // n,d,メモリ予算から実装時にベンチマークして調整
 }
 ```
 
-- `mem_budget_bytes`: ユーザー設定可能(デフォルト目安256MB程度、既存の`k_matrix`/`exp_buf`と同オーダーに収める)
-- `RECOMPUTE_THRESHOLD`: 経験的にはd/n ≳ 0.05〜0.1あたりが投資対効果の分岐点という目安。理論だけでは確定できないため、実装後のベンチマーク(exp呼び出しコスト・メモリ帯域の実測)で調整する前提とし、デフォルト値として残す(§12)
+理論的な参考値(目安であり決定基準ではない): `(n,n,d)`テンソルは`n²×d×sizeof(T)`バイト。基本のK行列自体もn²×sizeof(T)であり(例: n=5000,f64で約200MB)、ARDキャッシュはこれのd倍になる点に注意。d≪nの典型的GPRではキャッシュの投資対効果は薄いことが多い。`Auto`の具体的な閾値は実装後のベンチマークで決定する(§14)。
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
-Sum/Productは結合則・交換則が効くため、汎用レジスタ割当を持ち出さずシンプルなflatten+fold評価で済む。
+Sum/Productは結合則・交換則が効くため、flatten+fold評価で済む。
 
-1. **距離キャッシュ重複排除**: 合成木を走査し`DistanceKind`の`IndexSet`を構築
-2. **flatten**: `(A+B)+C`と`A+(B+C)`を`Sum(vec![A,B,C])`に正規化(Productも同様)。ネストの形に依存しないplanにするため
-3. **plan生成**: Sum/Productはそれぞれ単体では1バッファに畳み込める(上書き→以降は加算/乗算)。**必要バッファ数はネストの深さでしか増えない**(実用的な合成ではまず3を超えない)。`BufAllocator`(フリーリスト)で`alloc()`/`free()`を追跡し、最大同時使用数を計測してWorkspaceの確保サイズを決める
+1. 距離キャッシュ重複排除: 合成木を走査し`DistanceKind`集合を構築
+2. flatten: `(A+B)+C`を`Sum(vec![A,B,C])`に正規化
+3. plan生成: `BufAllocator`(フリーリスト)で`alloc()`/`free()`を追跡し、**実際のplanから動的に最大同時使用数を計算**してWorkspaceの確保サイズを決める
+
+**訂正(P0)**: 「必要バッファ数はネストの深さでしか増えず、実用上3を超えない」という主張は誤り。`(A*B)*(C*D)`のような合成では兄弟項間でバッファを使い回せず、必要数が増える。固定上限を仮定せず、`WorkspacePlan { max_buffers, max_bytes }`をplan構築時に実測することとする。
 
 ```rust
 enum PlanOp {
@@ -155,57 +180,33 @@ enum PlanOp {
     AddBufInto   { src: BufId, dst: BufId },
     MulBufInto   { src: BufId, dst: BufId },
 }
+struct WorkspacePlan { max_buffers: usize, max_bytes: usize }
 ```
 
 ### 5.4 部分更新(コーディネート型最適化器)対応
 
-**課題**: 5.3の畳み込みplanは上書き型のため、一部パラメータのみ変更された場合でも全項を再計算しないと結果を再現できない。座標降下法や一部パラメータのみ更新する最適化器を使う場合、変更されていない項の再計算(特に`exp`呼び出し)を省略したい。
-
-**対応方針**: `RecomputeStrategy`として2種類を選択可能にする。
+**対応方針**: `RecomputeStrategy`として2種類。
 
 ```rust
 trait RecomputeStrategy {}
-
-/// 5.3のplan。バッファ最小、常にフル再計算。nが大きい/メモリ重視の場合の既定。
-struct FullRecompute;
-
-/// リーフ項ごとに寄与行列(n×n)を独立バッファとして保持。
-/// 変更された項のみ再計算し、最終結合(Sum/Productの合算)だけ毎回やり直す。
-/// リーフ項数ぶんメモリを消費するため、項数が少ない/nが小さい場合向け。
+struct FullRecompute;  // バッファ最小、常にフル再計算。既定
 struct IncrementalRecompute {
-    leaf_contrib: Vec<Buf>,      // リーフ項ごとの寄与行列
-    param_to_leaf: Vec<LeafId>,  // パラメータindex→リーフ項の逆引き
+    leaf_contrib: Vec<Buf>,
+    param_to_leaf: Vec<LeafId>,
 }
 ```
 
-`IncrementalRecompute`の動作:
-1. `CompiledKernel`構築時、パラメータ全体のインデックス範囲をリーフ項ごとに区切り、`param_to_leaf`を確定
-2. 最適化器が`update_params(&[T], changed: ChangeSet)`を呼ぶ際、`ChangeSet::Indices(&[usize])`で変更indexを明示する(座標降下法はどのパラメータを更新したか自明なので検出コストは不要)
-3. 変更indexに対応するリーフ項のみ`apply`/`grad`を再実行し、`leaf_contrib`を更新
-4. 最終結合(Sum全項の和、Product全項の積)はO(n²×リーフ項数)で毎回やり直す。これはO(n³)のCholeskyに対して無視できるコストなので、フル再結合で問題ない
-
-**重要な制約**: **Cholesky分解自体は`K`全体が変わる以上、部分更新の恩恵を受けられずフルで行う必要がある**。したがって部分更新が効くのは「カーネル行列構築コスト(O(n²)、特に`exp`呼び出しの回数)」のみで、O(n³)のCholeskyコストには効かない。項数が多い/評価が重いカーネル(周期カーネルの三角関数など)を多用する場合に構築コストの比重が相対的に上がるため、そうしたケースで`IncrementalRecompute`の恩恵が大きい。
-
-**選択指針**: nが大きくメモリを切り詰めたい場合や単純なカーネル(項数少)は`FullRecompute`、項数が多く座標降下法的最適化を使う場合は`IncrementalRecompute`を推奨する。デフォルトは`FullRecompute`とし、`IncrementalRecompute`はオプトイン。
+`IncrementalRecompute`は変更indexに対応するリーフ項のみ再評価し、最終結合(O(n²×リーフ項数)、Choleskyに対して無視できるコスト)だけ毎回やり直す。**Cholesky分解自体はKが変わる以上フルで行う必要があり、部分更新の恩恵はカーネル行列構築コストにのみ及ぶ**。デフォルトは`FullRecompute`、`IncrementalRecompute`はオプトイン。
 
 #### 5.4.1 IncrementalRecomputeとfaer update APIの関係
 
-faerの`llt::update::{insert,delete}_rows_and_cols_clobber`は、分解済み`L`に対し指定インデックスの行/列を追加/削除するAPIで、**データ点の追加削除(次元nの変更)用**。ハイパラ変更には使えない(§11でオンライン学習として活用)。
-
-一方`ldlt_diagonal::update::rank_r_update_clobber`(`A' = A + αww^T`型のランクr更新)は、**ハイパラ変更が`K`にもたらす差分`ΔK`が低ランクな場合に限り使える**:
-
-- 線形カーネル項のamplitude変更: `ΔK`のランクはd(入力次元)相当 → `d≪n`ならrank-r updateでO(n²d)、フルCholesky(O(n³))を回避可能
-- 全体スケール(outputscale)のみの変更: `K_new = c·K_old`なら`L_new = √c·L_old`で自明に更新、rank-r update自体も不要
-- RBF/Maternのlengthscale変更など一般ケース: `ΔK`はランクnに近い密行列 → 高速パスの恩恵なし、フルCholesky必須
+`llt::update::{insert,delete}_rows_and_cols_clobber`はデータ点の追加削除用(§11)、ハイパラ変更には使えない。一方`rank_r_update_clobber`は、ハイパラ変更が`K`にもたらす差分`ΔK`が低ランクな場合(線形カーネル項のamplitude変更、全体スケール変更など)に限り使える。
 
 ```rust
 enum KRankStructure { Scalar, LowRank(usize), Dense }
-trait KernelTerm {
-    fn rank_structure(&self) -> KRankStructure { KRankStructure::Dense } // 安全側デフォルト
-}
 ```
 
-`IncrementalRecompute`は変更リーフ項の`rank_structure()`を見て高速パスを選択可能にする。デフォルト`Dense`ならユーザー定義カーネルは何もせず安全側に倒れるため、オプトインの上乗せとして安全に追加できる。
+デフォルト`Dense`ならユーザー定義カーネルは安全側に倒れる。
 
 ### 5.5 前処理パイプライン
 
@@ -217,225 +218,246 @@ trait Transform {
 struct Pipeline(Vec<Box<dyn Transform>>);
 ```
 
-`GPModel`のbuilderに`.with_transform(MinMaxScaler::new())`のように積める。fit時に統計量推定・保存、predict時に自動適用。ホットパスではないため`dyn`で問題ない。
-
 ## 6. GPModel抽象化(厳密/疎の差し替え)
+
+**`Inference`から`objective()`を切り離す**(P1修正、ChatGPT指摘: 推論モデル・ハイパラ最適化・Workspace・カーネル・Optimizerが強く結合しやすくなるため)。
 
 ```rust
 trait Inference<T: Scalar> {
-    fn fit(&mut self, x: MatRef<T>, y: &[T], kernel: &mut CompiledKernel<T>, mean: &dyn MeanFn<T>) -> Result<(), GpError>;
-    fn predict(&self, xs: MatRef<T>) -> (Vec<T>, Vec<T>);
-    fn objective(&mut self) -> &mut dyn Objective<T>;
+    fn fit(&mut self, x: MatRef<T>, y: &[T]) -> Result<(), GpError>;
+    fn predict(&self, xs: MatRef<T>) -> Result<Prediction<T>, GpError>;
+}
+
+struct Prediction<T: Scalar> {
+    mean: Vec<T>,
+    variance: Vec<T>, // 初期実装は対角分散のみ。フル共分散は将来拡張(§13 Phase 4以降)
 }
 ```
 
-`ExactGP`(n≲1万)と`SparseGP`(FITC/VFE、誘導点法)がこれを実装。
+`ExactGP`(n≲1万)と`SparseGP`(FITC/VFE)がこれを実装。ハイパラ最適化は`Objective`(§9)を介して別途扱う。
 
 ### 6.1 Sparse GPの誘導点キャッシュ問題
 
-Sparse GP(FITC/VFE)は`K(X,Z)`(n×m)、`K(Z,Z)`(m×m)、`K(X,X)`対角、の3種類を使う。誘導点`Z`が最適化対象になると`K(X,Z)`/`K(Z,Z)`はイテレーションごとに変わり、§5.2の「両側不変」前提の距離キャッシュが崩れる。
+`K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。
 
-**片側不変性の活用**:
-- `K(X,X)`対角: Xのみに依存し完全に不変。fit開始時に1回計算、既存の距離キャッシュ機構をそのまま流用
-- `K(X,Z)`, `K(Z,Z)`: Zが動くたびに再計算が必要。ただしm(誘導点数、通常n≫m)が小さいため、この再計算コストはCholeskyのO(nm²)(Sparse GPの主コスト)に対して十分小さく、**キャッシュ対象にせず毎回再計算する**のが既定方針でよい
+誘導点座標の勾配は`grad_wrt_coords`(§5.1)で扱い、未対応カーネルはpanicではなく`GpError::CoordGradientUnsupported`を返す。
+
+**初期実装ではフル共分散を扱わず、対角予測分散のみを目標にする**(P1修正、ChatGPT指摘)。フル共分散・Diagonal/Full切り替えは将来拡張として`Prediction`構造体を拡張する形で対応する。
+
+Sparse GPのオンライン学習は誘導点ZとデータXの非対称性のためスコープ外(§14)。
+
+## 7. Workspaceとメモリ管理
+
+### 7.1 個別バッファ構造(P1修正)
+
+当初は単一`Vec<T>`をオフセットでスライスする設計だったが、**同一Vecから複数の可変参照を同時に取り出す操作は煩雑になりやすい**(`split_at_mut`で安全に実現可能だが、Plan実行順序に応じて動的に分割点が決まるため静的なチェーンでは扱いにくい)。バッファ数は少数・固定なので、個別フィールドとして持つ設計に変更する。この際、**精度ポリシーのStorage/Refineを明示的に反映する**(P1修正、Gemini/ChatGPT指摘)。
 
 ```rust
-struct SparseWorkspace<T: Scalar> {
-    kxx_diag: Buf<T>,   // 不変、fit開始時に1回計算
-    kxz_buf: Buf<T>,    // n×m、可変、毎イテレーション上書き(キャッシュしない)
-    kzz_buf: Buf<T>,    // m×m、可変、Cholesky対象
-    faer_scratch: Buf<T>,
+struct Workspace<P: PrecisionPolicy> {
+    k_matrix: Mat<P::Storage>,
+    dist_cache: Mat<P::Storage>,
+    exp_buf: Mat<P::Storage>,
+    refine_buf: Option<Mat<P::Refine>>, // MixedPrecision時のみ使用、DoublePrecisionではNone
+    faer_scratch: MemBuffer,            // faer公式のスクラッチ機構をそのまま使う
+    thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
 }
 ```
 
-§7.1の「アリーナ+オフセットビュー」方式は共通で流用可能。この「不変/可変の分離」は§5.4の`IncrementalRecompute`(同一座標でハイパラのみ変わる場合の部分更新)とは別軸の問題であり、混同しないよう明確に区別する。
+各バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 
-**誘導点座標の勾配**: 誘導点Z自体が最適化パラメータ(座標値)である点はハイパラと扱いが異なり、`∂K(X,Z)/∂Z`という座標微分が必要。`KernelTerm`にデフォルト実装付きで座標微分メソッドを追加し、Sparse GPを使わないユーザーの実装負担を増やさない。デフォルト実装は`unimplemented!()`ではなく`GpError::CoordGradientUnsupported`(§10)を返す(ユーザーの構成ミスであってライブラリ内部のpanic対象ではないため)。
-
-```rust
-trait KernelTerm {
-    fn grad(&self, dist: MatRef<f64>, dK: MatMut<f64>, param_idx: usize);
-    fn grad_wrt_coords(&self, x1: MatRef<f64>, x2: MatRef<f64>, dK: MatMut<f64>, coord_idx: (usize, usize)) -> Result<(), GpError> {
-        Err(GpError::CoordGradientUnsupported)
-    }
-}
-```
-
-**Sparse GPのオンライン学習は誘導点ZとデータXの非対称性のため今回のスコープ外**(§12参照)。
-
-## 7. Workspaceとメモリ管理(バッチfit)
-
-### 7.1 単一アリーナ + オフセットビュー
-
-fit開始時にn,dが既知なので必要サイズを事前計算し、単一の連続領域を1回だけ確保する。イテレーション中は新規確保しない。
-
-```rust
-struct Workspace<T: Scalar> {
-    arena: Vec<T>,
-    dist_cache_offset: usize,
-    k_matrix_offset: usize,   // Cholesky後はin-place上書きでLになる、独立バッファ不要
-    exp_buf_offset: usize,    // value計算時に書き込み、gradient計算で再利用(exp再評価を回避)
-    faer_scratch_offset: usize, // faerのcholesky_in_place_scratchが要求する領域
-    thread_scratch: Vec<(usize, usize)>, // Rayonスレッド数ぶん事前分割(offset, len)
-}
-```
-
-`'static`借用は自己参照になり扱いにくいため、実装は生ポインタではなく**オフセット(usize)方式**を推奨(借用チェッカーと相性が良い)。faer自身のスクラッチ要求(`cholesky_in_place_scratch`)も見落としやすいので、アリーナサイズ計算に必ず含める。
-
-Rayon並列クロージャ内での`Vec::new()`は呼び出し回数ぶんアロケーションが走るため厳禁。スレッド数ぶん`thread_scratch`を事前分割し、`rayon::broadcast`かインデックスベースで割り当てる。
+Rayon並列クロージャ内での新規確保は厳禁。`thread_scratch`を事前分割し、`rayon::broadcast`かインデックスベースで割り当てる。
 
 ### 7.2 メモリレイアウト
 
-faerの`Mat`は列優先・行ストライド1。自前ループもこれに揃える:
+faerの`Mat`は列優先・行ストライド1。
 
-- 距離行列・カーネル行列の走査は**列優先**(`for j in 0..n { for i in 0..=j { ... } }`)
-- **対称性を利用し上三角/下三角のみ計算**(faerのLLTも下三角を扱うため整合)。SIMD化はブロック単位(例8x8タイル)で、対角ブロックのみ三角処理、それ以外は矩形として処理する
-- 入力`X(n×d)`は**1データ点=1列=メモリ連続**(`d×n`の列優先)で保持。ARDの次元ごと差分をSIMDレーンに載せる際、1点=連続dスカラーという前提と一致させる
+- 距離行列・カーネル行列の走査は列優先、対称性を利用し上三角/下三角のみ計算
+- 入力`X(n×d)`は1データ点=1列=メモリ連続(`d×n`の列優先)で保持
 
 ### 7.3 イテレーション中のライフサイクル
 
 ```
-fit()開始 → n,d確定 → arena確保(1回) → 距離キャッシュ計算(1回)
-  → 最適化ループ:
-      各iter: k_matrix領域に上書き構築 → in-place Cholesky(同一領域再利用)
-             → faer scratchも同一バッファ使い回し → value/grad
+fit()開始 → n,d確定 → 各Mat<T>を1回だけ確保 → 距離キャッシュ計算(1回)
+  → 最適化ループ: k_matrixに上書き構築 → in-place Cholesky(同一領域再利用) → value/grad
 fit()終了 → Workspaceは保持、predict/refitで再利用
 ```
 
-## 8. 並列化・SIMD
+## 8. 並列化・SIMD、数学関数バックエンド
 
-- カーネル評価内側ループ(特に`exp`)は`std::simd`かwideクレートでベクトル化
+- カーネル評価内側ループは`std::simd`かwideクレートでベクトル化
 - 距離行列・カーネル行列構築はRayonでブロック並列化
-- **faer自身もRayon並列化されるため、外側Rayonとの二重並列化でスレッド過剰生成に注意**。単一の`rayon::ThreadPool`をアプリ全体で共有する
-- `exp`は`MathBackend` traitで差し替え可能にする:
+- faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有
+
+**MathBackendは最小限のAPIから始め、デフォルトは近似ではなく正確な実装にする**(P1修正、ChatGPT/Gemini共通指摘: カーネル行列の近似誤差は正定値性・Cholesky安定性・尤度・勾配・予測値すべてに波及するため)。
 
 ```rust
 trait MathBackend<T: Scalar>: Send + Sync {
-    fn exp_inplace(&self, buf: &mut [T]);
-    fn erf_inplace(&self, buf: &mut [T]);
+    fn exp_inplace(&self, buf: &mut [T]); // 最初はexpのみ。erfは実際に必要になったカーネル(probit尤度等)が出てから追加
 }
-struct StdExp;              // libm、正確だが遅い、依存なし
-struct SleefBackend;        // SIMDベクトル化、高精度、Cライブラリ依存
-struct PolyApproxExp { degree: u8 } // pure Rust多項式近似、依存なし
+enum MathMode { Accurate, FastApprox }
 ```
 
-デフォルトは`PolyApproxExp`(依存ゼロ維持)。`SleefBackend`はfeatureフラグでオプトイン。GPRの精度要求はCholeskyの数値誤差に埋もれることが多く、多項式近似で実用上十分なケースが多い。
+デフォルトは`Accurate`(`StdExp`または`SleefBackend`)。`FastApprox`(`PolyApproxExp`)は明示的なfeatureや設定でオプトインし、**fit(ハイパラ最適化)では使わず、ハイパラ固定後の推論や大量predictに限定するのが安全**という位置づけにする。
 
 ## 9. Optimizer設計
 
-`value`と`gradient`を分離し、勾配不要な最適化器(Nelder-Mead等)がgradientパスに一切触れないようにする。
+**アロケーションフリー化とResultラップ**(P0/P1修正、Gemini/ChatGPT共通指摘)。
 
 ```rust
 trait Objective<T: Scalar> {
-    fn value(&mut self, params: &[T]) -> T;
-    fn gradient(&mut self, params: &[T]) -> Option<Vec<T>>;
-    fn value_and_gradient(&mut self, params: &[T]) -> (T, Option<Vec<T>>) {
-        (self.value(params), self.gradient(params))
+    fn num_params(&self) -> usize;
+    fn value(&mut self, params: &[T]) -> Result<T, GpError>;
+    /// 勾配をoutに書き込む。勾配計算非対応ならErr(GpError::UnsupportedKernelOperation)
+    fn gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<(), GpError>;
+    /// 実際に内部計算(Cholesky, exp_buf等)を共有する形で実装すること
+    fn value_and_gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<T, GpError> {
+        let v = self.value(params)?;
+        self.gradient_into(params, out)?;
+        Ok(v)
     }
 }
 trait Optimizer<T: Scalar> {
-    fn minimize(&self, objective: &mut dyn Objective<T>, init: Vec<T>) -> OptResult<T>;
+    fn minimize(&self, objective: &mut dyn Objective<T>, init: Vec<T>) -> Result<OptResult<T>, GpError>;
     fn requires_gradient(&self) -> bool;
 }
 ```
 
-`ExactGP`の`value_and_gradient`実装はCholesky分解(`L`, `alpha`)を尤度と勾配の両方で共有し、`exp_buf`も同様に再利用する。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を`Objective`側のAPIにも伝播させ(`value_at(params, changed)`のような形)、`IncrementalRecompute`と接続する。
+`ExactGP`実装では`value_and_gradient_into`をオーバーライドし、Cholesky分解(`L`, `alpha`)と`exp_buf`を尤度・勾配間で実際に共有する(デフォルト実装のように`value`→`gradient_into`を別々に呼ぶだけでは共有されないため、明示的にオーバーライドが必須である点をコメントで明記する)。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を`value_at`のようなAPIに伝播させ、`IncrementalRecompute`と接続する。
 
 ## 10. エラー型 GpError
+
+数値計算固有の失敗理由を拡充する(P2修正、ChatGPT指摘)。
 
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum GpError {
     #[error("入力次元が一致しません: X.ncols()={x_dim}, 期待値={expected_dim}")]
     DimensionMismatch { x_dim: usize, expected_dim: usize },
-
     #[error("データ点数が不足しています: n={n}, 最低{min}点必要です")]
     InsufficientData { n: usize, min: usize },
-
-    #[error("Cholesky分解に失敗しました(行列が半正定値ではありません, jitter={jitter}を適用済み)")]
-    CholeskyFailed { jitter: f64 },
-
+    #[error("入力が空です")]
+    EmptyInput,
+    #[error("入力に非有限値(NaN/Inf)が含まれます")]
+    NonFiniteInput,
+    #[error("カーネル評価結果に非有限値が含まれます")]
+    NonFiniteKernelValue,
+    #[error("Cholesky分解に失敗しました(段階={stage:?}, サイズ={matrix_size}, jitter={jitter}を適用済み)")]
+    CholeskyFailed { jitter: f64, matrix_size: usize, stage: CholeskyStage },
+    #[error("行列が半正定値ではありません")]
+    NonPositiveDefiniteMatrix,
     #[error("混合精度反復改良が収束しませんでした({iterations}回反復後、残差ノルム={residual_norm})")]
     RefinementNotConverged { iterations: usize, residual_norm: f64 },
-
     #[error("このカーネル項はSparse GP用の座標微分(grad_wrt_coords)を実装していません")]
     CoordGradientUnsupported,
-
     #[error("最適化が収束しませんでした({iterations}回反復後)")]
     OptimizationNotConverged { iterations: usize },
-
     #[error("ハイパーパラメータが不正です: {reason}")]
     InvalidHyperparameter { reason: String },
+    #[error("観測ノイズ分散が不正です: {reason}")]
+    InvalidNoiseVariance { reason: String },
+    #[error("未対応のカーネル操作です: {reason}")]
+    UnsupportedKernelOperation { reason: String },
+    #[error("Workspaceの容量が不足しています")]
+    WorkspaceTooSmall,
+    #[error("指定されたPointIdは存在しません")]
+    InvalidPointId,
 }
+
+#[derive(Debug)]
+pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 ```
 
-**Error/panicの線引き**:
-- `DimensionMismatch`, `InsufficientData`: ユーザー入力起因、`Result`で返し回復可能にする
-- `CholeskyFailed`: jitter適用済みでも半正定値にならない場合。データ/カーネル設計の問題の可能性が高く`Result`で返す
-- `RefinementNotConverged`: §4の安全弁に対応。`Result`で返し、呼び出し側が`DoublePrecision`へのフォールバックを選べるようにする
-- `CoordGradientUnsupported`: §6.1の`grad_wrt_coords`デフォルト実装はpanicではなく本Errorを返す
+**Error/panicの線引き**: ユーザー入力起因(`DimensionMismatch`等)、モデル/データ起因(`CholeskyFailed`等)は`Result`で返し回復可能にする。`CoordGradientUnsupported`はライブラリ内部panic対象ではないため`unimplemented!()`ではなく本Errorを返す。
 
 ## 11. オンライン学習(データ点の追加削除)
 
-GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除は実用上避けて通れないユースケースとして正式にスコープへ含める。§7.1の「fit開始時に1回だけアリーナ確保、以降不変」という前提とは相容れないため、**ExactGP向けに専用のWorkspace・更新経路を用意する**(バッチfit用のアリーナ方式とは別実装)。
+GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用のアリーナ方式とは別に、ExactGP向けに専用のWorkspace・更新経路を用意する。
 
 ### コスト比較
 
 | 操作 | フル再fit | 増分更新 |
 |---|---|---|
-| 1点追加 | O(n³) | O(n²)(距離O(n)+カーネル評価O(n)+faer insert O(n²)+alpha再ソルブO(n²)) |
-| 1点削除 | O(n³) | O(n²)(faer delete O(n²)+alpha再ソルブO(n²)) |
+| 1点追加 | O(n³) | O(n²) |
+| 1点削除 | O(n³) | O(n²) |
+
+### 増分追加の数学的根拠(P0追加、ChatGPT指摘により明記)
+
+新しい点を追加した行列は`K_new = [[K, k], [k^T, k_new]]`。既存のCholesky因子`L`に対し`L_new = [[L, 0], [v^T, d]]`とすると、`L_new L_new^T = K_new`を満たすには:
+
+- `L v = k` (前進消去でvを求める)
+- `d = √(k_new - v^T v)`
+
+faerの`insert_rows_and_cols_clobber`がこの関係を内部で実装している前提だが、**実装時に小規模行列(例: 2×2)でフルCholeskyとの一致を検証するテストを書くこと**(§12)。API仕様(要求する行列形式、削除が任意インデックスで動作するか、更新後Lの正しさ)は使用前に必ず確認する。
 
 ### Workspaceの容量方式
-
-faerの`Mat`自体が`reserve_exact(row_capacity, col_capacity)`をサポートするため、これを直接活用する。Vec同様の償却成長戦略(growth_factor 1.5〜2.0)で容量超過時のみ再確保。
 
 ```rust
 struct OnlineWorkspace<T: Scalar> {
     k_matrix: Mat<T>,
     dist_cache: Mat<T>,
-    l_factor: Mat<T>,      // insert/delete_rows_and_cols_clobberで直接更新
+    l_factor: Mat<T>,
     alpha: Col<T>,
+    v_buf: Col<T>,      // 予測分散計算用の前進消去スクラッチ(テスト点1点あたりO(n²)、P1追加、Gemini指摘)
     n_active: usize,
     n_capacity: usize,
-    growth_factor: f64,
+    growth_factor: f64, // デフォルト1.5〜2.0、Vec同様の償却成長
 }
 ```
 
-### 増分更新の手順
+**predict時の分散計算コストの見落とし修正**(P1、Gemini指摘): 予測平均はO(n)だが、予測分散`σ*² = k(x*,x*) - v^Tv (Lv=k*)`はテスト点1点あたりO(n²)の前進消去が必要。`OnlineWorkspace`に`v_buf`をあらかじめ確保しておく。
 
-**追加**: ①新規点と既存n点との距離計算(O(n)、ARDはO(nd))、距離キャッシュに新規行/列追加 → ②カーネル評価しK行列に新規行/列追加(`IncrementalRecompute`使用時は各リーフ項バッファも同様に追加) → ③`insert_rows_and_cols_clobber`でL更新(O(n²)) → ④alpha再ソルブ(O(n²))
+### 増分更新の手順と不変条件
+
+**追加**: ①新規点と既存n点との距離計算(O(n)) → ②カーネル評価しK行列に新規行/列追加 → ③`insert_rows_and_cols_clobber`でL更新(O(n²)) → ④alpha再ソルブ(O(n²))
 
 **削除**: ①`delete_rows_and_cols_clobber`でL更新(O(n²)) → ②距離キャッシュ・K・y・alphaから該当要素を除去(O(n)) → ③alpha再ソルブ(O(n²))
 
-### インデックス管理
-
-faerのAPIは内部行列インデックス(0..n_active)を直接操作し、削除のたびに後続点のインデックスがシフトする。安定した点ID⇔内部インデックスのマッピング層が必要。
+**不変条件(P0追加、ChatGPT指摘)**: 削除により内部インデックスがシフトする際、`K`, `L`, `y`, `alpha`, 距離キャッシュ, `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
 
 ```rust
 struct PointRegistry {
     id_to_index: HashMap<PointId, usize>,
-    index_to_id: Vec<PointId>, // 削除のたびにシフト、O(n)
+    index_to_id: Vec<PointId>,
 }
 ```
 
 ### API
 
+**insert/deleteとハイパラ再最適化を分離する**(P1修正、ChatGPT指摘: 「現在のハイパラで更新するだけ」なのか「再最適化も含む」のかを明確にするため)。
+
 ```rust
 trait OnlineInference<T: Scalar> {
-    fn insert(&mut self, x_new: &[T], y_new: T, kernel: &mut CompiledKernel<T>) -> Result<PointId, GpError>;
-    fn delete(&mut self, id: PointId, kernel: &mut CompiledKernel<T>) -> Result<(), GpError>;
+    fn insert(&mut self, x_new: &[T], y_new: T) -> Result<PointId, GpError>;
+    fn delete(&mut self, id: PointId) -> Result<(), GpError>;
+    fn refit_hyperparameters(&mut self, optimizer: &mut dyn Optimizer<T>) -> Result<(), GpError>;
 }
 ```
 
-`ExactGP`がこれを追加実装する。**Sparse GPのオンライン学習は誘導点ZとデータXの非対称性のためスコープ外**(§12未解決事項)。
+`insert`/`delete`は現在のカーネル・ハイパラのままL・alphaを更新するだけで、ハイパラ再最適化は`refit_hyperparameters`を明示的に呼んだ場合のみ行う。Sparse GPのオンライン学習はスコープ外(§14)。
 
-### 運用上の注意
+## 12. テスト計画(P2追加、ChatGPT指摘: 数値計算の正当性保証が設計書に不足していた)
 
-insert/deleteは現在のハイパーパラメータのままL・alphaを更新するだけで、ハイパーパラメータ自体は再最適化されない。データ分布の変化が大きい場合は、増分更新を続けつつ定期的に通常の`fit`(§9)を挟んでハイパーパラメータを追従させる運用が必要。
+速度より前に正しさを保証するテストを実装の各フェーズに組み込む。
 
-## 12. 未解決事項
+1. **カーネルの数学的正当性**: RBF/Matern/Periodicの既知値比較、対称性、対角値、数値微分と解析的勾配の比較
+2. **Choleskyの正当性**: `K=LLᵀ`再構成誤差、jitterあり/なし、悪条件・重複データでの挙動
+3. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件の検証)
+4. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのフォールバック挙動
+5. **推論結果**: 既知の小規模GPR実装との比較(mean, variance, log marginal likelihood, gradient)
 
-1. **Sparse GPのオンライン学習**: §11でExactGPの増分更新は解決したが、誘導点ZとデータXの非対称性がありSparse GPへの適用は別設計が必要
-2. **混合精度反復改良のパラメータ検証**: §4.1のデフォルト値は理論根拠付きだが、実ワークロードでのベンチマーク検証は未実施
-3. **ARDキャッシュのRECOMPUTE_THRESHOLD**: §5.2.1の目安値(d/n ≳ 0.05〜0.1)もベンチマークでの調整が必要
+## 13. 実装ロードマップ(P2追加、ChatGPT提案を採用)
+
+混合精度・Sparse GP・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
+
+- **Phase 1(正しいExact GP)**: f64のみ、RBF/Matern、faer Cholesky、MLLと勾配、予測mean/variance、基本Optimizer、§12のテスト一式
+- **Phase 2(高速化)**: CompiledKernel、距離キャッシュ、Workspace再利用、Rayon、SIMD、ベンチマーク
+- **Phase 3(オンライン学習)**: insert/delete、PointId、フル再fitとの一致テスト(§12-3)
+- **Phase 4(Sparse GP)**: VFEまたはFITCのどちらか一つ、誘導点固定、予測、ハイパラ最適化
+- **Phase 5(高度な最適化)**: 混合精度(predict中心)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
+
+## 14. 未解決事項
+
+1. **Sparse GPのオンライン学習**: 誘導点ZとデータXの非対称性があり、Phase 4以降の別設計が必要
+2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。fit時にMixedPrecisionを使う場合のlog|K|・トレース項の精度検証も含む
+3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要
+4. **faerのinsert/delete_rows_and_cols_clobberの実API検証**: §11の数学的根拠と実際のAPI挙動(要求する行列形式、削除の任意インデックス対応、バージョン差異)を小規模行列テストで確認する(Phase 3着手時に実施)
