@@ -53,8 +53,9 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidNoiseVariance`] if `θ` is not finite or if
-    /// `exp(θ)` overflows to a non-finite variance.
+    /// Returns [`GpError::InvalidNoiseVariance`] if `θ` is not finite, if
+    /// `exp(θ)` overflows to a non-finite variance, or if `exp(θ)` underflows
+    /// to zero.
     pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GpError> {
         Ok(Self {
             log_noise_variance: validate_log_noise_variance(log_noise_variance)?,
@@ -141,6 +142,9 @@ fn validate_log_noise_variance(theta: f64) -> Result<f64, GpError> {
         return Err(invalid_noise(
             "noise variance overflowed to a non-finite value",
         ));
+    }
+    if variance <= 0.0 {
+        return Err(invalid_noise("noise variance underflowed to zero"));
     }
     Ok(theta)
 }
@@ -243,6 +247,15 @@ mod tests {
         ));
         assert!(matches!(
             GaussianLikelihood::from_log_noise_variance(f64::INFINITY),
+            Err(GpError::InvalidNoiseVariance { .. })
+        ));
+        assert!(matches!(
+            GaussianLikelihood::from_log_noise_variance(-800.0),
+            Err(GpError::InvalidNoiseVariance { .. })
+        ));
+        let mut lik = GaussianLikelihood::new(1.0).expect("valid");
+        assert!(matches!(
+            lik.set_params(&[-800.0]),
             Err(GpError::InvalidNoiseVariance { .. })
         ));
     }
