@@ -6,6 +6,7 @@
 
 mod error;
 mod precision;
+mod workspace;
 
 pub use error::{CholeskyStage, GpError};
 pub use precision::{DoublePrecision, PrecisionPolicy};

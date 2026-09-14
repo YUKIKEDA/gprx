@@ -22,6 +22,8 @@ dbg_macro = "deny"
 float_cmp = "deny"
 
 [dependencies]
+dyn-stack = "0.13"
+faer = "0.24.4"
 thiserror = "2.0.20"
 
 [dev-dependencies]
