@@ -8,11 +8,11 @@ alwaysApply: false
 
 Source: [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/checklist.html) (C-CASE, C-CONV, C-GETTER, C-DEBUG, C-CONV-TRAITS).
 
-- Types `UpperCamelCase`, items `snake_case`, consts `SCREAMING_SNAKE`. Acronyms as in std (`GpError`, not `GPError`).
+- Types `UpperCamelCase`, items `snake_case`, consts `SCREAMING_SNAKE`. Acronyms as in std (`GprError`, not `GPRError`).
 - Getters: `len()`, `noise_variance()`, not `get_len()`. Conversions: `as_` (free borrow), `to_` (allocating), `into_` (consume).
 - Implement `From`/`TryFrom`/`AsRef`, never `Into`/`TryInto` directly.
 - Public types: `Debug` (never empty). `Clone` only if cheap or clearly documented as expensive. No `Copy` on types that own `Mat`.
-- `Send + Sync` on public GP types unless a later design says otherwise.
+- `Send + Sync` on public GPR types unless a later design says otherwise.
 - Prefer `pub(crate)` and crate-private modules. Public surface is listed in `layout.mdc`. Do not `pub use` faer types.
 - Hot-path functions take views (`MatRef`/`MatMut`/`&[T]`/`&mut [T]`), not owned `Mat`/`Vec` the callee will not store. In-place out-params: `foo_into(..., out: &mut [T])`.
 - Feature names: no placeholders (`fast`, `experimental` as the only name). Phase 1 has no features unless M0 needs one.

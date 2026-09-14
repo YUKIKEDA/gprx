@@ -6,7 +6,7 @@
 
 設計の方向性は良好
 
-結論：Phase 1のExact GP実装に進める段階。ただし、オンライン更新・精度ポリシー・カーネルAPIには実装前に詰めるべき重要な課題が残っています。
+結論：Phase 1のExact GPR実装に進める段階。ただし、オンライン更新・精度ポリシー・カーネルAPIには実装前に詰めるべき重要な課題が残っています。
 
 今回の設計書は、以前のレビューで指摘された問題をかなり丁寧に反映しています。特に、ノイズとjitterの分離、f32/f64の扱い、Workspace、Objective、オンライン更新の不変条件などは改善されています。
 
@@ -114,20 +114,20 @@ ObjectiveとInferenceの分離
 ### 1.2 Phase分割が適切
 
 ```
-Phase 1: 正しいExact GP
+Phase 1: 正しいExact GPR
     ↓
 Phase 2: 高速化
     ↓
 Phase 3: オンライン学習
     ↓
-Phase 4: Sparse GP
+Phase 4: Sparse GPR
     ↓
 Phase 5: 高度な最適化
 ```
 
 これはかなり良い順序です。
 
-GPライブラリでは、以下を同時に実装すると問題の切り分けが難しくなります。
+GPRライブラリでは、以下を同時に実装すると問題の切り分けが難しくなります。
 
 * 数値計算の正しさ
 
@@ -143,22 +143,22 @@ GPライブラリでは、以下を同時に実装すると問題の切り分け
 
 * オンライン更新
 
-まずf64のExact GPを完成させ、フル再計算と一致することを確認してから高速化する方針は、そのまま維持すべきです。
+まずf64のExact GPRを完成させ、フル再計算と一致することを確認してから高速化する方針は、そのまま維持すべきです。
 
-### 1.3 Exact GPとSparse GPを同じ抽象に押し込んでいない
+### 1.3 Exact GPRとSparse GPRを同じ抽象に押し込んでいない
 
-`Inference`を分離し、`ExactGP`と`SparseGP`を差し替え可能にする方針は良いです。
+`Inference`を分離し、`Gpr`と`SparseGpr`を差し替え可能にする方針は良いです。
 
 Rust
 
 ```
 trait Inference<T: Scalar> {
-    fn fit(&mut self, x: MatRef<T>, y: &[T]) -> Result<(), GpError>;
-    fn predict(&self, xs: MatRef<T>) -> Result<Prediction<T>, GpError>;
+    fn fit(&mut self, x: MatRef<T>, y: &[T]) -> Result<(), GprError>;
+    fn predict(&self, xs: MatRef<T>) -> Result<Prediction<T>, GprError>;
 }
 ```
 
-Exact GPとSparse GPは、計算量だけでなく、尤度・パラメータ・誘導点・予測分散の扱いが異なります。
+Exact GPRとSparse GPRは、計算量だけでなく、尤度・パラメータ・誘導点・予測分散の扱いが異なります。
 
 したがって、共通化するのは「GPとしての利用インターフェース」に留め、内部アルゴリズムは分離するのが妥当です。
 
@@ -751,7 +751,7 @@ enum DistanceCache {
 
 * カーネル項数が少ないと効果が薄い可能性
 
-特に、Exact GPではCholeskyがO(n³)です。
+特に、Exact GPRではCholeskyがO(n³)です。
 
 そのため、まずは、
 
@@ -774,8 +774,8 @@ Rust
 
 ```
 trait Inference<T: Scalar> {
-    fn fit(&mut self, x: MatRef<T>, y: &[T]) -> Result<(), GpError>;
-    fn predict(&self, xs: MatRef<T>) -> Result<Prediction<T>, GpError>;
+    fn fit(&mut self, x: MatRef<T>, y: &[T]) -> Result<(), GprError>;
+    fn predict(&self, xs: MatRef<T>) -> Result<Prediction<T>, GprError>;
 }
 ```
 
@@ -804,18 +804,18 @@ trait Inference<T: Scalar> {
 Rust
 
 ```
-struct ExactGP<T: Scalar, K> {
+struct Gpr<T: Scalar, K> {
     kernel: K,
     likelihood: GaussianLikelihood<T>,
     workspace: Workspace<T>,
-    state: ExactGpState<T>,
+    state: GprState<T>,
 }
 ```
 
 Rust
 
 ```
-struct ExactGpState<T: Scalar> {
+struct GprState<T: Scalar> {
     alpha: Col<T>,
     l_factor: Mat<T>,
     n: usize,
@@ -874,7 +874,7 @@ enum VarianceKind {
 
 または、APIの引数で切り替える設計です。
 
-これはSparse GPにも関係するため、Phase 1の段階で定義した方が良いでしょう。
+これはSparse GPRにも関係するため、Phase 1の段階で定義した方が良いでしょう。
 
 # 6. テスト計画の評価
 
@@ -1112,11 +1112,11 @@ MLL・勾配・ランダム操作列のテストを追加する
 
 特に良いのは、
 
-* Exact GPを最初に完成させる
+* Exact GPRを最初に完成させる
 
 * 高速化を後回しにする
 
-* Sparse GPを別モデルとして扱う
+* Sparse GPRを別モデルとして扱う
 
 * オンライン更新を独立経路にする
 
@@ -1138,4 +1138,4 @@ MLL・勾配・ランダム操作列のテストを追加する
 
 これらを確定すれば、Phase 1の実装に進んで問題ないと思います。
 
-設計全体としては、現時点では「汎用性・高速性を追求するGPライブラリ」の方向性は良いです。ただし、最も柔軟かつ最も高速という目標を達成するには、まずf64 Exact GPの正確な基準実装を完成させ、そこからベンチマークに基づいて最適化を進めるのが重要です。
+設計全体としては、現時点では「汎用性・高速性を追求するGPRライブラリ」の方向性は良いです。ただし、最も柔軟かつ最も高速という目標を達成するには、まずf64 Exact GPRの正確な基準実装を完成させ、そこからベンチマークに基づいて最適化を進めるのが重要です。

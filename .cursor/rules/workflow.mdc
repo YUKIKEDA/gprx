@@ -9,7 +9,7 @@ alwaysApply: true
 - Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge. History rewrite: `.cursor/rules/git.mdc`. Scope / Issue / roadmap questions: `.cursor/rules/consent.mdc`.
 - One Issue = one PR. Related: `Closes #N`.
 - Issue templates: Bug / Feat / Task / Spike. Spike commits use `chore` or `test`.
-- Identifiers, rustdoc, and `GpError` are English. Issues and commit subjects may be Japanese.
+- Identifiers, rustdoc, and `GprError` are English. Issues and commit subjects may be Japanese.
 - Local gates (CI runners may be limited; do not treat cloud CI as the DoD):
   - `just lint` = `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
   - `just test` = `cargo test` (must not invoke Python)

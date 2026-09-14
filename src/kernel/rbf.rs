@@ -1,7 +1,7 @@
 //! Isotropic squared-exponential (RBF) kernel.
 
-use super::{Triangle, finite_dist, write_triangle};
-use crate::error::GpError;
+use super::{Triangle, finite_dist, write_dense, write_triangle};
+use crate::error::GprError;
 use faer::{MatMut, MatRef};
 
 /// Isotropic RBF: `k = exp( -‖x-x'‖² / (2ℓ²) )`.
@@ -15,7 +15,7 @@ use faer::{MatMut, MatRef};
 /// ```rust
 /// use gprx::kernel::RbfKernel;
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let rbf = RbfKernel::new(1.5)?;
 /// assert!(rbf.lengthscale() > 0.0);
 /// # Ok(())
@@ -31,9 +31,9 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `lengthscale` is not
+    /// Returns [`GprError::InvalidHyperparameter`] if `lengthscale` is not
     /// finite or not strictly positive.
-    pub fn new(lengthscale: f64) -> Result<Self, GpError> {
+    pub fn new(lengthscale: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         Self::from_log_lengthscale(lengthscale.ln())
     }
@@ -42,9 +42,9 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `θ` is not finite, if
+    /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
-    pub fn from_log_lengthscale(log_lengthscale: f64) -> Result<Self, GpError> {
+    pub fn from_log_lengthscale(log_lengthscale: f64) -> Result<Self, GprError> {
         Ok(Self {
             log_lengthscale: validate_log_lengthscale(log_lengthscale)?,
         })
@@ -69,8 +69,8 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `out` is not length 1.
-    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GpError> {
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len())?;
         out[0] = self.log_lengthscale;
         Ok(())
@@ -80,9 +80,9 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `params` is not length 1
+    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
     /// or if the new `θ` is invalid.
-    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GpError> {
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len())?;
         self.log_lengthscale = validate_log_lengthscale(params[0])?;
         Ok(())
@@ -95,19 +95,32 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError`] if the matrices are empty, not square, or size
+    /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
     pub fn apply(
         &self,
         dist: MatRef<'_, f64>,
         out: MatMut<'_, f64>,
         uplo: Triangle,
-    ) -> Result<(), GpError> {
+    ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        write_triangle(dist, out, uplo, |d| {
-            let d = finite_dist(d)?;
-            Ok((-d * inv_two_ell_sq).exp())
-        })
+        write_triangle(dist, out, uplo, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+    }
+
+    /// Writes rectangular `k(dist)` into `out` (train × test).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
+    /// `dist` contains a non-finite value.
+    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
+        let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
+        write_dense(dist, out, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+    }
+
+    /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    pub fn fill_diag(&self, out: &mut [f64]) {
+        out.fill(1.0);
     }
 
     /// Writes `∂K/∂θ` for `θ = log(ℓ)` into `d_k`.
@@ -116,7 +129,7 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::InvalidHyperparameter`] if `param_idx` is not 0, or
+    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -124,9 +137,9 @@ impl RbfKernel {
         d_k: MatMut<'_, f64>,
         param_idx: usize,
         uplo: Triangle,
-    ) -> Result<(), GpError> {
+    ) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GpError::InvalidHyperparameter {
+            return Err(GprError::InvalidHyperparameter {
                 reason: "RBF has a single parameter at index 0".to_owned(),
             });
         }
@@ -141,13 +154,18 @@ impl RbfKernel {
     }
 }
 
-fn invalid_length(reason: &'static str) -> GpError {
-    GpError::InvalidHyperparameter {
+fn rbf_from_sq_dist(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
+    let d = finite_dist(d)?;
+    Ok((-d * inv_two_ell_sq).exp())
+}
+
+fn invalid_length(reason: &'static str) -> GprError {
+    GprError::InvalidHyperparameter {
         reason: reason.to_owned(),
     }
 }
 
-fn validate_lengthscale(lengthscale: f64) -> Result<(), GpError> {
+fn validate_lengthscale(lengthscale: f64) -> Result<(), GprError> {
     if !lengthscale.is_finite() {
         return Err(invalid_length("lengthscale must be finite"));
     }
@@ -157,7 +175,7 @@ fn validate_lengthscale(lengthscale: f64) -> Result<(), GpError> {
     Ok(())
 }
 
-fn validate_log_lengthscale(theta: f64) -> Result<f64, GpError> {
+fn validate_log_lengthscale(theta: f64) -> Result<f64, GprError> {
     if !theta.is_finite() {
         return Err(invalid_length("log lengthscale must be finite"));
     }
@@ -173,11 +191,11 @@ fn validate_log_lengthscale(theta: f64) -> Result<f64, GpError> {
     Ok(theta)
 }
 
-fn expect_one_param(len: usize) -> Result<(), GpError> {
+fn expect_one_param(len: usize) -> Result<(), GprError> {
     if len == 1 {
         Ok(())
     } else {
-        Err(GpError::InvalidHyperparameter {
+        Err(GprError::InvalidHyperparameter {
             reason: format!("expected 1 RBF parameter, got {len}"),
         })
     }
@@ -186,7 +204,7 @@ fn expect_one_param(len: usize) -> Result<(), GpError> {
 #[cfg(test)]
 mod tests {
     use super::RbfKernel;
-    use crate::error::GpError;
+    use crate::error::GprError;
     use crate::kernel::Triangle;
     use faer::{Mat, MatRef, mat};
 
@@ -364,18 +382,18 @@ mod tests {
     fn rejects_non_positive_lengthscale_and_bad_index() {
         assert!(matches!(
             RbfKernel::new(0.0),
-            Err(GpError::InvalidHyperparameter { .. })
+            Err(GprError::InvalidHyperparameter { .. })
         ));
         assert!(matches!(
             RbfKernel::from_log_lengthscale(f64::INFINITY),
-            Err(GpError::InvalidHyperparameter { .. })
+            Err(GprError::InvalidHyperparameter { .. })
         ));
         let rbf = RbfKernel::new(1.0).expect("valid");
         let dist = sq_dist_1d(&[0.0, 1.0]);
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             rbf.grad(dist.as_ref(), dk.as_mut(), 1, Triangle::Lower),
-            Err(GpError::InvalidHyperparameter { .. })
+            Err(GprError::InvalidHyperparameter { .. })
         ));
     }
 
@@ -386,7 +404,7 @@ mod tests {
         let mut k = fill(2, 0.0);
         assert!(matches!(
             rbf.apply(dist.as_ref(), k.as_mut(), Triangle::Full),
-            Err(GpError::NonFiniteInput)
+            Err(GprError::NonFiniteInput)
         ));
     }
 }

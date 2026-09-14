@@ -1,7 +1,7 @@
 //! Target (`y`) transforms: identity and standardize.
 
 use super::{population_std, require_finite, require_nonempty};
-use crate::error::GpError;
+use crate::error::GprError;
 
 /// Maps observations `y` into the space the GP fits, and maps predictive
 /// mean and variance back to the original scale.
@@ -14,25 +14,25 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError`] when `y` is empty, non-finite, or otherwise invalid
+    /// Returns [`GprError`] when `y` is empty, non-finite, or otherwise invalid
     /// for this transform.
-    fn fit(&mut self, y: &[f64]) -> Result<(), GpError>;
+    fn fit(&mut self, y: &[f64]) -> Result<(), GprError>;
 
     /// Applies the forward map to targets in place.
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::NotFitted`] when [`Self::fit`] has not succeeded, or
-    /// [`GpError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
-    fn transform(&self, y: &mut [f64]) -> Result<(), GpError>;
+    /// Returns [`GprError::NotFitted`] when [`Self::fit`] has not succeeded, or
+    /// [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
+    fn transform(&self, y: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps latent or observation means from transformed space to `y` scale.
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::NotFitted`] when [`Self::fit`] has not succeeded, or
-    /// [`GpError::NonFiniteInput`] when `mean` contains `NaN` or `Inf`.
-    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GpError>;
+    /// Returns [`GprError::NotFitted`] when [`Self::fit`] has not succeeded, or
+    /// [`GprError::NonFiniteInput`] when `mean` contains `NaN` or `Inf`.
+    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps predictive variances from transformed space to `y` scale.
     ///
@@ -40,9 +40,9 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`GpError::NotFitted`] when [`Self::fit`] has not succeeded, or
-    /// [`GpError::NonFiniteInput`] when `var` contains `NaN` or `Inf`.
-    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GpError>;
+    /// Returns [`GprError::NotFitted`] when [`Self::fit`] has not succeeded, or
+    /// [`GprError::NonFiniteInput`] when `var` contains `NaN` or `Inf`.
+    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError>;
 }
 
 /// Leaves targets and predictions unchanged.
@@ -52,7 +52,7 @@ pub trait TargetTransform: Send + Sync {
 /// ```rust
 /// use gprx::transform::{IdentityTarget, TargetTransform};
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let mut t = IdentityTarget;
 /// t.fit(&[1.0, 2.0])?;
 /// let mut mean = [0.5, 1.5];
@@ -65,19 +65,19 @@ pub trait TargetTransform: Send + Sync {
 pub struct IdentityTarget;
 
 impl TargetTransform for IdentityTarget {
-    fn fit(&mut self, y: &[f64]) -> Result<(), GpError> {
+    fn fit(&mut self, y: &[f64]) -> Result<(), GprError> {
         require_finite(y)
     }
 
-    fn transform(&self, y: &mut [f64]) -> Result<(), GpError> {
+    fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
         require_finite(y)
     }
 
-    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GpError> {
+    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
         require_finite(mean)
     }
 
-    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GpError> {
+    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
         require_finite(var)
     }
 }
@@ -92,7 +92,7 @@ impl TargetTransform for IdentityTarget {
 /// ```rust
 /// use gprx::transform::{StandardizeTarget, TargetTransform};
 ///
-/// # fn main() -> Result<(), gprx::GpError> {
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let mut t = StandardizeTarget::new();
 /// t.fit(&[1.0, 3.0, 5.0])?;
 /// let mut y = [1.0, 3.0, 5.0];
@@ -129,11 +129,11 @@ impl StandardizeTarget {
         self.fitted.then_some(self.std)
     }
 
-    fn require_fitted(&self) -> Result<(), GpError> {
+    fn require_fitted(&self) -> Result<(), GprError> {
         if self.fitted {
             Ok(())
         } else {
-            Err(GpError::NotFitted)
+            Err(GprError::NotFitted)
         }
     }
 }
@@ -145,7 +145,7 @@ impl Default for StandardizeTarget {
 }
 
 impl TargetTransform for StandardizeTarget {
-    fn fit(&mut self, y: &[f64]) -> Result<(), GpError> {
+    fn fit(&mut self, y: &[f64]) -> Result<(), GprError> {
         require_nonempty(y.len())?;
         require_finite(y)?;
         let n = y.len() as f64;
@@ -156,7 +156,7 @@ impl TargetTransform for StandardizeTarget {
         Ok(())
     }
 
-    fn transform(&self, y: &mut [f64]) -> Result<(), GpError> {
+    fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
         self.require_fitted()?;
         require_finite(y)?;
         let mean = self.mean;
@@ -167,7 +167,7 @@ impl TargetTransform for StandardizeTarget {
         Ok(())
     }
 
-    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GpError> {
+    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
         self.require_fitted()?;
         require_finite(mean)?;
         let loc = self.mean;
@@ -178,7 +178,7 @@ impl TargetTransform for StandardizeTarget {
         Ok(())
     }
 
-    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GpError> {
+    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
         self.require_fitted()?;
         require_finite(var)?;
         let scale = self.std * self.std;
@@ -192,7 +192,7 @@ impl TargetTransform for StandardizeTarget {
 #[cfg(test)]
 mod tests {
     use super::{IdentityTarget, StandardizeTarget, TargetTransform};
-    use crate::error::GpError;
+    use crate::error::GprError;
 
     const TOL: f64 = 1e-10;
 
@@ -303,12 +303,12 @@ mod tests {
     #[test]
     fn standardize_rejects_empty_and_non_finite() {
         let mut t = StandardizeTarget::new();
-        assert!(matches!(t.fit(&[]), Err(GpError::EmptyInput)));
+        assert!(matches!(t.fit(&[]), Err(GprError::EmptyInput)));
         assert!(matches!(
             t.fit(&[1.0, f64::NAN]),
-            Err(GpError::NonFiniteInput)
+            Err(GprError::NonFiniteInput)
         ));
-        assert!(matches!(t.transform(&mut [1.0]), Err(GpError::NotFitted)));
+        assert!(matches!(t.transform(&mut [1.0]), Err(GprError::NotFitted)));
     }
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
         let mut t = IdentityTarget;
         assert!(matches!(
             t.fit(&[f64::INFINITY]),
-            Err(GpError::NonFiniteInput)
+            Err(GprError::NonFiniteInput)
         ));
     }
 }
