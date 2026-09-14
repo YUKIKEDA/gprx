@@ -35,11 +35,11 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | ID  | 名前                  | 目的                           | 完了条件                                                                                |
 | --- | --------------------- | ------------------------------ | --------------------------------------------------------------------------------------- |
 | M0  | Spike                 | 箱と faer 0.24 を確認する      | `just lint` / `just test` が通る。2×2 と 5×5 で Cholesky 往復が一致する。GPR はまだ無い |
-| 1a  | 固定ハイパラ Exact GP | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
+| 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
 | 2   | 高速化                | Phase 1 を壊さず速くする       | `phase-1b` を見てボトルネック順に最適化。キャッシュと Rayon。SIMD は測定後だけ          |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
-| 4   | Sparse GP             | 大きい n                       | VFE または FITC の一方。Z 固定。対角予測                                                |
+| 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。Z 固定。対角予測                                                |
 | 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック                              |
 
 ## 依存
@@ -76,13 +76,13 @@ M0 → 1a → 1b → 2
 
 | ID     | 種別 | タイトル                                                                              | 依存                | DoD                                                                                                      |
 | ------ | ---- | ------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------- |
-| P1A-1  | Task | `GpError` と `DoublePrecision` のみの型                                               | M0-2                | 設計 §10 の主要バリアント。ライブラリ経路に `unwrap` なし                                                |
+| P1A-1  | Task | `GprError` と `DoublePrecision` のみの型                                               | M0-2                | 設計 §10 の主要バリアント。ライブラリ経路に `unwrap` なし                                                |
 | P1A-2  | Task | `Workspace`（f64, `k_matrix` / `w_matrix` / `dist_cache` / `exp_buf` / faer scratch） | P1A-1               | fit 開始時に1回確保。テストでサイズが分かる                                                              |
 | P1A-3  | Feat | `GaussianLikelihood`（`θ=log(σn²)`, `∂K/∂θ=σn² I`）                                   | P1A-1               | `add_noise_diag` / `noise_grad_diag` の単体テスト                                                        |
 | P1A-4  | Feat | `TargetTransform` と X の `Transform`（Identity / Standardize）                       | P1A-1               | 平均・分散の逆変換。§12-8                                                                                |
 | P1A-5  | Feat | RBF カーネル（`apply`/`grad`, `uplo=Lower`）                                          | P1A-1               | 対称性、対角、既知値、数値微分。Lower と Full の一致                                                     |
 | P1A-6  | Feat | `KernelSpec` / `CompiledKernel`（RBF + Sum/Product + param flatten）                  | P1A-5               | `get/set_params` がリーフに届く。組み込みは enum                                                         |
-| P1A-7  | Feat | `Gp`: `A=K+σn²I`、LLT、`α`                                                             | P1A-2, P1A-3, P1A-6 | 小規模で `A α = y`。失敗時 `fitted=false`。P1A-18 から crate 内で同じ経路をベンチできる                  |
+| P1A-7  | Feat | `Gpr`: `A=K+σn²I`、LLT、`α`                                                             | P1A-2, P1A-3, P1A-6 | 小規模で `A α = y`。失敗時 `fitted=false`。P1A-18 から crate 内で同じ経路をベンチできる                  |
 | P1A-8  | Feat | `predict`（mean, `VarianceKind::{Latent,Observation}`）                               | P1A-7, P1A-4        | 観測分散 = 潜在 + σn²（逆変換後）。`benches/exact.rs` に `predict_100` を足す                            |
 | P1A-9  | Feat | 負の MLL                                                                              | P1A-7               | `log det K = 2Σ log L_ii`。既知の小問題と一致                                                            |
 | P1A-10 | Feat | `W=ααᵀ-K⁻¹` による勾配                                                                | P1A-9               | `value_and_gradient_into` が L/α/W を共有。数値微分一致。bench に `mll_and_grad` を足す                  |
@@ -112,9 +112,9 @@ M0 → 1a → 1b → 2
 
 | ID    | 種別 | タイトル                          | 依存          | DoD                                                                                  |
 | ----- | ---- | --------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
-| P1B-1 | Feat | `Objective` と `GpObjective`      | P1A-10        | `set_params` が kernel+likelihood の連結配列                                         |
+| P1B-1 | Feat | `Objective` と `GprObjective`      | P1A-10        | `set_params` が kernel+likelihood の連結配列                                         |
 | P1B-2 | Feat | argmin L-BFGS アダプタ            | P1B-1         | `value_and_gradient_into` を1回の評価で使う                                          |
-| P1B-3 | Feat | `Gp::fit` が最適化する            | P1B-2, P1A-8  | 未学習 `predict` は `NotFitted`。成功後は L と α を保持。bench に `fit_lbfgs` を足す |
+| P1B-3 | Feat | `Gpr::fit` が最適化する            | P1B-2, P1A-8  | 未学習 `predict` は `NotFitted`。成功後は L と α を保持。bench に `fit_lbfgs` を足す |
 | P1B-4 | Task | パラメータ回収テスト              | P1B-3         | 合成データで lengthscale とノイズが真値の近くに戻る。LML が初期より下がる            |
 | P1B-5 | Docs | README, rustdoc, `examples/`      | P1B-4, P1A-17 | 英語 rustdoc。最短例で fit→predict                                                   |
 
@@ -150,14 +150,14 @@ M0 → 1a → 1b → 2
 
 ---
 
-## Phase 4 — Sparse GP
+## Phase 4 — Sparse GPR
 
 設計 §6.1。Z は k-means 等で固定。
 
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
 | P4-1 | Spike | VFE か FITC か一つ選ぶ                   | 1b   | 選択理由を `.dev/` に1ページ                  |
-| P4-2 | Feat  | `SparseGp`、誘導点固定                   | P4-1 | m≪n で fit が終わる                           |
+| P4-2 | Feat  | `SparseGpr`、誘導点固定                   | P4-1 | m≪n で fit が終わる                           |
 | P4-3 | Feat  | 対角予測と MLL                           | P4-2 | 小問題で Exact に近い（完全一致は要求しない） |
 | P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3 | 1b と同じ Optimizer 経路                      |
 

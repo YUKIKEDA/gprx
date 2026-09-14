@@ -79,8 +79,8 @@
   trait Objective<T: Scalar> {
       fn value(&mut self, params: &[T]) -> T;
       /// 勾配を out に書き込む。勾配計算非対応の場合は Err または None
-      fn gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<(), GpError>;
-      fn value_and_gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<T, GpError> {
+      fn gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<(), GprError>;
+      fn value_and_gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<T, GprError> {
           let v = self.value(params);
           self.gradient_into(params, out)?;
           Ok(v)
@@ -118,7 +118,7 @@
 
 §6.1 において、誘導点の座標微分メソッドが以下のように定義されています：
 ```rust
-fn grad_wrt_coords(&self, x1: MatRef<f64>, x2: MatRef<f64>, dK: MatMut<f64>, coord_idx: (usize, usize)) -> Result<(), GpError>
+fn grad_wrt_coords(&self, x1: MatRef<f64>, x2: MatRef<f64>, dK: MatMut<f64>, coord_idx: (usize, usize)) -> Result<(), GprError>
 ```
 
 * **問題点**:
@@ -127,7 +127,7 @@ fn grad_wrt_coords(&self, x1: MatRef<f64>, x2: MatRef<f64>, dK: MatMut<f64>, coo
   特定の1座標ごとではなく、次元方向（または全誘導点ブロック）をまとめて評価できるインターフェースにすべきです。
   ```rust
   /// 特定の入力次元 dim に対する全点の偏微分 ∂K(X1, X2) / ∂(X2_{*, dim}) を一括計算
-  fn grad_wrt_coord_dim(&self, x1: MatRef<T>, x2: MatRef<T>, dK: MatMut<T>, dim: usize) -> Result<(), GpError>;
+  fn grad_wrt_coord_dim(&self, x1: MatRef<T>, x2: MatRef<T>, dK: MatMut<T>, dim: usize) -> Result<(), GprError>;
   ```
 
 ---

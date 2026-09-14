@@ -95,14 +95,14 @@
 - **課題**:
   ```rust
   trait Objective<T: Scalar> {
-      fn value_and_gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<T, GpError>;
+      fn value_and_gradient_into(&mut self, params: &[T], out: &mut [T]) -> Result<T, GprError>;
   }
   ```
-  `ExactGP` の実装内部で、カーネル行列構築や距離計算を Rayon で並列化する際、`&mut self`（特に `Workspace`）をクロージャに渡そうとすると Rust の借用チェッカー（`cannot borrow self as mutable more than once`）に引っかかります。
+  `Gpr` の実装内部で、カーネル行列構築や距離計算を Rayon で並列化する際、`&mut self`（特に `Workspace`）をクロージャに渡そうとすると Rust の借用チェッカー（`cannot borrow self as mutable more than once`）に引っかかります。
 - **対策**:
   §7.1 の `thread_scratch: Vec<Mat<P::Storage>>` をそのまま使う場合、並列領域に入る直前に `let scratches = &mut self.workspace.thread_scratch[..];` のようにローカルにスライスとして取り出し、Rayon の `par_chunks_mut` や zip で各ワーカースレッドに分配するイディオムを明記しておくと実装時の手戻りを防げます。
 
-### 7. Sparse GP における誘導点 $Z$ の最適化境界
+### 7. Sparse GPR における誘導点 $Z$ の最適化境界
 
 §6.1 で誘導点勾配 `grad_wrt_coords` に触れられていますが、`Objective` との接続が未定義です。
 - 誘導点 $Z$（サイズ $m \times d$）をハイパーパラメータ $\theta$ と同時に最適化する場合、`params: &[T]` の末尾にフラット化して結合するのか、それともカーネルハイパラと $Z$ を交互に最適化（Alternate Optimization）するのかを決定しておく必要があります。
@@ -119,6 +119,6 @@
 | **ターゲット $y$ の前処理** | **P1** | 推論精度 | $y$ の標準化および予測時の `untransform` パイプラインを追加 |
 | **反復改良とJitter** | **P1** | 数値安定性 | Jitter増加時は方程式側も変更するか、f64フォールバックを優先する |
 | **カーネルの三角評価** | **P1** | 性能 (2倍速) | `KernelTerm::apply` に下三角のみ計算する `uplo` 制御を導入 |
-| **誘導点 $Z$ の最適化** | **P2** | Sparse GP | Phase 4 では $Z$ 固定とし、ハイパラ同時最適化は分離 |
+| **誘導点 $Z$ の最適化** | **P2** | Sparse GPR | Phase 4 では $Z$ 固定とし、ハイパラ同時最適化は分離 |
 
-これらが設計書に反映されれば、Phase 1（Exact GP）から手戻りなく、理論的にも実装的にも極めて堅牢なライブラリが構築できると考えます。
+これらが設計書に反映されれば、Phase 1（Exact GPR）から手戻りなく、理論的にも実装的にも極めて堅牢なライブラリが構築できると考えます。

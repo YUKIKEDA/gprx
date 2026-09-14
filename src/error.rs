@@ -18,8 +18,8 @@ pub enum CholeskyStage {
 /// Error type returned by gprx operations.
 ///
 /// Recoverable failures from user input (for example
-/// [`GpError::DimensionMismatch`]) and from the model or data (for example
-/// [`GpError::CholeskyFailed`]) both use this type. Library paths return
+/// [`GprError::DimensionMismatch`]) and from the model or data (for example
+/// [`GprError::CholeskyFailed`]) both use this type. Library paths return
 /// [`Result`] instead of panicking.
 ///
 /// Display text is English, matching crate identifiers and rustdoc.
@@ -27,22 +27,22 @@ pub enum CholeskyStage {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::GpError;
+/// use gprx::GprError;
 ///
-/// fn require_fitted(fitted: bool) -> Result<(), GpError> {
+/// fn require_fitted(fitted: bool) -> Result<(), GprError> {
 ///     if !fitted {
-///         return Err(GpError::NotFitted);
+///         return Err(GprError::NotFitted);
 ///     }
 ///     Ok(())
 /// }
 ///
-/// # fn main() -> Result<(), GpError> {
+/// # fn main() -> Result<(), GprError> {
 /// require_fitted(true)?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Debug, Error, PartialEq)]
-pub enum GpError {
+pub enum GprError {
     /// Input feature dimension does not match the fitted model.
     #[error("input dimension mismatch: X.ncols()={x_dim}, expected {expected_dim}")]
     DimensionMismatch {
@@ -98,7 +98,7 @@ pub enum GpError {
     },
     /// The kernel does not implement `grad_wrt_coord_dim`.
     #[error(
-        "this kernel term does not implement Sparse GP coordinate derivatives (grad_wrt_coord_dim)"
+        "this kernel term does not implement Sparse GPR coordinate derivatives (grad_wrt_coord_dim)"
     )]
     CoordGradientUnsupported,
     /// The hyperparameter optimizer stopped without meeting its convergence test.
@@ -135,20 +135,20 @@ pub enum GpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CholeskyStage, GpError};
+    use super::{CholeskyStage, GprError};
 
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
     fn error_is_send_sync() {
-        assert_send_sync::<GpError>();
+        assert_send_sync::<GprError>();
         assert_send_sync::<CholeskyStage>();
     }
 
     #[test]
     fn display_matches_english_messages() {
         assert_eq!(
-            GpError::DimensionMismatch {
+            GprError::DimensionMismatch {
                 x_dim: 3,
                 expected_dim: 2
             }
@@ -156,10 +156,10 @@ mod tests {
             "input dimension mismatch: X.ncols()=3, expected 2"
         );
         assert_eq!(
-            GpError::NotFitted.to_string(),
+            GprError::NotFitted.to_string(),
             "model is not fitted; call fit first"
         );
-        let chol = GpError::CholeskyFailed {
+        let chol = GprError::CholeskyFailed {
             jitter: 1e-6,
             matrix_size: 4,
             stage: CholeskyStage::Fit,
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn error_trait_is_implemented() {
-        let err = GpError::EmptyInput;
+        let err = GprError::EmptyInput;
         let _: &dyn std::error::Error = &err;
     }
 }
