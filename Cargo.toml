@@ -20,3 +20,7 @@ expect_used = "deny"
 panic = "deny"
 dbg_macro = "deny"
 float_cmp = "deny"
+
+[dev-dependencies]
+dyn-stack = "0.13"
+faer = "0.24.4"
