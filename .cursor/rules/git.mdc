@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Git (destructive)
 
-A question is not permission. Do not run history-changing git in the same turn as a yes/no.
+A question is not permission. Do not run history-changing git in the same turn as a yes/no. Scope and Issues: `.cursor/rules/consent.mdc`.
 
 ## Stop. Do not execute
 
