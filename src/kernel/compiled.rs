@@ -128,6 +128,68 @@ impl CompiledKernel {
         }
     }
 
+    /// Writes rectangular `k(dist)` (train × test) into `out`.
+    ///
+    /// `scratch` must match `out` and be a distinct buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same shape errors as [`Self::apply`].
+    pub fn apply_cross(
+        &self,
+        dist: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GpError> {
+        require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::Rbf(leaf) => leaf.apply_cross(dist, out),
+            Self::Sum(terms) => fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), add_rect),
+            Self::Product(terms) => {
+                fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), mul_rect)
+            }
+        }
+    }
+
+    /// Writes the diagonal `k(x, x)` into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpError::UnsupportedKernelOperation`] if a sum/product has no
+    /// terms.
+    pub fn fill_diag(&self, out: &mut [f64]) -> Result<(), GpError> {
+        match self {
+            Self::Rbf(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::Sum(terms) => {
+                let (first, rest) = split_terms(terms)?;
+                first.fill_diag(out)?;
+                let mut tmp = vec![0.0; out.len()];
+                for term in rest {
+                    term.fill_diag(&mut tmp)?;
+                    for (dst, src) in out.iter_mut().zip(&tmp) {
+                        *dst += *src;
+                    }
+                }
+                Ok(())
+            }
+            Self::Product(terms) => {
+                let (first, rest) = split_terms(terms)?;
+                first.fill_diag(out)?;
+                let mut tmp = vec![0.0; out.len()];
+                for term in rest {
+                    term.fill_diag(&mut tmp)?;
+                    for (dst, src) in out.iter_mut().zip(&tmp) {
+                        *dst *= *src;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Writes `∂K/∂θ_{param_idx}` into `d_k`. `scratch` must match `d_k`.
     ///
     /// `scratch` must be a distinct buffer from `d_k`.
@@ -315,6 +377,66 @@ fn apply_into(
         term.apply(dist, dest, uplo, buf.as_mut())
     } else {
         term.apply(dist, dest, uplo, fallback_scratch)
+    }
+}
+
+fn add_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
+    for col in 0..acc.ncols() {
+        for row in 0..acc.nrows() {
+            acc[(row, col)] += src[(row, col)];
+        }
+    }
+}
+
+fn mul_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
+    for col in 0..acc.ncols() {
+        for row in 0..acc.nrows() {
+            acc[(row, col)] *= src[(row, col)];
+        }
+    }
+}
+
+fn fold_rect(
+    terms: &[CompiledKernel],
+    dist: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    mut scratch: MatMut<'_, f64>,
+    combine: fn(MatMut<'_, f64>, MatRef<'_, f64>),
+) -> Result<(), GpError> {
+    let (first, rest) = split_terms(terms)?;
+    first.apply_cross(dist, out.as_mut(), scratch.as_mut())?;
+    let nrows = out.nrows();
+    let ncols = out.ncols();
+    let mut extra = None;
+    for term in rest {
+        apply_into_cross(
+            term,
+            dist,
+            scratch.as_mut(),
+            out.as_mut(),
+            &mut extra,
+            nrows,
+            ncols,
+        )?;
+        combine(out.as_mut(), scratch.as_ref());
+    }
+    Ok(())
+}
+
+fn apply_into_cross(
+    term: &CompiledKernel,
+    dist: MatRef<'_, f64>,
+    dest: MatMut<'_, f64>,
+    fallback_scratch: MatMut<'_, f64>,
+    extra: &mut Option<Mat<f64>>,
+    nrows: usize,
+    ncols: usize,
+) -> Result<(), GpError> {
+    if term.needs_internal_scratch() {
+        let buf = extra.get_or_insert_with(|| Mat::zeros(nrows, ncols));
+        term.apply_cross(dist, dest, buf.as_mut())
+    } else {
+        term.apply_cross(dist, dest, fallback_scratch)
     }
 }
 
@@ -682,5 +804,42 @@ mod tests {
             ),
             Err(crate::error::GpError::UnsupportedKernelOperation { .. })
         ));
+    }
+
+    #[test]
+    fn fill_diag_adds_rbf_leaves() {
+        let compiled = (rbf(1.0) + rbf(2.0)).compile();
+        let mut diag = [0.0, 0.0];
+        compiled.fill_diag(&mut diag).expect("two terms");
+        assert_close(diag[0], 2.0);
+        assert_close(diag[1], 2.0);
+    }
+
+    #[test]
+    fn apply_cross_matches_full_block() {
+        let compiled = rbf(1.0).compile();
+        let train = sq_dist_1d(&[0.0, 1.0]);
+        let mut k_nn = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply(
+                train.as_ref(),
+                k_nn.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("square");
+        let dist_cross = faer::mat![[0.0, 1.0], [1.0, 0.0]];
+        let mut k_cross = fill(2, 0.0);
+        let mut scratch_cross = fill(2, 0.0);
+        compiled
+            .apply_cross(
+                dist_cross.as_ref(),
+                k_cross.as_mut(),
+                scratch_cross.as_mut(),
+            )
+            .expect("rect");
+        assert_close(k_cross[(0, 0)], k_nn[(0, 0)]);
+        assert_close(k_cross[(0, 1)], k_nn[(0, 1)]);
     }
 }
