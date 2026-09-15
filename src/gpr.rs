@@ -53,8 +53,10 @@ pub struct Prediction {
 ///
 /// [`Self::fit`] builds the lower triangle of `A = K + σn² I`, factors it
 /// in place as `L Lᵀ`, and solves `A α = y`. `L` lives in the workspace;
-/// `α` is kept on the model. [`Self::predict`] returns the mean and a
-/// diagonal variance. Input and target transforms default to identity.
+/// `α` is kept on the model. [`Self::neg_log_marginal_likelihood`] is
+/// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
+/// [`Self::predict`] returns the mean and a diagonal variance. Input and
+/// target transforms default to identity.
 ///
 /// # Examples
 ///
@@ -70,6 +72,7 @@ pub struct Prediction {
 /// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
 /// let pred = gpr.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred.mean.len(), 1);
+/// let _nlml = gpr.neg_log_marginal_likelihood()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -81,7 +84,6 @@ pub struct Gpr {
     y_transform: Box<dyn TargetTransform>,
     workspace: Option<Workspace<DoublePrecision>>,
     x: Option<Mat<f64>>,
-    #[allow(dead_code)] // MLL (P1A-9)
     y: Option<Vec<f64>>,
     alpha: Option<Vec<f64>>,
     fitted: bool,
@@ -168,6 +170,43 @@ impl Gpr {
     /// Returns [`GprError::NotFitted`] if [`Self::fit`] has not succeeded.
     pub fn alpha(&self) -> Result<&[f64], GprError> {
         self.alpha.as_deref().ok_or(GprError::NotFitted)
+    }
+
+    /// Returns the negative log marginal likelihood of the last successful fit.
+    ///
+    /// Evaluates `½ yᵀ A⁻¹ y + ½ log|A| + (n/2) log(2π)` from the stored
+    /// `α` and the Cholesky factor `L` in the workspace, using
+    /// `log|A| = 2 Σ log(L_ii)`. `y` is the target after the target
+    /// transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NotFitted`] if [`Self::fit`] has not succeeded.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let mut gpr = Gpr::new(kernel, likelihood);
+    /// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    /// let nlml = gpr.neg_log_marginal_likelihood()?;
+    /// assert!(nlml.is_finite());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
+        if !self.fitted {
+            return Err(GprError::NotFitted);
+        }
+        let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
+        let alpha = self.alpha.as_deref().ok_or(GprError::NotFitted)?;
+        let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
+        Ok(neg_mll_from_factor(ws.k_matrix.as_ref(), y, alpha, self.n))
     }
 
     /// Factors `A = K + σn² I` and solves `A α = y`.
@@ -445,6 +484,24 @@ fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
     }
 }
 
+fn log_det_from_l(l: MatRef<'_, f64>, n: usize) -> f64 {
+    let mut log_diag = 0.0;
+    for i in 0..n {
+        log_diag += l[(i, i)].ln();
+    }
+    2.0 * log_diag
+}
+
+fn neg_mll_from_factor(l: MatRef<'_, f64>, y: &[f64], alpha: &[f64], n: usize) -> f64 {
+    let mut quad = 0.0;
+    for i in 0..n {
+        quad += y[i] * alpha[i];
+    }
+    let log_det = log_det_from_l(l, n);
+    let log_two_pi = (2.0 * std::f64::consts::PI).ln();
+    0.5 * (quad + log_det + n as f64 * log_two_pi)
+}
+
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
 ///
 /// P1A-18 can call this on the same `Workspace` buffers as [`Gpr::fit`].
@@ -666,7 +723,74 @@ mod tests {
     fn unfitted_alpha_is_not_fitted() {
         let gpr = rbf_gpr(1.0, 0.1);
         assert!(matches!(gpr.alpha(), Err(GprError::NotFitted)));
+        assert!(matches!(
+            gpr.neg_log_marginal_likelihood(),
+            Err(GprError::NotFitted)
+        ));
         assert!(!gpr.is_fitted());
+    }
+
+    #[test]
+    fn neg_mll_n_one_matches_closed_form() {
+        let noise = 0.25;
+        let y = 2.0;
+        let mut gpr = rbf_gpr(1.0, noise);
+        gpr.fit(&[0.0], 1, 1, &[y]).expect("spd");
+        let a = 1.0 + noise;
+        let log_det = a.ln();
+        let ws = gpr.workspace.as_ref().expect("workspace");
+        assert_close(super::log_det_from_l(ws.k_matrix.as_ref(), 1), log_det);
+        let quad = y * y / a;
+        let expected = 0.5 * (quad + log_det + (2.0 * std::f64::consts::PI).ln());
+        assert_close(gpr.neg_log_marginal_likelihood().expect("fitted"), expected);
+    }
+
+    #[test]
+    fn neg_mll_n_two_matches_analytic_det_and_quad() {
+        let ell = 1.0;
+        let noise = 0.1;
+        let x = [0.0, 1.0];
+        let y = [0.5, -0.25];
+        let mut gpr = rbf_gpr(ell, noise);
+        gpr.fit(&x, 2, 1, &y).expect("spd");
+        let k01 = (-0.5 * (1.0 / ell) * (1.0 / ell)).exp();
+        let diag = 1.0 + noise;
+        let det = diag * diag - k01 * k01;
+        let log_det = det.ln();
+        let ws = gpr.workspace.as_ref().expect("workspace");
+        assert_close(super::log_det_from_l(ws.k_matrix.as_ref(), 2), log_det);
+        let inv_scale = 1.0 / det;
+        let quad =
+            inv_scale * (y[0] * (diag * y[0] - k01 * y[1]) + y[1] * (-k01 * y[0] + diag * y[1]));
+        let expected = 0.5 * (quad + log_det + 2.0 * (2.0 * std::f64::consts::PI).ln());
+        assert_close(gpr.neg_log_marginal_likelihood().expect("fitted"), expected);
+    }
+
+    #[test]
+    fn neg_mll_uses_transformed_targets() {
+        let noise = 0.16;
+        let y = [0.0, 4.0];
+        let mut gpr = rbf_gpr(1.0, noise).with_target_transform(StandardizeTarget::new());
+        gpr.fit(&[0.0, 1.0], 2, 1, &y).expect("spd");
+        let mut t = StandardizeTarget::new();
+        t.fit(&y).expect("finite");
+        let mut y_t = y;
+        t.transform(&mut y_t).expect("fitted");
+        let k01 = (-0.5_f64).exp();
+        let diag = 1.0 + noise;
+        let det = diag * diag - k01 * k01;
+        let log_det = det.ln();
+        let inv_scale = 1.0 / det;
+        let quad = inv_scale
+            * (y_t[0] * (diag * y_t[0] - k01 * y_t[1]) + y_t[1] * (-k01 * y_t[0] + diag * y_t[1]));
+        let expected = 0.5 * (quad + log_det + 2.0 * (2.0 * std::f64::consts::PI).ln());
+        assert_close(gpr.neg_log_marginal_likelihood().expect("fitted"), expected);
+        let raw = 0.5
+            * (inv_scale
+                * (y[0] * (diag * y[0] - k01 * y[1]) + y[1] * (-k01 * y[0] + diag * y[1]))
+                + log_det
+                + 2.0 * (2.0 * std::f64::consts::PI).ln());
+        assert!((gpr.neg_log_marginal_likelihood().expect("fitted") - raw).abs() > TOL);
     }
 
     #[test]
