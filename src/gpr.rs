@@ -341,13 +341,7 @@ impl Gpr {
             }
             form_w_lower(ws.w_matrix.as_mut(), alpha, n);
             for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-                write_kernel_grad(
-                    compiled,
-                    ws.dist_cache.as_ref(),
-                    ws.exp_buf.as_mut(),
-                    i,
-                    ws.w_matrix.as_mut(),
-                )?;
+                write_kernel_grad(compiled, ws.dist_cache.as_ref(), ws.exp_buf.as_mut(), i)?;
                 let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
                 *slot = -0.5 * inner;
             }
@@ -697,17 +691,34 @@ fn write_kernel_grad(
     dist: MatRef<'_, f64>,
     d_k: MatMut<'_, f64>,
     param_idx: usize,
-    unused_scratch: MatMut<'_, f64>,
 ) -> Result<(), GprError> {
     match compiled {
         CompiledKernel::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
         CompiledKernel::Product(_) => Err(GprError::UnsupportedKernelOperation {
             reason: "product kernel gradient needs a dedicated scratch buffer".to_owned(),
         }),
-        CompiledKernel::Sum(_) => {
-            compiled.grad(dist, d_k, param_idx, Triangle::Lower, unused_scratch)
+        CompiledKernel::Sum(terms) => {
+            let (term, local) = term_for_kernel_param(terms, param_idx)?;
+            write_kernel_grad(term, dist, d_k, local)
         }
     }
+}
+
+fn term_for_kernel_param(
+    terms: &[CompiledKernel],
+    param_idx: usize,
+) -> Result<(&CompiledKernel, usize), GprError> {
+    let mut offset = 0;
+    for term in terms {
+        let n = term.num_params();
+        if param_idx < offset + n {
+            return Ok((term, param_idx - offset));
+        }
+        offset += n;
+    }
+    Err(GprError::InvalidHyperparameter {
+        reason: format!("kernel parameter index {param_idx} is out of range"),
+    })
 }
 
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
@@ -1057,6 +1068,58 @@ mod tests {
         }
         gpr.value_and_gradient_into(&params, &mut dummy)
             .expect("restore");
+    }
+
+    #[test]
+    fn value_and_gradient_sum_rbf_matches_finite_difference() {
+        let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+            + KernelSpec::from(RbfKernel::new(0.7).expect("valid"));
+        let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"));
+        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+            .expect("spd");
+        let n_params = gpr.num_params();
+        let mut params = vec![0.0; n_params];
+        gpr.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; n_params];
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        let h = 1e-5;
+        let mut dummy = vec![0.0; n_params];
+        for i in 0..n_params {
+            let mut plus = params.clone();
+            let mut minus = params.clone();
+            plus[i] += h;
+            minus[i] -= h;
+            let v_plus = gpr
+                .value_and_gradient_into(&plus, &mut dummy)
+                .expect("plus");
+            let v_minus = gpr
+                .value_and_gradient_into(&minus, &mut dummy)
+                .expect("minus");
+            let fd = (v_plus - v_minus) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (grad[i] - fd).abs() <= 1e-5 * scale,
+                "param {i}: analytic={}, fd={}",
+                grad[i],
+                fd
+            );
+        }
+    }
+
+    #[test]
+    fn value_and_gradient_product_is_unsupported() {
+        let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
+            * KernelSpec::from(RbfKernel::new(2.0).expect("valid"));
+        let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"));
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let mut params = [0.0; 3];
+        gpr.get_params(&mut params).expect("len 3");
+        let mut grad = [0.0; 3];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&params, &mut grad),
+            Err(GprError::UnsupportedKernelOperation { .. })
+        ));
     }
 
     #[test]
