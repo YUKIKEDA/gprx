@@ -22,7 +22,7 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | P1A-18  | [#44](https://github.com/YUKIKEDA/gprx/issues/44) | P1A-17  | [#19](https://github.com/YUKIKEDA/gprx/issues/19) | P4-4    | [#38](https://github.com/YUKIKEDA/gprx/issues/38) |
 | P1A-19  | [#45](https://github.com/YUKIKEDA/gprx/issues/45) | P1B-1   | [#20](https://github.com/YUKIKEDA/gprx/issues/20) | P5-1    | [#39](https://github.com/YUKIKEDA/gprx/issues/39) |
 | P1A-20  | [#54](https://github.com/YUKIKEDA/gprx/issues/54) | P1B-2   | [#21](https://github.com/YUKIKEDA/gprx/issues/21) | P5-2    | [#40](https://github.com/YUKIKEDA/gprx/issues/40) |
-|         |                                                   | P1B-3   | [#22](https://github.com/YUKIKEDA/gprx/issues/22) | P5-3    | [#41](https://github.com/YUKIKEDA/gprx/issues/41) |
+| P2-6    | [#60](https://github.com/YUKIKEDA/gprx/issues/60) | P1B-3   | [#22](https://github.com/YUKIKEDA/gprx/issues/22) | P5-3    | [#41](https://github.com/YUKIKEDA/gprx/issues/41) |
 |         |                                                   | P1B-4   | [#23](https://github.com/YUKIKEDA/gprx/issues/23) | P5-4    | [#42](https://github.com/YUKIKEDA/gprx/issues/42) |
 |         |                                                   | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
 |         |                                                   | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
@@ -133,6 +133,7 @@ M0 → 1a → 1b → 2
 | P2-3 | Feat  | Rayon でカーネル構築。`thread_scratch` を並列前に切り離す | P2-1         | 1b と数値一致。`kernel_rbf` が速くなることを bench で示す                    |
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
 | P2-5 | Spike | カーネル SIMD が必要か                                    | P2-1, P2-3   | `kernel_rbf` が支配的なら検討。そうでなければやらない                        |
+| P2-6 | Spike | NLML 定数項 `(n/2) log(2π)` の速度寄与                    | P2-1, P1A-10 | `mll_and_grad`（あれば `fit_lbfgs`）を定数あり/なしで測る。差がノイズなら一本のまま。結果を `.dev/bench-log.md` に残す。この行では API を分けない |
 
 ---
 
