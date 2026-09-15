@@ -55,8 +55,9 @@ pub struct Prediction {
 /// in place as `L Lᵀ`, and solves `A α = y`. `L` lives in the workspace;
 /// `α` is kept on the model. [`Self::neg_log_marginal_likelihood`] is
 /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
-/// [`Self::predict`] returns the mean and a diagonal variance. Input and
-/// target transforms default to identity.
+/// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
+/// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
+/// a diagonal variance. Input and target transforms default to identity.
 ///
 /// # Examples
 ///
@@ -207,6 +208,173 @@ impl Gpr {
         let alpha = self.alpha.as_deref().ok_or(GprError::NotFitted)?;
         let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
         Ok(neg_mll_from_factor(ws.k_matrix.as_ref(), y, alpha, self.n))
+    }
+
+    /// Returns the concatenated kernel and likelihood parameter count.
+    pub fn num_params(&self) -> usize {
+        self.kernel.num_params() + self.likelihood.num_params()
+    }
+
+    /// Writes kernel `θ` then likelihood `θ` into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+        let n_kernel = self.kernel.num_params();
+        require_param_len(out.len(), self.num_params())?;
+        self.kernel.get_params(&mut out[..n_kernel])?;
+        self.likelihood.get_params(&mut out[n_kernel..])
+    }
+
+    /// Sets kernel and likelihood `θ`, rebuilds `L` / `α` / `W`, and writes `∂L/∂θ`.
+    ///
+    /// `params` and `out` are kernel parameters followed by the likelihood
+    /// parameter. One Cholesky produces `L` and `α`; `W = ααᵀ - A⁻¹` is
+    /// formed in the workspace without overwriting `L`. Kernel `∂A/∂θ` goes
+    /// through `exp_buf`. The returned value is the same as
+    /// [`Self::neg_log_marginal_likelihood`] after a successful call.
+    ///
+    /// Training `X` / `y` must already come from [`Self::fit`]. Transforms
+    /// are not re-fit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NotFitted`] if [`Self::fit`] has not stored data,
+    /// [`GprError::InvalidHyperparameter`] if a slice length is wrong,
+    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid, or
+    /// [`GprError::CholeskyFailed`] if `A` cannot be factored. Kernel and
+    /// likelihood `θ` are committed together only after `A` factors. A
+    /// rejected slice or a Cholesky failure leaves stored `θ` unchanged.
+    /// Cholesky failure still sets `fitted = false` because `L` is
+    /// overwritten, but it keeps the training data.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let mut gpr = Gpr::new(kernel, likelihood);
+    /// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    /// let mut params = [0.0; 2];
+    /// gpr.get_params(&mut params)?;
+    /// let mut grad = [0.0; 2];
+    /// let nlml = gpr.value_and_gradient_into(&params, &mut grad)?;
+    /// assert!(nlml.is_finite());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn value_and_gradient_into(
+        &mut self,
+        params: &[f64],
+        out: &mut [f64],
+    ) -> Result<f64, GprError> {
+        if self.x.is_none() || self.y.is_none() || self.workspace.is_none() {
+            return Err(GprError::NotFitted);
+        }
+        let n_kernel = self.kernel.num_params();
+        let n_params = self.num_params();
+        require_param_len(params.len(), n_params)?;
+        require_param_len(out.len(), n_params)?;
+        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        let n = self.n;
+        let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
+        {
+            let ws = workspace_mut(&mut self.workspace)?;
+            compiled.apply(
+                ws.dist_cache.as_ref(),
+                ws.k_matrix.as_mut(),
+                Triangle::Lower,
+                ws.exp_buf.as_mut(),
+            )?;
+            add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
+        }
+        let mut rhs = Mat::from_fn(n, 1, |i, _| y[i]);
+        {
+            let ws = workspace_mut(&mut self.workspace)?;
+            if let Err(err) = cholesky_and_solve(
+                &mut ws.k_matrix,
+                &mut rhs,
+                &mut ws.faer_scratch,
+                0.0,
+                CholeskyStage::Fit,
+            ) {
+                self.fitted = false;
+                self.alpha = None;
+                return Err(err);
+            }
+        }
+        let alpha = self.alpha.get_or_insert_with(|| vec![0.0; n]);
+        if alpha.len() != n {
+            alpha.resize(n, 0.0);
+        }
+        for i in 0..n {
+            alpha[i] = rhs[(i, 0)];
+        }
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = Some(compiled);
+        self.fitted = true;
+        let nlml = {
+            let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
+            let alpha = self.alpha.as_deref().ok_or(GprError::NotFitted)?;
+            let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
+            neg_mll_from_factor(ws.k_matrix.as_ref(), y, alpha, n)
+        };
+        {
+            let compiled = self.compiled.as_ref().ok_or(GprError::NotFitted)?;
+            let alpha = self.alpha.as_deref().ok_or(GprError::NotFitted)?;
+            let ws = workspace_mut(&mut self.workspace)?;
+            fill_identity(ws.w_matrix.as_mut());
+            {
+                let stack = MemStack::new(&mut ws.faer_scratch);
+                llt::solve::solve_in_place(
+                    ws.k_matrix.as_ref(),
+                    ws.w_matrix.as_mut(),
+                    Par::Seq,
+                    stack,
+                );
+            }
+            form_w_lower(ws.w_matrix.as_mut(), alpha, n);
+            for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
+                write_kernel_grad(compiled, ws.dist_cache.as_ref(), ws.exp_buf.as_mut(), i)?;
+                let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
+                *slot = -0.5 * inner;
+            }
+            let mut noise_inner = 0.0;
+            let d_noise = self.likelihood.noise_variance();
+            for i in 0..n {
+                noise_inner += ws.w_matrix[(i, i)] * d_noise;
+            }
+            out[n_kernel] = -0.5 * noise_inner;
+        }
+        Ok(nlml)
+    }
+
+    /// Builds kernel, compiled kernel, and likelihood `θ` without storing them.
+    ///
+    /// Each `set_params` is atomic on its own type. The caller commits the
+    /// triple only after `A` factors, so a later Cholesky failure cannot
+    /// leave stored kernel and likelihood `θ` mixed or half-applied.
+    fn prepared_params(
+        &self,
+        params: &[f64],
+        n_kernel: usize,
+    ) -> Result<(KernelSpec, CompiledKernel, GaussianLikelihood), GprError> {
+        let mut likelihood = self.likelihood;
+        likelihood.set_params(&params[n_kernel..])?;
+        let mut kernel = self.kernel.clone();
+        kernel.set_params(&params[..n_kernel])?;
+        let mut compiled = match self.compiled.as_ref() {
+            Some(compiled) => compiled.clone(),
+            None => kernel.compile(),
+        };
+        compiled.set_params(&params[..n_kernel])?;
+        Ok((kernel, compiled, likelihood))
     }
 
     /// Factors `A = K + σn² I` and solves `A α = y`.
@@ -502,6 +670,79 @@ fn neg_mll_from_factor(l: MatRef<'_, f64>, y: &[f64], alpha: &[f64], n: usize) -
     0.5 * (quad + log_det + n as f64 * log_two_pi)
 }
 
+fn require_param_len(actual: usize, expected: usize) -> Result<(), GprError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("expected {expected} parameters, got {actual}"),
+        })
+    }
+}
+
+fn fill_identity(mut a: MatMut<'_, f64>) {
+    let n = a.nrows();
+    for col in 0..n {
+        for row in 0..n {
+            a[(row, col)] = if row == col { 1.0 } else { 0.0 };
+        }
+    }
+}
+
+fn form_w_lower(mut w: MatMut<'_, f64>, alpha: &[f64], n: usize) {
+    for col in 0..n {
+        for row in col..n {
+            w[(row, col)] = alpha[row] * alpha[col] - w[(row, col)];
+        }
+    }
+}
+
+fn frobenius_lower(w: MatRef<'_, f64>, d_k: MatRef<'_, f64>, n: usize) -> f64 {
+    let mut inner = 0.0;
+    for col in 0..n {
+        inner += w[(col, col)] * d_k[(col, col)];
+        for row in col + 1..n {
+            inner += 2.0 * w[(row, col)] * d_k[(row, col)];
+        }
+    }
+    inner
+}
+
+fn write_kernel_grad(
+    compiled: &CompiledKernel,
+    dist: MatRef<'_, f64>,
+    d_k: MatMut<'_, f64>,
+    param_idx: usize,
+) -> Result<(), GprError> {
+    match compiled {
+        CompiledKernel::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
+        CompiledKernel::Product(_) => Err(GprError::UnsupportedKernelOperation {
+            reason: "product kernel gradient needs a dedicated scratch buffer".to_owned(),
+        }),
+        CompiledKernel::Sum(terms) => {
+            let (term, local) = term_for_kernel_param(terms, param_idx)?;
+            write_kernel_grad(term, dist, d_k, local)
+        }
+    }
+}
+
+fn term_for_kernel_param(
+    terms: &[CompiledKernel],
+    param_idx: usize,
+) -> Result<(&CompiledKernel, usize), GprError> {
+    let mut offset = 0;
+    for term in terms {
+        let n = term.num_params();
+        if param_idx < offset + n {
+            return Ok((term, param_idx - offset));
+        }
+        offset += n;
+    }
+    Err(GprError::InvalidHyperparameter {
+        reason: format!("kernel parameter index {param_idx} is out of range"),
+    })
+}
+
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
 ///
 /// P1A-18 can call this on the same `Workspace` buffers as [`Gpr::fit`].
@@ -791,6 +1032,177 @@ mod tests {
                 + log_det
                 + 2.0 * (2.0 * std::f64::consts::PI).ln());
         assert!((gpr.neg_log_marginal_likelihood().expect("fitted") - raw).abs() > TOL);
+    }
+
+    #[test]
+    fn value_and_gradient_rejects_unfitted_and_bad_len() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        let params = [0.0, 0.0];
+        let mut grad = [0.0, 0.0];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&params, &mut grad),
+            Err(GprError::NotFitted)
+        ));
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        assert!(matches!(
+            gpr.value_and_gradient_into(&[0.0], &mut grad),
+            Err(GprError::InvalidHyperparameter { .. })
+        ));
+        assert!(matches!(
+            gpr.get_params(&mut [0.0]),
+            Err(GprError::InvalidHyperparameter { .. })
+        ));
+    }
+
+    #[test]
+    fn value_and_gradient_set_params_is_atomic() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let mut bad = before;
+        bad[0] = 0.5;
+        bad[1] = f64::INFINITY;
+        let mut grad = [0.0; 2];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&bad, &mut grad),
+            Err(GprError::InvalidNoiseVariance { .. })
+        ));
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+    }
+
+    #[test]
+    fn value_and_gradient_cholesky_failure_keeps_params() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 0.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let mut bad = before;
+        bad[0] = 0.5;
+        bad[1] = (1e-20_f64).ln();
+        let mut grad = [0.0; 2];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&bad, &mut grad),
+            Err(GprError::CholeskyFailed { .. })
+        ));
+        assert!(!gpr.is_fitted());
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+        gpr.value_and_gradient_into(&before, &mut grad)
+            .expect("restore");
+        assert!(gpr.is_fitted());
+    }
+
+    #[test]
+    fn value_and_gradient_matches_nlml_and_finite_difference() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+            .expect("spd");
+        let mut params = [0.0; 2];
+        gpr.get_params(&mut params).expect("len 2");
+        let mut grad = [0.0; 2];
+        let value = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert_close(value, gpr.neg_log_marginal_likelihood().expect("fitted"));
+        let h = 1e-5;
+        let mut dummy = [0.0; 2];
+        for i in 0..2 {
+            let mut plus = params;
+            let mut minus = params;
+            plus[i] += h;
+            minus[i] -= h;
+            let v_plus = gpr
+                .value_and_gradient_into(&plus, &mut dummy)
+                .expect("plus");
+            let v_minus = gpr
+                .value_and_gradient_into(&minus, &mut dummy)
+                .expect("minus");
+            let fd = (v_plus - v_minus) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (grad[i] - fd).abs() <= 1e-5 * scale,
+                "param {i}: analytic={}, fd={}",
+                grad[i],
+                fd
+            );
+        }
+        gpr.value_and_gradient_into(&params, &mut dummy)
+            .expect("restore");
+    }
+
+    #[test]
+    fn value_and_gradient_sum_rbf_matches_finite_difference() {
+        let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+            + KernelSpec::from(RbfKernel::new(0.7).expect("valid"));
+        let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"));
+        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+            .expect("spd");
+        let n_params = gpr.num_params();
+        let mut params = vec![0.0; n_params];
+        gpr.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; n_params];
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        let h = 1e-5;
+        let mut dummy = vec![0.0; n_params];
+        for i in 0..n_params {
+            let mut plus = params.clone();
+            let mut minus = params.clone();
+            plus[i] += h;
+            minus[i] -= h;
+            let v_plus = gpr
+                .value_and_gradient_into(&plus, &mut dummy)
+                .expect("plus");
+            let v_minus = gpr
+                .value_and_gradient_into(&minus, &mut dummy)
+                .expect("minus");
+            let fd = (v_plus - v_minus) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (grad[i] - fd).abs() <= 1e-5 * scale,
+                "param {i}: analytic={}, fd={}",
+                grad[i],
+                fd
+            );
+        }
+    }
+
+    #[test]
+    fn value_and_gradient_product_is_unsupported() {
+        let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
+            * KernelSpec::from(RbfKernel::new(2.0).expect("valid"));
+        let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"));
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let mut params = [0.0; 3];
+        gpr.get_params(&mut params).expect("len 3");
+        let mut grad = [0.0; 3];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&params, &mut grad),
+            Err(GprError::UnsupportedKernelOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn value_and_gradient_n_one_noise_matches_closed_form() {
+        let noise = 0.25;
+        let y = 2.0;
+        let mut gpr = rbf_gpr(1.0, noise);
+        gpr.fit(&[0.0], 1, 1, &[y]).expect("spd");
+        let mut params = [0.0; 2];
+        gpr.get_params(&mut params).expect("len 2");
+        let mut grad = [0.0; 2];
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        let a = 1.0 + noise;
+        let w = (y / a) * (y / a) - 1.0 / a;
+        assert_close(grad[0], 0.0);
+        assert_close(grad[1], -0.5 * w * noise);
     }
 
     #[test]
