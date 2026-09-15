@@ -244,8 +244,10 @@ impl Gpr {
     /// [`GprError::InvalidHyperparameter`] if a slice length is wrong,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid, or
     /// [`GprError::CholeskyFailed`] if `A` cannot be factored. Kernel and
-    /// likelihood `θ` are updated together or not at all. Cholesky failure
-    /// leaves `fitted = false` but keeps the training data.
+    /// likelihood `θ` are committed together only after `A` factors. A
+    /// rejected slice or a Cholesky failure leaves stored `θ` unchanged.
+    /// Cholesky failure still sets `fitted = false` because `L` is
+    /// overwritten, but it keeps the training data.
     ///
     /// # Examples
     ///
@@ -278,11 +280,10 @@ impl Gpr {
         let n_params = self.num_params();
         require_param_len(params.len(), n_params)?;
         require_param_len(out.len(), n_params)?;
-        self.set_all_params(params, n_kernel)?;
+        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
         {
-            let compiled = self.compiled.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
             compiled.apply(
                 ws.dist_cache.as_ref(),
@@ -290,7 +291,7 @@ impl Gpr {
                 Triangle::Lower,
                 ws.exp_buf.as_mut(),
             )?;
-            add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
+            add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
         }
         let mut rhs = Mat::from_fn(n, 1, |i, _| y[i]);
         {
@@ -314,6 +315,9 @@ impl Gpr {
         for i in 0..n {
             alpha[i] = rhs[(i, 0)];
         }
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = Some(compiled);
         self.fitted = true;
         let nlml = {
             let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
@@ -351,12 +355,16 @@ impl Gpr {
         Ok(nlml)
     }
 
-    /// Sets kernel, compiled kernel, and likelihood `θ` together.
+    /// Builds kernel, compiled kernel, and likelihood `θ` without storing them.
     ///
-    /// Each `set_params` is atomic on its own type. Applying them in place
-    /// would still leave a mixed model if a later call failed, so this clones,
-    /// applies, and assigns only after every slice is accepted.
-    fn set_all_params(&mut self, params: &[f64], n_kernel: usize) -> Result<(), GprError> {
+    /// Each `set_params` is atomic on its own type. The caller commits the
+    /// triple only after `A` factors, so a later Cholesky failure cannot
+    /// leave stored kernel and likelihood `θ` mixed or half-applied.
+    fn prepared_params(
+        &self,
+        params: &[f64],
+        n_kernel: usize,
+    ) -> Result<(KernelSpec, CompiledKernel, GaussianLikelihood), GprError> {
         let mut likelihood = self.likelihood;
         likelihood.set_params(&params[n_kernel..])?;
         let mut kernel = self.kernel.clone();
@@ -366,10 +374,7 @@ impl Gpr {
             None => kernel.compile(),
         };
         compiled.set_params(&params[..n_kernel])?;
-        self.kernel = kernel;
-        self.likelihood = likelihood;
-        self.compiled = Some(compiled);
-        Ok(())
+        Ok((kernel, compiled, likelihood))
     }
 
     /// Factors `A = K + σn² I` and solves `A α = y`.
@@ -1067,6 +1072,30 @@ mod tests {
         gpr.get_params(&mut after).expect("len 2");
         assert_close(after[0], before[0]);
         assert_close(after[1], before[1]);
+    }
+
+    #[test]
+    fn value_and_gradient_cholesky_failure_keeps_params() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 0.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let mut bad = before;
+        bad[0] = 0.5;
+        bad[1] = (1e-20_f64).ln();
+        let mut grad = [0.0; 2];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&bad, &mut grad),
+            Err(GprError::CholeskyFailed { .. })
+        ));
+        assert!(!gpr.is_fitted());
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+        gpr.value_and_gradient_into(&before, &mut grad)
+            .expect("restore");
+        assert!(gpr.is_fitted());
     }
 
     #[test]
