@@ -15,7 +15,6 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,
     /// `W = ααᵀ - K⁻¹` for the MLL gradient trace term.
-    #[allow(dead_code)]
     pub(crate) w_matrix: Mat<P::Storage>,
     /// Cached pairwise distances (squared Euclidean for Phase 1 RBF).
     pub(crate) dist_cache: Mat<P::Storage>,

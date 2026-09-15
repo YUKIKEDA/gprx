@@ -1,7 +1,7 @@
 //! Criterion benches for the Exact GPR path.
 //!
-//! P1A-8 adds `predict_100`. P1A-18 adds `kernel_rbf` and `cholesky_alpha`
-//! on the same fixed problem.
+//! P1A-8 adds `predict_100`. P1A-10 adds `mll_and_grad`. P1A-18 adds
+//! `kernel_rbf` and `cholesky_alpha` on the same fixed problem.
 
 #![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
 
@@ -56,5 +56,21 @@ fn predict_100(c: &mut Criterion) {
     });
 }
 
-criterion_group!(exact, predict_100);
+fn mll_and_grad(c: &mut Criterion) {
+    let (mut gpr, _) = fitted_model();
+    let mut params = vec![0.0; gpr.num_params()];
+    gpr.get_params(&mut params).expect("param length");
+    let mut grad = vec![0.0; params.len()];
+    c.bench_function("mll_and_grad", |b| {
+        b.iter(|| {
+            let value = gpr.value_and_gradient_into(
+                std::hint::black_box(&params),
+                std::hint::black_box(&mut grad),
+            );
+            std::hint::black_box(value)
+        });
+    });
+}
+
+criterion_group!(exact, predict_100, mll_and_grad);
 criterion_main!(exact);
