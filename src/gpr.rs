@@ -241,9 +241,11 @@ impl Gpr {
     /// # Errors
     ///
     /// Returns [`GprError::NotFitted`] if [`Self::fit`] has not stored data,
-    /// [`GprError::InvalidHyperparameter`] if a slice length is wrong, or
-    /// [`GprError::CholeskyFailed`] if `A` cannot be factored. Cholesky
-    /// failure leaves `fitted = false` but keeps the training data.
+    /// [`GprError::InvalidHyperparameter`] if a slice length is wrong,
+    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid, or
+    /// [`GprError::CholeskyFailed`] if `A` cannot be factored. Kernel and
+    /// likelihood `θ` are updated together or not at all. Cholesky failure
+    /// leaves `fitted = false` but keeps the training data.
     ///
     /// # Examples
     ///
@@ -276,13 +278,7 @@ impl Gpr {
         let n_params = self.num_params();
         require_param_len(params.len(), n_params)?;
         require_param_len(out.len(), n_params)?;
-        self.kernel.set_params(&params[..n_kernel])?;
-        self.likelihood.set_params(&params[n_kernel..])?;
-        if self.compiled.is_none() {
-            self.compiled = Some(self.kernel.compile());
-        }
-        let compiled = self.compiled.as_mut().ok_or(GprError::NotFitted)?;
-        compiled.set_params(&params[..n_kernel])?;
+        self.set_all_params(params, n_kernel)?;
         let n = self.n;
         let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
         {
@@ -353,6 +349,27 @@ impl Gpr {
             out[n_kernel] = -0.5 * noise_inner;
         }
         Ok(nlml)
+    }
+
+    /// Sets kernel, compiled kernel, and likelihood `θ` together.
+    ///
+    /// Each `set_params` is atomic on its own type. Applying them in place
+    /// would still leave a mixed model if a later call failed, so this clones,
+    /// applies, and assigns only after every slice is accepted.
+    fn set_all_params(&mut self, params: &[f64], n_kernel: usize) -> Result<(), GprError> {
+        let mut likelihood = self.likelihood;
+        likelihood.set_params(&params[n_kernel..])?;
+        let mut kernel = self.kernel.clone();
+        kernel.set_params(&params[..n_kernel])?;
+        let mut compiled = match self.compiled.as_ref() {
+            Some(compiled) => compiled.clone(),
+            None => kernel.compile(),
+        };
+        compiled.set_params(&params[..n_kernel])?;
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = Some(compiled);
+        Ok(())
     }
 
     /// Factors `A = K + σn² I` and solves `A α = y`.
@@ -1030,6 +1047,26 @@ mod tests {
             gpr.get_params(&mut [0.0]),
             Err(GprError::InvalidHyperparameter { .. })
         ));
+    }
+
+    #[test]
+    fn value_and_gradient_set_params_is_atomic() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let mut bad = before;
+        bad[0] = 0.5;
+        bad[1] = f64::INFINITY;
+        let mut grad = [0.0; 2];
+        assert!(matches!(
+            gpr.value_and_gradient_into(&bad, &mut grad),
+            Err(GprError::InvalidNoiseVariance { .. })
+        ));
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
     }
 
     #[test]
