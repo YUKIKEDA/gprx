@@ -29,6 +29,7 @@
   {"title":"[feat] P2-3: Rayon カーネル構築","labels":["type:feat","phase:2"],"milestone":"Phase 2","id":"P2-3","design":"§7.1 §8","depends":"P2-1","dod":"thread_scratch を並列前に切り離す。1b と数値一致。"},
   {"title":"[task] P2-4: fit ループの確保カウント","labels":["type:task","phase:2"],"milestone":"Phase 2","id":"P2-4","design":"§2 §7","depends":"P2-3","dod":"gprx 内部ホットパスで新規確保ゼロ（ユーザーカーネル除く）。"},
   {"title":"[spike] P2-5: カーネル SIMD が必要か","labels":["type:spike","phase:2"],"milestone":"Phase 2","id":"P2-5","design":"§8","depends":"P2-1, P2-3","dod":"測定結果を残す。不要なら実装しない。"},
+  {"title":"[spike] P2-6: NLML 定数項の速度寄与","labels":["type:spike","phase:2"],"milestone":"Phase 2","id":"P2-6","design":"§6.2 §15","depends":"P2-1, P1A-10","dod":"mll_and_grad（あれば fit_lbfgs）を定数あり/なしで測る。差がノイズなら一本のまま。結果を .dev/bench-log.md に残す。この行では API を分けない。"},
   {"title":"[spike] P3-1: LDLT delete API の実測","labels":["type:spike","phase:3"],"milestone":"Phase 3","id":"P3-1","design":"§3 §11","depends":"Phase 1b","dod":"任意インデックス削除がフル分解と一致。ダメなら末尾削除+再分解。"},
   {"title":"[feat] P3-2: OnlineWorkspace と容量拡張","labels":["type:feat","phase:3"],"milestone":"Phase 3","id":"P3-2","design":"§11","depends":"P3-1","dod":"拡張時に K/LD/y/α/cache が同期する。"},
   {"title":"[feat] P3-3: 末尾 insert","labels":["type:feat","phase:3"],"milestone":"Phase 3","id":"P3-3","design":"§11","depends":"P3-2","dod":"自前 bordered LDLT。1点追加 == フル再 fit。"},
