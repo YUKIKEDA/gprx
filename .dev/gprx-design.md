@@ -394,6 +394,8 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 ただし α = K⁻¹ y、W = ααᵀ - K⁻¹
 ```
 
+`(n/2) log(2π)` は θ に依らない。公開の NLML と最適化の `Objective` は当面同じ `L(θ)` を使う。定数を最適化から外すかは P2-6 で測ってから決める。
+
 標準アルゴリズム(Rasmussen & Williams / GPy系):
 
 1. `k_matrix`に `A = K + σn² I` を構築(下三角のみ、§5.1の`uplo=Lower`)
@@ -765,7 +767,7 @@ trait OnlineInference<T: Scalar> {
 | P1A-8 / P1A-10 | 同じファイルに `predict_100` / `mll_and_grad` を足す。P1A-19 で確保 ratchet |
 | 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
-| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。SIMD は `kernel_rbf` が支配的なときだけ |
+| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。SIMD は `kernel_rbf` が支配的なときだけ。NLML 定数項は P2-6 で `mll_and_grad` のあり/なしを同じ問題で測る |
 | Phase 3+ | insert/delete などを同じ問題定義で足す |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。
