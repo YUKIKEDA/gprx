@@ -37,7 +37,7 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | M0  | Spike                 | 箱と faer 0.24 を確認する      | `just lint` / `just test` が通る。2×2 と 5×5 で Cholesky 往復が一致する。GPR はまだ無い |
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
-| 2   | 高速化                | Phase 1 を壊さず速くする       | `phase-1b` を見てボトルネック順に最適化。キャッシュと Rayon。P2-5 で等方 RBF SIMD |
+| 2   | 高速化                | Phase 1 を壊さず速くする       | ボトルネック順に最適化。キャッシュ・Rayon・SIMD。P2-8 typestate。P2-9 で `phase-2`、alloc 0、README / rustdoc / 例 |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
 | 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。Z 固定。対角予測                                                |
 | 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック                              |
@@ -51,7 +51,7 @@ M0 → 1a → 1b → 2
                 2 の計測のあと → 5
 ```
 
-3 と 4 は 1b のあと並行してよい。5 は `phase-1b` の数値と Phase 2 の最適化対象が無いと「速くなった」と言えない。
+3 は P2-9 のあと。4 は 1b のあと並行してよい。5 は `phase-2` が無いと「速くなった」と言えない。
 
 計測は 1a から始める（P1A-18 / P1A-19）。Phase 2 でハーネスを新しく作らない。
 
@@ -126,7 +126,7 @@ M0 → 1a → 1b → 2
 
 ## Phase 2 — 高速化
 
-設計 §5.2, §7, §8, §15。1a からある criterion / alloc を使う。新しいハーネスは作らない。1b の数値テストを回帰として残す。
+設計 §5.2, §7, §8, §15。1a からある criterion / alloc を使う。新しいハーネスは作らない。1b の数値テストを回帰として残す。Phase 2 の出口は P2-9。
 
 | ID   | 種別  | タイトル                                                  | 依存         | DoD                                                                          |
 | ---- | ----- | --------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------- |
@@ -137,7 +137,8 @@ M0 → 1a → 1b → 2
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
 | P2-5 | Feat  | 等方 RBF と距離に SIMD                                    | P2-1, P2-3   | `wide::f64x4`。`kernel_rbf` / `predict_100` が Rayon のみより速い。数値は 1b と一致。可否はカーネル経路で判断し、`mll_and_grad` の勾配項だけを分母にしない |
 | P2-6 | Spike | NLML 定数項 `(n/2) log(2π)` の速度寄与                    | P2-1, P1A-10 | `mll_and_grad`（あれば `fit_lbfgs`）を定数あり/なしで測る。差がノイズなら一本のまま。結果を `.dev/bench-log.md` に残す。この行では API を分けない |
-| P2-8 | Feat  | `Gpr` / `FittedGpr` の typestate                          | P2-6         | `fit(self) → FittedGpr`。失敗は `(Gpr, GprError)`。`predict(&self)` と `predict_into(&mut self)`。`refit` は学習済み型。sklearn JSON は数値照合のみ。Issue は実装時 |
+| P2-8 | Feat  | `Gpr` / `FittedGpr` の typestate                          | P2-6         | `fit(self) → FittedGpr`。失敗は `(Gpr, GprError)`。`predict(&self)` と `predict_into(&mut self)`。`refit` は学習済み型。sklearn JSON は数値照合のみ。文書・baseline・alloc の締めは P2-9。Issue は実装時 |
+| P2-9 | Task  | Phase 2 締め                                              | P2-8         | 名前付き `phase-2` を取り、機械名と数値を `.dev/bench-log.md` に残す。等方は `phase-1b` と比較。ARD は Always vs Never（等方とは比べない）。`just test`（解析解・sklearn JSON・L-BFGS 回収）が `FittedGpr` 経路で通る。`tests/alloc.rs` 上限 0 を `FittedGpr::predict_into` で再確認（ユーザーカーネル除く）。README / rustdoc / `examples/` を `Gpr` + `FittedGpr`。Issue は実装時 |
 
 ---
 
@@ -147,7 +148,7 @@ M0 → 1a → 1b → 2
 
 | ID   | 種別  | タイトル                                    | 依存       | DoD                                                                   |
 | ---- | ----- | ------------------------------------------- | ---------- | --------------------------------------------------------------------- |
-| P3-1 | Spike | `ldlt::delete_rows_and_cols_clobber` の実測 | 1b         | 任意インデックス削除がフル分解と一致。ダメなら末尾削除+再分解に落とす |
+| P3-1 | Spike | `ldlt::delete_rows_and_cols_clobber` の実測 | P2-9       | 任意インデックス削除がフル分解と一致。ダメなら末尾削除+再分解に落とす |
 | P3-2 | Feat  | `OnlineWorkspace` と容量拡張                | P3-1       | 拡張時に K/LD/y/α/cache が同期する                                    |
 | P3-3 | Feat  | 末尾 insert（自前 bordered LDLT）           | P3-2       | 1点追加 == フル再 fit                                                 |
 | P3-4 | Feat  | delete + `PointId` / `PointRegistry`        | P3-2       | 不変条件: 全バッファが同じ順序                                        |

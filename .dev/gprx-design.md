@@ -816,8 +816,8 @@ trait OnlineInference<T: Scalar> {
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
-- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate（速度行のあと）
-- **Phase 3(オンライン学習)**: `FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
+- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
+- **Phase 3(オンライン学習)**: P2-9 のあと。`FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ、**誘導点Zは固定**、対角予測、ハイパラ最適化(Zは含めない)
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
 
@@ -867,13 +867,14 @@ trait OnlineInference<T: Scalar> {
 | 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
 | Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。P2-5: 等方 RBF と距離に SIMD。可否は `kernel_rbf` / `predict` / `FIXED` で判断し、`mll_and_grad` の勾配項だけを分母にしない。NLML 定数項は P2-6 で測り、差はノイズなので `L(θ)` は一本のまま。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never。埋めと RBF ARD は Rayon + SIMD |
-| Phase 3+ | insert/delete などを同じ問題定義で足す |
+| 2 完了（P2-9） | 名前付き baseline `phase-2` を取り、機械名と数値を `.dev/bench-log.md` に残す。等方は `phase-1b` と比較。ARD は Always vs Never。`FittedGpr` 経路で `just test` と alloc 0 |
+| Phase 3+ | insert/delete などを同じ問題定義で足す。比較の基準は `phase-2` |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。
 
 ### 15.4 指標
 
-目標比は `phase-1b` を取ってから置く。それまでは「前より悪くない」がゲート。
+目標比は `phase-1b` を取ってから置く。Phase 2 完了後の基準は `phase-2`。それまでは「前より悪くない」がゲート。
 
 | 指標 | 内容 |
 |---|---|
