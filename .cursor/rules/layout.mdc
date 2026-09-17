@@ -14,7 +14,7 @@ src/workspace.rs    # P1A-2
 src/likelihood.rs   # P1A-3
 src/kernel/         # all kernel leaves; never at src/*.rs
 src/transform/      # target.rs, input.rs
-src/gpr.rs          # Gpr
+src/gpr.rs          # Gpr（トレーナー）。P2-8 で FittedGpr もここ
 src/objective.rs    # Phase 1b
 tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs; M0: cholesky_smoke.rs
 benches/            # criterion; from P1A-18 (after first `Gpr` path)
@@ -27,6 +27,6 @@ Add later, not now: `src/online.rs` (Phase 3), `src/sparse.rs` (Phase 4).
 
 M0 creates root crate files and `src/lib.rs` only. `src/kernel/` starts at P1A-5.
 
-Public at Phase 1b / 2: `Gpr`, `Prediction`, `VarianceKind`, `PredictOptions`, `FitOptions`, `DistanceCachePolicy`, `kernel`, `GaussianLikelihood`, `transform`, `GprError`. Keep `Workspace`, `Objective`, and faer types crate-private.
+Public at Phase 1b / 2: `Gpr`, `Prediction`, `VarianceKind`, `PredictOptions`, `FitOptions`, `DistanceCachePolicy`, `kernel`, `GaussianLikelihood`, `transform`, `GprError`. P2-8 adds `FittedGpr`; `Gpr` becomes trainer-only (`fit(self)`). Keep `Workspace`, `Objective`, and faer types crate-private.
 
 Unit tests: `#[cfg(test)]` in the module. Integration tests: `tests/`. Golden files only under `compare/goldens/`.
