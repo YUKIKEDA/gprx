@@ -40,7 +40,7 @@ criterion 中央値（括弧は 95% 区間の両端）。
 
 `predict_100` は別経路（379 µs）。`fit_lbfgs` は上の 1 評価を繰り返す（257 ms）。
 
-Phase 2 の順: 距離キャッシュと Rayon は **kernel**（2）向け。Cholesky を先に触らない。kernel は MLL 1 回の支配項ではないので、SIMD は P2-5 でこの表を見てから。定数項 `(n/2) log(2π)` は P2-6。
+Phase 2 の順: 距離キャッシュと Rayon は **kernel**（2）向け。Cholesky を先に触らない。`mll_and_grad` の支配項は勾配用の `W`/`∂K` だが、SIMD の可否はカーネル経路（`kernel_rbf` / `predict` / `FIXED`）で決める。P2-5 で RBF と距離に SIMD を入れた。定数項 `(n/2) log(2π)` は P2-6。
 
 ## P2-2（距離キャッシュ、[#26](https://github.com/YUKIKEDA/gprx/issues/26)）
 
@@ -83,3 +83,20 @@ DoD（`kernel_rbf` が速くなること、1b と数値一致）は満たす。�
 | `fit_lbfgs` | 257 ms | 238 ms (237–240) | **−7.4%** |
 
 DoD（`tests/alloc.rs` 上限 0、ユーザーカーネル除く）は満たす。確保: `mll_and_grad` 0、`predict_100`（`predict_into`）0。P2-3（mll 1.18 ms / fit 231 ms / predict 374 µs）と比べると時間は同等域。`predict` の便利 API は出力 `Vec` を毎回確保する。
+
+## P2-5（カーネル SIMD、[#29](https://github.com/YUKIKEDA/gprx/issues/29)）
+
+同一機械。`wide::f64x4`。列優先・単位行ストライドの等方 RBF `apply` / `grad` / `apply_cross` と二乗距離の行ループ。既定 rustc（SSE2、`target-cpu=native` なし。phase-1b と同じフラグ）。
+
+最初の下書きは `mll_and_grad` を分母にして「13% だから入れない」とした。勾配込み 1 評価ではカーネルは最大部品ではないが、`FIXED` と `predict` は勾配を払わない。その結論は取り消した。
+
+比較: `cargo bench --bench exact -- --baseline phase-1b "kernel_rbf|cholesky_alpha|predict_100|mll_and_grad"`。
+
+| グループ | phase-1b | Rayon のみ（P2-5 初稿） | この PR（Rayon + SIMD） | vs 1b | vs Rayon のみ |
+| -------- | -------- | ----------------------- | ----------------------- | ----- | ------------- |
+| `kernel_rbf` | 266 µs | 165 µs (162–167) | 125 µs (125.2–125.7) | **−52.4%** | **−24%** |
+| `cholesky_alpha` | 159 µs | 165 µs (163–167) | 155 µs (153–158) | −5.7%（この行は未変更） | ノイズ域 |
+| `predict_100` | 379 µs | 368 µs（P2-4） | 284 µs (280–288) | **−26.0%** | **−23%** |
+| `mll_and_grad` | 1.42 ms | 1.25 ms (1.243–1.260) | 1.16 ms (1.159–1.163) | **−17.4%** | **−7%** |
+
+`kernel_rbf` は距離埋め + RBF 下三角。SIMD 後は Cholesky（155 µs）より短い。Matérn / Periodic / RQ の内側はまだスカラー。

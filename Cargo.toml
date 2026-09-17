@@ -28,6 +28,7 @@ dyn-stack = "0.13"
 faer = "0.24.4"
 rayon = "1.12"
 thiserror = "2.0.20"
+wide = "0.7"
 
 [dev-dependencies]
 criterion = "0.5"
