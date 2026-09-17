@@ -27,6 +27,12 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// Distinct `n×n` scratch for product `∂K/∂θ`. Empty until a product tree
     /// needs a gradient, so isotropic RBF does not carry an extra matrix.
     pub(crate) kernel_scratch: Mat<P::Storage>,
+    /// Raw `(Δx_d)²` for ARD leaves: `n × (n·d)`, dimension `k` in columns
+    /// `[k n, (k+1) n)`. Empty (`0×0`) for isotropic kernels and for
+    /// [`crate::DistanceCachePolicy::Never`].
+    pub(crate) ard_sq_diff: Mat<P::Storage>,
+    /// Whether `ard_sq_diff` matches the current training `X`.
+    pub(crate) ard_sq_diff_ready: bool,
     /// One empty `0×0` matrix per Rayon worker. Detached with `mem::take`
     /// before a parallel kernel fill so closures never borrow `&mut Workspace`.
     pub(crate) thread_scratch: Vec<Mat<P::Storage>>,
@@ -80,6 +86,8 @@ impl Workspace<DoublePrecision> {
             dist_ready: false,
             exp_buf: Mat::<f64>::zeros(n, n),
             kernel_scratch: Mat::<f64>::zeros(0, 0),
+            ard_sq_diff: Mat::<f64>::zeros(0, 0),
+            ard_sq_diff_ready: false,
             thread_scratch: empty_thread_scratch(),
             rhs: Mat::<f64>::zeros(n, 1),
             query_xs: Vec::new(),
@@ -125,6 +133,32 @@ impl Workspace<DoublePrecision> {
         }
         self.kernel_scratch = Mat::<f64>::zeros(n, n);
         Ok(())
+    }
+
+    /// Ensures the ARD `(Δx_d)²` tensor is `n × (n·d)`. No-op when already sized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n` or `d` is zero.
+    pub(crate) fn ensure_ard_sq_diff(&mut self, n: usize, d: usize) -> Result<(), GprError> {
+        if n == 0 || d == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        let cols = n.checked_mul(d).ok_or(GprError::EmptyInput)?;
+        if self.ard_sq_diff.nrows() == n && self.ard_sq_diff.ncols() == cols {
+            return Ok(());
+        }
+        self.ard_sq_diff = Mat::<f64>::zeros(n, cols);
+        self.ard_sq_diff_ready = false;
+        Ok(())
+    }
+
+    /// Drops the ARD tensor so isotropic / `Never` fits do not keep `n×n×d`.
+    pub(crate) fn clear_ard_sq_diff(&mut self) {
+        if self.ard_sq_diff.nrows() != 0 || self.ard_sq_diff.ncols() != 0 {
+            self.ard_sq_diff = Mat::<f64>::zeros(0, 0);
+        }
+        self.ard_sq_diff_ready = false;
     }
 
     /// Sizes query buffers for an `n×m` predict. No-op when already sized.
@@ -176,6 +210,24 @@ mod tests {
     }
 
     #[test]
+    fn ensure_ard_sq_diff_allocates_n_by_n_d() {
+        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
+        ws.ensure_ard_sq_diff(4, 3).expect("n,d > 0");
+        assert_eq!(ws.ard_sq_diff.nrows(), 4);
+        assert_eq!(ws.ard_sq_diff.ncols(), 12);
+        ws.ensure_ard_sq_diff(4, 3).expect("same");
+        assert_eq!(ws.ard_sq_diff.ncols(), 12);
+        ws.ensure_ard_sq_diff(4, 2).expect("retile d");
+        assert_eq!(ws.ard_sq_diff.ncols(), 8);
+        ws.clear_ard_sq_diff();
+        assert_eq!(ws.ard_sq_diff.nrows(), 0);
+        assert_eq!(
+            ws.ensure_ard_sq_diff(0, 2).err(),
+            Some(GprError::EmptyInput)
+        );
+    }
+
+    #[test]
     fn new_allocates_n_by_n_buffers_and_scratch() {
         let n = 8;
         let ws = Workspace::<DoublePrecision>::new(n).expect("n > 0");
@@ -187,6 +239,9 @@ mod tests {
         assert_square(&ws.exp_buf, n);
         assert_eq!(ws.kernel_scratch.nrows(), 0);
         assert_eq!(ws.kernel_scratch.ncols(), 0);
+        assert_eq!(ws.ard_sq_diff.nrows(), 0);
+        assert_eq!(ws.ard_sq_diff.ncols(), 0);
+        assert!(!ws.ard_sq_diff_ready);
         assert_eq!(ws.rhs.nrows(), n);
         assert_eq!(ws.rhs.ncols(), 1);
         assert_eq!(ws.query_k_star.nrows(), 0);

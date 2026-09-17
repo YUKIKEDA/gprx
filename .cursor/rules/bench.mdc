@@ -13,6 +13,6 @@ Correctness first, then **measure on the same PR**. Phase 2 is for speeding up. 
 - Split benches. Never mix "one MLL+grad" with "full L-BFGS fit".
 - `just bench` is local. Default CI does not run criterion (noisy). Alloc tests stay in `just test`.
 - PR that touches a hot path (`kernel/`, `workspace`, `gpr`, `objective`, `online`): paste criterion vs previous named baseline in Verification, or write why it cannot change speed.
-- Do not add SIMD, Rayon, mixed precision, or cache "for speed" unless a bench on this problem shows that path is the bottleneck. Isotropic RBF / distance SIMD is already in (`src/kernel/simd.rs`). Judge more SIMD on `kernel_rbf` / `predict` / `FIXED`, not only on `mll_and_grad`.
+- Do not add SIMD, Rayon, mixed precision, or cache "for speed" unless a bench on this problem shows that path is the bottleneck. Isotropic RBF / distance SIMD is already in (`src/kernel/simd.rs`). ARD `(Δx_d)²` fill and RBF ARD `apply`/`grad` SIMD are in with the P2-7 cache. Judge more SIMD on `kernel_rbf` / `predict` / `FIXED` / ARD kernel paths, not only on `mll_and_grad`.
 - Named baselines: `phase-1a`, `phase-1b`. Save with criterion; log the machine and the numbers in `.dev/bench-log.md`.
 - Strategy detail: `.dev/gprx-design.md` §15.
