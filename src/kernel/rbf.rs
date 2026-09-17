@@ -1,5 +1,6 @@
 //! Isotropic squared-exponential (RBF) kernel.
 
+use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{Triangle, finite_dist, write_dense, write_triangle};
 use crate::error::GprError;
 use faer::{MatMut, MatRef};
@@ -157,38 +158,6 @@ impl RbfKernel {
 fn rbf_from_sq_dist(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
     let d = finite_dist(d)?;
     Ok((-d * inv_two_ell_sq).exp())
-}
-
-fn invalid_length(reason: &'static str) -> GprError {
-    GprError::InvalidHyperparameter {
-        reason: reason.to_owned(),
-    }
-}
-
-fn validate_lengthscale(lengthscale: f64) -> Result<(), GprError> {
-    if !lengthscale.is_finite() {
-        return Err(invalid_length("lengthscale must be finite"));
-    }
-    if lengthscale <= 0.0 {
-        return Err(invalid_length("lengthscale must be positive"));
-    }
-    Ok(())
-}
-
-fn validate_log_lengthscale(theta: f64) -> Result<f64, GprError> {
-    if !theta.is_finite() {
-        return Err(invalid_length("log lengthscale must be finite"));
-    }
-    let lengthscale = theta.exp();
-    if !lengthscale.is_finite() {
-        return Err(invalid_length(
-            "lengthscale overflowed to a non-finite value",
-        ));
-    }
-    if lengthscale <= 0.0 {
-        return Err(invalid_length("lengthscale underflowed to zero"));
-    }
-    Ok(theta)
 }
 
 fn expect_one_param(len: usize) -> Result<(), GprError> {

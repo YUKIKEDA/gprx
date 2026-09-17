@@ -1,7 +1,7 @@
 //! Declaration-layer kernel tree: leaves, sums, and products.
 
 use crate::error::GprError;
-use crate::kernel::RbfKernel;
+use crate::kernel::{RbfArdKernel, RbfKernel};
 use std::ops::{Add, Mul};
 
 /// Maps a flat optimizer index to a leaf-local parameter.
@@ -36,6 +36,8 @@ pub struct ParameterBinding {
 pub enum KernelSpec {
     /// Isotropic RBF leaf.
     Rbf(RbfKernel),
+    /// ARD RBF leaf (`θ_d = log(ℓ_d)`).
+    RbfArd(RbfArdKernel),
     /// `k = k_left + k_right`.
     Sum(Box<KernelSpec>, Box<KernelSpec>),
     /// `k = k_left * k_right` (Hadamard product).
@@ -45,6 +47,12 @@ pub enum KernelSpec {
 impl From<RbfKernel> for KernelSpec {
     fn from(kernel: RbfKernel) -> Self {
         Self::Rbf(kernel)
+    }
+}
+
+impl From<RbfArdKernel> for KernelSpec {
+    fn from(kernel: RbfArdKernel) -> Self {
+        Self::RbfArd(kernel)
     }
 }
 
@@ -69,6 +77,7 @@ impl KernelSpec {
     pub fn num_params(&self) -> usize {
         match self {
             Self::Rbf(leaf) => leaf.num_params(),
+            Self::RbfArd(leaf) => leaf.num_params(),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.num_params() + right.num_params()
             }
@@ -139,6 +148,11 @@ impl KernelSpec {
                 out[*offset] = leaf.log_lengthscale();
                 *offset += 1;
             }
+            Self::RbfArd(leaf) => {
+                let n = leaf.num_params();
+                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
+                *offset += n;
+            }
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_params(out, offset);
                 right.write_params(out, offset);
@@ -149,6 +163,12 @@ impl KernelSpec {
     fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::RbfArd(leaf) => {
                 let n = leaf.num_params();
                 leaf.set_params(&params[*offset..*offset + n])?;
                 *offset += n;
@@ -169,22 +189,34 @@ impl KernelSpec {
     ) {
         match self {
             Self::Rbf(leaf) => {
-                let id = *leaf_id;
-                *leaf_id += 1;
-                for local_index in 0..leaf.num_params() {
-                    out.push(ParameterBinding {
-                        index: *index,
-                        leaf_id: id,
-                        local_index,
-                    });
-                    *index += 1;
-                }
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::RbfArd(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.collect_bindings(out, index, leaf_id);
                 right.collect_bindings(out, index, leaf_id);
             }
         }
+    }
+}
+
+fn push_leaf_bindings(
+    out: &mut Vec<ParameterBinding>,
+    index: &mut usize,
+    leaf_id: &mut usize,
+    n_params: usize,
+) {
+    let id = *leaf_id;
+    *leaf_id += 1;
+    for local_index in 0..n_params {
+        out.push(ParameterBinding {
+            index: *index,
+            leaf_id: id,
+            local_index,
+        });
+        *index += 1;
     }
 }
 
@@ -201,7 +233,7 @@ fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
 #[cfg(test)]
 mod tests {
     use super::KernelSpec;
-    use crate::kernel::RbfKernel;
+    use crate::kernel::{RbfArdKernel, RbfKernel};
 
     const TOL: f64 = 1e-12;
 
@@ -274,5 +306,28 @@ mod tests {
         assert_eq!(b[1].leaf_id, 1);
         assert_eq!(b[0].local_index, 0);
         assert_eq!(b[1].index, 1);
+    }
+
+    #[test]
+    fn ard_flattens_per_dimension_params() {
+        let mut spec = KernelSpec::from(RbfArdKernel::new(&[1.0, 2.0]).expect("valid"));
+        assert_eq!(spec.num_params(), 2);
+        let mut params = [0.0; 2];
+        spec.get_params(&mut params).expect("len 2");
+        assert_close(params[0], 1.0_f64.ln());
+        assert_close(params[1], 2.0_f64.ln());
+        params[1] = 3.0_f64.ln();
+        spec.set_params(&params).expect("len 2");
+        spec.get_params(&mut params).expect("len 2");
+        assert_close(params[1], 3.0_f64.ln());
+        let b = spec.parameter_bindings();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].leaf_id, 0);
+        assert_eq!(b[1].leaf_id, 0);
+        assert_eq!(b[1].local_index, 1);
+        match spec.compile() {
+            crate::kernel::CompiledKernel::RbfArd(leaf) => assert_eq!(leaf.num_params(), 2),
+            other => panic!("expected ARD RBF, got {other:?}"),
+        }
     }
 }
