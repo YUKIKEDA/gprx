@@ -220,7 +220,7 @@ trait KernelTerm<T: Scalar>: Send + Sync {
 `KernelSpec`は演算子オーバーロードでユーザーが自然に合成でき、`KernelTermSpec`はobject-safeなのでユーザー定義カーネルはこれを実装するだけで組み込める。`CompiledKernel<T>`への変換をfit開始時に一度だけ行う。
 
 **Lengthscale**: 等方はスカラー `ℓ`（`θ=log(ℓ)`）。ARD は次元ごとの `ℓ_d`（`θ_d=log(ℓ_d)`）。対象は lengthscale を持つ定常カーネル（RBF / Matern / RQ）。P1A-20 で RBF に口を固定し、P1A-14 / P1A-16 が同じ口を使う。Periodic の lengthscale はスカラーのまま。  
-ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が等しいとき等方に一致する。`∂K/∂θ_d` には次元ごとの差が必要で、等方の二乗距離行列だけでは足りない。`n×n×d` キャッシュは §5.2 / P2-2。P1A-20 では毎回座標から組む。
+ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が等しいとき等方に一致する。`∂K/∂θ_d` には次元ごとの差が必要で、等方の二乗距離行列だけでは足りない。`n×n×d` キャッシュは §5.2 / P2-7（生の `(Δx_d)²`。ℓ 込みの `r²` は置かない）。P1A-20 では毎回座標から組む。P2-2 は等方の n×n。
 
 ユーザー定義カーネル(`Custom`)はホットパスで新規アロケーションしないことを推奨するが、強制はしない(§2)。Phase 1では`Workspace`をユーザーカーネルに渡さない。安全APIとunsafe高速APIの二系統は設けない。
 
@@ -264,7 +264,9 @@ enum DistanceCachePolicy {
 
 理論的な参考値(目安であり決定基準ではない): `(n,n,d)`テンソルは`n²×d×sizeof(T)`バイト。基本のK行列自体もn²×sizeof(T)であり(例: n=5000,f64で約200MB)、ARDキャッシュはこれのd倍になる点に注意。d≪nの典型的GPRではキャッシュの投資対効果は薄いことが多い。`Auto`の具体的な閾値は実装後のベンチマークで決定する(§14)。
 
-P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。ARD は P1A-20 どおり毎回座標から組む。
+P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。
+
+P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always の ARD fit で 1 回確保し、等方 / `Never` では空（`kernel_scratch` と同じ）。apply/grad はキャッシュを読む。埋めは逐次（P2-3 に依存しない）。3D レイアウトは実装時（列優先・下三角。`DistanceCache` enum を膨らませない）。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。口が共通なら Matern/RQ ARD も同じ PR。`Auto` は P5-5。train×test / LOO / Linear / iso+ARD 混在は対象外。
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
@@ -775,7 +777,8 @@ trait OnlineInference<T: Scalar> {
   3. `mll_and_grad` — §6.2 の 1 評価（P1A-10 から）
   4. `predict_100` — テスト点 100（P1A-8 から）
   5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）
-  6. `online_insert` / `online_delete` — Phase 3
+  6. `mll_and_grad_ard` / `fit_lbfgs_ard` — 同じ n,d,seed の ARD RBF（P2-7）。Always vs Never。等方 `phase-1b` とは比べない
+  7. `online_insert` / `online_delete` — Phase 3
 
 ### 15.3 いつ何を足す
 
@@ -786,7 +789,7 @@ trait OnlineInference<T: Scalar> {
 | P1A-8 / P1A-10 | 同じファイルに `predict_100` / `mll_and_grad` を足す。P1A-19 で確保 ratchet |
 | 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
-| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。SIMD は `kernel_rbf` が支配的なときだけ。NLML 定数項は P2-6 で `mll_and_grad` のあり/なしを同じ問題で測る |
+| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。SIMD は `kernel_rbf` が支配的なときだけ。NLML 定数項は P2-6 で `mll_and_grad` のあり/なしを同じ問題で測る。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never |
 | Phase 3+ | insert/delete などを同じ問題定義で足す |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。

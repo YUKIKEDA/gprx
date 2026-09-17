@@ -9,7 +9,7 @@ Correctness first, then **measure on the same PR**. Phase 2 is for speeding up. 
 
 - Time: [criterion](https://docs.rs/criterion). Entry `benches/exact.rs`. Command `just bench`.
 - Allocations: `tests/alloc.rs` runs in `just test`. Count after Workspace setup. Ratchet: the allowed count must stay or fall, never rise without an Issue.
-- Fixed problem: RNG seed `0`, `d = 8`, RBF + `GaussianLikelihood`, hypers fixed. Sizes `n = 256` (required from P1A-18), then `512` / `1024` when they finish in seconds.
+- Fixed problem: RNG seed `0`, `d = 8`, RBF + `GaussianLikelihood`, hypers fixed. Sizes `n = 256` (required from P1A-18), then `512` / `1024` when they finish in seconds. P2-7 adds ARD RBF groups on that same problem (`mll_and_grad_ard` / `fit_lbfgs_ard`). Compare Always vs Never; do not compare those groups to isotropic `phase-1b`.
 - Split benches. Never mix "one MLL+grad" with "full L-BFGS fit".
 - `just bench` is local. Default CI does not run criterion (noisy). Alloc tests stay in `just test`.
 - PR that touches a hot path (`kernel/`, `workspace`, `gpr`, `objective`, `online`): paste criterion vs previous named baseline in Verification, or write why it cannot change speed.
