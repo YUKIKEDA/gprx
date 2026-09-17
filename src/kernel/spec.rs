@@ -477,6 +477,27 @@ mod tests {
     }
 
     #[test]
+    fn constant_times_rbf_then_rbf_flattens_like_sklearn() {
+        let spec = KernelSpec::from(ConstantKernel::new(1.5).expect("valid")) * rbf(1.0) + rbf(2.0);
+        assert_eq!(spec.num_params(), 3);
+        let mut params = [0.0; 3];
+        spec.get_params(&mut params).expect("len 3");
+        assert_close(params[0], 1.5_f64.ln());
+        assert_close(params[1], 1.0_f64.ln());
+        assert_close(params[2], 2.0_f64.ln());
+        match spec.compile() {
+            crate::kernel::CompiledKernel::Sum(terms) => {
+                assert_eq!(terms.len(), 2);
+                assert!(matches!(
+                    terms[0],
+                    crate::kernel::CompiledKernel::Product(_)
+                ));
+            }
+            other => panic!("expected sum of product and rbf, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn set_params_is_atomic() {
         let mut spec = rbf(1.0) + rbf(2.0);
         let before = spec.clone();
