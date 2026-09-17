@@ -1,8 +1,9 @@
 //! Execution-layer kernel: static dispatch over built-in leaves.
 
 use super::{
-    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel, RbfArdKernel,
-    RbfKernel, Triangle, WhiteKernel, visit_triangle,
+    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
+    RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, Triangle,
+    WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
@@ -52,6 +53,10 @@ pub enum CompiledKernel {
     MaternArd(MaternArdKernel),
     /// Periodic (exp-sine-squared).
     Periodic(PeriodicKernel),
+    /// Isotropic rational quadratic (`θ = [log(ℓ), log(α)]`).
+    RationalQuadratic(RationalQuadraticKernel),
+    /// ARD rational quadratic (`θ_d = log(ℓ_d)`, then `log(α)`).
+    RationalQuadraticArd(RationalQuadraticArdKernel),
     /// Constant `k = c`.
     Constant(ConstantKernel),
     /// Linear `k = σ² xᵀ x'`.
@@ -72,6 +77,8 @@ impl CompiledKernel {
             KernelSpec::Matern(leaf) => Self::Matern(*leaf),
             KernelSpec::MaternArd(leaf) => Self::MaternArd(leaf.clone()),
             KernelSpec::Periodic(leaf) => Self::Periodic(*leaf),
+            KernelSpec::RationalQuadratic(leaf) => Self::RationalQuadratic(*leaf),
+            KernelSpec::RationalQuadraticArd(leaf) => Self::RationalQuadraticArd(leaf.clone()),
             KernelSpec::Constant(leaf) => Self::Constant(*leaf),
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
@@ -98,6 +105,8 @@ impl CompiledKernel {
             Self::Matern(leaf) => leaf.num_params(),
             Self::MaternArd(leaf) => leaf.num_params(),
             Self::Periodic(leaf) => leaf.num_params(),
+            Self::RationalQuadratic(leaf) => leaf.num_params(),
+            Self::RationalQuadraticArd(leaf) => leaf.num_params(),
             Self::Constant(leaf) => leaf.num_params(),
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
@@ -151,9 +160,13 @@ impl CompiledKernel {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.apply(dist, out, uplo),
-            Self::RbfArd(_) | Self::Linear(_) | Self::MaternArd(_) => Err(ard_needs_coords()),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
             Self::Matern(leaf) => leaf.apply(dist, out, uplo),
             Self::Periodic(leaf) => leaf.apply(dist, out, uplo),
+            Self::RationalQuadratic(leaf) => leaf.apply(dist, out, uplo),
             Self::Constant(leaf) => leaf.apply(dist, out, uplo),
             Self::White(leaf) => leaf.apply(dist, out, uplo),
             Self::Sum(terms) => fold_terms(
@@ -191,9 +204,13 @@ impl CompiledKernel {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.apply_cross(dist, out),
-            Self::RbfArd(_) | Self::Linear(_) | Self::MaternArd(_) => Err(ard_needs_coords()),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
             Self::Matern(leaf) => leaf.apply_cross(dist, out),
             Self::Periodic(leaf) => leaf.apply_cross(dist, out),
+            Self::RationalQuadratic(leaf) => leaf.apply_cross(dist, out),
             Self::Constant(leaf) => leaf.apply_cross(dist, out),
             Self::White(leaf) => leaf.apply_cross(dist, out),
             Self::Sum(terms) => fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), add_rect),
@@ -228,6 +245,14 @@ impl CompiledKernel {
                 Ok(())
             }
             Self::Periodic(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::RationalQuadratic(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::RationalQuadraticArd(leaf) => {
                 leaf.fill_diag(out);
                 Ok(())
             }
@@ -297,6 +322,14 @@ impl CompiledKernel {
                 leaf.fill_diag(out);
                 Ok(())
             }
+            Self::RationalQuadratic(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
             Self::Constant(leaf) => {
                 leaf.fill_diag(out);
                 Ok(())
@@ -353,9 +386,13 @@ impl CompiledKernel {
         require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
-            Self::RbfArd(_) | Self::Linear(_) | Self::MaternArd(_) => Err(ard_needs_coords()),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
             Self::Matern(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Periodic(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::RationalQuadratic(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Constant(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::White(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Sum(terms) => {
@@ -383,10 +420,13 @@ impl CompiledKernel {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) => Err(iso_needs_dist()),
+            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
+                Err(iso_needs_dist())
+            }
             Self::RbfArd(leaf) => leaf.apply(x, out, uplo),
             Self::Linear(leaf) => leaf.apply(x, out, uplo),
             Self::MaternArd(leaf) => leaf.apply(x, out, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.apply(x, out, uplo),
             Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
             Self::White(leaf) => leaf.apply_points(x, out, uplo),
             Self::Sum(terms) => {
@@ -412,10 +452,13 @@ impl CompiledKernel {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) => Err(iso_needs_dist()),
+            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
+                Err(iso_needs_dist())
+            }
             Self::RbfArd(leaf) => leaf.apply_cross(x, xs, out),
             Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
             Self::MaternArd(leaf) => leaf.apply_cross(x, xs, out),
+            Self::RationalQuadraticArd(leaf) => leaf.apply_cross(x, xs, out),
             Self::Constant(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::White(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::Sum(terms) => {
@@ -443,10 +486,13 @@ impl CompiledKernel {
     ) -> Result<(), GprError> {
         require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) => Err(iso_needs_dist()),
+            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
+                Err(iso_needs_dist())
+            }
             Self::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::MaternArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::Sum(terms) => {
@@ -461,8 +507,13 @@ impl CompiledKernel {
 
     pub(crate) fn coord_mode(&self) -> Result<CoordMode, GprError> {
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) => Ok(CoordMode::Dist),
-            Self::RbfArd(_) | Self::Linear(_) | Self::MaternArd(_) => Ok(CoordMode::Points),
+            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
+                Ok(CoordMode::Dist)
+            }
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => Ok(CoordMode::Points),
             Self::Constant(_) | Self::White(_) => Ok(CoordMode::Either),
             Self::Sum(terms) | Self::Product(terms) => {
                 let (first, rest) = split_terms(terms)?;
@@ -499,6 +550,17 @@ impl CompiledKernel {
                 out[*offset] = leaf.log_lengthscale();
                 out[*offset + 1] = leaf.log_period();
                 *offset += 2;
+            }
+            Self::RationalQuadratic(leaf) => {
+                out[*offset] = leaf.log_lengthscale();
+                out[*offset + 1] = leaf.log_alpha();
+                *offset += 2;
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                let n = leaf.lengthscales().num_params();
+                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
+                out[*offset + n] = leaf.log_alpha();
+                *offset += n + 1;
             }
             Self::Constant(leaf) => {
                 out[*offset] = leaf.log_constant();
@@ -552,6 +614,18 @@ impl CompiledKernel {
                 *offset += n;
                 Ok(())
             }
+            Self::RationalQuadratic(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
             Self::Constant(leaf) => {
                 let n = leaf.num_params();
                 leaf.set_params(&params[*offset..*offset + n])?;
@@ -586,6 +660,8 @@ impl CompiledKernel {
             | Self::Matern(_)
             | Self::MaternArd(_)
             | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::RationalQuadraticArd(_)
             | Self::Constant(_)
             | Self::Linear(_)
             | Self::White(_) => false,
@@ -933,7 +1009,8 @@ mod tests {
     use super::CompiledKernel;
     use crate::kernel::{
         ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
-        PeriodicKernel, RbfArdKernel, RbfKernel, Triangle, WhiteKernel,
+        PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel,
+        RbfKernel, Triangle, WhiteKernel,
     };
     use faer::{Mat, MatRef, mat};
 
@@ -1440,5 +1517,49 @@ mod tests {
         let k01 = (-2.0 * s * s).exp();
         assert_close(out[(0, 0)], 1.0 + 0.1);
         assert_close(out[(0, 1)], k01);
+    }
+
+    #[test]
+    fn rational_quadratic_plus_white_is_distance_mode() {
+        let spec = KernelSpec::from(RationalQuadraticKernel::new(1.0, 1.0).expect("valid"))
+            + KernelSpec::from(WhiteKernel::new(0.1).expect("valid"));
+        let compiled = spec.compile();
+        assert_eq!(
+            compiled.coord_mode().expect("compat"),
+            super::CoordMode::Dist
+        );
+        let dist = sq_dist_1d(&[0.0, 1.0]);
+        let mut out = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply(
+                dist.as_ref(),
+                out.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("shape");
+        assert_close(out[(0, 0)], 1.1);
+        assert_close(out[(0, 1)], 2.0 / 3.0);
+    }
+
+    #[test]
+    fn rational_quadratic_ard_plus_constant_is_points_mode() {
+        let spec = KernelSpec::from(RationalQuadraticArdKernel::new(&[1.0], 1.0).expect("valid"))
+            + KernelSpec::from(ConstantKernel::new(0.5).expect("valid"));
+        let compiled = spec.compile();
+        assert_eq!(
+            compiled.coord_mode().expect("compat"),
+            super::CoordMode::Points
+        );
+        let x = Mat::from_fn(2, 1, |i, _| i as f64);
+        let mut out = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply_points(x.as_ref(), out.as_mut(), Triangle::Full, scratch.as_mut())
+            .expect("points");
+        assert_close(out[(0, 0)], 1.5);
+        assert_close(out[(1, 1)], 1.5);
+        assert_close(out[(1, 0)], 2.0 / 3.0 + 0.5);
     }
 }
