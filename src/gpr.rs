@@ -286,20 +286,7 @@ impl Gpr {
         {
             let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            match compiled.coord_mode()? {
-                CoordMode::Dist | CoordMode::Either => compiled.apply(
-                    ws.dist_cache.as_ref(),
-                    ws.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    ws.exp_buf.as_mut(),
-                )?,
-                CoordMode::Points => compiled.apply_points(
-                    x.as_ref(),
-                    ws.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    ws.exp_buf.as_mut(),
-                )?,
-            }
+            apply_train_kernel(&compiled, x.as_ref(), ws)?;
             add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
         }
         let mut rhs = Mat::from_fn(n, 1, |i, _| y[i]);
@@ -426,25 +413,7 @@ impl Gpr {
         let compiled = self.kernel.compile();
         {
             let ws = workspace_mut(&mut self.workspace)?;
-            match compiled.coord_mode()? {
-                CoordMode::Dist | CoordMode::Either => {
-                    fill_squared_euclidean(x_mat.as_ref(), ws.dist_cache.as_mut());
-                    compiled.apply(
-                        ws.dist_cache.as_ref(),
-                        ws.k_matrix.as_mut(),
-                        Triangle::Lower,
-                        ws.exp_buf.as_mut(),
-                    )?;
-                }
-                CoordMode::Points => {
-                    compiled.apply_points(
-                        x_mat.as_ref(),
-                        ws.k_matrix.as_mut(),
-                        Triangle::Lower,
-                        ws.exp_buf.as_mut(),
-                    )?;
-                }
-            }
+            apply_train_kernel(&compiled, x_mat.as_ref(), ws)?;
             add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
         }
         let mut rhs = Mat::from_fn(n_rows, 1, |i, _| y_buf[i]);
@@ -609,6 +578,32 @@ fn workspace_mut(
     workspace: &mut Option<Workspace<DoublePrecision>>,
 ) -> Result<&mut Workspace<DoublePrecision>, GprError> {
     workspace.as_mut().ok_or(GprError::EmptyInput)
+}
+
+/// Writes the training Gram matrix. Distance-mode leaves get squared Euclidean
+/// distances from `x` first so MLL/grad does not reuse a stale `dist_cache`.
+fn apply_train_kernel(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    ws: &mut Workspace<DoublePrecision>,
+) -> Result<(), GprError> {
+    match compiled.coord_mode()? {
+        CoordMode::Dist | CoordMode::Either => {
+            fill_squared_euclidean(x, ws.dist_cache.as_mut());
+            compiled.apply(
+                ws.dist_cache.as_ref(),
+                ws.k_matrix.as_mut(),
+                Triangle::Lower,
+                ws.exp_buf.as_mut(),
+            )
+        }
+        CoordMode::Points => compiled.apply_points(
+            x,
+            ws.k_matrix.as_mut(),
+            Triangle::Lower,
+            ws.exp_buf.as_mut(),
+        ),
+    }
 }
 
 fn validate_training(x: &[f64], n_rows: usize, n_cols: usize, y: &[f64]) -> Result<(), GprError> {
@@ -1144,6 +1139,25 @@ mod tests {
         gpr.value_and_gradient_into(&before, &mut grad)
             .expect("restore");
         assert!(gpr.is_fitted());
+    }
+
+    #[test]
+    fn value_and_gradient_refills_stale_dist_cache() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+            .expect("spd");
+        if let Some(ws) = gpr.workspace.as_mut() {
+            let n = ws.dist_cache.nrows();
+            ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
+        }
+        let mut params = [0.0; 2];
+        gpr.get_params(&mut params).expect("len 2");
+        let mut grad = [0.0; 2];
+        let value = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert_close(value, gpr.neg_log_marginal_likelihood().expect("fitted"));
+        assert!(grad.iter().all(|g| g.is_finite()));
     }
 
     #[test]
