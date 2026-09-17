@@ -19,7 +19,7 @@ src/objective.rs    # Phase 1b
 tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs; M0: cholesky_smoke.rs
 benches/            # criterion; from P1A-18 (after first `Gpr` path)
 compare/            # uv + sklearn + goldens/*.json
-examples/           # Phase 1b
+examples/           # Phase 1b; P2-9 updates to `Gpr` + `FittedGpr`
 .dev/               # design, roadmap, bench-log.md
 ```
 
