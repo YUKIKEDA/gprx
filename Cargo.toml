@@ -30,6 +30,8 @@ thiserror = "2.0.20"
 criterion = "0.5"
 dyn-stack = "0.13"
 faer = "0.24.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [[bench]]
 name = "exact"

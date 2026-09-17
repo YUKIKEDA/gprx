@@ -10,5 +10,9 @@ fmt:
 test:
     cargo test
 
+# Regenerates compare/goldens/*.json via sklearn. cargo test must not run this.
+gen-goldens:
+    uv run --directory compare python generate.py
+
 bench:
     cargo bench --bench exact

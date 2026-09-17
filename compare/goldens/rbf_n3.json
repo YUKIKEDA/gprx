@@ -1,0 +1,38 @@
+{
+  "kernel": "rbf",
+  "sklearn_version": "1.6.1",
+  "lengthscale": 1.25,
+  "noise_variance": 0.16,
+  "n_rows": 3,
+  "n_cols": 1,
+  "x": [
+    0.0,
+    0.8,
+    1.7
+  ],
+  "y": [
+    0.4,
+    -0.2,
+    0.9
+  ],
+  "xs_n_rows": 2,
+  "xs_n_cols": 1,
+  "xs": [
+    0.8,
+    1.2
+  ],
+  "mean": [
+    0.18745916449866862,
+    0.3414188864598639
+  ],
+  "latent_variance": [
+    0.08692413054094271,
+    0.08930528100046352
+  ],
+  "observation_variance": [
+    0.2469241305409427,
+    0.2493052810004635
+  ],
+  "log_marginal_likelihood": -3.6991024099546213,
+  "grad_log_lengthscale": -0.2597938254465354
+}
