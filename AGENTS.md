@@ -24,4 +24,4 @@
 
 ## 今の着手点
 
-Phase 2 の P2-8（`Gpr` / `FittedGpr`）。Issue は実装時。`phase-1b` の順は [`.dev/bench-log.md`](.dev/bench-log.md)。
+Phase 2 の P2-8（`Gpr` / `FittedGpr`）。Issue は実装時。Phase 2 の出口は P2-9。`phase-1b` の順は [`.dev/bench-log.md`](.dev/bench-log.md)。

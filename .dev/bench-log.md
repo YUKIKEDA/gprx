@@ -2,7 +2,7 @@
 
 時間は [criterion](https://docs.rs/criterion)、`benches/exact.rs`、`just bench`。確保は `tests/alloc.rs`。固定問題: RNG seed `0`、`n = 256`、`d = 8`、RBF + `GaussianLikelihood`、ハイパラ固定。`fit_lbfgs` だけ最適化ループ。新しいハーネスは作っていない。
 
-目標比はまだ置かない（P2-1 / [#25](https://github.com/YUKIKEDA/gprx/issues/25)）。
+目標比はまだ置かない（P2-1 / [#25](https://github.com/YUKIKEDA/gprx/issues/25)）。名前付き `phase-2` は P2-9 で取る（等方は `phase-1b` と比較。ARD は Always vs Never）。
 
 ## 機械
 
