@@ -65,6 +65,7 @@ fn allocs_in(f: impl FnOnce()) -> usize {
 }
 
 fn assert_alloc_cap(label: &str, count: usize, cap: usize) {
+    eprintln!("{label}: allocations={count} cap={cap}");
     assert!(
         count <= cap,
         "{label}: allocations={count}, cap={cap}; lower the cap when allocs drop, do not raise it without an Issue"
