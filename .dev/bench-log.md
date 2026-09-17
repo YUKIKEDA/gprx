@@ -40,7 +40,7 @@ criterion 中央値（括弧は 95% 区間の両端）。
 
 `predict_100` は別経路（379 µs）。`fit_lbfgs` は上の 1 評価を繰り返す（257 ms）。
 
-Phase 2 の順: 距離キャッシュと Rayon は **kernel**（2）向け。Cholesky を先に触らない。kernel は MLL 1 回の支配項ではない。P2-5 で再測し SIMD は入れない。定数項 `(n/2) log(2π)` は P2-6。
+Phase 2 の順: 距離キャッシュと Rayon は **kernel**（2）向け。Cholesky を先に触らない。kernel は MLL 1 回の支配項ではない。P2-5 で再測し SIMD は入れない。定数項 `(n/2) log(2π)` は P2-6 でノイズと分かり、`L(θ)` は一本のまま。
 
 ## P2-2（距離キャッシュ、[#26](https://github.com/YUKIKEDA/gprx/issues/26)）
 
@@ -95,3 +95,17 @@ DoD（`tests/alloc.rs` 上限 0、ユーザーカーネル除く）は満たす�
 | `mll_and_grad` | 1.42 ms | 1.25 ms (1.243–1.260) | −11.1% | 100% |
 
 残り（`W` と `∂K/∂θ`）は約 74%。P2-1 の「その他が約 7 割」と一致する。`kernel_rbf` は支配的ではないので **SIMD は入れない**。`std::simd` / wide は Phase 2 の対象外のまま。
+
+## P2-6（NLML 定数項は一本のまま、[#60](https://github.com/YUKIKEDA/gprx/issues/60)）
+
+同一機械。固定問題で `(n/2) log(2π)` のあり/なしを測った。公開 API は分けていない（計測時だけ内部フラグを切替）。
+
+| 経路 | 時間（中央値） |
+| ---- | -------------- |
+| `nlml_constant`（孤立の `0.5 n ln(2π)`） | 648 ps (642–655) |
+| `mll_and_grad` 定数なし | 1.188 ms (1.187–1.190) |
+| `mll_and_grad` 定数あり（直後の再測） | 1.200 ms (1.195–1.205) |
+
+あり/なしの差は 12 µs（約 1%）。孤立加算 650 ps の 1.8 万倍で、criterion の連測ゆらぎ（P2-5 の `mll_and_grad` は 1.25 ms）に埋まる。`fit_lbfgs` は同じ定数を評価ごとに 1 回足すだけなので測っていない（200 回でも 0.13 µs 対 238 ms）。
+
+**判断: 差はノイズ。公開 NLML と `Objective` は同じ `L(θ)` のまま。API は分けない。**
