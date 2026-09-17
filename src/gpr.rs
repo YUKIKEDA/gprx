@@ -758,6 +758,7 @@ fn write_kernel_grad(
         CompiledKernel::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
         CompiledKernel::Matern(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
         CompiledKernel::MaternArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
+        CompiledKernel::Periodic(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
         CompiledKernel::Linear(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
         CompiledKernel::Constant(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
         CompiledKernel::White(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
@@ -832,8 +833,8 @@ mod tests {
     use super::{Gpr, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GprError};
     use crate::kernel::{
-        KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu, RbfArdKernel, RbfKernel,
-        Triangle, WhiteKernel,
+        KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel,
+        RbfArdKernel, RbfKernel, Triangle, WhiteKernel,
     };
     use crate::likelihood::GaussianLikelihood;
     use crate::precision::DoublePrecision;
@@ -1455,6 +1456,28 @@ mod tests {
             .expect("spd");
         assert!(nlml.is_finite());
         assert_eq!(params.len(), 3);
+        assert!(grad.iter().all(|g| g.is_finite()));
+    }
+
+    #[test]
+    fn periodic_fits_and_predicts() {
+        let mut gpr = Gpr::new(
+            KernelSpec::from(PeriodicKernel::new(1.0, 2.0).expect("valid")),
+            GaussianLikelihood::new(0.1).expect("valid"),
+        );
+        gpr.fit(&[0.0, 0.5, 1.0], 3, 1, &[0.0, 0.4, 0.1])
+            .expect("spd");
+        let pred = gpr.predict(&[2.0], 1, 1).expect("fitted");
+        assert!(pred.mean[0].is_finite());
+        assert!(pred.variance[0] > 0.0);
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("len");
+        assert_eq!(params.len(), 3);
+        let mut grad = vec![0.0; params.len()];
+        let nlml = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert!(nlml.is_finite());
         assert!(grad.iter().all(|g| g.is_finite()));
     }
 }
