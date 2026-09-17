@@ -10,6 +10,7 @@ use faer::{Mat, MatMut, MatRef, Par};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
+use crate::objective::GprObjective;
 use crate::precision::DoublePrecision;
 use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
 use crate::workspace::Workspace;
@@ -225,6 +226,11 @@ impl Gpr {
         require_param_len(out.len(), self.num_params())?;
         self.kernel.get_params(&mut out[..n_kernel])?;
         self.likelihood.get_params(&mut out[n_kernel..])
+    }
+
+    #[allow(dead_code)] // P1B-2 L-BFGS
+    pub(crate) fn objective(&mut self) -> GprObjective<'_> {
+        GprObjective::new(self)
     }
 
     /// Sets kernel and likelihood `θ`, rebuilds `L` / `α` / `W`, and writes `∂L/∂θ`.
