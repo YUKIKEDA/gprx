@@ -15,7 +15,7 @@ These are questions. Do not create, edit, close, or retitle Issues/PRs. Do not r
 - 「これでいい？」「載せていないの？」
 - Any yes/no about scope, which kernels, which phase, or whether a row exists
 
-The reply lists the options and stops. Wait for a later message that names the artifact and the action.
+The reply lists options **with a recommended pick and a short pro / con for each**, then stops. A lean (“2かな”) is not an imperative. Wait for a later message that names the artifact and the action.
 
 ```text
 # BAD — do not run gh / edit roadmap
@@ -25,8 +25,14 @@ RBFだけなの？
 
 # GOOD — may change that artifact
 #54 の対象を RBF / Matern / RQ にして、roadmap の P1A-14 と P1A-16 の DoD を ARD 込みに更新して
-Issue は切るな。先に選択肢だけ書いて
+Issue は切るな。先に選択肢と推奨とメリデメを書いて
 ```
+
+When listing options:
+
+1. Mark one as **推奨** and say why
+2. Give every option a short 利点 / 欠点 (table or bullets)
+3. Do not implement, file Issues, or edit roadmap until the user names the artifact and the action
 
 「次に進んで」is the current roadmap row only. It is not consent to add rows, file extra Issues, or expand an open design question.
 
