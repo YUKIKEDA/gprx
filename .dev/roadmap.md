@@ -25,7 +25,7 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | P2-6    | [#60](https://github.com/YUKIKEDA/gprx/issues/60) | P1B-3   | [#22](https://github.com/YUKIKEDA/gprx/issues/22) | P5-3    | [#41](https://github.com/YUKIKEDA/gprx/issues/41) |
 | P1B-6   | [#80](https://github.com/YUKIKEDA/gprx/issues/80) | P1B-4   | [#23](https://github.com/YUKIKEDA/gprx/issues/23) | P5-4    | [#42](https://github.com/YUKIKEDA/gprx/issues/42) |
 | P1B-7   | [#83](https://github.com/YUKIKEDA/gprx/issues/83) | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
-|         |                                                   | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
+| P2-7    | [#88](https://github.com/YUKIKEDA/gprx/issues/88) | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
 |         |                                                   | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) |         |                                                   |
 |         |                                                   | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) |         |                                                   |
 |         |                                                   | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) |         |                                                   |
@@ -131,7 +131,8 @@ M0 → 1a → 1b → 2
 | ID   | 種別  | タイトル                                                  | 依存         | DoD                                                                          |
 | ---- | ----- | --------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------- |
 | P2-1 | Task  | `phase-1b` を読み、ボトルネック順を決める                 | 1b           | `.dev/` に短い順序（kernel vs Cholesky vs その他）。目標比はここで置いてよい |
-| P2-2 | Feat  | 距離キャッシュ                                            | P2-1         | `Never` / `Always`。RBF の数値が 1b と一致。bench が改善または同等           |
+| P2-2 | Feat  | 距離キャッシュ                                            | P2-1         | `Never` / `Always`。等方 RBF の数値が 1b と一致。bench が改善または同等      |
+| P2-7 | Feat  | ARD 距離キャッシュ                                        | P2-2         | `Never` / `Always` が ARD の `(Δx_d)²`（n×n×d）に効く。Never ≡ Always。`Auto` は P5-5 |
 | P2-3 | Feat  | Rayon でカーネル構築。`thread_scratch` を並列前に切り離す | P2-1         | 1b と数値一致。`kernel_rbf` が速くなることを bench で示す                    |
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
 | P2-5 | Spike | カーネル SIMD が必要か                                    | P2-1, P2-3   | `kernel_rbf` が支配的なら検討。そうでなければやらない                        |
@@ -176,7 +177,7 @@ M0 → 1a → 1b → 2
 | P5-2 | Feat  | predict 経路の MixedPrecision                            | P5-1 | 既定 fit は f64 のまま                     |
 | P5-3 | Feat  | `IncrementalRecompute`（オプトイン）                     | 1b   | FullRecompute と数値が一致                 |
 | P5-4 | Feat  | `MathMode::FastApprox` オプトイン                        | 1b   | 既定 Accurate。fit では使わない            |
-| P5-5 | Task  | `DistanceCachePolicy::Auto` の閾値                       | P2-2 | ベンチで決める。式だけで決めない           |
+| P5-5 | Task  | `DistanceCachePolicy::Auto` の閾値                       | P2-2, P2-7 | ベンチで決める。式だけで決めない           |
 
 ---
 

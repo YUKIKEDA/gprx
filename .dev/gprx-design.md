@@ -220,7 +220,7 @@ trait KernelTerm<T: Scalar>: Send + Sync {
 `KernelSpec`は演算子オーバーロードでユーザーが自然に合成でき、`KernelTermSpec`はobject-safeなのでユーザー定義カーネルはこれを実装するだけで組み込める。`CompiledKernel<T>`への変換をfit開始時に一度だけ行う。
 
 **Lengthscale**: 等方はスカラー `ℓ`（`θ=log(ℓ)`）。ARD は次元ごとの `ℓ_d`（`θ_d=log(ℓ_d)`）。対象は lengthscale を持つ定常カーネル（RBF / Matern / RQ）。P1A-20 で RBF に口を固定し、P1A-14 / P1A-16 が同じ口を使う。Periodic の lengthscale はスカラーのまま。  
-ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が等しいとき等方に一致する。`∂K/∂θ_d` には次元ごとの差が必要で、等方の二乗距離行列だけでは足りない。`n×n×d` キャッシュは §5.2 / P2-2。P1A-20 では毎回座標から組む。
+ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が等しいとき等方に一致する。`∂K/∂θ_d` には次元ごとの差が必要で、等方の二乗距離行列だけでは足りない。`n×n×d` キャッシュは §5.2 / P2-7（生の `(Δx_d)²`。ℓ 込みの `r²` は置かない）。P1A-20 では毎回座標から組む。P2-2 は等方の n×n。
 
 ユーザー定義カーネル(`Custom`)はホットパスで新規アロケーションしないことを推奨するが、強制はしない(§2)。Phase 1では`Workspace`をユーザーカーネルに渡さない。安全APIとunsafe高速APIの二系統は設けない。
 
@@ -264,7 +264,9 @@ enum DistanceCachePolicy {
 
 理論的な参考値(目安であり決定基準ではない): `(n,n,d)`テンソルは`n²×d×sizeof(T)`バイト。基本のK行列自体もn²×sizeof(T)であり(例: n=5000,f64で約200MB)、ARDキャッシュはこれのd倍になる点に注意。d≪nの典型的GPRではキャッシュの投資対効果は薄いことが多い。`Auto`の具体的な閾値は実装後のベンチマークで決定する(§14)。
 
-P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。ARD は P1A-20 どおり毎回座標から組む。
+P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。
+
+P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉（RBF / Matern / RQ）の `(Δx_d)²`（n×n×d）に載せる。ℓ 込みの `r²` はキャッシュしない。公開 Policy は増やさない。`Auto` の閾値は P5-5。
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
