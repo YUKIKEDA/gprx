@@ -11,6 +11,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
+use crate::optimizer::{Lbfgs, OptResult, Optimizer};
 use crate::precision::DoublePrecision;
 use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
 use crate::workspace::Workspace;
@@ -39,6 +40,26 @@ impl Default for PredictOptions {
     }
 }
 
+/// Options for [`Gpr::fit`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FitOptions {
+    /// When true, L-BFGS updates kernel and likelihood `θ` from the values
+    /// stored on the model. When false, those `θ` stay fixed and only `L`
+    /// and `α` are rebuilt. The default is true.
+    pub optimize: bool,
+}
+
+impl FitOptions {
+    /// Factors at the current kernel and likelihood `θ` without L-BFGS.
+    pub const FIXED: Self = Self { optimize: false };
+}
+
+impl Default for FitOptions {
+    fn default() -> Self {
+        Self { optimize: true }
+    }
+}
+
 /// Predictive mean and (diagonal) variance at the query points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prediction {
@@ -50,11 +71,14 @@ pub struct Prediction {
     pub variance_kind: VarianceKind,
 }
 
-/// Gaussian process regression with fixed hyperparameters.
+/// Gaussian process regression.
 ///
-/// [`Self::fit`] builds the lower triangle of `A = K + σn² I`, factors it
-/// in place as `L Lᵀ`, and solves `A α = y`. `L` lives in the workspace;
-/// `α` is kept on the model. [`Self::neg_log_marginal_likelihood`] is
+/// [`Self::fit`] stores training `X` / `y`, then runs L-BFGS on the
+/// negative log marginal likelihood starting from the kernel and
+/// likelihood `θ` on the model. [`FitOptions::FIXED`] skips that
+/// search and factors at the current `θ`. After a successful fit, `L`
+/// lives in the workspace and `α` is kept on the model.
+/// [`Self::neg_log_marginal_likelihood`] is
 /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
 /// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
@@ -228,7 +252,6 @@ impl Gpr {
         self.likelihood.get_params(&mut out[n_kernel..])
     }
 
-    #[allow(dead_code)] // P1B-3 Gpr::fit
     pub(crate) fn objective(&mut self) -> GprObjective<'_> {
         GprObjective::new(self)
     }
@@ -393,25 +416,67 @@ impl Gpr {
         Ok((kernel, compiled, likelihood))
     }
 
-    /// Factors `A = K + σn² I` and solves `A α = y`.
+    /// Factors `A = K + σn² I`, solves `A α = y`, and updates `θ` by L-BFGS.
     ///
     /// `x` is column-major with `n_rows` points and `n_cols` features. A
     /// previous successful fit is kept when this call fails validation.
-    /// Cholesky failure clears the fitted flag and does not leave a usable
-    /// `α`.
+    /// Uses [`FitOptions::default`] (`optimize = true`). After success, `L`
+    /// remains in the workspace and `α` is stored on the model. A failed
+    /// factorization or optimizer step leaves [`Self::is_fitted`] false and
+    /// does not leave a usable `α`. Kernel and likelihood `θ` are restored
+    /// to the values from the start of the call.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `n_rows` or `n_cols` is zero,
     /// [`GprError::InvalidHyperparameter`] if `x` or `y` has the wrong length,
-    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`, or
-    /// [`GprError::CholeskyFailed`] if `A` cannot be factored.
+    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
+    /// [`GprError::CholeskyFailed`] if `A` cannot be factored, or
+    /// [`GprError::OptimizationNotConverged`] if L-BFGS does not produce a
+    /// best parameter vector.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{FitOptions, Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let mut gpr = Gpr::new(kernel, likelihood);
+    /// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    /// assert!(gpr.is_fitted());
+    /// gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.0, 1.0], FitOptions::FIXED)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn fit(
         &mut self,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
+    ) -> Result<(), GprError> {
+        self.fit_with(x, n_rows, n_cols, y, FitOptions::default())
+    }
+
+    /// Fits with explicit optimizer options.
+    ///
+    /// Same as [`Self::fit`] when `options.optimize` is true. When
+    /// [`FitOptions::FIXED`] is used, kernel and likelihood `θ` are not
+    /// updated.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::fit`].
+    pub fn fit_with(
+        &mut self,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+        options: FitOptions,
     ) -> Result<(), GprError> {
         validate_training(x, n_rows, n_cols, y)?;
         self.clear_solution();
@@ -423,29 +488,93 @@ impl Gpr {
         self.y_transform.fit(&y_buf)?;
         self.y_transform.transform(&mut y_buf)?;
         let x_mat = pack_points(&x_buf, n_rows, n_cols);
-        let compiled = self.kernel.compile();
+        self.compiled = Some(self.kernel.compile());
+        self.x = Some(x_mat);
+        self.y = Some(y_buf);
+        self.n = n_rows;
+        self.d = n_cols;
+        if options.optimize {
+            self.optimize_hyperparameters()
+        } else {
+            self.factorize_current()
+        }
+    }
+
+    fn optimize_hyperparameters(&mut self) -> Result<(), GprError> {
+        let mut init = vec![0.0; self.num_params()];
+        self.get_params(&mut init)?;
+        let kernel_before = self.kernel.clone();
+        let likelihood_before = self.likelihood;
+        let optimizer = Lbfgs::new().with_max_iters(100);
+        if !optimizer.requires_gradient() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "L-BFGS requires an objective gradient".to_owned(),
+            });
+        }
+        let result = {
+            let mut obj = self.objective();
+            optimizer.minimize(&mut obj, &init)
+        };
+        self.commit_or_revert_optimize(kernel_before, likelihood_before, result)
+    }
+
+    fn commit_or_revert_optimize(
+        &mut self,
+        kernel_before: KernelSpec,
+        likelihood_before: GaussianLikelihood,
+        result: Result<OptResult, GprError>,
+    ) -> Result<(), GprError> {
+        match result {
+            Ok(opt) => {
+                if opt.params.len() != self.num_params() || !opt.value.is_finite() {
+                    self.revert_theta(kernel_before, likelihood_before);
+                    return Err(GprError::OptimizationNotConverged {
+                        iterations: opt.iterations as usize,
+                    });
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.revert_theta(kernel_before, likelihood_before);
+                Err(err)
+            }
+        }
+    }
+
+    fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = Some(self.kernel.compile());
+        self.fitted = false;
+        self.alpha = None;
+    }
+
+    fn factorize_current(&mut self) -> Result<(), GprError> {
+        let compiled = self.compiled.as_ref().ok_or(GprError::NotFitted)?;
         {
+            let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            apply_train_kernel(&compiled, x_mat.as_ref(), ws)?;
+            apply_train_kernel(compiled, x.as_ref(), ws)?;
             add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
         }
+        let n_rows = self.n;
+        let y_buf = self.y.as_deref().ok_or(GprError::NotFitted)?;
         let mut rhs = Mat::from_fn(n_rows, 1, |i, _| y_buf[i]);
         {
             let ws = workspace_mut(&mut self.workspace)?;
-            cholesky_and_solve(
+            if let Err(err) = cholesky_and_solve(
                 &mut ws.k_matrix,
                 &mut rhs,
                 &mut ws.faer_scratch,
                 0.0,
                 CholeskyStage::Fit,
-            )?;
+            ) {
+                self.fitted = false;
+                self.alpha = None;
+                return Err(err);
+            }
         }
-        self.compiled = Some(compiled);
-        self.x = Some(x_mat);
-        self.y = Some(y_buf);
         self.alpha = Some((0..n_rows).map(|i| rhs[(i, 0)]).collect());
-        self.n = n_rows;
-        self.d = n_cols;
         self.fitted = true;
         Ok(())
     }
@@ -816,7 +945,7 @@ pub(crate) fn cholesky_and_solve(
 
 #[cfg(test)]
 mod tests {
-    use super::{Gpr, cholesky_and_solve, pack_points};
+    use super::{FitOptions, Gpr, OptResult, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GprError};
     use crate::kernel::{
         ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -884,6 +1013,7 @@ mod tests {
         assert_send_sync::<super::Prediction>();
         assert_send_sync::<super::VarianceKind>();
         assert_send_sync::<super::PredictOptions>();
+        assert_send_sync::<super::FitOptions>();
     }
 
     #[test]
@@ -891,7 +1021,7 @@ mod tests {
         let mut gpr = rbf_gpr(1.25, 0.1);
         let x = [0.0, 0.5, 1.5, 0.0, 1.0, 0.5];
         let y = [0.2, -1.0, 0.7];
-        gpr.fit(&x, 3, 2, &y).expect("spd");
+        gpr.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         assert!(gpr.is_fitted());
         assert_eq!(gpr.n(), 3);
         assert_eq!(gpr.d(), 2);
@@ -914,9 +1044,16 @@ mod tests {
     #[test]
     fn refit_replaces_size_and_still_solves() {
         let mut gpr = rbf_gpr(1.25, 0.1);
-        gpr.fit(&[0.0, 0.5, 1.5, 0.0, 1.0, 0.5], 3, 2, &[0.2, -1.0, 0.7])
-            .expect("spd");
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("refit");
+        gpr.fit_with(
+            &[0.0, 0.5, 1.5, 0.0, 1.0, 0.5],
+            3,
+            2,
+            &[0.2, -1.0, 0.7],
+            FitOptions::FIXED,
+        )
+        .expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("refit");
         assert_eq!(gpr.n(), 2);
         assert_eq!(gpr.d(), 1);
         let a = dense_a(
@@ -936,7 +1073,8 @@ mod tests {
     fn fit_n_one_matches_scalar_solve() {
         let noise = 0.25;
         let mut gpr = rbf_gpr(1.0, noise);
-        gpr.fit(&[0.0], 1, 1, &[2.0]).expect("spd");
+        gpr.fit_with(&[0.0], 1, 1, &[2.0], FitOptions::FIXED)
+            .expect("spd");
         let a = 1.0 + noise;
         assert_close(gpr.alpha().expect("fitted")[0], 2.0 / a);
     }
@@ -944,7 +1082,8 @@ mod tests {
     #[test]
     fn validation_error_keeps_previous_fit() {
         let mut gpr = rbf_gpr(1.0, 0.1);
-        gpr.fit(&[0.0, 1.0], 2, 1, &[1.0, 2.0]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[1.0, 2.0], FitOptions::FIXED)
+            .expect("spd");
         let alpha = gpr.alpha().expect("fitted").to_vec();
         assert!(matches!(
             gpr.fit(&[0.0], 0, 1, &[]),
@@ -1012,7 +1151,8 @@ mod tests {
         let noise = 0.25;
         let y = 2.0;
         let mut gpr = rbf_gpr(1.0, noise);
-        gpr.fit(&[0.0], 1, 1, &[y]).expect("spd");
+        gpr.fit_with(&[0.0], 1, 1, &[y], FitOptions::FIXED)
+            .expect("spd");
         let a = 1.0 + noise;
         let log_det = a.ln();
         let ws = gpr.workspace.as_ref().expect("workspace");
@@ -1029,7 +1169,7 @@ mod tests {
         let x = [0.0, 1.0];
         let y = [0.5, -0.25];
         let mut gpr = rbf_gpr(ell, noise);
-        gpr.fit(&x, 2, 1, &y).expect("spd");
+        gpr.fit_with(&x, 2, 1, &y, FitOptions::FIXED).expect("spd");
         let k01 = (-0.5 * (1.0 / ell) * (1.0 / ell)).exp();
         let diag = 1.0 + noise;
         let det = diag * diag - k01 * k01;
@@ -1048,7 +1188,8 @@ mod tests {
         let noise = 0.16;
         let y = [0.0, 4.0];
         let mut gpr = rbf_gpr(1.0, noise).with_target_transform(StandardizeTarget::new());
-        gpr.fit(&[0.0, 1.0], 2, 1, &y).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &y, FitOptions::FIXED)
+            .expect("spd");
         let mut t = StandardizeTarget::new();
         t.fit(&y).expect("finite");
         let mut y_t = y;
@@ -1079,7 +1220,8 @@ mod tests {
             gpr.value_and_gradient_into(&params, &mut grad),
             Err(GprError::NotFitted)
         ));
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
         assert!(matches!(
             gpr.value_and_gradient_into(&[0.0], &mut grad),
             Err(GprError::InvalidHyperparameter { .. })
@@ -1093,7 +1235,8 @@ mod tests {
     #[test]
     fn value_and_gradient_set_params_is_atomic() {
         let mut gpr = rbf_gpr(1.0, 0.1);
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
         let mut before = [0.0; 2];
         gpr.get_params(&mut before).expect("len 2");
         let mut bad = before;
@@ -1113,7 +1256,8 @@ mod tests {
     #[test]
     fn value_and_gradient_cholesky_failure_keeps_params() {
         let mut gpr = rbf_gpr(1.0, 0.1);
-        gpr.fit(&[0.0, 0.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 0.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
         let mut before = [0.0; 2];
         gpr.get_params(&mut before).expect("len 2");
         let mut bad = before;
@@ -1137,7 +1281,7 @@ mod tests {
     #[test]
     fn value_and_gradient_refills_stale_dist_cache() {
         let mut gpr = rbf_gpr(1.25, 0.16);
-        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        gpr.fit_with(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9], FitOptions::FIXED)
             .expect("spd");
         if let Some(ws) = gpr.workspace.as_mut() {
             let n = ws.dist_cache.nrows();
@@ -1156,7 +1300,7 @@ mod tests {
     #[test]
     fn value_and_gradient_matches_nlml_and_finite_difference() {
         let mut gpr = rbf_gpr(1.25, 0.16);
-        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        gpr.fit_with(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9], FitOptions::FIXED)
             .expect("spd");
         let mut params = [0.0; 2];
         gpr.get_params(&mut params).expect("len 2");
@@ -1196,7 +1340,7 @@ mod tests {
         let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
             + KernelSpec::from(RbfKernel::new(0.7).expect("valid"));
         let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"));
-        gpr.fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        gpr.fit_with(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9], FitOptions::FIXED)
             .expect("spd");
         let n_params = gpr.num_params();
         let mut params = vec![0.0; n_params];
@@ -1233,7 +1377,8 @@ mod tests {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
             * KernelSpec::from(RbfKernel::new(2.0).expect("valid"));
         let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"));
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
         let n_params = gpr.num_params();
         let mut params = vec![0.0; n_params];
         gpr.get_params(&mut params).expect("len");
@@ -1270,7 +1415,8 @@ mod tests {
             * KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
             + KernelSpec::from(RbfKernel::new(2.0).expect("valid"));
         let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"));
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
         let n_params = gpr.num_params();
         let mut params = vec![0.0; n_params];
         gpr.get_params(&mut params).expect("len");
@@ -1306,7 +1452,8 @@ mod tests {
         let noise = 0.25;
         let y = 2.0;
         let mut gpr = rbf_gpr(1.0, noise);
-        gpr.fit(&[0.0], 1, 1, &[y]).expect("spd");
+        gpr.fit_with(&[0.0], 1, 1, &[y], FitOptions::FIXED)
+            .expect("spd");
         let mut params = [0.0; 2];
         gpr.get_params(&mut params).expect("len 2");
         let mut grad = [0.0; 2];
@@ -1325,7 +1472,8 @@ mod tests {
             gpr.predict(&[0.0], 1, 1),
             Err(GprError::NotFitted)
         ));
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.0, 1.0], FitOptions::FIXED)
+            .expect("spd");
         assert!(matches!(
             gpr.predict(&[0.0, 1.0], 1, 2),
             Err(GprError::DimensionMismatch {
@@ -1339,7 +1487,8 @@ mod tests {
     fn predict_n_one_matches_closed_form() {
         let noise = 0.25;
         let mut gpr = rbf_gpr(1.0, noise);
-        gpr.fit(&[0.0], 1, 1, &[2.0]).expect("spd");
+        gpr.fit_with(&[0.0], 1, 1, &[2.0], FitOptions::FIXED)
+            .expect("spd");
         let pred = gpr
             .predict_with(
                 &[0.0],
@@ -1363,7 +1512,8 @@ mod tests {
         let noise = 0.16;
         let mut gpr = rbf_gpr(1.0, noise).with_target_transform(StandardizeTarget::new());
         let y = [0.0, 4.0];
-        gpr.fit(&[0.0, 1.0], 2, 1, &y).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &y, FitOptions::FIXED)
+            .expect("spd");
         let mut t = StandardizeTarget::new();
         t.fit(&y).expect("finite");
         let scale = t.std().expect("fitted");
@@ -1395,12 +1545,12 @@ mod tests {
         let y = [0.2, -1.0, 0.7];
         let xs = [0.25, 1.0];
         let mut iso = rbf_gpr(ell, noise);
-        iso.fit(&x, 3, 2, &y).expect("spd");
+        iso.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         let mut ard = Gpr::new(
             KernelSpec::from(RbfArdKernel::new(&[ell, ell]).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         );
-        ard.fit(&x, 3, 2, &y).expect("spd");
+        ard.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
         let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
         assert_close(p_ard.mean[0], p_iso.mean[0]);
@@ -1423,7 +1573,8 @@ mod tests {
                 + KernelSpec::from(WhiteKernel::new(0.05).expect("valid")),
             GaussianLikelihood::new(0.1).expect("valid"),
         );
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.0, 1.0], FitOptions::FIXED)
+            .expect("spd");
         let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
         assert!(pred.mean[0].is_finite());
         assert!(pred.variance[0] > 0.0);
@@ -1437,7 +1588,7 @@ mod tests {
         );
         let x = [0.0, 1.0, 2.0];
         let y = [0.0, 1.0, 2.0];
-        gpr.fit(&x, 3, 1, &y).expect("spd");
+        gpr.fit_with(&x, 3, 1, &y, FitOptions::FIXED).expect("spd");
         let pred = gpr.predict(&[1.5], 1, 1).expect("fitted");
         assert!(pred.mean[0].is_finite());
         let mut params = vec![0.0; gpr.num_params()];
@@ -1456,7 +1607,7 @@ mod tests {
             KernelSpec::from(MaternKernel::new(1.0, MaternNu::FiveHalves).expect("valid")),
             GaussianLikelihood::new(0.1).expect("valid"),
         );
-        gpr.fit(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 0.5, 1.0])
+        gpr.fit_with(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 0.5, 1.0], FitOptions::FIXED)
             .expect("spd");
         let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
         assert!(pred.mean[0].is_finite());
@@ -1483,12 +1634,12 @@ mod tests {
             KernelSpec::from(MaternKernel::new(ell, nu).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         );
-        iso.fit(&x, 3, 2, &y).expect("spd");
+        iso.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         let mut ard = Gpr::new(
             KernelSpec::from(MaternArdKernel::new(&[ell, ell], nu).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         );
-        ard.fit(&x, 3, 2, &y).expect("spd");
+        ard.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
         let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
         assert_close(p_ard.mean[0], p_iso.mean[0]);
@@ -1510,7 +1661,7 @@ mod tests {
             KernelSpec::from(PeriodicKernel::new(1.0, 2.0).expect("valid")),
             GaussianLikelihood::new(0.1).expect("valid"),
         );
-        gpr.fit(&[0.0, 0.5, 1.0], 3, 1, &[0.0, 0.4, 0.1])
+        gpr.fit_with(&[0.0, 0.5, 1.0], 3, 1, &[0.0, 0.4, 0.1], FitOptions::FIXED)
             .expect("spd");
         let pred = gpr.predict(&[2.0], 1, 1).expect("fitted");
         assert!(pred.mean[0].is_finite());
@@ -1532,7 +1683,7 @@ mod tests {
             KernelSpec::from(RationalQuadraticKernel::new(1.0, 1.5).expect("valid")),
             GaussianLikelihood::new(0.1).expect("valid"),
         );
-        gpr.fit(&[0.0, 0.5, 1.0], 3, 1, &[0.0, 0.4, 0.1])
+        gpr.fit_with(&[0.0, 0.5, 1.0], 3, 1, &[0.0, 0.4, 0.1], FitOptions::FIXED)
             .expect("spd");
         let pred = gpr.predict(&[0.25], 1, 1).expect("fitted");
         assert!(pred.mean[0].is_finite());
@@ -1560,12 +1711,12 @@ mod tests {
             KernelSpec::from(RationalQuadraticKernel::new(ell, alpha).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         );
-        iso.fit(&x, 3, 2, &y).expect("spd");
+        iso.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         let mut ard = Gpr::new(
             KernelSpec::from(RationalQuadraticArdKernel::new(&[ell, ell], alpha).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         );
-        ard.fit(&x, 3, 2, &y).expect("spd");
+        ard.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
         let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
         let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
         assert_close(p_ard.mean[0], p_iso.mean[0]);
@@ -1579,5 +1730,117 @@ mod tests {
         assert!(nlml.is_finite());
         assert_eq!(params.len(), 4);
         assert!(grad.iter().all(|g| g.is_finite()));
+    }
+
+    #[test]
+    fn fit_optimizes_and_keeps_l_and_alpha() {
+        let mut gpr = rbf_gpr(2.0, 0.1);
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("lbfgs");
+        assert!(gpr.is_fitted());
+        let alpha = gpr.alpha().expect("fitted");
+        assert_eq!(alpha.len(), 2);
+        assert!(alpha.iter().all(|a| a.is_finite()));
+        let ws = gpr.workspace.as_ref().expect("workspace");
+        assert_eq!(ws.k_matrix.nrows(), 2);
+        let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
+        assert_eq!(pred.mean.len(), 1);
+        assert!(pred.mean[0].is_finite());
+        assert!(
+            gpr.neg_log_marginal_likelihood()
+                .expect("fitted")
+                .is_finite()
+        );
+        let a = dense_a(
+            gpr.kernel(),
+            gpr.likelihood().noise_variance(),
+            &[0.0, 1.0],
+            2,
+            1,
+        );
+        let restored = matvec_sym(&a, alpha);
+        assert_close(restored[0], 0.5);
+        assert_close(restored[1], -0.25);
+    }
+
+    #[test]
+    fn fit_fixed_keeps_construction_params() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
+        let mut params = [0.0; 2];
+        gpr.get_params(&mut params).expect("len 2");
+        assert_close(params[0], 1.25_f64.ln());
+        assert_close(params[1], 0.16_f64.ln());
+        let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
+        assert_eq!(pred.mean.len(), 1);
+    }
+
+    #[test]
+    fn non_finite_optimize_result_restores_theta() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
+        let kernel_before = gpr.kernel().clone();
+        let likelihood_before = *gpr.likelihood();
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let moved = [2.0_f64.ln(), 0.5_f64.ln()];
+        let mut grad = [0.0; 2];
+        gpr.value_and_gradient_into(&moved, &mut grad)
+            .expect("moved");
+        let mut mid = [0.0; 2];
+        gpr.get_params(&mut mid).expect("len 2");
+        assert!((mid[0] - before[0]).abs() > TOL);
+        let err = gpr
+            .commit_or_revert_optimize(
+                kernel_before,
+                likelihood_before,
+                Ok(OptResult {
+                    params: moved.to_vec(),
+                    value: f64::NAN,
+                    iterations: 4,
+                }),
+            )
+            .expect_err("nan nlml");
+        assert!(matches!(
+            err,
+            GprError::OptimizationNotConverged { iterations: 4 }
+        ));
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+        assert!(!gpr.is_fitted());
+        assert!(matches!(gpr.alpha(), Err(GprError::NotFitted)));
+    }
+
+    #[test]
+    fn failed_optimize_err_restores_theta() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
+        let kernel_before = gpr.kernel().clone();
+        let likelihood_before = *gpr.likelihood();
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let moved = [2.0_f64.ln(), 0.5_f64.ln()];
+        let mut grad = [0.0; 2];
+        gpr.value_and_gradient_into(&moved, &mut grad)
+            .expect("moved");
+        gpr.commit_or_revert_optimize(
+            kernel_before,
+            likelihood_before,
+            Err(GprError::CholeskyFailed {
+                jitter: 0.0,
+                matrix_size: 2,
+                stage: CholeskyStage::Fit,
+            }),
+        )
+        .expect_err("chol");
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+        assert!(!gpr.is_fitted());
     }
 }

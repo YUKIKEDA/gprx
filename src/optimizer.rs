@@ -2,9 +2,7 @@
 //!
 //! Crate-private. Does not implement L-BFGS itself. When argmin asks for cost
 //! and gradient at the same `θ`, one [`Objective::value_and_gradient_into`]
-//! call fills both. Wired into [`Gpr::fit`] in P1B-3.
-
-#![allow(dead_code)] // P1B-3 Gpr::fit
+//! call fills both.
 
 use std::cell::RefCell;
 
@@ -297,7 +295,8 @@ mod tests {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.1).expect("valid");
         let mut gpr = Gpr::new(kernel, likelihood);
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
+            .expect("spd");
         let mut init = [0.0; 2];
         gpr.get_params(&mut init).expect("len 2");
         init[0] = 2.0_f64.ln();
