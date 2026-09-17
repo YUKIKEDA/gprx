@@ -13,7 +13,7 @@ use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
-use gprx::{FitOptions, GaussianLikelihood, Gpr};
+use gprx::{FitOptions, GaussianLikelihood, Gpr, Prediction};
 
 const N: usize = 256;
 const D: usize = 8;
@@ -148,11 +148,19 @@ fn cholesky_alpha(c: &mut Criterion) {
 }
 
 fn predict_100(c: &mut Criterion) {
-    let (gpr, xs) = fitted_model();
+    let (mut gpr, xs) = fitted_model();
+    let mut pred = Prediction::default();
+    gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
     c.bench_function("predict_100", |b| {
         b.iter(|| {
-            let pred = gpr.predict(std::hint::black_box(&xs), M, D);
-            std::hint::black_box(pred)
+            gpr.predict_into(
+                std::hint::black_box(&xs),
+                M,
+                D,
+                std::hint::black_box(&mut pred),
+            )
+            .expect("predict");
+            std::hint::black_box(pred.mean[0] + pred.variance[0])
         });
     });
 }

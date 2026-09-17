@@ -20,11 +20,12 @@ use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform
 use crate::workspace::Workspace;
 
 /// Which predictive variance [`Prediction`] reports.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum VarianceKind {
     /// Variance of the latent function `f*`, without observation noise.
     Latent,
     /// Variance of a new observation `y*`, including `σn²`. This is the default.
+    #[default]
     Observation,
 }
 
@@ -97,7 +98,10 @@ pub enum DistanceCachePolicy {
 }
 
 /// Predictive mean and (diagonal) variance at the query points.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// [`Gpr::predict_into`] reuses `mean` / `variance` capacity when the
+/// query length matches a previous call.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Prediction {
     /// Predictive mean on the original target scale.
     pub mean: Vec<f64>,
@@ -118,7 +122,8 @@ pub struct Prediction {
 /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
 /// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
-/// a diagonal variance. [`Self::loo_predict`] is the GPML leave-one-out
+/// a diagonal variance; [`Self::predict_into`] writes into a reused
+/// [`Prediction`]. [`Self::loo_predict`] is the GPML leave-one-out
 /// at every training point, from `L` and `α`. Input and target transforms
 /// default to identity. Training squared distances default to
 /// [`DistanceCachePolicy::Always`].
@@ -377,13 +382,12 @@ impl Gpr {
             let ws = workspace_mut(&mut self.workspace)?;
             apply_train_kernel(&compiled, x.as_ref(), ws, self.distance_cache_policy)?;
             add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
-        }
-        let mut rhs = Mat::from_fn(n, 1, |i, _| y[i]);
-        {
-            let ws = workspace_mut(&mut self.workspace)?;
+            for (i, &yi) in y.iter().enumerate() {
+                ws.rhs[(i, 0)] = yi;
+            }
             if let Err(err) = cholesky_and_solve(
                 &mut ws.k_matrix,
-                &mut rhs,
+                &mut ws.rhs,
                 &mut ws.faer_scratch,
                 0.0,
                 CholeskyStage::Fit,
@@ -397,8 +401,11 @@ impl Gpr {
         if alpha.len() != n {
             alpha.resize(n, 0.0);
         }
-        for i in 0..n {
-            alpha[i] = rhs[(i, 0)];
+        {
+            let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
+            for (i, slot) in alpha.iter_mut().enumerate() {
+                *slot = ws.rhs[(i, 0)];
+            }
         }
         self.kernel = kernel;
         self.likelihood = likelihood;
@@ -625,12 +632,14 @@ impl Gpr {
         }
         let n_rows = self.n;
         let y_buf = self.y.as_deref().ok_or(GprError::NotFitted)?;
-        let mut rhs = Mat::from_fn(n_rows, 1, |i, _| y_buf[i]);
         {
             let ws = workspace_mut(&mut self.workspace)?;
+            for (i, &yi) in y_buf.iter().enumerate() {
+                ws.rhs[(i, 0)] = yi;
+            }
             if let Err(err) = cholesky_and_solve(
                 &mut ws.k_matrix,
-                &mut rhs,
+                &mut ws.rhs,
                 &mut ws.faer_scratch,
                 0.0,
                 CholeskyStage::Fit,
@@ -640,7 +649,16 @@ impl Gpr {
                 return Err(err);
             }
         }
-        self.alpha = Some((0..n_rows).map(|i| rhs[(i, 0)]).collect());
+        let alpha = self.alpha.get_or_insert_with(|| vec![0.0; n_rows]);
+        if alpha.len() != n_rows {
+            alpha.resize(n_rows, 0.0);
+        }
+        {
+            let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
+            for (i, slot) in alpha.iter_mut().enumerate() {
+                *slot = ws.rhs[(i, 0)];
+            }
+        }
         self.fitted = true;
         Ok(())
     }
@@ -648,7 +666,10 @@ impl Gpr {
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
     /// `xs` is column-major with `n_rows` query points and `n_cols` features.
-    /// See [`Gpr`] for a complete fit→predict example.
+    /// Query buffers live in the workspace, so this takes `&mut self`. The
+    /// returned [`Prediction`] is newly allocated; reuse
+    /// [`Self::predict_into`] after a warmup call for a zero-allocation
+    /// path. See [`Gpr`] for a complete fit→predict example.
     ///
     /// # Errors
     ///
@@ -658,12 +679,46 @@ impl Gpr {
     /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`] for a
     /// badly packed or non-finite `xs`.
     pub fn predict(
-        &self,
+        &mut self,
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
     ) -> Result<Prediction, GprError> {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
+    }
+
+    /// Writes [`Self::predict`] into `out`, reusing `mean` / `variance`
+    /// capacity when the query length matches.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood, Prediction};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let mut gpr = Gpr::new(kernel, likelihood);
+    /// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    /// let mut pred = Prediction::default();
+    /// gpr.predict_into(&[0.5], 1, 1, &mut pred)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn predict_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        out: &mut Prediction,
+    ) -> Result<(), GprError> {
+        self.predict_with_into(xs, n_rows, n_cols, PredictOptions::default(), out)
     }
 
     /// Predicts at `xs` with an explicit variance kind.
@@ -676,12 +731,31 @@ impl Gpr {
     ///
     /// Same as [`Self::predict`].
     pub fn predict_with(
-        &self,
+        &mut self,
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction, GprError> {
+        let mut out = Prediction::default();
+        self.predict_with_into(xs, n_rows, n_cols, options, &mut out)?;
+        Ok(out)
+    }
+
+    /// Writes [`Self::predict_with`] into `out`, reusing `mean` / `variance`
+    /// capacity when the query length matches.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    pub fn predict_with_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        out: &mut Prediction,
+    ) -> Result<(), GprError> {
         if !self.fitted {
             return Err(GprError::NotFitted);
         }
@@ -695,76 +769,84 @@ impl Gpr {
         let compiled = self.compiled.as_ref().ok_or(GprError::NotFitted)?;
         let x_train = self.x.as_ref().ok_or(GprError::NotFitted)?;
         let alpha = self.alpha.as_deref().ok_or(GprError::NotFitted)?;
-        let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
-        let mut xs_buf = xs.to_vec();
-        self.x_transform.apply(&mut xs_buf, n_rows, n_cols)?;
-        let x_test = pack_points(&xs_buf, n_rows, n_cols);
         let n = self.n;
         let m = n_rows;
-        let mut k_star = Mat::zeros(n, m);
-        let mut scratch = Mat::zeros(n, m);
+        let ws = workspace_mut(&mut self.workspace)?;
+        ws.ensure_query(n, m, n_cols)?;
+        ws.query_xs.copy_from_slice(xs);
+        self.x_transform.apply(&mut ws.query_xs, n_rows, n_cols)?;
+        pack_points_into(&ws.query_xs, n_rows, n_cols, ws.query_x.as_mut());
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => {
-                let mut dist = Mat::zeros(n, m);
+                let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
                 fill_squared_euclidean_cross(
                     x_train.as_ref(),
-                    x_test.as_ref(),
-                    dist.as_mut(),
-                    &mut [],
+                    ws.query_x.as_ref(),
+                    ws.query_dist.as_mut(),
+                    &mut thread_scratch,
                 );
-                compiled.apply_cross(dist.as_ref(), k_star.as_mut(), scratch.as_mut())?;
+                let applied = compiled.apply_cross(
+                    ws.query_dist.as_ref(),
+                    ws.query_k_star.as_mut(),
+                    ws.query_scratch.as_mut(),
+                );
+                ws.thread_scratch = thread_scratch;
+                applied?;
             }
             CoordMode::Points => {
                 compiled.apply_cross_points(
                     x_train.as_ref(),
-                    x_test.as_ref(),
-                    k_star.as_mut(),
-                    scratch.as_mut(),
+                    ws.query_x.as_ref(),
+                    ws.query_k_star.as_mut(),
+                    ws.query_scratch.as_mut(),
                 )?;
             }
         }
-        let mut mean = vec![0.0; m];
-        for col in 0..m {
+        if out.mean.len() != m {
+            out.mean.resize(m, 0.0);
+        }
+        if out.variance.len() != m {
+            out.variance.resize(m, 0.0);
+        }
+        for (col, mean) in out.mean.iter_mut().enumerate() {
             let mut sum = 0.0;
-            for row in 0..n {
-                sum += k_star[(row, col)] * alpha[row];
+            for (row, &a) in alpha.iter().enumerate() {
+                sum += ws.query_k_star[(row, col)] * a;
             }
-            mean[col] = sum;
+            *mean = sum;
         }
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             ws.k_matrix.as_ref(),
-            k_star.as_mut(),
+            ws.query_k_star.as_mut(),
             Par::Seq,
         );
-        let mut kss = vec![0.0; m];
         match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut kss)?,
-            CoordMode::Points => compiled.fill_diag_points(x_test.as_ref(), &mut kss)?,
+            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut ws.query_kss)?,
+            CoordMode::Points => {
+                compiled.fill_diag_points(ws.query_x.as_ref(), &mut ws.query_kss)?
+            }
         }
         let noise = self.likelihood.noise_variance();
-        let mut variance = vec![0.0; m];
         for col in 0..m {
             let mut vnorm = 0.0;
             for row in 0..n {
-                let v = k_star[(row, col)];
+                let v = ws.query_k_star[(row, col)];
                 vnorm += v * v;
             }
-            let mut latent = kss[col] - vnorm;
+            let mut latent = ws.query_kss[col] - vnorm;
             if latent < 0.0 {
                 latent = 0.0;
             }
-            variance[col] = match options.variance_kind {
+            out.variance[col] = match options.variance_kind {
                 VarianceKind::Latent => latent,
                 VarianceKind::Observation => latent + noise,
             };
         }
-        self.y_transform.inverse_transform_mean(&mut mean)?;
-        self.y_transform.inverse_transform_variance(&mut variance)?;
-        Ok(Prediction {
-            mean,
-            variance,
-            variance_kind: options.variance_kind,
-        })
+        self.y_transform.inverse_transform_mean(&mut out.mean)?;
+        self.y_transform
+            .inverse_transform_variance(&mut out.variance)?;
+        out.variance_kind = options.variance_kind;
+        Ok(())
     }
 
     /// Returns leave-one-out mean and observation variance at every training
@@ -950,7 +1032,19 @@ fn validate_query(xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprErr
 }
 
 fn pack_points(x: &[f64], n_rows: usize, n_cols: usize) -> Mat<f64> {
-    Mat::from_fn(n_rows, n_cols, |row, col| x[col * n_rows + row])
+    let mut dest = Mat::zeros(n_rows, n_cols);
+    pack_points_into(x, n_rows, n_cols, dest.as_mut());
+    dest
+}
+
+fn pack_points_into(x: &[f64], n_rows: usize, n_cols: usize, mut dest: MatMut<'_, f64>) {
+    debug_assert_eq!(dest.nrows(), n_rows);
+    debug_assert_eq!(dest.ncols(), n_cols);
+    for col in 0..n_cols {
+        for row in 0..n_rows {
+            dest[(row, col)] = x[col * n_rows + row];
+        }
+    }
 }
 
 fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
@@ -1167,6 +1261,25 @@ mod tests {
     fn fit_restores_thread_scratch() {
         let mut gpr = rbf_gpr(1.0, 0.1);
         gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        let ws = gpr.workspace.as_ref().expect("workspace");
+        assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
+        assert!(
+            ws.thread_scratch
+                .iter()
+                .all(|m| m.nrows() == 0 && m.ncols() == 0)
+        );
+    }
+
+    #[test]
+    fn predict_into_matches_predict() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        let owned = gpr.predict(&[0.5], 1, 1).expect("fitted");
+        let mut into = super::Prediction::default();
+        gpr.predict_into(&[0.5], 1, 1, &mut into).expect("fitted");
+        assert_eq!(into.mean, owned.mean);
+        assert_eq!(into.variance, owned.variance);
+        assert_eq!(into.variance_kind, owned.variance_kind);
         let ws = gpr.workspace.as_ref().expect("workspace");
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
@@ -2103,11 +2216,13 @@ mod tests {
         let mut gpr = rbf_gpr(2.0, 0.1);
         gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("lbfgs");
         assert!(gpr.is_fitted());
-        let alpha = gpr.alpha().expect("fitted");
+        let alpha = gpr.alpha().expect("fitted").to_vec();
         assert_eq!(alpha.len(), 2);
         assert!(alpha.iter().all(|a| a.is_finite()));
-        let ws = gpr.workspace.as_ref().expect("workspace");
-        assert_eq!(ws.k_matrix.nrows(), 2);
+        {
+            let ws = gpr.workspace.as_ref().expect("workspace");
+            assert_eq!(ws.k_matrix.nrows(), 2);
+        }
         let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
         assert_eq!(pred.mean.len(), 1);
         assert!(pred.mean[0].is_finite());
@@ -2123,7 +2238,7 @@ mod tests {
             2,
             1,
         );
-        let restored = matvec_sym(&a, alpha);
+        let restored = matvec_sym(&a, &alpha);
         assert_close(restored[0], 0.5);
         assert_close(restored[1], -0.25);
     }

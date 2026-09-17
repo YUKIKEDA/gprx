@@ -30,6 +30,20 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// One empty `0×0` matrix per Rayon worker. Detached with `mem::take`
     /// before a parallel kernel fill so closures never borrow `&mut Workspace`.
     pub(crate) thread_scratch: Vec<Mat<P::Storage>>,
+    /// Right-hand side `y` then `α` for the training Cholesky solve (`n×1`).
+    pub(crate) rhs: Mat<P::Storage>,
+    /// Transformed query features, packed column-major. Empty until predict.
+    pub(crate) query_xs: Vec<f64>,
+    /// Query points `m×d`. Empty until predict.
+    pub(crate) query_x: Mat<P::Storage>,
+    /// `k(X, X*)` then `L⁻¹ k_*` (`n×m`). Empty until predict.
+    pub(crate) query_k_star: Mat<P::Storage>,
+    /// Scratch for `apply_cross` (`n×m`). Empty until predict.
+    pub(crate) query_scratch: Mat<P::Storage>,
+    /// Train–test squared distances (`n×m`). Empty until predict.
+    pub(crate) query_dist: Mat<P::Storage>,
+    /// `k(x*_j, x*_j)` for each query column. Empty until predict.
+    pub(crate) query_kss: Vec<f64>,
     /// Residual buffer for mixed-precision refinement. `None` in Phase 1.
     #[allow(dead_code)]
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
@@ -67,6 +81,13 @@ impl Workspace<DoublePrecision> {
             exp_buf: Mat::<f64>::zeros(n, n),
             kernel_scratch: Mat::<f64>::zeros(0, 0),
             thread_scratch: empty_thread_scratch(),
+            rhs: Mat::<f64>::zeros(n, 1),
+            query_xs: Vec::new(),
+            query_x: Mat::<f64>::zeros(0, 0),
+            query_k_star: Mat::<f64>::zeros(0, 0),
+            query_scratch: Mat::<f64>::zeros(0, 0),
+            query_dist: Mat::<f64>::zeros(0, 0),
+            query_kss: Vec::new(),
             refine_buf: None,
             faer_scratch: MemBuffer::new(faer_scratch_req(n)),
         })
@@ -105,6 +126,32 @@ impl Workspace<DoublePrecision> {
         self.kernel_scratch = Mat::<f64>::zeros(n, n);
         Ok(())
     }
+
+    /// Sizes query buffers for an `n×m` predict. No-op when already sized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
+    pub(crate) fn ensure_query(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
+        if n == 0 || m == 0 || d == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        if self.query_k_star.nrows() == n
+            && self.query_k_star.ncols() == m
+            && self.query_x.ncols() == d
+            && self.query_x.nrows() == m
+        {
+            return Ok(());
+        }
+        self.query_xs
+            .resize(m.checked_mul(d).ok_or(GprError::EmptyInput)?, 0.0);
+        self.query_x = Mat::<f64>::zeros(m, d);
+        self.query_k_star = Mat::<f64>::zeros(n, m);
+        self.query_scratch = Mat::<f64>::zeros(n, m);
+        self.query_dist = Mat::<f64>::zeros(n, m);
+        self.query_kss.resize(m, 0.0);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +187,10 @@ mod tests {
         assert_square(&ws.exp_buf, n);
         assert_eq!(ws.kernel_scratch.nrows(), 0);
         assert_eq!(ws.kernel_scratch.ncols(), 0);
+        assert_eq!(ws.rhs.nrows(), n);
+        assert_eq!(ws.rhs.ncols(), 1);
+        assert_eq!(ws.query_k_star.nrows(), 0);
+        assert_eq!(ws.query_k_star.ncols(), 0);
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
             ws.thread_scratch
@@ -174,5 +225,21 @@ mod tests {
             ws.ensure_kernel_scratch(0).err(),
             Some(GprError::EmptyInput)
         );
+    }
+
+    #[test]
+    fn ensure_query_allocates_when_needed() {
+        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
+        assert_eq!(ws.query_k_star.ncols(), 0);
+        ws.ensure_query(4, 3, 2).expect("m,d > 0");
+        assert_eq!(ws.query_x.nrows(), 3);
+        assert_eq!(ws.query_x.ncols(), 2);
+        assert_eq!(ws.query_k_star.nrows(), 4);
+        assert_eq!(ws.query_k_star.ncols(), 3);
+        assert_eq!(ws.query_xs.len(), 6);
+        assert_eq!(ws.query_kss.len(), 3);
+        ws.ensure_query(4, 3, 2).expect("same size");
+        assert_eq!(ws.query_k_star.ncols(), 3);
+        assert_eq!(ws.ensure_query(4, 0, 2).err(), Some(GprError::EmptyInput));
     }
 }
