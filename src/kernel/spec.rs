@@ -1,7 +1,10 @@
 //! Declaration-layer kernel tree: leaves, sums, and products.
 
 use crate::error::GprError;
-use crate::kernel::{ConstantKernel, LinearKernel, RbfArdKernel, RbfKernel, WhiteKernel};
+use crate::kernel::{
+    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, RbfArdKernel, RbfKernel,
+    WhiteKernel,
+};
 use std::ops::{Add, Mul};
 
 /// Maps a flat optimizer index to a leaf-local parameter.
@@ -38,6 +41,10 @@ pub enum KernelSpec {
     Rbf(RbfKernel),
     /// ARD RBF leaf (`θ_d = log(ℓ_d)`).
     RbfArd(RbfArdKernel),
+    /// Isotropic Matérn leaf (`ν = 1/2`, `3/2`, or `5/2`).
+    Matern(MaternKernel),
+    /// ARD Matérn leaf (`θ_d = log(ℓ_d)`).
+    MaternArd(MaternArdKernel),
     /// Constant leaf `k = c`.
     Constant(ConstantKernel),
     /// Linear leaf `k = σ² xᵀ x'`.
@@ -59,6 +66,18 @@ impl From<RbfKernel> for KernelSpec {
 impl From<RbfArdKernel> for KernelSpec {
     fn from(kernel: RbfArdKernel) -> Self {
         Self::RbfArd(kernel)
+    }
+}
+
+impl From<MaternKernel> for KernelSpec {
+    fn from(kernel: MaternKernel) -> Self {
+        Self::Matern(kernel)
+    }
+}
+
+impl From<MaternArdKernel> for KernelSpec {
+    fn from(kernel: MaternArdKernel) -> Self {
+        Self::MaternArd(kernel)
     }
 }
 
@@ -102,6 +121,8 @@ impl KernelSpec {
         match self {
             Self::Rbf(leaf) => leaf.num_params(),
             Self::RbfArd(leaf) => leaf.num_params(),
+            Self::Matern(leaf) => leaf.num_params(),
+            Self::MaternArd(leaf) => leaf.num_params(),
             Self::Constant(leaf) => leaf.num_params(),
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
@@ -180,6 +201,15 @@ impl KernelSpec {
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 *offset += n;
             }
+            Self::Matern(leaf) => {
+                out[*offset] = leaf.log_lengthscale();
+                *offset += 1;
+            }
+            Self::MaternArd(leaf) => {
+                let n = leaf.num_params();
+                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
+                *offset += n;
+            }
             Self::Constant(leaf) => {
                 out[*offset] = leaf.log_constant();
                 *offset += 1;
@@ -208,6 +238,18 @@ impl KernelSpec {
                 Ok(())
             }
             Self::RbfArd(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::Matern(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::MaternArd(leaf) => {
                 let n = leaf.num_params();
                 leaf.set_params(&params[*offset..*offset + n])?;
                 *offset += n;
@@ -249,6 +291,12 @@ impl KernelSpec {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::RbfArd(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Matern(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::MaternArd(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::Constant(leaf) => {
@@ -299,7 +347,10 @@ fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
 #[cfg(test)]
 mod tests {
     use super::KernelSpec;
-    use crate::kernel::{ConstantKernel, RbfArdKernel, RbfKernel, WhiteKernel};
+    use crate::kernel::{
+        ConstantKernel, MaternArdKernel, MaternKernel, MaternNu, RbfArdKernel, RbfKernel,
+        WhiteKernel,
+    };
 
     const TOL: f64 = 1e-12;
 
@@ -413,5 +464,29 @@ mod tests {
             compiled.coord_mode().expect("compat"),
             crate::kernel::CoordMode::Dist
         );
+    }
+
+    #[test]
+    fn matern_and_matern_ard_flatten() {
+        let iso = KernelSpec::from(MaternKernel::new(1.5, MaternNu::ThreeHalves).expect("valid"));
+        assert_eq!(iso.num_params(), 1);
+        let mut params = [0.0];
+        iso.get_params(&mut params).expect("len 1");
+        assert_close(params[0], 1.5_f64.ln());
+        let mut ard =
+            KernelSpec::from(MaternArdKernel::new(&[1.0, 2.0], MaternNu::Half).expect("valid"));
+        assert_eq!(ard.num_params(), 2);
+        let mut ard_params = [0.0; 2];
+        ard.get_params(&mut ard_params).expect("len 2");
+        assert_close(ard_params[1], 2.0_f64.ln());
+        ard_params[1] = 3.0_f64.ln();
+        ard.set_params(&ard_params).expect("len 2");
+        match ard.compile() {
+            crate::kernel::CompiledKernel::MaternArd(leaf) => {
+                assert_eq!(leaf.num_params(), 2);
+                assert_eq!(leaf.nu(), MaternNu::Half);
+            }
+            other => panic!("expected ARD Matern, got {other:?}"),
+        }
     }
 }
