@@ -533,7 +533,7 @@ fit()終了 → Workspace(L含む)は保持、predict/refitで再利用
 
 ## 8. 並列化・SIMD、数学関数バックエンド
 
-- カーネル評価内側ループは`std::simd`かwideクレートでベクトル化。**ただしPhase 2では先にfaerとRayonの性能を測り、カーネルSIMDがボトルネックだと確認してから導入する**。`std::simd`はRustバージョン/feature依存のため採用時期に注意
+- カーネル評価内側ループは`std::simd`かwideクレートでベクトル化。**P2-5: `kernel_rbf` は `mll_and_grad` の約 13% で支配的ではない。Phase 2 では SIMD を入れない。** `std::simd`はRustバージョン/feature依存のため、将来入れるときも採用時期に注意
 - 距離行列・カーネル行列構築はRayonでブロック並列化
 - faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有
 
@@ -743,12 +743,12 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-5）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-6）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
-- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。SIMDは `kernel_rbf` がボトルネックなときだけ
+- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で `kernel_rbf` は支配項ではないと分かったので SIMD は入れない
 - **Phase 3(オンライン学習)**: 自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ、**誘導点Zは固定**、対角予測、ハイパラ最適化(Zは含めない)
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
@@ -798,7 +798,7 @@ trait OnlineInference<T: Scalar> {
 | P1A-8 / P1A-10 | 同じファイルに `predict_100` / `mll_and_grad` を足す。P1A-19 で確保 ratchet |
 | 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
-| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。SIMD は `kernel_rbf` が支配的なときだけ。NLML 定数項は P2-6 で `mll_and_grad` のあり/なしを同じ問題で測る。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never |
+| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。P2-5: `kernel_rbf` は支配的ではないので SIMD は入れない。NLML 定数項は P2-6 で `mll_and_grad` のあり/なしを同じ問題で測る。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never |
 | Phase 3+ | insert/delete などを同じ問題定義で足す |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。
