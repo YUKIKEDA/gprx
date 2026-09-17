@@ -785,13 +785,12 @@ impl Gpr {
                     ws.query_dist.as_mut(),
                     &mut thread_scratch,
                 );
-                let applied = compiled.apply_cross(
+                ws.thread_scratch = thread_scratch;
+                compiled.apply_cross(
                     ws.query_dist.as_ref(),
                     ws.query_k_star.as_mut(),
                     ws.query_scratch.as_mut(),
-                );
-                ws.thread_scratch = thread_scratch;
-                applied?;
+                )?;
             }
             CoordMode::Points => {
                 compiled.apply_cross_points(
@@ -967,23 +966,22 @@ fn apply_train_kernel(
 ) -> Result<(), GprError> {
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
             let refill = match policy {
                 DistanceCachePolicy::Never => true,
                 DistanceCachePolicy::Always => !ws.dist_ready,
             };
             if refill {
+                let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
                 fill_squared_euclidean(x, ws.dist_cache.as_mut(), &mut thread_scratch);
+                ws.thread_scratch = thread_scratch;
                 ws.dist_ready = policy == DistanceCachePolicy::Always;
             }
-            let applied = compiled.apply(
+            compiled.apply(
                 ws.dist_cache.as_ref(),
                 ws.k_matrix.as_mut(),
                 Triangle::Lower,
                 ws.exp_buf.as_mut(),
-            );
-            ws.thread_scratch = thread_scratch;
-            applied
+            )
         }
         CoordMode::Points => compiled.apply_points(
             x,
@@ -1261,6 +1259,28 @@ mod tests {
     fn fit_restores_thread_scratch() {
         let mut gpr = rbf_gpr(1.0, 0.1);
         gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        let ws = gpr.workspace.as_ref().expect("workspace");
+        assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
+        assert!(
+            ws.thread_scratch
+                .iter()
+                .all(|m| m.nrows() == 0 && m.ncols() == 0)
+        );
+    }
+
+    #[test]
+    fn predict_restores_thread_scratch_when_apply_cross_fails() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        {
+            let ws = gpr.workspace.as_mut().expect("workspace");
+            ws.ensure_query(2, 1, 1).expect("query");
+            ws.query_scratch = Mat::<f64>::zeros(1, 1);
+        }
+        assert!(matches!(
+            gpr.predict(&[0.5], 1, 1),
+            Err(GprError::WorkspaceTooSmall)
+        ));
         let ws = gpr.workspace.as_ref().expect("workspace");
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
