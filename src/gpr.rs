@@ -124,10 +124,10 @@ pub struct Prediction {
 /// [`DistanceCachePolicy::Always`].
 ///
 /// Isotropic distance fills and lower-triangle kernel writes use Rayon.
-/// Thread count is the process-wide pool (`RAYON_NUM_THREADS`, or
-/// `ThreadPoolBuilder::build_global` before the first fit). This type has
-/// no per-model thread-count field. See the [crate-level parallelism
-/// notes](crate).
+/// There is no parallel on/off flag. Thread count is the process-wide
+/// pool (`RAYON_NUM_THREADS`, or `ThreadPoolBuilder::build_global` before
+/// the first fit); one worker is sequential. See the [crate-level
+/// parallelism notes](crate).
 ///
 /// # Examples
 ///
