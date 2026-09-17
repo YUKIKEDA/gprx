@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: [M0-1](https://github.com/YUKIKEDA/gprx/issues/1)。** 1a は M0 の DoD が埋まってから。後の Phase は 1b 完了まで着手しない。
+**今やること: [P2-1](https://github.com/YUKIKEDA/gprx/issues/25)。** Phase 1（1b / 0.1.0 相当）完了。Phase 2 は計測してから高速化する。後の Phase は 2 のボトルネック順が埋まってから。
 
 Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 

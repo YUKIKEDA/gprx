@@ -584,6 +584,7 @@ impl Gpr {
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
     /// `xs` is column-major with `n_rows` query points and `n_cols` features.
+    /// See [`Gpr`] for a complete fit→predict example.
     ///
     /// # Errors
     ///
