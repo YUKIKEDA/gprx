@@ -1,11 +1,12 @@
-//! Allocation ratchet after Workspace setup (P1A-19).
+//! Allocation ratchet after Workspace setup (P1A-19 / P2-4).
 //!
 //! Counts heap allocations on the Exact GPR hot path once `fit` has already
-//! sized the workspace. Caps may fall, never rise without an Issue. Phase 1a
-//! does not require zero.
+//! sized the workspace. Caps may fall, never rise without an Issue. P2-4
+//! requires zero on isotropic RBF (`value_and_gradient_into` and
+//! `predict_into` after warmup). User kernels are excluded.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError};
+use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError, Prediction};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 
@@ -20,10 +21,10 @@ const ELL: f64 = 1.0;
 const NOISE: f64 = 0.1;
 
 /// One `value_and_gradient_into` after a warmup call. Do not raise without an Issue.
-const MAX_MLL_AND_GRAD_ALLOCS: usize = 16;
+const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 
-/// One `predict` of 100 points after a warmup call. Do not raise without an Issue.
-const MAX_PREDICT_100_ALLOCS: usize = 8;
+/// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
+const MAX_PREDICT_100_ALLOCS: usize = 0;
 
 fn splitmix64(state: &mut u64) -> f64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -89,10 +90,11 @@ fn mll_and_grad_allocs_after_workspace() {
 
 #[test]
 fn predict_100_allocs_after_workspace() {
-    let (gpr, xs) = fitted_model().expect("spd");
-    gpr.predict(&xs, M, D).expect("warmup");
+    let (mut gpr, xs) = fitted_model().expect("spd");
+    let mut pred = Prediction::default();
+    gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
     let count = allocs_in(|| {
-        gpr.predict(&xs, M, D).expect("counted");
+        gpr.predict_into(&xs, M, D, &mut pred).expect("counted");
     });
     assert_alloc_cap("predict_100", count, MAX_PREDICT_100_ALLOCS);
 }
