@@ -7,6 +7,7 @@
 **改訂履歴**:
 - 第1回: ChatGPT・Geminiのレビューを受け、混合精度の残差式、jitterと観測ノイズの混同、アロケーション方針、精度ジェネリクスを修正。
 - 第2回: 再レビューを受け、次を反映。(1) MLL勾配のトレース項と`W`バッファ、(2) faer 0.24.4のCholesky更新API実態(LLTにinsert/deleteは無い)、(3) `GaussianLikelihood`のパラメータ化と勾配式の一致、(4) カーネルパラメータのflatten、(5) `y`のTargetTransform、(6) 混合精度の残差行列とjitterフォールバック方針、(7) 組み込みカーネルの静的ディスパッチ、(8) 予測分散の意味。実装順序は§13のロードマップに従う。
+- 第3回: 公開面を `Gpr`（トレーナー）と `FittedGpr`（学習済み）に分ける。sklearn JSON は数値照合のみ。実装は P2-8。
 
 ## 2. 全体アーキテクチャ概要
 
@@ -16,11 +17,13 @@
   → TargetTransform (yの標準化等。predict時にmean/varianceを逆変換)
   → Likelihood (観測ノイズσn²、モデルパラメータとして独立管理)
   → CompiledKernel<T> (KernelSpecをコンパイルした実行計画 + Workspace)
-  → Inference (Gpr / SparseGpr など、差し替え)
-       → Objective (尤度・勾配、Optimizerへ提供、アロケーションフリー)
-       → Optimizer (L-BFGS / Nelder-Mead 等、勾配要否で分岐)
-       → OnlineInference (`Gpr` のみ: データ点の増分追加削除)
-  → 予測 (mean, variance。潜在分散 / 観測分散を明示)
+  → Gpr (トレーナー: カーネル・尤度・変換・FitOptions)
+       → Objective (尤度・勾配。fit 中だけ)
+       → Optimizer (argmin L-BFGS)
+       → fit(self) → FittedGpr | (Gpr, GprError)
+  → FittedGpr (L, α, X。predict / predict_into / refit / loo)
+       → Phase 3: OnlineInference (`FittedGpr` 上、`&mut self`)
+       → Phase 4: SparseGpr は同様に学習済み型を返す
 ```
 
 主要な設計原則:
@@ -347,14 +350,39 @@ struct StandardizeTarget<T: Scalar> { mean: T, std: T }
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
-**`Inference`から`objective()`を切り離す**。推論モデル・ハイパラ最適化・Workspace・カーネル・Optimizerが強く結合しやすくなるため。
+学習と推論は型で分ける。未学習の `predict` は公開 API に置かない。sklearn の同一オブジェクト `fit` / `predict` は数値照合の対象であり、公開面の契約ではない。`Objective` は `fit` のあいだだけ `Gpr` を借り、学習済み値とは結合しない。
 
 ```rust
-trait Inference<T: Scalar> {
-    fn fit(&mut self, x: MatRef<T>, y: &[T]) -> Result<(), GprError>;
-    fn predict(&self, xs: MatRef<T>) -> Result<Prediction<T>, GprError>;
+/// カーネル・尤度・変換・最適化設定。未学習。
+struct Gpr { /* FitOptions, DistanceCachePolicy, transforms */ }
+
+impl Gpr {
+    fn fit(self, x: &[f64], n_rows: usize, n_cols: usize, y: &[f64])
+        -> Result<FittedGpr, (Self, GprError)>;
 }
 
+/// 学習済み。L, α, X, カーネル, 尤度, 変換。W と L-BFGS 状態は持たない。
+struct FittedGpr { /* … */ }
+
+impl FittedGpr {
+    fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize)
+        -> Result<Prediction, GprError>;
+    fn predict_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        out: &mut Prediction,
+    ) -> Result<(), GprError>;
+    fn refit(&mut self) -> Result<(), GprError>;
+    fn log_marginal_likelihood(&self) -> Result<f64, GprError>;
+    fn loo_predict(&self) -> Result<Prediction, GprError>;
+}
+```
+
+P2-8 までは暫定で単一の `Gpr` と `fitted: bool`。実装後は `Gpr`（Exact）と `SparseGpr`（Phase 4）がそれぞれ学習済み型を返す。ハイパラ最適化は`Objective`(§9)を介して `fit` 中だけ扱う。
+
+```rust
 enum VarianceKind {
     Latent,       // 潜在関数 f* の分散(ノイズなし)
     Observation,  // 観測 y* の分散(σn² 込み)。既定
@@ -372,8 +400,6 @@ struct PredictOptions {
 ```
 
 初期実装は対角分散のみ。フル共分散は将来拡張(§13 Phase 4以降)。`predict`は`PredictOptions`で分散の意味を切り替える。未指定時は`Observation`(ユーザーが欲しいのは多くの場合ノイズ込みの予測分散)。
-
-`Gpr`(n≲1万)と`SparseGpr`(FITC/VFE)が`Inference`を実装。ハイパラ最適化は`Objective`(§9)を介して別途扱う。
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
@@ -416,45 +442,80 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 メモリ節約の代替(オプトイン、後付け可): 最適化ループ中はLを`K⁻¹`/`W`で上書きし、fit終了時にCholeskyを1回やり直してpredict用のLを復元する。Phase 1は`w_matrix`を独立確保し、Lを保持する。
 
-### 6.3 `Gpr` の所有権とfitの状態
+### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
-`Inference`と`Objective`を分離したため、モデルパラメータの所有者を明示する。
+公開面はトレーナーと学習済みモデルを分ける。実装は P2-8。それまでは単一の `Gpr` と `fitted: bool` が暫定の公開面。
+
+`Gpr` は `KernelSpec`・`GaussianLikelihood`・変換・`FitOptions`・距離キャッシュ方針だけを持つ。`fit(self, …)` が L-BFGS（または `FitOptions::fixed` の一回分解）を回し、成功時に `FittedGpr` を返す。失敗時は消費した `Gpr` をエラーと一緒に返し、呼び出し側はハイパラやデータを直して再試行できる。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外す。
+
+`FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
+
+既定の `fit` は argmin の L-BFGS でハイパラを動かす。`FitOptions::fixed` は勾配を取らず、与えたハイパラで一度だけ分解する。`FittedGpr::predict` は対角分散のみ。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit(&mut self)`。
 
 ```rust
-struct Gpr<T: Scalar, P: PrecisionPolicy> {
-    kernel: KernelSpec,                          // ハイパラの所有者
-    compiled: Option<CompiledKernel<T>>,
-    likelihood: GaussianLikelihood<T>,           // ノイズパラメータの所有者
-    x_transforms: Pipeline,
-    y_transform: Box<dyn TargetTransform<T>>,
-    workspace: Workspace<P>,
-    state: GprState<T>,
+struct Gpr {
+    kernel: KernelSpec,
+    likelihood: GaussianLikelihood,
+    x_transform: Box<dyn InputTransform>,
+    y_transform: Box<dyn TargetTransform>,
+    fit_options: FitOptions,
+    distance_cache_policy: DistanceCachePolicy,
 }
 
-struct GprState<T: Scalar> {
-    fitted: bool,
+enum DistanceCachePolicy {
+    Never,
+    Always,
+}
+
+struct FittedGpr {
+    kernel: KernelSpec,
+    likelihood: GaussianLikelihood,
+    x_transform: Box<dyn InputTransform>,
+    y_transform: Box<dyn TargetTransform>,
+    workspace: Workspace<DoublePrecision>, // L。W は空でよい
+    query: QueryWorkspace<DoublePrecision>, // predict_into 用
+    compiled: CompiledKernel,
+    alpha: Vec<f64>,
+    x: Mat<f64>,
+    y: Vec<f64>,
     n: usize,
     d: usize,
-    x: Option<Mat<T>>,   // 前処理後の学習入力(predict / online 用)
-    y: Option<Col<T>>,   // TargetTransform 適用後
-    alpha: Option<Col<T>>,
-    // L は workspace.k_matrix に置く(fit後も保持)
 }
 
-/// Objective は `Gpr` を &mut で借り、set_params → MLL/勾配 を中継するだけ。
+struct FitOptions {
+    pub max_iterations: u64,      // 既定 1000
+    pub tolerance: f64,           // 既定 1e-5
+    pub history_size: usize,      // 既定 10
+    pub line_search: LineSearch,  // StrongWolfe { c1: 1e-4, c2: 0.9 }
+}
+
+impl FitOptions {
+    fn fixed() -> Self { /* max_iterations = 0 */ }
+}
+
+/// Objective は `Gpr` を fit 中だけ &mut で借り、set_params → MLL/勾配 を中継する。
 /// パラメータの正本は Gpr.kernel / Gpr.likelihood。
-struct GprObjective<'a, T: Scalar, P: PrecisionPolicy> {
-    model: &'a mut Gpr<T, P>,
+struct GprObjective<'a> {
+    model: &'a mut Gpr,
 }
 ```
 
+`x` は列優先の `&[f64]` で受け、内部で `n×d` の `Mat` に詰める。
+
+| メソッド | レシーバ | 確保 |
+| -------- | -------- | ---- |
+| `FittedGpr::predict` | `&self` | 出力 `Prediction` と、必要なら一時 query バッファ |
+| `FittedGpr::predict_into` | `&mut self` | warmup 後は 0。`mean` / `variance` の容量を再利用 |
+
 前提条件:
-- fit前のpredict / `loo_predict`は`GprError::NotFitted`
-- fitは状態を置き換える(再fit可)
-- fit後の入力次元`d`は固定。不一致は`DimensionMismatch`
+- 未学習の `predict` は型で起きない（P2-8 まで暫定 `NotFitted`）
+- `FittedGpr::refit` は同じ `n`/`d` で L と `α` を置き換える
+- クエリの入力次元`d`は固定。不一致は`DimensionMismatch`
 - n=0は`EmptyInput`、nがカーネルの最低点数未満なら`InsufficientData`
 - 入力のNaN/Infは`NonFiniteInput`
-- Cholesky失敗時は`fitted=false`のままにし、中途半端なL/αを残さない
+- Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
+
+`DistanceCachePolicy::Always`（既定）は `fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。`Never` は毎回埋め直す。キャッシュは等方カーネル向けの `n×n`。ARD の `n×n×d` は P2-7。
 
 ### 6.4 Leave-one-out(P1B-7)
 
@@ -467,7 +528,7 @@ Exact GPR の leave-one-out は、学習後の `L` と `α` から閉じた式�
 
 これは観測の `p(y_i | X, y_{-i}, θ)`。潜在 `f_i` の LOO 分散は `max(0, 1/Q_ii - σn²)`。`Q_ii` は下三角 `L` から `L⁻¹` の列ノルムで取る(`A⁻¹ = L^{-T} L^{-1}`)。コストは Cholesky と同オーダーの O(n³)、追加メモリは `n×n` の一時行列。Phase 1b の n=16 / 36 では問題にならない。
 
-`Gpr::loo_predict` は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White 葉は使わず、ノイズは `GaussianLikelihood` のみ。
+`FittedGpr::loo_predict`（P2-8 までは `Gpr::loo_predict`）は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White 葉は使わず、ノイズは `GaussianLikelihood` のみ。
 
 sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_` に同じ GPML 式を適用して JSON に書く。Rust 側は sklearn が選んだ `θ` で `FitOptions::FIXED` して照合する(最適化器差を LOO に混ぜない)。
 
@@ -486,18 +547,22 @@ struct Workspace<P: PrecisionPolicy> {
     kernel_scratch: Mat<P::Storage>, // product `∂K/∂θ`。等方 RBF では空
     thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
     rhs: Mat<P::Storage>,            // n×1、訓練 Cholesky の右辺 y → α
-    query_xs: Vec<f64>,              // predict 用、変換後クエリ（列優先）
+    refine_buf: Option<Mat<P::Refine>>, // MixedPrecision時のみ。DoublePrecisionではNone
+    faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
+}
+
+// FittedGpr が保持。predict_into の warmup で (n, m, d) に合わせる
+struct QueryWorkspace<P: PrecisionPolicy> {
+    query_xs: Vec<f64>,              // 変換後クエリ（列優先）
     query_x: Mat<P::Storage>,        // m×d
     query_k_star: Mat<P::Storage>,   // n×m
     query_scratch: Mat<P::Storage>,
     query_dist: Mat<P::Storage>,
     query_kss: Vec<f64>,
-    refine_buf: Option<Mat<P::Refine>>, // MixedPrecision時のみ。DoublePrecisionではNone
-    faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
 }
 ```
 
-各バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは最初の `predict` / `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
+fit 用バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは `FittedGpr`（P2-8 までは暫定で同じ `Workspace`）が持ち、最初の `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。`predict(&self)` は出力 `Vec` を毎回確保してよい。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 
 Rayon並列クロージャ内での新規確保は厳禁。`thread_scratch`を事前分割し、**並列領域に入る直前に`Workspace`から切り離して**分配する。`&mut self`(Objective/`Gpr`)をRayonクロージャに渡さない。
 
@@ -525,8 +590,9 @@ fit()開始 → n,d確定 → 各Mat<T>を1回だけ確保 → 距離キャッ�
        α, log|K|
        w_matrix に K⁻¹ → W
        exp_buf に ∂K/∂θ を順に書き ⟨W, dK⟩
-fit()終了 → Workspace(L含む)は保持、predict/refitで再利用
-  → predict_into: query_* に上書き、`Prediction` の容量を再利用
+fit()終了 → FittedGpr が L, α, X を保持。W / ∂K / L-BFGS は捨ててよい
+  → predict(&self): 出力を確保
+  → predict_into(&mut self): query_* に上書き、`Prediction` の容量を再利用
 ```
 
 バッチfitのWorkspaceはn固定。オンライン学習の容量成長は`OnlineWorkspace`(§11)が担当し、バッチ用Workspaceとはメモリ管理方針を分ける。
@@ -587,7 +653,7 @@ pub enum GprError {
     #[error("入力が空です")]
     EmptyInput,
     #[error("モデルが未学習です。先に fit を呼んでください")]
-    NotFitted,
+    NotFitted, // P2-8 で公開の predict 経路から外す。型で未学習を表す
     #[error("入力に非有限値(NaN/Inf)が含まれます")]
     NonFiniteInput,
     #[error("カーネル評価結果に非有限値が含まれます")]
@@ -622,7 +688,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 ## 11. オンライン学習(データ点の追加削除)
 
-GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、`Gpr`向けに専用の`OnlineWorkspace`・更新経路を用意する。
+GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、`FittedGpr`向けに専用の`OnlineWorkspace`・更新経路を用意する（`&mut self`）。
 
 ### コスト比較
 
@@ -709,6 +775,8 @@ struct PointRegistry {
 
 **insert/deleteとハイパラ再最適化を分離する**。
 
+Phase 3 の対象は `FittedGpr`（`&mut self`）。未学習の `Gpr` には点を足さない。
+
 ```rust
 trait OnlineInference<T: Scalar> {
     fn insert(&mut self, x_new: &[T], y_new: T) -> Result<PointId, GprError>;
@@ -734,7 +802,7 @@ trait OnlineInference<T: Scalar> {
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
 5. **オンラインのプロパティテスト**: ランダムなinsert/delete列の各段階で `incremental == full refit`(mean, variance, LML, alpha)。特に削除順をランダム化する
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのf64フォールバック
-7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)
+7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)。sklearn JSON は数値の第二照合であり、公開 API の契約ではない。アルゴリズムの正本は GPML / Rasmussen
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
 9. **最適化後の推論**(P1B-6): 1次元 Forrester と 2次元重み付き球関数（ARD）で sklearn L-BFGS と `Gpr::fit` を緩い許容で照合する。固定ハイパラ JSON（1e-8）とは分ける。`cargo test` は Python を呼ばない
 10. **Leave-one-out**(P1B-7): n=2 の GPML 解析式、n=3 の実 leave-one-out `fit`+`predict`、および P1B-6 JSON の LOO 欄を sklearn の `θ` で照合する。`cargo test` は Python を呼ばない
@@ -748,8 +816,8 @@ trait OnlineInference<T: Scalar> {
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
-- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。SIMDは `kernel_rbf` がボトルネックなときだけ
-- **Phase 3(オンライン学習)**: 自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
+- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。SIMDは `kernel_rbf` がボトルネックなときだけ。P2-8 で `Gpr` / `FittedGpr` の typestate（速度行のあと）
+- **Phase 3(オンライン学習)**: `FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ、**誘導点Zは固定**、対角予測、ハイパラ最適化(Zは含めない)
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
 
