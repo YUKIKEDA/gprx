@@ -23,7 +23,7 @@ const NOISE: f64 = 0.1;
 const MAX_MLL_AND_GRAD_ALLOCS: usize = 16;
 
 /// One `predict` of 100 points after a warmup call. Do not raise without an Issue.
-const MAX_PREDICT_100_ALLOCS: usize = 9;
+const MAX_PREDICT_100_ALLOCS: usize = 8;
 
 fn splitmix64(state: &mut u64) -> f64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);

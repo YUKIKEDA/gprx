@@ -27,11 +27,19 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// Distinct `n×n` scratch for product `∂K/∂θ`. Empty until a product tree
     /// needs a gradient, so isotropic RBF does not carry an extra matrix.
     pub(crate) kernel_scratch: Mat<P::Storage>,
+    /// One empty `0×0` matrix per Rayon worker. Detached with `mem::take`
+    /// before a parallel kernel fill so closures never borrow `&mut Workspace`.
+    pub(crate) thread_scratch: Vec<Mat<P::Storage>>,
     /// Residual buffer for mixed-precision refinement. `None` in Phase 1.
     #[allow(dead_code)]
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
+}
+
+fn empty_thread_scratch() -> Vec<Mat<f64>> {
+    let n = rayon::current_num_threads().max(1);
+    (0..n).map(|_| Mat::<f64>::zeros(0, 0)).collect()
 }
 
 fn faer_scratch_req(n: usize) -> StackReq {
@@ -58,6 +66,7 @@ impl Workspace<DoublePrecision> {
             dist_ready: false,
             exp_buf: Mat::<f64>::zeros(n, n),
             kernel_scratch: Mat::<f64>::zeros(0, 0),
+            thread_scratch: empty_thread_scratch(),
             refine_buf: None,
             faer_scratch: MemBuffer::new(faer_scratch_req(n)),
         })
@@ -131,6 +140,12 @@ mod tests {
         assert_square(&ws.exp_buf, n);
         assert_eq!(ws.kernel_scratch.nrows(), 0);
         assert_eq!(ws.kernel_scratch.ncols(), 0);
+        assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
+        assert!(
+            ws.thread_scratch
+                .iter()
+                .all(|m| m.nrows() == 0 && m.ncols() == 0)
+        );
         assert!(ws.refine_buf.is_none());
         assert_eq!(ws.faer_scratch.len(), faer_scratch_req(n).size_bytes());
         assert_send_sync::<Workspace<DoublePrecision>>();
