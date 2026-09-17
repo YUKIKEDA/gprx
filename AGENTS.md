@@ -24,4 +24,4 @@
 
 ## 今の着手点
 
-M0（[#1](https://github.com/YUKIKEDA/gprx/issues/1) → [#2](https://github.com/YUKIKEDA/gprx/issues/2)）。GPR は書かない。1a は M0 完了後。
+Phase 1（1b / 0.1.0 相当）。次は Phase 2 の [P2-1](https://github.com/YUKIKEDA/gprx/issues/25)。
