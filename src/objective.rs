@@ -2,9 +2,8 @@
 //!
 //! Crate-private. [`GprObjective`] borrows [`Gpr`] and forwards concatenated
 //! kernel-then-likelihood `θ` to the model, which owns the source of truth.
-//! P1B-2 wires L-BFGS to this trait.
 
-#![allow(dead_code)]
+#![allow(dead_code)] // P1B-3 Gpr::fit
 
 use crate::error::GprError;
 use crate::gpr::Gpr;
