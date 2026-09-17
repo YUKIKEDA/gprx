@@ -5,6 +5,12 @@
 //! ARD RBF, ARD Matérn, and ARD rational quadratic evaluate from coordinates
 //! via [`ArdLengthscales`] (`θ_d = log(ℓ_d)`). Callers pass faer views; this
 //! module does not re-export faer types.
+//!
+//! Squared-Euclidean fills and [`Triangle::Lower`] writes run on Rayon's
+//! global pool. Limit threads with `RAYON_NUM_THREADS` or
+//! `rayon::ThreadPoolBuilder::build_global` before the first fill. ARD /
+//! points-mode leaves stay sequential. See the [crate-level parallelism
+//! notes](crate).
 
 mod compiled;
 mod constant;
