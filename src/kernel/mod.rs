@@ -7,8 +7,10 @@
 //! module does not re-export faer types.
 //!
 //! Squared-Euclidean fills and [`Triangle::Lower`] writes run on Rayon's
-//! global pool. There is no parallel on/off flag; `RAYON_NUM_THREADS=1` is
-//! sequential. Limit threads with `RAYON_NUM_THREADS` or
+//! global pool. Isotropic RBF and the distance row loop also use `wide::f64x4`
+//! when the faer view is column-major with unit row stride. There is no
+//! parallel on/off flag; `RAYON_NUM_THREADS=1` is sequential. Limit threads
+//! with `RAYON_NUM_THREADS` or
 //! `rayon::ThreadPoolBuilder::build_global` before the first fill. ARD /
 //! points-mode leaves stay sequential. See the [crate-level parallelism
 //! notes](crate).
@@ -25,6 +27,7 @@ mod rbf;
 mod rbf_ard;
 mod rq;
 mod rq_ard;
+mod simd;
 mod spec;
 mod white;
 
