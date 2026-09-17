@@ -232,7 +232,8 @@ impl Gpr {
     /// `params` and `out` are kernel parameters followed by the likelihood
     /// parameter. One Cholesky produces `L` and `α`; `W = ααᵀ - A⁻¹` is
     /// formed in the workspace without overwriting `L`. Kernel `∂A/∂θ` goes
-    /// through `exp_buf`. The returned value is the same as
+    /// through `exp_buf`. Product trees also use `kernel_scratch`. The
+    /// returned value is the same as
     /// [`Self::neg_log_marginal_likelihood`] after a successful call.
     ///
     /// Training `X` / `y` must already come from [`Self::fit`]. Transforms
@@ -242,9 +243,11 @@ impl Gpr {
     ///
     /// Returns [`GprError::NotFitted`] if [`Self::fit`] has not stored data,
     /// [`GprError::InvalidHyperparameter`] if a slice length is wrong,
-    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid, or
-    /// [`GprError::CholeskyFailed`] if `A` cannot be factored. Kernel and
-    /// likelihood `θ` are committed together only after `A` factors. A
+    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
+    /// [`GprError::CholeskyFailed`] if `A` cannot be factored, or
+    /// [`GprError::UnsupportedKernelOperation`] if a points-mode product tree
+    /// needs a gradient. Distance-mode product trees are supported. Kernel
+    /// and likelihood `θ` are committed together only after `A` factors. A
     /// rejected slice or a Cholesky failure leaves stored `θ` unchanged.
     /// Cholesky failure still sets `fitted = false` because `L` is
     /// overwritten, but it keeps the training data.
@@ -337,12 +340,16 @@ impl Gpr {
             }
             form_w_lower(ws.w_matrix.as_mut(), alpha, n);
             let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
+            if compiled.needs_product_grad_scratch() {
+                ws.ensure_kernel_scratch(n)?;
+            }
             for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
                 write_kernel_grad(
                     compiled,
                     ws.dist_cache.as_ref(),
                     x.as_ref(),
                     ws.exp_buf.as_mut(),
+                    ws.kernel_scratch.as_mut(),
                     i,
                 )?;
                 let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
@@ -751,44 +758,15 @@ fn write_kernel_grad(
     dist: MatRef<'_, f64>,
     x: MatRef<'_, f64>,
     d_k: MatMut<'_, f64>,
+    scratch: MatMut<'_, f64>,
     param_idx: usize,
 ) -> Result<(), GprError> {
-    match compiled {
-        CompiledKernel::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::Matern(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::MaternArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::Periodic(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::RationalQuadratic(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::Linear(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::Constant(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::White(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
-        CompiledKernel::Product(_) => Err(GprError::UnsupportedKernelOperation {
-            reason: "product kernel gradient needs a dedicated scratch buffer".to_owned(),
-        }),
-        CompiledKernel::Sum(terms) => {
-            let (term, local) = term_for_kernel_param(terms, param_idx)?;
-            write_kernel_grad(term, dist, x, d_k, local)
+    match compiled.coord_mode()? {
+        CoordMode::Dist | CoordMode::Either => {
+            compiled.grad(dist, d_k, param_idx, Triangle::Lower, scratch)
         }
+        CoordMode::Points => compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch),
     }
-}
-
-fn term_for_kernel_param(
-    terms: &[CompiledKernel],
-    param_idx: usize,
-) -> Result<(&CompiledKernel, usize), GprError> {
-    let mut offset = 0;
-    for term in terms {
-        let n = term.num_params();
-        if param_idx < offset + n {
-            return Ok((term, param_idx - offset));
-        }
-        offset += n;
-    }
-    Err(GprError::InvalidHyperparameter {
-        reason: format!("kernel parameter index {param_idx} is out of range"),
-    })
 }
 
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
@@ -835,9 +813,9 @@ mod tests {
     use super::{Gpr, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GprError};
     use crate::kernel::{
-        KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel,
-        RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, Triangle,
-        WhiteKernel,
+        ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
+        PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel,
+        RbfKernel, Triangle, WhiteKernel,
     };
     use crate::likelihood::GaussianLikelihood;
     use crate::precision::DoublePrecision;
@@ -1245,18 +1223,76 @@ mod tests {
     }
 
     #[test]
-    fn value_and_gradient_product_is_unsupported() {
+    fn value_and_gradient_product_matches_finite_difference() {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
             * KernelSpec::from(RbfKernel::new(2.0).expect("valid"));
         let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"));
         gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
-        let mut params = [0.0; 3];
-        gpr.get_params(&mut params).expect("len 3");
-        let mut grad = [0.0; 3];
-        assert!(matches!(
-            gpr.value_and_gradient_into(&params, &mut grad),
-            Err(GprError::UnsupportedKernelOperation { .. })
-        ));
+        let n_params = gpr.num_params();
+        let mut params = vec![0.0; n_params];
+        gpr.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; n_params];
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        let h = 1e-5;
+        let mut dummy = vec![0.0; n_params];
+        for i in 0..n_params {
+            let mut plus = params.clone();
+            let mut minus = params.clone();
+            plus[i] += h;
+            minus[i] -= h;
+            let v_plus = gpr
+                .value_and_gradient_into(&plus, &mut dummy)
+                .expect("plus");
+            let v_minus = gpr
+                .value_and_gradient_into(&minus, &mut dummy)
+                .expect("minus");
+            let fd = (v_plus - v_minus) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (grad[i] - fd).abs() <= 1e-5 * scale,
+                "param {i}: analytic={}, fd={}",
+                grad[i],
+                fd
+            );
+        }
+    }
+
+    #[test]
+    fn value_and_gradient_sum_of_product_matches_finite_difference() {
+        let kernel = KernelSpec::from(ConstantKernel::new(1.5).expect("valid"))
+            * KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
+            + KernelSpec::from(RbfKernel::new(2.0).expect("valid"));
+        let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"));
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        let n_params = gpr.num_params();
+        let mut params = vec![0.0; n_params];
+        gpr.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; n_params];
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        let h = 1e-5;
+        let mut dummy = vec![0.0; n_params];
+        for i in 0..n_params {
+            let mut plus = params.clone();
+            let mut minus = params.clone();
+            plus[i] += h;
+            minus[i] -= h;
+            let v_plus = gpr
+                .value_and_gradient_into(&plus, &mut dummy)
+                .expect("plus");
+            let v_minus = gpr
+                .value_and_gradient_into(&minus, &mut dummy)
+                .expect("minus");
+            let fd = (v_plus - v_minus) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (grad[i] - fd).abs() <= 1e-5 * scale,
+                "param {i}: analytic={}, fd={}",
+                grad[i],
+                fd
+            );
+        }
     }
 
     #[test]

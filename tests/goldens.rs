@@ -1,9 +1,9 @@
-//! sklearn golden checks for fixed-hyperparameter Exact GPR (P1A-12, P1A-17).
+//! sklearn golden checks for fixed-hyperparameter Exact GPR (P1A-12, P1A-17, #74).
 //!
 //! JSON under `compare/goldens/` is produced by `just gen-goldens`. This
 //! file only reads the committed bytes; `cargo test` must not invoke Python.
 //! P1A-12 pins isotropic RBF. P1A-17 adds Sum/Product flatten and extra
-//! leaves against the same sklearn bytes.
+//! leaves. Product and mixed trees include `grad_theta`.
 
 use gprx::kernel::{
     ConstantKernel, KernelSpec, MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticKernel,
@@ -27,6 +27,10 @@ const COMPOSITE_GOLDENS: &[(&str, &str)] = &[
     (
         "constant_rbf_product_n2",
         include_str!("../compare/goldens/constant_rbf_product_n2.json"),
+    ),
+    (
+        "constant_rbf_plus_rbf_n2",
+        include_str!("../compare/goldens/constant_rbf_plus_rbf_n2.json"),
     ),
     (
         "matern32_n2",
@@ -87,6 +91,8 @@ struct LeafGolden {
     alpha: Option<f64>,
     period: Option<f64>,
     nu: Option<f64>,
+    #[serde(default)]
+    leaves: Vec<LeafGolden>,
 }
 
 fn assert_close(actual: f64, expected: f64) {
@@ -119,6 +125,21 @@ fn matern_nu(nu: f64) -> Result<MaternNu, GprError> {
 
 fn leaf_spec(leaf: &LeafGolden) -> Result<KernelSpec, GprError> {
     match leaf.kind.as_str() {
+        "sum" | "product" => {
+            let mut terms = Vec::with_capacity(leaf.leaves.len());
+            for child in &leaf.leaves {
+                terms.push(leaf_spec(child)?);
+            }
+            let mut iter = terms.into_iter();
+            let first = iter
+                .next()
+                .ok_or_else(|| golden_err(format!("golden {} node has no leaves", leaf.kind)))?;
+            if leaf.kind == "sum" {
+                Ok(iter.fold(first, |acc, term| acc + term))
+            } else {
+                Ok(iter.fold(first, |acc, term| acc * term))
+            }
+        }
         "rbf" => Ok(KernelSpec::from(RbfKernel::new(require_field(
             leaf.lengthscale,
             "lengthscale",

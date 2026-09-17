@@ -1,11 +1,11 @@
-"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17).
+"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17, product grad).
 
 Noise is sklearn ``alpha``, matching ``GaussianLikelihood``, not ``WhiteKernel``.
 ``predict(..., return_std=True)`` is latent; observation variance adds ``alpha``.
 
 P1A-12: isotropic RBF. P1A-17: Sum/Product flatten plus extra leaves
-(Matern, RQ, Periodic). Product goldens omit ``grad_theta`` because
-``Gpr::value_and_gradient_into`` does not yet support product trees.
+(Matern, RQ, Periodic). Product and mixed trees include ``grad_theta``
+once ``Gpr::value_and_gradient_into`` calls ``CompiledKernel::grad``.
 sklearn ``RationalQuadratic.theta`` is ``[log(α), log(ℓ)]``; committed JSON
 uses gprx order ``[log(ℓ), log(α)]``.
 
@@ -80,7 +80,23 @@ COMPOSITE_CASES = [
             {"type": "constant", "constant": 1.5},
             {"type": "rbf", "lengthscale": 1.0},
         ],
-        "eval_gradient": False,
+        "eval_gradient": True,
+    },
+    {
+        **N2,
+        "name": "constant_rbf_plus_rbf_n2",
+        "op": "sum",
+        "leaves": [
+            {
+                "type": "product",
+                "leaves": [
+                    {"type": "constant", "constant": 1.5},
+                    {"type": "rbf", "lengthscale": 1.0},
+                ],
+            },
+            {"type": "rbf", "lengthscale": 2.0},
+        ],
+        "eval_gradient": True,
     },
     {
         **N2,
@@ -117,6 +133,8 @@ def as_f64_list(values: np.ndarray) -> list[float]:
 
 def sklearn_leaf(leaf: dict):
     kind = leaf["type"]
+    if kind in ("sum", "product"):
+        return sklearn_kernel(kind, leaf["leaves"])
     if kind == "rbf":
         return RBF(length_scale=float(leaf["lengthscale"]))
     if kind == "constant":
@@ -215,6 +233,18 @@ def rbf_golden(case: dict) -> dict:
     }
 
 
+def flatten_leaves(nodes: list[dict]) -> list[dict]:
+    """Depth-first leaves, matching KernelSpec flatten order."""
+    out: list[dict] = []
+    for node in nodes:
+        kind = node["type"]
+        if kind in ("sum", "product"):
+            out.extend(flatten_leaves(node["leaves"]))
+        else:
+            out.append(node)
+    return out
+
+
 def to_gprx_theta(leaves: list[dict], values: np.ndarray) -> list[float]:
     """Reorder sklearn ``kernel.theta`` to gprx flatten order.
 
@@ -223,7 +253,7 @@ def to_gprx_theta(leaves: list[dict], values: np.ndarray) -> list[float]:
     """
     out: list[float] = []
     offset = 0
-    for leaf in leaves:
+    for leaf in flatten_leaves(leaves):
         kind = leaf["type"]
         if kind == "rq":
             out.append(float(values[offset + 1]))
