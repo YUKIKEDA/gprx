@@ -2,8 +2,8 @@
 
 use crate::error::GprError;
 use crate::kernel::{
-    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, RbfArdKernel, RbfKernel,
-    WhiteKernel,
+    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel, RbfArdKernel,
+    RbfKernel, WhiteKernel,
 };
 use std::ops::{Add, Mul};
 
@@ -45,6 +45,8 @@ pub enum KernelSpec {
     Matern(MaternKernel),
     /// ARD Matérn leaf (`θ_d = log(ℓ_d)`).
     MaternArd(MaternArdKernel),
+    /// Periodic (exp-sine-squared) leaf.
+    Periodic(PeriodicKernel),
     /// Constant leaf `k = c`.
     Constant(ConstantKernel),
     /// Linear leaf `k = σ² xᵀ x'`.
@@ -78,6 +80,12 @@ impl From<MaternKernel> for KernelSpec {
 impl From<MaternArdKernel> for KernelSpec {
     fn from(kernel: MaternArdKernel) -> Self {
         Self::MaternArd(kernel)
+    }
+}
+
+impl From<PeriodicKernel> for KernelSpec {
+    fn from(kernel: PeriodicKernel) -> Self {
+        Self::Periodic(kernel)
     }
 }
 
@@ -123,6 +131,7 @@ impl KernelSpec {
             Self::RbfArd(leaf) => leaf.num_params(),
             Self::Matern(leaf) => leaf.num_params(),
             Self::MaternArd(leaf) => leaf.num_params(),
+            Self::Periodic(leaf) => leaf.num_params(),
             Self::Constant(leaf) => leaf.num_params(),
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
@@ -210,6 +219,11 @@ impl KernelSpec {
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 *offset += n;
             }
+            Self::Periodic(leaf) => {
+                out[*offset] = leaf.log_lengthscale();
+                out[*offset + 1] = leaf.log_period();
+                *offset += 2;
+            }
             Self::Constant(leaf) => {
                 out[*offset] = leaf.log_constant();
                 *offset += 1;
@@ -250,6 +264,12 @@ impl KernelSpec {
                 Ok(())
             }
             Self::MaternArd(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::Periodic(leaf) => {
                 let n = leaf.num_params();
                 leaf.set_params(&params[*offset..*offset + n])?;
                 *offset += n;
@@ -297,6 +317,9 @@ impl KernelSpec {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::MaternArd(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Periodic(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::Constant(leaf) => {
@@ -348,8 +371,8 @@ fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
 mod tests {
     use super::KernelSpec;
     use crate::kernel::{
-        ConstantKernel, MaternArdKernel, MaternKernel, MaternNu, RbfArdKernel, RbfKernel,
-        WhiteKernel,
+        ConstantKernel, MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel, RbfArdKernel,
+        RbfKernel, WhiteKernel,
     };
 
     const TOL: f64 = 1e-12;
@@ -488,5 +511,31 @@ mod tests {
             }
             other => panic!("expected ARD Matern, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn periodic_flattens_lengthscale_then_period() {
+        let mut spec = KernelSpec::from(PeriodicKernel::new(1.5, 4.0).expect("valid"));
+        assert_eq!(spec.num_params(), 2);
+        let mut params = [0.0; 2];
+        spec.get_params(&mut params).expect("len 2");
+        assert_close(params[0], 1.5_f64.ln());
+        assert_close(params[1], 4.0_f64.ln());
+        params[1] = 2.0_f64.ln();
+        spec.set_params(&params).expect("len 2");
+        let b = spec.parameter_bindings();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].leaf_id, 0);
+        assert_eq!(b[1].local_index, 1);
+        match spec.compile() {
+            crate::kernel::CompiledKernel::Periodic(leaf) => {
+                assert_close(leaf.period(), 2.0);
+            }
+            other => panic!("expected Periodic, got {other:?}"),
+        }
+        assert_eq!(
+            spec.compile().coord_mode().expect("compat"),
+            crate::kernel::CoordMode::Dist
+        );
     }
 }

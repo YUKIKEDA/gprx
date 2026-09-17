@@ -1,9 +1,9 @@
 //! Kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
 //!
-//! Isotropic RBF and Matérn evaluate from a squared-Euclidean distance matrix.
-//! ARD RBF and ARD Matérn evaluate from coordinates via [`ArdLengthscales`]
-//! (`θ_d = log(ℓ_d)`). Callers pass faer views; this module does not re-export
-//! faer types.
+//! Isotropic RBF, Matérn, and Periodic evaluate from a squared-Euclidean
+//! distance matrix (Periodic then takes the square root). ARD RBF and ARD
+//! Matérn evaluate from coordinates via [`ArdLengthscales`] (`θ_d = log(ℓ_d)`).
+//! Callers pass faer views; this module does not re-export faer types.
 
 mod compiled;
 mod constant;
@@ -11,6 +11,7 @@ mod lengthscale;
 mod linear;
 mod matern;
 mod matern_ard;
+mod periodic;
 mod rbf;
 mod rbf_ard;
 mod spec;
@@ -23,6 +24,7 @@ pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};
 pub use matern_ard::MaternArdKernel;
+pub use periodic::PeriodicKernel;
 pub use rbf::RbfKernel;
 pub use rbf_ard::RbfArdKernel;
 pub use spec::{KernelSpec, ParameterBinding};
