@@ -8,7 +8,7 @@ use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
 use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, KernelSpec, Triangle};
+use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::DoublePrecision;
 use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
@@ -284,13 +284,22 @@ impl Gpr {
         let n = self.n;
         let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
         {
+            let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            compiled.apply(
-                ws.dist_cache.as_ref(),
-                ws.k_matrix.as_mut(),
-                Triangle::Lower,
-                ws.exp_buf.as_mut(),
-            )?;
+            match compiled.coord_mode()? {
+                CoordMode::Dist => compiled.apply(
+                    ws.dist_cache.as_ref(),
+                    ws.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    ws.exp_buf.as_mut(),
+                )?,
+                CoordMode::Points => compiled.apply_points(
+                    x.as_ref(),
+                    ws.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    ws.exp_buf.as_mut(),
+                )?,
+            }
             add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
         }
         let mut rhs = Mat::from_fn(n, 1, |i, _| y[i]);
@@ -340,8 +349,15 @@ impl Gpr {
                 );
             }
             form_w_lower(ws.w_matrix.as_mut(), alpha, n);
+            let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-                write_kernel_grad(compiled, ws.dist_cache.as_ref(), ws.exp_buf.as_mut(), i)?;
+                write_kernel_grad(
+                    compiled,
+                    ws.dist_cache.as_ref(),
+                    x.as_ref(),
+                    ws.exp_buf.as_mut(),
+                    i,
+                )?;
                 let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
                 *slot = -0.5 * inner;
             }
@@ -410,13 +426,25 @@ impl Gpr {
         let compiled = self.kernel.compile();
         {
             let ws = workspace_mut(&mut self.workspace)?;
-            fill_squared_euclidean(x_mat.as_ref(), ws.dist_cache.as_mut());
-            compiled.apply(
-                ws.dist_cache.as_ref(),
-                ws.k_matrix.as_mut(),
-                Triangle::Lower,
-                ws.exp_buf.as_mut(),
-            )?;
+            match compiled.coord_mode()? {
+                CoordMode::Dist => {
+                    fill_squared_euclidean(x_mat.as_ref(), ws.dist_cache.as_mut());
+                    compiled.apply(
+                        ws.dist_cache.as_ref(),
+                        ws.k_matrix.as_mut(),
+                        Triangle::Lower,
+                        ws.exp_buf.as_mut(),
+                    )?;
+                }
+                CoordMode::Points => {
+                    compiled.apply_points(
+                        x_mat.as_ref(),
+                        ws.k_matrix.as_mut(),
+                        Triangle::Lower,
+                        ws.exp_buf.as_mut(),
+                    )?;
+                }
+            }
             add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
         }
         let mut rhs = Mat::from_fn(n_rows, 1, |i, _| y_buf[i]);
@@ -495,11 +523,23 @@ impl Gpr {
         let x_test = pack_points(&xs_buf, n_rows, n_cols);
         let n = self.n;
         let m = n_rows;
-        let mut dist = Mat::zeros(n, m);
         let mut k_star = Mat::zeros(n, m);
         let mut scratch = Mat::zeros(n, m);
-        fill_squared_euclidean_cross(x_train.as_ref(), x_test.as_ref(), dist.as_mut());
-        compiled.apply_cross(dist.as_ref(), k_star.as_mut(), scratch.as_mut())?;
+        match compiled.coord_mode()? {
+            CoordMode::Dist => {
+                let mut dist = Mat::zeros(n, m);
+                fill_squared_euclidean_cross(x_train.as_ref(), x_test.as_ref(), dist.as_mut());
+                compiled.apply_cross(dist.as_ref(), k_star.as_mut(), scratch.as_mut())?;
+            }
+            CoordMode::Points => {
+                compiled.apply_cross_points(
+                    x_train.as_ref(),
+                    x_test.as_ref(),
+                    k_star.as_mut(),
+                    scratch.as_mut(),
+                )?;
+            }
+        }
         let mut mean = vec![0.0; m];
         for col in 0..m {
             let mut sum = 0.0;
@@ -711,17 +751,19 @@ fn frobenius_lower(w: MatRef<'_, f64>, d_k: MatRef<'_, f64>, n: usize) -> f64 {
 fn write_kernel_grad(
     compiled: &CompiledKernel,
     dist: MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
     d_k: MatMut<'_, f64>,
     param_idx: usize,
 ) -> Result<(), GprError> {
     match compiled {
         CompiledKernel::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
+        CompiledKernel::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
         CompiledKernel::Product(_) => Err(GprError::UnsupportedKernelOperation {
             reason: "product kernel gradient needs a dedicated scratch buffer".to_owned(),
         }),
         CompiledKernel::Sum(terms) => {
             let (term, local) = term_for_kernel_param(terms, param_idx)?;
-            write_kernel_grad(term, dist, d_k, local)
+            write_kernel_grad(term, dist, x, d_k, local)
         }
     }
 }
@@ -786,7 +828,7 @@ pub(crate) fn cholesky_and_solve(
 mod tests {
     use super::{Gpr, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GprError};
-    use crate::kernel::{KernelSpec, RbfKernel, Triangle};
+    use crate::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
     use crate::likelihood::GaussianLikelihood;
     use crate::precision::DoublePrecision;
     use crate::transform::{StandardizeTarget, TargetTransform};
@@ -1272,5 +1314,34 @@ mod tests {
         t.inverse_transform_mean(&mut recovered).expect("fitted");
         assert_close(recovered[0], y[0]);
         assert_close(recovered[1], y[1]);
+    }
+
+    #[test]
+    fn ard_equal_lengthscales_match_isotropic_predict() {
+        let ell = 1.25;
+        let noise = 0.1;
+        let x = [0.0, 0.5, 1.5, 0.0, 1.0, 0.5];
+        let y = [0.2, -1.0, 0.7];
+        let xs = [0.25, 1.0];
+        let mut iso = rbf_gpr(ell, noise);
+        iso.fit(&x, 3, 2, &y).expect("spd");
+        let mut ard = Gpr::new(
+            KernelSpec::from(RbfArdKernel::new(&[ell, ell]).expect("valid")),
+            GaussianLikelihood::new(noise).expect("valid"),
+        );
+        ard.fit(&x, 3, 2, &y).expect("spd");
+        let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
+        let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
+        assert_close(p_ard.mean[0], p_iso.mean[0]);
+        assert_close(p_ard.variance[0], p_iso.variance[0]);
+        let mut params = vec![0.0; ard.num_params()];
+        ard.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; params.len()];
+        let nlml = ard
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert!(nlml.is_finite());
+        assert_eq!(params.len(), 3);
+        assert!(grad.iter().all(|g| g.is_finite()));
     }
 }

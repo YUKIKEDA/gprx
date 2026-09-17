@@ -1,14 +1,20 @@
 //! Kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
 //!
-//! Phase 1 evaluates isotropic RBF from a squared-Euclidean distance matrix.
+//! Isotropic RBF evaluates from a squared-Euclidean distance matrix. ARD RBF
+//! evaluates from coordinates via [`ArdLengthscales`] (`θ_d = log(ℓ_d)`).
 //! Callers pass faer views; this module does not re-export faer types.
 
 mod compiled;
+mod lengthscale;
 mod rbf;
+mod rbf_ard;
 mod spec;
 
 pub use compiled::CompiledKernel;
+pub(crate) use compiled::CoordMode;
+pub use lengthscale::ArdLengthscales;
 pub use rbf::RbfKernel;
+pub use rbf_ard::RbfArdKernel;
 pub use spec::{KernelSpec, ParameterBinding};
 
 use crate::error::GprError;
