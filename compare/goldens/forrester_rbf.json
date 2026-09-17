@@ -3,10 +3,14 @@
   "sklearn_version": "1.6.1",
   "function": "forrester1d",
   "normalize_y": true,
-  "lengthscale_init": 1.0,
+  "lengthscales_init": [
+    1.0
+  ],
   "noise_variance_init": 0.1,
   "noise_std_added": 1.0,
-  "lengthscale": 0.12152387301565337,
+  "lengthscales": [
+    0.12152387301565337
+  ],
   "noise_variance": 0.019268219231284963,
   "theta": [
     -2.1076445497767837,

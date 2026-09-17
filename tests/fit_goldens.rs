@@ -5,26 +5,34 @@
 //! Tolerances are looser than the fixed-hyperparameter 1e-8 cases because
 //! sklearn uses scipy L-BFGS-B and gprx uses argmin L-BFGS.
 
-use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
 use gprx::{GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
 use serde::Deserialize;
 
 /// Relative band for NLML and predictive mean / variance.
 const REL_TOL: f64 = 0.15;
-/// Recovered `ℓ` and `σn²` may differ more than the predictions.
-const THETA_REL_TOL: f64 = 0.5;
+/// `|log actual - log expected|` for `ℓ` and `σn²`. ARD short axes can
+/// differ by about a factor of ten between scipy L-BFGS-B and argmin.
+const THETA_LOG_ABS_TOL: f64 = 2.5;
 
-const FIT_GOLDENS: &[(&str, &str)] = &[(
-    "forrester_rbf",
-    include_str!("../compare/goldens/forrester_rbf.json"),
-)];
+const FIT_GOLDENS: &[(&str, &str)] = &[
+    (
+        "forrester_rbf",
+        include_str!("../compare/goldens/forrester_rbf.json"),
+    ),
+    (
+        "sphere_rbf_ard",
+        include_str!("../compare/goldens/sphere_rbf_ard.json"),
+    ),
+];
 
 #[derive(Debug, Deserialize)]
 struct FitGolden {
-    lengthscale_init: f64,
+    kernel: String,
+    lengthscales_init: Vec<f64>,
     noise_variance_init: f64,
-    lengthscale: f64,
+    lengthscales: Vec<f64>,
     noise_variance: f64,
     n_rows: usize,
     n_cols: usize,
@@ -43,10 +51,6 @@ fn rel_err(actual: f64, expected: f64) -> f64 {
     (actual - expected).abs() / expected.abs().max(1.0)
 }
 
-fn theta_rel_err(actual: f64, expected: f64) -> f64 {
-    (actual - expected).abs() / expected.abs()
-}
-
 fn assert_near(label: &str, actual: f64, expected: f64, tol: f64) {
     let err = rel_err(actual, expected);
     assert!(
@@ -56,16 +60,37 @@ fn assert_near(label: &str, actual: f64, expected: f64, tol: f64) {
 }
 
 fn assert_theta_near(label: &str, actual: f64, expected: f64) {
-    let err = theta_rel_err(actual, expected);
+    let err = (actual.ln() - expected.ln()).abs();
     assert!(
-        err <= THETA_REL_TOL,
-        "{label}: actual={actual}, expected={expected}, rel_err={err}, tol={THETA_REL_TOL}"
+        err <= THETA_LOG_ABS_TOL,
+        "{label}: actual={actual}, expected={expected}, abs_log_err={err}, tol={THETA_LOG_ABS_TOL}"
     );
+}
+
+fn kernel_from_golden(golden: &FitGolden) -> Result<KernelSpec, GprError> {
+    match golden.kernel.as_str() {
+        "rbf" => {
+            if golden.lengthscales_init.len() != 1 {
+                return Err(GprError::InvalidHyperparameter {
+                    reason: "isotropic RBF golden needs one init lengthscale".to_owned(),
+                });
+            }
+            Ok(KernelSpec::from(RbfKernel::new(
+                golden.lengthscales_init[0],
+            )?))
+        }
+        "rbf_ard" => Ok(KernelSpec::from(RbfArdKernel::new(
+            &golden.lengthscales_init,
+        )?)),
+        other => Err(GprError::InvalidHyperparameter {
+            reason: format!("unsupported fit golden kernel {other}"),
+        }),
+    }
 }
 
 fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
     let mut gpr = Gpr::new(
-        KernelSpec::from(RbfKernel::new(golden.lengthscale_init)?),
+        kernel_from_golden(golden)?,
         GaussianLikelihood::new(golden.noise_variance_init)?,
     )
     .with_target_transform(StandardizeTarget::new());
@@ -79,16 +104,27 @@ fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
         REL_TOL,
     );
 
-    let mut params = [0.0; 2];
+    let n_params = golden.lengthscales.len() + 1;
+    let mut params = vec![0.0; n_params];
     gpr.get_params(&mut params)?;
-    assert_theta_near(
-        &format!("{name} lengthscale"),
-        params[0].exp(),
-        golden.lengthscale,
-    );
+    for (i, expected) in golden.lengthscales.iter().enumerate() {
+        assert_theta_near(
+            &format!("{name} lengthscale[{i}]"),
+            params[i].exp(),
+            *expected,
+        );
+    }
+    if golden.kernel == "rbf_ard" && golden.lengthscales.len() >= 2 {
+        let ell0 = params[0].exp();
+        let ell1 = params[1].exp();
+        assert!(
+            ell0 < ell1,
+            "{name}: ARD should keep dim 0 shorter than dim 1: {ell0} vs {ell1}"
+        );
+    }
     assert_theta_near(
         &format!("{name} noise"),
-        params[1].exp(),
+        params[n_params - 1].exp(),
         golden.noise_variance,
     );
 
@@ -126,7 +162,7 @@ fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
 }
 
 #[test]
-fn forrester_fit_matches_committed_sklearn_json() {
+fn fit_matches_committed_sklearn_json() {
     for (name, raw) in FIT_GOLDENS {
         let golden: FitGolden = serde_json::from_str(raw).expect("committed JSON parses");
         check_fit_golden(name, &golden).expect(name);

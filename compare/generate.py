@@ -4,8 +4,9 @@ Fixed-hyperparameter cases (P1A-12 / P1A-17): noise is sklearn ``alpha``,
 matching ``GaussianLikelihood``, not ``WhiteKernel``.
 ``predict(..., return_std=True)`` is latent; observation variance adds ``alpha``.
 
-Fit cases (P1B-6): sklearn optimizes ``RBF + WhiteKernel`` with ``normalize_y``
-and a tiny ``alpha`` jitter. gprx matches that as RBF + ``GaussianLikelihood``
+Fit cases (P1B-6): sklearn optimizes ``RBF + WhiteKernel`` (scalar or ARD
+``length_scale``) with ``normalize_y`` and a tiny ``alpha`` jitter. gprx
+matches that as isotropic RBF or ``RbfArdKernel`` + ``GaussianLikelihood``
 + ``StandardizeTarget`` (no White leaf). ``WhiteKernel`` on the sklearn side
 is the optimized noise, not a second nugget on gprx.
 
@@ -138,38 +139,88 @@ def as_f64_list(values: np.ndarray) -> list[float]:
     return [float(v) for v in np.asarray(values, dtype=np.float64).ravel()]
 
 
+def pack_column_major(coords: np.ndarray) -> list[float]:
+    """Packs an ``n×d`` point matrix into gprx column-major order."""
+    n_rows, n_cols = coords.shape
+    packed = np.empty(n_rows * n_cols, dtype=np.float64)
+    for dim in range(n_cols):
+        packed[dim * n_rows : (dim + 1) * n_rows] = coords[:, dim]
+    return as_f64_list(packed)
+
+
 def forrester(x: np.ndarray) -> np.ndarray:
     return (6.0 * x - 2.0) ** 2 * np.sin(12.0 * x - 4.0)
 
 
-# 1-d Forrester on [0, 1] plus seeded observation noise so MLE noise
-# stays off the sklearn WhiteKernel lower bound. gprx uses RBF +
-# GaussianLikelihood. Tiny alpha is Cholesky jitter, not model noise.
-FORRESTER_N = 16
-FORRESTER_XS_N = 7
-_FORRESTER_X = np.linspace(0.0, 1.0, FORRESTER_N)
-_FORRESTER_XS = np.linspace(0.05, 0.95, FORRESTER_XS_N)
+def weighted_sphere(coords: np.ndarray) -> np.ndarray:
+    """Anisotropic quadratic: shorter characteristic length in dim 0 than dim 1."""
+    return (coords[:, 0] / 0.25) ** 2 + (coords[:, 1] / 1.0) ** 2
+
+
 FIT_JITTER = 1e-10
 FIT_NOISE_STD = 1.0
 FIT_SEED = 0
-_FORRESTER_Y = forrester(_FORRESTER_X) + FIT_NOISE_STD * np.random.default_rng(
-    FIT_SEED
-).standard_normal(FORRESTER_N)
-FIT_CASES = [
-    {
+FORRESTER_N = 16
+FORRESTER_XS_N = 7
+SPHERE_SIDE = 6
+
+
+def make_forrester_case() -> dict:
+    x = np.linspace(0.0, 1.0, FORRESTER_N).reshape(-1, 1)
+    noise = FIT_NOISE_STD * np.random.default_rng(FIT_SEED).standard_normal(FORRESTER_N)
+    y = forrester(x[:, 0]) + noise
+    xs = np.linspace(0.05, 0.95, FORRESTER_XS_N).reshape(-1, 1)
+    return {
         "name": "forrester_rbf",
-        "lengthscale_init": 1.0,
+        "kernel": "rbf",
+        "function": "forrester1d",
+        "lengthscales_init": [1.0],
         "noise_variance_init": 0.1,
         "noise_std_added": FIT_NOISE_STD,
         "n_rows": FORRESTER_N,
         "n_cols": 1,
-        "x": as_f64_list(_FORRESTER_X),
-        "y": as_f64_list(_FORRESTER_Y),
+        "x": pack_column_major(x),
+        "y": as_f64_list(y),
         "xs_n_rows": FORRESTER_XS_N,
         "xs_n_cols": 1,
-        "xs": as_f64_list(_FORRESTER_XS),
+        "xs": pack_column_major(xs),
     }
-]
+
+
+def make_sphere_ard_case() -> dict:
+    grid = np.linspace(0.0, 1.0, SPHERE_SIDE)
+    xx, yy = np.meshgrid(grid, grid, indexing="xy")
+    coords = np.column_stack([xx.ravel(), yy.ravel()])
+    n_rows = int(coords.shape[0])
+    noise = FIT_NOISE_STD * np.random.default_rng(FIT_SEED).standard_normal(n_rows)
+    y = weighted_sphere(coords) + noise
+    xs = np.array(
+        [
+            [0.25, 0.25],
+            [0.25, 0.75],
+            [0.75, 0.25],
+            [0.75, 0.75],
+        ],
+        dtype=np.float64,
+    )
+    return {
+        "name": "sphere_rbf_ard",
+        "kernel": "rbf_ard",
+        "function": "weighted_sphere2d",
+        "lengthscales_init": [1.0, 1.0],
+        "noise_variance_init": 0.1,
+        "noise_std_added": FIT_NOISE_STD,
+        "n_rows": n_rows,
+        "n_cols": 2,
+        "x": pack_column_major(coords),
+        "y": as_f64_list(y),
+        "xs_n_rows": int(xs.shape[0]),
+        "xs_n_cols": 2,
+        "xs": pack_column_major(xs),
+    }
+
+
+FIT_CASES = [make_forrester_case(), make_sphere_ard_case()]
 
 
 def sklearn_leaf(leaf: dict):
@@ -341,12 +392,16 @@ def composite_golden(case: dict) -> dict:
 
 def fit_gp_optimize(case: dict):
     """Fit with sklearn L-BFGS-B. WhiteKernel is the optimized noise."""
-    ell0 = float(case["lengthscale_init"])
+    lengthscales = np.asarray(case["lengthscales_init"], dtype=np.float64)
     noise0 = float(case["noise_variance_init"])
     x = unpack_column_major(case["x"], case["n_rows"], case["n_cols"])
     xs = unpack_column_major(case["xs"], case["xs_n_rows"], case["xs_n_cols"])
     y = np.asarray(case["y"], dtype=np.float64)
-    kernel = RBF(length_scale=ell0) + WhiteKernel(noise_level=noise0)
+    if lengthscales.size == 1:
+        rbf = RBF(length_scale=float(lengthscales[0]))
+    else:
+        rbf = RBF(length_scale=lengthscales)
+    kernel = rbf + WhiteKernel(noise_level=noise0)
     gp = GaussianProcessRegressor(
         kernel=kernel,
         alpha=FIT_JITTER,
@@ -363,27 +418,30 @@ def fit_gp_optimize(case: dict):
 def fit_golden(case: dict) -> dict:
     gp, mean, predict_var = fit_gp_optimize(case)
     rbf, white = gp.kernel_.k1, gp.kernel_.k2
-    ell = float(np.asarray(rbf.length_scale, dtype=np.float64).ravel()[0])
+    ells = np.atleast_1d(np.asarray(rbf.length_scale, dtype=np.float64).ravel())
     noise = float(np.asarray(white.noise_level, dtype=np.float64).ravel()[0])
     theta = np.asarray(gp.kernel_.theta, dtype=np.float64)
-    if theta.size != 2:
-        raise RuntimeError(f"expected [log(ℓ), log(σn²)], got {theta.size}")
+    n_cols = int(case["n_cols"])
+    if ells.size != n_cols:
+        raise RuntimeError(f"expected {n_cols} lengthscales, got {ells.size}")
+    if theta.size != n_cols + 1:
+        raise RuntimeError(f"expected {n_cols} log(ℓ) + log(σn²), got {theta.size}")
     lml = float(gp.log_marginal_likelihood(theta, eval_gradient=False))
     y_std = float(np.asarray(gp._y_train_std, dtype=np.float64).ravel()[0])
     # sklearn k** includes WhiteKernel, so return_std² is observation-like.
     # Latent strips the nugget in original scale: noise * s².
     latent_var = predict_var - noise * (y_std**2)
     return {
-        "kernel": "rbf",
+        "kernel": case["kernel"],
         "sklearn_version": sklearn.__version__,
-        "function": "forrester1d",
+        "function": case["function"],
         "normalize_y": True,
-        "lengthscale_init": float(case["lengthscale_init"]),
+        "lengthscales_init": [float(v) for v in case["lengthscales_init"]],
         "noise_variance_init": float(case["noise_variance_init"]),
         "noise_std_added": float(case["noise_std_added"]),
-        "lengthscale": ell,
+        "lengthscales": as_f64_list(ells),
         "noise_variance": noise,
-        "theta": [float(theta[0]), float(theta[1])],
+        "theta": as_f64_list(theta),
         "n_rows": case["n_rows"],
         "n_cols": case["n_cols"],
         "x": case["x"],
