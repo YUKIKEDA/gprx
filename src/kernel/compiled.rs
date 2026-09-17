@@ -1,6 +1,8 @@
 //! Execution-layer kernel: static dispatch over built-in leaves.
 
-use super::{RbfArdKernel, RbfKernel, Triangle, visit_triangle};
+use super::{
+    ConstantKernel, LinearKernel, RbfArdKernel, RbfKernel, Triangle, WhiteKernel, visit_triangle,
+};
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
 use faer::{Mat, MatMut, MatRef};
@@ -10,8 +12,10 @@ use faer::{Mat, MatMut, MatRef};
 pub(crate) enum CoordMode {
     /// Isotropic leaves: squared Euclidean `dist`.
     Dist,
-    /// ARD leaves: `n×d` point coordinates.
+    /// ARD / linear leaves: point coordinates.
     Points,
+    /// Constant and White: either a distance matrix (shape) or coordinates.
+    Either,
 }
 
 /// Compiled kernel. Built-ins are enum arms; Sum/Product are flattened lists.
@@ -41,6 +45,12 @@ pub enum CompiledKernel {
     Rbf(RbfKernel),
     /// ARD RBF (`θ_d = log(ℓ_d)`).
     RbfArd(RbfArdKernel),
+    /// Constant `k = c`.
+    Constant(ConstantKernel),
+    /// Linear `k = σ² xᵀ x'`.
+    Linear(LinearKernel),
+    /// White nugget.
+    White(WhiteKernel),
     /// Flattened sum of compiled terms.
     Sum(Vec<CompiledKernel>),
     /// Flattened Hadamard product of compiled terms.
@@ -52,6 +62,9 @@ impl CompiledKernel {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
             KernelSpec::RbfArd(leaf) => Self::RbfArd(leaf.clone()),
+            KernelSpec::Constant(leaf) => Self::Constant(*leaf),
+            KernelSpec::Linear(leaf) => Self::Linear(*leaf),
+            KernelSpec::White(leaf) => Self::White(*leaf),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
                 flatten_sum(left, &mut terms);
@@ -72,6 +85,9 @@ impl CompiledKernel {
         match self {
             Self::Rbf(leaf) => leaf.num_params(),
             Self::RbfArd(leaf) => leaf.num_params(),
+            Self::Constant(leaf) => leaf.num_params(),
+            Self::Linear(leaf) => leaf.num_params(),
+            Self::White(leaf) => leaf.num_params(),
             Self::Sum(terms) | Self::Product(terms) => terms.iter().map(Self::num_params).sum(),
         }
     }
@@ -122,7 +138,9 @@ impl CompiledKernel {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.apply(dist, out, uplo),
-            Self::RbfArd(_) => Err(ard_needs_coords()),
+            Self::RbfArd(_) | Self::Linear(_) => Err(ard_needs_coords()),
+            Self::Constant(leaf) => leaf.apply(dist, out, uplo),
+            Self::White(leaf) => leaf.apply(dist, out, uplo),
             Self::Sum(terms) => fold_terms(
                 terms,
                 dist,
@@ -158,7 +176,9 @@ impl CompiledKernel {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.apply_cross(dist, out),
-            Self::RbfArd(_) => Err(ard_needs_coords()),
+            Self::RbfArd(_) | Self::Linear(_) => Err(ard_needs_coords()),
+            Self::Constant(leaf) => leaf.apply_cross(dist, out),
+            Self::White(leaf) => leaf.apply_cross(dist, out),
             Self::Sum(terms) => fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), add_rect),
             Self::Product(terms) => {
                 fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), mul_rect)
@@ -182,6 +202,17 @@ impl CompiledKernel {
                 leaf.fill_diag(out);
                 Ok(())
             }
+            Self::Constant(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::White(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::Linear(_) => Err(GprError::UnsupportedKernelOperation {
+                reason: "linear kernel diagonal needs coordinates".to_owned(),
+            }),
             Self::Sum(terms) => {
                 let (first, rest) = split_terms(terms)?;
                 first.fill_diag(out)?;
@@ -200,6 +231,58 @@ impl CompiledKernel {
                 let mut tmp = vec![0.0; out.len()];
                 for term in rest {
                     term.fill_diag(&mut tmp)?;
+                    for (dst, src) in out.iter_mut().zip(&tmp) {
+                        *dst *= *src;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Writes the diagonal `k(x, x)` using coordinates when the leaf needs them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
+    /// terms, or the same shape errors as the leaf.
+    pub fn fill_diag_points(&self, x: MatRef<'_, f64>, out: &mut [f64]) -> Result<(), GprError> {
+        match self {
+            Self::Linear(leaf) => leaf.fill_diag_points(x, out),
+            Self::Rbf(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::RbfArd(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::Constant(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::White(leaf) => {
+                leaf.fill_diag(out);
+                Ok(())
+            }
+            Self::Sum(terms) => {
+                let (first, rest) = split_terms(terms)?;
+                first.fill_diag_points(x, out)?;
+                let mut tmp = vec![0.0; out.len()];
+                for term in rest {
+                    term.fill_diag_points(x, &mut tmp)?;
+                    for (dst, src) in out.iter_mut().zip(&tmp) {
+                        *dst += *src;
+                    }
+                }
+                Ok(())
+            }
+            Self::Product(terms) => {
+                let (first, rest) = split_terms(terms)?;
+                first.fill_diag_points(x, out)?;
+                let mut tmp = vec![0.0; out.len()];
+                for term in rest {
+                    term.fill_diag_points(x, &mut tmp)?;
                     for (dst, src) in out.iter_mut().zip(&tmp) {
                         *dst *= *src;
                     }
@@ -229,7 +312,9 @@ impl CompiledKernel {
         require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
-            Self::RbfArd(_) => Err(ard_needs_coords()),
+            Self::RbfArd(_) | Self::Linear(_) => Err(ard_needs_coords()),
+            Self::Constant(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad(dist, d_k, local, uplo, scratch)
@@ -257,6 +342,9 @@ impl CompiledKernel {
         match self {
             Self::Rbf(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => leaf.apply(x, out, uplo),
+            Self::Linear(leaf) => leaf.apply(x, out, uplo),
+            Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
+            Self::White(leaf) => leaf.apply_points(x, out, uplo),
             Self::Sum(terms) => {
                 fold_terms_points(terms, x, out.as_mut(), uplo, scratch.as_mut(), add_triangle)
             }
@@ -282,6 +370,9 @@ impl CompiledKernel {
         match self {
             Self::Rbf(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => leaf.apply_cross(x, xs, out),
+            Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
+            Self::Constant(leaf) => leaf.apply_cross_points(x, xs, out),
+            Self::White(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::Sum(terms) => {
                 fold_rect_points(terms, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
             }
@@ -309,6 +400,9 @@ impl CompiledKernel {
         match self {
             Self::Rbf(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
+            Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_points(x, d_k, local, uplo, scratch)
@@ -322,18 +416,13 @@ impl CompiledKernel {
     pub(crate) fn coord_mode(&self) -> Result<CoordMode, GprError> {
         match self {
             Self::Rbf(_) => Ok(CoordMode::Dist),
-            Self::RbfArd(_) => Ok(CoordMode::Points),
+            Self::RbfArd(_) | Self::Linear(_) => Ok(CoordMode::Points),
+            Self::Constant(_) | Self::White(_) => Ok(CoordMode::Either),
             Self::Sum(terms) | Self::Product(terms) => {
                 let (first, rest) = split_terms(terms)?;
-                let mode = first.coord_mode()?;
+                let mut mode = first.coord_mode()?;
                 for term in rest {
-                    if term.coord_mode()? != mode {
-                        return Err(GprError::UnsupportedKernelOperation {
-                            reason:
-                                "cannot mix isotropic distance kernels with ARD coordinate kernels"
-                                    .to_owned(),
-                        });
-                    }
+                    mode = merge_coord_mode(mode, term.coord_mode()?)?;
                 }
                 Ok(mode)
             }
@@ -350,6 +439,18 @@ impl CompiledKernel {
                 let n = leaf.num_params();
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 *offset += n;
+            }
+            Self::Constant(leaf) => {
+                out[*offset] = leaf.log_constant();
+                *offset += 1;
+            }
+            Self::Linear(leaf) => {
+                out[*offset] = leaf.log_variance();
+                *offset += 1;
+            }
+            Self::White(leaf) => {
+                out[*offset] = leaf.log_variance();
+                *offset += 1;
             }
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
@@ -373,6 +474,24 @@ impl CompiledKernel {
                 *offset += n;
                 Ok(())
             }
+            Self::Constant(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::Linear(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::White(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.apply_params(params, offset)?;
@@ -384,7 +503,11 @@ impl CompiledKernel {
 
     fn needs_internal_scratch(&self) -> bool {
         match self {
-            Self::Rbf(_) | Self::RbfArd(_) => false,
+            Self::Rbf(_)
+            | Self::RbfArd(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_) => false,
             Self::Sum(terms) | Self::Product(terms) => {
                 terms.len() > 1 || terms.iter().any(Self::needs_internal_scratch)
             }
@@ -439,6 +562,18 @@ fn ard_needs_coords() -> GprError {
 fn iso_needs_dist() -> GprError {
     GprError::UnsupportedKernelOperation {
         reason: "isotropic RBF evaluates from a squared-distance matrix".to_owned(),
+    }
+}
+
+fn merge_coord_mode(a: CoordMode, b: CoordMode) -> Result<CoordMode, GprError> {
+    use CoordMode::{Dist, Either, Points};
+    match (a, b) {
+        (Either, other) | (other, Either) => Ok(other),
+        (Dist, Dist) => Ok(Dist),
+        (Points, Points) => Ok(Points),
+        _ => Err(GprError::UnsupportedKernelOperation {
+            reason: "cannot mix isotropic distance kernels with coordinate kernels".to_owned(),
+        }),
     }
 }
 
@@ -715,7 +850,9 @@ fn product_grad(
 #[cfg(test)]
 mod tests {
     use super::CompiledKernel;
-    use crate::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
+    use crate::kernel::{
+        ConstantKernel, KernelSpec, LinearKernel, RbfArdKernel, RbfKernel, Triangle, WhiteKernel,
+    };
     use faer::{Mat, MatRef, mat};
 
     const TOL: f64 = 1e-9;
@@ -1106,5 +1243,48 @@ mod tests {
             compiled.coord_mode(),
             Err(crate::error::GprError::UnsupportedKernelOperation { .. })
         ));
+    }
+
+    #[test]
+    fn rbf_plus_white_is_distance_mode() {
+        let spec = rbf(1.0) + KernelSpec::from(WhiteKernel::new(0.1).expect("valid"));
+        let compiled = spec.compile();
+        assert_eq!(
+            compiled.coord_mode().expect("compat"),
+            super::CoordMode::Dist
+        );
+        let dist = sq_dist_1d(&[0.0, 1.0]);
+        let mut out = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply(
+                dist.as_ref(),
+                out.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("shape");
+        assert_close(out[(0, 0)], 1.0 + 0.1);
+        assert_close(out[(0, 1)], apply_rbf(1.0, dist.as_ref())[(0, 1)]);
+    }
+
+    #[test]
+    fn linear_plus_constant_is_points_mode() {
+        let spec = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+            + KernelSpec::from(ConstantKernel::new(0.5).expect("valid"));
+        let compiled = spec.compile();
+        assert_eq!(
+            compiled.coord_mode().expect("compat"),
+            super::CoordMode::Points
+        );
+        let x = Mat::from_fn(2, 1, |i, _| i as f64);
+        let mut out = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply_points(x.as_ref(), out.as_mut(), Triangle::Full, scratch.as_mut())
+            .expect("points");
+        assert_close(out[(0, 0)], 0.5);
+        assert_close(out[(1, 1)], 1.0 + 0.5);
+        assert_close(out[(1, 0)], 0.5);
     }
 }

@@ -5,17 +5,23 @@
 //! Callers pass faer views; this module does not re-export faer types.
 
 mod compiled;
+mod constant;
 mod lengthscale;
+mod linear;
 mod rbf;
 mod rbf_ard;
 mod spec;
+mod white;
 
 pub use compiled::CompiledKernel;
 pub(crate) use compiled::CoordMode;
+pub use constant::ConstantKernel;
 pub use lengthscale::ArdLengthscales;
+pub use linear::LinearKernel;
 pub use rbf::RbfKernel;
 pub use rbf_ard::RbfArdKernel;
 pub use spec::{KernelSpec, ParameterBinding};
+pub use white::WhiteKernel;
 
 use crate::error::GprError;
 use faer::{MatMut, MatRef};
@@ -155,5 +161,79 @@ fn finite_dist(d: f64) -> Result<f64, GprError> {
         Ok(d)
     } else {
         Err(GprError::NonFiniteInput)
+    }
+}
+
+fn write_square(
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+    mut kernel: impl FnMut(usize, usize) -> Result<f64, GprError>,
+) -> Result<(), GprError> {
+    if out.nrows() != out.ncols() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("output must be square, got {}x{}", out.nrows(), out.ncols()),
+        });
+    }
+    if out.nrows() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    let n = out.nrows();
+    let mut err = None;
+    visit_triangle(n, uplo, |row, col| {
+        if err.is_some() {
+            return;
+        }
+        match kernel(row, col) {
+            Ok(value) => out[(row, col)] = value,
+            Err(e) => err = Some(e),
+        }
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn validate_positive_finite(value: f64, what: &str) -> Result<(), GprError> {
+    if !value.is_finite() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("{what} must be finite"),
+        });
+    }
+    if value <= 0.0 {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("{what} must be positive"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_log_positive(theta: f64, what: &str) -> Result<f64, GprError> {
+    if !theta.is_finite() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("log {what} must be finite"),
+        });
+    }
+    let value = theta.exp();
+    if !value.is_finite() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("{what} overflowed to a non-finite value"),
+        });
+    }
+    if value <= 0.0 {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("{what} underflowed to zero"),
+        });
+    }
+    Ok(theta)
+}
+
+fn expect_one_param(len: usize, what: &str) -> Result<(), GprError> {
+    if len == 1 {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("expected 1 {what} parameter, got {len}"),
+        })
     }
 }
