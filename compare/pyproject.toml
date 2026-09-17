@@ -1,7 +1,7 @@
 [project]
 name = "gprx-compare"
 version = "0.0.0"
-description = "sklearn golden generator for gprx (P1A-12 / P1A-17 / product grad). Not a published package."
+description = "sklearn golden generator for gprx (P1A-12 / P1A-17 / P1B-6). Not a published package."
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
