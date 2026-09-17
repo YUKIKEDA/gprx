@@ -269,7 +269,7 @@ enum DistanceCachePolicy {
 
 P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。
 
-P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always の ARD fit で 1 回確保し、等方 / `Never` では空（`kernel_scratch` と同じ）。apply/grad はキャッシュを読む。埋めは逐次（P2-3 に依存しない）。3D レイアウトは実装時（列優先・下三角。`DistanceCache` enum を膨らませない）。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。口が共通なら Matern/RQ ARD も同じ PR。`Auto` は P5-5。train×test / LOO / Linear / iso+ARD 混在は対象外。
+P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always の ARD fit で 1 回確保し、等方 / `Never` では空（`kernel_scratch` と同じ）。レイアウトは列優先 `n × (n·d)`、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。埋めと RBF ARD `apply`/`grad` は Rayon + `wide::f64x4`（単位行ストライド）。Matérn / RQ ARD は同じキャッシュをスカラーで読む。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。`Auto` は P5-5。train×test / LOO / Linear / iso+ARD 混在は対象外。
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
@@ -424,7 +424,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 ただし α = K⁻¹ y、W = ααᵀ - K⁻¹
 ```
 
-`(n/2) log(2π)` は θ に依らない。公開の NLML と最適化の `Objective` は当面同じ `L(θ)` を使う。定数を最適化から外すかは P2-6 で測ってから決める。
+`(n/2) log(2π)` は θ に依らない。P2-6 で孤立加算は約 650 ps、`mll_and_grad` のあり/なし差は基準のゆらぎ以下だった。公開の NLML と最適化の `Objective` は同じ `L(θ)` のままにする。API は分けない。
 
 標準アルゴリズム(Rasmussen & Williams / GPy系):
 
@@ -515,7 +515,7 @@ struct GprObjective<'a> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-`DistanceCachePolicy::Always`（既定）は `fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。`Never` は毎回埋め直す。キャッシュは等方カーネル向けの `n×n`。ARD の `n×n×d` は P2-7。
+`DistanceCachePolicy::Always`（既定）は `fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。`Never` は毎回埋め直す。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。
 
 ### 6.4 Leave-one-out(P1B-7)
 
@@ -599,7 +599,7 @@ fit()終了 → FittedGpr が L, α, X を保持。W / ∂K / L-BFGS は捨て�
 
 ## 8. 並列化・SIMD、数学関数バックエンド
 
-- カーネル評価内側ループは `wide::f64x4` でベクトル化する（P2-5）。対象は列優先・単位行ストライドの等方 RBF `apply` / `grad` / `apply_cross` と二乗距離の行ループ。ストライドが 1 でないビューはスカラーに落とす。`std::simd` は安定化まで使わない。Matérn / Periodic / RQ の内側は未導入。
+- カーネル評価内側ループは `wide::f64x4` でベクトル化する（P2-5 / P2-7）。対象は列優先・単位行ストライドの等方 RBF `apply` / `grad` / `apply_cross`、ARD RBF `apply` / `grad`、二乗距離と `(Δx_d)²` の行ループ。ストライドが 1 でないビューはスカラーに落とす。`std::simd` は安定化まで使わない。Matérn / Periodic / RQ の内側は未導入。
 - 距離行列・カーネル行列構築はRayonでブロック並列化
 - faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有
 
@@ -811,12 +811,12 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-6）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-8）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
-- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-8 で `Gpr` / `FittedGpr` の typestate（速度行のあと）
+- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate（速度行のあと）
 - **Phase 3(オンライン学習)**: `FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ、**誘導点Zは固定**、対角予測、ハイパラ最適化(Zは含めない)
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
@@ -866,7 +866,7 @@ trait OnlineInference<T: Scalar> {
 | P1A-8 / P1A-10 | 同じファイルに `predict_100` / `mll_and_grad` を足す。P1A-19 で確保 ratchet |
 | 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
-| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。P2-5: 等方 RBF と距離に SIMD。可否は `kernel_rbf` / `predict` / `FIXED` で判断し、`mll_and_grad` の勾配項だけを分母にしない。NLML 定数項は P2-6 で `mll_and_grad` のあり/なしを同じ問題で測る。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never |
+| Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。P2-5: 等方 RBF と距離に SIMD。可否は `kernel_rbf` / `predict` / `FIXED` で判断し、`mll_and_grad` の勾配項だけを分母にしない。NLML 定数項は P2-6 で測り、差はノイズなので `L(θ)` は一本のまま。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never。埋めと RBF ARD は Rayon + SIMD |
 | Phase 3+ | insert/delete などを同じ問題定義で足す |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。

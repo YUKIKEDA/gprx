@@ -7,12 +7,12 @@
 //! module does not re-export faer types.
 //!
 //! Squared-Euclidean fills and [`Triangle::Lower`] writes run on Rayon's
-//! global pool. Isotropic RBF and the distance row loop also use `wide::f64x4`
-//! when the faer view is column-major with unit row stride. There is no
-//! parallel on/off flag; `RAYON_NUM_THREADS=1` is sequential. Limit threads
-//! with `RAYON_NUM_THREADS` or
-//! `rayon::ThreadPoolBuilder::build_global` before the first fill. ARD /
-//! points-mode leaves stay sequential. See the [crate-level parallelism
+//! global pool. Isotropic RBF, ARD RBF, and the distance / `(Δx_d)²` row loops
+//! use `wide::f64x4` when the faer view is column-major with unit row stride.
+//! There is no parallel on/off flag; `RAYON_NUM_THREADS=1` is sequential. Limit
+//! threads with `RAYON_NUM_THREADS` or
+//! `rayon::ThreadPoolBuilder::build_global` before the first fill. Linear and
+//! other points-mode leaves stay sequential. See the [crate-level parallelism
 //! notes](crate).
 
 mod compiled;
@@ -34,7 +34,9 @@ mod white;
 pub use compiled::CompiledKernel;
 pub(crate) use compiled::CoordMode;
 pub use constant::ConstantKernel;
-pub(crate) use dist::{fill_squared_euclidean, fill_squared_euclidean_cross};
+pub(crate) use dist::{
+    fill_ard_squared_diff, fill_squared_euclidean, fill_squared_euclidean_cross,
+};
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};

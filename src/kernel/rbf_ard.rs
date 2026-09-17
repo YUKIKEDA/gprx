@@ -1,7 +1,13 @@
 //! ARD squared-exponential (RBF) kernel.
 
+use super::dist::require_ard_sq_diff_shape;
+use super::simd::{
+    try_apply_rbf_ard_cache, try_apply_rbf_ard_points, try_grad_rbf_ard_cache,
+    try_grad_rbf_ard_points,
+};
 use super::{ArdLengthscales, Triangle, visit_triangle};
 use crate::error::GprError;
+use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
 /// ARD RBF: `k = exp( -½ Σ_d (x_d - x'_d)² / ℓ_d² )`.
@@ -11,8 +17,11 @@ use faer::{MatMut, MatRef};
 /// `apply` / `grad` take the `n×d` coordinate matrix; a scalar squared-distance
 /// matrix is not enough for `∂K/∂θ_d`. Amplitude is not stored here.
 ///
-/// Cloning copies the lengthscale vectors. This type does not cache an
-/// `n×n×d` tensor (Phase 2).
+/// Cloning copies the lengthscale vectors. When
+/// [`crate::DistanceCachePolicy::Always`] is set, [`crate::Gpr`] caches raw
+/// `(Δx_d)²` as `n × (n·d)` and evaluates from that tensor. Column-major
+/// views with unit row stride use `wide::f64x4` for [`Self::apply`] and
+/// [`Self::grad`].
 ///
 /// # Examples
 ///
@@ -115,6 +124,9 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         let n = require_square_points(x, out.as_ref(), self.num_params())?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_apply_rbf_ard_points(x, out.rb_mut(), uplo, inv_ell_sq)? {
+            return Ok(());
+        }
         let mut err = None;
         visit_triangle(n, uplo, |row, col| {
             if err.is_some() {
@@ -198,6 +210,9 @@ impl RbfArdKernel {
         }
         let n = require_square_points(x, d_k.as_ref(), self.num_params())?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_grad_rbf_ard_points(x, d_k.rb_mut(), uplo, inv_ell_sq, param_idx)? {
+            return Ok(());
+        }
         let mut err = None;
         visit_triangle(n, uplo, |row, col| {
             if err.is_some() {
@@ -212,6 +227,144 @@ impl RbfArdKernel {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    pub(crate) fn apply_from_sq_diff(
+        &self,
+        cache: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let n = require_square_out(out.as_ref())?;
+        let d = self.num_params();
+        require_ard_sq_diff_shape(cache, n, d)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_apply_rbf_ard_cache(cache, out.rb_mut(), uplo, inv_ell_sq)? {
+            return Ok(());
+        }
+        let mut err = None;
+        visit_triangle(n, uplo, |row, col| {
+            if err.is_some() {
+                return;
+            }
+            match ard_kernel_from_cache(cache, n, row, col, inv_ell_sq) {
+                Ok(value) => out[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn grad_from_sq_diff(
+        &self,
+        cache: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if param_idx >= self.num_params() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "ARD RBF parameter index {param_idx} is out of range (d={})",
+                    self.num_params()
+                ),
+            });
+        }
+        let n = require_square_out(d_k.as_ref())?;
+        let d = self.num_params();
+        require_ard_sq_diff_shape(cache, n, d)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_grad_rbf_ard_cache(cache, d_k.rb_mut(), uplo, inv_ell_sq, param_idx)? {
+            return Ok(());
+        }
+        let mut err = None;
+        visit_triangle(n, uplo, |row, col| {
+            if err.is_some() {
+                return;
+            }
+            match ard_kernel_grad_from_cache(cache, n, row, col, inv_ell_sq, param_idx) {
+                Ok(value) => d_k[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+fn require_square_out(out: MatRef<'_, f64>) -> Result<usize, GprError> {
+    if out.nrows() == 0 || out.ncols() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if out.nrows() != out.ncols() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
+        });
+    }
+    Ok(out.nrows())
+}
+
+fn ard_kernel_from_cache(
+    cache: MatRef<'_, f64>,
+    n: usize,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+) -> Result<f64, GprError> {
+    let mut r2 = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let v = cache[(row, dim * n + col)];
+        if !v.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        r2 += v * w;
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    if k.is_finite() {
+        Ok(k)
+    } else {
+        Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn ard_kernel_grad_from_cache(
+    cache: MatRef<'_, f64>,
+    n: usize,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+    param_idx: usize,
+) -> Result<f64, GprError> {
+    let mut r2 = 0.0;
+    let mut dim_term = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let v = cache[(row, dim * n + col)];
+        if !v.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = v * w;
+        r2 += term;
+        if dim == param_idx {
+            dim_term = term;
+        }
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    let dk = k * dim_term;
+    if dk.is_finite() {
+        Ok(dk)
+    } else {
+        Err(GprError::NonFiniteKernelValue)
     }
 }
 
@@ -436,6 +589,47 @@ mod tests {
             for row in 0..4 {
                 assert_close(k_ard[(row, col)], k_iso[(row, col)]);
             }
+        }
+    }
+
+    #[test]
+    fn apply_from_sq_diff_matches_apply_lower() {
+        let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
+        let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8]]);
+        let n = 4;
+        let d = 2;
+        let mut cache = Mat::zeros(n, n * d);
+        crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
+        let mut from_points = fill(n, 0.0);
+        let mut from_cache = fill(n, f64::NAN);
+        rbf.apply(x.as_ref(), from_points.as_mut(), Triangle::Lower)
+            .expect("points");
+        rbf.apply_from_sq_diff(cache.as_ref(), from_cache.as_mut(), Triangle::Lower)
+            .expect("cache");
+        lower_matches(from_cache.as_ref(), from_points.as_ref());
+    }
+
+    #[test]
+    fn grad_from_sq_diff_matches_grad_lower() {
+        let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
+        let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8], [0.7, -1.1]]);
+        let n = 5;
+        let d = 2;
+        let mut cache = Mat::zeros(n, n * d);
+        crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
+        for param_idx in 0..d {
+            let mut from_points = fill(n, 0.0);
+            let mut from_cache = fill(n, f64::NAN);
+            rbf.grad(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
+                .expect("points");
+            rbf.grad_from_sq_diff(
+                cache.as_ref(),
+                from_cache.as_mut(),
+                param_idx,
+                Triangle::Lower,
+            )
+            .expect("cache");
+            lower_matches(from_cache.as_ref(), from_points.as_ref());
         }
     }
 
