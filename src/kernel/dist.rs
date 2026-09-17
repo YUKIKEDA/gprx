@@ -182,8 +182,8 @@ mod tests {
 
     #[test]
     fn col_chunks_cover_n() {
-        for n in [1, 2, 7, 256] {
-            for chunks in [1, 2, 3, 8, worker_count()] {
+        for n in [1, 2, 5, 7, 256] {
+            for chunks in [1, 2, 3, 4, 8, worker_count()] {
                 let chunks = chunks.max(1);
                 let mut covered = 0;
                 for idx in 0..chunks {
@@ -191,6 +191,32 @@ mod tests {
                     covered += len;
                 }
                 assert_eq!(covered, n, "n={n} chunks={chunks}");
+            }
+        }
+    }
+
+    #[test]
+    fn col_chunk_five_by_four_covers_remainder() {
+        // Remainder split: first `rem` chunks get `chunk_size + 1` columns.
+        // n=5, n_chunks=4 → sizes 2, 1, 1, 1 (not four length-1 chunks).
+        assert_eq!(col_chunk(5, 0, 4), (0, 2));
+        assert_eq!(col_chunk(5, 1, 4), (2, 1));
+        assert_eq!(col_chunk(5, 2, 4), (3, 1));
+        assert_eq!(col_chunk(5, 3, 4), (4, 1));
+        let covered: usize = (0..4).map(|idx| col_chunk(5, idx, 4).1).sum();
+        assert_eq!(covered, 5);
+    }
+
+    #[test]
+    fn fill_when_more_chunks_than_columns_matches_sequential() {
+        let x = Mat::from_fn(5, 3, |r, c| (r as f64) * 0.1 + (c as f64) * 0.3);
+        let expected = sequential_sq(x.as_ref());
+        let mut dist = Mat::zeros(5, 5);
+        let mut scratches = vec![Mat::<f64>::zeros(0, 0); 8];
+        fill_squared_euclidean(x.as_ref(), dist.as_mut(), &mut scratches);
+        for col in 0..5 {
+            for row in 0..5 {
+                assert!((dist[(row, col)] - expected[(row, col)]).abs() <= 1e-15);
             }
         }
     }
