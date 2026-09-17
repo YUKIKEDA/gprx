@@ -9,6 +9,7 @@ mod gpr;
 pub mod kernel;
 mod likelihood;
 mod objective;
+mod optimizer;
 mod precision;
 pub mod transform;
 mod workspace;
