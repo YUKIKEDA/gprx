@@ -15,8 +15,9 @@ use faer::{MatMut, MatRef};
 /// and `α` matches, values match isotropic
 /// [`super::RationalQuadraticKernel`]. Amplitude is not stored here.
 ///
-/// Cloning copies the lengthscale vectors. This type does not cache an
-/// `n×n×d` tensor (Phase 2).
+/// Cloning copies the lengthscale vectors. When
+/// [`crate::DistanceCachePolicy::Always`] is set, [`crate::Gpr`] caches raw
+/// `(Δx_d)²`.
 ///
 /// # Examples
 ///
@@ -250,6 +251,96 @@ impl RationalQuadraticArdKernel {
                 return;
             }
             match ard_kernel_grad(x, row, col, inv_ell_sq, param_idx, d, alpha) {
+                Ok(value) => d_k[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn apply_from_sq_diff(
+        &self,
+        cache: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let n = out.nrows();
+        if out.ncols() != n {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
+            });
+        }
+        let d = self.lengthscales.num_params();
+        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        let alpha = self.alpha();
+        let mut err = None;
+        visit_triangle(n, uplo, |row, col| {
+            if err.is_some() {
+                return;
+            }
+            match super::dist::weighted_r2_from_cache(cache, n, row, col, inv_ell_sq, None)
+                .and_then(|(r2, _)| finite_kernel(rq_from_r2(r2.max(0.0), alpha)))
+            {
+                Ok(value) => out[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn grad_from_sq_diff(
+        &self,
+        cache: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        if param_idx > d {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "ARD rational quadratic parameter index {param_idx} is out of range (d={d})"
+                ),
+            });
+        }
+        let n = d_k.nrows();
+        if d_k.ncols() != n {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("output is {}x{}, expected square", d_k.nrows(), d_k.ncols()),
+            });
+        }
+        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        let alpha = self.alpha();
+        let mut err = None;
+        visit_triangle(n, uplo, |row, col| {
+            if err.is_some() {
+                return;
+            }
+            match super::dist::weighted_r2_from_cache(
+                cache,
+                n,
+                row,
+                col,
+                inv_ell_sq,
+                if param_idx < d { Some(param_idx) } else { None },
+            )
+            .and_then(|(r2, dim_term)| {
+                let r2 = r2.max(0.0);
+                let dk = if param_idx == d {
+                    rq_dk_dtheta_alpha(r2, alpha)
+                } else {
+                    rq_dk_dtheta_ard_dim(r2, alpha, dim_term)
+                };
+                finite_kernel(dk)
+            }) {
                 Ok(value) => d_k[(row, col)] = value,
                 Err(e) => err = Some(e),
             }

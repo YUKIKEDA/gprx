@@ -527,6 +527,59 @@ impl CompiledKernel {
         }
     }
 
+    pub(crate) fn needs_ard_sq_diff(&self) -> bool {
+        match self {
+            Self::RbfArd(_) | Self::MaternArd(_) | Self::RationalQuadraticArd(_) => true,
+            Self::Sum(terms) => terms.iter().any(Self::needs_ard_sq_diff),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn apply_from_ard_cache(
+        &self,
+        cache: MatRef<'_, f64>,
+        x: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+        uplo: Triangle,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::RbfArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
+            Self::MaternArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
+            Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
+            Self::White(leaf) => leaf.apply_points(x, out, uplo),
+            Self::Sum(terms) => {
+                fold_terms_ard_cache(terms, cache, x, out.as_mut(), uplo, scratch.as_mut())
+            }
+            _ => self.apply_points(x, out, uplo, scratch),
+        }
+    }
+
+    pub(crate) fn grad_from_ard_cache(
+        &self,
+        cache: MatRef<'_, f64>,
+        x: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::RbfArd(leaf) => leaf.grad_from_sq_diff(cache, d_k, param_idx, uplo),
+            Self::MaternArd(leaf) => leaf.grad_from_sq_diff(cache, d_k, param_idx, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.grad_from_sq_diff(cache, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_from_ard_cache(cache, x, d_k, local, uplo, scratch)
+            }
+            _ => self.grad_points(x, d_k, param_idx, uplo, scratch),
+        }
+    }
+
     fn write_params(&self, out: &mut [f64], offset: &mut usize) {
         match self {
             Self::Rbf(leaf) => {
@@ -858,6 +911,30 @@ fn apply_into_points(
     } else {
         term.apply_points(x, dest, uplo, fallback_scratch)
     }
+}
+
+fn fold_terms_ard_cache(
+    terms: &[CompiledKernel],
+    cache: MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+    mut scratch: MatMut<'_, f64>,
+) -> Result<(), GprError> {
+    let (first, rest) = split_terms(terms)?;
+    first.apply_from_ard_cache(cache, x, out.as_mut(), uplo, scratch.as_mut())?;
+    let n = out.nrows();
+    let mut extra = None;
+    for term in rest {
+        if term.needs_internal_scratch() {
+            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
+            term.apply_from_ard_cache(cache, x, scratch.as_mut(), uplo, buf.as_mut())?;
+        } else {
+            term.apply_from_ard_cache(cache, x, scratch.as_mut(), uplo, out.as_mut())?;
+        }
+        add_triangle(out.as_mut(), scratch.as_ref(), uplo);
+    }
+    Ok(())
 }
 
 fn add_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {

@@ -1,6 +1,7 @@
 //! Pairwise squared-Euclidean distances, filled by Rayon column partitions.
 
-use super::simd::{try_fill_cross_chunk, try_fill_lower_chunk};
+use super::simd::{try_fill_ard_chunk, try_fill_cross_chunk, try_fill_lower_chunk};
+use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
 use rayon::prelude::*;
@@ -69,6 +70,115 @@ pub(crate) fn fill_squared_euclidean(
             });
     }
     copy_lower_to_upper(dist);
+}
+
+/// Writes raw `(Δx_d)²` into an `n × (n·d)` cache (dimension `k` uses columns
+/// `[k n, (k+1) n)`). Only the lower triangle of each `n×n` block is filled.
+pub(crate) fn fill_ard_squared_diff(
+    x: MatRef<'_, f64>,
+    mut cache: MatMut<'_, f64>,
+    thread_scratch: &mut [Mat<f64>],
+) {
+    let n = x.nrows();
+    let d = x.ncols();
+    if n == 0 || d == 0 {
+        return;
+    }
+    debug_assert_eq!(cache.nrows(), n);
+    debug_assert_eq!(cache.ncols(), n * d);
+    let n_parts = partition_count(thread_scratch);
+    if thread_scratch.is_empty() {
+        cache
+            .rb_mut()
+            .par_col_partition_mut(n_parts)
+            .enumerate()
+            .for_each(|(chunk_idx, part)| {
+                fill_ard_chunk(x, part, chunk_idx, n_parts);
+            });
+    } else {
+        cache
+            .rb_mut()
+            .par_col_partition_mut(n_parts)
+            .zip(thread_scratch.par_iter_mut())
+            .enumerate()
+            .for_each(|(chunk_idx, (part, _scratch))| {
+                fill_ard_chunk(x, part, chunk_idx, n_parts);
+            });
+    }
+}
+
+pub(crate) fn require_ard_sq_diff_shape(
+    cache: MatRef<'_, f64>,
+    n: usize,
+    d: usize,
+) -> Result<(), GprError> {
+    let cols = n.checked_mul(d).ok_or(GprError::EmptyInput)?;
+    if cache.nrows() == n && cache.ncols() == cols {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!(
+                "ARD cache is {}x{}, expected {}x{}",
+                cache.nrows(),
+                cache.ncols(),
+                n,
+                cols
+            ),
+        })
+    }
+}
+
+pub(crate) fn weighted_r2_from_cache(
+    cache: MatRef<'_, f64>,
+    n: usize,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+    param_idx: Option<usize>,
+) -> Result<(f64, f64), GprError> {
+    let mut r2 = 0.0;
+    let mut dim_term = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let v = cache[(row, dim * n + col)];
+        if !v.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = v * w;
+        r2 += term;
+        if param_idx == Some(dim) {
+            dim_term = term;
+        }
+    }
+    if r2.is_finite() {
+        Ok((r2, dim_term))
+    } else {
+        Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn fill_ard_chunk(
+    x: MatRef<'_, f64>,
+    mut dist_chunk: MatMut<'_, f64>,
+    chunk_idx: usize,
+    n_chunks: usize,
+) {
+    let n = x.nrows();
+    let d = x.ncols();
+    let total = n * d;
+    let (start, len) = col_chunk(total, chunk_idx, n_chunks);
+    debug_assert_eq!(dist_chunk.ncols(), len);
+    if try_fill_ard_chunk(x, dist_chunk.rb_mut(), chunk_idx, n_chunks) {
+        return;
+    }
+    for local in 0..len {
+        let global = start + local;
+        let dim = global / n;
+        let col = global % n;
+        for row in col..n {
+            let diff = x[(row, dim)] - x[(col, dim)];
+            dist_chunk[(row, local)] = diff * diff;
+        }
+    }
 }
 
 /// Writes rectangular squared distances `k(x_train, x_test)`.
@@ -166,7 +276,10 @@ fn copy_lower_to_upper(mut dist: MatMut<'_, f64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{col_chunk, fill_squared_euclidean, fill_squared_euclidean_cross, worker_count};
+    use super::{
+        col_chunk, fill_ard_squared_diff, fill_squared_euclidean, fill_squared_euclidean_cross,
+        worker_count,
+    };
     use faer::Mat;
 
     fn sequential_sq(x: faer::MatRef<'_, f64>) -> Mat<f64> {
@@ -262,6 +375,24 @@ mod tests {
         for col in 0..3 {
             for row in 0..4 {
                 assert!((dist[(row, col)] - expected[(row, col)]).abs() <= 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn ard_fill_matches_per_dim_squared_diff() {
+        let x = Mat::from_fn(5, 3, |r, c| (r as f64) * 0.1 + (c as f64) * 0.3);
+        let n = 5;
+        let d = 3;
+        let mut cache = Mat::zeros(n, n * d);
+        fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
+        for dim in 0..d {
+            for col in 0..n {
+                for row in col..n {
+                    let diff = x[(row, dim)] - x[(col, dim)];
+                    let got = cache[(row, dim * n + col)];
+                    assert!((got - diff * diff).abs() <= 1e-15);
+                }
             }
         }
     }
