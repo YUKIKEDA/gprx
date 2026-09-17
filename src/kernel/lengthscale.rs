@@ -6,8 +6,8 @@ use crate::error::GprError;
 ///
 /// `num_params` is the feature dimension `d`. [`Self::get_params`] /
 /// [`Self::set_params`] read and write `θ_d = log(ℓ_d)`. Isotropic leaves keep
-/// a single `θ = log(ℓ)` and do not use this type. Matern and rational
-/// quadratic reuse this mouth in later issues.
+/// a single `θ = log(ℓ)` and do not use this type. [`super::MaternArdKernel`]
+/// uses this mouth; rational quadratic follows in a later issue.
 ///
 /// Cloning copies the `d`-vectors.
 ///

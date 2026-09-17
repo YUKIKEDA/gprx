@@ -1,13 +1,16 @@
 //! Kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
 //!
-//! Isotropic RBF evaluates from a squared-Euclidean distance matrix. ARD RBF
-//! evaluates from coordinates via [`ArdLengthscales`] (`θ_d = log(ℓ_d)`).
-//! Callers pass faer views; this module does not re-export faer types.
+//! Isotropic RBF and Matérn evaluate from a squared-Euclidean distance matrix.
+//! ARD RBF and ARD Matérn evaluate from coordinates via [`ArdLengthscales`]
+//! (`θ_d = log(ℓ_d)`). Callers pass faer views; this module does not re-export
+//! faer types.
 
 mod compiled;
 mod constant;
 mod lengthscale;
 mod linear;
+mod matern;
+mod matern_ard;
 mod rbf;
 mod rbf_ard;
 mod spec;
@@ -18,6 +21,8 @@ pub(crate) use compiled::CoordMode;
 pub use constant::ConstantKernel;
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
+pub use matern::{MaternKernel, MaternNu};
+pub use matern_ard::MaternArdKernel;
 pub use rbf::RbfKernel;
 pub use rbf_ard::RbfArdKernel;
 pub use spec::{KernelSpec, ParameterBinding};
