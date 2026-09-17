@@ -27,6 +27,6 @@ Add later, not now: `src/online.rs` (Phase 3), `src/sparse.rs` (Phase 4).
 
 M0 creates root crate files and `src/lib.rs` only. `src/kernel/` starts at P1A-5.
 
-Public at Phase 1b: `Gpr`, `Prediction`, `VarianceKind`, `PredictOptions`, `kernel`, `GaussianLikelihood`, `transform`, `GprError`. Keep `Workspace`, `Objective`, and faer types crate-private.
+Public at Phase 1b / 2: `Gpr`, `Prediction`, `VarianceKind`, `PredictOptions`, `FitOptions`, `DistanceCachePolicy`, `kernel`, `GaussianLikelihood`, `transform`, `GprError`. Keep `Workspace`, `Objective`, and faer types crate-private.
 
 Unit tests: `#[cfg(test)]` in the module. Integration tests: `tests/`. Golden files only under `compare/goldens/`.
