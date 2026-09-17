@@ -22,6 +22,8 @@ dbg_macro = "deny"
 float_cmp = "deny"
 
 [dependencies]
+argmin = { version = "0.11.0", default-features = false }
+argmin-math = { version = "0.5.1", default-features = false, features = ["vec"] }
 dyn-stack = "0.13"
 faer = "0.24.4"
 thiserror = "2.0.20"

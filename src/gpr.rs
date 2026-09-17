@@ -228,7 +228,7 @@ impl Gpr {
         self.likelihood.get_params(&mut out[n_kernel..])
     }
 
-    #[allow(dead_code)] // P1B-2 L-BFGS
+    #[allow(dead_code)] // P1B-3 Gpr::fit
     pub(crate) fn objective(&mut self) -> GprObjective<'_> {
         GprObjective::new(self)
     }
