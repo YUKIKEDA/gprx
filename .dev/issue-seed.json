@@ -28,7 +28,7 @@
   {"title":"[feat] P1B-5: README / rustdoc / examples","labels":["type:feat","phase:1b"],"milestone":"Phase 1b","id":"P1B-5","design":"conventions","depends":"P1B-7, P1A-17","dod":"英語 rustdoc。最短例で fit→predict。crates.io には出さない。0.1.0 相当。"},
   {"title":"[task] P2-1: ベンチ基準","labels":["type:task","phase:2"],"milestone":"Phase 2","id":"P2-1","design":"§15","depends":"Phase 1b","dod":"MLL+grad 1回、predict、メモリ、確保回数の数値が残る。目標比はまだ置かない。"},
   {"title":"[feat] P2-2: 距離キャッシュ","labels":["type:feat","phase:2"],"milestone":"Phase 2","id":"P2-2","design":"§5.2","depends":"P2-1","dod":"Never / Always。等方 RBF 経路の数値が 1b と一致。"},
-  {"title":"[feat] P2-7: ARD 距離キャッシュ","labels":["type:feat","phase:2"],"milestone":"Phase 2","id":"P2-7","design":"§5.1 §5.2","depends":"P2-2","dod":"Never / Always が ARD の (Δx_d)²（n×n×d）に効く。Never ≡ Always。公開 Policy は増やさない。Auto は P5-5。"},
+  {"title":"[feat] P2-7: ARD 距離キャッシュ","labels":["type:feat","phase:2"],"milestone":"Phase 2","id":"P2-7","design":"§5.1 §5.2","depends":"P2-2","dod":"Never / Always が (Δx_d)² に効く。mll_and_grad_ard / fit_lbfgs_ard で Always vs Never（改善または同等、bench-log、メモリ）。Workspace は n と d。fit 開始時に確保、等方/Never は空。必須数値は RBF ARD。埋めは逐次。Auto は P5-5。"},
   {"title":"[feat] P2-3: Rayon カーネル構築","labels":["type:feat","phase:2"],"milestone":"Phase 2","id":"P2-3","design":"§7.1 §8","depends":"P2-1","dod":"thread_scratch を並列前に切り離す。1b と数値一致。"},
   {"title":"[task] P2-4: fit ループの確保カウント","labels":["type:task","phase:2"],"milestone":"Phase 2","id":"P2-4","design":"§2 §7","depends":"P2-3","dod":"gprx 内部ホットパスで新規確保ゼロ（ユーザーカーネル除く）。"},
   {"title":"[spike] P2-5: カーネル SIMD が必要か","labels":["type:spike","phase:2"],"milestone":"Phase 2","id":"P2-5","design":"§8","depends":"P2-1, P2-3","dod":"測定結果を残す。不要なら実装しない。"},
