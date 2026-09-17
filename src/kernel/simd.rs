@@ -1,7 +1,9 @@
-//! Column-major SIMD helpers for squared distance and isotropic RBF.
+//! Column-major SIMD helpers for squared distance, isotropic RBF, and ARD RBF.
 //!
 //! Uses [`wide::f64x4`]. When a view is not unit row-stride, callers keep the
 //! scalar path. `wide::exp` may differ from scalar `f64::exp` by a few ULP.
+//! ARD caches store raw `(Δx_d)²` as `n × (n·d)` (dimension `k` uses columns
+//! `[k n, (k+1) n)`).
 
 use super::dist::{col_chunk, worker_count};
 use super::{Triangle, finite_dist, require_same_shape, require_square_pair};
@@ -419,9 +421,452 @@ pub(crate) fn try_grad_rbf(
     Ok(true)
 }
 
+pub(crate) fn ard_cache_col(n: usize, dim: usize, col: usize) -> usize {
+    dim * n + col
+}
+
+fn scale_add(src: &[f64], scale: f64, acc: &mut [f64]) -> Result<(), GprError> {
+    debug_assert_eq!(src.len(), acc.len());
+    let sv = f64x4::new([scale; LANES]);
+    let mut i = 0;
+    while i + LANES <= src.len() {
+        let s = load4(src, i);
+        if !all_finite4(s) {
+            return Err(GprError::NonFiniteInput);
+        }
+        store4(acc, i, load4(acc, i) + s * sv);
+        i += LANES;
+    }
+    while i < src.len() {
+        let v = finite_dist(src[i])?;
+        acc[i] += v * scale;
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Adds `scale · (x[i] - x0)²` into `acc[i]` with `f64x4` lanes.
+pub(crate) fn add_squared_diff_scaled(x: &[f64], x0: f64, scale: f64, acc: &mut [f64]) {
+    debug_assert_eq!(x.len(), acc.len());
+    let x0v = f64x4::new([x0; LANES]);
+    let sv = f64x4::new([scale; LANES]);
+    let mut i = 0;
+    while i + LANES <= x.len() {
+        let d = load4(x, i) - x0v;
+        store4(acc, i, load4(acc, i) + d * d * sv);
+        i += LANES;
+    }
+    while i < x.len() {
+        let d = x[i] - x0;
+        acc[i] += d * d * scale;
+        i += 1;
+    }
+}
+
+fn rbf_exp_in_place(buf: &mut [f64], inv_two: f64) -> Result<(), GprError> {
+    let scale = f64x4::new([-inv_two; LANES]);
+    let mut i = 0;
+    while i + LANES <= buf.len() {
+        let d = load4(buf, i);
+        if !all_finite4(d) {
+            return Err(GprError::NonFiniteInput);
+        }
+        store4(buf, i, (d * scale).exp());
+        i += LANES;
+    }
+    while i < buf.len() {
+        let d = finite_dist(buf[i])?;
+        buf[i] = (-d * inv_two).exp();
+        i += 1;
+    }
+    Ok(())
+}
+
+fn rbf_ard_grad_from_points(
+    r2: &mut [f64],
+    xdim: &[f64],
+    x0: f64,
+    inv_dim: f64,
+) -> Result<(), GprError> {
+    debug_assert_eq!(r2.len(), xdim.len());
+    let half = f64x4::new([-0.5; LANES]);
+    let inv = f64x4::new([inv_dim; LANES]);
+    let x0v = f64x4::new([x0; LANES]);
+    let mut i = 0;
+    while i + LANES <= r2.len() {
+        let d = load4(r2, i);
+        if !all_finite4(d) {
+            return Err(GprError::NonFiniteInput);
+        }
+        let delta = load4(xdim, i) - x0v;
+        let k = (d * half).exp();
+        store4(r2, i, k * delta * delta * inv);
+        i += LANES;
+    }
+    while i < r2.len() {
+        let d = finite_dist(r2[i])?;
+        let delta = xdim[i] - x0;
+        r2[i] = (-0.5 * d).exp() * delta * delta * inv_dim;
+        i += 1;
+    }
+    Ok(())
+}
+
+fn rbf_ard_grad_in_place(r2: &mut [f64], dim_sq: &[f64], inv_dim: f64) -> Result<(), GprError> {
+    debug_assert_eq!(r2.len(), dim_sq.len());
+    let half = f64x4::new([-0.5; LANES]);
+    let inv = f64x4::new([inv_dim; LANES]);
+    let mut i = 0;
+    while i + LANES <= r2.len() {
+        let d = load4(r2, i);
+        let sq = load4(dim_sq, i);
+        if !all_finite4(d) || !all_finite4(sq) {
+            return Err(GprError::NonFiniteInput);
+        }
+        let k = (d * half).exp();
+        store4(r2, i, k * sq * inv);
+        i += LANES;
+    }
+    while i < r2.len() {
+        let d = finite_dist(r2[i])?;
+        let sq = finite_dist(dim_sq[i])?;
+        r2[i] = (-0.5 * d).exp() * sq * inv_dim;
+        i += 1;
+    }
+    Ok(())
+}
+
+fn accumulate_ard_r2(
+    cache: Option<MatRef<'_, f64>>,
+    x: Option<MatRef<'_, f64>>,
+    inv_ell_sq: &[f64],
+    pair_col: usize,
+    dest: &mut [f64],
+    row_start: usize,
+) -> Result<(), GprError> {
+    dest.fill(0.0);
+    let n_rows = dest.len();
+    if let Some(cache) = cache {
+        let n = cache.nrows();
+        for (dim, &w) in inv_ell_sq.iter().enumerate() {
+            let Some(src) = col_slice(cache, ard_cache_col(n, dim, pair_col)) else {
+                return Err(GprError::UnsupportedKernelOperation {
+                    reason: "expected unit row-stride for SIMD ARD".to_owned(),
+                });
+            };
+            scale_add(&src[row_start..row_start + n_rows], w, dest)?;
+        }
+        return Ok(());
+    }
+    let x = x.ok_or(GprError::UnsupportedKernelOperation {
+        reason: "ARD SIMD needs coordinates or a squared-diff cache".to_owned(),
+    })?;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let Some(xdim) = col_slice(x, dim) else {
+            return Err(GprError::UnsupportedKernelOperation {
+                reason: "expected unit row-stride for SIMD ARD".to_owned(),
+            });
+        };
+        add_squared_diff_scaled(
+            &xdim[row_start..row_start + n_rows],
+            xdim[pair_col],
+            w,
+            dest,
+        );
+    }
+    Ok(())
+}
+
+fn map_ard_column(
+    cache: Option<MatRef<'_, f64>>,
+    x: Option<MatRef<'_, f64>>,
+    mut out: MatMut<'_, f64>,
+    window: ColWindow,
+    inv_ell_sq: &[f64],
+    param_idx: Option<usize>,
+) -> Result<(), GprError> {
+    let Some(dest) = col_slice_mut(out.rb_mut(), window.out_col) else {
+        return Err(GprError::UnsupportedKernelOperation {
+            reason: "expected unit row-stride for SIMD ARD".to_owned(),
+        });
+    };
+    let dest = &mut dest[window.row_start..window.row_end];
+    accumulate_ard_r2(
+        cache,
+        x,
+        inv_ell_sq,
+        window.dist_col,
+        dest,
+        window.row_start,
+    )?;
+    match param_idx {
+        None => rbf_exp_in_place(dest, 0.5),
+        Some(dim) => {
+            if let Some(cache) = cache {
+                let n = cache.nrows();
+                let Some(src) = col_slice(cache, ard_cache_col(n, dim, window.dist_col)) else {
+                    return Err(GprError::UnsupportedKernelOperation {
+                        reason: "expected unit row-stride for SIMD ARD".to_owned(),
+                    });
+                };
+                rbf_ard_grad_in_place(
+                    dest,
+                    &src[window.row_start..window.row_end],
+                    inv_ell_sq[dim],
+                )
+            } else {
+                let x = x.ok_or(GprError::UnsupportedKernelOperation {
+                    reason: "ARD SIMD needs coordinates or a squared-diff cache".to_owned(),
+                })?;
+                let Some(xdim) = col_slice(x, dim) else {
+                    return Err(GprError::UnsupportedKernelOperation {
+                        reason: "expected unit row-stride for SIMD ARD".to_owned(),
+                    });
+                };
+                rbf_ard_grad_from_points(
+                    dest,
+                    &xdim[window.row_start..window.row_end],
+                    xdim[window.dist_col],
+                    inv_ell_sq[dim],
+                )
+            }
+        }
+    }
+}
+
+fn rbf_ard_lower_parallel(
+    cache: Option<MatRef<'_, f64>>,
+    x: Option<MatRef<'_, f64>>,
+    out: MatMut<'_, f64>,
+    inv_ell_sq: &[f64],
+    param_idx: Option<usize>,
+) -> Result<(), GprError> {
+    let n = out.nrows();
+    let n_parts = worker_count();
+    out.par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, mut part)| {
+            let (start, len) = col_chunk(n, chunk_idx, n_parts);
+            for local in 0..len {
+                let col = start + local;
+                map_ard_column(
+                    cache,
+                    x,
+                    part.rb_mut(),
+                    ColWindow {
+                        dist_col: col,
+                        out_col: local,
+                        row_start: col,
+                        row_end: n,
+                    },
+                    inv_ell_sq,
+                    param_idx,
+                )?;
+            }
+            Ok(())
+        })
+}
+
+fn rbf_ard_serial_uplo(
+    cache: Option<MatRef<'_, f64>>,
+    x: Option<MatRef<'_, f64>>,
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+    inv_ell_sq: &[f64],
+    param_idx: Option<usize>,
+) -> Result<(), GprError> {
+    let n = out.nrows();
+    match uplo {
+        Triangle::Lower => rbf_ard_lower_parallel(cache, x, out, inv_ell_sq, param_idx),
+        Triangle::Full => {
+            for col in 0..n {
+                map_ard_column(
+                    cache,
+                    x,
+                    out.rb_mut(),
+                    ColWindow {
+                        dist_col: col,
+                        out_col: col,
+                        row_start: 0,
+                        row_end: n,
+                    },
+                    inv_ell_sq,
+                    param_idx,
+                )?;
+            }
+            Ok(())
+        }
+        Triangle::Upper => {
+            for col in 0..n {
+                map_ard_column(
+                    cache,
+                    x,
+                    out.rb_mut(),
+                    ColWindow {
+                        dist_col: col,
+                        out_col: col,
+                        row_start: 0,
+                        row_end: col + 1,
+                    },
+                    inv_ell_sq,
+                    param_idx,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn require_ard_cache(cache: MatRef<'_, f64>, n: usize, d: usize) -> Result<(), GprError> {
+    if cache.nrows() == n && cache.ncols() == n.saturating_mul(d) {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!(
+                "ARD cache is {}x{}, expected {}x{}",
+                cache.nrows(),
+                cache.ncols(),
+                n,
+                n * d
+            ),
+        })
+    }
+}
+
+/// Fills one column-partition of an `n × (n·d)` raw `(Δx_d)²` cache.
+pub(crate) fn try_fill_ard_chunk(
+    x: MatRef<'_, f64>,
+    mut dist_chunk: MatMut<'_, f64>,
+    chunk_idx: usize,
+    n_chunks: usize,
+) -> bool {
+    if !unit_row_stride(x) {
+        return false;
+    }
+    let n = x.nrows();
+    let d = x.ncols();
+    let total = n.saturating_mul(d);
+    let (start, len) = col_chunk(total, chunk_idx, n_chunks);
+    if dist_chunk.ncols() != len {
+        return false;
+    }
+    if len > 0 && col_slice_mut(dist_chunk.rb_mut(), 0).is_none() {
+        return false;
+    }
+    for local in 0..len {
+        let global = start + local;
+        let dim = global / n;
+        let col = global % n;
+        let Some(dest) = col_slice_mut(dist_chunk.rb_mut(), local) else {
+            return false;
+        };
+        let dest = &mut dest[col..];
+        dest.fill(0.0);
+        let Some(xdim) = col_slice(x, dim) else {
+            return false;
+        };
+        add_squared_diff(&xdim[col..], xdim[col], dest);
+    }
+    true
+}
+
+/// Writes ARD RBF from a raw `(Δx_d)²` cache when views are column-major.
+pub(crate) fn try_apply_rbf_ard_cache(
+    cache: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+    inv_ell_sq: &[f64],
+) -> Result<bool, GprError> {
+    let n = out.nrows();
+    if out.ncols() != n {
+        return Ok(false);
+    }
+    require_ard_cache(cache, n, inv_ell_sq.len())?;
+    if !unit_row_stride(cache) || !unit_row_stride(out.as_ref()) {
+        return Ok(false);
+    }
+    rbf_ard_serial_uplo(Some(cache), None, out.rb_mut(), uplo, inv_ell_sq, None)?;
+    Ok(true)
+}
+
+/// Writes ARD RBF from coordinates when views are column-major.
+pub(crate) fn try_apply_rbf_ard_points(
+    x: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+    inv_ell_sq: &[f64],
+) -> Result<bool, GprError> {
+    let n = out.nrows();
+    if out.ncols() != n || x.nrows() != n || x.ncols() != inv_ell_sq.len() {
+        return Ok(false);
+    }
+    if !unit_row_stride(x) || !unit_row_stride(out.as_ref()) {
+        return Ok(false);
+    }
+    rbf_ard_serial_uplo(None, Some(x), out.rb_mut(), uplo, inv_ell_sq, None)?;
+    Ok(true)
+}
+
+/// Writes ARD RBF `∂k/∂θ_d` from a raw `(Δx_d)²` cache.
+pub(crate) fn try_grad_rbf_ard_cache(
+    cache: MatRef<'_, f64>,
+    mut d_k: MatMut<'_, f64>,
+    uplo: Triangle,
+    inv_ell_sq: &[f64],
+    param_idx: usize,
+) -> Result<bool, GprError> {
+    let n = d_k.nrows();
+    if d_k.ncols() != n || param_idx >= inv_ell_sq.len() {
+        return Ok(false);
+    }
+    require_ard_cache(cache, n, inv_ell_sq.len())?;
+    if !unit_row_stride(cache) || !unit_row_stride(d_k.as_ref()) {
+        return Ok(false);
+    }
+    rbf_ard_serial_uplo(
+        Some(cache),
+        None,
+        d_k.rb_mut(),
+        uplo,
+        inv_ell_sq,
+        Some(param_idx),
+    )?;
+    Ok(true)
+}
+
+/// Writes ARD RBF `∂k/∂θ_d` from coordinates.
+pub(crate) fn try_grad_rbf_ard_points(
+    x: MatRef<'_, f64>,
+    mut d_k: MatMut<'_, f64>,
+    uplo: Triangle,
+    inv_ell_sq: &[f64],
+    param_idx: usize,
+) -> Result<bool, GprError> {
+    let n = d_k.nrows();
+    if d_k.ncols() != n
+        || x.nrows() != n
+        || x.ncols() != inv_ell_sq.len()
+        || param_idx >= inv_ell_sq.len()
+    {
+        return Ok(false);
+    }
+    if !unit_row_stride(x) || !unit_row_stride(d_k.as_ref()) {
+        return Ok(false);
+    }
+    rbf_ard_serial_uplo(
+        None,
+        Some(x),
+        d_k.rb_mut(),
+        uplo,
+        inv_ell_sq,
+        Some(param_idx),
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{add_squared_diff, rbf_exp_slice, rbf_grad_slice};
+    use super::{add_squared_diff, add_squared_diff_scaled, rbf_exp_slice, rbf_grad_slice};
     use crate::error::GprError;
 
     const TOL: f64 = 1e-12;
@@ -444,6 +889,21 @@ mod tests {
         for i in 0..11 {
             let d = x[i] - x0;
             expected[i] += d * d;
+            assert_close(acc[i], expected[i]);
+        }
+    }
+
+    #[test]
+    fn add_squared_diff_scaled_matches_scalar() {
+        let x: Vec<f64> = (0..11).map(|i| i as f64 * 0.3).collect();
+        let mut acc = vec![0.25; 11];
+        let mut expected = acc.clone();
+        let x0 = 1.25;
+        let w = 0.4;
+        add_squared_diff_scaled(&x, x0, w, &mut acc);
+        for i in 0..11 {
+            let d = x[i] - x0;
+            expected[i] += w * d * d;
             assert_close(acc[i], expected[i]);
         }
     }

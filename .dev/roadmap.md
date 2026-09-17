@@ -132,7 +132,7 @@ M0 → 1a → 1b → 2
 | ---- | ----- | --------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------- |
 | P2-1 | Task  | `phase-1b` を読み、ボトルネック順を決める                 | 1b           | `.dev/` に短い順序（kernel vs Cholesky vs その他）。目標比はここで置いてよい |
 | P2-2 | Feat  | 距離キャッシュ                                            | P2-1         | `Never` / `Always`。等方 RBF の数値が 1b と一致。bench が改善または同等      |
-| P2-7 | Feat  | ARD 距離キャッシュ                                        | P2-2         | `Never` / `Always` が `(Δx_d)²` に効く。`mll_and_grad_ard` / `fit_lbfgs_ard` で Always vs Never（改善または同等、bench-log、メモリ）。Workspace は n と d。fit 開始時に確保、等方/Never は空。必須数値は RBF ARD。埋めは逐次。`Auto` は P5-5 |
+| P2-7 | Feat  | ARD 距離キャッシュ                                        | P2-2         | `Never` / `Always` が `(Δx_d)²` に効く。`mll_and_grad_ard` / `fit_lbfgs_ard` で Always vs Never（改善または同等、bench-log、メモリ）。Workspace は n と d。fit 開始時に確保、等方/Never は空。必須数値は RBF ARD。埋めと RBF ARD apply/grad は Rayon + `wide::f64x4`。`Auto` は P5-5 |
 | P2-3 | Feat  | Rayon でカーネル構築。`thread_scratch` を並列前に切り離す | P2-1         | 1b と数値一致。`kernel_rbf` が速くなることを bench で示す                    |
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
 | P2-5 | Feat  | 等方 RBF と距離に SIMD                                    | P2-1, P2-3   | `wide::f64x4`。`kernel_rbf` / `predict_100` が Rayon のみより速い。数値は 1b と一致。可否はカーネル経路で判断し、`mll_and_grad` の勾配項だけを分母にしない |

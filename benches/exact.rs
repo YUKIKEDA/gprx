@@ -2,8 +2,9 @@
 //!
 //! P1A-18 adds `kernel_rbf` and `cholesky_alpha` on the fixed problem
 //! (n = 256, d = 8, seed = 0). P1A-8 adds `predict_100`. P1A-10 adds
-//! `mll_and_grad`. P1B-3 adds `fit_lbfgs`. Do not mix one MLL+grad with
-//! a full L-BFGS fit.
+//! `mll_and_grad`. P1B-3 adds `fit_lbfgs`. P2-7 adds ARD RBF groups
+//! `mll_and_grad_ard` / `fit_lbfgs_ard` (Always vs Never). Do not mix one
+//! MLL+grad with a full L-BFGS fit.
 
 #![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
 
@@ -12,8 +13,8 @@ use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
-use gprx::kernel::{KernelSpec, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
-use gprx::{FitOptions, GaussianLikelihood, Gpr, Prediction};
+use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
+use gprx::{DistanceCachePolicy, FitOptions, GaussianLikelihood, Gpr, Prediction};
 
 const N: usize = 256;
 const D: usize = 8;
@@ -202,12 +203,80 @@ fn fit_lbfgs(c: &mut Criterion) {
     group.finish();
 }
 
+fn fitted_ard(policy: DistanceCachePolicy) -> Gpr {
+    let ells = [ELL; D];
+    let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
+    let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+    let mut gpr = Gpr::new(kernel, likelihood).with_distance_cache_policy(policy);
+    let (x, y) = training_xy();
+    gpr.fit_with(&x, N, D, &y, FitOptions::FIXED)
+        .expect("training Cholesky");
+    gpr
+}
+
+fn mll_and_grad_ard(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mll_and_grad_ard");
+    for (name, policy) in [
+        ("always", DistanceCachePolicy::Always),
+        ("never", DistanceCachePolicy::Never),
+    ] {
+        let mut gpr = fitted_ard(policy);
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("param length");
+        let mut grad = vec![0.0; params.len()];
+        group.bench_function(name, move |b| {
+            b.iter(|| {
+                let value = gpr.value_and_gradient_into(
+                    std::hint::black_box(&params),
+                    std::hint::black_box(&mut grad),
+                );
+                std::hint::black_box(value)
+            });
+        });
+    }
+    group.finish();
+}
+
+fn fit_lbfgs_ard(c: &mut Criterion) {
+    let (x, y) = training_xy();
+    let ells = [ELL; D];
+    let mut group = c.benchmark_group("fit_lbfgs_ard");
+    group.sample_size(10);
+    for (name, policy) in [
+        ("always", DistanceCachePolicy::Always),
+        ("never", DistanceCachePolicy::Never),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || {
+                    let kernel =
+                        KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
+                    let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+                    (
+                        Gpr::new(kernel, likelihood).with_distance_cache_policy(policy),
+                        x.clone(),
+                        y.clone(),
+                    )
+                },
+                |(mut gpr, x, y)| {
+                    let result = gpr.fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y));
+                    std::hint::black_box(result)
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     exact,
     kernel_rbf,
     cholesky_alpha,
     predict_100,
     mll_and_grad,
-    fit_lbfgs
+    fit_lbfgs,
+    mll_and_grad_ard,
+    fit_lbfgs_ard
 );
 criterion_main!(exact);

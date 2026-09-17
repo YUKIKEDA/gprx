@@ -9,7 +9,7 @@ use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, CoordMode, KernelSpec, Triangle, fill_squared_euclidean,
+    CompiledKernel, CoordMode, KernelSpec, Triangle, fill_ard_squared_diff, fill_squared_euclidean,
     fill_squared_euclidean_cross,
 };
 use crate::likelihood::GaussianLikelihood;
@@ -64,12 +64,12 @@ impl Default for FitOptions {
     }
 }
 
-/// Selects whether training squared-Euclidean distances are reused across kernel builds.
+/// Selects whether training distances are reused across kernel builds.
 ///
-/// Isotropic RBF, Matérn, Periodic, and RQ evaluate from a distance matrix
-/// that does not change while `X` is fixed. [`Self::Always`] fills that
-/// matrix once per fit. [`Self::Never`] recomputes it on every kernel
-/// build, matching the Phase 1 path. ARD / points-mode leaves ignore this
+/// Isotropic RBF, Matérn, Periodic, and RQ evaluate from an `n×n` squared
+/// Euclidean matrix. ARD RBF / Matérn / RQ evaluate from raw `(Δx_d)²` stored
+/// as `n × (n·d)`. [`Self::Always`] fills the matching tensor once per fit.
+/// [`Self::Never`] recomputes it on every kernel build. Linear ignores this
 /// setting.
 ///
 /// # Examples
@@ -89,10 +89,10 @@ impl Default for FitOptions {
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DistanceCachePolicy {
-    /// Recompute squared Euclidean distances on every kernel build.
+    /// Recompute isotropic `n×n` distances or ARD `(Δx_d)²` on every kernel build.
     Never,
     /// Fill distances once per fit and reuse them while `X` is unchanged.
-    /// This is the default.
+    /// This is the default. ARD fits store an extra `n×(n·d)` tensor.
     #[default]
     Always,
 }
@@ -437,12 +437,18 @@ impl Gpr {
                 ws.ensure_kernel_scratch(n)?;
             }
             let thread_scratch = std::mem::take(&mut ws.thread_scratch);
+            let ard_cache = if compiled.needs_ard_sq_diff() && ws.ard_sq_diff_ready {
+                Some(ws.ard_sq_diff.as_ref())
+            } else {
+                None
+            };
             let result = (|| {
                 for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
                     write_kernel_grad(
                         compiled,
                         ws.dist_cache.as_ref(),
                         x.as_ref(),
+                        ard_cache,
                         ws.exp_buf.as_mut(),
                         ws.kernel_scratch.as_mut(),
                         i,
@@ -553,6 +559,7 @@ impl Gpr {
         self.prepare_workspace(n_rows)?;
         if let Some(ws) = self.workspace.as_mut() {
             ws.dist_ready = false;
+            ws.ard_sq_diff_ready = false;
         }
         let mut x_buf = x.to_vec();
         self.x_transform.fit(&x_buf, n_rows, n_cols)?;
@@ -562,6 +569,15 @@ impl Gpr {
         self.y_transform.transform(&mut y_buf)?;
         let x_mat = pack_points(&x_buf, n_rows, n_cols);
         self.compiled = Some(self.kernel.compile());
+        if let (Some(compiled), Some(ws)) = (self.compiled.as_ref(), self.workspace.as_mut()) {
+            if self.distance_cache_policy == DistanceCachePolicy::Always
+                && compiled.needs_ard_sq_diff()
+            {
+                ws.ensure_ard_sq_diff(n_rows, n_cols)?;
+            } else {
+                ws.clear_ard_sq_diff();
+            }
+        }
         self.x = Some(x_mat);
         self.y = Some(y_buf);
         self.n = n_rows;
@@ -955,9 +971,9 @@ fn workspace_mut(
 /// Writes the training Gram matrix.
 ///
 /// Distance-mode leaves use squared Euclidean distances in `dist_cache`.
-/// [`DistanceCachePolicy::Never`] refills that matrix every call so a stale
-/// cache cannot leak into MLL/grad. [`DistanceCachePolicy::Always`] fills
-/// it once per fit.
+/// ARD leaves under [`DistanceCachePolicy::Always`] use `ard_sq_diff`
+/// (`n × (n·d)` raw `(Δx_d)²`). [`DistanceCachePolicy::Never`] refills
+/// every call so a stale cache cannot leak into MLL/grad.
 fn apply_train_kernel(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
@@ -983,12 +999,34 @@ fn apply_train_kernel(
                 ws.exp_buf.as_mut(),
             )
         }
-        CoordMode::Points => compiled.apply_points(
-            x,
-            ws.k_matrix.as_mut(),
-            Triangle::Lower,
-            ws.exp_buf.as_mut(),
-        ),
+        CoordMode::Points => {
+            if compiled.needs_ard_sq_diff()
+                && policy == DistanceCachePolicy::Always
+                && ws.ard_sq_diff.ncols() > 0
+            {
+                let refill = !ws.ard_sq_diff_ready;
+                if refill {
+                    let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
+                    fill_ard_squared_diff(x, ws.ard_sq_diff.as_mut(), &mut thread_scratch);
+                    ws.thread_scratch = thread_scratch;
+                    ws.ard_sq_diff_ready = true;
+                }
+                compiled.apply_from_ard_cache(
+                    ws.ard_sq_diff.as_ref(),
+                    x,
+                    ws.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    ws.exp_buf.as_mut(),
+                )
+            } else {
+                compiled.apply_points(
+                    x,
+                    ws.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    ws.exp_buf.as_mut(),
+                )
+            }
+        }
     }
 }
 
@@ -1112,6 +1150,7 @@ fn write_kernel_grad(
     compiled: &CompiledKernel,
     dist: MatRef<'_, f64>,
     x: MatRef<'_, f64>,
+    ard_cache: Option<MatRef<'_, f64>>,
     d_k: MatMut<'_, f64>,
     scratch: MatMut<'_, f64>,
     param_idx: usize,
@@ -1120,7 +1159,13 @@ fn write_kernel_grad(
         CoordMode::Dist | CoordMode::Either => {
             compiled.grad(dist, d_k, param_idx, Triangle::Lower, scratch)
         }
-        CoordMode::Points => compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch),
+        CoordMode::Points => {
+            if let Some(cache) = ard_cache {
+                compiled.grad_from_ard_cache(cache, x, d_k, param_idx, Triangle::Lower, scratch)
+            } else {
+                compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
+            }
+        }
     }
 }
 
@@ -1212,6 +1257,13 @@ mod tests {
     fn rbf_gpr(ell: f64, noise: f64) -> Gpr {
         Gpr::new(
             KernelSpec::from(RbfKernel::new(ell).expect("valid")),
+            GaussianLikelihood::new(noise).expect("valid"),
+        )
+    }
+
+    fn rbf_ard_gpr(ells: &[f64], noise: f64) -> Gpr {
+        Gpr::new(
+            KernelSpec::from(RbfArdKernel::new(ells).expect("valid")),
             GaussianLikelihood::new(noise).expect("valid"),
         )
     }
@@ -1650,6 +1702,179 @@ mod tests {
         let pa = always.predict(&[0.5], 1, 1).expect("fitted");
         assert_close(pn.mean[0], pa.mean[0]);
         assert_close(pn.variance[0], pa.variance[0]);
+    }
+
+    #[test]
+    fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
+        let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
+        let y = [0.4, -0.2, 0.9];
+        let xs = [0.5, 0.1];
+        let mut never = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+            .with_distance_cache_policy(super::DistanceCachePolicy::Never);
+        let mut always = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+            .with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        never
+            .fit_with(&x, 3, 2, &y, FitOptions::FIXED)
+            .expect("spd");
+        always
+            .fit_with(&x, 3, 2, &y, FitOptions::FIXED)
+            .expect("spd");
+        assert_eq!(never.workspace.as_ref().expect("ws").ard_sq_diff.ncols(), 0);
+        assert_eq!(
+            always.workspace.as_ref().expect("ws").ard_sq_diff.ncols(),
+            6
+        );
+        let mut params = [0.0; 3];
+        never.get_params(&mut params).expect("len 3");
+        let mut grad_n = [0.0; 3];
+        let mut grad_a = [0.0; 3];
+        let vn = never
+            .value_and_gradient_into(&params, &mut grad_n)
+            .expect("spd");
+        let va = always
+            .value_and_gradient_into(&params, &mut grad_a)
+            .expect("spd");
+        assert_close(vn, va);
+        assert_close(grad_n[0], grad_a[0]);
+        assert_close(grad_n[1], grad_a[1]);
+        assert_close(grad_n[2], grad_a[2]);
+        let pn = never.predict(&xs, 1, 2).expect("fitted");
+        let pa = always.predict(&xs, 1, 2).expect("fitted");
+        assert_close(pn.mean[0], pa.mean[0]);
+        assert_close(pn.variance[0], pa.variance[0]);
+    }
+
+    #[test]
+    fn rbf_ard_fit_optimizes_with_always_cache() {
+        let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
+        let y = [0.4, -0.2, 0.9];
+        let mut gpr = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+            .with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        let mut before = [0.0; 3];
+        gpr.get_params(&mut before).expect("len 3");
+        gpr.fit(&x, 3, 2, &y).expect("optimize");
+        assert!(gpr.is_fitted());
+        let mut after = [0.0; 3];
+        gpr.get_params(&mut after).expect("len 3");
+        assert!(
+            before.iter().zip(&after).any(|(a, b)| (a - b).abs() > 1e-9),
+            "L-BFGS should move ARD θ: before={before:?}, after={after:?}"
+        );
+        assert_eq!(gpr.workspace.as_ref().expect("ws").ard_sq_diff.ncols(), 6);
+        assert!(gpr.workspace.as_ref().expect("ws").ard_sq_diff_ready);
+    }
+
+    #[test]
+    fn always_reuses_poisoned_ard_cache() {
+        let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
+        let y = [0.4, -0.2, 0.9];
+        let mut gpr = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+            .with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        gpr.fit_with(&x, 3, 2, &y, FitOptions::FIXED).expect("spd");
+        let mut params = [0.0; 3];
+        gpr.get_params(&mut params).expect("len 3");
+        let mut grad = [0.0; 3];
+        let good = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        if let Some(ws) = gpr.workspace.as_mut() {
+            let n = 3;
+            for dim in 0..2 {
+                for col in 0..n {
+                    for row in col..n {
+                        ws.ard_sq_diff[(row, dim * n + col)] = 999.0;
+                    }
+                }
+            }
+            ws.ard_sq_diff_ready = true;
+        }
+        let poisoned = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert!(
+            (poisoned - good).abs() > 1e-3,
+            "Always should keep the poisoned ARD cache: good={good}, poisoned={poisoned}"
+        );
+    }
+
+    #[test]
+    fn always_ard_cache_retiling_follows_n() {
+        let mut gpr = rbf_ard_gpr(&[1.0, 1.5], 0.16)
+            .with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        gpr.fit_with(
+            &[0.0, 0.8, 1.7, 0.2, -0.4, 0.9],
+            3,
+            2,
+            &[0.4, -0.2, 0.9],
+            FitOptions::FIXED,
+        )
+        .expect("spd n=3");
+        {
+            let ws = gpr.workspace.as_ref().expect("ws");
+            assert_eq!(ws.ard_sq_diff.nrows(), 3);
+            assert_eq!(ws.ard_sq_diff.ncols(), 6);
+        }
+        gpr.fit_with(
+            &[0.0, 0.8, 1.7, 2.1, 0.2, -0.4, 0.9, 0.3],
+            4,
+            2,
+            &[0.4, -0.2, 0.9, 0.1],
+            FitOptions::FIXED,
+        )
+        .expect("spd n=4");
+        let ws = gpr.workspace.as_ref().expect("ws");
+        assert_eq!(ws.ard_sq_diff.nrows(), 4);
+        assert_eq!(ws.ard_sq_diff.ncols(), 8);
+        assert!(ws.ard_sq_diff_ready);
+    }
+
+    #[test]
+    fn isotropic_always_leaves_ard_cache_empty() {
+        let mut gpr =
+            rbf_gpr(1.25, 0.16).with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        gpr.fit_with(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9], FitOptions::FIXED)
+            .expect("spd");
+        let ws = gpr.workspace.as_ref().expect("ws");
+        assert_eq!(ws.ard_sq_diff.nrows(), 0);
+        assert_eq!(ws.ard_sq_diff.ncols(), 0);
+        assert!(!ws.ard_sq_diff_ready);
+    }
+
+    #[test]
+    fn never_and_always_match_matern_ard_nlml() {
+        let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
+        let y = [0.4, -0.2, 0.9];
+        let nu = MaternNu::ThreeHalves;
+        let mut never = Gpr::new(
+            KernelSpec::from(MaternArdKernel::new(&[1.25, 0.8], nu).expect("valid")),
+            GaussianLikelihood::new(0.16).expect("valid"),
+        )
+        .with_distance_cache_policy(super::DistanceCachePolicy::Never);
+        let mut always = Gpr::new(
+            KernelSpec::from(MaternArdKernel::new(&[1.25, 0.8], nu).expect("valid")),
+            GaussianLikelihood::new(0.16).expect("valid"),
+        )
+        .with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        never
+            .fit_with(&x, 3, 2, &y, FitOptions::FIXED)
+            .expect("spd");
+        always
+            .fit_with(&x, 3, 2, &y, FitOptions::FIXED)
+            .expect("spd");
+        let mut params = [0.0; 3];
+        never.get_params(&mut params).expect("len 3");
+        let mut grad_n = [0.0; 3];
+        let mut grad_a = [0.0; 3];
+        let vn = never
+            .value_and_gradient_into(&params, &mut grad_n)
+            .expect("spd");
+        let va = always
+            .value_and_gradient_into(&params, &mut grad_a)
+            .expect("spd");
+        assert_close(vn, va);
+        assert_close(grad_n[0], grad_a[0]);
+        assert_close(grad_n[1], grad_a[1]);
+        assert_close(grad_n[2], grad_a[2]);
     }
 
     #[test]
