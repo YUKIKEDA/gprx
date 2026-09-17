@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: [P2-6](https://github.com/YUKIKEDA/gprx/issues/60)。** `phase-1b` の順は [`.dev/bench-log.md`](bench-log.md)。Phase 2 は計測してから高速化する。
+**今やること: P2-8（`Gpr` / `FittedGpr`）。** Issue は実装時。`phase-1b` の順は [`.dev/bench-log.md`](bench-log.md)。Phase 2 は計測してから高速化する。
 
 Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
