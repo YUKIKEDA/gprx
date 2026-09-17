@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Workflow
 
-- Work only the current roadmap row. Now: **P2-3**. Do not start Phase 3, 4, or 5 early.
+- Work only the current roadmap row. Now: **P2-4**. Do not start Phase 3, 4, or 5 early.
 - Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge. History rewrite: `.cursor/rules/git.mdc`. Scope / Issue / roadmap questions: `.cursor/rules/consent.mdc`.
 - One Issue = one PR. Related: `Closes #N`.
 - Issue templates: Bug / Feat / Task / Spike. Spike commits use `chore` or `test`.

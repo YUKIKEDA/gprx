@@ -5,9 +5,17 @@
 //! ARD RBF, ARD Matérn, and ARD rational quadratic evaluate from coordinates
 //! via [`ArdLengthscales`] (`θ_d = log(ℓ_d)`). Callers pass faer views; this
 //! module does not re-export faer types.
+//!
+//! Squared-Euclidean fills and [`Triangle::Lower`] writes run on Rayon's
+//! global pool. There is no parallel on/off flag; `RAYON_NUM_THREADS=1` is
+//! sequential. Limit threads with `RAYON_NUM_THREADS` or
+//! `rayon::ThreadPoolBuilder::build_global` before the first fill. ARD /
+//! points-mode leaves stay sequential. See the [crate-level parallelism
+//! notes](crate).
 
 mod compiled;
 mod constant;
+mod dist;
 mod lengthscale;
 mod linear;
 mod matern;
@@ -23,6 +31,7 @@ mod white;
 pub use compiled::CompiledKernel;
 pub(crate) use compiled::CoordMode;
 pub use constant::ConstantKernel;
+pub(crate) use dist::{fill_squared_euclidean, fill_squared_euclidean_cross};
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};
@@ -36,7 +45,9 @@ pub use spec::{KernelSpec, ParameterBinding};
 pub use white::WhiteKernel;
 
 use crate::error::GprError;
+use dist::{col_chunk, worker_count};
 use faer::{MatMut, MatRef};
+use rayon::prelude::*;
 
 /// Which triangle of a symmetric kernel matrix to write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,16 +159,18 @@ fn write_triangle(
     dist: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
-    mut kernel: impl FnMut(f64) -> Result<f64, GprError>,
+    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = require_square_pair(dist, out.as_ref())?;
+    if n > 0 && matches!(uplo, Triangle::Lower) {
+        return write_lower_parallel(dist, out, kernel);
+    }
     let mut err = None;
     visit_triangle(n, uplo, |row, col| {
         if err.is_some() {
             return;
         }
-        let d = dist[(row, col)];
-        match kernel(d) {
+        match kernel(dist[(row, col)]) {
             Ok(value) => out[(row, col)] = value,
             Err(e) => err = Some(e),
         }
@@ -166,6 +179,36 @@ fn write_triangle(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+fn write_lower_parallel(
+    dist: MatRef<'_, f64>,
+    out: MatMut<'_, f64>,
+    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+) -> Result<(), GprError> {
+    let n = dist.nrows();
+    let n_parts = worker_count();
+    out.par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, mut part)| {
+            let (start, len) = col_chunk(n, chunk_idx, n_parts);
+            for local in 0..len {
+                let col = start + local;
+                for row in col..n {
+                    part[(row, local)] = kernel(dist[(row, col)])?;
+                }
+            }
+            Ok(())
+        })
+}
+
+/// Fills pairwise squared Euclidean distances for criterion's `kernel_rbf`.
+///
+/// Hidden so benches can share the library fill without duplicating the
+/// Rayon partition. Not part of the documented public API.
+#[doc(hidden)]
+pub fn fill_pairwise_sq_euclidean(x: MatRef<'_, f64>, dist: MatMut<'_, f64>) {
+    fill_squared_euclidean(x, dist, &mut []);
 }
 
 fn finite_dist(d: f64) -> Result<f64, GprError> {

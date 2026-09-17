@@ -614,6 +614,7 @@ dependencies = [
  "criterion",
  "dyn-stack",
  "faer",
+ "rayon",
  "serde",
  "serde_json",
  "stats_alloc",
