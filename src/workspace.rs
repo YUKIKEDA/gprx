@@ -18,8 +18,11 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     pub(crate) w_matrix: Mat<P::Storage>,
     /// Cached pairwise distances (squared Euclidean for Phase 1 RBF).
     pub(crate) dist_cache: Mat<P::Storage>,
-    /// Kernel values and `∂K/∂θ` scratch.
+    /// Kernel values and `∂K/∂θ` output.
     pub(crate) exp_buf: Mat<P::Storage>,
+    /// Distinct `n×n` scratch for product `∂K/∂θ`. Empty until a product tree
+    /// needs a gradient, so isotropic RBF does not carry an extra matrix.
+    pub(crate) kernel_scratch: Mat<P::Storage>,
     /// Residual buffer for mixed-precision refinement. `None` in Phase 1.
     #[allow(dead_code)]
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
@@ -49,6 +52,7 @@ impl Workspace<DoublePrecision> {
             w_matrix: Mat::<f64>::zeros(n, n),
             dist_cache: Mat::<f64>::zeros(n, n),
             exp_buf: Mat::<f64>::zeros(n, n),
+            kernel_scratch: Mat::<f64>::zeros(0, 0),
             refine_buf: None,
             faer_scratch: MemBuffer::new(faer_scratch_req(n)),
         })
@@ -69,6 +73,22 @@ impl Workspace<DoublePrecision> {
             return Ok(());
         }
         *self = Self::new(n)?;
+        Ok(())
+    }
+
+    /// Ensures product `∂K/∂θ` scratch is `n×n`. No-op when already sized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n` is zero.
+    pub(crate) fn ensure_kernel_scratch(&mut self, n: usize) -> Result<(), GprError> {
+        if n == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        if self.kernel_scratch.nrows() == n && self.kernel_scratch.ncols() == n {
+            return Ok(());
+        }
+        self.kernel_scratch = Mat::<f64>::zeros(n, n);
         Ok(())
     }
 }
@@ -103,6 +123,8 @@ mod tests {
         assert_square(&ws.w_matrix, n);
         assert_square(&ws.dist_cache, n);
         assert_square(&ws.exp_buf, n);
+        assert_eq!(ws.kernel_scratch.nrows(), 0);
+        assert_eq!(ws.kernel_scratch.ncols(), 0);
         assert!(ws.refine_buf.is_none());
         assert_eq!(ws.faer_scratch.len(), faer_scratch_req(n).size_bytes());
         assert_send_sync::<Workspace<DoublePrecision>>();
@@ -117,5 +139,19 @@ mod tests {
         assert_eq!(ws.n(), 6);
         assert_square(&ws.k_matrix, 6);
         assert_eq!(ws.ensure(0).err(), Some(GprError::EmptyInput));
+    }
+
+    #[test]
+    fn ensure_kernel_scratch_allocates_when_needed() {
+        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
+        assert_eq!(ws.kernel_scratch.nrows(), 0);
+        ws.ensure_kernel_scratch(4).expect("n > 0");
+        assert_square(&ws.kernel_scratch, 4);
+        ws.ensure_kernel_scratch(4).expect("same n");
+        assert_square(&ws.kernel_scratch, 4);
+        assert_eq!(
+            ws.ensure_kernel_scratch(0).err(),
+            Some(GprError::EmptyInput)
+        );
     }
 }
