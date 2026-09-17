@@ -366,15 +366,16 @@ impl CompiledKernel {
         }
     }
 
-    /// Writes `∂K/∂θ_{param_idx}` into `d_k`. `scratch` must match `d_k`.
+    /// Writes `∂K/∂θ_{param_idx}` into `d_k`.
     ///
-    /// `scratch` must be a distinct buffer from `d_k`.
+    /// Product trees need `scratch` the same shape as `d_k` and distinct from
+    /// it. Leaves ignore `scratch`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
-    /// range, [`GprError::WorkspaceTooSmall`] if `scratch` is the wrong size, or
-    /// the same shape errors as [`Self::apply`].
+    /// range, [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is
+    /// the wrong size, or the same shape errors as [`Self::apply`].
     pub fn grad(
         &self,
         dist: MatRef<'_, f64>,
@@ -383,7 +384,6 @@ impl CompiledKernel {
         uplo: Triangle,
         mut scratch: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
-        require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::RbfArd(_)
@@ -400,6 +400,7 @@ impl CompiledKernel {
                 term.grad(dist, d_k, local, uplo, scratch)
             }
             Self::Product(terms) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
                 product_grad(terms, dist, d_k.as_mut(), param_idx, uplo, scratch.as_mut())
             }
         }
@@ -475,7 +476,8 @@ impl CompiledKernel {
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedKernelOperation`] for isotropic leaves
-    /// or product trees, or the same index / shape errors as [`Self::grad`].
+    /// or product trees, or the same index errors as [`Self::grad`].
+    #[allow(clippy::only_used_in_recursion)] // leaves ignore scratch; Product is still unsupported
     pub fn grad_points(
         &self,
         x: MatRef<'_, f64>,
@@ -484,7 +486,6 @@ impl CompiledKernel {
         uplo: Triangle,
         scratch: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
-        require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
         match self {
             Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
                 Err(iso_needs_dist())
@@ -668,6 +669,14 @@ impl CompiledKernel {
             Self::Sum(terms) | Self::Product(terms) => {
                 terms.len() > 1 || terms.iter().any(Self::needs_internal_scratch)
             }
+        }
+    }
+
+    pub(crate) fn needs_product_grad_scratch(&self) -> bool {
+        match self {
+            Self::Product(_) => true,
+            Self::Sum(terms) => terms.iter().any(Self::needs_product_grad_scratch),
+            _ => false,
         }
     }
 }
