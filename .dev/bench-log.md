@@ -55,3 +55,17 @@ Phase 2 の順: 距離キャッシュと Rayon は **kernel**（2）向け。Cho
 | `fit_lbfgs` | 257 ms | 224 ms (222–226) | **−13.0%** |
 
 DoD（改善または同等）は満たす。確保上限は変えていない。
+
+## P2-3（Rayon カーネル構築、[#27](https://github.com/YUKIKEDA/gprx/issues/27)）
+
+同一機械。比較: `cargo bench --bench exact -- --baseline phase-1b`。等方距離は下三角を列パーティションで並列し、上三角は逐次コピー。`write_triangle(Lower)` も同じ分割。Cholesky は `Par::Seq`。`thread_scratch` はワーカー数ぶんの空 `0×0` で、並列前に `mem::take`。孤立 `kernel_rbf` は毎回距離埋め + RBF 下三角なので、この行の効果はそこに出る。
+
+| グループ | phase-1b | この PR | 変化（中央値） |
+| -------- | -------- | ------- | ------------- |
+| `kernel_rbf` | 266 µs | 149 µs (148–149) | **−43.8%** |
+| `cholesky_alpha` | 159 µs | 153 µs (152–155) | −7.0%（この行は触っていない。機械ゆらぎ） |
+| `predict_100` | 379 µs | 374 µs (370–383) | −1.8%（ノイズ域） |
+| `mll_and_grad` | 1.42 ms | 1.18 ms (1.176–1.184) | **−15.7%** |
+| `fit_lbfgs` | 257 ms | 231 ms (230–233) | **−10.1%** |
+
+DoD（`kernel_rbf` が速くなること、1b と数値一致）は満たす。確保: `mll_and_grad` は 1（上限 16）。`predict_100` は warmup 後 8 に下がったので上限を 9→8。P2-2 Always（mll 1.23 ms / fit 224 ms）と比べると mll はもう一段速い。`fit_lbfgs` は 231 ms で P2-2 よりわずかに遅い（キャッシュ済み apply の並列オーバーヘッド + ゆらぎ）。

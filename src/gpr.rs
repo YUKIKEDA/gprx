@@ -8,7 +8,10 @@ use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
 use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, Triangle};
+use crate::kernel::{
+    CompiledKernel, CoordMode, KernelSpec, Triangle, fill_squared_euclidean,
+    fill_squared_euclidean_cross,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{Lbfgs, OptResult, Optimizer};
@@ -420,18 +423,24 @@ impl Gpr {
             if compiled.needs_product_grad_scratch() {
                 ws.ensure_kernel_scratch(n)?;
             }
-            for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-                write_kernel_grad(
-                    compiled,
-                    ws.dist_cache.as_ref(),
-                    x.as_ref(),
-                    ws.exp_buf.as_mut(),
-                    ws.kernel_scratch.as_mut(),
-                    i,
-                )?;
-                let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
-                *slot = -0.5 * inner;
-            }
+            let thread_scratch = std::mem::take(&mut ws.thread_scratch);
+            let result = (|| {
+                for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
+                    write_kernel_grad(
+                        compiled,
+                        ws.dist_cache.as_ref(),
+                        x.as_ref(),
+                        ws.exp_buf.as_mut(),
+                        ws.kernel_scratch.as_mut(),
+                        i,
+                    )?;
+                    let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
+                    *slot = -0.5 * inner;
+                }
+                Ok::<(), GprError>(())
+            })();
+            ws.thread_scratch = thread_scratch;
+            result?;
             let mut noise_inner = 0.0;
             let d_noise = self.likelihood.noise_variance();
             for i in 0..n {
@@ -691,7 +700,12 @@ impl Gpr {
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => {
                 let mut dist = Mat::zeros(n, m);
-                fill_squared_euclidean_cross(x_train.as_ref(), x_test.as_ref(), dist.as_mut());
+                fill_squared_euclidean_cross(
+                    x_train.as_ref(),
+                    x_test.as_ref(),
+                    dist.as_mut(),
+                    &mut [],
+                );
                 compiled.apply_cross(dist.as_ref(), k_star.as_mut(), scratch.as_mut())?;
             }
             CoordMode::Points => {
@@ -865,20 +879,23 @@ fn apply_train_kernel(
 ) -> Result<(), GprError> {
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
+            let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
             let refill = match policy {
                 DistanceCachePolicy::Never => true,
                 DistanceCachePolicy::Always => !ws.dist_ready,
             };
             if refill {
-                fill_squared_euclidean(x, ws.dist_cache.as_mut());
+                fill_squared_euclidean(x, ws.dist_cache.as_mut(), &mut thread_scratch);
                 ws.dist_ready = policy == DistanceCachePolicy::Always;
             }
-            compiled.apply(
+            let applied = compiled.apply(
                 ws.dist_cache.as_ref(),
                 ws.k_matrix.as_mut(),
                 Triangle::Lower,
                 ws.exp_buf.as_mut(),
-            )
+            );
+            ws.thread_scratch = thread_scratch;
+            applied
         }
         CoordMode::Points => compiled.apply_points(
             x,
@@ -928,42 +945,6 @@ fn validate_query(xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprErr
 
 fn pack_points(x: &[f64], n_rows: usize, n_cols: usize) -> Mat<f64> {
     Mat::from_fn(n_rows, n_cols, |row, col| x[col * n_rows + row])
-}
-
-fn fill_squared_euclidean(x: MatRef<'_, f64>, mut dist: MatMut<'_, f64>) {
-    let n = x.nrows();
-    let d = x.ncols();
-    for col in 0..n {
-        for row in col..n {
-            let mut sum = 0.0;
-            for dim in 0..d {
-                let diff = x[(row, dim)] - x[(col, dim)];
-                sum += diff * diff;
-            }
-            dist[(row, col)] = sum;
-            dist[(col, row)] = sum;
-        }
-    }
-}
-
-fn fill_squared_euclidean_cross(
-    x_train: MatRef<'_, f64>,
-    x_test: MatRef<'_, f64>,
-    mut dist: MatMut<'_, f64>,
-) {
-    let n = x_train.nrows();
-    let m = x_test.nrows();
-    let d = x_train.ncols();
-    for col in 0..m {
-        for row in 0..n {
-            let mut sum = 0.0;
-            for dim in 0..d {
-                let diff = x_train[(row, dim)] - x_test[(col, dim)];
-                sum += diff * diff;
-            }
-            dist[(row, col)] = sum;
-        }
-    }
 }
 
 fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
@@ -1141,7 +1122,7 @@ mod tests {
         let compiled = kernel.compile();
         let x_mat = pack_points(x, n, d);
         let mut dist = Mat::zeros(n, n);
-        super::fill_squared_euclidean(x_mat.as_ref(), dist.as_mut());
+        crate::kernel::fill_squared_euclidean(x_mat.as_ref(), dist.as_mut(), &mut []);
         let mut k = Mat::zeros(n, n);
         let mut scratch = Mat::zeros(n, n);
         compiled
@@ -1174,6 +1155,19 @@ mod tests {
         assert_send_sync::<super::VarianceKind>();
         assert_send_sync::<super::PredictOptions>();
         assert_send_sync::<super::FitOptions>();
+    }
+
+    #[test]
+    fn fit_restores_thread_scratch() {
+        let mut gpr = rbf_gpr(1.0, 0.1);
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        let ws = gpr.workspace.as_ref().expect("workspace");
+        assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
+        assert!(
+            ws.thread_scratch
+                .iter()
+                .all(|m| m.nrows() == 0 && m.ncols() == 0)
+        );
     }
 
     #[test]
