@@ -16,7 +16,7 @@ src/kernel/         # all kernel leaves; never at src/*.rs
 src/transform/      # target.rs, input.rs
 src/gpr.rs          # Gpr
 src/objective.rs    # Phase 1b
-tests/              # analytic.rs, goldens.rs, alloc.rs; M0: cholesky_smoke.rs
+tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs; M0: cholesky_smoke.rs
 benches/            # criterion; from P1A-18 (after first `Gpr` path)
 compare/            # uv + sklearn + goldens/*.json
 examples/           # Phase 1b
