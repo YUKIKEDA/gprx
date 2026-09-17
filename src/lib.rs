@@ -34,7 +34,7 @@ pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GprError};
-pub use gpr::{FitOptions, Gpr, PredictOptions, Prediction, VarianceKind};
+pub use gpr::{DistanceCachePolicy, FitOptions, Gpr, PredictOptions, Prediction, VarianceKind};
 pub use likelihood::GaussianLikelihood;
 pub use precision::{DoublePrecision, PrecisionPolicy};
 

@@ -60,6 +60,39 @@ impl Default for FitOptions {
     }
 }
 
+/// Selects whether training squared-Euclidean distances are reused across kernel builds.
+///
+/// Isotropic RBF, Matérn, Periodic, and RQ evaluate from a distance matrix
+/// that does not change while `X` is fixed. [`Self::Always`] fills that
+/// matrix once per fit. [`Self::Never`] recomputes it on every kernel
+/// build, matching the Phase 1 path. ARD / points-mode leaves ignore this
+/// setting.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{DistanceCachePolicy, GaussianLikelihood, Gpr};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+/// let likelihood = GaussianLikelihood::new(0.1)?;
+/// let mut gpr = Gpr::new(kernel, likelihood)
+///     .with_distance_cache_policy(DistanceCachePolicy::Always);
+/// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DistanceCachePolicy {
+    /// Recompute squared Euclidean distances on every kernel build.
+    Never,
+    /// Fill distances once per fit and reuse them while `X` is unchanged.
+    /// This is the default.
+    #[default]
+    Always,
+}
+
 /// Predictive mean and (diagonal) variance at the query points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prediction {
@@ -84,7 +117,8 @@ pub struct Prediction {
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
 /// a diagonal variance. [`Self::loo_predict`] is the GPML leave-one-out
 /// at every training point, from `L` and `α`. Input and target transforms
-/// default to identity.
+/// default to identity. Training squared distances default to
+/// [`DistanceCachePolicy::Always`].
 ///
 /// # Examples
 ///
@@ -110,6 +144,7 @@ pub struct Gpr {
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn Transform>,
     y_transform: Box<dyn TargetTransform>,
+    distance_cache_policy: DistanceCachePolicy,
     workspace: Option<Workspace<DoublePrecision>>,
     x: Option<Mat<f64>>,
     y: Option<Vec<f64>>,
@@ -127,6 +162,7 @@ impl fmt::Debug for Gpr {
             .field("d", &self.d)
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
+            .field("distance_cache_policy", &self.distance_cache_policy)
             .finish_non_exhaustive()
     }
 }
@@ -144,6 +180,7 @@ impl Gpr {
             likelihood,
             x_transform: Box::new(IdentityInput),
             y_transform: Box::new(IdentityTarget),
+            distance_cache_policy: DistanceCachePolicy::Always,
             workspace: None,
             x: None,
             y: None,
@@ -163,6 +200,15 @@ impl Gpr {
     /// Replaces the target (`y`) transform. Intended to be called before fit.
     pub fn with_target_transform(mut self, transform: impl TargetTransform + 'static) -> Self {
         self.y_transform = Box::new(transform);
+        self
+    }
+
+    /// Sets whether training distances are cached across kernel builds.
+    ///
+    /// Intended to be called before [`Self::fit`]. The default is
+    /// [`DistanceCachePolicy::Always`]. See [`DistanceCachePolicy`].
+    pub fn with_distance_cache_policy(mut self, policy: DistanceCachePolicy) -> Self {
+        self.distance_cache_policy = policy;
         self
     }
 
@@ -320,7 +366,7 @@ impl Gpr {
         {
             let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            apply_train_kernel(&compiled, x.as_ref(), ws)?;
+            apply_train_kernel(&compiled, x.as_ref(), ws, self.distance_cache_policy)?;
             add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
         }
         let mut rhs = Mat::from_fn(n, 1, |i, _| y[i]);
@@ -483,6 +529,9 @@ impl Gpr {
         validate_training(x, n_rows, n_cols, y)?;
         self.clear_solution();
         self.prepare_workspace(n_rows)?;
+        if let Some(ws) = self.workspace.as_mut() {
+            ws.dist_ready = false;
+        }
         let mut x_buf = x.to_vec();
         self.x_transform.fit(&x_buf, n_rows, n_cols)?;
         self.x_transform.apply(&mut x_buf, n_rows, n_cols)?;
@@ -556,7 +605,7 @@ impl Gpr {
         {
             let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            apply_train_kernel(compiled, x.as_ref(), ws)?;
+            apply_train_kernel(compiled, x.as_ref(), ws, self.distance_cache_policy)?;
             add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
         }
         let n_rows = self.n;
@@ -802,16 +851,28 @@ fn workspace_mut(
     workspace.as_mut().ok_or(GprError::EmptyInput)
 }
 
-/// Writes the training Gram matrix. Distance-mode leaves get squared Euclidean
-/// distances from `x` first so MLL/grad does not reuse a stale `dist_cache`.
+/// Writes the training Gram matrix.
+///
+/// Distance-mode leaves use squared Euclidean distances in `dist_cache`.
+/// [`DistanceCachePolicy::Never`] refills that matrix every call so a stale
+/// cache cannot leak into MLL/grad. [`DistanceCachePolicy::Always`] fills
+/// it once per fit.
 fn apply_train_kernel(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
     ws: &mut Workspace<DoublePrecision>,
+    policy: DistanceCachePolicy,
 ) -> Result<(), GprError> {
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            fill_squared_euclidean(x, ws.dist_cache.as_mut());
+            let refill = match policy {
+                DistanceCachePolicy::Never => true,
+                DistanceCachePolicy::Always => !ws.dist_ready,
+            };
+            if refill {
+                fill_squared_euclidean(x, ws.dist_cache.as_mut());
+                ws.dist_ready = policy == DistanceCachePolicy::Always;
+            }
             compiled.apply(
                 ws.dist_cache.as_ref(),
                 ws.k_matrix.as_mut(),
@@ -1379,12 +1440,14 @@ mod tests {
 
     #[test]
     fn value_and_gradient_refills_stale_dist_cache() {
-        let mut gpr = rbf_gpr(1.25, 0.16);
+        let mut gpr =
+            rbf_gpr(1.25, 0.16).with_distance_cache_policy(super::DistanceCachePolicy::Never);
         gpr.fit_with(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9], FitOptions::FIXED)
             .expect("spd");
         if let Some(ws) = gpr.workspace.as_mut() {
             let n = ws.dist_cache.nrows();
             ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
+            ws.dist_ready = false;
         }
         let mut params = [0.0; 2];
         gpr.get_params(&mut params).expect("len 2");
@@ -1394,6 +1457,66 @@ mod tests {
             .expect("spd");
         assert_close(value, gpr.neg_log_marginal_likelihood().expect("fitted"));
         assert!(grad.iter().all(|g| g.is_finite()));
+    }
+
+    #[test]
+    fn always_reuses_poisoned_dist_cache() {
+        let x = [0.0, 0.8, 1.7];
+        let y = [0.4, -0.2, 0.9];
+        let mut gpr =
+            rbf_gpr(1.25, 0.16).with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        gpr.fit_with(&x, 3, 1, &y, FitOptions::FIXED).expect("spd");
+        let mut params = [0.0; 2];
+        gpr.get_params(&mut params).expect("len 2");
+        let mut grad = [0.0; 2];
+        let good = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        if let Some(ws) = gpr.workspace.as_mut() {
+            let n = ws.dist_cache.nrows();
+            ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
+            ws.dist_ready = true;
+        }
+        let poisoned = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert!(
+            (poisoned - good).abs() > 1e-3,
+            "Always should keep the poisoned distances: good={good}, poisoned={poisoned}"
+        );
+    }
+
+    #[test]
+    fn never_and_always_match_rbf_nlml_grad_and_predict() {
+        let x = [0.0, 0.8, 1.7];
+        let y = [0.4, -0.2, 0.9];
+        let mut never =
+            rbf_gpr(1.25, 0.16).with_distance_cache_policy(super::DistanceCachePolicy::Never);
+        let mut always =
+            rbf_gpr(1.25, 0.16).with_distance_cache_policy(super::DistanceCachePolicy::Always);
+        never
+            .fit_with(&x, 3, 1, &y, FitOptions::FIXED)
+            .expect("spd");
+        always
+            .fit_with(&x, 3, 1, &y, FitOptions::FIXED)
+            .expect("spd");
+        let mut params = [0.0; 2];
+        never.get_params(&mut params).expect("len 2");
+        let mut grad_n = [0.0; 2];
+        let mut grad_a = [0.0; 2];
+        let vn = never
+            .value_and_gradient_into(&params, &mut grad_n)
+            .expect("spd");
+        let va = always
+            .value_and_gradient_into(&params, &mut grad_a)
+            .expect("spd");
+        assert_close(vn, va);
+        assert_close(grad_n[0], grad_a[0]);
+        assert_close(grad_n[1], grad_a[1]);
+        let pn = never.predict(&[0.5], 1, 1).expect("fitted");
+        let pa = always.predict(&[0.5], 1, 1).expect("fitted");
+        assert_close(pn.mean[0], pa.mean[0]);
+        assert_close(pn.variance[0], pa.variance[0]);
     }
 
     #[test]
