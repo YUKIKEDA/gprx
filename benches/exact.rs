@@ -2,7 +2,8 @@
 //!
 //! P1A-18 adds `kernel_rbf` and `cholesky_alpha` on the fixed problem
 //! (n = 256, d = 8, seed = 0). P1A-8 adds `predict_100`. P1A-10 adds
-//! `mll_and_grad`. Do not mix those with a full L-BFGS fit.
+//! `mll_and_grad`. P1B-3 adds `fit_lbfgs`. Do not mix one MLL+grad with
+//! a full L-BFGS fit.
 
 #![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
 
@@ -12,7 +13,7 @@ use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, MatRef, Par};
 use gprx::kernel::{KernelSpec, RbfKernel, Triangle};
-use gprx::{GaussianLikelihood, Gpr};
+use gprx::{FitOptions, GaussianLikelihood, Gpr};
 
 const N: usize = 256;
 const D: usize = 8;
@@ -102,7 +103,8 @@ fn fitted_model() -> (Gpr, Vec<f64>) {
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
     let mut gpr = Gpr::new(kernel, likelihood);
     let (x, y) = training_xy();
-    gpr.fit(&x, N, D, &y).expect("training Cholesky");
+    gpr.fit_with(&x, N, D, &y, FitOptions::FIXED)
+        .expect("training Cholesky");
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     (gpr, xs)
 }
@@ -187,5 +189,33 @@ fn mll_and_grad(c: &mut Criterion) {
     });
 }
 
-criterion_group!(exact, kernel_rbf, cholesky_alpha, predict_100, mll_and_grad);
+fn fit_lbfgs(c: &mut Criterion) {
+    let (x, y) = training_xy();
+    let mut group = c.benchmark_group("fit_lbfgs");
+    group.sample_size(10);
+    group.bench_function("fit_lbfgs", |b| {
+        b.iter_batched(
+            || {
+                let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
+                let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+                (Gpr::new(kernel, likelihood), x.clone(), y.clone())
+            },
+            |(mut gpr, x, y)| {
+                let result = gpr.fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y));
+                std::hint::black_box(result)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(
+    exact,
+    kernel_rbf,
+    cholesky_alpha,
+    predict_100,
+    mll_and_grad,
+    fit_lbfgs
+);
 criterion_main!(exact);

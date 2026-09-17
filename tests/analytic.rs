@@ -5,7 +5,7 @@
 //! call faer or sklearn; P1A-12 adds committed JSON as a second check.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
+use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
 
 const TOL: f64 = 1e-9;
 
@@ -183,7 +183,7 @@ fn check_rbf_case(ell: f64, noise: f64, x: &[f64], y: &[f64], xs: &[f64]) -> Res
         KernelSpec::from(RbfKernel::new(ell)?),
         GaussianLikelihood::new(noise)?,
     );
-    gpr.fit(x, n, 1, y)?;
+    gpr.fit_with(x, n, 1, y, FitOptions::FIXED)?;
     assert_eq!(gpr.n(), n);
     assert_eq!(gpr.d(), 1);
 

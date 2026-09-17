@@ -5,7 +5,7 @@
 //! does not require zero.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gpr, GprError};
+use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 
@@ -52,7 +52,7 @@ fn fitted_model() -> Result<(Gpr, Vec<f64>), GprError> {
     let x = fill_column_major(N, D, SEED);
     let mut state = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
     let y: Vec<f64> = (0..N).map(|_| splitmix64(&mut state)).collect();
-    gpr.fit(&x, N, D, &y)?;
+    gpr.fit_with(&x, N, D, &y, FitOptions::FIXED)?;
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     Ok((gpr, xs))
 }

@@ -3,8 +3,6 @@
 //! Crate-private. [`GprObjective`] borrows [`Gpr`] and forwards concatenated
 //! kernel-then-likelihood `θ` to the model, which owns the source of truth.
 
-#![allow(dead_code)] // P1B-3 Gpr::fit
-
 use crate::error::GprError;
 use crate::gpr::Gpr;
 
@@ -96,7 +94,8 @@ mod tests {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.1).expect("valid");
         let mut gpr = Gpr::new(kernel, likelihood);
-        gpr.fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25]).expect("spd");
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
+            .expect("spd");
         gpr
     }
 
