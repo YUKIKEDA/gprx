@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Workflow
 
-- Work only the current roadmap row. Now: **M0**. No GPR until M0-2 is done. Do not start 1b, 2, 3, 4, or 5 early.
+- Work only the current roadmap row. Now: **P2-1**. Do not start Phase 3, 4, or 5 early.
 - Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge. History rewrite: `.cursor/rules/git.mdc`. Scope / Issue / roadmap questions: `.cursor/rules/consent.mdc`.
 - One Issue = one PR. Related: `Closes #N`.
 - Issue templates: Bug / Feat / Task / Spike. Spike commits use `chore` or `test`.
@@ -17,5 +17,5 @@ alwaysApply: true
 - Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
 - Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in composition only; do not enable both at large values.
 - Optimizer is argmin L-BFGS. Do not write a custom L-BFGS.
-- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io in Phase 1.
+- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io (`publish = false`). Phase 2 does not lift this; the roadmap still lists crates.io as out of scope.
 - `just bench` = criterion. See `.cursor/rules/bench.mdc`. Speed work without a number is out of scope.
