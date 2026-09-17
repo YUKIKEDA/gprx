@@ -2,8 +2,8 @@
 
 use crate::error::GprError;
 use crate::kernel::{
-    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel, RbfArdKernel,
-    RbfKernel, WhiteKernel,
+    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
+    RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, WhiteKernel,
 };
 use std::ops::{Add, Mul};
 
@@ -47,6 +47,10 @@ pub enum KernelSpec {
     MaternArd(MaternArdKernel),
     /// Periodic (exp-sine-squared) leaf.
     Periodic(PeriodicKernel),
+    /// Isotropic rational quadratic leaf.
+    RationalQuadratic(RationalQuadraticKernel),
+    /// ARD rational quadratic leaf (`θ_d = log(ℓ_d)`, then `log(α)`).
+    RationalQuadraticArd(RationalQuadraticArdKernel),
     /// Constant leaf `k = c`.
     Constant(ConstantKernel),
     /// Linear leaf `k = σ² xᵀ x'`.
@@ -86,6 +90,18 @@ impl From<MaternArdKernel> for KernelSpec {
 impl From<PeriodicKernel> for KernelSpec {
     fn from(kernel: PeriodicKernel) -> Self {
         Self::Periodic(kernel)
+    }
+}
+
+impl From<RationalQuadraticKernel> for KernelSpec {
+    fn from(kernel: RationalQuadraticKernel) -> Self {
+        Self::RationalQuadratic(kernel)
+    }
+}
+
+impl From<RationalQuadraticArdKernel> for KernelSpec {
+    fn from(kernel: RationalQuadraticArdKernel) -> Self {
+        Self::RationalQuadraticArd(kernel)
     }
 }
 
@@ -132,6 +148,8 @@ impl KernelSpec {
             Self::Matern(leaf) => leaf.num_params(),
             Self::MaternArd(leaf) => leaf.num_params(),
             Self::Periodic(leaf) => leaf.num_params(),
+            Self::RationalQuadratic(leaf) => leaf.num_params(),
+            Self::RationalQuadraticArd(leaf) => leaf.num_params(),
             Self::Constant(leaf) => leaf.num_params(),
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
@@ -224,6 +242,17 @@ impl KernelSpec {
                 out[*offset + 1] = leaf.log_period();
                 *offset += 2;
             }
+            Self::RationalQuadratic(leaf) => {
+                out[*offset] = leaf.log_lengthscale();
+                out[*offset + 1] = leaf.log_alpha();
+                *offset += 2;
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                let n = leaf.lengthscales().num_params();
+                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
+                out[*offset + n] = leaf.log_alpha();
+                *offset += n + 1;
+            }
             Self::Constant(leaf) => {
                 out[*offset] = leaf.log_constant();
                 *offset += 1;
@@ -270,6 +299,18 @@ impl KernelSpec {
                 Ok(())
             }
             Self::Periodic(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::RationalQuadratic(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::RationalQuadraticArd(leaf) => {
                 let n = leaf.num_params();
                 leaf.set_params(&params[*offset..*offset + n])?;
                 *offset += n;
@@ -322,6 +363,12 @@ impl KernelSpec {
             Self::Periodic(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
+            Self::RationalQuadratic(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
             Self::Constant(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
@@ -371,8 +418,8 @@ fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
 mod tests {
     use super::KernelSpec;
     use crate::kernel::{
-        ConstantKernel, MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel, RbfArdKernel,
-        RbfKernel, WhiteKernel,
+        ConstantKernel, MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel,
+        RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, WhiteKernel,
     };
 
     const TOL: f64 = 1e-12;
@@ -536,6 +583,47 @@ mod tests {
         assert_eq!(
             spec.compile().coord_mode().expect("compat"),
             crate::kernel::CoordMode::Dist
+        );
+    }
+
+    #[test]
+    fn rational_quadratic_flattens_iso_and_ard() {
+        let mut iso = KernelSpec::from(RationalQuadraticKernel::new(1.5, 0.8).expect("valid"));
+        assert_eq!(iso.num_params(), 2);
+        let mut params = [0.0; 2];
+        iso.get_params(&mut params).expect("len 2");
+        assert_close(params[0], 1.5_f64.ln());
+        assert_close(params[1], 0.8_f64.ln());
+        params[1] = 2.0_f64.ln();
+        iso.set_params(&params).expect("len 2");
+        match iso.compile() {
+            crate::kernel::CompiledKernel::RationalQuadratic(leaf) => {
+                assert_close(leaf.alpha(), 2.0);
+            }
+            other => panic!("expected RQ, got {other:?}"),
+        }
+        assert_eq!(
+            iso.compile().coord_mode().expect("compat"),
+            crate::kernel::CoordMode::Dist
+        );
+        let mut ard =
+            KernelSpec::from(RationalQuadraticArdKernel::new(&[1.0, 2.0], 0.5).expect("valid"));
+        assert_eq!(ard.num_params(), 3);
+        let mut ard_params = [0.0; 3];
+        ard.get_params(&mut ard_params).expect("len 3");
+        assert_close(ard_params[2], 0.5_f64.ln());
+        ard_params[2] = 1.25_f64.ln();
+        ard.set_params(&ard_params).expect("len 3");
+        match ard.compile() {
+            crate::kernel::CompiledKernel::RationalQuadraticArd(leaf) => {
+                assert_eq!(leaf.num_params(), 3);
+                assert_close(leaf.alpha(), 1.25);
+            }
+            other => panic!("expected ARD RQ, got {other:?}"),
+        }
+        assert_eq!(
+            ard.compile().coord_mode().expect("compat"),
+            crate::kernel::CoordMode::Points
         );
     }
 }
