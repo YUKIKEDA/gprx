@@ -191,7 +191,7 @@ struct PredGolden<'a> {
     xs_n_cols: usize,
 }
 
-fn check_predictions(name: &str, gpr: &Gpr, golden: PredGolden<'_>) -> Result<(), GprError> {
+fn check_predictions(name: &str, gpr: &mut Gpr, golden: PredGolden<'_>) -> Result<(), GprError> {
     let pred_lat = gpr.predict_with(
         golden.xs,
         golden.xs_n_rows,
@@ -229,7 +229,7 @@ fn check_rbf_golden(name: &str, golden: &RbfGolden) -> Result<(), GprError> {
     )?;
     check_predictions(
         name,
-        &gpr,
+        &mut gpr,
         PredGolden {
             mean: &golden.mean,
             latent_variance: &golden.latent_variance,
@@ -269,7 +269,7 @@ fn check_composite_golden(name: &str, golden: &CompositeGolden) -> Result<(), Gp
     )?;
     check_predictions(
         name,
-        &gpr,
+        &mut gpr,
         PredGolden {
             mean: &golden.mean,
             latent_variance: &golden.latent_variance,

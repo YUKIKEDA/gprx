@@ -483,13 +483,21 @@ struct Workspace<P: PrecisionPolicy> {
     w_matrix: Mat<P::Storage>,       // W = ααᵀ - K⁻¹。勾配のトレース項(§6.2)
     dist_cache: Mat<P::Storage>,
     exp_buf: Mat<P::Storage>,        // カーネル評価、および ∂K/∂θ の一時領域
+    kernel_scratch: Mat<P::Storage>, // product `∂K/∂θ`。等方 RBF では空
+    thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
+    rhs: Mat<P::Storage>,            // n×1、訓練 Cholesky の右辺 y → α
+    query_xs: Vec<f64>,              // predict 用、変換後クエリ（列優先）
+    query_x: Mat<P::Storage>,        // m×d
+    query_k_star: Mat<P::Storage>,   // n×m
+    query_scratch: Mat<P::Storage>,
+    query_dist: Mat<P::Storage>,
+    query_kss: Vec<f64>,
     refine_buf: Option<Mat<P::Refine>>, // MixedPrecision時のみ。DoublePrecisionではNone
     faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
-    thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
 }
 ```
 
-各バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
+各バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは最初の `predict` / `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 
 Rayon並列クロージャ内での新規確保は厳禁。`thread_scratch`を事前分割し、**並列領域に入る直前に`Workspace`から切り離して**分配する。`&mut self`(Objective/`Gpr`)をRayonクロージャに渡さない。
 
@@ -518,6 +526,7 @@ fit()開始 → n,d確定 → 各Mat<T>を1回だけ確保 → 距離キャッ�
        w_matrix に K⁻¹ → W
        exp_buf に ∂K/∂θ を順に書き ⟨W, dK⟩
 fit()終了 → Workspace(L含む)は保持、predict/refitで再利用
+  → predict_into: query_* に上書き、`Prediction` の容量を再利用
 ```
 
 バッチfitのWorkspaceはn固定。オンライン学習の容量成長は`OnlineWorkspace`(§11)が担当し、バッチ用Workspaceとはメモリ管理方針を分ける。
@@ -734,7 +743,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-4）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-5）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
