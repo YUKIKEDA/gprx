@@ -1,5 +1,6 @@
 //! Pairwise squared-Euclidean distances, filled by Rayon column partitions.
 
+use super::simd::{try_fill_cross_chunk, try_fill_lower_chunk};
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
 use rayon::prelude::*;
@@ -110,6 +111,9 @@ fn fill_lower_chunk(
     let d = x.ncols();
     let (start, len) = col_chunk(n, chunk_idx, n_chunks);
     debug_assert_eq!(dist_chunk.ncols(), len);
+    if try_fill_lower_chunk(x, dist_chunk.rb_mut(), chunk_idx, n_chunks) {
+        return;
+    }
     for local in 0..len {
         let col = start + local;
         for row in col..n {
@@ -135,6 +139,9 @@ fn fill_cross_chunk(
     let m = x_test.nrows();
     let (start, len) = col_chunk(m, chunk_idx, n_chunks);
     debug_assert_eq!(dist_chunk.ncols(), len);
+    if try_fill_cross_chunk(x_train, x_test, dist_chunk.rb_mut(), chunk_idx, n_chunks) {
+        return;
+    }
     for local in 0..len {
         let col = start + local;
         for row in 0..n {

@@ -1,15 +1,19 @@
 //! Isotropic squared-exponential (RBF) kernel.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
+use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
 use super::{Triangle, finite_dist, write_dense, write_triangle};
 use crate::error::GprError;
+use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
 /// Isotropic RBF: `k = exp( -‖x-x'‖² / (2ℓ²) )`.
 ///
 /// The optimizer parameter is `θ = log(ℓ)`. Amplitude is not stored here;
 /// compose with [`super::ConstantKernel`] when a signal variance is needed.
-/// `dist` is the matrix of squared Euclidean distances.
+/// `dist` is the matrix of squared Euclidean distances. Column-major views
+/// with unit row stride use `wide::f64x4` for [`Self::apply`],
+/// [`Self::apply_cross`], and [`Self::grad`].
 ///
 /// # Examples
 ///
@@ -101,10 +105,13 @@ impl RbfKernel {
     pub fn apply(
         &self,
         dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        mut out: MatMut<'_, f64>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
+        if try_apply_rbf(dist, out.rb_mut(), uplo, inv_two_ell_sq)? {
+            return Ok(());
+        }
         write_triangle(dist, out, uplo, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
     }
 
@@ -114,8 +121,15 @@ impl RbfKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
-    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
+    pub fn apply_cross(
+        &self,
+        dist: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
+        if try_apply_rbf_cross(dist, out.rb_mut(), inv_two_ell_sq)? {
+            return Ok(());
+        }
         write_dense(dist, out, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
     }
 
@@ -135,7 +149,7 @@ impl RbfKernel {
     pub fn grad(
         &self,
         dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -147,6 +161,9 @@ impl RbfKernel {
         let ell_sq = self.lengthscale() * self.lengthscale();
         let inv_two_ell_sq = 0.5 / ell_sq;
         let inv_ell_sq = 1.0 / ell_sq;
+        if try_grad_rbf(dist, d_k.rb_mut(), uplo, inv_two_ell_sq, inv_ell_sq)? {
+            return Ok(());
+        }
         write_triangle(dist, d_k, uplo, |d| {
             let d = finite_dist(d)?;
             let k = (-d * inv_two_ell_sq).exp();
@@ -334,6 +351,22 @@ mod tests {
         assert_close(upper[(1, 0)], -1.0);
         assert_close(upper[(2, 0)], -1.0);
         assert_close(upper[(2, 1)], -1.0);
+    }
+
+    #[test]
+    fn simd_lower_matches_scalar_on_n_eight() {
+        let rbf = RbfKernel::new(1.25).expect("valid");
+        let x: Vec<f64> = (0..8).map(|i| i as f64 * 0.37).collect();
+        let dist = sq_dist_1d(&x);
+        let mut simd = fill(8, 0.0);
+        rbf.apply(dist.as_ref(), simd.as_mut(), Triangle::Lower)
+            .expect("shape");
+        for col in 0..8 {
+            for row in col..8 {
+                let expected = (-0.5 * dist[(row, col)] / (1.25 * 1.25)).exp();
+                assert_close(simd[(row, col)], expected);
+            }
+        }
     }
 
     #[test]
