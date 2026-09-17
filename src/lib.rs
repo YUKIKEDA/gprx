@@ -8,6 +8,7 @@ mod error;
 mod gpr;
 pub mod kernel;
 mod likelihood;
+mod objective;
 mod precision;
 pub mod transform;
 mod workspace;
