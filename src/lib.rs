@@ -7,11 +7,13 @@
 //! (`publish = false`).
 //!
 //! Distance fills and lower-triangle kernel writes use the process-wide
-//! Rayon pool (shared with faer). There is no `n_jobs` setter on [`Gpr`].
-//! Set `RAYON_NUM_THREADS` before the process starts, or call
+//! Rayon pool (shared with faer). There is no parallel on/off flag and no
+//! `n_jobs` setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process
+//! starts, or call
 //! `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before
-//! the first [`Gpr::fit`] / [`Gpr::predict`]. `RAYON_NUM_THREADS=1` is
-//! sequential. The global pool can be initialized only once.
+//! the first [`Gpr::fit`] / [`Gpr::predict`]. One worker
+//! (`RAYON_NUM_THREADS=1`) is sequential. The global pool can be
+//! initialized only once.
 //!
 //! # Examples
 //!
