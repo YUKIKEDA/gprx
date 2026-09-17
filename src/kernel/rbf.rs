@@ -8,7 +8,7 @@ use faer::{MatMut, MatRef};
 /// Isotropic RBF: `k = exp( -‖x-x'‖² / (2ℓ²) )`.
 ///
 /// The optimizer parameter is `θ = log(ℓ)`. Amplitude is not stored here;
-/// compose with a constant kernel in P1A-6 when a signal variance is needed.
+/// compose with [`super::ConstantKernel`] when a signal variance is needed.
 /// `dist` is the matrix of squared Euclidean distances.
 ///
 /// # Examples

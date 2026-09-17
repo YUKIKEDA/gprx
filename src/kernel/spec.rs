@@ -1,7 +1,7 @@
 //! Declaration-layer kernel tree: leaves, sums, and products.
 
 use crate::error::GprError;
-use crate::kernel::{RbfArdKernel, RbfKernel};
+use crate::kernel::{ConstantKernel, LinearKernel, RbfArdKernel, RbfKernel, WhiteKernel};
 use std::ops::{Add, Mul};
 
 /// Maps a flat optimizer index to a leaf-local parameter.
@@ -38,6 +38,12 @@ pub enum KernelSpec {
     Rbf(RbfKernel),
     /// ARD RBF leaf (`θ_d = log(ℓ_d)`).
     RbfArd(RbfArdKernel),
+    /// Constant leaf `k = c`.
+    Constant(ConstantKernel),
+    /// Linear leaf `k = σ² xᵀ x'`.
+    Linear(LinearKernel),
+    /// White (nugget) leaf.
+    White(WhiteKernel),
     /// `k = k_left + k_right`.
     Sum(Box<KernelSpec>, Box<KernelSpec>),
     /// `k = k_left * k_right` (Hadamard product).
@@ -53,6 +59,24 @@ impl From<RbfKernel> for KernelSpec {
 impl From<RbfArdKernel> for KernelSpec {
     fn from(kernel: RbfArdKernel) -> Self {
         Self::RbfArd(kernel)
+    }
+}
+
+impl From<ConstantKernel> for KernelSpec {
+    fn from(kernel: ConstantKernel) -> Self {
+        Self::Constant(kernel)
+    }
+}
+
+impl From<LinearKernel> for KernelSpec {
+    fn from(kernel: LinearKernel) -> Self {
+        Self::Linear(kernel)
+    }
+}
+
+impl From<WhiteKernel> for KernelSpec {
+    fn from(kernel: WhiteKernel) -> Self {
+        Self::White(kernel)
     }
 }
 
@@ -78,6 +102,9 @@ impl KernelSpec {
         match self {
             Self::Rbf(leaf) => leaf.num_params(),
             Self::RbfArd(leaf) => leaf.num_params(),
+            Self::Constant(leaf) => leaf.num_params(),
+            Self::Linear(leaf) => leaf.num_params(),
+            Self::White(leaf) => leaf.num_params(),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.num_params() + right.num_params()
             }
@@ -153,6 +180,18 @@ impl KernelSpec {
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 *offset += n;
             }
+            Self::Constant(leaf) => {
+                out[*offset] = leaf.log_constant();
+                *offset += 1;
+            }
+            Self::Linear(leaf) => {
+                out[*offset] = leaf.log_variance();
+                *offset += 1;
+            }
+            Self::White(leaf) => {
+                out[*offset] = leaf.log_variance();
+                *offset += 1;
+            }
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_params(out, offset);
                 right.write_params(out, offset);
@@ -169,6 +208,24 @@ impl KernelSpec {
                 Ok(())
             }
             Self::RbfArd(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::Constant(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::Linear(leaf) => {
+                let n = leaf.num_params();
+                leaf.set_params(&params[*offset..*offset + n])?;
+                *offset += n;
+                Ok(())
+            }
+            Self::White(leaf) => {
                 let n = leaf.num_params();
                 leaf.set_params(&params[*offset..*offset + n])?;
                 *offset += n;
@@ -192,6 +249,15 @@ impl KernelSpec {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::RbfArd(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Constant(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Linear(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::White(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::Sum(left, right) | Self::Product(left, right) => {
@@ -233,7 +299,7 @@ fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
 #[cfg(test)]
 mod tests {
     use super::KernelSpec;
-    use crate::kernel::{RbfArdKernel, RbfKernel};
+    use crate::kernel::{ConstantKernel, RbfArdKernel, RbfKernel, WhiteKernel};
 
     const TOL: f64 = 1e-12;
 
@@ -329,5 +395,23 @@ mod tests {
             crate::kernel::CompiledKernel::RbfArd(leaf) => assert_eq!(leaf.num_params(), 2),
             other => panic!("expected ARD RBF, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn constant_and_white_flatten_with_rbf() {
+        let spec = rbf(1.0)
+            + KernelSpec::from(ConstantKernel::new(2.0).expect("valid"))
+            + KernelSpec::from(WhiteKernel::new(0.1).expect("valid"));
+        assert_eq!(spec.num_params(), 3);
+        let mut params = [0.0; 3];
+        spec.get_params(&mut params).expect("len 3");
+        assert_close(params[1], 2.0_f64.ln());
+        assert_close(params[2], 0.1_f64.ln());
+        let compiled = spec.compile();
+        assert_eq!(compiled.num_params(), 3);
+        assert_eq!(
+            compiled.coord_mode().expect("compat"),
+            crate::kernel::CoordMode::Dist
+        );
     }
 }
