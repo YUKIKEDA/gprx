@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: [P2-5](https://github.com/YUKIKEDA/gprx/issues/29)。** `phase-1b` の順は [`.dev/bench-log.md`](bench-log.md)。Phase 2 は計測してから高速化する。
+**今やること: [P2-6](https://github.com/YUKIKEDA/gprx/issues/60)。** `phase-1b` の順は [`.dev/bench-log.md`](bench-log.md)。Phase 2 は計測してから高速化する。
 
 Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -37,7 +37,7 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | M0  | Spike                 | 箱と faer 0.24 を確認する      | `just lint` / `just test` が通る。2×2 と 5×5 で Cholesky 往復が一致する。GPR はまだ無い |
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
-| 2   | 高速化                | Phase 1 を壊さず速くする       | `phase-1b` を見てボトルネック順に最適化。キャッシュと Rayon。SIMD は測定後だけ          |
+| 2   | 高速化                | Phase 1 を壊さず速くする       | `phase-1b` を見てボトルネック順に最適化。キャッシュと Rayon。P2-5 で SIMD は不要 |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
 | 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。Z 固定。対角予測                                                |
 | 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック                              |
