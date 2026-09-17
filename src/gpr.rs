@@ -11,7 +11,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
-use crate::optimizer::{Lbfgs, Optimizer};
+use crate::optimizer::{Lbfgs, OptResult, Optimizer};
 use crate::precision::DoublePrecision;
 use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
 use crate::workspace::Workspace;
@@ -423,7 +423,8 @@ impl Gpr {
     /// Uses [`FitOptions::default`] (`optimize = true`). After success, `L`
     /// remains in the workspace and `α` is stored on the model. A failed
     /// factorization or optimizer step leaves [`Self::is_fitted`] false and
-    /// does not leave a usable `α`.
+    /// does not leave a usable `α`. Kernel and likelihood `θ` are restored
+    /// to the values from the start of the call.
     ///
     /// # Errors
     ///
@@ -502,6 +503,8 @@ impl Gpr {
     fn optimize_hyperparameters(&mut self) -> Result<(), GprError> {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
+        let kernel_before = self.kernel.clone();
+        let likelihood_before = self.likelihood;
         let optimizer = Lbfgs::new().with_max_iters(100);
         if !optimizer.requires_gradient() {
             return Err(GprError::InvalidHyperparameter {
@@ -512,11 +515,19 @@ impl Gpr {
             let mut obj = self.objective();
             optimizer.minimize(&mut obj, &init)
         };
+        self.commit_or_revert_optimize(kernel_before, likelihood_before, result)
+    }
+
+    fn commit_or_revert_optimize(
+        &mut self,
+        kernel_before: KernelSpec,
+        likelihood_before: GaussianLikelihood,
+        result: Result<OptResult, GprError>,
+    ) -> Result<(), GprError> {
         match result {
             Ok(opt) => {
                 if opt.params.len() != self.num_params() || !opt.value.is_finite() {
-                    self.fitted = false;
-                    self.alpha = None;
+                    self.revert_theta(kernel_before, likelihood_before);
                     return Err(GprError::OptimizationNotConverged {
                         iterations: opt.iterations as usize,
                     });
@@ -524,11 +535,18 @@ impl Gpr {
                 Ok(())
             }
             Err(err) => {
-                self.fitted = false;
-                self.alpha = None;
+                self.revert_theta(kernel_before, likelihood_before);
                 Err(err)
             }
         }
+    }
+
+    fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = Some(self.kernel.compile());
+        self.fitted = false;
+        self.alpha = None;
     }
 
     fn factorize_current(&mut self) -> Result<(), GprError> {
@@ -927,7 +945,7 @@ pub(crate) fn cholesky_and_solve(
 
 #[cfg(test)]
 mod tests {
-    use super::{FitOptions, Gpr, cholesky_and_solve, pack_points};
+    use super::{FitOptions, Gpr, OptResult, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GprError};
     use crate::kernel::{
         ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -1755,5 +1773,74 @@ mod tests {
         assert_close(params[1], 0.16_f64.ln());
         let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
         assert_eq!(pred.mean.len(), 1);
+    }
+
+    #[test]
+    fn non_finite_optimize_result_restores_theta() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
+        let kernel_before = gpr.kernel().clone();
+        let likelihood_before = *gpr.likelihood();
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let moved = [2.0_f64.ln(), 0.5_f64.ln()];
+        let mut grad = [0.0; 2];
+        gpr.value_and_gradient_into(&moved, &mut grad)
+            .expect("moved");
+        let mut mid = [0.0; 2];
+        gpr.get_params(&mut mid).expect("len 2");
+        assert!((mid[0] - before[0]).abs() > TOL);
+        let err = gpr
+            .commit_or_revert_optimize(
+                kernel_before,
+                likelihood_before,
+                Ok(OptResult {
+                    params: moved.to_vec(),
+                    value: f64::NAN,
+                    iterations: 4,
+                }),
+            )
+            .expect_err("nan nlml");
+        assert!(matches!(
+            err,
+            GprError::OptimizationNotConverged { iterations: 4 }
+        ));
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+        assert!(!gpr.is_fitted());
+        assert!(matches!(gpr.alpha(), Err(GprError::NotFitted)));
+    }
+
+    #[test]
+    fn failed_optimize_err_restores_theta() {
+        let mut gpr = rbf_gpr(1.25, 0.16);
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], FitOptions::FIXED)
+            .expect("spd");
+        let kernel_before = gpr.kernel().clone();
+        let likelihood_before = *gpr.likelihood();
+        let mut before = [0.0; 2];
+        gpr.get_params(&mut before).expect("len 2");
+        let moved = [2.0_f64.ln(), 0.5_f64.ln()];
+        let mut grad = [0.0; 2];
+        gpr.value_and_gradient_into(&moved, &mut grad)
+            .expect("moved");
+        gpr.commit_or_revert_optimize(
+            kernel_before,
+            likelihood_before,
+            Err(GprError::CholeskyFailed {
+                jitter: 0.0,
+                matrix_size: 2,
+                stage: CholeskyStage::Fit,
+            }),
+        )
+        .expect_err("chol");
+        let mut after = [0.0; 2];
+        gpr.get_params(&mut after).expect("len 2");
+        assert_close(after[0], before[0]);
+        assert_close(after[1], before[1]);
+        assert!(!gpr.is_fitted());
     }
 }
