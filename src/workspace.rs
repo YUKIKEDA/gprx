@@ -16,8 +16,12 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     pub(crate) k_matrix: Mat<P::Storage>,
     /// `W = ααᵀ - K⁻¹` for the MLL gradient trace term.
     pub(crate) w_matrix: Mat<P::Storage>,
-    /// Cached pairwise distances (squared Euclidean for Phase 1 RBF).
+    /// Cached pairwise squared distances for isotropic (distance-mode) leaves.
+    /// `Always` reuses this across optimizer steps; `Never` refills it every
+    /// kernel build.
     pub(crate) dist_cache: Mat<P::Storage>,
+    /// Whether `dist_cache` matches the current training `X`.
+    pub(crate) dist_ready: bool,
     /// Kernel values and `∂K/∂θ` output.
     pub(crate) exp_buf: Mat<P::Storage>,
     /// Distinct `n×n` scratch for product `∂K/∂θ`. Empty until a product tree
@@ -51,6 +55,7 @@ impl Workspace<DoublePrecision> {
             k_matrix: Mat::<f64>::zeros(n, n),
             w_matrix: Mat::<f64>::zeros(n, n),
             dist_cache: Mat::<f64>::zeros(n, n),
+            dist_ready: false,
             exp_buf: Mat::<f64>::zeros(n, n),
             kernel_scratch: Mat::<f64>::zeros(0, 0),
             refine_buf: None,
@@ -119,6 +124,7 @@ mod tests {
         let n = 8;
         let ws = Workspace::<DoublePrecision>::new(n).expect("n > 0");
         assert_eq!(ws.n(), n);
+        assert!(!ws.dist_ready);
         assert_square(&ws.k_matrix, n);
         assert_square(&ws.w_matrix, n);
         assert_square(&ws.dist_cache, n);
