@@ -116,7 +116,7 @@ M0 → 1a → 1b → 2
 | P1B-2 | Feat | argmin L-BFGS アダプタ            | P1B-1         | `value_and_gradient_into` を1回の評価で使う                                          |
 | P1B-3 | Feat | `Gpr::fit` が最適化する            | P1B-2, P1A-8  | 未学習 `predict` は `NotFitted`。成功後は L と α を保持。bench に `fit_lbfgs` を足す |
 | P1B-4 | Task | パラメータ回収テスト              | P1B-3         | 合成データで lengthscale とノイズが真値の近くに戻る。LML が初期より下がる            |
-| P1B-6 | Task | fit 込み sklearn golden（Forrester） | P1B-4, P1A-12 | 1 次元 Forrester を sklearn が L-BFGS した JSON をコミット。`Gpr::fit` が NLML・予測で緩い許容。`θ` は相対。1a の 1e-8 とは分ける。`cargo test` は Python 不要 |
+| P1B-6 | Task | fit 込み sklearn golden（Forrester / ARD） | P1B-4, P1A-12, P1A-20 | 1 次元 Forrester と 2 次元重み付き球関数（ARD）を sklearn が L-BFGS した JSON をコミット。`Gpr::fit` が NLML・予測で緩い許容。`θ` は相対。1a の 1e-8 とは分ける。`cargo test` は Python 不要 |
 | P1B-5 | Docs | README, rustdoc, `examples/`      | P1B-6, P1A-17 | 英語 rustdoc。最短例で fit→predict                                                   |
 
 **1b 完了 = Phase 1 完了 = 0.1.0 相当。** crates.io には出さない。`.dev/bench-log.md` に `phase-1b` がある。

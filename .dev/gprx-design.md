@@ -708,7 +708,7 @@ trait OnlineInference<T: Scalar> {
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのf64フォールバック
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
-9. **最適化後の推論**(P1B-6): 1次元 Forrester で sklearn L-BFGS と `Gpr::fit` を緩い許容で照合する。固定ハイパラ JSON（1e-8）とは分ける。`cargo test` は Python を呼ばない
+9. **最適化後の推論**(P1B-6): 1次元 Forrester と 2次元重み付き球関数（ARD）で sklearn L-BFGS と `Gpr::fit` を緩い許容で照合する。固定ハイパラ JSON（1e-8）とは分ける。`cargo test` は Python を呼ばない
 
 ## 13. 実装ロードマップ
 
