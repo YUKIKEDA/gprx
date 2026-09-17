@@ -11,8 +11,8 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
-use faer::{Mat, MatMut, MatRef, Par};
-use gprx::kernel::{KernelSpec, RbfKernel, Triangle};
+use faer::{Mat, MatMut, Par};
+use gprx::kernel::{KernelSpec, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
 use gprx::{FitOptions, GaussianLikelihood, Gpr};
 
 const N: usize = 256;
@@ -53,22 +53,6 @@ fn pack_points(x: &[f64], n_rows: usize, n_cols: usize) -> Mat<f64> {
     Mat::from_fn(n_rows, n_cols, |row, col| x[col * n_rows + row])
 }
 
-fn fill_squared_euclidean(x: MatRef<'_, f64>, mut dist: MatMut<'_, f64>) {
-    let n = x.nrows();
-    let d = x.ncols();
-    for col in 0..n {
-        for row in col..n {
-            let mut sum = 0.0;
-            for dim in 0..d {
-                let diff = x[(row, dim)] - x[(col, dim)];
-                sum += diff * diff;
-            }
-            dist[(row, col)] = sum;
-            dist[(col, row)] = sum;
-        }
-    }
-}
-
 fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
     let n = k.nrows();
     for i in 0..n {
@@ -89,7 +73,7 @@ fn kernel_and_a() -> (Mat<f64>, Mat<f64>) {
     let mut dist = Mat::zeros(N, N);
     let mut a = Mat::zeros(N, N);
     let mut scratch = Mat::zeros(N, N);
-    fill_squared_euclidean(x_mat.as_ref(), dist.as_mut());
+    fill_pairwise_sq_euclidean(x_mat.as_ref(), dist.as_mut());
     compiled
         .apply(dist.as_ref(), a.as_mut(), Triangle::Lower, scratch.as_mut())
         .expect("shape");
@@ -118,7 +102,7 @@ fn kernel_rbf(c: &mut Criterion) {
     let mut scratch = Mat::zeros(N, N);
     c.bench_function("kernel_rbf", |b| {
         b.iter(|| {
-            fill_squared_euclidean(x_mat.as_ref(), dist.as_mut());
+            fill_pairwise_sq_euclidean(x_mat.as_ref(), dist.as_mut());
             compiled
                 .apply(
                     std::hint::black_box(dist.as_ref()),
