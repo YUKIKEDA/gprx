@@ -445,12 +445,27 @@ struct GprObjective<'a, T: Scalar, P: PrecisionPolicy> {
 ```
 
 前提条件:
-- fit前のpredictは`GprError::NotFitted`
+- fit前のpredict / `loo_predict`は`GprError::NotFitted`
 - fitは状態を置き換える(再fit可)
 - fit後の入力次元`d`は固定。不一致は`DimensionMismatch`
 - n=0は`EmptyInput`、nがカーネルの最低点数未満なら`InsufficientData`
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は`fitted=false`のままにし、中途半端なL/αを残さない
+
+### 6.4 Leave-one-out(P1B-7)
+
+Exact GPR の leave-one-out は、学習後の `L` と `α` から閉じた式で出る(Rasmussen & Williams, GPML §5.4.2)。`A = K + σn² I`、`Q = A⁻¹`、`α = A⁻¹ y` として
+
+```
+μ_i = y_i - α_i / Q_ii
+σ_i² = 1 / Q_ii
+```
+
+これは観測の `p(y_i | X, y_{-i}, θ)`。潜在 `f_i` の LOO 分散は `max(0, 1/Q_ii - σn²)`。`Q_ii` は下三角 `L` から `L⁻¹` の列ノルムで取る(`A⁻¹ = L^{-T} L^{-1}`)。コストは Cholesky と同オーダーの O(n³)、追加メモリは `n×n` の一時行列。Phase 1b の n=16 / 36 では問題にならない。
+
+`Gpr::loo_predict` は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White 葉は使わず、ノイズは `GaussianLikelihood` のみ。
+
+sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_` に同じ GPML 式を適用して JSON に書く。Rust 側は sklearn が選んだ `θ` で `FitOptions::FIXED` して照合する(最適化器差を LOO に混ぜない)。
 
 ## 7. Workspaceとメモリ管理
 
@@ -709,6 +724,7 @@ trait OnlineInference<T: Scalar> {
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
 9. **最適化後の推論**(P1B-6): 1次元 Forrester と 2次元重み付き球関数（ARD）で sklearn L-BFGS と `Gpr::fit` を緩い許容で照合する。固定ハイパラ JSON（1e-8）とは分ける。`cargo test` は Python を呼ばない
+10. **Leave-one-out**(P1B-7): n=2 の GPML 解析式、n=3 の実 leave-one-out `fit`+`predict`、および P1B-6 JSON の LOO 欄を sklearn の `θ` で照合する。`cargo test` は Python を呼ばない
 
 ## 13. 実装ロードマップ
 

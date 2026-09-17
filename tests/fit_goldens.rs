@@ -1,20 +1,25 @@
-//! sklearn golden checks for Exact GPR **with** L-BFGS (P1B-6).
+//! sklearn golden checks for Exact GPR **with** L-BFGS (P1B-6) and
+//! leave-one-out at sklearn's `θ` (P1B-7).
 //!
 //! JSON under `compare/goldens/` is produced by `just gen-goldens`. This
 //! file only reads the committed bytes; `cargo test` must not invoke Python.
-//! Tolerances are looser than the fixed-hyperparameter 1e-8 cases because
-//! sklearn uses scipy L-BFGS-B and gprx uses argmin L-BFGS.
+//! Query-predict tolerances are looser than the fixed-hyperparameter 1e-8
+//! cases because sklearn uses scipy L-BFGS-B and gprx uses argmin L-BFGS.
+//! LOO is compared at the committed sklearn `θ` with a tight band.
 
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
+use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
 use serde::Deserialize;
 
-/// Relative band for NLML and predictive mean / variance.
+/// Relative band for NLML and predictive mean / variance after `Gpr::fit`.
 const REL_TOL: f64 = 0.15;
 /// `|log actual - log expected|` for `ℓ` and `σn²`. ARD short axes can
 /// differ by about a factor of ten between scipy L-BFGS-B and argmin.
 const THETA_LOG_ABS_TOL: f64 = 2.5;
+/// Relative band for LOO at sklearn's fitted `θ` (`FitOptions::FIXED`).
+/// sklearn's `alpha` jitter is `1e-10`; this is not an optimizer comparison.
+const LOO_REL_TOL: f64 = 1e-5;
 
 const FIT_GOLDENS: &[(&str, &str)] = &[
     (
@@ -45,6 +50,9 @@ struct FitGolden {
     latent_variance: Vec<f64>,
     observation_variance: Vec<f64>,
     log_marginal_likelihood: f64,
+    loo_mean: Vec<f64>,
+    loo_latent_variance: Vec<f64>,
+    loo_observation_variance: Vec<f64>,
 }
 
 fn rel_err(actual: f64, expected: f64) -> f64 {
@@ -67,25 +75,28 @@ fn assert_theta_near(label: &str, actual: f64, expected: f64) {
     );
 }
 
-fn kernel_from_golden(golden: &FitGolden) -> Result<KernelSpec, GprError> {
+fn kernel_from_lengthscales(
+    golden: &FitGolden,
+    lengthscales: &[f64],
+) -> Result<KernelSpec, GprError> {
     match golden.kernel.as_str() {
         "rbf" => {
-            if golden.lengthscales_init.len() != 1 {
+            if lengthscales.len() != 1 {
                 return Err(GprError::InvalidHyperparameter {
-                    reason: "isotropic RBF golden needs one init lengthscale".to_owned(),
+                    reason: "isotropic RBF golden needs one lengthscale".to_owned(),
                 });
             }
-            Ok(KernelSpec::from(RbfKernel::new(
-                golden.lengthscales_init[0],
-            )?))
+            Ok(KernelSpec::from(RbfKernel::new(lengthscales[0])?))
         }
-        "rbf_ard" => Ok(KernelSpec::from(RbfArdKernel::new(
-            &golden.lengthscales_init,
-        )?)),
+        "rbf_ard" => Ok(KernelSpec::from(RbfArdKernel::new(lengthscales)?)),
         other => Err(GprError::InvalidHyperparameter {
             reason: format!("unsupported fit golden kernel {other}"),
         }),
     }
+}
+
+fn kernel_from_golden(golden: &FitGolden) -> Result<KernelSpec, GprError> {
+    kernel_from_lengthscales(golden, &golden.lengthscales_init)
 }
 
 fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
@@ -161,10 +172,53 @@ fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
     Ok(())
 }
 
+fn check_loo_at_sklearn_theta(name: &str, golden: &FitGolden) -> Result<(), GprError> {
+    let mut gpr = Gpr::new(
+        kernel_from_lengthscales(golden, &golden.lengthscales)?,
+        GaussianLikelihood::new(golden.noise_variance)?,
+    )
+    .with_target_transform(StandardizeTarget::new());
+    gpr.fit_with(
+        &golden.x,
+        golden.n_rows,
+        golden.n_cols,
+        &golden.y,
+        FitOptions::FIXED,
+    )?;
+
+    let loo_obs = gpr.loo_predict()?;
+    let loo_lat = gpr.loo_predict_with(PredictOptions {
+        variance_kind: VarianceKind::Latent,
+    })?;
+    assert_eq!(loo_obs.mean.len(), golden.loo_mean.len(), "{name}");
+    for i in 0..golden.loo_mean.len() {
+        assert_near(
+            &format!("{name} loo_mean[{i}]"),
+            loo_obs.mean[i],
+            golden.loo_mean[i],
+            LOO_REL_TOL,
+        );
+        assert_near(
+            &format!("{name} loo_latent_var[{i}]"),
+            loo_lat.variance[i],
+            golden.loo_latent_variance[i],
+            LOO_REL_TOL,
+        );
+        assert_near(
+            &format!("{name} loo_obs_var[{i}]"),
+            loo_obs.variance[i],
+            golden.loo_observation_variance[i],
+            LOO_REL_TOL,
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn fit_matches_committed_sklearn_json() {
     for (name, raw) in FIT_GOLDENS {
         let golden: FitGolden = serde_json::from_str(raw).expect("committed JSON parses");
         check_fit_golden(name, &golden).expect(name);
+        check_loo_at_sklearn_theta(name, &golden).expect(name);
     }
 }

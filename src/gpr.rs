@@ -82,7 +82,9 @@ pub struct Prediction {
 /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
 /// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
-/// a diagonal variance. Input and target transforms default to identity.
+/// a diagonal variance. [`Self::loo_predict`] is the GPML leave-one-out
+/// at every training point, from `L` and `α`. Input and target transforms
+/// default to identity.
 ///
 /// # Examples
 ///
@@ -695,6 +697,83 @@ impl Gpr {
         })
     }
 
+    /// Returns leave-one-out mean and observation variance at every training
+    /// point.
+    ///
+    /// Uses the GPML identities `μ_i = y_i - α_i / Q_ii` and
+    /// `σ_i² = 1 / Q_ii` with `Q = A⁻¹` and `A = K + σn² I`. This is
+    /// `p(y_i | X, y_{-i}, θ)`, not a query at a new `x*`. Mean and
+    /// variance are inverse-transformed like [`Self::predict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NotFitted`] if [`Self::fit`] has not succeeded, or
+    /// [`GprError::NonPositiveDefiniteMatrix`] if a diagonal of `A⁻¹` is not
+    /// positive and finite.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let mut gpr = Gpr::new(kernel, likelihood);
+    /// gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    /// let loo = gpr.loo_predict()?;
+    /// assert_eq!(loo.mean.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn loo_predict(&self) -> Result<Prediction, GprError> {
+        self.loo_predict_with(PredictOptions::default())
+    }
+
+    /// Returns leave-one-out mean and variance with an explicit variance kind.
+    ///
+    /// Observation variance is `1 / Q_ii`. Latent variance is
+    /// `max(0, 1 / Q_ii - σn²)` in the transformed space, then both mean
+    /// and variance are mapped back by the target transform.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::loo_predict`].
+    pub fn loo_predict_with(&self, options: PredictOptions) -> Result<Prediction, GprError> {
+        if !self.fitted {
+            return Err(GprError::NotFitted);
+        }
+        let y = self.y.as_deref().ok_or(GprError::NotFitted)?;
+        let alpha = self.alpha.as_deref().ok_or(GprError::NotFitted)?;
+        let ws = self.workspace.as_ref().ok_or(GprError::NotFitted)?;
+        let n = self.n;
+        let mut q_diag = vec![0.0; n];
+        inv_diag_from_chol_l(ws.k_matrix.as_ref(), &mut q_diag);
+        let noise = self.likelihood.noise_variance();
+        let mut mean = vec![0.0; n];
+        let mut variance = vec![0.0; n];
+        for i in 0..n {
+            let qii = q_diag[i];
+            if !qii.is_finite() || qii <= 0.0 {
+                return Err(GprError::NonPositiveDefiniteMatrix);
+            }
+            mean[i] = y[i] - alpha[i] / qii;
+            let obs = 1.0 / qii;
+            variance[i] = match options.variance_kind {
+                VarianceKind::Observation => obs,
+                VarianceKind::Latent => (obs - noise).max(0.0),
+            };
+        }
+        self.y_transform.inverse_transform_mean(&mut mean)?;
+        self.y_transform.inverse_transform_variance(&mut variance)?;
+        Ok(Prediction {
+            mean,
+            variance,
+            variance_kind: options.variance_kind,
+        })
+    }
+
     fn clear_solution(&mut self) {
         self.fitted = false;
         self.compiled = None;
@@ -901,6 +980,25 @@ fn write_kernel_grad(
             compiled.grad(dist, d_k, param_idx, Triangle::Lower, scratch)
         }
         CoordMode::Points => compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch),
+    }
+}
+
+/// Writes `diag(A⁻¹)` given the lower Cholesky factor `L` of `A = L Lᵀ`.
+///
+/// `A⁻¹ = L^{-T} L^{-1}`, so entry `i` is the squared Euclidean norm of
+/// column `i` of `L⁻¹`.
+fn inv_diag_from_chol_l(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
+    let n = l.nrows();
+    debug_assert_eq!(q_diag.len(), n);
+    let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { 1.0 } else { 0.0 });
+    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, inv_l.as_mut(), Par::Seq);
+    for (i, qi) in q_diag.iter_mut().enumerate() {
+        let mut q = 0.0;
+        for k in 0..n {
+            let v = inv_l[(k, i)];
+            q += v * v;
+        }
+        *qi = q;
     }
 }
 
@@ -1481,6 +1579,150 @@ mod tests {
                 expected_dim: 1
             })
         ));
+    }
+
+    #[test]
+    fn loo_rejects_unfitted() {
+        let gpr = rbf_gpr(1.0, 0.1);
+        assert!(matches!(gpr.loo_predict(), Err(GprError::NotFitted)));
+    }
+
+    #[test]
+    fn loo_n_one_is_prior() {
+        let noise = 0.25;
+        let mut gpr = rbf_gpr(1.0, noise);
+        gpr.fit_with(&[0.0], 1, 1, &[2.0], FitOptions::FIXED)
+            .expect("spd");
+        let loo = gpr.loo_predict().expect("fitted");
+        assert_eq!(loo.variance_kind, super::VarianceKind::Observation);
+        assert_close(loo.mean[0], 0.0);
+        assert_close(loo.variance[0], 1.0 + noise);
+        let lat = gpr
+            .loo_predict_with(super::PredictOptions {
+                variance_kind: super::VarianceKind::Latent,
+            })
+            .expect("fitted");
+        assert_close(lat.mean[0], 0.0);
+        assert_close(lat.variance[0], 1.0);
+    }
+
+    #[test]
+    fn loo_n_two_matches_closed_form() {
+        let ell = 1.0;
+        let noise = 0.25;
+        let x = [0.0, 1.0];
+        let y = [0.5, 1.5];
+        let mut gpr = rbf_gpr(ell, noise);
+        gpr.fit_with(&x, 2, 1, &y, FitOptions::FIXED).expect("spd");
+        let k01 = (-0.5 / (ell * ell)).exp();
+        let a = 1.0 + noise;
+        let det = a * a - k01 * k01;
+        let qii = a / det;
+        let inv01 = -k01 / det;
+        let alpha0 = qii * y[0] + inv01 * y[1];
+        let alpha1 = inv01 * y[0] + qii * y[1];
+        let loo = gpr.loo_predict().expect("fitted");
+        assert_eq!(loo.mean.len(), 2);
+        assert_eq!(loo.variance_kind, super::VarianceKind::Observation);
+        assert_close(loo.mean[0], y[0] - alpha0 / qii);
+        assert_close(loo.mean[1], y[1] - alpha1 / qii);
+        assert_close(loo.variance[0], 1.0 / qii);
+        assert_close(loo.variance[1], 1.0 / qii);
+        let lat = gpr
+            .loo_predict_with(super::PredictOptions {
+                variance_kind: super::VarianceKind::Latent,
+            })
+            .expect("fitted");
+        assert_close(lat.variance[0], (1.0 / qii - noise).max(0.0));
+        assert_close(lat.variance[1], (1.0 / qii - noise).max(0.0));
+    }
+
+    fn omit_training_row(
+        x: &[f64],
+        y: &[f64],
+        n: usize,
+        d: usize,
+        skip: usize,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n_out = n - 1;
+        let mut xo = vec![0.0; n_out * d];
+        let mut yo = Vec::with_capacity(n_out);
+        let mut xs = vec![0.0; d];
+        let mut o = 0;
+        for i in 0..n {
+            if i == skip {
+                for dim in 0..d {
+                    xs[dim] = x[dim * n + i];
+                }
+                continue;
+            }
+            for dim in 0..d {
+                xo[dim * n_out + o] = x[dim * n + i];
+            }
+            yo.push(y[i]);
+            o += 1;
+        }
+        (xo, yo, xs)
+    }
+
+    #[test]
+    fn loo_n_three_matches_refit_predict() {
+        let ell = 1.25;
+        let noise = 0.16;
+        let n = 3;
+        let d = 1;
+        let x = [0.0, 0.5, 1.5];
+        let y = [0.2, -1.0, 0.7];
+        let mut gpr = rbf_gpr(ell, noise);
+        gpr.fit_with(&x, n, d, &y, FitOptions::FIXED).expect("spd");
+        let loo_obs = gpr.loo_predict().expect("fitted");
+        let loo_lat = gpr
+            .loo_predict_with(super::PredictOptions {
+                variance_kind: super::VarianceKind::Latent,
+            })
+            .expect("fitted");
+        for skip in 0..n {
+            let (xo, yo, xs) = omit_training_row(&x, &y, n, d, skip);
+            let mut held = rbf_gpr(ell, noise);
+            held.fit_with(&xo, n - 1, d, &yo, FitOptions::FIXED)
+                .expect("spd");
+            let pred_obs = held.predict(&xs, 1, d).expect("fitted");
+            let pred_lat = held
+                .predict_with(
+                    &xs,
+                    1,
+                    d,
+                    super::PredictOptions {
+                        variance_kind: super::VarianceKind::Latent,
+                    },
+                )
+                .expect("fitted");
+            assert_close(loo_obs.mean[skip], pred_obs.mean[0]);
+            assert_close(loo_obs.variance[skip], pred_obs.variance[0]);
+            assert_close(loo_lat.mean[skip], pred_lat.mean[0]);
+            assert_close(loo_lat.variance[skip], pred_lat.variance[0]);
+        }
+    }
+
+    #[test]
+    fn loo_observation_is_latent_plus_noise_after_inverse() {
+        let noise = 0.16;
+        let mut gpr = rbf_gpr(1.0, noise).with_target_transform(StandardizeTarget::new());
+        let y = [0.0, 4.0];
+        gpr.fit_with(&[0.0, 1.0], 2, 1, &y, FitOptions::FIXED)
+            .expect("spd");
+        let mut t = StandardizeTarget::new();
+        t.fit(&y).expect("finite");
+        let scale = t.std().expect("fitted");
+        let scale_sq = scale * scale;
+        let lat = gpr
+            .loo_predict_with(super::PredictOptions {
+                variance_kind: super::VarianceKind::Latent,
+            })
+            .expect("fitted");
+        let obs = gpr.loo_predict().expect("fitted");
+        assert_close(obs.variance[0], lat.variance[0] + scale_sq * noise);
+        assert_close(obs.variance[1], lat.variance[1] + scale_sq * noise);
     }
 
     #[test]
