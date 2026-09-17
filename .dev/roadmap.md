@@ -37,7 +37,7 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | M0  | Spike                 | 箱と faer 0.24 を確認する      | `just lint` / `just test` が通る。2×2 と 5×5 で Cholesky 往復が一致する。GPR はまだ無い |
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
-| 2   | 高速化                | Phase 1 を壊さず速くする       | `phase-1b` を見てボトルネック順に最適化。キャッシュと Rayon。P2-5 で SIMD は不要 |
+| 2   | 高速化                | Phase 1 を壊さず速くする       | `phase-1b` を見てボトルネック順に最適化。キャッシュと Rayon。P2-5 で等方 RBF SIMD |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
 | 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。Z 固定。対角予測                                                |
 | 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック                              |
@@ -135,7 +135,7 @@ M0 → 1a → 1b → 2
 | P2-7 | Feat  | ARD 距離キャッシュ                                        | P2-2         | `Never` / `Always` が `(Δx_d)²` に効く。`mll_and_grad_ard` / `fit_lbfgs_ard` で Always vs Never（改善または同等、bench-log、メモリ）。Workspace は n と d。fit 開始時に確保、等方/Never は空。必須数値は RBF ARD。埋めは逐次。`Auto` は P5-5 |
 | P2-3 | Feat  | Rayon でカーネル構築。`thread_scratch` を並列前に切り離す | P2-1         | 1b と数値一致。`kernel_rbf` が速くなることを bench で示す                    |
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
-| P2-5 | Spike | カーネル SIMD が必要か                                    | P2-1, P2-3   | `kernel_rbf` が支配的なら検討。そうでなければやらない                        |
+| P2-5 | Feat  | 等方 RBF と距離に SIMD                                    | P2-1, P2-3   | `wide::f64x4`。`kernel_rbf` / `predict_100` が Rayon のみより速い。数値は 1b と一致。可否はカーネル経路で判断し、`mll_and_grad` の勾配項だけを分母にしない |
 | P2-6 | Spike | NLML 定数項 `(n/2) log(2π)` の速度寄与                    | P2-1, P1A-10 | `mll_and_grad`（あれば `fit_lbfgs`）を定数あり/なしで測る。差がノイズなら一本のまま。結果を `.dev/bench-log.md` に残す。この行では API を分けない |
 
 ---
