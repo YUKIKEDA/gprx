@@ -287,7 +287,7 @@ impl Gpr {
             let x = self.x.as_ref().ok_or(GprError::NotFitted)?;
             let ws = workspace_mut(&mut self.workspace)?;
             match compiled.coord_mode()? {
-                CoordMode::Dist => compiled.apply(
+                CoordMode::Dist | CoordMode::Either => compiled.apply(
                     ws.dist_cache.as_ref(),
                     ws.k_matrix.as_mut(),
                     Triangle::Lower,
@@ -427,7 +427,7 @@ impl Gpr {
         {
             let ws = workspace_mut(&mut self.workspace)?;
             match compiled.coord_mode()? {
-                CoordMode::Dist => {
+                CoordMode::Dist | CoordMode::Either => {
                     fill_squared_euclidean(x_mat.as_ref(), ws.dist_cache.as_mut());
                     compiled.apply(
                         ws.dist_cache.as_ref(),
@@ -526,7 +526,7 @@ impl Gpr {
         let mut k_star = Mat::zeros(n, m);
         let mut scratch = Mat::zeros(n, m);
         match compiled.coord_mode()? {
-            CoordMode::Dist => {
+            CoordMode::Dist | CoordMode::Either => {
                 let mut dist = Mat::zeros(n, m);
                 fill_squared_euclidean_cross(x_train.as_ref(), x_test.as_ref(), dist.as_mut());
                 compiled.apply_cross(dist.as_ref(), k_star.as_mut(), scratch.as_mut())?;
@@ -554,7 +554,10 @@ impl Gpr {
             Par::Seq,
         );
         let mut kss = vec![0.0; m];
-        compiled.fill_diag(&mut kss)?;
+        match compiled.coord_mode()? {
+            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut kss)?,
+            CoordMode::Points => compiled.fill_diag_points(x_test.as_ref(), &mut kss)?,
+        }
         let noise = self.likelihood.noise_variance();
         let mut variance = vec![0.0; m];
         for col in 0..m {
@@ -758,6 +761,9 @@ fn write_kernel_grad(
     match compiled {
         CompiledKernel::Rbf(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
         CompiledKernel::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
+        CompiledKernel::Linear(leaf) => leaf.grad(x, d_k, param_idx, Triangle::Lower),
+        CompiledKernel::Constant(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
+        CompiledKernel::White(leaf) => leaf.grad(dist, d_k, param_idx, Triangle::Lower),
         CompiledKernel::Product(_) => Err(GprError::UnsupportedKernelOperation {
             reason: "product kernel gradient needs a dedicated scratch buffer".to_owned(),
         }),
@@ -828,7 +834,7 @@ pub(crate) fn cholesky_and_solve(
 mod tests {
     use super::{Gpr, cholesky_and_solve, pack_points};
     use crate::error::{CholeskyStage, GprError};
-    use crate::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
+    use crate::kernel::{KernelSpec, LinearKernel, RbfArdKernel, RbfKernel, Triangle, WhiteKernel};
     use crate::likelihood::GaussianLikelihood;
     use crate::precision::DoublePrecision;
     use crate::transform::{StandardizeTarget, TargetTransform};
@@ -1342,6 +1348,40 @@ mod tests {
             .expect("spd");
         assert!(nlml.is_finite());
         assert_eq!(params.len(), 3);
+        assert!(grad.iter().all(|g| g.is_finite()));
+    }
+
+    #[test]
+    fn rbf_plus_white_fits() {
+        let mut gpr = Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
+                + KernelSpec::from(WhiteKernel::new(0.05).expect("valid")),
+            GaussianLikelihood::new(0.1).expect("valid"),
+        );
+        gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).expect("spd");
+        let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
+        assert!(pred.mean[0].is_finite());
+        assert!(pred.variance[0] > 0.0);
+    }
+
+    #[test]
+    fn linear_kernel_fits_and_predicts() {
+        let mut gpr = Gpr::new(
+            KernelSpec::from(LinearKernel::new(1.0).expect("valid")),
+            GaussianLikelihood::new(0.1).expect("valid"),
+        );
+        let x = [0.0, 1.0, 2.0];
+        let y = [0.0, 1.0, 2.0];
+        gpr.fit(&x, 3, 1, &y).expect("spd");
+        let pred = gpr.predict(&[1.5], 1, 1).expect("fitted");
+        assert!(pred.mean[0].is_finite());
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; params.len()];
+        let nlml = gpr
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        assert!(nlml.is_finite());
         assert!(grad.iter().all(|g| g.is_finite()));
     }
 }
