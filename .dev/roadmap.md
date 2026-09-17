@@ -24,7 +24,7 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | P1A-20  | [#54](https://github.com/YUKIKEDA/gprx/issues/54) | P1B-2   | [#21](https://github.com/YUKIKEDA/gprx/issues/21) | P5-2    | [#40](https://github.com/YUKIKEDA/gprx/issues/40) |
 | P2-6    | [#60](https://github.com/YUKIKEDA/gprx/issues/60) | P1B-3   | [#22](https://github.com/YUKIKEDA/gprx/issues/22) | P5-3    | [#41](https://github.com/YUKIKEDA/gprx/issues/41) |
 | P1B-6   | [#80](https://github.com/YUKIKEDA/gprx/issues/80) | P1B-4   | [#23](https://github.com/YUKIKEDA/gprx/issues/23) | P5-4    | [#42](https://github.com/YUKIKEDA/gprx/issues/42) |
-|         |                                                   | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
+| P1B-7   | [#83](https://github.com/YUKIKEDA/gprx/issues/83) | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
 |         |                                                   | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
 |         |                                                   | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) |         |                                                   |
 |         |                                                   | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) |         |                                                   |
@@ -117,7 +117,8 @@ M0 → 1a → 1b → 2
 | P1B-3 | Feat | `Gpr::fit` が最適化する            | P1B-2, P1A-8  | 未学習 `predict` は `NotFitted`。成功後は L と α を保持。bench に `fit_lbfgs` を足す |
 | P1B-4 | Task | パラメータ回収テスト              | P1B-3         | 合成データで lengthscale とノイズが真値の近くに戻る。LML が初期より下がる            |
 | P1B-6 | Task | fit 込み sklearn golden（Forrester / ARD） | P1B-4, P1A-12, P1A-20 | 1 次元 Forrester と 2 次元重み付き球関数（ARD）を sklearn が L-BFGS した JSON をコミット。`Gpr::fit` が NLML・予測で緩い許容。`θ` は相対。1a の 1e-8 とは分ける。`cargo test` は Python 不要 |
-| P1B-5 | Docs | README, rustdoc, `examples/`      | P1B-6, P1A-17 | 英語 rustdoc。最短例で fit→predict                                                   |
+| P1B-7 | Feat | leave-one-out 予測                | P1B-6, P1A-8  | GPML の `μ_i = y_i - α_i / Q_ii`。観測/潜在。n=2 解析と n=3 実 LOO。fit golden に LOO を足し sklearn の `θ` で照合。`cargo test` は Python 不要 |
+| P1B-5 | Docs | README, rustdoc, `examples/`      | P1B-7, P1A-17 | 英語 rustdoc。最短例で fit→predict                                                   |
 
 **1b 完了 = Phase 1 完了 = 0.1.0 相当。** crates.io には出さない。`.dev/bench-log.md` に `phase-1b` がある。
 

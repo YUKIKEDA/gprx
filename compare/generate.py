@@ -1,4 +1,4 @@
-"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17, product grad, P1B-6).
+"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17, product grad, P1B-6, P1B-7).
 
 Fixed-hyperparameter cases (P1A-12 / P1A-17): noise is sklearn ``alpha``,
 matching ``GaussianLikelihood``, not ``WhiteKernel``.
@@ -9,6 +9,11 @@ Fit cases (P1B-6): sklearn optimizes ``RBF + WhiteKernel`` (scalar or ARD
 matches that as isotropic RBF or ``RbfArdKernel`` + ``GaussianLikelihood``
 + ``StandardizeTarget`` (no White leaf). ``WhiteKernel`` on the sklearn side
 is the optimized noise, not a second nugget on gprx.
+
+P1B-7: sklearn has no leave-one-out API. After fit, goldens store GPML
+LOO from sklearn's ``L_`` and ``alpha_``: ``μ_i = y_i - α_i / Q_ii``,
+``σ_i² = 1 / Q_ii`` with ``Q = A⁻¹``. Latent LOO strips WhiteKernel noise
+in the normalized space, then both maps undo ``normalize_y``.
 
 P1A-12: isotropic RBF. P1A-17: Sum/Product flatten plus extra leaves
 (Matern, RQ, Periodic). Product and mixed trees include ``grad_theta``
@@ -415,6 +420,27 @@ def fit_gp_optimize(case: dict):
     return gp, mean, np.square(predict_std)
 
 
+def loo_from_fitted_gp(gp, noise_white: float) -> dict:
+    """GPML leave-one-out from sklearn's Cholesky and α. No sklearn LOO API."""
+    chol = np.tril(np.asarray(gp.L_, dtype=np.float64))
+    n = int(chol.shape[0])
+    alpha = np.asarray(gp.alpha_, dtype=np.float64).reshape(-1)
+    y_trans = np.asarray(gp.y_train_, dtype=np.float64).reshape(-1)
+    inv_l = np.linalg.solve(chol, np.eye(n, dtype=np.float64))
+    q_diag = np.sum(np.square(inv_l), axis=0)
+    loo_mean_t = y_trans - alpha / q_diag
+    loo_obs_t = 1.0 / q_diag
+    loo_lat_t = np.maximum(0.0, loo_obs_t - float(noise_white))
+    y_mean = float(np.asarray(gp._y_train_mean, dtype=np.float64).ravel()[0])
+    y_std = float(np.asarray(gp._y_train_std, dtype=np.float64).ravel()[0])
+    scale_sq = y_std * y_std
+    return {
+        "loo_mean": as_f64_list(loo_mean_t * y_std + y_mean),
+        "loo_latent_variance": as_f64_list(loo_lat_t * scale_sq),
+        "loo_observation_variance": as_f64_list(loo_obs_t * scale_sq),
+    }
+
+
 def fit_golden(case: dict) -> dict:
     gp, mean, predict_var = fit_gp_optimize(case)
     rbf, white = gp.kernel_.k1, gp.kernel_.k2
@@ -431,6 +457,7 @@ def fit_golden(case: dict) -> dict:
     # sklearn k** includes WhiteKernel, so return_std² is observation-like.
     # Latent strips the nugget in original scale: noise * s².
     latent_var = predict_var - noise * (y_std**2)
+    loo = loo_from_fitted_gp(gp, noise)
     return {
         "kernel": case["kernel"],
         "sklearn_version": sklearn.__version__,
@@ -453,6 +480,9 @@ def fit_golden(case: dict) -> dict:
         "latent_variance": as_f64_list(latent_var),
         "observation_variance": as_f64_list(predict_var),
         "log_marginal_likelihood": lml,
+        "loo_mean": loo["loo_mean"],
+        "loo_latent_variance": loo["loo_latent_variance"],
+        "loo_observation_variance": loo["loo_observation_variance"],
     }
 
 
