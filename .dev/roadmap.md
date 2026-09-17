@@ -137,6 +137,7 @@ M0 → 1a → 1b → 2
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
 | P2-5 | Feat  | 等方 RBF と距離に SIMD                                    | P2-1, P2-3   | `wide::f64x4`。`kernel_rbf` / `predict_100` が Rayon のみより速い。数値は 1b と一致。可否はカーネル経路で判断し、`mll_and_grad` の勾配項だけを分母にしない |
 | P2-6 | Spike | NLML 定数項 `(n/2) log(2π)` の速度寄与                    | P2-1, P1A-10 | `mll_and_grad`（あれば `fit_lbfgs`）を定数あり/なしで測る。差がノイズなら一本のまま。結果を `.dev/bench-log.md` に残す。この行では API を分けない |
+| P2-8 | Feat  | `Gpr` / `FittedGpr` の typestate                          | P2-6         | `fit(self) → FittedGpr`。失敗は `(Gpr, GprError)`。`predict(&self)` と `predict_into(&mut self)`。`refit` は学習済み型。sklearn JSON は数値照合のみ。Issue は実装時 |
 
 ---
 
