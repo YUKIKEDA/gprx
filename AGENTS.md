@@ -24,4 +24,4 @@
 
 ## 今の着手点
 
-Phase 2 の [P2-4](https://github.com/YUKIKEDA/gprx/issues/28)。`phase-1b` の順は [`.dev/bench-log.md`](.dev/bench-log.md)。
+Phase 2 の [P2-5](https://github.com/YUKIKEDA/gprx/issues/29)。`phase-1b` の順は [`.dev/bench-log.md`](.dev/bench-log.md)。
