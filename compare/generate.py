@@ -1,7 +1,13 @@
-"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17, product grad).
+"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17, product grad, P1B-6).
 
-Noise is sklearn ``alpha``, matching ``GaussianLikelihood``, not ``WhiteKernel``.
+Fixed-hyperparameter cases (P1A-12 / P1A-17): noise is sklearn ``alpha``,
+matching ``GaussianLikelihood``, not ``WhiteKernel``.
 ``predict(..., return_std=True)`` is latent; observation variance adds ``alpha``.
+
+Fit cases (P1B-6): sklearn optimizes ``RBF + WhiteKernel`` with ``normalize_y``
+and a tiny ``alpha`` jitter. gprx matches that as RBF + ``GaussianLikelihood``
++ ``StandardizeTarget`` (no White leaf). ``WhiteKernel`` on the sklearn side
+is the optimized noise, not a second nugget on gprx.
 
 P1A-12: isotropic RBF. P1A-17: Sum/Product flatten plus extra leaves
 (Matern, RQ, Periodic). Product and mixed trees include ``grad_theta``
@@ -26,6 +32,7 @@ from sklearn.gaussian_process.kernels import (
     ExpSineSquared,
     Matern,
     RationalQuadratic,
+    WhiteKernel,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -129,6 +136,40 @@ def unpack_column_major(values: list[float], n_rows: int, n_cols: int) -> np.nda
 
 def as_f64_list(values: np.ndarray) -> list[float]:
     return [float(v) for v in np.asarray(values, dtype=np.float64).ravel()]
+
+
+def forrester(x: np.ndarray) -> np.ndarray:
+    return (6.0 * x - 2.0) ** 2 * np.sin(12.0 * x - 4.0)
+
+
+# 1-d Forrester on [0, 1] plus seeded observation noise so MLE noise
+# stays off the sklearn WhiteKernel lower bound. gprx uses RBF +
+# GaussianLikelihood. Tiny alpha is Cholesky jitter, not model noise.
+FORRESTER_N = 16
+FORRESTER_XS_N = 7
+_FORRESTER_X = np.linspace(0.0, 1.0, FORRESTER_N)
+_FORRESTER_XS = np.linspace(0.05, 0.95, FORRESTER_XS_N)
+FIT_JITTER = 1e-10
+FIT_NOISE_STD = 1.0
+FIT_SEED = 0
+_FORRESTER_Y = forrester(_FORRESTER_X) + FIT_NOISE_STD * np.random.default_rng(
+    FIT_SEED
+).standard_normal(FORRESTER_N)
+FIT_CASES = [
+    {
+        "name": "forrester_rbf",
+        "lengthscale_init": 1.0,
+        "noise_variance_init": 0.1,
+        "noise_std_added": FIT_NOISE_STD,
+        "n_rows": FORRESTER_N,
+        "n_cols": 1,
+        "x": as_f64_list(_FORRESTER_X),
+        "y": as_f64_list(_FORRESTER_Y),
+        "xs_n_rows": FORRESTER_XS_N,
+        "xs_n_cols": 1,
+        "xs": as_f64_list(_FORRESTER_XS),
+    }
+]
 
 
 def sklearn_leaf(leaf: dict):
@@ -298,6 +339,65 @@ def composite_golden(case: dict) -> dict:
     return payload
 
 
+def fit_gp_optimize(case: dict):
+    """Fit with sklearn L-BFGS-B. WhiteKernel is the optimized noise."""
+    ell0 = float(case["lengthscale_init"])
+    noise0 = float(case["noise_variance_init"])
+    x = unpack_column_major(case["x"], case["n_rows"], case["n_cols"])
+    xs = unpack_column_major(case["xs"], case["xs_n_rows"], case["xs_n_cols"])
+    y = np.asarray(case["y"], dtype=np.float64)
+    kernel = RBF(length_scale=ell0) + WhiteKernel(noise_level=noise0)
+    gp = GaussianProcessRegressor(
+        kernel=kernel,
+        alpha=FIT_JITTER,
+        optimizer="fmin_l_bfgs_b",
+        n_restarts_optimizer=0,
+        normalize_y=True,
+        random_state=0,
+    )
+    gp.fit(x, y)
+    mean, predict_std = gp.predict(xs, return_std=True)
+    return gp, mean, np.square(predict_std)
+
+
+def fit_golden(case: dict) -> dict:
+    gp, mean, predict_var = fit_gp_optimize(case)
+    rbf, white = gp.kernel_.k1, gp.kernel_.k2
+    ell = float(np.asarray(rbf.length_scale, dtype=np.float64).ravel()[0])
+    noise = float(np.asarray(white.noise_level, dtype=np.float64).ravel()[0])
+    theta = np.asarray(gp.kernel_.theta, dtype=np.float64)
+    if theta.size != 2:
+        raise RuntimeError(f"expected [log(ℓ), log(σn²)], got {theta.size}")
+    lml = float(gp.log_marginal_likelihood(theta, eval_gradient=False))
+    y_std = float(np.asarray(gp._y_train_std, dtype=np.float64).ravel()[0])
+    # sklearn k** includes WhiteKernel, so return_std² is observation-like.
+    # Latent strips the nugget in original scale: noise * s².
+    latent_var = predict_var - noise * (y_std**2)
+    return {
+        "kernel": "rbf",
+        "sklearn_version": sklearn.__version__,
+        "function": "forrester1d",
+        "normalize_y": True,
+        "lengthscale_init": float(case["lengthscale_init"]),
+        "noise_variance_init": float(case["noise_variance_init"]),
+        "noise_std_added": float(case["noise_std_added"]),
+        "lengthscale": ell,
+        "noise_variance": noise,
+        "theta": [float(theta[0]), float(theta[1])],
+        "n_rows": case["n_rows"],
+        "n_cols": case["n_cols"],
+        "x": case["x"],
+        "y": case["y"],
+        "xs_n_rows": case["xs_n_rows"],
+        "xs_n_cols": case["xs_n_cols"],
+        "xs": case["xs"],
+        "mean": as_f64_list(mean),
+        "latent_variance": as_f64_list(latent_var),
+        "observation_variance": as_f64_list(predict_var),
+        "log_marginal_likelihood": lml,
+    }
+
+
 def write_golden(name: str, payload: dict) -> None:
     path = GOLDENS / f"{name}.json"
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -310,6 +410,8 @@ def main() -> None:
         write_golden(case["name"], rbf_golden(case))
     for case in COMPOSITE_CASES:
         write_golden(case["name"], composite_golden(case))
+    for case in FIT_CASES:
+        write_golden(case["name"], fit_golden(case))
 
 
 if __name__ == "__main__":
