@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Consent (planning)
 
-A question is not a decision. Do not close a design choice, GitHub Issue, or PR in the same turn as a question.
+A question is not a decision. Do not close a design choice, GitHub Issue, or PR in the same turn as a question. The development cycle (Grill → Issue → … → human review → merge) is `.cursor/rules/workflow.mdc`.
 
 ## Stop. Reply only
 
@@ -33,6 +33,7 @@ When listing options:
 1. Mark one as **推奨** and say why
 2. Give every option a short 利点 / 欠点 (table or bullets)
 3. Do not implement, file Issues, or edit roadmap until the user names the artifact and the action
+4. Do not append to **意図的に今やらない** (or delete from it) as a way to settle scope. That list changes only through Grill → Issue (workflow.mdc)
 
 「次に進んで」is the current roadmap row only. It is not consent to add rows, file extra Issues, or expand an open design question.
 

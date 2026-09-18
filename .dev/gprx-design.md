@@ -19,7 +19,7 @@
   → CompiledKernel<T> (KernelSpecをコンパイルした実行計画 + Workspace)
   → Gpr (トレーナー: カーネル・尤度・変換・FitOptions)
        → Objective (尤度・勾配。fit 中だけ)
-       → Optimizer (argmin L-BFGS)
+       → Optimizer (型パラメータ。既定 `Lbfgs`。P2B-2 / P2B-9)
        → fit(self) → FittedGpr | (Gpr, GprError)
   → FittedGpr (L, α, X。predict / predict_into / refit / loo)
        → Phase 3: OnlineInference (`FittedGpr` 上、`&mut self`)
@@ -269,11 +269,11 @@ enum DistanceCachePolicy {
 
 P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。
 
-P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always の ARD fit で 1 回確保し、等方 / `Never` では空（`kernel_scratch` と同じ）。レイアウトは列優先 `n × (n·d)`、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。埋めと RBF ARD `apply`/`grad` は Rayon + `wide::f64x4`（単位行ストライド）。Matérn / RQ ARD は同じキャッシュをスカラーで読む。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。`Auto` は P5-5。train×test / LOO / Linear / iso+ARD 混在は対象外。
+P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always の ARD fit で 1 回確保し、等方 / `Never` では空（`kernel_scratch` と同じ）。レイアウトは列優先 `n × (n·d)`、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。埋めと RBF ARD `apply`/`grad` は Rayon + `wide::f64x4`（単位行ストライド）。Matérn / RQ ARD は同じキャッシュをスカラーで読む。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。`Auto` は P5-5。train×test / LOO のキャッシュは P2-7 の対象外。Dist 葉と Points 葉の合成の評価は P2B-13（P2-7 ではキャッシュ経路を混ぜない）。
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
-Sum/Productは結合則・交換則が効くため、flatten+fold評価で済む。
+Sum/Productは結合則・交換則が効くため、flatten+fold評価で済む。公開の `KernelSpec *` は Dist 葉でも Points 葉でも `grad` まで通す（P2B-12）。Dist 葉と Points 葉の Sum/Product（例: `RBF + Linear`）は混ぜて評価する（P2B-13）。`coord_mode` の実行時エラーや、型で混ぜを禁止する設計にはしない。
 
 1. 距離キャッシュ重複排除: 合成木を走査し`DistanceKind`集合を構築
 2. flatten: `(A+B)+C`を`Sum(vec![A,B,C])`に正規化
@@ -346,9 +346,11 @@ struct IdentityTarget<T>(PhantomData<T>);
 struct StandardizeTarget<T: Scalar> { mean: T, std: T }
 struct MinMaxInput { /* per-column min/max, default range [0, 1] */ }
 struct MinMaxTarget { /* y min/max, default range [0, 1] */ }
+/// P2B-8: 長さ d。列ごとに Identity / Standardize / MinMax / 自前
+struct ColumnwiseInput { maps: Vec<Box<dyn Transform>> }
 ```
 
-既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。Pipeline（複数マップの直列）は roadmap に無い。
+既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。未学習の `transform` / `apply` は型で起きない（P2B-10）。複数マップの直列は P2B-7（`Pipeline`）。入力は列ごとに別マップを指定できる（P2B-8）。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
@@ -401,17 +403,17 @@ struct PredictOptions {
 }
 ```
 
-初期実装は対角分散のみ。フル共分散は roadmap に無い。`predict`は`PredictOptions`で分散の意味を切り替える。未指定時は`Observation`(ユーザーが欲しいのは多くの場合ノイズ込みの予測分散)。
+対角分散は Phase 1 から既定。クエリ間の共分散と posterior sample は P2B-6 のオプトイン（既定では計算しない）。`predict`は`PredictOptions`で分散の意味を切り替える。未指定時は`Observation`(ユーザーが欲しいのは多くの場合ノイズ込みの予測分散)。
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。
 
-誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。Phase 4ではZ固定のためこのAPIは使わない。Z最適化は roadmap の「意図的に今やらない」。足すときは点ごとではなく次元一括で呼ぶ。
+誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。Phase 4 の初期（P4-1…4）はZ固定のためこのAPIは使わない。Z最適化は P4-5 / P4-6。足すときは点ごとではなく次元一括で呼ぶ。
 
-**Phase 4の初期実装では誘導点Zをk-means等で固定し、最適化対象はカーネルハイパラとノイズのみとする**。Zをθと同時最適化するとパラメータ数が m×d 増え、L-BFGSのメモリと収束性に大きく影響する。同時最適化・交互最適化はPhase 4の後続タスク(§14)。
+**Phase 4の初期実装では誘導点Zをk-means等で固定し、最適化対象はカーネルハイパラとノイズのみとする**（P4-4）。Zをθと同時最適化するとパラメータ数が m×d 増え、L-BFGSのメモリと収束性に大きく影響する。方式は P4-5、実装は P4-6。
 
-Sparse GPRのオンライン学習は誘導点ZとデータXの非対称性のためスコープ外(§14)。
+Sparse GPRのオンライン学習は誘導点ZとデータXの非対称性がある。P4-7。
 
 ### 6.2 `Gpr` のMLLと勾配(P0追加)
 
@@ -442,38 +444,48 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-メモリ節約の代替（L を `W` で上書きして fit 終了時に Cholesky をやり直す）は roadmap に無い。Phase 1 は `w_matrix` を独立確保し、L を保持する。
+メモリ節約の代替（L を `W` で上書きして fit 終了時に Cholesky をやり直す）は P5-6。Phase 1 / 2 は `w_matrix` を独立確保し、L を保持する。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr` は `KernelSpec`・`GaussianLikelihood`・変換・`FitOptions`・距離キャッシュ方針だけを持つ。`fit(self, …)` が L-BFGS（または `FitOptions::fixed` の一回分解）を回し、成功時に `FittedGpr` を返す。失敗時は消費した `Gpr` をエラーと一緒に返し、呼び出し側はハイパラやデータを直して再試行できる。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外した（`NotFitted` は transform `apply` のみ）。
+`Gpr<O = Lbfgs>` は `KernelSpec`・`GaussianLikelihood`・変換・距離キャッシュ方針と、最適化器 `O` を持つ。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`optimize: bool` は置かない。失敗時は消費した `Gpr<O>` をエラーと一緒に返す。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外した（`NotFitted` は transform `apply` のみ。P2B-10 でそれも型にする）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `fit` は argmin の L-BFGS でハイパラを動かす。`FitOptions::fixed` は勾配を取らず、与えたハイパラで一度だけ分解する。`FittedGpr::predict` は対角分散のみ。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit(&mut self)`。
+既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が型パラメータを差し替える（P2B-2 / P2B-9）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。
 
 ```rust
-struct Gpr {
+struct Gpr<O = Lbfgs> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
-    fit_options: FitOptions,
+    optimizer: O,
     distance_cache_policy: DistanceCachePolicy,
+}
+
+struct Fixed;
+
+struct Lbfgs {
+    max_iterations: u64,   // 既定 100
+    tolerance: f64,
+    history_size: usize,   // 既定 10。L-BFGS だけ
+    n_restarts: u32,       // 既定 0
 }
 
 enum DistanceCachePolicy {
     Never,
     Always,
-}
+} // 距離モードの経路だけ（P2B-11）。Linear / Constant / White 専用の trainer には無い
 
-struct FittedGpr {
+struct FittedGpr<O = Lbfgs> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
+    optimizer: O,
     workspace: Workspace<DoublePrecision>, // L。W は空でよい
     query: QueryWorkspace<DoublePrecision>, // predict_into 用
     compiled: CompiledKernel,
@@ -484,21 +496,10 @@ struct FittedGpr {
     d: usize,
 }
 
-struct FitOptions {
-    pub max_iterations: u64,      // 既定 1000
-    pub tolerance: f64,           // 既定 1e-5
-    pub history_size: usize,      // 既定 10
-    pub line_search: LineSearch,  // StrongWolfe { c1: 1e-4, c2: 0.9 }
-}
-
-impl FitOptions {
-    fn fixed() -> Self { /* max_iterations = 0 */ }
-}
-
 /// Objective は `Gpr` を fit 中だけ &mut で借り、set_params → MLL/勾配 を中継する。
 /// パラメータの正本は Gpr.kernel / Gpr.likelihood。
-struct GprObjective<'a> {
-    model: &'a mut Gpr,
+struct GprObjective<'a, O> {
+    model: &'a mut Gpr<O>,
 }
 ```
 
@@ -639,7 +640,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を伝播させ、`IncrementalRecompute`と接続する(Phase 5)。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。公開面は `Gpr<O: Optimizer>`。既定 `Lbfgs`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を伝播させ、`IncrementalRecompute`と接続する(Phase 5)。
 
 ## 10. エラー型 GprError
 
@@ -813,23 +814,24 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3（P3-1）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-1）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
 - **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
-- **Phase 3(オンライン学習)**: P2-9 のあと。`FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
-- **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ、**誘導点Zは固定**、対角予測、ハイパラ最適化(Zは含めない)
-- **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Autoの閾値調整
+- **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）
+- **Phase 3(オンライン学習)**: 2b のあと。`FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
+- **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ。初期は**誘導点Z固定**（P4-1…4）。P4-5 / P4-6 で Z 最適化。P4-7 で Sparse オンライン
+- **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto、fit 中の `L`/`W` バッファ共用（P5-6）
 
 ## 14. 未解決事項
 
-1. **Sparse GPRのオンライン学習**: 誘導点ZとデータXの非対称性があり、Phase 4以降の別設計が必要
+1. **Sparse GPRのオンライン学習**: 誘導点ZとデータXの非対称。方式は P4-7 の Issue / Grill で決める
 2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
-3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要
+3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
 4. **`ldlt::update::delete_rows_and_cols_clobber`の実測**: 任意インデックス・複数行・更新後LDの正しさをPhase 3着手時に小規模行列で確認する。失敗時は§11のフォールバック(末尾削除+フル再分解、またはGivens downdate)
-5. **Sparse GPRの誘導点Zの最適化**: Phase 4では固定。同時最適化か交互最適化かは後続で決める
+5. **Sparse GPRの誘導点Zの最適化**: 初期（P4-4）は固定。同時か交互かは P4-5
 
 ## 15. ベンチマーク戦略
 
