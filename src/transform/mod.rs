@@ -2,7 +2,7 @@
 //!
 //! Phase 1 provides [`IdentityInput`] / [`StandardizeInput`] for features and
 //! [`IdentityTarget`] / [`StandardizeTarget`] for observations. A pipeline of
-//! extra maps (MinMax, …) waits until a later issue.
+//! maps is listed under roadmap 「意図的に今やらない」.
 
 mod input;
 mod target;
