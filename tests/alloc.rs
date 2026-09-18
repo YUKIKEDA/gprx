@@ -6,7 +6,7 @@
 //! `predict_into` after warmup). User kernels are excluded.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{FitOptions, FittedGpr, GaussianLikelihood, Gpr, GprError, Prediction};
+use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, Prediction};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 
@@ -46,13 +46,15 @@ fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
     x
 }
 
-fn fitted_model() -> Result<(FittedGpr, Vec<f64>), GprError> {
+fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);
     let mut state = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
     let y: Vec<f64> = (0..N).map(|_| splitmix64(&mut state)).collect();
-    let gpr = Gpr::new(kernel, likelihood).fit_with(&x, N, D, &y, FitOptions::FIXED)?;
+    let gpr = Gpr::new(kernel, likelihood)
+        .with_optimizer(Fixed)
+        .factor(&x, N, D, &y)?;
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     Ok((gpr, xs))
 }

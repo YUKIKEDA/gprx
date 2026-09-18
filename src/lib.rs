@@ -1,8 +1,9 @@
 //! Exact Gaussian process regression with L-BFGS hyperparameter fitting.
 //!
-//! [`Gpr`] is the trainer. [`Gpr::fit`] consumes it and returns
-//! [`FittedGpr`]. Training `X` is column-major: `n` points and `d`
-//! features packed as feature 0 for all rows, then feature 1, and so on.
+//! [`Gpr`] is the trainer. [`Gpr::fit`] consumes [`Gpr<Lbfgs>`] and returns
+//! [`FittedGpr`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
+//! a search. Training `X` is column-major: `n` points and `d` features
+//! packed as feature 0 for all rows, then feature 1, and so on.
 //! Observation noise lives in [`GaussianLikelihood`].
 //! [`kernel::WhiteKernel`] is opt-in composition; using both at large
 //! values double-counts noise. This crate is not published to crates.io
@@ -40,15 +41,20 @@ pub mod kernel;
 mod likelihood;
 mod objective;
 mod optimizer;
+mod param;
 mod precision;
 pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GprError};
-pub use gpr::{
-    DistanceCachePolicy, FitOptions, FittedGpr, Gpr, PredictOptions, Prediction, VarianceKind,
-};
+pub use gpr::{DistanceCachePolicy, FittedGpr, Gpr, PredictOptions, Prediction, VarianceKind};
 pub use likelihood::GaussianLikelihood;
+pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
+pub use optimizer::{
+    AcceptsRecompute, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, OptResult, Optimizer,
+    RecomputeStrategy, UsesChangeIndices,
+};
+pub use param::{BoundedParam, Interval, IntervalError};
 pub use precision::{DoublePrecision, PrecisionPolicy};
 
 #[cfg(test)]

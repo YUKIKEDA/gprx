@@ -33,7 +33,7 @@ Default `predict` variance is observation (`latent + σn²`). Use `predict_with`
 
 Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Features can use `MinMaxInput` (default `[0, 1]`). Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in composition; using both at large values double-counts noise.
 
-`FitOptions::FIXED` skips L-BFGS and factors at the kernel and likelihood `θ` already on the trainer.
+`Gpr<Fixed>::factor` (after `with_optimizer(Fixed)`) factors at the kernel and likelihood `θ` already on the trainer. L-BFGS knobs live on `Lbfgs` (`with_max_iterations`, `with_tolerance`, `with_history_size`, `with_restarts`).
 
 ## License
 

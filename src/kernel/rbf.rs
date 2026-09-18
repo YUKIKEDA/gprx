@@ -4,6 +4,7 @@ use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
 use super::{Triangle, finite_dist, write_dense, write_triangle};
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
@@ -28,7 +29,7 @@ use faer::{MatMut, MatRef};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RbfKernel {
-    log_lengthscale: f64,
+    lengthscale: BoundedParam,
 }
 
 impl RbfKernel {
@@ -40,7 +41,9 @@ impl RbfKernel {
     /// finite or not strictly positive.
     pub fn new(lengthscale: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
-        Self::from_log_lengthscale(lengthscale.ln())
+        Ok(Self {
+            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
+        })
     }
 
     /// Builds an RBF kernel from `θ = log(ℓ)`.
@@ -50,19 +53,37 @@ impl RbfKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log_lengthscale(log_lengthscale: f64) -> Result<Self, GprError> {
+        let log_lengthscale = validate_log_lengthscale(log_lengthscale)?;
         Ok(Self {
-            log_lengthscale: validate_log_lengthscale(log_lengthscale)?,
+            lengthscale: BoundedParam::sklearn_positive(log_lengthscale.exp())?,
         })
     }
 
     /// Returns `ℓ = exp(θ)`.
     pub fn lengthscale(&self) -> f64 {
-        self.log_lengthscale.exp()
+        self.lengthscale.value()
     }
 
     /// Returns `θ = log(ℓ)`.
     pub fn log_lengthscale(&self) -> f64 {
-        self.log_lengthscale
+        self.lengthscale.ln()
+    }
+
+    /// Returns the open interval on `ℓ`.
+    pub fn bounds(&self) -> Interval {
+        self.lengthscale.interval()
+    }
+
+    /// Rebuilds this kernel with a new interval on `ℓ`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if the current `ℓ` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            lengthscale: self.lengthscale.with_interval(interval)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 1).
@@ -77,7 +98,7 @@ impl RbfKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len())?;
-        out[0] = self.log_lengthscale;
+        out[0] = self.lengthscale.ln();
         Ok(())
     }
 
@@ -89,7 +110,8 @@ impl RbfKernel {
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len())?;
-        self.log_lengthscale = validate_log_lengthscale(params[0])?;
+        let log_lengthscale = validate_log_lengthscale(params[0])?;
+        self.lengthscale = BoundedParam::new(log_lengthscale.exp(), self.lengthscale.interval())?;
         Ok(())
     }
 

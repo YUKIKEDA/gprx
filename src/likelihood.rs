@@ -1,6 +1,7 @@
 //! Gaussian observation noise, stored as `θ = log(σn²)`.
 
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 
 /// Gaussian likelihood with observation noise variance `σn²`.
 ///
@@ -27,7 +28,7 @@ use crate::error::GprError;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GaussianLikelihood {
-    log_noise_variance: f64,
+    noise_variance: BoundedParam,
 }
 
 impl GaussianLikelihood {
@@ -45,7 +46,7 @@ impl GaussianLikelihood {
             return Err(invalid_noise("noise variance must be positive"));
         }
         Ok(Self {
-            log_noise_variance: noise_variance.ln(),
+            noise_variance: BoundedParam::sklearn_positive(noise_variance)?,
         })
     }
 
@@ -57,19 +58,37 @@ impl GaussianLikelihood {
     /// `exp(θ)` overflows to a non-finite variance, or if `exp(θ)` underflows
     /// to zero.
     pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GprError> {
+        let log_noise_variance = validate_log_noise_variance(log_noise_variance)?;
         Ok(Self {
-            log_noise_variance: validate_log_noise_variance(log_noise_variance)?,
+            noise_variance: BoundedParam::sklearn_positive(log_noise_variance.exp())?,
         })
     }
 
     /// Returns `σn² = exp(θ)`.
     pub fn noise_variance(&self) -> f64 {
-        self.log_noise_variance.exp()
+        self.noise_variance.value()
     }
 
     /// Returns `θ = log(σn²)`.
     pub fn log_noise_variance(&self) -> f64 {
-        self.log_noise_variance
+        self.noise_variance.ln()
+    }
+
+    /// Returns the open interval on `σn²`.
+    pub fn bounds(&self) -> Interval {
+        self.noise_variance.interval()
+    }
+
+    /// Rebuilds this likelihood with a new interval on `σn²`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if the current `σn²` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            noise_variance: self.noise_variance.with_interval(interval)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 1).
@@ -84,7 +103,7 @@ impl GaussianLikelihood {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len())?;
-        out[0] = self.log_noise_variance;
+        out[0] = self.noise_variance.ln();
         Ok(())
     }
 
@@ -96,7 +115,9 @@ impl GaussianLikelihood {
     /// or [`GprError::InvalidNoiseVariance`] if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len())?;
-        self.log_noise_variance = validate_log_noise_variance(params[0])?;
+        let log_noise_variance = validate_log_noise_variance(params[0])?;
+        self.noise_variance =
+            BoundedParam::new(log_noise_variance.exp(), self.noise_variance.interval())?;
         Ok(())
     }
 

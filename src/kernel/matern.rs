@@ -3,6 +3,7 @@
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{Triangle, expect_one_param, finite_dist, write_dense, write_triangle};
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// Smoothness `ν` for the closed-form Matérn kernels in Phase 1a.
@@ -51,7 +52,7 @@ impl MaternNu {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaternKernel {
     nu: MaternNu,
-    log_lengthscale: f64,
+    lengthscale: BoundedParam,
 }
 
 impl MaternKernel {
@@ -63,7 +64,10 @@ impl MaternKernel {
     /// finite or not strictly positive.
     pub fn new(lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
-        Self::from_log_lengthscale(lengthscale.ln(), nu)
+        Ok(Self {
+            nu,
+            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
+        })
     }
 
     /// Builds an isotropic Matérn kernel from `θ = log(ℓ)` and `ν`.
@@ -75,7 +79,9 @@ impl MaternKernel {
     pub fn from_log_lengthscale(log_lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
         Ok(Self {
             nu,
-            log_lengthscale: validate_log_lengthscale(log_lengthscale)?,
+            lengthscale: BoundedParam::sklearn_positive(
+                validate_log_lengthscale(log_lengthscale)?.exp(),
+            )?,
         })
     }
 
@@ -86,12 +92,30 @@ impl MaternKernel {
 
     /// Returns `ℓ = exp(θ)`.
     pub fn lengthscale(&self) -> f64 {
-        self.log_lengthscale.exp()
+        self.lengthscale.value()
     }
 
     /// Returns `θ = log(ℓ)`.
     pub fn log_lengthscale(&self) -> f64 {
-        self.log_lengthscale
+        self.lengthscale.ln()
+    }
+
+    /// Returns the open interval on `ℓ`.
+    pub fn bounds(&self) -> Interval {
+        self.lengthscale.interval()
+    }
+
+    /// Rebuilds this kernel with a new interval on `ℓ`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if the current `ℓ` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            nu: self.nu,
+            lengthscale: self.lengthscale.with_interval(interval)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 1).
@@ -106,7 +130,7 @@ impl MaternKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len(), "Matern")?;
-        out[0] = self.log_lengthscale;
+        out[0] = self.lengthscale.ln();
         Ok(())
     }
 
@@ -118,7 +142,8 @@ impl MaternKernel {
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len(), "Matern")?;
-        self.log_lengthscale = validate_log_lengthscale(params[0])?;
+        let log_lengthscale = validate_log_lengthscale(params[0])?;
+        self.lengthscale = BoundedParam::new(log_lengthscale.exp(), self.lengthscale.interval())?;
         Ok(())
     }
 
