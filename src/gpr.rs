@@ -81,6 +81,219 @@ pub enum DistanceCachePolicy {
     Always,
 }
 
+/// Numerical Cholesky stabilizer, distinct from observation noise.
+///
+/// The first factorization always tries `A = K + σn² I` with no extra
+/// diagonal. [`Self::Fixed`] retries once with that `j` if the first factor
+/// fails. [`Self::Adaptive`] retries with `initial`, then
+/// `initial * multiplier` on each later attempt, stopping at `max_retries`
+/// or when `j` would exceed `max_jitter`. A successful retry factors
+/// `A + j I`; this crate does not iteratively refine back to `A`.
+/// Observation noise stays on [`GaussianLikelihood`].
+///
+/// The default is [`Self::fixed`]`(0.0)`: no retry, matching an unregularized
+/// factor. [`GprError::CholeskyFailed::jitter`] is the last `j` that was
+/// tried (`0.0` when the unregularized factor was the only attempt).
+///
+/// # Errors
+///
+/// Constructors return [`GprError::InvalidHyperparameter`] if a value is
+/// non-finite or outside the domain below.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, JitterPolicy};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let gpr = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_jitter_policy(JitterPolicy::adaptive(1e-10, 10.0, 5, 1e-3)?);
+/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JitterPolicy {
+    /// Retry the failed factor with this non-negative `j` on the diagonal.
+    Fixed(FixedJitter),
+    /// Retry with a growing `j` after the unregularized factor fails.
+    Adaptive(AdaptiveJitter),
+}
+
+/// Non-negative diagonal offset for [`JitterPolicy::Fixed`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FixedJitter {
+    jitter: f64,
+}
+
+/// Growing diagonal offsets for [`JitterPolicy::Adaptive`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveJitter {
+    initial: f64,
+    multiplier: f64,
+    max_retries: usize,
+    max_jitter: f64,
+}
+
+impl Default for JitterPolicy {
+    fn default() -> Self {
+        Self::Fixed(FixedJitter { jitter: 0.0 })
+    }
+}
+
+impl JitterPolicy {
+    /// Builds a single retry offset `j ≥ 0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `jitter` is not finite
+    /// or is negative.
+    pub fn fixed(jitter: f64) -> Result<Self, GprError> {
+        if !jitter.is_finite() || jitter < 0.0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("jitter must be finite and non-negative, got {jitter}"),
+            });
+        }
+        Ok(Self::Fixed(FixedJitter { jitter }))
+    }
+
+    /// Builds a growing retry sequence after an unregularized factor fails.
+    ///
+    /// `initial` must be positive, `multiplier` must be greater than 1,
+    /// `max_retries` must be at least 1, and `max_jitter` must be at least
+    /// `initial`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if a value is non-finite
+    /// or outside that domain.
+    pub fn adaptive(
+        initial: f64,
+        multiplier: f64,
+        max_retries: usize,
+        max_jitter: f64,
+    ) -> Result<Self, GprError> {
+        if !initial.is_finite() || initial <= 0.0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "adaptive initial jitter must be finite and positive, got {initial}"
+                ),
+            });
+        }
+        if !multiplier.is_finite() || multiplier <= 1.0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "adaptive jitter multiplier must be finite and greater than 1, got {multiplier}"
+                ),
+            });
+        }
+        if max_retries < 1 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "adaptive jitter max_retries must be at least 1".to_owned(),
+            });
+        }
+        if !max_jitter.is_finite() || max_jitter < initial {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "adaptive max_jitter must be finite and at least initial ({initial}), got {max_jitter}"
+                ),
+            });
+        }
+        Ok(Self::Adaptive(AdaptiveJitter {
+            initial,
+            multiplier,
+            max_retries,
+            max_jitter,
+        }))
+    }
+
+    fn retry_jitters(self) -> RetryJitters {
+        match self {
+            Self::Fixed(fixed) => {
+                if fixed.jitter > 0.0 {
+                    RetryJitters {
+                        next: Some(fixed.jitter),
+                        multiplier: 1.0,
+                        remaining: 1,
+                        max_jitter: fixed.jitter,
+                    }
+                } else {
+                    RetryJitters {
+                        next: None,
+                        multiplier: 1.0,
+                        remaining: 0,
+                        max_jitter: 0.0,
+                    }
+                }
+            }
+            Self::Adaptive(adaptive) => RetryJitters {
+                next: Some(adaptive.initial),
+                multiplier: adaptive.multiplier,
+                remaining: adaptive.max_retries,
+                max_jitter: adaptive.max_jitter,
+            },
+        }
+    }
+}
+
+impl FixedJitter {
+    /// Returns the retry offset `j`.
+    pub fn jitter(&self) -> f64 {
+        self.jitter
+    }
+}
+
+impl AdaptiveJitter {
+    /// Returns the first retry offset.
+    pub fn initial(&self) -> f64 {
+        self.initial
+    }
+
+    /// Returns the factor applied after each failed retry.
+    pub fn multiplier(&self) -> f64 {
+        self.multiplier
+    }
+
+    /// Returns the maximum number of jittered attempts.
+    pub fn max_retries(&self) -> usize {
+        self.max_retries
+    }
+
+    /// Returns the largest retry offset that may be tried.
+    pub fn max_jitter(&self) -> f64 {
+        self.max_jitter
+    }
+}
+
+struct RetryJitters {
+    next: Option<f64>,
+    multiplier: f64,
+    remaining: usize,
+    max_jitter: f64,
+}
+
+impl Iterator for RetryJitters {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<f64> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let j = self.next?;
+        if j > self.max_jitter {
+            return None;
+        }
+        self.remaining -= 1;
+        let grown = j * self.multiplier;
+        self.next = if grown.is_finite() { Some(grown) } else { None };
+        Some(j)
+    }
+}
+
 /// Predictive mean and (diagonal) variance at the query points.
 ///
 /// [`FittedGpr::predict_into`] reuses `mean` / `variance` capacity when the
@@ -137,6 +350,7 @@ pub struct Gpr<O = Lbfgs, S = FullRecompute> {
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
     distance_cache_policy: DistanceCachePolicy,
+    jitter_policy: JitterPolicy,
     _recompute: PhantomData<S>,
 }
 
@@ -150,6 +364,7 @@ where
             .field("likelihood", &self.likelihood)
             .field("optimizer", &self.optimizer)
             .field("distance_cache_policy", &self.distance_cache_policy)
+            .field("jitter_policy", &self.jitter_policy)
             .finish_non_exhaustive()
     }
 }
@@ -192,6 +407,7 @@ pub struct FittedGpr<O = Lbfgs, S = FullRecompute> {
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
     distance_cache_policy: DistanceCachePolicy,
+    jitter_policy: JitterPolicy,
     workspace: Option<Workspace<DoublePrecision>>,
     query: QueryWorkspace<DoublePrecision>,
     x: Option<Mat<f64>>,
@@ -213,6 +429,7 @@ where
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
             .field("distance_cache_policy", &self.distance_cache_policy)
+            .field("jitter_policy", &self.jitter_policy)
             .finish_non_exhaustive()
     }
 }
@@ -232,6 +449,7 @@ impl Gpr {
             y_transform: Box::new(IdentityTarget),
             optimizer: Lbfgs::new(),
             distance_cache_policy: DistanceCachePolicy::Always,
+            jitter_policy: JitterPolicy::default(),
             _recompute: PhantomData,
         }
     }
@@ -257,6 +475,35 @@ impl<O, S> Gpr<O, S> {
     /// [`DistanceCachePolicy`].
     pub fn with_distance_cache_policy(mut self, policy: DistanceCachePolicy) -> Self {
         self.distance_cache_policy = policy;
+        self
+    }
+
+    /// Sets the Cholesky jitter policy. Does not change observation noise.
+    ///
+    /// Intended to be called before [`Gpr::fit`] / [`Gpr<Fixed>::factor`].
+    /// The default is [`JitterPolicy::fixed`]`(0.0)`. See [`JitterPolicy`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Gpr, JitterPolicy};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_jitter_policy(JitterPolicy::fixed(1e-8)?);
+    /// let _fitted = gpr
+    ///     .with_optimizer(gprx::Fixed)
+    ///     .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_jitter_policy(mut self, policy: JitterPolicy) -> Self {
+        self.jitter_policy = policy;
         self
     }
 
@@ -294,6 +541,7 @@ impl<O, S> Gpr<O, S> {
             y_transform: self.y_transform,
             optimizer,
             distance_cache_policy: self.distance_cache_policy,
+            jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
         }
     }
@@ -360,6 +608,7 @@ where
             y_transform: self.y_transform,
             optimizer: self.optimizer,
             distance_cache_policy: self.distance_cache_policy,
+            jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
         }
     }
@@ -481,6 +730,7 @@ impl<O, S> FittedGpr<O, S> {
             y_transform: gpr.y_transform,
             optimizer: gpr.optimizer,
             distance_cache_policy: gpr.distance_cache_policy,
+            jitter_policy: gpr.jitter_policy,
             workspace: None,
             query: QueryWorkspace::new(),
             x: None,
@@ -493,7 +743,8 @@ impl<O, S> FittedGpr<O, S> {
     }
 
     /// Drops `L` / `α` / training data and returns a trainer with the current
-    /// kernel, likelihood, transforms, optimizer, and distance-cache policy.
+    /// kernel, likelihood, transforms, optimizer, distance-cache policy, and
+    /// jitter policy.
     pub fn into_trainer(self) -> Gpr<O, S> {
         Gpr {
             kernel: self.kernel,
@@ -502,6 +753,7 @@ impl<O, S> FittedGpr<O, S> {
             y_transform: self.y_transform,
             optimizer: self.optimizer,
             distance_cache_policy: self.distance_cache_policy,
+            jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
         }
     }
@@ -665,17 +917,17 @@ impl<O, S> FittedGpr<O, S> {
         {
             let x = self.x.as_ref().ok_or(GprError::EmptyInput)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            apply_train_kernel(&compiled, x.as_ref(), ws, self.distance_cache_policy)?;
-            add_noise_to_diag(ws.k_matrix.as_mut(), likelihood.noise_variance());
-            for (i, &yi) in y.iter().enumerate() {
-                ws.rhs[(i, 0)] = yi;
-            }
-            if let Err(err) = cholesky_and_solve(
-                &mut ws.k_matrix,
-                &mut ws.rhs,
-                &mut ws.faer_scratch,
-                0.0,
-                CholeskyStage::Fit,
+            if let Err(err) = factor_train_with_policy(
+                &compiled,
+                x.as_ref(),
+                ws,
+                y,
+                likelihood.noise_variance(),
+                FactorPolicy {
+                    cache: self.distance_cache_policy,
+                    jitter: self.jitter_policy,
+                    stage: CholeskyStage::Fit,
+                },
             ) {
                 let _ = self.factorize_current();
                 return Err(err);
@@ -869,25 +1121,22 @@ impl<O, S> FittedGpr<O, S> {
 
     fn factorize_current(&mut self) -> Result<(), GprError> {
         let compiled = self.compiled.as_ref().ok_or(GprError::EmptyInput)?;
-        {
-            let x = self.x.as_ref().ok_or(GprError::EmptyInput)?;
-            let ws = workspace_mut(&mut self.workspace)?;
-            apply_train_kernel(compiled, x.as_ref(), ws, self.distance_cache_policy)?;
-            add_noise_to_diag(ws.k_matrix.as_mut(), self.likelihood.noise_variance());
-        }
         let n_rows = self.n;
         let y_buf = self.y.as_deref().ok_or(GprError::EmptyInput)?;
         {
+            let x = self.x.as_ref().ok_or(GprError::EmptyInput)?;
             let ws = workspace_mut(&mut self.workspace)?;
-            for (i, &yi) in y_buf.iter().enumerate() {
-                ws.rhs[(i, 0)] = yi;
-            }
-            if let Err(err) = cholesky_and_solve(
-                &mut ws.k_matrix,
-                &mut ws.rhs,
-                &mut ws.faer_scratch,
-                0.0,
-                CholeskyStage::Fit,
+            if let Err(err) = factor_train_with_policy(
+                compiled,
+                x.as_ref(),
+                ws,
+                y_buf,
+                self.likelihood.noise_variance(),
+                FactorPolicy {
+                    cache: self.distance_cache_policy,
+                    jitter: self.jitter_policy,
+                    stage: CholeskyStage::Fit,
+                },
             ) {
                 self.alpha = None;
                 return Err(err);
@@ -1412,6 +1661,89 @@ fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
     }
 }
 
+fn assemble_train_system(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    ws: &mut Workspace<DoublePrecision>,
+    y: &[f64],
+    noise: f64,
+    extra_diag: f64,
+    cache: DistanceCachePolicy,
+) -> Result<(), GprError> {
+    apply_train_kernel(compiled, x, ws, cache)?;
+    add_noise_to_diag(ws.k_matrix.as_mut(), noise);
+    if extra_diag != 0.0 {
+        add_noise_to_diag(ws.k_matrix.as_mut(), extra_diag);
+    }
+    for (i, &yi) in y.iter().enumerate() {
+        ws.rhs[(i, 0)] = yi;
+    }
+    Ok(())
+}
+
+struct FactorPolicy {
+    cache: DistanceCachePolicy,
+    jitter: JitterPolicy,
+    stage: CholeskyStage,
+}
+
+fn map_cholesky_jitter(err: GprError, jitter: f64) -> GprError {
+    match err {
+        GprError::CholeskyFailed {
+            matrix_size, stage, ..
+        } => GprError::CholeskyFailed {
+            jitter,
+            matrix_size,
+            stage,
+        },
+        other => other,
+    }
+}
+
+fn factor_train_with_policy(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    ws: &mut Workspace<DoublePrecision>,
+    y: &[f64],
+    noise: f64,
+    policy: FactorPolicy,
+) -> Result<(), GprError> {
+    assemble_train_system(compiled, x, ws, y, noise, 0.0, policy.cache)?;
+    match cholesky_and_solve(
+        &mut ws.k_matrix,
+        &mut ws.rhs,
+        &mut ws.faer_scratch,
+        0.0,
+        policy.stage,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(GprError::CholeskyFailed { .. }) => {}
+        Err(err) => return Err(err),
+    }
+    let mut last_j = 0.0;
+    for j in policy.jitter.retry_jitters() {
+        last_j = j;
+        assemble_train_system(compiled, x, ws, y, noise, j, policy.cache)?;
+        match cholesky_and_solve(
+            &mut ws.k_matrix,
+            &mut ws.rhs,
+            &mut ws.faer_scratch,
+            0.0,
+            policy.stage,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(GprError::CholeskyFailed { .. }) => {}
+            Err(err) => return Err(map_cholesky_jitter(err, j)),
+        }
+    }
+    let n = ws.k_matrix.nrows();
+    Err(GprError::CholeskyFailed {
+        jitter: last_j,
+        matrix_size: n,
+        stage: policy.stage,
+    })
+}
+
 fn log_det_from_l(l: MatRef<'_, f64>, n: usize) -> f64 {
     let mut log_diag = 0.0;
     for i in 0..n {
@@ -1592,12 +1924,14 @@ impl FittedGpr<Fixed> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FittedGpr, Gpr, OptResult, Prediction, cholesky_and_solve, pack_points};
+    use super::{
+        FittedGpr, Gpr, JitterPolicy, OptResult, Prediction, cholesky_and_solve, pack_points,
+    };
     use crate::error::{CholeskyStage, GprError};
     use crate::kernel::{
-        ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
-        PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel,
-        RbfKernel, Triangle, WhiteKernel,
+        ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel,
+        MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
+        RbfArdKernel, RbfKernel, Triangle, WhiteKernel,
     };
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::Objective;
@@ -1609,7 +1943,7 @@ mod tests {
     use crate::precision::DoublePrecision;
     use crate::transform::{MinMaxInput, StandardizeTarget, TargetTransform};
     use crate::workspace::Workspace;
-    use faer::Mat;
+    use faer::{Mat, MatMut, MatRef};
 
     const TOL: f64 = 1e-9;
 
@@ -1678,6 +2012,9 @@ mod tests {
         assert_send_sync::<super::Prediction>();
         assert_send_sync::<super::VarianceKind>();
         assert_send_sync::<super::PredictOptions>();
+        assert_send_sync::<super::JitterPolicy>();
+        assert_send_sync::<super::FixedJitter>();
+        assert_send_sync::<super::AdaptiveJitter>();
     }
 
     #[test]
@@ -1834,8 +2171,179 @@ mod tests {
             GprError::CholeskyFailed {
                 stage: CholeskyStage::Fit,
                 matrix_size: 2,
-                jitter: _,
+                jitter: 0.0,
             }
+        ));
+    }
+
+    #[derive(Clone, Debug)]
+    struct IndefiniteLeaf;
+
+    impl KernelTerm for IndefiniteLeaf {
+        fn num_params(&self) -> usize {
+            0
+        }
+
+        fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+            if out.is_empty() {
+                Ok(())
+            } else {
+                Err(GprError::InvalidHyperparameter {
+                    reason: "indefinite leaf has no parameters".to_owned(),
+                })
+            }
+        }
+
+        fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
+            self.get_params(&mut params.to_vec())
+        }
+
+        fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            if out.is_empty() {
+                Ok(())
+            } else {
+                Err(GprError::InvalidHyperparameter {
+                    reason: "indefinite leaf has no parameters".to_owned(),
+                })
+            }
+        }
+
+        fn apply(
+            &self,
+            dist: MatRef<'_, f64>,
+            mut out: MatMut<'_, f64>,
+            uplo: Triangle,
+        ) -> Result<(), GprError> {
+            let n = dist.nrows();
+            if n == 0 || dist.ncols() != n || out.nrows() != n || out.ncols() != n {
+                return Err(GprError::InvalidHyperparameter {
+                    reason: "indefinite leaf needs matching square matrices".to_owned(),
+                });
+            }
+            for col in 0..n {
+                let start = match uplo {
+                    Triangle::Lower => col,
+                    Triangle::Upper | Triangle::Full => 0,
+                };
+                let end = match uplo {
+                    Triangle::Upper => col + 1,
+                    Triangle::Lower | Triangle::Full => n,
+                };
+                for row in start..end {
+                    out[(row, col)] = if row == col { 1.0 } else { 2.0 };
+                }
+            }
+            Ok(())
+        }
+
+        fn apply_cross(
+            &self,
+            dist: MatRef<'_, f64>,
+            mut out: MatMut<'_, f64>,
+        ) -> Result<(), GprError> {
+            for col in 0..out.ncols() {
+                for row in 0..out.nrows() {
+                    out[(row, col)] = if row == col { 1.0 } else { 2.0 };
+                }
+            }
+            let _ = dist;
+            Ok(())
+        }
+
+        fn fill_diag(&self, out: &mut [f64]) -> Result<(), GprError> {
+            out.fill(1.0);
+            Ok(())
+        }
+
+        fn grad(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _d_k: MatMut<'_, f64>,
+            param_idx: usize,
+            _uplo: Triangle,
+        ) -> Result<(), GprError> {
+            Err(GprError::InvalidHyperparameter {
+                reason: format!("indefinite leaf has no parameter {param_idx}"),
+            })
+        }
+
+        fn clone_box(&self) -> Box<dyn KernelTerm> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn indefinite_gpr(noise: f64) -> Gpr {
+        Gpr::new(
+            KernelSpec::custom(IndefiniteLeaf),
+            GaussianLikelihood::new(noise).expect("valid"),
+        )
+    }
+
+    #[test]
+    fn jitter_constructors_reject_invalid_values() {
+        assert!(JitterPolicy::fixed(-1e-8).is_err());
+        assert!(JitterPolicy::fixed(f64::NAN).is_err());
+        assert!(JitterPolicy::adaptive(0.0, 10.0, 3, 1.0).is_err());
+        assert!(JitterPolicy::adaptive(1e-8, 1.0, 3, 1.0).is_err());
+        assert!(JitterPolicy::adaptive(1e-8, 10.0, 0, 1.0).is_err());
+        assert!(JitterPolicy::adaptive(1.0, 10.0, 3, 0.5).is_err());
+    }
+
+    #[test]
+    fn default_jitter_policy_reports_zero_on_failure() {
+        let err = indefinite_gpr(0.1)
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+            .expect_err("indefinite")
+            .1;
+        assert!(matches!(
+            err,
+            GprError::CholeskyFailed {
+                jitter: 0.0,
+                matrix_size: 2,
+                stage: CholeskyStage::Fit,
+            }
+        ));
+    }
+
+    #[test]
+    fn fixed_jitter_recovers_without_changing_noise() {
+        let noise = 0.1;
+        let fitted = indefinite_gpr(noise)
+            .with_jitter_policy(JitterPolicy::fixed(1.0).expect("valid"))
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+            .expect("A + j I is spd");
+        assert_close(fitted.likelihood().noise_variance(), noise);
+        assert_eq!(fitted.alpha().len(), 2);
+        assert!(fitted.alpha().iter().all(|a| a.is_finite()));
+    }
+
+    #[test]
+    fn adaptive_jitter_recovers_after_growth() {
+        let fitted = indefinite_gpr(0.1)
+            .with_jitter_policy(JitterPolicy::adaptive(0.1, 10.0, 3, 10.0).expect("valid"))
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+            .expect("j grows past the negative eigenvalue");
+        assert_close(fitted.likelihood().noise_variance(), 0.1);
+    }
+
+    #[test]
+    fn adaptive_jitter_reports_last_attempt_when_capped() {
+        let err = indefinite_gpr(0.1)
+            .with_jitter_policy(JitterPolicy::adaptive(0.1, 10.0, 5, 0.5).expect("valid"))
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+            .expect_err("max_jitter too small")
+            .1;
+        assert!(matches!(
+            err,
+            GprError::CholeskyFailed {
+                jitter: j,
+                matrix_size: 2,
+                stage: CholeskyStage::Fit,
+            } if (j - 0.1).abs() <= 1e-18
         ));
     }
 
