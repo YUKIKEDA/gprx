@@ -50,6 +50,6 @@ DoD を roadmap に書くのは、Grill が終わり、ユーザーがその Iss
   - `just gen-goldens` = regenerate sklearn JSON under `compare/goldens/` (manual)
 - Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
 - Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in kernel composition. Adding both at large values double-counts noise; that is the caller's choice, not a crate ban.
-- Default trainer is `Gpr<Lbfgs>`. Other argmin solvers and user `Optimizer` replace the type parameter (P2B-2 / P2B-9). `Gpr<Fixed>` is `factor` only. Do not write a custom L-BFGS / quasi-Newton in this crate. Config exclusivity: `.cursor/rules/types.mdc`.
+- Default trainer is `Gpr<Lbfgs>`. Other argmin solvers and user `Optimizer` replace the type parameter (P2B-1 / P2B-2 / P2B-9). `Gpr<Fixed>` is `factor` only. Do not write a custom L-BFGS / quasi-Newton in this crate. Config exclusivity: `.cursor/rules/types.mdc`.
 - License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io (`publish = false`). Phase 2 does not lift this; the roadmap still lists crates.io as out of scope.
 - `just bench` = criterion. See `.cursor/rules/bench.mdc`. Speed work without a number is out of scope.
