@@ -10,11 +10,12 @@
 | `.cursor/rules/git.mdc`                  | 破壊的 git。質問は許可ではない                |
 | `.cursor/rules/consent.mdc`              | 質問は決定ではない。選択肢には推奨とメリデメ。Issue / ロードマップを独断で閉じない |
 | `.cursor/rules/pull-requests.mdc`        | PR タイトルと本文                             |
-| `.cursor/rules/workflow.mdc`             | Issue → ブランチ → PR。品質ゲート。フェーズ順 |
+| `.cursor/rules/workflow.mdc`             | Grill → Issue →（Grill・詳細化）→ 作業 → PR → 人間レビュー → マージ |
 | `.cursor/rules/defer.mdc`                | 計画のない「暫定」「今はやらない」は禁止      |
 | `.cursor/rules/layout.mdc`               | ディレクトリと公開 API                        |
 | `.cursor/rules/rust.mdc`                 | 安全性、Clippy、浮動小数の比較                |
 | `.cursor/rules/rust-api.mdc`             | 命名、所有権、公開面（API Guidelines）        |
+| `.cursor/rules/types.mdc`                | 取れない状態は型で表す。無視・実行時の設定エラーは禁止 |
 | `.cursor/rules/rust-docs.mdc`            | rustdoc（`///`、Examples / Errors / Panics）  |
 | `.cursor/rules/rust-hpc.mdc`             | 確保・レイアウト・Rayon（数値計算）           |
 | `.cursor/rules/bench.mdc`                | ベンチと確保カウント。高速化は測ってから      |
@@ -25,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 3 の P3-1（LDLT delete の Spike）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 2b の P2B-1（最適化ノブと `Gpr<Fixed>`）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
