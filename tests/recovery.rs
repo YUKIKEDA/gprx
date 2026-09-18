@@ -121,14 +121,16 @@ fn fit_recovers_rbf_lengthscale_and_noise() {
     let x = grid_x(N);
     let y = sample_gp(&x, ELL_TRUE, NOISE_TRUE, SEED);
 
-    let mut at_init = rbf_gpr(ELL_INIT, NOISE_INIT).expect("valid init");
-    at_init
+    let at_init = rbf_gpr(ELL_INIT, NOISE_INIT)
+        .expect("valid init")
         .fit_with(&x, N, D, &y, FitOptions::FIXED)
         .expect("spd at init");
     let nlml_init = at_init.neg_log_marginal_likelihood().expect("fitted init");
 
-    let mut gpr = rbf_gpr(ELL_INIT, NOISE_INIT).expect("valid init");
-    gpr.fit(&x, N, D, &y).expect("lbfgs");
+    let gpr = rbf_gpr(ELL_INIT, NOISE_INIT)
+        .expect("valid init")
+        .fit(&x, N, D, &y)
+        .expect("lbfgs");
     let nlml_fit = gpr.neg_log_marginal_likelihood().expect("fitted");
 
     assert!(
