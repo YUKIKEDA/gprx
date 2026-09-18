@@ -344,9 +344,11 @@ trait TargetTransform<T: Scalar>: Send + Sync {
 
 struct IdentityTarget<T>(PhantomData<T>);
 struct StandardizeTarget<T: Scalar> { mean: T, std: T }
+struct MinMaxInput { /* per-column min/max, default range [0, 1] */ }
+struct MinMaxTarget { /* y min/max, default range [0, 1] */ }
 ```
 
-既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。Pipeline（複数マップの直列）は roadmap に無い。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - μ)/s` なら `Var(y) = s² Var(y')`。
+既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。Pipeline（複数マップの直列）は roadmap に無い。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
