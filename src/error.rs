@@ -62,7 +62,7 @@ pub enum GprError {
     /// An input array or matrix was empty.
     #[error("input is empty")]
     EmptyInput,
-    /// `predict` or another post-fit operation ran before a successful `fit`.
+    /// A transform `apply` ran before a successful `fit`.
     #[error("model is not fitted; call fit first")]
     NotFitted,
     /// User-provided values contained `NaN` or `Inf`.

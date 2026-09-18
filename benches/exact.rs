@@ -14,7 +14,7 @@ use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
-use gprx::{DistanceCachePolicy, FitOptions, GaussianLikelihood, Gpr, Prediction};
+use gprx::{DistanceCachePolicy, FitOptions, FittedGpr, GaussianLikelihood, Gpr, Prediction};
 
 const N: usize = 256;
 const D: usize = 8;
@@ -83,12 +83,12 @@ fn kernel_and_a() -> (Mat<f64>, Mat<f64>) {
     (a, rhs)
 }
 
-fn fitted_model() -> (Gpr, Vec<f64>) {
+fn fitted_model() -> (FittedGpr, Vec<f64>) {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
-    let mut gpr = Gpr::new(kernel, likelihood);
     let (x, y) = training_xy();
-    gpr.fit_with(&x, N, D, &y, FitOptions::FIXED)
+    let gpr = Gpr::new(kernel, likelihood)
+        .fit_with(&x, N, D, &y, FitOptions::FIXED)
         .expect("training Cholesky");
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     (gpr, xs)
@@ -193,9 +193,11 @@ fn fit_lbfgs(c: &mut Criterion) {
                 let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
                 (Gpr::new(kernel, likelihood), x.clone(), y.clone())
             },
-            |(mut gpr, x, y)| {
-                let result = gpr.fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y));
-                std::hint::black_box(result)
+            |(gpr, x, y)| {
+                let fitted = gpr
+                    .fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y))
+                    .expect("lbfgs");
+                std::hint::black_box(fitted)
             },
             BatchSize::LargeInput,
         );
@@ -203,15 +205,15 @@ fn fit_lbfgs(c: &mut Criterion) {
     group.finish();
 }
 
-fn fitted_ard(policy: DistanceCachePolicy) -> Gpr {
+fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr {
     let ells = [ELL; D];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
-    let mut gpr = Gpr::new(kernel, likelihood).with_distance_cache_policy(policy);
     let (x, y) = training_xy();
-    gpr.fit_with(&x, N, D, &y, FitOptions::FIXED)
-        .expect("training Cholesky");
-    gpr
+    Gpr::new(kernel, likelihood)
+        .with_distance_cache_policy(policy)
+        .fit_with(&x, N, D, &y, FitOptions::FIXED)
+        .expect("training Cholesky")
 }
 
 fn mll_and_grad_ard(c: &mut Criterion) {
@@ -258,9 +260,11 @@ fn fit_lbfgs_ard(c: &mut Criterion) {
                         y.clone(),
                     )
                 },
-                |(mut gpr, x, y)| {
-                    let result = gpr.fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y));
-                    std::hint::black_box(result)
+                |(gpr, x, y)| {
+                    let fitted = gpr
+                        .fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y))
+                        .expect("lbfgs");
+                    std::hint::black_box(fitted)
                 },
                 BatchSize::LargeInput,
             );

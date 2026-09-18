@@ -128,7 +128,7 @@ struct DoublePrecision; // Storage=f64, Refine=f64
 4. f32の`L`で`delta = solve(L, r)`、`alpha_1 = alpha_0 + delta`
 5. 収束するまで数回繰り返す
 
-実装優先度: `DoublePrecision`をデフォルトとし、`MixedPrecision`はオプション機能として後付け(§13 Phase 5)。`A_resid`の方式はPhase 5着手時に上記2通りを実装可能にしてベンチマークで選ぶ。
+実装優先度: `DoublePrecision`をデフォルトとし、`MixedPrecision`は P5-1 / P5-2。`A_resid`の方式はP5-1で上記2通りを実装可能にしてベンチマークで選ぶ。
 
 ### 4.2 混合精度反復改良の収束判定パラメータ
 
@@ -346,7 +346,7 @@ struct IdentityTarget<T>(PhantomData<T>);
 struct StandardizeTarget<T: Scalar> { mean: T, std: T }
 ```
 
-既定は`StandardizeTarget`。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - μ)/s` なら `Var(y) = s² Var(y')`。
+既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。Pipeline（複数マップの直列）は roadmap に無い。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - μ)/s` なら `Var(y) = s² Var(y')`。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
@@ -380,7 +380,7 @@ impl FittedGpr {
 }
 ```
 
-P2-8 までは暫定で単一の `Gpr` と `fitted: bool`。実装後は `Gpr`（Exact）と `SparseGpr`（Phase 4）がそれぞれ学習済み型を返す。ハイパラ最適化は`Objective`(§9)を介して `fit` 中だけ扱う。
+`Gpr`（Exact）と `SparseGpr`（P4-2）がそれぞれ学習済み型を返す。ハイパラ最適化は`Objective`(§9)を介して `fit` 中だけ扱う。
 
 ```rust
 enum VarianceKind {
@@ -399,13 +399,13 @@ struct PredictOptions {
 }
 ```
 
-初期実装は対角分散のみ。フル共分散は将来拡張(§13 Phase 4以降)。`predict`は`PredictOptions`で分散の意味を切り替える。未指定時は`Observation`(ユーザーが欲しいのは多くの場合ノイズ込みの予測分散)。
+初期実装は対角分散のみ。フル共分散は roadmap に無い。`predict`は`PredictOptions`で分散の意味を切り替える。未指定時は`Observation`(ユーザーが欲しいのは多くの場合ノイズ込みの予測分散)。
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。
 
-誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。Phase 4ではZ固定のためこのAPIは使わない。Z最適化を後で足すときも、点ごとではなく次元一括で呼ぶ。
+誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。Phase 4ではZ固定のためこのAPIは使わない。Z最適化は roadmap の「意図的に今やらない」。足すときは点ごとではなく次元一括で呼ぶ。
 
 **Phase 4の初期実装では誘導点Zをk-means等で固定し、最適化対象はカーネルハイパラとノイズのみとする**。Zをθと同時最適化するとパラメータ数が m×d 増え、L-BFGSのメモリと収束性に大きく影響する。同時最適化・交互最適化はPhase 4の後続タスク(§14)。
 
@@ -440,13 +440,13 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-メモリ節約の代替(オプトイン、後付け可): 最適化ループ中はLを`K⁻¹`/`W`で上書きし、fit終了時にCholeskyを1回やり直してpredict用のLを復元する。Phase 1は`w_matrix`を独立確保し、Lを保持する。
+メモリ節約の代替（L を `W` で上書きして fit 終了時に Cholesky をやり直す）は roadmap に無い。Phase 1 は `w_matrix` を独立確保し、L を保持する。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
-公開面はトレーナーと学習済みモデルを分ける。実装は P2-8。それまでは単一の `Gpr` と `fitted: bool` が暫定の公開面。
+公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr` は `KernelSpec`・`GaussianLikelihood`・変換・`FitOptions`・距離キャッシュ方針だけを持つ。`fit(self, …)` が L-BFGS（または `FitOptions::fixed` の一回分解）を回し、成功時に `FittedGpr` を返す。失敗時は消費した `Gpr` をエラーと一緒に返し、呼び出し側はハイパラやデータを直して再試行できる。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外す。
+`Gpr` は `KernelSpec`・`GaussianLikelihood`・変換・`FitOptions`・距離キャッシュ方針だけを持つ。`fit(self, …)` が L-BFGS（または `FitOptions::fixed` の一回分解）を回し、成功時に `FittedGpr` を返す。失敗時は消費した `Gpr` をエラーと一緒に返し、呼び出し側はハイパラやデータを直して再試行できる。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外した（`NotFitted` は transform `apply` のみ）。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
@@ -508,7 +508,7 @@ struct GprObjective<'a> {
 | `FittedGpr::predict_into` | `&mut self` | warmup 後は 0。`mean` / `variance` の容量を再利用 |
 
 前提条件:
-- 未学習の `predict` は型で起きない（P2-8 まで暫定 `NotFitted`）
+- 未学習の `predict` は型で起きない。`NotFitted` は transform `apply` だけが返す
 - `FittedGpr::refit` は同じ `n`/`d` で L と `α` を置き換える
 - クエリの入力次元`d`は固定。不一致は`DimensionMismatch`
 - n=0は`EmptyInput`、nがカーネルの最低点数未満なら`InsufficientData`
@@ -528,7 +528,7 @@ Exact GPR の leave-one-out は、学習後の `L` と `α` から閉じた式�
 
 これは観測の `p(y_i | X, y_{-i}, θ)`。潜在 `f_i` の LOO 分散は `max(0, 1/Q_ii - σn²)`。`Q_ii` は下三角 `L` から `L⁻¹` の列ノルムで取る(`A⁻¹ = L^{-T} L^{-1}`)。コストは Cholesky と同オーダーの O(n³)、追加メモリは `n×n` の一時行列。Phase 1b の n=16 / 36 では問題にならない。
 
-`FittedGpr::loo_predict`（P2-8 までは `Gpr::loo_predict`）は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White 葉は使わず、ノイズは `GaussianLikelihood` のみ。
+`FittedGpr::loo_predict` は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White 葉は使わず、ノイズは `GaussianLikelihood` のみ。
 
 sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_` に同じ GPML 式を適用して JSON に書く。Rust 側は sklearn が選んだ `θ` で `FitOptions::FIXED` して照合する(最適化器差を LOO に混ぜない)。
 
@@ -562,7 +562,7 @@ struct QueryWorkspace<P: PrecisionPolicy> {
 }
 ```
 
-fit 用バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは `FittedGpr`（P2-8 までは暫定で同じ `Workspace`）が持ち、最初の `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。`predict(&self)` は出力 `Vec` を毎回確保してよい。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
+fit 用バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは `FittedGpr` の `QueryWorkspace` が持ち、最初の `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。`predict(&self)` は出力 `Vec` を毎回確保してよい。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 
 Rayon並列クロージャ内での新規確保は厳禁。`thread_scratch`を事前分割し、**並列領域に入る直前に`Workspace`から切り離して**分配する。`&mut self`(Objective/`Gpr`)をRayonクロージャに渡さない。
 
