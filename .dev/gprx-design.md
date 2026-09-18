@@ -455,7 +455,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。
+既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。
 
 ```rust
 struct Gpr<O = Lbfgs, S = FullRecompute> {
@@ -475,6 +475,18 @@ struct Lbfgs {
     tolerance: f64,
     history_size: usize,   // 既定 10。L-BFGS だけ
     n_restarts: u32,       // 既定 0
+}
+
+struct NonlinearCg {
+    max_iterations: u64,
+    tolerance: f64,
+    n_restarts: u32,
+}
+
+struct NelderMead {
+    max_iterations: u64,
+    tolerance: f64,
+    n_restarts: u32,
 }
 
 enum DistanceCachePolicy {
@@ -817,7 +829,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-1）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-2）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
