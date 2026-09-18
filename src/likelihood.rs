@@ -10,7 +10,7 @@ use crate::param::{BoundedParam, Interval};
 /// `∂K/∂θ = σn² I`, not `2 σn I`.
 ///
 /// Observation noise lives here. Do not also add a large white kernel term;
-/// that double-counts noise. Cholesky jitter (`LltRegularization`) is a
+/// that double-counts noise. Cholesky jitter ([`crate::JitterPolicy`]) is a
 /// separate numerical stabilizer and is not this parameter.
 ///
 /// # Examples
