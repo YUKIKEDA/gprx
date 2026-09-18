@@ -1,7 +1,9 @@
-//! Reusable buffers for one batch GPR fit of size `n`.
+//! Reusable buffers for one batch GPR fit of size `n`, and query buffers
+//! for [`crate::FittedGpr::predict_into`].
 //!
-//! Allocated once when fit starts. Later optimizer iterations overwrite the
-//! same storage. Crate-private; faer types are not re-exported.
+//! Fit buffers are allocated once when fit starts. Later optimizer iterations
+//! overwrite the same storage. Query buffers live on [`QueryWorkspace`], not
+//! on [`Workspace`]. Crate-private; faer types are not re-exported.
 
 use dyn_stack::{MemBuffer, StackReq};
 use faer::linalg::cholesky::llt;
@@ -10,7 +12,10 @@ use faer::{Mat, Par};
 use crate::error::GprError;
 use crate::precision::{DoublePrecision, PrecisionPolicy};
 
-/// Dense buffers for a batch GPR of a fixed `n`.
+/// Dense fit buffers for a batch GPR of a fixed `n`.
+///
+/// Owns `L`, `W`, distance caches, and Cholesky scratch. Does not own
+/// train–test predict buffers; those are [`QueryWorkspace`].
 pub(crate) struct Workspace<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,
@@ -38,23 +43,31 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     pub(crate) thread_scratch: Vec<Mat<P::Storage>>,
     /// Right-hand side `y` then `α` for the training Cholesky solve (`n×1`).
     pub(crate) rhs: Mat<P::Storage>,
-    /// Transformed query features, packed column-major. Empty until predict.
-    pub(crate) query_xs: Vec<f64>,
-    /// Query points `m×d`. Empty until predict.
-    pub(crate) query_x: Mat<P::Storage>,
-    /// `k(X, X*)` then `L⁻¹ k_*` (`n×m`). Empty until predict.
-    pub(crate) query_k_star: Mat<P::Storage>,
-    /// Scratch for `apply_cross` (`n×m`). Empty until predict.
-    pub(crate) query_scratch: Mat<P::Storage>,
-    /// Train–test squared distances (`n×m`). Empty until predict.
-    pub(crate) query_dist: Mat<P::Storage>,
-    /// `k(x*_j, x*_j)` for each query column. Empty until predict.
-    pub(crate) query_kss: Vec<f64>,
-    /// Residual buffer for mixed-precision refinement. `None` in Phase 1.
+    /// Residual buffer for mixed-precision refinement. `None` until P5-2.
     #[allow(dead_code)]
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
+}
+
+/// Predict-into buffers owned by [`crate::FittedGpr`].
+///
+/// Sized on the first `predict_into` for `(n, m, d)`. The same query length
+/// reuses this storage. [`crate::FittedGpr::predict`] allocates locally and
+/// does not touch these fields.
+pub(crate) struct QueryWorkspace<P: PrecisionPolicy> {
+    /// Transformed query features, packed column-major.
+    pub(crate) query_xs: Vec<f64>,
+    /// Query points `m×d`.
+    pub(crate) query_x: Mat<P::Storage>,
+    /// `k(X, X*)` then `L⁻¹ k_*` (`n×m`).
+    pub(crate) query_k_star: Mat<P::Storage>,
+    /// Scratch for `apply_cross` (`n×m`).
+    pub(crate) query_scratch: Mat<P::Storage>,
+    /// Train–test squared distances (`n×m`).
+    pub(crate) query_dist: Mat<P::Storage>,
+    /// `k(x*_j, x*_j)` for each query column.
+    pub(crate) query_kss: Vec<f64>,
 }
 
 pub(crate) fn empty_thread_scratch() -> Vec<Mat<f64>> {
@@ -90,12 +103,6 @@ impl Workspace<DoublePrecision> {
             ard_sq_diff_ready: false,
             thread_scratch: empty_thread_scratch(),
             rhs: Mat::<f64>::zeros(n, 1),
-            query_xs: Vec::new(),
-            query_x: Mat::<f64>::zeros(0, 0),
-            query_k_star: Mat::<f64>::zeros(0, 0),
-            query_scratch: Mat::<f64>::zeros(0, 0),
-            query_dist: Mat::<f64>::zeros(0, 0),
-            query_kss: Vec::new(),
             refine_buf: None,
             faer_scratch: MemBuffer::new(faer_scratch_req(n)),
         })
@@ -160,13 +167,27 @@ impl Workspace<DoublePrecision> {
         }
         self.ard_sq_diff_ready = false;
     }
+}
 
-    /// Sizes query buffers for an `n×m` predict. No-op when already sized.
+impl QueryWorkspace<DoublePrecision> {
+    /// Builds empty query buffers. [`Self::ensure`] sizes them on first use.
+    pub(crate) fn new() -> Self {
+        Self {
+            query_xs: Vec::new(),
+            query_x: Mat::<f64>::zeros(0, 0),
+            query_k_star: Mat::<f64>::zeros(0, 0),
+            query_scratch: Mat::<f64>::zeros(0, 0),
+            query_dist: Mat::<f64>::zeros(0, 0),
+            query_kss: Vec::new(),
+        }
+    }
+
+    /// Sizes buffers for an `n×m` predict. No-op when already sized.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
-    pub(crate) fn ensure_query(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
+    pub(crate) fn ensure(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
         if n == 0 || m == 0 || d == 0 {
             return Err(GprError::EmptyInput);
         }
@@ -190,7 +211,7 @@ impl Workspace<DoublePrecision> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Workspace, faer_scratch_req};
+    use super::{QueryWorkspace, Workspace, faer_scratch_req};
     use crate::error::GprError;
     use crate::precision::DoublePrecision;
 
@@ -244,8 +265,6 @@ mod tests {
         assert!(!ws.ard_sq_diff_ready);
         assert_eq!(ws.rhs.nrows(), n);
         assert_eq!(ws.rhs.ncols(), 1);
-        assert_eq!(ws.query_k_star.nrows(), 0);
-        assert_eq!(ws.query_k_star.ncols(), 0);
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
             ws.thread_scratch
@@ -255,6 +274,7 @@ mod tests {
         assert!(ws.refine_buf.is_none());
         assert_eq!(ws.faer_scratch.len(), faer_scratch_req(n).size_bytes());
         assert_send_sync::<Workspace<DoublePrecision>>();
+        assert_send_sync::<QueryWorkspace<DoublePrecision>>();
     }
 
     #[test]
@@ -283,18 +303,18 @@ mod tests {
     }
 
     #[test]
-    fn ensure_query_allocates_when_needed() {
-        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
-        assert_eq!(ws.query_k_star.ncols(), 0);
-        ws.ensure_query(4, 3, 2).expect("m,d > 0");
-        assert_eq!(ws.query_x.nrows(), 3);
-        assert_eq!(ws.query_x.ncols(), 2);
-        assert_eq!(ws.query_k_star.nrows(), 4);
-        assert_eq!(ws.query_k_star.ncols(), 3);
-        assert_eq!(ws.query_xs.len(), 6);
-        assert_eq!(ws.query_kss.len(), 3);
-        ws.ensure_query(4, 3, 2).expect("same size");
-        assert_eq!(ws.query_k_star.ncols(), 3);
-        assert_eq!(ws.ensure_query(4, 0, 2).err(), Some(GprError::EmptyInput));
+    fn query_ensure_allocates_when_needed() {
+        let mut query = QueryWorkspace::<DoublePrecision>::new();
+        assert_eq!(query.query_k_star.ncols(), 0);
+        query.ensure(4, 3, 2).expect("m,d > 0");
+        assert_eq!(query.query_x.nrows(), 3);
+        assert_eq!(query.query_x.ncols(), 2);
+        assert_eq!(query.query_k_star.nrows(), 4);
+        assert_eq!(query.query_k_star.ncols(), 3);
+        assert_eq!(query.query_xs.len(), 6);
+        assert_eq!(query.query_kss.len(), 3);
+        query.ensure(4, 3, 2).expect("same size");
+        assert_eq!(query.query_k_star.ncols(), 3);
+        assert_eq!(query.ensure(4, 0, 2).err(), Some(GprError::EmptyInput));
     }
 }
