@@ -55,6 +55,7 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
 /// Sized on the first `predict_into` for `(n, m, d)`. The same query length
 /// reuses this storage. [`crate::FittedGpr::predict`] allocates locally and
 /// does not touch these fields.
+#[derive(Clone)]
 pub(crate) struct QueryWorkspace<P: PrecisionPolicy> {
     /// Transformed query features, packed column-major.
     pub(crate) query_xs: Vec<f64>,
@@ -118,6 +119,7 @@ impl Workspace<DoublePrecision> {
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `n` is zero.
+    #[cfg(test)]
     pub(crate) fn ensure(&mut self, n: usize) -> Result<(), GprError> {
         if n == self.n() {
             return Ok(());
@@ -166,6 +168,25 @@ impl Workspace<DoublePrecision> {
             self.ard_sq_diff = Mat::<f64>::zeros(0, 0);
         }
         self.ard_sq_diff_ready = false;
+    }
+}
+
+impl Clone for Workspace<DoublePrecision> {
+    fn clone(&self) -> Self {
+        Self {
+            k_matrix: self.k_matrix.clone(),
+            w_matrix: self.w_matrix.clone(),
+            dist_cache: self.dist_cache.clone(),
+            dist_ready: self.dist_ready,
+            exp_buf: self.exp_buf.clone(),
+            kernel_scratch: self.kernel_scratch.clone(),
+            ard_sq_diff: self.ard_sq_diff.clone(),
+            ard_sq_diff_ready: self.ard_sq_diff_ready,
+            thread_scratch: self.thread_scratch.clone(),
+            rhs: self.rhs.clone(),
+            refine_buf: self.refine_buf.clone(),
+            faer_scratch: MemBuffer::new(faer_scratch_req(self.n())),
+        }
     }
 }
 

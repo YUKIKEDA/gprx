@@ -43,6 +43,9 @@ pub trait TargetTransform: Send + Sync {
     /// Returns [`GprError::NotFitted`] when [`Self::fit`] has not succeeded, or
     /// [`GprError::NonFiniteInput`] when `var` contains `NaN` or `Inf`.
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError>;
+
+    /// Clones this map into a new box. Used by [`crate::Gpr`] / [`crate::FittedGpr`] clone.
+    fn clone_box(&self) -> Box<dyn TargetTransform>;
 }
 
 /// Leaves targets and predictions unchanged.
@@ -79,6 +82,10 @@ impl TargetTransform for IdentityTarget {
 
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
         require_finite(var)
+    }
+
+    fn clone_box(&self) -> Box<dyn TargetTransform> {
+        Box::new(*self)
     }
 }
 
@@ -186,6 +193,10 @@ impl TargetTransform for StandardizeTarget {
             *value *= scale;
         }
         Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn TargetTransform> {
+        Box::new(*self)
     }
 }
 
@@ -348,6 +359,10 @@ impl TargetTransform for MinMaxTarget {
             *value *= scale2;
         }
         Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn TargetTransform> {
+        Box::new(*self)
     }
 }
 
