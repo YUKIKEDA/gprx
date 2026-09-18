@@ -1,5 +1,8 @@
 //! Kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
 //!
+//! Built-in leaves are enum arms. User distance leaves implement [`KernelTerm`]
+//! and enter the tree as [`KernelSpec::Custom`].
+//!
 //! Isotropic RBF, Matérn, Periodic, and rational quadratic evaluate from a
 //! squared-Euclidean distance matrix (Periodic then takes the square root).
 //! ARD RBF, ARD Matérn, and ARD rational quadratic evaluate from coordinates
@@ -29,6 +32,7 @@ mod rq;
 mod rq_ard;
 mod simd;
 mod spec;
+mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
@@ -47,6 +51,7 @@ pub use rbf_ard::RbfArdKernel;
 pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use spec::{KernelSpec, ParameterBinding};
+pub use term::{CustomKernel, KernelTerm};
 pub use white::WhiteKernel;
 
 use crate::error::GprError;
