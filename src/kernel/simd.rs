@@ -279,7 +279,7 @@ fn rbf_lower_parallel(
                     )?,
                 }
             }
-            Ok(())
+            Ok::<(), GprError>(())
         })
 }
 
@@ -364,7 +364,7 @@ pub(crate) fn try_apply_rbf_cross(
                     inv_two_ell_sq,
                 )?;
             }
-            Ok(())
+            Ok::<(), GprError>(())
         })?;
     Ok(true)
 }
@@ -663,7 +663,7 @@ fn rbf_ard_lower_parallel(
                     param_idx,
                 )?;
             }
-            Ok(())
+            Ok::<(), GprError>(())
         })
 }
 

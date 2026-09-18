@@ -9,7 +9,9 @@ use gprx::kernel::{
     ConstantKernel, KernelSpec, MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticKernel,
     RbfKernel,
 };
-use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
+use gprx::{
+    FitOptions, FittedGpr, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind,
+};
 use serde::Deserialize;
 
 const TOL: f64 = 1e-8;
@@ -191,7 +193,11 @@ struct PredGolden<'a> {
     xs_n_cols: usize,
 }
 
-fn check_predictions(name: &str, gpr: &mut Gpr, golden: PredGolden<'_>) -> Result<(), GprError> {
+fn check_predictions(
+    name: &str,
+    gpr: &mut FittedGpr,
+    golden: PredGolden<'_>,
+) -> Result<(), GprError> {
     let pred_lat = gpr.predict_with(
         golden.xs,
         golden.xs_n_rows,
@@ -219,8 +225,8 @@ fn check_rbf_golden(name: &str, golden: &RbfGolden) -> Result<(), GprError> {
     let mut gpr = Gpr::new(
         KernelSpec::from(RbfKernel::new(golden.lengthscale)?),
         GaussianLikelihood::new(golden.noise_variance)?,
-    );
-    gpr.fit_with(
+    )
+    .fit_with(
         &golden.x,
         golden.n_rows,
         golden.n_cols,
@@ -259,8 +265,7 @@ fn check_composite_golden(name: &str, golden: &CompositeGolden) -> Result<(), Gp
     for (actual, expected) in kernel_params.iter().zip(&golden.theta) {
         assert_close(*actual, *expected);
     }
-    let mut gpr = Gpr::new(spec, GaussianLikelihood::new(golden.noise_variance)?);
-    gpr.fit_with(
+    let mut gpr = Gpr::new(spec, GaussianLikelihood::new(golden.noise_variance)?).fit_with(
         &golden.x,
         golden.n_rows,
         golden.n_cols,

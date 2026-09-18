@@ -203,7 +203,7 @@ fn write_lower_parallel(
                     part[(row, local)] = kernel(dist[(row, col)])?;
                 }
             }
-            Ok(())
+            Ok::<(), GprError>(())
         })
 }
 

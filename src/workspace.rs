@@ -57,7 +57,7 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     pub(crate) faer_scratch: MemBuffer,
 }
 
-fn empty_thread_scratch() -> Vec<Mat<f64>> {
+pub(crate) fn empty_thread_scratch() -> Vec<Mat<f64>> {
     let n = rayon::current_num_threads().max(1);
     (0..n).map(|_| Mat::<f64>::zeros(0, 0)).collect()
 }
