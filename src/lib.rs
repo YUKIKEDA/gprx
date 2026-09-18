@@ -3,8 +3,9 @@
 //! [`Gpr`] is the trainer. [`Gpr::fit`] consumes it and returns
 //! [`FittedGpr`]. Training `X` is column-major: `n` points and `d`
 //! features packed as feature 0 for all rows, then feature 1, and so on.
-//! Observation noise lives in [`GaussianLikelihood`]. Do not also add a
-//! large [`kernel::WhiteKernel`]. This crate is not published to crates.io
+//! Observation noise lives in [`GaussianLikelihood`].
+//! [`kernel::WhiteKernel`] is opt-in composition; using both at large
+//! values double-counts noise. This crate is not published to crates.io
 //! (`publish = false`).
 //!
 //! Distance fills and lower-triangle kernel writes use the process-wide

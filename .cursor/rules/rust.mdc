@@ -13,7 +13,7 @@ Sources: Clippy restriction lints; Rust API Guidelines C-VALIDATE, C-GOOD-ERR.
 - `just lint` already uses `-D warnings`. Do not add `clippy::pedantic` as deny; allow specific pedantic lints only with a comment.
 - No `unsafe` in gprx in Phase 1. Later: `unsafe` only with a `# Safety` rustdoc and a next-line invariant comment.
 - No logging in Phase 1. Failures go through `GprError` (`thiserror`, `Display` + `Error`). Never `()` as `E`.
-- Validate user input (`NaN`/`Inf`, empty `X`, dim mismatch) at the public boundary. Return `GprError`. Do not panic on bad data.
+- Validate user input (`NaN`/`Inf`, empty `X`, dim mismatch) at the public boundary. Return `GprError`. Do not panic on bad data. Do not use `GprError` to reject mutually exclusive options; those combinations must not exist as types (`.cursor/rules/types.mdc`).
 - `debug_assert!` only for internal invariants that mean a gprx bug. Not for user-shaped input.
 - Do not use `==` on computed `f32`/`f64` (Clippy `float_cmp`). Tests use an explicit relative/absolute tolerance.
 
