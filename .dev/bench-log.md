@@ -1,6 +1,6 @@
 # Bench log
 
-時間は [criterion](https://docs.rs/criterion)、`benches/exact.rs`、`just bench`。確保は `tests/alloc.rs`。固定問題: RNG seed `0`、`n = 256`、`d = 8`、RBF + `GaussianLikelihood`、ハイパラ固定。`fit_lbfgs` だけ最適化ループ。新しいハーネスは作っていない。
+時間は [criterion](https://docs.rs/criterion)、`benches/exact.rs`、`just bench`。確保は `tests/alloc.rs`。固定問題（P2-9 再測以降）: `n = 256`。等方は 1 次元 Forrester + `StandardizeTarget`、ARD は 2 次元重み付き球（16×16）。`y` は関数 + `N(0, 1)`（seed `0`）。`fit_lbfgs` だけ最適化ループ。新しいハーネスは作っていない。P2-9 より前の行は `d = 8`・独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9 節。
 
 目標比はまだ置かない（P2-1 / [#25](https://github.com/YUKIKEDA/gprx/issues/25)）。名前付き `phase-2` は P2-9 で取った（等方は `phase-1b` と比較。ARD は Always vs Never）。
 
@@ -16,7 +16,7 @@
 
 criterion は gnuplot なし、plotters。baseline 名 `phase-1b` / `phase-2` はこの機械の `target/criterion` に保存した（git には入れない）。比較: `cargo bench --bench exact -- --baseline phase-2`。
 
-## `phase-1b`（n = 256）
+## `phase-1b`（n = 256、d = 8・独立乱数 `y`）
 
 criterion 中央値（括弧は 95% 区間の両端）。
 
@@ -142,9 +142,9 @@ DoD（`tests/alloc.rs` 上限 0、ユーザーカーネル除く）は満たす�
 | `mll_and_grad` | 1.42 ms | 1.15 ms (1.144–1.148) | **−19.3%** |
 | `fit_lbfgs` | 257 ms | 337 ms (336.5–338.2) | **+31.3%** |
 
-`kernel_rbf` / `predict_100` / `mll_and_grad` は Phase 2 のキャッシュ・Rayon・SIMD のまま 1b より短い。`fit_lbfgs` は 1 評価より遅い（L-BFGS ループ + `fit(self) → FittedGpr` の構築）。1 評価の改善はフィット全体には乗っていない。以降の比較基準は `phase-2`。
+`kernel_rbf` / `predict_100` / `mll_and_grad` は Phase 2 のキャッシュ・Rayon・SIMD のまま 1b より短い。`fit_lbfgs` の +31.3% は 1 評価が遅くなったのではなく、独立乱数 `y` の平坦な尾根で L-BFGS の評価回数が増えた（当時 ~291、1b 当時はそれより少ない）。この表は `d = 8`・独立乱数 `y` の歴史記録。再測は次節。
 
-### ARD Always vs Never
+### ARD Always vs Never（初回、d = 8・独立乱数 `y`）
 
 等方とは比べない。P2-7 と同じ問題（ARD RBF、`ℓ_d = 1`、d = 8）。
 
@@ -154,4 +154,27 @@ DoD（`tests/alloc.rs` 上限 0、ユーザーカーネル除く）は満たす�
 | `fit_lbfgs_ard` | 5.679 ms (5.660–5.720) | 4.751 ms (4.741–4.760) | **+19.5%**（Always が遅い） |
 
 n = 256, d = 8 では Never が速い（P2-7 と同じ向き）。`Auto` は P5-5。
+
+### 再測（Forrester / 球、この問題が以降の `phase-2`）
+
+同一機械。`y` を独立乱数から外し、P1B-6 と同じ関数を n = 256 に伸ばした。等方は 1 次元 Forrester + `StandardizeTarget`（初期 `ℓ = 1`）。ARD は 2 次元重み付き球・16×16（初期 `ℓ_d = 4`。`ℓ_d = 1` では線探索が初手で止まる）。
+
+`phase-2`: 現行コードで `cargo bench --bench exact -- --save-baseline phase-2`。`phase-1b` 再測: コミット `766b37c`（`task/25-phase-1b-baseline`）に同じ Forrester 入力を載せ、等方グループだけ測った。上の d = 8 表とは混ぜない。ARD は 1b にグループが無い。
+
+L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 26 回（11 iter）。終値 NLML は一致（−1.758）。勾配の ulp 差で線探索の歩数が変わる。壁時計の fit 比は速度差と読まない。
+
+| グループ | phase-1b（Forrester） | phase-2 | 変化（中央値） |
+| -------- | --------------------- | ------- | ------------- |
+| `kernel_rbf` | 290 µs (289–292) | 102 µs (100.9–102.5) | **−65.0%** |
+| `cholesky_alpha` | 156 µs (155–157) | 152 µs (150.9–152.7) | −2.6%（ノイズ域。この経路は Phase 2 で触っていない） |
+| `predict_100` | 300 µs (298–301) | 250 µs (248.1–251.6) | **−16.7%** |
+| `mll_and_grad` | 1.40 ms (1.394–1.407) | 1.17 ms (1.153–1.199) | **−16.1%** |
+| `fit_lbfgs` | 98.5 ms (98.0–99.4) / 69 eval | 30.3 ms (30.10–30.50) / 26 eval | 壁時計 −69%。1 評価は 1.43 ms → **1.17 ms（−18%）** |
+
+| グループ | Always | Never | 注 |
+| -------- | ------ | ----- | -- |
+| `mll_and_grad_ard` | 1.282 ms (1.280–1.285) | 1.287 ms (1.277–1.303) | 同等（ノイズ域） |
+| `fit_lbfgs_ard` | 86.2 ms (86.19–86.31) / 67 eval | 59.0 ms (58.86–59.03) / 46 eval | 壁時計は評価回数。1 評価はどちらも **~1.28 ms** |
+
+1 評価の改善はフィットに乗る（回数を揃えたとき）。ARD の壁時計差（Always が長い）を速度差と読まない。1 評価は Always ≈ Never（d = 2）。`Auto` は P5-5。以降の比較基準はこの節の `phase-2`。
 

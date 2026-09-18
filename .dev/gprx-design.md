@@ -848,15 +848,18 @@ trait OnlineInference<T: Scalar> {
 
 毎回同じ入力でないと、速くなったのかデータが変わったのか分からない。
 
-- RNG seed `0`、`d = 8`、RBF + `GaussianLikelihood`、ハイパラ固定
 - `n = 256` を P1A-18 から必須。`512` / `1024` は数秒で終わるようになってから足す
+- 等方: 1 次元 Forrester `f(x)=(6x-2)² sin(12x-4)`、`x ∈ [0, 1]`、RBF + `GaussianLikelihood` + `StandardizeTarget`。初期ハイパラ `ℓ = 1`、`σn² = 0.1`
+- ARD: 2 次元重み付き球 `f=(x/0.25)²+(y/1)²`、`[0, 1]²` の 16×16 格子。初期 `ℓ_d = 4`（`ℓ_d = 1` では線探索が初手で止まる）
+- `y` は上記の関数 + `N(0, 1)`（seed `0`）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
+- 歴史的な `phase-1a` / `phase-1b` ログの一部は `d = 8` と独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9（`.dev/bench-log.md`）。d = 8 の時間とは混ぜない
 - グループ（存在する経路だけ。無いものはまだ書かない）:
   1. `kernel_rbf` — K の下三角構築
   2. `cholesky_alpha` — `A` の LLT と `α`
   3. `mll_and_grad` — §6.2 の 1 評価（P1A-10 から）
   4. `predict_100` — テスト点 100（P1A-8 から）
-  5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）
-  6. `mll_and_grad_ard` / `fit_lbfgs_ard` — 同じ n,d,seed の ARD RBF（P2-7）。Always vs Never。等方 `phase-1b` とは比べない
+  5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）。壁時計と一緒に L-BFGS の評価回数を残す。回数が違うときの差は速度差と読まない
+  6. `mll_and_grad_ard` / `fit_lbfgs_ard` — 重み付き球の ARD RBF（P2-7）。Always vs Never。等方とは比べない。`fit_lbfgs_ard` も評価回数を残す
   7. `online_insert` / `online_delete` — Phase 3
 
 ### 15.3 いつ何を足す
