@@ -15,7 +15,7 @@ use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
 use gprx::transform::StandardizeTarget;
-use gprx::{DistanceCachePolicy, FitOptions, FittedGpr, GaussianLikelihood, Gpr, Prediction};
+use gprx::{DistanceCachePolicy, FittedGpr, Fixed, GaussianLikelihood, Gpr, Prediction};
 
 const N: usize = 256;
 const D_ISO: usize = 1;
@@ -127,13 +127,14 @@ fn kernel_and_a() -> (Mat<f64>, Mat<f64>) {
     (a, rhs)
 }
 
-fn fitted_model() -> (FittedGpr, Vec<f64>) {
+fn fitted_model() -> (FittedGpr<Fixed>, Vec<f64>) {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
     let (x, y) = forrester_xy();
     let gpr = Gpr::new(kernel, likelihood)
         .with_target_transform(StandardizeTarget::new())
-        .fit_with(&x, N, D_ISO, &y, FitOptions::FIXED)
+        .with_optimizer(Fixed)
+        .factor(&x, N, D_ISO, &y)
         .expect("training Cholesky");
     (gpr, forrester_query())
 }
@@ -253,7 +254,7 @@ fn fit_lbfgs(c: &mut Criterion) {
     group.finish();
 }
 
-fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr {
+fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr<Fixed> {
     let ells = [ELL_ARD; D_ARD];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
@@ -261,7 +262,8 @@ fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr {
     Gpr::new(kernel, likelihood)
         .with_distance_cache_policy(policy)
         .with_target_transform(StandardizeTarget::new())
-        .fit_with(&x, N, D_ARD, &y, FitOptions::FIXED)
+        .with_optimizer(Fixed)
+        .factor(&x, N, D_ARD, &y)
         .expect("training Cholesky")
 }
 

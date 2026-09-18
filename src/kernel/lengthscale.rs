@@ -1,6 +1,7 @@
 //! Per-dimension lengthscales with optimizer parameters `θ_d = log(ℓ_d)`.
 
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 
 /// ARD lengthscales for stationary leaves that scale each input dimension.
 ///
@@ -25,6 +26,7 @@ use crate::error::GprError;
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArdLengthscales {
+    params: Vec<BoundedParam>,
     log_lengthscales: Vec<f64>,
     inv_ell_sq: Vec<f64>,
 }
@@ -38,12 +40,12 @@ impl ArdLengthscales {
     /// value is not finite and strictly positive.
     pub fn new(lengthscales: &[f64]) -> Result<Self, GprError> {
         require_non_empty(lengthscales.len())?;
-        let mut log_lengthscales = Vec::with_capacity(lengthscales.len());
+        let mut params = Vec::with_capacity(lengthscales.len());
         for &ell in lengthscales {
             validate_lengthscale(ell)?;
-            log_lengthscales.push(ell.ln());
+            params.push(BoundedParam::default_positive(ell)?);
         }
-        Self::from_validated_log(log_lengthscales)
+        Self::from_params(params)
     }
 
     /// Builds ARD lengthscales from `θ_d = log(ℓ_d)`.
@@ -54,19 +56,55 @@ impl ArdLengthscales {
     /// `θ_d` is not finite, or `exp(θ_d)` overflows or underflows to zero.
     pub fn from_log_lengthscales(log_lengthscales: &[f64]) -> Result<Self, GprError> {
         require_non_empty(log_lengthscales.len())?;
-        let mut validated = Vec::with_capacity(log_lengthscales.len());
+        let mut params = Vec::with_capacity(log_lengthscales.len());
         for &theta in log_lengthscales {
-            validated.push(validate_log_lengthscale(theta)?);
+            let log = validate_log_lengthscale(theta)?;
+            params.push(BoundedParam::default_positive(log.exp())?);
         }
-        Self::from_validated_log(validated)
+        Self::from_params(params)
     }
 
-    fn from_validated_log(log_lengthscales: Vec<f64>) -> Result<Self, GprError> {
+    fn from_params(params: Vec<BoundedParam>) -> Result<Self, GprError> {
+        let log_lengthscales: Vec<f64> = params.iter().map(|p| p.ln()).collect();
         let inv_ell_sq = inv_ell_sq_from_log(&log_lengthscales)?;
         Ok(Self {
+            params,
             log_lengthscales,
             inv_ell_sq,
         })
+    }
+
+    /// Rebuilds every `ℓ_d` with the same open interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if any current `ℓ_d` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        let mut params = Vec::with_capacity(self.params.len());
+        for param in self.params {
+            params.push(param.with_interval(interval)?);
+        }
+        let log_lengthscales: Vec<f64> = params.iter().map(|p| p.ln()).collect();
+        let inv_ell_sq = inv_ell_sq_from_log(&log_lengthscales).map_err(|_| {
+            crate::IntervalError::OutOfRange {
+                value: params[0].value(),
+                lo: interval.lo(),
+                hi: interval.hi(),
+            }
+        })?;
+        Ok(Self {
+            params,
+            log_lengthscales,
+            inv_ell_sq,
+        })
+    }
+
+    pub(crate) fn write_intervals(&self, out: &mut [Interval], offset: &mut usize) {
+        for param in &self.params {
+            out[*offset] = param.interval();
+            *offset += 1;
+        }
     }
 
     /// Returns the number of optimizer parameters, equal to the feature dimension.
@@ -90,9 +128,9 @@ impl ArdLengthscales {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `dim` is out of range.
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
-        self.log_lengthscales
+        self.params
             .get(dim)
-            .map(|theta| theta.exp())
+            .map(|param| param.value())
             .ok_or_else(|| GprError::InvalidHyperparameter {
                 reason: format!(
                     "lengthscale dimension {dim} is out of range (d={})",
@@ -120,7 +158,12 @@ impl ArdLengthscales {
     /// length or a `θ_d` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         require_param_len(params.len(), self.num_params())?;
-        *self = Self::from_log_lengthscales(params)?;
+        let mut next = Vec::with_capacity(self.params.len());
+        for (i, param) in self.params.iter().enumerate() {
+            let log = validate_log_lengthscale(params[i])?;
+            next.push(BoundedParam::new(log.exp(), param.interval())?);
+        }
+        *self = Self::from_params(next)?;
         Ok(())
     }
 }

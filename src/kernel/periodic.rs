@@ -6,6 +6,7 @@ use super::{
     write_triangle,
 };
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// Periodic kernel: `k = exp( -2 sin²(π ‖x-x'‖ / p) / ℓ² )`.
@@ -30,8 +31,8 @@ use faer::{MatMut, MatRef};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PeriodicKernel {
-    log_lengthscale: f64,
-    log_period: f64,
+    lengthscale: BoundedParam,
+    period: BoundedParam,
 }
 
 impl PeriodicKernel {
@@ -44,7 +45,10 @@ impl PeriodicKernel {
     pub fn new(lengthscale: f64, period: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         validate_positive_finite(period, "period")?;
-        Self::from_log(lengthscale.ln(), period.ln())
+        Ok(Self {
+            lengthscale: BoundedParam::default_positive(lengthscale)?,
+            period: BoundedParam::default_positive(period)?,
+        })
     }
 
     /// Builds a periodic kernel from `θ = [log(ℓ), log(p)]`.
@@ -55,29 +59,60 @@ impl PeriodicKernel {
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log(log_lengthscale: f64, log_period: f64) -> Result<Self, GprError> {
         Ok(Self {
-            log_lengthscale: validate_log_lengthscale(log_lengthscale)?,
-            log_period: validate_log_positive(log_period, "period")?,
+            lengthscale: BoundedParam::default_positive(
+                validate_log_lengthscale(log_lengthscale)?.exp(),
+            )?,
+            period: BoundedParam::default_positive(
+                validate_log_positive(log_period, "period")?.exp(),
+            )?,
         })
     }
 
     /// Returns `ℓ = exp(θ_0)`.
     pub fn lengthscale(&self) -> f64 {
-        self.log_lengthscale.exp()
+        self.lengthscale.value()
     }
 
     /// Returns `θ_0 = log(ℓ)`.
     pub fn log_lengthscale(&self) -> f64 {
-        self.log_lengthscale
+        self.lengthscale.ln()
     }
 
     /// Returns `p = exp(θ_1)`.
     pub fn period(&self) -> f64 {
-        self.log_period.exp()
+        self.period.value()
     }
 
     /// Returns `θ_1 = log(p)`.
     pub fn log_period(&self) -> f64 {
-        self.log_period
+        self.period.ln()
+    }
+
+    /// Returns the open interval on `ℓ`.
+    pub fn lengthscale_bounds(&self) -> Interval {
+        self.lengthscale.interval()
+    }
+
+    /// Returns the open interval on `p`.
+    pub fn period_bounds(&self) -> Interval {
+        self.period.interval()
+    }
+
+    /// Rebuilds this kernel with new intervals on `ℓ` and `p`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if a current value is not strictly
+    /// inside the matching interval.
+    pub fn with_bounds(
+        self,
+        lengthscale: Interval,
+        period: Interval,
+    ) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            lengthscale: self.lengthscale.with_interval(lengthscale)?,
+            period: self.period.with_interval(period)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 2).
@@ -92,8 +127,8 @@ impl PeriodicKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 2.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_two_params(out.len())?;
-        out[0] = self.log_lengthscale;
-        out[1] = self.log_period;
+        out[0] = self.lengthscale.ln();
+        out[1] = self.period.ln();
         Ok(())
     }
 
@@ -105,7 +140,12 @@ impl PeriodicKernel {
     /// or a `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_two_params(params.len())?;
-        *self = Self::from_log(params[0], params[1])?;
+        let ell = validate_log_lengthscale(params[0])?.exp();
+        let period = validate_log_positive(params[1], "period")?.exp();
+        let lengthscale = BoundedParam::new(ell, self.lengthscale.interval())?;
+        let period = BoundedParam::new(period, self.period.interval())?;
+        self.lengthscale = lengthscale;
+        self.period = period;
         Ok(())
     }
 

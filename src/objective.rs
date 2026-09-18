@@ -1,23 +1,52 @@
 //! Negative log marginal likelihood as an optimizer objective.
 //!
-//! Crate-private. [`GprObjective`] borrows [`FittedGpr`] and forwards concatenated
-//! kernel-then-likelihood `θ` to the model, which owns the source of truth.
+//! [`GprObjective`] borrows [`FittedGpr`] during `fit` / `refit` and forwards
+//! concatenated kernel-then-likelihood `θ` to the model, which owns the
+//! source of truth. Capability is split so a derivative-free solver can
+//! require only [`Objective`], L-BFGS can require [`Differentiable`], and a
+//! Newton solver can require [`TwiceDifferentiable`] after P2B-17.
 
 use crate::error::GprError;
 use crate::gpr::FittedGpr;
+use crate::param::Interval;
 
-/// Optimizer-facing negative log marginal likelihood.
+/// Optimizer-facing scalar objective (`value` only).
 ///
-/// Default [`Self::value_and_gradient_into`] calls [`Self::value`] then
-/// [`Self::gradient_into`] separately. [`GprObjective`] overrides it so one
-/// Cholesky produces `L`, `α`, and `W`.
-pub(crate) trait Objective {
+/// Default [`Differentiable::value_and_gradient_into`] is not on this trait.
+/// A solver that needs derivatives takes [`Differentiable`], not a runtime
+/// flag.
+pub trait Objective {
+    /// Returns the concatenated parameter count.
     fn num_params(&self) -> usize;
 
+    /// Returns the objective at `params`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError`] when `params` is the wrong length or the model
+    /// cannot evaluate at that point.
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError>;
+}
 
+/// First-order objective. Supertrait of [`Objective`].
+///
+/// [`GprObjective`] overrides [`Self::value_and_gradient_into`] so one
+/// Cholesky produces `L`, `α`, and `W`.
+pub trait Differentiable: Objective {
+    /// Writes `∂L/∂θ` into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Objective::value`], plus a length mismatch on `out`.
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
 
+    /// Returns the value and writes the gradient in one evaluation.
+    ///
+    /// The default calls [`Objective::value`] then [`Self::gradient_into`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::gradient_into`].
     fn value_and_gradient_into(
         &mut self,
         params: &[f64],
@@ -29,23 +58,61 @@ pub(crate) trait Objective {
     }
 }
 
+/// Second-order objective. Supertrait of [`Differentiable`].
+///
+/// [`GprObjective`] does not implement this in P2B-1. A solver that needs a
+/// Hessian cannot be passed to [`crate::Gpr`] until P2B-17. There is no
+/// runtime `NotImplemented`.
+pub trait TwiceDifferentiable: Differentiable {
+    /// Writes the Hessian (row-major `n×n`) into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError`] when a slice length is wrong or the model cannot
+    /// evaluate at `params`.
+    fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
+}
+
+/// Partial kernel rebuild from changed parameter indices.
+///
+/// `indices` is the list of flat `θ` positions that changed. Empty, duplicate,
+/// or out-of-range indices are a [`GprError`] at this boundary. Full rebuilds
+/// use [`Objective::value`]. [`crate::FullRecompute`] does not implement this
+/// trait. [`GprObjective`] does not implement it until P2B-18.
+pub trait IncrementalObjective: Objective {
+    /// Returns the objective after rebuilding only the leaves that `indices`
+    /// touch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError`] when `params` is the wrong length, `indices` is
+    /// empty, contains a duplicate, or contains `i >= n_params`, or when the
+    /// model cannot evaluate.
+    fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError>;
+}
+
+/// Supplies per-parameter [`Interval`] in user units (crate-private).
+pub(crate) trait HasBounds {
+    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError>;
+}
+
 /// Exact GPR objective. Parameters are kernel `θ` followed by likelihood `θ`.
 ///
 /// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
 /// kernel and likelihood match `params`.
-pub(crate) struct GprObjective<'a> {
-    model: &'a mut FittedGpr,
+pub(crate) struct GprObjective<'a, O, S> {
+    model: &'a mut FittedGpr<O, S>,
     scratch: Vec<f64>,
 }
 
-impl<'a> GprObjective<'a> {
-    pub(crate) fn new(model: &'a mut FittedGpr) -> Self {
+impl<'a, O, S> GprObjective<'a, O, S> {
+    pub(crate) fn new(model: &'a mut FittedGpr<O, S>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self { model, scratch }
     }
 }
 
-impl Objective for GprObjective<'_> {
+impl<O, S> Objective for GprObjective<'_, O, S> {
     fn num_params(&self) -> usize {
         self.model.num_params()
     }
@@ -58,7 +125,9 @@ impl Objective for GprObjective<'_> {
         self.model
             .value_and_gradient_into(params, &mut self.scratch)
     }
+}
 
+impl<O, S> Differentiable for GprObjective<'_, O, S> {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.value_and_gradient_into(params, out).map(|_| ())
     }
@@ -72,13 +141,20 @@ impl Objective for GprObjective<'_> {
     }
 }
 
+impl<O, S> HasBounds for GprObjective<'_, O, S> {
+    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        self.model.fill_intervals(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Objective;
+    use super::{Differentiable, Objective};
     use crate::error::GprError;
     use crate::gpr::{FittedGpr, Gpr};
     use crate::kernel::{KernelSpec, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
+    use crate::optimizer::Fixed;
 
     const TOL: f64 = 1e-12;
 
@@ -90,11 +166,12 @@ mod tests {
         );
     }
 
-    fn fitted_rbf() -> FittedGpr {
+    fn fitted_rbf() -> FittedGpr<Fixed> {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.1).expect("valid");
         Gpr::new(kernel, likelihood)
-            .fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
             .unwrap_or_else(|(_, e)| panic!("{e}"))
     }
 
@@ -115,7 +192,9 @@ mod tests {
             self.last_params = params.to_vec();
             Ok(1.5)
         }
+    }
 
+    impl Differentiable for CountingObjective {
         fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
             self.grads += 1;
             self.last_params = params.to_vec();

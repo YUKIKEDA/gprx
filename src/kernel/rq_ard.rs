@@ -5,6 +5,7 @@ use super::{
     ArdLengthscales, Triangle, validate_log_positive, validate_positive_finite, visit_triangle,
 };
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// ARD rational quadratic: `k = (1 + r² / (2α))^(-α)` with
@@ -33,7 +34,7 @@ use faer::{MatMut, MatRef};
 #[derive(Clone, Debug, PartialEq)]
 pub struct RationalQuadraticArdKernel {
     lengthscales: ArdLengthscales,
-    log_alpha: f64,
+    alpha: BoundedParam,
 }
 
 impl RationalQuadraticArdKernel {
@@ -47,7 +48,7 @@ impl RationalQuadraticArdKernel {
         validate_positive_finite(alpha, "alpha")?;
         Ok(Self {
             lengthscales: ArdLengthscales::new(lengthscales)?,
-            log_alpha: validate_log_positive(alpha.ln(), "alpha")?,
+            alpha: BoundedParam::default_positive(alpha)?,
         })
     }
 
@@ -63,18 +64,42 @@ impl RationalQuadraticArdKernel {
     ) -> Result<Self, GprError> {
         Ok(Self {
             lengthscales: ArdLengthscales::from_log_lengthscales(log_lengthscales)?,
-            log_alpha: validate_log_positive(log_alpha, "alpha")?,
+            alpha: BoundedParam::default_positive(
+                validate_log_positive(log_alpha, "alpha")?.exp(),
+            )?,
         })
     }
 
     /// Returns `α = exp(θ_α)`.
     pub fn alpha(&self) -> f64 {
-        self.log_alpha.exp()
+        self.alpha.value()
     }
 
     /// Returns `θ_α = log(α)`.
     pub fn log_alpha(&self) -> f64 {
-        self.log_alpha
+        self.alpha.ln()
+    }
+
+    /// Returns the open interval on `α`.
+    pub fn alpha_bounds(&self) -> Interval {
+        self.alpha.interval()
+    }
+
+    /// Rebuilds this kernel with new intervals on every `ℓ_d` and on `α`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if a current value is not strictly
+    /// inside the matching interval.
+    pub fn with_bounds(
+        self,
+        lengthscale: Interval,
+        alpha: Interval,
+    ) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            lengthscales: self.lengthscales.with_bounds(lengthscale)?,
+            alpha: self.alpha.with_interval(alpha)?,
+        })
     }
 
     /// Returns the shared ARD lengthscale mouth.
@@ -118,7 +143,7 @@ impl RationalQuadraticArdKernel {
             });
         }
         self.lengthscales.get_params(&mut out[..d])?;
-        out[d] = self.log_alpha;
+        out[d] = self.alpha.ln();
         Ok(())
     }
 
@@ -139,7 +164,12 @@ impl RationalQuadraticArdKernel {
                 ),
             });
         }
-        *self = Self::from_log_lengthscales(&params[..d], params[d])?;
+        let mut lengthscales = self.lengthscales.clone();
+        lengthscales.set_params(&params[..d])?;
+        let log_alpha = validate_log_positive(params[d], "alpha")?;
+        let alpha = BoundedParam::new(log_alpha.exp(), self.alpha.interval())?;
+        self.lengthscales = lengthscales;
+        self.alpha = alpha;
         Ok(())
     }
 
