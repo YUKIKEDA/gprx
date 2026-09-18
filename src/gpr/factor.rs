@@ -334,6 +334,70 @@ pub(crate) fn inv_diag_from_chol_l(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
     }
 }
 
+/// Factors `A` in place as `L Lᵀ`. The strictly upper triangle is unspecified.
+pub(crate) fn cholesky_lower(
+    a: &mut Mat<f64>,
+    scratch: &mut MemBuffer,
+    jitter: f64,
+    stage: CholeskyStage,
+) -> Result<(), GprError> {
+    let n = a.nrows();
+    let regularization = LltRegularization {
+        dynamic_regularization_delta: jitter,
+        dynamic_regularization_epsilon: 0.0,
+    };
+    let stack = MemStack::new(scratch);
+    match llt::factor::cholesky_in_place(
+        a.as_mut(),
+        regularization,
+        Par::Seq,
+        stack,
+        Default::default(),
+    ) {
+        Ok(_) => Ok(()),
+        Err(LltError::NonPositivePivot { .. }) => Err(GprError::CholeskyFailed {
+            jitter,
+            matrix_size: n,
+            stage,
+        }),
+    }
+}
+
+/// Factors `A` in place as `L Lᵀ`, retrying with [`JitterPolicy`] on failure.
+///
+/// The first attempt uses `A` as given. Each retry restores that snapshot and
+/// adds `j` to the diagonal. Used for the posterior covariance in
+/// [`crate::FittedGpr::sample`].
+pub(crate) fn cholesky_lower_with_policy(
+    a: &mut Mat<f64>,
+    scratch: &mut MemBuffer,
+    policy: JitterPolicy,
+    stage: CholeskyStage,
+) -> Result<(), GprError> {
+    let backup = a.clone();
+    match cholesky_lower(a, scratch, 0.0, stage) {
+        Ok(()) => return Ok(()),
+        Err(GprError::CholeskyFailed { .. }) => {}
+        Err(err) => return Err(err),
+    }
+    let mut last_j = 0.0;
+    for j in policy.retry_jitters() {
+        last_j = j;
+        *a = backup.clone();
+        add_noise_to_diag(a.as_mut(), j);
+        match cholesky_lower(a, scratch, 0.0, stage) {
+            Ok(()) => return Ok(()),
+            Err(GprError::CholeskyFailed { .. }) => {}
+            Err(err) => return Err(map_cholesky_jitter(err, j)),
+        }
+    }
+    Err(GprError::CholeskyFailed {
+        jitter: last_j,
+        matrix_size: a.nrows(),
+        stage,
+    })
+}
+
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
 ///
 /// P1A-18 can call this on the same `Workspace` buffers as [`crate::Gpr::fit`].
@@ -344,30 +408,7 @@ pub(crate) fn cholesky_and_solve(
     jitter: f64,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
-    let n = a.nrows();
-    let regularization = LltRegularization {
-        dynamic_regularization_delta: jitter,
-        dynamic_regularization_epsilon: 0.0,
-    };
-    {
-        let stack = MemStack::new(scratch);
-        match llt::factor::cholesky_in_place(
-            a.as_mut(),
-            regularization,
-            Par::Seq,
-            stack,
-            Default::default(),
-        ) {
-            Ok(_) => {}
-            Err(LltError::NonPositivePivot { .. }) => {
-                return Err(GprError::CholeskyFailed {
-                    jitter,
-                    matrix_size: n,
-                    stage,
-                });
-            }
-        }
-    }
+    cholesky_lower(a, scratch, jitter, stage)?;
     let stack = MemStack::new(scratch);
     llt::solve::solve_in_place(a.as_ref(), rhs.as_mut(), Par::Seq, stack);
     Ok(())

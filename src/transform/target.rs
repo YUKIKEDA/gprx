@@ -8,7 +8,8 @@ use crate::error::GprError;
 ///
 /// [`StandardizeTarget`] is the usual choice when the mean function is zero:
 /// it centers and scales `y`, then undoes that affine map on predictions.
-/// Variance undoes `y' = (y - μ) / s` as `Var(y) = s² Var(y')`.
+/// Variance undoes `y' = (y - μ) / s` as `Var(y) = s² Var(y')`. Covariance
+/// uses the same `s²` on every entry.
 pub trait TargetTransform: Send + Sync {
     /// Estimates transform parameters from training targets.
     ///
@@ -43,6 +44,19 @@ pub trait TargetTransform: Send + Sync {
     /// Returns [`GprError::NotFitted`] when [`Self::fit`] has not succeeded, or
     /// [`GprError::NonFiniteInput`] when `var` contains `NaN` or `Inf`.
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError>;
+
+    /// Maps a packed query–query covariance from transformed space to `y` scale.
+    ///
+    /// Affine maps multiply every entry by the same `s²` as
+    /// [`Self::inverse_transform_variance`]. The default implementation is
+    /// that scaling.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::inverse_transform_variance`].
+    fn inverse_transform_covariance(&self, cov: &mut [f64]) -> Result<(), GprError> {
+        self.inverse_transform_variance(cov)
+    }
 
     /// Clones this map into a new box. Used by [`crate::Gpr`] / [`crate::FittedGpr`] clone.
     fn clone_box(&self) -> Box<dyn TargetTransform>;
@@ -452,6 +466,21 @@ mod tests {
         assert_close(var[0], 0.25 * s * s);
         assert_close(var[1], 1.0 * s * s);
         assert_close(var[2], 4.0 * s * s);
+    }
+
+    #[test]
+    fn inverse_covariance_is_std_squared() {
+        let y = [1.0, 3.0, 5.0];
+        let mut t = StandardizeTarget::new();
+        t.fit(&y).expect("valid");
+        let s = t.std().expect("fitted");
+        let mut cov = [1.0, 0.5, 0.5, 4.0];
+        t.inverse_transform_covariance(&mut cov).expect("fitted");
+        let s2 = s * s;
+        assert_close(cov[0], 1.0 * s2);
+        assert_close(cov[1], 0.5 * s2);
+        assert_close(cov[2], 0.5 * s2);
+        assert_close(cov[3], 4.0 * s2);
     }
 
     #[test]
