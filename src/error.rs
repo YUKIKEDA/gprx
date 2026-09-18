@@ -113,6 +113,9 @@ pub enum GprError {
         /// Why the value is invalid.
         reason: String,
     },
+    /// An [`crate::Interval`] or [`crate::BoundedParam`] could not be built.
+    #[error(transparent)]
+    InvalidInterval(#[from] crate::param::IntervalError),
     /// Observation-noise variance is outside its valid domain.
     #[error("invalid observation noise variance: {reason}")]
     InvalidNoiseVariance {

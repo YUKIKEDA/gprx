@@ -9,6 +9,7 @@ alwaysApply: false
 Sources: [rustdoc book](https://doc.rust-lang.org/stable/rustdoc/how-to-write-documentation.html), RFC 505 / 1574, API Guidelines C-EXAMPLE, C-QUESTION-MARK, C-FAILURE, C-LINK.
 
 - English. `//!` only for crate/module docs. `///` on items. Line comments, not `/** */`.
+- rustdoc says what the item does in gprx / GPR terms. Do not define an item by another product's name or API (`.cursor/rules/rust-api.mdc`).
 - First line: one punctuated sentence, third-person singular (“Returns…”, not “Return…”). rustdoc uses it as the search summary.
 - Then: why/when, then sections. Common headings (plural `Examples` even for one): `# Examples`, `# Errors`, `# Panics`, `# Safety`.
 - `# Errors` on every public `Result`. `# Panics` only if it can panic (gprx library paths should not). `# Safety` on every `unsafe`.

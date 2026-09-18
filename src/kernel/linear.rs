@@ -4,6 +4,7 @@ use super::{
     Triangle, expect_one_param, validate_log_positive, validate_positive_finite, write_square,
 };
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// Linear kernel: `k = σ² xᵀ x'`.
@@ -25,7 +26,7 @@ use faer::{MatMut, MatRef};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinearKernel {
-    log_variance: f64,
+    variance: BoundedParam,
 }
 
 impl LinearKernel {
@@ -37,7 +38,9 @@ impl LinearKernel {
     /// or not strictly positive.
     pub fn new(variance: f64) -> Result<Self, GprError> {
         validate_positive_finite(variance, "linear variance")?;
-        Self::from_log_variance(variance.ln())
+        Ok(Self {
+            variance: BoundedParam::default_positive(variance)?,
+        })
     }
 
     /// Builds a linear kernel from `θ = log(σ²)`.
@@ -47,19 +50,37 @@ impl LinearKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
+        let log_variance = validate_log_positive(log_variance, "linear variance")?;
         Ok(Self {
-            log_variance: validate_log_positive(log_variance, "linear variance")?,
+            variance: BoundedParam::default_positive(log_variance.exp())?,
         })
     }
 
     /// Returns `σ² = exp(θ)`.
     pub fn variance(&self) -> f64 {
-        self.log_variance.exp()
+        self.variance.value()
     }
 
     /// Returns `θ = log(σ²)`.
     pub fn log_variance(&self) -> f64 {
-        self.log_variance
+        self.variance.ln()
+    }
+
+    /// Returns the open interval on `σ²`.
+    pub fn bounds(&self) -> Interval {
+        self.variance.interval()
+    }
+
+    /// Rebuilds this kernel with a new interval on `σ²`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if the current `σ²` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            variance: self.variance.with_interval(interval)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 1).
@@ -74,7 +95,7 @@ impl LinearKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len(), "linear")?;
-        out[0] = self.log_variance;
+        out[0] = self.variance.ln();
         Ok(())
     }
 
@@ -86,7 +107,8 @@ impl LinearKernel {
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len(), "linear")?;
-        self.log_variance = validate_log_positive(params[0], "linear variance")?;
+        let log_variance = validate_log_positive(params[0], "linear variance")?;
+        self.variance = BoundedParam::new(log_variance.exp(), self.variance.interval())?;
         Ok(())
     }
 

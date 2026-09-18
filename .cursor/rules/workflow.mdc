@@ -43,6 +43,7 @@ DoD を roadmap に書くのは、Grill が終わり、ユーザーがその Iss
 ## 品質ゲート
 
 - Identifiers, rustdoc, and `GprError` are English. Issues and commit subjects may be Japanese.
+- Names describe gprx / GPR concepts, not unrelated products or harnesses. Naming: `.cursor/rules/rust-api.mdc`.
 - Spike commits use `chore` or `test`.
 - Local gates (CI runners may be limited; do not treat cloud CI as the DoD):
   - `just lint` = `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`

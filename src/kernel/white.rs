@@ -5,6 +5,7 @@ use super::{
     validate_positive_finite, write_square,
 };
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// White (nugget) kernel: `σw²` on the training diagonal and zero elsewhere.
@@ -27,7 +28,7 @@ use faer::{MatMut, MatRef};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WhiteKernel {
-    log_variance: f64,
+    variance: BoundedParam,
 }
 
 impl WhiteKernel {
@@ -39,7 +40,9 @@ impl WhiteKernel {
     /// or not strictly positive.
     pub fn new(variance: f64) -> Result<Self, GprError> {
         validate_positive_finite(variance, "white kernel variance")?;
-        Self::from_log_variance(variance.ln())
+        Ok(Self {
+            variance: BoundedParam::default_positive(variance)?,
+        })
     }
 
     /// Builds a white kernel from `θ = log(σw²)`.
@@ -49,19 +52,37 @@ impl WhiteKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
+        let log_variance = validate_log_positive(log_variance, "white kernel variance")?;
         Ok(Self {
-            log_variance: validate_log_positive(log_variance, "white kernel variance")?,
+            variance: BoundedParam::default_positive(log_variance.exp())?,
         })
     }
 
     /// Returns `σw² = exp(θ)`.
     pub fn variance(&self) -> f64 {
-        self.log_variance.exp()
+        self.variance.value()
     }
 
     /// Returns `θ = log(σw²)`.
     pub fn log_variance(&self) -> f64 {
-        self.log_variance
+        self.variance.ln()
+    }
+
+    /// Returns the open interval on `σw²`.
+    pub fn bounds(&self) -> Interval {
+        self.variance.interval()
+    }
+
+    /// Rebuilds this kernel with a new interval on `σw²`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if the current `σw²` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            variance: self.variance.with_interval(interval)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 1).
@@ -76,7 +97,7 @@ impl WhiteKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len(), "white")?;
-        out[0] = self.log_variance;
+        out[0] = self.variance.ln();
         Ok(())
     }
 
@@ -88,7 +109,8 @@ impl WhiteKernel {
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len(), "white")?;
-        self.log_variance = validate_log_positive(params[0], "white kernel variance")?;
+        let log_variance = validate_log_positive(params[0], "white kernel variance")?;
+        self.variance = BoundedParam::new(log_variance.exp(), self.variance.interval())?;
         Ok(())
     }
 

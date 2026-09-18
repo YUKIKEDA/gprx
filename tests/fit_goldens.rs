@@ -9,7 +9,7 @@
 
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
 use serde::Deserialize;
 
 /// Relative band for NLML and predictive mean / variance after `Gpr::fit`.
@@ -17,7 +17,7 @@ const REL_TOL: f64 = 0.15;
 /// `|log actual - log expected|` for `ℓ` and `σn²`. ARD short axes can
 /// differ by about a factor of ten between scipy L-BFGS-B and argmin.
 const THETA_LOG_ABS_TOL: f64 = 2.5;
-/// Relative band for LOO at sklearn's fitted `θ` (`FitOptions::FIXED`).
+/// Relative band for LOO at sklearn's fitted `θ` (`Gpr<Fixed>::factor`).
 /// sklearn's `alpha` jitter is `1e-10`; this is not an optimizer comparison.
 const LOO_REL_TOL: f64 = 1e-5;
 
@@ -178,13 +178,8 @@ fn check_loo_at_sklearn_theta(name: &str, golden: &FitGolden) -> Result<(), GprE
         GaussianLikelihood::new(golden.noise_variance)?,
     )
     .with_target_transform(StandardizeTarget::new())
-    .fit_with(
-        &golden.x,
-        golden.n_rows,
-        golden.n_cols,
-        &golden.y,
-        FitOptions::FIXED,
-    )?;
+    .with_optimizer(Fixed)
+    .factor(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
 
     let loo_obs = gpr.loo_predict()?;
     let loo_lat = gpr.loo_predict_with(PredictOptions {
