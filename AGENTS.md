@@ -10,7 +10,7 @@
 | `.cursor/rules/git.mdc`                  | 破壊的 git。質問は許可ではない                |
 | `.cursor/rules/consent.mdc`              | 質問は決定ではない。選択肢には推奨とメリデメ。Issue / ロードマップを独断で閉じない |
 | `.cursor/rules/pull-requests.mdc`        | PR タイトルと本文                             |
-| `.cursor/rules/workflow.mdc`             | Grill → Issue →（Grill・詳細化）→ 作業 → PR → 人間レビュー → マージ |
+| `.cursor/rules/workflow.mdc`             | Grill → Issue → Grill で DoD 確定 → 作業 → PR → 人間レビュー → マージ。DoD を先に書かない |
 | `.cursor/rules/defer.mdc`                | 計画のない「暫定」「今はやらない」は禁止      |
 | `.cursor/rules/layout.mdc`               | ディレクトリと公開 API                        |
 | `.cursor/rules/rust.mdc`                 | 安全性、Clippy、浮動小数の比較                |

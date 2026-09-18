@@ -12,7 +12,7 @@ Do not grow that out-of-scope list in the same change that notices a gap. Adding
 If there is no row and it is not in that out-of-scope list:
 
 - do the work in the current Issue, or
-- add the row (ID, DoD, dependency) in the **same change** that introduces the gap
+- add the row in the **same change** that introduces the gap: ID, タイトル, Issue。DoD は Grill 済みならその文言。未 Grill なら `Grill 後に #<n> で確定`（`.cursor/rules/workflow.mdc` **DoD**）。エージェントが完成条件を作って埋めない
 
 Forbidden:
 
