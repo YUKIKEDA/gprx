@@ -1469,7 +1469,7 @@ mod tests {
     };
     use crate::likelihood::GaussianLikelihood;
     use crate::precision::DoublePrecision;
-    use crate::transform::{StandardizeTarget, TargetTransform};
+    use crate::transform::{MinMaxInput, StandardizeTarget, TargetTransform};
     use crate::workspace::Workspace;
     use faer::Mat;
 
@@ -1696,6 +1696,18 @@ mod tests {
                 jitter: _,
             }
         ));
+    }
+
+    #[test]
+    fn minmax_input_fit_predicts() {
+        let gpr = rbf_gpr(1.0, 0.1)
+            .with_input_transform(MinMaxInput::new())
+            .fit_with(&[0.0, 10.0], 2, 1, &[0.0, 1.0], FitOptions::FIXED)
+            .expect("spd");
+        let pred = gpr.predict(&[5.0], 1, 1).expect("fitted");
+        assert!(pred.mean[0].is_finite());
+        assert!(pred.variance[0].is_finite());
+        assert!(pred.variance[0] >= 0.0);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! Criterion benches for the Exact GPR path.
 //!
-//! P1A-18 adds `kernel_rbf` and `cholesky_alpha` on the fixed problem
-//! (n = 256, d = 8, seed = 0). P1A-8 adds `predict_100`. P1A-10 adds
-//! `mll_and_grad`. P1B-3 adds `fit_lbfgs`. P2-7 adds ARD RBF groups
-//! `mll_and_grad_ard` / `fit_lbfgs_ard` (Always vs Never). Do not mix one
-//! MLL+grad with a full L-BFGS fit.
+//! Fixed problems match the P1B-6 goldens, scaled to n = 256:
+//! isotropic groups use 1-D Forrester with `StandardizeTarget`; ARD groups
+//! use the 2-D weighted sphere on a 16×16 grid. `y` is the named function
+//! plus N(0, 1) noise (seed 0), not an independent random series. Do not
+//! mix one MLL+grad with a full L-BFGS fit.
 
 #![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
 
@@ -14,14 +14,19 @@ use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
+use gprx::transform::StandardizeTarget;
 use gprx::{DistanceCachePolicy, FitOptions, FittedGpr, GaussianLikelihood, Gpr, Prediction};
 
 const N: usize = 256;
-const D: usize = 8;
+const D_ISO: usize = 1;
+const D_ARD: usize = 2;
+const SPHERE_SIDE: usize = 16;
 const M: usize = 100;
 const SEED: u64 = 0;
 const ELL: f64 = 1.0;
+const ELL_ARD: f64 = 4.0;
 const NOISE: f64 = 0.1;
+const NOISE_STD: f64 = 1.0;
 
 fn splitmix64(state: &mut u64) -> f64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -32,21 +37,60 @@ fn splitmix64(state: &mut u64) -> f64 {
     (z >> 11) as f64 / ((1u64 << 53) as f64)
 }
 
-fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
-    let mut state = seed;
-    let mut x = vec![0.0; n * d];
-    for col in 0..d {
-        for row in 0..n {
-            x[col * n + row] = splitmix64(&mut state);
-        }
-    }
-    x
+fn standard_normal(state: &mut u64) -> f64 {
+    let u1 = splitmix64(state).max(f64::MIN_POSITIVE);
+    let u2 = splitmix64(state);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
-fn training_xy() -> (Vec<f64>, Vec<f64>) {
-    let x = fill_column_major(N, D, SEED);
-    let mut state = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
-    let y: Vec<f64> = (0..N).map(|_| splitmix64(&mut state)).collect();
+fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
+    if n == 1 {
+        return vec![lo];
+    }
+    let denom = (n - 1) as f64;
+    (0..n)
+        .map(|i| lo + (hi - lo) * (i as f64) / denom)
+        .collect()
+}
+
+fn forrester(x: f64) -> f64 {
+    let t = 6.0 * x - 2.0;
+    t * t * (12.0 * x - 4.0).sin()
+}
+
+fn weighted_sphere(x0: f64, x1: f64) -> f64 {
+    let a = x0 / 0.25;
+    a * a + x1 * x1
+}
+
+fn forrester_xy() -> (Vec<f64>, Vec<f64>) {
+    let x = linspace(0.0, 1.0, N);
+    let mut state = SEED;
+    let y: Vec<f64> = x
+        .iter()
+        .map(|&xi| forrester(xi) + NOISE_STD * standard_normal(&mut state))
+        .collect();
+    (x, y)
+}
+
+fn forrester_query() -> Vec<f64> {
+    linspace(0.05, 0.95, M)
+}
+
+fn sphere_xy() -> (Vec<f64>, Vec<f64>) {
+    debug_assert_eq!(SPHERE_SIDE * SPHERE_SIDE, N);
+    let mut x = vec![0.0; N * D_ARD];
+    let denom = (SPHERE_SIDE - 1) as f64;
+    for row in 0..N {
+        let i = row % SPHERE_SIDE;
+        let j = row / SPHERE_SIDE;
+        x[row] = i as f64 / denom;
+        x[N + row] = j as f64 / denom;
+    }
+    let mut state = SEED;
+    let y: Vec<f64> = (0..N)
+        .map(|row| weighted_sphere(x[row], x[N + row]) + NOISE_STD * standard_normal(&mut state))
+        .collect();
     (x, y)
 }
 
@@ -69,8 +113,8 @@ fn chol_scratch(n: usize, rhs_ncols: usize) -> MemBuffer {
 
 fn kernel_and_a() -> (Mat<f64>, Mat<f64>) {
     let compiled = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale")).compile();
-    let (x, y) = training_xy();
-    let x_mat = pack_points(&x, N, D);
+    let (x, y) = forrester_xy();
+    let x_mat = pack_points(&x, N, D_ISO);
     let mut dist = Mat::zeros(N, N);
     let mut a = Mat::zeros(N, N);
     let mut scratch = Mat::zeros(N, N);
@@ -86,18 +130,18 @@ fn kernel_and_a() -> (Mat<f64>, Mat<f64>) {
 fn fitted_model() -> (FittedGpr, Vec<f64>) {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
-    let (x, y) = training_xy();
+    let (x, y) = forrester_xy();
     let gpr = Gpr::new(kernel, likelihood)
-        .fit_with(&x, N, D, &y, FitOptions::FIXED)
+        .with_target_transform(StandardizeTarget::new())
+        .fit_with(&x, N, D_ISO, &y, FitOptions::FIXED)
         .expect("training Cholesky");
-    let xs = fill_column_major(M, D, SEED.wrapping_add(1));
-    (gpr, xs)
+    (gpr, forrester_query())
 }
 
 fn kernel_rbf(c: &mut Criterion) {
     let compiled = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale")).compile();
-    let (x, _) = training_xy();
-    let x_mat = pack_points(&x, N, D);
+    let (x, _) = forrester_xy();
+    let x_mat = pack_points(&x, N, D_ISO);
     let mut dist = Mat::zeros(N, N);
     let mut k = Mat::zeros(N, N);
     let mut scratch = Mat::zeros(N, N);
@@ -151,13 +195,13 @@ fn cholesky_alpha(c: &mut Criterion) {
 fn predict_100(c: &mut Criterion) {
     let (mut gpr, xs) = fitted_model();
     let mut pred = Prediction::default();
-    gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
+    gpr.predict_into(&xs, M, D_ISO, &mut pred).expect("warmup");
     c.bench_function("predict_100", |b| {
         b.iter(|| {
             gpr.predict_into(
                 std::hint::black_box(&xs),
                 M,
-                D,
+                D_ISO,
                 std::hint::black_box(&mut pred),
             )
             .expect("predict");
@@ -183,7 +227,7 @@ fn mll_and_grad(c: &mut Criterion) {
 }
 
 fn fit_lbfgs(c: &mut Criterion) {
-    let (x, y) = training_xy();
+    let (x, y) = forrester_xy();
     let mut group = c.benchmark_group("fit_lbfgs");
     group.sample_size(10);
     group.bench_function("fit_lbfgs", |b| {
@@ -191,11 +235,15 @@ fn fit_lbfgs(c: &mut Criterion) {
             || {
                 let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
                 let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
-                (Gpr::new(kernel, likelihood), x.clone(), y.clone())
+                (
+                    Gpr::new(kernel, likelihood).with_target_transform(StandardizeTarget::new()),
+                    x.clone(),
+                    y.clone(),
+                )
             },
             |(gpr, x, y)| {
                 let fitted = gpr
-                    .fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y))
+                    .fit(std::hint::black_box(&x), N, D_ISO, std::hint::black_box(&y))
                     .expect("lbfgs");
                 std::hint::black_box(fitted)
             },
@@ -206,13 +254,14 @@ fn fit_lbfgs(c: &mut Criterion) {
 }
 
 fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr {
-    let ells = [ELL; D];
+    let ells = [ELL_ARD; D_ARD];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
-    let (x, y) = training_xy();
+    let (x, y) = sphere_xy();
     Gpr::new(kernel, likelihood)
         .with_distance_cache_policy(policy)
-        .fit_with(&x, N, D, &y, FitOptions::FIXED)
+        .with_target_transform(StandardizeTarget::new())
+        .fit_with(&x, N, D_ARD, &y, FitOptions::FIXED)
         .expect("training Cholesky")
 }
 
@@ -240,8 +289,8 @@ fn mll_and_grad_ard(c: &mut Criterion) {
 }
 
 fn fit_lbfgs_ard(c: &mut Criterion) {
-    let (x, y) = training_xy();
-    let ells = [ELL; D];
+    let (x, y) = sphere_xy();
+    let ells = [ELL_ARD; D_ARD];
     let mut group = c.benchmark_group("fit_lbfgs_ard");
     group.sample_size(10);
     for (name, policy) in [
@@ -255,14 +304,16 @@ fn fit_lbfgs_ard(c: &mut Criterion) {
                         KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
                     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
                     (
-                        Gpr::new(kernel, likelihood).with_distance_cache_policy(policy),
+                        Gpr::new(kernel, likelihood)
+                            .with_distance_cache_policy(policy)
+                            .with_target_transform(StandardizeTarget::new()),
                         x.clone(),
                         y.clone(),
                     )
                 },
                 |(gpr, x, y)| {
                     let fitted = gpr
-                        .fit(std::hint::black_box(&x), N, D, std::hint::black_box(&y))
+                        .fit(std::hint::black_box(&x), N, D_ARD, std::hint::black_box(&y))
                         .expect("lbfgs");
                     std::hint::black_box(fitted)
                 },
