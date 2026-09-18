@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P2B-2（argmin ソルバの選択）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P2B-3（`KernelTerm` と `KernelSpec::Custom`）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -30,6 +30,7 @@
 | P2-9    | [#97](https://github.com/YUKIKEDA/gprx/issues/97) | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) | P2B-15  | [#106](https://github.com/YUKIKEDA/gprx/issues/106) |
 | P2B-17  | [#109](https://github.com/YUKIKEDA/gprx/issues/109) | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) | P2B-16  | [#103](https://github.com/YUKIKEDA/gprx/issues/103) |
 | P2B-1   | [#108](https://github.com/YUKIKEDA/gprx/issues/108) | P2B-2   | [#114](https://github.com/YUKIKEDA/gprx/issues/114) | P2B-20  | [#116](https://github.com/YUKIKEDA/gprx/issues/116) |
+| P2B-3   | [#117](https://github.com/YUKIKEDA/gprx/issues/117) |         |                                                   |         |                                                   |
 
 ## マイルストーン
 

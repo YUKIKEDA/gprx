@@ -2,7 +2,7 @@
 
 use crate::error::GprError;
 use crate::kernel::{
-    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
+    ConstantKernel, CustomKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
     RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, WhiteKernel,
 };
 use crate::param::Interval;
@@ -58,6 +58,8 @@ pub enum KernelSpec {
     Linear(LinearKernel),
     /// White (nugget) leaf.
     White(WhiteKernel),
+    /// User-defined distance leaf ([`super::KernelTerm`]).
+    Custom(CustomKernel),
     /// `k = k_left + k_right`.
     Sum(Box<KernelSpec>, Box<KernelSpec>),
     /// `k = k_left * k_right` (Hadamard product).
@@ -124,6 +126,12 @@ impl From<WhiteKernel> for KernelSpec {
     }
 }
 
+impl From<CustomKernel> for KernelSpec {
+    fn from(kernel: CustomKernel) -> Self {
+        Self::Custom(kernel)
+    }
+}
+
 impl Add for KernelSpec {
     type Output = Self;
 
@@ -141,6 +149,18 @@ impl Mul for KernelSpec {
 }
 
 impl KernelSpec {
+    /// Wraps a user [`super::KernelTerm`] as a distance leaf.
+    ///
+    /// The leaf clones into [`super::CompiledKernel`] at [`Self::compile`].
+    /// Sum and product with other distance leaves work. Mixing with
+    /// points-mode leaves (Linear, ARD) is the same [`crate::GprError::UnsupportedKernelOperation`]
+    /// as isotropic + ARD.
+    ///
+    /// See [`super::KernelTerm`] for a Sum example.
+    pub fn custom(term: impl super::KernelTerm) -> Self {
+        Self::Custom(CustomKernel::new(term))
+    }
+
     /// Returns the number of flattened kernel parameters.
     pub fn num_params(&self) -> usize {
         match self {
@@ -154,6 +174,7 @@ impl KernelSpec {
             Self::Constant(leaf) => leaf.num_params(),
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
+            Self::Custom(leaf) => leaf.num_params(),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.num_params() + right.num_params()
             }
@@ -266,6 +287,7 @@ impl KernelSpec {
                 out[*offset] = leaf.log_variance();
                 *offset += 1;
             }
+            Self::Custom(leaf) => leaf.write_params(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_params(out, offset);
                 right.write_params(out, offset);
@@ -316,6 +338,7 @@ impl KernelSpec {
                 out[*offset] = leaf.bounds();
                 *offset += 1;
             }
+            Self::Custom(leaf) => leaf.write_intervals(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_intervals(out, offset);
                 right.write_intervals(out, offset);
@@ -385,6 +408,7 @@ impl KernelSpec {
                 *offset += n;
                 Ok(())
             }
+            Self::Custom(leaf) => leaf.apply_params(params, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.apply_params(params, offset)?;
                 right.apply_params(params, offset)
@@ -427,6 +451,9 @@ impl KernelSpec {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::White(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Custom(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
             }
             Self::Sum(left, right) | Self::Product(left, right) => {

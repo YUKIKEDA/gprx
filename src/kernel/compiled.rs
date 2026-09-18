@@ -1,7 +1,7 @@
 //! Execution-layer kernel: static dispatch over built-in leaves.
 
 use super::{
-    ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
+    ConstantKernel, CustomKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
     RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, Triangle,
     WhiteKernel, visit_triangle,
 };
@@ -63,6 +63,8 @@ pub enum CompiledKernel {
     Linear(LinearKernel),
     /// White nugget.
     White(WhiteKernel),
+    /// User-defined distance leaf ([`super::KernelTerm`]).
+    Custom(CustomKernel),
     /// Flattened sum of compiled terms.
     Sum(Vec<CompiledKernel>),
     /// Flattened Hadamard product of compiled terms.
@@ -82,6 +84,7 @@ impl CompiledKernel {
             KernelSpec::Constant(leaf) => Self::Constant(*leaf),
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
+            KernelSpec::Custom(leaf) => Self::Custom(leaf.clone()),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
                 flatten_sum(left, &mut terms);
@@ -110,6 +113,7 @@ impl CompiledKernel {
             Self::Constant(leaf) => leaf.num_params(),
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
+            Self::Custom(leaf) => leaf.num_params(),
             Self::Sum(terms) | Self::Product(terms) => terms.iter().map(Self::num_params).sum(),
         }
     }
@@ -169,6 +173,7 @@ impl CompiledKernel {
             Self::RationalQuadratic(leaf) => leaf.apply(dist, out, uplo),
             Self::Constant(leaf) => leaf.apply(dist, out, uplo),
             Self::White(leaf) => leaf.apply(dist, out, uplo),
+            Self::Custom(leaf) => leaf.apply(dist, out, uplo),
             Self::Sum(terms) => fold_terms(
                 terms,
                 dist,
@@ -213,6 +218,7 @@ impl CompiledKernel {
             Self::RationalQuadratic(leaf) => leaf.apply_cross(dist, out),
             Self::Constant(leaf) => leaf.apply_cross(dist, out),
             Self::White(leaf) => leaf.apply_cross(dist, out),
+            Self::Custom(leaf) => leaf.apply_cross(dist, out),
             Self::Sum(terms) => fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), add_rect),
             Self::Product(terms) => {
                 fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), mul_rect)
@@ -264,6 +270,7 @@ impl CompiledKernel {
                 leaf.fill_diag(out);
                 Ok(())
             }
+            Self::Custom(leaf) => leaf.fill_diag(out),
             Self::Linear(_) => Err(GprError::UnsupportedKernelOperation {
                 reason: "linear kernel diagonal needs coordinates".to_owned(),
             }),
@@ -338,6 +345,7 @@ impl CompiledKernel {
                 leaf.fill_diag(out);
                 Ok(())
             }
+            Self::Custom(leaf) => leaf.fill_diag(out),
             Self::Linear(leaf) => leaf.fill_diag_points(x, out),
             Self::Sum(terms) => {
                 let (first, rest) = split_terms(terms)?;
@@ -395,6 +403,7 @@ impl CompiledKernel {
             Self::RationalQuadratic(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Constant(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::White(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::Custom(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad(dist, d_k, local, uplo, scratch)
@@ -421,9 +430,11 @@ impl CompiledKernel {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
-                Err(iso_needs_dist())
-            }
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => leaf.apply(x, out, uplo),
             Self::Linear(leaf) => leaf.apply(x, out, uplo),
             Self::MaternArd(leaf) => leaf.apply(x, out, uplo),
@@ -453,9 +464,11 @@ impl CompiledKernel {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
-                Err(iso_needs_dist())
-            }
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => leaf.apply_cross(x, xs, out),
             Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
             Self::MaternArd(leaf) => leaf.apply_cross(x, xs, out),
@@ -487,9 +500,11 @@ impl CompiledKernel {
         scratch: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
-                Err(iso_needs_dist())
-            }
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::MaternArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
@@ -508,9 +523,11 @@ impl CompiledKernel {
 
     pub(crate) fn coord_mode(&self) -> Result<CoordMode, GprError> {
         match self {
-            Self::Rbf(_) | Self::Matern(_) | Self::Periodic(_) | Self::RationalQuadratic(_) => {
-                Ok(CoordMode::Dist)
-            }
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_) => Ok(CoordMode::Dist),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
@@ -628,6 +645,7 @@ impl CompiledKernel {
                 out[*offset] = leaf.log_variance();
                 *offset += 1;
             }
+            Self::Custom(leaf) => leaf.write_params(out, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.write_params(out, offset);
@@ -698,6 +716,7 @@ impl CompiledKernel {
                 *offset += n;
                 Ok(())
             }
+            Self::Custom(leaf) => leaf.apply_params(params, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.apply_params(params, offset)?;
@@ -718,7 +737,8 @@ impl CompiledKernel {
             | Self::RationalQuadraticArd(_)
             | Self::Constant(_)
             | Self::Linear(_)
-            | Self::White(_) => false,
+            | Self::White(_)
+            | Self::Custom(_) => false,
             Self::Sum(terms) | Self::Product(terms) => {
                 terms.len() > 1 || terms.iter().any(Self::needs_internal_scratch)
             }
@@ -1094,10 +1114,11 @@ fn product_grad(
 mod tests {
     use super::CompiledKernel;
     use crate::kernel::{
-        ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
-        PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel,
-        RbfKernel, Triangle, WhiteKernel,
+        ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel,
+        MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
+        RbfArdKernel, RbfKernel, Triangle, WhiteKernel,
     };
+    use crate::param::Interval;
     use faer::{Mat, MatRef, mat};
 
     const TOL: f64 = 1e-9;
@@ -1114,6 +1135,73 @@ mod tests {
 
     fn rbf(ell: f64) -> KernelSpec {
         KernelSpec::from(RbfKernel::new(ell).expect("valid"))
+    }
+
+    #[derive(Clone, Debug)]
+    struct RbfAsTerm(RbfKernel);
+
+    impl KernelTerm for RbfAsTerm {
+        fn num_params(&self) -> usize {
+            self.0.num_params()
+        }
+
+        fn get_params(&self, out: &mut [f64]) -> Result<(), crate::GprError> {
+            self.0.get_params(out)
+        }
+
+        fn set_params(&mut self, params: &[f64]) -> Result<(), crate::GprError> {
+            self.0.set_params(params)
+        }
+
+        fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
+            if out.len() != 1 {
+                return Err(crate::GprError::InvalidHyperparameter {
+                    reason: format!("expected 1 bound, got {}", out.len()),
+                });
+            }
+            out[0] = self.0.bounds();
+            Ok(())
+        }
+
+        fn apply(
+            &self,
+            dist: MatRef<'_, f64>,
+            out: faer::MatMut<'_, f64>,
+            uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            self.0.apply(dist, out, uplo)
+        }
+
+        fn apply_cross(
+            &self,
+            dist: MatRef<'_, f64>,
+            out: faer::MatMut<'_, f64>,
+        ) -> Result<(), crate::GprError> {
+            self.0.apply_cross(dist, out)
+        }
+
+        fn fill_diag(&self, out: &mut [f64]) -> Result<(), crate::GprError> {
+            self.0.fill_diag(out);
+            Ok(())
+        }
+
+        fn grad(
+            &self,
+            dist: MatRef<'_, f64>,
+            d_k: faer::MatMut<'_, f64>,
+            param_idx: usize,
+            uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            self.0.grad(dist, d_k, param_idx, uplo)
+        }
+
+        fn clone_box(&self) -> Box<dyn KernelTerm> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn custom_rbf(ell: f64) -> KernelSpec {
+        KernelSpec::custom(RbfAsTerm(RbfKernel::new(ell).expect("valid")))
     }
 
     fn sq_dist_1d(x: &[f64]) -> Mat<f64> {
@@ -1160,6 +1248,70 @@ mod tests {
     #[test]
     fn is_send_sync() {
         assert_send_sync::<CompiledKernel>();
+    }
+
+    #[test]
+    fn custom_plus_rbf_apply_matches_two_rbf() {
+        let compiled = (custom_rbf(1.0) + rbf(2.0)).compile();
+        let builtin = (rbf(1.0) + rbf(2.0)).compile();
+        let dist = sq_dist_1d(&[0.0, 1.0, 2.0]);
+        let out = apply_compiled(&compiled, dist.as_ref());
+        let expected = apply_compiled(&builtin, dist.as_ref());
+        for col in 0..3 {
+            for row in 0..3 {
+                assert_close(out[(row, col)], expected[(row, col)]);
+            }
+        }
+    }
+
+    #[test]
+    fn custom_times_rbf_apply_matches_two_rbf() {
+        let compiled = (custom_rbf(1.0) * rbf(0.5)).compile();
+        let builtin = (rbf(1.0) * rbf(0.5)).compile();
+        let dist = sq_dist_1d(&[0.0, 1.2]);
+        let out = apply_compiled(&compiled, dist.as_ref());
+        let expected = apply_compiled(&builtin, dist.as_ref());
+        assert_close(out[(0, 1)], expected[(0, 1)]);
+        assert_close(out[(0, 0)], expected[(0, 0)]);
+    }
+
+    #[test]
+    fn custom_sum_grad_matches_finite_difference() {
+        let spec = custom_rbf(1.0) + rbf(2.0);
+        let compiled = spec.compile();
+        let dist = sq_dist_1d(&[0.0, 0.8, 1.5]);
+        let mut params = [0.0; 2];
+        spec.get_params(&mut params).expect("len 2");
+        let h = 1e-6;
+        let mut spec_plus = spec.clone();
+        let mut spec_minus = spec.clone();
+        params[1] += h;
+        spec_plus.set_params(&params).expect("valid");
+        params[1] -= 2.0 * h;
+        spec_minus.set_params(&params).expect("valid");
+        let kp = apply_compiled(&spec_plus.compile(), dist.as_ref());
+        let km = apply_compiled(&spec_minus.compile(), dist.as_ref());
+        let mut dk = fill(3, 0.0);
+        let mut scratch = fill(3, 0.0);
+        compiled
+            .grad(
+                dist.as_ref(),
+                dk.as_mut(),
+                1,
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("idx 1");
+        for col in 0..3 {
+            for row in 0..3 {
+                let fd = (kp[(row, col)] - km[(row, col)]) / (2.0 * h);
+                assert!(
+                    (dk[(row, col)] - fd).abs() <= 1e-4 * fd.abs().max(1.0),
+                    "row={row} col={col} analytic={} fd={fd}",
+                    dk[(row, col)]
+                );
+            }
+        }
     }
 
     #[test]
@@ -1478,6 +1630,16 @@ mod tests {
                 assert_close(out[(row, col)], iso[(row, col)]);
             }
         }
+    }
+
+    #[test]
+    fn custom_plus_linear_is_unsupported() {
+        let spec = custom_rbf(1.0) + KernelSpec::from(LinearKernel::new(1.0).expect("valid"));
+        let compiled = spec.compile();
+        assert!(matches!(
+            compiled.coord_mode(),
+            Err(crate::error::GprError::UnsupportedKernelOperation { .. })
+        ));
     }
 
     #[test]
