@@ -1,10 +1,10 @@
 //! Negative log marginal likelihood as an optimizer objective.
 //!
-//! Crate-private. [`GprObjective`] borrows [`Gpr`] and forwards concatenated
+//! Crate-private. [`GprObjective`] borrows [`FittedGpr`] and forwards concatenated
 //! kernel-then-likelihood `θ` to the model, which owns the source of truth.
 
 use crate::error::GprError;
-use crate::gpr::Gpr;
+use crate::gpr::FittedGpr;
 
 /// Optimizer-facing negative log marginal likelihood.
 ///
@@ -31,15 +31,15 @@ pub(crate) trait Objective {
 
 /// Exact GPR objective. Parameters are kernel `θ` followed by likelihood `θ`.
 ///
-/// Does not own hyperparameters. After a successful evaluation, [`Gpr`]'s
+/// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
 /// kernel and likelihood match `params`.
 pub(crate) struct GprObjective<'a> {
-    model: &'a mut Gpr,
+    model: &'a mut FittedGpr,
     scratch: Vec<f64>,
 }
 
 impl<'a> GprObjective<'a> {
-    pub(crate) fn new(model: &'a mut Gpr) -> Self {
+    pub(crate) fn new(model: &'a mut FittedGpr) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self { model, scratch }
     }
@@ -76,7 +76,7 @@ impl Objective for GprObjective<'_> {
 mod tests {
     use super::Objective;
     use crate::error::GprError;
-    use crate::gpr::Gpr;
+    use crate::gpr::{FittedGpr, Gpr};
     use crate::kernel::{KernelSpec, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
 
@@ -90,13 +90,12 @@ mod tests {
         );
     }
 
-    fn fitted_rbf() -> Gpr {
+    fn fitted_rbf() -> FittedGpr {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.1).expect("valid");
-        let mut gpr = Gpr::new(kernel, likelihood);
-        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
-            .expect("spd");
-        gpr
+        Gpr::new(kernel, likelihood)
+            .fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
+            .unwrap_or_else(|(_, e)| panic!("{e}"))
     }
 
     struct CountingObjective {
@@ -215,19 +214,5 @@ mod tests {
         gpr.get_params(&mut after).expect("len 2");
         assert_close(after[0], before[0]);
         assert_close(after[1], before[1]);
-    }
-
-    #[test]
-    fn unfitted_model_is_not_fitted() {
-        let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
-        let likelihood = GaussianLikelihood::new(0.1).expect("valid");
-        let mut gpr = Gpr::new(kernel, likelihood);
-        let mut obj = gpr.objective();
-        let params = [0.0, 0.1_f64.ln()];
-        let mut grad = [0.0; 2];
-        assert!(matches!(
-            obj.value_and_gradient_into(&params, &mut grad),
-            Err(GprError::NotFitted)
-        ));
     }
 }

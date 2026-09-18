@@ -11,6 +11,7 @@
 | `.cursor/rules/consent.mdc`              | 質問は決定ではない。選択肢には推奨とメリデメ。Issue / ロードマップを独断で閉じない |
 | `.cursor/rules/pull-requests.mdc`        | PR タイトルと本文                             |
 | `.cursor/rules/workflow.mdc`             | Issue → ブランチ → PR。品質ゲート。フェーズ順 |
+| `.cursor/rules/defer.mdc`                | 計画のない「暫定」「今はやらない」は禁止      |
 | `.cursor/rules/layout.mdc`               | ディレクトリと公開 API                        |
 | `.cursor/rules/rust.mdc`                 | 安全性、Clippy、浮動小数の比較                |
 | `.cursor/rules/rust-api.mdc`             | 命名、所有権、公開面（API Guidelines）        |

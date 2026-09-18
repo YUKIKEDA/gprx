@@ -1,0 +1,23 @@
+﻿---
+description: Do not defer work as temporary unless a roadmap row owns the follow-up
+alwaysApply: true
+---
+
+# Deferral
+
+Do not ship a design or implementation gap as 「暫定」「今はやらない」「until Px-y」 unless `.dev/roadmap.md` already has a **named row** that owns the follow-up (ID + DoD), or the item is listed under **意図的に今やらない**.
+
+If there is no row and it is not in that out-of-scope list:
+
+- do the work in the current Issue, or
+- add the row (ID, DoD, dependency) in the **same change** that introduces the gap
+
+Forbidden:
+
+- 「P2-8 までは暫定で同じ Workspace」when P2-8's DoD does not name that split
+- 「後で Issue を切る」「later issue」with no roadmap ID
+- Closing a phase while a "temporary until this phase" gap is still in the code
+
+Stale 「until Px」 prose that the row already shipped must be rewritten to present tense in the same PR that lands the row.
+
+A question about whether something is temporary is not consent to leave it unplanned. Consent: `.cursor/rules/consent.mdc`.

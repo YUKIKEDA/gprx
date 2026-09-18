@@ -100,12 +100,12 @@ fn kernel_from_golden(golden: &FitGolden) -> Result<KernelSpec, GprError> {
 }
 
 fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
-    let mut gpr = Gpr::new(
+    let gpr = Gpr::new(
         kernel_from_golden(golden)?,
         GaussianLikelihood::new(golden.noise_variance_init)?,
     )
-    .with_target_transform(StandardizeTarget::new());
-    gpr.fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
+    .with_target_transform(StandardizeTarget::new())
+    .fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
 
     let nlml = gpr.neg_log_marginal_likelihood()?;
     assert_near(
@@ -173,12 +173,12 @@ fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
 }
 
 fn check_loo_at_sklearn_theta(name: &str, golden: &FitGolden) -> Result<(), GprError> {
-    let mut gpr = Gpr::new(
+    let gpr = Gpr::new(
         kernel_from_lengthscales(golden, &golden.lengthscales)?,
         GaussianLikelihood::new(golden.noise_variance)?,
     )
-    .with_target_transform(StandardizeTarget::new());
-    gpr.fit_with(
+    .with_target_transform(StandardizeTarget::new())
+    .fit_with(
         &golden.x,
         golden.n_rows,
         golden.n_cols,

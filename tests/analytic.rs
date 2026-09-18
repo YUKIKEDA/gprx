@@ -182,8 +182,8 @@ fn check_rbf_case(ell: f64, noise: f64, x: &[f64], y: &[f64], xs: &[f64]) -> Res
     let mut gpr = Gpr::new(
         KernelSpec::from(RbfKernel::new(ell)?),
         GaussianLikelihood::new(noise)?,
-    );
-    gpr.fit_with(x, n, 1, y, FitOptions::FIXED)?;
+    )
+    .fit_with(x, n, 1, y, FitOptions::FIXED)?;
     assert_eq!(gpr.n(), n);
     assert_eq!(gpr.d(), 1);
 

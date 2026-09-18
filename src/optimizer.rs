@@ -294,9 +294,9 @@ mod tests {
     fn lbfgs_lowers_gpr_nlml() {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.1).expect("valid");
-        let mut gpr = Gpr::new(kernel, likelihood);
-        gpr.fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
-            .expect("spd");
+        let mut gpr = Gpr::new(kernel, likelihood)
+            .fit_with(&[0.0, 1.0], 2, 1, &[0.5, -0.25], crate::FitOptions::FIXED)
+            .unwrap_or_else(|(_, e)| panic!("{e}"));
         let mut init = [0.0; 2];
         gpr.get_params(&mut init).expect("len 2");
         init[0] = 2.0_f64.ln();
