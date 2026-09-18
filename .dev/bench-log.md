@@ -2,7 +2,7 @@
 
 時間は [criterion](https://docs.rs/criterion)、`benches/exact.rs`、`just bench`。確保は `tests/alloc.rs`。固定問題: RNG seed `0`、`n = 256`、`d = 8`、RBF + `GaussianLikelihood`、ハイパラ固定。`fit_lbfgs` だけ最適化ループ。新しいハーネスは作っていない。
 
-目標比はまだ置かない（P2-1 / [#25](https://github.com/YUKIKEDA/gprx/issues/25)）。名前付き `phase-2` は P2-9 で取る（等方は `phase-1b` と比較。ARD は Always vs Never）。
+目標比はまだ置かない（P2-1 / [#25](https://github.com/YUKIKEDA/gprx/issues/25)）。名前付き `phase-2` は P2-9 で取った（等方は `phase-1b` と比較。ARD は Always vs Never）。
 
 ## 機械
 
@@ -14,7 +14,7 @@
 | rustc | 1.97.1 (`x86_64-pc-windows-msvc`) |
 | 日付 | 2026-09-18 |
 
-criterion は gnuplot なし、plotters。baseline 名 `phase-1b` はこの機械の `target/criterion` に保存した（git には入れない）。比較: `cargo bench --bench exact -- --baseline phase-1b`。
+criterion は gnuplot なし、plotters。baseline 名 `phase-1b` / `phase-2` はこの機械の `target/criterion` に保存した（git には入れない）。比較: `cargo bench --bench exact -- --baseline phase-2`。
 
 ## `phase-1b`（n = 256）
 
@@ -127,4 +127,31 @@ DoD（`tests/alloc.rs` 上限 0、ユーザーカーネル除く）は満たす�
 | `fit_lbfgs_ard` | 5.647 ms (5.609–5.729) | 4.526 ms (4.509–4.544) | **+24.8%**（Always が遅い） |
 
 メモリ（解析）: Always の ARD テンソルは `256 × (256·8) × 8 B = 4.00 MiB`。Never / 等方は 0。X 自体は 16 KiB。n = 256, d = 8 ではキャッシュ読み（n²d）より座標 SIMD（nd）の方が帯域が小さい。設計 §5.2 の「d≪n では投資対効果が薄い」と一致。DoD の Always vs Never は「改善または同等」だが、この問題では Never が速い。Policy と数値一致（Never ≡ Always）はテストで満たす。`Auto` は P5-5。
+
+## P2-9（`phase-2`、[#97](https://github.com/YUKIKEDA/gprx/issues/97)）
+
+同一機械。`cargo bench --bench exact -- --save-baseline phase-2`。経路は `FittedGpr`（P2-8 typestate）。確保は `tests/alloc.rs` の `FittedGpr::predict_into` / `value_and_gradient_into` で上限 0。
+
+### 等方 vs `phase-1b`
+
+| グループ | phase-1b | phase-2 | 変化（中央値） |
+| -------- | -------- | ------- | ------------- |
+| `kernel_rbf` | 266 µs | 123 µs (123.2–123.7) | **−53.6%** |
+| `cholesky_alpha` | 159 µs | 156 µs (155.6–157.3) | −1.7%（ノイズ域。この経路は Phase 2 で触っていない） |
+| `predict_100` | 379 µs | 265 µs (264.3–266.7) | **−30.0%** |
+| `mll_and_grad` | 1.42 ms | 1.15 ms (1.144–1.148) | **−19.3%** |
+| `fit_lbfgs` | 257 ms | 337 ms (336.5–338.2) | **+31.3%** |
+
+`kernel_rbf` / `predict_100` / `mll_and_grad` は Phase 2 のキャッシュ・Rayon・SIMD のまま 1b より短い。`fit_lbfgs` は 1 評価より遅い（L-BFGS ループ + `fit(self) → FittedGpr` の構築）。1 評価の改善はフィット全体には乗っていない。以降の比較基準は `phase-2`。
+
+### ARD Always vs Never
+
+等方とは比べない。P2-7 と同じ問題（ARD RBF、`ℓ_d = 1`、d = 8）。
+
+| グループ | Always | Never | Always vs Never |
+| -------- | ------ | ----- | --------------- |
+| `mll_and_grad_ard` | 2.244 ms (2.229–2.259) | 2.103 ms (2.092–2.116) | **+6.7%**（Always が遅い） |
+| `fit_lbfgs_ard` | 5.679 ms (5.660–5.720) | 4.751 ms (4.741–4.760) | **+19.5%**（Always が遅い） |
+
+n = 256, d = 8 では Never が速い（P2-7 と同じ向き）。`Auto` は P5-5。
 

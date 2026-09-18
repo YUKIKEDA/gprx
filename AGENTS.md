@@ -24,4 +24,4 @@
 
 ## 今の着手点
 
-Phase 2 の P2-8（`Gpr` / `FittedGpr`）。Issue は実装時。Phase 2 の出口は P2-9。`phase-1b` の順は [`.dev/bench-log.md`](.dev/bench-log.md)。
+Phase 3 の P3-1（LDLT delete の Spike）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
