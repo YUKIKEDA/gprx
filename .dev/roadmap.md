@@ -4,7 +4,7 @@
 
 **今やること: P2B-1（最適化ノブと `Gpr<Fixed>`）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
-進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 →（Grill・タスク詳細化・Issue 更新）→ 作業 → PR → 人間レビュー → マージ。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
+進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
 ## GitHub Issue 対応
 
@@ -26,9 +26,9 @@
 | P1B-6   | [#80](https://github.com/YUKIKEDA/gprx/issues/80) | P1B-4   | [#23](https://github.com/YUKIKEDA/gprx/issues/23) | P5-4    | [#42](https://github.com/YUKIKEDA/gprx/issues/42) |
 | P1B-7   | [#83](https://github.com/YUKIKEDA/gprx/issues/83) | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
 | P2-7    | [#88](https://github.com/YUKIKEDA/gprx/issues/88) | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
-| P2-8    | [#98](https://github.com/YUKIKEDA/gprx/issues/98) | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) |         |                                                   |
-| P2-9    | [#97](https://github.com/YUKIKEDA/gprx/issues/97) | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) |         |                                                   |
-|         |                                                   | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) |         |                                                   |
+| P2-8    | [#98](https://github.com/YUKIKEDA/gprx/issues/98) | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) | P2B-14  | [#63](https://github.com/YUKIKEDA/gprx/issues/63) |
+| P2-9    | [#97](https://github.com/YUKIKEDA/gprx/issues/97) | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) | P2B-15  | [#106](https://github.com/YUKIKEDA/gprx/issues/106) |
+|         |                                                   | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) | P2B-16  | [#103](https://github.com/YUKIKEDA/gprx/issues/103) |
 
 ## マイルストーン
 
@@ -38,7 +38,7 @@
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
 | 2   | 高速化                | Phase 1 を壊さず速くする       | ボトルネック順に最適化。キャッシュ・Rayon・SIMD。P2-8 typestate。P2-9 で `phase-2`、alloc 0、README / rustdoc / 例 |
-| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。P3-1 より前 |
+| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。ファイル persist、カスタム Optimizer 例、他ライブラリ比較（P2B-14…16。DoD は Grill 後）。P3-1 より前 |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
 | 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。初期は Z 固定。あとから Z 最適化と Sparse オンライン |
 | 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック。fit 中の `L` / `W` バッファ共用 |
@@ -144,7 +144,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 2b — Exact GPR 公開骨格
 
-設計 §1, §4.0, §5.1, §5.5, §6, §9。P2-9 のあと、P3-1 の前。組み込みの fit→predict は 1b / 2 で通っている。欠けているのは設計が公開すると書いた拡張点（`Gpr<O>` のソルバ差し替え、カスタムカーネル、jitter、学習済みの読み書き）、予測共分散の別経路、Pipeline と列ごと前処理、公開の `*` と Dist+Points 合成が実行時エラーで落ちる穴。各行は Grill（必要なとき）のあと Issue を切ってから作業する。設定の排他は型（`.cursor/rules/types.mdc`）。
+設計 §1, §4.0, §5.1, §5.5, §6, §9。P2-9 のあと、P3-1 の前。組み込みの fit→predict は 1b / 2 で通っている。欠けているのは設計が公開すると書いた拡張点（`Gpr<O>` のソルバ差し替え、カスタムカーネル、jitter、学習済みの読み書き）、予測共分散の別経路、Pipeline と列ごと前処理、公開の `*` と Dist+Points 合成が実行時エラーで落ちる穴、プロセスをまたぐ persist、自作 Optimizer の例、他ライブラリとの時間・RSS。各行は Grill のあと Issue で DoD を確定してから作業する（`.cursor/rules/workflow.mdc`）。設定の排他は型（`.cursor/rules/types.mdc`）。
 
 前処理のユーザー実装（`Transform` / `TargetTransform` + `with_*`）は P1A-4 で載済み。学習前後の型分けは P2B-10。Pipeline と列ごとの指定は P2B-7 / P2B-8。
 
@@ -163,8 +163,11 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-11 | Feat | 距離キャッシュを距離経路専用にする            | P2-9   | rustdoc「Linear ignores this setting」をやめる。`Linear` / `Constant` / `White`（距離を使わない spec）の trainer に `DistanceCachePolicy` を持たせない。`with_distance_cache_policy` は距離モードの経路にだけ存在する |
 | P2B-12 | Feat | Product の points 勾配                        | P2-9   | 公開の `KernelSpec *` が points 葉（Linear / ARD）でも `grad` と fit の MLL+grad まで通る。現行 `grad_points` の `UnsupportedKernelOperation`（dedicated scratch）を消す。数値微分または既知値。Dist Product の既存 `grad` は壊さない |
 | P2B-13 | Feat | Dist と Points の Sum/Product                 | P2B-12 | `RBF + Linear` など Dist 葉と Points 葉の合成を評価する。`coord_mode` で混ぜを `UnsupportedKernelOperation` しない。型で混ぜ不可にもしない。葉は従来どおり Dist は距離、Points は座標。解析または sklearn golden（L-BFGS と混ぜない） |
+| P2B-14 | Feat | 学習済みモデルの保存・読み込み                | P2-8   | Grill 後に [#63](https://github.com/YUKIKEDA/gprx/issues/63) で確定 |
+| P2B-15 | Feat | カスタム Optimizer の使用例                   | P2B-9  | Grill 後に [#106](https://github.com/YUKIKEDA/gprx/issues/106) で確定 |
+| P2B-16 | Spike | 他ライブラリとの時間・RSS 比較               | P2-9   | Grill 後に [#103](https://github.com/YUKIKEDA/gprx/issues/103) で確定 |
 
-**2b 完了:** P2B-1…13 がマージ済み。`just test` が緑。P3-1 に進む。
+**2b 完了:** P2B-1…16 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…16 の作業は各 Issue の Grill と DoD 確定のあと。
 
 ---
 
