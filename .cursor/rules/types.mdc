@@ -7,12 +7,37 @@ alwaysApply: true
 
 Safety of configuration is decided in the type design. It is not a rustdoc note, not a README caveat, and not a `GprError` that fires when two options are combined.
 
+## Runtime validation is boundary-only
+
+Runtime validation (a check that returns `Result`/`GprError`) is allowed only
+at the boundary where a value crosses from outside the type system into it —
+the **IO boundary**: a public API entry point receiving a raw `f64` / `&[f64]`
+from the caller, a flat parameter vector handed back by `argmin`, matrix data
+whose size or finiteness is only known at that call. Everything past that
+boundary trusts the type: a `RbfKernel` that validated its lengthscale once at
+`new` never re-checks it in `apply`/`grad`; that is why those methods return
+`Result` only for the *new* data passed to them (dimensions, `NaN`/`Inf`), not
+for state already inside `self`.
+
+An object's own lifecycle preconditions (fit before predict, register before
+lookup, …) are not an exception. They are configuration exclusivity by
+another name and get the same fix: a type per state, not a flag plus a
+runtime error.
+
+- **Do not ship**: `fitted: bool` on a struct, checked by a `require_fitted()`
+  that returns `GprError::NotFitted` from every method that needs it.
+- **Do**: split the type the way `Gpr` / `FittedGpr` already do — `fit(self)`
+  consumes the unfitted type and returns the fitted one; only the fitted type
+  has the methods that need the invariant. A precondition that cannot be
+  called out of order does not need a runtime check for it.
+
 ## Do not ship
 
 - 「`with_optimizer` のときは `solver` は無視される」
 - 「両方指定したら実行時エラー」
 - 「このフラグが false のとき他フィールドは使われない」（`optimize: bool` + 最適化ノブ）
 - A field that exists on a type where it has no meaning (`history_size` on Nelder–Mead)
+- `fitted: bool` + `GprError::NotFitted`（`Gpr`/`FittedGpr` のように学習前後を型で分ける。§Runtime validation is boundary-only）
 
 If the current structs can represent a combination you would have to ignore or reject, **change the types**. Do not add validation or documentation as a substitute.
 
