@@ -16,7 +16,7 @@
 
 ## Verification
 
-<!-- What you actually ran. N/A if not yet. Hot-path PRs: paste criterion vs the last named baseline (phase-1a / phase-1b). -->
+<!-- What you actually ran. N/A if not yet. Hot-path PRs: paste criterion vs the last named baseline (phase-1b / phase-2). -->
 
 ## Risk / Rollback
 
