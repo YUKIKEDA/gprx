@@ -137,7 +137,7 @@ M0 → 1a → 1b → 2
 | P2-4 | Task  | 確保 ratchet をホットパス 0 まで下げる                    | P2-3, P1A-19 | `tests/alloc.rs` の上限が 0。ユーザーカーネル除く                            |
 | P2-5 | Feat  | 等方 RBF と距離に SIMD                                    | P2-1, P2-3   | `wide::f64x4`。`kernel_rbf` / `predict_100` が Rayon のみより速い。数値は 1b と一致。可否はカーネル経路で判断し、`mll_and_grad` の勾配項だけを分母にしない |
 | P2-6 | Spike | NLML 定数項 `(n/2) log(2π)` の速度寄与                    | P2-1, P1A-10 | `mll_and_grad`（あれば `fit_lbfgs`）を定数あり/なしで測る。差がノイズなら一本のまま。結果を `.dev/bench-log.md` に残す。この行では API を分けない |
-| P2-8 | Feat  | `Gpr` / `FittedGpr` の typestate                          | P2-6         | `fit(self) → FittedGpr`。失敗は `(Gpr, GprError)`。`predict(&self)` と `predict_into(&mut self)`。`refit` は学習済み型。sklearn JSON は数値照合のみ。文書・baseline・alloc の締めは P2-9。Issue は実装時 |
+| P2-8 | Feat  | `Gpr` / `FittedGpr` の typestate                          | P2-6         | `fit(self) → FittedGpr`。失敗は `(Gpr, GprError)`。`predict(&self)` と `predict_into(&mut self)`。`refit` は学習済み型。`Workspace` は fit、`QueryWorkspace` は `FittedGpr`（同じ struct に詰め込まない）。sklearn JSON は数値照合のみ。文書・baseline・alloc の締めは P2-9。Issue は実装時 |
 | P2-9 | Task  | Phase 2 締め                                              | P2-8         | 名前付き `phase-2` を取り、機械名と数値を `.dev/bench-log.md` に残す。等方は `phase-1b` と比較。ARD は Always vs Never（等方とは比べない）。`just test`（解析解・sklearn JSON・L-BFGS 回収）が `FittedGpr` 経路で通る。`tests/alloc.rs` 上限 0 を `FittedGpr::predict_into` で再確認（ユーザーカーネル除く）。README / rustdoc / `examples/` を `Gpr` + `FittedGpr`。Issue は実装時 |
 
 ---
@@ -188,5 +188,7 @@ M0 → 1a → 1b → 2
 - crates.io 公開、MSRV 約束、カバレッジ必須
 - 自前 L-BFGS
 - 誘導点 Z の最適化、Sparse のオンライン学習
+- フル共分散予測、変換の Pipeline（複数マップの直列）
+- 最適化ループ中に L を `W` で上書きしてメモリを削ること
 - Likelihood と White を両方既定で足すこと
 - クラウド CI を制限中の完了条件にすること
