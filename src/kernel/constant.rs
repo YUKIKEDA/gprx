@@ -5,6 +5,7 @@ use super::{
     validate_positive_finite, write_square,
 };
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// Constant kernel: `k = c` for every pair of points.
@@ -26,7 +27,7 @@ use faer::{MatMut, MatRef};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConstantKernel {
-    log_constant: f64,
+    constant: BoundedParam,
 }
 
 impl ConstantKernel {
@@ -38,7 +39,9 @@ impl ConstantKernel {
     /// or not strictly positive.
     pub fn new(constant: f64) -> Result<Self, GprError> {
         validate_positive_finite(constant, "constant value")?;
-        Self::from_log_constant(constant.ln())
+        Ok(Self {
+            constant: BoundedParam::sklearn_positive(constant)?,
+        })
     }
 
     /// Builds a constant kernel from `θ = log(c)`.
@@ -48,19 +51,37 @@ impl ConstantKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log_constant(log_constant: f64) -> Result<Self, GprError> {
+        let log_constant = validate_log_positive(log_constant, "constant value")?;
         Ok(Self {
-            log_constant: validate_log_positive(log_constant, "constant value")?,
+            constant: BoundedParam::sklearn_positive(log_constant.exp())?,
         })
     }
 
     /// Returns `c = exp(θ)`.
     pub fn constant(&self) -> f64 {
-        self.log_constant.exp()
+        self.constant.value()
     }
 
     /// Returns `θ = log(c)`.
     pub fn log_constant(&self) -> f64 {
-        self.log_constant
+        self.constant.ln()
+    }
+
+    /// Returns the open interval on `c`.
+    pub fn bounds(&self) -> Interval {
+        self.constant.interval()
+    }
+
+    /// Rebuilds this kernel with a new interval on `c`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if the current `c` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            constant: self.constant.with_interval(interval)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 1).
@@ -75,7 +96,7 @@ impl ConstantKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_one_param(out.len(), "constant")?;
-        out[0] = self.log_constant;
+        out[0] = self.constant.ln();
         Ok(())
     }
 
@@ -87,7 +108,8 @@ impl ConstantKernel {
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_one_param(params.len(), "constant")?;
-        self.log_constant = validate_log_positive(params[0], "constant value")?;
+        let log_constant = validate_log_positive(params[0], "constant value")?;
+        self.constant = BoundedParam::new(log_constant.exp(), self.constant.interval())?;
         Ok(())
     }
 

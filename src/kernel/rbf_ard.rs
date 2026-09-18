@@ -83,6 +83,21 @@ impl RbfArdKernel {
         self.lengthscales.log_lengthscales()
     }
 
+    /// Rebuilds every `ℓ_d` with the same open interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if any current `ℓ_d` is not strictly
+    /// inside `interval`.
+    pub fn with_bounds(
+        self,
+        interval: crate::param::Interval,
+    ) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            lengthscales: self.lengthscales.with_bounds(interval)?,
+        })
+    }
+
     /// Returns the number of optimizer parameters (`d`).
     pub fn num_params(&self) -> usize {
         self.lengthscales.num_params()

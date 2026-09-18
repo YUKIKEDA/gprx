@@ -6,6 +6,7 @@ use super::{
     write_triangle,
 };
 use crate::error::GprError;
+use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
 /// Isotropic rational quadratic: `k = (1 + ‖x-x'‖² / (2αℓ²))^(-α)`.
@@ -29,8 +30,8 @@ use faer::{MatMut, MatRef};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RationalQuadraticKernel {
-    log_lengthscale: f64,
-    log_alpha: f64,
+    lengthscale: BoundedParam,
+    alpha: BoundedParam,
 }
 
 impl RationalQuadraticKernel {
@@ -43,7 +44,10 @@ impl RationalQuadraticKernel {
     pub fn new(lengthscale: f64, alpha: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         validate_positive_finite(alpha, "alpha")?;
-        Self::from_log(lengthscale.ln(), alpha.ln())
+        Ok(Self {
+            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
+            alpha: BoundedParam::sklearn_positive(alpha)?,
+        })
     }
 
     /// Builds an isotropic RQ kernel from `θ = [log(ℓ), log(α)]`.
@@ -54,29 +58,60 @@ impl RationalQuadraticKernel {
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log(log_lengthscale: f64, log_alpha: f64) -> Result<Self, GprError> {
         Ok(Self {
-            log_lengthscale: validate_log_lengthscale(log_lengthscale)?,
-            log_alpha: validate_log_positive(log_alpha, "alpha")?,
+            lengthscale: BoundedParam::sklearn_positive(
+                validate_log_lengthscale(log_lengthscale)?.exp(),
+            )?,
+            alpha: BoundedParam::sklearn_positive(
+                validate_log_positive(log_alpha, "alpha")?.exp(),
+            )?,
         })
     }
 
     /// Returns `ℓ = exp(θ_0)`.
     pub fn lengthscale(&self) -> f64 {
-        self.log_lengthscale.exp()
+        self.lengthscale.value()
     }
 
     /// Returns `θ_0 = log(ℓ)`.
     pub fn log_lengthscale(&self) -> f64 {
-        self.log_lengthscale
+        self.lengthscale.ln()
     }
 
     /// Returns `α = exp(θ_1)`.
     pub fn alpha(&self) -> f64 {
-        self.log_alpha.exp()
+        self.alpha.value()
     }
 
     /// Returns `θ_1 = log(α)`.
     pub fn log_alpha(&self) -> f64 {
-        self.log_alpha
+        self.alpha.ln()
+    }
+
+    /// Returns the open interval on `ℓ`.
+    pub fn lengthscale_bounds(&self) -> Interval {
+        self.lengthscale.interval()
+    }
+
+    /// Returns the open interval on `α`.
+    pub fn alpha_bounds(&self) -> Interval {
+        self.alpha.interval()
+    }
+
+    /// Rebuilds this kernel with new intervals on `ℓ` and `α`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IntervalError`] if a current value is not strictly
+    /// inside the matching interval.
+    pub fn with_bounds(
+        self,
+        lengthscale: Interval,
+        alpha: Interval,
+    ) -> Result<Self, crate::IntervalError> {
+        Ok(Self {
+            lengthscale: self.lengthscale.with_interval(lengthscale)?,
+            alpha: self.alpha.with_interval(alpha)?,
+        })
     }
 
     /// Returns the number of optimizer parameters (always 2).
@@ -91,8 +126,8 @@ impl RationalQuadraticKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 2.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_two_params(out.len())?;
-        out[0] = self.log_lengthscale;
-        out[1] = self.log_alpha;
+        out[0] = self.lengthscale.ln();
+        out[1] = self.alpha.ln();
         Ok(())
     }
 
@@ -104,7 +139,12 @@ impl RationalQuadraticKernel {
     /// or a `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_two_params(params.len())?;
-        *self = Self::from_log(params[0], params[1])?;
+        let ell = validate_log_lengthscale(params[0])?.exp();
+        let alpha = validate_log_positive(params[1], "alpha")?.exp();
+        let lengthscale = BoundedParam::new(ell, self.lengthscale.interval())?;
+        let alpha = BoundedParam::new(alpha, self.alpha.interval())?;
+        self.lengthscale = lengthscale;
+        self.alpha = alpha;
         Ok(())
     }
 

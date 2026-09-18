@@ -5,6 +5,7 @@ use crate::kernel::{
     ConstantKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
     RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, WhiteKernel,
 };
+use crate::param::Interval;
 use std::ops::{Add, Mul};
 
 /// Maps a flat optimizer index to a leaf-local parameter.
@@ -268,6 +269,56 @@ impl KernelSpec {
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_params(out, offset);
                 right.write_params(out, offset);
+            }
+        }
+    }
+
+    pub(crate) fn write_intervals(&self, out: &mut [Interval], offset: &mut usize) {
+        match self {
+            Self::Rbf(leaf) => {
+                out[*offset] = leaf.bounds();
+                *offset += 1;
+            }
+            Self::RbfArd(leaf) => {
+                leaf.lengthscales().write_intervals(out, offset);
+            }
+            Self::Matern(leaf) => {
+                out[*offset] = leaf.bounds();
+                *offset += 1;
+            }
+            Self::MaternArd(leaf) => {
+                leaf.lengthscales().write_intervals(out, offset);
+            }
+            Self::Periodic(leaf) => {
+                out[*offset] = leaf.lengthscale_bounds();
+                out[*offset + 1] = leaf.period_bounds();
+                *offset += 2;
+            }
+            Self::RationalQuadratic(leaf) => {
+                out[*offset] = leaf.lengthscale_bounds();
+                out[*offset + 1] = leaf.alpha_bounds();
+                *offset += 2;
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                leaf.lengthscales().write_intervals(out, offset);
+                out[*offset] = leaf.alpha_bounds();
+                *offset += 1;
+            }
+            Self::Constant(leaf) => {
+                out[*offset] = leaf.bounds();
+                *offset += 1;
+            }
+            Self::Linear(leaf) => {
+                out[*offset] = leaf.bounds();
+                *offset += 1;
+            }
+            Self::White(leaf) => {
+                out[*offset] = leaf.bounds();
+                *offset += 1;
+            }
+            Self::Sum(left, right) | Self::Product(left, right) => {
+                left.write_intervals(out, offset);
+                right.write_intervals(out, offset);
             }
         }
     }

@@ -6,7 +6,7 @@
 //! at the initial `θ` (log marginal likelihood improved).
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{FitOptions, GaussianLikelihood, Gpr, GprError};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError};
 
 const N: usize = 40;
 const D: usize = 1;
@@ -123,7 +123,8 @@ fn fit_recovers_rbf_lengthscale_and_noise() {
 
     let at_init = rbf_gpr(ELL_INIT, NOISE_INIT)
         .expect("valid init")
-        .fit_with(&x, N, D, &y, FitOptions::FIXED)
+        .with_optimizer(Fixed)
+        .factor(&x, N, D, &y)
         .expect("spd at init");
     let nlml_init = at_init.neg_log_marginal_likelihood().expect("fitted init");
 
