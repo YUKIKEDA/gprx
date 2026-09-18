@@ -22,13 +22,14 @@
 | P1A-18  | [#44](https://github.com/YUKIKEDA/gprx/issues/44) | P1A-17  | [#19](https://github.com/YUKIKEDA/gprx/issues/19) | P4-4    | [#38](https://github.com/YUKIKEDA/gprx/issues/38) |
 | P1A-19  | [#45](https://github.com/YUKIKEDA/gprx/issues/45) | P1B-1   | [#20](https://github.com/YUKIKEDA/gprx/issues/20) | P5-1    | [#39](https://github.com/YUKIKEDA/gprx/issues/39) |
 | P1A-20  | [#54](https://github.com/YUKIKEDA/gprx/issues/54) | P1B-2   | [#21](https://github.com/YUKIKEDA/gprx/issues/21) | P5-2    | [#40](https://github.com/YUKIKEDA/gprx/issues/40) |
-| P2-6    | [#60](https://github.com/YUKIKEDA/gprx/issues/60) | P1B-3   | [#22](https://github.com/YUKIKEDA/gprx/issues/22) | P5-3    | [#41](https://github.com/YUKIKEDA/gprx/issues/41) |
+| P2-6    | [#60](https://github.com/YUKIKEDA/gprx/issues/60) | P1B-3   | [#22](https://github.com/YUKIKEDA/gprx/issues/22) | P2B-18  | [#110](https://github.com/YUKIKEDA/gprx/issues/110) |
 | P1B-6   | [#80](https://github.com/YUKIKEDA/gprx/issues/80) | P1B-4   | [#23](https://github.com/YUKIKEDA/gprx/issues/23) | P5-4    | [#42](https://github.com/YUKIKEDA/gprx/issues/42) |
 | P1B-7   | [#83](https://github.com/YUKIKEDA/gprx/issues/83) | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
-| P2-7    | [#88](https://github.com/YUKIKEDA/gprx/issues/88) | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
+| P2-7    | [#88](https://github.com/YUKIKEDA/gprx/issues/88) | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) | P2B-19  | [#111](https://github.com/YUKIKEDA/gprx/issues/111) |
 | P2-8    | [#98](https://github.com/YUKIKEDA/gprx/issues/98) | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) | P2B-14  | [#63](https://github.com/YUKIKEDA/gprx/issues/63) |
 | P2-9    | [#97](https://github.com/YUKIKEDA/gprx/issues/97) | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) | P2B-15  | [#106](https://github.com/YUKIKEDA/gprx/issues/106) |
-|         |                                                   | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) | P2B-16  | [#103](https://github.com/YUKIKEDA/gprx/issues/103) |
+| P2B-17  | [#109](https://github.com/YUKIKEDA/gprx/issues/109) | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) | P2B-16  | [#103](https://github.com/YUKIKEDA/gprx/issues/103) |
+| P2B-1   | [#108](https://github.com/YUKIKEDA/gprx/issues/108) |         |                                                   |         |                                                   |
 
 ## マイルストーン
 
@@ -38,10 +39,10 @@
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
 | 2   | 高速化                | Phase 1 を壊さず速くする       | ボトルネック順に最適化。キャッシュ・Rayon・SIMD。P2-8 typestate。P2-9 で `phase-2`、alloc 0、README / rustdoc / 例 |
-| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。ファイル persist、カスタム Optimizer 例、他ライブラリ比較（P2B-14…16。DoD は Grill 後）。P3-1 より前 |
+| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。ファイル persist、カスタム Optimizer 例、他ライブラリ比較（P2B-14…16。DoD は Grill 後）。NLML ヘッセ impl（P2B-17。DoD は Grill 後）。`IncrementalRecompute`（P2B-18）と fit 中の `L`/`W` 共用（P2B-19。DoD は Grill 後）。P3-1 より前 |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
 | 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。初期は Z 固定。あとから Z 最適化と Sparse オンライン |
-| 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック。fit 中の `L` / `W` バッファ共用 |
+| 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック |
 
 ## 依存
 
@@ -144,21 +145,21 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 2b — Exact GPR 公開骨格
 
-設計 §1, §4.0, §5.1, §5.5, §6, §9。P2-9 のあと、P3-1 の前。組み込みの fit→predict は 1b / 2 で通っている。欠けているのは設計が公開すると書いた拡張点（`Gpr<O>` のソルバ差し替え、カスタムカーネル、jitter、学習済みの読み書き）、予測共分散の別経路、Pipeline と列ごと前処理、公開の `*` と Dist+Points 合成が実行時エラーで落ちる穴、プロセスをまたぐ persist、自作 Optimizer の例、他ライブラリとの時間・RSS。各行は Grill のあと Issue で DoD を確定してから作業する（`.cursor/rules/workflow.mdc`）。設定の排他は型（`.cursor/rules/types.mdc`）。
+設計 §1, §4.0, §5.1, §5.4, §5.5, §6, §9。P2-9 のあと、P3-1 の前。組み込みの fit→predict は 1b / 2 で通っている。欠けているのは設計が公開すると書いた拡張点（`Gpr<O>` のソルバ差し替え、カスタムカーネル、jitter、学習済みの読み書き）、予測共分散の別経路、Pipeline と列ごと前処理、公開の `*` と Dist+Points 合成が実行時エラーで落ちる穴、プロセスをまたぐ persist、自作 Optimizer の例、他ライブラリとの時間・RSS、逐次更新の本体（P2B-18）と fit 中の `L`/`W` 共用（P2B-19）。各行は Grill のあと Issue で DoD を確定してから作業する（`.cursor/rules/workflow.mdc`）。設定の排他は型（`.cursor/rules/types.mdc`）。
 
 前処理のユーザー実装（`Transform` / `TargetTransform` + `with_*`）は P1A-4 で載済み。学習前後の型分けは P2B-10。Pipeline と列ごとの指定は P2B-7 / P2B-8。
 
 | ID    | 種別 | タイトル                                      | 依存   | DoD                                                                                                                                 |
 | ----- | ---- | --------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| P2B-1 | Feat | 最適化ノブと `Gpr<Fixed>`                     | P2-9   | 現行の `FitOptions { optimize: bool }` / `FIXED` / `if options.optimize` / rustdoc「When false…」/ README の skip 文を型に置き換える。`Gpr<Lbfgs>::fit` と `Gpr<Fixed>::factor`。共有ノブは最適化側だけ: `max_iterations`（既定 100）、`tolerance`、`n_restarts`（既定 0）。`history_size`（既定 10）は `Lbfgs` 上。ノブが `fit` / `refit` に効くテスト。`factor` に最適化ノブは無い |
-| P2B-2 | Feat | argmin ソルバの選択                           | P2B-1  | `Gpr<Lbfgs>`（既定）/ `Gpr<NonlinearCg>` / `Gpr<NelderMead>`。`with_optimizer` が型パラメータを差し替える。`FitOptions::solver` は置かない。現行 `requires_gradient` が false なら `InvalidHyperparameter` する分岐を消す。gprx は準ニュートンを自前実装しない。NCG: 勾配経路 + 回収ゴールデン。Nelder–Mead: `value` のみ + NLML 低下 + sklearn / scipy `Nelder-Mead` JSON（`compare/goldens/`。L-BFGS と混ぜない） |
+| P2B-1 | Feat | 最適化ノブと `Gpr<Fixed>`                     | P2-9   | 現行の `FitOptions { optimize: bool }` / `FIXED` / `if options.optimize` / rustdoc「When false…」/ README の skip 文を型に置き換える。`Gpr<Lbfgs, FullRecompute>::fit` と `Gpr<Fixed>::factor`。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。`with_optimizer` が `O` を差し替える。`minimize` は generic（hot path に `dyn Objective` を置かない）。公開トレイト: `Objective` ⊂ `Differentiable` ⊂ `TwiceDifferentiable`。`IncrementalObjective`（`value_with_changes(params, indices: &[usize])`）。`RecomputeStrategy` マーカーと `FullRecompute`。`UsesChangeIndices`。`GprObjective` の impl は value+grad まで。ヘッセ impl は P2B-17。Incremental impl は P2B-18。実行時の NotImplemented は置かない。`with_recompute_strategy` は `Gpr<O, S>` にだけある。`IncrementalRecompute` への差し替えは `O: UsesChangeIndices` のときだけ。L-BFGS / NCG / Nelder–Mead は impl しない。`FittedGpr<O, S>` は `PhantomData<S>`。`refit` は同じ `O` と `S`。predict は `S` を読まない。`ChangeSet` 構造体は置かない。θ の数値差分で index を推測しない。共有ノブは最適化側だけ: `max_iterations`（既定 100）、`tolerance`、`n_restarts`（`with_restarts(n, seed)`、`n ≥ 1`）。`history_size`（既定 10）は `Lbfgs` 上。`factor` に最適化ノブは無い。境界は葉と尤度の `Interval` + `BoundedParam`（開区間）。ユーザー単位。sklearn 相当の有限既定。argmin L-BFGS は unconstrained + logit。範囲外は型で表し、`InvalidHyperparameter` で設定排他しない。ノブが `fit` / `refit` に効くテスト。`FitOptions::solver` は置かない。gprx は準ニュートンを自前実装しない |
+| P2B-2 | Feat | argmin ソルバの選択                           | P2B-1  | `Gpr<Lbfgs>`（既定）/ `Gpr<NonlinearCg>` / `Gpr<NelderMead>`。`with_optimizer` は P2B-1 の口。gprx は準ニュートンを自前実装しない。NCG: 勾配経路 + 回収ゴールデン。Nelder–Mead: `value` のみ + NLML 低下 + sklearn / scipy `Nelder-Mead` JSON（`compare/goldens/`。L-BFGS と混ぜない） |
 | P2B-3 | Feat | `KernelTerm` と `KernelSpec::Custom`          | P2-9   | 設計 §5.1。ユーザー葉が Sum/Product に載る。`apply` / `grad` の数値微分または既知値。`tests/alloc.rs` はユーザーカーネル除く（既存） |
 | P2B-4 | Feat | `JitterPolicy`                                | P2-9   | 設計 §4.0。`Fixed` / `Adaptive`。分解失敗時だけ jitter。いまの `jitter = 0` 固定をやめる。`CholeskyFailed.jitter` に使用値。観測ノイズとは混ぜない |
 | P2B-5 | Feat | 学習済みの読み書きと Clone                    | P2-8   | `FittedGpr::set_params` のあと `Gpr<Fixed>` / `factor` で再分解。訓練 `X` / `y` の参照。`Gpr` / `FittedGpr` が Clone（`Transform` / `TargetTransform` に clone）。`kernel()` は `&` のまま、書き換えは `set_params`。公開 `FittedGpr` の `compiled` / `workspace` / `X` / `y` / `α` を `Option` にしない。欠けるときに `EmptyInput` を返さない |
 | P2B-6 | Feat | 任意の予測共分散と posterior sample           | P2-9   | 既定 `predict` は対角のまま（共分散フィールドを持たない）。クエリ間共分散は別メソッド。対角は既存 `predict` と一致。共分散経路から `sample`（seed 付き）。フラグで「計算しない」を表さない |
 | P2B-7 | Feat | 変換 Pipeline                                 | P2B-10 | 複数マップの直列（例: MinMax のあと Standardize）。`X` と `y` それぞれ。1 段だけのいまの `with_*` は残す |
 | P2B-8 | Feat | 入力変換を列ごとに指定                        | P2B-7  | 列 `d` ごとに Identity / Standardize / MinMax / 自前 `Transform`。一様な列は MinMax、正規に近い列は Standardize、という使い分け。長さが `d` でないときはエラー |
-| P2B-9 | Feat | 自作 `Optimizer` の差し替え                   | P2B-2  | 設計 §9: `pub trait Optimizer`。`Gpr<O>::with_optimizer` が `Gpr<O2>` を返す（argmin も自作も同じスロット）。ダミーが `minimize` されるテスト。`Objective` 公開。Phase 3 の `refit` は学習済み型の `O` と同じ口。`solver` と custom を並べない |
+| P2B-9 | Feat | 自作 `Optimizer` の差し替え                   | P2B-1  | トレイトと差し込み口は P2B-1。この行は自作 `O` のダミーが `minimize` されるテスト。`Gpr<O>::with_optimizer` は P2B-1 の口。Phase 3 の `refit` は学習済み型の `O` と同じ口。`solver` と custom を並べない |
 | P2B-10 | Feat | 変換の fitted を型にする                      | P1A-4  | `StandardizeTarget` / `MinMax*` の `fitted: bool` と `GprError::NotFitted` をやめる。`fit(self)` が学習済み型を返す。`transform` / `apply` は学習済みにだけある。`error.rs` の `fitted: bool` 例を消す |
 | P2B-11 | Feat | 距離キャッシュを距離経路専用にする            | P2-9   | rustdoc「Linear ignores this setting」をやめる。`Linear` / `Constant` / `White`（距離を使わない spec）の trainer に `DistanceCachePolicy` を持たせない。`with_distance_cache_policy` は距離モードの経路にだけ存在する |
 | P2B-12 | Feat | Product の points 勾配                        | P2-9   | 公開の `KernelSpec *` が points 葉（Linear / ARD）でも `grad` と fit の MLL+grad まで通る。現行 `grad_points` の `UnsupportedKernelOperation`（dedicated scratch）を消す。数値微分または既知値。Dist Product の既存 `grad` は壊さない |
@@ -166,8 +167,11 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-14 | Feat | 学習済みモデルの保存・読み込み                | P2-8   | Grill 後に [#63](https://github.com/YUKIKEDA/gprx/issues/63) で確定 |
 | P2B-15 | Feat | カスタム Optimizer の使用例                   | P2B-9  | Grill 後に [#106](https://github.com/YUKIKEDA/gprx/issues/106) で確定 |
 | P2B-16 | Spike | 他ライブラリとの時間・RSS 比較               | P2-9   | Grill 後に [#103](https://github.com/YUKIKEDA/gprx/issues/103) で確定 |
+| P2B-17 | Feat | `GprObjective` の NLML ヘッセ                 | P2B-1  | Grill 後に [#109](https://github.com/YUKIKEDA/gprx/issues/109) で確定 |
+| P2B-18 | Feat | `IncrementalRecompute` の本体                 | P2B-1  | Grill 後に [#110](https://github.com/YUKIKEDA/gprx/issues/110) で確定 |
+| P2B-19 | Feat | fit 中の `L`/`W` バッファ共用                 | P2B-1  | Grill 後に [#111](https://github.com/YUKIKEDA/gprx/issues/111) で確定 |
 
-**2b 完了:** P2B-1…16 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…16 の作業は各 Issue の Grill と DoD 確定のあと。
+**2b 完了:** P2B-1…19 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…19 の作業は各 Issue の Grill と DoD 確定のあと。
 
 ---
 
@@ -203,16 +207,14 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 5 — 高度な最適化
 
-設計 §4.1, §4.2, §5.4。2 の計測のあと。
+設計 §4.1, §4.2。2 の計測のあと。`IncrementalRecompute` は P2B-18。fit 中の `L`/`W` 共用は P2B-19。
 
 | ID   | 種別  | タイトル                                                 | 依存 | DoD                                        |
 | ---- | ----- | -------------------------------------------------------- | ---- | ------------------------------------------ |
 | P5-1 | Spike | 混合精度の残差（`PromoteStorage` vs `ReevaluateKernel`） | P2-1 | 方式を選ぶ。IR 不収束は f64 フォールバック |
 | P5-2 | Feat  | predict 経路の MixedPrecision                            | P5-1 | 既定 fit は f64 のまま                     |
-| P5-3 | Feat  | `IncrementalRecompute`（オプトイン）                     | 1b   | FullRecompute と数値が一致                 |
 | P5-4 | Feat  | `MathMode::FastApprox` オプトイン                        | 1b   | 既定 Accurate。fit では使わない            |
 | P5-5 | Task  | `DistanceCachePolicy::Auto` の閾値                       | P2-2, P2-7 | ベンチで決める。式だけで決めない           |
-| P5-6 | Feat  | fit 中に `L` を `W` で上書きしてメモリを削る             | P2-4 | 勾配用 `W` が `L` のバッファを再利用。fit 終了時に Cholesky をやり直して `L` を戻す。予測の数値は上書きなしと一致。ピークメモリが `n²` 相当減ることを記録 |
 
 ---
 
