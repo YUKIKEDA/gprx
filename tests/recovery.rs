@@ -1,12 +1,12 @@
-//! Hyperparameter recovery for Exact GPR L-BFGS (P1B-4).
+//! Hyperparameter recovery for Exact GPR (P1B-4, P2B-2).
 //!
 //! Draws `y ~ N(0, K(ℓ*) + σn²* I)` on a 1-d grid, then [`Gpr::fit`]
 //! starts from a far-away `θ`. Recovered lengthscale and noise sit near
-//! the generating values. Negative log marginal likelihood is lower than
-//! at the initial `θ` (log marginal likelihood improved).
+//! the generating values for L-BFGS and nonlinear CG. Negative log
+//! marginal likelihood is lower than at the initial `θ`.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Fixed, GaussianLikelihood, Gpr, GprError};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, NonlinearCg};
 
 const N: usize = 40;
 const D: usize = 1;
@@ -132,6 +132,46 @@ fn fit_recovers_rbf_lengthscale_and_noise() {
         .expect("valid init")
         .fit(&x, N, D, &y)
         .expect("lbfgs");
+    let nlml_fit = gpr.neg_log_marginal_likelihood().expect("fitted");
+
+    assert!(
+        nlml_fit < nlml_init,
+        "NLML should fall (LML should rise): init={nlml_init}, fit={nlml_fit}"
+    );
+
+    let mut params = [0.0; 2];
+    gpr.get_params(&mut params).expect("len 2");
+    let ell = params[0].exp();
+    let noise = params[1].exp();
+    assert_near("lengthscale", ell, ELL_TRUE);
+    assert_near("noise", noise, NOISE_TRUE);
+    assert!(
+        rel_err(ell, ELL_TRUE) < rel_err(ELL_INIT, ELL_TRUE),
+        "lengthscale should move toward the truth: fitted={ell}, init={ELL_INIT}, true={ELL_TRUE}"
+    );
+    assert!(
+        rel_err(noise, NOISE_TRUE) < rel_err(NOISE_INIT, NOISE_TRUE),
+        "noise should move toward the truth: fitted={noise}, init={NOISE_INIT}, true={NOISE_TRUE}"
+    );
+}
+
+#[test]
+fn fit_nonlinear_cg_recovers_rbf_lengthscale_and_noise() {
+    let x = grid_x(N);
+    let y = sample_gp(&x, ELL_TRUE, NOISE_TRUE, SEED);
+
+    let at_init = rbf_gpr(ELL_INIT, NOISE_INIT)
+        .expect("valid init")
+        .with_optimizer(Fixed)
+        .factor(&x, N, D, &y)
+        .expect("spd at init");
+    let nlml_init = at_init.neg_log_marginal_likelihood().expect("fitted init");
+
+    let gpr = rbf_gpr(ELL_INIT, NOISE_INIT)
+        .expect("valid init")
+        .with_optimizer(NonlinearCg::new())
+        .fit(&x, N, D, &y)
+        .expect("ncg");
     let nlml_fit = gpr.neg_log_marginal_likelihood().expect("fitted");
 
     assert!(

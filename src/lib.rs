@@ -1,7 +1,8 @@
 //! Exact Gaussian process regression with L-BFGS hyperparameter fitting.
 //!
 //! [`Gpr`] is the trainer. [`Gpr::fit`] consumes [`Gpr<Lbfgs>`] and returns
-//! [`FittedGpr`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
+//! [`FittedGpr`]. [`Gpr::with_optimizer`] swaps in [`NonlinearCg`] or
+//! [`NelderMead`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
 //! a search. Training `X` is column-major: `n` points and `d` features
 //! packed as feature 0 for all rows, then feature 1, and so on.
 //! Observation noise lives in [`GaussianLikelihood`].
@@ -51,8 +52,8 @@ pub use gpr::{DistanceCachePolicy, FittedGpr, Gpr, PredictOptions, Prediction, V
 pub use likelihood::GaussianLikelihood;
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
-    AcceptsRecompute, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, OptResult, Optimizer,
-    RecomputeStrategy, UsesChangeIndices,
+    AcceptsRecompute, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead, NonlinearCg,
+    OptResult, Optimizer, RecomputeStrategy, UsesChangeIndices,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
 pub use precision::{DoublePrecision, PrecisionPolicy};
