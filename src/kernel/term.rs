@@ -244,16 +244,22 @@ impl CustomKernel {
         self.inner.num_params()
     }
 
-    pub(super) fn write_params(&self, out: &mut [f64], offset: &mut usize) {
+    pub(super) fn write_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
         let n = self.inner.num_params();
-        let _ = self.inner.get_params(&mut out[*offset..*offset + n]);
+        self.inner.get_params(&mut out[*offset..*offset + n])?;
         *offset += n;
+        Ok(())
     }
 
-    pub(super) fn write_intervals(&self, out: &mut [Interval], offset: &mut usize) {
+    pub(super) fn write_intervals(
+        &self,
+        out: &mut [Interval],
+        offset: &mut usize,
+    ) -> Result<(), GprError> {
         let n = self.inner.num_params();
-        let _ = self.inner.bounds_into(&mut out[*offset..*offset + n]);
+        self.inner.bounds_into(&mut out[*offset..*offset + n])?;
         *offset += n;
+        Ok(())
     }
 
     pub(super) fn apply_params(
@@ -473,5 +479,106 @@ mod tests {
             .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
             .expect("spd");
         assert!(fitted.neg_log_marginal_likelihood().unwrap().is_finite());
+    }
+
+    #[derive(Clone, Debug)]
+    struct FailingRead;
+
+    impl KernelTerm for FailingRead {
+        fn num_params(&self) -> usize {
+            1
+        }
+
+        fn get_params(&self, out: &mut [f64]) -> Result<(), crate::GprError> {
+            if out.len() != 1 {
+                return Err(crate::GprError::InvalidHyperparameter {
+                    reason: format!("expected 1 parameter, got {}", out.len()),
+                });
+            }
+            Err(crate::GprError::InvalidHyperparameter {
+                reason: "cannot read parameters".to_owned(),
+            })
+        }
+
+        fn set_params(&mut self, params: &[f64]) -> Result<(), crate::GprError> {
+            if params.len() == 1 {
+                Ok(())
+            } else {
+                Err(crate::GprError::InvalidHyperparameter {
+                    reason: format!("expected 1 parameter, got {}", params.len()),
+                })
+            }
+        }
+
+        fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
+            if out.len() != 1 {
+                return Err(crate::GprError::InvalidHyperparameter {
+                    reason: format!("expected 1 bound, got {}", out.len()),
+                });
+            }
+            Err(crate::GprError::InvalidHyperparameter {
+                reason: "cannot write bounds".to_owned(),
+            })
+        }
+
+        fn apply(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _out: MatMut<'_, f64>,
+            _uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            Ok(())
+        }
+
+        fn apply_cross(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _out: MatMut<'_, f64>,
+        ) -> Result<(), crate::GprError> {
+            Ok(())
+        }
+
+        fn fill_diag(&self, _out: &mut [f64]) -> Result<(), crate::GprError> {
+            Ok(())
+        }
+
+        fn grad(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _d_k: MatMut<'_, f64>,
+            _param_idx: usize,
+            _uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn KernelTerm> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn get_params_propagates_custom_error() {
+        let spec = KernelSpec::custom(FailingRead);
+        let mut out = [0.0];
+        assert!(matches!(
+            spec.get_params(&mut out),
+            Err(crate::GprError::InvalidHyperparameter { .. })
+        ));
+        assert!(matches!(
+            spec.compile().get_params(&mut out),
+            Err(crate::GprError::InvalidHyperparameter { .. })
+        ));
+    }
+
+    #[test]
+    fn write_intervals_propagates_custom_error() {
+        let spec = KernelSpec::custom(FailingRead);
+        let mut out = [Interval::DEFAULT_POSITIVE];
+        let mut offset = 0;
+        assert!(matches!(
+            spec.write_intervals(&mut out, &mut offset),
+            Err(crate::GprError::InvalidHyperparameter { .. })
+        ));
     }
 }

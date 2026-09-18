@@ -317,7 +317,8 @@ impl<O, S> Gpr<O, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         write_params(&self.kernel, &self.likelihood, out)
     }
@@ -575,7 +576,8 @@ impl<O, S> FittedGpr<O, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
         require_param_len(out.len(), self.num_params())?;
@@ -597,7 +599,7 @@ impl<O, S> FittedGpr<O, S> {
         let n_kernel = self.kernel.num_params();
         let mut offset = 0;
         self.kernel
-            .write_intervals(&mut out[..n_kernel], &mut offset);
+            .write_intervals(&mut out[..n_kernel], &mut offset)?;
         out[n_kernel] = self.likelihood.bounds();
         Ok(())
     }
