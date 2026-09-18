@@ -344,9 +344,11 @@ trait TargetTransform<T: Scalar>: Send + Sync {
 
 struct IdentityTarget<T>(PhantomData<T>);
 struct StandardizeTarget<T: Scalar> { mean: T, std: T }
+struct MinMaxInput { /* per-column min/max, default range [0, 1] */ }
+struct MinMaxTarget { /* y min/max, default range [0, 1] */ }
 ```
 
-既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。Pipeline（複数マップの直列）は roadmap に無い。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - μ)/s` なら `Var(y) = s² Var(y')`。
+既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。Pipeline（複数マップの直列）は roadmap に無い。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
@@ -811,7 +813,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2（P2-8）。`phase-1b` のボトルネック順は [bench-log.md](bench-log.md)。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3（P3-1）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
@@ -846,15 +848,18 @@ trait OnlineInference<T: Scalar> {
 
 毎回同じ入力でないと、速くなったのかデータが変わったのか分からない。
 
-- RNG seed `0`、`d = 8`、RBF + `GaussianLikelihood`、ハイパラ固定
 - `n = 256` を P1A-18 から必須。`512` / `1024` は数秒で終わるようになってから足す
+- 等方: 1 次元 Forrester `f(x)=(6x-2)² sin(12x-4)`、`x ∈ [0, 1]`、RBF + `GaussianLikelihood` + `StandardizeTarget`。初期ハイパラ `ℓ = 1`、`σn² = 0.1`
+- ARD: 2 次元重み付き球 `f=(x/0.25)²+(y/1)²`、`[0, 1]²` の 16×16 格子。初期 `ℓ_d = 4`（`ℓ_d = 1` では線探索が初手で止まる）
+- `y` は上記の関数 + `N(0, 1)`（seed `0`）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
+- 歴史的な `phase-1a` / `phase-1b` ログの一部は `d = 8` と独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9（`.dev/bench-log.md`）。d = 8 の時間とは混ぜない
 - グループ（存在する経路だけ。無いものはまだ書かない）:
   1. `kernel_rbf` — K の下三角構築
   2. `cholesky_alpha` — `A` の LLT と `α`
   3. `mll_and_grad` — §6.2 の 1 評価（P1A-10 から）
   4. `predict_100` — テスト点 100（P1A-8 から）
-  5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）
-  6. `mll_and_grad_ard` / `fit_lbfgs_ard` — 同じ n,d,seed の ARD RBF（P2-7）。Always vs Never。等方 `phase-1b` とは比べない
+  5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）。壁時計と一緒に L-BFGS の評価回数を残す。回数が違うときの差は速度差と読まない
+  6. `mll_and_grad_ard` / `fit_lbfgs_ard` — 重み付き球の ARD RBF（P2-7）。Always vs Never。等方とは比べない。`fit_lbfgs_ard` も評価回数を残す
   7. `online_insert` / `online_delete` — Phase 3
 
 ### 15.3 いつ何を足す

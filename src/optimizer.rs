@@ -186,7 +186,7 @@ mod tests {
     use super::{CachedProblem, CostFunction, EvalCache, Gradient, Lbfgs, Optimizer};
     use crate::error::GprError;
     use crate::gpr::Gpr;
-    use crate::kernel::{KernelSpec, RbfKernel};
+    use crate::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::Objective;
     use std::cell::RefCell;
@@ -319,5 +319,189 @@ mod tests {
         gpr.get_params(&mut got).expect("len 2");
         assert_close(got[0], result.params[0]);
         assert_close(got[1], result.params[1]);
+    }
+
+    struct CountingObj<'a> {
+        inner: crate::objective::GprObjective<'a>,
+        joint_evals: usize,
+    }
+
+    impl Objective for CountingObj<'_> {
+        fn num_params(&self) -> usize {
+            self.inner.num_params()
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            let mut dummy = vec![0.0; self.num_params()];
+            self.value_and_gradient_into(params, &mut dummy)
+        }
+
+        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.value_and_gradient_into(params, out).map(|_| ())
+        }
+
+        fn value_and_gradient_into(
+            &mut self,
+            params: &[f64],
+            out: &mut [f64],
+        ) -> Result<f64, GprError> {
+            self.joint_evals += 1;
+            self.inner.value_and_gradient_into(params, out)
+        }
+    }
+
+    fn splitmix64(state: &mut u64) -> f64 {
+        *state = state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / ((1u64 << 53) as f64)
+    }
+
+    fn forrester_bench_xy() -> (Vec<f64>, Vec<f64>) {
+        const N: usize = 256;
+        let x: Vec<f64> = (0..N).map(|i| i as f64 / (N - 1) as f64).collect();
+        let mut state = 0u64;
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| {
+                let t = 6.0 * xi - 2.0;
+                let u1 = splitmix64(&mut state).max(f64::MIN_POSITIVE);
+                let u2 = splitmix64(&mut state);
+                let noise = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                t * t * (12.0 * xi - 4.0).sin() + noise
+            })
+            .collect();
+        (x, y)
+    }
+
+    /// The `fit_lbfgs` bench problem must stay a peaked landscape. Independent
+    /// random `y` walked a flat ridge and spent ~291 joint evals.
+    #[test]
+    fn forrester_bench_lbfgs_eval_count_is_bounded() {
+        let (x, y) = forrester_bench_xy();
+        let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
+        let likelihood = GaussianLikelihood::new(0.1).expect("valid");
+        let mut gpr = Gpr::new(kernel, likelihood)
+            .with_target_transform(crate::transform::StandardizeTarget::new())
+            .fit_with(&x, 256, 1, &y, crate::FitOptions::FIXED)
+            .unwrap_or_else(|(_, e)| panic!("{e}"));
+        let mut init = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut init).expect("len");
+        let mut start_grad = vec![0.0; init.len()];
+        let start = gpr
+            .value_and_gradient_into(&init, &mut start_grad)
+            .expect("start");
+        let (result, evals) = {
+            let mut obj = CountingObj {
+                inner: gpr.objective(),
+                joint_evals: 0,
+            };
+            let result = Lbfgs::new()
+                .with_max_iters(100)
+                .minimize(&mut obj, &init)
+                .expect("lbfgs");
+            (result, obj.joint_evals)
+        };
+        eprintln!(
+            "forrester_bench_lbfgs_eval_count iters={} evals={} start={:.6} value={:.6} init={:?} grad={:?} best={:?}",
+            result.iterations, evals, start, result.value, init, start_grad, result.params
+        );
+        assert!(
+            (8..=80).contains(&evals),
+            "evals={evals}; Forrester should iterate, not walk a ridge"
+        );
+        assert!(
+            (4..=40).contains(&result.iterations),
+            "iters={}",
+            result.iterations
+        );
+        assert!(
+            result.value < start - 1.0,
+            "start={start}, best={}",
+            result.value
+        );
+    }
+
+    fn sphere_bench_xy() -> (Vec<f64>, Vec<f64>) {
+        const N: usize = 256;
+        const SIDE: usize = 16;
+        let mut x = vec![0.0; N * 2];
+        let denom = (SIDE - 1) as f64;
+        for row in 0..N {
+            let i = row % SIDE;
+            let j = row / SIDE;
+            x[row] = i as f64 / denom;
+            x[N + row] = j as f64 / denom;
+        }
+        let mut state = 0u64;
+        let y: Vec<f64> = (0..N)
+            .map(|row| {
+                let a = x[row] / 0.25;
+                let u1 = splitmix64(&mut state).max(f64::MIN_POSITIVE);
+                let u2 = splitmix64(&mut state);
+                let noise = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                a * a + x[N + row] * x[N + row] + noise
+            })
+            .collect();
+        (x, y)
+    }
+
+    fn sphere_lbfgs_evals(policy: crate::DistanceCachePolicy) -> (u64, usize, f64, f64) {
+        let (x, y) = sphere_bench_xy();
+        let kernel = KernelSpec::from(RbfArdKernel::new(&[4.0, 4.0]).expect("valid"));
+        let likelihood = GaussianLikelihood::new(0.1).expect("valid");
+        let mut gpr = Gpr::new(kernel, likelihood)
+            .with_distance_cache_policy(policy)
+            .with_target_transform(crate::transform::StandardizeTarget::new())
+            .fit_with(&x, 256, 2, &y, crate::FitOptions::FIXED)
+            .unwrap_or_else(|(_, e)| panic!("{e}"));
+        let mut init = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut init).expect("len");
+        let start = {
+            let mut grad = vec![0.0; init.len()];
+            gpr.value_and_gradient_into(&init, &mut grad)
+                .expect("start")
+        };
+        let (result, evals) = {
+            let mut obj = CountingObj {
+                inner: gpr.objective(),
+                joint_evals: 0,
+            };
+            let result = Lbfgs::new()
+                .with_max_iters(100)
+                .minimize(&mut obj, &init)
+                .expect("lbfgs");
+            (result, obj.joint_evals)
+        };
+        (result.iterations, evals, start, result.value)
+    }
+
+    #[test]
+    fn sphere_bench_lbfgs_eval_count_is_bounded() {
+        let (iters_a, evals_a, start_a, value_a) =
+            sphere_lbfgs_evals(crate::DistanceCachePolicy::Always);
+        let (iters_n, evals_n, start_n, value_n) =
+            sphere_lbfgs_evals(crate::DistanceCachePolicy::Never);
+        eprintln!(
+            "sphere_bench_lbfgs_eval_count always iters={iters_a} evals={evals_a} start={start_a:.6} value={value_a:.6}"
+        );
+        eprintln!(
+            "sphere_bench_lbfgs_eval_count never iters={iters_n} evals={evals_n} start={start_n:.6} value={value_n:.6}"
+        );
+        assert!(
+            (8..=90).contains(&evals_a),
+            "evals={evals_a}; sphere should iterate, not walk a ridge"
+        );
+        assert!(
+            (8..=90).contains(&evals_n),
+            "evals={evals_n}; sphere should iterate, not walk a ridge"
+        );
+        assert!((4..=40).contains(&iters_a), "iters={iters_a}");
+        assert!((4..=40).contains(&iters_n), "iters={iters_n}");
+        assert_close(start_a, start_n);
+        assert_close(value_a, value_n);
+        assert!(value_a < start_a - 1.0, "start={start_a}, best={value_a}");
     }
 }
