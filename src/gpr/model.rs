@@ -3,12 +3,15 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use dyn_stack::MemStack;
+use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
-use faer::{Mat, Par};
+use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, fill_squared_euclidean_cross};
+use crate::kernel::{
+    CompiledKernel, CoordMode, KernelSpec, Triangle, fill_squared_euclidean,
+    fill_squared_euclidean_cross,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{
@@ -20,11 +23,15 @@ use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform
 use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch};
 
 use super::factor::{
-    FactorPolicy, factor_train_with_policy, fill_identity, form_w_lower, frobenius_lower,
-    inv_diag_from_chol_l, neg_mll_from_factor, pack_points, pack_points_into, require_param_len,
-    validate_query, validate_training, write_kernel_grad, write_params,
+    FactorPolicy, cholesky_lower_with_policy, factor_train_with_policy, fill_identity,
+    form_w_lower, frobenius_lower, inv_diag_from_chol_l, neg_mll_from_factor, pack_points,
+    pack_points_into, require_param_len, validate_query, validate_training, write_kernel_grad,
+    write_params,
 };
-use super::{DistanceCachePolicy, JitterPolicy, PredictOptions, Prediction, VarianceKind};
+use super::{
+    DistanceCachePolicy, JitterPolicy, PredictOptions, Prediction, PredictiveCovariance,
+    VarianceKind,
+};
 
 /// Unfitted Exact GPR trainer: kernel, likelihood, transforms, optimizer, and
 /// recompute strategy.
@@ -111,6 +118,8 @@ impl<O: Clone, S> Clone for Gpr<O, S> {
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
 /// a diagonal variance; [`Self::predict_into`] writes into a reused
 /// [`Prediction`] and crate-private query buffers (not the fit workspace).
+/// [`Self::predict_covariance`] returns the query–query matrix as
+/// [`PredictiveCovariance`]. [`Self::sample`] draws from that posterior.
 /// [`Self::loo_predict`] is the GPML leave-one-out at every
 /// training point, from `L` and `α`. [`Self::refit`] re-runs the trainer's
 /// optimizer (`Gpr<O>`) or re-factors (`Gpr<Fixed>`) on the same training
@@ -1260,6 +1269,262 @@ impl<O, S> FittedGpr<O, S> {
         Ok(())
     }
 
+    /// Returns the predictive mean and query–query covariance at `xs`.
+    ///
+    /// Default [`PredictOptions`] uses [`VarianceKind::Observation`]: `σn²`
+    /// is added on the diagonal in the transformed space. The diagonal
+    /// matches [`Self::predict`] for the same query. This path allocates
+    /// an `m × m` matrix; the default [`Self::predict`] stays diagonal-only.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let gpr = Gpr::new(kernel, likelihood);
+    /// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+    /// let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
+    /// assert_eq!(cov.mean.len(), 2);
+    /// assert_eq!(cov.covariance.len(), 4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn predict_covariance(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<PredictiveCovariance, GprError> {
+        self.predict_covariance_with(xs, n_rows, n_cols, PredictOptions::default())
+    }
+
+    /// Returns query–query covariance with an explicit variance kind.
+    ///
+    /// Posterior covariance is `K** − VᵀV` with `V = L⁻¹ K_*`. Latent
+    /// diagonals are clipped at 0. Observation adds `σn²` on the diagonal
+    /// in the transformed space, then the target transform scales the
+    /// whole matrix.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    pub fn predict_covariance_with(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance, GprError> {
+        self.write_covariance(xs, n_rows, n_cols, options)
+    }
+
+    /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
+    ///
+    /// Each column of the returned column-major `m × n_draws` matrix is
+    /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
+    /// posterior covariance. `seed` is the SplitMix64 start state. Zero
+    /// draws returns an empty vector after the covariance is formed.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`], plus [`GprError::CholeskyFailed`] with
+    /// [`CholeskyStage::Predict`] if the posterior covariance cannot be
+    /// factored after [`JitterPolicy`] retries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let gpr = Gpr::new(kernel, likelihood);
+    /// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+    /// let draws = fitted.sample(&[0.25, 0.75], 2, 1, 4, 1)?;
+    /// assert_eq!(draws.len(), 8);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sample(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        n_draws: usize,
+        seed: u64,
+    ) -> Result<Vec<f64>, GprError> {
+        self.sample_with(xs, n_rows, n_cols, PredictOptions::default(), n_draws, seed)
+    }
+
+    /// Draws posterior samples with an explicit variance kind.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::sample`].
+    pub fn sample_with(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        n_draws: usize,
+        seed: u64,
+    ) -> Result<Vec<f64>, GprError> {
+        let cov = self.write_covariance(xs, n_rows, n_cols, options)?;
+        if n_draws == 0 {
+            return Ok(Vec::new());
+        }
+        let m = cov.mean.len();
+        let mut a = Mat::zeros(m, m);
+        for col in 0..m {
+            for row in 0..m {
+                a[(row, col)] = cov.covariance[col * m + row];
+            }
+        }
+        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, Par::Seq, Default::default());
+        let mut scratch = MemBuffer::new(req);
+        cholesky_lower_with_policy(
+            &mut a,
+            &mut scratch,
+            self.jitter_policy,
+            CholeskyStage::Predict,
+        )?;
+        let mut rng = seed;
+        let mut out = vec![0.0; m * n_draws];
+        let mut z = vec![0.0; m];
+        let mut lz = vec![0.0; m];
+        for draw in 0..n_draws {
+            for slot in &mut z {
+                *slot = unit_normal(&mut rng);
+            }
+            mul_lower_chol(a.as_ref(), &z, &mut lz);
+            let col = &mut out[draw * m..(draw + 1) * m];
+            for i in 0..m {
+                col[i] = cov.mean[i] + lz[i];
+            }
+        }
+        Ok(out)
+    }
+
+    fn write_covariance(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance, GprError> {
+        if n_cols != self.d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: n_cols,
+                expected_dim: self.d,
+            });
+        }
+        validate_query(xs, n_rows, n_cols)?;
+        let compiled = &self.compiled;
+        let x_train = self.x.as_ref();
+        let alpha = self.alpha.as_slice();
+        let ws = &self.workspace;
+        let n = self.n;
+        let m = n_rows;
+        let mut query_xs = xs.to_vec();
+        self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
+        let mut query_x = Mat::zeros(m, n_cols);
+        pack_points_into(&query_xs, n_rows, n_cols, query_x.as_mut());
+        let mut query_dist = Mat::zeros(n, m);
+        let mut query_k_star = Mat::zeros(n, m);
+        let mut query_scratch = Mat::zeros(n, m);
+        let mut thread_scratch = empty_thread_scratch();
+        match compiled.coord_mode()? {
+            CoordMode::Dist | CoordMode::Either => {
+                fill_squared_euclidean_cross(
+                    x_train.as_ref(),
+                    query_x.as_ref(),
+                    query_dist.as_mut(),
+                    &mut thread_scratch,
+                );
+                compiled.apply_cross(
+                    query_dist.as_ref(),
+                    query_k_star.as_mut(),
+                    query_scratch.as_mut(),
+                )?;
+            }
+            CoordMode::Points => {
+                compiled.apply_cross_points(
+                    x_train.as_ref(),
+                    query_x.as_ref(),
+                    query_k_star.as_mut(),
+                    query_scratch.as_mut(),
+                )?;
+            }
+        }
+        let mut mean = vec![0.0; m];
+        for (col, slot) in mean.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for (row, &a) in alpha.iter().enumerate() {
+                sum += query_k_star[(row, col)] * a;
+            }
+            *slot = sum;
+        }
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            ws.k_matrix.as_ref(),
+            query_k_star.as_mut(),
+            Par::Seq,
+        );
+        let mut kss = Mat::zeros(m, m);
+        let mut kss_scratch = Mat::zeros(m, m);
+        fill_query_query_kernel(
+            compiled,
+            query_x.as_ref(),
+            kss.as_mut(),
+            kss_scratch.as_mut(),
+            &mut thread_scratch,
+        )?;
+        for col in 0..m {
+            for row in 0..m {
+                let mut dot = 0.0;
+                for k in 0..n {
+                    dot += query_k_star[(k, row)] * query_k_star[(k, col)];
+                }
+                kss[(row, col)] -= dot;
+            }
+        }
+        let noise = self.likelihood.noise_variance();
+        for i in 0..m {
+            let mut latent = kss[(i, i)];
+            if latent < 0.0 {
+                latent = 0.0;
+            }
+            kss[(i, i)] = match options.variance_kind {
+                VarianceKind::Latent => latent,
+                VarianceKind::Observation => latent + noise,
+            };
+        }
+        self.y_transform.inverse_transform_mean(&mut mean)?;
+        let mut covariance = vec![0.0; m * m];
+        for col in 0..m {
+            for row in 0..m {
+                covariance[col * m + row] = kss[(row, col)];
+            }
+        }
+        self.y_transform
+            .inverse_transform_covariance(&mut covariance)?;
+        Ok(PredictiveCovariance {
+            mean,
+            covariance,
+            variance_kind: options.variance_kind,
+        })
+    }
+
     /// Returns leave-one-out mean and observation variance at every training
     /// point.
     ///
@@ -1361,6 +1626,52 @@ impl FittedGpr<Fixed> {
     /// Same as [`Gpr<Fixed>::factor`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         self.factorize_current()
+    }
+}
+
+fn fill_query_query_kernel(
+    compiled: &CompiledKernel,
+    query_x: MatRef<'_, f64>,
+    kss: MatMut<'_, f64>,
+    scratch: MatMut<'_, f64>,
+    thread_scratch: &mut [Mat<f64>],
+) -> Result<(), GprError> {
+    match compiled.coord_mode()? {
+        CoordMode::Dist | CoordMode::Either => {
+            let m = query_x.nrows();
+            let mut dist_ss = Mat::zeros(m, m);
+            fill_squared_euclidean(query_x, dist_ss.as_mut(), thread_scratch);
+            compiled.apply(dist_ss.as_ref(), kss, Triangle::Full, scratch)
+        }
+        CoordMode::Points => compiled.apply_points(query_x, kss, Triangle::Full, scratch),
+    }
+}
+
+fn splitmix64(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / ((1u64 << 53) as f64)
+}
+
+fn unit_normal(state: &mut u64) -> f64 {
+    let u1 = splitmix64(state).max(f64::MIN_POSITIVE);
+    let u2 = splitmix64(state);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+fn mul_lower_chol(l: MatRef<'_, f64>, z: &[f64], out: &mut [f64]) {
+    let m = l.nrows();
+    debug_assert_eq!(z.len(), m);
+    debug_assert_eq!(out.len(), m);
+    for i in 0..m {
+        let mut s = 0.0;
+        for (j, &zj) in z.iter().enumerate().take(i + 1) {
+            s += l[(i, j)] * zj;
+        }
+        out[i] = s;
     }
 }
 
