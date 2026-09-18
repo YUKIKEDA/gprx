@@ -185,12 +185,12 @@ impl KernelSpec {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         require_len(out.len(), self.num_params())?;
         let mut offset = 0;
-        self.write_params(out, &mut offset);
-        Ok(())
+        self.write_params(out, &mut offset)
     }
 
     /// Replaces flattened `θ`. All leaves are updated or none are.
@@ -239,109 +239,133 @@ impl KernelSpec {
         crate::kernel::CompiledKernel::from_spec(self)
     }
 
-    fn write_params(&self, out: &mut [f64], offset: &mut usize) {
+    fn write_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
                 out[*offset] = leaf.log_lengthscale();
                 *offset += 1;
+                Ok(())
             }
             Self::RbfArd(leaf) => {
                 let n = leaf.num_params();
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 *offset += n;
+                Ok(())
             }
             Self::Matern(leaf) => {
                 out[*offset] = leaf.log_lengthscale();
                 *offset += 1;
+                Ok(())
             }
             Self::MaternArd(leaf) => {
                 let n = leaf.num_params();
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 *offset += n;
+                Ok(())
             }
             Self::Periodic(leaf) => {
                 out[*offset] = leaf.log_lengthscale();
                 out[*offset + 1] = leaf.log_period();
                 *offset += 2;
+                Ok(())
             }
             Self::RationalQuadratic(leaf) => {
                 out[*offset] = leaf.log_lengthscale();
                 out[*offset + 1] = leaf.log_alpha();
                 *offset += 2;
+                Ok(())
             }
             Self::RationalQuadraticArd(leaf) => {
                 let n = leaf.lengthscales().num_params();
                 out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
                 out[*offset + n] = leaf.log_alpha();
                 *offset += n + 1;
+                Ok(())
             }
             Self::Constant(leaf) => {
                 out[*offset] = leaf.log_constant();
                 *offset += 1;
+                Ok(())
             }
             Self::Linear(leaf) => {
                 out[*offset] = leaf.log_variance();
                 *offset += 1;
+                Ok(())
             }
             Self::White(leaf) => {
                 out[*offset] = leaf.log_variance();
                 *offset += 1;
+                Ok(())
             }
             Self::Custom(leaf) => leaf.write_params(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
-                left.write_params(out, offset);
-                right.write_params(out, offset);
+                left.write_params(out, offset)?;
+                right.write_params(out, offset)
             }
         }
     }
 
-    pub(crate) fn write_intervals(&self, out: &mut [Interval], offset: &mut usize) {
+    pub(crate) fn write_intervals(
+        &self,
+        out: &mut [Interval],
+        offset: &mut usize,
+    ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
                 out[*offset] = leaf.bounds();
                 *offset += 1;
+                Ok(())
             }
             Self::RbfArd(leaf) => {
                 leaf.lengthscales().write_intervals(out, offset);
+                Ok(())
             }
             Self::Matern(leaf) => {
                 out[*offset] = leaf.bounds();
                 *offset += 1;
+                Ok(())
             }
             Self::MaternArd(leaf) => {
                 leaf.lengthscales().write_intervals(out, offset);
+                Ok(())
             }
             Self::Periodic(leaf) => {
                 out[*offset] = leaf.lengthscale_bounds();
                 out[*offset + 1] = leaf.period_bounds();
                 *offset += 2;
+                Ok(())
             }
             Self::RationalQuadratic(leaf) => {
                 out[*offset] = leaf.lengthscale_bounds();
                 out[*offset + 1] = leaf.alpha_bounds();
                 *offset += 2;
+                Ok(())
             }
             Self::RationalQuadraticArd(leaf) => {
                 leaf.lengthscales().write_intervals(out, offset);
                 out[*offset] = leaf.alpha_bounds();
                 *offset += 1;
+                Ok(())
             }
             Self::Constant(leaf) => {
                 out[*offset] = leaf.bounds();
                 *offset += 1;
+                Ok(())
             }
             Self::Linear(leaf) => {
                 out[*offset] = leaf.bounds();
                 *offset += 1;
+                Ok(())
             }
             Self::White(leaf) => {
                 out[*offset] = leaf.bounds();
                 *offset += 1;
+                Ok(())
             }
             Self::Custom(leaf) => leaf.write_intervals(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
-                left.write_intervals(out, offset);
-                right.write_intervals(out, offset);
+                left.write_intervals(out, offset)?;
+                right.write_intervals(out, offset)
             }
         }
     }
