@@ -23,6 +23,9 @@ pub trait Transform: Send + Sync {
     /// [`GprError::DimensionMismatch`] when `n_cols` differs from the fit, or
     /// [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`.
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
+
+    /// Clones this map into a new box. Used by [`crate::Gpr`] / [`crate::FittedGpr`] clone.
+    fn clone_box(&self) -> Box<dyn Transform>;
 }
 
 fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
@@ -58,6 +61,10 @@ impl Transform for IdentityInput {
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_pack(x, n_rows, n_cols)?;
         require_finite(x)
+    }
+
+    fn clone_box(&self) -> Box<dyn Transform> {
+        Box::new(*self)
     }
 }
 
@@ -163,6 +170,10 @@ impl Transform for StandardizeInput {
             }
         }
         Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn Transform> {
+        Box::new(self.clone())
     }
 }
 
@@ -308,6 +319,10 @@ impl Transform for MinMaxInput {
             }
         }
         Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn Transform> {
+        Box::new(self.clone())
     }
 }
 

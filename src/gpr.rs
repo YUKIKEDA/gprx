@@ -317,7 +317,8 @@ pub struct Prediction {
 /// [`GprError`] so the caller can change `θ` or data and try again.
 /// Input and target transforms default to identity. Training squared
 /// distances default to [`DistanceCachePolicy::Always`]. The default type is
-/// [`Gpr<Lbfgs, FullRecompute>`].
+/// [`Gpr<Lbfgs, FullRecompute>`]. [`Clone`] copies kernel, likelihood,
+/// transforms, optimizer, and policies.
 ///
 /// Isotropic distance fills and lower-triangle kernel writes use Rayon.
 /// There is no parallel on/off flag. Thread count is the process-wide
@@ -369,6 +370,21 @@ where
     }
 }
 
+impl<O: Clone, S> Clone for Gpr<O, S> {
+    fn clone(&self) -> Self {
+        Self {
+            kernel: self.kernel.clone(),
+            likelihood: self.likelihood,
+            x_transform: self.x_transform.clone_box(),
+            y_transform: self.y_transform.clone_box(),
+            optimizer: self.optimizer.clone(),
+            distance_cache_policy: self.distance_cache_policy,
+            jitter_policy: self.jitter_policy,
+            _recompute: PhantomData,
+        }
+    }
+}
+
 /// Fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
 ///
 /// [`Self::neg_log_marginal_likelihood`] is
@@ -381,6 +397,10 @@ where
 /// training point, from `L` and `α`. [`Self::refit`] re-runs the trainer's
 /// optimizer (`Gpr<O>`) or re-factors (`Gpr<Fixed>`) on the same training
 /// data.
+///
+/// [`Clone`] copies the factorization, training observations, transforms, and
+/// optimizer. [`Self::kernel`] is a shared reference; writes go through
+/// [`Self::set_params`].
 ///
 /// # Examples
 ///
@@ -401,21 +421,48 @@ where
 /// ```
 pub struct FittedGpr<O = Lbfgs, S = FullRecompute> {
     kernel: KernelSpec,
-    compiled: Option<CompiledKernel>,
+    compiled: CompiledKernel,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn Transform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
     distance_cache_policy: DistanceCachePolicy,
     jitter_policy: JitterPolicy,
-    workspace: Option<Workspace<DoublePrecision>>,
+    workspace: Workspace<DoublePrecision>,
     query: QueryWorkspace<DoublePrecision>,
-    x: Option<Mat<f64>>,
-    y: Option<Vec<f64>>,
-    alpha: Option<Vec<f64>>,
+    x_obs: Vec<f64>,
+    y_obs: Vec<f64>,
+    x: Mat<f64>,
+    y_train: Vec<f64>,
+    alpha: Vec<f64>,
     n: usize,
     d: usize,
     _recompute: PhantomData<S>,
+}
+
+impl<O: Clone, S> Clone for FittedGpr<O, S> {
+    fn clone(&self) -> Self {
+        Self {
+            kernel: self.kernel.clone(),
+            compiled: self.compiled.clone(),
+            likelihood: self.likelihood,
+            x_transform: self.x_transform.clone_box(),
+            y_transform: self.y_transform.clone_box(),
+            optimizer: self.optimizer.clone(),
+            distance_cache_policy: self.distance_cache_policy,
+            jitter_policy: self.jitter_policy,
+            workspace: self.workspace.clone(),
+            query: self.query.clone(),
+            x_obs: self.x_obs.clone(),
+            y_obs: self.y_obs.clone(),
+            x: self.x.clone(),
+            y_train: self.y_train.clone(),
+            alpha: self.alpha.clone(),
+            n: self.n,
+            d: self.d,
+            _recompute: PhantomData,
+        }
+    }
 }
 
 impl<O, S> fmt::Debug for FittedGpr<O, S>
@@ -658,8 +705,8 @@ where
         n_cols: usize,
         y: &[f64],
     ) -> Result<FittedGpr<O, S>, (Self, GprError)> {
-        let mut model = FittedGpr::from_trainer(self);
-        match model.train(x, n_rows, n_cols, y) {
+        let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
+        match model.optimize_hyperparameters() {
             Ok(()) => Ok(model),
             Err(err) => Err((model.into_trainer(), err)),
         }
@@ -702,11 +749,8 @@ impl Gpr<Fixed> {
         n_cols: usize,
         y: &[f64],
     ) -> Result<FittedGpr<Fixed>, (Self, GprError)> {
-        let mut model = FittedGpr::from_trainer(self);
-        let result = model
-            .prepare_training(x, n_rows, n_cols, y)
-            .and_then(|()| model.factorize_current());
-        match result {
+        let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
+        match model.factorize_current() {
             Ok(()) => Ok(model),
             Err(err) => Err((model.into_trainer(), err)),
         }
@@ -721,25 +765,64 @@ impl<O, S> From<(Gpr<O, S>, GprError)> for GprError {
 }
 
 impl<O, S> FittedGpr<O, S> {
-    fn from_trainer(gpr: Gpr<O, S>) -> Self {
-        Self {
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
+    fn prepare(
+        mut gpr: Gpr<O, S>,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+    ) -> Result<Self, (Gpr<O, S>, GprError)> {
+        if let Err(err) = validate_training(x, n_rows, n_cols, y) {
+            return Err((gpr, err));
+        }
+        let mut x_buf = x.to_vec();
+        if let Err(err) = gpr.x_transform.fit(&x_buf, n_rows, n_cols) {
+            return Err((gpr, err));
+        }
+        if let Err(err) = gpr.x_transform.apply(&mut x_buf, n_rows, n_cols) {
+            return Err((gpr, err));
+        }
+        let mut y_buf = y.to_vec();
+        if let Err(err) = gpr.y_transform.fit(&y_buf) {
+            return Err((gpr, err));
+        }
+        if let Err(err) = gpr.y_transform.transform(&mut y_buf) {
+            return Err((gpr, err));
+        }
+        let mut workspace = match Workspace::new(n_rows) {
+            Ok(ws) => ws,
+            Err(err) => return Err((gpr, err)),
+        };
+        let compiled = gpr.kernel.compile();
+        if gpr.distance_cache_policy == DistanceCachePolicy::Always && compiled.needs_ard_sq_diff()
+        {
+            if let Err(err) = workspace.ensure_ard_sq_diff(n_rows, n_cols) {
+                return Err((gpr, err));
+            }
+        } else {
+            workspace.clear_ard_sq_diff();
+        }
+        Ok(Self {
             kernel: gpr.kernel,
-            compiled: None,
+            compiled,
             likelihood: gpr.likelihood,
             x_transform: gpr.x_transform,
             y_transform: gpr.y_transform,
             optimizer: gpr.optimizer,
             distance_cache_policy: gpr.distance_cache_policy,
             jitter_policy: gpr.jitter_policy,
-            workspace: None,
+            workspace,
             query: QueryWorkspace::new(),
-            x: None,
-            y: None,
-            alpha: None,
-            n: 0,
-            d: 0,
+            x_obs: x.to_vec(),
+            y_obs: y.to_vec(),
+            x: pack_points(&x_buf, n_rows, n_cols),
+            y_train: y_buf,
+            alpha: vec![0.0; n_rows],
+            n: n_rows,
+            d: n_cols,
             _recompute: PhantomData,
-        }
+        })
     }
 
     /// Drops `L` / `α` / training data and returns a trainer with the current
@@ -780,7 +863,23 @@ impl<O, S> FittedGpr<O, S> {
 
     /// Returns `α = A⁻¹ y` from the last successful fit.
     pub fn alpha(&self) -> &[f64] {
-        self.alpha.as_deref().unwrap_or(&[])
+        &self.alpha
+    }
+
+    /// Returns the original training features in column-major order.
+    ///
+    /// Same packing as [`Gpr::fit`] / [`Gpr<Fixed>::factor`]: `n` points by
+    /// `d` features. Values are on the scale passed to fit, before the input
+    /// transform.
+    pub fn x(&self) -> &[f64] {
+        &self.x_obs
+    }
+
+    /// Returns the original training targets.
+    ///
+    /// Values are on the scale passed to fit, before the target transform.
+    pub fn y(&self) -> &[f64] {
+        &self.y_obs
     }
 
     /// Returns the negative log marginal likelihood of the last successful fit.
@@ -789,12 +888,6 @@ impl<O, S> FittedGpr<O, S> {
     /// `α` and the Cholesky factor `L` in the workspace, using
     /// `log|A| = 2 Σ log(L_ii)`. `y` is the target after the target
     /// transform.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::EmptyInput`] if this value was constructed without
-    /// a stored factorization (should not happen for a value returned by
-    /// [`Gpr::fit`]).
     ///
     /// # Examples
     ///
@@ -813,10 +906,12 @@ impl<O, S> FittedGpr<O, S> {
     /// # }
     /// ```
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
-        let y = self.y.as_deref().ok_or(GprError::EmptyInput)?;
-        let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-        let ws = self.workspace.as_ref().ok_or(GprError::EmptyInput)?;
-        Ok(neg_mll_from_factor(ws.k_matrix.as_ref(), y, alpha, self.n))
+        Ok(neg_mll_from_factor(
+            self.workspace.k_matrix.as_ref(),
+            &self.y_train,
+            &self.alpha,
+            self.n,
+        ))
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
@@ -835,6 +930,73 @@ impl<O, S> FittedGpr<O, S> {
         require_param_len(out.len(), self.num_params())?;
         self.kernel.get_params(&mut out[..n_kernel])?;
         self.likelihood.get_params(&mut out[n_kernel..])
+    }
+
+    /// Sets kernel then likelihood `θ` and rebuilds `L` / `α`.
+    ///
+    /// `params` is kernel parameters followed by the likelihood parameter,
+    /// matching [`Self::get_params`]. Transforms and training `X` / `y` are
+    /// not changed. [`Self::kernel`] stays a shared reference; this is the
+    /// write path. After success, [`Gpr<Fixed>::factor`] on
+    /// [`Self::into_trainer`] with [`Self::x`] / [`Self::y`] rebuilds the
+    /// same factorization from the stored observations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// length, [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is
+    /// invalid, or [`GprError::CholeskyFailed`] if `A` cannot be factored.
+    /// Kernel and likelihood `θ` are committed together only after `A`
+    /// factors. A rejected slice or a Cholesky failure leaves stored `θ`
+    /// and `L` / `α` unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let mut fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let mut params = [0.0; 2];
+    /// fitted.get_params(&mut params)?;
+    /// params[0] = 0.5_f64.ln();
+    /// fitted.set_params(&params)?;
+    /// let x = fitted.x().to_vec();
+    /// let y = fitted.y().to_vec();
+    /// let n = fitted.n();
+    /// let d = fitted.d();
+    /// let _fitted = fitted
+    ///     .into_trainer()
+    ///     .with_optimizer(Fixed)
+    ///     .factor(&x, n, d, &y)
+    ///     .map_err(|(_, e)| e)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
+        let n_kernel = self.kernel.num_params();
+        require_param_len(params.len(), self.num_params())?;
+        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        let old_kernel = self.kernel.clone();
+        let old_compiled = self.compiled.clone();
+        let old_likelihood = self.likelihood;
+        self.kernel = kernel;
+        self.compiled = compiled;
+        self.likelihood = likelihood;
+        if let Err(err) = self.factorize_current() {
+            self.kernel = old_kernel;
+            self.compiled = old_compiled;
+            self.likelihood = old_likelihood;
+            let _ = self.factorize_current();
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub(crate) fn objective(&mut self) -> GprObjective<'_, O, S> {
@@ -904,76 +1066,61 @@ impl<O, S> FittedGpr<O, S> {
         params: &[f64],
         out: &mut [f64],
     ) -> Result<f64, GprError> {
-        if self.x.is_none() || self.y.is_none() || self.workspace.is_none() {
-            return Err(GprError::EmptyInput);
-        }
         let n_kernel = self.kernel.num_params();
         let n_params = self.num_params();
         require_param_len(params.len(), n_params)?;
         require_param_len(out.len(), n_params)?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
-        let y = self.y.as_deref().ok_or(GprError::EmptyInput)?;
-        {
-            let x = self.x.as_ref().ok_or(GprError::EmptyInput)?;
-            let ws = workspace_mut(&mut self.workspace)?;
-            if let Err(err) = factor_train_with_policy(
-                &compiled,
-                x.as_ref(),
-                ws,
-                y,
-                likelihood.noise_variance(),
-                FactorPolicy {
-                    cache: self.distance_cache_policy,
-                    jitter: self.jitter_policy,
-                    stage: CholeskyStage::Fit,
-                },
-            ) {
-                let _ = self.factorize_current();
-                return Err(err);
-            }
+        if let Err(err) = factor_train_with_policy(
+            &compiled,
+            self.x.as_ref(),
+            &mut self.workspace,
+            &self.y_train,
+            likelihood.noise_variance(),
+            FactorPolicy {
+                cache: self.distance_cache_policy,
+                jitter: self.jitter_policy,
+                stage: CholeskyStage::Fit,
+            },
+        ) {
+            let _ = self.factorize_current();
+            return Err(err);
         }
-        let alpha = self.alpha.get_or_insert_with(|| vec![0.0; n]);
-        if alpha.len() != n {
-            alpha.resize(n, 0.0);
+        if self.alpha.len() != n {
+            self.alpha.resize(n, 0.0);
         }
-        {
-            let ws = self.workspace.as_ref().ok_or(GprError::EmptyInput)?;
-            for (i, slot) in alpha.iter_mut().enumerate() {
-                *slot = ws.rhs[(i, 0)];
-            }
+        for (i, slot) in self.alpha.iter_mut().enumerate() {
+            *slot = self.workspace.rhs[(i, 0)];
         }
         self.kernel = kernel;
         self.likelihood = likelihood;
-        self.compiled = Some(compiled);
-        let nlml = {
-            let ws = self.workspace.as_ref().ok_or(GprError::EmptyInput)?;
-            let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-            let y = self.y.as_deref().ok_or(GprError::EmptyInput)?;
-            neg_mll_from_factor(ws.k_matrix.as_ref(), y, alpha, n)
-        };
+        self.compiled = compiled;
+        let nlml = neg_mll_from_factor(
+            self.workspace.k_matrix.as_ref(),
+            &self.y_train,
+            &self.alpha,
+            n,
+        );
         {
-            let compiled = self.compiled.as_ref().ok_or(GprError::EmptyInput)?;
-            let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-            let ws = workspace_mut(&mut self.workspace)?;
-            fill_identity(ws.w_matrix.as_mut());
+            let compiled = &self.compiled;
+            fill_identity(self.workspace.w_matrix.as_mut());
             {
-                let stack = MemStack::new(&mut ws.faer_scratch);
+                let stack = MemStack::new(&mut self.workspace.faer_scratch);
                 llt::solve::solve_in_place(
-                    ws.k_matrix.as_ref(),
-                    ws.w_matrix.as_mut(),
+                    self.workspace.k_matrix.as_ref(),
+                    self.workspace.w_matrix.as_mut(),
                     Par::Seq,
                     stack,
                 );
             }
-            form_w_lower(ws.w_matrix.as_mut(), alpha, n);
-            let x = self.x.as_ref().ok_or(GprError::EmptyInput)?;
+            form_w_lower(self.workspace.w_matrix.as_mut(), &self.alpha, n);
             if compiled.needs_product_grad_scratch() {
-                ws.ensure_kernel_scratch(n)?;
+                self.workspace.ensure_kernel_scratch(n)?;
             }
-            let thread_scratch = std::mem::take(&mut ws.thread_scratch);
-            let ard_cache = if compiled.needs_ard_sq_diff() && ws.ard_sq_diff_ready {
-                Some(ws.ard_sq_diff.as_ref())
+            let thread_scratch = std::mem::take(&mut self.workspace.thread_scratch);
+            let ard_cache = if compiled.needs_ard_sq_diff() && self.workspace.ard_sq_diff_ready {
+                Some(self.workspace.ard_sq_diff.as_ref())
             } else {
                 None
             };
@@ -981,24 +1128,28 @@ impl<O, S> FittedGpr<O, S> {
                 for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
                     write_kernel_grad(
                         compiled,
-                        ws.dist_cache.as_ref(),
-                        x.as_ref(),
+                        self.workspace.dist_cache.as_ref(),
+                        self.x.as_ref(),
                         ard_cache,
-                        ws.exp_buf.as_mut(),
-                        ws.kernel_scratch.as_mut(),
+                        self.workspace.exp_buf.as_mut(),
+                        self.workspace.kernel_scratch.as_mut(),
                         i,
                     )?;
-                    let inner = frobenius_lower(ws.w_matrix.as_ref(), ws.exp_buf.as_ref(), n);
+                    let inner = frobenius_lower(
+                        self.workspace.w_matrix.as_ref(),
+                        self.workspace.exp_buf.as_ref(),
+                        n,
+                    );
                     *slot = -0.5 * inner;
                 }
                 Ok::<(), GprError>(())
             })();
-            ws.thread_scratch = thread_scratch;
+            self.workspace.thread_scratch = thread_scratch;
             result?;
             let mut noise_inner = 0.0;
             let d_noise = self.likelihood.noise_variance();
             for i in 0..n {
-                noise_inner += ws.w_matrix[(i, i)] * d_noise;
+                noise_inner += self.workspace.w_matrix[(i, i)] * d_noise;
             }
             out[n_kernel] = -0.5 * noise_inner;
         }
@@ -1019,58 +1170,9 @@ impl<O, S> FittedGpr<O, S> {
         likelihood.set_params(&params[n_kernel..])?;
         let mut kernel = self.kernel.clone();
         kernel.set_params(&params[..n_kernel])?;
-        let mut compiled = match self.compiled.as_ref() {
-            Some(compiled) => compiled.clone(),
-            None => kernel.compile(),
-        };
+        let mut compiled = self.compiled.clone();
         compiled.set_params(&params[..n_kernel])?;
         Ok((kernel, compiled, likelihood))
-    }
-
-    fn train(&mut self, x: &[f64], n_rows: usize, n_cols: usize, y: &[f64]) -> Result<(), GprError>
-    where
-        O: Clone + for<'a> Optimizer<GprObjective<'a, O, S>>,
-    {
-        self.prepare_training(x, n_rows, n_cols, y)?;
-        self.optimize_hyperparameters()
-    }
-
-    fn prepare_training(
-        &mut self,
-        x: &[f64],
-        n_rows: usize,
-        n_cols: usize,
-        y: &[f64],
-    ) -> Result<(), GprError> {
-        validate_training(x, n_rows, n_cols, y)?;
-        self.clear_solution();
-        self.prepare_workspace(n_rows)?;
-        if let Some(ws) = self.workspace.as_mut() {
-            ws.dist_ready = false;
-            ws.ard_sq_diff_ready = false;
-        }
-        let mut x_buf = x.to_vec();
-        self.x_transform.fit(&x_buf, n_rows, n_cols)?;
-        self.x_transform.apply(&mut x_buf, n_rows, n_cols)?;
-        let mut y_buf = y.to_vec();
-        self.y_transform.fit(&y_buf)?;
-        self.y_transform.transform(&mut y_buf)?;
-        let x_mat = pack_points(&x_buf, n_rows, n_cols);
-        self.compiled = Some(self.kernel.compile());
-        if let (Some(compiled), Some(ws)) = (self.compiled.as_ref(), self.workspace.as_mut()) {
-            if self.distance_cache_policy == DistanceCachePolicy::Always
-                && compiled.needs_ard_sq_diff()
-            {
-                ws.ensure_ard_sq_diff(n_rows, n_cols)?;
-            } else {
-                ws.clear_ard_sq_diff();
-            }
-        }
-        self.x = Some(x_mat);
-        self.y = Some(y_buf);
-        self.n = n_rows;
-        self.d = n_cols;
-        Ok(())
     }
 
     fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
@@ -1115,42 +1217,29 @@ impl<O, S> FittedGpr<O, S> {
     fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {
         self.kernel = kernel;
         self.likelihood = likelihood;
-        self.compiled = Some(self.kernel.compile());
+        self.compiled = self.kernel.compile();
         let _ = self.factorize_current();
     }
 
     fn factorize_current(&mut self) -> Result<(), GprError> {
-        let compiled = self.compiled.as_ref().ok_or(GprError::EmptyInput)?;
         let n_rows = self.n;
-        let y_buf = self.y.as_deref().ok_or(GprError::EmptyInput)?;
-        {
-            let x = self.x.as_ref().ok_or(GprError::EmptyInput)?;
-            let ws = workspace_mut(&mut self.workspace)?;
-            if let Err(err) = factor_train_with_policy(
-                compiled,
-                x.as_ref(),
-                ws,
-                y_buf,
-                self.likelihood.noise_variance(),
-                FactorPolicy {
-                    cache: self.distance_cache_policy,
-                    jitter: self.jitter_policy,
-                    stage: CholeskyStage::Fit,
-                },
-            ) {
-                self.alpha = None;
-                return Err(err);
-            }
+        factor_train_with_policy(
+            &self.compiled,
+            self.x.as_ref(),
+            &mut self.workspace,
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            FactorPolicy {
+                cache: self.distance_cache_policy,
+                jitter: self.jitter_policy,
+                stage: CholeskyStage::Fit,
+            },
+        )?;
+        if self.alpha.len() != n_rows {
+            self.alpha.resize(n_rows, 0.0);
         }
-        let alpha = self.alpha.get_or_insert_with(|| vec![0.0; n_rows]);
-        if alpha.len() != n_rows {
-            alpha.resize(n_rows, 0.0);
-        }
-        {
-            let ws = self.workspace.as_ref().ok_or(GprError::EmptyInput)?;
-            for (i, slot) in alpha.iter_mut().enumerate() {
-                *slot = ws.rhs[(i, 0)];
-            }
+        for (i, slot) in self.alpha.iter_mut().enumerate() {
+            *slot = self.workspace.rhs[(i, 0)];
         }
         Ok(())
     }
@@ -1265,10 +1354,10 @@ impl<O, S> FittedGpr<O, S> {
             n_cols,
             self.query.query_x.as_mut(),
         );
-        let compiled = self.compiled.as_ref().ok_or(GprError::EmptyInput)?;
-        let x_train = self.x.as_ref().ok_or(GprError::EmptyInput)?;
-        let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-        let ws = workspace_mut(&mut self.workspace)?;
+        let compiled = &self.compiled;
+        let x_train = self.x.as_ref();
+        let alpha = self.alpha.as_slice();
+        let ws = &mut self.workspace;
         let query = &mut self.query;
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => {
@@ -1357,10 +1446,10 @@ impl<O, S> FittedGpr<O, S> {
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        let compiled = self.compiled.as_ref().ok_or(GprError::EmptyInput)?;
-        let x_train = self.x.as_ref().ok_or(GprError::EmptyInput)?;
-        let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-        let ws = self.workspace.as_ref().ok_or(GprError::EmptyInput)?;
+        let compiled = &self.compiled;
+        let x_train = self.x.as_ref();
+        let alpha = self.alpha.as_slice();
+        let ws = &self.workspace;
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
@@ -1483,9 +1572,9 @@ impl<O, S> FittedGpr<O, S> {
     ///
     /// Same as [`Self::loo_predict`].
     pub fn loo_predict_with(&self, options: PredictOptions) -> Result<Prediction, GprError> {
-        let y = self.y.as_deref().ok_or(GprError::EmptyInput)?;
-        let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-        let ws = self.workspace.as_ref().ok_or(GprError::EmptyInput)?;
+        let y = self.y_train.as_slice();
+        let alpha = self.alpha.as_slice();
+        let ws = &self.workspace;
         let n = self.n;
         let mut q_diag = vec![0.0; n];
         inv_diag_from_chol_l(ws.k_matrix.as_ref(), &mut q_diag);
@@ -1512,31 +1601,6 @@ impl<O, S> FittedGpr<O, S> {
             variance_kind: options.variance_kind,
         })
     }
-
-    fn clear_solution(&mut self) {
-        self.compiled = None;
-        self.x = None;
-        self.y = None;
-        self.alpha = None;
-        self.n = 0;
-        self.d = 0;
-    }
-
-    fn prepare_workspace(&mut self, n: usize) -> Result<(), GprError> {
-        match &mut self.workspace {
-            Some(ws) => ws.ensure(n),
-            None => {
-                self.workspace = Some(Workspace::new(n)?);
-                Ok(())
-            }
-        }
-    }
-}
-
-fn workspace_mut(
-    workspace: &mut Option<Workspace<DoublePrecision>>,
-) -> Result<&mut Workspace<DoublePrecision>, GprError> {
-    workspace.as_mut().ok_or(GprError::EmptyInput)
 }
 
 /// Writes the training Gram matrix.
@@ -2015,6 +2079,11 @@ mod tests {
         assert_send_sync::<super::JitterPolicy>();
         assert_send_sync::<super::FixedJitter>();
         assert_send_sync::<super::AdaptiveJitter>();
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<Gpr>();
+        assert_clone::<Gpr<Fixed>>();
+        assert_clone::<FittedGpr>();
+        assert_clone::<FittedGpr<Fixed>>();
     }
 
     #[test]
@@ -2022,7 +2091,7 @@ mod tests {
         let gpr = rbf_gpr(1.0, 0.1)
             .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
             .expect("spd");
-        let ws = gpr.workspace.as_ref().expect("workspace");
+        let ws = &gpr.workspace;
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
             ws.thread_scratch
@@ -2042,7 +2111,7 @@ mod tests {
             gpr.predict_into(&[0.5], 1, 1, &mut Prediction::default()),
             Err(GprError::WorkspaceTooSmall)
         ));
-        let ws = gpr.workspace.as_ref().expect("workspace");
+        let ws = &gpr.workspace;
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
             ws.thread_scratch
@@ -2062,7 +2131,7 @@ mod tests {
         assert_eq!(into.mean, owned.mean);
         assert_eq!(into.variance, owned.variance);
         assert_eq!(into.variance_kind, owned.variance_kind);
-        let ws = gpr.workspace.as_ref().expect("workspace");
+        let ws = &gpr.workspace;
         assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
         assert!(
             ws.thread_scratch
@@ -2087,7 +2156,7 @@ mod tests {
         for i in 0..3 {
             assert_close(restored[i], y[i]);
         }
-        let ws = gpr.workspace.as_ref().expect("workspace");
+        let ws = &gpr.workspace;
         let l = copy_lower(ws.k_matrix.as_ref());
         let a_from_l = &l * l.transpose();
         for col in 0..3 {
@@ -2348,6 +2417,103 @@ mod tests {
     }
 
     #[test]
+    fn set_params_refactors_and_training_xy_roundtrip_through_factor() {
+        let x = [0.0, 1.0];
+        let y = [0.25, -0.5];
+        let mut fitted = rbf_gpr(1.0, 0.1)
+            .with_optimizer(Fixed)
+            .factor(&x, 2, 1, &y)
+            .expect("spd");
+        assert_eq!(fitted.x(), x.as_slice());
+        assert_eq!(fitted.y(), y.as_slice());
+        let mut params = [0.0; 2];
+        fitted.get_params(&mut params).expect("len 2");
+        params[0] = 2.0_f64.ln();
+        fitted.set_params(&params).expect("spd at new theta");
+        let mut got = [0.0; 2];
+        fitted.get_params(&mut got).expect("len 2");
+        assert_close(got[0], params[0]);
+        assert_close(got[1], params[1]);
+        let pred = fitted.predict(&[0.5], 1, 1).expect("fitted");
+        assert!(pred.mean[0].is_finite());
+
+        let n = fitted.n();
+        let d = fitted.d();
+        let x_obs = fitted.x().to_vec();
+        let y_obs = fitted.y().to_vec();
+        let alpha = fitted.alpha().to_vec();
+        let rebuilt = fitted
+            .into_trainer()
+            .with_optimizer(Fixed)
+            .factor(&x_obs, n, d, &y_obs)
+            .expect("same observations");
+        assert_eq!(rebuilt.alpha().len(), alpha.len());
+        for (a, b) in rebuilt.alpha().iter().zip(alpha.iter()) {
+            assert_close(*a, *b);
+        }
+    }
+
+    #[test]
+    fn set_params_rejects_wrong_length_without_changing_theta() {
+        let mut fitted = rbf_gpr(1.0, 0.1)
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+            .expect("spd");
+        let mut before = [0.0; 2];
+        fitted.get_params(&mut before).expect("len 2");
+        assert!(fitted.set_params(&[0.0]).is_err());
+        let mut after = [0.0; 2];
+        fitted.get_params(&mut after).expect("len 2");
+        assert_close(before[0], after[0]);
+        assert_close(before[1], after[1]);
+    }
+
+    #[test]
+    fn clone_preserves_trainer_and_fitted_predict() {
+        let trainer = rbf_gpr(1.25, 0.1);
+        let trainer_clone = trainer.clone();
+        let fitted = trainer
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
+            .expect("spd");
+        let fitted_clone = fitted.clone();
+        let p1 = fitted.predict(&[0.25], 1, 1).expect("fitted");
+        let p2 = fitted_clone.predict(&[0.25], 1, 1).expect("clone");
+        assert_close(p1.mean[0], p2.mean[0]);
+        assert_close(p1.variance[0], p2.variance[0]);
+        let other = trainer_clone
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
+            .expect("spd");
+        let p3 = other.predict(&[0.25], 1, 1).expect("cloned trainer");
+        assert_close(p1.mean[0], p3.mean[0]);
+    }
+
+    #[test]
+    fn training_y_is_original_scale_with_standardize_target() {
+        let y = [1.0, 3.0];
+        let fitted = rbf_gpr(1.0, 0.1)
+            .with_target_transform(StandardizeTarget::new())
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0], 2, 1, &y)
+            .expect("spd");
+        assert_eq!(fitted.y(), y.as_slice());
+        let x_obs = fitted.x().to_vec();
+        let y_obs = fitted.y().to_vec();
+        let n = fitted.n();
+        let d = fitted.d();
+        let pred = fitted.predict(&[0.5], 1, 1).expect("fitted");
+        let rebuilt = fitted
+            .into_trainer()
+            .with_optimizer(Fixed)
+            .factor(&x_obs, n, d, &y_obs)
+            .expect("roundtrip");
+        let pred2 = rebuilt.predict(&[0.5], 1, 1).expect("rebuilt");
+        assert_close(pred.mean[0], pred2.mean[0]);
+        assert_close(pred.variance[0], pred2.variance[0]);
+    }
+
+    #[test]
     fn minmax_input_fit_predicts() {
         let gpr = rbf_gpr(1.0, 0.1)
             .with_input_transform(MinMaxInput::new())
@@ -2386,7 +2552,7 @@ mod tests {
             .expect("spd");
         let a = 1.0 + noise;
         let log_det = a.ln();
-        let ws = gpr.workspace.as_ref().expect("workspace");
+        let ws = &gpr.workspace;
         assert_close(super::log_det_from_l(ws.k_matrix.as_ref(), 1), log_det);
         let quad = y * y / a;
         let expected = 0.5 * (quad + log_det + (2.0 * std::f64::consts::PI).ln());
@@ -2407,7 +2573,7 @@ mod tests {
         let diag = 1.0 + noise;
         let det = diag * diag - k01 * k01;
         let log_det = det.ln();
-        let ws = gpr.workspace.as_ref().expect("workspace");
+        let ws = &gpr.workspace;
         assert_close(super::log_det_from_l(ws.k_matrix.as_ref(), 2), log_det);
         let inv_scale = 1.0 / det;
         let quad =
@@ -2522,7 +2688,8 @@ mod tests {
             .with_optimizer(Fixed)
             .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
             .expect("spd");
-        if let Some(ws) = gpr.workspace.as_mut() {
+        {
+            let ws = &mut gpr.workspace;
             let n = ws.dist_cache.nrows();
             ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
             ws.dist_ready = false;
@@ -2552,7 +2719,8 @@ mod tests {
         let good = gpr
             .value_and_gradient_into(&params, &mut grad)
             .expect("spd");
-        if let Some(ws) = gpr.workspace.as_mut() {
+        {
+            let ws = &mut gpr.workspace;
             let n = ws.dist_cache.nrows();
             ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
             ws.dist_ready = true;
@@ -2614,11 +2782,8 @@ mod tests {
             .with_optimizer(Fixed)
             .factor(&x, 3, 2, &y)
             .expect("spd");
-        assert_eq!(never.workspace.as_ref().expect("ws").ard_sq_diff.ncols(), 0);
-        assert_eq!(
-            always.workspace.as_ref().expect("ws").ard_sq_diff.ncols(),
-            6
-        );
+        assert_eq!(never.workspace.ard_sq_diff.ncols(), 0);
+        assert_eq!(always.workspace.ard_sq_diff.ncols(), 6);
         let mut params = [0.0; 3];
         never.get_params(&mut params).expect("len 3");
         let mut grad_n = [0.0; 3];
@@ -2654,8 +2819,8 @@ mod tests {
             before.iter().zip(&after).any(|(a, b)| (a - b).abs() > 1e-9),
             "L-BFGS should move ARD θ: before={before:?}, after={after:?}"
         );
-        assert_eq!(gpr.workspace.as_ref().expect("ws").ard_sq_diff.ncols(), 6);
-        assert!(gpr.workspace.as_ref().expect("ws").ard_sq_diff_ready);
+        assert_eq!(gpr.workspace.ard_sq_diff.ncols(), 6);
+        assert!(gpr.workspace.ard_sq_diff_ready);
     }
 
     #[test]
@@ -2673,7 +2838,8 @@ mod tests {
         let good = gpr
             .value_and_gradient_into(&params, &mut grad)
             .expect("spd");
-        if let Some(ws) = gpr.workspace.as_mut() {
+        {
+            let ws = &mut gpr.workspace;
             let n = 3;
             for dim in 0..2 {
                 for col in 0..n {
@@ -2701,7 +2867,7 @@ mod tests {
             .factor(&[0.0, 0.8, 1.7, 0.2, -0.4, 0.9], 3, 2, &[0.4, -0.2, 0.9])
             .expect("spd n=3");
         {
-            let ws = gpr.workspace.as_ref().expect("ws");
+            let ws = &gpr.workspace;
             assert_eq!(ws.ard_sq_diff.nrows(), 3);
             assert_eq!(ws.ard_sq_diff.ncols(), 6);
         }
@@ -2715,7 +2881,7 @@ mod tests {
                 &[0.4, -0.2, 0.9, 0.1],
             )
             .expect("spd n=4");
-        let ws = gpr.workspace.as_ref().expect("ws");
+        let ws = &gpr.workspace;
         assert_eq!(ws.ard_sq_diff.nrows(), 4);
         assert_eq!(ws.ard_sq_diff.ncols(), 8);
         assert!(ws.ard_sq_diff_ready);
@@ -2728,7 +2894,7 @@ mod tests {
             .with_optimizer(Fixed)
             .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
             .expect("spd");
-        let ws = gpr.workspace.as_ref().expect("ws");
+        let ws = &gpr.workspace;
         assert_eq!(ws.ard_sq_diff.nrows(), 0);
         assert_eq!(ws.ard_sq_diff.ncols(), 0);
         assert!(!ws.ard_sq_diff_ready);
@@ -3384,7 +3550,7 @@ mod tests {
         assert_eq!(alpha.len(), 2);
         assert!(alpha.iter().all(|a| a.is_finite()));
         {
-            let ws = gpr.workspace.as_ref().expect("workspace");
+            let ws = &gpr.workspace;
             assert_eq!(ws.k_matrix.nrows(), 2);
         }
         let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
