@@ -66,7 +66,7 @@ impl MaternKernel {
         validate_lengthscale(lengthscale)?;
         Ok(Self {
             nu,
-            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
+            lengthscale: BoundedParam::default_positive(lengthscale)?,
         })
     }
 
@@ -79,7 +79,7 @@ impl MaternKernel {
     pub fn from_log_lengthscale(log_lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
         Ok(Self {
             nu,
-            lengthscale: BoundedParam::sklearn_positive(
+            lengthscale: BoundedParam::default_positive(
                 validate_log_lengthscale(log_lengthscale)?.exp(),
             )?,
         })

@@ -190,7 +190,7 @@ impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
                 reason: format!("expected {n} parameters, got {}", init.len()),
             });
         }
-        let mut intervals = vec![Interval::SKLEARN_POSITIVE; n];
+        let mut intervals = vec![Interval::DEFAULT_POSITIVE; n];
         objective.fill_intervals(&mut intervals)?;
         let mut best: Option<OptResult> = None;
         let first_z = log_theta_to_z(init, &intervals)?;
@@ -671,7 +671,7 @@ mod tests {
             .unwrap_or_else(|(_, e)| panic!("{e}"));
         let mut log_theta = [0.0; 2];
         gpr.get_params(&mut log_theta).expect("len 2");
-        let intervals = [Interval::SKLEARN_POSITIVE, Interval::SKLEARN_POSITIVE];
+        let intervals = [Interval::DEFAULT_POSITIVE, Interval::DEFAULT_POSITIVE];
         let z = super::log_theta_to_z(&log_theta, &intervals).expect("z");
         let mut obj = gpr.objective();
         let mut mapped = super::LogitMapped {
@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn logit_roundtrip_stays_inside_interval() {
-        let interval = Interval::SKLEARN_POSITIVE;
+        let interval = Interval::DEFAULT_POSITIVE;
         let x = 2.5;
         let z = super::user_to_z(x, interval).expect("inside");
         let back = super::z_to_user(z, interval);

@@ -46,7 +46,7 @@ impl GaussianLikelihood {
             return Err(invalid_noise("noise variance must be positive"));
         }
         Ok(Self {
-            noise_variance: BoundedParam::sklearn_positive(noise_variance)?,
+            noise_variance: BoundedParam::default_positive(noise_variance)?,
         })
     }
 
@@ -60,7 +60,7 @@ impl GaussianLikelihood {
     pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GprError> {
         let log_noise_variance = validate_log_noise_variance(log_noise_variance)?;
         Ok(Self {
-            noise_variance: BoundedParam::sklearn_positive(log_noise_variance.exp())?,
+            noise_variance: BoundedParam::default_positive(log_noise_variance.exp())?,
         })
     }
 

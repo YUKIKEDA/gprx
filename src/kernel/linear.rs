@@ -39,7 +39,7 @@ impl LinearKernel {
     pub fn new(variance: f64) -> Result<Self, GprError> {
         validate_positive_finite(variance, "linear variance")?;
         Ok(Self {
-            variance: BoundedParam::sklearn_positive(variance)?,
+            variance: BoundedParam::default_positive(variance)?,
         })
     }
 
@@ -52,7 +52,7 @@ impl LinearKernel {
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
         let log_variance = validate_log_positive(log_variance, "linear variance")?;
         Ok(Self {
-            variance: BoundedParam::sklearn_positive(log_variance.exp())?,
+            variance: BoundedParam::default_positive(log_variance.exp())?,
         })
     }
 

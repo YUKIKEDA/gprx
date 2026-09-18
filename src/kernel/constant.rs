@@ -40,7 +40,7 @@ impl ConstantKernel {
     pub fn new(constant: f64) -> Result<Self, GprError> {
         validate_positive_finite(constant, "constant value")?;
         Ok(Self {
-            constant: BoundedParam::sklearn_positive(constant)?,
+            constant: BoundedParam::default_positive(constant)?,
         })
     }
 
@@ -53,7 +53,7 @@ impl ConstantKernel {
     pub fn from_log_constant(log_constant: f64) -> Result<Self, GprError> {
         let log_constant = validate_log_positive(log_constant, "constant value")?;
         Ok(Self {
-            constant: BoundedParam::sklearn_positive(log_constant.exp())?,
+            constant: BoundedParam::default_positive(log_constant.exp())?,
         })
     }
 

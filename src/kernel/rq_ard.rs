@@ -48,7 +48,7 @@ impl RationalQuadraticArdKernel {
         validate_positive_finite(alpha, "alpha")?;
         Ok(Self {
             lengthscales: ArdLengthscales::new(lengthscales)?,
-            alpha: BoundedParam::sklearn_positive(alpha)?,
+            alpha: BoundedParam::default_positive(alpha)?,
         })
     }
 
@@ -64,7 +64,7 @@ impl RationalQuadraticArdKernel {
     ) -> Result<Self, GprError> {
         Ok(Self {
             lengthscales: ArdLengthscales::from_log_lengthscales(log_lengthscales)?,
-            alpha: BoundedParam::sklearn_positive(
+            alpha: BoundedParam::default_positive(
                 validate_log_positive(log_alpha, "alpha")?.exp(),
             )?,
         })

@@ -42,7 +42,7 @@ impl RbfKernel {
     pub fn new(lengthscale: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         Ok(Self {
-            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
+            lengthscale: BoundedParam::default_positive(lengthscale)?,
         })
     }
 
@@ -55,7 +55,7 @@ impl RbfKernel {
     pub fn from_log_lengthscale(log_lengthscale: f64) -> Result<Self, GprError> {
         let log_lengthscale = validate_log_lengthscale(log_lengthscale)?;
         Ok(Self {
-            lengthscale: BoundedParam::sklearn_positive(log_lengthscale.exp())?,
+            lengthscale: BoundedParam::default_positive(log_lengthscale.exp())?,
         })
     }
 
