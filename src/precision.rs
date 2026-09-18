@@ -1,7 +1,6 @@
 //! Storage and refinement scalar policy.
 //!
-//! Phase 1 implements [`DoublePrecision`] only. Mixed and single precision wait
-//! until Phase 5.
+//! Phase 1 implements [`DoublePrecision`] only. Mixed precision is P5-1 / P5-2.
 
 /// Selects storage and residual-refinement scalar types for GP computations.
 pub trait PrecisionPolicy {
@@ -14,7 +13,7 @@ pub trait PrecisionPolicy {
 /// Uses `f64` for both stored buffers and residual refinement.
 ///
 /// This is the Phase 1 default. Fit (MLL and gradients) stays in double
-/// precision; mixed-precision iterative refinement is a later option.
+/// precision; mixed-precision iterative refinement is P5-1 / P5-2.
 ///
 /// # Examples
 ///

@@ -17,7 +17,7 @@ use crate::objective::GprObjective;
 use crate::optimizer::{Lbfgs, OptResult, Optimizer};
 use crate::precision::DoublePrecision;
 use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
-use crate::workspace::{Workspace, empty_thread_scratch};
+use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch};
 
 /// Which predictive variance [`Prediction`] reports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -170,7 +170,8 @@ impl fmt::Debug for Gpr {
 /// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
 /// a diagonal variance; [`Self::predict_into`] writes into a reused
-/// [`Prediction`]. [`Self::loo_predict`] is the GPML leave-one-out at every
+/// [`Prediction`] and crate-private query buffers (not the fit workspace).
+/// [`Self::loo_predict`] is the GPML leave-one-out at every
 /// training point, from `L` and `α`. [`Self::refit`] re-factors or re-runs
 /// L-BFGS on the same training data.
 ///
@@ -199,6 +200,7 @@ pub struct FittedGpr {
     y_transform: Box<dyn TargetTransform>,
     distance_cache_policy: DistanceCachePolicy,
     workspace: Option<Workspace<DoublePrecision>>,
+    query: QueryWorkspace<DoublePrecision>,
     x: Option<Mat<f64>>,
     y: Option<Vec<f64>>,
     alpha: Option<Vec<f64>>,
@@ -369,6 +371,7 @@ impl FittedGpr {
             y_transform: gpr.y_transform,
             distance_cache_policy: gpr.distance_cache_policy,
             workspace: None,
+            query: QueryWorkspace::new(),
             x: None,
             y: None,
             alpha: None,
@@ -897,38 +900,45 @@ impl FittedGpr {
             });
         }
         validate_query(xs, n_rows, n_cols)?;
+        let n = self.n;
+        let m = n_rows;
+        self.query.ensure(n, m, n_cols)?;
+        self.query.query_xs.copy_from_slice(xs);
+        self.x_transform
+            .apply(&mut self.query.query_xs, n_rows, n_cols)?;
+        pack_points_into(
+            &self.query.query_xs,
+            n_rows,
+            n_cols,
+            self.query.query_x.as_mut(),
+        );
         let compiled = self.compiled.as_ref().ok_or(GprError::EmptyInput)?;
         let x_train = self.x.as_ref().ok_or(GprError::EmptyInput)?;
         let alpha = self.alpha.as_deref().ok_or(GprError::EmptyInput)?;
-        let n = self.n;
-        let m = n_rows;
         let ws = workspace_mut(&mut self.workspace)?;
-        ws.ensure_query(n, m, n_cols)?;
-        ws.query_xs.copy_from_slice(xs);
-        self.x_transform.apply(&mut ws.query_xs, n_rows, n_cols)?;
-        pack_points_into(&ws.query_xs, n_rows, n_cols, ws.query_x.as_mut());
+        let query = &mut self.query;
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => {
                 let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
                 fill_squared_euclidean_cross(
                     x_train.as_ref(),
-                    ws.query_x.as_ref(),
-                    ws.query_dist.as_mut(),
+                    query.query_x.as_ref(),
+                    query.query_dist.as_mut(),
                     &mut thread_scratch,
                 );
                 ws.thread_scratch = thread_scratch;
                 compiled.apply_cross(
-                    ws.query_dist.as_ref(),
-                    ws.query_k_star.as_mut(),
-                    ws.query_scratch.as_mut(),
+                    query.query_dist.as_ref(),
+                    query.query_k_star.as_mut(),
+                    query.query_scratch.as_mut(),
                 )?;
             }
             CoordMode::Points => {
                 compiled.apply_cross_points(
                     x_train.as_ref(),
-                    ws.query_x.as_ref(),
-                    ws.query_k_star.as_mut(),
-                    ws.query_scratch.as_mut(),
+                    query.query_x.as_ref(),
+                    query.query_k_star.as_mut(),
+                    query.query_scratch.as_mut(),
                 )?;
             }
         }
@@ -941,29 +951,29 @@ impl FittedGpr {
         for (col, mean) in out.mean.iter_mut().enumerate() {
             let mut sum = 0.0;
             for (row, &a) in alpha.iter().enumerate() {
-                sum += ws.query_k_star[(row, col)] * a;
+                sum += query.query_k_star[(row, col)] * a;
             }
             *mean = sum;
         }
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             ws.k_matrix.as_ref(),
-            ws.query_k_star.as_mut(),
+            query.query_k_star.as_mut(),
             Par::Seq,
         );
         match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut ws.query_kss)?,
+            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query.query_kss)?,
             CoordMode::Points => {
-                compiled.fill_diag_points(ws.query_x.as_ref(), &mut ws.query_kss)?
+                compiled.fill_diag_points(query.query_x.as_ref(), &mut query.query_kss)?
             }
         }
         let noise = self.likelihood.noise_variance();
         for col in 0..m {
             let mut vnorm = 0.0;
             for row in 0..n {
-                let v = ws.query_k_star[(row, col)];
+                let v = query.query_k_star[(row, col)];
                 vnorm += v * v;
             }
-            let mut latent = ws.query_kss[col] - vnorm;
+            let mut latent = query.query_kss[col] - vnorm;
             if latent < 0.0 {
                 latent = 0.0;
             }
@@ -1548,11 +1558,8 @@ mod tests {
         let mut gpr = rbf_gpr(1.0, 0.1)
             .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
             .expect("spd");
-        {
-            let ws = gpr.workspace.as_mut().expect("workspace");
-            ws.ensure_query(2, 1, 1).expect("query");
-            ws.query_scratch = Mat::<f64>::zeros(1, 1);
-        }
+        gpr.query.ensure(2, 1, 1).expect("query");
+        gpr.query.query_scratch = Mat::<f64>::zeros(1, 1);
         assert!(matches!(
             gpr.predict_into(&[0.5], 1, 1, &mut Prediction::default()),
             Err(GprError::WorkspaceTooSmall)
