@@ -670,6 +670,7 @@ fn value_and_gradient_cholesky_failure_keeps_params() {
     .with_optimizer(Fixed)
     .factor(&[0.0, 0.0], 2, 1, &[0.5, -0.25])
     .expect("spd");
+    let snapshot = gpr.clone();
     let mut before = [0.0; 2];
     gpr.get_params(&mut before).expect("len 2");
     let mut bad = before;
@@ -684,6 +685,20 @@ fn value_and_gradient_cholesky_failure_keeps_params() {
     gpr.get_params(&mut after).expect("len 2");
     assert_close(after[0], before[0]);
     assert_close(after[1], before[1]);
+    let pred = gpr.predict(&[0.0], 1, 1).expect("usable after failed grad");
+    let pred0 = snapshot.predict(&[0.0], 1, 1).expect("snapshot predict");
+    assert_close(pred.mean[0], pred0.mean[0]);
+    assert_close(pred.variance[0], pred0.variance[0]);
+    assert_close(
+        gpr.neg_log_marginal_likelihood().expect("nlml"),
+        snapshot
+            .neg_log_marginal_likelihood()
+            .expect("snapshot nlml"),
+    );
+    assert_eq!(gpr.alpha().len(), snapshot.alpha().len());
+    for (a, b) in gpr.alpha().iter().zip(snapshot.alpha()) {
+        assert_close(*a, *b);
+    }
     gpr.value_and_gradient_into(&before, &mut grad)
         .expect("restore");
 }
