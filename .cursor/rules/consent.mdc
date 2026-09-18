@@ -34,6 +34,7 @@ When listing options:
 2. Give every option a short 利点 / 欠点 (table or bullets)
 3. Do not implement, file Issues, or edit roadmap until the user names the artifact and the action
 4. Do not append to **意図的に今やらない** (or delete from it) as a way to settle scope. That list changes only through Grill → Issue (workflow.mdc)
+5. A recommended pick is not a DoD. Do not write formats, pass/fail numbers, or file layouts into `.dev/roadmap.md` until Grill on that row finishes (`.cursor/rules/workflow.mdc` **DoD**)
 
 「次に進んで」is the current roadmap row only. It is not consent to add rows, file extra Issues, or expand an open design question.
 

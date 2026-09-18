@@ -8,3 +8,5 @@ Interview me relentlessly about every aspect of this plan until we reach a share
 Ask the questions one at a time.
 
 If a question can be answered by exploring the codebase, explore the codebase instead.
+
+Do not write a Definition of Done into `.dev/roadmap.md` or the GitHub Issue until this Grill finishes and the user names the Issue and the DoD text. A recommended answer in a question is not a DoD. See `.cursor/rules/workflow.mdc` **DoD**.
