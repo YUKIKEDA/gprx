@@ -43,7 +43,7 @@ impl ArdLengthscales {
         let mut params = Vec::with_capacity(lengthscales.len());
         for &ell in lengthscales {
             validate_lengthscale(ell)?;
-            params.push(BoundedParam::sklearn_positive(ell)?);
+            params.push(BoundedParam::default_positive(ell)?);
         }
         Self::from_params(params)
     }
@@ -59,7 +59,7 @@ impl ArdLengthscales {
         let mut params = Vec::with_capacity(log_lengthscales.len());
         for &theta in log_lengthscales {
             let log = validate_log_lengthscale(theta)?;
-            params.push(BoundedParam::sklearn_positive(log.exp())?);
+            params.push(BoundedParam::default_positive(log.exp())?);
         }
         Self::from_params(params)
     }

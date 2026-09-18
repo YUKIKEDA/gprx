@@ -46,8 +46,8 @@ impl PeriodicKernel {
         validate_lengthscale(lengthscale)?;
         validate_positive_finite(period, "period")?;
         Ok(Self {
-            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
-            period: BoundedParam::sklearn_positive(period)?,
+            lengthscale: BoundedParam::default_positive(lengthscale)?,
+            period: BoundedParam::default_positive(period)?,
         })
     }
 
@@ -59,10 +59,10 @@ impl PeriodicKernel {
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log(log_lengthscale: f64, log_period: f64) -> Result<Self, GprError> {
         Ok(Self {
-            lengthscale: BoundedParam::sklearn_positive(
+            lengthscale: BoundedParam::default_positive(
                 validate_log_lengthscale(log_lengthscale)?.exp(),
             )?,
-            period: BoundedParam::sklearn_positive(
+            period: BoundedParam::default_positive(
                 validate_log_positive(log_period, "period")?.exp(),
             )?,
         })

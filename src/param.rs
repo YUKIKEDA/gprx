@@ -51,8 +51,9 @@ pub struct Interval {
 }
 
 impl Interval {
-    /// sklearn-like finite default `(1e-5, 1e5)` for positive kernel parameters.
-    pub const SKLEARN_POSITIVE: Self = Self { lo: 1e-5, hi: 1e5 };
+    /// Default open interval `(1e-5, 1e5)` for positive kernel and likelihood
+    /// parameters (`ℓ`, `σn²`, constant `c`, …).
+    pub const DEFAULT_POSITIVE: Self = Self { lo: 1e-5, hi: 1e5 };
 
     /// Builds a finite open interval.
     ///
@@ -99,7 +100,7 @@ impl Interval {
 /// use gprx::{BoundedParam, Interval};
 ///
 /// # fn main() -> Result<(), gprx::IntervalError> {
-/// let param = BoundedParam::new(1.0, Interval::SKLEARN_POSITIVE)?;
+/// let param = BoundedParam::new(1.0, Interval::DEFAULT_POSITIVE)?;
 /// assert!((param.value() - 1.0).abs() < 1e-15);
 /// # Ok(())
 /// # }
@@ -129,13 +130,13 @@ impl BoundedParam {
         }
     }
 
-    /// Builds a parameter on [`Interval::SKLEARN_POSITIVE`].
+    /// Builds a parameter on [`Interval::DEFAULT_POSITIVE`].
     ///
     /// # Errors
     ///
     /// Same as [`Self::new`].
-    pub fn sklearn_positive(value: f64) -> Result<Self, IntervalError> {
-        Self::new(value, Interval::SKLEARN_POSITIVE)
+    pub fn default_positive(value: f64) -> Result<Self, IntervalError> {
+        Self::new(value, Interval::DEFAULT_POSITIVE)
     }
 
     /// Returns the value in user units.
@@ -207,7 +208,7 @@ mod tests {
 
     #[test]
     fn bounded_param_rejects_endpoint_and_outside() {
-        let interval = Interval::SKLEARN_POSITIVE;
+        let interval = Interval::DEFAULT_POSITIVE;
         assert!(matches!(
             BoundedParam::new(interval.lo(), interval),
             Err(IntervalError::OutOfRange { .. })
@@ -220,7 +221,7 @@ mod tests {
             BoundedParam::new(1e6, interval),
             Err(IntervalError::OutOfRange { .. })
         ));
-        let param = BoundedParam::sklearn_positive(1.0).expect("inside");
+        let param = BoundedParam::default_positive(1.0).expect("inside");
         assert!((param.value() - 1.0).abs() < 1e-15);
         assert!((param.ln() - 1.0_f64.ln()).abs() < 1e-15);
     }

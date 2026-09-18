@@ -45,8 +45,8 @@ impl RationalQuadraticKernel {
         validate_lengthscale(lengthscale)?;
         validate_positive_finite(alpha, "alpha")?;
         Ok(Self {
-            lengthscale: BoundedParam::sklearn_positive(lengthscale)?,
-            alpha: BoundedParam::sklearn_positive(alpha)?,
+            lengthscale: BoundedParam::default_positive(lengthscale)?,
+            alpha: BoundedParam::default_positive(alpha)?,
         })
     }
 
@@ -58,10 +58,10 @@ impl RationalQuadraticKernel {
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
     pub fn from_log(log_lengthscale: f64, log_alpha: f64) -> Result<Self, GprError> {
         Ok(Self {
-            lengthscale: BoundedParam::sklearn_positive(
+            lengthscale: BoundedParam::default_positive(
                 validate_log_lengthscale(log_lengthscale)?.exp(),
             )?,
-            alpha: BoundedParam::sklearn_positive(
+            alpha: BoundedParam::default_positive(
                 validate_log_positive(log_alpha, "alpha")?.exp(),
             )?,
         })
