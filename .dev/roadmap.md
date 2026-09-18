@@ -2,9 +2,9 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P3-1（`ldlt::delete_rows_and_cols_clobber`）。** Phase 2 は P2-9 で閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P2B-1（最適化ノブと `Gpr<Fixed>`）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
-Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
+進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 →（Grill・タスク詳細化・Issue 更新）→ 作業 → PR → 人間レビュー → マージ。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
 ## GitHub Issue 対応
 
@@ -38,20 +38,20 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
 | 2   | 高速化                | Phase 1 を壊さず速くする       | ボトルネック順に最適化。キャッシュ・Rayon・SIMD。P2-8 typestate。P2-9 で `phase-2`、alloc 0、README / rustdoc / 例 |
+| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。P3-1 より前 |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
-| 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。Z 固定。対角予測                                                |
-| 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック                              |
+| 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。初期は Z 固定。あとから Z 最適化と Sparse オンライン |
+| 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック。fit 中の `L` / `W` バッファ共用 |
 
 ## 依存
 
 ```
-M0 → 1a → 1b → 2
-                → 3
-                → 4 → （Z 最適化は未決、§14）
+M0 → 1a → 1b → 2 → 2b → 3
+                     → 4 → P4-5（Z 最適化）→ P4-7（Sparse オンライン、3 のあと）
                 2 の計測のあと → 5
 ```
 
-3 は P2-9 のあと。4 は 1b のあと並行してよい。5 は `phase-2` が無いと「速くなった」と言えない。
+3 は 2b のあと。4 の初期（P4-1…4）は 1b のあと並行してよい（自作 Optimizer を使うなら P2B-9 のあと）。Z 最適化は P4-5。Sparse オンラインは P4-4 と Phase 3。5 は `phase-2` が無いと「速くなった」と言えない。
 
 計測は 1a から始める（P1A-18 / P1A-19）。Phase 2 でハーネスを新しく作らない。
 
@@ -142,13 +142,39 @@ M0 → 1a → 1b → 2
 
 ---
 
+## Phase 2b — Exact GPR 公開骨格
+
+設計 §1, §4.0, §5.1, §5.5, §6, §9。P2-9 のあと、P3-1 の前。組み込みの fit→predict は 1b / 2 で通っている。欠けているのは設計が公開すると書いた拡張点（`Gpr<O>` のソルバ差し替え、カスタムカーネル、jitter、学習済みの読み書き）、予測共分散の別経路、Pipeline と列ごと前処理、公開の `*` と Dist+Points 合成が実行時エラーで落ちる穴。各行は Grill（必要なとき）のあと Issue を切ってから作業する。設定の排他は型（`.cursor/rules/types.mdc`）。
+
+前処理のユーザー実装（`Transform` / `TargetTransform` + `with_*`）は P1A-4 で載済み。学習前後の型分けは P2B-10。Pipeline と列ごとの指定は P2B-7 / P2B-8。
+
+| ID    | 種別 | タイトル                                      | 依存   | DoD                                                                                                                                 |
+| ----- | ---- | --------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| P2B-1 | Feat | 最適化ノブと `Gpr<Fixed>`                     | P2-9   | 現行の `FitOptions { optimize: bool }` / `FIXED` / `if options.optimize` / rustdoc「When false…」/ README の skip 文を型に置き換える。`Gpr<Lbfgs>::fit` と `Gpr<Fixed>::factor`。共有ノブは最適化側だけ: `max_iterations`（既定 100）、`tolerance`、`n_restarts`（既定 0）。`history_size`（既定 10）は `Lbfgs` 上。ノブが `fit` / `refit` に効くテスト。`factor` に最適化ノブは無い |
+| P2B-2 | Feat | argmin ソルバの選択                           | P2B-1  | `Gpr<Lbfgs>`（既定）/ `Gpr<NonlinearCg>` / `Gpr<NelderMead>`。`with_optimizer` が型パラメータを差し替える。`FitOptions::solver` は置かない。現行 `requires_gradient` が false なら `InvalidHyperparameter` する分岐を消す。gprx は準ニュートンを自前実装しない。NCG: 勾配経路 + 回収ゴールデン。Nelder–Mead: `value` のみ + NLML 低下 + sklearn / scipy `Nelder-Mead` JSON（`compare/goldens/`。L-BFGS と混ぜない） |
+| P2B-3 | Feat | `KernelTerm` と `KernelSpec::Custom`          | P2-9   | 設計 §5.1。ユーザー葉が Sum/Product に載る。`apply` / `grad` の数値微分または既知値。`tests/alloc.rs` はユーザーカーネル除く（既存） |
+| P2B-4 | Feat | `JitterPolicy`                                | P2-9   | 設計 §4.0。`Fixed` / `Adaptive`。分解失敗時だけ jitter。いまの `jitter = 0` 固定をやめる。`CholeskyFailed.jitter` に使用値。観測ノイズとは混ぜない |
+| P2B-5 | Feat | 学習済みの読み書きと Clone                    | P2-8   | `FittedGpr::set_params` のあと `Gpr<Fixed>` / `factor` で再分解。訓練 `X` / `y` の参照。`Gpr` / `FittedGpr` が Clone（`Transform` / `TargetTransform` に clone）。`kernel()` は `&` のまま、書き換えは `set_params`。公開 `FittedGpr` の `compiled` / `workspace` / `X` / `y` / `α` を `Option` にしない。欠けるときに `EmptyInput` を返さない |
+| P2B-6 | Feat | 任意の予測共分散と posterior sample           | P2-9   | 既定 `predict` は対角のまま（共分散フィールドを持たない）。クエリ間共分散は別メソッド。対角は既存 `predict` と一致。共分散経路から `sample`（seed 付き）。フラグで「計算しない」を表さない |
+| P2B-7 | Feat | 変換 Pipeline                                 | P2B-10 | 複数マップの直列（例: MinMax のあと Standardize）。`X` と `y` それぞれ。1 段だけのいまの `with_*` は残す |
+| P2B-8 | Feat | 入力変換を列ごとに指定                        | P2B-7  | 列 `d` ごとに Identity / Standardize / MinMax / 自前 `Transform`。一様な列は MinMax、正規に近い列は Standardize、という使い分け。長さが `d` でないときはエラー |
+| P2B-9 | Feat | 自作 `Optimizer` の差し替え                   | P2B-2  | 設計 §9: `pub trait Optimizer`。`Gpr<O>::with_optimizer` が `Gpr<O2>` を返す（argmin も自作も同じスロット）。ダミーが `minimize` されるテスト。`Objective` 公開。Phase 3 の `refit` は学習済み型の `O` と同じ口。`solver` と custom を並べない |
+| P2B-10 | Feat | 変換の fitted を型にする                      | P1A-4  | `StandardizeTarget` / `MinMax*` の `fitted: bool` と `GprError::NotFitted` をやめる。`fit(self)` が学習済み型を返す。`transform` / `apply` は学習済みにだけある。`error.rs` の `fitted: bool` 例を消す |
+| P2B-11 | Feat | 距離キャッシュを距離経路専用にする            | P2-9   | rustdoc「Linear ignores this setting」をやめる。`Linear` / `Constant` / `White`（距離を使わない spec）の trainer に `DistanceCachePolicy` を持たせない。`with_distance_cache_policy` は距離モードの経路にだけ存在する |
+| P2B-12 | Feat | Product の points 勾配                        | P2-9   | 公開の `KernelSpec *` が points 葉（Linear / ARD）でも `grad` と fit の MLL+grad まで通る。現行 `grad_points` の `UnsupportedKernelOperation`（dedicated scratch）を消す。数値微分または既知値。Dist Product の既存 `grad` は壊さない |
+| P2B-13 | Feat | Dist と Points の Sum/Product                 | P2B-12 | `RBF + Linear` など Dist 葉と Points 葉の合成を評価する。`coord_mode` で混ぜを `UnsupportedKernelOperation` しない。型で混ぜ不可にもしない。葉は従来どおり Dist は距離、Points は座標。解析または sklearn golden（L-BFGS と混ぜない） |
+
+**2b 完了:** P2B-1…13 がマージ済み。`just test` が緑。P3-1 に進む。
+
+---
+
 ## Phase 3 — オンライン学習
 
-設計 §11。着手時に LDLT delete を先に Spike する。
+設計 §11。2b のあと。着手時に LDLT delete を先に Spike する。
 
 | ID   | 種別  | タイトル                                    | 依存       | DoD                                                                   |
 | ---- | ----- | ------------------------------------------- | ---------- | --------------------------------------------------------------------- |
-| P3-1 | Spike | `ldlt::delete_rows_and_cols_clobber` の実測 | P2-9       | 任意インデックス削除がフル分解と一致。ダメなら末尾削除+再分解に落とす |
+| P3-1 | Spike | `ldlt::delete_rows_and_cols_clobber` の実測 | 2b         | 任意インデックス削除がフル分解と一致。ダメなら末尾削除+再分解に落とす |
 | P3-2 | Feat  | `OnlineWorkspace` と容量拡張                | P3-1       | 拡張時に K/LD/y/α/cache が同期する                                    |
 | P3-3 | Feat  | 末尾 insert（自前 bordered LDLT）           | P3-2       | 1点追加 == フル再 fit                                                 |
 | P3-4 | Feat  | delete + `PointId` / `PointRegistry`        | P3-2       | 不変条件: 全バッファが同じ順序                                        |
@@ -158,14 +184,17 @@ M0 → 1a → 1b → 2
 
 ## Phase 4 — Sparse GPR
 
-設計 §6.1。Z は k-means 等で固定。
+設計 §6.1。初期は Z を k-means 等で固定。Z の最適化と Sparse オンラインはあとの行。
 
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
 | P4-1 | Spike | VFE か FITC か一つ選ぶ                   | 1b   | 選択理由を `.dev/` に1ページ                  |
 | P4-2 | Feat  | `SparseGpr`、誘導点固定                   | P4-1 | m≪n で fit が終わる                           |
 | P4-3 | Feat  | 対角予測と MLL                           | P4-2 | 小問題で Exact に近い（完全一致は要求しない） |
-| P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3 | 1b と同じ Optimizer 経路                      |
+| P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3, P2B-9 | 2b と同じ公開 Optimizer 経路。Z は params に入れない |
+| P4-5 | Spike | 誘導点 Z の最適化方式                     | P4-4 | 同時最適化か交互最適化かを `.dev/` に1ページ。理由とメモリ（`m×d`） |
+| P4-6 | Feat  | Z を最適化対象にする                      | P4-5 | P4-5 の方式。カーネル・ノイズに加え Z が動く。小問題で固定 Z より NLML が下がるか記録 |
+| P4-7 | Feat  | Sparse のオンライン学習                   | P4-4, P3-5 | 点の追加削除。Exact Phase 3 と同じ不変条件は要求しない。設計 §14 の非対称を `.dev/` に残し、incremental == その Sparse のフル再 fit |
 
 ---
 
@@ -180,15 +209,14 @@ M0 → 1a → 1b → 2
 | P5-3 | Feat  | `IncrementalRecompute`（オプトイン）                     | 1b   | FullRecompute と数値が一致                 |
 | P5-4 | Feat  | `MathMode::FastApprox` オプトイン                        | 1b   | 既定 Accurate。fit では使わない            |
 | P5-5 | Task  | `DistanceCachePolicy::Auto` の閾値                       | P2-2, P2-7 | ベンチで決める。式だけで決めない           |
+| P5-6 | Feat  | fit 中に `L` を `W` で上書きしてメモリを削る             | P2-4 | 勾配用 `W` が `L` のバッファを再利用。fit 終了時に Cholesky をやり直して `L` を戻す。予測の数値は上書きなしと一致。ピークメモリが `n²` 相当減ることを記録 |
 
 ---
 
 ## 意図的に今やらない
 
-- crates.io 公開、MSRV 約束、カバレッジ必須
-- 自前 L-BFGS
-- 誘導点 Z の最適化、Sparse のオンライン学習
-- フル共分散予測、変換の Pipeline（複数マップの直列）
-- 最適化ループ中に L を `W` で上書きしてメモリを削ること
-- Likelihood と White を両方既定で足すこと
+この節の追加・削除は Grill → Issue（`.cursor/rules/workflow.mdc`）。エージェントは合意なしに行を足さない。
+
+- 自前の L-BFGS / 準ニュートン実装（argmin のソルバを選んで呼ぶ）
 - クラウド CI を制限中の完了条件にすること
+- crates.io 公開、MSRV 約束、カバレッジ必須

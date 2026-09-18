@@ -1,0 +1,44 @@
+---
+description: Illegal states are unrepresentable. Config exclusivity is types, not docs or runtime checks.
+alwaysApply: true
+---
+
+# Types (illegal states)
+
+Safety of configuration is decided in the type design. It is not a rustdoc note, not a README caveat, and not a `GprError` that fires when two options are combined.
+
+## Do not ship
+
+- 「`with_optimizer` のときは `solver` は無視される」
+- 「両方指定したら実行時エラー」
+- 「このフラグが false のとき他フィールドは使われない」（`optimize: bool` + 最適化ノブ）
+- A field that exists on a type where it has no meaning (`history_size` on Nelder–Mead)
+
+If the current structs can represent a combination you would have to ignore or reject, **change the types**. Do not add validation or documentation as a substitute.
+
+## Do
+
+- One slot for one choice. Argmin L-BFGS / Nonlinear CG / Nelder–Mead / user `Optimizer` are the same generic (or enum) parameter, not two fields on `Gpr`.
+- Methods that cannot apply do not exist. `Gpr<Fixed>` has `factor`, not `fit`. `Gpr<O: Optimizer>` has `fit`, not `factor`.
+- Solver-specific knobs live on that solver type (`Lbfgs::history_size`), not on a shared options struct.
+- `Result` / `GprError` is for **data**: empty `X`, dim mismatch, NaN, Cholesky failure. Not for “you set two configs”.
+
+## Examples
+
+```rust
+// BAD — two fields; one must be ignored or rejected
+struct Gpr {
+    solver: ArgminSolver,
+    custom: Option<Box<dyn Optimizer>>,
+}
+
+// GOOD — one type parameter; switching replaces the other
+struct Gpr<O = Lbfgs> { optimizer: O, /* … */ }
+impl<O: Optimizer> Gpr<O> {
+    fn with_optimizer<O2: Optimizer>(self, optimizer: O2) -> Gpr<O2> { /* … */ }
+    fn fit(self, /* … */) -> Result<FittedGpr, (Self, GprError)>;
+}
+impl Gpr<Fixed> {
+    fn factor(self, /* … */) -> Result<FittedGpr, (Self, GprError)>;
+}
+```

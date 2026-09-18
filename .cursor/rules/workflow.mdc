@@ -5,17 +5,34 @@ alwaysApply: true
 
 # Workflow
 
-- Work only the current roadmap row. Now: **P3-1**. Do not start Phase 4 or 5 early. Deferral without a roadmap row: `.cursor/rules/defer.mdc`.
-- Flow: GitHub Issue → branch `{type}/{number}-{slug}` (example `chore/1-crate-bootstrap`) → `just lint` and `just test` → PR → merge. History rewrite: `.cursor/rules/git.mdc`. Scope / Issue / roadmap questions: `.cursor/rules/consent.mdc`.
-- One Issue = one PR. Related: `Closes #N`.
-- Issue templates: Bug / Feat / Task / Spike. Spike commits use `chore` or `test`.
+## Cycle
+
+開発は次の順だけ。飛ばさない。エージェントは人間レビューのあと自分で merge しない。
+
+1. **Grill**（必要なとき） — 設計・範囲・「やる / やらない / どのフェーズ」が未決なら、実装も Issue も roadmap 編集もせず Grill する（`.cursor/skills/grill-me/SKILL.md`、`.cursor/rules/consent.mdc`）。質問のターンで成果物を閉じない。
+2. **Issue 作成** — 1 Issue = 1 PR。テンプレートは Bug / Feat / Task / Spike。ブランチは `{type}/{number}-{slug}`（例: `chore/1-crate-bootstrap`）。
+3. **Grill → タスク詳細化**（必要なとき） — 分解・DoD・依存を具体化し、**同じ Issue を更新**する。roadmap の ID / DoD を変えるなら、その Issue が対象を指名してから。
+4. **作業** — その Issue（現行 roadmap 行）だけ。今の行: **P2B-1**。Phase 3 は 2b のあと。Phase 4 / 5 を先に始めない。計画のない先送り: `.cursor/rules/defer.mdc`。取れない状態は型: `.cursor/rules/types.mdc`。
+5. **PR 開始** — `Closes #N`。本文は `.github/pull_request_template.md`。ゲート: `just lint` と `just test`。
+6. **人間レビュー**
+7. **マージ**（人間） — そのあと 1 に戻る。
+
+「進めなさい」は現行行の **Issue があるとき**の作業・PR であり、Issue 作成や範囲決定の代用ではない。履歴改変: `.cursor/rules/git.mdc`。範囲の質問: `.cursor/rules/consent.mdc`。
+
+## 範囲の出し入れ
+
+`.dev/roadmap.md` の行の追加・削除・DoD 変更と、**意図的に今やらない** への追加・削除は、上の Cycle の Grill → Issue を経る。エージェントは合意なしに「やらない」リストへ載せない。
+
+## 品質ゲート
+
 - Identifiers, rustdoc, and `GprError` are English. Issues and commit subjects may be Japanese.
+- Spike commits use `chore` or `test`.
 - Local gates (CI runners may be limited; do not treat cloud CI as the DoD):
   - `just lint` = `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
   - `just test` = `cargo test` (must not invoke Python)
   - `just gen-goldens` = regenerate sklearn JSON under `compare/goldens/` (manual)
 - Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
-- Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in composition only; do not enable both at large values.
-- Optimizer is argmin L-BFGS. Do not write a custom L-BFGS.
+- Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in kernel composition. Adding both at large values double-counts noise; that is the caller's choice, not a crate ban.
+- Default trainer is `Gpr<Lbfgs>`. Other argmin solvers and user `Optimizer` replace the type parameter (P2B-2 / P2B-9). `Gpr<Fixed>` is `factor` only. Do not write a custom L-BFGS / quasi-Newton in this crate. Config exclusivity: `.cursor/rules/types.mdc`.
 - License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io (`publish = false`). Phase 2 does not lift this; the roadmap still lists crates.io as out of scope.
 - `just bench` = criterion. See `.cursor/rules/bench.mdc`. Speed work without a number is out of scope.
