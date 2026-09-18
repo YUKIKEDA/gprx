@@ -29,7 +29,7 @@
 | P2-8    | [#98](https://github.com/YUKIKEDA/gprx/issues/98) | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) | P2B-14  | [#63](https://github.com/YUKIKEDA/gprx/issues/63) |
 | P2-9    | [#97](https://github.com/YUKIKEDA/gprx/issues/97) | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) | P2B-15  | [#106](https://github.com/YUKIKEDA/gprx/issues/106) |
 | P2B-17  | [#109](https://github.com/YUKIKEDA/gprx/issues/109) | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) | P2B-16  | [#103](https://github.com/YUKIKEDA/gprx/issues/103) |
-| P2B-1   | [#108](https://github.com/YUKIKEDA/gprx/issues/108) | P2B-2   | [#114](https://github.com/YUKIKEDA/gprx/issues/114) |         |                                                   |
+| P2B-1   | [#108](https://github.com/YUKIKEDA/gprx/issues/108) | P2B-2   | [#114](https://github.com/YUKIKEDA/gprx/issues/114) | P2B-20  | [#116](https://github.com/YUKIKEDA/gprx/issues/116) |
 
 ## マイルストーン
 
@@ -39,7 +39,7 @@
 | 1a  | 固定ハイパラ Exact GPR | 正しい推論と勾配               | 解析解、sklearn JSON、criterion `phase-1a`、確保 ratchet、Phase 1 カーネル              |
 | 1b  | Optimizer と 0.1 API  | ハイパラ最適化と使えるクレート | L-BFGS で lengthscale / ノイズ回収。README / rustdoc / 例。baseline `phase-1b`          |
 | 2   | 高速化                | Phase 1 を壊さず速くする       | ボトルネック順に最適化。キャッシュ・Rayon・SIMD。P2-8 typestate。P2-9 で `phase-2`、alloc 0、README / rustdoc / 例 |
-| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。ファイル persist、カスタム Optimizer 例、他ライブラリ比較（P2B-14…16。DoD は Grill 後）。NLML ヘッセ impl（P2B-17。DoD は Grill 後）。`IncrementalRecompute`（P2B-18）と fit 中の `L`/`W` 共用（P2B-19。DoD は Grill 後）。P3-1 より前 |
+| 2b  | Exact GPR 公開骨格    | §1 の拡張点を公開面に載せる    | `Gpr<O>` / `Gpr<Fixed>`。argmin と自作 Optimizer は同じ型スロット。変換の fitted 型、距離キャッシュは距離経路だけ。カスタムカーネル、jitter、学習済みの読み書き、予測共分散は別経路、Pipeline と列ごと前処理。Product の points 勾配と Dist+Points 合成。ファイル persist、カスタム Optimizer 例、他ライブラリ比較（P2B-14…16。DoD は Grill 後）。NLML ヘッセ impl（P2B-17。DoD は Grill 後）。`IncrementalRecompute`（P2B-18）と fit 中の `L`/`W` 共用（P2B-19。DoD は Grill 後）。transform ファイル分割の判断（P2B-20。DoD は Grill 後）。P3-1 より前 |
 | 3   | オンライン学習        | 点の追加削除                   | 任意 delete を含む incremental == full refit。プロパティテスト                          |
 | 4   | Sparse GPR             | 大きい n                       | VFE または FITC の一方。初期は Z 固定。あとから Z 最適化と Sparse オンライン |
 | 5   | 高度な最適化          | 混合精度など                   | predict 中心の MixedPrecision。失敗時は f64 フォールバック |
@@ -147,7 +147,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 設計 §1, §4.0, §5.1, §5.4, §5.5, §6, §9。P2-9 のあと、P3-1 の前。組み込みの fit→predict は 1b / 2 で通っている。欠けているのは設計が公開すると書いた拡張点（`Gpr<O>` のソルバ差し替え、カスタムカーネル、jitter、学習済みの読み書き）、予測共分散の別経路、Pipeline と列ごと前処理、公開の `*` と Dist+Points 合成が実行時エラーで落ちる穴、プロセスをまたぐ persist、自作 Optimizer の例、他ライブラリとの時間・RSS、逐次更新の本体（P2B-18）と fit 中の `L`/`W` 共用（P2B-19）。各行は Grill のあと Issue で DoD を確定してから作業する（`.cursor/rules/workflow.mdc`）。設定の排他は型（`.cursor/rules/types.mdc`）。
 
-前処理のユーザー実装（`Transform` / `TargetTransform` + `with_*`）は P1A-4 で載済み。学習前後の型分けは P2B-10。Pipeline と列ごとの指定は P2B-7 / P2B-8。
+前処理のユーザー実装（`Transform` / `TargetTransform` + `with_*`）は P1A-4 で載済み。学習前後の型分けは P2B-10。Pipeline と列ごとの指定は P2B-7 / P2B-8。`input.rs` / `target.rs` を葉ファイルに分けるかは P2B-20（[#116](https://github.com/YUKIKEDA/gprx/issues/116)）。P2B-10 より前には動かない。P2B-10 のあと、または P2B-7 / P2B-8 でファイルが伸びたあと、同じ基準で判断する。
 
 | ID    | 種別 | タイトル                                      | 依存   | DoD                                                                                                                                 |
 | ----- | ---- | --------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -170,8 +170,9 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-17 | Feat | `GprObjective` の NLML ヘッセ                 | P2B-1  | Grill 後に [#109](https://github.com/YUKIKEDA/gprx/issues/109) で確定 |
 | P2B-18 | Feat | `IncrementalRecompute` の本体                 | P2B-1  | Grill 後に [#110](https://github.com/YUKIKEDA/gprx/issues/110) で確定 |
 | P2B-19 | Feat | fit 中の `L`/`W` バッファ共用                 | P2B-1  | Grill 後に [#111](https://github.com/YUKIKEDA/gprx/issues/111) で確定 |
+| P2B-20 | Task | transform ファイル分割の判断                  | P2B-10 | Grill 後に [#116](https://github.com/YUKIKEDA/gprx/issues/116) で確定 |
 
-**2b 完了:** P2B-1…19 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…19 の作業は各 Issue の Grill と DoD 確定のあと。
+**2b 完了:** P2B-1…20 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…20 の作業は各 Issue の Grill と DoD 確定のあと。
 
 ---
 
