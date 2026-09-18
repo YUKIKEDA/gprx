@@ -19,7 +19,7 @@
   → CompiledKernel<T> (KernelSpecをコンパイルした実行計画 + Workspace)
   → Gpr (トレーナー: カーネル・尤度・変換・FitOptions)
        → Objective (尤度・勾配。fit 中だけ)
-       → Optimizer (型パラメータ。既定 `Lbfgs`。P2B-2 / P2B-9)
+       → Optimizer (型パラメータ。既定 `Lbfgs`。差し込み口は P2B-1。argmin ソルバは P2B-2。自作の例は P2B-9)
        → fit(self) → FittedGpr | (Gpr, GprError)
   → FittedGpr (L, α, X。predict / predict_into / refit / loo)
        → Phase 3: OnlineInference (`FittedGpr` 上、`&mut self`)
@@ -296,23 +296,23 @@ plan実行時、組み込みリーフは`CompiledKernel`のenumアームを直�
 
 ### 5.4 部分更新(コーディネート型最適化器)対応
 
-**対応方針**: `RecomputeStrategy`として2種類。初期実装には不要でPhase 5。Exact GPRではCholeskyがO(n³)のため、カーネル構築の部分更新より先にフルK構築→Cholesky→MLL→勾配を正しく高速化する。
+**対応方針**: `RecomputeStrategy` はマーカー型（ZST）。既定 `FullRecompute`。`IncrementalRecompute` の本体は P2B-18（[#110](https://github.com/YUKIKEDA/gprx/issues/110)）。差し込み口は P2B-1。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
 
 ```rust
 trait RecomputeStrategy {}
-struct FullRecompute;  // バッファ最小、常にフル再計算。既定
-struct IncrementalRecompute {
-    leaf_contrib: Vec<Buf>,
-    param_to_leaf: Vec<LeafId>,
-}
+struct FullRecompute;
+struct IncrementalRecompute; // ZST。葉バッファは fit / refit 中の Objective / Workspace
 
-/// IncrementalRecompute と Optimizer を繋ぐ差分情報。Phase 5。
-struct ChangeSet {
-    changed_param_indices: Vec<usize>,
+trait IncrementalObjective: Objective {
+    fn value_with_changes(&mut self, params: &[T], indices: &[usize]) -> Result<T, GprError>;
 }
 ```
 
-`IncrementalRecompute`は変更indexに対応するリーフ項のみ再評価し、最終結合(O(n²×リーフ項数)、Choleskyに対して無視できるコスト)だけ毎回やり直す。**Cholesky分解自体はKが変わる以上フルで行う必要があり、部分更新の恩恵はカーネル行列構築コストにのみ及ぶ**。デフォルトは`FullRecompute`、`IncrementalRecompute`はオプトイン。
+変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`FullRecompute` は `IncrementalObjective` を impl しない。
+
+`Gpr<O = Lbfgs, S = FullRecompute>`。`with_recompute_strategy` が `S` を差し替える。`Gpr<Fixed>` に `S` は無い（`factor` は一発フル）。`FittedGpr<O, S>` は `PhantomData<S>`（`refit` が同じ戦略。predict は `S` を読まない）。`with_recompute_strategy(IncrementalRecompute)` は `UsesChangeIndices` を impl した Optimizer にだけある。L-BFGS / NCG / Nelder–Mead は impl しない。
+
+`IncrementalRecompute` は変更 index に対応するリーフ項のみ再評価し、最終結合（O(n²×リーフ項数)、Cholesky に対して小さい）だけ毎回やり直す。**Cholesky 分解自体は K が変わる以上フル。** オプトイン。P2B-1 ではトレイトと `FullRecompute` だけ。`GprObjective` の Incremental impl は P2B-18。実行時の NotImplemented は置かない。
 
 #### 5.4.1 IncrementalRecomputeとfaer update APIの関係
 
@@ -444,26 +444,27 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-メモリ節約の代替（L を `W` で上書きして fit 終了時に Cholesky をやり直す）は P5-6。Phase 1 / 2 は `w_matrix` を独立確保し、L を保持する。
+メモリ節約の代替（L を `W` で上書きして fit 終了時に Cholesky をやり直す）は P2B-19（[#111](https://github.com/YUKIKEDA/gprx/issues/111)）。Phase 1 / 2 は `w_matrix` を独立確保し、L を保持する。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr<O = Lbfgs>` は `KernelSpec`・`GaussianLikelihood`・変換・距離キャッシュ方針と、最適化器 `O` を持つ。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`optimize: bool` は置かない。失敗時は消費した `Gpr<O>` をエラーと一緒に返す。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外した（`NotFitted` は transform `apply` のみ。P2B-10 でそれも型にする）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
+`Gpr<O = Lbfgs, S = FullRecompute>` は `KernelSpec`・`GaussianLikelihood`・変換・距離キャッシュ方針と、最適化器 `O` と再計算戦略 `S`（マーカー）を持つ。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S>` をエラーと一緒に返す。`fitted: bool` と公開経路の [`GprError::NotFitted`] は P2-8 で外した（`NotFitted` は transform `apply` のみ。P2B-10 でそれも型にする）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が型パラメータを差し替える（P2B-2 / P2B-9）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。
+既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。
 
 ```rust
-struct Gpr<O = Lbfgs> {
+struct Gpr<O = Lbfgs, S = FullRecompute> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
     distance_cache_policy: DistanceCachePolicy,
+    _recompute: PhantomData<S>,
 }
 
 struct Fixed;
@@ -480,12 +481,13 @@ enum DistanceCachePolicy {
     Always,
 } // 距離モードの経路だけ（P2B-11）。Linear / Constant / White 専用の trainer には無い
 
-struct FittedGpr<O = Lbfgs> {
+struct FittedGpr<O = Lbfgs, S = FullRecompute> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
+    _recompute: PhantomData<S>,
     workspace: Workspace<DoublePrecision>, // L。W は空でよい
     query: QueryWorkspace<DoublePrecision>, // predict_into 用
     compiled: CompiledKernel,
@@ -498,8 +500,8 @@ struct FittedGpr<O = Lbfgs> {
 
 /// Objective は `Gpr` を fit 中だけ &mut で借り、set_params → MLL/勾配 を中継する。
 /// パラメータの正本は Gpr.kernel / Gpr.likelihood。
-struct GprObjective<'a, O> {
-    model: &'a mut Gpr<O>,
+struct GprObjective<'a, O, S> {
+    model: &'a mut Gpr<O, S>,
 }
 ```
 
@@ -640,7 +642,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。公開面は `Gpr<O: Optimizer>`。既定 `Lbfgs`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。座標降下法的な最適化器を使う場合は§5.4の`ChangeSet`を伝播させ、`IncrementalRecompute`と接続する(Phase 5)。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。公開面は `Gpr<O: Optimizer, S: RecomputeStrategy>`。既定 `Lbfgs` と `FullRecompute`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。`GprObjective` のヘッセ **impl** は P2B-17（[#109](https://github.com/YUKIKEDA/gprx/issues/109)）。P2B-1 ではトレイトだけ置き、`GprObjective` は value+grad。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`（P2B-1 でトレイト、impl は P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。`ChangeSet` 構造体は置かない。
 
 ## 10. エラー型 GprError
 
@@ -820,10 +822,10 @@ trait OnlineInference<T: Scalar> {
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
 - **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
-- **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）。P2B-14…16 の DoD は Grill 後
+- **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）。P2B-14…19 の DoD は Grill 後
 - **Phase 3(オンライン学習)**: 2b のあと。`FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ。初期は**誘導点Z固定**（P4-1…4）。P4-5 / P4-6 で Z 最適化。P4-7 で Sparse オンライン
-- **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、IncrementalRecompute、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto、fit 中の `L`/`W` バッファ共用（P5-6）
+- **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
 
 ## 14. 未解決事項
 
