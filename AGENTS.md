@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 2b の P2B-4（`JitterPolicy`）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 2b の P2B-5（学習済みの読み書きと Clone）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
