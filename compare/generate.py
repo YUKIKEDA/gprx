@@ -1,4 +1,4 @@
-"""Write sklearn Exact GPR goldens for gprx (P1A-12, P1A-17, product grad, P1B-6, P1B-7).
+"""Write Exact GPR goldens for gprx (P1A-12, P1A-17, product grad, P1B-6, P1B-7, P2B-2).
 
 Fixed-hyperparameter cases (P1A-12 / P1A-17): noise is sklearn ``alpha``,
 matching ``GaussianLikelihood``, not ``WhiteKernel``.
@@ -14,6 +14,10 @@ P1B-7: sklearn has no leave-one-out API. After fit, goldens store GPML
 LOO from sklearn's ``L_`` and ``alpha_``: ``μ_i = y_i - α_i / Q_ii``,
 ``σ_i² = 1 / Q_ii`` with ``Q = A⁻¹``. Latent LOO strips WhiteKernel noise
 in the normalized space, then both maps undo ``normalize_y``.
+
+P2B-2 Nelder–Mead: scipy ``minimize(method="Nelder-Mead")`` on sklearn's
+log marginal likelihood. Written to a separate JSON; not mixed with L-BFGS
+fit goldens.
 
 P1A-12: isotropic RBF. P1A-17: Sum/Product flatten plus extra leaves
 (Matern, RQ, Periodic). Product and mixed trees include ``grad_theta``
@@ -226,6 +230,25 @@ def make_sphere_ard_case() -> dict:
 
 
 FIT_CASES = [make_forrester_case(), make_sphere_ard_case()]
+
+
+def make_nelder_mead_rbf_case() -> dict:
+    n_rows = 16
+    x = np.linspace(0.0, 8.0, n_rows)
+    noise = 0.1 * np.random.default_rng(0).standard_normal(n_rows)
+    y = np.sin(x) + noise
+    return {
+        "name": "nelder_mead_rbf_n16",
+        "kernel": "rbf",
+        "lengthscale_init": 1.0,
+        "noise_variance_init": 0.1,
+        "n_rows": n_rows,
+        "n_cols": 1,
+        "x": as_f64_list(x),
+        "y": as_f64_list(y),
+    }
+
+NELDER_MEAD_CASES = [make_nelder_mead_rbf_case()]
 
 
 def sklearn_leaf(leaf: dict):
@@ -486,6 +509,63 @@ def fit_golden(case: dict) -> dict:
     }
 
 
+def nelder_mead_golden(case: dict) -> dict:
+    import scipy
+    from scipy.optimize import Bounds, minimize
+
+    x = unpack_column_major(case["x"], case["n_rows"], case["n_cols"])
+    y = np.asarray(case["y"], dtype=np.float64)
+    kernel = RBF(length_scale=float(case["lengthscale_init"])) + WhiteKernel(
+        noise_level=float(case["noise_variance_init"])
+    )
+    gp = GaussianProcessRegressor(
+        kernel=kernel,
+        alpha=FIT_JITTER,
+        optimizer=None,
+        normalize_y=False,
+        random_state=0,
+    )
+    gp.fit(x, y)
+    theta0 = np.asarray(gp.kernel.theta, dtype=np.float64)
+
+    def nll(theta: np.ndarray) -> float:
+        return -float(
+            gp.log_marginal_likelihood(
+                np.asarray(theta, dtype=np.float64), eval_gradient=False
+            )
+        )
+
+    log_lo = float(np.log(1e-5))
+    log_hi = float(np.log(1e5))
+    result = minimize(
+        nll,
+        theta0,
+        method="Nelder-Mead",
+        bounds=Bounds(log_lo, log_hi),
+    )
+    theta = np.asarray(result.x, dtype=np.float64)
+    if theta.size != 2:
+        raise RuntimeError(f"expected log(ℓ) + log(σn²), got {theta.size}")
+    lml = float(gp.log_marginal_likelihood(theta, eval_gradient=False))
+    return {
+        "kernel": case["kernel"],
+        "sklearn_version": sklearn.__version__,
+        "scipy_version": scipy.__version__,
+        "lengthscale_init": float(case["lengthscale_init"]),
+        "noise_variance_init": float(case["noise_variance_init"]),
+        "lengthscale": float(np.exp(theta[0])),
+        "noise_variance": float(np.exp(theta[1])),
+        "theta": as_f64_list(theta),
+        "n_rows": case["n_rows"],
+        "n_cols": case["n_cols"],
+        "x": case["x"],
+        "y": case["y"],
+        "log_marginal_likelihood": lml,
+        "nfev": int(result.nfev),
+        "success": bool(result.success),
+    }
+
+
 def write_golden(name: str, payload: dict) -> None:
     path = GOLDENS / f"{name}.json"
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -500,6 +580,8 @@ def main() -> None:
         write_golden(case["name"], composite_golden(case))
     for case in FIT_CASES:
         write_golden(case["name"], fit_golden(case))
+    for case in NELDER_MEAD_CASES:
+        write_golden(case["name"], nelder_mead_golden(case))
 
 
 if __name__ == "__main__":

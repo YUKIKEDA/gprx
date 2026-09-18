@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 2b の P2B-1（最適化ノブと `Gpr<Fixed>`）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 2b の P2B-2（argmin ソルバの選択）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

@@ -351,7 +351,7 @@ struct MinMaxTarget { /* y min/max, default range [0, 1] */ }
 struct ColumnwiseInput { maps: Vec<Box<dyn Transform>> }
 ```
 
-既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。未学習の `transform` / `apply` は型で起きない（P2B-10）。複数マップの直列は P2B-7（`Pipeline`）。入力は列ごとに別マップを指定できる（P2B-8）。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。
+既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。未学習の `transform` / `apply` は型で起きない（P2B-10）。複数マップの直列は P2B-7（`Pipeline`）。入力は列ごとに別マップを指定できる（P2B-8）。`src/transform/` はいま `input.rs` と `target.rs`。葉ファイルに分けるかは P2B-20（[#116](https://github.com/YUKIKEDA/gprx/issues/116)）。行数ではなく、独立したアダプタかどうかで判断する。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
@@ -455,7 +455,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。
+既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。
 
 ```rust
 struct Gpr<O = Lbfgs, S = FullRecompute> {
@@ -475,6 +475,18 @@ struct Lbfgs {
     tolerance: f64,
     history_size: usize,   // 既定 10。L-BFGS だけ
     n_restarts: u32,       // 既定 0
+}
+
+struct NonlinearCg {
+    max_iterations: u64,
+    tolerance: f64,
+    n_restarts: u32,
+}
+
+struct NelderMead {
+    max_iterations: u64,
+    tolerance: f64,
+    n_restarts: u32,
 }
 
 enum DistanceCachePolicy {
@@ -817,13 +829,13 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-1）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-2）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
 - **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
-- **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）。P2B-14…19 の DoD は Grill 後
+- **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）、transform ファイル分割の判断（P2B-20 / [#116](https://github.com/YUKIKEDA/gprx/issues/116)）。P2B-14…20 の DoD は Grill 後
 - **Phase 3(オンライン学習)**: 2b のあと。`FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ。初期は**誘導点Z固定**（P4-1…4）。P4-5 / P4-6 で Z 最適化。P4-7 で Sparse オンライン
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
