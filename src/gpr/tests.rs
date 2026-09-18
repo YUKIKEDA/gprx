@@ -478,6 +478,51 @@ fn set_params_rejects_wrong_length_without_changing_theta() {
 }
 
 #[test]
+fn set_params_cholesky_failure_leaves_theta_and_factorization() {
+    let mut fitted = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1)
+            .expect("valid")
+            .with_bounds(Interval::new(1e-30, 1e5).expect("open"))
+            .expect("inside"),
+    )
+    .with_optimizer(Fixed)
+    .factor(&[0.0, 0.0], 2, 1, &[0.5, -0.25])
+    .expect("spd");
+    let snapshot = fitted.clone();
+    let mut bad = [0.0; 2];
+    fitted.get_params(&mut bad).expect("len 2");
+    bad[0] = 0.5;
+    bad[1] = (1e-20_f64).ln();
+    assert!(matches!(
+        fitted.set_params(&bad),
+        Err(GprError::CholeskyFailed { .. })
+    ));
+    let mut after = [0.0; 2];
+    fitted.get_params(&mut after).expect("len 2");
+    let mut before = [0.0; 2];
+    snapshot.get_params(&mut before).expect("len 2");
+    assert_close(after[0], before[0]);
+    assert_close(after[1], before[1]);
+    let pred = fitted
+        .predict(&[0.0], 1, 1)
+        .expect("usable after failed set_params");
+    let pred0 = snapshot.predict(&[0.0], 1, 1).expect("snapshot predict");
+    assert_close(pred.mean[0], pred0.mean[0]);
+    assert_close(pred.variance[0], pred0.variance[0]);
+    assert_close(
+        fitted.neg_log_marginal_likelihood().expect("nlml"),
+        snapshot
+            .neg_log_marginal_likelihood()
+            .expect("snapshot nlml"),
+    );
+    assert_eq!(fitted.alpha().len(), snapshot.alpha().len());
+    for (a, b) in fitted.alpha().iter().zip(snapshot.alpha()) {
+        assert_close(*a, *b);
+    }
+}
+
+#[test]
 fn clone_preserves_trainer_and_fitted_predict() {
     let trainer = rbf_gpr(1.25, 0.1);
     let trainer_clone = trainer.clone();
