@@ -1,4 +1,4 @@
-//! Target (`y`) transforms: identity and standardize.
+//! Target (`y`) transforms: identity, standardize, and min-max.
 
 use super::{population_std, require_finite, require_nonempty};
 use crate::error::GprError;
@@ -189,9 +189,180 @@ impl TargetTransform for StandardizeTarget {
     }
 }
 
+/// Scales targets to a closed interval, default `[0, 1]`, then inverts that map.
+///
+/// `y' = lo + (hi - lo) * (y - min) / (max - min)`. A constant `y` uses
+/// denominator `1`, so every entry maps to `lo` and the inverse is a shift
+/// by `min`. Variance undoes the affine map as `Var(y) = s² Var(y')` with
+/// `s = (max - min) / (hi - lo)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::transform::{MinMaxTarget, TargetTransform};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let mut t = MinMaxTarget::new();
+/// t.fit(&[1.0, 3.0, 5.0])?;
+/// let mut y = [1.0, 3.0, 5.0];
+/// t.transform(&mut y)?;
+/// t.inverse_transform_mean(&mut y)?;
+/// # let _ = y;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MinMaxTarget {
+    data_min: f64,
+    data_max: f64,
+    range_lo: f64,
+    range_hi: f64,
+    fitted: bool,
+}
+
+impl MinMaxTarget {
+    /// Returns an unfitted map onto `[0, 1]`. Call [`TargetTransform::fit`]
+    /// before use.
+    pub fn new() -> Self {
+        Self {
+            data_min: 0.0,
+            data_max: 1.0,
+            range_lo: 0.0,
+            range_hi: 1.0,
+            fitted: false,
+        }
+    }
+
+    /// Returns an unfitted map onto `[lo, hi]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `lo` or `hi` is not
+    /// finite, or if `hi <= lo`.
+    pub fn with_feature_range(lo: f64, hi: f64) -> Result<Self, GprError> {
+        require_feature_range(lo, hi)?;
+        Ok(Self {
+            data_min: 0.0,
+            data_max: 1.0,
+            range_lo: lo,
+            range_hi: hi,
+            fitted: false,
+        })
+    }
+
+    /// Returns the output interval `[lo, hi]`.
+    pub fn feature_range(&self) -> (f64, f64) {
+        (self.range_lo, self.range_hi)
+    }
+
+    /// Returns the training minimum after a successful fit.
+    pub fn min(&self) -> Option<f64> {
+        self.fitted.then_some(self.data_min)
+    }
+
+    /// Returns the training maximum after a successful fit.
+    pub fn max(&self) -> Option<f64> {
+        self.fitted.then_some(self.data_max)
+    }
+
+    fn require_fitted(&self) -> Result<(), GprError> {
+        if self.fitted {
+            Ok(())
+        } else {
+            Err(GprError::NotFitted)
+        }
+    }
+
+    fn data_span(&self) -> f64 {
+        let span = self.data_max - self.data_min;
+        if span > 0.0 && span.is_finite() {
+            span
+        } else {
+            1.0
+        }
+    }
+
+    fn out_span(&self) -> f64 {
+        self.range_hi - self.range_lo
+    }
+}
+
+impl Default for MinMaxTarget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TargetTransform for MinMaxTarget {
+    fn fit(&mut self, y: &[f64]) -> Result<(), GprError> {
+        require_nonempty(y.len())?;
+        require_finite(y)?;
+        let mut min = y[0];
+        let mut max = y[0];
+        for &value in &y[1..] {
+            if value < min {
+                min = value;
+            }
+            if value > max {
+                max = value;
+            }
+        }
+        self.data_min = min;
+        self.data_max = max;
+        self.fitted = true;
+        Ok(())
+    }
+
+    fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
+        self.require_fitted()?;
+        require_finite(y)?;
+        let min = self.data_min;
+        let span = self.data_span();
+        let lo = self.range_lo;
+        let out_span = self.out_span();
+        for value in y {
+            *value = lo + out_span * (*value - min) / span;
+        }
+        Ok(())
+    }
+
+    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
+        self.require_fitted()?;
+        require_finite(mean)?;
+        let min = self.data_min;
+        let span = self.data_span();
+        let lo = self.range_lo;
+        let out_span = self.out_span();
+        for value in mean {
+            *value = min + span * (*value - lo) / out_span;
+        }
+        Ok(())
+    }
+
+    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
+        self.require_fitted()?;
+        require_finite(var)?;
+        let scale = self.data_span() / self.out_span();
+        let scale2 = scale * scale;
+        for value in var {
+            *value *= scale2;
+        }
+        Ok(())
+    }
+}
+
+fn require_feature_range(lo: f64, hi: f64) -> Result<(), GprError> {
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("feature range must satisfy lo < hi and both finite, got [{lo}, {hi}]"),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IdentityTarget, StandardizeTarget, TargetTransform};
+    use super::{IdentityTarget, MinMaxTarget, StandardizeTarget, TargetTransform};
     use crate::error::GprError;
 
     const TOL: f64 = 1e-10;
@@ -210,6 +381,7 @@ mod tests {
     fn is_send_sync() {
         assert_send_sync::<IdentityTarget>();
         assert_send_sync::<StandardizeTarget>();
+        assert_send_sync::<MinMaxTarget>();
     }
 
     #[test]
@@ -318,5 +490,45 @@ mod tests {
             t.fit(&[f64::INFINITY]),
             Err(GprError::NonFiniteInput)
         ));
+    }
+
+    #[test]
+    fn minmax_scales_and_inverts() {
+        let y = [1.0, 3.0, 5.0];
+        let mut t = MinMaxTarget::new();
+        t.fit(&y).expect("valid");
+        assert_close(t.min().expect("fitted"), 1.0);
+        assert_close(t.max().expect("fitted"), 5.0);
+        let mut z = y;
+        t.transform(&mut z).expect("fitted");
+        assert_close(z[0], 0.0);
+        assert_close(z[1], 0.5);
+        assert_close(z[2], 1.0);
+        t.inverse_transform_mean(&mut z).expect("fitted");
+        assert_close(z[0], y[0]);
+        assert_close(z[1], y[1]);
+        assert_close(z[2], y[2]);
+        let mut var = [1.0, 0.25];
+        t.inverse_transform_variance(&mut var).expect("fitted");
+        assert_close(var[0], 16.0);
+        assert_close(var[1], 4.0);
+    }
+
+    #[test]
+    fn minmax_constant_target_maps_to_lo() {
+        let mut t = MinMaxTarget::new();
+        t.fit(&[4.0, 4.0, 4.0]).expect("valid");
+        let mut y = [4.0, 4.0];
+        t.transform(&mut y).expect("fitted");
+        assert_close(y[0], 0.0);
+        t.inverse_transform_mean(&mut y).expect("fitted");
+        assert_close(y[0], 4.0);
+    }
+
+    #[test]
+    fn minmax_target_rejects() {
+        assert!(MinMaxTarget::with_feature_range(1.0, 0.0).is_err());
+        let t = MinMaxTarget::new();
+        assert!(matches!(t.transform(&mut [1.0]), Err(GprError::NotFitted)));
     }
 }

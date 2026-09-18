@@ -31,7 +31,7 @@ Same program: `cargo run --example fit_predict`. `?` on `fit` drops the trainer 
 
 Default `predict` variance is observation (`latent + σn²`). Use `predict_with` and `VarianceKind::Latent` for the latent function. After fit, `loo_predict` is the GPML leave-one-out at every training point. `predict` allocates query buffers; `predict_into` reuses them after a warmup call. `FittedGpr::refit` re-factors or re-optimizes on the stored training data.
 
-Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Observation noise belongs in `GaussianLikelihood`; do not also enable a large `WhiteKernel`.
+Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Features can use `MinMaxInput` (default `[0, 1]`). Observation noise belongs in `GaussianLikelihood`; do not also enable a large `WhiteKernel`.
 
 `FitOptions::FIXED` skips L-BFGS and factors at the kernel and likelihood `θ` already on the trainer.
 
