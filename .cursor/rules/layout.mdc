@@ -13,7 +13,7 @@ src/error.rs        # P1A-1
 src/workspace.rs    # P1A-2。`Workspace`（fit）と `QueryWorkspace`（predict_into）。同じ struct に詰め込まない
 src/likelihood.rs   # P1A-3
 src/kernel/         # all kernel leaves; never at src/*.rs
-src/transform/      # target.rs, input.rs
+src/transform/      # target.rs, input.rs。葉に分けるかは P2B-20（P2B-10 のあと、または P2B-7 / P2B-8 で伸びたあと判断）。空ファイルは先に置かない
 src/gpr.rs          # Gpr（トレーナー）。P2-8 で FittedGpr もここ
 src/objective.rs    # Phase 1b
 src/optimizer/      # P2B-1 / P2B-2。`mod.rs` トレイト、`logit.rs`、ソルバは `lbfgs.rs` / `ncg.rs` / `neldermead.rs`
