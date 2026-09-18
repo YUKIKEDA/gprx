@@ -1,10 +1,10 @@
 # gprx
 
-Exact Gaussian process regression in Rust. `Gpr::fit` runs argmin L-BFGS on the negative log marginal likelihood. The crate is **not** published to crates.io (`publish = false` in `Cargo.toml`).
+Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, runs argmin L-BFGS on the negative log marginal likelihood, and returns `FittedGpr`. The crate is **not** published to crates.io (`publish = false` in `Cargo.toml`).
 
 ## Status
 
-Local **0.1.0** quality: `Gpr`, kernels, `fit` / `predict` / leave-one-out, English rustdoc, and `examples/`. Depend on git or a path, not crates.io.
+Local **0.1.0** quality: `Gpr` / `FittedGpr`, kernels, `fit` / `predict` / `predict_into` / leave-one-out, English rustdoc, and `examples/`. Depend on git or a path, not crates.io.
 
 Design: [`.dev/gprx-design.md`](.dev/gprx-design.md). Tasks: [`.dev/roadmap.md`](.dev/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md).
 
@@ -19,21 +19,21 @@ use gprx::{GaussianLikelihood, Gpr};
 fn main() -> Result<(), gprx::GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     let likelihood = GaussianLikelihood::new(0.1)?;
-    let mut gpr = Gpr::new(kernel, likelihood);
-    gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let pred = gpr.predict(&[0.5], 1, 1)?;
+    let gpr = Gpr::new(kernel, likelihood);
+    let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    let pred = fitted.predict(&[0.5], 1, 1)?;
     println!("mean = {}, variance = {}", pred.mean[0], pred.variance[0]);
     Ok(())
 }
 ```
 
-Same program: `cargo run --example fit_predict`.
+Same program: `cargo run --example fit_predict`. `?` on `fit` drops the trainer (`From<(Gpr, GprError)> for GprError`). Use `.map_err(|(_, e)| e)` when you want only the error, or match `Err((gpr, err))` to retry with the same trainer.
 
-Default `predict` variance is observation (`latent + σn²`). Use `predict_with` and `VarianceKind::Latent` for the latent function. After fit, `loo_predict` is the GPML leave-one-out at every training point.
+Default `predict` variance is observation (`latent + σn²`). Use `predict_with` and `VarianceKind::Latent` for the latent function. After fit, `loo_predict` is the GPML leave-one-out at every training point. `predict` allocates query buffers; `predict_into` reuses them after a warmup call. `FittedGpr::refit` re-factors or re-optimizes on the stored training data.
 
-Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Observation noise belongs in `GaussianLikelihood`; do not also enable a large `WhiteKernel`.
+Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Features can use `MinMaxInput` (default `[0, 1]`). Observation noise belongs in `GaussianLikelihood`; do not also enable a large `WhiteKernel`.
 
-`FitOptions::FIXED` skips L-BFGS and factors at the kernel and likelihood `θ` already on the model.
+`FitOptions::FIXED` skips L-BFGS and factors at the kernel and likelihood `θ` already on the trainer.
 
 ## License
 

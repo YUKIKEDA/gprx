@@ -1,14 +1,14 @@
 //! Input (`X`) and target (`y`) transforms.
 //!
-//! Phase 1 provides [`IdentityInput`] / [`StandardizeInput`] for features and
-//! [`IdentityTarget`] / [`StandardizeTarget`] for observations. A pipeline of
-//! maps is listed under roadmap 「意図的に今やらない」.
+//! Input maps: [`IdentityInput`], [`StandardizeInput`], [`MinMaxInput`].
+//! Target maps: [`IdentityTarget`], [`StandardizeTarget`], [`MinMaxTarget`].
+//! A pipeline of stacked maps is not on the roadmap.
 
 mod input;
 mod target;
 
-pub use input::{IdentityInput, StandardizeInput, Transform};
-pub use target::{IdentityTarget, StandardizeTarget, TargetTransform};
+pub use input::{IdentityInput, MinMaxInput, StandardizeInput, Transform};
+pub use target::{IdentityTarget, MinMaxTarget, StandardizeTarget, TargetTransform};
 
 use crate::error::GprError;
 

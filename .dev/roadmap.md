@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P2-8（`Gpr` / `FittedGpr`）。** Issue は実装時。`phase-1b` の順は [`.dev/bench-log.md`](bench-log.md)。Phase 2 は計測してから高速化する。
+**今やること: P3-1（`ldlt::delete_rows_and_cols_clobber`）。** Phase 2 は P2-9 で閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -26,8 +26,8 @@ Issue は 1 タスクにつき 1 本。ブランチは `type/{issue}-{slug}`（�
 | P1B-6   | [#80](https://github.com/YUKIKEDA/gprx/issues/80) | P1B-4   | [#23](https://github.com/YUKIKEDA/gprx/issues/23) | P5-4    | [#42](https://github.com/YUKIKEDA/gprx/issues/42) |
 | P1B-7   | [#83](https://github.com/YUKIKEDA/gprx/issues/83) | P1B-5   | [#24](https://github.com/YUKIKEDA/gprx/issues/24) | P5-5    | [#43](https://github.com/YUKIKEDA/gprx/issues/43) |
 | P2-7    | [#88](https://github.com/YUKIKEDA/gprx/issues/88) | P2-1    | [#25](https://github.com/YUKIKEDA/gprx/issues/25) |         |                                                   |
-|         |                                                   | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) |         |                                                   |
-|         |                                                   | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) |         |                                                   |
+| P2-8    | [#98](https://github.com/YUKIKEDA/gprx/issues/98) | P2-2    | [#26](https://github.com/YUKIKEDA/gprx/issues/26) |         |                                                   |
+| P2-9    | [#97](https://github.com/YUKIKEDA/gprx/issues/97) | P2-3    | [#27](https://github.com/YUKIKEDA/gprx/issues/27) |         |                                                   |
 |         |                                                   | P2-4    | [#28](https://github.com/YUKIKEDA/gprx/issues/28) |         |                                                   |
 
 ## マイルストーン
