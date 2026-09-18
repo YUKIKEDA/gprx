@@ -701,19 +701,28 @@ impl<O, S> FittedGpr<O, S> {
         let n_kernel = self.kernel.num_params();
         require_param_len(params.len(), self.num_params())?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
-        let old_kernel = self.kernel.clone();
-        let old_compiled = self.compiled.clone();
-        let old_likelihood = self.likelihood;
+        let workspace = self.workspace.clone();
+        let alpha = self.alpha.clone();
+        if let Err(err) = factor_train_with_policy(
+            &compiled,
+            self.x.as_ref(),
+            &mut self.workspace,
+            &self.y_train,
+            likelihood.noise_variance(),
+            FactorPolicy {
+                cache: self.distance_cache_policy,
+                jitter: self.jitter_policy,
+                stage: CholeskyStage::Fit,
+            },
+        ) {
+            self.workspace = workspace;
+            self.alpha = alpha;
+            return Err(err);
+        }
+        self.copy_alpha_from_rhs();
         self.kernel = kernel;
         self.compiled = compiled;
         self.likelihood = likelihood;
-        if let Err(err) = self.factorize_current() {
-            self.kernel = old_kernel;
-            self.compiled = old_compiled;
-            self.likelihood = old_likelihood;
-            let _ = self.factorize_current();
-            return Err(err);
-        }
         Ok(())
     }
 
@@ -940,7 +949,6 @@ impl<O, S> FittedGpr<O, S> {
     }
 
     fn factorize_current(&mut self) -> Result<(), GprError> {
-        let n_rows = self.n;
         factor_train_with_policy(
             &self.compiled,
             self.x.as_ref(),
@@ -953,13 +961,18 @@ impl<O, S> FittedGpr<O, S> {
                 stage: CholeskyStage::Fit,
             },
         )?;
-        if self.alpha.len() != n_rows {
-            self.alpha.resize(n_rows, 0.0);
+        self.copy_alpha_from_rhs();
+        Ok(())
+    }
+
+    fn copy_alpha_from_rhs(&mut self) {
+        let n = self.n;
+        if self.alpha.len() != n {
+            self.alpha.resize(n, 0.0);
         }
         for (i, slot) in self.alpha.iter_mut().enumerate() {
             *slot = self.workspace.rhs[(i, 0)];
         }
-        Ok(())
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
