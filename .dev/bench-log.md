@@ -180,7 +180,7 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 ## P2B-16（他ライブラリ、`compare/perf/`）
 
-同一機械。初回 2026-09-19（faer `Par::Seq`）。表は **2026-09-20、回数を n で分けたあと `just perf` を 1 回通した値だけ**。セルの差し替えはない。`uv run --directory compare/perf python run.py`。criterion ではない。
+同一機械。初回 2026-09-19（faer `Par::Seq`）。表は **2026-09-20、libgp の `set_loghyper` を eval の時計の外に出したあと `just perf` を 1 回通した値だけ**。セルの差し替えはない。`uv run --directory compare/perf python run.py`。criterion ではない。
 
 時間は **捨て 1 回 + 中央値（括弧は min–max）**。回数の既定は `n ≤ 256` で 51、`n ≤ 1024` で 21、それ以外 7（`PERF_REPS` で上書き）。`eval 10` は 1 回の MLL+grad の中央 × 10。ピーク RSS は同じプロセスの `PeakWorkingSet`（前の factor は次を組む前に捨てる。8 個重ねると n=4096 で約 2 倍になる）。
 
@@ -188,33 +188,33 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 ゲートは中央値。sklearn は factor・eval・RSS がすべて小さい（5% 以内は判定不能）。libgp は +10% 超で fail。friedrich は factor 時間か RSS の一方。
 
-負け: sklearn は 6 セルすべて pass。以前の一発表で球 n=256 factor が 4.39 vs 3.30 だったのは、捨て回なしの初回 Cholesky。今回の中央は 0.95 ms（0.85–1.47）対 2.18 ms（1.88–10.38）。libgp は走った 6 セルすべて fail（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。
+負け: sklearn は 6 セルすべて pass。以前の一発表で球 n=256 factor が 4.39 vs 3.30 だったのは、捨て回なしの初回 Cholesky。今回の中央は 0.92 ms（0.84–1.38）対 2.16 ms（1.88–4.45）。libgp は走った 6 セルすべて fail（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。
 
 | 問題      | n    | lib       | factor                  | eval 10                      | predict 100             | peak RSS   | ゲート           |
 | --------- | ---- | --------- | ----------------------- | ---------------------------- | ----------------------- | ---------- | ---------------- |
-| Forrester | 256  | gprx      | 0.87 ms（0.73–1.16）    | 11.78 ms（10.54–17.10）      | 0.44 ms（0.42–0.57）    | 9.6 MiB    | —                |
-| Forrester | 256  | sklearn   | 2.13 ms（2.01–4.23）    | 27.03 ms（24.77–42.84）      | 0.40 ms（0.38–0.94）    | 110.9 MiB  | pass             |
-| Forrester | 256  | libgp     | 1.28 ms（1.14–1.50）    | 62.59 ms（56.74–286.49）     | 0.96 ms（0.93–1.88）    | 7.2 MiB    | fail（RSS +33%） |
-| Forrester | 256  | friedrich | 1.66 ms（1.54–1.88）    | N/A                          | 2.19 ms（2.07–2.88）    | 4.9 MiB    | pass（時間）     |
-| Forrester | 1024 | gprx      | 12.29 ms（10.81–26.96） | 149 ms（131–248）            | 2.27 ms（2.01–2.42）    | 43.6 MiB   | —                |
-| Forrester | 1024 | sklearn   | 74.21 ms（52.88–168.83）| 1.242 s（654 ms–1.713 s）    | 2.30 ms（2.23–2.50）    | 179.6 MiB  | pass             |
-| Forrester | 1024 | libgp     | 33.59 ms（31.39–44.34） | 1.987 s（1.938–2.118）       | 9.75 ms（9.29–10.10）   | 33.2 MiB   | fail（RSS +31%） |
-| Forrester | 1024 | friedrich | 54.94 ms（53.09–58.19） | N/A                          | 25.17 ms（24.07–27.93） | 13.8 MiB   | pass（時間）     |
-| Forrester | 4096 | gprx      | 464 ms（448–643）       | 6.522 s（6.455–7.094）       | 15.50 ms（15.03–16.03） | 537.2 MiB  | —                |
-| Forrester | 4096 | sklearn   | 1.324 s（1.203–1.559）  | 23.572 s（20.929–27.674）    | 33.39 ms（26.49–37.16） | 1151.3 MiB | pass             |
-| Forrester | 4096 | libgp     | 1.559 s（1.550–1.652）  | 102.918 s（101.718–104.916） | 414 ms（368–468）       | 405.2 MiB  | fail（RSS +33%） |
-| Forrester | 4096 | friedrich | 4.935 s（4.827–5.131）  | N/A                          | 712 ms（698–815）       | 138.8 MiB  | pass（時間）     |
-| 球 ARD    | 256  | gprx      | 0.95 ms（0.85–1.47）    | 11.95 ms（10.25–17.93）      | 0.41 ms（0.38–0.64）    | 10.7 MiB   | —                |
-| 球 ARD    | 256  | sklearn   | 2.18 ms（1.88–10.38）   | 39.57 ms（35.29–69.02）      | 0.42 ms（0.39–0.65）    | 111.4 MiB  | pass             |
-| 球 ARD    | 256  | libgp     | 1.27 ms（1.14–1.82）    | 70.87 ms（67.65–78.27）      | 0.95 ms（0.93–1.25）    | 7.2 MiB    | fail（RSS +49%） |
+| Forrester | 256  | gprx      | 0.86 ms（0.71–1.38）    | 11.40 ms（10.18–14.36）      | 0.41 ms（0.40–0.61）    | 9.6 MiB    | —                |
+| Forrester | 256  | sklearn   | 2.28 ms（1.88–8.67）    | 26.59 ms（24.59–34.48）      | 0.40 ms（0.38–0.69）    | 110.9 MiB  | pass             |
+| Forrester | 256  | libgp     | 1.28 ms（1.10–1.71）    | 63.95 ms（58.30–81.16）      | 1.02 ms（0.92–1.32）    | 7.2 MiB    | fail（RSS +33%） |
+| Forrester | 256  | friedrich | 1.83 ms（1.71–2.35）    | N/A                          | 2.43 ms（2.27–3.78）    | 4.9 MiB    | pass（時間）     |
+| Forrester | 1024 | gprx      | 17.10 ms（12.51–58.57） | 232 ms（171–975）            | 2.53 ms（2.33–3.21）    | 43.6 MiB   | —                |
+| Forrester | 1024 | sklearn   | 86.92 ms（59.35–152.24）| 1.226 s（704 ms–1.690 s）    | 2.32 ms（2.21–3.13）    | 179.8 MiB  | pass             |
+| Forrester | 1024 | libgp     | 36.03 ms（33.08–39.57） | 2.079 s（2.005–2.152）       | 10.05 ms（9.71–11.12）  | 33.2 MiB   | fail（RSS +31%） |
+| Forrester | 1024 | friedrich | 57.92 ms（55.06–69.37） | N/A                          | 25.90 ms（24.80–28.79） | 13.8 MiB   | pass（時間）     |
+| Forrester | 4096 | gprx      | 463 ms（440–623）       | 7.267 s（7.097–8.408）       | 16.27 ms（15.42–17.14） | 537.2 MiB  | —                |
+| Forrester | 4096 | sklearn   | 1.240 s（1.187–1.416）  | 20.574 s（20.189–20.957）    | 31.19 ms（26.29–33.29） | 1151.3 MiB | pass             |
+| Forrester | 4096 | libgp     | 1.532 s（1.482–1.576）  | 105.594 s（105.055–105.857） | 344 ms（339–370）       | 405.2 MiB  | fail（RSS +33%） |
+| Forrester | 4096 | friedrich | 4.965 s（4.927–5.132）  | N/A                          | 721 ms（716–733）       | 138.8 MiB  | pass（時間）     |
+| 球 ARD    | 256  | gprx      | 0.92 ms（0.84–1.38）    | 12.52 ms（11.10–14.43）      | 0.41 ms（0.39–0.53）    | 10.7 MiB   | —                |
+| 球 ARD    | 256  | sklearn   | 2.16 ms（1.88–4.45）    | 41.00 ms（38.38–58.47）      | 0.42 ms（0.37–0.60）    | 111.0 MiB  | pass             |
+| 球 ARD    | 256  | libgp     | 1.27 ms（1.21–1.54）    | 74.46 ms（68.05–224.21）     | 0.97 ms（0.91–1.19）    | 7.2 MiB    | fail（RSS +49%） |
 | 球 ARD    | 256  | friedrich | N/A                     | N/A                          | N/A                     | N/A        | N/A              |
-| 球 ARD    | 1024 | gprx      | 15.40 ms（14.42–22.61） | 182 ms（170–432）            | 2.12 ms（1.80–3.01）    | 59.7 MiB   | —                |
-| 球 ARD    | 1024 | sklearn   | 106 ms（53.52–143.40）  | 1.651 s（1.440–1.978）       | 2.44 ms（2.27–3.09）    | 188.1 MiB  | pass             |
-| 球 ARD    | 1024 | libgp     | 37.26 ms（34.44–40.37） | 2.303 s（2.237–2.808）       | 10.33 ms（9.76–11.31）  | 33.3 MiB   | fail（RSS +79%） |
+| 球 ARD    | 1024 | gprx      | 14.91 ms（13.20–36.68） | 189 ms（175–293）            | 2.12 ms（1.79–2.64）    | 59.7 MiB   | —                |
+| 球 ARD    | 1024 | sklearn   | 99.96 ms（56.32–139.87）| 1.648 s（1.488–1.999）       | 2.36 ms（2.23–3.52）    | 187.8 MiB  | pass             |
+| 球 ARD    | 1024 | libgp     | 37.40 ms（34.31–41.39） | 2.293 s（2.215–2.753）       | 10.78 ms（9.81–13.41）  | 33.3 MiB   | fail（RSS +79%） |
 | 球 ARD    | 1024 | friedrich | N/A                     | N/A                          | N/A                     | N/A        | N/A              |
-| 球 ARD    | 4096 | gprx      | 417 ms（396–484）       | 7.359 s（7.041–9.060）       | 16.84 ms（16.11–18.16） | 793.4 MiB  | —                |
-| 球 ARD    | 4096 | sklearn   | 1.283 s（1.216–1.332）  | 25.073 s（24.806–25.786）    | 30.37 ms（26.64–35.05） | 1279.7 MiB | pass             |
-| 球 ARD    | 4096 | libgp     | 1.548 s（1.525–1.601）  | 105.596 s（104.952–106.124） | 347 ms（339–365）       | 405.2 MiB  | fail（RSS +96%） |
+| 球 ARD    | 4096 | gprx      | 407 ms（404–427）       | 7.982 s（7.271–9.534）       | 16.64 ms（16.16–19.13） | 793.4 MiB  | —                |
+| 球 ARD    | 4096 | sklearn   | 1.170 s（1.155–1.399）  | 23.447 s（22.682–24.032）    | 31.14 ms（24.96–36.96） | 1279.5 MiB | pass             |
+| 球 ARD    | 4096 | libgp     | 1.553 s（1.541–1.584）  | 105.275 s（105.082–106.291） | 341 ms（329–353）       | 405.2 MiB  | fail（RSS +96%） |
 | 球 ARD    | 4096 | friedrich | N/A                     | N/A                          | N/A                     | N/A        | N/A              |
 
 ゲートは中央値。gprx の n=4096 eval は sklearn より短い。libgp の eval は gprx より遅い。RSS は sklearn 全セルで gprx が小さく、libgp / friedrich より大きい。RSS vs libgp は P2B-21 / [#142](https://github.com/YUKIKEDA/gprx/issues/142)。HEAD 逐次との 5 回比は次節 P2B-22。

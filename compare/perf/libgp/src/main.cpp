@@ -206,8 +206,11 @@ json run(const json& case_json) {
     std::vector<double> eval_samples;
     eval_samples.reserve(reps);
     for (std::size_t i = 0; i < warmup + reps; ++i) {
-        const auto start = std::chrono::steady_clock::now();
+        // Same theta as after factor. Must run before the clock: libgp
+        // skips `compute()` unless `loghyper_changed`, so this is the
+        // cache-bust that matches gprx `value_and_gradient_into`.
         fitted->covf().set_loghyper(loghyper);
+        const auto start = std::chrono::steady_clock::now();
         (void)fitted->log_likelihood_gradient();
         const double dt =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
