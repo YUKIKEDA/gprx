@@ -19,7 +19,7 @@
   → CompiledKernel<T> (KernelSpecをコンパイルした実行計画 + Workspace)
   → Gpr (トレーナー: カーネル・尤度・変換・FitOptions)
        → Objective (尤度・勾配。fit 中だけ)
-       → Optimizer (型パラメータ。既定 `Lbfgs`。差し込み口は P2B-1。argmin ソルバは P2B-2。自作の例は P2B-9)
+       → Optimizer (型パラメータ。既定 `Lbfgs`。差し込み口は P2B-1。argmin ソルバは P2B-2。自作 `O` は同じ口で `minimize` される。使用例は P2B-15)
        → fit(self) → FittedGpr | (Gpr, GprError)
   → FittedGpr (L, α, X。predict / predict_into / refit / loo)
        → Phase 3: OnlineInference (`FittedGpr` 上、`&mut self`)
@@ -828,7 +828,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-8）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-9）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
