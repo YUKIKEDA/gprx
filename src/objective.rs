@@ -100,19 +100,33 @@ pub(crate) trait HasBounds {
 ///
 /// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
 /// kernel and likelihood match `params`.
-pub(crate) struct GprObjective<'a, O, S, C = crate::DistanceCachePolicy> {
-    model: &'a mut FittedGpr<O, S, C>,
+pub(crate) struct GprObjective<
+    'a,
+    O,
+    S,
+    C = crate::DistanceCachePolicy,
+    B: crate::gpr::AllocWorkspace = crate::RetainCholesky,
+> {
+    model: &'a mut FittedGpr<O, S, C, B>,
     scratch: Vec<f64>,
 }
 
-impl<'a, O, S, C: DistanceCacheSlot> GprObjective<'a, O, S, C> {
-    pub(crate) fn new(model: &'a mut FittedGpr<O, S, C>) -> Self {
+impl<'a, O, S, C, B> GprObjective<'a, O, S, C, B>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
+    pub(crate) fn new(model: &'a mut FittedGpr<O, S, C, B>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self { model, scratch }
     }
 }
 
-impl<O, S, C: DistanceCacheSlot> Objective for GprObjective<'_, O, S, C> {
+impl<O, S, C, B> Objective for GprObjective<'_, O, S, C, B>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
     fn num_params(&self) -> usize {
         self.model.num_params()
     }
@@ -123,13 +137,19 @@ impl<O, S, C: DistanceCacheSlot> Objective for GprObjective<'_, O, S, C> {
             self.scratch.resize(n, 0.0);
         }
         self.model
-            .value_and_gradient_into(params, &mut self.scratch)
+            .value_and_gradient_into_fit(params, &mut self.scratch)
     }
 }
 
-impl<O, S, C: DistanceCacheSlot> Differentiable for GprObjective<'_, O, S, C> {
+impl<O, S, C, B> Differentiable for GprObjective<'_, O, S, C, B>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
-        self.model.value_and_gradient_into(params, out).map(|_| ())
+        self.model
+            .value_and_gradient_into_fit(params, out)
+            .map(|_| ())
     }
 
     fn value_and_gradient_into(
@@ -137,11 +157,15 @@ impl<O, S, C: DistanceCacheSlot> Differentiable for GprObjective<'_, O, S, C> {
         params: &[f64],
         out: &mut [f64],
     ) -> Result<f64, GprError> {
-        self.model.value_and_gradient_into(params, out)
+        self.model.value_and_gradient_into_fit(params, out)
     }
 }
 
-impl<O, S, C: DistanceCacheSlot> HasBounds for GprObjective<'_, O, S, C> {
+impl<O, S, C, B> HasBounds for GprObjective<'_, O, S, C, B>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)
     }

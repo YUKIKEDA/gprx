@@ -3,6 +3,8 @@
 use std::fmt;
 
 use crate::error::GprError;
+use crate::precision::DoublePrecision;
+use crate::workspace::{FitWorkspace, ReuseWorkspace, Workspace};
 
 /// Which predictive variance [`Prediction`] reports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -365,4 +367,83 @@ pub struct PredictiveCovariance {
     pub covariance: Vec<f64>,
     /// Whether the diagonal of [`Self::covariance`] is latent or observation.
     pub variance_kind: VarianceKind,
+}
+
+/// Keeps a dedicated gradient matrix so the Cholesky factor stays in place.
+///
+/// This is the default [`crate::Gpr`] buffer policy. Joint MLL+grad does not
+/// rebuild `L` afterwards.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, RetainCholesky};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let gpr = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_cholesky_buffer(RetainCholesky);
+/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetainCholesky;
+
+/// Reuses the Cholesky buffer as the gradient matrix `W`, then refactors.
+///
+/// [`crate::Gpr::fit`] restores `L` once after the optimizer. A standalone
+/// [`crate::FittedGpr::value_and_gradient_into`] restores `L` after the call
+/// so [`crate::FittedGpr::predict`] stays available. Optimizer iterations do
+/// not restore between steps.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, ReuseCholesky};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let gpr = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_cholesky_buffer(ReuseCholesky);
+/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReuseCholesky;
+
+/// Marker for how [`crate::Gpr`] stores the Cholesky factor versus `W`.
+///
+/// The only implementations are [`RetainCholesky`] and [`ReuseCholesky`].
+/// Switch with [`crate::Gpr::with_cholesky_buffer`].
+pub trait CholeskyBuffer:
+    Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
+{
+}
+
+impl CholeskyBuffer for RetainCholesky {}
+
+impl CholeskyBuffer for ReuseCholesky {}
+
+/// Crate-private workspace allocation for a [`CholeskyBuffer`].
+pub(crate) trait AllocWorkspace: CholeskyBuffer {
+    type Workspace: FitWorkspace;
+    const OVERWRITES_CHOLESKY: bool;
+}
+
+impl AllocWorkspace for RetainCholesky {
+    type Workspace = Workspace<DoublePrecision>;
+    const OVERWRITES_CHOLESKY: bool = false;
+}
+
+impl AllocWorkspace for ReuseCholesky {
+    type Workspace = ReuseWorkspace<DoublePrecision>;
+    const OVERWRITES_CHOLESKY: bool = true;
 }

@@ -438,21 +438,21 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 2. in-place Cholesky。`k_matrix`はLになる
 3. `log|K| = 2 Σ log(L_ii)` をLの対角から計算
 4. `L Lᵀ α = y` を前進・後退代入で解く(O(n²))
-5. `L`から`K⁻¹`を`w_matrix`へ計算する(三角ソルブで `L Lᵀ X = I`、O(n³)が1回)。Lは`k_matrix`に残す
-6. `w_matrix[i,j] ← α[i] α[j] - K⁻¹[i,j]`(対称なので下三角のみ)
+5. `L`から`K⁻¹`を計算する(三角ソルブで `L Lᵀ X = I`、O(n³)が1回)
+6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]`(対称なので下三角のみ)
 7. 各θ_iについて `∂K/∂θ_i` を`exp_buf`へ評価し、`⟨W, ∂K/∂θ_i⟩_F` をO(n²)で積算。カーネルパラメータは`KernelTerm::grad`、ノイズは`Likelihood::noise_grad_diag`(対角のみ)
 
 全体コストはO(n³ + p n²)。K⁻¹をパラメータごとに作り直さない。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-メモリ節約の代替（L を `W` で上書きして fit 終了時に Cholesky をやり直す）は P2B-19（[#111](https://github.com/YUKIKEDA/gprx/issues/111)）。Phase 1 / 2 は `w_matrix` を独立確保し、L を保持する。
+既定の第4型は `RetainCholesky`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。`with_cholesky_buffer(ReuseCholesky)` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にスロットは書かない。`load` は `RetainCholesky`。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C` を持つ。`Gpr::new` の `C` は `DistanceCachePolicy`。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。`with_distance_cache_policy` は `C = DistanceCachePolicy` にだけある。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
+`Gpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy, B = RetainCholesky>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C`、Cholesky バッファ方針 `B` を持つ。`Gpr::new` の `C` は `DistanceCachePolicy`。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。`with_distance_cache_policy` は `C = DistanceCachePolicy` にだけある。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
@@ -558,16 +558,24 @@ sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_
 バッファ数は少数・固定なので、個別フィールドとして持つ。精度ポリシーのStorage/Refineを明示的に反映する。
 
 ```rust
-struct Workspace<P: PrecisionPolicy> {
-    k_matrix: Mat<P::Storage>,       // K → Cholesky後は L
-    w_matrix: Mat<P::Storage>,       // W = ααᵀ - K⁻¹。勾配のトレース項(§6.2)
+struct WorkspaceCore<P: PrecisionPolicy> {
+    k_matrix: Mat<P::Storage>,       // K → Cholesky後は L。Reuse の勾配中は W
     dist_cache: Mat<P::Storage>,
-    exp_buf: Mat<P::Storage>,        // カーネル評価、および ∂K/∂θ の一時領域
+    exp_buf: Mat<P::Storage>,        // カーネル評価、∂K/∂θ。Reuse の n-RHS はここ
     kernel_scratch: Mat<P::Storage>, // product `∂K/∂θ`。等方 RBF では空
     thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
     rhs: Mat<P::Storage>,            // n×1、訓練 Cholesky の右辺 y → α
     refine_buf: Option<Mat<P::Refine>>, // MixedPrecision時のみ。DoublePrecisionではNone
     faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
+}
+
+struct Workspace<P: PrecisionPolicy> {          // RetainCholesky
+    core: WorkspaceCore<P>,
+    w_matrix: Mat<P::Storage>,       // W = ααᵀ - K⁻¹。勾配のトレース項(§6.2)
+}
+
+struct ReuseWorkspace<P: PrecisionPolicy> {     // ReuseCholesky。第2の n×n (W) は無い
+    core: WorkspaceCore<P>,
 }
 
 // FittedGpr が保持。predict_into の warmup で (n, m, d) に合わせる
@@ -607,9 +615,9 @@ fit()開始 → n,d確定 → 各Mat<T>を1回だけ確保 → 距離キャッ�
        k_matrix に A を下三角構築
        in-place Cholesky(同一領域が L になる)
        α, log|K|
-       w_matrix に K⁻¹ → W
+       Retain: w_matrix に K⁻¹ → W。Reuse: exp_buf で K⁻¹、k_matrix へ W
        exp_buf に ∂K/∂θ を順に書き ⟨W, dK⟩
-fit()終了 → FittedGpr が L, α, X を保持。W / ∂K / L-BFGS は捨ててよい
+fit()終了 → FittedGpr が L, α, X を保持（Reuse はここで Chol し直す）。W / ∂K / L-BFGS は捨ててよい
   → predict(&self): 出力を確保
   → predict_into(&mut self): query_* に上書き、`Prediction` の容量を再利用
 ```
