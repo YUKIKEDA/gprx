@@ -12,7 +12,8 @@ pub enum VarianceKind {
     Observation,
 }
 
-/// Options for [`crate::FittedGpr::predict`].
+/// Options for [`crate::FittedGpr::predict`], [`crate::FittedGpr::predict_covariance`],
+/// and [`crate::FittedGpr::sample`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PredictOptions {
     /// Which variance to return. Defaults to [`VarianceKind::Observation`].
@@ -276,7 +277,8 @@ impl Iterator for RetryJitters {
 /// Predictive mean and (diagonal) variance at the query points.
 ///
 /// [`FittedGpr::predict_into`] reuses `mean` / `variance` capacity when the
-/// query length matches a previous call.
+/// query length matches a previous call. Query–query covariance is
+/// [`PredictiveCovariance`], not a field here.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Prediction {
     /// Predictive mean on the original target scale.
@@ -284,5 +286,40 @@ pub struct Prediction {
     /// Predictive variance on the original target scale.
     pub variance: Vec<f64>,
     /// Whether [`Self::variance`] is latent or observation variance.
+    pub variance_kind: VarianceKind,
+}
+
+/// Predictive mean and query–query covariance at the query points.
+///
+/// [`crate::FittedGpr::predict_covariance`] returns this type. `covariance` is
+/// packed column-major as an `m × m` matrix: index `col * m + row`. The
+/// diagonal matches [`Prediction::variance`] for the same query and
+/// [`PredictOptions`]. Observation covariance adds `σn²` on the diagonal in
+/// the transformed space, then the target transform scales every entry by
+/// the same `s²` as variance.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{Gpr, GaussianLikelihood};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+/// let likelihood = GaussianLikelihood::new(0.1)?;
+/// let gpr = Gpr::new(kernel, likelihood);
+/// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
+/// assert_eq!(cov.covariance.len(), cov.mean.len() * cov.mean.len());
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PredictiveCovariance {
+    /// Predictive mean on the original target scale.
+    pub mean: Vec<f64>,
+    /// Predictive covariance, packed column-major `m × m`.
+    pub covariance: Vec<f64>,
+    /// Whether the diagonal of [`Self::covariance`] is latent or observation.
     pub variance_kind: VarianceKind,
 }
