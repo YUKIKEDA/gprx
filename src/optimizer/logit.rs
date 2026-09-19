@@ -4,9 +4,12 @@ use std::cell::RefCell;
 
 use argmin::core::{CostFunction, Error as ArgminError, Gradient};
 
+use rand::rngs::SmallRng;
+
 use crate::error::GprError;
 use crate::objective::{Differentiable, Objective};
 use crate::param::Interval;
+use crate::rng::open_unit;
 
 use super::OptResult;
 
@@ -188,19 +191,18 @@ fn sigmoid(z: f64) -> f64 {
 
 pub(super) fn sample_log_uniform_z(
     intervals: &[Interval],
-    rng: &mut u64,
+    rng: &mut SmallRng,
 ) -> Result<Vec<f64>, GprError> {
     let mut z = vec![0.0; intervals.len()];
     for (slot, interval) in z.iter_mut().zip(intervals.iter().copied()) {
-        let x = log_uniform_open(*rng, interval);
-        *rng = splitmix64_state(*rng);
+        let x = log_uniform_open(rng, interval);
         *slot = user_to_z(x, interval)?;
     }
     Ok(z)
 }
 
-fn log_uniform_open(state: u64, interval: Interval) -> f64 {
-    let u = open_unit(state);
+fn log_uniform_open(rng: &mut SmallRng, interval: Interval) -> f64 {
+    let u = open_unit(rng);
     if interval.lo() > 0.0 {
         let ln_lo = interval.lo().ln();
         let ln_hi = interval.hi().ln();
@@ -208,30 +210,6 @@ fn log_uniform_open(state: u64, interval: Interval) -> f64 {
     } else {
         interval.lo() + u * interval.width()
     }
-}
-
-fn open_unit(state: u64) -> f64 {
-    let u = splitmix64_f64(state);
-    let eps = 1.0 / ((1u64 << 53) as f64);
-    if u <= eps {
-        eps
-    } else if u >= 1.0 - eps {
-        1.0 - eps
-    } else {
-        u
-    }
-}
-
-fn splitmix64_state(state: u64) -> u64 {
-    state.wrapping_add(0x9E3779B97F4A7C15)
-}
-
-fn splitmix64_f64(state: u64) -> f64 {
-    let mut z = splitmix64_state(state);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    (z >> 11) as f64 / ((1u64 << 53) as f64)
 }
 
 /// Cost returned to argmin when a trial point is non-finite or rejected (for

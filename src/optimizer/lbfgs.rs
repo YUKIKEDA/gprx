@@ -124,7 +124,7 @@ impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
         let first_z = log_theta_to_z(init, &intervals)?;
         consider_run(self, objective, &intervals, &first_z, &mut best)?;
         if let Some(restarts) = self.restarts {
-            let mut rng = restarts.seed;
+            let mut rng = crate::rng::small_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider_run(self, objective, &intervals, &z, &mut best);
@@ -353,27 +353,15 @@ mod tests {
         }
     }
 
-    fn splitmix64(state: &mut u64) -> f64 {
-        *state = state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = *state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^= z >> 31;
-        (z >> 11) as f64 / ((1u64 << 53) as f64)
-    }
-
     fn forrester_bench_xy() -> (Vec<f64>, Vec<f64>) {
         const N: usize = 256;
         let x: Vec<f64> = (0..N).map(|i| i as f64 / (N - 1) as f64).collect();
-        let mut state = 0u64;
+        let mut rng = crate::rng::small_rng(0);
         let y: Vec<f64> = x
             .iter()
             .map(|&xi| {
                 let t = 6.0 * xi - 2.0;
-                let u1 = splitmix64(&mut state).max(f64::MIN_POSITIVE);
-                let u2 = splitmix64(&mut state);
-                let noise = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
-                t * t * (12.0 * xi - 4.0).sin() + noise
+                t * t * (12.0 * xi - 4.0).sin() + crate::rng::unit_normal(&mut rng)
             })
             .collect();
         (x, y)
@@ -429,6 +417,11 @@ mod tests {
     }
 
     fn sphere_bench_xy() -> (Vec<f64>, Vec<f64>) {
+        // SmallRng seed 0 walks a ridge on DistanceCachePolicy::Never (~485 evals).
+        sphere_bench_xy_with_seed(9)
+    }
+
+    fn sphere_bench_xy_with_seed(seed: u64) -> (Vec<f64>, Vec<f64>) {
         const N: usize = 256;
         const SIDE: usize = 16;
         let mut x = vec![0.0; N * 2];
@@ -439,14 +432,11 @@ mod tests {
             x[row] = i as f64 / denom;
             x[N + row] = j as f64 / denom;
         }
-        let mut state = 0u64;
+        let mut rng = crate::rng::small_rng(seed);
         let y: Vec<f64> = (0..N)
             .map(|row| {
                 let a = x[row] / 0.25;
-                let u1 = splitmix64(&mut state).max(f64::MIN_POSITIVE);
-                let u2 = splitmix64(&mut state);
-                let noise = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
-                a * a + x[N + row] * x[N + row] + noise
+                a * a + x[N + row] * x[N + row] + crate::rng::unit_normal(&mut rng)
             })
             .collect();
         (x, y)

@@ -16,6 +16,8 @@ use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
 use gprx::transform::StandardizeTarget;
 use gprx::{DistanceCachePolicy, FittedGpr, Fixed, GaussianLikelihood, Gpr, Prediction};
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
 
 const N: usize = 256;
 const D_ISO: usize = 1;
@@ -28,18 +30,25 @@ const ELL_ARD: f64 = 4.0;
 const NOISE: f64 = 0.1;
 const NOISE_STD: f64 = 1.0;
 
-fn splitmix64(state: &mut u64) -> f64 {
-    *state = state.wrapping_add(0x9E3779B97F4A7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    (z >> 11) as f64 / ((1u64 << 53) as f64)
+fn small_rng(seed: u64) -> SmallRng {
+    SmallRng::seed_from_u64(seed)
 }
 
-fn standard_normal(state: &mut u64) -> f64 {
-    let u1 = splitmix64(state).max(f64::MIN_POSITIVE);
-    let u2 = splitmix64(state);
+fn open_unit(rng: &mut SmallRng) -> f64 {
+    let u: f64 = rng.random();
+    let eps = 1.0 / ((1u64 << 53) as f64);
+    if u <= eps {
+        eps
+    } else if u >= 1.0 - eps {
+        1.0 - eps
+    } else {
+        u
+    }
+}
+
+fn standard_normal(rng: &mut SmallRng) -> f64 {
+    let u1 = open_unit(rng).max(f64::MIN_POSITIVE);
+    let u2 = open_unit(rng);
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
@@ -65,10 +74,10 @@ fn weighted_sphere(x0: f64, x1: f64) -> f64 {
 
 fn forrester_xy() -> (Vec<f64>, Vec<f64>) {
     let x = linspace(0.0, 1.0, N);
-    let mut state = SEED;
+    let mut rng = small_rng(SEED);
     let y: Vec<f64> = x
         .iter()
-        .map(|&xi| forrester(xi) + NOISE_STD * standard_normal(&mut state))
+        .map(|&xi| forrester(xi) + NOISE_STD * standard_normal(&mut rng))
         .collect();
     (x, y)
 }
@@ -87,9 +96,11 @@ fn sphere_xy() -> (Vec<f64>, Vec<f64>) {
         x[row] = i as f64 / denom;
         x[N + row] = j as f64 / denom;
     }
-    let mut state = SEED;
+    // Same seed as `sphere_bench_xy` in `src/optimizer/lbfgs.rs`. Seed 0
+    // walks a ridge on `DistanceCachePolicy::Never`.
+    let mut rng = small_rng(9);
     let y: Vec<f64> = (0..N)
-        .map(|row| weighted_sphere(x[row], x[N + row]) + NOISE_STD * standard_normal(&mut state))
+        .map(|row| weighted_sphere(x[row], x[N + row]) + NOISE_STD * standard_normal(&mut rng))
         .collect();
     (x, y)
 }

@@ -1,8 +1,8 @@
 //! Exact Gaussian process regression with L-BFGS hyperparameter fitting.
 //!
 //! [`Gpr`] is the trainer. [`Gpr::fit`] consumes [`Gpr<Lbfgs>`] and returns
-//! [`FittedGpr`]. [`Gpr::with_optimizer`] swaps in [`NonlinearCg`] or
-//! [`NelderMead`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
+//! [`FittedGpr`]. [`Gpr::with_optimizer`] swaps in [`NonlinearCg`],
+//! [`NelderMead`], or [`FastSimulatedAnnealing`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
 //! a search. Training `X` is column-major: `n` points and `d` features
 //! packed as feature 0 for all rows, then feature 1, and so on.
 //! Observation noise lives in [`GaussianLikelihood`].
@@ -45,6 +45,7 @@ mod optimizer;
 mod param;
 pub mod persist;
 mod precision;
+mod rng;
 pub mod transform;
 mod workspace;
 
@@ -56,8 +57,9 @@ pub use gpr::{
 pub use likelihood::GaussianLikelihood;
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
-    AcceptsRecompute, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead, NonlinearCg,
-    OptResult, Optimizer, RecomputeStrategy, UsesChangeIndices,
+    AcceptsRecompute, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
+    IncrementalRecompute, Lbfgs, NelderMead, NonlinearCg, OptResult, Optimizer, RecomputeStrategy,
+    UsesChangeIndices,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
 pub use persist::{FORMAT_VERSION, LoadedGpr, PersistRegistry};
