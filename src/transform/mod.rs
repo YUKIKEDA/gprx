@@ -2,15 +2,17 @@
 //!
 //! Input maps: [`IdentityInput`], [`StandardizeInput`], [`MinMaxInput`].
 //! Target maps: [`IdentityTarget`], [`StandardizeTarget`], [`MinMaxTarget`].
-//! A pipeline of stacked maps is not on the roadmap.
+//! Stack several maps with [`Pipeline`] (`X`) or [`TargetPipeline`] (`y`).
 
 mod input;
+mod pipeline;
 mod target;
 
 pub use input::{
     FittedMinMaxInput, FittedStandardizeInput, IdentityInput, MinMaxInput, StandardizeInput,
     Transform, UnfittedTransform,
 };
+pub use pipeline::{FittedPipeline, FittedTargetPipeline, Pipeline, TargetPipeline};
 pub use target::{
     FittedMinMaxTarget, FittedStandardizeTarget, IdentityTarget, MinMaxTarget, StandardizeTarget,
     TargetTransform, UnfittedTarget,
