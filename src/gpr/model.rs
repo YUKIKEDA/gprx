@@ -304,7 +304,8 @@ impl<O, S> Gpr<O, S> {
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after
     /// this switch. argmin solvers are [`crate::Lbfgs`], [`crate::NonlinearCg`],
-    /// and [`crate::NelderMead`].
+    /// and [`crate::NelderMead`]. A user type that implements [`Optimizer`]
+    /// uses this same method; there is no second solver slot.
     ///
     /// # Examples
     ///
@@ -1625,7 +1626,8 @@ where
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
     ///
-    /// Transforms are not re-fit. `n` and `d` stay the same.
+    /// This is the same `O` that [`Gpr::with_optimizer`] installed. Transforms
+    /// are not re-fit. `n` and `d` stay the same.
     ///
     /// # Errors
     ///
