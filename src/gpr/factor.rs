@@ -12,7 +12,7 @@ use crate::kernel::{
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::DoublePrecision;
-use crate::workspace::{Workspace, faer_par};
+use crate::workspace::{Workspace, faer_par, faer_par_dims};
 
 use super::{DistanceCachePolicy, JitterPolicy};
 
@@ -435,7 +435,9 @@ pub(crate) fn cholesky_and_solve(
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
     cholesky_lower(a, scratch, jitter, stage)?;
+    let n = a.nrows();
+    let n_rhs = rhs.ncols();
     let stack = MemStack::new(scratch);
-    llt::solve::solve_in_place(a.as_ref(), rhs.as_mut(), faer_par(a.nrows()), stack);
+    llt::solve::solve_in_place(a.as_ref(), rhs.as_mut(), faer_par_dims(n, n_rhs), stack);
     Ok(())
 }
