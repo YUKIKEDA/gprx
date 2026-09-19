@@ -19,7 +19,9 @@ use crate::optimizer::{
 };
 use crate::param::Interval;
 use crate::precision::DoublePrecision;
-use crate::transform::{IdentityInput, IdentityTarget, TargetTransform, Transform};
+use crate::transform::{
+    IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
+};
 use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch};
 
 use super::factor::{
@@ -72,8 +74,8 @@ use super::{
 pub struct Gpr<O = Lbfgs, S = FullRecompute> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
-    x_transform: Box<dyn Transform>,
-    y_transform: Box<dyn TargetTransform>,
+    x_transform: Box<dyn UnfittedTransform>,
+    y_transform: Box<dyn UnfittedTarget>,
     optimizer: O,
     distance_cache_policy: DistanceCachePolicy,
     jitter_policy: JitterPolicy,
@@ -150,6 +152,8 @@ pub struct FittedGpr<O = Lbfgs, S = FullRecompute> {
     kernel: KernelSpec,
     compiled: CompiledKernel,
     likelihood: GaussianLikelihood,
+    x_unfitted: Box<dyn UnfittedTransform>,
+    y_unfitted: Box<dyn UnfittedTarget>,
     x_transform: Box<dyn Transform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
@@ -173,6 +177,8 @@ impl<O: Clone, S> Clone for FittedGpr<O, S> {
             kernel: self.kernel.clone(),
             compiled: self.compiled.clone(),
             likelihood: self.likelihood,
+            x_unfitted: self.x_unfitted.clone_box(),
+            y_unfitted: self.y_unfitted.clone_box(),
             x_transform: self.x_transform.clone_box(),
             y_transform: self.y_transform.clone_box(),
             optimizer: self.optimizer.clone(),
@@ -213,7 +219,9 @@ impl Gpr {
     ///
     /// Input and target maps default to identity. The optimizer is [`Lbfgs`].
     /// Call [`Self::with_input_transform`] / [`Self::with_target_transform`]
-    /// before [`Self::fit`] to standardize. Call [`Self::with_optimizer`] to
+    /// before [`Self::fit`] to standardize. Those methods take an unfitted
+    /// map; `fit` / `factor` produce the fitted map stored on [`FittedGpr`].
+    /// Call [`Self::with_optimizer`] to
     /// switch to [`Fixed`] or another [`Optimizer`].
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
@@ -231,13 +239,13 @@ impl Gpr {
 
 impl<O, S> Gpr<O, S> {
     /// Replaces the input (`X`) transform. Intended to be called before fit.
-    pub fn with_input_transform(mut self, transform: impl Transform + 'static) -> Self {
+    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
         self.x_transform = Box::new(transform);
         self
     }
 
     /// Replaces the target (`y`) transform. Intended to be called before fit.
-    pub fn with_target_transform(mut self, transform: impl TargetTransform + 'static) -> Self {
+    pub fn with_target_transform(mut self, transform: impl UnfittedTarget + 'static) -> Self {
         self.y_transform = Box::new(transform);
         self
     }
@@ -494,7 +502,7 @@ impl<O, S> From<(Gpr<O, S>, GprError)> for GprError {
 impl<O, S> FittedGpr<O, S> {
     #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
     fn prepare(
-        mut gpr: Gpr<O, S>,
+        gpr: Gpr<O, S>,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
@@ -504,17 +512,19 @@ impl<O, S> FittedGpr<O, S> {
             return Err((gpr, err));
         }
         let mut x_buf = x.to_vec();
-        if let Err(err) = gpr.x_transform.fit(&x_buf, n_rows, n_cols) {
-            return Err((gpr, err));
-        }
-        if let Err(err) = gpr.x_transform.apply(&mut x_buf, n_rows, n_cols) {
+        let x_fitted = match gpr.x_transform.clone_box().fit(&x_buf, n_rows, n_cols) {
+            Ok(t) => t,
+            Err(err) => return Err((gpr, err)),
+        };
+        if let Err(err) = x_fitted.apply(&mut x_buf, n_rows, n_cols) {
             return Err((gpr, err));
         }
         let mut y_buf = y.to_vec();
-        if let Err(err) = gpr.y_transform.fit(&y_buf) {
-            return Err((gpr, err));
-        }
-        if let Err(err) = gpr.y_transform.transform(&mut y_buf) {
+        let y_fitted = match gpr.y_transform.clone_box().fit(&y_buf) {
+            Ok(t) => t,
+            Err(err) => return Err((gpr, err)),
+        };
+        if let Err(err) = y_fitted.transform(&mut y_buf) {
             return Err((gpr, err));
         }
         let mut workspace = match Workspace::new(n_rows) {
@@ -534,8 +544,10 @@ impl<O, S> FittedGpr<O, S> {
             kernel: gpr.kernel,
             compiled,
             likelihood: gpr.likelihood,
-            x_transform: gpr.x_transform,
-            y_transform: gpr.y_transform,
+            x_unfitted: gpr.x_transform,
+            y_unfitted: gpr.y_transform,
+            x_transform: x_fitted,
+            y_transform: y_fitted,
             optimizer: gpr.optimizer,
             distance_cache_policy: gpr.distance_cache_policy,
             jitter_policy: gpr.jitter_policy,
@@ -559,8 +571,8 @@ impl<O, S> FittedGpr<O, S> {
         Gpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
+            x_transform: self.x_unfitted,
+            y_transform: self.y_unfitted,
             optimizer: self.optimizer,
             distance_cache_policy: self.distance_cache_policy,
             jitter_policy: self.jitter_policy,

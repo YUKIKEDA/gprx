@@ -7,8 +7,14 @@
 mod input;
 mod target;
 
-pub use input::{IdentityInput, MinMaxInput, StandardizeInput, Transform};
-pub use target::{IdentityTarget, MinMaxTarget, StandardizeTarget, TargetTransform};
+pub use input::{
+    FittedMinMaxInput, FittedStandardizeInput, IdentityInput, MinMaxInput, StandardizeInput,
+    Transform, UnfittedTransform,
+};
+pub use target::{
+    FittedMinMaxTarget, FittedStandardizeTarget, IdentityTarget, MinMaxTarget, StandardizeTarget,
+    TargetTransform, UnfittedTarget,
+};
 
 use crate::error::GprError;
 

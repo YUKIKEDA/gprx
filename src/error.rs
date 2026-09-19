@@ -29,15 +29,15 @@ pub enum CholeskyStage {
 /// ```rust
 /// use gprx::GprError;
 ///
-/// fn require_fitted(fitted: bool) -> Result<(), GprError> {
-///     if !fitted {
-///         return Err(GprError::NotFitted);
+/// fn reject_empty(n: usize) -> Result<(), GprError> {
+///     if n == 0 {
+///         return Err(GprError::EmptyInput);
 ///     }
 ///     Ok(())
 /// }
 ///
 /// # fn main() -> Result<(), GprError> {
-/// require_fitted(true)?;
+/// reject_empty(1)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -62,9 +62,6 @@ pub enum GprError {
     /// An input array or matrix was empty.
     #[error("input is empty")]
     EmptyInput,
-    /// A transform `apply` ran before a successful `fit`.
-    #[error("model is not fitted; call fit first")]
-    NotFitted,
     /// User-provided values contained `NaN` or `Inf`.
     #[error("input contains a non-finite value (NaN/Inf)")]
     NonFiniteInput,
@@ -158,10 +155,7 @@ mod tests {
             .to_string(),
             "input dimension mismatch: X.ncols()=3, expected 2"
         );
-        assert_eq!(
-            GprError::NotFitted.to_string(),
-            "model is not fitted; call fit first"
-        );
+        assert_eq!(GprError::EmptyInput.to_string(), "input is empty");
         let chol = GprError::CholeskyFailed {
             jitter: 1e-6,
             matrix_size: 4,
