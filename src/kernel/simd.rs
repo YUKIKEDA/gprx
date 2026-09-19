@@ -369,6 +369,66 @@ pub(crate) fn try_apply_rbf_cross(
     Ok(true)
 }
 
+/// Writes rectangular ARD RBF `k(X, X*)` when views are column-major.
+pub(crate) fn try_apply_rbf_ard_cross(
+    x: MatRef<'_, f64>,
+    xs: MatRef<'_, f64>,
+    out: MatMut<'_, f64>,
+    inv_ell_sq: &[f64],
+) -> Result<bool, GprError> {
+    let n = x.nrows();
+    let m = xs.nrows();
+    let d = inv_ell_sq.len();
+    if x.ncols() != d || xs.ncols() != d || out.nrows() != n || out.ncols() != m {
+        return Ok(false);
+    }
+    if !unit_row_stride(x) || !unit_row_stride(xs) || !unit_row_stride(out.as_ref()) {
+        return Ok(false);
+    }
+    let n_parts = worker_count();
+    out.par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, mut part)| {
+            let (start, len) = col_chunk(m, chunk_idx, n_parts);
+            for local in 0..len {
+                let col = start + local;
+                map_ard_cross_column(x, xs, part.rb_mut(), local, col, inv_ell_sq)?;
+            }
+            Ok::<(), GprError>(())
+        })?;
+    Ok(true)
+}
+
+fn map_ard_cross_column(
+    x: MatRef<'_, f64>,
+    xs: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    out_col: usize,
+    query_col: usize,
+    inv_ell_sq: &[f64],
+) -> Result<(), GprError> {
+    let Some(dest) = col_slice_mut(out.rb_mut(), out_col) else {
+        return Err(GprError::UnsupportedKernelOperation {
+            reason: "expected unit row-stride for SIMD ARD".to_owned(),
+        });
+    };
+    dest.fill(0.0);
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let Some(xdim) = col_slice(x, dim) else {
+            return Err(GprError::UnsupportedKernelOperation {
+                reason: "expected unit row-stride for SIMD ARD".to_owned(),
+            });
+        };
+        let Some(xs_dim) = col_slice(xs, dim) else {
+            return Err(GprError::UnsupportedKernelOperation {
+                reason: "expected unit row-stride for SIMD ARD".to_owned(),
+            });
+        };
+        add_squared_diff_scaled(xdim, xs_dim[query_col], w, dest);
+    }
+    rbf_exp_in_place(dest, 0.5)
+}
+
 /// Writes `∂k/∂θ = k · d / ℓ²` when views are column-major.
 pub(crate) fn try_grad_rbf(
     dist: MatRef<'_, f64>,

@@ -2,8 +2,8 @@
 
 use super::dist::require_ard_sq_diff_shape;
 use super::simd::{
-    try_apply_rbf_ard_cache, try_apply_rbf_ard_points, try_grad_rbf_ard_cache,
-    try_grad_rbf_ard_points,
+    try_apply_rbf_ard_cache, try_apply_rbf_ard_cross, try_apply_rbf_ard_points,
+    try_grad_rbf_ard_cache, try_grad_rbf_ard_points,
 };
 use super::{ArdLengthscales, Triangle, visit_triangle};
 use crate::error::GprError;
@@ -191,6 +191,9 @@ impl RbfArdKernel {
         require_finite_points(x)?;
         require_finite_points(xs)?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_apply_rbf_ard_cross(x, xs, out.rb_mut(), inv_ell_sq)? {
+            return Ok(());
+        }
         for col in 0..xs.nrows() {
             for row in 0..x.nrows() {
                 out[(row, col)] = ard_kernel_pair(x, row, xs, col, inv_ell_sq)?;

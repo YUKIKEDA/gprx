@@ -10,7 +10,8 @@ n=4096 の joint MLL+grad は Cholesky と `W` 用の n 本三角ソルブが壁
 
 ## 決定
 
-- factor の Cholesky、α / W の `solve_in_place`、predict / LOO / `predict_covariance` の三角ソルブは `faer_par(n) = Par::rayon(min(pool, max(1, n/64)))`
+- factor の Cholesky と `W`（n 本 RHS）は `faer_par(n) = Par::rayon(min(pool, n/64))`
+- α（1 本）と predict / `predict_covariance` の `L⁻¹ k_*`（`n×m`）は `faer_par_dims(n, k) = Par::rayon(min(pool, n/64, n·k/16384, k/12))`。`k = n` なら正方の式と同じ（`k/12` は緩い）
 - カーネル埋めはプロセス広域プールのまま
 - 公開の `n_jobs` / 並列 on-off は置かない。`RAYON_NUM_THREADS=1` は 1 本
 - `Workspace` の faer scratch は同じ `Par` で取る
@@ -33,10 +34,12 @@ eval 10 の平均。1 本に対する比。
 
 `n/64` は 256→4、1024→16、4096→16。faer だけ 4 本・カーネル 16 本の混在は、256 で 16 本事故を避け、両方 4 本より数 ms 遅い。n≥1024 では式がプール全本数になり、カーネルを絞っても差は出ない。
 
+predict 100 は `k = 100`。`faer_par(n)` のままだと n=1024 で 16 本になり、三角ソルブが 1.5–22 ms で跳ぶ（確保・カーネルは 0.2–0.8 ms で安定）。n=4096 でも 16 本のまま 5 回中 1 回が 103 ms。同じセルで Seq / 1 本は 2.4–3.0 ms、4 本は 1.6–2.1 ms、8 本は 1.5–1.8 ms。`n·k/16384` は n=256 の eval 4 本点（`256²/4`）。`k/12` は 100 列を 8 本までに落とす。1024×100 は 6 本、4096×100 は 8 本。
+
 壁時計は一面である。アルゴリズム（A⁻¹ の n 本ソルブ）は sklearn と同じ。アロケーション（`I` / `W` の n×n）は #142 / P2B-19。
 
 ## 帰結
 
-- 未設定 16 本でも n=256 は faer 4 本に落ちる
+- 未設定 16 本でも n=256 の正方核は faer 4 本、n=1024 の predict 100 は 6 本、n=4096 の predict 100 は 8 本
 - 並列は bitwise を変えうる。数値テストは公差
 - 合否は `compare/perf` と `.dev/bench-log.md`。criterion は使わない

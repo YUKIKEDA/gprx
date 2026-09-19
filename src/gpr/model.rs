@@ -23,7 +23,7 @@ use crate::precision::DoublePrecision;
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
 };
-use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch, faer_par};
+use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch, faer_par, faer_par_dims};
 
 use super::factor::{
     FactorPolicy, cholesky_lower_with_policy, factor_train_with_policy, fill_identity,
@@ -1403,7 +1403,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             l,
             query.query_k_star.as_mut(),
-            faer_par(n),
+            faer_par_dims(n, m),
         );
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query.query_kss)?,
@@ -1517,7 +1517,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
-            faer_par(n),
+            faer_par_dims(n, m),
         );
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query_kss)?,
@@ -1772,7 +1772,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
-            faer_par(n),
+            faer_par_dims(n, m),
         );
         let mut kss = Mat::zeros(m, m);
         let mut kss_scratch = Mat::zeros(m, m);
