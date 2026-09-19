@@ -3,7 +3,7 @@
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
-use faer::{Mat, MatMut, MatRef, Par};
+use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
@@ -12,7 +12,7 @@ use crate::kernel::{
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::DoublePrecision;
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, faer_par};
 
 use super::{DistanceCachePolicy, JitterPolicy};
 
@@ -349,7 +349,7 @@ pub(crate) fn inv_diag_from_chol_l(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
     let n = l.nrows();
     debug_assert_eq!(q_diag.len(), n);
     let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { 1.0 } else { 0.0 });
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, inv_l.as_mut(), Par::Seq);
+    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, inv_l.as_mut(), faer_par(n));
     for (i, qi) in q_diag.iter_mut().enumerate() {
         let mut q = 0.0;
         for k in 0..n {
@@ -376,7 +376,7 @@ pub(crate) fn cholesky_lower(
     match llt::factor::cholesky_in_place(
         a.as_mut(),
         regularization,
-        Par::Seq,
+        faer_par(n),
         stack,
         Default::default(),
     ) {
@@ -436,6 +436,6 @@ pub(crate) fn cholesky_and_solve(
 ) -> Result<(), GprError> {
     cholesky_lower(a, scratch, jitter, stage)?;
     let stack = MemStack::new(scratch);
-    llt::solve::solve_in_place(a.as_ref(), rhs.as_mut(), Par::Seq, stack);
+    llt::solve::solve_in_place(a.as_ref(), rhs.as_mut(), faer_par(a.nrows()), stack);
     Ok(())
 }

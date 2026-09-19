@@ -76,10 +76,21 @@ pub(crate) fn empty_thread_scratch() -> Vec<Mat<f64>> {
     (0..n).map(|_| Mat::<f64>::zeros(0, 0)).collect()
 }
 
+/// Caps faer workers at `min(pool, max(1, n / 64))`. Kernel Rayon is unchanged.
+///
+/// See `.dev/adr/0001-faer-parallel-degree.md`.
+#[inline]
+pub(crate) fn faer_par(n: usize) -> Par {
+    let pool = rayon::current_num_threads().max(1);
+    let cap = (n / 64).max(1);
+    Par::rayon(pool.min(cap))
+}
+
 fn faer_scratch_req(n: usize) -> StackReq {
-    let chol = llt::factor::cholesky_in_place_scratch::<f64>(n, Par::Seq, Default::default());
-    let solve_vec = llt::solve::solve_in_place_scratch::<f64>(n, 1, Par::Seq);
-    let solve_mat = llt::solve::solve_in_place_scratch::<f64>(n, n, Par::Seq);
+    let par = faer_par(n);
+    let chol = llt::factor::cholesky_in_place_scratch::<f64>(n, par, Default::default());
+    let solve_vec = llt::solve::solve_in_place_scratch::<f64>(n, 1, par);
+    let solve_mat = llt::solve::solve_in_place_scratch::<f64>(n, n, par);
     chol.or(solve_vec).or(solve_mat)
 }
 
