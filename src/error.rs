@@ -131,6 +131,20 @@ pub enum GprError {
     /// An online-learning point identifier is not in the current model.
     #[error("the given PointId does not exist")]
     InvalidPointId,
+    /// Saving or loading a fitted model failed.
+    #[error("persist failed: {reason}")]
+    PersistFailed {
+        /// Why the save or load could not finish.
+        reason: String,
+    },
+    /// `config.json` `format_version` is not supported by this crate.
+    #[error("unsupported persist format version {found}; this crate reads version {supported}")]
+    UnsupportedPersistVersion {
+        /// Version written in the file.
+        found: u32,
+        /// Version this crate reads.
+        supported: u32,
+    },
 }
 
 #[cfg(test)]
@@ -156,6 +170,21 @@ mod tests {
             "input dimension mismatch: X.ncols()=3, expected 2"
         );
         assert_eq!(GprError::EmptyInput.to_string(), "input is empty");
+        assert_eq!(
+            GprError::PersistFailed {
+                reason: "missing l".to_owned()
+            }
+            .to_string(),
+            "persist failed: missing l"
+        );
+        assert_eq!(
+            GprError::UnsupportedPersistVersion {
+                found: 2,
+                supported: 1
+            }
+            .to_string(),
+            "unsupported persist format version 2; this crate reads version 1"
+        );
         let chol = GprError::CholeskyFailed {
             jitter: 1e-6,
             matrix_size: 4,

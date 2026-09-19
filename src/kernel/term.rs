@@ -220,6 +220,25 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
 
     /// Clones this leaf into a new box. Used by [`super::KernelSpec::clone`].
     fn clone_box(&self) -> Box<dyn KernelTerm>;
+
+    /// Stable registry key for persist. Must not start with `gprx.`.
+    ///
+    /// Built-in leaves do not use this. The default empty string is rejected
+    /// when saving a [`super::KernelSpec::Custom`] leaf.
+    fn persist_id(&self) -> &'static str {
+        ""
+    }
+
+    /// JSON state paired with [`Self::persist_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when this leaf has no persist form.
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Err(GprError::PersistFailed {
+            reason: "this custom kernel does not implement persist_state".to_owned(),
+        })
+    }
 }
 
 /// Wrapper stored as [`super::KernelSpec::Custom`] / [`super::CompiledKernel::Custom`].
@@ -240,8 +259,20 @@ impl CustomKernel {
         }
     }
 
+    pub(crate) fn from_box(inner: Box<dyn KernelTerm>) -> Self {
+        Self { inner }
+    }
+
     pub(super) fn num_params(&self) -> usize {
         self.inner.num_params()
+    }
+
+    pub(crate) fn persist_id(&self) -> &'static str {
+        self.inner.persist_id()
+    }
+
+    pub(crate) fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        self.inner.persist_state()
     }
 
     pub(super) fn write_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
