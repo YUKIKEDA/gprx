@@ -18,6 +18,26 @@ pub(crate) enum CoordMode {
     Points,
     /// Constant and White: either a distance matrix (shape) or coordinates.
     Either,
+    /// Dist leaves and Points leaves in one tree. Each leaf keeps its mode.
+    Mixed,
+}
+
+/// Distance matrix, coordinates, and optional ARD `(Δx_d)²` for a Mixed tree.
+#[derive(Clone, Copy)]
+pub(crate) struct MixedKernelViews<'a> {
+    pub(crate) dist: MatRef<'a, f64>,
+    pub(crate) x: MatRef<'a, f64>,
+    pub(crate) ard_cache: Option<MatRef<'a, f64>>,
+}
+
+impl<'a> MixedKernelViews<'a> {
+    pub(crate) fn new(dist: MatRef<'a, f64>, x: MatRef<'a, f64>) -> Self {
+        Self {
+            dist,
+            x,
+            ard_cache: None,
+        }
+    }
 }
 
 /// Compiled kernel. Built-ins are enum arms; Sum/Product are flattened lists.
@@ -543,7 +563,7 @@ impl CompiledKernel {
                 let (first, rest) = split_terms(terms)?;
                 let mut mode = first.coord_mode()?;
                 for term in rest {
-                    mode = merge_coord_mode(mode, term.coord_mode()?)?;
+                    mode = merge_coord_mode(mode, term.coord_mode()?);
                 }
                 Ok(mode)
             }
@@ -553,7 +573,7 @@ impl CompiledKernel {
     pub(crate) fn needs_ard_sq_diff(&self) -> bool {
         match self {
             Self::RbfArd(_) | Self::MaternArd(_) | Self::RationalQuadraticArd(_) => true,
-            Self::Sum(terms) => terms.iter().any(Self::needs_ard_sq_diff),
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::needs_ard_sq_diff),
             _ => false,
         }
     }
@@ -600,6 +620,128 @@ impl CompiledKernel {
                 term.grad_from_ard_cache(cache, x, d_k, local, uplo, scratch)
             }
             _ => self.grad_points(x, d_k, param_idx, uplo, scratch),
+        }
+    }
+
+    /// Writes `K` from a distance matrix and coordinates, one mode per leaf.
+    pub(crate) fn apply_mixed(
+        &self,
+        views: MixedKernelViews<'_>,
+        mut out: MatMut<'_, f64>,
+        uplo: Triangle,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.apply(views.dist, out, uplo, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => {
+                if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
+                    self.apply_from_ard_cache(cache, views.x, out, uplo, scratch)
+                } else {
+                    self.apply_points(views.x, out, uplo, scratch)
+                }
+            }
+            Self::Sum(terms) => fold_terms_mixed(
+                terms,
+                views,
+                out.as_mut(),
+                uplo,
+                scratch.as_mut(),
+                add_triangle,
+            ),
+            Self::Product(terms) => fold_terms_mixed(
+                terms,
+                views,
+                out.as_mut(),
+                uplo,
+                scratch.as_mut(),
+                mul_triangle,
+            ),
+        }
+    }
+
+    /// Writes rectangular `k` from train–query distances and coordinates.
+    pub(crate) fn apply_cross_mixed(
+        &self,
+        dist: MatRef<'_, f64>,
+        x: MatRef<'_, f64>,
+        xs: MatRef<'_, f64>,
+        mut out: MatMut<'_, f64>,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.apply_cross(dist, out, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => self.apply_cross_points(x, xs, out, scratch),
+            Self::Sum(terms) => {
+                fold_rect_mixed(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
+            }
+            Self::Product(terms) => {
+                fold_rect_mixed(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), mul_rect)
+            }
+        }
+    }
+
+    /// Writes `∂K/∂θ` from a distance matrix and coordinates, one mode per leaf.
+    pub(crate) fn grad_mixed(
+        &self,
+        views: MixedKernelViews<'_>,
+        mut d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.grad(views.dist, d_k, param_idx, uplo, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => {
+                if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
+                    self.grad_from_ard_cache(cache, views.x, d_k, param_idx, uplo, scratch)
+                } else {
+                    self.grad_points(views.x, d_k, param_idx, uplo, scratch)
+                }
+            }
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_mixed(views, d_k, local, uplo, scratch)
+            }
+            Self::Product(terms) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
+                product_grad_mixed(
+                    terms,
+                    views,
+                    d_k.as_mut(),
+                    param_idx,
+                    uplo,
+                    scratch.as_mut(),
+                )
+            }
         }
     }
 
@@ -821,15 +963,13 @@ fn iso_needs_dist() -> GprError {
     }
 }
 
-fn merge_coord_mode(a: CoordMode, b: CoordMode) -> Result<CoordMode, GprError> {
-    use CoordMode::{Dist, Either, Points};
+fn merge_coord_mode(a: CoordMode, b: CoordMode) -> CoordMode {
+    use CoordMode::{Dist, Either, Mixed, Points};
     match (a, b) {
-        (Either, other) | (other, Either) => Ok(other),
-        (Dist, Dist) => Ok(Dist),
-        (Points, Points) => Ok(Points),
-        _ => Err(GprError::UnsupportedKernelOperation {
-            reason: "cannot mix isotropic distance kernels with coordinate kernels".to_owned(),
-        }),
+        (Either, other) | (other, Either) => other,
+        (Dist, Dist) => Dist,
+        (Points, Points) => Points,
+        (Mixed, _) | (_, Mixed) | (Dist, Points) | (Points, Dist) => Mixed,
     }
 }
 
@@ -1178,9 +1318,156 @@ fn product_grad_points(
     Ok(())
 }
 
+fn fold_terms_mixed(
+    terms: &[CompiledKernel],
+    views: MixedKernelViews<'_>,
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+    mut scratch: MatMut<'_, f64>,
+    combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
+) -> Result<(), GprError> {
+    let (first, rest) = split_terms(terms)?;
+    first.apply_mixed(views, out.as_mut(), uplo, scratch.as_mut())?;
+    let n = out.nrows();
+    let mut extra = None;
+    for term in rest {
+        apply_into_mixed(
+            term,
+            views,
+            scratch.as_mut(),
+            out.as_mut(),
+            uplo,
+            &mut extra,
+            n,
+        )?;
+        combine(out.as_mut(), scratch.as_ref(), uplo);
+    }
+    Ok(())
+}
+
+fn apply_into_mixed(
+    term: &CompiledKernel,
+    views: MixedKernelViews<'_>,
+    dest: MatMut<'_, f64>,
+    fallback_scratch: MatMut<'_, f64>,
+    uplo: Triangle,
+    extra: &mut Option<Mat<f64>>,
+    n: usize,
+) -> Result<(), GprError> {
+    if term.needs_internal_scratch() {
+        let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
+        term.apply_mixed(views, dest, uplo, buf.as_mut())
+    } else {
+        term.apply_mixed(views, dest, uplo, fallback_scratch)
+    }
+}
+
+fn fold_rect_mixed(
+    terms: &[CompiledKernel],
+    dist: MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    xs: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    mut scratch: MatMut<'_, f64>,
+    combine: fn(MatMut<'_, f64>, MatRef<'_, f64>),
+) -> Result<(), GprError> {
+    let (first, rest) = split_terms(terms)?;
+    first.apply_cross_mixed(dist, x, xs, out.as_mut(), scratch.as_mut())?;
+    let mut extra = None;
+    for term in rest {
+        apply_into_cross_mixed(
+            term,
+            dist,
+            x,
+            xs,
+            scratch.as_mut(),
+            out.as_mut(),
+            &mut extra,
+        )?;
+        combine(out.as_mut(), scratch.as_ref());
+    }
+    Ok(())
+}
+
+fn apply_into_cross_mixed(
+    term: &CompiledKernel,
+    dist: MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    xs: MatRef<'_, f64>,
+    dest: MatMut<'_, f64>,
+    fallback_scratch: MatMut<'_, f64>,
+    extra: &mut Option<Mat<f64>>,
+) -> Result<(), GprError> {
+    if term.needs_internal_scratch() {
+        let buf = extra.get_or_insert_with(|| Mat::zeros(dest.nrows(), dest.ncols()));
+        term.apply_cross_mixed(dist, x, xs, dest, buf.as_mut())
+    } else {
+        term.apply_cross_mixed(dist, x, xs, dest, fallback_scratch)
+    }
+}
+
+fn product_grad_mixed(
+    terms: &[CompiledKernel],
+    views: MixedKernelViews<'_>,
+    mut d_k: MatMut<'_, f64>,
+    param_idx: usize,
+    uplo: Triangle,
+    mut scratch: MatMut<'_, f64>,
+) -> Result<(), GprError> {
+    let mut offset = 0;
+    let mut owner = None;
+    for (i, term) in terms.iter().enumerate() {
+        let n = term.num_params();
+        if param_idx < offset + n {
+            owner = Some((i, param_idx - offset));
+            break;
+        }
+        offset += n;
+    }
+    let (owner_i, local) = owner.ok_or_else(|| GprError::InvalidHyperparameter {
+        reason: format!("kernel parameter index {param_idx} is out of range"),
+    })?;
+
+    let n = d_k.nrows();
+    let mut extra = None;
+    let mut started = false;
+    for (j, term) in terms.iter().enumerate() {
+        if j == owner_i {
+            continue;
+        }
+        if !started {
+            term.apply_mixed(views, d_k.as_mut(), uplo, scratch.as_mut())?;
+            started = true;
+        } else {
+            apply_into_mixed(
+                term,
+                views,
+                scratch.as_mut(),
+                d_k.as_mut(),
+                uplo,
+                &mut extra,
+                n,
+            )?;
+            mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
+        }
+    }
+    if started {
+        if terms[owner_i].needs_internal_scratch() {
+            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
+            terms[owner_i].grad_mixed(views, scratch.as_mut(), local, uplo, buf.as_mut())?;
+        } else {
+            terms[owner_i].grad_mixed(views, scratch.as_mut(), local, uplo, d_k.as_mut())?;
+        }
+        mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
+    } else {
+        terms[owner_i].grad_mixed(views, d_k.as_mut(), local, uplo, scratch.as_mut())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CompiledKernel;
+    use super::{CompiledKernel, MixedKernelViews};
     use crate::kernel::{
         ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel,
         MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
@@ -1772,23 +2059,130 @@ mod tests {
     }
 
     #[test]
-    fn custom_plus_linear_is_unsupported() {
+    fn custom_plus_linear_is_mixed() {
         let spec = custom_rbf(1.0) + KernelSpec::from(LinearKernel::new(1.0).expect("valid"));
         let compiled = spec.compile();
-        assert!(matches!(
-            compiled.coord_mode(),
-            Err(crate::error::GprError::UnsupportedKernelOperation { .. })
-        ));
+        assert_eq!(compiled.coord_mode().expect("mix"), super::CoordMode::Mixed);
     }
 
     #[test]
-    fn mixed_isotropic_and_ard_is_unsupported() {
+    fn mixed_isotropic_and_ard_is_mixed() {
         let spec = rbf(1.0) + KernelSpec::from(RbfArdKernel::new(&[1.0, 2.0]).expect("valid"));
         let compiled = spec.compile();
-        assert!(matches!(
-            compiled.coord_mode(),
-            Err(crate::error::GprError::UnsupportedKernelOperation { .. })
-        ));
+        assert_eq!(compiled.coord_mode().expect("mix"), super::CoordMode::Mixed);
+    }
+
+    #[test]
+    fn rbf_plus_linear_apply_adds_leaves() {
+        let spec = rbf(1.0) + KernelSpec::from(LinearKernel::new(1.0).expect("valid"));
+        let compiled = spec.compile();
+        assert_eq!(compiled.coord_mode().expect("mix"), super::CoordMode::Mixed);
+        let xs = [0.5, 1.5];
+        let x = Mat::from_fn(2, 1, |i, _| xs[i]);
+        let dist = sq_dist_1d(&xs);
+        let mut out = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply_mixed(
+                MixedKernelViews::new(dist.as_ref(), x.as_ref()),
+                out.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("mix");
+        let kr = apply_compiled(&rbf(1.0).compile(), dist.as_ref());
+        let mut kl = fill(2, 0.0);
+        LinearKernel::new(1.0)
+            .expect("valid")
+            .apply(x.as_ref(), kl.as_mut(), Triangle::Full)
+            .expect("linear");
+        for col in 0..2 {
+            for row in 0..2 {
+                assert_close(out[(row, col)], kr[(row, col)] + kl[(row, col)]);
+            }
+        }
+    }
+
+    #[test]
+    fn rbf_times_linear_apply_multiplies_leaves() {
+        let spec = rbf(1.0) * KernelSpec::from(LinearKernel::new(1.0).expect("valid"));
+        let compiled = spec.compile();
+        assert_eq!(compiled.coord_mode().expect("mix"), super::CoordMode::Mixed);
+        let xs = [0.5, 1.5];
+        let x = Mat::from_fn(2, 1, |i, _| xs[i]);
+        let dist = sq_dist_1d(&xs);
+        let mut out = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply_mixed(
+                MixedKernelViews::new(dist.as_ref(), x.as_ref()),
+                out.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("mix");
+        let kr = apply_compiled(&rbf(1.0).compile(), dist.as_ref());
+        let mut kl = fill(2, 0.0);
+        LinearKernel::new(1.0)
+            .expect("valid")
+            .apply(x.as_ref(), kl.as_mut(), Triangle::Full)
+            .expect("linear");
+        for col in 0..2 {
+            for row in 0..2 {
+                assert_close(out[(row, col)], kr[(row, col)] * kl[(row, col)]);
+            }
+        }
+    }
+
+    #[test]
+    fn rbf_plus_linear_grad_matches_finite_difference() {
+        let spec = rbf(1.0) + KernelSpec::from(LinearKernel::new(0.8).expect("valid"));
+        let compiled = spec.compile();
+        let xs = [0.5, 1.5];
+        let x = Mat::from_fn(2, 1, |i, _| xs[i]);
+        let dist = sq_dist_1d(&xs);
+        let mut params = [0.0; 2];
+        spec.get_params(&mut params).expect("len 2");
+        let h = 1e-6;
+        let mut spec_plus = spec.clone();
+        let mut spec_minus = spec.clone();
+        params[1] += h;
+        spec_plus.set_params(&params).expect("valid");
+        params[1] -= 2.0 * h;
+        spec_minus.set_params(&params).expect("valid");
+        let mut kp = fill(2, 0.0);
+        let mut km = fill(2, 0.0);
+        let mut scratch = fill(2, 0.0);
+        spec_plus
+            .compile()
+            .apply_mixed(
+                MixedKernelViews::new(dist.as_ref(), x.as_ref()),
+                kp.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("plus");
+        spec_minus
+            .compile()
+            .apply_mixed(
+                MixedKernelViews::new(dist.as_ref(), x.as_ref()),
+                km.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("minus");
+        let mut dk = fill(2, 0.0);
+        compiled
+            .grad_mixed(
+                MixedKernelViews::new(dist.as_ref(), x.as_ref()),
+                dk.as_mut(),
+                1,
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("grad");
+        let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
+        assert_close(dk[(0, 1)], fd);
     }
 
     #[test]

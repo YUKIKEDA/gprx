@@ -9,7 +9,7 @@ use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, CoordMode, KernelSpec, Triangle, fill_squared_euclidean,
+    CompiledKernel, CoordMode, KernelSpec, MixedKernelViews, Triangle, fill_squared_euclidean,
     fill_squared_euclidean_cross,
 };
 use crate::likelihood::GaussianLikelihood;
@@ -1196,6 +1196,23 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
                     query.query_scratch.as_mut(),
                 )?;
             }
+            CoordMode::Mixed => {
+                let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
+                fill_squared_euclidean_cross(
+                    x_train.as_ref(),
+                    query.query_x.as_ref(),
+                    query.query_dist.as_mut(),
+                    &mut thread_scratch,
+                );
+                ws.thread_scratch = thread_scratch;
+                compiled.apply_cross_mixed(
+                    query.query_dist.as_ref(),
+                    x_train.as_ref(),
+                    query.query_x.as_ref(),
+                    query.query_k_star.as_mut(),
+                    query.query_scratch.as_mut(),
+                )?;
+            }
         }
         if out.mean.len() != m {
             out.mean.resize(m, 0.0);
@@ -1217,7 +1234,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         );
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query.query_kss)?,
-            CoordMode::Points => {
+            CoordMode::Points | CoordMode::Mixed => {
                 compiled.fill_diag_points(query.query_x.as_ref(), &mut query.query_kss)?
             }
         }
@@ -1296,6 +1313,21 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
                     query_scratch.as_mut(),
                 )?;
             }
+            CoordMode::Mixed => {
+                fill_squared_euclidean_cross(
+                    x_train.as_ref(),
+                    query_x.as_ref(),
+                    query_dist.as_mut(),
+                    &mut thread_scratch,
+                );
+                compiled.apply_cross_mixed(
+                    query_dist.as_ref(),
+                    x_train.as_ref(),
+                    query_x.as_ref(),
+                    query_k_star.as_mut(),
+                    query_scratch.as_mut(),
+                )?;
+            }
         }
         if out.mean.len() != m {
             out.mean.resize(m, 0.0);
@@ -1317,7 +1349,9 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         );
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query_kss)?,
-            CoordMode::Points => compiled.fill_diag_points(query_x.as_ref(), &mut query_kss)?,
+            CoordMode::Points | CoordMode::Mixed => {
+                compiled.fill_diag_points(query_x.as_ref(), &mut query_kss)?
+            }
         }
         let noise = self.likelihood.noise_variance();
         for col in 0..m {
@@ -1539,6 +1573,21 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
                     query_scratch.as_mut(),
                 )?;
             }
+            CoordMode::Mixed => {
+                fill_squared_euclidean_cross(
+                    x_train.as_ref(),
+                    query_x.as_ref(),
+                    query_dist.as_mut(),
+                    &mut thread_scratch,
+                );
+                compiled.apply_cross_mixed(
+                    query_dist.as_ref(),
+                    x_train.as_ref(),
+                    query_x.as_ref(),
+                    query_k_star.as_mut(),
+                    query_scratch.as_mut(),
+                )?;
+            }
         }
         let mut mean = vec![0.0; m];
         for (col, slot) in mean.iter_mut().enumerate() {
@@ -1720,6 +1769,17 @@ fn fill_query_query_kernel(
             compiled.apply(dist_ss.as_ref(), kss, Triangle::Full, scratch)
         }
         CoordMode::Points => compiled.apply_points(query_x, kss, Triangle::Full, scratch),
+        CoordMode::Mixed => {
+            let m = query_x.nrows();
+            let mut dist_ss = Mat::zeros(m, m);
+            fill_squared_euclidean(query_x, dist_ss.as_mut(), thread_scratch);
+            compiled.apply_mixed(
+                MixedKernelViews::new(dist_ss.as_ref(), query_x),
+                kss,
+                Triangle::Full,
+                scratch,
+            )
+        }
     }
 }
 

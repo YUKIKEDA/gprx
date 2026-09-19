@@ -14,8 +14,8 @@ use super::Triangle;
 /// Built-in leaves stay as [`super::KernelSpec`] enum arms. Implement this
 /// trait and wrap with [`super::KernelSpec::custom`] to sit on Sum/Product.
 /// Hot-path dispatch is static for built-ins; only this leaf uses a vtable.
-/// Coordinate (points) kernels are not this trait; Dist+Points mixing is
-/// P2B-13.
+/// Coordinate (points) kernels are not this trait. Sum/Product with
+/// points-mode leaves evaluates each leaf in its own mode.
 ///
 /// `get_params` / `set_params` / [`Self::bounds_into`] use the same log-`θ`
 /// convention as built-in leaves. [`Self::apply`] writes `uplo`; entries

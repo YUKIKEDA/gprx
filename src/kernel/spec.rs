@@ -153,8 +153,7 @@ impl KernelSpec {
     ///
     /// The leaf clones into [`super::CompiledKernel`] at [`Self::compile`].
     /// Sum and product with other distance leaves work. Mixing with
-    /// points-mode leaves (Linear, ARD) is the same [`crate::GprError::UnsupportedKernelOperation`]
-    /// as isotropic + ARD.
+    /// points-mode leaves (Linear, ARD) evaluates each leaf in its own mode.
     ///
     /// See [`super::KernelTerm`] for a Sum example.
     pub fn custom(term: impl super::KernelTerm) -> Self {
