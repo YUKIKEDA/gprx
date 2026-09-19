@@ -18,7 +18,10 @@ use crate::optimizer::{
 };
 use crate::param::Interval;
 use crate::precision::DoublePrecision;
-use crate::transform::{MinMaxInput, StandardizeTarget, TargetTransform};
+use crate::transform::{
+    MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget, TargetPipeline,
+    TargetTransform,
+};
 use crate::workspace::Workspace;
 use faer::{Mat, MatMut, MatRef};
 
@@ -692,6 +695,61 @@ fn minmax_input_fit_predicts() {
     assert!(pred.mean[0].is_finite());
     assert!(pred.variance[0].is_finite());
     assert!(pred.variance[0] >= 0.0);
+}
+
+#[test]
+fn one_step_target_pipeline_matches_direct_map() {
+    let y = [1.0, 3.0];
+    let direct = rbf_gpr(1.0, 0.1)
+        .with_target_transform(StandardizeTarget::new())
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &y)
+        .expect("spd");
+    let via = rbf_gpr(1.0, 0.1)
+        .with_target_transform(TargetPipeline::new().then(StandardizeTarget::new()))
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &y)
+        .expect("spd");
+    let p1 = direct.predict(&[0.5], 1, 1).expect("fitted");
+    let p2 = via.predict(&[0.5], 1, 1).expect("fitted");
+    assert_close(p1.mean[0], p2.mean[0]);
+    assert_close(p1.variance[0], p2.variance[0]);
+}
+
+#[test]
+fn stacked_transforms_fit_predict_and_roundtrip() {
+    let x = [0.0, 10.0];
+    let y = [1.0, 5.0];
+    let fitted = rbf_gpr(1.0, 0.1)
+        .with_input_transform(
+            Pipeline::new()
+                .then(MinMaxInput::new())
+                .then(StandardizeInput::new()),
+        )
+        .with_target_transform(
+            TargetPipeline::new()
+                .then(MinMaxTarget::new())
+                .then(StandardizeTarget::new()),
+        )
+        .with_optimizer(Fixed)
+        .factor(&x, 2, 1, &y)
+        .expect("spd");
+    let pred = fitted.predict(&[5.0], 1, 1).expect("fitted");
+    assert!(pred.mean[0].is_finite());
+    assert!(pred.variance[0].is_finite());
+    assert!(pred.variance[0] >= 0.0);
+    let x_obs = fitted.x().to_vec();
+    let y_obs = fitted.y().to_vec();
+    let n = fitted.n();
+    let d = fitted.d();
+    let rebuilt = fitted
+        .into_trainer()
+        .with_optimizer(Fixed)
+        .factor(&x_obs, n, d, &y_obs)
+        .expect("roundtrip");
+    let pred2 = rebuilt.predict(&[5.0], 1, 1).expect("rebuilt");
+    assert_close(pred.mean[0], pred2.mean[0]);
+    assert_close(pred.variance[0], pred2.variance[0]);
 }
 
 #[test]
