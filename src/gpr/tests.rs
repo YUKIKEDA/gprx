@@ -2,8 +2,8 @@ use super::{FittedGpr, Gpr};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
 use crate::gpr::{
-    AdaptiveJitter, DistanceCachePolicy, FixedJitter, JitterPolicy, NoDistanceCache,
-    PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
+    AdaptiveJitter, DistanceCachePolicy, DistanceCacheSlot, FixedJitter, JitterPolicy,
+    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
 };
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -1339,6 +1339,62 @@ fn value_and_gradient_product_matches_finite_difference() {
             fd
         );
     }
+}
+
+fn assert_mll_grad_matches_finite_difference<C: DistanceCacheSlot>(
+    gpr: &mut FittedGpr<Fixed, FullRecompute, C>,
+) {
+    let n_params = gpr.num_params();
+    let mut params = vec![0.0; n_params];
+    gpr.get_params(&mut params).expect("len");
+    let mut grad = vec![0.0; n_params];
+    gpr.value_and_gradient_into(&params, &mut grad)
+        .expect("spd");
+    let h = 1e-5;
+    let mut dummy = vec![0.0; n_params];
+    for i in 0..n_params {
+        let mut plus = params.clone();
+        let mut minus = params.clone();
+        plus[i] += h;
+        minus[i] -= h;
+        let v_plus = gpr
+            .value_and_gradient_into(&plus, &mut dummy)
+            .expect("plus");
+        let v_minus = gpr
+            .value_and_gradient_into(&minus, &mut dummy)
+            .expect("minus");
+        let fd = (v_plus - v_minus) / (2.0 * h);
+        let scale = fd.abs().max(1.0);
+        assert!(
+            (grad[i] - fd).abs() <= 1e-5 * scale,
+            "param {i}: analytic={}, fd={}",
+            grad[i],
+            fd
+        );
+    }
+}
+
+#[test]
+fn value_and_gradient_linear_times_constant_matches_finite_difference() {
+    let kernel = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+        * KernelSpec::from(ConstantKernel::new(1.5).expect("valid"));
+    let mut gpr = Gpr::from_points(kernel, GaussianLikelihood::new(0.1).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&[0.5, 1.5], 2, 1, &[0.5, -0.25])
+        .expect("spd");
+    assert_mll_grad_matches_finite_difference(&mut gpr);
+}
+
+#[test]
+fn value_and_gradient_linear_times_ard_matches_finite_difference() {
+    let kernel = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+        * KernelSpec::from(RbfArdKernel::new(&[1.2, 0.8]).expect("valid"));
+    let x = [0.0, 1.0, 0.2, 0.0, 0.4, 1.1];
+    let mut gpr = Gpr::from_points(kernel, GaussianLikelihood::new(0.1).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 2, &[0.2, -1.0, 0.7])
+        .expect("spd");
+    assert_mll_grad_matches_finite_difference(&mut gpr);
 }
 
 #[test]
