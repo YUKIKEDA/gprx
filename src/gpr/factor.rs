@@ -12,7 +12,7 @@ use crate::kernel::{
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::DoublePrecision;
-use crate::workspace::{Workspace, faer_par, faer_par_dims};
+use crate::workspace::{WorkspaceCore, faer_par, faer_par_dims};
 
 use super::{DistanceCachePolicy, JitterPolicy};
 
@@ -25,7 +25,7 @@ use super::{DistanceCachePolicy, JitterPolicy};
 fn apply_train_kernel(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
-    ws: &mut Workspace<DoublePrecision>,
+    ws: &mut WorkspaceCore<DoublePrecision>,
     policy: DistanceCachePolicy,
 ) -> Result<(), GprError> {
     match compiled.coord_mode()? {
@@ -164,7 +164,7 @@ pub(crate) fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
 fn assemble_train_system(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
-    ws: &mut Workspace<DoublePrecision>,
+    ws: &mut WorkspaceCore<DoublePrecision>,
     y: &[f64],
     noise: f64,
     extra_diag: f64,
@@ -203,7 +203,7 @@ fn map_cholesky_jitter(err: GprError, jitter: f64) -> GprError {
 pub(crate) fn factor_train_with_policy(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
-    ws: &mut Workspace<DoublePrecision>,
+    ws: &mut WorkspaceCore<DoublePrecision>,
     y: &[f64],
     noise: f64,
     policy: FactorPolicy,
@@ -280,23 +280,6 @@ pub(crate) fn require_param_len(actual: usize, expected: usize) -> Result<(), Gp
         Err(GprError::InvalidHyperparameter {
             reason: format!("expected {expected} parameters, got {actual}"),
         })
-    }
-}
-
-pub(crate) fn fill_identity(mut a: MatMut<'_, f64>) {
-    let n = a.nrows();
-    for col in 0..n {
-        for row in 0..n {
-            a[(row, col)] = if row == col { 1.0 } else { 0.0 };
-        }
-    }
-}
-
-pub(crate) fn form_w_lower(mut w: MatMut<'_, f64>, alpha: &[f64], n: usize) {
-    for col in 0..n {
-        for row in col..n {
-            w[(row, col)] = alpha[row] * alpha[col] - w[(row, col)];
-        }
     }
 }
 
