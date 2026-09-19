@@ -36,7 +36,7 @@ mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
-pub(crate) use compiled::CoordMode;
+pub(crate) use compiled::{CoordMode, MixedKernelViews};
 pub use constant::ConstantKernel;
 pub(crate) use dist::{
     fill_ard_squared_diff, fill_squared_euclidean, fill_squared_euclidean_cross,
