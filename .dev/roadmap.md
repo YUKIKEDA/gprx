@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P2B-9（自作 Optimizer の差し替え）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P2B-11（距離キャッシュを距離経路専用にする）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -32,7 +32,7 @@
 | P2B-1   | [#108](https://github.com/YUKIKEDA/gprx/issues/108) | P2B-2   | [#114](https://github.com/YUKIKEDA/gprx/issues/114) | P2B-20  | [#116](https://github.com/YUKIKEDA/gprx/issues/116) |
 | P2B-3   | [#117](https://github.com/YUKIKEDA/gprx/issues/117) | P2B-4   | [#119](https://github.com/YUKIKEDA/gprx/issues/119) | P2B-5   | [#121](https://github.com/YUKIKEDA/gprx/issues/121) |
 | P2B-6   | [#123](https://github.com/YUKIKEDA/gprx/issues/123) | P2B-10  | [#125](https://github.com/YUKIKEDA/gprx/issues/125) | P2B-7   | [#127](https://github.com/YUKIKEDA/gprx/issues/127) |
-| P2B-8   | [#129](https://github.com/YUKIKEDA/gprx/issues/129) | P2B-9   | [#131](https://github.com/YUKIKEDA/gprx/issues/131) |         |                                                   |
+| P2B-8   | [#129](https://github.com/YUKIKEDA/gprx/issues/129) | P2B-9   | [#131](https://github.com/YUKIKEDA/gprx/issues/131) | P2B-11  | [#133](https://github.com/YUKIKEDA/gprx/issues/133) |
 
 ## マイルストーン
 

@@ -1,5 +1,7 @@
 //! Public prediction, cache, and jitter types for [`crate::Gpr`].
 
+use std::fmt;
+
 use crate::error::GprError;
 
 /// Which predictive variance [`Prediction`] reports.
@@ -33,8 +35,12 @@ impl Default for PredictOptions {
 /// Isotropic RBF, Matérn, Periodic, and RQ evaluate from an `n×n` squared
 /// Euclidean matrix. ARD RBF / Matérn / RQ evaluate from raw `(Δx_d)²` stored
 /// as `n × (n·d)`. [`Self::Always`] fills the matching tensor once per fit.
-/// [`Self::Never`] recomputes it on every kernel build. Linear ignores this
-/// setting.
+/// [`Self::Never`] recomputes it on every kernel build.
+///
+/// This type is the cache slot on trainers from [`crate::Gpr::new`].
+/// Standalone Linear, Constant, and White trainers use
+/// [`crate::Gpr::from_points`] and have no
+/// [`crate::Gpr::with_distance_cache_policy`].
 ///
 /// # Examples
 ///
@@ -59,6 +65,33 @@ pub enum DistanceCachePolicy {
     /// This is the default. ARD fits store an extra `n×(n·d)` tensor.
     #[default]
     Always,
+}
+
+/// Maps a trainer cache slot to the policy used when factorizing `A`.
+pub(crate) trait DistanceCacheSlot:
+    Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
+{
+    fn policy(self) -> DistanceCachePolicy;
+}
+
+impl DistanceCacheSlot for DistanceCachePolicy {
+    fn policy(self) -> DistanceCachePolicy {
+        self
+    }
+}
+
+/// Marks a trainer that does not store a [`DistanceCachePolicy`].
+///
+/// [`crate::Gpr::from_points`] builds this slot for a standalone Linear,
+/// Constant, or White kernel. Distance kernels keep [`DistanceCachePolicy`]
+/// on [`crate::Gpr::new`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoDistanceCache;
+
+impl DistanceCacheSlot for NoDistanceCache {
+    fn policy(self) -> DistanceCachePolicy {
+        DistanceCachePolicy::Never
+    }
 }
 
 /// Numerical Cholesky stabilizer, distinct from observation noise.
