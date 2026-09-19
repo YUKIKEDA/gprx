@@ -1609,8 +1609,9 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
     ///
     /// Each column of the returned column-major `m × n_draws` matrix is
     /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
-    /// posterior covariance. `seed` is the SplitMix64 start state. Zero
-    /// draws returns an empty vector after the covariance is formed.
+    /// posterior covariance. `seed` is the crate [`rand::rngs::SmallRng`]
+    /// start state. Zero draws returns an empty vector after the covariance
+    /// is formed.
     ///
     /// # Errors
     ///
@@ -1678,13 +1679,13 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
             self.jitter_policy,
             CholeskyStage::Predict,
         )?;
-        let mut rng = seed;
+        let mut rng = crate::rng::small_rng(seed);
         let mut out = vec![0.0; m * n_draws];
         let mut z = vec![0.0; m];
         let mut lz = vec![0.0; m];
         for draw in 0..n_draws {
             for slot in &mut z {
-                *slot = unit_normal(&mut rng);
+                *slot = crate::rng::unit_normal(&mut rng);
             }
             mul_lower_chol(a.as_ref(), &z, &mut lz);
             let col = &mut out[draw * m..(draw + 1) * m];
@@ -2004,21 +2005,6 @@ fn fill_query_query_kernel(
             )
         }
     }
-}
-
-fn splitmix64(state: &mut u64) -> f64 {
-    *state = state.wrapping_add(0x9E3779B97F4A7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    (z >> 11) as f64 / ((1u64 << 53) as f64)
-}
-
-fn unit_normal(state: &mut u64) -> f64 {
-    let u1 = splitmix64(state).max(f64::MIN_POSITIVE);
-    let u2 = splitmix64(state);
-    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 fn mul_lower_chol(l: MatRef<'_, f64>, z: &[f64], out: &mut [f64]) {
