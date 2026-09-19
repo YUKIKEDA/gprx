@@ -351,7 +351,7 @@ struct MinMaxTarget { /* y min/max, default range [0, 1] */ }
 struct ColumnwiseInput { maps: Vec<Box<dyn Transform>> }
 ```
 
-既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。未学習の `transform` / `apply` は型で起きない（P2B-10）。複数マップの直列は P2B-7（`Pipeline`）。入力は列ごとに別マップを指定できる（P2B-8）。`src/transform/` はいま `input.rs` と `target.rs`。葉ファイルに分けるかは P2B-20（[#116](https://github.com/YUKIKEDA/gprx/issues/116)）。行数ではなく、独立したアダプタかどうかで判断する。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。
+既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。未学習の `transform` / `apply` は型で起きない。複数マップの直列は `Pipeline`（`X`）と `TargetPipeline`（`y`）。1 段だけの `with_*` はそのまま残る。入力は列ごとに別マップを指定できる（P2B-8）。`src/transform/` は `input.rs` / `target.rs` / `pipeline.rs`。葉ファイルに分けるかは P2B-20（[#116](https://github.com/YUKIKEDA/gprx/issues/116)）。行数ではなく、独立したアダプタかどうかで判断する。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 
@@ -828,7 +828,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-10）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-7）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
