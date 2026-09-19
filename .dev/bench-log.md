@@ -182,40 +182,38 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 同一機械。日付 2026-09-19。`just perf`（`uv run --directory compare/perf python run.py`）。criterion ではない。
 
-問題: 等方 Forrester（`ℓ = 1`）と ARD 球（`ℓ_d = 4`）、`n = 256 / 1024 / 4096`（ARD は 16×16 / 32×32 / 64×64）。`y = f(x) + N(0, 1)`（NumPy Generator、Forrester seed `0`、球 seed `9`）。各セルは fit（壁時計 + joint-eval）→ predict 100 → ピーク RSS（Windows `PeakWorkingSet`）。gprx は `StandardizeTarget` + `Gpr::fit`。sklearn は `normalize_y=True` + `alpha=σn²`。friedrich / libgp は runner 側で `y` を z-score。
+問題: 等方 Forrester（`ℓ = 1`）と ARD 球（`ℓ_d = 4`）、`n = 256 / 1024 / 4096`（ARD は 16×16 / 32×32 / 64×64）。`y = f(x) + N(0, 1)`（NumPy Generator、Forrester seed `0`、球 seed `9`）。各セルは **同じ初期 θ で factor（最適化なし）** → **MLL+grad を 10 回**（同じ θ）→ predict 100 → ピーク RSS（Windows `PeakWorkingSet`）。ソルバは回さない。gprx は `Gpr<Fixed>::factor` + `value_and_gradient_into` + `StandardizeTarget`。sklearn は `optimizer=None` + `normalize_y=True` + `log_marginal_likelihood(..., eval_gradient=True)`。libgp は C++ 本体（`compare/perf/libgp/`）の `add_patterns` + `log_likelihood_gradient`。friedrich / libgp は runner 側で `y` を z-score。friedrich に ARD と公開 MLL+grad はない。
 
-gprx の L-BFGS はハーネスの `CountingLbfgs`（log-θ、logit なし。`HasBounds` がクレート私有のため）。既定 `Lbfgs` の評価回数とは一致しない。sklearn は `fmin_l_bfgs_b` の `eval_gradient=True` 回数。回数差がある壁時計は速度差と書かない。
+ゲート: sklearn は factor 時間・eval 時間・RSS がすべて小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は factor 時間か RSS の一方。
 
-libgp は MSVC で Python バインディングがビルドできない（`M_PI` / `drand48`）。全セル N/A。friedrich に ARD はない。球セルは N/A。
+負け: sklearn は n=4096 の 2 セル（eval が約 2 倍遅い。RSS は gprx が小さい）。libgp は走った 6 セルすべて（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。
 
-ゲート: sklearn は時間と RSS が両方小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は時間か RSS の一方。負けたセルは 0。改善行は足していない。
+| 問題      | n    | lib       | factor    | eval 10   | predict 100 | peak RSS   | ゲート                         |
+| --------- | ---- | --------- | --------- | --------- | ----------- | ---------- | ------------------------------ |
+| Forrester | 256  | gprx      | 1.34 ms   | 11.36 ms  | 0.46 ms     | 7.9 MiB    | —                              |
+| Forrester | 256  | sklearn   | 3.61 ms   | 25.70 ms  | 0.72 ms     | 110.2 MiB  | pass                           |
+| Forrester | 256  | libgp     | 1.30 ms   | 60.17 ms  | 0.93 ms     | 7.1 MiB    | fail（RSS +11%）               |
+| Forrester | 256  | friedrich | 1.90 ms   | N/A       | 2.49 ms     | 4.9 MiB    | pass（時間）                   |
+| Forrester | 1024 | gprx      | 16.35 ms  | 534.89 ms | 3.72 ms     | 41.7 MiB   | —                              |
+| Forrester | 1024 | sklearn   | 146.54 ms | 1.315 s   | 3.34 ms     | 178.7 MiB  | pass                           |
+| Forrester | 1024 | libgp     | 35.81 ms  | 2.075 s   | 9.59 ms     | 33.2 MiB   | fail（RSS +26%）               |
+| Forrester | 1024 | friedrich | 58.55 ms  | N/A       | 26.97 ms    | 13.7 MiB   | pass（時間）                   |
+| Forrester | 4096 | gprx      | 1.349 s   | 41.994 s  | 44.46 ms    | 535.1 MiB  | —                              |
+| Forrester | 4096 | sklearn   | 1.206 s   | 21.214 s  | 34.92 ms    | 1150.5 MiB | fail（eval 約 2 倍）           |
+| Forrester | 4096 | libgp     | 1.579 s   | 108.680 s | 374.82 ms   | 405.2 MiB  | fail（RSS +32%）               |
+| Forrester | 4096 | friedrich | 5.079 s   | N/A       | 724.00 ms   | 138.6 MiB  | pass（時間）                   |
+| 球 ARD    | 256  | gprx      | 1.58 ms   | 13.29 ms  | 0.81 ms     | 9.0 MiB    | —                              |
+| 球 ARD    | 256  | sklearn   | 3.44 ms   | 52.51 ms  | 0.77 ms     | 110.5 MiB  | pass                           |
+| 球 ARD    | 256  | libgp     | 1.45 ms   | 76.03 ms  | 1.19 ms     | 7.3 MiB    | fail（RSS +23%）               |
+| 球 ARD    | 256  | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
+| 球 ARD    | 1024 | gprx      | 18.44 ms  | 571.76 ms | 4.17 ms     | 57.8 MiB   | —                              |
+| 球 ARD    | 1024 | sklearn   | 132.31 ms | 1.561 s   | 3.38 ms     | 186.8 MiB  | pass                           |
+| 球 ARD    | 1024 | libgp     | 38.20 ms  | 2.388 s   | 11.78 ms    | 33.3 MiB   | fail（RSS +74%）               |
+| 球 ARD    | 1024 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
+| 球 ARD    | 4096 | gprx      | 1.576 s   | 41.729 s  | 47.44 ms    | 791.4 MiB  | —                              |
+| 球 ARD    | 4096 | sklearn   | 1.296 s   | 24.552 s  | 42.55 ms    | 1278.5 MiB | fail（eval 約 1.7 倍）         |
+| 球 ARD    | 4096 | libgp     | 1.591 s   | 110.568 s | 385.57 ms   | 405.2 MiB  | fail（RSS +95%）               |
+| 球 ARD    | 4096 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
 
-| 問題      | n    | lib       | fit       | evals | predict 100 | peak RSS   | ゲート                                   |
-| --------- | ---- | --------- | --------- | ----- | ----------- | ---------- | ---------------------------------------- |
-| Forrester | 256  | gprx      | 103.82 ms | 94    | 0.59 ms     | 8.3 MiB    | —                                        |
-| Forrester | 256  | sklearn   | 10.33 ms  | 2     | 0.81 ms     | 109.2 MiB  | 判定不能（回数差）                       |
-| Forrester | 256  | libgp     | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| Forrester | 256  | friedrich | 108.63 ms | N/A   | 2.26 ms     | 6.0 MiB    | 判定不能（時間 5% 内、RSS は friedrich） |
-| Forrester | 1024 | gprx      | 1.103 s   | 33    | 3.21 ms     | 41.9 MiB   | —                                        |
-| Forrester | 1024 | sklearn   | 288.31 ms | 2     | 3.53 ms     | 169.5 MiB  | 判定不能（回数差）                       |
-| Forrester | 1024 | libgp     | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| Forrester | 1024 | friedrich | 4.227 s   | N/A   | 28.30 ms    | 36.1 MiB   | pass（時間）                             |
-| Forrester | 4096 | gprx      | 678.628 s | 179   | 44.96 ms    | 535.4 MiB  | —                                        |
-| Forrester | 4096 | sklearn   | 5.110 s   | 2     | 46.49 ms    | 1019.2 MiB | 判定不能（回数差）                       |
-| Forrester | 4096 | libgp     | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| Forrester | 4096 | friedrich | 428.726 s | N/A   | 719.77 ms   | 516.5 MiB  | 判定不能（時間は回数なし、RSS 5% 内）    |
-| 球 ARD    | 256  | gprx      | 53.96 ms  | 51    | 0.75 ms     | 9.3 MiB    | —                                        |
-| 球 ARD    | 256  | sklearn   | 90.76 ms  | 18    | 0.78 ms     | 110.6 MiB  | 判定不能（回数差）                       |
-| 球 ARD    | 256  | libgp     | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| 球 ARD    | 256  | friedrich | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| 球 ARD    | 1024 | gprx      | 4.973 s   | 96    | 5.56 ms     | 58.0 MiB   | —                                        |
-| 球 ARD    | 1024 | sklearn   | 2.044 s   | 12    | 3.49 ms     | 178.8 MiB  | 判定不能（回数差）                       |
-| 球 ARD    | 1024 | libgp     | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| 球 ARD    | 1024 | friedrich | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| 球 ARD    | 4096 | gprx      | 676.871 s | 176   | 49.34 ms    | 791.6 MiB  | —                                        |
-| 球 ARD    | 4096 | sklearn   | 17.972 s  | 7     | 60.11 ms    | 1150.6 MiB | 判定不能（回数差）                       |
-| 球 ARD    | 4096 | libgp     | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-| 球 ARD    | 4096 | friedrich | N/A       | N/A   | N/A         | N/A        | N/A                                      |
-
-RSS は走った sklearn 全セルで gprx が小さい。predict 100 は同程度（n = 4096 では gprx の方が短い）。fit の壁時計は評価回数が揃わないので速度差と書かない。
+時間は同じ仕事（factor 1 回 + MLL+grad 10 回）で比較できる。libgp の eval は gprx より遅い。n=4096 の sklearn eval は gprx より短い。RSS は sklearn 全セルで gprx が小さく、libgp / friedrich より大きい。改善行: RSS vs libgp は P2B-21 / [#142](https://github.com/YUKIKEDA/gprx/issues/142)。n=4096 eval vs sklearn は P2B-22 / [#143](https://github.com/YUKIKEDA/gprx/issues/143)。
 

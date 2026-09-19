@@ -1,0 +1,10 @@
+#ifndef LIBGP_VERSION_H
+#define LIBGP_VERSION_H
+
+#define LIBGP_VERSION_MAJOR 0
+#define LIBGP_VERSION_MINOR 3
+#define LIBGP_VERSION_PATCH 0
+#define LIBGP_VERSION "0.3.0"
+#define LIBGP_EXPORT
+
+#endif

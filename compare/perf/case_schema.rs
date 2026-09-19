@@ -15,6 +15,7 @@ pub struct Case {
     pub xs: Vec<f64>,
     pub lengthscales_init: Vec<f64>,
     pub noise_variance_init: f64,
+    pub joint_evals: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -22,7 +23,8 @@ pub struct ResultRow {
     pub lib: String,
     pub name: String,
     pub status: String,
-    pub fit_s: Option<f64>,
+    pub factor_s: Option<f64>,
+    pub eval_s: Option<f64>,
     pub predict_s: Option<f64>,
     pub joint_evals: Option<u64>,
     pub peak_rss_bytes: Option<u64>,

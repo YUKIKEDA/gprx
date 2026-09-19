@@ -1,4 +1,4 @@
-//! One friedrich cell. ARD is N/A: the built-in Gaussian kernel is isotropic.
+//! One friedrich cell. Factor at fixed theta. No public MLL+grad: eval is N/A.
 
 use std::env;
 use std::fs;
@@ -35,7 +35,8 @@ fn na_row(name: &str, note: String) -> ResultRow {
         lib: "friedrich".to_string(),
         name: name.to_string(),
         status: "na".to_string(),
-        fit_s: None,
+        factor_s: None,
+        eval_s: None,
         predict_s: None,
         joint_evals: None,
         peak_rss_bytes: None,
@@ -58,14 +59,12 @@ fn run(case: &Case) -> ResultRow {
     let outputs = zscore(&case.y);
     let queries = unpack_rows(&case.xs, case.xs_n_rows, case.xs_n_cols);
     let noise_std = case.noise_variance_init.sqrt();
-    let fit_start = Instant::now();
+    let factor_start = Instant::now();
     let gp = GaussianProcess::builder(inputs, outputs)
         .set_noise(noise_std)
         .set_kernel(SquaredExp::new(ell, 1.0))
-        .set_fit_parameters(100, 0.05)
-        .fit_kernel()
         .train();
-    let fit_s = fit_start.elapsed().as_secs_f64();
+    let factor_s = factor_start.elapsed().as_secs_f64();
     let predict_start = Instant::now();
     let _ = gp.predict_mean_variance(&queries);
     let predict_s = predict_start.elapsed().as_secs_f64();
@@ -79,11 +78,15 @@ fn run(case: &Case) -> ResultRow {
         lib: "friedrich".to_string(),
         name: case.name.clone(),
         status: "ok".to_string(),
-        fit_s: Some(fit_s),
+        factor_s: Some(factor_s),
+        eval_s: None,
         predict_s: Some(predict_s),
         joint_evals: None,
         peak_rss_bytes: peak,
-        note: Some("internal gradient descent; joint-eval count is N/A".to_string()),
+        note: Some(format!(
+            "factor at fixed theta; no public MLL+grad (case asked {} evals)",
+            case.joint_evals
+        )),
     }
 }
 
@@ -117,7 +120,7 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             eprintln!("{e}");
-            return ExitCode::from(1);
+            ExitCode::from(1)
         }
     }
 }
