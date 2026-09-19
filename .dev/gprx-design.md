@@ -446,13 +446,13 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-既定の第4型は `RetainCholesky`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。`with_cholesky_buffer(ReuseCholesky)` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にスロットは書かない。`load` は `RetainCholesky`。
+既定の第4型は `RetainCholesky`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。公開のメモリ極（`with_prefer_memory`）が `ReuseCholesky` を選ぶ。`with_cholesky_buffer` は `pub(crate)`。`ReuseCholesky` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にスロットは書かない。`load` は `RetainCholesky`。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C`、Cholesky バッファ方針 `B` を持つ。`DistanceCachePolicy` はトレイト。`Gpr::new` の `C` は `CachedDistances`。`with_distance_cache_policy(UncachedDistances)` が型を差し替える。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。`with_distance_cache_policy` は `C: DistanceCachePolicy` にだけある。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
+`Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C`、Cholesky バッファ方針 `B` を持つ。`DistanceCachePolicy` はトレイト。`Gpr::new` の既定は速さ極（`CachedDistances` + `RetainCholesky`）。公開の切り替えは `with_prefer_memory` / `with_prefer_speed`。メモリ極は `UncachedDistances` + `ReuseCholesky`。`with_distance_cache_policy` / `with_cholesky_buffer` は `pub(crate)`（クレート内の混合組み合わせ用）。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。同じ prefer メソッドがあり、`B` だけが変わる。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
@@ -533,7 +533,7 @@ struct GprObjective<'a, O, S, C = CachedDistances> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の `C` は `CachedDistances`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`UncachedDistances` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。速さは既定のまま。メモリ優先の合否は `UncachedDistances` + `RetainCholesky`（P2B-21）。この方針は距離経路の trainer（`Gpr::new`）だけが持つ。`RBF + White` と `Constant * RBF` は距離経路のまま。`from_points` の Linear / Constant / White には枠ごと無い。persist タグは `always` / `never`。`LoadedGpr::Distance` は inner enum。`load` は `RetainCholesky`。
+既定の `C` は `CachedDistances`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`UncachedDistances` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`UncachedDistances` + `ReuseCholesky`）。速さ極は既定のまま（`with_prefer_speed`）。P2B-21 の libgp 比 RSS 合否は `UncachedDistances` + `RetainCholesky`（crate 内の混合。公開極ではない）。この方針は距離経路の trainer（`Gpr::new`）だけが持つ。`RBF + White` と `Constant * RBF` は距離経路のまま。`from_points` の Linear / Constant / White には距離枠ごと無く、prefer は `B` だけを変える。persist タグは `always` / `never`。`LoadedGpr::Distance` は inner enum。`load` は `RetainCholesky`。
 
 ### 6.4 Leave-one-out(P1B-7)
 
