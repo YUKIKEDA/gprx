@@ -758,8 +758,7 @@ fn neg_mll_uses_transformed_targets() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &y)
         .expect("spd");
-    let mut t = StandardizeTarget::new();
-    t.fit(&y).expect("finite");
+    let t = StandardizeTarget::new().fit(&y).expect("finite");
     let mut y_t = y;
     t.transform(&mut y_t).expect("fitted");
     let k01 = (-0.5_f64).exp();
@@ -1438,9 +1437,8 @@ fn loo_observation_is_latent_plus_noise_after_inverse() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &y)
         .expect("spd");
-    let mut t = StandardizeTarget::new();
-    t.fit(&y).expect("finite");
-    let scale = t.std().expect("fitted");
+    let t = StandardizeTarget::new().fit(&y).expect("finite");
+    let scale = t.std();
     let scale_sq = scale * scale;
     let lat = gpr
         .loo_predict_with(PredictOptions {
@@ -1486,9 +1484,8 @@ fn observation_variance_is_latent_plus_noise_after_inverse() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &y)
         .expect("spd");
-    let mut t = StandardizeTarget::new();
-    t.fit(&y).expect("finite");
-    let scale = t.std().expect("fitted");
+    let t = StandardizeTarget::new().fit(&y).expect("finite");
+    let scale = t.std();
     let scale_sq = scale * scale;
     let lat = gpr
         .predict_with(
