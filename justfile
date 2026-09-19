@@ -16,3 +16,7 @@ gen-goldens:
 
 bench:
     cargo bench --bench exact
+
+# Manual P2B-16 harness. cargo test must not run this.
+perf:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run.py
