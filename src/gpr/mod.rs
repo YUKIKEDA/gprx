@@ -6,9 +6,9 @@ mod types;
 
 pub use model::{FittedGpr, Gpr};
 pub(crate) use types::AllocWorkspace;
-pub(crate) use types::DistanceCacheSlot;
 pub use types::{
-    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FixedJitter, JitterPolicy,
-    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, RetainCholesky,
-    ReuseCholesky, VarianceKind,
+    AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FixedJitter,
+    JitterPolicy, NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance,
+    RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
 };
+pub(crate) use types::{DistanceCachePersist, DistanceCacheSlot, FitBuffers};

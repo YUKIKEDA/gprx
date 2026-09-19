@@ -212,7 +212,7 @@ mod tests {
     use crate::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::{Differentiable, Objective};
-    use crate::optimizer::{Fixed, Optimizer};
+    use crate::optimizer::{Fixed, FullRecompute, Optimizer};
 
     const TOL: f64 = 1e-6;
 
@@ -316,12 +316,12 @@ mod tests {
         assert_close(got[1], result.params[1]);
     }
 
-    struct CountingObj<'a, O, S> {
-        inner: crate::objective::GprObjective<'a, O, S>,
+    struct CountingObj<'a, O, S, C: crate::gpr::DistanceCacheSlot = crate::CachedDistances> {
+        inner: crate::objective::GprObjective<'a, O, S, C>,
         joint_evals: usize,
     }
 
-    impl<O, S> Objective for CountingObj<'_, O, S> {
+    impl<O, S, C: crate::gpr::DistanceCacheSlot> Objective for CountingObj<'_, O, S, C> {
         fn num_params(&self) -> usize {
             self.inner.num_params()
         }
@@ -332,7 +332,7 @@ mod tests {
         }
     }
 
-    impl<O, S> Differentiable for CountingObj<'_, O, S> {
+    impl<O, S, C: crate::gpr::DistanceCacheSlot> Differentiable for CountingObj<'_, O, S, C> {
         fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
             self.value_and_gradient_into(params, out).map(|_| ())
         }
@@ -347,7 +347,9 @@ mod tests {
         }
     }
 
-    impl<O, S> crate::objective::HasBounds for CountingObj<'_, O, S> {
+    impl<O, S, C: crate::gpr::DistanceCacheSlot> crate::objective::HasBounds
+        for CountingObj<'_, O, S, C>
+    {
         fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
             self.inner.fill_intervals(out)
         }
@@ -417,7 +419,7 @@ mod tests {
     }
 
     fn sphere_bench_xy() -> (Vec<f64>, Vec<f64>) {
-        // SmallRng seed 0 walks a ridge on DistanceCachePolicy::Never (~485 evals).
+        // SmallRng seed 0 walks a ridge on UncachedDistances (~485 evals).
         sphere_bench_xy_with_seed(9)
     }
 
@@ -442,7 +444,11 @@ mod tests {
         (x, y)
     }
 
-    fn sphere_lbfgs_evals(policy: crate::DistanceCachePolicy) -> (u64, usize, f64, f64) {
+    fn sphere_lbfgs_evals<C: crate::DistanceCachePolicy>(policy: C) -> (u64, usize, f64, f64)
+    where
+        for<'a> crate::objective::GprObjective<'a, Fixed, FullRecompute, C>:
+            crate::objective::HasBounds,
+    {
         let (x, y) = sphere_bench_xy();
         let kernel = KernelSpec::from(RbfArdKernel::new(&[4.0, 4.0]).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.1).expect("valid");
@@ -475,10 +481,8 @@ mod tests {
 
     #[test]
     fn sphere_bench_lbfgs_eval_count_is_bounded() {
-        let (iters_a, evals_a, start_a, value_a) =
-            sphere_lbfgs_evals(crate::DistanceCachePolicy::Always);
-        let (iters_n, evals_n, start_n, value_n) =
-            sphere_lbfgs_evals(crate::DistanceCachePolicy::Never);
+        let (iters_a, evals_a, start_a, value_a) = sphere_lbfgs_evals(crate::CachedDistances);
+        let (iters_n, evals_n, start_n, value_n) = sphere_lbfgs_evals(crate::UncachedDistances);
         eprintln!(
             "sphere_bench_lbfgs_eval_count always iters={iters_a} evals={evals_a} start={start_a:.6} value={value_a:.6}"
         );
