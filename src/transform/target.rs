@@ -1,5 +1,7 @@
 //! Target (`y`) transforms: identity, standardize, and min-max.
 
+use std::any::Any;
+
 use super::{population_std, require_finite, require_nonempty};
 use crate::error::GprError;
 
@@ -16,6 +18,25 @@ pub trait UnfittedTarget: Send + Sync {
 
     /// Clones this map into a new box. Used by [`crate::Gpr`] clone.
     fn clone_box(&self) -> Box<dyn UnfittedTarget>;
+
+    /// Downcast handle used when encoding a built-in map for persist.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    fn persist_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// JSON state paired with [`Self::persist_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Err(GprError::PersistFailed {
+            reason: "this target transform does not implement persist_state".to_owned(),
+        })
+    }
 }
 
 /// Fitted target map: forward and inverse maps exist only here.
@@ -62,6 +83,25 @@ pub trait TargetTransform: Send + Sync {
 
     /// Clones this map into a new box. Used by [`crate::FittedGpr`] clone.
     fn clone_box(&self) -> Box<dyn TargetTransform>;
+
+    /// Downcast handle used when encoding a built-in map for persist.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    fn persist_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// JSON state paired with [`Self::persist_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Err(GprError::PersistFailed {
+            reason: "this target transform does not implement persist_state".to_owned(),
+        })
+    }
 }
 
 /// Leaves targets and predictions unchanged.
@@ -105,6 +145,10 @@ impl UnfittedTarget for IdentityTarget {
     fn clone_box(&self) -> Box<dyn UnfittedTarget> {
         Box::new(*self)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl TargetTransform for IdentityTarget {
@@ -122,6 +166,10 @@ impl TargetTransform for IdentityTarget {
 
     fn clone_box(&self) -> Box<dyn TargetTransform> {
         Box::new(*self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -180,6 +228,10 @@ impl UnfittedTarget for StandardizeTarget {
     fn clone_box(&self) -> Box<dyn UnfittedTarget> {
         Box::new(*self)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Fitted center-and-scale map with training `μ` and `s`.
@@ -198,6 +250,17 @@ impl FittedStandardizeTarget {
     /// Returns the training scale `s`.
     pub fn std(&self) -> f64 {
         self.std
+    }
+
+    pub(crate) fn from_parts(mean: f64, std: f64) -> Result<Self, GprError> {
+        if !mean.is_finite() || !std.is_finite() || std <= 0.0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "fitted standardize target stats must be finite with positive scale, got mean={mean}, std={std}"
+                ),
+            });
+        }
+        Ok(Self { mean, std })
     }
 }
 
@@ -233,6 +296,10 @@ impl TargetTransform for FittedStandardizeTarget {
 
     fn clone_box(&self) -> Box<dyn TargetTransform> {
         Box::new(*self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -330,6 +397,10 @@ impl UnfittedTarget for MinMaxTarget {
     fn clone_box(&self) -> Box<dyn UnfittedTarget> {
         Box::new(*self)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Fitted min-max map with training extrema and the output interval.
@@ -374,6 +445,24 @@ impl FittedMinMaxTarget {
     fn out_span(&self) -> f64 {
         self.range_hi - self.range_lo
     }
+
+    pub(crate) fn from_parts(
+        data_min: f64,
+        data_max: f64,
+        range_lo: f64,
+        range_hi: f64,
+    ) -> Result<Self, GprError> {
+        require_feature_range(range_lo, range_hi)?;
+        if !data_min.is_finite() || !data_max.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        Ok(Self {
+            data_min,
+            data_max,
+            range_lo,
+            range_hi,
+        })
+    }
 }
 
 impl TargetTransform for FittedMinMaxTarget {
@@ -413,6 +502,10 @@ impl TargetTransform for FittedMinMaxTarget {
 
     fn clone_box(&self) -> Box<dyn TargetTransform> {
         Box::new(*self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

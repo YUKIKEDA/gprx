@@ -18,6 +18,7 @@ use crate::optimizer::{
     AcceptsRecompute, Fixed, FullRecompute, Lbfgs, OptResult, Optimizer, RecomputeStrategy,
 };
 use crate::param::Interval;
+use crate::persist::{self, MappedTensors, PersistedModel};
 use crate::precision::DoublePrecision;
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
@@ -171,11 +172,16 @@ pub struct FittedGpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy> {
     alpha: Vec<f64>,
     n: usize,
     d: usize,
+    mapped_factor: Option<MappedTensors>,
     _recompute: PhantomData<S>,
 }
 
 impl<O: Clone, S, C: Copy> Clone for FittedGpr<O, S, C> {
     fn clone(&self) -> Self {
+        let mut workspace = self.workspace.clone();
+        if let Some(mapped) = &self.mapped_factor {
+            persist::copy_l_into(workspace.k_matrix.as_mut(), mapped.l_view());
+        }
         Self {
             kernel: self.kernel.clone(),
             compiled: self.compiled.clone(),
@@ -187,7 +193,7 @@ impl<O: Clone, S, C: Copy> Clone for FittedGpr<O, S, C> {
             optimizer: self.optimizer.clone(),
             distance_cache: self.distance_cache,
             jitter_policy: self.jitter_policy,
-            workspace: self.workspace.clone(),
+            workspace,
             query: self.query.clone(),
             x_obs: self.x_obs.clone(),
             y_obs: self.y_obs.clone(),
@@ -196,6 +202,7 @@ impl<O: Clone, S, C: Copy> Clone for FittedGpr<O, S, C> {
             alpha: self.alpha.clone(),
             n: self.n,
             d: self.d,
+            mapped_factor: None,
             _recompute: PhantomData,
         }
     }
@@ -300,6 +307,22 @@ impl<O, S, C> Gpr<O, S, C> {
     /// still use this method.
     pub fn with_target_transform(mut self, transform: impl UnfittedTarget + 'static) -> Self {
         self.y_transform = Box::new(transform);
+        self
+    }
+
+    pub(crate) fn with_boxed_input_transform(
+        mut self,
+        transform: Box<dyn UnfittedTransform>,
+    ) -> Self {
+        self.x_transform = transform;
+        self
+    }
+
+    pub(crate) fn with_boxed_target_transform(
+        mut self,
+        transform: Box<dyn UnfittedTarget>,
+    ) -> Self {
+        self.y_transform = transform;
         self
     }
 
@@ -620,6 +643,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
             alpha: vec![0.0; n_rows],
             n: n_rows,
             d: n_cols,
+            mapped_factor: None,
             _recompute: PhantomData,
         })
     }
@@ -681,6 +705,148 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         &self.y_obs
     }
 
+    /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
+    ///
+    /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
+    /// by factorizing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// created or a Custom leaf / caller transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!(
+    ///     "gprx-doctest-save-{}",
+    ///     std::process::id()
+    /// ));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// fitted.save(&dir)?;
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_fitted(self, dir.as_ref(), false)
+    }
+
+    /// Writes this fitted model including the Cholesky factor `L` and `α`.
+    ///
+    /// `L` is stored as a column-major `n×n` `f64` tensor; the lower triangle
+    /// is canonical. [`crate::persist::LoadedGpr::load`] keeps the safetensors
+    /// file mapped for `L`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::save`].
+    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_fitted(self, dir.as_ref(), true)
+    }
+
+    /// Replaces the optimizer used by a later [`Self::refit`].
+    ///
+    /// Does not write a solver into a persist directory. A model loaded as
+    /// [`crate::persist::LoadedGpr`] is [`Fixed`]; call this before `refit`
+    /// to search again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::persist::{LoadedGpr, PersistRegistry};
+    /// use gprx::{GaussianLikelihood, Gpr, Lbfgs};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!(
+    ///     "gprx-doctest-refit-{}",
+    ///     std::process::id()
+    /// ));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// fitted.save(&dir)?;
+    /// let LoadedGpr::Distance(model) = LoadedGpr::load(&dir, &PersistRegistry::new())? else {
+    ///     return Ok(());
+    /// };
+    /// let mut model = model.with_optimizer(Lbfgs::new());
+    /// model.refit()?;
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> FittedGpr<O2, S, C> {
+        FittedGpr {
+            kernel: self.kernel,
+            compiled: self.compiled,
+            likelihood: self.likelihood,
+            x_unfitted: self.x_unfitted,
+            y_unfitted: self.y_unfitted,
+            x_transform: self.x_transform,
+            y_transform: self.y_transform,
+            optimizer,
+            distance_cache: self.distance_cache,
+            jitter_policy: self.jitter_policy,
+            workspace: self.workspace,
+            query: self.query,
+            x_obs: self.x_obs,
+            y_obs: self.y_obs,
+            x: self.x,
+            y_train: self.y_train,
+            alpha: self.alpha,
+            n: self.n,
+            d: self.d,
+            mapped_factor: self.mapped_factor,
+            _recompute: PhantomData,
+        }
+    }
+
+    pub(crate) fn jitter_policy(&self) -> JitterPolicy {
+        self.jitter_policy
+    }
+
+    pub(crate) fn distance_cache_slot(&self) -> C {
+        self.distance_cache
+    }
+
+    pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
+        self.x_unfitted.as_ref()
+    }
+
+    pub(crate) fn y_unfitted(&self) -> &dyn UnfittedTarget {
+        self.y_unfitted.as_ref()
+    }
+
+    pub(crate) fn x_transform(&self) -> &dyn Transform {
+        self.x_transform.as_ref()
+    }
+
+    pub(crate) fn y_transform(&self) -> &dyn TargetTransform {
+        self.y_transform.as_ref()
+    }
+
+    pub(crate) fn chol_l(&self) -> MatRef<'_, f64> {
+        match &self.mapped_factor {
+            Some(mapped) => mapped.l_view(),
+            None => self.workspace.k_matrix.as_ref(),
+        }
+    }
+
     /// Returns the negative log marginal likelihood of the last successful fit.
     ///
     /// Evaluates `½ yᵀ A⁻¹ y + ½ log|A| + (n/2) log(2π)` from the stored
@@ -706,7 +872,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
     /// ```
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
         Ok(neg_mll_from_factor(
-            self.workspace.k_matrix.as_ref(),
+            self.chol_l(),
             &self.y_train,
             &self.alpha,
             self.n,
@@ -804,6 +970,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         self.kernel = kernel;
         self.compiled = compiled;
         self.likelihood = likelihood;
+        self.mapped_factor = None;
         Ok(())
     }
 
@@ -905,6 +1072,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         self.kernel = kernel;
         self.likelihood = likelihood;
         self.compiled = compiled;
+        self.mapped_factor = None;
         let nlml = neg_mll_from_factor(
             self.workspace.k_matrix.as_ref(),
             &self.y_train,
@@ -1031,6 +1199,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
     }
 
     fn factorize_current(&mut self) -> Result<(), GprError> {
+        self.mapped_factor = None;
         factor_train_with_policy(
             &self.compiled,
             self.x.as_ref(),
@@ -1227,8 +1396,12 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
             }
             *mean = sum;
         }
+        let l = match &self.mapped_factor {
+            Some(mapped) => mapped.l_view(),
+            None => self.workspace.k_matrix.as_ref(),
+        };
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-            ws.k_matrix.as_ref(),
+            l,
             query.query_k_star.as_mut(),
             Par::Seq,
         );
@@ -1279,7 +1452,6 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         let compiled = &self.compiled;
         let x_train = self.x.as_ref();
         let alpha = self.alpha.as_slice();
-        let ws = &self.workspace;
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
@@ -1343,7 +1515,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
             *mean = sum;
         }
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-            ws.k_matrix.as_ref(),
+            self.chol_l(),
             query_k_star.as_mut(),
             Par::Seq,
         );
@@ -1540,7 +1712,6 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         let compiled = &self.compiled;
         let x_train = self.x.as_ref();
         let alpha = self.alpha.as_slice();
-        let ws = &self.workspace;
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
@@ -1598,7 +1769,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
             *slot = sum;
         }
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-            ws.k_matrix.as_ref(),
+            self.chol_l(),
             query_k_star.as_mut(),
             Par::Seq,
         );
@@ -1692,10 +1863,9 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
     pub fn loo_predict_with(&self, options: PredictOptions) -> Result<Prediction, GprError> {
         let y = self.y_train.as_slice();
         let alpha = self.alpha.as_slice();
-        let ws = &self.workspace;
         let n = self.n;
         let mut q_diag = vec![0.0; n];
-        inv_diag_from_chol_l(ws.k_matrix.as_ref(), &mut q_diag);
+        inv_diag_from_chol_l(self.chol_l(), &mut q_diag);
         let noise = self.likelihood.noise_variance();
         let mut mean = vec![0.0; n];
         let mut variance = vec![0.0; n];
@@ -1742,6 +1912,59 @@ where
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; `refit` still needs it.
 impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C> {
+    pub(crate) fn from_persisted(parts: PersistedModel<C>) -> Result<Self, GprError> {
+        let n = parts.y_obs.len();
+        if n == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        if parts.x_obs.len() % n != 0 {
+            return Err(persist::persist_err("persisted x length is not n * d"));
+        }
+        let d = parts.x_obs.len() / n;
+        if parts.alpha.len() != n {
+            return Err(persist::persist_err(format!(
+                "alpha has {} values, expected n = {n}",
+                parts.alpha.len()
+            )));
+        }
+        let mut x_buf = parts.x_obs.clone();
+        parts.x_transform.apply(&mut x_buf, n, d)?;
+        let mut y_buf = parts.y_obs.clone();
+        parts.y_transform.transform(&mut y_buf)?;
+        let mut workspace = Workspace::new(n)?;
+        let compiled = parts.kernel.compile();
+        if parts.distance_cache.policy() == DistanceCachePolicy::Always
+            && compiled.needs_ard_sq_diff()
+        {
+            workspace.ensure_ard_sq_diff(n, d)?;
+        } else {
+            workspace.clear_ard_sq_diff();
+        }
+        Ok(Self {
+            kernel: parts.kernel,
+            compiled,
+            likelihood: parts.likelihood,
+            x_unfitted: parts.x_unfitted,
+            y_unfitted: parts.y_unfitted,
+            x_transform: parts.x_transform,
+            y_transform: parts.y_transform,
+            optimizer: Fixed,
+            distance_cache: parts.distance_cache,
+            jitter_policy: parts.jitter_policy,
+            workspace,
+            query: QueryWorkspace::new(),
+            x: pack_points(&x_buf, n, d),
+            y_train: y_buf,
+            x_obs: parts.x_obs,
+            y_obs: parts.y_obs,
+            alpha: parts.alpha,
+            n,
+            d,
+            mapped_factor: parts.mapped,
+            _recompute: PhantomData,
+        })
+    }
+
     /// Rebuilds `L` and `α` at the current `θ` without a search.
     ///
     /// Transforms are not re-fit. `n` and `d` stay the same.

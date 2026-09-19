@@ -72,11 +72,17 @@ pub(crate) trait DistanceCacheSlot:
     Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {
     fn policy(self) -> DistanceCachePolicy;
+
+    fn persist(self) -> Option<DistanceCachePolicy>;
 }
 
 impl DistanceCacheSlot for DistanceCachePolicy {
     fn policy(self) -> DistanceCachePolicy {
         self
+    }
+
+    fn persist(self) -> Option<DistanceCachePolicy> {
+        Some(self)
     }
 }
 
@@ -91,6 +97,10 @@ pub struct NoDistanceCache;
 impl DistanceCacheSlot for NoDistanceCache {
     fn policy(self) -> DistanceCachePolicy {
         DistanceCachePolicy::Never
+    }
+
+    fn persist(self) -> Option<DistanceCachePolicy> {
+        None
     }
 }
 
