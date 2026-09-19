@@ -7,7 +7,8 @@ use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, CoordMode, KernelSpec, Triangle, fill_ard_squared_diff, fill_squared_euclidean,
+    CompiledKernel, CoordMode, KernelSpec, MixedKernelViews, Triangle, fill_ard_squared_diff,
+    fill_squared_euclidean,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::DoublePrecision;
@@ -73,6 +74,24 @@ fn apply_train_kernel(
                     ws.exp_buf.as_mut(),
                 )
             }
+        }
+        CoordMode::Mixed => {
+            let refill = match policy {
+                DistanceCachePolicy::Never => true,
+                DistanceCachePolicy::Always => !ws.dist_ready,
+            };
+            if refill {
+                let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
+                fill_squared_euclidean(x, ws.dist_cache.as_mut(), &mut thread_scratch);
+                ws.thread_scratch = thread_scratch;
+                ws.dist_ready = policy == DistanceCachePolicy::Always;
+            }
+            compiled.apply_mixed(
+                MixedKernelViews::new(ws.dist_cache.as_ref(), x),
+                ws.k_matrix.as_mut(),
+                Triangle::Lower,
+                ws.exp_buf.as_mut(),
+            )
         }
     }
 }
@@ -312,6 +331,13 @@ pub(crate) fn write_kernel_grad(
                 compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
             }
         }
+        CoordMode::Mixed => compiled.grad_mixed(
+            MixedKernelViews::new(dist, x),
+            d_k,
+            param_idx,
+            Triangle::Lower,
+            scratch,
+        ),
     }
 }
 

@@ -1398,6 +1398,33 @@ fn value_and_gradient_linear_times_ard_matches_finite_difference() {
 }
 
 #[test]
+fn rbf_plus_linear_fits_predicts_and_matches_finite_difference() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
+        + KernelSpec::from(LinearKernel::new(1.0).expect("valid"));
+    let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&[0.5, 1.5], 2, 1, &[0.5, -0.25])
+        .expect("spd");
+    let pred = gpr.predict(&[1.0], 1, 1).expect("fitted");
+    assert!(pred.mean[0].is_finite());
+    assert!(pred.variance[0] > 0.0);
+    assert_mll_grad_matches_finite_difference(&mut gpr);
+}
+
+#[test]
+fn rbf_times_linear_fits_and_matches_finite_difference() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
+        * KernelSpec::from(LinearKernel::new(1.0).expect("valid"));
+    let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&[0.5, 1.5], 2, 1, &[0.5, -0.25])
+        .expect("spd");
+    let pred = gpr.predict(&[1.0], 1, 1).expect("fitted");
+    assert!(pred.mean[0].is_finite());
+    assert_mll_grad_matches_finite_difference(&mut gpr);
+}
+
+#[test]
 fn value_and_gradient_sum_of_product_matches_finite_difference() {
     let kernel = KernelSpec::from(ConstantKernel::new(1.5).expect("valid"))
         * KernelSpec::from(RbfKernel::new(1.0).expect("valid"))
