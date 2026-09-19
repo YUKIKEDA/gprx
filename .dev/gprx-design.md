@@ -451,20 +451,20 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr<O = Lbfgs, S = FullRecompute>` は `KernelSpec`・`GaussianLikelihood`・変換・距離キャッシュ方針と、最適化器 `O` と再計算戦略 `S`（マーカー）を持つ。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
+`Gpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C` を持つ。`Gpr::new` の `C` は `DistanceCachePolicy`。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。`with_distance_cache_policy` は `C = DistanceCachePolicy` にだけある。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。
+既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
 
 ```rust
-struct Gpr<O = Lbfgs, S = FullRecompute> {
+struct Gpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
-    distance_cache_policy: DistanceCachePolicy,
+    distance_cache: C,
     _recompute: PhantomData<S>,
 }
 
@@ -494,7 +494,7 @@ enum DistanceCachePolicy {
     Always,
 } // 距離モードの経路だけ（P2B-11）。Linear / Constant / White 専用の trainer には無い
 
-struct FittedGpr<O = Lbfgs, S = FullRecompute> {
+struct FittedGpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
@@ -513,8 +513,8 @@ struct FittedGpr<O = Lbfgs, S = FullRecompute> {
 
 /// Objective は `Gpr` を fit 中だけ &mut で借り、set_params → MLL/勾配 を中継する。
 /// パラメータの正本は Gpr.kernel / Gpr.likelihood。
-struct GprObjective<'a, O, S> {
-    model: &'a mut Gpr<O, S>,
+struct GprObjective<'a, O, S, C = DistanceCachePolicy> {
+    model: &'a mut FittedGpr<O, S, C>,
 }
 ```
 
@@ -533,7 +533,7 @@ struct GprObjective<'a, O, S> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-`DistanceCachePolicy::Always`（既定）は `fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。`Never` は毎回埋め直す。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。
+`DistanceCachePolicy::Always`（既定）は `fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。`Never` は毎回埋め直す。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。この方針は距離経路の trainer（`Gpr::new`）だけが持つ。`RBF + White` と `Constant * RBF` は距離経路のまま。`from_points` の Linear / Constant / White には枠ごと無い。
 
 ### 6.4 Leave-one-out(P1B-7)
 
@@ -828,7 +828,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-9）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-11）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
