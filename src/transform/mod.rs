@@ -3,11 +3,14 @@
 //! Input maps: [`IdentityInput`], [`StandardizeInput`], [`MinMaxInput`].
 //! Target maps: [`IdentityTarget`], [`StandardizeTarget`], [`MinMaxTarget`].
 //! Stack several maps with [`Pipeline`] (`X`) or [`TargetPipeline`] (`y`).
+//! Assign a map per feature with [`ColumnwiseInput`].
 
+mod columnwise;
 mod input;
 mod pipeline;
 mod target;
 
+pub use columnwise::{ColumnwiseInput, FittedColumnwiseInput};
 pub use input::{
     FittedMinMaxInput, FittedStandardizeInput, IdentityInput, MinMaxInput, StandardizeInput,
     Transform, UnfittedTransform,
