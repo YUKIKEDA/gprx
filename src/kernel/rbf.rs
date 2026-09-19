@@ -2,7 +2,7 @@
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
-use super::{Triangle, finite_dist, write_dense, write_triangle};
+use super::{Triangle, finite_dist, write_dense, write_square_from_coords, write_triangle};
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
@@ -187,6 +187,38 @@ impl RbfKernel {
             return Ok(());
         }
         write_triangle(dist, d_k, uplo, |d| {
+            let d = finite_dist(d)?;
+            let k = (-d * inv_two_ell_sq).exp();
+            Ok(k * d * inv_ell_sq)
+        })
+    }
+
+    pub(crate) fn apply_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
+        write_square_from_coords(x, out, uplo, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+    }
+
+    pub(crate) fn grad_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "RBF has a single parameter at index 0".to_owned(),
+            });
+        }
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let inv_two_ell_sq = 0.5 / ell_sq;
+        let inv_ell_sq = 1.0 / ell_sq;
+        write_square_from_coords(x, d_k, uplo, |d| {
             let d = finite_dist(d)?;
             let k = (-d * inv_two_ell_sq).exp();
             Ok(k * d * inv_ell_sq)

@@ -1,7 +1,9 @@
 //! Isotropic Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::{Triangle, expect_one_param, finite_dist, write_dense, write_triangle};
+use super::{
+    Triangle, expect_one_param, finite_dist, write_dense, write_square_from_coords, write_triangle,
+};
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
@@ -207,6 +209,37 @@ impl MaternKernel {
         let ell = self.lengthscale();
         let nu = self.nu;
         write_triangle(dist, d_k, uplo, |d| {
+            let r = scaled_distance(d, ell)?;
+            finite_kernel(matern_dk_dtheta_iso(nu, r))
+        })
+    }
+
+    pub(crate) fn apply_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let ell = self.lengthscale();
+        let nu = self.nu;
+        write_square_from_coords(x, out, uplo, |d| matern_from_sq_dist(d, ell, nu))
+    }
+
+    pub(crate) fn grad_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "Matern has a single parameter at index 0".to_owned(),
+            });
+        }
+        let ell = self.lengthscale();
+        let nu = self.nu;
+        write_square_from_coords(x, d_k, uplo, |d| {
             let r = scaled_distance(d, ell)?;
             finite_kernel(matern_dk_dtheta_iso(nu, r))
         })

@@ -3,7 +3,7 @@
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{
     Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
-    write_triangle,
+    write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
@@ -206,6 +206,41 @@ impl RationalQuadraticKernel {
         let ell_sq = self.lengthscale() * self.lengthscale();
         let alpha = self.alpha();
         write_triangle(dist, d_k, uplo, |d| {
+            let r2 = scaled_r2(d, ell_sq)?;
+            finite_kernel(if param_idx == 0 {
+                rq_dk_dtheta_lengthscale(r2, alpha)
+            } else {
+                rq_dk_dtheta_alpha(r2, alpha)
+            })
+        })
+    }
+
+    pub(crate) fn apply_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let alpha = self.alpha();
+        write_square_from_coords(x, out, uplo, |d| rq_from_sq_dist(d, ell_sq, alpha))
+    }
+
+    pub(crate) fn grad_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if param_idx > 1 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("rational quadratic parameter index {param_idx} is out of range"),
+            });
+        }
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let alpha = self.alpha();
+        write_square_from_coords(x, d_k, uplo, |d| {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(if param_idx == 0 {
                 rq_dk_dtheta_lengthscale(r2, alpha)

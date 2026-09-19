@@ -7,7 +7,10 @@ use std::time::Instant;
 
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{Fixed, FittedGpr, GaussianLikelihood, Gpr};
+use gprx::{
+    CachedDistances, DistanceCachePolicy, Fixed, FittedGpr, FullRecompute, GaussianLikelihood, Gpr,
+    UncachedDistances,
+};
 
 #[path = "../../case_schema.rs"]
 mod case_schema;
@@ -40,7 +43,7 @@ fn na_row(name: &str, note: String) -> ResultRow {
     }
 }
 
-fn make_gpr(case: &Case) -> Result<Gpr<Fixed>, String> {
+fn make_gpr<C: DistanceCachePolicy>(case: &Case, policy: C) -> Result<Gpr<Fixed, FullRecompute, C>, String> {
     let kernel = if case.ard {
         let spec = RbfArdKernel::new(&case.lengthscales_init).map_err(|e| e.to_string())?;
         KernelSpec::from(spec)
@@ -56,17 +59,18 @@ fn make_gpr(case: &Case) -> Result<Gpr<Fixed>, String> {
         GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
     Ok(Gpr::new(kernel, likelihood)
         .with_target_transform(StandardizeTarget::new())
+        .with_distance_cache_policy(policy)
         .with_optimizer(Fixed))
 }
 
-fn run(case: &Case) -> Result<ResultRow, String> {
+fn run<C: DistanceCachePolicy>(case: &Case, policy: C) -> Result<ResultRow, String> {
     let warmup = timing::warmup_count();
     let reps = timing::timed_reps(case.n_rows);
     let mut factor_samples = Vec::with_capacity(reps);
-    let mut fitted: Option<FittedGpr<Fixed>> = None;
+    let mut fitted: Option<FittedGpr<Fixed, FullRecompute, C>> = None;
     for i in 0..warmup + reps {
         drop(fitted.take());
-        let gpr = make_gpr(case)?;
+        let gpr = make_gpr(case, policy)?;
         let start = Instant::now();
         let next = gpr
             .factor(&case.x, case.n_rows, case.n_cols, &case.y)
@@ -137,12 +141,18 @@ fn run(case: &Case) -> Result<ResultRow, String> {
 }
 
 fn main() -> ExitCode {
-    let path = match env::args().nth(1) {
-        Some(p) => p,
-        None => {
-            eprintln!("usage: gprx-perf CASE.json");
-            return ExitCode::from(2);
+    let mut path = None;
+    let mut uncached = false;
+    for arg in env::args().skip(1) {
+        if arg == "--uncached" {
+            uncached = true;
+        } else if path.is_none() {
+            path = Some(arg);
         }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: gprx-perf CASE.json [--uncached]");
+        return ExitCode::from(2);
     };
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
@@ -158,7 +168,12 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let row = match run(&case) {
+    let row = if uncached {
+        run(&case, UncachedDistances)
+    } else {
+        run(&case, CachedDistances)
+    };
+    let row = match row {
         Ok(row) => row,
         Err(e) => na_row(&case.name, e),
     };

@@ -3,7 +3,7 @@
 use super::{
     ConstantKernel, CustomKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
     RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, Triangle,
-    WhiteKernel, visit_triangle,
+    WhiteKernel, visit_triangle, write_square_from_coords,
 };
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
@@ -435,12 +435,15 @@ impl CompiledKernel {
         }
     }
 
-    /// Writes `k` from point coordinates. Used by ARD leaves.
+    /// Writes `k` from point coordinates.
+    ///
+    /// Isotropic leaves compute `‖x_i-x_j‖²` from `X` on each pair. ARD and
+    /// Linear evaluate from coordinates. Custom distance leaves fill the
+    /// triangle with those distances, then apply in place.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::UnsupportedKernelOperation`] for isotropic leaves,
-    /// or the same shape errors as [`Self::apply`].
+    /// Same shape errors as [`Self::apply`].
     pub fn apply_points(
         &self,
         x: MatRef<'_, f64>,
@@ -450,11 +453,11 @@ impl CompiledKernel {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_)
-            | Self::Matern(_)
-            | Self::Periodic(_)
-            | Self::RationalQuadratic(_)
-            | Self::Custom(_) => Err(iso_needs_dist()),
+            Self::Rbf(leaf) => leaf.apply_from_coords(x, out, uplo),
+            Self::Matern(leaf) => leaf.apply_from_coords(x, out, uplo),
+            Self::Periodic(leaf) => leaf.apply_from_coords(x, out, uplo),
+            Self::RationalQuadratic(leaf) => leaf.apply_from_coords(x, out, uplo),
+            Self::Custom(leaf) => apply_custom_from_coords(leaf, x, out, uplo),
             Self::RbfArd(leaf) => leaf.apply(x, out, uplo),
             Self::Linear(leaf) => leaf.apply(x, out, uplo),
             Self::MaternArd(leaf) => leaf.apply(x, out, uplo),
@@ -511,7 +514,6 @@ impl CompiledKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::UnsupportedKernelOperation`] for isotropic leaves,
     /// [`GprError::InvalidHyperparameter`] if `param_idx` is out of range,
     /// [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is the
     /// wrong size, or the same shape errors as [`Self::apply_points`].
@@ -525,11 +527,11 @@ impl CompiledKernel {
         mut scratch: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
         match self {
-            Self::Rbf(_)
-            | Self::Matern(_)
-            | Self::Periodic(_)
-            | Self::RationalQuadratic(_)
-            | Self::Custom(_) => Err(iso_needs_dist()),
+            Self::Rbf(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
+            Self::Matern(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
+            Self::Periodic(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
+            Self::RationalQuadratic(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
+            Self::Custom(leaf) => grad_custom_from_coords(leaf, x, d_k, param_idx, uplo),
             Self::RbfArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::MaternArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
@@ -961,6 +963,31 @@ fn iso_needs_dist() -> GprError {
     GprError::UnsupportedKernelOperation {
         reason: "isotropic RBF evaluates from a squared-distance matrix".to_owned(),
     }
+}
+
+fn apply_custom_from_coords(
+    leaf: &CustomKernel,
+    x: MatRef<'_, f64>,
+    mut out: MatMut<'_, f64>,
+    uplo: Triangle,
+) -> Result<(), GprError> {
+    let n = out.nrows();
+    let mut dist = Mat::zeros(n, n);
+    write_square_from_coords(x, dist.as_mut(), uplo, Ok)?;
+    leaf.apply(dist.as_ref(), out.as_mut(), uplo)
+}
+
+fn grad_custom_from_coords(
+    leaf: &CustomKernel,
+    x: MatRef<'_, f64>,
+    mut d_k: MatMut<'_, f64>,
+    param_idx: usize,
+    uplo: Triangle,
+) -> Result<(), GprError> {
+    let n = d_k.nrows();
+    let mut dist = Mat::zeros(n, n);
+    write_square_from_coords(x, dist.as_mut(), uplo, Ok)?;
+    leaf.grad(dist.as_ref(), d_k.as_mut(), param_idx, uplo)
 }
 
 fn merge_coord_mode(a: CoordMode, b: CoordMode) -> CoordMode {

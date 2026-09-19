@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
+use crate::gpr::DistanceCachePersist;
 use crate::param::{BoundedParam, Interval};
-use crate::{DistanceCachePolicy, GaussianLikelihood, JitterPolicy};
+use crate::{GaussianLikelihood, JitterPolicy};
 
 use super::kernel::KernelJson;
 use super::transform::{FittedInputJson, FittedTargetJson, UnfittedInputJson, UnfittedTargetJson};
@@ -140,17 +141,17 @@ pub(super) enum DistanceCacheJson {
 }
 
 impl DistanceCacheJson {
-    pub(super) fn encode(policy: DistanceCachePolicy) -> Self {
+    pub(super) fn encode(policy: DistanceCachePersist) -> Self {
         match policy {
-            DistanceCachePolicy::Always => Self::Always,
-            DistanceCachePolicy::Never => Self::Never,
+            DistanceCachePersist::Cached => Self::Always,
+            DistanceCachePersist::Uncached => Self::Never,
         }
     }
 
-    pub(super) fn decode(self) -> DistanceCachePolicy {
+    pub(super) fn decode(self) -> DistanceCachePersist {
         match self {
-            Self::Always => DistanceCachePolicy::Always,
-            Self::Never => DistanceCachePolicy::Never,
+            Self::Always => DistanceCachePersist::Cached,
+            Self::Never => DistanceCachePersist::Uncached,
         }
     }
 }
