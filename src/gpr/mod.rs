@@ -5,7 +5,8 @@ mod model;
 mod types;
 
 pub use model::{FittedGpr, Gpr};
+pub(crate) use types::DistanceCacheSlot;
 pub use types::{
-    AdaptiveJitter, DistanceCachePolicy, FixedJitter, JitterPolicy, PredictOptions, Prediction,
-    PredictiveCovariance, VarianceKind,
+    AdaptiveJitter, DistanceCachePolicy, FixedJitter, JitterPolicy, NoDistanceCache,
+    PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
 };
