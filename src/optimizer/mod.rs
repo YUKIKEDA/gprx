@@ -8,7 +8,10 @@
 //! midpoint. When a gradient solver asks for cost and gradient at the same
 //! point, one [`crate::Differentiable::value_and_gradient_into`] call fills
 //! both. [`NelderMead`] evaluates [`crate::Objective::value`] only.
+//! [`FastSimulatedAnnealing`] is a homemade value-only solver that walks
+//! log-`θ` with Cauchy / Metropolis steps instead of a logit map.
 
+mod fsa;
 mod lbfgs;
 mod logit;
 mod ncg;
@@ -16,6 +19,7 @@ mod neldermead;
 
 use std::num::NonZeroU32;
 
+pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
 pub use ncg::NonlinearCg;
 pub use neldermead::NelderMead;
@@ -37,7 +41,7 @@ pub struct OptResult {
 ///
 /// `P` is the objective this algorithm can minimize. [`Lbfgs`] and
 /// [`NonlinearCg`] require [`crate::Differentiable`] plus bounds. [`NelderMead`]
-/// requires only [`crate::Objective`] plus bounds.
+/// and [`FastSimulatedAnnealing`] require only [`crate::Objective`] plus bounds.
 pub trait Optimizer<P: ?Sized> {
     /// Minimizes `objective` from `init` without taking ownership of `init`.
     ///

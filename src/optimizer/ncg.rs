@@ -117,7 +117,7 @@ impl<P: Differentiable + HasBounds> Optimizer<P> for NonlinearCg {
             run_ncg(self, mapped, z)
         })?;
         if let Some(restarts) = self.restarts {
-            let mut rng = restarts.seed;
+            let mut rng = crate::rng::small_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider_value_run(objective, &intervals, &z, &mut best, |mapped, z| {

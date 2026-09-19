@@ -7,6 +7,8 @@
 
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, Prediction};
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 
@@ -26,21 +28,28 @@ const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 /// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
 const MAX_PREDICT_100_ALLOCS: usize = 0;
 
-fn splitmix64(state: &mut u64) -> f64 {
-    *state = state.wrapping_add(0x9E3779B97F4A7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    (z >> 11) as f64 / ((1u64 << 53) as f64)
+fn small_rng(seed: u64) -> SmallRng {
+    SmallRng::seed_from_u64(seed)
+}
+
+fn open_unit(rng: &mut SmallRng) -> f64 {
+    let u: f64 = rng.random();
+    let eps = 1.0 / ((1u64 << 53) as f64);
+    if u <= eps {
+        eps
+    } else if u >= 1.0 - eps {
+        1.0 - eps
+    } else {
+        u
+    }
 }
 
 fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
-    let mut state = seed;
+    let mut rng = small_rng(seed);
     let mut x = vec![0.0; n * d];
     for col in 0..d {
         for row in 0..n {
-            x[col * n + row] = splitmix64(&mut state);
+            x[col * n + row] = open_unit(&mut rng);
         }
     }
     x
@@ -50,8 +59,8 @@ fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);
-    let mut state = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
-    let y: Vec<f64> = (0..N).map(|_| splitmix64(&mut state)).collect();
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let gpr = Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&x, N, D, &y)?;
