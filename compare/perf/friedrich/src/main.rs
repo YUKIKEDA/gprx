@@ -12,6 +12,8 @@ use friedrich::kernel::SquaredExp;
 mod case_schema;
 #[path = "../../rss_win.rs"]
 mod peak_rss;
+#[path = "../../timing.rs"]
+mod timing;
 
 use case_schema::{Case, ResultRow};
 
@@ -36,10 +38,18 @@ fn na_row(name: &str, note: String) -> ResultRow {
         name: name.to_string(),
         status: "na".to_string(),
         factor_s: None,
+        factor_min_s: None,
+        factor_max_s: None,
         eval_s: None,
+        eval_min_s: None,
+        eval_max_s: None,
         predict_s: None,
+        predict_min_s: None,
+        predict_max_s: None,
         joint_evals: None,
         peak_rss_bytes: None,
+        warmup: None,
+        reps: None,
         note: Some(note),
     }
 }
@@ -59,32 +69,60 @@ fn run(case: &Case) -> ResultRow {
     let outputs = zscore(&case.y);
     let queries = unpack_rows(&case.xs, case.xs_n_rows, case.xs_n_cols);
     let noise_std = case.noise_variance_init.sqrt();
-    let factor_start = Instant::now();
-    let gp = GaussianProcess::builder(inputs, outputs)
-        .set_noise(noise_std)
-        .set_kernel(SquaredExp::new(ell, 1.0))
-        .train();
-    let factor_s = factor_start.elapsed().as_secs_f64();
-    let predict_start = Instant::now();
-    let _ = gp.predict_mean_variance(&queries);
-    let predict_s = predict_start.elapsed().as_secs_f64();
+    let warmup = timing::warmup_count();
+    let reps = timing::timed_reps(case.n_rows);
+    let mut factor_samples = Vec::with_capacity(reps);
+    let mut gp = None;
+    for i in 0..warmup + reps {
+        drop(gp.take());
+        let start = Instant::now();
+        let next = GaussianProcess::builder(inputs.clone(), outputs.clone())
+            .set_noise(noise_std)
+            .set_kernel(SquaredExp::new(ell, 1.0))
+            .train();
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            factor_samples.push(dt);
+        }
+        gp = Some(next);
+    }
+    let gp = gp.expect("timed_reps is at least 1");
+    let mut predict_samples = Vec::with_capacity(reps);
+    for i in 0..warmup + reps {
+        let start = Instant::now();
+        let _ = gp.predict_mean_variance(&queries);
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            predict_samples.push(dt);
+        }
+    }
     let peak = match peak_rss::peak_rss_bytes() {
         Ok(v) => Some(v),
         Err(e) => {
             return na_row(&case.name, e);
         }
     };
+    let (factor_min, factor_max) = timing::min_max(&factor_samples);
+    let (predict_min, predict_max) = timing::min_max(&predict_samples);
     ResultRow {
         lib: "friedrich".to_string(),
         name: case.name.clone(),
         status: "ok".to_string(),
-        factor_s: Some(factor_s),
+        factor_s: Some(timing::median(&factor_samples)),
+        factor_min_s: Some(factor_min),
+        factor_max_s: Some(factor_max),
         eval_s: None,
-        predict_s: Some(predict_s),
+        eval_min_s: None,
+        eval_max_s: None,
+        predict_s: Some(timing::median(&predict_samples)),
+        predict_min_s: Some(predict_min),
+        predict_max_s: Some(predict_max),
         joint_evals: None,
         peak_rss_bytes: peak,
+        warmup: Some(warmup as u64),
+        reps: Some(reps as u64),
         note: Some(format!(
-            "factor at fixed theta; no public MLL+grad (case asked {} evals)",
+            "factor at fixed theta; no public MLL+grad (case asked {} evals); discard {warmup} then {reps} timed",
             case.joint_evals
         )),
     }
