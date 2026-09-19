@@ -16,6 +16,7 @@ ELL_ISO = 1.0
 ELL_ARD = 4.0
 FORRESTER_SEED = 0
 SPHERE_SEED = 9
+JOINT_EVALS = 10
 
 
 def forrester(x: np.ndarray) -> np.ndarray:
@@ -56,6 +57,7 @@ def make_forrester(n: int) -> dict:
         "xs": pack_column_major(xs),
         "lengthscales_init": [ELL_ISO],
         "noise_variance_init": NOISE_VARIANCE_INIT,
+        "joint_evals": JOINT_EVALS,
     }
 
 
@@ -82,6 +84,7 @@ def make_sphere(side: int) -> dict:
         "xs": pack_column_major(xs),
         "lengthscales_init": [ELL_ARD, ELL_ARD],
         "noise_variance_init": NOISE_VARIANCE_INIT,
+        "joint_evals": JOINT_EVALS,
     }
 
 

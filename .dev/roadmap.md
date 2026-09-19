@@ -33,7 +33,8 @@
 | P2B-3   | [#117](https://github.com/YUKIKEDA/gprx/issues/117) | P2B-4   | [#119](https://github.com/YUKIKEDA/gprx/issues/119) | P2B-5   | [#121](https://github.com/YUKIKEDA/gprx/issues/121) |
 | P2B-6   | [#123](https://github.com/YUKIKEDA/gprx/issues/123) | P2B-10  | [#125](https://github.com/YUKIKEDA/gprx/issues/125) | P2B-7   | [#127](https://github.com/YUKIKEDA/gprx/issues/127) |
 | P2B-8   | [#129](https://github.com/YUKIKEDA/gprx/issues/129) | P2B-9   | [#131](https://github.com/YUKIKEDA/gprx/issues/131) | P2B-11  | [#133](https://github.com/YUKIKEDA/gprx/issues/133) |
-| P2B-12  | [#135](https://github.com/YUKIKEDA/gprx/issues/135) | P2B-13  | [#137](https://github.com/YUKIKEDA/gprx/issues/137) |         |                                                   |
+| P2B-12  | [#135](https://github.com/YUKIKEDA/gprx/issues/135) | P2B-13  | [#137](https://github.com/YUKIKEDA/gprx/issues/137) | P2B-21  | [#142](https://github.com/YUKIKEDA/gprx/issues/142) |
+| P2B-22  | [#143](https://github.com/YUKIKEDA/gprx/issues/143) |         |                                                   |         |                                                   |
 
 ## マイルストーン
 
@@ -170,13 +171,15 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-13 | Feat | Dist と Points の Sum/Product                 | P2B-12 | `RBF + Linear` など Dist 葉と Points 葉の合成を評価する。`coord_mode` で混ぜを `UnsupportedKernelOperation` しない。型で混ぜ不可にもしない。葉は従来どおり Dist は距離、Points は座標。解析または sklearn golden（L-BFGS と混ぜない） |
 | P2B-14 | Feat | 学習済みモデルの保存・読み込み                | P2-8   | 学習済みだけを保存する（未学習の `Gpr` は置かない）。ディレクトリ一つ（`config.json` + `model.safetensors`）。`save` と `save_with_factor`（bool ではない）。`load` は予測用で中身は `FittedGpr<Fixed>`、距離 / Points は公開 enum。再学習は `with_optimizer` → `refit`（ファイルにソルバは書かない）。テンソルは safetensors。`L` があるとき mmap を保持。元の `X` / `y` を書き、変換は load で `apply`。`L` は正方 `n×n` 列優先、下側が正本。config は `format_version`（この行は `1`、未知は拒否）、jitter、距離経路だけキャッシュ方針。組み込みは閉じたタグ。Custom / 自前変換は `persist_id` + JSON。`gprx.` は予約。レジストリは明示登録 |
 | P2B-15 | Feat | カスタム Optimizer の使用例                   | P2B-9  | 公開 `FastSimulatedAnnealing` と `BoundaryPolicy` を `src/optimizer/fsa.rs` に置き、`Lbfgs` と同じ段で再エクスポートする。`examples/` 専用にはしない。Cauchy / Metropolis、component-wise、Ingber 冷却。ノブは型の上（共有 `with_max_iterations` / `with_restarts`、FSA 専用 `with_initial_temperature` / `with_cooling_rate` / `with_seed` / `with_boundary`）。境界は `HasBounds`。既定反復 100。未使用の `tolerance` / `FsaConfig` / 独自 `Bound` は置かない。探索は `minimize` の log-θ。開区間 `(ln lo, ln hi)`。`BoundaryPolicy::{Clamp, Periodic}`、既定 Clamp。政策ごとの追加ノブなし。乱数は `rand` の `SmallRng`（公開は `u64` seed）。FSA・`sample`・リスタートと bench／テストの `y` を同じ生成器に寄せる。`sample` の rustdoc から SplitMix64 を外す。rustdoc が正本（Szu & Hartley 1987 / Ingber 1989 と Example）。README のソルバ段落に1行。新しい example バイナリは置かない。試験: 固定 seed の 1 次元受理／Clamp／Periodic。`Gpr<FastSimulatedAnnealing>` の `fit` が `FittedGpr` を返し同じ seed で NLML が初期より下がる。Rosenbrock 2D は座標が両軸 `(-0.5, 2.5)` に入る（既知最小一致は求めない） |
-| P2B-16 | Spike | 他ライブラリとの時間・RSS 比較               | P2-9   | sklearn / libgp / friedrich だけ。等方 Forrester と ARD 球、`n = 256 / 1024 / 4096`（ARD は 16×16 / 32×32 / 64×64）。各セルで fit（壁時計 + joint-eval 数）・predict 100・ピーク RSS。回数差がある時間は速度差と書かない。走った全セルにゲート。sklearn は時間と RSS が両方小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は時間か RSS の一方。同じ問題を書けないセルは N/A。スクリプトは `compare/perf/`（gprx も同じ手順）。記録と合否は `.dev/bench-log.md`（機械名）。手動、CI なし。criterion は合否に使わない。負けたセルは同じ変更で改善行を足してこの Spike を閉じる。README から bench-log へ 1 行 |
+| P2B-16 | Spike | 他ライブラリとの時間・RSS 比較               | P2-9   | sklearn / libgp / friedrich だけ。等方 Forrester と ARD 球、`n = 256 / 1024 / 4096`（ARD は 16×16 / 32×32 / 64×64）。各セルで同じ初期 θ の factor（最適化なし）・その θ で joint MLL+grad 10 回・predict 100・ピーク RSS。ソルバは回さない。回数差がある時間は速度差と書かない。走った全セルにゲート。sklearn は factor・eval・RSS がどれも小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は factor 時間か RSS の一方。同じ問題を書けないセルは N/A。libgp は C++ 本体。スクリプトは `compare/perf/`（gprx も同じ手順）。記録と合否は `.dev/bench-log.md`（機械名）。手動、CI なし。criterion は合否に使わない。負けたセルは同じ変更で改善行を足してこの Spike を閉じる（P2B-21 / P2B-22）。README から bench-log へ 1 行 |
 | P2B-17 | Feat | `GprObjective` の NLML ヘッセ                 | P2B-1  | Grill 後に [#109](https://github.com/YUKIKEDA/gprx/issues/109) で確定 |
 | P2B-18 | Feat | `IncrementalRecompute` の本体                 | P2B-1  | Grill 後に [#110](https://github.com/YUKIKEDA/gprx/issues/110) で確定 |
 | P2B-19 | Feat | fit 中の `L`/`W` バッファ共用                 | P2B-1  | Grill 後に [#111](https://github.com/YUKIKEDA/gprx/issues/111) で確定 |
 | P2B-20 | Task | transform ファイル分割の判断                  | P2B-10 | Grill 後に [#116](https://github.com/YUKIKEDA/gprx/issues/116) で確定 |
+| P2B-21 | Feat | libgp 比のピーク RSS                          | P2B-16 | Grill 後に [#142](https://github.com/YUKIKEDA/gprx/issues/142) で確定 |
+| P2B-22 | Feat | n=4096 の MLL+grad（sklearn 比）              | P2B-16 | Grill 後に [#143](https://github.com/YUKIKEDA/gprx/issues/143) で確定 |
 
-**2b 完了:** P2B-1…20 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…20 の作業は各 Issue の Grill と DoD 確定のあと。
+**2b 完了:** P2B-1…22 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…22 の作業は各 Issue の Grill と DoD 確定のあと。
 
 ---
 

@@ -32,7 +32,8 @@ def run_cmd(args: list[str], cwd: Path | None = None) -> dict[str, Any]:
         return {
             "status": "na",
             "note": f"runner failed ({proc.returncode}): {err}",
-            "fit_s": None,
+            "factor_s": None,
+            "eval_s": None,
             "predict_s": None,
             "joint_evals": None,
             "peak_rss_bytes": None,
@@ -77,6 +78,85 @@ def run_python(script: str, case_path: Path) -> dict[str, Any]:
     return run_cmd([sys.executable, str(ROOT / script), str(case_path)], cwd=ROOT)
 
 
+def libgp_exe_candidates(build: Path) -> list[Path]:
+    return [
+        build / "Release" / "libgp-perf.exe",
+        build / "RelWithDebInfo" / "libgp-perf.exe",
+        build / "libgp-perf.exe",
+        build / "libgp-perf",
+    ]
+
+
+def ensure_libgp() -> Path | dict[str, Any]:
+    src = ROOT / "libgp"
+    build = src / "build"
+    for candidate in libgp_exe_candidates(build):
+        if candidate.is_file():
+            return candidate
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            str(src),
+            "-B",
+            str(build),
+            "-DCMAKE_BUILD_TYPE=Release",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if configure.returncode != 0:
+        err = (configure.stderr or configure.stdout or "").strip()
+        return {
+            "status": "na",
+            "note": f"libgp cmake configure failed ({configure.returncode}): {err}",
+            "factor_s": None,
+            "eval_s": None,
+            "predict_s": None,
+            "joint_evals": None,
+            "peak_rss_bytes": None,
+        }
+    built = subprocess.run(
+        ["cmake", "--build", str(build), "--config", "Release"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if built.returncode != 0:
+        err = (built.stderr or built.stdout or "").strip()
+        return {
+            "status": "na",
+            "note": f"libgp cmake build failed ({built.returncode}): {err}",
+            "factor_s": None,
+            "eval_s": None,
+            "predict_s": None,
+            "joint_evals": None,
+            "peak_rss_bytes": None,
+        }
+    for candidate in libgp_exe_candidates(build):
+        if candidate.is_file():
+            return candidate
+    return {
+        "status": "na",
+        "note": "libgp-perf binary not found after cmake --build",
+        "factor_s": None,
+        "eval_s": None,
+        "predict_s": None,
+        "joint_evals": None,
+        "peak_rss_bytes": None,
+    }
+
+
+def run_libgp(case_path: Path) -> dict[str, Any]:
+    exe = ensure_libgp()
+    if isinstance(exe, dict):
+        return exe
+    return run_cmd([str(exe), str(case_path)], cwd=ROOT)
+
+
 def ratio_verdict(ours: float, theirs: float, band: float) -> str:
     if theirs == 0.0:
         return "判定不能"
@@ -88,16 +168,22 @@ def ratio_verdict(ours: float, theirs: float, band: float) -> str:
     return "fail"
 
 
+def combine_times(*verdicts: str) -> str:
+    judged = [v for v in verdicts if v != "判定不能"]
+    if any(v == "fail" for v in judged):
+        return "fail"
+    if judged and all(v == "pass" for v in judged):
+        return "pass"
+    return "判定不能"
+
+
 def judge_sklearn(gprx: dict[str, Any], other: dict[str, Any]) -> dict[str, str]:
     if gprx.get("status") != "ok" or other.get("status") != "ok":
         return {"time": "N/A", "rss": "N/A", "cell": "N/A"}
-    time_v = ratio_verdict(gprx["fit_s"], other["fit_s"], SKLEARN_BAND)
+    factor_v = ratio_verdict(gprx["factor_s"], other["factor_s"], SKLEARN_BAND)
+    eval_v = ratio_verdict(gprx["eval_s"], other["eval_s"], SKLEARN_BAND)
     rss_v = ratio_verdict(gprx["peak_rss_bytes"], other["peak_rss_bytes"], SKLEARN_BAND)
-    evals_match = gprx.get("joint_evals") == other.get("joint_evals")
-    if not evals_match:
-        time_note = "判定不能"
-    else:
-        time_note = time_v
+    time_note = combine_times(factor_v, eval_v)
     if time_note == "pass" and rss_v == "pass":
         cell = "pass"
     elif "fail" in (time_note, rss_v):
@@ -119,13 +205,12 @@ def within_band_or_better(ours: float, theirs: float, band: float) -> str:
 def judge_libgp(gprx: dict[str, Any], other: dict[str, Any]) -> dict[str, str]:
     if gprx.get("status") != "ok" or other.get("status") != "ok":
         return {"time": "N/A", "rss": "N/A", "cell": "N/A"}
-    time_v = within_band_or_better(gprx["fit_s"], other["fit_s"], LIBGP_BAND)
+    factor_v = within_band_or_better(gprx["factor_s"], other["factor_s"], LIBGP_BAND)
+    eval_v = within_band_or_better(gprx["eval_s"], other["eval_s"], LIBGP_BAND)
     rss_v = within_band_or_better(
         gprx["peak_rss_bytes"], other["peak_rss_bytes"], LIBGP_BAND
     )
-    evals_match = gprx.get("joint_evals") == other.get("joint_evals")
-    if not evals_match:
-        time_v = "判定不能"
+    time_v = combine_times(factor_v, eval_v)
     judged = [v for v in (time_v, rss_v) if v != "判定不能"]
     if any(v == "fail" for v in judged):
         cell = "fail"
@@ -139,24 +224,15 @@ def judge_libgp(gprx: dict[str, Any], other: dict[str, Any]) -> dict[str, str]:
 def judge_friedrich(gprx: dict[str, Any], other: dict[str, Any]) -> dict[str, str]:
     if gprx.get("status") != "ok" or other.get("status") != "ok":
         return {"time": "N/A", "rss": "N/A", "cell": "N/A"}
-    time_v = ratio_verdict(gprx["fit_s"], other["fit_s"], SKLEARN_BAND)
+    time_v = ratio_verdict(gprx["factor_s"], other["factor_s"], SKLEARN_BAND)
     rss_v = ratio_verdict(gprx["peak_rss_bytes"], other["peak_rss_bytes"], SKLEARN_BAND)
-    evals_match = (
-        gprx.get("joint_evals") is not None
-        and other.get("joint_evals") is not None
-        and gprx.get("joint_evals") == other.get("joint_evals")
-    )
-    if not evals_match:
-        time_speed = "判定不能"
-    else:
-        time_speed = time_v
     if time_v == "pass" or rss_v == "pass":
         cell = "pass"
     elif time_v == "fail" and rss_v == "fail":
         cell = "fail"
     else:
         cell = "判定不能"
-    return {"time": time_speed, "rss": rss_v, "cell": cell}
+    return {"time": time_v, "rss": rss_v, "cell": cell}
 
 
 def fmt_s(value: float | None) -> str:
@@ -192,7 +268,7 @@ def main() -> int:
     runners = (
         ("gprx", run_gprx),
         ("sklearn", lambda p: run_python("sklearn_run.py", p)),
-        ("libgp", lambda p: run_python("libgp_run.py", p)),
+        ("libgp", run_libgp),
         ("friedrich", run_friedrich),
     )
     for case_path in cases:
@@ -203,7 +279,11 @@ def main() -> int:
             row.setdefault("lib", lib)
             row.setdefault("name", case_path.stem)
             rows.append(row)
-            print(f"    {row.get('status')} fit={fmt_s(row.get('fit_s'))}", flush=True)
+            print(
+                f"    {row.get('status')} factor={fmt_s(row.get('factor_s'))} "
+                f"eval={fmt_s(row.get('eval_s'))}",
+                flush=True,
+            )
 
     (OUT / "results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
@@ -213,9 +293,9 @@ def main() -> int:
 
     print("\n## cells\n")
     print(
-        "| 問題 | n | lib | fit | evals | predict 100 | peak RSS | vs gprx |"
+        "| 問題 | n | lib | factor | eval N | evals | predict 100 | peak RSS | vs gprx |"
     )
-    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     verdicts: list[tuple[str, str, str]] = []
     for name, libs in by_name.items():
         gprx = libs.get("gprx", {})
@@ -238,9 +318,10 @@ def main() -> int:
                 gate = judged["cell"]
                 verdicts.append((name, lib, gate))
             print(
-                f"| {problem} | {n} | {lib} | {fmt_s(row.get('fit_s'))} | "
-                f"{fmt_evals(row.get('joint_evals'))} | {fmt_s(row.get('predict_s'))} | "
-                f"{fmt_rss(row.get('peak_rss_bytes'))} | {gate} |"
+                f"| {problem} | {n} | {lib} | {fmt_s(row.get('factor_s'))} | "
+                f"{fmt_s(row.get('eval_s'))} | {fmt_evals(row.get('joint_evals'))} | "
+                f"{fmt_s(row.get('predict_s'))} | {fmt_rss(row.get('peak_rss_bytes'))} | "
+                f"{gate} |"
             )
 
     fails = [(n, lib, v) for n, lib, v in verdicts if v == "fail"]

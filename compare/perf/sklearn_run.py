@@ -1,4 +1,4 @@
-"""sklearn GaussianProcessRegressor cell (same JSON case as the other runners)."""
+"""sklearn cell: factor at fixed theta, then N joint MLL+grad evals."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ def run(case: dict) -> dict:
     y = np.asarray(case["y"], dtype=np.float64)
     xs = unpack_rows(case["xs"], case["xs_n_rows"], case["xs_n_cols"])
     lengthscales = np.asarray(case["lengthscales_init"], dtype=np.float64)
+    n_evals = int(case["joint_evals"])
     if case["ard"]:
         kernel = RBF(length_scale=lengthscales)
     else:
@@ -26,35 +27,32 @@ def run(case: dict) -> dict:
     model = GaussianProcessRegressor(
         kernel=kernel,
         alpha=float(case["noise_variance_init"]),
-        optimizer="fmin_l_bfgs_b",
+        optimizer=None,
         n_restarts_optimizer=0,
         normalize_y=True,
         random_state=0,
     )
-    evals = {"n": 0}
-    orig = GaussianProcessRegressor.log_marginal_likelihood
-
-    def counted(self, theta=None, eval_gradient=False, clone_kernel=True):
-        if eval_gradient:
-            evals["n"] += 1
-        return orig(self, theta, eval_gradient=eval_gradient, clone_kernel=clone_kernel)
-
-    model.log_marginal_likelihood = counted.__get__(model, GaussianProcessRegressor)
     t0 = time.perf_counter()
     model.fit(x, y)
-    fit_s = time.perf_counter() - t0
+    factor_s = time.perf_counter() - t0
+    theta = np.asarray(model.kernel_.theta, dtype=np.float64)
     t1 = time.perf_counter()
+    for _ in range(n_evals):
+        model.log_marginal_likelihood(theta, eval_gradient=True, clone_kernel=True)
+    eval_s = time.perf_counter() - t1
+    t2 = time.perf_counter()
     model.predict(xs, return_std=True)
-    predict_s = time.perf_counter() - t1
+    predict_s = time.perf_counter() - t2
     return {
         "lib": "sklearn",
         "name": case["name"],
         "status": "ok",
-        "fit_s": fit_s,
+        "factor_s": factor_s,
+        "eval_s": eval_s,
         "predict_s": predict_s,
-        "joint_evals": evals["n"],
+        "joint_evals": n_evals,
         "peak_rss_bytes": peak_rss_bytes(),
-        "note": None,
+        "note": f"optimizer=None factor + {n_evals} joint MLL+grad at the same theta",
     }
 
 

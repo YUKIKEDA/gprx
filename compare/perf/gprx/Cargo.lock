@@ -553,8 +553,6 @@ dependencies = [
 name = "gprx-perf"
 version = "0.0.0"
 dependencies = [
- "argmin",
- "argmin-math",
  "gprx",
  "libc",
  "serde",
