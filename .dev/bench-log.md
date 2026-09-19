@@ -180,42 +180,42 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 ## P2B-16（他ライブラリ、`compare/perf/`）
 
-同一機械。日付 2026-09-19。`just perf`（`uv run --directory compare/perf python run.py`）。criterion ではない。
+同一機械。初回 2026-09-19（faer `Par::Seq`）。表は **同日 P2B-22 後に `just perf` で取り直し**（`faer_par(n)`）。`uv run --directory compare/perf python run.py`。criterion ではない。
 
 問題: 等方 Forrester（`ℓ = 1`）と ARD 球（`ℓ_d = 4`）、`n = 256 / 1024 / 4096`（ARD は 16×16 / 32×32 / 64×64）。`y = f(x) + N(0, 1)`（NumPy Generator、Forrester seed `0`、球 seed `9`）。各セルは **同じ初期 θ で factor（最適化なし）** → **MLL+grad を 10 回**（同じ θ）→ predict 100 → ピーク RSS（Windows `PeakWorkingSet`）。ソルバは回さない。gprx は `Gpr<Fixed>::factor` + `value_and_gradient_into` + `StandardizeTarget`。sklearn は `optimizer=None` + `normalize_y=True` + `log_marginal_likelihood(..., eval_gradient=True)`。libgp は C++ 本体（`compare/perf/libgp/`）の `add_patterns` + `log_likelihood_gradient`。friedrich / libgp は runner 側で `y` を z-score。friedrich に ARD と公開 MLL+grad はない。
 
 ゲート: sklearn は factor 時間・eval 時間・RSS がすべて小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は factor 時間か RSS の一方。
 
-負け（この節の計測時）: sklearn は n=4096 の 2 セル（eval が約 2 倍遅い。RSS は gprx が小さい）。libgp は走った 6 セルすべて（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。n=4096 eval は P2B-22 / [#143](https://github.com/YUKIKEDA/gprx/issues/143) で faer 並列のあと再判定。
+負け: sklearn の 6 セルは pass（n=4096 の eval も含む）。libgp は走った 6 セルすべて fail（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。
 
-| 問題      | n    | lib       | factor    | eval 10   | predict 100 | peak RSS   | ゲート                         |
-| --------- | ---- | --------- | --------- | --------- | ----------- | ---------- | ------------------------------ |
-| Forrester | 256  | gprx      | 1.34 ms   | 11.36 ms  | 0.46 ms     | 7.9 MiB    | —                              |
-| Forrester | 256  | sklearn   | 3.61 ms   | 25.70 ms  | 0.72 ms     | 110.2 MiB  | pass                           |
-| Forrester | 256  | libgp     | 1.30 ms   | 60.17 ms  | 0.93 ms     | 7.1 MiB    | fail（RSS +11%）               |
-| Forrester | 256  | friedrich | 1.90 ms   | N/A       | 2.49 ms     | 4.9 MiB    | pass（時間）                   |
-| Forrester | 1024 | gprx      | 16.35 ms  | 534.89 ms | 3.72 ms     | 41.7 MiB   | —                              |
-| Forrester | 1024 | sklearn   | 146.54 ms | 1.315 s   | 3.34 ms     | 178.7 MiB  | pass                           |
-| Forrester | 1024 | libgp     | 35.81 ms  | 2.075 s   | 9.59 ms     | 33.2 MiB   | fail（RSS +26%）               |
-| Forrester | 1024 | friedrich | 58.55 ms  | N/A       | 26.97 ms    | 13.7 MiB   | pass（時間）                   |
-| Forrester | 4096 | gprx      | 1.349 s   | 41.994 s  | 44.46 ms    | 535.1 MiB  | —                              |
-| Forrester | 4096 | sklearn   | 1.206 s   | 21.214 s  | 34.92 ms    | 1150.5 MiB | fail（eval 約 2 倍）           |
-| Forrester | 4096 | libgp     | 1.579 s   | 108.680 s | 374.82 ms   | 405.2 MiB  | fail（RSS +32%）               |
-| Forrester | 4096 | friedrich | 5.079 s   | N/A       | 724.00 ms   | 138.6 MiB  | pass（時間）                   |
-| 球 ARD    | 256  | gprx      | 1.58 ms   | 13.29 ms  | 0.81 ms     | 9.0 MiB    | —                              |
-| 球 ARD    | 256  | sklearn   | 3.44 ms   | 52.51 ms  | 0.77 ms     | 110.5 MiB  | pass                           |
-| 球 ARD    | 256  | libgp     | 1.45 ms   | 76.03 ms  | 1.19 ms     | 7.3 MiB    | fail（RSS +23%）               |
-| 球 ARD    | 256  | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
-| 球 ARD    | 1024 | gprx      | 18.44 ms  | 571.76 ms | 4.17 ms     | 57.8 MiB   | —                              |
-| 球 ARD    | 1024 | sklearn   | 132.31 ms | 1.561 s   | 3.38 ms     | 186.8 MiB  | pass                           |
-| 球 ARD    | 1024 | libgp     | 38.20 ms  | 2.388 s   | 11.78 ms    | 33.3 MiB   | fail（RSS +74%）               |
-| 球 ARD    | 1024 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
-| 球 ARD    | 4096 | gprx      | 1.576 s   | 41.729 s  | 47.44 ms    | 791.4 MiB  | —                              |
-| 球 ARD    | 4096 | sklearn   | 1.296 s   | 24.552 s  | 42.55 ms    | 1278.5 MiB | fail（eval 約 1.7 倍）         |
-| 球 ARD    | 4096 | libgp     | 1.591 s   | 110.568 s | 385.57 ms   | 405.2 MiB  | fail（RSS +95%）               |
-| 球 ARD    | 4096 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
+| 問題      | n    | lib       | factor    | eval 10   | predict 100 | peak RSS   | ゲート                 |
+| --------- | ---- | --------- | --------- | --------- | ----------- | ---------- | ---------------------- |
+| Forrester | 256  | gprx      | 1.48 ms   | 10.70 ms  | 0.51 ms     | 9.6 MiB    | —                      |
+| Forrester | 256  | sklearn   | 3.32 ms   | 30.83 ms  | 0.71 ms     | 110.2 MiB  | pass                   |
+| Forrester | 256  | libgp     | 1.20 ms   | 58.71 ms  | 1.22 ms     | 7.1 MiB    | fail（RSS +34%）       |
+| Forrester | 256  | friedrich | 1.98 ms   | N/A       | 2.40 ms     | 4.9 MiB    | pass（時間）           |
+| Forrester | 1024 | gprx      | 41.22 ms  | 210.80 ms | 3.84 ms     | 43.5 MiB   | —                      |
+| Forrester | 1024 | sklearn   | 144.57 ms | 1.139 s   | 2.76 ms     | 178.8 MiB  | pass                   |
+| Forrester | 1024 | libgp     | 36.49 ms  | 2.097 s   | 11.62 ms    | 33.2 MiB   | fail（RSS +31%）       |
+| Forrester | 1024 | friedrich | 60.95 ms  | N/A       | 25.72 ms    | 13.7 MiB   | pass（時間）           |
+| Forrester | 4096 | gprx      | 518.94 ms | 7.858 s   | 34.64 ms    | 537.2 MiB  | —                      |
+| Forrester | 4096 | sklearn   | 1.250 s   | 22.112 s  | 36.63 ms    | 1150.4 MiB | pass                   |
+| Forrester | 4096 | libgp     | 1.516 s   | 105.318 s | 331.38 ms   | 405.2 MiB  | fail（RSS +33%）       |
+| Forrester | 4096 | friedrich | 4.741 s   | N/A       | 682.93 ms   | 138.8 MiB  | pass（時間）           |
+| 球 ARD    | 256  | gprx      | 1.76 ms   | 10.81 ms  | 0.64 ms     | 10.5 MiB   | —                      |
+| 球 ARD    | 256  | sklearn   | 8.47 ms   | 48.14 ms  | 0.83 ms     | 110.6 MiB  | pass                   |
+| 球 ARD    | 256  | libgp     | 1.52 ms   | 72.43 ms  | 1.01 ms     | 7.3 MiB    | fail（RSS +45%）       |
+| 球 ARD    | 256  | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                    |
+| 球 ARD    | 1024 | gprx      | 41.09 ms  | 212.24 ms | 3.28 ms     | 59.7 MiB   | —                      |
+| 球 ARD    | 1024 | sklearn   | 115.99 ms | 1.586 s   | 3.34 ms     | 186.8 MiB  | pass                   |
+| 球 ARD    | 1024 | libgp     | 39.70 ms  | 2.242 s   | 10.83 ms    | 33.3 MiB   | fail（RSS +79%）       |
+| 球 ARD    | 1024 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                    |
+| 球 ARD    | 4096 | gprx      | 415.53 ms | 8.368 s   | 41.45 ms    | 793.4 MiB  | —                      |
+| 球 ARD    | 4096 | sklearn   | 1.175 s   | 23.879 s  | 36.19 ms    | 1278.9 MiB | pass                   |
+| 球 ARD    | 4096 | libgp     | 1.528 s   | 107.443 s | 356.58 ms   | 405.2 MiB  | fail（RSS +96%）       |
+| 球 ARD    | 4096 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                    |
 
-時間は同じ仕事（factor 1 回 + MLL+grad 10 回）で比較できる。libgp の eval は gprx より遅い。n=4096 の sklearn eval は（この節では）gprx より短い。RSS は sklearn 全セルで gprx が小さく、libgp / friedrich より大きい。改善行: RSS vs libgp は P2B-21 / [#142](https://github.com/YUKIKEDA/gprx/issues/142)。n=4096 eval vs sklearn は次節 P2B-22。
+時間は同じ仕事（factor 1 回 + MLL+grad 10 回）で比較できる。gprx の n=4096 eval は sklearn より短い。libgp の eval は gprx より遅い。RSS は sklearn 全セルで gprx が小さく、libgp / friedrich より大きい。RSS vs libgp は P2B-21 / [#142](https://github.com/YUKIKEDA/gprx/issues/142)。HEAD 逐次との 5 回比は次節 P2B-22。
 
 ## P2B-22（faer 並列度、[#143](https://github.com/YUKIKEDA/gprx/issues/143)）
 
@@ -225,28 +225,28 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 **n=256 / 1024 eval 10（逐次比、+10% まで）**
 
-| 問題 | n | HEAD 逐次 | 実装後 | 比 | 判定 |
-|---|---:|---:|---:|---:|---|
-| Forrester | 256 | 12.45 ms | 12.22 ms | 0.98 | pass |
-| sphere | 256 | 12.70 ms | 13.42 ms | 1.06 | pass |
-| Forrester | 1024 | 530 ms | 208 ms | 0.39 | pass |
-| sphere | 1024 | 547 ms | 288 ms | 0.53 | pass |
+| 問題      |    n | HEAD 逐次 |   実装後 |   比 | 判定 |
+| --------- | ---: | --------: | -------: | ---: | ---- |
+| Forrester |  256 |  12.45 ms | 12.22 ms | 0.98 | pass |
+| sphere    |  256 |  12.70 ms | 13.42 ms | 1.06 | pass |
+| Forrester | 1024 |    530 ms |   208 ms | 0.39 | pass |
+| sphere    | 1024 |    547 ms |   288 ms | 0.53 | pass |
 
 **n=256 factor vs 同セッション sklearn**
 
-| 問題 | gprx | sklearn | 判定 |
-|---|---:|---:|---|
+| 問題      |    gprx | sklearn | 判定 |
+| --------- | ------: | ------: | ---- |
 | Forrester | 1.98 ms | 3.77 ms | pass |
-| sphere | 2.22 ms | 8.83 ms | pass |
+| sphere    | 2.22 ms | 8.83 ms | pass |
 
 **n=4096 vs 同セッション sklearn（P2B-16 ゲート: factor・eval が小さい）**
 
-| 問題 | 項目 | gprx（5 回平均） | sklearn | 判定 |
-|---|---|---:|---:|---|
-| Forrester | factor | 0.465 s | 1.221 s | pass |
-| Forrester | eval 10 | 7.90 s | 20.45 s | pass |
-| sphere | factor | 0.432 s | 1.320 s | pass |
-| sphere | eval 10 | 8.73 s | 23.30 s | pass |
+| 問題      | 項目    | gprx（5 回平均） | sklearn | 判定 |
+| --------- | ------- | ---------------: | ------: | ---- |
+| Forrester | factor  |          0.465 s | 1.221 s | pass |
+| Forrester | eval 10 |           7.90 s | 20.45 s | pass |
+| sphere    | factor  |          0.432 s | 1.320 s | pass |
+| sphere    | eval 10 |           8.73 s | 23.30 s | pass |
 
-predict 100 は合否に使っていない（Forrester 4096: 55 ms、sklearn 42 ms）。
+predict 100 は合否に使っていない。4 ライブラリの一発表は上の P2B-16 再測。
 
