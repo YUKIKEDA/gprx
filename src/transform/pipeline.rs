@@ -57,6 +57,14 @@ impl Pipeline {
         self.steps.is_empty()
     }
 
+    pub(crate) fn from_steps(steps: Vec<Box<dyn UnfittedTransform>>) -> Self {
+        Self { steps }
+    }
+
+    pub(crate) fn steps(&self) -> &[Box<dyn UnfittedTransform>] {
+        &self.steps
+    }
+
     /// Fits each map on the output of the previous map.
     ///
     /// # Errors
@@ -115,6 +123,10 @@ impl UnfittedTransform for Pipeline {
     fn clone_box(&self) -> Box<dyn UnfittedTransform> {
         Box::new(self.clone())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Fitted sequence of input maps.
@@ -133,6 +145,14 @@ impl FittedPipeline {
     /// Returns whether this pipeline has no maps.
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+
+    pub(crate) fn from_steps(steps: Vec<Box<dyn Transform>>) -> Self {
+        Self { steps }
+    }
+
+    pub(crate) fn steps(&self) -> &[Box<dyn Transform>] {
+        &self.steps
     }
 }
 
@@ -165,6 +185,10 @@ impl Transform for FittedPipeline {
 
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -217,6 +241,14 @@ impl TargetPipeline {
     /// Returns whether this pipeline has no maps.
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+
+    pub(crate) fn from_steps(steps: Vec<Box<dyn UnfittedTarget>>) -> Self {
+        Self { steps }
+    }
+
+    pub(crate) fn steps(&self) -> &[Box<dyn UnfittedTarget>] {
+        &self.steps
     }
 
     /// Fits each map on the output of the previous map.
@@ -272,6 +304,10 @@ impl UnfittedTarget for TargetPipeline {
     fn clone_box(&self) -> Box<dyn UnfittedTarget> {
         Box::new(self.clone())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Fitted sequence of target maps.
@@ -292,6 +328,14 @@ impl FittedTargetPipeline {
     /// Returns whether this pipeline has no maps.
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+
+    pub(crate) fn from_steps(steps: Vec<Box<dyn TargetTransform>>) -> Self {
+        Self { steps }
+    }
+
+    pub(crate) fn steps(&self) -> &[Box<dyn TargetTransform>] {
+        &self.steps
     }
 }
 
@@ -344,6 +388,10 @@ impl TargetTransform for FittedTargetPipeline {
 
     fn clone_box(&self) -> Box<dyn TargetTransform> {
         Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

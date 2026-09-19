@@ -43,6 +43,7 @@ mod likelihood;
 mod objective;
 mod optimizer;
 mod param;
+pub mod persist;
 mod precision;
 pub mod transform;
 mod workspace;
@@ -59,6 +60,7 @@ pub use optimizer::{
     OptResult, Optimizer, RecomputeStrategy, UsesChangeIndices,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
+pub use persist::{FORMAT_VERSION, LoadedGpr, PersistRegistry};
 pub use precision::{DoublePrecision, PrecisionPolicy};
 
 #[cfg(test)]
