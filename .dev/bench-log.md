@@ -320,3 +320,57 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 
 ゲート 4 セルはすべて pass。n=4096 の削減は距離テンソルと一致する（等方は `n×n` の 128 MiB、537.2 → 409.3。ARD はさらに `n×(n·2)` の 256 MiB、793.5 → 409.4）。Uncached の eval は等方で既定より長い（n=4096 で 7.20 s → 9.39 s）。ARD は同程度。
 
+## P2B-23（速さ / メモリのプリセット、[#148](https://github.com/YUKIKEDA/gprx/issues/148)）
+
+同一機械。日付 2026-09-20。`just perf`（gprx 既定 = 速さ極 `CachedDistances` + `RetainCholesky`、表2は `with_prefer_memory` = `UncachedDistances` + `ReuseCholesky`）。criterion ではない。CI なし。問題・回数・時計の取り方は P2B-16 と同じ。新しい RSS ゲートは置かない。上の P2B-21 Uncached+Retain 表はそのまま。
+
+表1 の libgp 列は P2B-16 どおり RSS で fail（既定は距離キャッシュと専用 `W` を持つ）。sklearn / friedrich の時間ゲートは pass。
+
+**表1 CachedDistances + RetainCholesky（速さ極 / 既定）**
+
+| 問題      | n    | lib           | factor                   | eval 10                      | predict 100             | peak RSS   | ゲート           |
+| --------- | ---- | ------------- | ------------------------ | ---------------------------- | ----------------------- | ---------- | ---------------- |
+| Forrester | 256  | gprx          | 0.55 ms（0.47–0.94）     | 11.28 ms（10.35–13.04）      | 0.45 ms（0.41–0.69）    | 9.6 MiB    | —                |
+| Forrester | 256  | sklearn       | 2.25 ms（2.06–6.14）     | 24.75 ms（22.63–35.54）      | 0.41 ms（0.37–0.61）    | 111.1 MiB  | pass             |
+| Forrester | 256  | libgp         | 1.28 ms（1.21–1.65）     | 62.74 ms（57.49–69.62）      | 0.90 ms（0.85–1.61）    | 7.2 MiB    | fail（RSS）      |
+| Forrester | 256  | friedrich     | 1.67 ms（1.54–2.82）     | N/A                          | 2.32 ms（2.11–3.43）    | 4.9 MiB    | pass（時間）     |
+| Forrester | 1024 | gprx          | 41.59 ms（25.38–60.06）  | 571 ms（247–984）            | 2.28 ms（2.07–2.92）    | 43.6 MiB   | —                |
+| Forrester | 1024 | sklearn       | 91.82 ms（52.80–128.50） | 813 ms（724–1.617 s）        | 2.80 ms（2.70–4.24）    | 179.3 MiB  | pass             |
+| Forrester | 1024 | libgp         | 38.90 ms（34.67–41.95）  | 2.230 s（2.012–2.446）       | 15.69 ms（10.73–28.21） | 33.2 MiB   | fail（RSS）      |
+| Forrester | 1024 | friedrich     | 61.40 ms（57.20–63.79）  | N/A                          | 27.17 ms（26.10–28.56） | 13.8 MiB   | pass（時間）     |
+| Forrester | 4096 | gprx          | 476 ms（455–664）        | 8.465 s（7.780–9.670）       | 17.05 ms（15.73–20.33） | 537.3 MiB  | —                |
+| Forrester | 4096 | sklearn       | 1.282 s（1.238–1.567）   | 20.881 s（20.643–21.880）    | 32.40 ms（28.79–37.34） | 1151.5 MiB | pass             |
+| Forrester | 4096 | libgp         | 1.526 s（1.502–1.588）   | 103.429 s（102.847–106.886） | 358 ms（343–405）       | 405.2 MiB  | fail（RSS）      |
+| Forrester | 4096 | friedrich     | 5.028 s（5.013–5.044）   | N/A                          | 712 ms（695–724）       | 138.8 MiB  | pass（時間）     |
+| 球 ARD    | 256  | gprx          | 0.99 ms（0.72–2.26）     | 12.48 ms（10.74–15.06）      | 0.41 ms（0.38–0.59）    | 10.7 MiB   | —                |
+| 球 ARD    | 256  | sklearn       | 2.18 ms（2.09–5.25）     | 44.69 ms（42.46–58.15）      | 0.42 ms（0.38–0.58）    | 111.4 MiB  | pass             |
+| 球 ARD    | 256  | libgp         | 1.28 ms（1.18–1.75）     | 70.54 ms（67.01–84.60）      | 0.94 ms（0.92–1.27）    | 7.2 MiB    | fail（RSS）      |
+| 球 ARD    | 256  | friedrich     | N/A                      | N/A                          | N/A                     | N/A        | N/A              |
+| 球 ARD    | 1024 | gprx          | 15.56 ms（13.69–56.09）  | 185 ms（170–1.367 s）        | 2.24 ms（2.06–2.75）    | 59.8 MiB   | —                |
+| 球 ARD    | 1024 | sklearn       | 91.89 ms（46.17–159.03） | 1.644 s（1.287–1.971）       | 2.45 ms（2.28–3.06）    | 187.7 MiB  | pass             |
+| 球 ARD    | 1024 | libgp         | 36.13 ms（34.21–41.32）  | 2.267 s（2.209–2.943）       | 10.58 ms（9.96–11.18）  | 33.3 MiB   | fail（RSS）      |
+| 球 ARD    | 1024 | friedrich     | N/A                      | N/A                          | N/A                     | N/A        | N/A              |
+| 球 ARD    | 4096 | gprx          | 408 ms（398–424）        | 7.365 s（7.141–7.716）       | 16.64 ms（15.57–17.16） | 793.4 MiB  | —                |
+| 球 ARD    | 4096 | sklearn       | 1.274 s（1.187–1.335）   | 23.807 s（23.549–24.452）    | 32.18 ms（28.75–34.63） | 1279.3 MiB | pass             |
+| 球 ARD    | 4096 | libgp         | 1.534 s（1.525–1.548）   | 105.174 s（104.606–105.955） | 343 ms（343–387）       | 405.2 MiB  | fail（RSS）      |
+| 球 ARD    | 4096 | friedrich     | N/A                      | N/A                          | N/A                     | N/A        | N/A              |
+
+**表2 `with_prefer_memory`（UncachedDistances + ReuseCholesky、記録のみ）**
+
+| 問題      | n    | lib           | factor                   | eval 10                      | predict 100             | peak RSS  | vs libgp RSS |
+| --------- | ---- | ------------- | ------------------------ | ---------------------------- | ----------------------- | --------- | ------------ |
+| Forrester | 256  | gprx-memory   | 0.94 ms（0.68–1.95）     | 27.85 ms（22.34–33.28）      | 0.43 ms（0.39–0.69）    | 8.7 MiB   | record       |
+| Forrester | 256  | libgp         | 1.28 ms（1.21–1.65）     | 62.74 ms（57.49–69.62）      | 0.90 ms（0.85–1.61）    | 7.2 MiB   | record       |
+| Forrester | 1024 | gprx-memory   | 32.25 ms（21.45–57.45）  | 1.098 s（935 ms–1.721 s）    | 2.38 ms（2.11–2.86）    | 27.7 MiB  | record       |
+| Forrester | 1024 | libgp         | 38.90 ms（34.67–41.95）  | 2.230 s（2.012–2.446）       | 15.69 ms（10.73–28.21） | 33.2 MiB  | record       |
+| Forrester | 4096 | gprx-memory   | 415 ms（405–523）        | 15.281 s（12.609–15.967）    | 18.39 ms（17.56–22.19） | 281.3 MiB | record       |
+| Forrester | 4096 | libgp         | 1.526 s（1.502–1.588）   | 103.429 s（102.847–106.886） | 358 ms（343–405）       | 405.2 MiB | record       |
+| 球 ARD    | 256  | gprx-memory   | 0.48 ms（0.44–0.92）     | 16.26 ms（13.06–20.94）      | 0.40 ms（0.38–0.59）    | 8.6 MiB   | record       |
+| 球 ARD    | 256  | libgp         | 1.28 ms（1.18–1.75）     | 70.54 ms（67.01–84.60）      | 0.94 ms（0.92–1.27）    | 7.2 MiB   | record       |
+| 球 ARD    | 1024 | gprx-memory   | 8.05 ms（6.67–23.07）    | 239 ms（205–425）            | 2.39 ms（2.13–2.95）    | 27.6 MiB  | record       |
+| 球 ARD    | 1024 | libgp         | 36.13 ms（34.21–41.32）  | 2.267 s（2.209–2.943）       | 10.58 ms（9.96–11.18）  | 33.3 MiB  | record       |
+| 球 ARD    | 4096 | gprx-memory   | 323 ms（305–416）        | 9.959 s（9.756–10.625）      | 15.91 ms（15.32–18.23） | 281.4 MiB | record       |
+| 球 ARD    | 4096 | libgp         | 1.534 s（1.525–1.548）   | 105.174 s（104.606–105.955） | 343 ms（343–387）       | 405.2 MiB | record       |
+
+n=4096 のメモリ極は P2B-21 Uncached+Retain（409.3 / 409.4 MiB）からさらに専用 `W`（`n×n` の 128 MiB）を外し、281.3 / 281.4 MiB。libgp 405.2 より小さい。eval は等方で既定より長い（n=4096 で 8.47 s → 15.28 s）。ARD も長い（7.37 s → 9.96 s）。criterion は合否にしない。
+
