@@ -486,18 +486,23 @@ impl CompiledKernel {
 
     /// Writes `∂K/∂θ_{param_idx}` from point coordinates.
     ///
+    /// Product trees need `scratch` the same shape as `d_k` and distinct from
+    /// it. Leaves ignore `scratch`.
+    ///
     /// # Errors
     ///
-    /// Returns [`GprError::UnsupportedKernelOperation`] for isotropic leaves
-    /// or product trees, or the same index errors as [`Self::grad`].
-    #[allow(clippy::only_used_in_recursion)] // leaves ignore scratch; Product is still unsupported
+    /// Returns [`GprError::UnsupportedKernelOperation`] for isotropic leaves,
+    /// [`GprError::InvalidHyperparameter`] if `param_idx` is out of range,
+    /// [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is the
+    /// wrong size, or the same shape errors as [`Self::apply_points`].
+    #[allow(clippy::only_used_in_recursion)] // leaves ignore scratch; Sum forwards it
     pub fn grad_points(
         &self,
         x: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
         param_idx: usize,
         uplo: Triangle,
-        scratch: MatMut<'_, f64>,
+        mut scratch: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(_)
@@ -515,9 +520,10 @@ impl CompiledKernel {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_points(x, d_k, local, uplo, scratch)
             }
-            Self::Product(_) => Err(GprError::UnsupportedKernelOperation {
-                reason: "product kernel gradient needs a dedicated scratch buffer".to_owned(),
-            }),
+            Self::Product(terms) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
+                product_grad_points(terms, x, d_k.as_mut(), param_idx, uplo, scratch.as_mut())
+            }
         }
     }
 
@@ -1121,6 +1127,57 @@ fn product_grad(
     Ok(())
 }
 
+fn product_grad_points(
+    terms: &[CompiledKernel],
+    x: MatRef<'_, f64>,
+    mut d_k: MatMut<'_, f64>,
+    param_idx: usize,
+    uplo: Triangle,
+    mut scratch: MatMut<'_, f64>,
+) -> Result<(), GprError> {
+    let mut offset = 0;
+    let mut owner = None;
+    for (i, term) in terms.iter().enumerate() {
+        let n = term.num_params();
+        if param_idx < offset + n {
+            owner = Some((i, param_idx - offset));
+            break;
+        }
+        offset += n;
+    }
+    let (owner_i, local) = owner.ok_or_else(|| GprError::InvalidHyperparameter {
+        reason: format!("kernel parameter index {param_idx} is out of range"),
+    })?;
+
+    let n = d_k.nrows();
+    let mut extra = None;
+    let mut started = false;
+    for (j, term) in terms.iter().enumerate() {
+        if j == owner_i {
+            continue;
+        }
+        if !started {
+            term.apply_points(x, d_k.as_mut(), uplo, scratch.as_mut())?;
+            started = true;
+        } else {
+            apply_into_points(term, x, scratch.as_mut(), d_k.as_mut(), uplo, &mut extra, n)?;
+            mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
+        }
+    }
+    if started {
+        if terms[owner_i].needs_internal_scratch() {
+            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
+            terms[owner_i].grad_points(x, scratch.as_mut(), local, uplo, buf.as_mut())?;
+        } else {
+            terms[owner_i].grad_points(x, scratch.as_mut(), local, uplo, d_k.as_mut())?;
+        }
+        mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
+    } else {
+        terms[owner_i].grad_points(x, d_k.as_mut(), local, uplo, scratch.as_mut())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::CompiledKernel;
@@ -1233,6 +1290,16 @@ mod tests {
         let mut scratch = fill(n, 0.0);
         compiled
             .apply(dist, out.as_mut(), Triangle::Full, scratch.as_mut())
+            .expect("shape");
+        out
+    }
+
+    fn apply_compiled_points(compiled: &CompiledKernel, x: MatRef<'_, f64>) -> Mat<f64> {
+        let n = x.nrows();
+        let mut out = fill(n, 0.0);
+        let mut scratch = fill(n, 0.0);
+        compiled
+            .apply_points(x, out.as_mut(), Triangle::Full, scratch.as_mut())
             .expect("shape");
         out
     }
@@ -1506,6 +1573,67 @@ mod tests {
             .expect("idx 2");
         let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
         assert_close(dk[(0, 1)], fd);
+    }
+
+    fn assert_points_product_grad_fd(spec: KernelSpec, x: Mat<f64>, param_idx: usize) {
+        let compiled = spec.compile();
+        let mut params = vec![0.0; spec.num_params()];
+        spec.get_params(&mut params).expect("len");
+        let h = 1e-6;
+        let mut spec_plus = spec.clone();
+        let mut spec_minus = spec.clone();
+        params[param_idx] += h;
+        spec_plus.set_params(&params).expect("valid");
+        params[param_idx] -= 2.0 * h;
+        spec_minus.set_params(&params).expect("valid");
+        let kp = apply_compiled_points(&spec_plus.compile(), x.as_ref());
+        let km = apply_compiled_points(&spec_minus.compile(), x.as_ref());
+        let mut dk = fill(x.nrows(), 0.0);
+        let mut scratch = fill(x.nrows(), 0.0);
+        compiled
+            .grad_points(
+                x.as_ref(),
+                dk.as_mut(),
+                param_idx,
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("grad");
+        let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
+        assert_close(dk[(0, 1)], fd);
+    }
+
+    #[test]
+    fn linear_times_linear_grad_matches_finite_difference() {
+        let spec = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+            * KernelSpec::from(LinearKernel::new(0.5).expect("valid"));
+        let x = Mat::from_fn(2, 1, |i, _| 0.5 + i as f64);
+        assert_points_product_grad_fd(spec, x, 0);
+    }
+
+    #[test]
+    fn linear_times_constant_grad_matches_finite_difference() {
+        let spec = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+            * KernelSpec::from(ConstantKernel::new(1.5).expect("valid"));
+        let x = Mat::from_fn(2, 1, |i, _| 0.5 + i as f64);
+        assert_points_product_grad_fd(spec, x, 1);
+    }
+
+    #[test]
+    fn linear_times_ard_grad_matches_finite_difference() {
+        let spec = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+            * KernelSpec::from(RbfArdKernel::new(&[1.2, 0.8]).expect("valid"));
+        let x = points_2d(&[[0.0, 0.0], [1.0, 0.4], [0.2, 1.1]]);
+        assert_points_product_grad_fd(spec, x, 2);
+    }
+
+    #[test]
+    fn nested_points_product_grad_matches_finite_difference() {
+        let spec = KernelSpec::from(LinearKernel::new(1.0).expect("valid"))
+            * (KernelSpec::from(LinearKernel::new(0.8).expect("valid"))
+                + KernelSpec::from(ConstantKernel::new(0.5).expect("valid")));
+        let x = Mat::from_fn(2, 1, |i, _| 0.5 + i as f64);
+        assert_points_product_grad_fd(spec, x, 2);
     }
 
     #[test]

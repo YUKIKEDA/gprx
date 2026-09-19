@@ -843,10 +843,11 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
     /// Returns [`GprError::InvalidHyperparameter`] if a slice length is wrong,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
     /// [`GprError::CholeskyFailed`] if `A` cannot be factored, or
-    /// [`GprError::UnsupportedKernelOperation`] if a points-mode product tree
-    /// needs a gradient. Distance-mode product trees are supported. Kernel
-    /// and likelihood `θ` are committed together only after `A` factors. A
-    /// rejected slice or a Cholesky failure leaves stored `θ` unchanged.
+    /// [`GprError::UnsupportedKernelOperation`] if the compiled tree cannot
+    /// evaluate at this `θ`. Distance-mode and points-mode product trees are
+    /// supported. Kernel and likelihood `θ` are committed together only after
+    /// `A` factors. A rejected slice or a Cholesky failure leaves stored `θ`
+    /// unchanged.
     /// Cholesky failure restores `L` and `α` at the previous `θ` so this
     /// value stays a usable [`FittedGpr`].
     ///
