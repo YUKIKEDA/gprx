@@ -1,0 +1,16 @@
+[package]
+name = "gprx-perf"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "P2B-16 gprx runner. Not part of the gprx crate."
+
+[dependencies]
+argmin = { version = "0.11.0", default-features = false }
+argmin-math = { version = "0.5.1", default-features = false, features = ["vec"] }
+gprx = { path = "../../.." }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

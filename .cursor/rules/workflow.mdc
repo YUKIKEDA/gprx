@@ -12,7 +12,7 @@ alwaysApply: true
 1. **Grill**（必要なとき） — 設計・範囲・「やる / やらない / どのフェーズ」が未決なら、実装も Issue も roadmap の DoD 埋めもせず Grill する（`.cursor/skills/grill-me/SKILL.md`、`.cursor/rules/consent.mdc`）。質問のターンで成果物を閉じない。
 2. **Issue 作成** — 1 Issue = 1 PR。テンプレートは Bug / Feat / Task / Spike。ブランチは `{type}/{number}-{slug}`（例: `chore/1-crate-bootstrap`）。
 3. **Grill → タスク詳細化** — 分解・**DoD**・依存を具体化し、**同じ Issue を更新**してから roadmap の DoD 欄へ写す。DoD はここまで書かない。roadmap の ID / DoD を変えるなら、その Issue が対象を指名してから。
-4. **作業** — その Issue（現行 roadmap 行）だけ。今の行: **P2B-15**。Phase 3 は 2b のあと。Phase 4 / 5 を先に始めない。計画のない先送り: `.cursor/rules/defer.mdc`。取れない状態は型: `.cursor/rules/types.mdc`。DoD が Grill 前の行は作業しない。
+4. **作業** — その Issue（現行 roadmap 行）だけ。今の行: **P2B-16**。Phase 3 は 2b のあと。Phase 4 / 5 を先に始めない。計画のない先送り: `.cursor/rules/defer.mdc`。取れない状態は型: `.cursor/rules/types.mdc`。DoD が Grill 前の行は作業しない。
 5. **PR 開始** — `Closes #N`。本文は `.github/pull_request_template.md`。ゲート: `just lint` と `just test`。
 6. **人間レビュー**
 7. **マージ**（人間） — そのあと 1 に戻る。

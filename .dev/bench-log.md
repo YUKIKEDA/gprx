@@ -1,6 +1,6 @@
 # Bench log
 
-時間は [criterion](https://docs.rs/criterion)、`benches/exact.rs`、`just bench`。確保は `tests/alloc.rs`。固定問題（P2-9 再測以降）: `n = 256`。等方は 1 次元 Forrester + `StandardizeTarget`、ARD は 2 次元重み付き球（16×16）。`y` は関数 + `N(0, 1)`。P2B-15 以降は `SmallRng`（Forrester seed `0`、ARD seed `9`）。それ以前の `phase-2` ARD 行は SplitMix64 seed `0` なので、新しい ARD 時間と混ぜない。`fit_lbfgs` だけ最適化ループ。新しいハーネスは作っていない。P2-9 より前の行は `d = 8`・独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9 節。
+時間は [criterion](https://docs.rs/criterion)、`benches/exact.rs`、`just bench`。確保は `tests/alloc.rs`。他ライブラリとの壁時計・ピーク RSS は `compare/perf/`（`just perf`。手動、CI なし。criterion は合否に使わない）。固定問題（P2-9 再測以降）: `n = 256`。等方は 1 次元 Forrester + `StandardizeTarget`、ARD は 2 次元重み付き球（16×16）。`y` は関数 + `N(0, 1)`。P2B-15 以降は `SmallRng`（Forrester seed `0`、ARD seed `9`）。それ以前の `phase-2` ARD 行は SplitMix64 seed `0` なので、新しい ARD 時間と混ぜない。`fit_lbfgs` だけ最適化ループ。P2-9 より前の行は `d = 8`・独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9 節。
 
 目標比はまだ置かない（P2-1 / [#25](https://github.com/YUKIKEDA/gprx/issues/25)）。名前付き `phase-2` は P2-9 で取った（等方は `phase-1b` と比較。ARD は Always vs Never）。
 
@@ -177,4 +177,45 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 | `fit_lbfgs_ard` | 86.2 ms (86.19–86.31) / 67 eval | 59.0 ms (58.86–59.03) / 46 eval | 壁時計は評価回数。1 評価はどちらも **~1.28 ms** |
 
 1 評価の改善はフィットに乗る（回数を揃えたとき）。ARD の壁時計差（Always が長い）を速度差と読まない。1 評価は Always ≈ Never（d = 2）。`Auto` は P5-5。以降の比較基準はこの節の `phase-2`。
+
+## P2B-16（他ライブラリ、`compare/perf/`）
+
+同一機械。日付 2026-09-19。`just perf`（`uv run --directory compare/perf python run.py`）。criterion ではない。
+
+問題: 等方 Forrester（`ℓ = 1`）と ARD 球（`ℓ_d = 4`）、`n = 256 / 1024 / 4096`（ARD は 16×16 / 32×32 / 64×64）。`y = f(x) + N(0, 1)`（NumPy Generator、Forrester seed `0`、球 seed `9`）。各セルは fit（壁時計 + joint-eval）→ predict 100 → ピーク RSS（Windows `PeakWorkingSet`）。gprx は `StandardizeTarget` + `Gpr::fit`。sklearn は `normalize_y=True` + `alpha=σn²`。friedrich / libgp は runner 側で `y` を z-score。
+
+gprx の L-BFGS はハーネスの `CountingLbfgs`（log-θ、logit なし。`HasBounds` がクレート私有のため）。既定 `Lbfgs` の評価回数とは一致しない。sklearn は `fmin_l_bfgs_b` の `eval_gradient=True` 回数。回数差がある壁時計は速度差と書かない。
+
+libgp は MSVC で Python バインディングがビルドできない（`M_PI` / `drand48`）。全セル N/A。friedrich に ARD はない。球セルは N/A。
+
+ゲート: sklearn は時間と RSS が両方小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は時間か RSS の一方。負けたセルは 0。改善行は足していない。
+
+| 問題 | n | lib | fit | evals | predict 100 | peak RSS | ゲート |
+| ---- | - | --- | --- | ----- | ----------- | -------- | ------ |
+| Forrester | 256 | gprx | 103.82 ms | 94 | 0.59 ms | 8.3 MiB | — |
+| Forrester | 256 | sklearn | 10.33 ms | 2 | 0.81 ms | 109.2 MiB | 判定不能（回数差） |
+| Forrester | 256 | libgp | N/A | N/A | N/A | N/A | N/A |
+| Forrester | 256 | friedrich | 108.63 ms | N/A | 2.26 ms | 6.0 MiB | 判定不能（時間 5% 内、RSS は friedrich） |
+| Forrester | 1024 | gprx | 1.103 s | 33 | 3.21 ms | 41.9 MiB | — |
+| Forrester | 1024 | sklearn | 288.31 ms | 2 | 3.53 ms | 169.5 MiB | 判定不能（回数差） |
+| Forrester | 1024 | libgp | N/A | N/A | N/A | N/A | N/A |
+| Forrester | 1024 | friedrich | 4.227 s | N/A | 28.30 ms | 36.1 MiB | pass（時間） |
+| Forrester | 4096 | gprx | 678.628 s | 179 | 44.96 ms | 535.4 MiB | — |
+| Forrester | 4096 | sklearn | 5.110 s | 2 | 46.49 ms | 1019.2 MiB | 判定不能（回数差） |
+| Forrester | 4096 | libgp | N/A | N/A | N/A | N/A | N/A |
+| Forrester | 4096 | friedrich | 428.726 s | N/A | 719.77 ms | 516.5 MiB | 判定不能（時間は回数なし、RSS 5% 内） |
+| 球 ARD | 256 | gprx | 53.96 ms | 51 | 0.75 ms | 9.3 MiB | — |
+| 球 ARD | 256 | sklearn | 90.76 ms | 18 | 0.78 ms | 110.6 MiB | 判定不能（回数差） |
+| 球 ARD | 256 | libgp | N/A | N/A | N/A | N/A | N/A |
+| 球 ARD | 256 | friedrich | N/A | N/A | N/A | N/A | N/A |
+| 球 ARD | 1024 | gprx | 4.973 s | 96 | 5.56 ms | 58.0 MiB | — |
+| 球 ARD | 1024 | sklearn | 2.044 s | 12 | 3.49 ms | 178.8 MiB | 判定不能（回数差） |
+| 球 ARD | 1024 | libgp | N/A | N/A | N/A | N/A | N/A |
+| 球 ARD | 1024 | friedrich | N/A | N/A | N/A | N/A | N/A |
+| 球 ARD | 4096 | gprx | 676.871 s | 176 | 49.34 ms | 791.6 MiB | — |
+| 球 ARD | 4096 | sklearn | 17.972 s | 7 | 60.11 ms | 1150.6 MiB | 判定不能（回数差） |
+| 球 ARD | 4096 | libgp | N/A | N/A | N/A | N/A | N/A |
+| 球 ARD | 4096 | friedrich | N/A | N/A | N/A | N/A | N/A |
+
+RSS は走った sklearn 全セルで gprx が小さい。predict 100 は同程度（n = 4096 では gprx の方が短い）。fit の壁時計は評価回数が揃わないので速度差と書かない。
 
