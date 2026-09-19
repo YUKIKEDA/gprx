@@ -19,8 +19,8 @@ use crate::optimizer::{
 use crate::param::Interval;
 use crate::precision::DoublePrecision;
 use crate::transform::{
-    MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget, TargetPipeline,
-    TargetTransform,
+    ColumnwiseInput, MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget,
+    TargetPipeline, TargetTransform,
 };
 use crate::workspace::Workspace;
 use faer::{Mat, MatMut, MatRef};
@@ -750,6 +750,54 @@ fn stacked_transforms_fit_predict_and_roundtrip() {
     let pred2 = rebuilt.predict(&[5.0], 1, 1).expect("rebuilt");
     assert_close(pred.mean[0], pred2.mean[0]);
     assert_close(pred.variance[0], pred2.variance[0]);
+}
+
+#[test]
+fn columnwise_input_minmax_and_standardize() {
+    let x = [0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 1.5, 2.5];
+    let y = [0.0, 1.0, 0.5, 1.5];
+    let fitted = rbf_gpr(1.0, 0.1)
+        .with_input_transform(
+            ColumnwiseInput::new()
+                .then(MinMaxInput::new())
+                .then(StandardizeInput::new()),
+        )
+        .with_optimizer(Fixed)
+        .factor(&x, 4, 2, &y)
+        .expect("spd");
+    let pred = fitted.predict(&[1.5, 1.75], 1, 2).expect("fitted");
+    assert!(pred.mean[0].is_finite());
+    assert!(pred.variance[0].is_finite());
+    assert!(pred.variance[0] >= 0.0);
+    let x_obs = fitted.x().to_vec();
+    let y_obs = fitted.y().to_vec();
+    let n = fitted.n();
+    let d = fitted.d();
+    let rebuilt = fitted
+        .into_trainer()
+        .with_optimizer(Fixed)
+        .factor(&x_obs, n, d, &y_obs)
+        .expect("roundtrip");
+    let pred2 = rebuilt.predict(&[1.5, 1.75], 1, 2).expect("rebuilt");
+    assert_close(pred.mean[0], pred2.mean[0]);
+    assert_close(pred.variance[0], pred2.variance[0]);
+}
+
+#[test]
+fn columnwise_input_rejects_length_mismatch() {
+    assert!(matches!(
+        rbf_gpr(1.0, 0.1)
+            .with_input_transform(ColumnwiseInput::new().then(MinMaxInput::new()))
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0, 2.0, 3.0], 2, 2, &[0.0, 1.0]),
+        Err((
+            _,
+            GprError::DimensionMismatch {
+                x_dim: 2,
+                expected_dim: 1
+            }
+        ))
+    ));
 }
 
 #[test]

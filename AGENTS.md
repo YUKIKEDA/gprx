@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 2b の P2B-7（変換 Pipeline）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 2b の P2B-8（入力変換を列ごとに指定）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
