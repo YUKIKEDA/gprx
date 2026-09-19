@@ -2,8 +2,8 @@ use super::{FittedGpr, Gpr};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
 use crate::gpr::{
-    AdaptiveJitter, DistanceCachePolicy, FixedJitter, JitterPolicy, PredictOptions, Prediction,
-    PredictiveCovariance, VarianceKind,
+    AdaptiveJitter, DistanceCachePolicy, FixedJitter, JitterPolicy, NoDistanceCache,
+    PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
 };
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -96,9 +96,12 @@ fn is_send_sync() {
     assert_send_sync::<JitterPolicy>();
     assert_send_sync::<FixedJitter>();
     assert_send_sync::<AdaptiveJitter>();
+    assert_send_sync::<NoDistanceCache>();
+    assert_send_sync::<Gpr<Lbfgs, FullRecompute, NoDistanceCache>>();
     fn assert_clone<T: Clone>() {}
     assert_clone::<Gpr>();
     assert_clone::<Gpr<Fixed>>();
+    assert_clone::<Gpr<Lbfgs, FullRecompute, NoDistanceCache>>();
     assert_clone::<FittedGpr>();
     assert_clone::<FittedGpr<Fixed>>();
 }
@@ -1664,7 +1667,7 @@ fn rbf_plus_white_fits() {
 fn linear_kernel_fits_and_predicts() {
     let x = [0.0, 1.0, 2.0];
     let y = [0.0, 1.0, 2.0];
-    let mut gpr = Gpr::new(
+    let mut gpr = Gpr::from_points(
         KernelSpec::from(LinearKernel::new(1.0).expect("valid")),
         GaussianLikelihood::new(0.1).expect("valid"),
     )
@@ -1672,6 +1675,63 @@ fn linear_kernel_fits_and_predicts() {
     .factor(&x, 3, 1, &y)
     .expect("spd");
     let pred = gpr.predict(&[1.5], 1, 1).expect("fitted");
+    assert!(pred.mean[0].is_finite());
+    let mut params = vec![0.0; gpr.num_params()];
+    gpr.get_params(&mut params).expect("len");
+    let mut grad = vec![0.0; params.len()];
+    let nlml = gpr
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("spd");
+    assert!(nlml.is_finite());
+    assert!(grad.iter().all(|g| g.is_finite()));
+}
+
+#[test]
+fn from_points_linear_trainer_has_no_distance_cache_slot() {
+    let gpr = Gpr::from_points(
+        KernelSpec::from(LinearKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    );
+    let _: Gpr<Lbfgs, FullRecompute, NoDistanceCache> = gpr;
+}
+
+#[test]
+fn new_rbf_trainer_has_distance_cache_policy() {
+    let gpr = rbf_gpr(1.0, 0.1);
+    let _: Gpr<Lbfgs, FullRecompute, DistanceCachePolicy> = gpr;
+}
+
+#[test]
+fn constant_kernel_fits_from_points() {
+    let mut gpr = Gpr::from_points(
+        KernelSpec::from(ConstantKernel::new(1.5).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_optimizer(Fixed)
+    .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
+    .expect("spd");
+    let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
+    assert!(pred.mean[0].is_finite());
+    let mut params = vec![0.0; gpr.num_params()];
+    gpr.get_params(&mut params).expect("len");
+    let mut grad = vec![0.0; params.len()];
+    let nlml = gpr
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("spd");
+    assert!(nlml.is_finite());
+    assert!(grad.iter().all(|g| g.is_finite()));
+}
+
+#[test]
+fn white_kernel_fits_from_points() {
+    let mut gpr = Gpr::from_points(
+        KernelSpec::from(WhiteKernel::new(0.2).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_optimizer(Fixed)
+    .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
+    .expect("spd");
+    let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
     assert!(pred.mean[0].is_finite());
     let mut params = vec![0.0; gpr.num_params()];
     gpr.get_params(&mut params).expect("len");

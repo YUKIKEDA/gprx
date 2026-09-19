@@ -7,7 +7,7 @@
 //! Newton solver can require [`TwiceDifferentiable`] after P2B-17.
 
 use crate::error::GprError;
-use crate::gpr::FittedGpr;
+use crate::gpr::{DistanceCacheSlot, FittedGpr};
 use crate::param::Interval;
 
 /// Optimizer-facing scalar objective (`value` only).
@@ -100,19 +100,19 @@ pub(crate) trait HasBounds {
 ///
 /// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
 /// kernel and likelihood match `params`.
-pub(crate) struct GprObjective<'a, O, S> {
-    model: &'a mut FittedGpr<O, S>,
+pub(crate) struct GprObjective<'a, O, S, C = crate::DistanceCachePolicy> {
+    model: &'a mut FittedGpr<O, S, C>,
     scratch: Vec<f64>,
 }
 
-impl<'a, O, S> GprObjective<'a, O, S> {
-    pub(crate) fn new(model: &'a mut FittedGpr<O, S>) -> Self {
+impl<'a, O, S, C: DistanceCacheSlot> GprObjective<'a, O, S, C> {
+    pub(crate) fn new(model: &'a mut FittedGpr<O, S, C>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self { model, scratch }
     }
 }
 
-impl<O, S> Objective for GprObjective<'_, O, S> {
+impl<O, S, C: DistanceCacheSlot> Objective for GprObjective<'_, O, S, C> {
     fn num_params(&self) -> usize {
         self.model.num_params()
     }
@@ -127,7 +127,7 @@ impl<O, S> Objective for GprObjective<'_, O, S> {
     }
 }
 
-impl<O, S> Differentiable for GprObjective<'_, O, S> {
+impl<O, S, C: DistanceCacheSlot> Differentiable for GprObjective<'_, O, S, C> {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.value_and_gradient_into(params, out).map(|_| ())
     }
@@ -141,7 +141,7 @@ impl<O, S> Differentiable for GprObjective<'_, O, S> {
     }
 }
 
-impl<O, S> HasBounds for GprObjective<'_, O, S> {
+impl<O, S, C: DistanceCacheSlot> HasBounds for GprObjective<'_, O, S, C> {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)
     }
