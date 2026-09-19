@@ -54,8 +54,9 @@ mod workspace;
 
 pub use error::{CholeskyStage, GprError};
 pub use gpr::{
-    AdaptiveJitter, DistanceCachePolicy, FittedGpr, FixedJitter, Gpr, JitterPolicy,
-    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
+    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter, Gpr, JitterPolicy,
+    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, RetainCholesky,
+    ReuseCholesky, VarianceKind,
 };
 pub use likelihood::GaussianLikelihood;
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};

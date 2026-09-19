@@ -5,22 +5,20 @@
 //! overwrite the same storage. Query buffers live on [`QueryWorkspace`], not
 //! on [`Workspace`]. Crate-private; faer types are not re-exported.
 
-use dyn_stack::{MemBuffer, StackReq};
+use std::ops::{Deref, DerefMut};
+
+use dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::llt;
-use faer::{Mat, Par};
+use faer::{Mat, MatRef, Par};
 
 use crate::error::GprError;
 use crate::precision::{DoublePrecision, PrecisionPolicy};
 
-/// Dense fit buffers for a batch GPR of a fixed `n`.
-///
-/// Owns `L`, `W`, distance caches, and Cholesky scratch. Does not own
-/// train–test predict buffers; those are [`QueryWorkspace`].
-pub(crate) struct Workspace<P: PrecisionPolicy> {
+/// Shared fit buffers: `L` (or `W` while [`ReuseWorkspace`] is in a gradient),
+/// distance caches, and Cholesky scratch.
+pub(crate) struct WorkspaceCore<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,
-    /// `W = ααᵀ - K⁻¹` for the MLL gradient trace term.
-    pub(crate) w_matrix: Mat<P::Storage>,
     /// Cached pairwise squared distances for isotropic (distance-mode) leaves.
     /// `Always` reuses this across optimizer steps; `Never` refills it every
     /// kernel build.
@@ -48,6 +46,36 @@ pub(crate) struct Workspace<P: PrecisionPolicy> {
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
+}
+
+/// Fit buffers that keep a dedicated `W = ααᵀ - K⁻¹` matrix ([`crate::RetainCholesky`]).
+pub(crate) struct Workspace<P: PrecisionPolicy> {
+    pub(crate) core: WorkspaceCore<P>,
+    pub(crate) w_matrix: Mat<P::Storage>,
+}
+
+/// Fit buffers that write `W` over the Cholesky factor ([`crate::ReuseCholesky`]).
+///
+/// There is no `w_matrix`. The n-RHS solve for `K⁻¹` uses [`WorkspaceCore::exp_buf`].
+pub(crate) struct ReuseWorkspace<P: PrecisionPolicy> {
+    pub(crate) core: WorkspaceCore<P>,
+}
+
+/// Construction and core access for [`Workspace`] and [`ReuseWorkspace`].
+pub(crate) trait FitWorkspace: Clone + Send + Sync + 'static {
+    fn new(n: usize) -> Result<Self, GprError>
+    where
+        Self: Sized;
+
+    fn core(&self) -> &WorkspaceCore<DoublePrecision>;
+
+    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision>;
+
+    /// Forms `W = ααᵀ - K⁻¹` after `k_matrix` holds `L`.
+    fn form_gradient_w(&mut self, alpha: &[f64], n: usize);
+
+    /// `W` after [`Self::form_gradient_w`].
+    fn gradient_w(&self) -> MatRef<'_, f64>;
 }
 
 /// Predict-into buffers owned by [`crate::FittedGpr`].
@@ -113,19 +141,13 @@ fn faer_scratch_req(n: usize) -> StackReq {
     chol.or(solve_vec).or(solve_mat)
 }
 
-impl Workspace<DoublePrecision> {
-    /// Allocates `n×n` buffers and faer scratch for an `n`-point batch fit.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::EmptyInput`] if `n` is zero.
-    pub(crate) fn new(n: usize) -> Result<Self, GprError> {
+impl WorkspaceCore<DoublePrecision> {
+    fn new(n: usize) -> Result<Self, GprError> {
         if n == 0 {
             return Err(GprError::EmptyInput);
         }
         Ok(Self {
             k_matrix: Mat::<f64>::zeros(n, n),
-            w_matrix: Mat::<f64>::zeros(n, n),
             dist_cache: Mat::<f64>::zeros(n, n),
             dist_ready: false,
             exp_buf: Mat::<f64>::zeros(n, n),
@@ -142,20 +164,6 @@ impl Workspace<DoublePrecision> {
     /// Returns the number of training points this workspace was sized for.
     pub(crate) fn n(&self) -> usize {
         self.k_matrix.nrows()
-    }
-
-    /// Reuses the existing allocation when `n` matches, otherwise reallocates.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::EmptyInput`] if `n` is zero.
-    #[cfg(test)]
-    pub(crate) fn ensure(&mut self, n: usize) -> Result<(), GprError> {
-        if n == self.n() {
-            return Ok(());
-        }
-        *self = Self::new(n)?;
-        Ok(())
     }
 
     /// Ensures product `∂K/∂θ` scratch is `n×n`. No-op when already sized.
@@ -201,11 +209,10 @@ impl Workspace<DoublePrecision> {
     }
 }
 
-impl Clone for Workspace<DoublePrecision> {
+impl Clone for WorkspaceCore<DoublePrecision> {
     fn clone(&self) -> Self {
         Self {
             k_matrix: self.k_matrix.clone(),
-            w_matrix: self.w_matrix.clone(),
             dist_cache: self.dist_cache.clone(),
             dist_ready: self.dist_ready,
             exp_buf: self.exp_buf.clone(),
@@ -217,6 +224,177 @@ impl Clone for Workspace<DoublePrecision> {
             refine_buf: self.refine_buf.clone(),
             faer_scratch: MemBuffer::new(faer_scratch_req(self.n())),
         }
+    }
+}
+
+impl Workspace<DoublePrecision> {
+    pub(crate) fn new(n: usize) -> Result<Self, GprError> {
+        Ok(Self {
+            core: WorkspaceCore::new(n)?,
+            w_matrix: Mat::<f64>::zeros(n, n),
+        })
+    }
+
+    /// Reuses the existing allocation when `n` matches, otherwise reallocates.
+    #[cfg(test)]
+    pub(crate) fn ensure(&mut self, n: usize) -> Result<(), GprError> {
+        if n == self.n() {
+            return Ok(());
+        }
+        *self = Self::new(n)?;
+        Ok(())
+    }
+}
+
+impl ReuseWorkspace<DoublePrecision> {
+    pub(crate) fn new(n: usize) -> Result<Self, GprError> {
+        Ok(Self {
+            core: WorkspaceCore::new(n)?,
+        })
+    }
+}
+
+impl Deref for Workspace<DoublePrecision> {
+    type Target = WorkspaceCore<DoublePrecision>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for Workspace<DoublePrecision> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
+impl Deref for ReuseWorkspace<DoublePrecision> {
+    type Target = WorkspaceCore<DoublePrecision>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for ReuseWorkspace<DoublePrecision> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
+impl Clone for Workspace<DoublePrecision> {
+    fn clone(&self) -> Self {
+        Self {
+            core: self.core.clone(),
+            w_matrix: self.w_matrix.clone(),
+        }
+    }
+}
+
+impl Clone for ReuseWorkspace<DoublePrecision> {
+    fn clone(&self) -> Self {
+        Self {
+            core: self.core.clone(),
+        }
+    }
+}
+
+fn fill_identity(mut a: faer::MatMut<'_, f64>) {
+    let n = a.nrows();
+    for col in 0..n {
+        for row in 0..n {
+            a[(row, col)] = if row == col { 1.0 } else { 0.0 };
+        }
+    }
+}
+
+fn form_w_lower(mut w: faer::MatMut<'_, f64>, alpha: &[f64], n: usize) {
+    for col in 0..n {
+        for row in col..n {
+            w[(row, col)] = alpha[row] * alpha[col] - w[(row, col)];
+        }
+    }
+}
+
+fn form_w_from_inverse(
+    mut dest: faer::MatMut<'_, f64>,
+    k_inv: MatRef<'_, f64>,
+    alpha: &[f64],
+    n: usize,
+) {
+    for col in 0..n {
+        for row in col..n {
+            dest[(row, col)] = alpha[row] * alpha[col] - k_inv[(row, col)];
+        }
+    }
+}
+
+impl FitWorkspace for Workspace<DoublePrecision> {
+    fn new(n: usize) -> Result<Self, GprError> {
+        Self::new(n)
+    }
+
+    fn core(&self) -> &WorkspaceCore<DoublePrecision> {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision> {
+        &mut self.core
+    }
+
+    fn form_gradient_w(&mut self, alpha: &[f64], n: usize) {
+        fill_identity(self.w_matrix.as_mut());
+        {
+            let stack = MemStack::new(&mut self.core.faer_scratch);
+            llt::solve::solve_in_place(
+                self.core.k_matrix.as_ref(),
+                self.w_matrix.as_mut(),
+                faer_par(n),
+                stack,
+            );
+        }
+        form_w_lower(self.w_matrix.as_mut(), alpha, n);
+    }
+
+    fn gradient_w(&self) -> MatRef<'_, f64> {
+        self.w_matrix.as_ref()
+    }
+}
+
+impl FitWorkspace for ReuseWorkspace<DoublePrecision> {
+    fn new(n: usize) -> Result<Self, GprError> {
+        Self::new(n)
+    }
+
+    fn core(&self) -> &WorkspaceCore<DoublePrecision> {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision> {
+        &mut self.core
+    }
+
+    fn form_gradient_w(&mut self, alpha: &[f64], n: usize) {
+        fill_identity(self.core.exp_buf.as_mut());
+        {
+            let stack = MemStack::new(&mut self.core.faer_scratch);
+            llt::solve::solve_in_place(
+                self.core.k_matrix.as_ref(),
+                self.core.exp_buf.as_mut(),
+                faer_par(n),
+                stack,
+            );
+        }
+        form_w_from_inverse(
+            self.core.k_matrix.as_mut(),
+            self.core.exp_buf.as_ref(),
+            alpha,
+            n,
+        );
+    }
+
+    fn gradient_w(&self) -> MatRef<'_, f64> {
+        self.core.k_matrix.as_ref()
     }
 }
 
@@ -262,7 +440,7 @@ impl QueryWorkspace<DoublePrecision> {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueryWorkspace, Workspace, faer_degree, faer_scratch_req};
+    use super::{QueryWorkspace, ReuseWorkspace, Workspace, faer_degree, faer_scratch_req};
     use crate::error::GprError;
     use crate::precision::DoublePrecision;
 
@@ -312,6 +490,19 @@ mod tests {
             ws.ensure_ard_sq_diff(0, 2).err(),
             Some(GprError::EmptyInput)
         );
+    }
+
+    #[test]
+    fn reuse_workspace_has_no_second_n_by_n_w() {
+        let n = 8;
+        let ws = ReuseWorkspace::<DoublePrecision>::new(n).expect("n > 0");
+        assert_eq!(ws.n(), n);
+        assert_square(&ws.k_matrix, n);
+        assert_square(&ws.dist_cache, n);
+        assert_square(&ws.exp_buf, n);
+        assert_eq!(ws.kernel_scratch.nrows(), 0);
+        assert_eq!(ws.kernel_scratch.ncols(), 0);
+        assert_eq!(std::mem::size_of_val(&ws), std::mem::size_of_val(&ws.core));
     }
 
     #[test]
