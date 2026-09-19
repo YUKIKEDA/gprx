@@ -2073,6 +2073,47 @@ fn neldermead_fit_lowers_nlml() {
     );
 }
 
+#[derive(Clone, Debug)]
+struct DummyOpt {
+    calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl DummyOpt {
+    fn new() -> Self {
+        Self {
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    fn calls(&self) -> u64 {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<P: Objective> Optimizer<P> for DummyOpt {
+    fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let value = objective.value(init)?;
+        Ok(OptResult {
+            params: init.to_vec(),
+            value,
+            iterations: 0,
+        })
+    }
+}
+
+#[test]
+fn custom_optimizer_minimize_is_called_on_fit_and_refit() {
+    let dummy = DummyOpt::new();
+    let mut fitted = rbf_gpr(1.0, 0.1)
+        .with_optimizer(dummy.clone())
+        .fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
+        .expect("fit");
+    assert_eq!(dummy.calls(), 1);
+    fitted.refit().expect("refit");
+    assert_eq!(dummy.calls(), 2);
+}
+
 #[derive(Clone, Copy, Debug)]
 struct IndexUsingOpt;
 
