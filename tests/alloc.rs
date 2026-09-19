@@ -3,7 +3,9 @@
 //! Counts heap allocations on the Exact GPR hot path once `fit` has already
 //! sized the workspace. Caps may fall, never rise without an Issue. P2-4
 //! requires zero on isotropic RBF (`value_and_gradient_into` and
-//! `predict_into` after warmup). User kernels are excluded.
+//! `predict_into` after warmup). User kernels are excluded. P2B-22 (#143)
+//! pins `RAYON_NUM_THREADS=1` in this binary so faer `Par::rayon(1)` does
+//! not allocate worker scratch that a multi-thread pool would.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, Prediction};
@@ -11,6 +13,7 @@ use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
+use std::sync::OnceLock;
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -27,6 +30,18 @@ const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 
 /// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
 const MAX_PREDICT_100_ALLOCS: usize = 0;
+
+fn ensure_one_rayon_worker() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        // SAFETY: this integration test has not started the Rayon pool yet.
+        // One worker keeps faer at `Par::rayon(1)` so the 0-alloc ratchet
+        // still applies after P2B-22 (#143).
+        unsafe {
+            std::env::set_var("RAYON_NUM_THREADS", "1");
+        }
+    });
+}
 
 fn small_rng(seed: u64) -> SmallRng {
     SmallRng::seed_from_u64(seed)
@@ -56,6 +71,7 @@ fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
 }
 
 fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
+    ensure_one_rayon_worker();
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);

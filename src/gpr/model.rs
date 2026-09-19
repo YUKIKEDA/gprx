@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
-use faer::{Mat, MatMut, MatRef, Par};
+use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
@@ -23,7 +23,7 @@ use crate::precision::DoublePrecision;
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
 };
-use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch};
+use crate::workspace::{QueryWorkspace, Workspace, empty_thread_scratch, faer_par, faer_par_dims};
 
 use super::factor::{
     FactorPolicy, cholesky_lower_with_policy, factor_train_with_policy, fill_identity,
@@ -1087,7 +1087,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
                 llt::solve::solve_in_place(
                     self.workspace.k_matrix.as_ref(),
                     self.workspace.w_matrix.as_mut(),
-                    Par::Seq,
+                    faer_par(n),
                     stack,
                 );
             }
@@ -1403,7 +1403,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             l,
             query.query_k_star.as_mut(),
-            Par::Seq,
+            faer_par_dims(n, m),
         );
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query.query_kss)?,
@@ -1517,7 +1517,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
-            Par::Seq,
+            faer_par_dims(n, m),
         );
         match compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query_kss)?,
@@ -1671,7 +1671,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
                 a[(row, col)] = cov.covariance[col * m + row];
             }
         }
-        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, Par::Seq, Default::default());
+        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
         let mut scratch = MemBuffer::new(req);
         cholesky_lower_with_policy(
             &mut a,
@@ -1772,7 +1772,7 @@ impl<O, S, C: DistanceCacheSlot> FittedGpr<O, S, C> {
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
-            Par::Seq,
+            faer_par_dims(n, m),
         );
         let mut kss = Mat::zeros(m, m);
         let mut kss_scratch = Mat::zeros(m, m);
