@@ -24,9 +24,25 @@ pub struct ResultRow {
     pub name: String,
     pub status: String,
     pub factor_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factor_min_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factor_max_s: Option<f64>,
     pub eval_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_min_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_max_s: Option<f64>,
     pub predict_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predict_min_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predict_max_s: Option<f64>,
     pub joint_evals: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reps: Option<u64>,
     pub note: Option<String>,
 }

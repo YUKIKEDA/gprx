@@ -243,6 +243,18 @@ def fmt_s(value: float | None) -> str:
     return f"{value * 1000:.2f} ms"
 
 
+def fmt_s_range(
+    median: float | None, lo: float | None, hi: float | None
+) -> str:
+    if median is None:
+        return "N/A"
+    if lo is None or hi is None:
+        return fmt_s(median)
+    if abs(hi - lo) <= max(median, 1e-12) * 1e-6:
+        return fmt_s(median)
+    return f"{fmt_s(median)} ({fmt_s(lo)}–{fmt_s(hi)})"
+
+
 def fmt_rss(value: int | None) -> str:
     if value is None:
         return "N/A"
@@ -256,6 +268,12 @@ def fmt_evals(value: int | None) -> str:
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    print(
+        "times: discard PERF_WARMUP (default 1) then median of PERF_REPS "
+        "(default 51/21/7 by n); eval N is N × median of one joint call; "
+        "RSS is one-process peak",
+        flush=True,
+    )
     only = {arg for arg in sys.argv[1:] if not arg.startswith("-")}
     OUT.mkdir(parents=True, exist_ok=True)
     cases = write_cases(PROBLEMS)
@@ -280,8 +298,10 @@ def main() -> int:
             row.setdefault("name", case_path.stem)
             rows.append(row)
             print(
-                f"    {row.get('status')} factor={fmt_s(row.get('factor_s'))} "
-                f"eval={fmt_s(row.get('eval_s'))}",
+                f"    {row.get('status')} factor="
+                f"{fmt_s_range(row.get('factor_s'), row.get('factor_min_s'), row.get('factor_max_s'))} "
+                f"eval="
+                f"{fmt_s_range(row.get('eval_s'), row.get('eval_min_s'), row.get('eval_max_s'))}",
                 flush=True,
             )
 
@@ -318,10 +338,12 @@ def main() -> int:
                 gate = judged["cell"]
                 verdicts.append((name, lib, gate))
             print(
-                f"| {problem} | {n} | {lib} | {fmt_s(row.get('factor_s'))} | "
-                f"{fmt_s(row.get('eval_s'))} | {fmt_evals(row.get('joint_evals'))} | "
-                f"{fmt_s(row.get('predict_s'))} | {fmt_rss(row.get('peak_rss_bytes'))} | "
-                f"{gate} |"
+                f"| {problem} | {n} | {lib} | "
+                f"{fmt_s_range(row.get('factor_s'), row.get('factor_min_s'), row.get('factor_max_s'))} | "
+                f"{fmt_s_range(row.get('eval_s'), row.get('eval_min_s'), row.get('eval_max_s'))} | "
+                f"{fmt_evals(row.get('joint_evals'))} | "
+                f"{fmt_s_range(row.get('predict_s'), row.get('predict_min_s'), row.get('predict_max_s'))} | "
+                f"{fmt_rss(row.get('peak_rss_bytes'))} | {gate} |"
             )
 
     fails = [(n, lib, v) for n, lib, v in verdicts if v == "fail"]
