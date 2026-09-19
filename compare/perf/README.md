@@ -21,6 +21,6 @@ Same JSON cases for gprx, sklearn, libgp, and friedrich:
 
 gprx uses `Gpr<Fixed>::factor` and `value_and_gradient_into` with `StandardizeTarget`. sklearn uses `optimizer=None` + `normalize_y=True`, then `log_marginal_likelihood(..., eval_gradient=True)`. libgp is the native C++ library (`compare/perf/libgp/`): `add_patterns` then `log_likelihood_gradient`. friedrich / libgp z-score `y` in the runner. friedrich has no ARD and no public MLL+grad: those cells are N/A. Python bindings are not used.
 
-`just perf` prints two tables: default `CachedDistances`, then `UncachedDistances` + `RetainCholesky`. P2B-21 RSS gates use the second table against libgp (`n = 1024` / `4096`; `n = 256` is recorded only). Uncached wall time is not a gate.
+`just perf` prints two tables: default `CachedDistances`, then `UncachedDistances` + `RetainCholesky`. P2B-21 RSS gates use the second table against libgp (`n = 1024` / `4096`; `n = 256` is recorded only). Uncached wall time is not a gate. `python run.py --reprint` rebuilds the tables from `out/results.json` without rerunning.
 
 Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench-log.md`. criterion is not used for these gates.

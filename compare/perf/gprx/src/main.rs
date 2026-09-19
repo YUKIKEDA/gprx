@@ -8,7 +8,7 @@ use std::time::Instant;
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
 use gprx::{
-    CachedDistances, DistanceCachePolicy, Fixed, FittedGpr, FullRecompute, GaussianLikelihood, Gpr,
+    CachedDistances, DistanceCachePolicy, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
     UncachedDistances,
 };
 
@@ -21,9 +21,9 @@ mod timing;
 
 use case_schema::{Case, ResultRow};
 
-fn na_row(name: &str, note: String) -> ResultRow {
+fn na_row(lib: &str, name: &str, note: String) -> ResultRow {
     ResultRow {
-        lib: "gprx".to_string(),
+        lib: lib.to_string(),
         name: name.to_string(),
         status: "na".to_string(),
         factor_s: None,
@@ -43,7 +43,10 @@ fn na_row(name: &str, note: String) -> ResultRow {
     }
 }
 
-fn make_gpr<C: DistanceCachePolicy>(case: &Case, policy: C) -> Result<Gpr<Fixed, FullRecompute, C>, String> {
+fn make_gpr<C: DistanceCachePolicy>(
+    case: &Case,
+    policy: C,
+) -> Result<Gpr<Fixed, FullRecompute, C>, String> {
     let kernel = if case.ard {
         let spec = RbfArdKernel::new(&case.lengthscales_init).map_err(|e| e.to_string())?;
         KernelSpec::from(spec)
@@ -63,7 +66,7 @@ fn make_gpr<C: DistanceCachePolicy>(case: &Case, policy: C) -> Result<Gpr<Fixed,
         .with_optimizer(Fixed))
 }
 
-fn run<C: DistanceCachePolicy>(case: &Case, policy: C) -> Result<ResultRow, String> {
+fn run<C: DistanceCachePolicy>(case: &Case, policy: C, lib: &str) -> Result<ResultRow, String> {
     let warmup = timing::warmup_count();
     let reps = timing::timed_reps(case.n_rows);
     let mut factor_samples = Vec::with_capacity(reps);
@@ -117,7 +120,7 @@ fn run<C: DistanceCachePolicy>(case: &Case, policy: C) -> Result<ResultRow, Stri
     let (eval_min, eval_max) = timing::min_max(&eval_scale);
     let (predict_min, predict_max) = timing::min_max(&predict_samples);
     Ok(ResultRow {
-        lib: "gprx".to_string(),
+        lib: lib.to_string(),
         name: case.name.clone(),
         status: "ok".to_string(),
         factor_s: Some(timing::median(&factor_samples)),
@@ -168,14 +171,15 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let lib = if uncached { "gprx-uncached" } else { "gprx" };
     let row = if uncached {
-        run(&case, UncachedDistances)
+        run(&case, UncachedDistances, lib)
     } else {
-        run(&case, CachedDistances)
+        run(&case, CachedDistances, lib)
     };
     let row = match row {
         Ok(row) => row,
-        Err(e) => na_row(&case.name, e),
+        Err(e) => na_row(lib, &case.name, e),
     };
     match serde_json::to_string(&row) {
         Ok(json) => {

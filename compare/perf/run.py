@@ -286,6 +286,10 @@ def main() -> int:
     )
     only = {arg for arg in sys.argv[1:] if not arg.startswith("-")}
     OUT.mkdir(parents=True, exist_ok=True)
+    if "--reprint" in sys.argv:
+        path = OUT / "results.json"
+        rows = json.loads(path.read_text(encoding="utf-8"))
+        return emit_tables(rows)
     cases = write_cases(PROBLEMS)
     if only:
         cases = [p for p in cases if p.stem in only]
@@ -305,7 +309,7 @@ def main() -> int:
         for lib, fn in runners:
             print(f"  {lib}...", flush=True)
             row = fn(case_path)
-            row.setdefault("lib", lib)
+            row["lib"] = lib
             row.setdefault("name", case_path.stem)
             rows.append(row)
             print(
@@ -317,7 +321,10 @@ def main() -> int:
             )
 
     (OUT / "results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    return emit_tables(rows)
 
+
+def emit_tables(rows: list[dict[str, Any]]) -> int:
     by_name: dict[str, dict[str, dict[str, Any]]] = {}
     for row in rows:
         by_name.setdefault(row["name"], {})[row["lib"]] = row
