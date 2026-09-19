@@ -107,6 +107,13 @@ impl RationalQuadraticArdKernel {
         &self.lengthscales
     }
 
+    pub(crate) fn from_ard(lengthscales: ArdLengthscales, alpha: BoundedParam) -> Self {
+        Self {
+            lengthscales,
+            alpha,
+        }
+    }
+
     /// Returns `ℓ_d` for feature `dim`.
     ///
     /// # Errors

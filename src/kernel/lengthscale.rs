@@ -64,6 +64,14 @@ impl ArdLengthscales {
         Self::from_params(params)
     }
 
+    pub(crate) fn from_bounded(params: Vec<BoundedParam>) -> Result<Self, GprError> {
+        Self::from_params(params)
+    }
+
+    pub(crate) fn bounded_params(&self) -> &[BoundedParam] {
+        &self.params
+    }
+
     fn from_params(params: Vec<BoundedParam>) -> Result<Self, GprError> {
         let log_lengthscales: Vec<f64> = params.iter().map(|p| p.ln()).collect();
         let inv_ell_sq = inv_ell_sq_from_log(&log_lengthscales)?;

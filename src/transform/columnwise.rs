@@ -74,6 +74,14 @@ impl ColumnwiseInput {
         self.maps.is_empty()
     }
 
+    pub(crate) fn from_maps(maps: Vec<Box<dyn UnfittedTransform>>) -> Self {
+        Self { maps }
+    }
+
+    pub(crate) fn maps(&self) -> &[Box<dyn UnfittedTransform>] {
+        &self.maps
+    }
+
     /// Fits each map on its own column of `x`.
     ///
     /// # Errors
@@ -134,6 +142,10 @@ impl UnfittedTransform for ColumnwiseInput {
     fn clone_box(&self) -> Box<dyn UnfittedTransform> {
         Box::new(self.clone())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Fitted per-column input maps.
@@ -152,6 +164,14 @@ impl FittedColumnwiseInput {
     /// Returns whether this list has no column maps.
     pub fn is_empty(&self) -> bool {
         self.maps.is_empty()
+    }
+
+    pub(crate) fn from_maps(maps: Vec<Box<dyn Transform>>) -> Self {
+        Self { maps }
+    }
+
+    pub(crate) fn maps(&self) -> &[Box<dyn Transform>] {
+        &self.maps
     }
 }
 
@@ -186,6 +206,10 @@ impl Transform for FittedColumnwiseInput {
 
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -235,6 +259,10 @@ mod tests {
         fn clone_box(&self) -> Box<dyn UnfittedTransform> {
             Box::new(*self)
         }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     impl Transform for TimesTwo {
@@ -249,6 +277,10 @@ mod tests {
 
         fn clone_box(&self) -> Box<dyn Transform> {
             Box::new(*self)
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

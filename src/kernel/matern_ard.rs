@@ -70,6 +70,10 @@ impl MaternArdKernel {
         &self.lengthscales
     }
 
+    pub(crate) fn from_ard(lengthscales: ArdLengthscales, nu: MaternNu) -> Self {
+        Self { nu, lengthscales }
+    }
+
     /// Returns `ℓ_d` for feature `dim`.
     ///
     /// # Errors

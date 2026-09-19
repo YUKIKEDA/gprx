@@ -69,6 +69,10 @@ impl RbfArdKernel {
         &self.lengthscales
     }
 
+    pub(crate) fn from_ard(lengthscales: ArdLengthscales) -> Self {
+        Self { lengthscales }
+    }
+
     /// Returns `ℓ_d` for feature `dim`.
     ///
     /// # Errors

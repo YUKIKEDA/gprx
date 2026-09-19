@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P2B-13（Dist と Points の Sum/Product）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P2B-14（学習済みモデルの保存・読み込み）。** Phase 2 は P2-9 で閉じた。Phase 3 の前に公開骨格（2b）を載せる。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -168,7 +168,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-11 | Feat | 距離キャッシュを距離経路専用にする            | P2-9   | rustdoc「Linear ignores this setting」をやめる。`Linear` / `Constant` / `White`（距離を使わない spec）の trainer に `DistanceCachePolicy` を持たせない。`with_distance_cache_policy` は距離モードの経路にだけ存在する |
 | P2B-12 | Feat | Product の points 勾配                        | P2-9   | 公開の `KernelSpec *` が points 葉（Linear / ARD）でも `grad` と fit の MLL+grad まで通る。現行 `grad_points` の `UnsupportedKernelOperation`（dedicated scratch）を消す。数値微分または既知値。Dist Product の既存 `grad` は壊さない |
 | P2B-13 | Feat | Dist と Points の Sum/Product                 | P2B-12 | `RBF + Linear` など Dist 葉と Points 葉の合成を評価する。`coord_mode` で混ぜを `UnsupportedKernelOperation` しない。型で混ぜ不可にもしない。葉は従来どおり Dist は距離、Points は座標。解析または sklearn golden（L-BFGS と混ぜない） |
-| P2B-14 | Feat | 学習済みモデルの保存・読み込み                | P2-8   | Grill 後に [#63](https://github.com/YUKIKEDA/gprx/issues/63) で確定 |
+| P2B-14 | Feat | 学習済みモデルの保存・読み込み                | P2-8   | 学習済みだけを保存する（未学習の `Gpr` は置かない）。ディレクトリ一つ（`config.json` + `model.safetensors`）。`save` と `save_with_factor`（bool ではない）。`load` は予測用で中身は `FittedGpr<Fixed>`、距離 / Points は公開 enum。再学習は `with_optimizer` → `refit`（ファイルにソルバは書かない）。テンソルは safetensors。`L` があるとき mmap を保持。元の `X` / `y` を書き、変換は load で `apply`。`L` は正方 `n×n` 列優先、下側が正本。config は `format_version`（この行は `1`、未知は拒否）、jitter、距離経路だけキャッシュ方針。組み込みは閉じたタグ。Custom / 自前変換は `persist_id` + JSON。`gprx.` は予約。レジストリは明示登録 |
 | P2B-15 | Feat | カスタム Optimizer の使用例                   | P2B-9  | Grill 後に [#106](https://github.com/YUKIKEDA/gprx/issues/106) で確定 |
 | P2B-16 | Spike | 他ライブラリとの時間・RSS 比較               | P2-9   | Grill 後に [#103](https://github.com/YUKIKEDA/gprx/issues/103) で確定 |
 | P2B-17 | Feat | `GprObjective` の NLML ヘッセ                 | P2B-1  | Grill 後に [#109](https://github.com/YUKIKEDA/gprx/issues/109) で確定 |

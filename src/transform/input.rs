@@ -1,5 +1,7 @@
 //! Input (`X`) transforms: identity, per-feature standardize, and min-max.
 
+use std::any::Any;
+
 use super::{column_major_len, population_std, require_finite, require_len, require_nonempty};
 use crate::error::GprError;
 
@@ -20,6 +22,27 @@ pub trait UnfittedTransform: Send + Sync {
 
     /// Clones this map into a new box. Used by [`crate::Gpr`] clone.
     fn clone_box(&self) -> Box<dyn UnfittedTransform>;
+
+    /// Downcast handle used when encoding a built-in map for persist.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    ///
+    /// The id must not start with `gprx.`.
+    fn persist_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// JSON state paired with [`Self::persist_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Err(GprError::PersistFailed {
+            reason: "this input transform does not implement persist_state".to_owned(),
+        })
+    }
 }
 
 /// Fitted input map. [`Self::apply`] exists only here.
@@ -36,6 +59,25 @@ pub trait Transform: Send + Sync {
 
     /// Clones this map into a new box. Used by [`crate::FittedGpr`] clone.
     fn clone_box(&self) -> Box<dyn Transform>;
+
+    /// Downcast handle used when encoding a built-in map for persist.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    fn persist_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// JSON state paired with [`Self::persist_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Err(GprError::PersistFailed {
+            reason: "this input transform does not implement persist_state".to_owned(),
+        })
+    }
 }
 
 fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
@@ -91,6 +133,10 @@ impl UnfittedTransform for IdentityInput {
     fn clone_box(&self) -> Box<dyn UnfittedTransform> {
         Box::new(*self)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Transform for IdentityInput {
@@ -101,6 +147,10 @@ impl Transform for IdentityInput {
 
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(*self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -171,6 +221,10 @@ impl UnfittedTransform for StandardizeInput {
     fn clone_box(&self) -> Box<dyn UnfittedTransform> {
         Box::new(*self)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Fitted per-column center-and-scale map.
@@ -189,6 +243,21 @@ impl FittedStandardizeInput {
     /// Returns per-column training scales.
     pub fn std(&self) -> &[f64] {
         &self.std
+    }
+
+    pub(crate) fn from_parts(mean: Vec<f64>, std: Vec<f64>) -> Result<Self, GprError> {
+        require_len(&std, mean.len())?;
+        require_finite(&mean)?;
+        require_finite(&std)?;
+        if mean.is_empty() {
+            return Err(GprError::EmptyInput);
+        }
+        if std.iter().any(|s| *s <= 0.0) {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "fitted standardize scale must be positive".to_owned(),
+            });
+        }
+        Ok(Self { mean, std })
     }
 }
 
@@ -217,6 +286,10 @@ impl Transform for FittedStandardizeInput {
 
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -332,6 +405,10 @@ impl UnfittedTransform for MinMaxInput {
     fn clone_box(&self) -> Box<dyn UnfittedTransform> {
         Box::new(*self)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Fitted per-column min-max map.
@@ -361,6 +438,27 @@ impl FittedMinMaxInput {
     pub fn max(&self) -> &[f64] {
         &self.data_max
     }
+
+    pub(crate) fn from_parts(
+        data_min: Vec<f64>,
+        data_max: Vec<f64>,
+        range_lo: f64,
+        range_hi: f64,
+    ) -> Result<Self, GprError> {
+        require_feature_range(range_lo, range_hi)?;
+        require_len(&data_max, data_min.len())?;
+        require_finite(&data_min)?;
+        require_finite(&data_max)?;
+        if data_min.is_empty() {
+            return Err(GprError::EmptyInput);
+        }
+        Ok(Self {
+            data_min,
+            data_max,
+            range_lo,
+            range_hi,
+        })
+    }
 }
 
 impl Transform for FittedMinMaxInput {
@@ -389,6 +487,10 @@ impl Transform for FittedMinMaxInput {
 
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
