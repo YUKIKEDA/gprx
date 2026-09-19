@@ -111,6 +111,12 @@ pub(crate) trait FitWorkspace: Clone + Send + Sync + 'static {
     fn has_distance_cache(&self) -> bool {
         false
     }
+
+    /// Whether this workspace stores a dedicated `W` matrix.
+    #[allow(dead_code)] // used by unit tests on `FittedGpr::workspace`
+    fn has_dedicated_w(&self) -> bool {
+        false
+    }
 }
 
 /// Default cached + retain layout used by unit tests that still name `Workspace`.
@@ -421,6 +427,10 @@ impl<W: FitWorkspace> FitWorkspace for WithW<W> {
     fn gradient_w(&self) -> MatRef<'_, f64> {
         self.w_matrix.as_ref()
     }
+
+    fn has_dedicated_w(&self) -> bool {
+        true
+    }
 }
 
 impl<W: FitWorkspace> FitWorkspace for WithDist<W> {
@@ -464,6 +474,10 @@ impl<W: FitWorkspace> FitWorkspace for WithDist<W> {
 
     fn has_distance_cache(&self) -> bool {
         true
+    }
+
+    fn has_dedicated_w(&self) -> bool {
+        self.inner.has_dedicated_w()
     }
 }
 
