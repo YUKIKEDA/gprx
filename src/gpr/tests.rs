@@ -2,8 +2,9 @@ use super::{FittedGpr, Gpr};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
 use crate::gpr::{
-    AdaptiveJitter, DistanceCachePolicy, DistanceCacheSlot, FixedJitter, JitterPolicy,
-    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, ReuseCholesky, VarianceKind,
+    AdaptiveJitter, CachedDistances, DistanceCacheSlot, FixedJitter, JitterPolicy, NoDistanceCache,
+    PredictOptions, Prediction, PredictiveCovariance, ReuseCholesky, UncachedDistances,
+    VarianceKind,
 };
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -22,6 +23,7 @@ use crate::transform::{
     ColumnwiseInput, MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget,
     TargetPipeline, TargetTransform,
 };
+use crate::workspace::FitWorkspace;
 use crate::workspace::Workspace;
 use faer::{Mat, MatMut, MatRef};
 
@@ -971,26 +973,19 @@ fn value_and_gradient_cholesky_failure_keeps_params() {
 }
 
 #[test]
-fn value_and_gradient_refills_stale_dist_cache() {
-    let mut gpr = rbf_gpr(1.25, 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Never)
+fn uncached_workspace_has_no_distance_cache() {
+    let iso = rbf_gpr(1.25, 0.16)
+        .with_distance_cache_policy(UncachedDistances)
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
         .expect("spd");
-    {
-        let ws = &mut gpr.workspace;
-        let n = ws.dist_cache.nrows();
-        ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
-        ws.dist_ready = false;
-    }
-    let mut params = [0.0; 2];
-    gpr.get_params(&mut params).expect("len 2");
-    let mut grad = [0.0; 2];
-    let value = gpr
-        .value_and_gradient_into(&params, &mut grad)
+    assert!(!iso.workspace.has_distance_cache());
+    let ard = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+        .with_distance_cache_policy(UncachedDistances)
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.8, 1.7, 0.2, -0.4, 0.9], 3, 2, &[0.4, -0.2, 0.9])
         .expect("spd");
-    assert_close(value, gpr.neg_log_marginal_likelihood().expect("fitted"));
-    assert!(grad.iter().all(|g| g.is_finite()));
+    assert!(!ard.workspace.has_distance_cache());
 }
 
 #[test]
@@ -998,7 +993,7 @@ fn always_reuses_poisoned_dist_cache() {
     let x = [0.0, 0.8, 1.7];
     let y = [0.4, -0.2, 0.9];
     let mut gpr = rbf_gpr(1.25, 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Always)
+        .with_distance_cache_policy(CachedDistances)
         .with_optimizer(Fixed)
         .factor(&x, 3, 1, &y)
         .expect("spd");
@@ -1028,12 +1023,12 @@ fn never_and_always_match_rbf_nlml_grad_and_predict() {
     let x = [0.0, 0.8, 1.7];
     let y = [0.4, -0.2, 0.9];
     let mut never = rbf_gpr(1.25, 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Never)
+        .with_distance_cache_policy(UncachedDistances)
         .with_optimizer(Fixed)
         .factor(&x, 3, 1, &y)
         .expect("spd");
     let mut always = rbf_gpr(1.25, 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Always)
+        .with_distance_cache_policy(CachedDistances)
         .with_optimizer(Fixed)
         .factor(&x, 3, 1, &y)
         .expect("spd");
@@ -1062,16 +1057,17 @@ fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
     let y = [0.4, -0.2, 0.9];
     let xs = [0.5, 0.1];
     let mut never = rbf_ard_gpr(&[1.25, 0.8], 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Never)
+        .with_distance_cache_policy(UncachedDistances)
         .with_optimizer(Fixed)
         .factor(&x, 3, 2, &y)
         .expect("spd");
     let mut always = rbf_ard_gpr(&[1.25, 0.8], 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Always)
+        .with_distance_cache_policy(CachedDistances)
         .with_optimizer(Fixed)
         .factor(&x, 3, 2, &y)
         .expect("spd");
-    assert_eq!(never.workspace.ard_sq_diff.ncols(), 0);
+    assert!(!never.workspace.has_distance_cache());
+    assert!(always.workspace.has_distance_cache());
     assert_eq!(always.workspace.ard_sq_diff.ncols(), 6);
     let mut params = [0.0; 3];
     never.get_params(&mut params).expect("len 3");
@@ -1097,8 +1093,7 @@ fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
 fn rbf_ard_fit_optimizes_with_always_cache() {
     let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
     let y = [0.4, -0.2, 0.9];
-    let gpr =
-        rbf_ard_gpr(&[1.25, 0.8], 0.16).with_distance_cache_policy(DistanceCachePolicy::Always);
+    let gpr = rbf_ard_gpr(&[1.25, 0.8], 0.16).with_distance_cache_policy(CachedDistances);
     let mut before = [0.0; 3];
     gpr.get_params(&mut before).expect("len 3");
     let gpr = gpr.fit(&x, 3, 2, &y).expect("optimize");
@@ -1160,7 +1155,7 @@ fn always_reuses_poisoned_ard_cache() {
     let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
     let y = [0.4, -0.2, 0.9];
     let mut gpr = rbf_ard_gpr(&[1.25, 0.8], 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Always)
+        .with_distance_cache_policy(CachedDistances)
         .with_optimizer(Fixed)
         .factor(&x, 3, 2, &y)
         .expect("spd");
@@ -1194,7 +1189,7 @@ fn always_reuses_poisoned_ard_cache() {
 #[test]
 fn always_ard_cache_retiling_follows_n() {
     let gpr = rbf_ard_gpr(&[1.0, 1.5], 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Always)
+        .with_distance_cache_policy(CachedDistances)
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7, 0.2, -0.4, 0.9], 3, 2, &[0.4, -0.2, 0.9])
         .expect("spd n=3");
@@ -1222,7 +1217,7 @@ fn always_ard_cache_retiling_follows_n() {
 #[test]
 fn isotropic_always_leaves_ard_cache_empty() {
     let gpr = rbf_gpr(1.25, 0.16)
-        .with_distance_cache_policy(DistanceCachePolicy::Always)
+        .with_distance_cache_policy(CachedDistances)
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
         .expect("spd");
@@ -1241,7 +1236,7 @@ fn never_and_always_match_matern_ard_nlml() {
         KernelSpec::from(MaternArdKernel::new(&[1.25, 0.8], nu).expect("valid")),
         GaussianLikelihood::new(0.16).expect("valid"),
     )
-    .with_distance_cache_policy(DistanceCachePolicy::Never)
+    .with_distance_cache_policy(UncachedDistances)
     .with_optimizer(Fixed)
     .factor(&x, 3, 2, &y)
     .expect("spd");
@@ -1249,7 +1244,7 @@ fn never_and_always_match_matern_ard_nlml() {
         KernelSpec::from(MaternArdKernel::new(&[1.25, 0.8], nu).expect("valid")),
         GaussianLikelihood::new(0.16).expect("valid"),
     )
-    .with_distance_cache_policy(DistanceCachePolicy::Always)
+    .with_distance_cache_policy(CachedDistances)
     .with_optimizer(Fixed)
     .factor(&x, 3, 2, &y)
     .expect("spd");
@@ -1824,7 +1819,7 @@ fn from_points_linear_trainer_has_no_distance_cache_slot() {
 #[test]
 fn new_rbf_trainer_has_distance_cache_policy() {
     let gpr = rbf_gpr(1.0, 0.1);
-    let _: Gpr<Lbfgs, FullRecompute, DistanceCachePolicy> = gpr;
+    let _: Gpr<Lbfgs, FullRecompute, CachedDistances> = gpr;
 }
 
 #[test]

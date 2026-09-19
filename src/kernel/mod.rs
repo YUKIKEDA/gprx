@@ -229,6 +229,63 @@ fn finite_dist(d: f64) -> Result<f64, GprError> {
     }
 }
 
+pub(crate) fn pair_squared_euclidean(x: MatRef<'_, f64>, i: usize, j: usize) -> f64 {
+    let d = x.ncols();
+    let mut sum = 0.0;
+    for dim in 0..d {
+        let diff = x[(i, dim)] - x[(j, dim)];
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// Writes a kernel triangle from coordinates. Each pair computes `‖x_i-x_j‖²`
+/// without a distance matrix.
+pub(crate) fn write_square_from_coords(
+    x: MatRef<'_, f64>,
+    out: MatMut<'_, f64>,
+    uplo: Triangle,
+    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+) -> Result<(), GprError> {
+    let n = out.nrows();
+    if out.ncols() != n {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("output must be square, got {}x{}", out.nrows(), out.ncols()),
+        });
+    }
+    if n == 0 || x.nrows() != n || x.ncols() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if matches!(uplo, Triangle::Lower) {
+        return write_lower_from_coords_parallel(x, out, kernel);
+    }
+    write_square(out, uplo, |row, col| {
+        kernel(finite_dist(pair_squared_euclidean(x, row, col))?)
+    })
+}
+
+fn write_lower_from_coords_parallel(
+    x: MatRef<'_, f64>,
+    out: MatMut<'_, f64>,
+    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+) -> Result<(), GprError> {
+    let n = x.nrows();
+    let n_parts = worker_count();
+    out.par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, mut part)| {
+            let (start, len) = col_chunk(n, chunk_idx, n_parts);
+            for local in 0..len {
+                let col = start + local;
+                for row in col..n {
+                    let d = finite_dist(pair_squared_euclidean(x, row, col))?;
+                    part[(row, local)] = kernel(d)?;
+                }
+            }
+            Ok::<(), GprError>(())
+        })
+}
+
 fn write_square(
     mut out: MatMut<'_, f64>,
     uplo: Triangle,

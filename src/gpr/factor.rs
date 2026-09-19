@@ -11,87 +11,104 @@ use crate::kernel::{
     fill_squared_euclidean,
 };
 use crate::likelihood::GaussianLikelihood;
-use crate::precision::DoublePrecision;
-use crate::workspace::{WorkspaceCore, faer_par, faer_par_dims};
+use crate::workspace::{FitWorkspace, faer_par, faer_par_dims};
 
-use super::{DistanceCachePolicy, JitterPolicy};
+use super::JitterPolicy;
 
 /// Writes the training Gram matrix.
 ///
-/// Distance-mode leaves use squared Euclidean distances in `dist_cache`.
-/// ARD leaves under [`DistanceCachePolicy::Always`] use `ard_sq_diff`
-/// (`n × (n·d)` raw `(Δx_d)²`). [`DistanceCachePolicy::Never`] refills
-/// every call so a stale cache cannot leak into MLL/grad.
-fn apply_train_kernel(
+/// [`crate::CachedDistances`] fills `dist_cache` (and ARD `ard_sq_diff`) once
+/// and reuses them. [`crate::UncachedDistances`] has no those tensors;
+/// isotropic and mixed trees compute distances from `X`.
+fn apply_train_kernel<W: FitWorkspace>(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
-    ws: &mut WorkspaceCore<DoublePrecision>,
-    policy: DistanceCachePolicy,
+    ws: &mut W,
 ) -> Result<(), GprError> {
+    let (core, dist) = ws.split_fit();
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            let refill = match policy {
-                DistanceCachePolicy::Never => true,
-                DistanceCachePolicy::Always => !ws.dist_ready,
-            };
-            if refill {
-                let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
-                fill_squared_euclidean(x, ws.dist_cache.as_mut(), &mut thread_scratch);
-                ws.thread_scratch = thread_scratch;
-                ws.dist_ready = policy == DistanceCachePolicy::Always;
-            }
-            compiled.apply(
-                ws.dist_cache.as_ref(),
-                ws.k_matrix.as_mut(),
-                Triangle::Lower,
-                ws.exp_buf.as_mut(),
-            )
-        }
-        CoordMode::Points => {
-            if compiled.needs_ard_sq_diff()
-                && policy == DistanceCachePolicy::Always
-                && ws.ard_sq_diff.ncols() > 0
-            {
-                let refill = !ws.ard_sq_diff_ready;
-                if refill {
-                    let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
-                    fill_ard_squared_diff(x, ws.ard_sq_diff.as_mut(), &mut thread_scratch);
-                    ws.thread_scratch = thread_scratch;
-                    ws.ard_sq_diff_ready = true;
+            if let Some(d) = dist {
+                if !*d.dist_ready {
+                    let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
+                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut thread_scratch);
+                    core.thread_scratch = thread_scratch;
+                    *d.dist_ready = true;
                 }
-                compiled.apply_from_ard_cache(
-                    ws.ard_sq_diff.as_ref(),
-                    x,
-                    ws.k_matrix.as_mut(),
+                compiled.apply(
+                    d.dist_cache.as_ref(),
+                    core.k_matrix.as_mut(),
                     Triangle::Lower,
-                    ws.exp_buf.as_mut(),
+                    core.exp_buf.as_mut(),
                 )
             } else {
                 compiled.apply_points(
                     x,
-                    ws.k_matrix.as_mut(),
+                    core.k_matrix.as_mut(),
                     Triangle::Lower,
-                    ws.exp_buf.as_mut(),
+                    core.exp_buf.as_mut(),
+                )
+            }
+        }
+        CoordMode::Points => {
+            if compiled.needs_ard_sq_diff()
+                && let Some(d) = dist
+                && d.ard_sq_diff.ncols() > 0
+            {
+                if !*d.ard_sq_diff_ready {
+                    let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
+                    fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut thread_scratch);
+                    core.thread_scratch = thread_scratch;
+                    *d.ard_sq_diff_ready = true;
+                }
+                compiled.apply_from_ard_cache(
+                    d.ard_sq_diff.as_ref(),
+                    x,
+                    core.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    core.exp_buf.as_mut(),
+                )
+            } else {
+                compiled.apply_points(
+                    x,
+                    core.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    core.exp_buf.as_mut(),
                 )
             }
         }
         CoordMode::Mixed => {
-            let refill = match policy {
-                DistanceCachePolicy::Never => true,
-                DistanceCachePolicy::Always => !ws.dist_ready,
-            };
-            if refill {
-                let mut thread_scratch = std::mem::take(&mut ws.thread_scratch);
-                fill_squared_euclidean(x, ws.dist_cache.as_mut(), &mut thread_scratch);
-                ws.thread_scratch = thread_scratch;
-                ws.dist_ready = policy == DistanceCachePolicy::Always;
+            if let Some(d) = dist {
+                if !*d.dist_ready {
+                    let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
+                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut thread_scratch);
+                    core.thread_scratch = thread_scratch;
+                    *d.dist_ready = true;
+                }
+                let mut views = MixedKernelViews::new(d.dist_cache.as_ref(), x);
+                if compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0 {
+                    if !*d.ard_sq_diff_ready {
+                        let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
+                        fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut thread_scratch);
+                        core.thread_scratch = thread_scratch;
+                        *d.ard_sq_diff_ready = true;
+                    }
+                    views.ard_cache = Some(d.ard_sq_diff.as_ref());
+                }
+                compiled.apply_mixed(
+                    views,
+                    core.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    core.exp_buf.as_mut(),
+                )
+            } else {
+                compiled.apply_points(
+                    x,
+                    core.k_matrix.as_mut(),
+                    Triangle::Lower,
+                    core.exp_buf.as_mut(),
+                )
             }
-            compiled.apply_mixed(
-                MixedKernelViews::new(ws.dist_cache.as_ref(), x),
-                ws.k_matrix.as_mut(),
-                Triangle::Lower,
-                ws.exp_buf.as_mut(),
-            )
         }
     }
 }
@@ -161,28 +178,27 @@ pub(crate) fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
     }
 }
 
-fn assemble_train_system(
+fn assemble_train_system<W: FitWorkspace>(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
-    ws: &mut WorkspaceCore<DoublePrecision>,
+    ws: &mut W,
     y: &[f64],
     noise: f64,
     extra_diag: f64,
-    cache: DistanceCachePolicy,
 ) -> Result<(), GprError> {
-    apply_train_kernel(compiled, x, ws, cache)?;
-    add_noise_to_diag(ws.k_matrix.as_mut(), noise);
+    apply_train_kernel(compiled, x, ws)?;
+    let core = ws.core_mut();
+    add_noise_to_diag(core.k_matrix.as_mut(), noise);
     if extra_diag != 0.0 {
-        add_noise_to_diag(ws.k_matrix.as_mut(), extra_diag);
+        add_noise_to_diag(core.k_matrix.as_mut(), extra_diag);
     }
     for (i, &yi) in y.iter().enumerate() {
-        ws.rhs[(i, 0)] = yi;
+        core.rhs[(i, 0)] = yi;
     }
     Ok(())
 }
 
 pub(crate) struct FactorPolicy {
-    pub(crate) cache: DistanceCachePolicy,
     pub(crate) jitter: JitterPolicy,
     pub(crate) stage: CholeskyStage,
 }
@@ -200,34 +216,38 @@ fn map_cholesky_jitter(err: GprError, jitter: f64) -> GprError {
     }
 }
 
-pub(crate) fn factor_train_with_policy(
+pub(crate) fn factor_train_with_policy<W: FitWorkspace>(
     compiled: &CompiledKernel,
     x: MatRef<'_, f64>,
-    ws: &mut WorkspaceCore<DoublePrecision>,
+    ws: &mut W,
     y: &[f64],
     noise: f64,
     policy: FactorPolicy,
 ) -> Result<(), GprError> {
-    assemble_train_system(compiled, x, ws, y, noise, 0.0, policy.cache)?;
-    match cholesky_and_solve(
-        &mut ws.k_matrix,
-        &mut ws.rhs,
-        &mut ws.faer_scratch,
-        0.0,
-        policy.stage,
-    ) {
-        Ok(()) => return Ok(()),
-        Err(GprError::CholeskyFailed { .. }) => {}
-        Err(err) => return Err(err),
+    assemble_train_system(compiled, x, ws, y, noise, 0.0)?;
+    {
+        let core = ws.core_mut();
+        match cholesky_and_solve(
+            &mut core.k_matrix,
+            &mut core.rhs,
+            &mut core.faer_scratch,
+            0.0,
+            policy.stage,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(GprError::CholeskyFailed { .. }) => {}
+            Err(err) => return Err(err),
+        }
     }
     let mut last_j = 0.0;
     for j in policy.jitter.retry_jitters() {
         last_j = j;
-        assemble_train_system(compiled, x, ws, y, noise, j, policy.cache)?;
+        assemble_train_system(compiled, x, ws, y, noise, j)?;
+        let core = ws.core_mut();
         match cholesky_and_solve(
-            &mut ws.k_matrix,
-            &mut ws.rhs,
-            &mut ws.faer_scratch,
+            &mut core.k_matrix,
+            &mut core.rhs,
+            &mut core.faer_scratch,
             0.0,
             policy.stage,
         ) {
@@ -236,7 +256,7 @@ pub(crate) fn factor_train_with_policy(
             Err(err) => return Err(map_cholesky_jitter(err, j)),
         }
     }
-    let n = ws.k_matrix.nrows();
+    let n = ws.core().k_matrix.nrows();
     Err(GprError::CholeskyFailed {
         jitter: last_j,
         matrix_size: n,
@@ -322,6 +342,16 @@ pub(crate) fn write_kernel_grad(
             scratch,
         ),
     }
+}
+
+pub(crate) fn write_kernel_grad_from_coords(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    d_k: MatMut<'_, f64>,
+    scratch: MatMut<'_, f64>,
+    param_idx: usize,
+) -> Result<(), GprError> {
+    compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
 }
 
 /// Writes `diag(A⁻¹)` given the lower Cholesky factor `L` of `A = L Lᵀ`.

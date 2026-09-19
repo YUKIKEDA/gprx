@@ -13,7 +13,9 @@ use crate::gpr::{DistanceCacheSlot, FittedGpr};
 use crate::kernel::KernelSpec;
 use crate::optimizer::{Fixed, FullRecompute};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::{DistanceCachePolicy, GaussianLikelihood, JitterPolicy, NoDistanceCache};
+use crate::{
+    CachedDistances, GaussianLikelihood, JitterPolicy, NoDistanceCache, UncachedDistances,
+};
 
 use config::{DistanceCacheJson, JitterJson, LikelihoodJson, ModelConfig};
 use kernel::KernelJson;
@@ -51,7 +53,7 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::persist::{LoadedGpr, PersistRegistry};
+/// use gprx::persist::{LoadedDistance, LoadedGpr, PersistRegistry};
 /// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
@@ -69,9 +71,12 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// fitted.save(&dir)?;
 /// let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
 /// match loaded {
-///     LoadedGpr::Distance(model) => {
+///     LoadedGpr::Distance(LoadedDistance::Cached(model)) => {
 ///         let pred = model.predict(&[0.5], 1, 1)?;
 ///         assert_eq!(pred.mean.len(), 1);
+///     }
+///     LoadedGpr::Distance(LoadedDistance::Uncached(_)) => {
+///         panic!("default save is CachedDistances")
 ///     }
 ///     LoadedGpr::Points(_) => panic!("RBF is a distance kernel"),
 /// }
@@ -81,10 +86,19 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// ```
 #[derive(Clone, Debug)]
 pub enum LoadedGpr {
-    /// Model whose trainer stored a [`DistanceCachePolicy`].
-    Distance(FittedGpr<Fixed, FullRecompute, DistanceCachePolicy>),
+    /// Model whose trainer stored a [`crate::DistanceCachePolicy`].
+    Distance(LoadedDistance),
     /// Model whose trainer was [`crate::Gpr::from_points`].
     Points(FittedGpr<Fixed, FullRecompute, NoDistanceCache>),
+}
+
+/// Distance-path model loaded as [`CachedDistances`] or [`UncachedDistances`].
+#[derive(Clone, Debug)]
+pub enum LoadedDistance {
+    /// Trainer used [`CachedDistances`] (`always` in `config.json`).
+    Cached(FittedGpr<Fixed, FullRecompute, CachedDistances>),
+    /// Trainer used [`UncachedDistances`] (`never` in `config.json`).
+    Uncached(FittedGpr<Fixed, FullRecompute, UncachedDistances>),
 }
 
 impl LoadedGpr {
@@ -193,22 +207,38 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
         let alpha = read_alpha(dir, config.n)?;
         let mapped = MappedTensors::open(dir, config.n)?;
         match cache {
-            Some(policy) => Ok(LoadedGpr::Distance(FittedGpr::from_persisted(
-                PersistedModel {
+            Some(crate::gpr::DistanceCachePersist::Cached) => Ok(LoadedGpr::Distance(
+                LoadedDistance::Cached(FittedGpr::from_persisted(PersistedModel {
                     kernel,
                     likelihood,
                     x_unfitted,
                     y_unfitted,
                     x_transform,
                     y_transform,
-                    distance_cache: policy,
+                    distance_cache: CachedDistances,
                     jitter_policy: jitter,
                     x_obs,
                     y_obs,
                     alpha,
                     mapped: Some(mapped),
-                },
-            )?)),
+                })?),
+            )),
+            Some(crate::gpr::DistanceCachePersist::Uncached) => Ok(LoadedGpr::Distance(
+                LoadedDistance::Uncached(FittedGpr::from_persisted(PersistedModel {
+                    kernel,
+                    likelihood,
+                    x_unfitted,
+                    y_unfitted,
+                    x_transform,
+                    y_transform,
+                    distance_cache: UncachedDistances,
+                    jitter_policy: jitter,
+                    x_obs,
+                    y_obs,
+                    alpha,
+                    mapped: Some(mapped),
+                })?),
+            )),
             None => Ok(LoadedGpr::Points(FittedGpr::from_persisted(
                 PersistedModel {
                     kernel,
@@ -228,17 +258,29 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
         }
     } else {
         match cache {
-            Some(policy) => {
+            Some(crate::gpr::DistanceCachePersist::Cached) => {
                 let gpr = crate::Gpr::new(kernel, likelihood)
                     .with_optimizer(Fixed)
                     .with_boxed_input_transform(x_unfitted)
                     .with_boxed_target_transform(y_unfitted)
                     .with_jitter_policy(jitter)
-                    .with_distance_cache_policy(policy);
-                Ok(LoadedGpr::Distance(
+                    .with_distance_cache_policy(CachedDistances);
+                Ok(LoadedGpr::Distance(LoadedDistance::Cached(
                     gpr.factor(&x_obs, config.n, config.d, &y_obs)
                         .map_err(|(_, err)| err)?,
-                ))
+                )))
+            }
+            Some(crate::gpr::DistanceCachePersist::Uncached) => {
+                let gpr = crate::Gpr::new(kernel, likelihood)
+                    .with_optimizer(Fixed)
+                    .with_boxed_input_transform(x_unfitted)
+                    .with_boxed_target_transform(y_unfitted)
+                    .with_jitter_policy(jitter)
+                    .with_distance_cache_policy(UncachedDistances);
+                Ok(LoadedGpr::Distance(LoadedDistance::Uncached(
+                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
+                        .map_err(|(_, err)| err)?,
+                )))
             }
             None => {
                 let gpr = crate::Gpr::from_points(kernel, likelihood)
@@ -258,7 +300,8 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_FILE, FORMAT_VERSION, LoadedGpr, PersistRegistry, RESERVED_PREFIX, persist_err,
+        CONFIG_FILE, FORMAT_VERSION, LoadedDistance, LoadedGpr, PersistRegistry, RESERVED_PREFIX,
+        persist_err,
     };
     use crate::kernel::{KernelSpec, KernelTerm, LinearKernel, RbfKernel, Triangle};
     use crate::param::Interval;
@@ -407,7 +450,7 @@ mod tests {
         let dir = temp_dir("rbf-save");
         fitted.save(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Distance(model) = loaded else {
+        let LoadedGpr::Distance(LoadedDistance::Cached(model)) = loaded else {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
@@ -429,7 +472,7 @@ mod tests {
         let dir = temp_dir("rbf-factor");
         fitted.save_with_factor(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Distance(model) = loaded else {
+        let LoadedGpr::Distance(LoadedDistance::Cached(model)) = loaded else {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[0.25], 1, 1).expect("loaded predict");
@@ -475,7 +518,7 @@ mod tests {
         let dir = temp_dir("std-roundtrip");
         fitted.save(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Distance(model) = loaded else {
+        let LoadedGpr::Distance(LoadedDistance::Cached(model)) = loaded else {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[1.0], 1, 1).expect("loaded predict");

@@ -15,7 +15,10 @@ use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
 use gprx::transform::StandardizeTarget;
-use gprx::{DistanceCachePolicy, FittedGpr, Fixed, GaussianLikelihood, Gpr, Prediction};
+use gprx::{
+    CachedDistances, DistanceCachePolicy, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
+    Prediction, UncachedDistances,
+};
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
@@ -265,7 +268,7 @@ fn fit_lbfgs(c: &mut Criterion) {
     group.finish();
 }
 
-fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr<Fixed> {
+fn fitted_ard<C: DistanceCachePolicy>(policy: C) -> FittedGpr<Fixed, FullRecompute, C> {
     let ells = [ELL_ARD; D_ARD];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
@@ -278,27 +281,63 @@ fn fitted_ard(policy: DistanceCachePolicy) -> FittedGpr<Fixed> {
         .expect("training Cholesky")
 }
 
+fn bench_mll_ard<C: DistanceCachePolicy>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    name: &str,
+    policy: C,
+) {
+    let mut gpr = fitted_ard(policy);
+    let mut params = vec![0.0; gpr.num_params()];
+    gpr.get_params(&mut params).expect("param length");
+    let mut grad = vec![0.0; params.len()];
+    group.bench_function(name, move |b| {
+        b.iter(|| {
+            let value = gpr.value_and_gradient_into(
+                std::hint::black_box(&params),
+                std::hint::black_box(&mut grad),
+            );
+            std::hint::black_box(value)
+        });
+    });
+}
+
 fn mll_and_grad_ard(c: &mut Criterion) {
     let mut group = c.benchmark_group("mll_and_grad_ard");
-    for (name, policy) in [
-        ("always", DistanceCachePolicy::Always),
-        ("never", DistanceCachePolicy::Never),
-    ] {
-        let mut gpr = fitted_ard(policy);
-        let mut params = vec![0.0; gpr.num_params()];
-        gpr.get_params(&mut params).expect("param length");
-        let mut grad = vec![0.0; params.len()];
-        group.bench_function(name, move |b| {
-            b.iter(|| {
-                let value = gpr.value_and_gradient_into(
-                    std::hint::black_box(&params),
-                    std::hint::black_box(&mut grad),
-                );
-                std::hint::black_box(value)
-            });
-        });
-    }
+    bench_mll_ard(&mut group, "always", CachedDistances);
+    bench_mll_ard(&mut group, "never", UncachedDistances);
     group.finish();
+}
+
+fn bench_fit_ard<C: DistanceCachePolicy>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    name: &str,
+    policy: C,
+    x: &[f64],
+    y: &[f64],
+    ells: &[f64; D_ARD],
+) {
+    group.bench_function(name, |b| {
+        b.iter_batched(
+            || {
+                let kernel = KernelSpec::from(RbfArdKernel::new(ells).expect("valid lengthscale"));
+                let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+                (
+                    Gpr::new(kernel, likelihood)
+                        .with_distance_cache_policy(policy)
+                        .with_target_transform(StandardizeTarget::new()),
+                    x.to_vec(),
+                    y.to_vec(),
+                )
+            },
+            |(gpr, x, y)| {
+                let fitted = gpr
+                    .fit(std::hint::black_box(&x), N, D_ARD, std::hint::black_box(&y))
+                    .expect("lbfgs");
+                std::hint::black_box(fitted)
+            },
+            BatchSize::LargeInput,
+        );
+    });
 }
 
 fn fit_lbfgs_ard(c: &mut Criterion) {
@@ -306,34 +345,8 @@ fn fit_lbfgs_ard(c: &mut Criterion) {
     let ells = [ELL_ARD; D_ARD];
     let mut group = c.benchmark_group("fit_lbfgs_ard");
     group.sample_size(10);
-    for (name, policy) in [
-        ("always", DistanceCachePolicy::Always),
-        ("never", DistanceCachePolicy::Never),
-    ] {
-        group.bench_function(name, |b| {
-            b.iter_batched(
-                || {
-                    let kernel =
-                        KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
-                    let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
-                    (
-                        Gpr::new(kernel, likelihood)
-                            .with_distance_cache_policy(policy)
-                            .with_target_transform(StandardizeTarget::new()),
-                        x.clone(),
-                        y.clone(),
-                    )
-                },
-                |(gpr, x, y)| {
-                    let fitted = gpr
-                        .fit(std::hint::black_box(&x), N, D_ARD, std::hint::black_box(&y))
-                        .expect("lbfgs");
-                    std::hint::black_box(fitted)
-                },
-                BatchSize::LargeInput,
-            );
-        });
-    }
+    bench_fit_ard(&mut group, "always", CachedDistances, &x, &y, &ells);
+    bench_fit_ard(&mut group, "never", UncachedDistances, &x, &y, &ells);
     group.finish();
 }
 

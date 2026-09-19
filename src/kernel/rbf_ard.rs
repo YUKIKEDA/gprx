@@ -18,7 +18,7 @@ use faer::{MatMut, MatRef};
 /// matrix is not enough for `∂K/∂θ_d`. Amplitude is not stored here.
 ///
 /// Cloning copies the lengthscale vectors. When
-/// [`crate::DistanceCachePolicy::Always`] is set, [`crate::Gpr`] caches raw
+/// [`crate::CachedDistances`] is set, [`crate::Gpr`] caches raw
 /// `(Δx_d)²` as `n × (n·d)` and evaluates from that tensor. Column-major
 /// views with unit row stride use `wide::f64x4` for [`Self::apply`] and
 /// [`Self::grad`].

@@ -3,7 +3,7 @@
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{
     Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
-    write_triangle,
+    write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
@@ -207,6 +207,36 @@ impl PeriodicKernel {
         let ell = self.lengthscale();
         let period = self.period();
         write_triangle(dist, d_k, uplo, |d| {
+            periodic_grad_from_sq_dist(d, ell, period, param_idx)
+        })
+    }
+
+    pub(crate) fn apply_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let ell = self.lengthscale();
+        let period = self.period();
+        write_square_from_coords(x, out, uplo, |d| periodic_from_sq_dist(d, ell, period))
+    }
+
+    pub(crate) fn grad_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if param_idx > 1 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("periodic kernel parameter index {param_idx} is out of range"),
+            });
+        }
+        let ell = self.lengthscale();
+        let period = self.period();
+        write_square_from_coords(x, d_k, uplo, |d| {
             periodic_grad_from_sq_dist(d, ell, period, param_idx)
         })
     }
