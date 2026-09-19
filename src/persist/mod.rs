@@ -44,7 +44,8 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// [`Self::Distance`]. Standalone Linear / Constant / White models
 /// (trainers from [`crate::Gpr::from_points`]) are [`Self::Points`].
 /// Re-training is [`crate::FittedGpr::with_optimizer`] then
-/// [`crate::FittedGpr::refit`]. The file does not store a solver.
+/// [`crate::FittedGpr::refit`]. The file does not store a solver or a
+/// Cholesky buffer policy; load is always [`crate::RetainCholesky`].
 ///
 /// # Examples
 ///
@@ -91,7 +92,8 @@ impl LoadedGpr {
     ///
     /// Reconstructs fitted transforms from the config and applies them to the
     /// stored original `X` / `y`. When `L` is present, the safetensors file
-    /// stays memory-mapped for the Cholesky factor. Unknown
+    /// stays memory-mapped for the Cholesky factor. The buffer policy is
+    /// [`crate::RetainCholesky`]. Unknown
     /// [`FORMAT_VERSION`] is rejected.
     ///
     /// # Errors
@@ -127,11 +129,15 @@ pub(crate) fn persist_err(reason: impl Into<String>) -> GprError {
     }
 }
 
-pub(crate) fn save_fitted<O, S, C: DistanceCacheSlot>(
-    model: &FittedGpr<O, S, C>,
+pub(crate) fn save_fitted<O, S, C, B>(
+    model: &FittedGpr<O, S, C, B>,
     dir: &Path,
     with_factor: bool,
-) -> Result<(), GprError> {
+) -> Result<(), GprError>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
     std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
     let config = ModelConfig {
         format_version: FORMAT_VERSION,

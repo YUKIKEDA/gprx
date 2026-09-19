@@ -3,7 +3,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
 use crate::gpr::{
     AdaptiveJitter, DistanceCachePolicy, DistanceCacheSlot, FixedJitter, JitterPolicy,
-    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
+    NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance, ReuseCholesky, VarianceKind,
 };
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -1110,6 +1110,49 @@ fn rbf_ard_fit_optimizes_with_always_cache() {
     );
     assert_eq!(gpr.workspace.ard_sq_diff.ncols(), 6);
     assert!(gpr.workspace.ard_sq_diff_ready);
+}
+
+#[test]
+fn retain_and_reuse_match_nlml_grad_and_predict() {
+    let x = [0.0, 0.4, 1.0];
+    let y = [0.2, -0.1, 0.8];
+    let xs = [0.5];
+    let mut retain = rbf_gpr(1.0, 0.1)
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 1, &y)
+        .expect("spd");
+    let mut reuse = rbf_gpr(1.0, 0.1)
+        .with_cholesky_buffer(ReuseCholesky)
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 1, &y)
+        .expect("spd");
+    let mut params = [0.0; 2];
+    retain.get_params(&mut params).expect("len 2");
+    let mut grad_r = [0.0; 2];
+    let mut grad_u = [0.0; 2];
+    let vr = retain
+        .value_and_gradient_into(&params, &mut grad_r)
+        .expect("spd");
+    let vu = reuse
+        .value_and_gradient_into(&params, &mut grad_u)
+        .expect("spd");
+    assert_close(vr, vu);
+    assert_close(grad_r[0], grad_u[0]);
+    assert_close(grad_r[1], grad_u[1]);
+    let pr = retain.predict(&xs, 1, 1).expect("fitted");
+    let pu = reuse.predict(&xs, 1, 1).expect("fitted");
+    assert_close(pr.mean[0], pu.mean[0]);
+    assert_close(pr.variance[0], pu.variance[0]);
+
+    let fitted_r = rbf_gpr(1.0, 0.1).fit(&x, 3, 1, &y).expect("optimize");
+    let fitted_u = rbf_gpr(1.0, 0.1)
+        .with_cholesky_buffer(ReuseCholesky)
+        .fit(&x, 3, 1, &y)
+        .expect("optimize");
+    let fr = fitted_r.predict(&xs, 1, 1).expect("fitted");
+    let fu = fitted_u.predict(&xs, 1, 1).expect("fitted");
+    assert_close(fr.mean[0], fu.mean[0]);
+    assert_close(fr.variance[0], fu.variance[0]);
 }
 
 #[test]
