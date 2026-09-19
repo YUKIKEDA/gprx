@@ -3,7 +3,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
 use crate::gpr::{
     AdaptiveJitter, DistanceCachePolicy, FixedJitter, JitterPolicy, PredictOptions, Prediction,
-    VarianceKind,
+    PredictiveCovariance, VarianceKind,
 };
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -87,6 +87,7 @@ fn is_send_sync() {
     assert_send_sync::<FittedGpr<NonlinearCg>>();
     assert_send_sync::<FittedGpr<NelderMead>>();
     assert_send_sync::<Prediction>();
+    assert_send_sync::<PredictiveCovariance>();
     assert_send_sync::<VarianceKind>();
     assert_send_sync::<PredictOptions>();
     assert_send_sync::<JitterPolicy>();
@@ -151,6 +152,119 @@ fn predict_into_matches_predict() {
             .iter()
             .all(|m| m.nrows() == 0 && m.ncols() == 0)
     );
+}
+
+fn cov_diag(cov: &PredictiveCovariance) -> Vec<f64> {
+    let m = cov.mean.len();
+    (0..m).map(|i| cov.covariance[i * m + i]).collect()
+}
+
+#[test]
+fn predict_covariance_diagonal_matches_predict() {
+    let gpr = rbf_gpr(1.0, 0.1)
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+        .expect("spd");
+    let xs = [0.25, 0.75];
+    let pred = gpr.predict(&xs, 2, 1).expect("fitted");
+    let cov = gpr.predict_covariance(&xs, 2, 1).expect("fitted");
+    assert_eq!(cov.mean, pred.mean);
+    assert_eq!(cov.variance_kind, pred.variance_kind);
+    let diag = cov_diag(&cov);
+    for (d, v) in diag.iter().zip(pred.variance.iter()) {
+        assert_close(*d, *v);
+    }
+    assert_close(cov.covariance[1], cov.covariance[2]);
+    let lat = gpr
+        .predict_covariance_with(
+            &xs,
+            2,
+            1,
+            PredictOptions {
+                variance_kind: VarianceKind::Latent,
+            },
+        )
+        .expect("fitted");
+    let lat_pred = gpr
+        .predict_with(
+            &xs,
+            2,
+            1,
+            PredictOptions {
+                variance_kind: VarianceKind::Latent,
+            },
+        )
+        .expect("fitted");
+    for (d, v) in cov_diag(&lat).iter().zip(lat_pred.variance.iter()) {
+        assert_close(*d, *v);
+    }
+    assert_close(cov.covariance[0], lat.covariance[0] + 0.1);
+    assert_close(cov.covariance[3], lat.covariance[3] + 0.1);
+    assert_close(cov.covariance[1], lat.covariance[1]);
+}
+
+#[test]
+fn predict_covariance_n1_matches_predict() {
+    let gpr = rbf_gpr(1.0, 0.1)
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+        .expect("spd");
+    let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
+    let cov = gpr.predict_covariance(&[0.5], 1, 1).expect("fitted");
+    assert_eq!(cov.mean, pred.mean);
+    assert_eq!(cov.covariance.len(), 1);
+    assert_close(cov.covariance[0], pred.variance[0]);
+}
+
+#[test]
+fn predict_covariance_standardize_diagonal_matches_predict() {
+    let y = [0.0, 4.0];
+    let gpr = rbf_gpr(1.0, 0.16)
+        .with_target_transform(StandardizeTarget::new())
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &y)
+        .expect("spd");
+    let xs = [0.25, 0.75];
+    let pred = gpr.predict(&xs, 2, 1).expect("fitted");
+    let cov = gpr.predict_covariance(&xs, 2, 1).expect("fitted");
+    assert_eq!(cov.mean, pred.mean);
+    for (d, v) in cov_diag(&cov).iter().zip(pred.variance.iter()) {
+        assert_close(*d, *v);
+    }
+}
+
+#[test]
+fn predict_covariance_ard_diagonal_matches_predict() {
+    let x = [0.0, 0.5, 1.5, 0.0, 1.0, 0.5];
+    let y = [0.2, -1.0, 0.7];
+    let xs = [0.25, 1.0, 0.75, 0.5];
+    let gpr = rbf_ard_gpr(&[1.25, 0.8], 0.1)
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 2, &y)
+        .expect("spd");
+    let pred = gpr.predict(&xs, 2, 2).expect("fitted");
+    let cov = gpr.predict_covariance(&xs, 2, 2).expect("fitted");
+    assert_eq!(cov.mean, pred.mean);
+    for (d, v) in cov_diag(&cov).iter().zip(pred.variance.iter()) {
+        assert_close(*d, *v);
+    }
+}
+
+#[test]
+fn sample_is_deterministic_for_seed() {
+    let gpr = rbf_gpr(1.0, 0.1)
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+        .expect("spd");
+    let xs = [0.25, 0.75];
+    let a = gpr.sample(&xs, 2, 1, 3, 7).expect("fitted");
+    let b = gpr.sample(&xs, 2, 1, 3, 7).expect("fitted");
+    assert_eq!(a, b);
+    assert_eq!(a.len(), 6);
+    let c = gpr.sample(&xs, 2, 1, 3, 8).expect("fitted");
+    assert_ne!(a, c);
+    let empty = gpr.sample(&xs, 2, 1, 0, 7).expect("fitted");
+    assert!(empty.is_empty());
 }
 
 #[test]
