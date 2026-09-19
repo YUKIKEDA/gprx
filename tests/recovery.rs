@@ -7,6 +7,8 @@
 
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, NonlinearCg};
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
 
 const N: usize = 40;
 const D: usize = 1;
@@ -19,24 +21,26 @@ const SEED: u64 = 0;
 /// Recovered `ℓ` and `σn²` must lie within this relative band of the truth.
 const REL_TOL: f64 = 0.5;
 
-fn splitmix64(state: &mut u64) -> f64 {
-    *state = state.wrapping_add(0x9E3779B97F4A7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    (z >> 11) as f64 / ((1u64 << 53) as f64)
+fn small_rng(seed: u64) -> SmallRng {
+    SmallRng::seed_from_u64(seed)
 }
 
-fn standard_normal(state: &mut u64) -> f64 {
-    loop {
-        let u = 2.0 * splitmix64(state) - 1.0;
-        let v = 2.0 * splitmix64(state) - 1.0;
-        let s = u * u + v * v;
-        if s > 0.0 && s < 1.0 {
-            return u * (-2.0 * s.ln() / s).sqrt();
-        }
+fn open_unit(rng: &mut SmallRng) -> f64 {
+    let u: f64 = rng.random();
+    let eps = 1.0 / ((1u64 << 53) as f64);
+    if u <= eps {
+        eps
+    } else if u >= 1.0 - eps {
+        1.0 - eps
+    } else {
+        u
     }
+}
+
+fn standard_normal(rng: &mut SmallRng) -> f64 {
+    let u1 = open_unit(rng).max(f64::MIN_POSITIVE);
+    let u2 = open_unit(rng);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 fn grid_x(n: usize) -> Vec<f64> {
@@ -84,8 +88,8 @@ fn sample_gp(x: &[f64], ell: f64, noise: f64, seed: u64) -> Vec<f64> {
     let n = x.len();
     let mut a = rbf_cov(x, ell, noise);
     cholesky_lower(&mut a, n);
-    let mut state = seed;
-    let z: Vec<f64> = (0..n).map(|_| standard_normal(&mut state)).collect();
+    let mut rng = small_rng(seed);
+    let z: Vec<f64> = (0..n).map(|_| standard_normal(&mut rng)).collect();
     let mut y = vec![0.0; n];
     for i in 0..n {
         let mut s = 0.0;
