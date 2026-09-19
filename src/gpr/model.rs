@@ -239,12 +239,18 @@ impl Gpr {
 
 impl<O, S> Gpr<O, S> {
     /// Replaces the input (`X`) transform. Intended to be called before fit.
+    ///
+    /// A single map or a [`crate::transform::Pipeline`]. One-step maps still
+    /// use this method.
     pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
         self.x_transform = Box::new(transform);
         self
     }
 
     /// Replaces the target (`y`) transform. Intended to be called before fit.
+    ///
+    /// A single map or a [`crate::transform::TargetPipeline`]. One-step maps
+    /// still use this method.
     pub fn with_target_transform(mut self, transform: impl UnfittedTarget + 'static) -> Self {
         self.y_transform = Box::new(transform);
         self
