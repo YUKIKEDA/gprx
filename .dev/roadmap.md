@@ -177,7 +177,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-19 | Feat | fit 中の `L`/`W` バッファ共用                 | P2B-1  | Grill 後に [#111](https://github.com/YUKIKEDA/gprx/issues/111) で確定 |
 | P2B-20 | Task | transform ファイル分割の判断                  | P2B-10 | Grill 後に [#116](https://github.com/YUKIKEDA/gprx/issues/116) で確定 |
 | P2B-21 | Feat | libgp 比のピーク RSS                          | P2B-16 | Grill 後に [#142](https://github.com/YUKIKEDA/gprx/issues/142) で確定 |
-| P2B-22 | Feat | n=4096 の MLL+grad（sklearn 比）              | P2B-16 | Grill 後に [#143](https://github.com/YUKIKEDA/gprx/issues/143) で確定 |
+| P2B-22 | Feat | n=4096 の MLL+grad（sklearn 比）              | P2B-16 | factor の Cholesky、α/W の `solve_in_place`、predict / LOO / `predict_covariance` の三角ソルブが `faer_par(n)`（`min(プール, max(1, n/64))`）。カーネルはプール全部。scratch は同じ `Par`。公開 `n_jobs` なし。rustdoc に式。ADR `.dev/adr/0001-faer-parallel-degree.md`、§8 から 1 行。`just lint` / `just test`。n=4096 Forrester / sphere で sklearn の factor・eval が P2B-16 ゲートを通る。n=256 の factor が sklearn より短い。n=256 / 1024 の eval が同じセッションの HEAD 逐次 5 回平均 +10% を超えない（PR 冒頭 HEAD、実装後に式入り、各 5 回）。記録は `.dev/bench-log.md`。手動、CI なし。criterion / RSS は合否にしない（RSS は [#142](https://github.com/YUKIKEDA/gprx/issues/142)） |
 
 **2b 完了:** P2B-1…22 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…22 の作業は各 Issue の Grill と DoD 確定のあと。
 

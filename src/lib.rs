@@ -17,7 +17,10 @@
 //! `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before
 //! the first [`Gpr::fit`] / [`FittedGpr::predict`]. One worker
 //! (`RAYON_NUM_THREADS=1`) is sequential. The global pool can be
-//! initialized only once.
+//! initialized only once. Training Cholesky, the `W` solve, and the
+//! predict / LOO triangular solves cap faer at
+//! `min(pool, max(1, n / 64))` so a large default pool does not slow
+//! small `n`. Kernel fills still use the full pool.
 //!
 //! # Examples
 //!

@@ -620,7 +620,7 @@ fit()終了 → FittedGpr が L, α, X を保持。W / ∂K / L-BFGS は捨て�
 
 - カーネル評価内側ループは `wide::f64x4` でベクトル化する（P2-5 / P2-7）。対象は列優先・単位行ストライドの等方 RBF `apply` / `grad` / `apply_cross`、ARD RBF `apply` / `grad`、二乗距離と `(Δx_d)²` の行ループ。ストライドが 1 でないビューはスカラーに落とす。`std::simd` は安定化まで使わない。Matérn / Periodic / RQ の内側は未導入。
 - 距離行列・カーネル行列構築はRayonでブロック並列化
-- faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有
+- faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有。faer の本数は `min(プール, max(1, n/64))`（[ADR 0001](adr/0001-faer-parallel-degree.md)）。カーネル埋めはプール全部
 
 **MathBackendは最小限のAPIから始め、デフォルトは近似ではなく正確な実装にする**。カーネル行列の近似誤差は正定値性・Cholesky安定性・尤度・勾配・予測値すべてに波及するため。
 

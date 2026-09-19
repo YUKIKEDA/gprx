@@ -186,7 +186,7 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 ゲート: sklearn は factor 時間・eval 時間・RSS がすべて小さい（5% 以内は判定不能）。libgp は ±10%。friedrich は factor 時間か RSS の一方。
 
-負け: sklearn は n=4096 の 2 セル（eval が約 2 倍遅い。RSS は gprx が小さい）。libgp は走った 6 セルすべて（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。
+負け（この節の計測時）: sklearn は n=4096 の 2 セル（eval が約 2 倍遅い。RSS は gprx が小さい）。libgp は走った 6 セルすべて（RSS が +10% 超。eval 時間は gprx の方が短い）。friedrich の等方 3 セルは pass。n=4096 eval は P2B-22 / [#143](https://github.com/YUKIKEDA/gprx/issues/143) で faer 並列のあと再判定。
 
 | 問題      | n    | lib       | factor    | eval 10   | predict 100 | peak RSS   | ゲート                         |
 | --------- | ---- | --------- | --------- | --------- | ----------- | ---------- | ------------------------------ |
@@ -215,5 +215,38 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 | 球 ARD    | 4096 | libgp     | 1.591 s   | 110.568 s | 385.57 ms   | 405.2 MiB  | fail（RSS +95%）               |
 | 球 ARD    | 4096 | friedrich | N/A       | N/A       | N/A         | N/A        | N/A                            |
 
-時間は同じ仕事（factor 1 回 + MLL+grad 10 回）で比較できる。libgp の eval は gprx より遅い。n=4096 の sklearn eval は gprx より短い。RSS は sklearn 全セルで gprx が小さく、libgp / friedrich より大きい。改善行: RSS vs libgp は P2B-21 / [#142](https://github.com/YUKIKEDA/gprx/issues/142)。n=4096 eval vs sklearn は P2B-22 / [#143](https://github.com/YUKIKEDA/gprx/issues/143)。
+時間は同じ仕事（factor 1 回 + MLL+grad 10 回）で比較できる。libgp の eval は gprx より遅い。n=4096 の sklearn eval は（この節では）gprx より短い。RSS は sklearn 全セルで gprx が小さく、libgp / friedrich より大きい。改善行: RSS vs libgp は P2B-21 / [#142](https://github.com/YUKIKEDA/gprx/issues/142)。n=4096 eval vs sklearn は次節 P2B-22。
+
+## P2B-22（faer 並列度、[#143](https://github.com/YUKIKEDA/gprx/issues/143)）
+
+同一機械。日付 2026-09-19。ADR [`.dev/adr/0001-faer-parallel-degree.md`](adr/0001-faer-parallel-degree.md)。`faer_par(n) = min(プール, max(1, n/64))`。カーネルはプール全部。criterion は合否に使っていない。
+
+対照: PR 冒頭の HEAD（faer `Par::Seq`）5 回平均と、実装後 5 回。`RAYON_NUM_THREADS` 未設定（16 論理）。
+
+**n=256 / 1024 eval 10（逐次比、+10% まで）**
+
+| 問題 | n | HEAD 逐次 | 実装後 | 比 | 判定 |
+|---|---:|---:|---:|---:|---|
+| Forrester | 256 | 12.45 ms | 12.22 ms | 0.98 | pass |
+| sphere | 256 | 12.70 ms | 13.42 ms | 1.06 | pass |
+| Forrester | 1024 | 530 ms | 208 ms | 0.39 | pass |
+| sphere | 1024 | 547 ms | 288 ms | 0.53 | pass |
+
+**n=256 factor vs 同セッション sklearn**
+
+| 問題 | gprx | sklearn | 判定 |
+|---|---:|---:|---|
+| Forrester | 1.98 ms | 3.77 ms | pass |
+| sphere | 2.22 ms | 8.83 ms | pass |
+
+**n=4096 vs 同セッション sklearn（P2B-16 ゲート: factor・eval が小さい）**
+
+| 問題 | 項目 | gprx（5 回平均） | sklearn | 判定 |
+|---|---|---:|---:|---|
+| Forrester | factor | 0.465 s | 1.221 s | pass |
+| Forrester | eval 10 | 7.90 s | 20.45 s | pass |
+| sphere | factor | 0.432 s | 1.320 s | pass |
+| sphere | eval 10 | 8.73 s | 23.30 s | pass |
+
+predict 100 は合否に使っていない（Forrester 4096: 55 ms、sklearn 42 ms）。
 
