@@ -104,7 +104,7 @@ pub(crate) struct GprObjective<
     'a,
     O,
     S,
-    C = crate::DistanceCachePolicy,
+    C: crate::gpr::DistanceCacheSlot = crate::CachedDistances,
     B: crate::gpr::AllocWorkspace = crate::RetainCholesky,
 > {
     model: &'a mut FittedGpr<O, S, C, B>,

@@ -452,14 +452,14 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy, B = RetainCholesky>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C`、Cholesky バッファ方針 `B` を持つ。`Gpr::new` の `C` は `DistanceCachePolicy`。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。`with_distance_cache_policy` は `C = DistanceCachePolicy` にだけある。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
+`Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C`、Cholesky バッファ方針 `B` を持つ。`DistanceCachePolicy` はトレイト。`Gpr::new` の `C` は `CachedDistances`。`with_distance_cache_policy(UncachedDistances)` が型を差し替える。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。`with_distance_cache_policy` は `C: DistanceCachePolicy` にだけある。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
 既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
 
 ```rust
-struct Gpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy> {
+struct Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
@@ -490,12 +490,11 @@ struct NelderMead {
     n_restarts: u32,
 }
 
-enum DistanceCachePolicy {
-    Never,
-    Always,
-} // 距離モードの経路だけ（P2B-11）。Linear / Constant / White 専用の trainer には無い
+trait DistanceCachePolicy {} // CachedDistances | UncachedDistances。距離モードの経路だけ（P2B-11）
+struct CachedDistances; // 既定。n×n（ARD は n×(n·d)）を Workspace に持つ
+struct UncachedDistances; // dist_cache / ard_sq_diff を置かない。等方は X から距離
 
-struct FittedGpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy> {
+struct FittedGpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
@@ -514,7 +513,7 @@ struct FittedGpr<O = Lbfgs, S = FullRecompute, C = DistanceCachePolicy> {
 
 /// Objective は `Gpr` を fit 中だけ &mut で借り、set_params → MLL/勾配 を中継する。
 /// パラメータの正本は Gpr.kernel / Gpr.likelihood。
-struct GprObjective<'a, O, S, C = DistanceCachePolicy> {
+struct GprObjective<'a, O, S, C = CachedDistances> {
     model: &'a mut FittedGpr<O, S, C>,
 }
 ```
@@ -534,7 +533,7 @@ struct GprObjective<'a, O, S, C = DistanceCachePolicy> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-`DistanceCachePolicy::Always`（既定）は `fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。`Never` は毎回埋め直す。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。この方針は距離経路の trainer（`Gpr::new`）だけが持つ。`RBF + White` と `Constant * RBF` は距離経路のまま。`from_points` の Linear / Constant / White には枠ごと無い。
+既定の `C` は `CachedDistances`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`UncachedDistances` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。速さは既定のまま。メモリ優先の合否は `UncachedDistances` + `RetainCholesky`（P2B-21）。この方針は距離経路の trainer（`Gpr::new`）だけが持つ。`RBF + White` と `Constant * RBF` は距離経路のまま。`from_points` の Linear / Constant / White には枠ごと無い。persist タグは `always` / `never`。`LoadedGpr::Distance` は inner enum。`load` は `RetainCholesky`。
 
 ### 6.4 Leave-one-out(P1B-7)
 
@@ -560,7 +559,6 @@ sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_
 ```rust
 struct WorkspaceCore<P: PrecisionPolicy> {
     k_matrix: Mat<P::Storage>,       // K → Cholesky後は L。Reuse の勾配中は W
-    dist_cache: Mat<P::Storage>,
     exp_buf: Mat<P::Storage>,        // カーネル評価、∂K/∂θ。Reuse の n-RHS はここ
     kernel_scratch: Mat<P::Storage>, // product `∂K/∂θ`。等方 RBF では空
     thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
@@ -569,13 +567,15 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
 }
 
-struct Workspace<P: PrecisionPolicy> {          // RetainCholesky
-    core: WorkspaceCore<P>,
-    w_matrix: Mat<P::Storage>,       // W = ααᵀ - K⁻¹。勾配のトレース項(§6.2)
+struct WithDist<W> {                // CachedDistances。Uncached はこのラッパを付けない
+    inner: W,
+    dist_cache: Mat<f64>,
+    ard_sq_diff: Mat<f64>,           // 等方では 0×0
 }
 
-struct ReuseWorkspace<P: PrecisionPolicy> {     // ReuseCholesky。第2の n×n (W) は無い
-    core: WorkspaceCore<P>,
+struct WithW<W> {                   // RetainCholesky。Reuse はこのラッパを付けない
+    inner: W,
+    w_matrix: Mat<f64>,             // W = ααᵀ - K⁻¹。勾配のトレース項(§6.2)
 }
 
 // FittedGpr が保持。predict_into の warmup で (n, m, d) に合わせる

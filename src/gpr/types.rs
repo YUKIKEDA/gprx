@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::error::GprError;
 use crate::precision::DoublePrecision;
-use crate::workspace::{FitWorkspace, ReuseWorkspace, Workspace};
+use crate::workspace::{FitWorkspace, WithDist, WithW, WorkspaceCore};
 
 /// Which predictive variance [`Prediction`] reports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,79 +32,126 @@ impl Default for PredictOptions {
     }
 }
 
-/// Selects whether training distances are reused across kernel builds.
+/// Marker for whether [`crate::Gpr`] caches training distances.
 ///
-/// Isotropic RBF, Matérn, Periodic, and RQ evaluate from an `n×n` squared
-/// Euclidean matrix. ARD RBF / Matérn / RQ evaluate from raw `(Δx_d)²` stored
-/// as `n × (n·d)`. [`Self::Always`] fills the matching tensor once per fit.
-/// [`Self::Never`] recomputes it on every kernel build.
+/// The only implementations are [`CachedDistances`] and
+/// [`UncachedDistances`]. Switch with
+/// [`crate::Gpr::with_distance_cache_policy`]. Standalone Linear, Constant,
+/// and White trainers use [`crate::Gpr::from_points`] and have no cache
+/// slot.
+#[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; the public slot types are the unit structs.
+pub trait DistanceCachePolicy:
+    DistanceCacheSlot + Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
+{
+}
+
+/// Fills training distances once per fit and reuses them while `X` is
+/// unchanged.
 ///
-/// This type is the cache slot on trainers from [`crate::Gpr::new`].
-/// Standalone Linear, Constant, and White trainers use
-/// [`crate::Gpr::from_points`] and have no
-/// [`crate::Gpr::with_distance_cache_policy`].
+/// This is the default [`crate::Gpr`] cache policy. Isotropic fits store an
+/// `n×n` squared-Euclidean matrix. ARD fits also store raw `(Δx_d)²` as
+/// `n × (n·d)`.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{DistanceCachePolicy, GaussianLikelihood, Gpr};
+/// use gprx::{CachedDistances, GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let gpr = Gpr::new(kernel, likelihood)
-///     .with_distance_cache_policy(DistanceCachePolicy::Always);
+/// let gpr = Gpr::new(kernel, likelihood).with_distance_cache_policy(CachedDistances);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum DistanceCachePolicy {
-    /// Recompute isotropic `n×n` distances or ARD `(Δx_d)²` on every kernel build.
-    Never,
-    /// Fill distances once per fit and reuse them while `X` is unchanged.
-    /// This is the default. ARD fits store an extra `n×(n·d)` tensor.
-    #[default]
-    Always,
+pub struct CachedDistances;
+
+/// Recomputes training distances from `X` on every kernel build.
+///
+/// The workspace has no `dist_cache` / `ard_sq_diff`. Isotropic leaves
+/// evaluate `‖x_i-x_j‖²` from coordinates. Peak RSS is the P2B-21 gate
+/// path when paired with [`crate::RetainCholesky`].
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, UncachedDistances};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+/// let likelihood = GaussianLikelihood::new(0.1)?;
+/// let gpr = Gpr::new(kernel, likelihood).with_distance_cache_policy(UncachedDistances);
+/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UncachedDistances;
+
+impl DistanceCachePolicy for CachedDistances {}
+
+impl DistanceCachePolicy for UncachedDistances {}
+
+/// Persist tag written as `always` / `never` in `config.json`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DistanceCachePersist {
+    Cached,
+    Uncached,
 }
 
-/// Maps a trainer cache slot to the policy used when factorizing `A`.
+/// Maps a trainer cache slot to workspace wrapping and persist tags.
 pub(crate) trait DistanceCacheSlot:
     Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {
-    fn policy(self) -> DistanceCachePolicy;
+    type DistWrap<W: FitWorkspace>: FitWorkspace;
+    const CACHES_DISTANCES: bool;
 
-    fn persist(self) -> Option<DistanceCachePolicy>;
+    fn persist(self) -> Option<DistanceCachePersist>;
 }
 
-impl DistanceCacheSlot for DistanceCachePolicy {
-    fn policy(self) -> DistanceCachePolicy {
-        self
-    }
+impl DistanceCacheSlot for CachedDistances {
+    type DistWrap<W: FitWorkspace> = WithDist<W>;
+    const CACHES_DISTANCES: bool = true;
 
-    fn persist(self) -> Option<DistanceCachePolicy> {
-        Some(self)
+    fn persist(self) -> Option<DistanceCachePersist> {
+        Some(DistanceCachePersist::Cached)
+    }
+}
+
+impl DistanceCacheSlot for UncachedDistances {
+    type DistWrap<W: FitWorkspace> = W;
+    const CACHES_DISTANCES: bool = false;
+
+    fn persist(self) -> Option<DistanceCachePersist> {
+        Some(DistanceCachePersist::Uncached)
     }
 }
 
 /// Marks a trainer that does not store a [`DistanceCachePolicy`].
 ///
 /// [`crate::Gpr::from_points`] builds this slot for a standalone Linear,
-/// Constant, or White kernel. Distance kernels keep [`DistanceCachePolicy`]
-/// on [`crate::Gpr::new`].
+/// Constant, or White kernel. Distance kernels keep [`CachedDistances`]
+/// or [`UncachedDistances`] on [`crate::Gpr::new`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NoDistanceCache;
 
 impl DistanceCacheSlot for NoDistanceCache {
-    fn policy(self) -> DistanceCachePolicy {
-        DistanceCachePolicy::Never
-    }
+    type DistWrap<W: FitWorkspace> = W;
+    const CACHES_DISTANCES: bool = false;
 
-    fn persist(self) -> Option<DistanceCachePolicy> {
+    fn persist(self) -> Option<DistanceCachePersist> {
         None
     }
 }
+
+/// Composed fit buffers for cache policy `C` and Cholesky policy `B`.
+pub(crate) type FitBuffers<C, B> = <C as DistanceCacheSlot>::DistWrap<
+    <B as AllocWorkspace>::CholWrap<WorkspaceCore<DoublePrecision>>,
+>;
 
 /// Numerical Cholesky stabilizer, distinct from observation noise.
 ///
@@ -434,16 +481,16 @@ impl CholeskyBuffer for ReuseCholesky {}
 
 /// Crate-private workspace allocation for a [`CholeskyBuffer`].
 pub(crate) trait AllocWorkspace: CholeskyBuffer {
-    type Workspace: FitWorkspace;
+    type CholWrap<W: FitWorkspace>: FitWorkspace;
     const OVERWRITES_CHOLESKY: bool;
 }
 
 impl AllocWorkspace for RetainCholesky {
-    type Workspace = Workspace<DoublePrecision>;
+    type CholWrap<W: FitWorkspace> = WithW<W>;
     const OVERWRITES_CHOLESKY: bool = false;
 }
 
 impl AllocWorkspace for ReuseCholesky {
-    type Workspace = ReuseWorkspace<DoublePrecision>;
+    type CholWrap<W: FitWorkspace> = W;
     const OVERWRITES_CHOLESKY: bool = true;
 }
