@@ -274,7 +274,7 @@ P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCac
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
-Sum/Productは結合則・交換則が効くため、flatten+fold評価で済む。公開の `KernelSpec *` は Dist 葉でも Points 葉でも `grad` まで通る。Dist 葉と Points 葉の Sum/Product（例: `RBF + Linear`）は混ぜて評価する（P2B-13）。`coord_mode` の実行時エラーや、型で混ぜを禁止する設計にはしない。
+Sum/Productは結合則・交換則が効くため、flatten+fold評価で済む。公開の `KernelSpec *` は Dist 葉でも Points 葉でも `grad` まで通る。Dist 葉と Points 葉の Sum/Product（例: `RBF + Linear`）は混ぜて評価する。`coord_mode` は `Mixed` を返し、実行時エラーや型で混ぜを禁止しない。葉は Dist が距離、Points が座標のまま。
 
 1. 距離キャッシュ重複排除: 合成木を走査し`DistanceKind`集合を構築
 2. flatten: `(A+B)+C`を`Sum(vec![A,B,C])`に正規化
@@ -828,7 +828,7 @@ trait OnlineInference<T: Scalar> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-12）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-13）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）

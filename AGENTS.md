@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 2b の P2B-12（Product の points 勾配）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 2b の P2B-13（Dist と Points の Sum/Product）。Phase 3 は 2b のあと。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
