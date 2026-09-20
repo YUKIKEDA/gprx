@@ -2,7 +2,7 @@
 //!
 //! [`Gpr`] is the trainer. [`Gpr::fit`] consumes [`Gpr<Lbfgs>`] and returns
 //! [`FittedGpr`]. [`Gpr::with_optimizer`] swaps in [`NonlinearCg`],
-//! [`NelderMead`], or [`FastSimulatedAnnealing`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
+//! [`NelderMead`], [`Newton`], or [`FastSimulatedAnnealing`]. [`Gpr<Fixed>::factor`] factors at the current `θ` without
 //! a search. Training `X` is column-major: `n` points and `d` features
 //! packed as feature 0 for all rows, then feature 1, and so on.
 //! Observation noise lives in [`GaussianLikelihood`].
@@ -62,8 +62,8 @@ pub use likelihood::GaussianLikelihood;
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
     AcceptsRecompute, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
-    IncrementalRecompute, Lbfgs, NelderMead, NonlinearCg, OptResult, Optimizer, RecomputeStrategy,
-    UsesChangeIndices,
+    IncrementalRecompute, Lbfgs, NelderMead, Newton, NonlinearCg, OptResult, Optimizer,
+    RecomputeStrategy, UsesChangeIndices,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
 pub use persist::{FORMAT_VERSION, LoadedDistance, LoadedGpr, PersistRegistry};

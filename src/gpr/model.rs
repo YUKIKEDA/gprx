@@ -3,7 +3,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use dyn_stack::MemBuffer;
+use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
 
@@ -28,10 +28,11 @@ use crate::workspace::{
 };
 
 use super::factor::{
-    FactorPolicy, cholesky_lower_with_policy, factor_train_with_policy, frobenius_lower,
-    inv_diag_from_chol_l, neg_mll_from_factor, pack_points, pack_points_into, require_param_len,
-    validate_query, validate_training, write_kernel_grad, write_kernel_grad_from_coords,
-    write_params,
+    FactorPolicy, cholesky_lower_with_policy, factor_train_with_policy, frobenius_lower, gemv_full,
+    gemv_sym_lower, inv_diag_from_chol_l, neg_mll_from_factor, pack_points, pack_points_into,
+    require_param_len, symmetrize_lower, trace_product, validate_query, validate_training,
+    write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
+    write_kernel_hess_from_coords, write_params,
 };
 use super::{
     AllocWorkspace, CachedDistances, DistanceCachePolicy, DistanceCacheSlot, FitBuffers,
@@ -384,7 +385,7 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after
     /// this switch. argmin solvers are [`crate::Lbfgs`], [`crate::NonlinearCg`],
-    /// and [`crate::NelderMead`]. A user type that implements [`Optimizer`]
+    /// [`crate::NelderMead`], and [`crate::Newton`]. A user type that implements [`Optimizer`]
     /// uses this same method; there is no second solver slot.
     ///
     /// # Examples
@@ -1252,6 +1253,341 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         );
         self.fill_gradient_from_factor(n_kernel, n, out)?;
         Ok(nlml)
+    }
+
+    /// Writes the analytic NLML Hessian (row-major `p×p`) at `params`.
+    ///
+    /// `params` is kernel `θ` followed by likelihood `θ`. After a successful
+    /// call the stored kernel and likelihood match `params`. `ReuseCholesky`
+    /// rebuilds `L` before return, matching [`Self::value_and_gradient_into`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError`] when a slice length is wrong, `params` is
+    /// rejected, or the Gram matrix does not factor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let mut fitted = Gpr::new(kernel, likelihood)
+    ///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// let mut params = [0.0; 2];
+    /// fitted.get_params(&mut params)?;
+    /// let mut hess = [0.0; 4];
+    /// fitted.hessian_into(&params, &mut hess)?;
+    /// assert!(hess.iter().all(|h| h.is_finite()));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        self.hessian_into_fit(params, out)?;
+        self.restore_cholesky_if_overwritten()?;
+        Ok(())
+    }
+
+    pub(crate) fn hessian_into_fit(
+        &mut self,
+        params: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let n_kernel = self.kernel.num_params();
+        let n_params = self.num_params();
+        require_param_len(params.len(), n_params)?;
+        require_param_len(out.len(), n_params * n_params)?;
+        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        let n = self.n;
+        if let Err(err) = factor_train_with_policy(
+            &compiled,
+            self.x.as_ref(),
+            &mut self.workspace,
+            &self.y_train,
+            likelihood.noise_variance(),
+            FactorPolicy {
+                jitter: self.jitter_policy,
+                stage: CholeskyStage::Fit,
+            },
+        ) {
+            let _ = self.factorize_current();
+            return Err(err);
+        }
+        self.copy_alpha_from_rhs();
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = compiled;
+        self.mapped_factor = None;
+        self.fill_hessian_from_factor(n_kernel, n, out)
+    }
+
+    fn fill_hessian_from_factor(
+        &mut self,
+        n_kernel: usize,
+        n: usize,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        self.workspace.core_mut().ensure_kernel_scratch(n)?;
+        if self.compiled.needs_product_grad_scratch() {
+            self.workspace.core_mut().ensure_kernel_scratch(n)?;
+        }
+        self.workspace.form_gradient_w(&self.alpha, n);
+        out.fill(0.0);
+        let n_params = n_kernel + 1;
+        let noise = self.likelihood.noise_variance();
+        let thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
+        let second = (|| {
+            for i in 0..n_params {
+                for j in i..n_params {
+                    self.write_second_deriv(n_kernel, i, j, n)?;
+                    let inner = frobenius_lower(
+                        self.workspace.gradient_w(),
+                        self.workspace.core().exp_buf.as_ref(),
+                        n,
+                    );
+                    let hij = -0.5 * inner;
+                    out[i * n_params + j] = hij;
+                    out[j * n_params + i] = hij;
+                }
+            }
+            Ok::<(), GprError>(())
+        })();
+        self.workspace.core_mut().thread_scratch = thread_scratch;
+        second?;
+        self.add_noise_first_order(n_kernel, n, noise, out)?;
+        if !self.workspace.has_dedicated_w() {
+            self.factorize_current()?;
+        }
+        self.add_kernel_first_order(n_kernel, n, out)
+    }
+
+    fn write_second_deriv(
+        &mut self,
+        n_kernel: usize,
+        i: usize,
+        j: usize,
+        n: usize,
+    ) -> Result<(), GprError> {
+        if i >= n_kernel || j >= n_kernel {
+            zero_and_maybe_noise(
+                self.workspace.core_mut().exp_buf.as_mut(),
+                n,
+                i == n_kernel && j == n_kernel,
+                self.likelihood.noise_variance(),
+            );
+            return Ok(());
+        }
+        let (core, dist) = self.workspace.split_fit();
+        if let Some(d) = dist {
+            let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready {
+                Some(d.ard_sq_diff.as_ref())
+            } else {
+                None
+            };
+            write_kernel_hess(
+                &self.compiled,
+                d.dist_cache.as_ref(),
+                self.x.as_ref(),
+                ard_cache,
+                core.exp_buf.as_mut(),
+                core.kernel_scratch.as_mut(),
+                (i, j),
+            )
+        } else {
+            write_kernel_hess_from_coords(
+                &self.compiled,
+                self.x.as_ref(),
+                core.exp_buf.as_mut(),
+                core.kernel_scratch.as_mut(),
+                i,
+                j,
+            )
+        }
+    }
+
+    fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
+        let (core, dist) = self.workspace.split_fit();
+        if let Some(d) = dist {
+            let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready {
+                Some(d.ard_sq_diff.as_ref())
+            } else {
+                None
+            };
+            write_kernel_grad(
+                &self.compiled,
+                d.dist_cache.as_ref(),
+                self.x.as_ref(),
+                ard_cache,
+                core.exp_buf.as_mut(),
+                core.kernel_scratch.as_mut(),
+                idx,
+            )
+        } else {
+            write_kernel_grad_from_coords(
+                &self.compiled,
+                self.x.as_ref(),
+                core.exp_buf.as_mut(),
+                core.kernel_scratch.as_mut(),
+                idx,
+            )
+        }
+    }
+
+    fn add_noise_first_order(
+        &mut self,
+        n_kernel: usize,
+        n: usize,
+        noise: f64,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let n_params = n_kernel + 1;
+        let (kinv_alpha, tr_kinv2) = {
+            let w = self.workspace.gradient_w();
+            let mut w_alpha = vec![0.0; n];
+            gemv_sym_lower(w, &self.alpha, &mut w_alpha, n);
+            let alpha_dot: f64 = self.alpha.iter().map(|a| a * a).sum();
+            let mut kinv_alpha = vec![0.0; n];
+            for i in 0..n {
+                kinv_alpha[i] = self.alpha[i] * alpha_dot - w_alpha[i];
+            }
+            let mut tr_kinv2 = 0.0;
+            for col in 0..n {
+                let kinv_cc = self.alpha[col] * self.alpha[col] - w[(col, col)];
+                tr_kinv2 += kinv_cc * kinv_cc;
+                for row in col + 1..n {
+                    let kinv_rc = self.alpha[row] * self.alpha[col] - w[(row, col)];
+                    tr_kinv2 += 2.0 * kinv_rc * kinv_rc;
+                }
+            }
+            (kinv_alpha, tr_kinv2)
+        };
+        let u_n: Vec<f64> = self.alpha.iter().map(|a| noise * a).collect();
+        let w_n: Vec<f64> = kinv_alpha.iter().map(|a| noise * a).collect();
+        let mut un_wn = 0.0;
+        for i in 0..n {
+            un_wn += u_n[i] * w_n[i];
+        }
+        let nn = n_kernel;
+        out[nn * n_params + nn] += -0.5 * noise * noise * tr_kinv2 + un_wn;
+
+        self.workspace.core_mut().ensure_kernel_scratch(n)?;
+        let thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
+        let cross = (|| {
+            for i in 0..n_kernel {
+                self.write_first_deriv(i)?;
+                let tr = trace_ki_kinv2(
+                    self.workspace.core().exp_buf.as_ref(),
+                    self.workspace.gradient_w(),
+                    &self.alpha,
+                    n,
+                );
+                let mut u_i = vec![0.0; n];
+                gemv_sym_lower(
+                    self.workspace.core().exp_buf.as_ref(),
+                    &self.alpha,
+                    &mut u_i,
+                    n,
+                );
+                let mut ui_wn = 0.0;
+                for k in 0..n {
+                    ui_wn += u_i[k] * w_n[k];
+                }
+                let hij = -0.5 * noise * tr + ui_wn;
+                out[i * n_params + nn] += hij;
+                out[nn * n_params + i] += hij;
+            }
+            Ok::<(), GprError>(())
+        })();
+        self.workspace.core_mut().thread_scratch = thread_scratch;
+        cross
+    }
+
+    fn add_kernel_first_order(
+        &mut self,
+        n_kernel: usize,
+        n: usize,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        if n_kernel == 0 {
+            return Ok(());
+        }
+        self.workspace.core_mut().ensure_kernel_scratch(n)?;
+        let n_params = n_kernel + 1;
+        let thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
+        let result = (|| {
+            for j in 0..n_kernel {
+                self.write_first_deriv(j)?;
+                let mut u_j = vec![0.0; n];
+                gemv_sym_lower(
+                    self.workspace.core().exp_buf.as_ref(),
+                    &self.alpha,
+                    &mut u_j,
+                    n,
+                );
+                symmetrize_lower(self.workspace.core_mut().exp_buf.as_mut(), n);
+                self.solve_exp_against_l(n);
+                // `write_first_deriv` for a product reuses `kernel_scratch`.
+                let mut q_j = Mat::zeros(n, n);
+                {
+                    let core = self.workspace.core();
+                    for col in 0..n {
+                        for row in 0..n {
+                            q_j[(row, col)] = core.exp_buf[(row, col)];
+                        }
+                    }
+                }
+                let mut w_j = vec![0.0; n];
+                gemv_full(q_j.as_ref(), &self.alpha, &mut w_j, n);
+                for i in 0..=j {
+                    let tr;
+                    let mut ui_wj = 0.0;
+                    if i == j {
+                        tr = trace_product(q_j.as_ref(), q_j.as_ref(), n);
+                        for k in 0..n {
+                            ui_wj += u_j[k] * w_j[k];
+                        }
+                    } else {
+                        self.write_first_deriv(i)?;
+                        let mut u_i = vec![0.0; n];
+                        gemv_sym_lower(
+                            self.workspace.core().exp_buf.as_ref(),
+                            &self.alpha,
+                            &mut u_i,
+                            n,
+                        );
+                        symmetrize_lower(self.workspace.core_mut().exp_buf.as_mut(), n);
+                        self.solve_exp_against_l(n);
+                        tr = trace_product(self.workspace.core().exp_buf.as_ref(), q_j.as_ref(), n);
+                        for k in 0..n {
+                            ui_wj += u_i[k] * w_j[k];
+                        }
+                    }
+                    let add = -0.5 * tr + ui_wj;
+                    out[i * n_params + j] += add;
+                    if i != j {
+                        out[j * n_params + i] += add;
+                    }
+                }
+            }
+            Ok::<(), GprError>(())
+        })();
+        self.workspace.core_mut().thread_scratch = thread_scratch;
+        result
+    }
+
+    fn solve_exp_against_l(&mut self, n: usize) {
+        let core = self.workspace.core_mut();
+        let stack = MemStack::new(&mut core.faer_scratch);
+        llt::solve::solve_in_place(
+            core.k_matrix.as_ref(),
+            core.exp_buf.as_mut(),
+            faer_par(n),
+            stack,
+        );
     }
 
     fn fill_gradient_from_factor(
@@ -2193,6 +2529,41 @@ fn fill_query_query_kernel(
             )
         }
     }
+}
+
+fn zero_and_maybe_noise(mut out: MatMut<'_, f64>, n: usize, noise_diag: bool, noise: f64) {
+    for col in 0..n {
+        for row in col..n {
+            out[(row, col)] = if noise_diag && row == col { noise } else { 0.0 };
+        }
+    }
+}
+
+fn kinv_from_w(alpha: &[f64], w: MatRef<'_, f64>, row: usize, col: usize) -> f64 {
+    let (r, c) = if row >= col { (row, col) } else { (col, row) };
+    alpha[row] * alpha[col] - w[(r, c)]
+}
+
+fn ki_sym(ki: MatRef<'_, f64>, row: usize, col: usize) -> f64 {
+    if row >= col {
+        ki[(row, col)]
+    } else {
+        ki[(col, row)]
+    }
+}
+
+fn trace_ki_kinv2(ki: MatRef<'_, f64>, w: MatRef<'_, f64>, alpha: &[f64], n: usize) -> f64 {
+    let mut tr = 0.0;
+    for c in 0..n {
+        for b in 0..n {
+            let mut m_bc = 0.0;
+            for k in 0..n {
+                m_bc += ki_sym(ki, b, k) * kinv_from_w(alpha, w, k, c);
+            }
+            tr += kinv_from_w(alpha, w, b, c) * m_bc;
+        }
+    }
+    tr
 }
 
 fn mul_lower_chol(l: MatRef<'_, f64>, z: &[f64], out: &mut [f64]) {

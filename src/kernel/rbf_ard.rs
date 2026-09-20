@@ -317,6 +317,77 @@ impl RbfArdKernel {
             None => Ok(()),
         }
     }
+
+    /// Writes `∂²K/∂θ_i ∂θ_j` for `θ_d = log(ℓ_d)` into `d2_k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// range, or the same shape / non-finite errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        x: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let d = self.num_params();
+        if i >= d || j >= d {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
+            });
+        }
+        let n = require_square_points(x, d2_k.as_ref(), d)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        let mut err = None;
+        visit_triangle(n, uplo, |row, col| {
+            if err.is_some() {
+                return;
+            }
+            match ard_kernel_hess(x, row, col, inv_ell_sq, i, j) {
+                Ok(value) => d2_k[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn hess_from_sq_diff(
+        &self,
+        cache: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let d = self.num_params();
+        if i >= d || j >= d {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
+            });
+        }
+        let n = require_square_out(d2_k.as_ref())?;
+        require_ard_sq_diff_shape(cache, n, d)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        let mut err = None;
+        visit_triangle(n, uplo, |row, col| {
+            if err.is_some() {
+                return;
+            }
+            match ard_kernel_hess_from_cache(cache, n, row, col, inv_ell_sq, i, j) {
+                Ok(value) => d2_k[(row, col)] = value,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 fn require_square_out(out: MatRef<'_, f64>) -> Result<usize, GprError> {
@@ -514,6 +585,84 @@ fn ard_kernel_grad(
     }
 }
 
+fn ard_rbf_hess_from_terms(k: f64, dim_i: f64, dim_j: f64, same: bool) -> Result<f64, GprError> {
+    let h = if same {
+        k * dim_i * (dim_i - 2.0)
+    } else {
+        k * dim_i * dim_j
+    };
+    if h.is_finite() {
+        Ok(h)
+    } else {
+        Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn ard_kernel_hess(
+    x: MatRef<'_, f64>,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+    i: usize,
+    j: usize,
+) -> Result<f64, GprError> {
+    let mut r2 = 0.0;
+    let mut dim_i = 0.0;
+    let mut dim_j = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let diff = x[(row, dim)] - x[(col, dim)];
+        if !diff.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = diff * diff * w;
+        r2 += term;
+        if dim == i {
+            dim_i = term;
+        }
+        if dim == j {
+            dim_j = term;
+        }
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    ard_rbf_hess_from_terms(k, dim_i, dim_j, i == j)
+}
+
+fn ard_kernel_hess_from_cache(
+    cache: MatRef<'_, f64>,
+    n: usize,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+    i: usize,
+    j: usize,
+) -> Result<f64, GprError> {
+    let mut r2 = 0.0;
+    let mut dim_i = 0.0;
+    let mut dim_j = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let v = cache[(row, dim * n + col)];
+        if !v.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = v * w;
+        r2 += term;
+        if dim == i {
+            dim_i = term;
+        }
+        if dim == j {
+            dim_j = term;
+        }
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    ard_rbf_hess_from_terms(k, dim_i, dim_j, i == j)
+}
+
 #[cfg(test)]
 mod tests {
     use super::RbfArdKernel;
@@ -704,6 +853,41 @@ mod tests {
         assert_close(upper[(1, 0)], -1.0);
         assert_close(upper[(2, 0)], -1.0);
         assert_close(upper[(2, 1)], -1.0);
+    }
+
+    #[test]
+    fn hess_matches_finite_difference_of_grad() {
+        let rbf = RbfArdKernel::from_log_lengthscales(&[-0.3, 0.4]).expect("valid");
+        let x = points_2d(&[[0.0, 0.0], [1.2, -0.4], [0.3, 2.4]]);
+        let h = 1e-6;
+        let mut theta = [0.0; 2];
+        rbf.get_params(&mut theta).expect("len 2");
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut plus_th = theta;
+                let mut minus_th = theta;
+                plus_th[j] += h;
+                minus_th[j] -= h;
+                let plus = RbfArdKernel::from_log_lengthscales(&plus_th).expect("valid");
+                let minus = RbfArdKernel::from_log_lengthscales(&minus_th).expect("valid");
+                let mut g_plus = fill(3, 0.0);
+                let mut g_minus = fill(3, 0.0);
+                let mut d2 = fill(3, 0.0);
+                plus.grad(x.as_ref(), g_plus.as_mut(), i, Triangle::Full)
+                    .expect("plus");
+                minus
+                    .grad(x.as_ref(), g_minus.as_mut(), i, Triangle::Full)
+                    .expect("minus");
+                rbf.hess(x.as_ref(), d2.as_mut(), i, j, Triangle::Full)
+                    .expect("pair");
+                for col in 0..3 {
+                    for row in 0..3 {
+                        let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
+                        assert_close(d2[(row, col)], fd);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

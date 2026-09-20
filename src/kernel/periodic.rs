@@ -240,6 +240,44 @@ impl PeriodicKernel {
             periodic_grad_from_sq_dist(d, ell, period, param_idx)
         })
     }
+
+    /// Writes `∂²K/∂θ_i ∂θ_j`. Index 0 is `log(ℓ)`, index 1 is `log(p)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// range, or the same shape / non-finite errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_periodic_hess_idx(i, j)?;
+        let ell = self.lengthscale();
+        let period = self.period();
+        write_triangle(dist, d2_k, uplo, |d| {
+            periodic_hess_from_sq_dist(d, ell, period, i, j)
+        })
+    }
+
+    pub(crate) fn hess_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_periodic_hess_idx(i, j)?;
+        let ell = self.lengthscale();
+        let period = self.period();
+        write_square_from_coords(x, d2_k, uplo, |d| {
+            periodic_hess_from_sq_dist(d, ell, period, i, j)
+        })
+    }
 }
 
 fn expect_two_params(len: usize) -> Result<(), GprError> {
@@ -285,6 +323,45 @@ fn periodic_grad_from_sq_dist(
         k * 4.0 * s * alpha.cos() * alpha * inv_ell_sq
     };
     finite_kernel(dk)
+}
+
+fn periodic_hess_from_sq_dist(
+    sq_dist: f64,
+    ell: f64,
+    period: f64,
+    i: usize,
+    j: usize,
+) -> Result<f64, GprError> {
+    let r = euclidean_from_sq(sq_dist)?;
+    let alpha = std::f64::consts::PI * r / period;
+    let s = alpha.sin();
+    let c = alpha.cos();
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let k = (-2.0 * s * s * inv_ell_sq).exp();
+    let beta = 4.0 * s * s * inv_ell_sq;
+    let gamma = 4.0 * s * c * alpha * inv_ell_sq;
+    let (a, b) = if i <= j { (i, j) } else { (j, i) };
+    let h = match (a, b) {
+        (0, 0) => k * beta * (beta - 2.0),
+        (0, 1) => k * gamma * (beta - 2.0),
+        (1, 1) => {
+            let dgamma =
+                4.0 * inv_ell_sq * (-alpha * alpha * c * c + alpha * alpha * s * s - alpha * s * c);
+            k * gamma * gamma + k * dgamma
+        }
+        _ => 0.0,
+    };
+    finite_kernel(h)
+}
+
+fn require_periodic_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
+    if i <= 1 && j <= 1 {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("periodic kernel parameter pair ({i}, {j}) is out of range"),
+        })
+    }
 }
 
 fn finite_kernel(value: f64) -> Result<f64, GprError> {
@@ -421,6 +498,42 @@ mod tests {
             }
         }
         assert_close(upper[(1, 0)], -1.0);
+    }
+
+    #[test]
+    fn hess_matches_finite_difference_of_grad() {
+        let kernel = PeriodicKernel::from_log(-0.15, 0.4).expect("valid");
+        let mut theta = [0.0; 2];
+        kernel.get_params(&mut theta).expect("len 2");
+        let h = 1e-6;
+        let dist = sq_dist_1d(&[0.0, 0.7, 1.4]);
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut plus_th = theta;
+                let mut minus_th = theta;
+                plus_th[j] += h;
+                minus_th[j] -= h;
+                let plus = PeriodicKernel::from_log(plus_th[0], plus_th[1]).expect("valid");
+                let minus = PeriodicKernel::from_log(minus_th[0], minus_th[1]).expect("valid");
+                let mut g_plus = fill(3, 0.0);
+                let mut g_minus = fill(3, 0.0);
+                let mut d2 = fill(3, 0.0);
+                plus.grad(dist.as_ref(), g_plus.as_mut(), i, Triangle::Full)
+                    .expect("plus");
+                minus
+                    .grad(dist.as_ref(), g_minus.as_mut(), i, Triangle::Full)
+                    .expect("minus");
+                kernel
+                    .hess(dist.as_ref(), d2.as_mut(), i, j, Triangle::Full)
+                    .expect("pair");
+                for col in 0..3 {
+                    for row in 0..3 {
+                        let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
+                        assert_close(d2[(row, col)], fd);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
