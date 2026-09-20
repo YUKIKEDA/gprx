@@ -36,7 +36,7 @@ use super::factor::{
 use super::{
     AllocWorkspace, CachedDistances, DistanceCachePolicy, DistanceCacheSlot, FitBuffers,
     JitterPolicy, NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance,
-    RetainCholesky, VarianceKind,
+    RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
 };
 
 /// Unfitted Exact GPR trainer: kernel, likelihood, transforms, optimizer, and
@@ -47,9 +47,11 @@ use super::{
 /// search. Success returns [`FittedGpr`]. Failure returns the trainer with
 /// [`GprError`] so the caller can change `θ` or data and try again.
 /// Input and target transforms default to identity. Trainers from
-/// [`Gpr::new`] store [`CachedDistances`] by default. Switch with
-/// [`Gpr::with_distance_cache_policy`]. Standalone Linear, Constant, and
-/// White kernels use [`Gpr::from_points`], which has no distance-cache slot.
+/// [`Gpr::new`] store [`CachedDistances`] and [`RetainCholesky`] by default
+/// (the speed pole). [`Gpr::with_prefer_memory`] switches to
+/// [`UncachedDistances`] and [`ReuseCholesky`]. Standalone Linear, Constant,
+/// and White kernels use [`Gpr::from_points`], which has no distance-cache
+/// slot; the same prefer methods change only the Cholesky buffer.
 /// The default type is
 /// [`Gpr<Lbfgs, FullRecompute, CachedDistances, RetainCholesky>`].
 /// [`Clone`] copies kernel, likelihood,
@@ -247,8 +249,10 @@ impl Gpr {
     /// map; `fit` / `factor` produce the fitted map stored on [`FittedGpr`].
     /// Call [`Self::with_optimizer`] to
     /// switch to [`Fixed`] or another [`Optimizer`]. Distance kernels use this
-    /// constructor; the cache slot is [`CachedDistances`]. Standalone
-    /// Linear, Constant, and White kernels use [`Self::from_points`].
+    /// constructor; the cache slot is [`CachedDistances`] and the Cholesky
+    /// buffer is [`RetainCholesky`]. [`Self::with_prefer_memory`] / [`Self::with_prefer_speed`]
+    /// switch those poles. Standalone Linear, Constant, and White kernels
+    /// use [`Self::from_points`].
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
             kernel,
@@ -267,8 +271,10 @@ impl Gpr {
     /// pairwise distances.
     ///
     /// Use this for a standalone Linear, Constant, or White kernel. The
-    /// trainer has no [`DistanceCachePolicy`]. Compositions that still fill
-    /// distances (`RBF + White`, `Constant * RBF`) use [`Self::new`].
+    /// trainer has no [`DistanceCachePolicy`]. [`Self::with_prefer_memory`]
+    /// / [`Self::with_prefer_speed`] still exist and change only the
+    /// Cholesky buffer. Compositions that still fill distances
+    /// (`RBF + White`, `Constant * RBF`) use [`Self::new`].
     ///
     /// # Examples
     ///
@@ -413,27 +419,8 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
 
     /// Selects whether the Cholesky factor keeps a dedicated `W` buffer.
     ///
-    /// The default is [`RetainCholesky`]. [`ReuseCholesky`] writes `W` over
-    /// `L` during a gradient and restores `L` after [`Gpr::fit`] or a
-    /// standalone [`FittedGpr::value_and_gradient_into`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Gpr, ReuseCholesky};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let gpr = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_cholesky_buffer(ReuseCholesky);
-    /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, S, C, B2>
+    /// Public callers use [`Gpr::with_prefer_memory`] / [`Gpr::with_prefer_speed`].
+    pub(crate) fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, S, C, B2>
     where
         B2: crate::CholeskyBuffer,
     {
@@ -477,13 +464,69 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
 }
 
 impl<O, S, C: DistanceCachePolicy, B> Gpr<O, S, C, B> {
+    /// Selects the memory pole: no distance cache and a reused Cholesky buffer.
+    ///
+    /// The returned trainer is [`UncachedDistances`] + [`ReuseCholesky`].
+    /// Training distances are computed from `X` each kernel build. `W`
+    /// overwrites `L` during a gradient. Call before [`Gpr::fit`] /
+    /// [`Gpr<Fixed>::factor`]. [`Self::with_prefer_speed`] restores the
+    /// default. This method exists only on trainers from [`Gpr::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Gpr, ReuseCholesky, UncachedDistances};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_prefer_memory();
+    /// let _: gprx::Gpr<_, _, UncachedDistances, ReuseCholesky> = gpr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_prefer_memory(self) -> Gpr<O, S, UncachedDistances, ReuseCholesky> {
+        self.with_distance_cache_policy(UncachedDistances)
+            .with_cholesky_buffer(ReuseCholesky)
+    }
+
+    /// Selects the speed pole: cached distances and a dedicated `W` buffer.
+    ///
+    /// This is the default [`Gpr::new`] layout ([`CachedDistances`] +
+    /// [`RetainCholesky`]). Use it to undo [`Self::with_prefer_memory`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{CachedDistances, GaussianLikelihood, Gpr, RetainCholesky};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_prefer_memory()
+    /// .with_prefer_speed();
+    /// let _: gprx::Gpr<_, _, CachedDistances, RetainCholesky> = gpr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_prefer_speed(self) -> Gpr<O, S, CachedDistances, RetainCholesky> {
+        self.with_distance_cache_policy(CachedDistances)
+            .with_cholesky_buffer(RetainCholesky)
+    }
+
     /// Sets whether training distances are cached across kernel builds.
     ///
-    /// Intended to be called before [`Gpr::fit`] / [`Gpr<Fixed>::factor`].
-    /// The default is [`CachedDistances`]. [`crate::UncachedDistances`] recomputes
-    /// from `X` and omits the distance tensors. This method exists only on
-    /// trainers from [`Gpr::new`]. See [`DistanceCachePolicy`].
-    pub fn with_distance_cache_policy<C2: DistanceCachePolicy>(self, _: C2) -> Gpr<O, S, C2, B> {
+    /// Public callers use [`Self::with_prefer_memory`] / [`Self::with_prefer_speed`].
+    pub(crate) fn with_distance_cache_policy<C2: DistanceCachePolicy>(
+        self,
+        _: C2,
+    ) -> Gpr<O, S, C2, B> {
         Gpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -495,6 +538,55 @@ impl<O, S, C: DistanceCachePolicy, B> Gpr<O, S, C, B> {
             _recompute: PhantomData,
             _cholesky: PhantomData,
         }
+    }
+}
+
+impl<O, S, B> Gpr<O, S, NoDistanceCache, B> {
+    /// Selects the memory-pole Cholesky layout. The cache slot stays
+    /// [`NoDistanceCache`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, LinearKernel};
+    /// use gprx::{GaussianLikelihood, Gpr, NoDistanceCache, ReuseCholesky};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::from_points(
+    ///     KernelSpec::from(LinearKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_prefer_memory();
+    /// let _: gprx::Gpr<_, _, NoDistanceCache, ReuseCholesky> = gpr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_prefer_memory(self) -> Gpr<O, S, NoDistanceCache, ReuseCholesky> {
+        self.with_cholesky_buffer(ReuseCholesky)
+    }
+
+    /// Selects the speed-pole Cholesky layout. The cache slot stays
+    /// [`NoDistanceCache`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, LinearKernel};
+    /// use gprx::{GaussianLikelihood, Gpr, NoDistanceCache, RetainCholesky};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::from_points(
+    ///     KernelSpec::from(LinearKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_prefer_memory()
+    /// .with_prefer_speed();
+    /// let _: gprx::Gpr<_, _, NoDistanceCache, RetainCholesky> = gpr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_prefer_speed(self) -> Gpr<O, S, NoDistanceCache, RetainCholesky> {
+        self.with_cholesky_buffer(RetainCholesky)
     }
 }
 
