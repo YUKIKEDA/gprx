@@ -20,9 +20,9 @@ src/optimizer/      # P2B-1 / P2B-2 / P2B-15 / P2B-17。`mod.rs` トレイト、
 src/rng.rs          # P2B-15。クレート私有の `SmallRng`（`sample` / リスタート / FSA）
 src/persist/        # P2B-14。`config.json` + `model.safetensors`。`LoadedGpr` / `PersistRegistry`。P3-3: 必須 `factor_kind`（`llt` / `ldlt`）
 src/online.rs       # P3-2。crate-private `OnlineWorkspace` と `ensure_capacity`
-tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs, nelder_mead_goldens.rs; M0: cholesky_smoke.rs。P3-1: ldlt_delete.rs。P3-5: online_ops.rs
+tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs, nelder_mead_goldens.rs; M0: cholesky_smoke.rs。P3-1: ldlt_delete.rs。P3-5: online_ops.rs。P3-6: online_libgp.rs
 benches/            # criterion; from P1A-18 (after first `Gpr` path)
-compare/            # uv + sklearn + goldens/*.json。P2B-16 は compare/perf/（gprx / sklearn / libgp / friedrich。手動、CI なし）
+compare/            # uv + sklearn + goldens/*.json。P2B-16 は compare/perf/（gprx / sklearn / libgp / friedrich。手動、CI なし）。P3-6 は `just gen-online-goldens` と `just perf-online`
 examples/           # Phase 1b; P2-9 updates to `Gpr` + `FittedGpr`
 .dev/               # design, roadmap, bench-log.md
 ```

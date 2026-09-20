@@ -87,6 +87,15 @@ def libgp_exe_candidates(build: Path) -> list[Path]:
     ]
 
 
+def libgp_online_candidates(build: Path) -> list[Path]:
+    return [
+        build / "Release" / "libgp-online.exe",
+        build / "RelWithDebInfo" / "libgp-online.exe",
+        build / "libgp-online.exe",
+        build / "libgp-online",
+    ]
+
+
 def ensure_libgp() -> Path | dict[str, Any]:
     src = ROOT / "libgp"
     build = src / "build"
@@ -155,6 +164,66 @@ def run_libgp(case_path: Path) -> dict[str, Any]:
     if isinstance(exe, dict):
         return exe
     return run_cmd([str(exe), str(case_path)], cwd=ROOT)
+
+
+def ensure_libgp_online() -> Path | dict[str, Any]:
+    src = ROOT / "libgp"
+    build = src / "build"
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            str(src),
+            "-B",
+            str(build),
+            "-DCMAKE_BUILD_TYPE=Release",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if configure.returncode != 0:
+        err = (configure.stderr or configure.stdout or "").strip()
+        return {
+            "status": "na",
+            "note": f"libgp cmake configure failed ({configure.returncode}): {err}",
+            "factor_s": None,
+            "eval_s": None,
+            "predict_s": None,
+            "joint_evals": None,
+            "peak_rss_bytes": None,
+        }
+    built = subprocess.run(
+        ["cmake", "--build", str(build), "--config", "Release", "--target", "libgp-online"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if built.returncode != 0:
+        err = (built.stderr or built.stdout or "").strip()
+        return {
+            "status": "na",
+            "note": f"libgp-online cmake build failed ({built.returncode}): {err}",
+            "factor_s": None,
+            "eval_s": None,
+            "predict_s": None,
+            "joint_evals": None,
+            "peak_rss_bytes": None,
+        }
+    for candidate in libgp_online_candidates(build):
+        if candidate.is_file():
+            return candidate
+    return {
+        "status": "na",
+        "note": "libgp-online binary not found after cmake --build",
+        "factor_s": None,
+        "eval_s": None,
+        "predict_s": None,
+        "joint_evals": None,
+        "peak_rss_bytes": None,
+    }
 
 
 def ratio_verdict(ours: float, theirs: float, band: float) -> str:
