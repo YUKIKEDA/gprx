@@ -26,28 +26,54 @@ fn apply_train_kernel<W: FitWorkspace>(
     ws: &mut W,
 ) -> Result<(), GprError> {
     let (core, dist) = ws.split_fit();
+    apply_compiled_views(
+        compiled,
+        x,
+        dist,
+        core.k_matrix.as_mut(),
+        core.exp_buf.as_mut(),
+        &mut core.thread_scratch,
+    )
+}
+
+/// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
+pub(crate) fn apply_compiled_to<W: FitWorkspace>(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    ws: &mut W,
+    dest: MatMut<'_, f64>,
+) -> Result<(), GprError> {
+    let (core, dist) = ws.split_fit();
+    apply_compiled_views(
+        compiled,
+        x,
+        dist,
+        dest,
+        core.exp_buf.as_mut(),
+        &mut core.thread_scratch,
+    )
+}
+
+fn apply_compiled_views(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    dist: Option<crate::workspace::DistBufs<'_>>,
+    dest: MatMut<'_, f64>,
+    scratch: MatMut<'_, f64>,
+    thread_scratch: &mut Vec<Mat<f64>>,
+) -> Result<(), GprError> {
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             if let Some(d) = dist {
                 if !*d.dist_ready {
-                    let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
-                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut thread_scratch);
-                    core.thread_scratch = thread_scratch;
+                    let mut pool = std::mem::take(thread_scratch);
+                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut pool);
+                    *thread_scratch = pool;
                     *d.dist_ready = true;
                 }
-                compiled.apply(
-                    d.dist_cache.as_ref(),
-                    core.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    core.exp_buf.as_mut(),
-                )
+                compiled.apply(d.dist_cache.as_ref(), dest, Triangle::Lower, scratch)
             } else {
-                compiled.apply_points(
-                    x,
-                    core.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    core.exp_buf.as_mut(),
-                )
+                compiled.apply_points(x, dest, Triangle::Lower, scratch)
             }
         }
         CoordMode::Points => {
@@ -56,58 +82,43 @@ fn apply_train_kernel<W: FitWorkspace>(
                 && d.ard_sq_diff.ncols() > 0
             {
                 if !*d.ard_sq_diff_ready {
-                    let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
-                    fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut thread_scratch);
-                    core.thread_scratch = thread_scratch;
+                    let mut pool = std::mem::take(thread_scratch);
+                    fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut pool);
+                    *thread_scratch = pool;
                     *d.ard_sq_diff_ready = true;
                 }
                 compiled.apply_from_ard_cache(
                     d.ard_sq_diff.as_ref(),
                     x,
-                    core.k_matrix.as_mut(),
+                    dest,
                     Triangle::Lower,
-                    core.exp_buf.as_mut(),
+                    scratch,
                 )
             } else {
-                compiled.apply_points(
-                    x,
-                    core.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    core.exp_buf.as_mut(),
-                )
+                compiled.apply_points(x, dest, Triangle::Lower, scratch)
             }
         }
         CoordMode::Mixed => {
             if let Some(d) = dist {
                 if !*d.dist_ready {
-                    let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
-                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut thread_scratch);
-                    core.thread_scratch = thread_scratch;
+                    let mut pool = std::mem::take(thread_scratch);
+                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut pool);
+                    *thread_scratch = pool;
                     *d.dist_ready = true;
                 }
                 let mut views = MixedKernelViews::new(d.dist_cache.as_ref(), x);
                 if compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0 {
                     if !*d.ard_sq_diff_ready {
-                        let mut thread_scratch = std::mem::take(&mut core.thread_scratch);
-                        fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut thread_scratch);
-                        core.thread_scratch = thread_scratch;
+                        let mut pool = std::mem::take(thread_scratch);
+                        fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut pool);
+                        *thread_scratch = pool;
                         *d.ard_sq_diff_ready = true;
                     }
                     views.ard_cache = Some(d.ard_sq_diff.as_ref());
                 }
-                compiled.apply_mixed(
-                    views,
-                    core.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    core.exp_buf.as_mut(),
-                )
+                compiled.apply_mixed(views, dest, Triangle::Lower, scratch)
             } else {
-                compiled.apply_points(
-                    x,
-                    core.k_matrix.as_mut(),
-                    Triangle::Lower,
-                    core.exp_buf.as_mut(),
-                )
+                compiled.apply_points(x, dest, Triangle::Lower, scratch)
             }
         }
     }
@@ -178,15 +189,12 @@ pub(crate) fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
     }
 }
 
-fn assemble_train_system<W: FitWorkspace>(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
+pub(crate) fn finish_train_system<W: FitWorkspace>(
     ws: &mut W,
     y: &[f64],
     noise: f64,
     extra_diag: f64,
-) -> Result<(), GprError> {
-    apply_train_kernel(compiled, x, ws)?;
+) {
     let core = ws.core_mut();
     add_noise_to_diag(core.k_matrix.as_mut(), noise);
     if extra_diag != 0.0 {
@@ -195,7 +203,6 @@ fn assemble_train_system<W: FitWorkspace>(
     for (i, &yi) in y.iter().enumerate() {
         core.rhs[(i, 0)] = yi;
     }
-    Ok(())
 }
 
 pub(crate) struct FactorPolicy {
@@ -224,7 +231,25 @@ pub(crate) fn factor_train_with_policy<W: FitWorkspace>(
     noise: f64,
     policy: FactorPolicy,
 ) -> Result<(), GprError> {
-    assemble_train_system(compiled, x, ws, y, noise, 0.0)?;
+    factor_written_k_with_policy(ws, y, noise, policy, |ws| {
+        apply_train_kernel(compiled, x, ws)
+    })
+}
+
+/// Factors after `write_k` fills the lower training Gram (no noise).
+pub(crate) fn factor_written_k_with_policy<W, F>(
+    ws: &mut W,
+    y: &[f64],
+    noise: f64,
+    policy: FactorPolicy,
+    mut write_k: F,
+) -> Result<(), GprError>
+where
+    W: FitWorkspace,
+    F: FnMut(&mut W) -> Result<(), GprError>,
+{
+    write_k(ws)?;
+    finish_train_system(ws, y, noise, 0.0);
     {
         let core = ws.core_mut();
         match cholesky_and_solve(
@@ -242,7 +267,8 @@ pub(crate) fn factor_train_with_policy<W: FitWorkspace>(
     let mut last_j = 0.0;
     for j in policy.jitter.retry_jitters() {
         last_j = j;
-        assemble_train_system(compiled, x, ws, y, noise, j)?;
+        write_k(ws)?;
+        finish_train_system(ws, y, noise, j);
         let core = ws.core_mut();
         match cholesky_and_solve(
             &mut core.k_matrix,

@@ -321,7 +321,10 @@ mod tests {
         joint_evals: usize,
     }
 
-    impl<O, S, C: crate::gpr::DistanceCacheSlot> Objective for CountingObj<'_, O, S, C> {
+    impl<O, S, C: crate::gpr::DistanceCacheSlot> Objective for CountingObj<'_, O, S, C>
+    where
+        S: crate::objective::EvalObjective,
+    {
         fn num_params(&self) -> usize {
             self.inner.num_params()
         }
@@ -332,7 +335,10 @@ mod tests {
         }
     }
 
-    impl<O, S, C: crate::gpr::DistanceCacheSlot> Differentiable for CountingObj<'_, O, S, C> {
+    impl<O, S, C: crate::gpr::DistanceCacheSlot> Differentiable for CountingObj<'_, O, S, C>
+    where
+        S: crate::objective::EvalObjective,
+    {
         fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
             self.value_and_gradient_into(params, out).map(|_| ())
         }
