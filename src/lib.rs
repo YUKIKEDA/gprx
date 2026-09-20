@@ -56,8 +56,8 @@ mod workspace;
 pub use error::{CholeskyStage, GprError};
 pub use gpr::{
     AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter,
-    Gpr, JitterPolicy, NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance,
-    RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
+    Gpr, JitterPolicy, NoDistanceCache, OnlineGpr, PredictOptions, Prediction,
+    PredictiveCovariance, RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
 };
 pub use likelihood::GaussianLikelihood;
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
@@ -67,7 +67,9 @@ pub use optimizer::{
     PoleRecompute, RecomputeStrategy, UsesChangeIndices,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
-pub use persist::{FORMAT_VERSION, LoadedDistance, LoadedGpr, PersistRegistry};
+pub use persist::{
+    FORMAT_VERSION, LoadedDistance, LoadedGpr, LoadedOnlineDistance, PersistRegistry,
+};
 pub use precision::{DoublePrecision, PrecisionPolicy};
 
 #[cfg(test)]
