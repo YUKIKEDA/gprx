@@ -770,23 +770,24 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 
 バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は関連バッファを**全て同じ手順で**再確保・コピーする。
 
+crate-private。`from_active(n)` で `n_active = n_capacity = n`。`FittedGpr` への接続は P3-3。倍率フィールドは置かない。
+
 ```rust
-struct OnlineWorkspace<T: Scalar> {
-    k_matrix: Mat<T>,     // 下三角の A(容量 n_capacity)
-    dist_cache: Mat<T>,
-    ld_factor: Mat<T>,    // LDLT因子(対角=D、厳密下三角=L)
-    alpha: Col<T>,
-    y: Col<T>,
-    v_buf: Col<T>,        // 予測分散の前進消去スクラッチ(テスト点1点あたりO(n²))
+struct OnlineWorkspace {
+    k_matrix: Mat<f64>,     // 下三角の A(容量 n_capacity)
+    dist_cache: Mat<f64>,
+    ld_factor: Mat<f64>,    // LDLT因子(対角=D、厳密下三角=L)
+    alpha: Col<f64>,
+    y: Col<f64>,
+    v_buf: Col<f64>,        // 予測分散の前進消去スクラッチ(テスト点1点あたりO(n²))
     n_active: usize,
     n_capacity: usize,
-    growth_factor: f64,   // デフォルト1.5〜2.0
 }
 ```
 
-**容量拡張手順** (`n_active == n_capacity`のとき、insertの前に行う):
+**容量拡張** (`ensure_capacity(needed)`。`n_capacity < needed` のとき):
 
-1. `new_cap = max(n_capacity + 1, (n_capacity as f64 * growth_factor) as usize)`
+1. `new_cap = max(needed, max(n_capacity, 1) * 2)`
 2. `k_matrix`, `dist_cache`, `ld_factor`, `alpha`, `y`, `v_buf`を`new_cap`で再確保
 3. 既存の`n_active × n_active`ブロックと長さ`n_active`のベクトルをコピー
 4. `PointRegistry`のインデックスは`n_active`未満のままなので付け替え不要
