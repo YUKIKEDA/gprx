@@ -797,16 +797,17 @@ struct OnlineWorkspace {
 
 ### 増分更新の手順と不変条件
 
-**追加（末尾）**: ①容量が足りなければ `ensure_capacity` → ②新規点と既存n点との距離計算(O(n)) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)) → ⑤alpha再ソルブ(O(n²))。`PointId` / `PointRegistry` は P3-4。
+**追加（末尾）**: ①容量が足りなければ `ensure_capacity` → ②新規点と既存n点との距離計算(O(n)) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)) → ⑤alpha再ソルブ(O(n²)) → ⑥`PointRegistry` に新しい `PointId` を発行。
 
-**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)) → ②距離キャッシュ・K・y・alphaから該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④alpha再ソルブ(O(n²))
+**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)) → ②距離キャッシュ・K・y・alpha・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④alpha再ソルブ(O(n²))。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
 
-**不変条件**: 削除により内部インデックスがシフトする際、`K`, `LD`, `y`, `alpha`, 距離キャッシュ, `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
+**不変条件**: 削除により内部インデックスがシフトする際、`K`, `LD`, `y`, `alpha`, 距離キャッシュ, `X`, `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
 
 ```rust
 struct PointRegistry {
     id_to_index: HashMap<PointId, usize>,
     index_to_id: Vec<PointId>,
+    next_id: u64,
 }
 ```
 
@@ -822,11 +823,13 @@ impl FittedGpr<O, S, C, B> {
 }
 
 impl OnlineGpr<O, S, C, B> {
-    fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<(), GprError>;
+    fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError>;
+    fn delete(&mut self, id: PointId) -> Result<(), GprError>;
+    fn point_ids(&self) -> &[PointId];
 }
 ```
 
-`insert` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`、`ldlt` は `OnlineGpr`。delete / `PointId` / `PointRegistry` は P3-4。Sparse GPRのオンライン学習はスコープ外(§14)。
+`insert` / `delete` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private で `OnlineGpr` が持つ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse GPRのオンライン学習はスコープ外(§14)。
 
 ## 12. テスト計画
 
