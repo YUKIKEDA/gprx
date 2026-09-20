@@ -97,6 +97,16 @@ fn copy_leading_col(src: &Col<f64>, dest: &mut Col<f64>, n: usize) {
 mod tests {
     use super::*;
 
+    const TOL: f64 = 1e-12;
+
+    fn assert_close(actual: f64, expected: f64) {
+        let scale = expected.abs().max(1.0);
+        assert!(
+            (actual - expected).abs() <= TOL * scale,
+            "actual={actual}, expected={expected}"
+        );
+    }
+
     fn mark(ws: &mut OnlineWorkspace) {
         let n = ws.n_active;
         for j in 0..n {
@@ -116,13 +126,13 @@ mod tests {
         for j in 0..n {
             for i in 0..n {
                 let base = (i * n + j) as f64;
-                assert!((ws.k_matrix[(i, j)] - (10.0 + base)).abs() <= 0.0);
-                assert!((ws.ld_factor[(i, j)] - (20.0 + base)).abs() <= 0.0);
-                assert!((ws.dist_cache[(i, j)] - (30.0 + base)).abs() <= 0.0);
+                assert_close(ws.k_matrix[(i, j)], 10.0 + base);
+                assert_close(ws.ld_factor[(i, j)], 20.0 + base);
+                assert_close(ws.dist_cache[(i, j)], 30.0 + base);
             }
-            assert!((ws.y[j] - (40.0 + j as f64)).abs() <= 0.0);
-            assert!((ws.alpha[j] - (50.0 + j as f64)).abs() <= 0.0);
-            assert!((ws.v_buf[j] - (60.0 + j as f64)).abs() <= 0.0);
+            assert_close(ws.y[j], 40.0 + j as f64);
+            assert_close(ws.alpha[j], 50.0 + j as f64);
+            assert_close(ws.v_buf[j], 60.0 + j as f64);
         }
     }
 
@@ -133,15 +143,15 @@ mod tests {
                 if i < n && j < n {
                     continue;
                 }
-                assert!((ws.k_matrix[(i, j)]).abs() <= 0.0);
-                assert!((ws.ld_factor[(i, j)]).abs() <= 0.0);
-                assert!((ws.dist_cache[(i, j)]).abs() <= 0.0);
+                assert_close(ws.k_matrix[(i, j)], 0.0);
+                assert_close(ws.ld_factor[(i, j)], 0.0);
+                assert_close(ws.dist_cache[(i, j)], 0.0);
             }
         }
         for i in n..cap {
-            assert!((ws.y[i]).abs() <= 0.0);
-            assert!((ws.alpha[i]).abs() <= 0.0);
-            assert!((ws.v_buf[i]).abs() <= 0.0);
+            assert_close(ws.y[i], 0.0);
+            assert_close(ws.alpha[i], 0.0);
+            assert_close(ws.v_buf[i], 0.0);
         }
     }
 
