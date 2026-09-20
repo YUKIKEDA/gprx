@@ -13,6 +13,7 @@ use crate::kernel::{
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
+use crate::online::OnlineWorkspace;
 use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute};
 use crate::param::Interval;
 use crate::persist::{self, PersistedModel};
@@ -21,6 +22,8 @@ use crate::workspace::{
     FitWorkspace, QueryWorkspace, empty_thread_scratch, faer_par, faer_par_dims,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
+
+use super::super::online::{OnlineGpr, fill_train_a};
 
 use super::super::factor::{
     FactorPolicy, apply_compiled_to, cholesky_lower_with_policy, factor_train_with_policy,
@@ -35,7 +38,7 @@ use super::{FittedGpr, Gpr};
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; factorization reads it.
 impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
-    pub(super) fn prepare(
+    pub(crate) fn prepare(
         gpr: Gpr<O, S, C, B>,
         x: &[f64],
         n_rows: usize,
@@ -100,17 +103,123 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// kernel, likelihood, transforms, optimizer, distance-cache slot, and
     /// jitter policy.
     pub fn into_trainer(self) -> Gpr<O, S, C, B> {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_unfitted,
-            y_transform: self.y_unfitted,
-            optimizer: self.optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
+        Gpr::from_owned(
+            self.kernel,
+            self.likelihood,
+            self.x_unfitted,
+            self.y_unfitted,
+            self.optimizer,
+            self.distance_cache,
+            self.jitter_policy,
+        )
+    }
+
+    /// Converts this LLT factorization into an [`OnlineGpr`] for tail inserts.
+    ///
+    /// Writes `D[j] = L_jj²` and `L_ldlt[i,j] = L_llt[i,j] / L_jj`, then
+    /// rebuilds `A = K + σn² I` on the online workspace. [`OnlineGpr::insert`]
+    /// updates that LDLT in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n` is zero, or
+    /// [`GprError::CholeskyFailed`] if a diagonal of `L` is not positive.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online()?;
+    /// online.insert(&[1.5], 0.5)?;
+    /// let pred = online.predict(&[0.5], 1, 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn into_online(self) -> Result<OnlineGpr<O, S, C, B>, GprError> {
+        let n = self.n;
+        let mut workspace = OnlineWorkspace::from_active(n)?;
+        workspace.fill_ld_from_llt(self.chol_l(), n)?;
+        fill_train_a(
+            &self.compiled,
+            self.x.as_ref(),
+            workspace.k_matrix.as_mut(),
+            workspace.dist_cache.as_mut(),
+            C::CACHES_DISTANCES,
+            self.likelihood.noise_variance(),
+        )?;
+        OnlineWorkspace::set_vector_prefix(&mut workspace.y, &self.y_train);
+        OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.alpha);
+        Ok(OnlineGpr::from_parts(
+            self.kernel,
+            self.compiled,
+            self.likelihood,
+            self.x_unfitted,
+            self.y_unfitted,
+            self.x_transform,
+            self.y_transform,
+            self.optimizer,
+            self.distance_cache,
+            self.jitter_policy,
+            workspace,
+            self.query,
+            self.x_obs,
+            self.y_obs,
+            self.x,
+            self.y_train,
+            self.alpha,
+            self.n,
+            self.d,
+        ))
+    }
+
+    pub(crate) fn from_online_snapshot(online: &OnlineGpr<O, S, C, B>) -> Result<Self, GprError>
+    where
+        O: Clone,
+        C: Copy,
+    {
+        let n = online.n;
+        let d = online.d;
+        let mut workspace = FitBuffers::<C, B>::new(n)?;
+        let compiled = online.compiled.clone();
+        if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
+            workspace.ensure_ard_if_cached(n, d)?;
         }
+        let mut fitted = Self {
+            kernel: online.kernel.clone(),
+            compiled,
+            likelihood: online.likelihood,
+            x_unfitted: online.x_unfitted.clone_box(),
+            y_unfitted: online.y_unfitted.clone_box(),
+            x_transform: online.x_transform.clone_box(),
+            y_transform: online.y_transform.clone_box(),
+            optimizer: online.optimizer.clone(),
+            distance_cache: online.distance_cache,
+            jitter_policy: online.jitter_policy,
+            workspace,
+            query: online.query.clone(),
+            x_obs: online.x_obs.clone(),
+            y_obs: online.y_obs.clone(),
+            x: online.x.clone(),
+            y_train: online.y_train.clone(),
+            alpha: online.alpha.clone(),
+            n,
+            d,
+            mapped_factor: None,
+            _recompute: PhantomData,
+        };
+        fitted.factorize_current()?;
+        Ok(fitted)
     }
 
     /// Returns the number of training points.
@@ -1093,7 +1202,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         let _ = self.factorize_current();
     }
 
-    pub(super) fn factorize_current(&mut self) -> Result<(), GprError> {
+    pub(crate) fn factorize_current(&mut self) -> Result<(), GprError> {
         self.mapped_factor = None;
         factor_train_with_policy(
             &self.compiled,
@@ -1810,6 +1919,48 @@ where
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; `refit` still needs it.
 impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
+    pub(crate) fn into_online_preserving_factor(
+        self,
+    ) -> Result<OnlineGpr<Fixed, FullRecompute, C, RetainCholesky>, GprError> {
+        if self.mapped_factor.is_none() {
+            return self.into_online();
+        }
+        let n = self.n;
+        let mut workspace = OnlineWorkspace::from_active(n)?;
+        workspace.copy_ld_from(self.chol_l(), n)?;
+        fill_train_a(
+            &self.compiled,
+            self.x.as_ref(),
+            workspace.k_matrix.as_mut(),
+            workspace.dist_cache.as_mut(),
+            C::CACHES_DISTANCES,
+            self.likelihood.noise_variance(),
+        )?;
+        OnlineWorkspace::set_vector_prefix(&mut workspace.y, &self.y_train);
+        OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.alpha);
+        Ok(OnlineGpr::from_parts(
+            self.kernel,
+            self.compiled,
+            self.likelihood,
+            self.x_unfitted,
+            self.y_unfitted,
+            self.x_transform,
+            self.y_transform,
+            self.optimizer,
+            self.distance_cache,
+            self.jitter_policy,
+            workspace,
+            self.query,
+            self.x_obs,
+            self.y_obs,
+            self.x,
+            self.y_train,
+            self.alpha,
+            self.n,
+            self.d,
+        ))
+    }
+
     pub(crate) fn from_persisted(parts: PersistedModel<C>) -> Result<Self, GprError> {
         let n = parts.y_obs.len();
         if n == 0 {

@@ -323,6 +323,28 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
         self
     }
 
+    pub(crate) fn from_owned(
+        kernel: KernelSpec,
+        likelihood: GaussianLikelihood,
+        x_transform: Box<dyn UnfittedTransform>,
+        y_transform: Box<dyn UnfittedTarget>,
+        optimizer: O,
+        distance_cache: C,
+        jitter_policy: JitterPolicy,
+    ) -> Self {
+        Self {
+            kernel,
+            likelihood,
+            x_transform,
+            y_transform,
+            optimizer,
+            distance_cache,
+            jitter_policy,
+            _recompute: PhantomData,
+            _cholesky: PhantomData,
+        }
+    }
+
     pub(crate) fn with_boxed_target_transform(
         mut self,
         transform: Box<dyn UnfittedTarget>,

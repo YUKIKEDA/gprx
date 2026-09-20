@@ -22,8 +22,8 @@
        → Optimizer (型パラメータ。既定 `Lbfgs`。差し込み口は P2B-1。argmin ソルバは P2B-2。自作 `O` は同じ口で `minimize` される。使用例は P2B-15)
        → fit(self) → FittedGpr | (Gpr, GprError)
   → FittedGpr (L, α, X。predict / predict_into / refit / loo / save)
-       → persist: 1 ディレクトリ（`config.json` + `model.safetensors`）。`load` は `FittedGpr<Fixed>`。`L` があるとき mmap。再学習は `with_optimizer` → `refit`
-       → Phase 3: OnlineInference (`FittedGpr` 上、`&mut self`)
+       → persist: 1 ディレクトリ（`config.json` + `model.safetensors`）。`format_version` 1。`factor_kind` は必須（`llt` / `ldlt`）。`llt` の `load` は `FittedGpr<Fixed>`。`ldlt` は `OnlineGpr<Fixed>`。因子があるとき mmap。再学習は `with_optimizer` → `refit`
+       → OnlineGpr: `FittedGpr::into_online(self)` で LLT→LDLT。末尾 `insert` は `OnlineGpr` だけ
        → Phase 4: SparseGpr は同様に学習済み型を返す
 ```
 
@@ -729,7 +729,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 ## 11. オンライン学習(データ点の追加削除)
 
-GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、`FittedGpr`向けに専用の`OnlineWorkspace`・更新経路を用意する（`&mut self`）。
+GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、crate-private の `OnlineWorkspace` と公開の `OnlineGpr` を置く。`FittedGpr::into_online(self)` が変換する。`insert` は `OnlineGpr` だけにある。
 
 ### コスト比較
 
@@ -745,7 +745,7 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 1. **追加(末尾append)**: 自前で bordered update を実装する。O(n²)
 2. **削除(任意インデックス)**: `OnlineWorkspace`は**LDLT因子**を保持し、`ldlt::update::delete_rows_and_cols_clobber`を使う。`2×2` / `5×5` の手書き SPD で、削除後の再構成 `A = L D Lᵀ` がフル LDLT と一致する（P3-1 / [#30](https://github.com/YUKIKEDA/gprx/issues/30)）。Givens downdate は置かない
 
-バッチfitはLLTのままにする。初回`insert`時にLLT→LDLTへO(n²)で変換する:
+バッチfitはLLTのままにする。`FittedGpr::into_online` で LLT→LDLT へ O(n²) 変換する:
 
 - `D[j] = L_llt[j,j]²`
 - `L_ldlt[:, j] = L_llt[:, j] / L_llt[j, j]`(対角は1)
@@ -770,7 +770,7 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 
 バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は関連バッファを**全て同じ手順で**再確保・コピーする。
 
-crate-private。`from_active(n)` で `n_active = n_capacity = n`。`FittedGpr` への接続は P3-3。倍率フィールドは置かない。
+crate-private。`from_active(n)` で `n_active = n_capacity = n`。`OnlineGpr` が訓練 `X` を持ち、末尾 insert の前に `ensure_capacity` する。倍率フィールドは置かない。
 
 ```rust
 struct OnlineWorkspace {
@@ -797,7 +797,7 @@ struct OnlineWorkspace {
 
 ### 増分更新の手順と不変条件
 
-**追加**: ①容量が足りなければ拡張 → ②新規点と既存n点との距離計算(O(n)) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)) → ⑤alpha再ソルブ(O(n²)) → ⑥`PointRegistry`にPointIdを登録
+**追加（末尾）**: ①容量が足りなければ `ensure_capacity` → ②新規点と既存n点との距離計算(O(n)) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)) → ⑤alpha再ソルブ(O(n²))。`PointId` / `PointRegistry` は P3-4。
 
 **削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)) → ②距離キャッシュ・K・y・alphaから該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④alpha再ソルブ(O(n²))
 
@@ -814,17 +814,19 @@ struct PointRegistry {
 
 **insert/deleteとハイパラ再最適化を分離する**。
 
-Phase 3 の対象は `FittedGpr`（`&mut self`）。未学習の `Gpr` には点を足さない。
+未学習の `Gpr` には点を足さない。バッチの `FittedGpr` に `insert` は無い。
 
 ```rust
-trait OnlineInference<T: Scalar> {
-    fn insert(&mut self, x_new: &[T], y_new: T) -> Result<PointId, GprError>;
-    fn delete(&mut self, id: PointId) -> Result<(), GprError>;
-    fn refit_hyperparameters(&mut self, optimizer: &mut dyn Optimizer<T>) -> Result<(), GprError>;
+impl FittedGpr<O, S, C, B> {
+    fn into_online(self) -> Result<OnlineGpr<O, S, C, B>, GprError>;
+}
+
+impl OnlineGpr<O, S, C, B> {
+    fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<(), GprError>;
 }
 ```
 
-`insert`/`delete`は現在のカーネル・ハイパラのままLD・alphaを更新するだけで、ハイパラ再最適化は`refit_hyperparameters`を明示的に呼んだ場合のみ行う。Sparse GPRのオンライン学習はスコープ外(§14)。
+`insert` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`、`ldlt` は `OnlineGpr`。delete / `PointId` / `PointRegistry` は P3-4。Sparse GPRのオンライン学習はスコープ外(§14)。
 
 ## 12. テスト計画
 
@@ -857,7 +859,7 @@ trait OnlineInference<T: Scalar> {
 - **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
 - **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
 - **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）、transform ファイル分割の判断（P2B-20 / [#116](https://github.com/YUKIKEDA/gprx/issues/116)）。P2B-14…20 の DoD は Grill 後
-- **Phase 3(オンライン学習)**: 2b のあと。`FittedGpr` 上でデータ点の追加削除。自前insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
+- **Phase 3(オンライン学習)**: 2b のあと。`OnlineGpr` でデータ点の追加削除。`into_online` と自前末尾 insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFEまたはFITCのどちらか一つ。初期は**誘導点Z固定**（P4-1…4）。P4-5 / P4-6 で Z 最適化。P4-7 で Sparse オンライン
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
 
