@@ -768,7 +768,7 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 
 ### Workspaceの容量方式
 
-バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は **LD・`y`・`α`・`v_buf` を同じ手順で**再確保・コピーする。予測・NLML・insert は Gram `K` と距離キャッシュを読まないので、`OnlineWorkspace` には置かない。
+バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は **LD・`y`・`α`・`v_buf` を同じ手順で**再確保・コピーする。delete の faer スクラッチも同じ容量に伸ばす。予測・NLML・insert は Gram `K` と距離キャッシュを読まないので、`OnlineWorkspace` には置かない。
 
 crate-private。`from_active(n)` で `n_active = n_capacity = n`。`OnlineGpr` が訓練 `X` を持ち、末尾 insert の前に `ensure_capacity` する。倍率フィールドは置かない。
 
@@ -778,6 +778,7 @@ struct OnlineWorkspace {
     alpha: Col<f64>,
     y: Col<f64>,
     v_buf: Col<f64>,        // 予測分散の前進消去スクラッチ(テスト点1点あたりO(n²))
+    delete_scratch: MemBuffer, // faer delete_rows_and_cols。容量に合わせて伸ばす
     n_active: usize,
     n_capacity: usize,
 }
@@ -786,7 +787,7 @@ struct OnlineWorkspace {
 **容量拡張** (`ensure_capacity(needed)`。`n_capacity < needed` のとき):
 
 1. `new_cap = max(needed, max(n_capacity, 1) * 2)`
-2. `ld_factor`, `alpha`, `y`, `v_buf`を`new_cap`で再確保
+2. `ld_factor`, `alpha`, `y`, `v_buf`を`new_cap`で再確保。delete スクラッチも `new_cap` 用に伸ばす
 3. 既存の`n_active × n_active`下三角と長さ`n_active`のベクトルをコピー
 4. `PointRegistry`のインデックスは`n_active`未満のままなので付け替え不要
 5. 拡張後にinsertを実行する。更新アルゴリズムの最中には再確保しない
@@ -795,9 +796,9 @@ struct OnlineWorkspace {
 
 ### 増分更新の手順と不変条件
 
-**追加（末尾）**: ①容量が足りなければ `ensure_capacity`（倍率 2。`X` / `y` も同じ。クエリバッファは `ensure_at_least`） → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル対角 `k_new` だけ足す（insert は `K` の新行/列を書かない。予測・NLML は LD だけ読む） → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ → ⑥`PointRegistry` に新しい `PointId` を発行。delete 後の `α` はフル再ソルブのまま。
+**追加（末尾）**: ①容量が足りなければ `ensure_capacity`（倍率 2。`X` / `y` も同じ。クエリバッファは `ensure_at_least`） → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル対角 `k_new` だけ足す（insert は `K` の新行/列を書かない。予測・NLML は LD だけ読む） → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ → ⑥`PointRegistry` に新しい `PointId` を発行。
 
-**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)) → ②y・alpha・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④alpha再ソルブ(O(n²))。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
+**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)。スクラッチは `OnlineWorkspace` に置き再利用) → ②y・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④`α` は delete でも解かない。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
 
 **不変条件**: 削除により内部インデックスがシフトする際、`LD`, `y`, `alpha`, `X`, `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
 

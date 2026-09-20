@@ -304,6 +304,69 @@ fn run_online(case: &Case, stages: bool) -> Result<ResultRow, String> {
     })
 }
 
+fn run_online_delete(case: &Case) -> Result<ResultRow, String> {
+    if case.n_rows < 2 {
+        return Err("n_rows must be at least 2".to_string());
+    }
+    let warmup = timing::warmup_count();
+    let reps = timing::timed_reps(case.n_rows);
+    let d = case.n_cols;
+    let n = case.n_rows;
+    let x0 = prefix_colmajor(&case.x, n, d, 2);
+    let mut delete_samples = Vec::with_capacity(reps);
+    for i in 0..warmup + reps {
+        let gpr = make_gpr_raw(case)?;
+        let fitted = gpr
+            .factor(&x0, 2, d, &case.y[..2])
+            .map_err(|(_, e)| e.to_string())?;
+        let mut online = fitted.into_online().map_err(|e| e.to_string())?;
+        for index in 2..n {
+            let x_new = point_at(&case.x, n, d, index);
+            online
+                .insert(&x_new, case.y[index])
+                .map_err(|e| e.to_string())?;
+        }
+        let start = Instant::now();
+        while online.n() > 2 {
+            let id = *online
+                .point_ids()
+                .last()
+                .ok_or_else(|| "point_ids empty during delete clock".to_string())?;
+            online.delete(id).map_err(|e| e.to_string())?;
+        }
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            delete_samples.push(dt);
+        }
+    }
+    let (lo, hi) = timing::min_max(&delete_samples);
+    Ok(ResultRow {
+        lib: "gprx".to_string(),
+        name: case.name.clone(),
+        status: "ok".to_string(),
+        factor_s: Some(timing::median(&delete_samples)),
+        factor_min_s: Some(lo),
+        factor_max_s: Some(hi),
+        eval_s: None,
+        eval_min_s: None,
+        eval_max_s: None,
+        predict_s: None,
+        predict_min_s: None,
+        predict_max_s: None,
+        joint_evals: None,
+        peak_rss_bytes: Some(peak_rss::peak_rss_bytes()?),
+        warmup: Some(warmup as u64),
+        reps: Some(reps as u64),
+        kernel_s: None,
+        border_s: None,
+        rest_s: None,
+        note: Some(
+            "OnlineGpr::delete from n to 2; last remaining PointId each step; insert untimed"
+                .to_string(),
+        ),
+    })
+}
+
 fn take_insert_stages_or_zero() -> (f64, f64, f64) {
     #[cfg(feature = "insert-stages")]
     {
@@ -382,6 +445,7 @@ fn main() -> ExitCode {
     let mut memory = false;
     let mut online = false;
     let mut stages = false;
+    let mut delete = false;
     for arg in env::args().skip(1) {
         if arg == "--memory" {
             memory = true;
@@ -389,12 +453,14 @@ fn main() -> ExitCode {
             online = true;
         } else if arg == "--stages" {
             stages = true;
+        } else if arg == "--delete" {
+            delete = true;
         } else if path.is_none() {
             path = Some(arg);
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: gprx-perf CASE.json [--memory|--online|--stages]");
+        eprintln!("usage: gprx-perf CASE.json [--memory|--online|--stages|--delete]");
         return ExitCode::from(2);
     };
     let text = match fs::read_to_string(&path) {
@@ -412,7 +478,9 @@ fn main() -> ExitCode {
         }
     };
     let lib = if memory { "gprx-memory" } else { "gprx" };
-    let row = if online {
+    let row = if delete {
+        run_online_delete(&case)
+    } else if online {
         run_online(&case, stages)
     } else if memory {
         run_memory(&case)
