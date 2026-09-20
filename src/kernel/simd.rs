@@ -345,6 +345,20 @@ pub(crate) fn try_apply_rbf_cross(
     }
     let n = dist.nrows();
     let m = dist.ncols();
+    if m == 1 {
+        apply_rbf_range(
+            dist,
+            out,
+            ColWindow {
+                dist_col: 0,
+                out_col: 0,
+                row_start: 0,
+                row_end: n,
+            },
+            inv_two_ell_sq,
+        )?;
+        return Ok(true);
+    }
     let n_parts = worker_count();
     out.par_col_partition_mut(n_parts)
         .enumerate()
@@ -384,6 +398,10 @@ pub(crate) fn try_apply_rbf_ard_cross(
     }
     if !unit_row_stride(x) || !unit_row_stride(xs) || !unit_row_stride(out.as_ref()) {
         return Ok(false);
+    }
+    if m == 1 {
+        map_ard_cross_column(x, xs, out, 0, 0, inv_ell_sq)?;
+        return Ok(true);
     }
     let n_parts = worker_count();
     out.par_col_partition_mut(n_parts)

@@ -28,3 +28,7 @@ Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench
 ## Online insert (P3-6)
 
 `just perf-online` times `OnlineGpr::insert` vs libgp `add_pattern` from `n = 2` to `n` on the same Forrester / sphere cases. Raw `y` (no `StandardizeTarget`, no z-score). Gate: `n = 256 / 1024` median ≤ libgp (5% inconclusive). `4096` and RSS are recorded only. Goldens for `just test` are `just gen-online-goldens` → `compare/goldens/online_libgp_*.json`.
+
+`just perf-online-stages` rebuilds gprx-perf with `--features insert-stages` and prints kernel / bordered LDLT / X·y medians for Forrester `n = 256 / 1024`. It does not change the gate clock.
+
+`just perf-online-delete` times gprx `OnlineGpr::delete` from `n` down to 2 (last remaining `PointId` each step; insert is untimed). No libgp cell. Used to record before / after of the P3-7 delete path.

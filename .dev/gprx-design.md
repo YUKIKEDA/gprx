@@ -768,18 +768,17 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 
 ### Workspaceの容量方式
 
-バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は関連バッファを**全て同じ手順で**再確保・コピーする。
+バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は **LD・`y`・`α`・`v_buf` を同じ手順で**再確保・コピーする。delete の faer スクラッチも同じ容量に伸ばす。予測・NLML・insert は Gram `K` と距離キャッシュを読まないので、`OnlineWorkspace` には置かない。
 
-crate-private。`from_active(n)` で `n_active = n_capacity = n`。`OnlineGpr` が訓練 `X` を持ち、末尾 insert の前に `ensure_capacity` する。倍率フィールドは置かない。
+crate-private。`from_active(n)` で `n_active = n_capacity = n`。訓練 `X` は `OnlineGpr` が持ち、この struct には置かない。末尾 insert の前に `OnlineGpr` が `ensure_capacity` する。倍率フィールドは置かない。
 
 ```rust
 struct OnlineWorkspace {
-    k_matrix: Mat<f64>,     // 下三角の A(容量 n_capacity)
-    dist_cache: Mat<f64>,
     ld_factor: Mat<f64>,    // LDLT因子(対角=D、厳密下三角=L)
     alpha: Col<f64>,
     y: Col<f64>,
     v_buf: Col<f64>,        // 予測分散の前進消去スクラッチ(テスト点1点あたりO(n²))
+    delete_scratch: MemBuffer, // faer delete_rows_and_cols。容量に合わせて伸ばす
     n_active: usize,
     n_capacity: usize,
 }
@@ -788,8 +787,8 @@ struct OnlineWorkspace {
 **容量拡張** (`ensure_capacity(needed)`。`n_capacity < needed` のとき):
 
 1. `new_cap = max(needed, max(n_capacity, 1) * 2)`
-2. `k_matrix`, `dist_cache`, `ld_factor`, `alpha`, `y`, `v_buf`を`new_cap`で再確保
-3. 既存の`n_active × n_active`ブロックと長さ`n_active`のベクトルをコピー
+2. `ld_factor`, `alpha`, `y`, `v_buf`を`new_cap`で再確保。delete スクラッチも `new_cap` 用に伸ばす
+3. 既存の`n_active × n_active`下三角と長さ`n_active`のベクトルをコピー
 4. `PointRegistry`のインデックスは`n_active`未満のままなので付け替え不要
 5. 拡張後にinsertを実行する。更新アルゴリズムの最中には再確保しない
 
@@ -797,11 +796,11 @@ struct OnlineWorkspace {
 
 ### 増分更新の手順と不変条件
 
-**追加（末尾）**: ①容量が足りなければ `ensure_capacity` → ②新規点と既存n点との距離計算(O(n)) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)) → ⑤alpha再ソルブ(O(n²)) → ⑥`PointRegistry` に新しい `PointId` を発行。
+**追加（末尾）**: ①容量が足りなければ `OnlineWorkspace::ensure_capacity`（倍率 2）。`OnlineGpr` の訓練 `X` / `y` も同じ倍率で伸ばす。クエリバッファは `ensure_at_least` → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル対角 `k_new` だけ足す（insert は `K` の新行/列を書かない。予測・NLML は LD だけ読む） → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ → ⑥`PointRegistry` に新しい `PointId` を発行。
 
-**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)) → ②距離キャッシュ・K・y・alpha・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④alpha再ソルブ(O(n²))。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
+**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)。スクラッチは `OnlineWorkspace` に置き再利用) → ②`OnlineGpr` の y・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④`α` は delete でも解かない。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
 
-**不変条件**: 削除により内部インデックスがシフトする際、`K`, `LD`, `y`, `alpha`, 距離キャッシュ, `X`, `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
+**不変条件**: 削除により内部インデックスがシフトする際、workspace の `LD` / `y` / `alpha` と `OnlineGpr` の `X` と `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
 
 ```rust
 struct PointRegistry {
@@ -856,7 +855,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3 の P3-6。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3 の P3-7。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）

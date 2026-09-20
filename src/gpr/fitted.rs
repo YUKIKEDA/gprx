@@ -23,7 +23,7 @@ use crate::workspace::{
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 
-use super::super::online::{OnlineGpr, fill_train_a};
+use super::super::online::OnlineGpr;
 
 use super::super::factor::{
     FactorPolicy, apply_compiled_to, cholesky_lower_with_policy, factor_train_with_policy,
@@ -150,14 +150,6 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         let n = self.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
         workspace.fill_ld_from_llt(self.chol_l(), n)?;
-        fill_train_a(
-            &self.compiled,
-            self.x.as_ref(),
-            workspace.k_matrix.as_mut(),
-            workspace.dist_cache.as_mut(),
-            C::CACHES_DISTANCES,
-            self.likelihood.noise_variance(),
-        )?;
         OnlineWorkspace::set_vector_prefix(&mut workspace.y, &self.y_train);
         OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.alpha);
         Ok(OnlineGpr::from_parts(
@@ -210,9 +202,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             query: online.query.clone(),
             x_obs: online.x_obs.clone(),
             y_obs: online.y_obs.clone(),
-            x: online.x.clone(),
+            x: compact_train_x(&online.x, n, d),
             y_train: online.y_train.clone(),
-            alpha: online.alpha.clone(),
+            alpha: online.alpha().to_vec(),
             n,
             d,
             mapped_factor: None,
@@ -1928,14 +1920,6 @@ impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
         let n = self.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
-        fill_train_a(
-            &self.compiled,
-            self.x.as_ref(),
-            workspace.k_matrix.as_mut(),
-            workspace.dist_cache.as_mut(),
-            C::CACHES_DISTANCES,
-            self.likelihood.noise_variance(),
-        )?;
         OnlineWorkspace::set_vector_prefix(&mut workspace.y, &self.y_train);
         OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.alpha);
         Ok(OnlineGpr::from_parts(
@@ -2107,6 +2091,13 @@ fn trace_ki_kinv2(ki: MatRef<'_, f64>, w: MatRef<'_, f64>, alpha: &[f64], n: usi
         }
     }
     tr
+}
+
+fn compact_train_x(x: &Mat<f64>, n: usize, d: usize) -> Mat<f64> {
+    if x.nrows() == n && x.ncols() == d {
+        return x.clone();
+    }
+    Mat::from_fn(n, d, |i, j| x[(i, j)])
 }
 
 fn mul_lower_chol(l: MatRef<'_, f64>, z: &[f64], out: &mut [f64]) {
