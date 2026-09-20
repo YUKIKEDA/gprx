@@ -15,7 +15,7 @@ use crate::kernel::{
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{
-    AcceptsRecompute, Fixed, FullRecompute, Lbfgs, OptResult, Optimizer, RecomputeStrategy,
+    AcceptsRecompute, Fixed, FullRecompute, Lbfgs, OptResult, Optimizer, PoleRecompute,
 };
 use crate::param::Interval;
 use crate::persist::{self, MappedTensors, PersistedModel};
@@ -28,11 +28,11 @@ use crate::workspace::{
 };
 
 use super::factor::{
-    FactorPolicy, cholesky_lower_with_policy, factor_train_with_policy, frobenius_lower, gemv_full,
-    gemv_sym_lower, inv_diag_from_chol_l, neg_mll_from_factor, pack_points, pack_points_into,
-    require_param_len, symmetrize_lower, trace_product, validate_query, validate_training,
-    write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
-    write_kernel_hess_from_coords, write_params,
+    FactorPolicy, apply_compiled_to, cholesky_lower_with_policy, factor_train_with_policy,
+    factor_written_k_with_policy, frobenius_lower, gemv_full, gemv_sym_lower, inv_diag_from_chol_l,
+    neg_mll_from_factor, pack_points, pack_points_into, require_param_len, symmetrize_lower,
+    trace_product, validate_query, validate_training, write_kernel_grad,
+    write_kernel_grad_from_coords, write_kernel_hess, write_kernel_hess_from_coords, write_params,
 };
 use super::{
     AllocWorkspace, CachedDistances, DistanceCachePolicy, DistanceCacheSlot, FitBuffers,
@@ -379,9 +379,14 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
 
     /// Replaces the optimizer, changing the type parameter `O`.
     ///
-    /// The recompute strategy becomes [`FullRecompute`]. Call
-    /// [`Gpr::with_recompute_strategy`] afterwards when the new optimizer
-    /// implements [`crate::UsesChangeIndices`].
+    /// The recompute strategy follows the Cholesky pole `B`:
+    /// [`crate::ReuseCholesky`] is always [`FullRecompute`].
+    /// [`crate::RetainCholesky`] is [`crate::IncrementalRecompute`] when
+    /// `O2: `[`crate::UsesChangeIndices`], otherwise [`FullRecompute`].
+    /// L-BFGS cannot be incremental. A custom optimizer that does not
+    /// implement [`crate::UsesChangeIndices`] implements
+    /// [`crate::PoleRecompute`]`<`[`crate::RetainCholesky`]`>` with
+    /// [`FullRecompute`].
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after
     /// this switch. argmin solvers are [`crate::Lbfgs`], [`crate::NonlinearCg`],
@@ -404,7 +409,10 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Gpr<O2, FullRecompute, C, B> {
+    pub fn with_optimizer<O2: PoleRecompute<B>>(
+        self,
+        optimizer: O2,
+    ) -> Gpr<O2, O2::Strategy, C, B> {
         Gpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -421,9 +429,10 @@ impl<O, S, C, B> Gpr<O, S, C, B> {
     /// Selects whether the Cholesky factor keeps a dedicated `W` buffer.
     ///
     /// Public callers use [`Gpr::with_prefer_memory`] / [`Gpr::with_prefer_speed`].
-    pub(crate) fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, S, C, B2>
+    pub(crate) fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, O::Strategy, C, B2>
     where
         B2: crate::CholeskyBuffer,
+        O: PoleRecompute<B2>,
     {
         Gpr {
             kernel: self.kernel,
@@ -489,7 +498,10 @@ impl<O, S, C: DistanceCachePolicy, B> Gpr<O, S, C, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_memory(self) -> Gpr<O, S, UncachedDistances, ReuseCholesky> {
+    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, UncachedDistances, ReuseCholesky>
+    where
+        O: PoleRecompute<ReuseCholesky, Strategy = FullRecompute>,
+    {
         self.with_distance_cache_policy(UncachedDistances)
             .with_cholesky_buffer(ReuseCholesky)
     }
@@ -516,7 +528,10 @@ impl<O, S, C: DistanceCachePolicy, B> Gpr<O, S, C, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_speed(self) -> Gpr<O, S, CachedDistances, RetainCholesky> {
+    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, CachedDistances, RetainCholesky>
+    where
+        O: PoleRecompute<RetainCholesky>,
+    {
         self.with_distance_cache_policy(CachedDistances)
             .with_cholesky_buffer(RetainCholesky)
     }
@@ -562,7 +577,10 @@ impl<O, S, B> Gpr<O, S, NoDistanceCache, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_memory(self) -> Gpr<O, S, NoDistanceCache, ReuseCholesky> {
+    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, NoDistanceCache, ReuseCholesky>
+    where
+        O: PoleRecompute<ReuseCholesky, Strategy = FullRecompute>,
+    {
         self.with_cholesky_buffer(ReuseCholesky)
     }
 
@@ -586,7 +604,10 @@ impl<O, S, B> Gpr<O, S, NoDistanceCache, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_speed(self) -> Gpr<O, S, NoDistanceCache, RetainCholesky> {
+    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, NoDistanceCache, RetainCholesky>
+    where
+        O: PoleRecompute<RetainCholesky>,
+    {
         self.with_cholesky_buffer(RetainCholesky)
     }
 }
@@ -594,47 +615,11 @@ impl<O, S, B> Gpr<O, S, NoDistanceCache, B> {
 #[allow(private_bounds)] // `GprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
 impl<O, S, C, B> Gpr<O, S, C, B>
 where
-    S: RecomputeStrategy,
+    S: AcceptsRecompute<O>,
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B>>,
 {
-    /// Replaces the recompute-strategy marker.
-    ///
-    /// [`FullRecompute`] is valid for every optimizer. [`crate::IncrementalRecompute`]
-    /// requires `O: `[`crate::UsesChangeIndices`]. L-BFGS does not implement
-    /// that marker. The incremental evaluation body is P2B-18.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{FullRecompute, GaussianLikelihood, Gpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let gpr = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_recompute_strategy(FullRecompute);
-    /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_recompute_strategy<S2: AcceptsRecompute<O>>(self, _: S2) -> Gpr<O, S2, C, B> {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
-            optimizer: self.optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-        }
-    }
-
     /// Factors `A = K + σn² I`, solves `A α = y`, and updates `θ` with `O`.
     ///
     /// `x` is column-major with `n_rows` points and `n_cols` features. After
@@ -922,7 +907,8 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     ///
     /// Does not write a solver into a persist directory. A model loaded as
     /// [`crate::persist::LoadedGpr`] is [`Fixed`]; call this before `refit`
-    /// to search again.
+    /// to search again. `S` follows the same Cholesky-pole rule as
+    /// [`Gpr::with_optimizer`].
     ///
     /// # Examples
     ///
@@ -955,7 +941,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> FittedGpr<O2, S, C, B> {
+    pub fn with_optimizer<O2: PoleRecompute<B>>(
+        self,
+        optimizer: O2,
+    ) -> FittedGpr<O2, O2::Strategy, C, B> {
         FittedGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -1253,6 +1242,84 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         );
         self.fill_gradient_from_factor(n_kernel, n, out)?;
         Ok(nlml)
+    }
+
+    /// Rebuilds dirty compiled leaves, recombines the tree, and factors.
+    pub(crate) fn value_from_leaf_grams(
+        &mut self,
+        params: &[f64],
+        indices: Option<&[usize]>,
+        leaf_grams: &mut Vec<Mat<f64>>,
+        primed: &mut bool,
+    ) -> Result<f64, GprError> {
+        let n_kernel = self.kernel.num_params();
+        let n_params = self.num_params();
+        require_param_len(params.len(), n_params)?;
+        if let Some(changed) = indices {
+            require_change_indices(changed, n_params)?;
+        }
+        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        let n = self.n;
+        let n_leaves = compiled.leaf_count();
+        if leaf_grams.len() != n_leaves || leaf_grams.first().is_none_or(|m| m.nrows() != n) {
+            *leaf_grams = (0..n_leaves).map(|_| Mat::zeros(n, n)).collect();
+            *primed = false;
+        }
+        let mut dirty = vec![true; n_leaves];
+        if *primed && indices.is_some() {
+            dirty.fill(false);
+            let mut last = vec![0.0; n_params];
+            write_params(&self.kernel, &self.likelihood, &mut last)?;
+            for (j, (&prev, &next)) in last.iter().zip(params.iter()).enumerate() {
+                if prev.to_bits() != next.to_bits() && j < n_kernel {
+                    dirty[compiled.leaf_index_for_param(j)?] = true;
+                }
+            }
+        }
+        for (i, slot) in leaf_grams.iter_mut().enumerate() {
+            if dirty[i] {
+                apply_compiled_to(
+                    compiled.leaf_at(i)?,
+                    self.x.as_ref(),
+                    &mut self.workspace,
+                    slot.as_mut(),
+                )?;
+            }
+        }
+        if let Err(err) = factor_written_k_with_policy(
+            &mut self.workspace,
+            &self.y_train,
+            likelihood.noise_variance(),
+            FactorPolicy {
+                jitter: self.jitter_policy,
+                stage: CholeskyStage::Fit,
+            },
+            |ws| {
+                let core = ws.core_mut();
+                compiled.combine_from_leaf_grams(
+                    leaf_grams,
+                    core.k_matrix.as_mut(),
+                    core.exp_buf.as_mut(),
+                    Triangle::Lower,
+                )
+            },
+        ) {
+            *primed = false;
+            let _ = self.factorize_current();
+            return Err(err);
+        }
+        *primed = true;
+        self.copy_alpha_from_rhs();
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        self.compiled = compiled;
+        self.mapped_factor = None;
+        Ok(neg_mll_from_factor(
+            self.workspace.core().k_matrix.as_ref(),
+            &self.y_train,
+            &self.alpha,
+            n,
+        ))
     }
 
     /// Writes the analytic NLML Hessian (row-major `p×p`) at `params`.
@@ -2529,6 +2596,29 @@ fn fill_query_query_kernel(
             )
         }
     }
+}
+
+fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprError> {
+    if indices.is_empty() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: "change indices must not be empty".to_owned(),
+        });
+    }
+    let mut seen = vec![false; n_params];
+    for &i in indices {
+        if i >= n_params {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("change index {i} is out of range (n_params={n_params})"),
+            });
+        }
+        if seen[i] {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("change index {i} is duplicated"),
+            });
+        }
+        seen[i] = true;
+    }
+    Ok(())
 }
 
 fn zero_and_maybe_noise(mut out: MatMut<'_, f64>, n: usize, noise_diag: bool, noise: f64) {
