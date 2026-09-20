@@ -42,23 +42,45 @@ fn na_row(lib: &str, name: &str, note: String) -> ResultRow {
     }
 }
 
-fn make_gpr(case: &Case) -> Result<Gpr<Fixed>, String> {
-    let kernel = if case.ard {
+fn make_kernel(case: &Case) -> Result<KernelSpec, String> {
+    if case.ard {
         let spec = RbfArdKernel::new(&case.lengthscales_init).map_err(|e| e.to_string())?;
-        KernelSpec::from(spec)
+        Ok(KernelSpec::from(spec))
     } else {
         let ell = case
             .lengthscales_init
             .first()
             .copied()
             .ok_or_else(|| "missing lengthscale".to_string())?;
-        KernelSpec::from(RbfKernel::new(ell).map_err(|e| e.to_string())?)
-    };
+        Ok(KernelSpec::from(RbfKernel::new(ell).map_err(|e| e.to_string())?))
+    }
+}
+
+fn make_gpr(case: &Case) -> Result<Gpr<Fixed>, String> {
     let likelihood =
         GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
-    Ok(Gpr::new(kernel, likelihood)
+    Ok(Gpr::new(make_kernel(case)?, likelihood)
         .with_target_transform(StandardizeTarget::new())
         .with_optimizer(Fixed))
+}
+
+fn make_gpr_raw(case: &Case) -> Result<Gpr<Fixed>, String> {
+    let likelihood =
+        GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
+    Ok(Gpr::new(make_kernel(case)?, likelihood).with_optimizer(Fixed))
+}
+
+fn point_at(x: &[f64], n: usize, d: usize, index: usize) -> Vec<f64> {
+    (0..d).map(|feature| x[feature * n + index]).collect()
+}
+
+fn prefix_colmajor(x: &[f64], n: usize, d: usize, keep: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(keep * d);
+    for feature in 0..d {
+        let base = feature * n;
+        out.extend_from_slice(&x[base..base + keep]);
+    }
+    out
 }
 
 fn finish_row(
@@ -199,6 +221,56 @@ impl EvalPredict for FittedGpr<Fixed, FullRecompute, UncachedDistances, ReuseCho
     }
 }
 
+fn run_online(case: &Case) -> Result<ResultRow, String> {
+    if case.n_rows < 2 {
+        return Err("n_rows must be at least 2".to_string());
+    }
+    let warmup = timing::warmup_count();
+    let reps = timing::timed_reps(case.n_rows);
+    let d = case.n_cols;
+    let n = case.n_rows;
+    let x0 = prefix_colmajor(&case.x, n, d, 2);
+    let mut insert_samples = Vec::with_capacity(reps);
+    for i in 0..warmup + reps {
+        let gpr = make_gpr_raw(case)?;
+        let fitted = gpr
+            .factor(&x0, 2, d, &case.y[..2])
+            .map_err(|(_, e)| e.to_string())?;
+        let mut online = fitted.into_online().map_err(|e| e.to_string())?;
+        let start = Instant::now();
+        for index in 2..n {
+            let x_new = point_at(&case.x, n, d, index);
+            online
+                .insert(&x_new, case.y[index])
+                .map_err(|e| e.to_string())?;
+        }
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            insert_samples.push(dt);
+        }
+    }
+    let (lo, hi) = timing::min_max(&insert_samples);
+    Ok(ResultRow {
+        lib: "gprx".to_string(),
+        name: case.name.clone(),
+        status: "ok".to_string(),
+        factor_s: Some(timing::median(&insert_samples)),
+        factor_min_s: Some(lo),
+        factor_max_s: Some(hi),
+        eval_s: None,
+        eval_min_s: None,
+        eval_max_s: None,
+        predict_s: None,
+        predict_min_s: None,
+        predict_max_s: None,
+        joint_evals: None,
+        peak_rss_bytes: Some(peak_rss::peak_rss_bytes()?),
+        warmup: Some(warmup as u64),
+        reps: Some(reps as u64),
+        note: Some("OnlineGpr::insert from n=2 to n; first two points untimed".to_string()),
+    })
+}
+
 fn run_speed(case: &Case) -> Result<ResultRow, String> {
     let warmup = timing::warmup_count();
     let reps = timing::timed_reps(case.n_rows);
@@ -264,15 +336,18 @@ fn run_memory(case: &Case) -> Result<ResultRow, String> {
 fn main() -> ExitCode {
     let mut path = None;
     let mut memory = false;
+    let mut online = false;
     for arg in env::args().skip(1) {
         if arg == "--memory" {
             memory = true;
+        } else if arg == "--online" {
+            online = true;
         } else if path.is_none() {
             path = Some(arg);
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: gprx-perf CASE.json [--memory]");
+        eprintln!("usage: gprx-perf CASE.json [--memory|--online]");
         return ExitCode::from(2);
     };
     let text = match fs::read_to_string(&path) {
@@ -290,7 +365,9 @@ fn main() -> ExitCode {
         }
     };
     let lib = if memory { "gprx-memory" } else { "gprx" };
-    let row = if memory {
+    let row = if online {
+        run_online(&case)
+    } else if memory {
         run_memory(&case)
     } else {
         run_speed(&case)

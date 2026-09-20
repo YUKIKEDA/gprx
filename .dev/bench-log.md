@@ -374,3 +374,26 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 
 速さ極の Forrester n=1024 / 4096 は P2B-21（factor 16.0 ms / eval 211 ms / 7.20 s）と同程度（14.5 ms / 180 ms / 7.25 s）。初回の 41.6 ms / 571 ms / 8.47 s は残していない。球 n=4096 eval は 7.48 s → 7.88 s（範囲 7.33–9.35）。n=4096 のメモリ極 RSS は P2B-21 Uncached+Retain（409.3 / 409.4 MiB）からさらに専用 `W`（`n×n` の 128 MiB）を外し、281.3 / 281.5 MiB。libgp 405.2 より小さい。eval は等方で既定より長い（n=4096 で 7.25 s → 13.05 s）。ARD も長い（7.88 s → 9.90 s）。criterion は合否にしない。
 
+## P3-6（online insert vs libgp、[#176](https://github.com/YUKIKEDA/gprx/issues/176)）
+
+同一機械。日付 2026-09-20。`just perf-online`。生の `y`（`StandardizeTarget` なし、libgp も z-score なし）。時計は `n = 2` まで組んだあと、3 点目から `n` までの `insert` / `add_pattern`。捨て 1 回 + 中央値（括弧は min–max）。回数は P2B-16 と同じ（`n ≤ 256` で 51、`n ≤ 1024` で 21、それ以外 7）。
+
+ゲートは `n = 256 / 1024` の中央値が libgp 以下（5% 以内は判定不能）。`4096` と RSS は記録。4 ゲートセルすべて fail。改善は P3-7 / [#177](https://github.com/YUKIKEDA/gprx/issues/177)。
+
+| 問題      | n    | lib   | insert n=2→n              | peak RSS  | ゲート |
+| --------- | ---- | ----- | ------------------------- | --------- | ------ |
+| Forrester | 256  | gprx  | 16.10 ms（14.65–17.84）   | 7.7 MiB   | fail   |
+| Forrester | 256  | libgp | 1.39 ms（1.20–1.90）      | 5.8 MiB   | —      |
+| Forrester | 1024 | gprx  | 202.60 ms（200.57–206.03）| 36.8 MiB  | fail   |
+| Forrester | 1024 | libgp | 47.01 ms（42.38–52.85）   | 24.5 MiB  | —      |
+| Forrester | 4096 | gprx  | 12.844 s（12.756–12.935） | 487.4 MiB | record |
+| Forrester | 4096 | libgp | 3.846 s（3.801–3.918）    | 265.4 MiB | —      |
+| 球 ARD    | 256  | gprx  | 13.77 ms（8.67–14.56）    | 8.1 MiB   | fail   |
+| 球 ARD    | 256  | libgp | 1.87 ms（1.73–2.26）      | 5.9 MiB   | —      |
+| 球 ARD    | 1024 | gprx  | 190.85 ms（188.24–196.64）| 37.5 MiB  | fail   |
+| 球 ARD    | 1024 | libgp | 49.69 ms（46.43–53.22）   | 24.6 MiB  | —      |
+| 球 ARD    | 4096 | gprx  | 12.828 s（12.758–12.931） | 488.5 MiB | record |
+| 球 ARD    | 4096 | libgp | 3.928 s（3.822–4.000）    | 265.5 MiB | —      |
+
+数値照合（Forrester / 球の先頭 32 点、各段階の平均・観測分散・NLML）は相対 `1e-8` で pass。`just test` はコミット済み JSON を読む。criterion は合否にしない。
+

@@ -14,9 +14,17 @@ test:
 gen-goldens:
     uv run --directory compare python generate.py
 
+# Regenerates libgp online-insert goldens (P3-6). cargo test must not run this.
+gen-online-goldens:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare python generate_online_libgp.py
+
 bench:
     cargo bench --bench exact
 
 # Manual P2B-16 harness. cargo test must not run this.
 perf:
     $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run.py
+
+# Manual P3-6 insert-sequence vs libgp. cargo test must not run this.
+perf-online:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_online.py
