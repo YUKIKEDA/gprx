@@ -845,6 +845,7 @@ impl OnlineGpr<O, S, C, B> {
    - 悪条件行列での勾配安定性
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
 5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順は `SmallRng` でランダム化する
+5b. **オンライン insert の外部照合**(P3-6): 同じ θ の libgp `add_pattern` と predict（平均・観測分散）および NLML を相対 `1e-8`。delete の外部 API は無い。`cargo test` はコミット済み JSON を読む（C++ を呼ばない）
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのf64フォールバック
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)。sklearn JSON は数値の第二照合であり、公開 API の契約ではない。アルゴリズムの正本は GPML / Rasmussen
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
@@ -855,7 +856,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 2b（P2B-16）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 3 は 2b のあと。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3 の P3-6。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）

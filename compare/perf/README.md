@@ -24,3 +24,7 @@ gprx uses `Gpr<Fixed>::factor` and `value_and_gradient_into` with `StandardizeTa
 `just perf` prints two tables: the speed pole (default `CachedDistances` + `RetainCholesky`), then the memory pole (`Gpr::with_prefer_memory` = `UncachedDistances` + `ReuseCholesky`). P2B-16 time / RSS gates use the first table. The second table is recorded only; it does not add an RSS gate. The P2B-21 Uncached+Retain table stays in `.dev/bench-log.md`. `python run.py --reprint` rebuilds the tables from `out/results.json` without rerunning.
 
 Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench-log.md`. criterion is not used for these gates.
+
+## Online insert (P3-6)
+
+`just perf-online` times `OnlineGpr::insert` vs libgp `add_pattern` from `n = 2` to `n` on the same Forrester / sphere cases. Raw `y` (no `StandardizeTarget`, no z-score). Gate: `n = 256 / 1024` median ≤ libgp (5% inconclusive). `4096` and RSS are recorded only. Goldens for `just test` are `just gen-online-goldens` → `compare/goldens/online_libgp_*.json`.
