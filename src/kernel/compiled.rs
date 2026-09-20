@@ -260,6 +260,9 @@ impl CompiledKernel {
             });
         }
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        visit_triangle(out.nrows(), uplo, |row, col| {
+            out[(row, col)] = 0.0;
+        });
         let mut index = 0;
         self.write_from_leaf_grams(grams, &mut index, out.as_mut(), scratch.as_mut(), uplo)?;
         if index != grams.len() {
@@ -2381,6 +2384,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn combine_sum_from_leaf_grams_overwrites_dirty_dest() {
+        let compiled = (rbf(1.0) + rbf(2.0)).compile();
+        let dist = sq_dist_1d(&[0.0, 1.0, 2.0]);
+        let expected = apply_compiled(&compiled, dist.as_ref());
+        let mut grams = [fill(3, 0.0), fill(3, 0.0)];
+        compiled
+            .leaf_at(0)
+            .expect("leaf 0")
+            .apply(
+                dist.as_ref(),
+                grams[0].as_mut(),
+                Triangle::Lower,
+                fill(3, 0.0).as_mut(),
+            )
+            .expect("leaf 0");
+        compiled
+            .leaf_at(1)
+            .expect("leaf 1")
+            .apply(
+                dist.as_ref(),
+                grams[1].as_mut(),
+                Triangle::Lower,
+                fill(3, 0.0).as_mut(),
+            )
+            .expect("leaf 1");
+        let mut dirty = fill(3, 999.0);
+        let mut scratch = fill(3, 0.0);
+        compiled
+            .combine_from_leaf_grams(&grams, dirty.as_mut(), scratch.as_mut(), Triangle::Lower)
+            .expect("combine");
+        lower_matches(dirty.as_ref(), expected.as_ref());
     }
 
     #[test]

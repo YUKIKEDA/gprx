@@ -237,6 +237,11 @@ pub(crate) fn factor_train_with_policy<W: FitWorkspace>(
 }
 
 /// Factors after `write_k` fills the lower training Gram (no noise).
+///
+/// Clears `k_matrix` before every `write_k`. In-place Cholesky overwrites
+/// that buffer with `L` (or a partial factor on failure). A later
+/// `write_k` that accumulates — Sum [`crate::kernel::CompiledKernel`]
+/// combine uses `add_triangle` — must not add into that leftover.
 pub(crate) fn factor_written_k_with_policy<W, F>(
     ws: &mut W,
     y: &[f64],
@@ -248,6 +253,7 @@ where
     W: FitWorkspace,
     F: FnMut(&mut W) -> Result<(), GprError>,
 {
+    clear_train_gram(ws);
     write_k(ws)?;
     finish_train_system(ws, y, noise, 0.0);
     {
@@ -267,6 +273,7 @@ where
     let mut last_j = 0.0;
     for j in policy.jitter.retry_jitters() {
         last_j = j;
+        clear_train_gram(ws);
         write_k(ws)?;
         finish_train_system(ws, y, noise, j);
         let core = ws.core_mut();
@@ -288,6 +295,10 @@ where
         matrix_size: n,
         stage: policy.stage,
     })
+}
+
+fn clear_train_gram<W: FitWorkspace>(ws: &mut W) {
+    ws.core_mut().k_matrix.fill(0.0);
 }
 
 pub(crate) fn log_det_from_l(l: MatRef<'_, f64>, n: usize) -> f64 {

@@ -1,6 +1,9 @@
 use super::{FittedGpr, Gpr};
 use crate::error::{CholeskyStage, GprError};
-use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
+use crate::gpr::factor::{
+    FactorPolicy, add_noise_to_diag, cholesky_and_solve, factor_written_k_with_policy,
+    log_det_from_l, pack_points,
+};
 use crate::gpr::{
     AdaptiveJitter, CachedDistances, DistanceCacheSlot, FixedJitter, JitterPolicy, NoDistanceCache,
     PredictOptions, Prediction, PredictiveCovariance, RetainCholesky, ReuseCholesky,
@@ -553,6 +556,44 @@ fn adaptive_jitter_recovers_after_growth() {
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
         .expect("j grows past the negative eigenvalue");
     assert_close(fitted.likelihood().noise_variance(), 0.1);
+}
+
+#[test]
+fn factor_retry_does_not_accumulate_into_failed_cholesky() {
+    let n = 2;
+    let mut ws = Workspace::<DoublePrecision>::new(n).expect("n > 0");
+    let y = [1.0, 0.0];
+    let noise = 0.1;
+    let jitter = 1.0;
+    factor_written_k_with_policy(
+        &mut ws,
+        &y,
+        noise,
+        FactorPolicy {
+            jitter: JitterPolicy::fixed(jitter).expect("valid"),
+            stage: CholeskyStage::Fit,
+        },
+        |ws| {
+            let mut k = ws.core_mut().k_matrix.as_mut();
+            k[(0, 0)] += 1.0;
+            k[(1, 0)] += 2.0;
+            k[(1, 1)] += 1.0;
+            Ok(())
+        },
+    )
+    .expect("jitter recovers an indefinite Gram");
+    let l = ws.core().k_matrix.as_ref();
+    let diag = noise + jitter;
+    let expected = [[1.0 + diag, 2.0], [2.0, 1.0 + diag]];
+    for col in 0..n {
+        for row in col..n {
+            let mut a = 0.0;
+            for k in 0..=row.min(col) {
+                a += l[(row, k)] * l[(col, k)];
+            }
+            assert_close(a, expected[row][col]);
+        }
+    }
 }
 
 #[test]
@@ -2556,6 +2597,77 @@ fn incremental_sum_matches_full_value() {
     let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
         + KernelSpec::from(RbfKernel::new(0.8).expect("valid"));
     assert_incremental_matches_full(kernel, 0.16, 1);
+}
+
+/// Cached non-dirty leaf Grams must still match a full rebuild after a later
+/// coordinate step, and after an eval that is not a neighbor of the last eval
+/// (FSA rejection).
+#[test]
+fn incremental_cached_leaves_match_full_after_later_steps() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+        + KernelSpec::from(RbfKernel::new(0.8).expect("valid"));
+    let mut full = full_at_init(kernel.clone(), 0.16);
+    let mut incr = incremental_at_init(kernel, 0.16);
+    let n = full.num_params();
+    let mut start = vec![0.0; n];
+    full.get_params(&mut start).expect("len");
+    let mut after_first = start.clone();
+    after_first[0] += 0.15;
+    let mut after_second = after_first.clone();
+    after_second[1] += 0.2;
+    let mut rejected_then_other = start.clone();
+    rejected_then_other[1] += 0.2;
+    {
+        let mut obj = incr.objective();
+        obj.value(&start).expect("prime");
+        IncrementalObjective::value_with_changes(&mut obj, &after_first, &[0]).expect("leaf 0");
+        let sequential = IncrementalObjective::value_with_changes(&mut obj, &after_second, &[1])
+            .expect("leaf 1 after accept");
+        let v_full = full.objective().value(&after_second).expect("full seq");
+        assert_close(sequential, v_full);
+    }
+    let mut incr = incremental_at_init(
+        KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+            + KernelSpec::from(RbfKernel::new(0.8).expect("valid")),
+        0.16,
+    );
+    let v_incr = {
+        let mut obj = incr.objective();
+        obj.value(&start).expect("prime");
+        IncrementalObjective::value_with_changes(&mut obj, &after_first, &[0]).expect("rejected");
+        IncrementalObjective::value_with_changes(&mut obj, &rejected_then_other, &[1])
+            .expect("other coord from start")
+    };
+    let v_full = full
+        .objective()
+        .value(&rejected_then_other)
+        .expect("full reject");
+    assert_close(v_incr, v_full);
+}
+
+#[test]
+fn incremental_sum_jitter_retry_matches_full() {
+    let kernel = KernelSpec::custom(IndefiniteLeaf)
+        + KernelSpec::from(ConstantKernel::new(0.5).expect("valid"));
+    let jitter = JitterPolicy::fixed(1.0).expect("valid");
+    let likelihood = GaussianLikelihood::new(0.1).expect("valid");
+    let x = [0.0, 1.0];
+    let y = [0.0, 1.0];
+    let mut incr = Gpr::new(kernel.clone(), likelihood)
+        .with_optimizer(FastSimulatedAnnealing::new().with_max_iterations(0))
+        .with_jitter_policy(jitter)
+        .fit(&x, 2, 1, &y)
+        .expect("incr");
+    let mut full = Gpr::new(kernel, likelihood)
+        .with_optimizer(Fixed)
+        .with_jitter_policy(jitter)
+        .factor(&x, 2, 1, &y)
+        .expect("full");
+    let mut params = vec![0.0; full.num_params()];
+    full.get_params(&mut params).expect("len");
+    let v_full = full.objective().value(&params).expect("full");
+    let v_incr = incr.objective().value(&params).expect("incr");
+    assert_close(v_incr, v_full);
 }
 
 #[test]
