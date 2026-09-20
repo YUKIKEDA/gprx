@@ -193,6 +193,31 @@ impl RbfKernel {
         })
     }
 
+    /// Writes `∂²K/∂θ²` for `θ = log(ℓ)` into `d2_k`.
+    ///
+    /// `∂²k/∂θ² = k · (s/ℓ²) · (s/ℓ² − 2)` where `s = ‖x-x'‖²`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// the same shape / non-finite errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_rbf_hess_idx(i, j)?;
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let inv_two_ell_sq = 0.5 / ell_sq;
+        let inv_ell_sq = 1.0 / ell_sq;
+        write_triangle(dist, d2_k, uplo, |d| {
+            rbf_hess_from_sq_dist(d, inv_two_ell_sq, inv_ell_sq)
+        })
+    }
+
     pub(crate) fn apply_from_coords(
         &self,
         x: MatRef<'_, f64>,
@@ -224,11 +249,50 @@ impl RbfKernel {
             Ok(k * d * inv_ell_sq)
         })
     }
+
+    pub(crate) fn hess_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_rbf_hess_idx(i, j)?;
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let inv_two_ell_sq = 0.5 / ell_sq;
+        let inv_ell_sq = 1.0 / ell_sq;
+        write_square_from_coords(x, d2_k, uplo, |d| {
+            rbf_hess_from_sq_dist(d, inv_two_ell_sq, inv_ell_sq)
+        })
+    }
 }
 
 fn rbf_from_sq_dist(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
     let d = finite_dist(d)?;
     Ok((-d * inv_two_ell_sq).exp())
+}
+
+fn rbf_hess_from_sq_dist(d: f64, inv_two_ell_sq: f64, inv_ell_sq: f64) -> Result<f64, GprError> {
+    let d = finite_dist(d)?;
+    let k = (-d * inv_two_ell_sq).exp();
+    let u = d * inv_ell_sq;
+    let h = k * u * (u - 2.0);
+    if h.is_finite() {
+        Ok(h)
+    } else {
+        Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn require_rbf_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
+    if i == 0 && j == 0 {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("RBF has a single parameter; got pair ({i}, {j})"),
+        })
+    }
 }
 
 fn expect_one_param(len: usize) -> Result<(), GprError> {
@@ -369,6 +433,32 @@ mod tests {
             for row in 0..3 {
                 let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
                 assert_close(dk[(row, col)], fd);
+            }
+        }
+    }
+
+    #[test]
+    fn hess_matches_finite_difference_of_grad() {
+        let rbf = RbfKernel::from_log_lengthscale(-0.3).expect("valid");
+        let theta = rbf.log_lengthscale();
+        let h = 1e-6;
+        let plus = RbfKernel::from_log_lengthscale(theta + h).expect("valid");
+        let minus = RbfKernel::from_log_lengthscale(theta - h).expect("valid");
+        let dist = sq_dist_1d(&[0.0, 1.2, 2.4]);
+        let mut g_plus = fill(3, 0.0);
+        let mut g_minus = fill(3, 0.0);
+        let mut d2 = fill(3, 0.0);
+        plus.grad(dist.as_ref(), g_plus.as_mut(), 0, Triangle::Full)
+            .expect("shape");
+        minus
+            .grad(dist.as_ref(), g_minus.as_mut(), 0, Triangle::Full)
+            .expect("shape");
+        rbf.hess(dist.as_ref(), d2.as_mut(), 0, 0, Triangle::Full)
+            .expect("index 0");
+        for col in 0..3 {
+            for row in 0..3 {
+                let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
+                assert_close(d2[(row, col)], fd);
             }
         }
     }

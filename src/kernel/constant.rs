@@ -225,6 +225,43 @@ impl ConstantKernel {
         self.write_square(d_k, uplo)
     }
 
+    /// Writes `∂²K/∂θ²` for `θ = log(c)` into `d2_k` (`∂²k/∂θ² = c`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// the same shape errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_hess_idx(i, j)?;
+        require_square_pair(dist, d2_k.as_ref())?;
+        self.write_square(d2_k, uplo)
+    }
+
+    /// Writes `∂²K/∂θ²` from coordinates. `x` is used only for shape.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::hess`], with `x` in place of `dist`.
+    pub fn hess_points(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_hess_idx(i, j)?;
+        require_points_square(x, d2_k.as_ref())?;
+        self.write_square(d2_k, uplo)
+    }
+
     fn write_square(&self, out: MatMut<'_, f64>, uplo: Triangle) -> Result<(), GprError> {
         let c = self.constant();
         write_square(out, uplo, |_, _| Ok(c))
@@ -237,6 +274,16 @@ fn require_param_idx(param_idx: usize) -> Result<(), GprError> {
     } else {
         Err(GprError::InvalidHyperparameter {
             reason: "constant kernel has a single parameter at index 0".to_owned(),
+        })
+    }
+}
+
+fn require_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
+    if i == 0 && j == 0 {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("constant kernel has a single parameter; got pair ({i}, {j})"),
         })
     }
 }

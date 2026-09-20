@@ -212,6 +212,28 @@ impl LinearKernel {
         }
         self.apply(x, d_k, uplo)
     }
+
+    /// Writes `∂²K/∂θ²` for `θ = log(σ²)` (`∂²k/∂θ² = k`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// the same shape / non-finite errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if i != 0 || j != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("linear kernel has a single parameter; got pair ({i}, {j})"),
+            });
+        }
+        self.apply(x, d2_k, uplo)
+    }
 }
 
 fn dot_at(

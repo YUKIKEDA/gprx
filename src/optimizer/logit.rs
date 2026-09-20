@@ -7,7 +7,7 @@ use argmin::core::{CostFunction, Error as ArgminError, Gradient};
 use rand::rngs::SmallRng;
 
 use crate::error::GprError;
-use crate::objective::{Differentiable, Objective};
+use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 use crate::rng::open_unit;
 
@@ -44,6 +44,24 @@ impl<P: Differentiable> Differentiable for LogitMapped<'_, P> {
         let value = self.inner.value_and_gradient_into(&self.log_scratch, out)?;
         chain_logit_grad(params, self.intervals, &self.log_scratch, out);
         Ok(value)
+    }
+}
+
+impl<P: TwiceDifferentiable> TwiceDifferentiable for LogitMapped<'_, P> {
+    fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        z_to_log_theta_into(params, self.intervals, &mut self.log_scratch)?;
+        let n = params.len();
+        if out.len() != n * n {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("expected {} Hessian entries, got {}", n * n, out.len()),
+            });
+        }
+        let mut grad = vec![0.0; n];
+        self.inner
+            .value_and_gradient_into(&self.log_scratch, &mut grad)?;
+        self.inner.hessian_into(&self.log_scratch, out)?;
+        chain_logit_hess(params, self.intervals, &self.log_scratch, &grad, out);
+        Ok(())
     }
 }
 
@@ -118,17 +136,57 @@ fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Re
 
 fn chain_logit_grad(z: &[f64], intervals: &[Interval], log_theta: &[f64], grad: &mut [f64]) {
     for i in 0..z.len() {
-        let scale = logit_scale(intervals[i]);
-        let t = z[i] / scale;
-        let s = sigmoid(t);
-        let ds = s * (1.0 - s);
-        let dlog_dt = if intervals[i].lo() > 0.0 {
-            (intervals[i].hi().ln() - intervals[i].lo().ln()) * ds
-        } else {
-            let x = log_theta[i].exp();
-            intervals[i].width() * ds / x
-        };
-        grad[i] *= dlog_dt / scale;
+        grad[i] *= dlog_dz(z[i], intervals[i], log_theta[i]);
+    }
+}
+
+fn chain_logit_hess(
+    z: &[f64],
+    intervals: &[Interval],
+    log_theta: &[f64],
+    grad_theta: &[f64],
+    hess: &mut [f64],
+) {
+    let n = z.len();
+    let mut jac = vec![0.0; n];
+    for i in 0..n {
+        jac[i] = dlog_dz(z[i], intervals[i], log_theta[i]);
+    }
+    for i in 0..n {
+        for j in 0..n {
+            hess[i * n + j] *= jac[i] * jac[j];
+        }
+        hess[i * n + i] += grad_theta[i] * d2log_dz2(z[i], intervals[i], log_theta[i]);
+    }
+}
+
+fn dlog_dz(z: f64, interval: Interval, log_theta: f64) -> f64 {
+    let scale = logit_scale(interval);
+    let t = z / scale;
+    let s = sigmoid(t);
+    let ds = s * (1.0 - s);
+    let dlog_dt = if interval.lo() > 0.0 {
+        (interval.hi().ln() - interval.lo().ln()) * ds
+    } else {
+        let x = log_theta.exp();
+        interval.width() * ds / x
+    };
+    dlog_dt / scale
+}
+
+fn d2log_dz2(z: f64, interval: Interval, log_theta: f64) -> f64 {
+    let scale = logit_scale(interval);
+    let t = z / scale;
+    let s = sigmoid(t);
+    let ds = s * (1.0 - s);
+    if interval.lo() > 0.0 {
+        4.0 * ds * (1.0 - 2.0 * s) / scale
+    } else {
+        let x = log_theta.exp();
+        let dnum_dz = 4.0 * (1.0 - 2.0 * s) * ds / scale;
+        let dx_dz = 4.0 * ds;
+        let num = 4.0 * ds;
+        (dnum_dz * x - num * dx_dz) / (x * x)
     }
 }
 
@@ -367,7 +425,7 @@ mod tests {
     use crate::gpr::Gpr;
     use crate::kernel::{KernelSpec, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
-    use crate::objective::{Differentiable, Objective};
+    use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
     use crate::optimizer::Fixed;
     use crate::param::Interval;
     use std::cell::RefCell;
@@ -445,6 +503,52 @@ mod tests {
             let _ = problem.gradient(&other).expect("other grad");
         }
         assert_eq!(obj.joint_evals, 3);
+    }
+
+    #[test]
+    fn logit_mapped_hess_matches_finite_difference() {
+        let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"));
+        let likelihood = GaussianLikelihood::new(0.16).expect("valid");
+        let mut gpr = Gpr::new(kernel, likelihood)
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+            .unwrap_or_else(|(_, e)| panic!("{e}"));
+        let mut log_theta = [0.0; 2];
+        gpr.get_params(&mut log_theta).expect("len 2");
+        let intervals = [Interval::DEFAULT_POSITIVE, Interval::DEFAULT_POSITIVE];
+        let z = super::log_theta_to_z(&log_theta, &intervals).expect("z");
+        let mut obj = gpr.objective();
+        let mut mapped = super::LogitMapped {
+            inner: &mut obj,
+            intervals: &intervals,
+            log_scratch: vec![0.0; 2],
+        };
+        let mut hess = [0.0; 4];
+        mapped.hessian_into(&z, &mut hess).expect("hess");
+        let h = 1e-6;
+        let mut g_plus = [0.0; 2];
+        let mut g_minus = [0.0; 2];
+        for j in 0..2 {
+            let mut plus = z.clone();
+            let mut minus = z.clone();
+            plus[j] += h;
+            minus[j] -= h;
+            mapped
+                .value_and_gradient_into(&plus, &mut g_plus)
+                .expect("plus");
+            mapped
+                .value_and_gradient_into(&minus, &mut g_minus)
+                .expect("minus");
+            for i in 0..2 {
+                let fd = (g_plus[i] - g_minus[i]) / (2.0 * h);
+                assert!(
+                    (hess[i * 2 + j] - fd).abs() <= 2e-4 * fd.abs().max(1.0),
+                    "H[{i},{j}] analytic={} fd={}",
+                    hess[i * 2 + j],
+                    fd
+                );
+            }
+        }
     }
 
     #[test]

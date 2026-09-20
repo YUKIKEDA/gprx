@@ -467,6 +467,32 @@ impl KernelTerm for IndefiniteLeaf {
         })
     }
 
+    fn hess(
+        &self,
+        _dist: MatRef<'_, f64>,
+        _d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        _uplo: Triangle,
+    ) -> Result<(), GprError> {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("indefinite leaf has no parameter pair ({i}, {j})"),
+        })
+    }
+
+    fn hess_points(
+        &self,
+        _x: MatRef<'_, f64>,
+        _d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        _uplo: Triangle,
+    ) -> Result<(), GprError> {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("indefinite leaf has no parameter pair ({i}, {j})"),
+        })
+    }
+
     fn clone_box(&self) -> Box<dyn KernelTerm> {
         Box::new(self.clone())
     }
@@ -1301,6 +1327,79 @@ fn value_and_gradient_matches_nlml_and_finite_difference() {
     }
     gpr.value_and_gradient_into(&params, &mut dummy)
         .expect("restore");
+}
+
+#[test]
+fn hessian_matches_finite_difference_of_gradient() {
+    let mut gpr = rbf_gpr(1.25, 0.16)
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .expect("spd");
+    let mut params = [0.0; 2];
+    gpr.get_params(&mut params).expect("len 2");
+    let mut hess = [0.0; 4];
+    gpr.hessian_into(&params, &mut hess).expect("spd");
+    let h = 1e-5;
+    let mut g_plus = [0.0; 2];
+    let mut g_minus = [0.0; 2];
+    for j in 0..2 {
+        let mut plus = params;
+        let mut minus = params;
+        plus[j] += h;
+        minus[j] -= h;
+        gpr.value_and_gradient_into(&plus, &mut g_plus)
+            .expect("plus");
+        gpr.value_and_gradient_into(&minus, &mut g_minus)
+            .expect("minus");
+        for i in 0..2 {
+            let fd = (g_plus[i] - g_minus[i]) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (hess[i * 2 + j] - fd).abs() <= 2e-4 * scale,
+                "H[{i},{j}]: analytic={}, fd={}",
+                hess[i * 2 + j],
+                fd
+            );
+        }
+    }
+}
+
+#[test]
+fn hessian_product_matches_finite_difference_of_gradient() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+        * KernelSpec::from(crate::kernel::ConstantKernel::new(1.4).expect("valid"));
+    let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .expect("spd");
+    let n = gpr.num_params();
+    let mut params = vec![0.0; n];
+    gpr.get_params(&mut params).expect("len");
+    let mut hess = vec![0.0; n * n];
+    gpr.hessian_into(&params, &mut hess).expect("spd");
+    let h = 1e-5;
+    let mut g_plus = vec![0.0; n];
+    let mut g_minus = vec![0.0; n];
+    for j in 0..n {
+        let mut plus = params.clone();
+        let mut minus = params.clone();
+        plus[j] += h;
+        minus[j] -= h;
+        gpr.value_and_gradient_into(&plus, &mut g_plus)
+            .expect("plus");
+        gpr.value_and_gradient_into(&minus, &mut g_minus)
+            .expect("minus");
+        for i in 0..n {
+            let fd = (g_plus[i] - g_minus[i]) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (hess[i * n + j] - fd).abs() <= 2e-4 * scale,
+                "H[{i},{j}]: analytic={}, fd={}",
+                hess[i * n + j],
+                fd
+            );
+        }
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
-//! sklearn golden checks for Exact GPR **with** L-BFGS (P1B-6) and
-//! leave-one-out at sklearn's `θ` (P1B-7).
+//! sklearn golden checks for Exact GPR **with** L-BFGS (P1B-6), Newton
+//! recovery (P2B-17), and leave-one-out at sklearn's `θ` (P1B-7).
 //!
 //! JSON under `compare/goldens/` is produced by `just gen-goldens`. This
 //! file only reads the committed bytes; `cargo test` must not invoke Python.
@@ -9,7 +9,7 @@
 
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKind};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, Newton, PredictOptions, VarianceKind};
 use serde::Deserialize;
 
 /// Relative band for NLML and predictive mean / variance after `Gpr::fit`.
@@ -216,4 +216,75 @@ fn fit_matches_committed_sklearn_json() {
         check_fit_golden(name, &golden).expect(name);
         check_loo_at_sklearn_theta(name, &golden).expect(name);
     }
+}
+
+fn check_newton_forrester(golden: &FitGolden) -> Result<(), GprError> {
+    // Undamped Newton from the L-BFGS start (`ℓ = 1`) goes to another
+    // critical point. This start is in the basin of the committed θ.
+    let gpr = Gpr::new(
+        KernelSpec::from(RbfKernel::new(0.2)?),
+        GaussianLikelihood::new(0.03)?,
+    )
+    .with_target_transform(StandardizeTarget::new())
+    .with_optimizer(Newton::new())
+    .fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
+
+    let nlml = gpr.neg_log_marginal_likelihood()?;
+    assert_near(
+        "newton forrester nlml",
+        -nlml,
+        golden.log_marginal_likelihood,
+        REL_TOL,
+    );
+
+    let mut params = [0.0; 2];
+    gpr.get_params(&mut params)?;
+    assert_theta_near(
+        "newton forrester lengthscale",
+        params[0].exp(),
+        golden.lengthscales[0],
+    );
+    assert_theta_near(
+        "newton forrester noise",
+        params[1].exp(),
+        golden.noise_variance,
+    );
+
+    let pred_lat = gpr.predict_with(
+        &golden.xs,
+        golden.xs_n_rows,
+        golden.xs_n_cols,
+        PredictOptions {
+            variance_kind: VarianceKind::Latent,
+        },
+    )?;
+    let pred_obs = gpr.predict(&golden.xs, golden.xs_n_rows, golden.xs_n_cols)?;
+    for i in 0..golden.mean.len() {
+        assert_near(
+            &format!("newton forrester mean[{i}]"),
+            pred_lat.mean[i],
+            golden.mean[i],
+            REL_TOL,
+        );
+        assert_near(
+            &format!("newton forrester latent_var[{i}]"),
+            pred_lat.variance[i],
+            golden.latent_variance[i],
+            REL_TOL,
+        );
+        assert_near(
+            &format!("newton forrester obs_var[{i}]"),
+            pred_obs.variance[i],
+            golden.observation_variance[i],
+            REL_TOL,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn newton_forrester_matches_committed_sklearn_json() {
+    let raw = include_str!("../compare/goldens/forrester_rbf.json");
+    let golden: FitGolden = serde_json::from_str(raw).expect("committed JSON parses");
+    check_newton_forrester(&golden).expect("forrester_rbf");
 }
