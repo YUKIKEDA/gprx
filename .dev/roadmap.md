@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P4-1（VFE か FITC か一つ選ぶ）。** Phase 2 / 2b / 3 は閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P4-2（`SparseGpr`、誘導点固定）。** Phase 2 / 2b / 3 / P4-1 は閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -203,12 +203,12 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 4 — Sparse GPR
 
-設計 §6.1。2b / 3 のあと。着手は P4-1（[#35](https://github.com/YUKIKEDA/gprx/issues/35)）の VFE / FITC 選択。初期は Z を k-means 等で固定。Z の最適化と Sparse オンラインはあとの行。
+設計 §6.1。2b / 3 のあと。P4-1 は閉じた（VFE / ADR 0002）。着手は P4-2（[#36](https://github.com/YUKIKEDA/gprx/issues/36)）の `SparseGpr`。初期は呼び出し側の Z を固定。Z の最適化と Sparse オンラインはあとの行。
 
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
 | P4-1 | Spike | VFE か FITC か一つ選ぶ                   | 1b   | VFE を選ぶ。FITC は載せず、両方もしない。`.dev/adr/0002-sparse-vfe.md` に文脈・決定・根拠（Titsias 2009、GPyTorch SGPR / GPflow、FITC の棄却理由）。ELBO の展開・`SparseGpr` の API・数値実験は置かない（P4-2）。§6.1 と §13 を「VFE。理由は ADR 0002」現在形。`src/sparse.rs` / 新しい `tests/` / golden なし。`layout.mdc` は変えない。着手点を P4-1（[#35](https://github.com/YUKIKEDA/gprx/issues/35)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just perf` は合否にしない |
-| P4-2 | Feat  | `SparseGpr`、誘導点固定                   | P4-1 | m≪n で fit が終わる                           |
+| P4-2 | Feat  | `SparseGpr`、誘導点固定                   | P4-1 | `SparseGpr` / `FittedSparseGpr` を公開する（crate ルート再エクスポート）。`src/sparse.rs` だけ。`SparseGpr<Fixed>::factor` のみ（`fit` / predict / ELBO は置かない。それらは P4-4 / P4-3）。Z は呼び出し側が渡す。k-means なし。カーネルは RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n = 4`・`m = 2` で `factor` が `FittedSparseGpr` を返し、`n` / `m` / `d` / `x` / `y` / `z` が入力と一致。RBF の `n = 2`・`Z = X` は `K_mm` の LLT 再構成が解析 Gram と相対 `1e-12`。空入力・次元不一致・`m = 0` は既存 `GprError`。新しい `GprError` / golden / `tests/` なし。`tests/alloc.rs` 上限は上げない。`layout.mdc` に `src/sparse.rs` と公開型。§6.1 を `SparseGpr` / `factor` / 呼び出し側 Z の現在形。着手点を P4-2（[#36](https://github.com/YUKIKEDA/gprx/issues/36)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just perf` は合否にしない |
 | P4-3 | Feat  | 対角予測と MLL                           | P4-2 | 小問題で Exact に近い（完全一致は要求しない） |
 | P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3, P2B-9 | 2b と同じ公開 Optimizer 経路。Z は params に入れない |
 | P4-5 | Spike | 誘導点 Z の最適化方式                     | P4-4 | 同時最適化か交互最適化かを `.dev/` に1ページ。理由とメモリ（`m×d`） |

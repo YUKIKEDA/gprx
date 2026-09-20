@@ -409,13 +409,13 @@ struct PredictOptions {
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
-Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。
+Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。公開型は `SparseGpr` / `FittedSparseGpr`。`SparseGpr<Fixed>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。k-means は置かない。predict / ELBO は P4-3。`fit` は P4-4。
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。
 
 誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。Phase 4 の初期（P4-1…4）はZ固定のためこのAPIは使わない。Z最適化は P4-5 / P4-6。足すときは点ごとではなく次元一括で呼ぶ。
 
-**Phase 4の初期実装では誘導点Zをk-means等で固定し、最適化対象はカーネルハイパラとノイズのみとする**（P4-4）。Zをθと同時最適化するとパラメータ数が m×d 増え、L-BFGSのメモリと収束性に大きく影響する。方式は P4-5、実装は P4-6。
+**初期は呼び出し側が Z を渡し、最適化対象はカーネルハイパラとノイズのみとする**（P4-4）。Zをθと同時最適化するとパラメータ数が m×d 増え、L-BFGSのメモリと収束性に大きく影響する。方式は P4-5、実装は P4-6。
 
 Sparse GPRのオンライン学習は誘導点ZとデータXの非対称性がある。P4-7。
 
@@ -857,7 +857,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-1。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-2。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
