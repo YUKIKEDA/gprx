@@ -48,7 +48,7 @@ Pure Rustで、OpenBLAS/LAPACK/Eigenと同等以上の性能を達成してお�
   - `llt::update`にあるのは`rank_r_update_clobber`のみ。**LLTに行・列のinsert/delete高水準APIは存在しない**
   - `ldlt::update::delete_rows_and_cols_clobber(LD, indices: &mut [usize], ...)`は存在し、任意インデックスの複数行削除に対応
   - `ldlt::update::insert_rows_and_cols_clobber`は公開されていない(`insert_rows_and_cols_clobber_scratch`のみ。本体は非公開)
-  - オンライン学習はこれに合わせて§11の方針で実装する(追加は自前、削除はLDLT API)
+  - オンライン学習はこれに合わせて§11の方針で実装する(追加は自前、削除はLDLT API)。`delete_rows_and_cols_clobber` は P3-1 でフル LDLT 再構成と一致する
 - `llt::update::rank_r_update_clobber` / `ldlt::update::rank_r_update_clobber`: ランクr更新、低ランクΔKの場合のみ利用可(§5.4.1)
 
 ## 4. 精度ポリシーとノイズ/Jitterの分離
@@ -743,10 +743,7 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 §3の通り、**LLTにinsert/delete APIは無い**。オンライン経路は次で進める。
 
 1. **追加(末尾append)**: 自前で bordered update を実装する。O(n²)
-2. **削除(任意インデックス)**: `OnlineWorkspace`は**LDLT因子**を保持し、`ldlt::update::delete_rows_and_cols_clobber`を使う。Phase 3着手時に小規模行列でフル分解との一致を検証する
-3. フォールバック(APIが期待通り動かない場合):
-   - 末尾削除のみ自前実装し、任意削除はフル再分解
-   - またはLLTに対するGivens回転ベースのdowndateを自前実装
+2. **削除(任意インデックス)**: `OnlineWorkspace`は**LDLT因子**を保持し、`ldlt::update::delete_rows_and_cols_clobber`を使う。`2×2` / `5×5` の手書き SPD で、削除後の再構成 `A = L D Lᵀ` がフル LDLT と一致する（P3-1 / [#30](https://github.com/YUKIKEDA/gprx/issues/30)）。Givens downdate は置かない
 
 バッチfitはLLTのままにする。初回`insert`時にLLT→LDLTへO(n²)で変換する:
 
@@ -868,8 +865,7 @@ trait OnlineInference<T: Scalar> {
 1. **Sparse GPRのオンライン学習**: 誘導点ZとデータXの非対称。方式は P4-7 の Issue / Grill で決める
 2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
 3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
-4. **`ldlt::update::delete_rows_and_cols_clobber`の実測**: 任意インデックス・複数行・更新後LDの正しさをPhase 3着手時に小規模行列で確認する。失敗時は§11のフォールバック(末尾削除+フル再分解、またはGivens downdate)
-5. **Sparse GPRの誘導点Zの最適化**: 初期（P4-4）は固定。同時か交互かは P4-5
+4. **Sparse GPRの誘導点Zの最適化**: 初期（P4-4）は固定。同時か交互かは P4-5
 
 ## 15. ベンチマーク戦略
 

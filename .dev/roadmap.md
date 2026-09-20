@@ -186,11 +186,11 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 3 — オンライン学習
 
-設計 §11。2b のあと。着手時に LDLT delete を先に Spike する。
+設計 §11。2b のあと。着手は P3-1（[#30](https://github.com/YUKIKEDA/gprx/issues/30)）の LDLT delete 実測。
 
 | ID   | 種別  | タイトル                                    | 依存       | DoD                                                                   |
 | ---- | ----- | ------------------------------------------- | ---------- | --------------------------------------------------------------------- |
-| P3-1 | Spike | `ldlt::delete_rows_and_cols_clobber` の実測 | 2b         | 任意インデックス削除がフル分解と一致。ダメなら末尾削除+再分解に落とす |
+| P3-1 | Spike | `ldlt::delete_rows_and_cols_clobber` の実測 | 2b         | `tests/ldlt_delete.rs` だけ。`src/online.rs` も `FittedGpr` の insert/delete も置かない。`2×2` / `5×5` の手書き SPD（対角優勢。カーネル Gram は使わない）。`2×2` は先頭と末尾の1点、`5×5` は先頭・真ん中・末尾の1点と非隣接2点。削除後 `LD` から `A = L D Lᵀ` を再構成し、行・列を除いた `A` のフル LDLT 再構成と下三角で一致（相対 `1e-12`）。`LD` 要素は比べない。通ったら一致を assert。落ちたら一致の assert は置かず、API が呼べることだけ残し、§11 / §14-4 を「使えない。削除は末尾だけ自前、任意削除はフル再分解」現在形にする。Givens は今やらない。通ったら §11 / §14-4 を「任意削除は `delete_rows_and_cols_clobber`」現在形。`layout.mdc` の `tests/` に `ldlt_delete.rs`。新しい golden なし。既定の `tests/alloc.rs` 上限は上げない。`just lint` / `just test`。criterion / `just perf` は合否にしない |
 | P3-2 | Feat  | `OnlineWorkspace` と容量拡張                | P3-1       | 拡張時に K/LD/y/α/cache が同期する                                    |
 | P3-3 | Feat  | 末尾 insert（自前 bordered LDLT）           | P3-2       | 1点追加 == フル再 fit                                                 |
 | P3-4 | Feat  | delete + `PointId` / `PointRegistry`        | P3-2       | 不変条件: 全バッファが同じ順序                                        |
