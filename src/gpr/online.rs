@@ -1,5 +1,6 @@
 //! Incremental tail insert and delete on a converted [`crate::FittedGpr`].
 
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -103,7 +104,71 @@ impl PointRegistry {
         self.id_to_index.insert(id, index);
         id
     }
+}
 
+/// `α` materialized on read. Insert only marks it stale (libgp `add_pattern`).
+struct LazyAlpha {
+    values: UnsafeCell<Vec<f64>>,
+    ready: Cell<bool>,
+}
+
+impl LazyAlpha {
+    fn from_ready(values: Vec<f64>) -> Self {
+        Self {
+            values: UnsafeCell::new(values),
+            ready: Cell::new(true),
+        }
+    }
+
+    fn invalidate(&self) {
+        self.ready.set(false);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.get()
+    }
+
+    fn mark_ready(&self) {
+        self.ready.set(true);
+    }
+
+    fn get(&self) -> &[f64] {
+        // SAFETY: `OnlineGpr` is not `Sync`. Callers do not hold this slice
+        // across a `&mut self` method, and `&self` writes happen only in
+        // `fill` while `ready` is false.
+        unsafe { (*self.values.get()).as_slice() }
+    }
+
+    fn get_mut(&mut self) -> &mut Vec<f64> {
+        self.values.get_mut()
+    }
+
+    fn fill(&self, values: &[f64]) {
+        // SAFETY: same as `get`; no live slice from `get` exists because this
+        // is called only while `ready` is false.
+        unsafe {
+            (*self.values.get()).clear();
+            (*self.values.get()).extend_from_slice(values);
+        }
+        self.ready.set(true);
+    }
+
+    fn clone_vec(&self) -> Vec<f64> {
+        // SAFETY: shared read of the cached vector; `OnlineGpr` is not `Sync`.
+        unsafe { (*self.values.get()).clone() }
+    }
+}
+
+impl Clone for LazyAlpha {
+    fn clone(&self) -> Self {
+        Self {
+            values: UnsafeCell::new(self.clone_vec()),
+            ready: Cell::new(self.ready.get()),
+        }
+    }
+}
+
+impl PointRegistry {
     fn remove_at(&mut self, index: usize) {
         let id = self.index_to_id.remove(index);
         self.id_to_index.remove(&id);
@@ -167,7 +232,7 @@ pub struct OnlineGpr<
     pub(crate) y_obs: Vec<f64>,
     pub(crate) x: Mat<f64>,
     pub(crate) y_train: Vec<f64>,
-    pub(crate) alpha: Vec<f64>,
+    alpha: LazyAlpha,
     pub(crate) n: usize,
     pub(crate) d: usize,
     pub(crate) registry: PointRegistry,
@@ -262,7 +327,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             y_obs,
             x,
             y_train,
-            alpha,
+            alpha: LazyAlpha::from_ready(alpha),
             n,
             d,
             registry: PointRegistry::from_count(n),
@@ -340,7 +405,25 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
 
     /// Returns `α = A⁻¹ y` after the last insert or hyperparameter write.
     pub fn alpha(&self) -> &[f64] {
-        &self.alpha
+        self.ensure_alpha();
+        self.alpha.get()
+    }
+
+    fn ensure_alpha(&self) {
+        if self.alpha.is_ready() {
+            return;
+        }
+        let n = self.n;
+        let mut rhs = Mat::zeros(n, 1);
+        for i in 0..n {
+            rhs[(i, 0)] = self.y_train[i];
+        }
+        OnlineWorkspace::solve_ldlt_in_place(self.workspace.ld_factor.as_ref(), rhs.as_mut(), n);
+        let mut values = vec![0.0; n];
+        for (i, slot) in values.iter_mut().enumerate() {
+            *slot = rhs[(i, 0)];
+        }
+        self.alpha.fill(&values);
     }
 
     /// Returns the original training features in column-major order.
@@ -422,11 +505,17 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             .submatrix(0, 0, self.n, self.n)
     }
 
+    fn x_active(&self) -> MatRef<'_, f64> {
+        self.x.as_ref().submatrix(0, 0, self.n, self.d)
+    }
+
     /// Appends one training point at the current `θ` with a bordered LDLT update.
     ///
     /// `x_new` has length [`Self::d`]. Transforms already stored on this model
     /// are applied; they are not re-fit. Grows the online workspace when the
-    /// next row does not fit. The returned [`PointId`] is new and is never
+    /// next row does not fit. `α` is not solved here; the next
+    /// [`Self::predict`], [`Self::neg_log_marginal_likelihood`], or
+    /// [`Self::alpha`] fills it. The returned [`PointId`] is new and is never
     /// reused after a later [`Self::delete`].
     ///
     /// # Errors
@@ -448,19 +537,58 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        let mut x_trans = x_new.to_vec();
-        self.x_transform.apply(&mut x_trans, 1, self.d)?;
+        let n = self.n;
+        let d = self.d;
+        self.query.ensure_at_least(n, 1, d)?;
+        let xs_len = d;
+        if self.query.query_xs.len() < xs_len {
+            self.query.query_xs.resize(xs_len, 0.0);
+        }
+        self.query.query_xs[..xs_len].copy_from_slice(x_new);
+        self.x_transform
+            .apply(&mut self.query.query_xs[..xs_len], 1, d)?;
         let mut y_trans = [y_new];
         self.y_transform.transform(&mut y_trans)?;
-        let (k, k_ss) = train_new_kernel(&self.compiled, self.x.as_ref(), &x_trans)?;
-        let k_new = k_ss + self.likelihood.noise_variance();
-        self.workspace.append_border(&k, k_new)?;
-        append_colmajor(&mut self.x_obs, self.n, self.d, x_new);
+        {
+            let dest = self.workspace.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
+            let QueryWorkspace {
+                query_xs,
+                query_x,
+                query_dist,
+                query_scratch,
+                ..
+            } = &mut self.query;
+            pack_points_into(
+                &query_xs[..xs_len],
+                1,
+                d,
+                query_x.as_mut().submatrix_mut(0, 0, 1, d),
+            );
+            fill_train_query_kernel(
+                &self.compiled,
+                self.x.as_ref().submatrix(0, 0, n, d),
+                query_x.as_ref().submatrix(0, 0, 1, d),
+                query_dist.as_mut().submatrix_mut(0, 0, n, 1),
+                dest,
+                query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
+            )?;
+        }
+        let mut kss = [0.0];
+        match self.compiled.coord_mode()? {
+            CoordMode::Dist | CoordMode::Either => self.compiled.fill_diag(&mut kss)?,
+            CoordMode::Points | CoordMode::Mixed => self
+                .compiled
+                .fill_diag_points(self.query.query_x.as_ref().submatrix(0, 0, 1, d), &mut kss)?,
+        }
+        let k_new = kss[0] + self.likelihood.noise_variance();
+        self.workspace.append_border(k_new)?;
+        append_colmajor(&mut self.x_obs, n, d, x_new);
         self.y_obs.push(y_new);
-        self.x = append_point_mat(self.x.as_ref(), &x_trans);
+        append_point_mat_inplace(&mut self.x, n, &self.query.query_xs[..xs_len]);
         self.y_train.push(y_trans[0]);
         self.n += 1;
-        self.refresh_alpha();
+        OnlineWorkspace::set_vector_prefix(&mut self.workspace.y, &self.y_train);
+        self.alpha.invalidate();
         Ok(self.registry.insert())
     }
 
@@ -504,10 +632,11 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.workspace.delete_index(index)?;
         remove_colmajor(&mut self.x_obs, self.n, self.d, index);
         self.y_obs.remove(index);
-        self.x = remove_point_mat(self.x.as_ref(), index);
+        remove_point_mat_inplace(&mut self.x, self.n, index);
         self.y_train.remove(index);
-        if index < self.alpha.len() {
-            self.alpha.remove(index);
+        let alpha = self.alpha.get_mut();
+        if index < alpha.len() {
+            alpha.remove(index);
         }
         self.registry.remove_at(index);
         self.n -= 1;
@@ -522,14 +651,16 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             rhs[(i, 0)] = self.y_train[i];
         }
         OnlineWorkspace::solve_ldlt_in_place(self.workspace.ld_factor.as_ref(), rhs.as_mut(), n);
-        if self.alpha.len() != n {
-            self.alpha.resize(n, 0.0);
+        let alpha = self.alpha.get_mut();
+        if alpha.len() != n {
+            alpha.resize(n, 0.0);
         }
         for i in 0..n {
-            self.alpha[i] = rhs[(i, 0)];
+            alpha[i] = rhs[(i, 0)];
         }
         OnlineWorkspace::set_vector_prefix(&mut self.workspace.y, &self.y_train);
-        OnlineWorkspace::set_vector_prefix(&mut self.workspace.alpha, &self.alpha);
+        OnlineWorkspace::set_vector_prefix(&mut self.workspace.alpha, alpha);
+        self.alpha.mark_ready();
     }
 
     /// Writes this model to `dir/config.json` and `dir/model.safetensors`.
@@ -566,7 +697,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         Ok(neg_mll_from_ldlt(
             self.workspace.ld_factor.as_ref(),
             &self.y_train,
-            &self.alpha,
+            self.alpha(),
             self.n,
         ))
     }
@@ -718,23 +849,29 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.query.query_xs.copy_from_slice(xs);
         self.x_transform
             .apply(&mut self.query.query_xs, n_rows, n_cols)?;
-        pack_points_into(
-            &self.query.query_xs,
-            n_rows,
-            n_cols,
-            self.query.query_x.as_mut(),
-        );
-        fill_train_query_kernel(
-            &self.compiled,
-            self.x.as_ref(),
-            self.query.query_x.as_ref(),
-            self.query.query_dist.as_mut(),
-            self.query.query_k_star.as_mut(),
-            self.query.query_scratch.as_mut(),
-        )?;
+        {
+            let QueryWorkspace {
+                query_xs,
+                query_x,
+                query_dist,
+                query_k_star,
+                query_scratch,
+                ..
+            } = &mut self.query;
+            pack_points_into(query_xs, n_rows, n_cols, query_x.as_mut());
+            fill_train_query_kernel(
+                &self.compiled,
+                self.x.as_ref().submatrix(0, 0, n, n_cols),
+                query_x.as_ref(),
+                query_dist.as_mut(),
+                query_k_star.as_mut(),
+                query_scratch.as_mut(),
+            )?;
+        }
+        self.ensure_alpha();
         write_ldlt_prediction(
             self.workspace.ld_factor.as_ref(),
-            &self.alpha,
+            self.alpha.get(),
             &self.compiled,
             self.query.query_x.as_ref(),
             self.query.query_k_star.as_mut(),
@@ -775,7 +912,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         let mut query_kss = vec![0.0; m];
         fill_train_query_kernel(
             &self.compiled,
-            self.x.as_ref(),
+            self.x_active(),
             query_x.as_ref(),
             query_dist.as_mut(),
             query_k_star.as_mut(),
@@ -783,7 +920,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         )?;
         write_ldlt_prediction(
             self.workspace.ld_factor.as_ref(),
-            &self.alpha,
+            self.alpha(),
             &self.compiled,
             query_x.as_ref(),
             query_k_star.as_mut(),
@@ -1017,40 +1154,6 @@ pub(crate) fn fill_train_a(
     Ok(())
 }
 
-fn train_new_kernel(
-    compiled: &CompiledKernel,
-    x_train: MatRef<'_, f64>,
-    x_new: &[f64],
-) -> Result<(Vec<f64>, f64), GprError> {
-    let n = x_train.nrows();
-    let d = x_train.ncols();
-    let mut query_x = Mat::zeros(1, d);
-    pack_points_into(x_new, 1, d, query_x.as_mut());
-    let mut dist = Mat::zeros(n, 1);
-    let mut k_star = Mat::zeros(n, 1);
-    let mut scratch = Mat::zeros(n, 1);
-    fill_train_query_kernel(
-        compiled,
-        x_train,
-        query_x.as_ref(),
-        dist.as_mut(),
-        k_star.as_mut(),
-        scratch.as_mut(),
-    )?;
-    let mut k = vec![0.0; n];
-    for i in 0..n {
-        k[i] = k_star[(i, 0)];
-    }
-    let mut kss = [0.0];
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut kss)?,
-        CoordMode::Points | CoordMode::Mixed => {
-            compiled.fill_diag_points(query_x.as_ref(), &mut kss)?
-        }
-    }
-    Ok((k, kss[0]))
-}
-
 fn fill_train_query_kernel(
     compiled: &CompiledKernel,
     x_train: MatRef<'_, f64>,
@@ -1059,28 +1162,17 @@ fn fill_train_query_kernel(
     query_k_star: MatMut<'_, f64>,
     query_scratch: MatMut<'_, f64>,
 ) -> Result<(), GprError> {
-    let mut thread_scratch = empty_thread_scratch();
     let mut query_dist = query_dist;
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            fill_squared_euclidean_cross(
-                x_train,
-                query_x,
-                query_dist.as_mut(),
-                &mut thread_scratch,
-            );
+            fill_squared_euclidean_cross(x_train, query_x, query_dist.as_mut(), &mut []);
             compiled.apply_cross(query_dist.as_ref(), query_k_star, query_scratch)
         }
         CoordMode::Points => {
             compiled.apply_cross_points(x_train, query_x, query_k_star, query_scratch)
         }
         CoordMode::Mixed => {
-            fill_squared_euclidean_cross(
-                x_train,
-                query_x,
-                query_dist.as_mut(),
-                &mut thread_scratch,
-            );
+            fill_squared_euclidean_cross(x_train, query_x, query_dist.as_mut(), &mut []);
             compiled.apply_cross_mixed(
                 query_dist.as_ref(),
                 x_train,
@@ -1158,27 +1250,37 @@ fn neg_mll_from_ldlt(ld: MatRef<'_, f64>, y: &[f64], alpha: &[f64], n: usize) ->
 }
 
 fn append_colmajor(x: &mut Vec<f64>, n: usize, d: usize, x_new: &[f64]) {
-    let mut next = vec![0.0; (n + 1) * d];
-    for feature in 0..d {
-        for i in 0..n {
-            next[feature * (n + 1) + i] = x[feature * n + i];
-        }
-        next[feature * (n + 1) + n] = x_new[feature];
+    let next_len = (n + 1) * d;
+    if x.capacity() < next_len {
+        let grow_to = next_len.max(x.capacity().max(1).saturating_mul(2));
+        x.reserve(grow_to.saturating_sub(x.len()));
     }
-    *x = next;
+    x.resize(next_len, 0.0);
+    for feature in (0..d).rev() {
+        let src = feature * n;
+        let dest = feature * (n + 1);
+        for i in (0..n).rev() {
+            x[dest + i] = x[src + i];
+        }
+        x[dest + n] = x_new[feature];
+    }
 }
 
-fn append_point_mat(x: MatRef<'_, f64>, x_new: &[f64]) -> Mat<f64> {
-    let n = x.nrows();
+fn append_point_mat_inplace(x: &mut Mat<f64>, n: usize, x_new: &[f64]) {
     let d = x.ncols();
-    let mut next = Mat::zeros(n + 1, d);
-    for feature in 0..d {
-        for i in 0..n {
-            next[(i, feature)] = x[(i, feature)];
+    if x.nrows() <= n {
+        let new_rows = (n + 1).max(x.nrows().max(1).saturating_mul(2));
+        let mut next = Mat::zeros(new_rows, d);
+        for feature in 0..d {
+            for i in 0..n {
+                next[(i, feature)] = x[(i, feature)];
+            }
         }
-        next[(n, feature)] = x_new[feature];
+        *x = next;
     }
-    next
+    for feature in 0..d {
+        x[(n, feature)] = x_new[feature];
+    }
 }
 
 fn remove_colmajor(x: &mut Vec<f64>, n: usize, d: usize, index: usize) {
@@ -1193,13 +1295,13 @@ fn remove_colmajor(x: &mut Vec<f64>, n: usize, d: usize, index: usize) {
     *x = next;
 }
 
-fn remove_point_mat(x: MatRef<'_, f64>, index: usize) -> Mat<f64> {
-    let n = x.nrows();
+fn remove_point_mat_inplace(x: &mut Mat<f64>, n: usize, index: usize) {
     let d = x.ncols();
-    Mat::from_fn(n - 1, d, |i, feature| {
-        let src = if i < index { i } else { i + 1 };
-        x[(src, feature)]
-    })
+    for feature in 0..d {
+        for i in index..(n - 1) {
+            x[(i, feature)] = x[(i + 1, feature)];
+        }
+    }
 }
 
 #[cfg(test)]

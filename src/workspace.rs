@@ -519,6 +519,51 @@ impl QueryWorkspace<DoublePrecision> {
         self.query_kss.resize(m, 0.0);
         Ok(())
     }
+
+    /// Grows query buffers so an `n×m` fill with feature count `d` fits.
+    ///
+    /// New sides are `max(needed, max(current, 1) * 2)` when a side is short.
+    /// No-op when every buffer already fits. Does not shrink.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
+    pub(crate) fn ensure_at_least(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
+        if n == 0 || m == 0 || d == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        let have_n = self.query_k_star.nrows();
+        let have_m = self.query_k_star.ncols();
+        let have_d = self.query_x.ncols();
+        let have_xq = self.query_x.nrows();
+        if have_n >= n && have_m >= m && have_d == d && have_xq >= m {
+            if self.query_xs.len() < m.saturating_mul(d) {
+                self.query_xs.resize(m * d, 0.0);
+            }
+            if self.query_kss.len() < m {
+                self.query_kss.resize(m, 0.0);
+            }
+            return Ok(());
+        }
+        let new_n = if have_n >= n {
+            have_n
+        } else {
+            n.max(have_n.max(1).saturating_mul(2))
+        };
+        let new_m = if have_m >= m && have_xq >= m {
+            have_m.max(have_xq)
+        } else {
+            m.max(have_m.max(have_xq).max(1).saturating_mul(2))
+        };
+        self.query_xs
+            .resize(new_m.checked_mul(d).ok_or(GprError::EmptyInput)?, 0.0);
+        self.query_x = Mat::<f64>::zeros(new_m, d);
+        self.query_k_star = Mat::<f64>::zeros(new_n, new_m);
+        self.query_scratch = Mat::<f64>::zeros(new_n, new_m);
+        self.query_dist = Mat::<f64>::zeros(new_n, new_m);
+        self.query_kss.resize(new_m, 0.0);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

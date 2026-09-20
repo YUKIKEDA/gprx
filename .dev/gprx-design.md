@@ -797,7 +797,7 @@ struct OnlineWorkspace {
 
 ### 増分更新の手順と不変条件
 
-**追加（末尾）**: ①容量が足りなければ `ensure_capacity` → ②新規点と既存n点との距離計算(O(n)) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)) → ⑤alpha再ソルブ(O(n²)) → ⑥`PointRegistry` に新しい `PointId` を発行。
+**追加（末尾）**: ①容量が足りなければ `ensure_capacity`（倍率 2。`X` / `y` も同じ。クエリバッファは `ensure_at_least`） → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル評価しKに新規行/列追加 → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ → ⑥`PointRegistry` に新しい `PointId` を発行。delete 後の `α` はフル再ソルブのまま。
 
 **削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)) → ②距離キャッシュ・K・y・alpha・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④alpha再ソルブ(O(n²))。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
 
@@ -856,7 +856,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3 の P3-6。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 3 の P3-7。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
