@@ -1,18 +1,20 @@
-//! Growable buffers for later online insert and delete on a fitted GPR.
+//! Growable buffers for online insert on a fitted GPR.
 //!
-//! Crate-private. Not attached to [`crate::FittedGpr`] yet. Point storage,
-//! ARD caches, and bordered LDLT live on later Phase 3 rows.
-#![allow(dead_code)] // P3-3 (#32) attaches insert; this module is test-only until then
+//! Crate-private. [`crate::OnlineGpr`] owns training `X` and calls
+//! [`OnlineWorkspace::ensure_capacity`] before a tail insert.
 
-use faer::{Col, Mat};
+use faer::linalg::triangular_solve::{
+    solve_unit_lower_triangular_in_place, solve_unit_upper_triangular_in_place,
+};
+use faer::{Col, Mat, MatMut, MatRef, Par};
 
-use crate::error::GprError;
+use crate::error::{CholeskyStage, GprError};
 
 /// Capacity-backed K, LDLT, targets, and an isotropic distance cache.
 ///
 /// All matrices are `n_capacity × n_capacity`. Vectors are length
 /// `n_capacity`. The live prefix is `n_active`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct OnlineWorkspace {
     pub(crate) k_matrix: Mat<f64>,
     pub(crate) ld_factor: Mat<f64>,
@@ -76,6 +78,123 @@ impl OnlineWorkspace {
         self.alpha = alpha;
         self.v_buf = v_buf;
         self.n_capacity = new_cap;
+    }
+
+    /// Fills the leading `n` of `ld_factor` from an LLT factor (`L Lᵀ`).
+    pub(crate) fn fill_ld_from_llt(
+        &mut self,
+        l: MatRef<'_, f64>,
+        n: usize,
+    ) -> Result<(), GprError> {
+        if n == 0 || n > self.n_capacity || l.nrows() < n || l.ncols() < n {
+            return Err(GprError::EmptyInput);
+        }
+        for j in 0..n {
+            let ljj = l[(j, j)];
+            if !ljj.is_finite() || ljj <= 0.0 {
+                return Err(GprError::CholeskyFailed {
+                    jitter: 0.0,
+                    matrix_size: n,
+                    stage: CholeskyStage::OnlineInsert,
+                });
+            }
+            self.ld_factor[(j, j)] = ljj * ljj;
+            let inv = 1.0 / ljj;
+            for i in (j + 1)..n {
+                self.ld_factor[(i, j)] = l[(i, j)] * inv;
+            }
+        }
+        self.n_active = n;
+        Ok(())
+    }
+
+    /// Copies packed LDLT from `ld` into the leading `n`.
+    pub(crate) fn copy_ld_from(&mut self, ld: MatRef<'_, f64>, n: usize) -> Result<(), GprError> {
+        if n == 0 || n > self.n_capacity || ld.nrows() < n || ld.ncols() < n {
+            return Err(GprError::EmptyInput);
+        }
+        for j in 0..n {
+            for i in j..n {
+                self.ld_factor[(i, j)] = ld[(i, j)];
+            }
+        }
+        self.n_active = n;
+        Ok(())
+    }
+
+    /// Appends one bordered row: `L D v = k`, `δ = k_new - vᵀ D v`.
+    pub(crate) fn append_border(&mut self, k: &[f64], k_new: f64) -> Result<(), GprError> {
+        let n = self.n_active;
+        if k.len() != n {
+            return Err(GprError::EmptyInput);
+        }
+        self.ensure_capacity(n + 1);
+        let mut w = Mat::zeros(n, 1);
+        for i in 0..n {
+            w[(i, 0)] = k[i];
+        }
+        if n > 0 {
+            let ld = self.ld_factor.as_ref().submatrix(0, 0, n, n);
+            solve_unit_lower_triangular_in_place(ld, w.as_mut(), Par::Seq);
+        }
+        let mut vtdv = 0.0;
+        for i in 0..n {
+            let d = self.ld_factor[(i, i)];
+            if !d.is_finite() || d <= 0.0 {
+                return Err(GprError::CholeskyFailed {
+                    jitter: 0.0,
+                    matrix_size: n + 1,
+                    stage: CholeskyStage::OnlineInsert,
+                });
+            }
+            let vi = w[(i, 0)] / d;
+            self.ld_factor[(n, i)] = vi;
+            vtdv += vi * d * vi;
+        }
+        let delta = k_new - vtdv;
+        if !delta.is_finite() || delta <= 0.0 {
+            return Err(GprError::CholeskyFailed {
+                jitter: 0.0,
+                matrix_size: n + 1,
+                stage: CholeskyStage::OnlineInsert,
+            });
+        }
+        self.ld_factor[(n, n)] = delta;
+        for (i, &ki) in k.iter().enumerate() {
+            self.k_matrix[(n, i)] = ki;
+            self.k_matrix[(i, n)] = ki;
+        }
+        self.k_matrix[(n, n)] = k_new;
+        self.n_active = n + 1;
+        Ok(())
+    }
+
+    pub(crate) fn set_vector_prefix(col: &mut Col<f64>, values: &[f64]) {
+        for (i, &v) in values.iter().enumerate() {
+            col[i] = v;
+        }
+    }
+
+    /// Solves `L D Lᵀ x = b` for the leading `n` (overwrites the first column of `rhs`).
+    pub(crate) fn solve_ldlt_in_place(ld: MatRef<'_, f64>, mut rhs: MatMut<'_, f64>, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let ld_n = ld.submatrix(0, 0, n, n);
+        solve_unit_lower_triangular_in_place(ld_n, rhs.as_mut(), Par::Seq);
+        for i in 0..n {
+            rhs[(i, 0)] /= ld[(i, i)];
+        }
+        solve_unit_upper_triangular_in_place(ld_n.transpose(), rhs, Par::Seq);
+    }
+
+    /// Overwrites each column of `rhs` (`n×m`) with `L⁻¹` of that column.
+    pub(crate) fn apply_inv_l(ld: MatRef<'_, f64>, rhs: MatMut<'_, f64>, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let ld_n = ld.submatrix(0, 0, n, n);
+        solve_unit_lower_triangular_in_place(ld_n, rhs, Par::Seq);
     }
 }
 
