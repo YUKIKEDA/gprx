@@ -31,24 +31,21 @@ fn assert_lower_close(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
     }
 }
 
+// Packed LDLT: diagonal is D, strictly lower is unit-L. `L D` is lower
+// triangular, so `A[i, j] = Σ_{k ≤ min(i, j)} L[i, k] D[k] L[j, k]`.
 fn reconstruct_a(ld: MatRef<'_, f64>) -> Mat<f64> {
     let n = ld.nrows();
     assert_eq!(n, ld.ncols());
-    let mut l = Mat::zeros(n, n);
-    for j in 0..n {
-        l[(j, j)] = 1.0;
-        for i in (j + 1)..n {
-            l[(i, j)] = ld[(i, j)];
+    Mat::from_fn(n, n, |i, j| {
+        let last = i.min(j);
+        let mut sum = 0.0;
+        for k in 0..=last {
+            let lik = if i == k { 1.0 } else { ld[(i, k)] };
+            let ljk = if j == k { 1.0 } else { ld[(j, k)] };
+            sum += lik * ld[(k, k)] * ljk;
         }
-    }
-    let mut ld_times = l.clone();
-    for j in 0..n {
-        let d = ld[(j, j)];
-        for i in j..n {
-            ld_times[(i, j)] *= d;
-        }
-    }
-    &ld_times * l.transpose()
+        sum
+    })
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
