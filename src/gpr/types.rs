@@ -495,3 +495,43 @@ impl AllocWorkspace for ReuseCholesky {
     type CholWrap<W: FitWorkspace> = W;
     const OVERWRITES_CHOLESKY: bool = true;
 }
+
+/// Stable identity of one training point on [`crate::OnlineGpr`].
+///
+/// [`crate::FittedGpr::into_online`] assigns identifiers `0 .. n-1` in buffer
+/// order. Later [`crate::OnlineGpr::insert`] values increase monotonically and
+/// are never reused after [`crate::OnlineGpr::delete`]. There is no public
+/// constructor.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{Fixed, GaussianLikelihood, Gpr};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_optimizer(Fixed)
+/// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+/// .map_err(|(_, e)| e)?;
+/// let mut online = fitted.into_online()?;
+/// let id = online.insert(&[1.5], 0.5)?;
+/// assert_eq!(online.point_ids().last().copied(), Some(id));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PointId(u64);
+
+impl PointId {
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
+}

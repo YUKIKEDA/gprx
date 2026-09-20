@@ -1,8 +1,10 @@
-//! Growable buffers for online insert on a fitted GPR.
+//! Growable buffers for online insert and delete on a fitted GPR.
 //!
 //! Crate-private. [`crate::OnlineGpr`] owns training `X` and calls
 //! [`OnlineWorkspace::ensure_capacity`] before a tail insert.
 
+use dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::ldlt;
 use faer::linalg::triangular_solve::{
     solve_unit_lower_triangular_in_place, solve_unit_upper_triangular_in_place,
 };
@@ -169,6 +171,29 @@ impl OnlineWorkspace {
         Ok(())
     }
 
+    /// Drops row and column `index` from every live buffer. Capacity is unchanged.
+    pub(crate) fn delete_index(&mut self, index: usize) -> Result<(), GprError> {
+        let n = self.n_active;
+        if n <= 1 || index >= n {
+            return Err(GprError::EmptyInput);
+        }
+        compact_leading_square(&mut self.k_matrix, n, index);
+        compact_leading_square(&mut self.dist_cache, n, index);
+        compact_leading_col(&mut self.y, n, index);
+        compact_leading_col(&mut self.alpha, n, index);
+        compact_leading_col(&mut self.v_buf, n, index);
+
+        let mut indices = [index];
+        let scratch = ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n, 1);
+        let mut memory = MemBuffer::new(scratch);
+        let stack = MemStack::new(&mut memory);
+        let ld = self.ld_factor.as_mut().submatrix_mut(0, 0, n, n);
+        ldlt::update::delete_rows_and_cols_clobber(ld, &mut indices, Par::Seq, stack);
+        zero_trailing_row_col(&mut self.ld_factor, n);
+        self.n_active = n - 1;
+        Ok(())
+    }
+
     pub(crate) fn set_vector_prefix(col: &mut Col<f64>, values: &[f64]) {
         for (i, &v) in values.iter().enumerate() {
             col[i] = v;
@@ -209,6 +234,45 @@ fn copy_leading_mat(src: &Mat<f64>, dest: &mut Mat<f64>, n: usize) {
 fn copy_leading_col(src: &Col<f64>, dest: &mut Col<f64>, n: usize) {
     for i in 0..n {
         dest[i] = src[i];
+    }
+}
+
+fn compact_leading_square(mat: &mut Mat<f64>, n: usize, index: usize) {
+    let m = n - 1;
+    let mut packed = Mat::zeros(m, m);
+    for j in 0..n {
+        if j == index {
+            continue;
+        }
+        let dest_j = if j < index { j } else { j - 1 };
+        for i in 0..n {
+            if i == index {
+                continue;
+            }
+            let dest_i = if i < index { i } else { i - 1 };
+            packed[(dest_i, dest_j)] = mat[(i, j)];
+        }
+    }
+    for j in 0..m {
+        for i in 0..m {
+            mat[(i, j)] = packed[(i, j)];
+        }
+    }
+    zero_trailing_row_col(mat, n);
+}
+
+fn compact_leading_col(col: &mut Col<f64>, n: usize, index: usize) {
+    for i in index..(n - 1) {
+        col[i] = col[i + 1];
+    }
+    col[n - 1] = 0.0;
+}
+
+fn zero_trailing_row_col(mat: &mut Mat<f64>, n: usize) {
+    let last = n - 1;
+    for i in 0..n {
+        mat[(i, last)] = 0.0;
+        mat[(last, i)] = 0.0;
     }
 }
 

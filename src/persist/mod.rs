@@ -123,8 +123,9 @@ impl LoadedGpr {
     ///
     /// Reconstructs fitted transforms from the config and applies them to the
     /// stored original `X` / `y`. `factor_kind` is required: `llt` loads
-    /// [`FittedGpr`], `ldlt` loads [`crate::OnlineGpr`]. When a factor is
-    /// present, the safetensors file stays memory-mapped. The buffer policy is
+    /// [`FittedGpr`], `ldlt` loads [`crate::OnlineGpr`] and requires
+    /// `point_ids` plus `next_point_id`. When a factor is present, the
+    /// safetensors file stays memory-mapped. The buffer policy is
     /// [`crate::RetainCholesky`]. Unknown [`FORMAT_VERSION`] is rejected.
     ///
     /// # Errors
@@ -187,6 +188,8 @@ where
         y_unfitted: encode_unfitted_target(model.y_unfitted())?,
         x_transform: encode_fitted_input(model.x_transform())?,
         y_transform: encode_fitted_target(model.y_transform())?,
+        point_ids: None,
+        next_point_id: None,
     };
     let config_path = dir.join(CONFIG_FILE);
     let json = serde_json::to_vec_pretty(&config)
@@ -234,6 +237,8 @@ where
         y_unfitted: encode_unfitted_target(model.y_unfitted())?,
         x_transform: encode_fitted_input(model.x_transform())?,
         y_transform: encode_fitted_target(model.y_transform())?,
+        point_ids: Some(model.persist_point_ids()),
+        next_point_id: Some(model.persist_next_point_id()),
     };
     let config_path = dir.join(CONFIG_FILE);
     let json = serde_json::to_vec_pretty(&config)
@@ -254,11 +259,32 @@ where
     write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
 }
 
+fn apply_online_ids<O, S, C, B>(
+    online: &mut OnlineGpr<O, S, C, B>,
+    ids: &Option<(Vec<u64>, u64)>,
+) -> Result<(), GprError>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
+    let (ids, next_id) = ids
+        .as_ref()
+        .ok_or_else(|| persist_err("ldlt config missing point_ids"))?;
+    online.apply_persisted_ids(ids, *next_id)
+}
+
 fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
         .map_err(|err| persist_err(format!("read {config_path:?}: {err}")))?;
     let config = config::parse_config(&bytes)?;
+    let ldlt_ids = match config.factor_kind {
+        FactorKind::Ldlt => {
+            let (ids, next_id) = config.online_ids()?;
+            Some((ids.to_vec(), next_id))
+        }
+        FactorKind::Llt => None,
+    };
     let kernel = config.kernel.decode(registry)?;
     let likelihood = config.likelihood.decode()?;
     let jitter = config.jitter.decode()?;
@@ -325,43 +351,47 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                 },
             )?)),
             (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Cached)) => {
+                let mut online = OnlineGpr::from_persisted(PersistedModel {
+                    kernel,
+                    likelihood,
+                    x_unfitted,
+                    y_unfitted,
+                    x_transform,
+                    y_transform,
+                    distance_cache: CachedDistances,
+                    jitter_policy: jitter,
+                    x_obs,
+                    y_obs,
+                    alpha,
+                    mapped: Some(mapped),
+                })?;
+                apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(LoadedGpr::OnlineDistance(LoadedOnlineDistance::Cached(
-                    OnlineGpr::from_persisted(PersistedModel {
-                        kernel,
-                        likelihood,
-                        x_unfitted,
-                        y_unfitted,
-                        x_transform,
-                        y_transform,
-                        distance_cache: CachedDistances,
-                        jitter_policy: jitter,
-                        x_obs,
-                        y_obs,
-                        alpha,
-                        mapped: Some(mapped),
-                    })?,
+                    online,
                 )))
             }
             (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Uncached)) => {
+                let mut online = OnlineGpr::from_persisted(PersistedModel {
+                    kernel,
+                    likelihood,
+                    x_unfitted,
+                    y_unfitted,
+                    x_transform,
+                    y_transform,
+                    distance_cache: UncachedDistances,
+                    jitter_policy: jitter,
+                    x_obs,
+                    y_obs,
+                    alpha,
+                    mapped: Some(mapped),
+                })?;
+                apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(LoadedGpr::OnlineDistance(LoadedOnlineDistance::Uncached(
-                    OnlineGpr::from_persisted(PersistedModel {
-                        kernel,
-                        likelihood,
-                        x_unfitted,
-                        y_unfitted,
-                        x_transform,
-                        y_transform,
-                        distance_cache: UncachedDistances,
-                        jitter_policy: jitter,
-                        x_obs,
-                        y_obs,
-                        alpha,
-                        mapped: Some(mapped),
-                    })?,
+                    online,
                 )))
             }
-            (FactorKind::Ldlt, None) => Ok(LoadedGpr::OnlinePoints(OnlineGpr::from_persisted(
-                PersistedModel {
+            (FactorKind::Ldlt, None) => {
+                let mut online = OnlineGpr::from_persisted(PersistedModel {
                     kernel,
                     likelihood,
                     x_unfitted,
@@ -374,8 +404,10 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                     y_obs,
                     alpha,
                     mapped: Some(mapped),
-                },
-            )?)),
+                })?;
+                apply_online_ids(&mut online, &ldlt_ids)?;
+                Ok(LoadedGpr::OnlinePoints(online))
+            }
         }
     } else {
         match (config.factor_kind, cache) {
@@ -421,10 +453,13 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                     .with_boxed_target_transform(y_unfitted)
                     .with_jitter_policy(jitter)
                     .with_distance_cache_policy(CachedDistances);
+                let mut online = gpr
+                    .factor(&x_obs, config.n, config.d, &y_obs)
+                    .map_err(|(_, err)| err)?
+                    .into_online()?;
+                apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(LoadedGpr::OnlineDistance(LoadedOnlineDistance::Cached(
-                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
-                        .map_err(|(_, err)| err)?
-                        .into_online()?,
+                    online,
                 )))
             }
             (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Uncached)) => {
@@ -434,10 +469,13 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                     .with_boxed_target_transform(y_unfitted)
                     .with_jitter_policy(jitter)
                     .with_distance_cache_policy(UncachedDistances);
+                let mut online = gpr
+                    .factor(&x_obs, config.n, config.d, &y_obs)
+                    .map_err(|(_, err)| err)?
+                    .into_online()?;
+                apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(LoadedGpr::OnlineDistance(LoadedOnlineDistance::Uncached(
-                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
-                        .map_err(|(_, err)| err)?
-                        .into_online()?,
+                    online,
                 )))
             }
             (FactorKind::Ldlt, None) => {
@@ -446,11 +484,12 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                     .with_boxed_input_transform(x_unfitted)
                     .with_boxed_target_transform(y_unfitted)
                     .with_jitter_policy(jitter);
-                Ok(LoadedGpr::OnlinePoints(
-                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
-                        .map_err(|(_, err)| err)?
-                        .into_online()?,
-                ))
+                let mut online = gpr
+                    .factor(&x_obs, config.n, config.d, &y_obs)
+                    .map_err(|(_, err)| err)?
+                    .into_online()?;
+                apply_online_ids(&mut online, &ldlt_ids)?;
+                Ok(LoadedGpr::OnlinePoints(online))
             }
         }
     }
