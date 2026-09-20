@@ -2,9 +2,11 @@
 
 pub(crate) mod factor;
 mod model;
+mod online;
 mod types;
 
 pub use model::{FittedGpr, Gpr};
+pub use online::OnlineGpr;
 pub(crate) use types::AllocWorkspace;
 pub use types::{
     AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FixedJitter,

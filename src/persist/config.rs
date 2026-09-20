@@ -18,6 +18,7 @@ pub(super) struct ModelConfig {
     pub n: usize,
     pub d: usize,
     pub has_factor: bool,
+    pub factor_kind: FactorKind,
     pub kernel: KernelJson,
     pub likelihood: LikelihoodJson,
     pub jitter: JitterJson,
@@ -40,6 +41,14 @@ impl ModelConfig {
             })
         }
     }
+}
+
+/// Which triangular factor is stored (or reconstructed) for this directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum FactorKind {
+    Llt,
+    Ldlt,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
