@@ -244,6 +244,46 @@ impl MaternKernel {
             finite_kernel(matern_dk_dtheta_iso(nu, r))
         })
     }
+
+    /// Writes `∂²K/∂θ²` for `θ = log(ℓ)` into `d2_k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// the same shape / non-finite errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_matern_hess_idx(i, j)?;
+        let ell = self.lengthscale();
+        let nu = self.nu;
+        write_triangle(dist, d2_k, uplo, |d| {
+            let r = scaled_distance(d, ell)?;
+            finite_kernel(matern_d2k_dtheta2_iso(nu, r))
+        })
+    }
+
+    pub(crate) fn hess_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_matern_hess_idx(i, j)?;
+        let ell = self.lengthscale();
+        let nu = self.nu;
+        write_square_from_coords(x, d2_k, uplo, |d| {
+            let r = scaled_distance(d, ell)?;
+            finite_kernel(matern_d2k_dtheta2_iso(nu, r))
+        })
+    }
 }
 
 pub(crate) fn matern_from_r(nu: MaternNu, r: f64) -> f64 {
@@ -275,6 +315,24 @@ pub(crate) fn matern_dk_dtheta_iso(nu: MaternNu, r: f64) -> f64 {
     }
 }
 
+/// `∂²k/∂θ²` for isotropic `θ = log(ℓ)` at scaled distance `r = ‖x-x'‖ / ℓ`.
+pub(crate) fn matern_d2k_dtheta2_iso(nu: MaternNu, r: f64) -> f64 {
+    match nu {
+        MaternNu::Half => {
+            let k = matern_from_r(nu, r);
+            k * r * (r - 1.0)
+        }
+        MaternNu::ThreeHalves => {
+            let rho = 3.0_f64.sqrt() * r;
+            rho * rho * (rho - 2.0) * (-rho).exp()
+        }
+        MaternNu::FiveHalves => {
+            let rho = 5.0_f64.sqrt() * r;
+            (rho * rho / 3.0) * (rho * rho - 2.0 * rho - 2.0) * (-rho).exp()
+        }
+    }
+}
+
 /// `∂k/∂θ_d` for ARD `θ_d = log(ℓ_d)`. `dim_term` is `(x_d-x'_d)² / ℓ_d²`.
 pub(crate) fn matern_dk_dtheta_ard(nu: MaternNu, r: f64, dim_term: f64) -> f64 {
     match nu {
@@ -290,6 +348,57 @@ pub(crate) fn matern_dk_dtheta_ard(nu: MaternNu, r: f64, dim_term: f64) -> f64 {
             let rho = 5.0_f64.sqrt() * r;
             (5.0 / 3.0) * (1.0 + rho) * (-rho).exp() * dim_term
         }
+    }
+}
+
+/// `∂²k/∂θ_d ∂θ_e` for ARD lengthscales. `same` is `d == e`.
+pub(crate) fn matern_d2k_dtheta_ard(
+    nu: MaternNu,
+    r: f64,
+    dim_i: f64,
+    dim_j: f64,
+    same: bool,
+) -> f64 {
+    if r <= 0.0 {
+        return 0.0;
+    }
+    match nu {
+        MaternNu::Half => {
+            let k = matern_from_r(nu, r);
+            if same {
+                k * (dim_i * dim_i / (r * r) - 2.0 * dim_i / r + dim_i * dim_i / (r * r * r))
+            } else {
+                k * dim_i * dim_j * (1.0 / (r * r) + 1.0 / (r * r * r))
+            }
+        }
+        MaternNu::ThreeHalves => {
+            let rho = 3.0_f64.sqrt() * r;
+            let e = (-rho).exp();
+            if same {
+                3.0 * e * (rho * dim_i * dim_i / (r * r) - 2.0 * dim_i)
+            } else {
+                3.0 * e * (rho * dim_i * dim_j / (r * r))
+            }
+        }
+        MaternNu::FiveHalves => {
+            let rho = 5.0_f64.sqrt() * r;
+            let e = (-rho).exp();
+            if same {
+                (5.0 / 3.0) * e * (rho * rho * dim_i * dim_i / (r * r) - 2.0 * (1.0 + rho) * dim_i)
+            } else {
+                (5.0 / 3.0) * e * (rho * rho * dim_i * dim_j / (r * r))
+            }
+        }
+    }
+}
+
+fn require_matern_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
+    if i == 0 && j == 0 {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("Matern has a single parameter; got pair ({i}, {j})"),
+        })
     }
 }
 
@@ -463,6 +572,35 @@ mod tests {
         assert_close(upper[(1, 0)], -1.0);
         assert_close(upper[(2, 0)], -1.0);
         assert_close(upper[(2, 1)], -1.0);
+    }
+
+    #[test]
+    fn hess_matches_finite_difference_of_grad() {
+        for nu in all_nu() {
+            let kernel = MaternKernel::from_log_lengthscale(-0.2, nu).expect("valid");
+            let theta = kernel.log_lengthscale();
+            let h = 1e-6;
+            let plus = MaternKernel::from_log_lengthscale(theta + h, nu).expect("valid");
+            let minus = MaternKernel::from_log_lengthscale(theta - h, nu).expect("valid");
+            let dist = sq_dist_1d(&[0.0, 1.1, 2.3]);
+            let mut g_plus = fill(3, 0.0);
+            let mut g_minus = fill(3, 0.0);
+            let mut d2 = fill(3, 0.0);
+            plus.grad(dist.as_ref(), g_plus.as_mut(), 0, Triangle::Full)
+                .expect("shape");
+            minus
+                .grad(dist.as_ref(), g_minus.as_mut(), 0, Triangle::Full)
+                .expect("shape");
+            kernel
+                .hess(dist.as_ref(), d2.as_mut(), 0, 0, Triangle::Full)
+                .expect("index 0");
+            for col in 0..3 {
+                for row in 0..3 {
+                    let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
+                    assert_close(d2[(row, col)], fd);
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,13 +1,14 @@
 //! argmin optimizer adapters and the [`Optimizer`] type slot.
 //!
-//! Does not implement L-BFGS, nonlinear CG, or Nelder–Mead. [`Lbfgs`],
-//! [`NonlinearCg`], and [`NelderMead`] map user-unit [`crate::Interval`]
+//! Does not implement L-BFGS, nonlinear CG, Nelder–Mead, or Newton. [`Lbfgs`],
+//! [`NonlinearCg`], [`NelderMead`], and [`Newton`] map user-unit [`crate::Interval`]
 //! through a logit so argmin stays unconstrained. Positive intervals
 //! (`lo > 0`) use a log-uniform logit, matching restart sampling. The
 //! unconstrained coordinate is scaled so the Jacobian is 1 at the interval
 //! midpoint. When a gradient solver asks for cost and gradient at the same
 //! point, one [`crate::Differentiable::value_and_gradient_into`] call fills
-//! both. [`NelderMead`] evaluates [`crate::Objective::value`] only.
+//! both. [`Newton`] also maps the analytic Hessian to logit coordinates.
+//! [`NelderMead`] evaluates [`crate::Objective::value`] only.
 //! [`FastSimulatedAnnealing`] is a homemade value-only solver that walks
 //! log-`θ` with Cauchy / Metropolis steps instead of a logit map.
 
@@ -16,6 +17,7 @@ mod lbfgs;
 mod logit;
 mod ncg;
 mod neldermead;
+mod newton;
 
 use std::num::NonZeroU32;
 
@@ -23,6 +25,7 @@ pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
 pub use ncg::NonlinearCg;
 pub use neldermead::NelderMead;
+pub use newton::Newton;
 
 use crate::error::GprError;
 
@@ -40,7 +43,8 @@ pub struct OptResult {
 /// Hyperparameter optimizer.
 ///
 /// `P` is the objective this algorithm can minimize. [`Lbfgs`] and
-/// [`NonlinearCg`] require [`crate::Differentiable`] plus bounds. [`NelderMead`]
+/// [`NonlinearCg`] require [`crate::Differentiable`] plus bounds. [`Newton`]
+/// requires [`crate::TwiceDifferentiable`] plus bounds. [`NelderMead`]
 /// and [`FastSimulatedAnnealing`] require only [`crate::Objective`] plus bounds.
 pub trait Optimizer<P: ?Sized> {
     /// Minimizes `objective` from `init` without taking ownership of `init`.

@@ -138,6 +138,32 @@ use super::Triangle;
 ///         })
 ///     }
 ///
+///     fn hess(
+///         &self,
+///         _dist: MatRef<'_, f64>,
+///         _d2_k: MatMut<'_, f64>,
+///         i: usize,
+///         j: usize,
+///         _uplo: Triangle,
+///     ) -> Result<(), gprx::GprError> {
+///         Err(gprx::GprError::InvalidHyperparameter {
+///             reason: format!("unit kernel has no parameter pair ({i}, {j})"),
+///         })
+///     }
+///
+///     fn hess_points(
+///         &self,
+///         _x: MatRef<'_, f64>,
+///         _d2_k: MatMut<'_, f64>,
+///         i: usize,
+///         j: usize,
+///         _uplo: Triangle,
+///     ) -> Result<(), gprx::GprError> {
+///         Err(gprx::GprError::InvalidHyperparameter {
+///             reason: format!("unit kernel has no parameter pair ({i}, {j})"),
+///         })
+///     }
+///
 ///     fn clone_box(&self) -> Box<dyn KernelTerm> {
 ///         Box::new(self.clone())
 ///     }
@@ -215,6 +241,40 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
         dist: MatRef<'_, f64>,
         d_k: MatMut<'_, f64>,
         param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+
+    /// Writes `∂²K/∂θ_i ∂θ_j` from squared distances into `d2_k`.
+    ///
+    /// One index pair per call. There is no numeric-difference fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// range, or the same shape errors as [`Self::apply`].
+    fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+
+    /// Writes `∂²K/∂θ_i ∂θ_j` from point coordinates into `d2_k`.
+    ///
+    /// Distance leaves typically fill squared Euclidean distances from `x`
+    /// and then call [`Self::hess`].
+    ///
+    /// # Errors
+    ///
+    /// Same index and shape errors as [`Self::hess`].
+    fn hess_points(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError>;
 
@@ -333,6 +393,28 @@ impl CustomKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         self.inner.grad(dist, d_k, param_idx, uplo)
+    }
+
+    pub(super) fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.inner.hess(dist, d2_k, i, j, uplo)
+    }
+
+    pub(super) fn hess_points(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.inner.hess_points(x, d2_k, i, j, uplo)
     }
 }
 
@@ -485,6 +567,32 @@ mod tests {
             })
         }
 
+        fn hess(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _d2_k: MatMut<'_, f64>,
+            i: usize,
+            j: usize,
+            _uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            Err(crate::GprError::InvalidHyperparameter {
+                reason: format!("unit kernel has no parameter pair ({i}, {j})"),
+            })
+        }
+
+        fn hess_points(
+            &self,
+            _x: MatRef<'_, f64>,
+            _d2_k: MatMut<'_, f64>,
+            i: usize,
+            j: usize,
+            _uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            Err(crate::GprError::InvalidHyperparameter {
+                reason: format!("unit kernel has no parameter pair ({i}, {j})"),
+            })
+        }
+
         fn clone_box(&self) -> Box<dyn KernelTerm> {
             Box::new(self.clone())
         }
@@ -578,6 +686,28 @@ mod tests {
             _dist: MatRef<'_, f64>,
             _d_k: MatMut<'_, f64>,
             _param_idx: usize,
+            _uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            Ok(())
+        }
+
+        fn hess(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _d2_k: MatMut<'_, f64>,
+            _i: usize,
+            _j: usize,
+            _uplo: Triangle,
+        ) -> Result<(), crate::GprError> {
+            Ok(())
+        }
+
+        fn hess_points(
+            &self,
+            _x: MatRef<'_, f64>,
+            _d2_k: MatMut<'_, f64>,
+            _i: usize,
+            _j: usize,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
             Ok(())

@@ -444,6 +444,14 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 全体コストはO(n³ + p n²)。K⁻¹をパラメータごとに作り直さない。
 
+解析 NLML ヘッセ（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）:
+
+```
+H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
+```
+
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。新しい `n×n` は Workspace に足さない。`ReuseCholesky` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
+
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
 既定の第4型は `RetainCholesky`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。公開のメモリ極（`with_prefer_memory`）が `ReuseCholesky` を選ぶ。`with_cholesky_buffer` は `pub(crate)`。`ReuseCholesky` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にスロットは書かない。`load` は `RetainCholesky`。
@@ -456,7 +464,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
+既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
 
 ```rust
 struct Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
@@ -476,6 +484,13 @@ struct Lbfgs {
     tolerance: f64,
     history_size: usize,   // 既定 10。L-BFGS だけ
     n_restarts: u32,       // 既定 0
+}
+
+struct Newton {
+    max_iterations: u64,
+    tolerance: f64,
+    gamma: f64,            // 既定 1。Newton だけ
+    n_restarts: u32,
 }
 
 struct NonlinearCg {
@@ -664,7 +679,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。公開面は `Gpr<O: Optimizer, S: RecomputeStrategy>`。既定 `Lbfgs` と `FullRecompute`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。自作例は `FastSimulatedAnnealing`（Cauchy / Metropolis。P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）。logit は使わず、`minimize` が受け取る log-`θ` を歩く。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。`GprObjective` のヘッセ **impl** は P2B-17（[#109](https://github.com/YUKIKEDA/gprx/issues/109)）。P2B-1 ではトレイトだけ置き、`GprObjective` は value+grad。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`（P2B-1 でトレイト、impl は P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。`ChangeSet` 構造体は置かない。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。公開面は `Gpr<O: Optimizer, S: RecomputeStrategy>`。既定 `Lbfgs` と `FullRecompute`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。公開 `Newton` は argmin の `Newton`（`H⁻¹` は faer の私有型。logit は L-BFGS と同じで `H_z` は解析連鎖。ノブは共有 3 つ + `with_gamma`）。自作例は `FastSimulatedAnnealing`（Cauchy / Metropolis。P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）。logit は使わず、`minimize` が受け取る log-`θ` を歩く。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`（P2B-1 でトレイト、impl は P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。`ChangeSet` 構造体は置かない。
 
 ## 10. エラー型 GprError
 
