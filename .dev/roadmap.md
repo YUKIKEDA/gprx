@@ -34,7 +34,7 @@
 | P2B-6   | [#123](https://github.com/YUKIKEDA/gprx/issues/123) | P2B-10  | [#125](https://github.com/YUKIKEDA/gprx/issues/125) | P2B-7   | [#127](https://github.com/YUKIKEDA/gprx/issues/127) |
 | P2B-8   | [#129](https://github.com/YUKIKEDA/gprx/issues/129) | P2B-9   | [#131](https://github.com/YUKIKEDA/gprx/issues/131) | P2B-11  | [#133](https://github.com/YUKIKEDA/gprx/issues/133) |
 | P2B-12  | [#135](https://github.com/YUKIKEDA/gprx/issues/135) | P2B-13  | [#137](https://github.com/YUKIKEDA/gprx/issues/137) | P2B-21  | [#142](https://github.com/YUKIKEDA/gprx/issues/142) |
-| P2B-22  | [#143](https://github.com/YUKIKEDA/gprx/issues/143) |         |                                                   |         |                                                   |
+| P2B-22  | [#143](https://github.com/YUKIKEDA/gprx/issues/143) | P2B-23  | [#148](https://github.com/YUKIKEDA/gprx/issues/148) |         |                                                   |
 
 ## マイルストーン
 
