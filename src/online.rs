@@ -3,7 +3,9 @@
 //! Crate-private. [`crate::OnlineGpr`] owns training `X` and calls
 //! [`OnlineWorkspace::ensure_capacity`] before a tail insert.
 
-use dyn_stack::{MemBuffer, MemStack};
+use std::fmt;
+
+use dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::ldlt;
 use faer::linalg::triangular_solve::{
     solve_unit_lower_triangular_in_place, solve_unit_upper_triangular_in_place,
@@ -12,18 +14,17 @@ use faer::{Col, Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
 
-/// Capacity-backed K, LDLT, targets, and an isotropic distance cache.
+/// Capacity-backed LDLT, targets, and a one-column solve buffer.
 ///
-/// All matrices are `n_capacity × n_capacity`. Vectors are length
-/// `n_capacity`. The live prefix is `n_active`.
-#[derive(Clone, Debug)]
+/// `ld_factor` is `n_capacity × n_capacity`. Vectors are length
+/// `n_capacity`. The live prefix is `n_active`. Insert and predict read
+/// the factor only; there is no live Gram or distance cache.
 pub(crate) struct OnlineWorkspace {
-    pub(crate) k_matrix: Mat<f64>,
     pub(crate) ld_factor: Mat<f64>,
-    pub(crate) dist_cache: Mat<f64>,
     pub(crate) y: Col<f64>,
     pub(crate) alpha: Col<f64>,
     pub(crate) v_buf: Col<f64>,
+    delete_scratch: MemBuffer,
     pub(crate) n_active: usize,
     pub(crate) n_capacity: usize,
 }
@@ -35,12 +36,11 @@ impl OnlineWorkspace {
             return Err(GprError::EmptyInput);
         }
         Ok(Self {
-            k_matrix: Mat::zeros(n, n),
             ld_factor: Mat::zeros(n, n),
-            dist_cache: Mat::zeros(n, n),
             y: Col::zeros(n),
             alpha: Col::zeros(n),
             v_buf: Col::zeros(n),
+            delete_scratch: MemBuffer::new(delete_scratch_req(n)),
             n_active: n,
             n_capacity: n,
         })
@@ -59,12 +59,8 @@ impl OnlineWorkspace {
         let new_cap = needed.max(doubled);
         let n = self.n_active;
 
-        let mut k_matrix = Mat::zeros(new_cap, new_cap);
         let mut ld_factor = Mat::zeros(new_cap, new_cap);
-        let mut dist_cache = Mat::zeros(new_cap, new_cap);
-        copy_leading_mat(&self.k_matrix, &mut k_matrix, n);
-        copy_leading_mat(&self.ld_factor, &mut ld_factor, n);
-        copy_leading_mat(&self.dist_cache, &mut dist_cache, n);
+        copy_leading_lower(&self.ld_factor, &mut ld_factor, n);
 
         let mut y = Col::zeros(new_cap);
         let mut alpha = Col::zeros(new_cap);
@@ -73,12 +69,11 @@ impl OnlineWorkspace {
         copy_leading_col(&self.alpha, &mut alpha, n);
         copy_leading_col(&self.v_buf, &mut v_buf, n);
 
-        self.k_matrix = k_matrix;
         self.ld_factor = ld_factor;
-        self.dist_cache = dist_cache;
         self.y = y;
         self.alpha = alpha;
         self.v_buf = v_buf;
+        ensure_delete_scratch(&mut self.delete_scratch, new_cap);
         self.n_capacity = new_cap;
     }
 
@@ -125,33 +120,22 @@ impl OnlineWorkspace {
     }
 
     /// Appends one bordered row: `L D v = k`, `δ = k_new - vᵀ D v`.
-    pub(crate) fn append_border(&mut self, k: &[f64], k_new: f64) -> Result<(), GprError> {
+    ///
+    /// The leading `n_active` of [`Self::v_buf`] must already hold `k`.
+    pub(crate) fn append_border(&mut self, k_new: f64) -> Result<(), GprError> {
         let n = self.n_active;
-        if k.len() != n {
-            return Err(GprError::EmptyInput);
-        }
         self.ensure_capacity(n + 1);
-        let mut w = Mat::zeros(n, 1);
-        for i in 0..n {
-            w[(i, 0)] = k[i];
-        }
         if n > 0 {
             let ld = self.ld_factor.as_ref().submatrix(0, 0, n, n);
-            solve_unit_lower_triangular_in_place(ld, w.as_mut(), Par::Seq);
+            let w = self.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
+            solve_unit_lower_triangular_in_place(ld, w, Par::Seq);
         }
         let mut vtdv = 0.0;
         for i in 0..n {
             let d = self.ld_factor[(i, i)];
-            if !d.is_finite() || d <= 0.0 {
-                return Err(GprError::CholeskyFailed {
-                    jitter: 0.0,
-                    matrix_size: n + 1,
-                    stage: CholeskyStage::OnlineInsert,
-                });
-            }
-            let vi = w[(i, 0)] / d;
+            let vi = self.v_buf[i] / d;
             self.ld_factor[(n, i)] = vi;
-            vtdv += vi * d * vi;
+            vtdv += vi * vi * d;
         }
         let delta = k_new - vtdv;
         if !delta.is_finite() || delta <= 0.0 {
@@ -162,11 +146,6 @@ impl OnlineWorkspace {
             });
         }
         self.ld_factor[(n, n)] = delta;
-        for (i, &ki) in k.iter().enumerate() {
-            self.k_matrix[(n, i)] = ki;
-            self.k_matrix[(i, n)] = ki;
-        }
-        self.k_matrix[(n, n)] = k_new;
         self.n_active = n + 1;
         Ok(())
     }
@@ -177,16 +156,13 @@ impl OnlineWorkspace {
         if n <= 1 || index >= n {
             return Err(GprError::EmptyInput);
         }
-        compact_leading_square(&mut self.k_matrix, n, index);
-        compact_leading_square(&mut self.dist_cache, n, index);
         compact_leading_col(&mut self.y, n, index);
         compact_leading_col(&mut self.alpha, n, index);
         compact_leading_col(&mut self.v_buf, n, index);
 
+        ensure_delete_scratch(&mut self.delete_scratch, n);
         let mut indices = [index];
-        let scratch = ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n, 1);
-        let mut memory = MemBuffer::new(scratch);
-        let stack = MemStack::new(&mut memory);
+        let stack = MemStack::new(&mut self.delete_scratch);
         let ld = self.ld_factor.as_mut().submatrix_mut(0, 0, n, n);
         ldlt::update::delete_rows_and_cols_clobber(ld, &mut indices, Par::Seq, stack);
         zero_trailing_row_col(&mut self.ld_factor, n);
@@ -223,9 +199,43 @@ impl OnlineWorkspace {
     }
 }
 
-fn copy_leading_mat(src: &Mat<f64>, dest: &mut Mat<f64>, n: usize) {
+impl Clone for OnlineWorkspace {
+    fn clone(&self) -> Self {
+        Self {
+            ld_factor: self.ld_factor.clone(),
+            y: self.y.clone(),
+            alpha: self.alpha.clone(),
+            v_buf: self.v_buf.clone(),
+            delete_scratch: MemBuffer::new(delete_scratch_req(self.n_capacity)),
+            n_active: self.n_active,
+            n_capacity: self.n_capacity,
+        }
+    }
+}
+
+impl fmt::Debug for OnlineWorkspace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnlineWorkspace")
+            .field("n_active", &self.n_active)
+            .field("n_capacity", &self.n_capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+fn delete_scratch_req(n: usize) -> StackReq {
+    ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n.max(1), 1)
+}
+
+fn ensure_delete_scratch(buf: &mut MemBuffer, n: usize) {
+    let req = delete_scratch_req(n);
+    if buf.len() < req.size_bytes() {
+        *buf = MemBuffer::new(req);
+    }
+}
+
+fn copy_leading_lower(src: &Mat<f64>, dest: &mut Mat<f64>, n: usize) {
     for j in 0..n {
-        for i in 0..n {
+        for i in j..n {
             dest[(i, j)] = src[(i, j)];
         }
     }
@@ -235,30 +245,6 @@ fn copy_leading_col(src: &Col<f64>, dest: &mut Col<f64>, n: usize) {
     for i in 0..n {
         dest[i] = src[i];
     }
-}
-
-fn compact_leading_square(mat: &mut Mat<f64>, n: usize, index: usize) {
-    let m = n - 1;
-    let mut packed = Mat::zeros(m, m);
-    for j in 0..n {
-        if j == index {
-            continue;
-        }
-        let dest_j = if j < index { j } else { j - 1 };
-        for i in 0..n {
-            if i == index {
-                continue;
-            }
-            let dest_i = if i < index { i } else { i - 1 };
-            packed[(dest_i, dest_j)] = mat[(i, j)];
-        }
-    }
-    for j in 0..m {
-        for i in 0..m {
-            mat[(i, j)] = packed[(i, j)];
-        }
-    }
-    zero_trailing_row_col(mat, n);
 }
 
 fn compact_leading_col(col: &mut Col<f64>, n: usize, index: usize) {
@@ -293,11 +279,9 @@ mod tests {
     fn mark(ws: &mut OnlineWorkspace) {
         let n = ws.n_active;
         for j in 0..n {
-            for i in 0..n {
+            for i in j..n {
                 let base = (i * n + j) as f64;
-                ws.k_matrix[(i, j)] = 10.0 + base;
                 ws.ld_factor[(i, j)] = 20.0 + base;
-                ws.dist_cache[(i, j)] = 30.0 + base;
             }
             ws.y[j] = 40.0 + j as f64;
             ws.alpha[j] = 50.0 + j as f64;
@@ -307,11 +291,9 @@ mod tests {
 
     fn assert_leading_marks(ws: &OnlineWorkspace, n: usize) {
         for j in 0..n {
-            for i in 0..n {
+            for i in j..n {
                 let base = (i * n + j) as f64;
-                assert_close(ws.k_matrix[(i, j)], 10.0 + base);
                 assert_close(ws.ld_factor[(i, j)], 20.0 + base);
-                assert_close(ws.dist_cache[(i, j)], 30.0 + base);
             }
             assert_close(ws.y[j], 40.0 + j as f64);
             assert_close(ws.alpha[j], 50.0 + j as f64);
@@ -323,12 +305,10 @@ mod tests {
         let cap = ws.n_capacity;
         for j in 0..cap {
             for i in 0..cap {
-                if i < n && j < n {
+                if i < n && j < n && i >= j {
                     continue;
                 }
-                assert_close(ws.k_matrix[(i, j)], 0.0);
                 assert_close(ws.ld_factor[(i, j)], 0.0);
-                assert_close(ws.dist_cache[(i, j)], 0.0);
             }
         }
         for i in n..cap {
@@ -340,12 +320,8 @@ mod tests {
 
     fn assert_same_capacity(ws: &OnlineWorkspace, cap: usize) {
         assert_eq!(ws.n_capacity, cap);
-        assert_eq!(ws.k_matrix.nrows(), cap);
-        assert_eq!(ws.k_matrix.ncols(), cap);
         assert_eq!(ws.ld_factor.nrows(), cap);
         assert_eq!(ws.ld_factor.ncols(), cap);
-        assert_eq!(ws.dist_cache.nrows(), cap);
-        assert_eq!(ws.dist_cache.ncols(), cap);
         assert_eq!(ws.y.nrows(), cap);
         assert_eq!(ws.alpha.nrows(), cap);
         assert_eq!(ws.v_buf.nrows(), cap);

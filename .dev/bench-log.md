@@ -397,3 +397,43 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 
 数値照合（Forrester / 球の先頭 32 点、各段階の平均・観測分散・NLML）は相対 `1e-8` で pass。`just test` はコミット済み JSON を読む。criterion は合否にしない。
 
+## P3-7（online insert 高速化、[#177](https://github.com/YUKIKEDA/gprx/issues/177)）
+
+同一機械。日付 2026-09-20。`just perf-online`。P3-6 と同じ時計。insert は bordered LDLT と `v_buf` 再利用、1 列の距離 / RBF は逐次、`α` は insert / delete とも読み出しまで遅延。delete の faer スクラッチは `OnlineWorkspace` に置いて再利用する。
+
+ゲートは `n = 256 / 1024` の中央値が libgp 以下（5% 以内は判定不能）。`OnlineWorkspace` は LD / `y` / `α` / `v_buf` だけ伸ばす（予測が読まない `K` と距離キャッシュは置かない）。4 ゲートセルは pass。RSS は 1024 / 4096 で libgp より小さい。`4096` の時間は記録。criterion は合否にしない。
+
+自前 `f64x4` 単位下三角は Forrester 1024 で faer より遅い（61 ms 対 45 ms）ので入れない。1 列の Rayon と LLT 全面乗り換えは測ったうえで不採用（delete / persist が LDLT）。
+
+| 問題      | n    | lib   | insert n=2→n             | peak RSS  | ゲート |
+| --------- | ---- | ----- | ------------------------ | --------- | ------ |
+| Forrester | 256  | gprx  | 1.03 ms（0.99–1.67）     | 5.8 MiB   | pass   |
+| Forrester | 256  | libgp | 1.43 ms（1.24–1.88）     | 5.9 MiB   | —      |
+| Forrester | 1024 | gprx  | 44.83 ms（40.64–57.52）  | 15.4 MiB  | pass   |
+| Forrester | 1024 | libgp | 47.93 ms（44.94–49.79）  | 24.7 MiB  | —      |
+| Forrester | 4096 | gprx  | 4.493 s（4.107–7.086）   | 166.0 MiB | record |
+| Forrester | 4096 | libgp | 3.845 s（3.748–3.887）   | 265.3 MiB | —      |
+| 球 ARD    | 256  | gprx  | 1.17 ms（1.12–1.41）     | 5.9 MiB   | pass   |
+| 球 ARD    | 256  | libgp | 1.51 ms（1.34–1.70）     | 5.9 MiB   | —      |
+| 球 ARD    | 1024 | gprx  | 44.29 ms（40.33–50.59）  | 15.5 MiB  | pass   |
+| 球 ARD    | 1024 | libgp | 48.30 ms（46.68–71.28）  | 24.5 MiB  | —      |
+| 球 ARD    | 4096 | gprx  | 4.121 s（4.105–4.182）   | 166.2 MiB | record |
+| 球 ARD    | 4096 | libgp | 3.972 s（3.895–4.047）   | 265.7 MiB | —      |
+
+同一機械。日付 2026-09-20。`just perf-online-delete`。時計は n まで insert（計時外）のあと末尾 `PointId` を 1 点ずつ消して n→2。比較相手なし。前は毎回 α 再ソルブと都度 `MemBuffer`。後は遅延 α とスクラッチ再利用。後の方が 256 で約 5 倍、1024 で約 11 倍、4096 で約 40 倍短いので採用する。
+
+| 問題      | n    | 版  | delete n→2               | peak RSS  |
+| --------- | ---- | --- | ------------------------ | --------- |
+| Forrester | 256  | 前  | 1.75 ms（1.66–2.11）     | 6.4 MiB   |
+| Forrester | 256  | 後  | 0.32 ms（0.30–0.51）     | 6.2 MiB   |
+| Forrester | 1024 | 前  | 78.35 ms（74.75–116.22） | 16.7 MiB  |
+| Forrester | 1024 | 後  | 6.68 ms（5.73–9.63）     | 16.6 MiB  |
+| Forrester | 4096 | 前  | 8.216 s（8.162–8.367）   | 168.0 MiB |
+| Forrester | 4096 | 後  | 181.08 ms（169.70–184.11） | 166.9 MiB |
+| 球 ARD    | 256  | 前  | 1.86 ms（1.68–2.14）     | 6.2 MiB   |
+| 球 ARD    | 256  | 後  | 0.37 ms（0.36–0.53）     | 6.0 MiB   |
+| 球 ARD    | 1024 | 前  | 79.10 ms（73.02–90.44）  | 16.5 MiB  |
+| 球 ARD    | 1024 | 後  | 7.71 ms（6.04–9.33）     | 15.8 MiB  |
+| 球 ARD    | 4096 | 前  | 8.167 s（8.103–8.259）   | 166.6 MiB |
+| 球 ARD    | 4096 | 後  | 192.50 ms（178.34–205.79） | 166.3 MiB |
+

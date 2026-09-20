@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "P2B-16 gprx runner. Not part of the gprx crate."
 
+[features]
+insert-stages = ["gprx/insert-stages"]
+
 [dependencies]
 gprx = { path = "../../.." }
 serde = { version = "1.0.229", features = ["derive"] }
