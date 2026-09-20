@@ -1,8 +1,10 @@
 //! Spike for faer 0.24 `ldlt::update::delete_rows_and_cols_clobber`.
 //!
-//! Compares the reconstructed `A = L D Lᵀ` after an in-place row/column
-//! delete with a full LDLT of the same reduced matrix. This is not a
-//! Gaussian process test.
+//! After delete, faer packs the remaining LDLT into the leading
+//! `(n − r)×(n − r)` of the same matrix (`delete_rows_and_cols_triangular`,
+//! then a rank update from the first removed index). This file reconstructs
+//! `A = L D Lᵀ` from that block and compares it to a full LDLT of the
+//! reduced matrix. This is not a Gaussian process test.
 
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt;
@@ -29,7 +31,9 @@ fn assert_lower_close(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
     }
 }
 
-fn reconstruct_a(ld: MatRef<'_, f64>, n: usize) -> Mat<f64> {
+fn reconstruct_a(ld: MatRef<'_, f64>) -> Mat<f64> {
+    let n = ld.nrows();
+    assert_eq!(n, ld.ncols());
     let mut l = Mat::zeros(n, n);
     for j in 0..n {
         l[(j, j)] = 1.0;
@@ -78,11 +82,11 @@ fn delete_matches_full_factor(a: MatRef<'_, f64>, indices: &mut [usize]) {
     let mut ld = a.cloned();
     factor_ldlt(ld.as_mut(), stack);
     ldlt::update::delete_rows_and_cols_clobber(ld.as_mut(), indices, Par::Seq, stack);
-    let deleted = reconstruct_a(ld.as_ref(), m);
+    let deleted = reconstruct_a(ld.as_ref().submatrix(0, 0, m, m));
 
     let mut full = expected_a.clone();
     factor_ldlt(full.as_mut(), stack);
-    let from_full = reconstruct_a(full.as_ref(), m);
+    let from_full = reconstruct_a(full.as_ref());
 
     assert_lower_close(deleted.as_ref(), from_full.as_ref());
     assert_lower_close(deleted.as_ref(), expected_a.as_ref());
