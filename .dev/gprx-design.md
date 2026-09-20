@@ -844,7 +844,7 @@ impl OnlineGpr<O, S, C, B> {
    - ノイズパラメータ(`log_noise_variance`)の勾配比較。`∂K/∂θ = σn² I`であること
    - 悪条件行列での勾配安定性
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
-5. **オンラインのプロパティテスト**: ランダムなinsert/delete列の各段階で `incremental == full refit`(mean, variance, LML, alpha)。特に削除順をランダム化する
+5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順は `SmallRng` でランダム化する
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのf64フォールバック
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)。sklearn JSON は数値の第二照合であり、公開 API の契約ではない。アルゴリズムの正本は GPML / Rasmussen
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
