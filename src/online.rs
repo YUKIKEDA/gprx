@@ -3,7 +3,9 @@
 //! Crate-private. [`crate::OnlineGpr`] owns training `X` and calls
 //! [`OnlineWorkspace::ensure_capacity`] before a tail insert.
 
-use dyn_stack::{MemBuffer, MemStack};
+use std::fmt;
+
+use dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::ldlt;
 use faer::linalg::triangular_solve::{
     solve_unit_lower_triangular_in_place, solve_unit_upper_triangular_in_place,
@@ -17,12 +19,12 @@ use crate::error::{CholeskyStage, GprError};
 /// `ld_factor` is `n_capacity × n_capacity`. Vectors are length
 /// `n_capacity`. The live prefix is `n_active`. Insert and predict read
 /// the factor only; there is no live Gram or distance cache.
-#[derive(Clone, Debug)]
 pub(crate) struct OnlineWorkspace {
     pub(crate) ld_factor: Mat<f64>,
     pub(crate) y: Col<f64>,
     pub(crate) alpha: Col<f64>,
     pub(crate) v_buf: Col<f64>,
+    delete_scratch: MemBuffer,
     pub(crate) n_active: usize,
     pub(crate) n_capacity: usize,
 }
@@ -38,6 +40,7 @@ impl OnlineWorkspace {
             y: Col::zeros(n),
             alpha: Col::zeros(n),
             v_buf: Col::zeros(n),
+            delete_scratch: MemBuffer::new(delete_scratch_req(n)),
             n_active: n,
             n_capacity: n,
         })
@@ -70,6 +73,7 @@ impl OnlineWorkspace {
         self.y = y;
         self.alpha = alpha;
         self.v_buf = v_buf;
+        ensure_delete_scratch(&mut self.delete_scratch, new_cap);
         self.n_capacity = new_cap;
     }
 
@@ -156,10 +160,9 @@ impl OnlineWorkspace {
         compact_leading_col(&mut self.alpha, n, index);
         compact_leading_col(&mut self.v_buf, n, index);
 
+        ensure_delete_scratch(&mut self.delete_scratch, n);
         let mut indices = [index];
-        let scratch = ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n, 1);
-        let mut memory = MemBuffer::new(scratch);
-        let stack = MemStack::new(&mut memory);
+        let stack = MemStack::new(&mut self.delete_scratch);
         let ld = self.ld_factor.as_mut().submatrix_mut(0, 0, n, n);
         ldlt::update::delete_rows_and_cols_clobber(ld, &mut indices, Par::Seq, stack);
         zero_trailing_row_col(&mut self.ld_factor, n);
@@ -193,6 +196,40 @@ impl OnlineWorkspace {
         }
         let ld_n = ld.submatrix(0, 0, n, n);
         solve_unit_lower_triangular_in_place(ld_n, rhs, Par::Seq);
+    }
+}
+
+impl Clone for OnlineWorkspace {
+    fn clone(&self) -> Self {
+        Self {
+            ld_factor: self.ld_factor.clone(),
+            y: self.y.clone(),
+            alpha: self.alpha.clone(),
+            v_buf: self.v_buf.clone(),
+            delete_scratch: MemBuffer::new(delete_scratch_req(self.n_capacity)),
+            n_active: self.n_active,
+            n_capacity: self.n_capacity,
+        }
+    }
+}
+
+impl fmt::Debug for OnlineWorkspace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnlineWorkspace")
+            .field("n_active", &self.n_active)
+            .field("n_capacity", &self.n_capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+fn delete_scratch_req(n: usize) -> StackReq {
+    ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n.max(1), 1)
+}
+
+fn ensure_delete_scratch(buf: &mut MemBuffer, n: usize) {
+    let req = delete_scratch_req(n);
+    if buf.len() < req.size_bytes() {
+        *buf = MemBuffer::new(req);
     }
 }
 

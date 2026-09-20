@@ -105,7 +105,7 @@ impl PointRegistry {
     }
 }
 
-/// `α` materialized on read. Insert only marks it stale (libgp `add_pattern`).
+/// `α` materialized on read. Insert and delete only mark it stale.
 struct LazyAlpha {
     values: UnsafeCell<Vec<f64>>,
     ready: Cell<bool>,
@@ -127,19 +127,11 @@ impl LazyAlpha {
         self.ready.get()
     }
 
-    fn mark_ready(&self) {
-        self.ready.set(true);
-    }
-
     fn get(&self) -> &[f64] {
         // SAFETY: `OnlineGpr` is not `Sync`. Callers do not hold this slice
         // across a `&mut self` method, and `&self` writes happen only in
         // `fill` while `ready` is false.
         unsafe { (*self.values.get()).as_slice() }
-    }
-
-    fn get_mut(&mut self) -> &mut Vec<f64> {
-        self.values.get_mut()
     }
 
     fn fill(&self, values: &[f64]) {
@@ -442,7 +434,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         &self.likelihood
     }
 
-    /// Returns `α = A⁻¹ y` after the last insert or hyperparameter write.
+    /// Returns `α = A⁻¹ y` after the last insert, delete, or hyperparameter write.
     pub fn alpha(&self) -> &[f64] {
         self.ensure_alpha();
         self.alpha.get()
@@ -648,7 +640,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     ///
     /// Updates the stored LDLT with
     /// `ldlt::update::delete_rows_and_cols_clobber`. Workspace capacity is
-    /// unchanged. The last remaining point cannot be deleted.
+    /// unchanged. `α` is not solved here; the next
+    /// [`Self::predict`], [`Self::neg_log_marginal_likelihood`], or
+    /// [`Self::alpha`] fills it. The last remaining point cannot be deleted.
     ///
     /// # Errors
     ///
@@ -686,33 +680,11 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.y_obs.remove(index);
         remove_point_mat_inplace(&mut self.x, self.n, index);
         self.y_train.remove(index);
-        let alpha = self.alpha.get_mut();
-        if index < alpha.len() {
-            alpha.remove(index);
-        }
         self.registry.remove_at(index);
         self.n -= 1;
-        self.refresh_alpha();
-        Ok(())
-    }
-
-    fn refresh_alpha(&mut self) {
-        let n = self.n;
-        let mut rhs = Mat::zeros(n, 1);
-        for i in 0..n {
-            rhs[(i, 0)] = self.y_train[i];
-        }
-        OnlineWorkspace::solve_ldlt_in_place(self.workspace.ld_factor.as_ref(), rhs.as_mut(), n);
-        let alpha = self.alpha.get_mut();
-        if alpha.len() != n {
-            alpha.resize(n, 0.0);
-        }
-        for i in 0..n {
-            alpha[i] = rhs[(i, 0)];
-        }
         OnlineWorkspace::set_vector_prefix(&mut self.workspace.y, &self.y_train);
-        OnlineWorkspace::set_vector_prefix(&mut self.workspace.alpha, alpha);
-        self.alpha.mark_ready();
+        self.alpha.invalidate();
+        Ok(())
     }
 
     /// Writes this model to `dir/config.json` and `dir/model.safetensors`.

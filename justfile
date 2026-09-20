@@ -32,3 +32,7 @@ perf-online:
 # P3-7 insert stages (gprx Forrester 256/1024). cargo test must not run this.
 perf-online-stages:
     $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_online.py --stages
+
+# P3-7 delete n→2 (gprx only). cargo test must not run this.
+perf-online-delete:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_online.py --delete
