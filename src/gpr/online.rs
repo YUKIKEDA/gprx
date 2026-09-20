@@ -1,5 +1,6 @@
-//! Incremental tail insert on a converted [`crate::FittedGpr`].
+//! Incremental tail insert and delete on a converted [`crate::FittedGpr`].
 
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -15,22 +16,112 @@ use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, FullRecompute, Optimizer, PoleRecompute};
-use crate::persist::{self, PersistedModel};
+use crate::persist::{self, PersistedModel, persist_err};
 use crate::precision::DoublePrecision;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{QueryWorkspace, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{add_noise_to_diag, pack_points_into, require_param_len, validate_query};
-use super::{AllocWorkspace, DistanceCacheSlot, FittedGpr, Gpr, JitterPolicy, RetainCholesky};
+use super::{
+    AllocWorkspace, DistanceCacheSlot, FittedGpr, Gpr, JitterPolicy, PointId, RetainCholesky,
+};
 
-/// Online Exact GPR after [`FittedGpr::into_online`]: LDLT factor and tail insert.
+#[derive(Clone, Debug)]
+pub(crate) struct PointRegistry {
+    id_to_index: HashMap<PointId, usize>,
+    index_to_id: Vec<PointId>,
+    next_id: u64,
+}
+
+impl PointRegistry {
+    fn from_count(n: usize) -> Self {
+        let index_to_id: Vec<PointId> = (0..n as u64).map(PointId::from_raw).collect();
+        let id_to_index = index_to_id
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        Self {
+            id_to_index,
+            index_to_id,
+            next_id: n as u64,
+        }
+    }
+
+    fn from_persisted(ids: &[u64], next_id: u64) -> Result<Self, GprError> {
+        let mut id_to_index = HashMap::with_capacity(ids.len());
+        let mut index_to_id = Vec::with_capacity(ids.len());
+        let mut max_id = None;
+        for (index, &raw) in ids.iter().enumerate() {
+            let id = PointId::from_raw(raw);
+            if id_to_index.insert(id, index).is_some() {
+                return Err(persist_err("ldlt config has duplicate point_ids"));
+            }
+            index_to_id.push(id);
+            max_id = Some(max_id.map_or(raw, |seen: u64| seen.max(raw)));
+        }
+        if let Some(max_id) = max_id {
+            if next_id <= max_id {
+                return Err(persist_err(
+                    "ldlt config next_point_id must exceed every stored PointId",
+                ));
+            }
+        }
+        Ok(Self {
+            id_to_index,
+            index_to_id,
+            next_id,
+        })
+    }
+
+    fn ids(&self) -> &[PointId] {
+        &self.index_to_id
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    fn len(&self) -> usize {
+        self.index_to_id.len()
+    }
+
+    fn index_of(&self, id: PointId) -> Result<usize, GprError> {
+        self.id_to_index
+            .get(&id)
+            .copied()
+            .ok_or(GprError::InvalidPointId)
+    }
+
+    fn insert(&mut self) -> PointId {
+        let id = PointId::from_raw(self.next_id);
+        let index = self.index_to_id.len();
+        self.next_id = self.next_id.saturating_add(1);
+        self.index_to_id.push(id);
+        self.id_to_index.insert(id, index);
+        id
+    }
+
+    fn remove_at(&mut self, index: usize) {
+        let id = self.index_to_id.remove(index);
+        self.id_to_index.remove(&id);
+        for (shifted, remaining) in self.index_to_id.iter().enumerate().skip(index) {
+            self.id_to_index.insert(*remaining, shifted);
+        }
+    }
+}
+
+/// Online Exact GPR after [`FittedGpr::into_online`]: LDLT factor, tail insert, and delete.
 ///
-/// [`Self::insert`] appends one training point with a bordered LDLT update.
-/// Predictive mean and variance use that factor (`L w = k_*`, then
-/// `k(x*,x*) − Σ wᵢ² / Dᵢ`). Hyperparameter writes ([`Self::set_params`],
-/// [`Self::refit`], gradient, Hessian) snapshot through a batch
-/// [`FittedGpr`] at the current `θ` and convert back.
+/// [`Self::insert`] appends one training point with a bordered LDLT update
+/// and returns a [`PointId`]. [`Self::delete`] removes one point by that
+/// identifier. Predictive mean and variance use the stored LDLT
+/// (`L w = k_*`, then `k(x*,x*) − Σ wᵢ² / Dᵢ`). Hyperparameter writes
+/// ([`Self::set_params`], [`Self::refit`], gradient, Hessian) snapshot
+/// through a batch [`FittedGpr`] at the current `θ` and convert back,
+/// keeping the same [`PointId`] values.
 ///
 /// # Examples
 ///
@@ -79,6 +170,7 @@ pub struct OnlineGpr<
     pub(crate) alpha: Vec<f64>,
     pub(crate) n: usize,
     pub(crate) d: usize,
+    pub(crate) registry: PointRegistry,
     pub(crate) _recompute: PhantomData<S>,
     pub(crate) _cholesky: PhantomData<B>,
 }
@@ -105,6 +197,7 @@ impl<O: Clone, S, C: Copy + DistanceCacheSlot, B: AllocWorkspace> Clone for Onli
             alpha: self.alpha.clone(),
             n: self.n,
             d: self.d,
+            registry: self.registry.clone(),
             _recompute: PhantomData,
             _cholesky: PhantomData,
         }
@@ -172,6 +265,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             alpha,
             n,
             d,
+            registry: PointRegistry::from_count(n),
             _recompute: PhantomData,
             _cholesky: PhantomData,
         }
@@ -218,6 +312,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             alpha: self.alpha,
             n: self.n,
             d: self.d,
+            registry: self.registry,
             _recompute: PhantomData,
             _cholesky: PhantomData,
         }
@@ -258,6 +353,44 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         &self.y_obs
     }
 
+    /// Returns training-point identifiers in workspace buffer order.
+    pub fn point_ids(&self) -> &[PointId] {
+        self.registry.ids()
+    }
+
+    pub(crate) fn persist_point_ids(&self) -> Vec<u64> {
+        self.registry.ids().iter().map(|id| id.raw()).collect()
+    }
+
+    pub(crate) fn persist_next_point_id(&self) -> u64 {
+        self.registry.next_id()
+    }
+
+    pub(crate) fn apply_persisted_ids(
+        &mut self,
+        ids: &[u64],
+        next_id: u64,
+    ) -> Result<(), GprError> {
+        let registry = PointRegistry::from_persisted(ids, next_id)?;
+        if registry.len() != self.n {
+            return Err(persist_err(format!(
+                "point_ids has {} values, expected n = {}",
+                registry.len(),
+                self.n
+            )));
+        }
+        self.registry = registry;
+        Ok(())
+    }
+
+    fn adopt_fitted(&mut self, fitted: FittedGpr<O, S, C, B>) -> Result<(), GprError> {
+        let registry = self.registry.clone();
+        *self = fitted.into_online()?;
+        debug_assert_eq!(self.n, registry.len());
+        self.registry = registry;
+        Ok(())
+    }
+
     pub(crate) fn jitter_policy(&self) -> JitterPolicy {
         self.jitter_policy
     }
@@ -293,7 +426,8 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     ///
     /// `x_new` has length [`Self::d`]. Transforms already stored on this model
     /// are applied; they are not re-fit. Grows the online workspace when the
-    /// next row does not fit.
+    /// next row does not fit. The returned [`PointId`] is new and is never
+    /// reused after a later [`Self::delete`].
     ///
     /// # Errors
     ///
@@ -301,7 +435,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
     /// [`GprError::EmptyInput`] if the workspace cannot accept a row, or
     /// [`GprError::CholeskyFailed`] if the new pivot `δ` is not positive.
-    pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<(), GprError> {
+    pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
@@ -327,6 +461,57 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.y_train.push(y_trans[0]);
         self.n += 1;
         self.refresh_alpha();
+        Ok(self.registry.insert())
+    }
+
+    /// Removes the training point identified by `id` and packs every buffer.
+    ///
+    /// Updates the stored LDLT with
+    /// `ldlt::update::delete_rows_and_cols_clobber`. Workspace capacity is
+    /// unchanged. The last remaining point cannot be deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InsufficientData`] when `n == 1`, or
+    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5])
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online()?;
+    /// let id = online.point_ids()[1];
+    /// online.delete(id)?;
+    /// assert_eq!(online.n(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn delete(&mut self, id: PointId) -> Result<(), GprError> {
+        if self.n <= 1 {
+            return Err(GprError::InsufficientData { n: self.n, min: 2 });
+        }
+        let index = self.registry.index_of(id)?;
+        self.workspace.delete_index(index)?;
+        remove_colmajor(&mut self.x_obs, self.n, self.d, index);
+        self.y_obs.remove(index);
+        self.x = remove_point_mat(self.x.as_ref(), index);
+        self.y_train.remove(index);
+        if index < self.alpha.len() {
+            self.alpha.remove(index);
+        }
+        self.registry.remove_at(index);
+        self.n -= 1;
+        self.refresh_alpha();
         Ok(())
     }
 
@@ -350,7 +535,8 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     /// Writes this model to `dir/config.json` and `dir/model.safetensors`.
     ///
     /// Omits the LDLT factor and `α`. [`crate::persist::LoadedGpr::load`]
-    /// rebuilds an [`OnlineGpr`] (`factor_kind` is `ldlt`).
+    /// rebuilds an [`OnlineGpr`] (`factor_kind` is `ldlt`) and restores
+    /// [`Self::point_ids`].
     ///
     /// # Errors
     ///
@@ -419,8 +605,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.set_params(params)?;
-        *self = fitted.into_online()?;
-        Ok(())
+        self.adopt_fitted(fitted)
     }
 
     /// Writes the joint NLML and gradient at `params`.
@@ -439,7 +624,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         let nlml = fitted.value_and_gradient_into(params, out)?;
-        *self = fitted.into_online()?;
+        self.adopt_fitted(fitted)?;
         Ok(nlml)
     }
 
@@ -455,8 +640,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.hessian_into(params, out)?;
-        *self = fitted.into_online()?;
-        Ok(())
+        self.adopt_fitted(fitted)
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
@@ -746,8 +930,7 @@ where
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.refit()?;
-        *self = fitted.into_online()?;
-        Ok(())
+        self.adopt_fitted(fitted)
     }
 }
 
@@ -765,8 +948,7 @@ impl<C: DistanceCacheSlot> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky> {
     pub fn refit(&mut self) -> Result<(), GprError> {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.refit()?;
-        *self = fitted.into_online()?;
-        Ok(())
+        self.adopt_fitted(fitted)
     }
 }
 
@@ -999,12 +1181,33 @@ fn append_point_mat(x: MatRef<'_, f64>, x_new: &[f64]) -> Mat<f64> {
     next
 }
 
+fn remove_colmajor(x: &mut Vec<f64>, n: usize, d: usize, index: usize) {
+    let mut next = Vec::with_capacity((n - 1) * d);
+    for feature in 0..d {
+        for i in 0..n {
+            if i != index {
+                next.push(x[feature * n + i]);
+            }
+        }
+    }
+    *x = next;
+}
+
+fn remove_point_mat(x: MatRef<'_, f64>, index: usize) -> Mat<f64> {
+    let n = x.nrows();
+    let d = x.ncols();
+    Mat::from_fn(n - 1, d, |i, feature| {
+        let src = if i < index { i } else { i + 1 };
+        x[(src, feature)]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
     use crate::persist::{LoadedGpr, PersistRegistry};
-    use crate::{Fixed, GaussianLikelihood};
+    use crate::{Fixed, GaussianLikelihood, GprError, PointId};
 
     const TOL: f64 = 1e-12;
 
@@ -1150,6 +1353,187 @@ mod tests {
         else {
             panic!("online RBF should load as OnlineDistance::Cached");
         };
+        let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
+        assert_pred_close(&got, &want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn delete_matches_factor(
+        kernel: KernelSpec,
+        x3: &[f64],
+        y3: &[f64],
+        n: usize,
+        d: usize,
+        index: usize,
+        xs: &[f64],
+        n_query: usize,
+    ) {
+        let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+        let fitted = Gpr::new(kernel.clone(), likelihood)
+            .with_optimizer(Fixed)
+            .factor(x3, n, d, y3)
+            .map_err(|(_, e)| e)
+            .expect("factor n");
+        let mut online = fitted.into_online().expect("into_online");
+        let cap = online.workspace.n_capacity;
+        let id = online.point_ids()[index];
+        online.delete(id).expect("delete");
+        assert_eq!(online.n(), n - 1);
+        assert_eq!(online.workspace.n_capacity, cap);
+        let got = online.predict(xs, n_query, d).expect("online predict");
+
+        let mut x_rest = x3.to_vec();
+        remove_colmajor(&mut x_rest, n, d, index);
+        let mut y_rest = y3.to_vec();
+        y_rest.remove(index);
+        let full = Gpr::new(kernel, likelihood)
+            .with_optimizer(Fixed)
+            .factor(&x_rest, n - 1, d, &y_rest)
+            .map_err(|(_, e)| e)
+            .expect("factor remaining");
+        let want = full.predict(xs, n_query, d).expect("full predict");
+        assert_pred_close(&got, &want);
+    }
+
+    fn delete_each_index(
+        kernel: KernelSpec,
+        x3: &[f64],
+        y3: &[f64],
+        n: usize,
+        d: usize,
+        xs: &[f64],
+        n_query: usize,
+    ) {
+        for index in 0..n {
+            delete_matches_factor(kernel.clone(), x3, y3, n, d, index, xs, n_query);
+        }
+    }
+
+    #[test]
+    fn delete_rbf_matches_factor() {
+        delete_each_index(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            &[0.0, 1.0, 2.0],
+            &[0.0, 1.0, 0.5],
+            3,
+            1,
+            &[0.5],
+            1,
+        );
+    }
+
+    #[test]
+    fn delete_matern_three_halves_matches_factor() {
+        delete_each_index(
+            KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves).expect("ℓ")),
+            &[0.0, 1.0, 2.0],
+            &[0.0, 1.0, 0.5],
+            3,
+            1,
+            &[0.5],
+            1,
+        );
+    }
+
+    #[test]
+    fn delete_rbf_ard_2d_matches_factor() {
+        delete_each_index(
+            KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ")),
+            &[0.0, 1.0, 0.5, 0.0, 1.0, 0.25],
+            &[0.0, 1.0, 0.4],
+            3,
+            2,
+            &[0.25, 0.75],
+            1,
+        );
+    }
+
+    #[test]
+    fn delete_rbf_plus_white_matches_factor() {
+        delete_each_index(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+                + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
+            &[0.0, 1.0, 2.0],
+            &[0.0, 1.0, 0.5],
+            3,
+            1,
+            &[0.5],
+            1,
+        );
+    }
+
+    #[test]
+    fn delete_unknown_id_is_invalid_point_id() {
+        let fitted = Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5])
+        .map_err(|(_, e)| e)
+        .expect("factor");
+        let mut online = fitted.into_online().expect("into_online");
+        let gone = online.point_ids()[1];
+        online.delete(gone).expect("first delete");
+        assert_eq!(online.delete(gone), Err(GprError::InvalidPointId));
+        assert_eq!(
+            online.delete(PointId::from_raw(99)),
+            Err(GprError::InvalidPointId)
+        );
+    }
+
+    #[test]
+    fn delete_last_point_is_insufficient_data() {
+        let fitted = Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+        .map_err(|(_, e)| e)
+        .expect("factor");
+        let mut online = fitted.into_online().expect("into_online");
+        let ids = online.point_ids().to_vec();
+        online.delete(ids[0]).expect("first delete");
+        assert_eq!(
+            online.delete(ids[1]),
+            Err(GprError::InsufficientData { n: 1, min: 2 })
+        );
+        assert_eq!(online.n(), 1);
+    }
+
+    #[test]
+    fn delete_save_load_keeps_point_ids() {
+        let fitted = Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5])
+        .map_err(|(_, e)| e)
+        .expect("factor");
+        let mut online = fitted.into_online().expect("into_online");
+        let middle = online.point_ids()[1];
+        online.delete(middle).expect("delete");
+        let want_ids = online.point_ids().to_vec();
+        let want = online.predict(&[0.5], 1, 1).expect("predict");
+        let dir = std::env::temp_dir().join(format!(
+            "gprx-online-delete-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        online.save_with_factor(&dir).expect("save");
+        let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
+        let LoadedGpr::OnlineDistance(crate::persist::LoadedOnlineDistance::Cached(model)) = loaded
+        else {
+            panic!("online RBF should load as OnlineDistance::Cached");
+        };
+        assert_eq!(model.point_ids(), want_ids.as_slice());
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
         assert_pred_close(&got, &want);
         let _ = std::fs::remove_dir_all(&dir);

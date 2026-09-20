@@ -28,6 +28,10 @@ pub(super) struct ModelConfig {
     pub y_unfitted: UnfittedTargetJson,
     pub x_transform: FittedInputJson,
     pub y_transform: FittedTargetJson,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub point_ids: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub next_point_id: Option<u64>,
 }
 
 impl ModelConfig {
@@ -40,6 +44,24 @@ impl ModelConfig {
                 supported: FORMAT_VERSION,
             })
         }
+    }
+
+    pub(super) fn online_ids(&self) -> Result<(&[u64], u64), GprError> {
+        let ids = self
+            .point_ids
+            .as_deref()
+            .ok_or_else(|| persist_err("ldlt config missing point_ids"))?;
+        let next_id = self
+            .next_point_id
+            .ok_or_else(|| persist_err("ldlt config missing next_point_id"))?;
+        if ids.len() != self.n {
+            return Err(persist_err(format!(
+                "point_ids has {} values, expected n = {}",
+                ids.len(),
+                self.n
+            )));
+        }
+        Ok((ids, next_id))
     }
 }
 

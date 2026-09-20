@@ -10,7 +10,7 @@ pub use online::OnlineGpr;
 pub(crate) use types::AllocWorkspace;
 pub use types::{
     AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FixedJitter,
-    JitterPolicy, NoDistanceCache, PredictOptions, Prediction, PredictiveCovariance,
+    JitterPolicy, NoDistanceCache, PointId, PredictOptions, Prediction, PredictiveCovariance,
     RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
 };
 pub(crate) use types::{DistanceCachePersist, DistanceCacheSlot, FitBuffers};
