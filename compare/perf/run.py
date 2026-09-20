@@ -42,7 +42,7 @@ def run_cmd(args: list[str], cwd: Path | None = None) -> dict[str, Any]:
     return json.loads(line)
 
 
-def run_gprx(case_path: Path, uncached: bool = False) -> dict[str, Any]:
+def run_gprx(case_path: Path, memory: bool = False) -> dict[str, Any]:
     args = [
         "cargo",
         "run",
@@ -53,8 +53,8 @@ def run_gprx(case_path: Path, uncached: bool = False) -> dict[str, Any]:
         "--",
         str(case_path),
     ]
-    if uncached:
-        args.append("--uncached")
+    if memory:
+        args.append("--memory")
     return run_cmd(args, cwd=REPO)
 
 
@@ -221,16 +221,6 @@ def judge_libgp(gprx: dict[str, Any], other: dict[str, Any]) -> dict[str, str]:
     return {"time": time_v, "rss": rss_v, "cell": cell}
 
 
-def judge_uncached_libgp_rss(gprx: dict[str, Any], other: dict[str, Any]) -> str:
-    if gprx.get("status") != "ok" or other.get("status") != "ok":
-        return "N/A"
-    ours = gprx.get("peak_rss_bytes")
-    theirs = other.get("peak_rss_bytes")
-    if ours is None or theirs is None:
-        return "N/A"
-    return within_band_or_better(ours, theirs, LIBGP_BAND)
-
-
 def judge_friedrich(gprx: dict[str, Any], other: dict[str, Any]) -> dict[str, str]:
     if gprx.get("status") != "ok" or other.get("status") != "ok":
         return {"time": "N/A", "rss": "N/A", "cell": "N/A"}
@@ -299,7 +289,7 @@ def main() -> int:
     rows: list[dict[str, Any]] = []
     runners = (
         ("gprx", run_gprx),
-        ("gprx-uncached", lambda p: run_gprx(p, uncached=True)),
+        ("gprx-memory", lambda p: run_gprx(p, memory=True)),
         ("sklearn", lambda p: run_python("sklearn_run.py", p)),
         ("libgp", run_libgp),
         ("friedrich", run_friedrich),
@@ -364,56 +354,37 @@ def emit_tables(rows: list[dict[str, Any]]) -> int:
                 f"{fmt_rss(row.get('peak_rss_bytes'))} | {gate} |"
             )
 
-    print("\n## cells (UncachedDistances + RetainCholesky)\n")
+    print("\n## cells (with_prefer_memory = UncachedDistances + ReuseCholesky)\n")
     print(
         "| 問題 | n | lib | factor | eval N | evals | predict 100 | peak RSS | vs libgp RSS |"
     )
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-    rss_verdicts: list[tuple[str, str, str]] = []
     for name, libs in by_name.items():
-        uncached = libs.get("gprx-uncached", {})
+        memory = libs.get("gprx-memory", {})
         libgp = libs.get("libgp", {})
         n = name.rsplit("n", 1)[-1]
         problem = "forrester" if name.startswith("forrester") else "sphere"
         for lib, row in (
-            ("gprx-uncached", uncached),
+            ("gprx-memory", memory),
             ("libgp", libgp),
         ):
-            if lib == "gprx-uncached":
-                gate = "-"
-            elif n == "256":
-                gate = "record"
-                rss_verdicts.append((name, "libgp-rss", gate))
-            else:
-                gate = judge_uncached_libgp_rss(uncached, libgp)
-                rss_verdicts.append((name, "libgp-rss", gate))
             print(
                 f"| {problem} | {n} | {lib} | "
                 f"{fmt_s_range(row.get('factor_s'), row.get('factor_min_s'), row.get('factor_max_s'))} | "
                 f"{fmt_s_range(row.get('eval_s'), row.get('eval_min_s'), row.get('eval_max_s'))} | "
                 f"{fmt_evals(row.get('joint_evals'))} | "
                 f"{fmt_s_range(row.get('predict_s'), row.get('predict_min_s'), row.get('predict_max_s'))} | "
-                f"{fmt_rss(row.get('peak_rss_bytes'))} | {gate} |"
+                f"{fmt_rss(row.get('peak_rss_bytes'))} | record |"
             )
 
     fails = [(n, lib, v) for n, lib, v in verdicts if v == "fail"]
-    rss_fails = [(n, lib, v) for n, lib, v in rss_verdicts if v == "fail"]
     print("\n## gates\n")
     for name, lib, v in verdicts:
         print(f"- {name} vs {lib}: {v}")
-    print("\n## P2B-21 RSS gates (UncachedDistances, n=1024 / 4096)\n")
-    for name, lib, v in rss_verdicts:
-        print(f"- {name} vs {lib}: {v}")
+    print("\n## P2B-23 memory pole (record only; no new RSS gate)\n")
+    print("- table 2 is with_prefer_memory vs libgp; P2B-21 Uncached+Retain stays in bench-log")
     (OUT / "verdicts.json").write_text(
-        json.dumps(
-            {
-                "verdicts": verdicts,
-                "fails": fails,
-                "rss_verdicts": rss_verdicts,
-                "rss_fails": rss_fails,
-            },
-            indent=2,
-        ),
+        json.dumps({"verdicts": verdicts, "fails": fails}, indent=2),
         encoding="utf-8",
     )
     return 0

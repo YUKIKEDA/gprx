@@ -35,10 +35,10 @@ impl Default for PredictOptions {
 /// Marker for whether [`crate::Gpr`] caches training distances.
 ///
 /// The only implementations are [`CachedDistances`] and
-/// [`UncachedDistances`]. Switch with
-/// [`crate::Gpr::with_distance_cache_policy`]. Standalone Linear, Constant,
-/// and White trainers use [`crate::Gpr::from_points`] and have no cache
-/// slot.
+/// [`UncachedDistances`]. Public callers switch poles with
+/// [`crate::Gpr::with_prefer_memory`] / [`crate::Gpr::with_prefer_speed`].
+/// Standalone Linear, Constant, and White trainers use
+/// [`crate::Gpr::from_points`] and have no cache slot.
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; the public slot types are the unit structs.
 pub trait DistanceCachePolicy:
     DistanceCacheSlot + Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
@@ -56,12 +56,12 @@ pub trait DistanceCachePolicy:
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{CachedDistances, GaussianLikelihood, Gpr};
+/// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let gpr = Gpr::new(kernel, likelihood).with_distance_cache_policy(CachedDistances);
+/// let gpr = Gpr::new(kernel, likelihood).with_prefer_speed();
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
 /// # }
@@ -72,19 +72,19 @@ pub struct CachedDistances;
 /// Recomputes training distances from `X` on every kernel build.
 ///
 /// The workspace has no `dist_cache` / `ard_sq_diff`. Isotropic leaves
-/// evaluate `‖x_i-x_j‖²` from coordinates. Peak RSS is the P2B-21 gate
-/// path when paired with [`crate::RetainCholesky`].
+/// evaluate `‖x_i-x_j‖²` from coordinates. [`crate::Gpr::with_prefer_memory`]
+/// pairs this with [`crate::ReuseCholesky`].
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr, UncachedDistances};
+/// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let gpr = Gpr::new(kernel, likelihood).with_distance_cache_policy(UncachedDistances);
+/// let gpr = Gpr::new(kernel, likelihood).with_prefer_memory();
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
 /// # }
@@ -425,14 +425,14 @@ pub struct PredictiveCovariance {
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr, RetainCholesky};
+/// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let gpr = Gpr::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
 ///     GaussianLikelihood::new(0.1)?,
 /// )
-/// .with_cholesky_buffer(RetainCholesky);
+/// .with_prefer_speed();
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
 /// # }
@@ -451,14 +451,14 @@ pub struct RetainCholesky;
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr, ReuseCholesky};
+/// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let gpr = Gpr::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
 ///     GaussianLikelihood::new(0.1)?,
 /// )
-/// .with_cholesky_buffer(ReuseCholesky);
+/// .with_prefer_memory();
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
 /// # }
@@ -469,7 +469,8 @@ pub struct ReuseCholesky;
 /// Marker for how [`crate::Gpr`] stores the Cholesky factor versus `W`.
 ///
 /// The only implementations are [`RetainCholesky`] and [`ReuseCholesky`].
-/// Switch with [`crate::Gpr::with_cholesky_buffer`].
+/// Public callers switch poles with [`crate::Gpr::with_prefer_memory`] /
+/// [`crate::Gpr::with_prefer_speed`].
 pub trait CholeskyBuffer:
     Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {

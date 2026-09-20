@@ -34,7 +34,7 @@
 | P2B-6   | [#123](https://github.com/YUKIKEDA/gprx/issues/123) | P2B-10  | [#125](https://github.com/YUKIKEDA/gprx/issues/125) | P2B-7   | [#127](https://github.com/YUKIKEDA/gprx/issues/127) |
 | P2B-8   | [#129](https://github.com/YUKIKEDA/gprx/issues/129) | P2B-9   | [#131](https://github.com/YUKIKEDA/gprx/issues/131) | P2B-11  | [#133](https://github.com/YUKIKEDA/gprx/issues/133) |
 | P2B-12  | [#135](https://github.com/YUKIKEDA/gprx/issues/135) | P2B-13  | [#137](https://github.com/YUKIKEDA/gprx/issues/137) | P2B-21  | [#142](https://github.com/YUKIKEDA/gprx/issues/142) |
-| P2B-22  | [#143](https://github.com/YUKIKEDA/gprx/issues/143) |         |                                                   |         |                                                   |
+| P2B-22  | [#143](https://github.com/YUKIKEDA/gprx/issues/143) | P2B-23  | [#148](https://github.com/YUKIKEDA/gprx/issues/148) |         |                                                   |
 
 ## マイルストーン
 
@@ -178,8 +178,9 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P2B-20 | Task | transform ファイル分割の判断                  | P2B-10 | Grill 後に [#116](https://github.com/YUKIKEDA/gprx/issues/116) で確定 |
 | P2B-21 | Feat | libgp 比のピーク RSS                          | P2B-16 | `DistanceCachePolicy` をトレイト。既定 `C` は `CachedDistances`。`with_distance_cache_policy(UncachedDistances)` で差し替え（速さは既定のまま）。`UncachedDistances` の Workspace に `dist_cache` / `ard_sq_diff` は置かない。等方は `X` から距離を計算。Workspace は `WithDist` / `WithW`。persist タグは `always` / `never`。`LoadedGpr::Distance` は inner enum。`load` は `RetainCholesky`。同じ θ で NLML・勾配・fit 後 predict が `CachedDistances` と一致。`UncachedDistances` に距離キャッシュが無いテスト。既定の `tests/alloc.rs` 上限は上げない。`just lint` / `just test`。rustdoc。§6.3 を現在形。`layout.mdc`。`just perf` は表2つ（既定と Uncached）。合否は Uncached + `RetainCholesky` の n=1024 / 4096（Forrester / 球）が libgp RSS ±10%。n=256 は記録。記録は `.dev/bench-log.md`。手動、CI なし。criterion / Uncached の時間は合否にしない |
 | P2B-22 | Feat | n=4096 の MLL+grad（sklearn 比）              | P2B-16 | factor の Cholesky、α/W の `solve_in_place`、predict / LOO / `predict_covariance` の三角ソルブが `faer_par(n)`（`min(プール, max(1, n/64))`）。カーネルはプール全部。scratch は同じ `Par`。公開 `n_jobs` なし。rustdoc に式。ADR `.dev/adr/0001-faer-parallel-degree.md`、§8 から 1 行。`just lint` / `just test`。n=4096 Forrester / sphere で sklearn の factor・eval が P2B-16 ゲートを通る。n=256 の factor が sklearn より短い。n=256 / 1024 の eval が同じセッションの HEAD 逐次 5 回平均 +10% を超えない（PR 冒頭 HEAD、実装後に式入り、各 5 回）。記録は `.dev/bench-log.md`。手動、CI なし。criterion / RSS は合否にしない（RSS は [#142](https://github.com/YUKIKEDA/gprx/issues/142)） |
+| P2B-23 | Feat | 速さ / メモリのプリセット                     | P2B-19 / P2B-21 | `Gpr` に `with_prefer_memory` / `with_prefer_speed`。メモリ極は `UncachedDistances` + `ReuseCholesky`、速さ極は既定の `CachedDistances` + `RetainCholesky`。`with_distance_cache_policy` / `with_cholesky_buffer` は `pub(crate)`。`from_points` でも同じメソッド（`C` は `NoDistanceCache`、`B` だけ）。`FittedGpr` に `with_prefer_*` は置かない。persist は `always` / `never`、`load` は `RetainCholesky`。型は crate ルートに残す。戻り型テスト、メモリ極 Workspace に dist / 専用 W が無いテスト、同じ θ の NLML・勾配・predict が既定と一致する 1 本。既定の `tests/alloc.rs` 上限は上げない。`just lint` / `just test`。rustdoc。§6.3 と `layout.mdc` を現在形。`just perf` は表2つ（既定とメモリ極）。回して `.dev/bench-log.md` に記録。新しい RSS ゲートは置かない。P2B-21 の Uncached+Retain 表は残す。criterion は合否にしない |
 
-**2b 完了:** P2B-1…22 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…22 の作業は各 Issue の Grill と DoD 確定のあと。
+**2b 完了:** P2B-1…23 がマージ済み。`just test` が緑。P3-1 に進む。P2B-14…23 の作業は各 Issue の Grill と DoD 確定のあと。
 
 ---
 

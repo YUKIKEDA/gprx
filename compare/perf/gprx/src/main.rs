@@ -8,8 +8,7 @@ use std::time::Instant;
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
 use gprx::{
-    CachedDistances, DistanceCachePolicy, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
-    UncachedDistances,
+    FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr, ReuseCholesky, UncachedDistances,
 };
 
 #[path = "../../case_schema.rs"]
@@ -43,10 +42,7 @@ fn na_row(lib: &str, name: &str, note: String) -> ResultRow {
     }
 }
 
-fn make_gpr<C: DistanceCachePolicy>(
-    case: &Case,
-    policy: C,
-) -> Result<Gpr<Fixed, FullRecompute, C>, String> {
+fn make_gpr(case: &Case) -> Result<Gpr<Fixed>, String> {
     let kernel = if case.ard {
         let spec = RbfArdKernel::new(&case.lengthscales_init).map_err(|e| e.to_string())?;
         KernelSpec::from(spec)
@@ -62,74 +58,32 @@ fn make_gpr<C: DistanceCachePolicy>(
         GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
     Ok(Gpr::new(kernel, likelihood)
         .with_target_transform(StandardizeTarget::new())
-        .with_distance_cache_policy(policy)
         .with_optimizer(Fixed))
 }
 
-fn run<C: DistanceCachePolicy>(case: &Case, policy: C, lib: &str) -> Result<ResultRow, String> {
-    let warmup = timing::warmup_count();
-    let reps = timing::timed_reps(case.n_rows);
-    let mut factor_samples = Vec::with_capacity(reps);
-    let mut fitted: Option<FittedGpr<Fixed, FullRecompute, C>> = None;
-    for i in 0..warmup + reps {
-        drop(fitted.take());
-        let gpr = make_gpr(case, policy)?;
-        let start = Instant::now();
-        let next = gpr
-            .factor(&case.x, case.n_rows, case.n_cols, &case.y)
-            .map_err(|(_, e)| e.to_string())?;
-        let dt = start.elapsed().as_secs_f64();
-        if i >= warmup {
-            factor_samples.push(dt);
-        }
-        fitted = Some(next);
-    }
-    let mut fitted = fitted.expect("timed_reps is at least 1");
-
-    let n_params = fitted.num_params();
-    let mut params = vec![0.0; n_params];
-    fitted.get_params(&mut params).map_err(|e| e.to_string())?;
-    let mut grad = vec![0.0; n_params];
-    let mut eval_samples = Vec::with_capacity(reps);
-    for i in 0..warmup + reps {
-        let start = Instant::now();
-        fitted
-            .value_and_gradient_into(&params, &mut grad)
-            .map_err(|e| e.to_string())?;
-        let dt = start.elapsed().as_secs_f64();
-        if i >= warmup {
-            eval_samples.push(dt);
-        }
-    }
-    let n_evals = case.joint_evals as f64;
-    let eval_scale: Vec<f64> = eval_samples.iter().map(|s| s * n_evals).collect();
-
-    let mut predict_samples = Vec::with_capacity(reps);
-    for i in 0..warmup + reps {
-        let start = Instant::now();
-        fitted
-            .predict(&case.xs, case.xs_n_rows, case.xs_n_cols)
-            .map_err(|e| e.to_string())?;
-        let dt = start.elapsed().as_secs_f64();
-        if i >= warmup {
-            predict_samples.push(dt);
-        }
-    }
-
-    let (factor_min, factor_max) = timing::min_max(&factor_samples);
-    let (eval_min, eval_max) = timing::min_max(&eval_scale);
-    let (predict_min, predict_max) = timing::min_max(&predict_samples);
+fn finish_row(
+    case: &Case,
+    lib: &str,
+    factor_samples: &[f64],
+    eval_scale: &[f64],
+    predict_samples: &[f64],
+    warmup: usize,
+    reps: usize,
+) -> Result<ResultRow, String> {
+    let (factor_min, factor_max) = timing::min_max(factor_samples);
+    let (eval_min, eval_max) = timing::min_max(eval_scale);
+    let (predict_min, predict_max) = timing::min_max(predict_samples);
     Ok(ResultRow {
         lib: lib.to_string(),
         name: case.name.clone(),
         status: "ok".to_string(),
-        factor_s: Some(timing::median(&factor_samples)),
+        factor_s: Some(timing::median(factor_samples)),
         factor_min_s: Some(factor_min),
         factor_max_s: Some(factor_max),
-        eval_s: Some(timing::median(&eval_scale)),
+        eval_s: Some(timing::median(eval_scale)),
         eval_min_s: Some(eval_min),
         eval_max_s: Some(eval_max),
-        predict_s: Some(timing::median(&predict_samples)),
+        predict_s: Some(timing::median(predict_samples)),
         predict_min_s: Some(predict_min),
         predict_max_s: Some(predict_max),
         joint_evals: Some(case.joint_evals),
@@ -143,18 +97,182 @@ fn run<C: DistanceCachePolicy>(case: &Case, policy: C, lib: &str) -> Result<Resu
     })
 }
 
+fn time_eval_predict_speed(
+    case: &Case,
+    fitted: &mut FittedGpr<Fixed>,
+    warmup: usize,
+    reps: usize,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    time_eval_predict_body(case, fitted, warmup, reps)
+}
+
+fn time_eval_predict_memory(
+    case: &Case,
+    fitted: &mut FittedGpr<Fixed, FullRecompute, UncachedDistances, ReuseCholesky>,
+    warmup: usize,
+    reps: usize,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    time_eval_predict_body(case, fitted, warmup, reps)
+}
+
+fn time_eval_predict_body<F>(
+    case: &Case,
+    fitted: &mut F,
+    warmup: usize,
+    reps: usize,
+) -> Result<(Vec<f64>, Vec<f64>), String>
+where
+    F: EvalPredict,
+{
+    let n_params = fitted.num_params();
+    let mut params = vec![0.0; n_params];
+    fitted.get_params(&mut params)?;
+    let mut grad = vec![0.0; n_params];
+    let mut eval_samples = Vec::with_capacity(reps);
+    for i in 0..warmup + reps {
+        let start = Instant::now();
+        fitted.value_and_gradient_into(&params, &mut grad)?;
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            eval_samples.push(dt);
+        }
+    }
+    let n_evals = case.joint_evals as f64;
+    let eval_scale: Vec<f64> = eval_samples.iter().map(|s| s * n_evals).collect();
+
+    let mut predict_samples = Vec::with_capacity(reps);
+    for i in 0..warmup + reps {
+        let start = Instant::now();
+        fitted.predict(&case.xs, case.xs_n_rows, case.xs_n_cols)?;
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            predict_samples.push(dt);
+        }
+    }
+    Ok((eval_scale, predict_samples))
+}
+
+trait EvalPredict {
+    fn num_params(&self) -> usize;
+    fn get_params(&self, out: &mut [f64]) -> Result<(), String>;
+    fn value_and_gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<f64, String>;
+    fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), String>;
+}
+
+impl EvalPredict for FittedGpr<Fixed> {
+    fn num_params(&self) -> usize {
+        FittedGpr::num_params(self)
+    }
+
+    fn get_params(&self, out: &mut [f64]) -> Result<(), String> {
+        FittedGpr::get_params(self, out).map_err(|e| e.to_string())
+    }
+
+    fn value_and_gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<f64, String> {
+        FittedGpr::value_and_gradient_into(self, params, out).map_err(|e| e.to_string())
+    }
+
+    fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), String> {
+        FittedGpr::predict(self, xs, n_rows, n_cols)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl EvalPredict for FittedGpr<Fixed, FullRecompute, UncachedDistances, ReuseCholesky> {
+    fn num_params(&self) -> usize {
+        FittedGpr::num_params(self)
+    }
+
+    fn get_params(&self, out: &mut [f64]) -> Result<(), String> {
+        FittedGpr::get_params(self, out).map_err(|e| e.to_string())
+    }
+
+    fn value_and_gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<f64, String> {
+        FittedGpr::value_and_gradient_into(self, params, out).map_err(|e| e.to_string())
+    }
+
+    fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), String> {
+        FittedGpr::predict(self, xs, n_rows, n_cols)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn run_speed(case: &Case) -> Result<ResultRow, String> {
+    let warmup = timing::warmup_count();
+    let reps = timing::timed_reps(case.n_rows);
+    let mut factor_samples = Vec::with_capacity(reps);
+    let mut fitted: Option<FittedGpr<Fixed>> = None;
+    for i in 0..warmup + reps {
+        drop(fitted.take());
+        let gpr = make_gpr(case)?;
+        let start = Instant::now();
+        let next = gpr
+            .factor(&case.x, case.n_rows, case.n_cols, &case.y)
+            .map_err(|(_, e)| e.to_string())?;
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            factor_samples.push(dt);
+        }
+        fitted = Some(next);
+    }
+    let mut fitted = fitted.expect("timed_reps is at least 1");
+    let (eval_scale, predict_samples) = time_eval_predict_speed(case, &mut fitted, warmup, reps)?;
+    finish_row(
+        case,
+        "gprx",
+        &factor_samples,
+        &eval_scale,
+        &predict_samples,
+        warmup,
+        reps,
+    )
+}
+
+fn run_memory(case: &Case) -> Result<ResultRow, String> {
+    let warmup = timing::warmup_count();
+    let reps = timing::timed_reps(case.n_rows);
+    let mut factor_samples = Vec::with_capacity(reps);
+    let mut fitted: Option<FittedGpr<Fixed, FullRecompute, UncachedDistances, ReuseCholesky>> = None;
+    for i in 0..warmup + reps {
+        drop(fitted.take());
+        let gpr = make_gpr(case)?.with_prefer_memory();
+        let start = Instant::now();
+        let next = gpr
+            .factor(&case.x, case.n_rows, case.n_cols, &case.y)
+            .map_err(|(_, e)| e.to_string())?;
+        let dt = start.elapsed().as_secs_f64();
+        if i >= warmup {
+            factor_samples.push(dt);
+        }
+        fitted = Some(next);
+    }
+    let mut fitted = fitted.expect("timed_reps is at least 1");
+    let (eval_scale, predict_samples) = time_eval_predict_memory(case, &mut fitted, warmup, reps)?;
+    finish_row(
+        case,
+        "gprx-memory",
+        &factor_samples,
+        &eval_scale,
+        &predict_samples,
+        warmup,
+        reps,
+    )
+}
+
 fn main() -> ExitCode {
     let mut path = None;
-    let mut uncached = false;
+    let mut memory = false;
     for arg in env::args().skip(1) {
-        if arg == "--uncached" {
-            uncached = true;
+        if arg == "--memory" {
+            memory = true;
         } else if path.is_none() {
             path = Some(arg);
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: gprx-perf CASE.json [--uncached]");
+        eprintln!("usage: gprx-perf CASE.json [--memory]");
         return ExitCode::from(2);
     };
     let text = match fs::read_to_string(&path) {
@@ -171,11 +289,11 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let lib = if uncached { "gprx-uncached" } else { "gprx" };
-    let row = if uncached {
-        run(&case, UncachedDistances, lib)
+    let lib = if memory { "gprx-memory" } else { "gprx" };
+    let row = if memory {
+        run_memory(&case)
     } else {
-        run(&case, CachedDistances, lib)
+        run_speed(&case)
     };
     let row = match row {
         Ok(row) => row,

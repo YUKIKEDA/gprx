@@ -3,8 +3,8 @@ use crate::error::{CholeskyStage, GprError};
 use crate::gpr::factor::{add_noise_to_diag, cholesky_and_solve, log_det_from_l, pack_points};
 use crate::gpr::{
     AdaptiveJitter, CachedDistances, DistanceCacheSlot, FixedJitter, JitterPolicy, NoDistanceCache,
-    PredictOptions, Prediction, PredictiveCovariance, ReuseCholesky, UncachedDistances,
-    VarianceKind,
+    PredictOptions, Prediction, PredictiveCovariance, RetainCholesky, ReuseCholesky,
+    UncachedDistances, VarianceKind,
 };
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -1820,6 +1820,79 @@ fn from_points_linear_trainer_has_no_distance_cache_slot() {
 fn new_rbf_trainer_has_distance_cache_policy() {
     let gpr = rbf_gpr(1.0, 0.1);
     let _: Gpr<Lbfgs, FullRecompute, CachedDistances> = gpr;
+}
+
+#[test]
+fn prefer_memory_sets_uncached_and_reuse() {
+    let gpr = rbf_gpr(1.0, 0.1).with_prefer_memory();
+    let _: Gpr<Lbfgs, FullRecompute, UncachedDistances, ReuseCholesky> = gpr;
+}
+
+#[test]
+fn prefer_speed_sets_cached_and_retain() {
+    let gpr = rbf_gpr(1.0, 0.1).with_prefer_memory().with_prefer_speed();
+    let _: Gpr<Lbfgs, FullRecompute, CachedDistances, RetainCholesky> = gpr;
+}
+
+#[test]
+fn from_points_prefer_memory_keeps_no_distance_cache() {
+    let gpr = Gpr::from_points(
+        KernelSpec::from(LinearKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_prefer_memory();
+    let _: Gpr<Lbfgs, FullRecompute, NoDistanceCache, ReuseCholesky> = gpr;
+}
+
+#[test]
+fn prefer_memory_workspace_has_no_dist_or_dedicated_w() {
+    let mem = rbf_gpr(1.25, 0.16)
+        .with_prefer_memory()
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .expect("spd");
+    assert!(!mem.workspace.has_distance_cache());
+    assert!(!mem.workspace.has_dedicated_w());
+    let speed = rbf_gpr(1.25, 0.16)
+        .with_prefer_speed()
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .expect("spd");
+    assert!(speed.workspace.has_distance_cache());
+    assert!(speed.workspace.has_dedicated_w());
+}
+
+#[test]
+fn prefer_memory_matches_default_nlml_grad_and_predict() {
+    let x = [0.0, 0.8, 1.7];
+    let y = [0.4, -0.2, 0.9];
+    let mut memory = rbf_gpr(1.25, 0.16)
+        .with_prefer_memory()
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 1, &y)
+        .expect("spd");
+    let mut speed = rbf_gpr(1.25, 0.16)
+        .with_prefer_speed()
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 1, &y)
+        .expect("spd");
+    let mut params = [0.0; 2];
+    memory.get_params(&mut params).expect("len 2");
+    let mut grad_m = [0.0; 2];
+    let mut grad_s = [0.0; 2];
+    let vm = memory
+        .value_and_gradient_into(&params, &mut grad_m)
+        .expect("spd");
+    let vs = speed
+        .value_and_gradient_into(&params, &mut grad_s)
+        .expect("spd");
+    assert_close(vm, vs);
+    assert_close(grad_m[0], grad_s[0]);
+    assert_close(grad_m[1], grad_s[1]);
+    let pm = memory.predict(&[0.5], 1, 1).expect("fitted");
+    let ps = speed.predict(&[0.5], 1, 1).expect("fitted");
+    assert_close(pm.mean[0], ps.mean[0]);
+    assert_close(pm.variance[0], ps.variance[0]);
 }
 
 #[test]
