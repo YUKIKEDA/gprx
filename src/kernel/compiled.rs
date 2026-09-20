@@ -165,6 +165,142 @@ impl CompiledKernel {
         Ok(())
     }
 
+    /// Returns the number of compiled leaves in this tree.
+    pub(crate) fn leaf_count(&self) -> usize {
+        match self {
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().map(Self::leaf_count).sum(),
+            _ => 1,
+        }
+    }
+
+    /// Returns the leaf that owns kernel parameter `param_idx`.
+    pub(crate) fn leaf_index_for_param(&self, param_idx: usize) -> Result<usize, GprError> {
+        if param_idx >= self.num_params() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("kernel parameter index {param_idx} is out of range"),
+            });
+        }
+        let mut offset = 0;
+        let mut leaf = 0;
+        if self.locate_leaf(param_idx, &mut offset, &mut leaf) {
+            Ok(leaf)
+        } else {
+            Err(GprError::InvalidHyperparameter {
+                reason: format!("kernel parameter index {param_idx} is out of range"),
+            })
+        }
+    }
+
+    fn locate_leaf(&self, param_idx: usize, offset: &mut usize, leaf: &mut usize) -> bool {
+        match self {
+            Self::Sum(terms) | Self::Product(terms) => terms
+                .iter()
+                .any(|term| term.locate_leaf(param_idx, offset, leaf)),
+            _ => {
+                let start = *offset;
+                *offset += self.num_params();
+                if param_idx >= start && param_idx < *offset {
+                    true
+                } else {
+                    *leaf += 1;
+                    false
+                }
+            }
+        }
+    }
+
+    /// Returns the compiled leaf at depth-first index `leaf`.
+    pub(crate) fn leaf_at(&self, leaf: usize) -> Result<&Self, GprError> {
+        let mut remaining = leaf;
+        self.find_leaf_at(&mut remaining)
+            .ok_or(GprError::InvalidHyperparameter {
+                reason: format!("leaf index {leaf} is out of range"),
+            })
+    }
+
+    fn find_leaf_at(&self, remaining: &mut usize) -> Option<&Self> {
+        match self {
+            Self::Sum(terms) | Self::Product(terms) => {
+                for term in terms {
+                    if let Some(found) = term.find_leaf_at(remaining) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            _ => {
+                if *remaining == 0 {
+                    Some(self)
+                } else {
+                    *remaining -= 1;
+                    None
+                }
+            }
+        }
+    }
+
+    /// Combines cached leaf Grams into `out` (sum / product tree).
+    ///
+    /// `scratch` must match `out`. Nested products may allocate one extra
+    /// `n×n` buffer.
+    pub(crate) fn combine_from_leaf_grams(
+        &self,
+        grams: &[Mat<f64>],
+        mut out: MatMut<'_, f64>,
+        mut scratch: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if grams.len() != self.leaf_count() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "expected {} leaf Grams, got {}",
+                    self.leaf_count(),
+                    grams.len()
+                ),
+            });
+        }
+        require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        visit_triangle(out.nrows(), uplo, |row, col| {
+            out[(row, col)] = 0.0;
+        });
+        let mut index = 0;
+        self.write_from_leaf_grams(grams, &mut index, out.as_mut(), scratch.as_mut(), uplo)?;
+        if index != grams.len() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "leaf Gram walk did not consume every leaf".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn write_from_leaf_grams(
+        &self,
+        grams: &[Mat<f64>],
+        index: &mut usize,
+        dest: MatMut<'_, f64>,
+        scratch: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Sum(terms) => {
+                fold_cached_leaves(terms, grams, index, dest, scratch, uplo, add_triangle)
+            }
+            Self::Product(terms) => {
+                fold_cached_leaves(terms, grams, index, dest, scratch, uplo, mul_triangle)
+            }
+            _ => {
+                if *index >= grams.len() {
+                    return Err(GprError::InvalidHyperparameter {
+                        reason: "leaf Gram walk ran past the cache".to_owned(),
+                    });
+                }
+                copy_triangle(dest, grams[*index].as_ref(), uplo);
+                *index += 1;
+                Ok(())
+            }
+        }
+    }
+
     /// Writes `k` into `out` for `uplo`. `scratch` must match `out`.
     ///
     /// Entries outside the requested triangle are left unchanged. `scratch`
@@ -1194,6 +1330,37 @@ fn term_for_param(
     })
 }
 
+fn fold_cached_leaves(
+    terms: &[CompiledKernel],
+    grams: &[Mat<f64>],
+    index: &mut usize,
+    mut dest: MatMut<'_, f64>,
+    mut scratch: MatMut<'_, f64>,
+    uplo: Triangle,
+    combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
+) -> Result<(), GprError> {
+    let (first, rest) = split_terms(terms)?;
+    first.write_from_leaf_grams(grams, index, dest.as_mut(), scratch.as_mut(), uplo)?;
+    let n = dest.nrows();
+    let mut extra = None;
+    for term in rest {
+        if term.needs_internal_scratch() {
+            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
+            term.write_from_leaf_grams(grams, index, scratch.as_mut(), buf.as_mut(), uplo)?;
+        } else {
+            term.write_from_leaf_grams(grams, index, scratch.as_mut(), dest.as_mut(), uplo)?;
+        }
+        combine(dest.as_mut(), scratch.as_ref(), uplo);
+    }
+    Ok(())
+}
+
+fn copy_triangle(mut dest: MatMut<'_, f64>, src: MatRef<'_, f64>, uplo: Triangle) {
+    visit_triangle(dest.nrows(), uplo, |row, col| {
+        dest[(row, col)] = src[(row, col)];
+    });
+}
+
 fn add_triangle(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>, uplo: Triangle) {
     visit_triangle(acc.nrows(), uplo, |row, col| {
         acc[(row, col)] += src[(row, col)];
@@ -2217,6 +2384,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn combine_sum_from_leaf_grams_overwrites_dirty_dest() {
+        let compiled = (rbf(1.0) + rbf(2.0)).compile();
+        let dist = sq_dist_1d(&[0.0, 1.0, 2.0]);
+        let expected = apply_compiled(&compiled, dist.as_ref());
+        let mut grams = [fill(3, 0.0), fill(3, 0.0)];
+        compiled
+            .leaf_at(0)
+            .expect("leaf 0")
+            .apply(
+                dist.as_ref(),
+                grams[0].as_mut(),
+                Triangle::Lower,
+                fill(3, 0.0).as_mut(),
+            )
+            .expect("leaf 0");
+        compiled
+            .leaf_at(1)
+            .expect("leaf 1")
+            .apply(
+                dist.as_ref(),
+                grams[1].as_mut(),
+                Triangle::Lower,
+                fill(3, 0.0).as_mut(),
+            )
+            .expect("leaf 1");
+        let mut dirty = fill(3, 999.0);
+        let mut scratch = fill(3, 0.0);
+        compiled
+            .combine_from_leaf_grams(&grams, dirty.as_mut(), scratch.as_mut(), Triangle::Lower)
+            .expect("combine");
+        lower_matches(dirty.as_ref(), expected.as_ref());
     }
 
     #[test]

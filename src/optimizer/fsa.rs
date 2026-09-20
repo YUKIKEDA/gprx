@@ -28,8 +28,9 @@ pub enum BoundaryPolicy {
 /// [`crate::Gpr`]). Positive user-unit [`Interval`]s map to
 /// `(ln lo, ln hi)`. Component-wise Cauchy proposals use the Szu–Hartley
 /// inverse CDF; worse points follow the Metropolis rule. Temperature follows
-/// Ingber’s dimension-normalized exponential schedule. Evaluates
-/// [`Objective::value`] only.
+/// Ingber’s dimension-normalized exponential schedule. The first
+/// evaluation and each restart use [`Objective::value`]. Each coordinate
+/// step uses [`Objective::value_at_changes`].
 ///
 /// References: Szu & Hartley (1987), “Fast simulated annealing”; Ingber
 /// (1989), “Very fast simulated re-annealing”.
@@ -158,6 +159,8 @@ impl FastSimulatedAnnealing {
     }
 }
 
+impl crate::UsesChangeIndices for FastSimulatedAnnealing {}
+
 impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
@@ -217,7 +220,7 @@ fn anneal<P: Objective>(
             let (lo, hi) = bounds[i];
             let step = cauchy_step(&mut rng, temperature) * (hi - lo);
             proposed[i] = apply_boundary(current[i] + step, lo, hi, fsa.boundary);
-            let proposed_energy = objective.value(&proposed)?;
+            let proposed_energy = objective.value_at_changes(&proposed, &[i])?;
             if !proposed_energy.is_finite() {
                 continue;
             }

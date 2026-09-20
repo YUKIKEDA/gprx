@@ -298,23 +298,23 @@ plan実行時、組み込みリーフは`CompiledKernel`のenumアームを直�
 
 ### 5.4 部分更新(コーディネート型最適化器)対応
 
-**対応方針**: `RecomputeStrategy` はマーカー型（ZST）。既定 `FullRecompute`。`IncrementalRecompute` の本体は P2B-18（[#110](https://github.com/YUKIKEDA/gprx/issues/110)）。差し込み口は P2B-1。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
+**対応方針**: `RecomputeStrategy` はマーカー型（ZST）。既定 `FullRecompute`。`IncrementalRecompute` の本体は P2B-18（[#110](https://github.com/YUKIKEDA/gprx/issues/110)）。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
 
 ```rust
 trait RecomputeStrategy {}
 struct FullRecompute;
-struct IncrementalRecompute; // ZST。葉バッファは fit / refit 中の Objective / Workspace
+struct IncrementalRecompute; // ZST。葉 Gram は fit / refit 中の Objective だけ
 
 trait IncrementalObjective: Objective {
     fn value_with_changes(&mut self, params: &[T], indices: &[usize]) -> Result<T, GprError>;
 }
 ```
 
-変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`FullRecompute` は `IncrementalObjective` を impl しない。
+変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`Objective::value_at_changes` の既定は `value`。`GprObjective<IncrementalRecompute>` だけ `value_with_changes` へ転送する。`FullRecompute` は `IncrementalObjective` を impl しない。
 
-`Gpr<O = Lbfgs, S = FullRecompute>`。`with_recompute_strategy` が `S` を差し替える。`Gpr<Fixed>` に `S` は無い（`factor` は一発フル）。`FittedGpr<O, S>` は `PhantomData<S>`（`refit` が同じ戦略。predict は `S` を読まない）。`with_recompute_strategy(IncrementalRecompute)` は `UsesChangeIndices` を impl した Optimizer にだけある。L-BFGS / NCG / Nelder–Mead は impl しない。
+`Gpr<O = Lbfgs, S = FullRecompute>`。公開切替は `with_prefer_memory` / `with_prefer_speed`。`with_recompute_strategy` は無い。極は `B`：`ReuseCholesky` は常に `FullRecompute`。`RetainCholesky` は `O: UsesChangeIndices` のとき `IncrementalRecompute`。`with_optimizer` も同じ規則。`Gpr<Fixed>` に `S` は無い（`factor` は一発フル）。`FittedGpr<O, S>` は `PhantomData<S>`（`refit` が同じ戦略。predict は `S` を読まない）。L-BFGS / NCG / Nelder–Mead / Newton に Incremental は無い。FSA は `UsesChangeIndices`。初回とリスタートは `value`、座標一歩は `value_at_changes`。
 
-`IncrementalRecompute` は変更 index に対応するリーフ項のみ再評価し、最終結合（O(n²×リーフ項数)、Cholesky に対して小さい）だけ毎回やり直す。**Cholesky 分解自体は K が変わる以上フル。** オプトイン。P2B-1 ではトレイトと `FullRecompute` だけ。`GprObjective` の Incremental impl は P2B-18。実行時の NotImplemented は置かない。
+`IncrementalRecompute` はコンパイル済み葉だけをキャッシュし、変更 index が触る葉だけ `apply` し直す。木の結合と **Cholesky は毎回フル**。低ランク更新はしない。Workspace に新しい `n×n` は足さない。実行時の NotImplemented は置かない。
 
 #### 5.4.1 IncrementalRecomputeとfaer update APIの関係
 
@@ -464,7 +464,7 @@ H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。`with_recompute_strategy` が `S` を差し替える（`IncrementalRecompute` は `UsesChangeIndices` 付きの `O` だけ。本体は P2B-18）。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
+既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。`S` は Cholesky 極 `B` から決まる（P2B-18）。`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
 
 ```rust
 struct Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
@@ -679,7 +679,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。公開面は `Gpr<O: Optimizer, S: RecomputeStrategy>`。既定 `Lbfgs` と `FullRecompute`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。公開 `Newton` は argmin の `Newton`（`H⁻¹` は faer の私有型。logit は L-BFGS と同じで `H_z` は解析連鎖。ノブは共有 3 つ + `with_gamma`）。自作例は `FastSimulatedAnnealing`（Cauchy / Metropolis。P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）。logit は使わず、`minimize` が受け取る log-`θ` を歩く。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`（P2B-1 でトレイト、impl は P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。`ChangeSet` 構造体は置かない。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。公開面は `Gpr<O: Optimizer, S: RecomputeStrategy>`。既定 `Lbfgs` と `FullRecompute`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。公開 `Newton` は argmin の `Newton`（`H⁻¹` は faer の私有型。logit は L-BFGS と同じで `H_z` は解析連鎖。ノブは共有 3 つ + `with_gamma`）。自作例は `FastSimulatedAnnealing`（Cauchy / Metropolis。P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）。logit は使わず、`minimize` が受け取る log-`θ` を歩く。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`。`GprObjective<IncrementalRecompute>` が impl する（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。`Objective::value_at_changes` の既定は `value`。FSA の座標一歩がそれを呼ぶ。`ChangeSet` 構造体は置かない。
 
 ## 10. エラー型 GprError
 
