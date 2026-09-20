@@ -397,3 +397,24 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 
 数値照合（Forrester / 球の先頭 32 点、各段階の平均・観測分散・NLML）は相対 `1e-8` で pass。`just test` はコミット済み JSON を読む。criterion は合否にしない。
 
+## P3-7（online insert 高速化、[#177](https://github.com/YUKIKEDA/gprx/issues/177)）
+
+同一機械。日付 2026-09-20。`just perf-online`。P3-6 と同じ時計。insert は bordered LDLT と `v_buf` 再利用、1 列の距離 / RBF は逐次、`α` は libgp と同じく読み出しまで遅延。
+
+ゲートは `n = 256 / 1024` の中央値が libgp 以下（5% 以内は判定不能）。4 ゲートセルはまだ fail（libgp 比およそ 1.10–1.16）。P3-6 からは Forrester 256 が 16.10 ms → 1.60 ms、1024 が 202.60 ms → 54.28 ms。`4096` と RSS は記録。criterion は合否にしない。
+
+| 問題      | n    | lib   | insert n=2→n             | peak RSS  | ゲート |
+| --------- | ---- | ----- | ------------------------ | --------- | ------ |
+| Forrester | 256  | gprx  | 1.60 ms（1.54–1.83）     | 7.2 MiB   | fail   |
+| Forrester | 256  | libgp | 1.39 ms（1.25–1.61）     | 5.8 MiB   | —      |
+| Forrester | 1024 | gprx  | 54.28 ms（50.78–61.58）  | 35.4 MiB  | fail   |
+| Forrester | 1024 | libgp | 46.83 ms（45.23–49.56）  | 24.5 MiB  | —      |
+| Forrester | 4096 | gprx  | 4.328 s（4.268–4.441）   | 486.1 MiB | record |
+| Forrester | 4096 | libgp | 3.909 s（3.743–3.995）   | 265.5 MiB | —      |
+| 球 ARD    | 256  | gprx  | 1.68 ms（1.48–2.27）     | 7.2 MiB   | fail   |
+| 球 ARD    | 256  | libgp | 1.51 ms（1.34–1.97）     | 5.9 MiB   | —      |
+| 球 ARD    | 1024 | gprx  | 55.02 ms（50.89–62.73）  | 35.7 MiB  | fail   |
+| 球 ARD    | 1024 | libgp | 49.59 ms（47.70–51.74）  | 24.9 MiB  | —      |
+| 球 ARD    | 4096 | gprx  | 4.345 s（4.300–4.365）   | 486.3 MiB | record |
+| 球 ARD    | 4096 | libgp | 4.096 s（3.885–4.327）   | 265.9 MiB | —      |
+

@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 3 の P3-6（libgp との online insert 照合と時間比較）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 3 の P3-7（online insert を libgp 比で速くする）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

@@ -210,9 +210,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             query: online.query.clone(),
             x_obs: online.x_obs.clone(),
             y_obs: online.y_obs.clone(),
-            x: online.x.clone(),
+            x: compact_train_x(&online.x, n, d),
             y_train: online.y_train.clone(),
-            alpha: online.alpha.clone(),
+            alpha: online.alpha().to_vec(),
             n,
             d,
             mapped_factor: None,
@@ -2107,6 +2107,13 @@ fn trace_ki_kinv2(ki: MatRef<'_, f64>, w: MatRef<'_, f64>, alpha: &[f64], n: usi
         }
     }
     tr
+}
+
+fn compact_train_x(x: &Mat<f64>, n: usize, d: usize) -> Mat<f64> {
+    if x.nrows() == n && x.ncols() == d {
+        return x.clone();
+    }
+    Mat::from_fn(n, d, |i, j| x[(i, j)])
 }
 
 fn mul_lower_chol(l: MatRef<'_, f64>, z: &[f64], out: &mut [f64]) {

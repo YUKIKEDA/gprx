@@ -125,33 +125,28 @@ impl OnlineWorkspace {
     }
 
     /// Appends one bordered row: `L D v = k`, `δ = k_new - vᵀ D v`.
-    pub(crate) fn append_border(&mut self, k: &[f64], k_new: f64) -> Result<(), GprError> {
+    ///
+    /// The leading `n_active` of [`Self::v_buf`] must already hold `k`.
+    pub(crate) fn append_border(&mut self, k_new: f64) -> Result<(), GprError> {
         let n = self.n_active;
-        if k.len() != n {
-            return Err(GprError::EmptyInput);
-        }
         self.ensure_capacity(n + 1);
-        let mut w = Mat::zeros(n, 1);
         for i in 0..n {
-            w[(i, 0)] = k[i];
+            let ki = self.v_buf[i];
+            self.k_matrix[(n, i)] = ki;
+            self.k_matrix[(i, n)] = ki;
         }
+        self.k_matrix[(n, n)] = k_new;
         if n > 0 {
             let ld = self.ld_factor.as_ref().submatrix(0, 0, n, n);
-            solve_unit_lower_triangular_in_place(ld, w.as_mut(), Par::Seq);
+            let w = self.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
+            solve_unit_lower_triangular_in_place(ld, w, Par::Seq);
         }
         let mut vtdv = 0.0;
         for i in 0..n {
             let d = self.ld_factor[(i, i)];
-            if !d.is_finite() || d <= 0.0 {
-                return Err(GprError::CholeskyFailed {
-                    jitter: 0.0,
-                    matrix_size: n + 1,
-                    stage: CholeskyStage::OnlineInsert,
-                });
-            }
-            let vi = w[(i, 0)] / d;
+            let vi = self.v_buf[i] / d;
             self.ld_factor[(n, i)] = vi;
-            vtdv += vi * d * vi;
+            vtdv += vi * vi * d;
         }
         let delta = k_new - vtdv;
         if !delta.is_finite() || delta <= 0.0 {
@@ -162,11 +157,6 @@ impl OnlineWorkspace {
             });
         }
         self.ld_factor[(n, n)] = delta;
-        for (i, &ki) in k.iter().enumerate() {
-            self.k_matrix[(n, i)] = ki;
-            self.k_matrix[(i, n)] = ki;
-        }
-        self.k_matrix[(n, n)] = k_new;
         self.n_active = n + 1;
         Ok(())
     }

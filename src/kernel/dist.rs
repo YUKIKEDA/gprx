@@ -192,6 +192,10 @@ pub(crate) fn fill_squared_euclidean_cross(
     if x_train.nrows() == 0 || m == 0 {
         return;
     }
+    if m == 1 {
+        fill_cross_chunk(x_train, x_test, dist.rb_mut(), 0, 1);
+        return;
+    }
     let n_parts = partition_count(thread_scratch);
     if thread_scratch.is_empty() {
         dist.rb_mut()
