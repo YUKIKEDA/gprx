@@ -63,7 +63,7 @@ pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDiffer
 pub use optimizer::{
     AcceptsRecompute, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
     IncrementalRecompute, Lbfgs, NelderMead, Newton, NonlinearCg, OptResult, Optimizer,
-    RecomputeStrategy, UsesChangeIndices,
+    PoleRecompute, RecomputeStrategy, UsesChangeIndices,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
 pub use persist::{FORMAT_VERSION, LoadedDistance, LoadedGpr, PersistRegistry};

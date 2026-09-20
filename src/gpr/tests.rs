@@ -12,10 +12,10 @@ use crate::kernel::{
     Triangle, WhiteKernel,
 };
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::Objective;
+use crate::objective::{IncrementalObjective, Objective};
 use crate::optimizer::{
-    Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead, NonlinearCg, OptResult,
-    Optimizer, UsesChangeIndices,
+    FastSimulatedAnnealing, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead,
+    NonlinearCg, OptResult, Optimizer, PoleRecompute, UsesChangeIndices,
 };
 use crate::param::Interval;
 use crate::precision::DoublePrecision;
@@ -2443,6 +2443,10 @@ impl DummyOpt {
     }
 }
 
+impl PoleRecompute<RetainCholesky> for DummyOpt {
+    type Strategy = FullRecompute;
+}
+
 impl<P: Objective> Optimizer<P> for DummyOpt {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2484,15 +2488,147 @@ impl<P: Objective> Optimizer<P> for IndexUsingOpt {
 }
 
 #[test]
-fn incremental_recompute_is_gated_on_uses_change_indices() {
+fn prefer_speed_is_incremental_only_with_uses_change_indices() {
+    let incr = rbf_gpr(1.0, 0.1).with_optimizer(IndexUsingOpt);
+    let _: Gpr<IndexUsingOpt, IncrementalRecompute, CachedDistances, RetainCholesky> = incr;
+    let lbfgs = rbf_gpr(1.0, 0.1).with_prefer_speed();
+    let _: Gpr<Lbfgs, FullRecompute, CachedDistances, RetainCholesky> = lbfgs;
+    let mem = rbf_gpr(1.0, 0.1)
+        .with_optimizer(IndexUsingOpt)
+        .with_prefer_memory();
+    let _: Gpr<IndexUsingOpt, FullRecompute, UncachedDistances, ReuseCholesky> = mem;
     let fitted = rbf_gpr(1.0, 0.1)
         .with_optimizer(IndexUsingOpt)
-        .with_recompute_strategy(IncrementalRecompute)
         .fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
         .expect("fit");
     assert_eq!(fitted.n(), 2);
-    let _full = rbf_gpr(1.0, 0.1)
-        .with_recompute_strategy(FullRecompute)
-        .fit(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
-        .expect("fit");
+}
+
+fn incremental_at_init(
+    kernel: KernelSpec,
+    noise: f64,
+) -> FittedGpr<FastSimulatedAnnealing, IncrementalRecompute> {
+    Gpr::new(kernel, GaussianLikelihood::new(noise).expect("valid"))
+        .with_optimizer(FastSimulatedAnnealing::new().with_max_iterations(0))
+        .fit(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .expect("spd")
+}
+
+fn full_at_init(kernel: KernelSpec, noise: f64) -> FittedGpr<Fixed> {
+    Gpr::new(kernel, GaussianLikelihood::new(noise).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .expect("spd")
+}
+
+fn assert_incremental_matches_full(kernel: KernelSpec, noise: f64, change: usize) {
+    let mut full = full_at_init(kernel.clone(), noise);
+    let mut incr = incremental_at_init(kernel, noise);
+    let n = full.num_params();
+    let mut start = vec![0.0; n];
+    full.get_params(&mut start).expect("len");
+    let mut params = start.clone();
+    params[change] += 0.15;
+    let v_full = {
+        let mut obj = full.objective();
+        obj.value(&params).expect("full")
+    };
+    let v_incr = {
+        let mut obj = incr.objective();
+        let primed = obj.value(&start).expect("prime");
+        assert!(primed.is_finite());
+        IncrementalObjective::value_with_changes(&mut obj, &params, &[change]).expect("incr")
+    };
+    assert_close(v_incr, v_full);
+}
+
+#[test]
+fn incremental_rbf_matches_full_value() {
+    assert_incremental_matches_full(
+        KernelSpec::from(RbfKernel::new(1.25).expect("valid")),
+        0.16,
+        0,
+    );
+}
+
+#[test]
+fn incremental_sum_matches_full_value() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+        + KernelSpec::from(RbfKernel::new(0.8).expect("valid"));
+    assert_incremental_matches_full(kernel, 0.16, 1);
+}
+
+#[test]
+fn incremental_product_matches_full_value() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+        * KernelSpec::from(ConstantKernel::new(1.4).expect("valid"));
+    assert_incremental_matches_full(kernel, 0.16, 1);
+}
+
+#[test]
+fn incremental_noise_only_matches_full_value() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"));
+    let n = kernel.num_params();
+    assert_incremental_matches_full(kernel, 0.16, n);
+}
+
+#[test]
+fn incremental_rejects_empty_duplicate_and_oob_indices() {
+    let mut incr =
+        incremental_at_init(KernelSpec::from(RbfKernel::new(1.25).expect("valid")), 0.16);
+    let n = incr.num_params();
+    let mut params = vec![0.0; n];
+    incr.get_params(&mut params).expect("len");
+    let mut obj = incr.objective();
+    obj.value(&params).expect("prime");
+    assert!(matches!(
+        obj.value_at_changes(&params, &[]),
+        Err(GprError::InvalidHyperparameter { .. })
+    ));
+    assert!(matches!(
+        obj.value_at_changes(&params, &[0, 0]),
+        Err(GprError::InvalidHyperparameter { .. })
+    ));
+    assert!(matches!(
+        obj.value_at_changes(&params, &[n]),
+        Err(GprError::InvalidHyperparameter { .. })
+    ));
+}
+
+#[test]
+fn fsa_speed_and_memory_poles_fit_and_match() {
+    let kernel = KernelSpec::from(RbfKernel::new(4.0).expect("valid"));
+    let likelihood = GaussianLikelihood::new(1.0).expect("valid");
+    let x = [0.0, 1.0];
+    let y = [0.5, -0.25];
+    let start = Gpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(&x, 2, 1, &y)
+        .expect("spd")
+        .neg_log_marginal_likelihood()
+        .expect("start");
+    let speed = Gpr::new(kernel.clone(), likelihood)
+        .with_optimizer(FastSimulatedAnnealing::new().with_seed(7))
+        .with_prefer_speed();
+    let _: Gpr<FastSimulatedAnnealing, IncrementalRecompute, CachedDistances, RetainCholesky> =
+        speed.clone();
+    let memory = Gpr::new(kernel, likelihood)
+        .with_optimizer(FastSimulatedAnnealing::new().with_seed(7))
+        .with_prefer_memory();
+    let _: Gpr<FastSimulatedAnnealing, FullRecompute, UncachedDistances, ReuseCholesky> =
+        memory.clone();
+    let speed = speed.fit(&x, 2, 1, &y).expect("speed");
+    let memory = memory.fit(&x, 2, 1, &y).expect("memory");
+    let speed_nlml = speed.neg_log_marginal_likelihood().expect("speed nlml");
+    let memory_nlml = memory.neg_log_marginal_likelihood().expect("memory nlml");
+    assert!(speed_nlml < start, "speed={speed_nlml}, start={start}");
+    assert!(memory_nlml < start, "memory={memory_nlml}, start={start}");
+    assert_close(speed_nlml, memory_nlml);
+    let mut speed_theta = vec![0.0; speed.num_params()];
+    let mut memory_theta = vec![0.0; memory.num_params()];
+    speed.get_params(&mut speed_theta).expect("speed θ");
+    memory.get_params(&mut memory_theta).expect("memory θ");
+    for (a, b) in speed_theta.iter().zip(memory_theta.iter()) {
+        assert_close(*a, *b);
+    }
 }
