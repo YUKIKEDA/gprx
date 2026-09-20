@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-1（VFE か FITC か一つ選ぶ）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-2（`SparseGpr`、誘導点固定）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
