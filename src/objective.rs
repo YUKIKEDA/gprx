@@ -4,7 +4,7 @@
 //! concatenated kernel-then-likelihood `θ` to the model, which owns the
 //! source of truth. Capability is split so a derivative-free solver can
 //! require only [`Objective`], L-BFGS can require [`Differentiable`], and a
-//! Newton solver can require [`TwiceDifferentiable`] after P2B-17.
+//! Newton solver can require [`TwiceDifferentiable`].
 
 use crate::error::GprError;
 use crate::gpr::{DistanceCacheSlot, FittedGpr};
@@ -60,9 +60,8 @@ pub trait Differentiable: Objective {
 
 /// Second-order objective. Supertrait of [`Differentiable`].
 ///
-/// [`GprObjective`] does not implement this in P2B-1. A solver that needs a
-/// Hessian cannot be passed to [`crate::Gpr`] until P2B-17. There is no
-/// runtime `NotImplemented`.
+/// [`GprObjective`] implements this by forwarding to
+/// [`crate::FittedGpr::hessian_into`]. There is no runtime `NotImplemented`.
 pub trait TwiceDifferentiable: Differentiable {
     /// Writes the Hessian (row-major `n×n`) into `out`.
     ///
@@ -158,6 +157,16 @@ where
         out: &mut [f64],
     ) -> Result<f64, GprError> {
         self.model.value_and_gradient_into_fit(params, out)
+    }
+}
+
+impl<O, S, C, B> TwiceDifferentiable for GprObjective<'_, O, S, C, B>
+where
+    C: DistanceCacheSlot,
+    B: crate::gpr::AllocWorkspace,
+{
+    fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        self.model.hessian_into_fit(params, out)
     }
 }
 

@@ -354,6 +354,90 @@ pub(crate) fn write_kernel_grad_from_coords(
     compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
 }
 
+pub(crate) fn write_kernel_hess(
+    compiled: &CompiledKernel,
+    dist: MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    ard_cache: Option<MatRef<'_, f64>>,
+    d2_k: MatMut<'_, f64>,
+    scratch: MatMut<'_, f64>,
+    pair: (usize, usize),
+) -> Result<(), GprError> {
+    let (i, j) = pair;
+    match compiled.coord_mode()? {
+        CoordMode::Dist | CoordMode::Either => {
+            compiled.hess(dist, d2_k, i, j, Triangle::Lower, scratch)
+        }
+        CoordMode::Points => {
+            if let Some(cache) = ard_cache {
+                compiled.hess_from_ard_cache(cache, x, d2_k, pair, Triangle::Lower, scratch)
+            } else {
+                compiled.hess_points(x, d2_k, i, j, Triangle::Lower, scratch)
+            }
+        }
+        CoordMode::Mixed => compiled.hess_mixed(
+            MixedKernelViews::new(dist, x),
+            d2_k,
+            i,
+            j,
+            Triangle::Lower,
+            scratch,
+        ),
+    }
+}
+
+pub(crate) fn write_kernel_hess_from_coords(
+    compiled: &CompiledKernel,
+    x: MatRef<'_, f64>,
+    d2_k: MatMut<'_, f64>,
+    scratch: MatMut<'_, f64>,
+    i: usize,
+    j: usize,
+) -> Result<(), GprError> {
+    compiled.hess_points(x, d2_k, i, j, Triangle::Lower, scratch)
+}
+
+pub(crate) fn symmetrize_lower(mut a: MatMut<'_, f64>, n: usize) {
+    for col in 0..n {
+        for row in col + 1..n {
+            a[(col, row)] = a[(row, col)];
+        }
+    }
+}
+
+pub(crate) fn gemv_sym_lower(a: MatRef<'_, f64>, x: &[f64], y: &mut [f64], n: usize) {
+    for i in 0..n {
+        let mut s = a[(i, i)] * x[i];
+        for j in 0..i {
+            s += a[(i, j)] * x[j];
+        }
+        for j in i + 1..n {
+            s += a[(j, i)] * x[j];
+        }
+        y[i] = s;
+    }
+}
+
+pub(crate) fn gemv_full(a: MatRef<'_, f64>, x: &[f64], y: &mut [f64], n: usize) {
+    for i in 0..n {
+        let mut s = 0.0;
+        for j in 0..n {
+            s += a[(i, j)] * x[j];
+        }
+        y[i] = s;
+    }
+}
+
+pub(crate) fn trace_product(a: MatRef<'_, f64>, b: MatRef<'_, f64>, n: usize) -> f64 {
+    let mut tr = 0.0;
+    for col in 0..n {
+        for row in 0..n {
+            tr += a[(row, col)] * b[(col, row)];
+        }
+    }
+    tr
+}
+
 /// Writes `diag(A⁻¹)` given the lower Cholesky factor `L` of `A = L Lᵀ`.
 ///
 /// `A⁻¹ = L^{-T} L^{-1}`, so entry `i` is the squared Euclidean norm of

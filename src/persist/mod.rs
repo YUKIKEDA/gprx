@@ -410,6 +410,32 @@ mod tests {
             })
         }
 
+        fn hess(
+            &self,
+            _dist: MatRef<'_, f64>,
+            _d2_k: MatMut<'_, f64>,
+            i: usize,
+            j: usize,
+            _uplo: Triangle,
+        ) -> Result<(), GprError> {
+            Err(GprError::InvalidHyperparameter {
+                reason: format!("persist unit kernel has no parameter pair ({i}, {j})"),
+            })
+        }
+
+        fn hess_points(
+            &self,
+            _x: MatRef<'_, f64>,
+            _d2_k: MatMut<'_, f64>,
+            i: usize,
+            j: usize,
+            _uplo: Triangle,
+        ) -> Result<(), GprError> {
+            Err(GprError::InvalidHyperparameter {
+                reason: format!("persist unit kernel has no parameter pair ({i}, {j})"),
+            })
+        }
+
         fn clone_box(&self) -> Box<dyn KernelTerm> {
             Box::new(self.clone())
         }

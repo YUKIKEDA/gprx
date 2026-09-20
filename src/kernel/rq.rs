@@ -249,6 +249,46 @@ impl RationalQuadraticKernel {
             })
         })
     }
+
+    /// Writes `∂²K/∂θ_i ∂θ_j`. Index 0 is `log(ℓ)`, index 1 is `log(α)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// range, or the same shape / non-finite errors as [`Self::apply`].
+    pub fn hess(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_rq_hess_idx(i, j)?;
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let alpha = self.alpha();
+        write_triangle(dist, d2_k, uplo, |d| {
+            let r2 = scaled_r2(d, ell_sq)?;
+            finite_kernel(rq_d2k(r2, alpha, i, j))
+        })
+    }
+
+    pub(crate) fn hess_from_coords(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_rq_hess_idx(i, j)?;
+        let ell_sq = self.lengthscale() * self.lengthscale();
+        let alpha = self.alpha();
+        write_square_from_coords(x, d2_k, uplo, |d| {
+            let r2 = scaled_r2(d, ell_sq)?;
+            finite_kernel(rq_d2k(r2, alpha, i, j))
+        })
+    }
 }
 
 pub(crate) fn rq_from_r2(r2: f64, alpha: f64) -> f64 {
@@ -272,6 +312,59 @@ pub(crate) fn rq_dk_dtheta_ard_dim(r2: f64, alpha: f64, dim_term: f64) -> f64 {
     let u = 1.0 + r2 / (2.0 * alpha);
     let k = u.powf(-alpha);
     (k / u) * dim_term
+}
+
+pub(crate) fn rq_d2k(r2: f64, alpha: f64, i: usize, j: usize) -> f64 {
+    let (a, b) = if i <= j { (i, j) } else { (j, i) };
+    let u = 1.0 + r2 / (2.0 * alpha);
+    let k = u.powf(-alpha);
+    match (a, b) {
+        (0, 0) => -2.0 * (k / u) * r2 + (1.0 + 1.0 / alpha) * r2 * r2 * k / (u * u),
+        (0, 1) => (k / u) * r2 * (-alpha * u.ln() + (alpha + 1.0) * (u - 1.0) / u),
+        (1, 1) => {
+            let v = -u.ln() + 1.0 - 1.0 / u;
+            let dv = (1.0 - u) * (1.0 - u) / (u * u);
+            let h = alpha * k * v;
+            h + (h * h) / k + alpha * k * dv
+        }
+        _ => 0.0,
+    }
+}
+
+pub(crate) fn rq_d2k_ard(
+    r2: f64,
+    alpha: f64,
+    dim_i: f64,
+    dim_j: f64,
+    i: usize,
+    j: usize,
+    d: usize,
+) -> f64 {
+    let u = 1.0 + r2 / (2.0 * alpha);
+    let k = u.powf(-alpha);
+    let alpha_idx = d;
+    if i == alpha_idx && j == alpha_idx {
+        return rq_d2k(r2, alpha, 1, 1);
+    }
+    if i == alpha_idx || j == alpha_idx {
+        let dim = if i == alpha_idx { dim_j } else { dim_i };
+        return (k / u) * dim * (-alpha * u.ln() + (alpha + 1.0) * (u - 1.0) / u);
+    }
+    if i == j {
+        -2.0 * (k / u) * dim_i + (1.0 + 1.0 / alpha) * dim_i * dim_i * k / (u * u)
+    } else {
+        (1.0 + 1.0 / alpha) * dim_i * dim_j * k / (u * u)
+    }
+}
+
+fn require_rq_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
+    if i <= 1 && j <= 1 {
+        Ok(())
+    } else {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("rational quadratic parameter pair ({i}, {j}) is out of range"),
+        })
+    }
 }
 
 pub(crate) fn finite_kernel(value: f64) -> Result<f64, GprError> {
@@ -424,6 +517,44 @@ mod tests {
             }
         }
         assert_close(upper[(1, 0)], -1.0);
+    }
+
+    #[test]
+    fn hess_matches_finite_difference_of_grad() {
+        let kernel = RationalQuadraticKernel::from_log(-0.2, 0.3).expect("valid");
+        let mut theta = [0.0; 2];
+        kernel.get_params(&mut theta).expect("len 2");
+        let h = 1e-6;
+        let dist = sq_dist_1d(&[0.0, 0.9, 1.7]);
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut plus_th = theta;
+                let mut minus_th = theta;
+                plus_th[j] += h;
+                minus_th[j] -= h;
+                let plus =
+                    RationalQuadraticKernel::from_log(plus_th[0], plus_th[1]).expect("valid");
+                let minus =
+                    RationalQuadraticKernel::from_log(minus_th[0], minus_th[1]).expect("valid");
+                let mut g_plus = fill(3, 0.0);
+                let mut g_minus = fill(3, 0.0);
+                let mut d2 = fill(3, 0.0);
+                plus.grad(dist.as_ref(), g_plus.as_mut(), i, Triangle::Full)
+                    .expect("plus");
+                minus
+                    .grad(dist.as_ref(), g_minus.as_mut(), i, Triangle::Full)
+                    .expect("minus");
+                kernel
+                    .hess(dist.as_ref(), d2.as_mut(), i, j, Triangle::Full)
+                    .expect("pair");
+                for col in 0..3 {
+                    for row in 0..3 {
+                        let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
+                        assert_close(d2[(row, col)], fd);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
