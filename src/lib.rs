@@ -44,6 +44,7 @@ mod gpr;
 pub mod kernel;
 mod likelihood;
 mod objective;
+mod online;
 mod optimizer;
 mod param;
 pub mod persist;
