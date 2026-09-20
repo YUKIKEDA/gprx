@@ -4,14 +4,13 @@ use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
+#[cfg(feature = "insert-stages")]
+use std::time::Instant;
 
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
-use crate::kernel::{
-    CompiledKernel, CoordMode, KernelSpec, MixedKernelViews, Triangle, fill_squared_euclidean,
-    fill_squared_euclidean_cross,
-};
+use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, fill_squared_euclidean_cross};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
@@ -20,10 +19,10 @@ use crate::optimizer::{Fixed, FullRecompute, Optimizer, PoleRecompute};
 use crate::persist::{self, PersistedModel, persist_err};
 use crate::precision::DoublePrecision;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::workspace::{QueryWorkspace, empty_thread_scratch};
+use crate::workspace::QueryWorkspace;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::factor::{add_noise_to_diag, pack_points_into, require_param_len, validate_query};
+use super::factor::{pack_points_into, require_param_len, validate_query};
 use super::{
     AllocWorkspace, DistanceCacheSlot, FittedGpr, Gpr, JitterPolicy, PointId, RetainCholesky,
 };
@@ -166,6 +165,46 @@ impl Clone for LazyAlpha {
             ready: Cell::new(self.ready.get()),
         }
     }
+}
+
+#[cfg(feature = "insert-stages")]
+mod insert_stages {
+    use std::cell::Cell;
+
+    thread_local! {
+        static KERNEL_S: Cell<f64> = const { Cell::new(0.0) };
+        static BORDER_S: Cell<f64> = const { Cell::new(0.0) };
+        static REST_S: Cell<f64> = const { Cell::new(0.0) };
+    }
+
+    pub(super) fn add_kernel(dt: f64) {
+        KERNEL_S.with(|slot| slot.set(slot.get() + dt));
+    }
+
+    pub(super) fn add_border(dt: f64) {
+        BORDER_S.with(|slot| slot.set(slot.get() + dt));
+    }
+
+    pub(super) fn add_rest(dt: f64) {
+        REST_S.with(|slot| slot.set(slot.get() + dt));
+    }
+
+    pub(super) fn take() -> (f64, f64, f64) {
+        (
+            KERNEL_S.with(|slot| slot.replace(0.0)),
+            BORDER_S.with(|slot| slot.replace(0.0)),
+            REST_S.with(|slot| slot.replace(0.0)),
+        )
+    }
+}
+
+/// Returns accumulated `insert` stage seconds `(kernel, border, rest)` and resets them.
+///
+/// Enabled only with the `insert-stages` crate feature used by `compare/perf`.
+#[cfg(feature = "insert-stages")]
+#[doc(hidden)]
+pub fn take_insert_stages() -> (f64, f64, f64) {
+    insert_stages::take()
 }
 
 impl PointRegistry {
@@ -537,6 +576,8 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
+        #[cfg(feature = "insert-stages")]
+        let kernel_start = Instant::now();
         let n = self.n;
         let d = self.d;
         self.query.ensure_at_least(n, 1, d)?;
@@ -581,7 +622,15 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
                 .fill_diag_points(self.query.query_x.as_ref().submatrix(0, 0, 1, d), &mut kss)?,
         }
         let k_new = kss[0] + self.likelihood.noise_variance();
+        #[cfg(feature = "insert-stages")]
+        insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
+        #[cfg(feature = "insert-stages")]
+        let border_start = Instant::now();
         self.workspace.append_border(k_new)?;
+        #[cfg(feature = "insert-stages")]
+        insert_stages::add_border(border_start.elapsed().as_secs_f64());
+        #[cfg(feature = "insert-stages")]
+        let rest_start = Instant::now();
         append_colmajor(&mut self.x_obs, n, d, x_new);
         self.y_obs.push(y_new);
         append_point_mat_inplace(&mut self.x, n, &self.query.query_xs[..xs_len]);
@@ -589,7 +638,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.n += 1;
         OnlineWorkspace::set_vector_prefix(&mut self.workspace.y, &self.y_train);
         self.alpha.invalidate();
-        Ok(self.registry.insert())
+        let id = self.registry.insert();
+        #[cfg(feature = "insert-stages")]
+        insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
+        Ok(id)
     }
 
     /// Removes the training point identified by `id` and packs every buffer.
@@ -1087,71 +1139,6 @@ impl<C: DistanceCacheSlot> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky> {
         fitted.refit()?;
         self.adopt_fitted(fitted)
     }
-}
-
-pub(crate) fn fill_train_a(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
-    dest: MatMut<'_, f64>,
-    dist_cache: MatMut<'_, f64>,
-    cache_dist: bool,
-    noise: f64,
-) -> Result<(), GprError> {
-    let n = x.nrows();
-    let mut scratch = Mat::zeros(n, n);
-    let mut thread_scratch = empty_thread_scratch();
-    let mut dest = dest;
-    {
-        let dest_n = dest.as_mut().submatrix_mut(0, 0, n, n);
-        match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => {
-                if cache_dist {
-                    let mut dist = dist_cache;
-                    fill_squared_euclidean(
-                        x,
-                        dist.as_mut().submatrix_mut(0, 0, n, n),
-                        &mut thread_scratch,
-                    );
-                    compiled.apply(
-                        dist.as_ref().submatrix(0, 0, n, n),
-                        dest_n,
-                        Triangle::Lower,
-                        scratch.as_mut(),
-                    )?;
-                } else {
-                    compiled.apply_points(x, dest_n, Triangle::Lower, scratch.as_mut())?;
-                }
-            }
-            CoordMode::Points => {
-                compiled.apply_points(x, dest_n, Triangle::Lower, scratch.as_mut())?;
-            }
-            CoordMode::Mixed => {
-                if cache_dist {
-                    let mut dist = dist_cache;
-                    fill_squared_euclidean(
-                        x,
-                        dist.as_mut().submatrix_mut(0, 0, n, n),
-                        &mut thread_scratch,
-                    );
-                    compiled.apply_mixed(
-                        MixedKernelViews::new(dist.as_ref().submatrix(0, 0, n, n), x),
-                        dest_n,
-                        Triangle::Lower,
-                        scratch.as_mut(),
-                    )?;
-                } else {
-                    compiled.apply_points(x, dest_n, Triangle::Lower, scratch.as_mut())?;
-                }
-            }
-        }
-    }
-    add_noise_to_diag(dest.as_mut().submatrix_mut(0, 0, n, n), noise);
-    for j in 0..n {
-        for i in (j + 1)..n {
-            dest[(j, i)] = dest[(i, j)];
-        }
-    }
-    Ok(())
 }
 
 fn fill_train_query_kernel(

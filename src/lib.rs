@@ -54,6 +54,9 @@ pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GprError};
+#[cfg(feature = "insert-stages")]
+#[doc(hidden)]
+pub use gpr::take_insert_stages;
 pub use gpr::{
     AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter,
     Gpr, JitterPolicy, NoDistanceCache, OnlineGpr, PointId, PredictOptions, Prediction,

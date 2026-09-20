@@ -50,6 +50,9 @@ fn na_row(name: &str, note: String) -> ResultRow {
         peak_rss_bytes: None,
         warmup: None,
         reps: None,
+        kernel_s: None,
+        border_s: None,
+        rest_s: None,
         note: Some(note),
     }
 }
@@ -121,6 +124,9 @@ fn run(case: &Case) -> ResultRow {
         peak_rss_bytes: peak,
         warmup: Some(warmup as u64),
         reps: Some(reps as u64),
+        kernel_s: None,
+        border_s: None,
+        rest_s: None,
         note: Some(format!(
             "factor at fixed theta; no public MLL+grad (case asked {} evals); discard {warmup} then {reps} timed",
             case.joint_evals

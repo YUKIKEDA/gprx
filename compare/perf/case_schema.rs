@@ -44,5 +44,11 @@ pub struct ResultRow {
     pub warmup: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rest_s: Option<f64>,
     pub note: Option<String>,
 }
