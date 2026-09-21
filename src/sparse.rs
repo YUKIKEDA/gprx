@@ -1958,6 +1958,247 @@ mod tests {
         );
     }
 
+    struct Rank1Vfe {
+        a: Mat<f64>,
+        b_l: Mat<f64>,
+        w: Vec<f64>,
+        k_diag_sum: f64,
+        a_frobenius2: f64,
+        k_mm_l: Mat<f64>,
+    }
+
+    impl Rank1Vfe {
+        fn from_fitted(fitted: &FittedSparseGpr<Fixed>) -> Self {
+            Self {
+                a: fitted.a.clone(),
+                b_l: fitted.b_l.clone(),
+                w: fitted.w.clone(),
+                k_diag_sum: fitted.k_diag_sum,
+                a_frobenius2: fitted.a_frobenius2,
+                k_mm_l: fitted.k_mm_l.clone(),
+            }
+        }
+    }
+
+    fn reconstruct_llt(l: &Mat<f64>, i: usize, j: usize) -> f64 {
+        let k_max = i.min(j);
+        let mut sum = 0.0;
+        for k in 0..=k_max {
+            sum += l[(i, k)] * l[(j, k)];
+        }
+        sum
+    }
+
+    fn chol_rank1_update(l: &mut Mat<f64>, v: &mut [f64]) {
+        let n = l.nrows();
+        for k in 0..n {
+            let lkk = l[(k, k)];
+            let vk = v[k];
+            let r = lkk.hypot(vk);
+            let c = r / lkk;
+            let s = vk / lkk;
+            l[(k, k)] = r;
+            for i in (k + 1)..n {
+                let li = l[(i, k)];
+                let vi = v[i];
+                l[(i, k)] = (li + s * vi) / c;
+                v[i] = c * vi - s * l[(i, k)];
+            }
+        }
+    }
+
+    fn chol_rank1_downdate(l: &mut Mat<f64>, v: &mut [f64]) -> Result<(), &'static str> {
+        let n = l.nrows();
+        for k in 0..n {
+            let lkk = l[(k, k)];
+            let vk = v[k];
+            let r2 = lkk * lkk - vk * vk;
+            if r2 <= 0.0 || !r2.is_finite() {
+                return Err("chol downdate lost positive definiteness");
+            }
+            let r = r2.sqrt();
+            let c = r / lkk;
+            let s = vk / lkk;
+            l[(k, k)] = r;
+            for i in (k + 1)..n {
+                let li = l[(i, k)];
+                let vi = v[i];
+                l[(i, k)] = (li - s * vi) / c;
+                v[i] = c * vi - s * l[(i, k)];
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_w(a: MatRef<'_, f64>, b_l: MatRef<'_, f64>, y: &[f64]) -> Vec<f64> {
+        let m = a.nrows();
+        let n = a.ncols();
+        let mut ay = Mat::zeros(m, 1);
+        for i in 0..m {
+            let mut sum = 0.0;
+            for j in 0..n {
+                sum += a[(i, j)] * y[j];
+            }
+            ay[(i, 0)] = sum;
+        }
+        solve_llt_in_place(b_l, ay.as_mut());
+        let mut w = vec![0.0; m];
+        for i in 0..m {
+            w[i] = ay[(i, 0)];
+        }
+        w
+    }
+
+    fn append_column(a: &Mat<f64>, col: MatRef<'_, f64>) -> Mat<f64> {
+        let m = a.nrows();
+        let n = a.ncols();
+        let mut out = Mat::zeros(m, n + 1);
+        for j in 0..n {
+            for i in 0..m {
+                out[(i, j)] = a[(i, j)];
+            }
+        }
+        for i in 0..m {
+            out[(i, n)] = col[(i, 0)];
+        }
+        out
+    }
+
+    fn remove_column(a: &Mat<f64>, idx: usize) -> Mat<f64> {
+        let m = a.nrows();
+        let n = a.ncols();
+        let mut out = Mat::zeros(m, n - 1);
+        let mut dest = 0;
+        for j in 0..n {
+            if j == idx {
+                continue;
+            }
+            for i in 0..m {
+                out[(i, dest)] = a[(i, j)];
+            }
+            dest += 1;
+        }
+        out
+    }
+
+    fn append_point(x: &[f64], n: usize, d: usize, x_new: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; (n + 1) * d];
+        for dim in 0..d {
+            for i in 0..n {
+                out[i + (n + 1) * dim] = x[i + n * dim];
+            }
+            out[n + (n + 1) * dim] = x_new[dim];
+        }
+        out
+    }
+
+    fn remove_point(x: &[f64], n: usize, d: usize, idx: usize) -> Vec<f64> {
+        let mut out = vec![0.0; (n - 1) * d];
+        for dim in 0..d {
+            let mut dest = 0;
+            for i in 0..n {
+                if i == idx {
+                    continue;
+                }
+                out[dest + (n - 1) * dim] = x[i + n * dim];
+                dest += 1;
+            }
+        }
+        out
+    }
+
+    fn point_at(x: &[f64], n: usize, d: usize, idx: usize) -> Vec<f64> {
+        let mut out = vec![0.0; d];
+        for dim in 0..d {
+            out[dim] = x[idx + n * dim];
+        }
+        out
+    }
+
+    fn kernel_column(
+        kernel: &KernelSpec,
+        z: &[f64],
+        m: usize,
+        x_pt: &[f64],
+        d: usize,
+    ) -> Result<Mat<f64>, GprError> {
+        let compiled = kernel.compile();
+        let z_mat = pack_points(z, m, d);
+        let x_mat = pack_points(x_pt, 1, d);
+        kernel_cross(&compiled, z_mat.as_ref(), x_mat.as_ref())
+    }
+
+    fn kernel_diag_at(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<f64, GprError> {
+        let compiled = kernel.compile();
+        let x_mat = pack_points(x_pt, 1, d);
+        let mut diag = vec![0.0; 1];
+        compiled.fill_diag_points(x_mat.as_ref(), &mut diag)?;
+        Ok(diag[0])
+    }
+
+    fn solve_lmm(k_mm_l: MatRef<'_, f64>, mut col: MatMut<'_, f64>) {
+        let m = k_mm_l.nrows();
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            k_mm_l,
+            col.as_mut(),
+            faer_par_dims(m, 1),
+        );
+    }
+
+    fn rank1_insert(
+        state: &mut Rank1Vfe,
+        kernel: &KernelSpec,
+        z: &[f64],
+        d: usize,
+        y: &mut Vec<f64>,
+        x_new: &[f64],
+        y_new: f64,
+    ) -> Result<(), GprError> {
+        let m = state.a.nrows();
+        let mut a_col = kernel_column(kernel, z, m, x_new, d)?;
+        solve_lmm(state.k_mm_l.as_ref(), a_col.as_mut());
+        let mut v = vec![0.0; m];
+        for (i, slot) in v.iter_mut().enumerate() {
+            *slot = a_col[(i, 0)];
+        }
+        state.a_frobenius2 += frobenius2(a_col.as_ref());
+        state.k_diag_sum += kernel_diag_at(kernel, x_new, d)?;
+        state.a = append_column(&state.a, a_col.as_ref());
+        chol_rank1_update(&mut state.b_l, &mut v);
+        y.push(y_new);
+        state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y);
+        Ok(())
+    }
+
+    fn rank1_delete(
+        state: &mut Rank1Vfe,
+        kernel: &KernelSpec,
+        x: &[f64],
+        n: usize,
+        d: usize,
+        y: &mut Vec<f64>,
+        idx: usize,
+    ) -> Result<(), String> {
+        let m = state.a.nrows();
+        let mut v = vec![0.0; m];
+        for (i, slot) in v.iter_mut().enumerate() {
+            *slot = state.a[(i, idx)];
+        }
+        let x_pt = point_at(x, n, d, idx);
+        let diag = kernel_diag_at(kernel, &x_pt, d).map_err(|e| e.to_string())?;
+        let mut col_norm = 0.0;
+        for value in &v {
+            col_norm += *value * *value;
+        }
+        state.k_diag_sum -= diag;
+        state.a_frobenius2 -= col_norm;
+        state.a = remove_column(&state.a, idx);
+        chol_rank1_downdate(&mut state.b_l, &mut v)?;
+        y.remove(idx);
+        state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y);
+        Ok(())
+    }
+
     fn factor_sparse(
         kernel: KernelSpec,
         x: &[f64],
@@ -2745,5 +2986,156 @@ mod tests {
             &z,
             2,
         );
+    }
+
+    fn assert_rank1_matches_factor(got: &Rank1Vfe, want: &FittedSparseGpr<Fixed>) {
+        assert_eq!(got.a.nrows(), want.a.nrows());
+        assert_eq!(got.a.ncols(), want.a.ncols());
+        for j in 0..got.a.ncols() {
+            for i in 0..got.a.nrows() {
+                assert_close(got.a[(i, j)], want.a[(i, j)]);
+            }
+        }
+        let m = got.b_l.nrows();
+        assert_eq!(want.b_l.nrows(), m);
+        for j in 0..m {
+            for i in j..m {
+                assert_close(
+                    reconstruct_llt(&got.b_l, i, j),
+                    reconstruct_llt(&want.b_l, i, j),
+                );
+            }
+        }
+        assert_eq!(got.w.len(), want.w.len());
+        for i in 0..got.w.len() {
+            assert_close(got.w[i], want.w[i]);
+        }
+        assert_close(got.k_diag_sum, want.k_diag_sum);
+        assert_close(got.a_frobenius2, want.a_frobenius2);
+    }
+
+    struct Rank1Case<'a> {
+        kernel: KernelSpec,
+        x: &'a [f64],
+        n: usize,
+        d: usize,
+        y: &'a [f64],
+        z: &'a [f64],
+        m: usize,
+        x_new: &'a [f64],
+        y_new: f64,
+        delete_idx: usize,
+    }
+
+    fn assert_rank1_insert_delete(case: Rank1Case<'_>) {
+        let Rank1Case {
+            kernel,
+            x,
+            n,
+            d,
+            y,
+            z,
+            m,
+            x_new,
+            y_new,
+            delete_idx,
+        } = case;
+        let fitted = factor_sparse(kernel.clone(), x, n, d, y, z, m);
+        let mut inserted = Rank1Vfe::from_fitted(&fitted);
+        let mut y_ins = y.to_vec();
+        rank1_insert(&mut inserted, &kernel, z, d, &mut y_ins, x_new, y_new).expect("insert");
+        let x_ins = append_point(x, n, d, x_new);
+        let oracle_ins = factor_sparse(kernel.clone(), &x_ins, n + 1, d, &y_ins, z, m);
+        assert_rank1_matches_factor(&inserted, &oracle_ins);
+
+        let mut deleted = Rank1Vfe::from_fitted(&fitted);
+        let mut y_del = y.to_vec();
+        rank1_delete(&mut deleted, &kernel, x, n, d, &mut y_del, delete_idx).expect("delete");
+        let x_del = remove_point(x, n, d, delete_idx);
+        let oracle_del = factor_sparse(kernel, &x_del, n - 1, d, &y_del, z, m);
+        assert_rank1_matches_factor(&deleted, &oracle_del);
+    }
+
+    #[test]
+    fn chol_rank1_update_and_downdate_2x2() {
+        let mut l = Mat::zeros(2, 2);
+        l[(0, 0)] = 2.0;
+        l[(1, 0)] = 1.0;
+        l[(1, 1)] = 1.0;
+        let mut v = [1.0, 0.0];
+        chol_rank1_update(&mut l, &mut v);
+        assert_close(reconstruct_llt(&l, 0, 0), 5.0);
+        assert_close(reconstruct_llt(&l, 1, 0), 2.0);
+        assert_close(reconstruct_llt(&l, 1, 1), 2.0);
+        let mut back = [1.0, 0.0];
+        chol_rank1_downdate(&mut l, &mut back).expect("downdate");
+        assert_close(reconstruct_llt(&l, 0, 0), 4.0);
+        assert_close(reconstruct_llt(&l, 1, 0), 2.0);
+        assert_close(reconstruct_llt(&l, 1, 1), 2.0);
+    }
+
+    #[test]
+    fn rank1_rbf_n4_m2_matches_factor() {
+        assert_rank1_insert_delete(Rank1Case {
+            kernel: KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            x: &[0.0, 1.0, 2.0, 3.0],
+            n: 4,
+            d: 1,
+            y: &[0.0, 1.0, 0.5, 0.25],
+            z: &[0.5, 2.5],
+            m: 2,
+            x_new: &[4.0],
+            y_new: 0.1,
+            delete_idx: 1,
+        });
+    }
+
+    #[test]
+    fn rank1_matern_n4_m2_matches_factor() {
+        assert_rank1_insert_delete(Rank1Case {
+            kernel: KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves).expect("ℓ")),
+            x: &[0.0, 1.0, 2.0, 3.0],
+            n: 4,
+            d: 1,
+            y: &[0.0, 1.0, 0.5, 0.25],
+            z: &[0.5, 2.5],
+            m: 2,
+            x_new: &[4.0],
+            y_new: 0.1,
+            delete_idx: 1,
+        });
+    }
+
+    #[test]
+    fn rank1_rbf_ard_n4_m2_matches_factor() {
+        assert_rank1_insert_delete(Rank1Case {
+            kernel: KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ")),
+            x: &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+            n: 4,
+            d: 2,
+            y: &[0.0, 1.0, 0.5, 0.25],
+            z: &[0.25, 0.75, 0.25, 0.75],
+            m: 2,
+            x_new: &[0.5, 0.5],
+            y_new: 0.1,
+            delete_idx: 1,
+        });
+    }
+
+    #[test]
+    fn rank1_rbf_plus_white_n4_m2_matches_factor() {
+        assert_rank1_insert_delete(Rank1Case {
+            kernel: KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+                + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
+            x: &[0.0, 1.0, 2.0, 3.0],
+            n: 4,
+            d: 1,
+            y: &[0.0, 1.0, 0.5, 0.25],
+            z: &[0.5, 2.5],
+            m: 2,
+            x_new: &[4.0],
+            y_new: 0.1,
+            delete_idx: 1,
+        });
     }
 }
