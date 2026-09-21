@@ -409,7 +409,7 @@ struct PredictOptions {
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
-Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。factor / ELBO / 対角予測は P4-15。`Adam` / `fit` は P4-16。公開型は `SparseGpr` / `FittedSparseGpr`。既定は `SparseGpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`SparseGpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSparseGpr` は対角の `predict` / `predict_with`、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。k-means は置かない。
+Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`FittedSvgp` は対角の `predict` / `predict_with` と `neg_elbo` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSparseGpr` と一致する。`Adam` / ミニバッチ `fit` は P4-16。公開型は `SparseGpr` / `FittedSparseGpr`。既定は `SparseGpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`SparseGpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSparseGpr` は対角の `predict` / `predict_with`、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。k-means は置かない。
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。
 
@@ -876,7 +876,7 @@ impl OnlineGpr<O, S, C, B> {
 3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
 4. **Sparse GPRの誘導点Zの最適化**: 既定は `FixedInducing`。自由 Z は `FreeInducing` で同時。理由は [ADR 0003](adr/0003-sparse-z-joint.md)
 5. **Sparse の外部照合**: バッチは P4-11（P4-15 のあと）、オンラインは P4-13。時間は P4-12 / P4-14。相手と許容は Grill 後
-6. **SVGP**: 別公開型。factor / ELBO / 対角予測は P4-15。`Adam` / ミニバッチ `fit` は P4-16（DoD は Grill 後）。VFE の `SparseGpr` は残す
+6. **SVGP**: 別公開型 `Svgp` / `FittedSvgp`。`factor` / 全データ ELBO / 対角予測は載った。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Adam` / ミニバッチ `fit` は P4-16（DoD は Grill 後）。VFE の `SparseGpr` は残す
 
 ## 15. ベンチマーク戦略
 

@@ -1,0 +1,169 @@
+//! Trainer for stochastic variational GPR.
+
+use std::marker::PhantomData;
+
+use crate::error::GprError;
+use crate::gpr::factor::{require_param_len, write_params};
+use crate::kernel::KernelSpec;
+use crate::likelihood::GaussianLikelihood;
+use crate::optimizer::Fixed;
+
+use super::factor::assemble_fitted;
+use super::fitted::FittedSvgp;
+
+/// Trainer for stochastic variational GPR at a caller-supplied inducing set `Z`.
+///
+/// [`Svgp<Fixed>::factor`] prepares `K_mm` and a whitened prior `q(u)`
+/// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`. Mini-batch
+/// `fit` is a later type parameter, not a flag on this trainer.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Svgp};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+/// let likelihood = GaussianLikelihood::new(0.1)?;
+/// let fitted = Svgp::new(kernel, likelihood)
+///     .factor(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
+///     .map_err(|(_, e)| e)?;
+/// assert_eq!(fitted.n(), 4);
+/// assert_eq!(fitted.m(), 2);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Svgp<O = Fixed> {
+    pub(crate) kernel: KernelSpec,
+    pub(crate) likelihood: GaussianLikelihood,
+    pub(crate) optimizer: PhantomData<O>,
+}
+
+impl Svgp {
+    /// Builds a trainer with the current kernel `θ` and [`Fixed`].
+    ///
+    /// Inducing coordinates are an argument of [`Svgp<Fixed>::factor`], not
+    /// of this constructor. The whitened prior is allocated at `factor` from
+    /// the inducing count.
+    pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
+        Self {
+            kernel,
+            likelihood,
+            optimizer: PhantomData,
+        }
+    }
+}
+
+impl<O> Svgp<O> {
+    /// Returns the kernel whose hyperparameters this trainer owns.
+    pub fn kernel(&self) -> &KernelSpec {
+        &self.kernel
+    }
+
+    /// Returns the observation-noise model.
+    pub fn likelihood(&self) -> &GaussianLikelihood {
+        &self.likelihood
+    }
+
+    /// Returns the concatenated kernel and likelihood parameter count.
+    ///
+    /// Inducing coordinates and the variational posterior are not counted.
+    pub fn num_params(&self) -> usize {
+        self.kernel.num_params() + self.likelihood.num_params()
+    }
+
+    /// Writes kernel `θ` then likelihood `θ` into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// or a custom leaf rejects the write.
+    pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+        write_params(&self.kernel, &self.likelihood, out)
+    }
+
+    /// Sets kernel then likelihood `θ` without forming the SVGP system.
+    ///
+    /// `params` is kernel parameters followed by the likelihood parameter,
+    /// matching [`Self::get_params`]. Inducing coordinates are not in this
+    /// slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// length, or [`GprError::InvalidNoiseVariance`] if the likelihood `θ`
+    /// is invalid. Kernel and likelihood `θ` are committed together only
+    /// after both writes succeed.
+    pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
+        let n_kernel = self.kernel.num_params();
+        require_param_len(params.len(), self.num_params())?;
+        let mut kernel = self.kernel.clone();
+        kernel.set_params(&params[..n_kernel])?;
+        let mut likelihood = self.likelihood;
+        likelihood.set_params(&params[n_kernel..])?;
+        self.kernel = kernel;
+        self.likelihood = likelihood;
+        Ok(())
+    }
+}
+
+impl Svgp<Fixed> {
+    /// Factors `K_mm` and installs a whitened prior `q(u)` at the current `θ`.
+    ///
+    /// `x` and `z` are column-major (`n` / `m` points by `d` features). `Z`
+    /// is supplied by the caller and is not a parameter. Likelihood noise is
+    /// not added to `K_mm`. The variational mean is zero and the whitened
+    /// Cholesky factor is the identity of order `m`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] when `n`, `d`, or `m` is zero.
+    /// Returns [`GprError::DimensionMismatch`] when `z` is packed with a
+    /// different feature count than `x` (the same `n_cols` is required).
+    /// Length and finiteness errors match [`crate::Gpr::fit`].
+    /// [`GprError::CholeskyFailed`] when `K_mm` cannot be factored.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let fitted = Svgp::new(kernel, likelihood)
+    ///     .factor(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.num_params(), 7);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
+    pub fn factor(
+        self,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+        z: &[f64],
+        n_inducing: usize,
+    ) -> Result<FittedSvgp, (Self, GprError)> {
+        match assemble_fitted(
+            self.kernel.clone(),
+            self.likelihood,
+            x,
+            n_rows,
+            n_cols,
+            y,
+            z,
+            n_inducing,
+            None,
+        ) {
+            Ok(fitted) => Ok(fitted),
+            Err(err) => Err((self, err)),
+        }
+    }
+}
