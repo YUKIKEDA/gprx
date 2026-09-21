@@ -1188,3 +1188,147 @@ fn rank1_rbf_plus_white_n4_m2_matches_factor() {
         delete_idx: 1,
     });
 }
+
+fn vfe_from_fitted(fitted: &FittedSparseGpr<Fixed>) -> VfeState {
+    VfeState {
+        k_mm_l: fitted.k_mm_l.clone(),
+        a: fitted.a.clone(),
+        b_l: fitted.b_l.clone(),
+        w: fitted.w.clone(),
+        k_diag_sum: fitted.k_diag_sum,
+        a_frobenius2: fitted.a_frobenius2,
+    }
+}
+
+fn assert_inducing_matches_factor(got: &VfeState, want: &FittedSparseGpr<Fixed>) {
+    assert_eq!(got.a.nrows(), want.a.nrows());
+    assert_eq!(got.a.ncols(), want.a.ncols());
+    for j in 0..got.a.ncols() {
+        for i in 0..got.a.nrows() {
+            assert_close(got.a[(i, j)], want.a[(i, j)]);
+        }
+    }
+    let m = got.k_mm_l.nrows();
+    assert_eq!(want.k_mm_l.nrows(), m);
+    assert_eq!(got.b_l.nrows(), m);
+    assert_eq!(want.b_l.nrows(), m);
+    for j in 0..m {
+        for i in j..m {
+            assert_close(
+                reconstruct_llt(&got.k_mm_l, i, j),
+                reconstruct_llt(&want.k_mm_l, i, j),
+            );
+            assert_close(
+                reconstruct_llt(&got.b_l, i, j),
+                reconstruct_llt(&want.b_l, i, j),
+            );
+        }
+    }
+    assert_eq!(got.w.len(), want.w.len());
+    for i in 0..got.w.len() {
+        assert_close(got.w[i], want.w[i]);
+    }
+    assert_close(got.k_diag_sum, want.k_diag_sum);
+    assert_close(got.a_frobenius2, want.a_frobenius2);
+}
+
+struct InducingCase<'a> {
+    kernel: KernelSpec,
+    x: &'a [f64],
+    n: usize,
+    d: usize,
+    y: &'a [f64],
+    z: &'a [f64],
+    m: usize,
+    z_new: &'a [f64],
+    delete_idx: usize,
+}
+
+fn assert_inducing_insert_delete(case: InducingCase<'_>) {
+    let InducingCase {
+        kernel,
+        x,
+        n,
+        d,
+        y,
+        z,
+        m,
+        z_new,
+        delete_idx,
+    } = case;
+    let fitted = factor_sparse(kernel.clone(), x, n, d, y, z, m);
+    let noise = fitted.likelihood.noise_variance();
+    let mut inserted = vfe_from_fitted(&fitted);
+    inducing_insert(&mut inserted, &kernel, noise, x, n, d, y, z, m, z_new)
+        .expect("insert inducing");
+    let z_ins = append_point(z, m, d, z_new);
+    let oracle_ins = factor_sparse(kernel.clone(), x, n, d, y, &z_ins, m + 1);
+    assert_inducing_matches_factor(&inserted, &oracle_ins);
+
+    let mut deleted = vfe_from_fitted(&fitted);
+    inducing_delete(&mut deleted, noise, y, delete_idx).expect("delete inducing");
+    let z_del = remove_point(z, m, d, delete_idx);
+    let oracle_del = factor_sparse(kernel, x, n, d, y, &z_del, m - 1);
+    assert_inducing_matches_factor(&deleted, &oracle_del);
+}
+
+#[test]
+fn inducing_rbf_n4_m2_matches_factor() {
+    assert_inducing_insert_delete(InducingCase {
+        kernel: KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+        x: &[0.0, 1.0, 2.0, 3.0],
+        n: 4,
+        d: 1,
+        y: &[0.0, 1.0, 0.5, 0.25],
+        z: &[0.5, 2.5],
+        m: 2,
+        z_new: &[1.5],
+        delete_idx: 0,
+    });
+}
+
+#[test]
+fn inducing_matern_n4_m2_matches_factor() {
+    assert_inducing_insert_delete(InducingCase {
+        kernel: KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves).expect("ℓ")),
+        x: &[0.0, 1.0, 2.0, 3.0],
+        n: 4,
+        d: 1,
+        y: &[0.0, 1.0, 0.5, 0.25],
+        z: &[0.5, 2.5],
+        m: 2,
+        z_new: &[1.5],
+        delete_idx: 0,
+    });
+}
+
+#[test]
+fn inducing_rbf_ard_n4_m2_matches_factor() {
+    assert_inducing_insert_delete(InducingCase {
+        kernel: KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ")),
+        x: &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        n: 4,
+        d: 2,
+        y: &[0.0, 1.0, 0.5, 0.25],
+        z: &[0.25, 0.75, 0.25, 0.75],
+        m: 2,
+        z_new: &[0.5, 0.5],
+        delete_idx: 0,
+    });
+}
+
+#[test]
+fn inducing_rbf_plus_white_n4_m2_matches_factor() {
+    assert_inducing_insert_delete(InducingCase {
+        kernel: KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+            + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
+        x: &[0.0, 1.0, 2.0, 3.0],
+        n: 4,
+        d: 1,
+        y: &[0.0, 1.0, 0.5, 0.25],
+        z: &[0.5, 2.5],
+        m: 2,
+        z_new: &[1.5],
+        delete_idx: 0,
+    });
+}
