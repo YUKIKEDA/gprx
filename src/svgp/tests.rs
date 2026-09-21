@@ -1,0 +1,294 @@
+use super::*;
+use crate::error::GprError;
+use crate::gpr::JitterPolicy;
+use crate::gpr::factor::cholesky_lower_with_policy;
+use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
+use crate::likelihood::GaussianLikelihood;
+use crate::workspace::{faer_par, faer_par_dims};
+use crate::{Fixed, PredictOptions, SparseGpr, VarianceKind};
+use dyn_stack::MemBuffer;
+use faer::linalg::cholesky::llt;
+use faer::{Mat, MatRef};
+
+const TOL: f64 = 1e-12;
+
+fn assert_close(actual: f64, expected: f64) {
+    let scale = expected.abs().max(1.0);
+    assert!(
+        (actual - expected).abs() <= TOL * scale,
+        "actual={actual}, expected={expected}"
+    );
+}
+
+const X_1D: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
+const Y: [f64; 4] = [0.0, 1.0, 0.5, 0.25];
+const Z_1D: [f64; 2] = [0.5, 2.5];
+const X_ARD: [f64; 8] = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0];
+const Z_ARD: [f64; 4] = [0.25, 0.75, 0.25, 0.75];
+
+fn kernel_rbf() -> KernelSpec {
+    KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+}
+
+fn kernel_matern() -> KernelSpec {
+    KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves).expect("ℓ"))
+}
+
+fn kernel_ard() -> KernelSpec {
+    KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ"))
+}
+
+fn kernel_rbf_white() -> KernelSpec {
+    KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+        + KernelSpec::from(WhiteKernel::new(0.05).expect("white"))
+}
+
+struct Case {
+    kernel: KernelSpec,
+    x: &'static [f64],
+    n: usize,
+    d: usize,
+    z: &'static [f64],
+}
+
+fn cases() -> [Case; 4] {
+    [
+        Case {
+            kernel: kernel_rbf(),
+            x: &X_1D,
+            n: 4,
+            d: 1,
+            z: &Z_1D,
+        },
+        Case {
+            kernel: kernel_matern(),
+            x: &X_1D,
+            n: 4,
+            d: 1,
+            z: &Z_1D,
+        },
+        Case {
+            kernel: kernel_ard(),
+            x: &X_ARD,
+            n: 4,
+            d: 2,
+            z: &Z_ARD,
+        },
+        Case {
+            kernel: kernel_rbf_white(),
+            x: &X_1D,
+            n: 4,
+            d: 1,
+            z: &Z_1D,
+        },
+    ]
+}
+
+fn factor_svgp(kernel: KernelSpec, x: &[f64], n: usize, d: usize, z: &[f64]) -> FittedSvgp {
+    Svgp::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .factor(x, n, d, &Y, z, 2)
+        .map_err(|(_, e)| e)
+        .expect("svgp factor")
+}
+
+fn factor_vfe(
+    kernel: KernelSpec,
+    x: &[f64],
+    n: usize,
+    d: usize,
+    z: &[f64],
+) -> crate::FittedSparseGpr<Fixed> {
+    SparseGpr::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .with_optimizer(Fixed)
+        .factor(x, n, d, &Y, z, 2)
+        .map_err(|(_, e)| e)
+        .expect("vfe factor")
+}
+
+fn cholesky_lower(mat: &mut Mat<f64>) {
+    let n = mat.nrows();
+    let req = llt::factor::cholesky_in_place_scratch::<f64>(n, faer_par(n), Default::default());
+    let mut scratch = MemBuffer::new(req);
+    cholesky_lower_with_policy(
+        mat,
+        &mut scratch,
+        JitterPolicy::default(),
+        crate::error::CholeskyStage::Fit,
+    )
+    .expect("chol");
+}
+
+fn titsias_whitened_q(vfe: &crate::FittedSparseGpr<Fixed>) -> (Vec<f64>, Mat<f64>) {
+    let m = vfe.m();
+    let noise = vfe.likelihood().noise_variance();
+    let mean = vfe.w.clone();
+    let mut inv = Mat::zeros(m, m);
+    for i in 0..m {
+        inv[(i, i)] = 1.0;
+    }
+    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+        vfe.b_l.as_ref(),
+        inv.as_mut(),
+        faer_par_dims(m, m),
+    );
+    let mut s = Mat::zeros(m, m);
+    for j in 0..m {
+        for i in j..m {
+            let mut sum = 0.0;
+            for k in 0..m {
+                sum += inv[(k, i)] * inv[(k, j)];
+            }
+            s[(i, j)] = noise * sum;
+        }
+    }
+    cholesky_lower(&mut s);
+    (mean, s)
+}
+
+fn write_q_params(fitted: &FittedSvgp, mean: &[f64], l: MatRef<'_, f64>) -> Vec<f64> {
+    let mut params = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut params).expect("get");
+    let n_theta = fitted.kernel().num_params() + fitted.likelihood().num_params();
+    super::factor::pack_q(mean, l, &mut params[n_theta..]);
+    params
+}
+
+fn independent_neg_elbo(
+    a: MatRef<'_, f64>,
+    q_mean: &[f64],
+    q_l: MatRef<'_, f64>,
+    y: &[f64],
+    k_diag: &[f64],
+    noise: f64,
+) -> f64 {
+    let n = y.len();
+    let m = q_mean.len();
+    let mut tr_s = 0.0;
+    let mut log_det_s = 0.0;
+    for i in 0..m {
+        for j in 0..m {
+            tr_s += q_l[(i, j)] * q_l[(i, j)];
+        }
+        log_det_s += q_l[(i, i)].ln();
+    }
+    log_det_s *= 2.0;
+    let mean_norm2: f64 = q_mean.iter().map(|v| v * v).sum();
+    let kl = 0.5 * (tr_s + mean_norm2 - m as f64 - log_det_s);
+    let c = 0.5 * (2.0 * std::f64::consts::PI * noise).ln();
+    let inv_noise = 1.0 / noise;
+    let mut ell = 0.0;
+    for i in 0..n {
+        let mut mu = 0.0;
+        let mut a_norm = 0.0;
+        for r in 0..m {
+            mu += a[(r, i)] * q_mean[r];
+            a_norm += a[(r, i)] * a[(r, i)];
+        }
+        // ‖Lᵀ a‖² via the product (Lᵀ a)_j = Σ_i L_{ij} a_i
+        let mut lt_norm = 0.0;
+        for j in 0..m {
+            let mut acc = 0.0;
+            for i_row in 0..m {
+                acc += q_l[(i_row, j)] * a[(i_row, i)];
+            }
+            lt_norm += acc * acc;
+        }
+        let var = k_diag[i] - a_norm + lt_norm;
+        let resid = y[i] - mu;
+        ell += -c - 0.5 * inv_noise * (resid * resid + var);
+    }
+    -(ell - kl)
+}
+
+#[test]
+fn factor_installs_whitened_prior() {
+    let fitted = factor_svgp(kernel_rbf(), &X_1D, 4, 1, &Z_1D);
+    let mut params = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut params).expect("get");
+    let n_theta = fitted.kernel().num_params() + fitted.likelihood().num_params();
+    assert_eq!(n_theta, 2);
+    assert_close(params[n_theta], 0.0);
+    assert_close(params[n_theta + 1], 0.0);
+    // packed L = I: L00, L10, L11
+    assert_close(params[n_theta + 2], 1.0);
+    assert_close(params[n_theta + 3], 0.0);
+    assert_close(params[n_theta + 4], 1.0);
+}
+
+#[test]
+fn set_params_rejects_non_positive_l_diag() {
+    let mut fitted = factor_svgp(kernel_rbf(), &X_1D, 4, 1, &Z_1D);
+    let mut params = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut params).expect("get");
+    let n_theta = fitted.kernel().num_params() + fitted.likelihood().num_params();
+    params[n_theta + 2] = 0.0;
+    let err = fitted.set_params(&params).expect_err("diag");
+    assert!(matches!(err, GprError::InvalidHyperparameter { .. }));
+}
+
+#[test]
+fn titsias_q_matches_vfe_nlml_and_predict() {
+    for case in cases() {
+        let vfe = factor_vfe(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let mut svgp = factor_svgp(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let (mean, l) = titsias_whitened_q(&vfe);
+        let params = write_q_params(&svgp, &mean, l.as_ref());
+        svgp.set_params(&params).expect("set q");
+        assert_close(
+            svgp.neg_elbo().expect("elbo"),
+            vfe.neg_log_marginal_likelihood().expect("nlml"),
+        );
+        let pred_s = svgp.predict(case.x, case.n, case.d).expect("svgp pred");
+        let pred_v = vfe.predict(case.x, case.n, case.d).expect("vfe pred");
+        for i in 0..case.n {
+            assert_close(pred_s.mean[i], pred_v.mean[i]);
+            assert_close(pred_s.variance[i], pred_v.variance[i]);
+        }
+        let latent_s = svgp
+            .predict_with(
+                case.x,
+                case.n,
+                case.d,
+                PredictOptions {
+                    variance_kind: VarianceKind::Latent,
+                },
+            )
+            .expect("svgp latent");
+        let latent_v = vfe
+            .predict_with(
+                case.x,
+                case.n,
+                case.d,
+                PredictOptions {
+                    variance_kind: VarianceKind::Latent,
+                },
+            )
+            .expect("vfe latent");
+        for i in 0..case.n {
+            assert_close(latent_s.variance[i], latent_v.variance[i]);
+        }
+    }
+}
+
+#[test]
+fn shifted_q_matches_independent_elbo() {
+    for case in cases() {
+        let vfe = factor_vfe(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let mut svgp = factor_svgp(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let (mut mean, mut l) = titsias_whitened_q(&vfe);
+        mean[0] += 0.15;
+        l[(0, 0)] *= 1.1;
+        l[(1, 0)] += 0.05;
+        let params = write_q_params(&svgp, &mean, l.as_ref());
+        svgp.set_params(&params).expect("set q");
+        let independent = independent_neg_elbo(
+            svgp.a.as_ref(),
+            &svgp.q_mean,
+            svgp.q_l.as_ref(),
+            svgp.y(),
+            &svgp.k_diag,
+            svgp.likelihood().noise_variance(),
+        );
+        assert_close(svgp.neg_elbo().expect("elbo"), independent);
+    }
+}
