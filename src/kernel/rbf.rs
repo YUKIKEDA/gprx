@@ -266,6 +266,224 @@ impl RbfKernel {
             rbf_hess_from_sq_dist(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
+
+    /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
+    ///
+    /// `∂k/∂x2_e = k (x1_e - x2_e) / ℓ²`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] or [`GprError::DimensionMismatch`] when
+    /// the views are empty or `dim` is out of range, [`GprError::NonFiniteInput`]
+    /// when a coordinate is not finite, or [`GprError::InvalidHyperparameter`]
+    /// when `d_k` is the wrong shape.
+    pub fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (k, delta) = rbf_pair(x1, row, x2, col, dim, inv_two_ell_sq)?;
+                d_k[(row, col)] = k * delta * inv_ell_sq;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_dims(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (k, da, db) =
+                    rbf_pair_two_dims(x1, row, x2, col, dim_a, dim_b, inv_two_ell_sq)?;
+                let mut value = k * da * db * inv_ell_sq * inv_ell_sq;
+                if dim_a == dim_b {
+                    value -= k * inv_ell_sq;
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (k, d1, d2) =
+                    rbf_pair_two_dims(x1, row, x2, col, dim_x1, dim_x2, inv_two_ell_sq)?;
+                let mut value = -k * d1 * d2 * inv_ell_sq * inv_ell_sq;
+                if dim_x1 == dim_x2 {
+                    value += k * inv_ell_sq;
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_theta_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        param_idx: usize,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "RBF has a single parameter at index 0".to_owned(),
+            });
+        }
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (k, delta, s) = rbf_pair_with_s(x1, row, x2, col, dim, inv_two_ell_sq)?;
+                d2_k[(row, col)] = k * delta * inv_ell_sq * (s * inv_ell_sq - 2.0);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn grad_cross_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "RBF has a single parameter at index 0".to_owned(),
+            });
+        }
+        super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (k, _, s) = rbf_pair_with_s(x1, row, x2, col, 0, inv_two_ell_sq)?;
+                d_k[(row, col)] = k * s * inv_ell_sq;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_cross_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_rbf_hess_idx(i, j)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), 0)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (_, _, s) = rbf_pair_with_s(x1, row, x2, col, 0, inv_two_ell_sq)?;
+                d2_k[(row, col)] = rbf_hess_from_sq_dist(s, inv_two_ell_sq, inv_ell_sq)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn rbf_pair(
+    x1: MatRef<'_, f64>,
+    i: usize,
+    x2: MatRef<'_, f64>,
+    j: usize,
+    dim: usize,
+    inv_two_ell_sq: f64,
+) -> Result<(f64, f64), GprError> {
+    let (k, delta, _) = rbf_pair_with_s(x1, i, x2, j, dim, inv_two_ell_sq)?;
+    Ok((k, delta))
+}
+
+fn rbf_pair_two_dims(
+    x1: MatRef<'_, f64>,
+    i: usize,
+    x2: MatRef<'_, f64>,
+    j: usize,
+    dim_a: usize,
+    dim_b: usize,
+    inv_two_ell_sq: f64,
+) -> Result<(f64, f64, f64), GprError> {
+    let mut s = 0.0;
+    for d in 0..x1.ncols() {
+        let a = x1[(i, d)];
+        let b = x2[(j, d)];
+        if !a.is_finite() || !b.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let delta = a - b;
+        s += delta * delta;
+    }
+    let k = (-s * inv_two_ell_sq).exp();
+    if !k.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    Ok((
+        k,
+        x1[(i, dim_a)] - x2[(j, dim_a)],
+        x1[(i, dim_b)] - x2[(j, dim_b)],
+    ))
+}
+
+fn rbf_pair_with_s(
+    x1: MatRef<'_, f64>,
+    i: usize,
+    x2: MatRef<'_, f64>,
+    j: usize,
+    dim: usize,
+    inv_two_ell_sq: f64,
+) -> Result<(f64, f64, f64), GprError> {
+    let mut s = 0.0;
+    for d in 0..x1.ncols() {
+        let a = x1[(i, d)];
+        let b = x2[(j, d)];
+        if !a.is_finite() || !b.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let delta = a - b;
+        s += delta * delta;
+    }
+    let k = (-s * inv_two_ell_sq).exp();
+    if !k.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    Ok((k, x1[(i, dim)] - x2[(j, dim)], s))
 }
 
 fn rbf_from_sq_dist(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {

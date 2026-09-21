@@ -264,9 +264,83 @@ impl WhiteKernel {
         self.write_square(d2_k, uplo)
     }
 
+    /// Writes the zero coordinate derivative of a white kernel.
+    ///
+    /// Cross-covariance is identically zero, and the square diagonal does not
+    /// depend on coordinates.
+    ///
+    /// # Errors
+    ///
+    /// Same shape errors as [`RbfKernel::grad_wrt_coord_dim`].
+    pub fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
+        for col in 0..d_k.ncols() {
+            for row in 0..d_k.nrows() {
+                d_k[(row, col)] = 0.0;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_dims(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
+        fill_zero(d2_k.as_mut());
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
+        fill_zero(d2_k.as_mut());
+        Ok(())
+    }
+
+    pub(crate) fn hess_theta_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        param_idx: usize,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        require_param_idx(param_idx)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
+        fill_zero(d2_k.as_mut());
+        Ok(())
+    }
+
     fn write_square(&self, out: MatMut<'_, f64>, uplo: Triangle) -> Result<(), GprError> {
         let var = self.variance();
         write_square(out, uplo, |row, col| Ok(if row == col { var } else { 0.0 }))
+    }
+}
+
+fn fill_zero(mut out: MatMut<'_, f64>) {
+    for col in 0..out.ncols() {
+        for row in 0..out.nrows() {
+            out[(row, col)] = 0.0;
+        }
     }
 }
 
