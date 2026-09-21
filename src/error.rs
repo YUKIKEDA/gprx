@@ -131,6 +131,9 @@ pub enum GprError {
     /// An online-learning point identifier is not in the current model.
     #[error("the given PointId does not exist")]
     InvalidPointId,
+    /// An online inducing-point identifier is not in the current model.
+    #[error("the given InducingId does not exist")]
+    InvalidInducingId,
     /// Saving or loading a fitted model failed.
     #[error("persist failed: {reason}")]
     PersistFailed {
@@ -170,6 +173,10 @@ mod tests {
             "input dimension mismatch: X.ncols()=3, expected 2"
         );
         assert_eq!(GprError::EmptyInput.to_string(), "input is empty");
+        assert_eq!(
+            GprError::InvalidInducingId.to_string(),
+            "the given InducingId does not exist"
+        );
         assert_eq!(
             GprError::PersistFailed {
                 reason: "missing l".to_owned()

@@ -10,7 +10,7 @@ mod tests;
 
 pub use fitted::FittedSparseGpr;
 pub use model::SparseGpr;
-pub use online::OnlineSparseGpr;
+pub use online::{InducingId, OnlineSparseGpr};
 
 /// Keeps inducing coordinates fixed during [`SparseGpr::fit`].
 ///
