@@ -284,6 +284,219 @@ impl MaternKernel {
             finite_kernel(matern_d2k_dtheta2_iso(nu, r))
         })
     }
+
+    /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is not `3/2`,
+    /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`].
+    pub fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        if self.nu != MaternNu::ThreeHalves {
+            return Err(GprError::CoordGradientUnsupported);
+        }
+        super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
+        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
+        let scale = 3.0_f64.sqrt() / self.lengthscale();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (r, delta) = euclid_pair(x1, row, x2, col, dim)?;
+                let psi = (-scale * r).exp();
+                d_k[(row, col)] = 3.0 * inv_ell_sq * psi * delta;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_dims(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Result<(), GprError> {
+        if self.nu != MaternNu::ThreeHalves {
+            return Err(GprError::CoordGradientUnsupported);
+        }
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
+        let ell = self.lengthscale();
+        let inv_ell_sq = 1.0 / (ell * ell);
+        let scale = 3.0_f64.sqrt() / ell;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (r, da, db) = euclid_pair_two(x1, row, x2, col, dim_a, dim_b)?;
+                let psi = (-scale * r).exp();
+                let mut value = -3.0 * inv_ell_sq * psi;
+                if dim_a != dim_b {
+                    value = 0.0;
+                }
+                if r > 0.0 {
+                    value = 3.0 * inv_ell_sq * psi * (scale * da * db / r);
+                    if dim_a == dim_b {
+                        value -= 3.0 * inv_ell_sq * psi;
+                    }
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        if self.nu != MaternNu::ThreeHalves {
+            return Err(GprError::CoordGradientUnsupported);
+        }
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
+        let ell = self.lengthscale();
+        let inv_ell_sq = 1.0 / (ell * ell);
+        let scale = 3.0_f64.sqrt() / ell;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (r, d1, d2) = euclid_pair_two(x1, row, x2, col, dim_x1, dim_x2)?;
+                let psi = (-scale * r).exp();
+                let mut value = if dim_x1 == dim_x2 {
+                    3.0 * inv_ell_sq * psi
+                } else {
+                    0.0
+                };
+                if r > 0.0 {
+                    value = 3.0 * inv_ell_sq * psi * (-scale * d1 * d2 / r);
+                    if dim_x1 == dim_x2 {
+                        value += 3.0 * inv_ell_sq * psi;
+                    }
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_theta_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        param_idx: usize,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "Matern has a single parameter at index 0".to_owned(),
+            });
+        }
+        if self.nu != MaternNu::ThreeHalves {
+            return Err(GprError::CoordGradientUnsupported);
+        }
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
+        let ell = self.lengthscale();
+        let inv_ell_sq = 1.0 / (ell * ell);
+        let scale = 3.0_f64.sqrt() / ell;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (r, delta) = euclid_pair(x1, row, x2, col, dim)?;
+                let psi = (-scale * r).exp();
+                d2_k[(row, col)] = 3.0 * inv_ell_sq * psi * delta * (scale * r - 2.0);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn grad_cross_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::InvalidHyperparameter {
+                reason: "Matern has a single parameter at index 0".to_owned(),
+            });
+        }
+        super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
+        let ell = self.lengthscale();
+        let nu = self.nu;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (r, _) = euclid_pair(x1, row, x2, col, 0)?;
+                d_k[(row, col)] = finite_kernel(matern_dk_dtheta_iso(nu, r / ell))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_cross_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_matern_hess_idx(i, j)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), 0)?;
+        let ell = self.lengthscale();
+        let nu = self.nu;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (r, _) = euclid_pair(x1, row, x2, col, 0)?;
+                d2_k[(row, col)] = finite_kernel(matern_d2k_dtheta2_iso(nu, r / ell))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn euclid_pair(
+    x1: MatRef<'_, f64>,
+    i: usize,
+    x2: MatRef<'_, f64>,
+    j: usize,
+    dim: usize,
+) -> Result<(f64, f64), GprError> {
+    let (r, da, _) = euclid_pair_two(x1, i, x2, j, dim, dim)?;
+    Ok((r, da))
+}
+
+fn euclid_pair_two(
+    x1: MatRef<'_, f64>,
+    i: usize,
+    x2: MatRef<'_, f64>,
+    j: usize,
+    dim_a: usize,
+    dim_b: usize,
+) -> Result<(f64, f64, f64), GprError> {
+    let mut s = 0.0;
+    for d in 0..x1.ncols() {
+        let a = x1[(i, d)];
+        let b = x2[(j, d)];
+        if !a.is_finite() || !b.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let delta = a - b;
+        s += delta * delta;
+    }
+    Ok((
+        s.max(0.0).sqrt(),
+        x1[(i, dim_a)] - x2[(j, dim_a)],
+        x1[(i, dim_b)] - x2[(j, dim_b)],
+    ))
 }
 
 pub(crate) fn matern_from_r(nu: MaternNu, r: f64) -> f64 {

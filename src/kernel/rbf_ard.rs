@@ -388,6 +388,242 @@ impl RbfArdKernel {
             None => Ok(()),
         }
     }
+
+    /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
+    ///
+    /// `∂k/∂x2_e = k (x1_e - x2_e) / ℓ_e²`.
+    ///
+    /// # Errors
+    ///
+    /// Same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`], or
+    /// [`GprError::InvalidHyperparameter`] when `dim` does not match `ℓ_d`.
+    pub fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
+        if dim >= self.num_params() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "coordinate dimension {dim} is out of range for d={}",
+                    self.num_params()
+                ),
+            });
+        }
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let k = ard_kernel_pair(x1, row, x2, col, inv_ell_sq)?;
+                let delta = x1[(row, dim)] - x2[(col, dim)];
+                d_k[(row, col)] = k * delta * inv_ell_sq[dim];
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_dims(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let k = ard_kernel_pair(x1, row, x2, col, inv_ell_sq)?;
+                let da = x1[(row, dim_a)] - x2[(col, dim_a)];
+                let db = x1[(row, dim_b)] - x2[(col, dim_b)];
+                let mut value = k * da * db * inv_ell_sq[dim_a] * inv_ell_sq[dim_b];
+                if dim_a == dim_b {
+                    value -= k * inv_ell_sq[dim_a];
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let k = ard_kernel_pair(x1, row, x2, col, inv_ell_sq)?;
+                let d1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
+                let d2 = x1[(row, dim_x2)] - x2[(col, dim_x2)];
+                let mut value = -k * d1 * d2 * inv_ell_sq[dim_x1] * inv_ell_sq[dim_x2];
+                if dim_x1 == dim_x2 {
+                    value += k * inv_ell_sq[dim_x1];
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_theta_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        param_idx: usize,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        if param_idx >= self.num_params() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "ARD RBF parameter {param_idx} is out of range (d={})",
+                    self.num_params()
+                ),
+            });
+        }
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let k = ard_kernel_pair(x1, row, x2, col, inv_ell_sq)?;
+                let delta_theta = x1[(row, param_idx)] - x2[(col, param_idx)];
+                let delta_dim = x1[(row, dim)] - x2[(col, dim)];
+                let dk_dtheta = k * delta_theta * delta_theta * inv_ell_sq[param_idx];
+                let mut value = dk_dtheta * delta_dim * inv_ell_sq[dim];
+                if param_idx == dim {
+                    value += k * delta_dim * (-2.0 * inv_ell_sq[dim]);
+                }
+                d2_k[(row, col)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn grad_cross_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx >= self.num_params() {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "ARD RBF parameter {param_idx} is out of range (d={})",
+                    self.num_params()
+                ),
+            });
+        }
+        super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                d_k[(row, col)] = ard_kernel_grad_pair(x1, row, x2, col, inv_ell_sq, param_idx)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hess_cross_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        let d = self.num_params();
+        if i >= d || j >= d {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
+            });
+        }
+        super::require_coord_grad(x1, x2, d2_k.as_ref(), 0)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                d2_k[(row, col)] = ard_kernel_hess_pair(x1, row, x2, col, inv_ell_sq, i, j)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn ard_kernel_grad_pair(
+    x: MatRef<'_, f64>,
+    row: usize,
+    xs: MatRef<'_, f64>,
+    col: usize,
+    inv_ell_sq: &[f64],
+    param_idx: usize,
+) -> Result<f64, GprError> {
+    let mut r2 = 0.0;
+    let mut dim_term = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let diff = x[(row, dim)] - xs[(col, dim)];
+        if !diff.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = diff * diff * w;
+        r2 += term;
+        if dim == param_idx {
+            dim_term = term;
+        }
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    let dk = k * dim_term;
+    if dk.is_finite() {
+        Ok(dk)
+    } else {
+        Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn ard_kernel_hess_pair(
+    x: MatRef<'_, f64>,
+    row: usize,
+    xs: MatRef<'_, f64>,
+    col: usize,
+    inv_ell_sq: &[f64],
+    i: usize,
+    j: usize,
+) -> Result<f64, GprError> {
+    let mut r2 = 0.0;
+    let mut dim_i = 0.0;
+    let mut dim_j = 0.0;
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let diff = x[(row, dim)] - xs[(col, dim)];
+        if !diff.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = diff * diff * w;
+        r2 += term;
+        if dim == i {
+            dim_i = term;
+        }
+        if dim == j {
+            dim_j = term;
+        }
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    ard_rbf_hess_from_terms(k, dim_i, dim_j, i == j)
 }
 
 fn require_square_out(out: MatRef<'_, f64>) -> Result<usize, GprError> {

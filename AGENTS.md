@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-5（誘導点 Z の最適化方式）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-6（Z を最適化対象にする）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

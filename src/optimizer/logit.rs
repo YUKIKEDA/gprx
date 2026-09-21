@@ -109,7 +109,11 @@ pub(super) fn log_theta_to_z(
 ) -> Result<Vec<f64>, GprError> {
     let mut z = vec![0.0; log_theta.len()];
     for (i, &theta) in log_theta.iter().enumerate() {
-        let x = theta.exp();
+        let x = if intervals[i].lo() > 0.0 {
+            theta.exp()
+        } else {
+            theta
+        };
         z[i] = user_to_z(x, intervals[i])?;
     }
     Ok(z)
@@ -129,7 +133,7 @@ fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Re
     }
     for i in 0..z.len() {
         let x = z_to_user(z[i], intervals[i]);
-        out[i] = x.ln();
+        out[i] = if intervals[i].lo() > 0.0 { x.ln() } else { x };
     }
     Ok(())
 }
@@ -168,8 +172,8 @@ fn dlog_dz(z: f64, interval: Interval, log_theta: f64) -> f64 {
     let dlog_dt = if interval.lo() > 0.0 {
         (interval.hi().ln() - interval.lo().ln()) * ds
     } else {
-        let x = log_theta.exp();
-        interval.width() * ds / x
+        let _ = log_theta;
+        interval.width() * ds
     };
     dlog_dt / scale
 }
@@ -182,11 +186,8 @@ fn d2log_dz2(z: f64, interval: Interval, log_theta: f64) -> f64 {
     if interval.lo() > 0.0 {
         4.0 * ds * (1.0 - 2.0 * s) / scale
     } else {
-        let x = log_theta.exp();
-        let dnum_dz = 4.0 * (1.0 - 2.0 * s) * ds / scale;
-        let dx_dz = 4.0 * ds;
-        let num = 4.0 * ds;
-        (dnum_dz * x - num * dx_dz) / (x * x)
+        let _ = log_theta;
+        4.0 * ds * (1.0 - 2.0 * s) / scale
     }
 }
 
@@ -419,7 +420,8 @@ pub(super) fn map_argmin_error(err: ArgminError) -> GprError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedProblem, CostFunction, EvalCache, Gradient, logit, sigmoid, user_to_z, z_to_user,
+        CachedProblem, CostFunction, EvalCache, Gradient, log_theta_to_z, logit, sigmoid,
+        user_to_z, z_to_log_theta_into, z_to_user,
     };
     use crate::error::GprError;
     use crate::gpr::Gpr;
@@ -589,6 +591,18 @@ mod tests {
                 fd
             );
         }
+    }
+
+    #[test]
+    fn logit_linear_interval_passes_user_units() {
+        let interval = Interval::new(-0.25, 1.25).expect("linear");
+        let x = 0.4;
+        let z = user_to_z(x, interval).expect("inside");
+        let mut out = [0.0];
+        z_to_log_theta_into(&[z], &[interval], &mut out).expect("map");
+        assert_close(out[0], x);
+        let back = log_theta_to_z(&out, &[interval]).expect("z");
+        assert_close(z_to_user(back[0], interval), x);
     }
 
     #[test]

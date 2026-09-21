@@ -524,7 +524,7 @@ fn fold_terms_ard_cache(
     Ok(())
 }
 
-fn add_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
+pub(super) fn add_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
     for col in 0..acc.ncols() {
         for row in 0..acc.nrows() {
             acc[(row, col)] += src[(row, col)];
