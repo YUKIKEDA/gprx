@@ -1270,8 +1270,7 @@ pub(crate) fn solve_lmm(k_mm_l: MatRef<'_, f64>, mut col: MatMut<'_, f64>) {
 /// Appends one inducing point at the end by a bordered LLT of `K_mm` and `B`.
 ///
 /// `A` gains a row. `k_diag_sum` is unchanged. `w` is solved from the new `B`.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)] // kernel, data, and new `Z` stay explicit for the spike helper
+#[allow(clippy::too_many_arguments)] // kernel, data, and new `Z` stay explicit
 pub(crate) fn inducing_insert(
     state: &mut VfeState,
     kernel: &KernelSpec,
@@ -1366,7 +1365,6 @@ pub(crate) fn inducing_insert(
 ///
 /// Reuses `K(Z, X) = L A`, drops that row, and solves the reduced `A`.
 /// `B` is formed again from the new `A`. `k_diag_sum` is unchanged.
-#[cfg(test)]
 pub(crate) fn inducing_delete(
     state: &mut VfeState,
     noise: f64,
@@ -1396,7 +1394,6 @@ pub(crate) fn inducing_delete(
     Ok(())
 }
 
-#[cfg(test)]
 fn append_chol_border(l: &Mat<f64>, row: &[f64], ell: f64) -> Mat<f64> {
     let m = l.nrows();
     let mut out = Mat::zeros(m + 1, m + 1);
@@ -1410,7 +1407,6 @@ fn append_chol_border(l: &Mat<f64>, row: &[f64], ell: f64) -> Mat<f64> {
     out
 }
 
-#[cfg(test)]
 fn delete_chol_row(l: &Mat<f64>, idx: usize) -> Mat<f64> {
     let m = l.nrows();
     let trail = m - idx - 1;
@@ -1452,7 +1448,6 @@ fn delete_chol_row(l: &Mat<f64>, idx: usize) -> Mat<f64> {
     out
 }
 
-#[cfg(test)]
 fn append_row(a: &Mat<f64>, row: &[f64]) -> Mat<f64> {
     let m = a.nrows();
     let n = a.ncols();
@@ -1466,7 +1461,6 @@ fn append_row(a: &Mat<f64>, row: &[f64]) -> Mat<f64> {
     out
 }
 
-#[cfg(test)]
 fn remove_row(a: &Mat<f64>, idx: usize) -> Mat<f64> {
     let m = a.nrows();
     let n = a.ncols();
@@ -1484,7 +1478,6 @@ fn remove_row(a: &Mat<f64>, idx: usize) -> Mat<f64> {
     out
 }
 
-#[cfg(test)]
 fn mul_lower_left(l: MatRef<'_, f64>, a: MatRef<'_, f64>) -> Mat<f64> {
     let m = l.nrows();
     let n = a.ncols();
@@ -1501,7 +1494,6 @@ fn mul_lower_left(l: MatRef<'_, f64>, a: MatRef<'_, f64>) -> Mat<f64> {
     out
 }
 
-#[cfg(test)]
 fn factor_lower_in_place(mat: &mut Mat<f64>, stage: CholeskyStage) -> Result<(), GprError> {
     let n = mat.nrows();
     let req = llt::factor::cholesky_in_place_scratch::<f64>(n, faer_par(n), Default::default());

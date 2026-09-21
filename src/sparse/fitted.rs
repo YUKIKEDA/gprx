@@ -30,7 +30,8 @@ use super::{FixedInducing, InducingLayout};
 /// [`Self::predict`] and [`Self::neg_log_marginal_likelihood`]. Observation
 /// noise is not added to `K_mm`. Hyperparameters are kernel `θ` then
 /// likelihood `θ`. [`FreeInducing`] then appends column-major `Z`.
-/// [`Self::into_online`] yields [`OnlineSparseGpr`] for `X`-only updates.
+/// [`Self::into_online`] yields [`OnlineSparseGpr`] for training-point and
+/// inducing-point updates.
 #[derive(Clone, Debug)]
 pub struct FittedSparseGpr<O = Lbfgs, I = FixedInducing> {
     pub(crate) kernel: KernelSpec,
@@ -312,11 +313,12 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
         Ok(())
     }
 
-    /// Converts this model into an online sparse GPR that updates `X` only.
+    /// Converts this model into an online sparse GPR.
     ///
-    /// Inducing coordinates stay fixed. [`FixedInducing`] and
-    /// [`FreeInducing`] both produce [`OnlineSparseGpr<O>`] whose parameters
-    /// are kernel then likelihood `θ`. The stored VFE factors are reused.
+    /// [`OnlineSparseGpr`] can append or drop training points and inducing
+    /// points. [`FixedInducing`] and [`FreeInducing`] both produce
+    /// [`OnlineSparseGpr<O>`] whose parameters are kernel then likelihood
+    /// `θ`. The stored VFE factors are reused.
     ///
     /// # Examples
     ///

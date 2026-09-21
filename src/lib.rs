@@ -75,7 +75,9 @@ pub use persist::{
     FORMAT_VERSION, LoadedDistance, LoadedGpr, LoadedOnlineDistance, PersistRegistry,
 };
 pub use precision::{DoublePrecision, PrecisionPolicy};
-pub use sparse::{FittedSparseGpr, FixedInducing, FreeInducing, OnlineSparseGpr, SparseGpr};
+pub use sparse::{
+    FittedSparseGpr, FixedInducing, FreeInducing, InducingId, OnlineSparseGpr, SparseGpr,
+};
 
 #[cfg(test)]
 mod tests {

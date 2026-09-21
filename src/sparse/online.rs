@@ -1,5 +1,6 @@
 //! Online variational sparse GPR.
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use faer::Mat;
@@ -16,18 +17,116 @@ use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
 use super::factor::{
-    append_column, append_point, assemble_vfe, chol_rank1_downdate, chol_rank1_update, frobenius2,
-    kernel_column, kernel_diag_at, point_at, refresh_w, remove_column, remove_point, solve_lmm,
-    vfe_neg_log_marginal_likelihood, vfe_predict,
+    VfeState, append_column, append_point, assemble_vfe, chol_rank1_downdate, chol_rank1_update,
+    frobenius2, inducing_delete, inducing_insert, kernel_column, kernel_diag_at, point_at,
+    refresh_w, remove_column, remove_point, solve_lmm, vfe_neg_log_marginal_likelihood,
+    vfe_predict,
 };
 use super::fitted::FittedSparseGpr;
+
+/// Stable identity of one inducing point on [`OnlineSparseGpr`].
+///
+/// [`crate::FittedSparseGpr::into_online`] assigns identifiers `0 .. m-1` in
+/// buffer order. Later [`OnlineSparseGpr::insert_inducing`] values increase
+/// monotonically and are never reused after
+/// [`OnlineSparseGpr::delete_inducing`]. There is no public constructor.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let fitted = SparseGpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_optimizer(Fixed)
+/// .factor(
+///     &[0.0, 1.0, 2.0, 3.0],
+///     4,
+///     1,
+///     &[0.0, 1.0, 0.5, 0.25],
+///     &[0.5, 2.5],
+///     2,
+/// )
+/// .map_err(|(_, e)| e)?;
+/// let mut online = fitted.into_online();
+/// let id = online.insert_inducing(&[1.5])?;
+/// assert_eq!(online.inducing_ids().last().copied(), Some(id));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InducingId(u64);
+
+impl InducingId {
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct InducingRegistry {
+    id_to_index: HashMap<InducingId, usize>,
+    index_to_id: Vec<InducingId>,
+    next_id: u64,
+}
+
+impl InducingRegistry {
+    fn from_count(m: usize) -> Self {
+        let index_to_id: Vec<InducingId> = (0..m as u64).map(InducingId::from_raw).collect();
+        let id_to_index = index_to_id
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        Self {
+            id_to_index,
+            index_to_id,
+            next_id: m as u64,
+        }
+    }
+
+    fn ids(&self) -> &[InducingId] {
+        &self.index_to_id
+    }
+
+    fn index_of(&self, id: InducingId) -> Result<usize, GprError> {
+        self.id_to_index
+            .get(&id)
+            .copied()
+            .ok_or(GprError::InvalidInducingId)
+    }
+
+    fn insert(&mut self) -> InducingId {
+        let id = InducingId::from_raw(self.next_id);
+        let index = self.index_to_id.len();
+        self.next_id = self.next_id.saturating_add(1);
+        self.index_to_id.push(id);
+        self.id_to_index.insert(id, index);
+        id
+    }
+
+    fn remove_at(&mut self, index: usize) {
+        let id = self.index_to_id.remove(index);
+        self.id_to_index.remove(&id);
+        for (shifted, remaining) in self.index_to_id.iter().enumerate().skip(index) {
+            self.id_to_index.insert(*remaining, shifted);
+        }
+    }
+}
 
 /// Online variational sparse GPR after [`FittedSparseGpr::into_online`].
 ///
 /// [`Self::insert`] appends one training point and returns a [`PointId`].
-/// [`Self::delete`] removes one point by that identifier. Inducing
-/// coordinates stay fixed. VFE factors update with a rank-1 cholupdate of
-/// `B` while `K_mm` stays put.
+/// [`Self::delete`] removes one point by that identifier. VFE factors for
+/// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
+/// [`Self::insert_inducing`] appends one inducing point and returns an
+/// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
+/// by that identifier. Those updates follow ADR 0005.
 /// Parameters are kernel `θ` then likelihood `θ`. [`Self::set_params`] and
 /// [`Self::refit`] rebuild the VFE system.
 ///
@@ -77,11 +176,13 @@ pub struct OnlineSparseGpr<O = Lbfgs> {
     m: usize,
     d: usize,
     registry: PointRegistry,
+    inducing: InducingRegistry,
 }
 
 impl<O> OnlineSparseGpr<O> {
     pub(crate) fn from_fitted<I>(fitted: FittedSparseGpr<O, I>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
+        let inducing = InducingRegistry::from_count(fitted.m);
         Self {
             kernel: fitted.kernel,
             likelihood: fitted.likelihood,
@@ -99,6 +200,7 @@ impl<O> OnlineSparseGpr<O> {
             m: fitted.m,
             d: fitted.d,
             registry,
+            inducing,
         }
     }
 
@@ -144,6 +246,45 @@ impl<O> OnlineSparseGpr<O> {
         self.d = fitted.d;
     }
 
+    fn vfe_state(&self) -> VfeState {
+        VfeState {
+            k_mm_l: self.k_mm_l.clone(),
+            a: self.a.clone(),
+            b_l: self.b_l.clone(),
+            w: self.w.clone(),
+            k_diag_sum: self.k_diag_sum,
+            a_frobenius2: self.a_frobenius2,
+        }
+    }
+
+    fn apply_vfe(&mut self, state: VfeState) {
+        self.k_mm_l = state.k_mm_l;
+        self.a = state.a;
+        self.b_l = state.b_l;
+        self.w = state.w;
+        self.k_diag_sum = state.k_diag_sum;
+        self.a_frobenius2 = state.a_frobenius2;
+    }
+
+    /// Rebuilds the stored VFE factors from the current `X` / `Z` / `θ`.
+    ///
+    /// ADR 0005 applies first. This refresh keeps `L` aligned with `k(Z, Z)`
+    /// so a long insert/delete sequence stays within the public 1e-12 check.
+    fn refresh_vfe(&mut self) -> Result<(), GprError> {
+        let state = assemble_vfe(
+            &self.kernel,
+            self.likelihood,
+            &self.x_obs,
+            self.n,
+            self.d,
+            &self.y,
+            &self.z_obs,
+            self.m,
+        )?;
+        self.apply_vfe(state);
+        Ok(())
+    }
+
     /// Returns the number of training points.
     pub fn n(&self) -> usize {
         self.n
@@ -187,6 +328,11 @@ impl<O> OnlineSparseGpr<O> {
     /// Returns training-point identifiers in buffer order.
     pub fn point_ids(&self) -> &[PointId] {
         self.registry.ids()
+    }
+
+    /// Returns inducing-point identifiers in buffer order.
+    pub fn inducing_ids(&self) -> &[InducingId] {
+        self.inducing.ids()
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
@@ -454,11 +600,141 @@ impl<O> OnlineSparseGpr<O> {
         Ok(())
     }
 
+    /// Appends one inducing point at the current `θ` with a bordered VFE update.
+    ///
+    /// `z_new` has length [`Self::d`]. Training `X` / `y` are not moved.
+    /// The returned [`InducingId`] is new and is never reused after a later
+    /// [`Self::delete_inducing`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::DimensionMismatch`] if `z_new` is the wrong length,
+    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
+    /// [`GprError::EmptyInput`] if `d` is zero, or
+    /// [`GprError::CholeskyFailed`] if the bordered factor loses positive
+    /// definiteness.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = SparseGpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(
+    ///     &[0.0, 1.0, 2.0, 3.0],
+    ///     4,
+    ///     1,
+    ///     &[0.0, 1.0, 0.5, 0.25],
+    ///     &[0.5, 2.5],
+    ///     2,
+    /// )
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online();
+    /// online.insert_inducing(&[1.5])?;
+    /// assert_eq!(online.m(), 3);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert_inducing(&mut self, z_new: &[f64]) -> Result<InducingId, GprError> {
+        if z_new.len() != self.d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: z_new.len(),
+                expected_dim: self.d,
+            });
+        }
+        if self.d == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        if z_new.iter().any(|v| !v.is_finite()) {
+            return Err(GprError::NonFiniteInput);
+        }
+        let mut state = self.vfe_state();
+        inducing_insert(
+            &mut state,
+            &self.kernel,
+            self.likelihood.noise_variance(),
+            &self.x_obs,
+            self.n,
+            self.d,
+            &self.y,
+            &self.z_obs,
+            self.m,
+            z_new,
+        )?;
+        self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
+        self.apply_vfe(state);
+        self.m += 1;
+        self.refresh_vfe()?;
+        Ok(self.inducing.insert())
+    }
+
+    /// Removes the inducing point identified by `id` and packs every buffer.
+    ///
+    /// Updates `K_mm` with a trailing cholupdate and rebuilds `A` / `B`
+    /// from the reduced inducing set. The last remaining inducing point
+    /// cannot be deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] when `m == 1`, or
+    /// [`GprError::InvalidInducingId`] when `id` is unknown or already
+    /// deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = SparseGpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(
+    ///     &[0.0, 1.0, 2.0, 3.0],
+    ///     4,
+    ///     1,
+    ///     &[0.0, 1.0, 0.5, 0.25],
+    ///     &[0.5, 2.5],
+    ///     2,
+    /// )
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online();
+    /// let id = online.inducing_ids()[0];
+    /// online.delete_inducing(id)?;
+    /// assert_eq!(online.m(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn delete_inducing(&mut self, id: InducingId) -> Result<(), GprError> {
+        if self.m <= 1 {
+            return Err(GprError::EmptyInput);
+        }
+        let idx = self.inducing.index_of(id)?;
+        let mut state = self.vfe_state();
+        inducing_delete(&mut state, self.likelihood.noise_variance(), &self.y, idx)?;
+        self.z_obs = remove_point(&self.z_obs, self.m, self.d, idx);
+        self.apply_vfe(state);
+        self.m -= 1;
+        self.inducing.remove_at(idx);
+        self.refresh_vfe()?;
+        Ok(())
+    }
+
     /// Converts this model back to a batch sparse GPR with fixed inducing
     /// points.
     ///
-    /// Point identifiers are discarded. Parameters stay kernel then
-    /// likelihood `θ`.
+    /// Point and inducing identifiers are discarded. Parameters stay
+    /// kernel then likelihood `θ`. The snapshot `Z` is the current
+    /// inducing coordinates.
     ///
     /// # Examples
     ///
