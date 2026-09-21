@@ -2,7 +2,7 @@
 
 pub(crate) mod factor;
 mod model;
-mod online;
+pub(crate) mod online;
 mod types;
 
 pub use model::{FittedGpr, Gpr};
