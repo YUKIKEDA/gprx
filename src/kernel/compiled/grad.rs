@@ -165,6 +165,190 @@ impl CompiledKernel {
             _ => false,
         }
     }
+
+    /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::CoordGradientUnsupported`] when a leaf does not
+    /// implement coordinate derivatives (including Product trees).
+    pub fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
+            Self::Matern(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
+            Self::RbfArd(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
+            Self::White(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
+            Self::Custom(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
+            Self::Sum(terms) => {
+                let (first, rest) = terms
+                    .split_first()
+                    .ok_or(GprError::CoordGradientUnsupported)?;
+                first.grad_wrt_coord_dim(x1, x2, d_k.as_mut(), dim)?;
+                if rest.is_empty() {
+                    return Ok(());
+                }
+                let mut scratch = Mat::zeros(d_k.nrows(), d_k.ncols());
+                for term in rest {
+                    term.grad_wrt_coord_dim(x1, x2, scratch.as_mut(), dim)?;
+                    super::apply::add_rect(d_k.as_mut(), scratch.as_ref());
+                }
+                Ok(())
+            }
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_wrt_coord_dims(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.hess_wrt_coord_dims(x1, x2, d2_k, dim_a, dim_b),
+            Self::Matern(leaf) => leaf.hess_wrt_coord_dims(x1, x2, d2_k, dim_a, dim_b),
+            Self::RbfArd(leaf) => leaf.hess_wrt_coord_dims(x1, x2, d2_k, dim_a, dim_b),
+            Self::White(leaf) => leaf.hess_wrt_coord_dims(x1, x2, d2_k, dim_a, dim_b),
+            Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), |term, dest| {
+                term.hess_wrt_coord_dims(x1, x2, dest, dim_a, dim_b)
+            }),
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.hess_wrt_coord_mixed(x1, x2, d2_k, dim_x1, dim_x2),
+            Self::Matern(leaf) => leaf.hess_wrt_coord_mixed(x1, x2, d2_k, dim_x1, dim_x2),
+            Self::RbfArd(leaf) => leaf.hess_wrt_coord_mixed(x1, x2, d2_k, dim_x1, dim_x2),
+            Self::White(leaf) => leaf.hess_wrt_coord_mixed(x1, x2, d2_k, dim_x1, dim_x2),
+            Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), |term, dest| {
+                term.hess_wrt_coord_mixed(x1, x2, dest, dim_x1, dim_x2)
+            }),
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_theta_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        param_idx: usize,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.hess_theta_coord_dim(x1, x2, d2_k, param_idx, dim),
+            Self::Matern(leaf) => leaf.hess_theta_coord_dim(x1, x2, d2_k, param_idx, dim),
+            Self::RbfArd(leaf) => leaf.hess_theta_coord_dim(x1, x2, d2_k, param_idx, dim),
+            Self::White(leaf) => leaf.hess_theta_coord_dim(x1, x2, d2_k, param_idx, dim),
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.hess_theta_coord_dim(x1, x2, d2_k, local, dim)
+            }
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn grad_cross_points(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
+            Self::Matern(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
+            Self::RbfArd(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
+            Self::White(leaf) => {
+                let _ = param_idx;
+                if x1.ncols() == 0 {
+                    return Err(GprError::EmptyInput);
+                }
+                leaf.grad_wrt_coord_dim(x1, x2, d_k, 0)
+            }
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_cross_points(x1, x2, d_k, local, scratch.as_mut())
+            }
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_cross_points(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        mut d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        mut scratch: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
+            Self::Matern(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
+            Self::RbfArd(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
+            Self::White(leaf) => {
+                let _ = (i, j);
+                if x1.ncols() == 0 {
+                    return Err(GprError::EmptyInput);
+                }
+                leaf.grad_wrt_coord_dim(x1, x2, d2_k, 0)
+            }
+            Self::Sum(terms) => {
+                let (term_i, li) = term_for_param(terms, i)?;
+                let (term_j, lj) = term_for_param(terms, j)?;
+                if std::ptr::eq(term_i, term_j) {
+                    term_i.hess_cross_points(x1, x2, d2_k, li, lj, scratch.as_mut())
+                } else {
+                    for col in 0..d2_k.ncols() {
+                        for row in 0..d2_k.nrows() {
+                            d2_k[(row, col)] = 0.0;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+}
+
+fn fold_coord_sum(
+    terms: &[CompiledKernel],
+    mut out: MatMut<'_, f64>,
+    mut eval: impl FnMut(&CompiledKernel, MatMut<'_, f64>) -> Result<(), GprError>,
+) -> Result<(), GprError> {
+    let (first, rest) = terms
+        .split_first()
+        .ok_or(GprError::CoordGradientUnsupported)?;
+    eval(first, out.as_mut())?;
+    if rest.is_empty() {
+        return Ok(());
+    }
+    let mut scratch = Mat::zeros(out.nrows(), out.ncols());
+    for term in rest {
+        eval(term, scratch.as_mut())?;
+        super::apply::add_rect(out.as_mut(), scratch.as_ref());
+    }
+    Ok(())
 }
 
 fn grad_custom_from_coords(
