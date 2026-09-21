@@ -5,8 +5,9 @@ use std::marker::PhantomData;
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::gpr::PointId;
 use crate::gpr::factor::write_params;
-use crate::gpr::{PointId, PointRegistry};
+use crate::gpr::online::PointRegistry;
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SparseGprObjective;
