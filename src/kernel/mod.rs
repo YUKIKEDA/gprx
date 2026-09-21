@@ -123,6 +123,43 @@ fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<us
     Ok(dist.nrows())
 }
 
+pub(crate) fn require_coord_grad(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    d_k: MatRef<'_, f64>,
+    dim: usize,
+) -> Result<(), GprError> {
+    if x1.nrows() == 0 || x2.nrows() == 0 || x1.ncols() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if x1.ncols() != x2.ncols() {
+        return Err(GprError::DimensionMismatch {
+            x_dim: x2.ncols(),
+            expected_dim: x1.ncols(),
+        });
+    }
+    if dim >= x1.ncols() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!(
+                "coordinate dimension {dim} is out of range for d={}",
+                x1.ncols()
+            ),
+        });
+    }
+    if d_k.nrows() != x1.nrows() || d_k.ncols() != x2.nrows() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                d_k.nrows(),
+                d_k.ncols(),
+                x1.nrows(),
+                x2.nrows()
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn require_same_shape(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(), GprError> {
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
         return Err(GprError::InvalidHyperparameter {

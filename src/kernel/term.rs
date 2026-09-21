@@ -278,6 +278,25 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
         uplo: Triangle,
     ) -> Result<(), GprError>;
 
+    /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
+    ///
+    /// The default is [`GprError::CoordGradientUnsupported`]. Built-in
+    /// stationary leaves used by free inducing points override this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::CoordGradientUnsupported`] when this leaf has no
+    /// coordinate derivative, or the same shape errors as [`Self::apply_cross`].
+    fn grad_wrt_coord_dim(
+        &self,
+        _x1: MatRef<'_, f64>,
+        _x2: MatRef<'_, f64>,
+        _d_k: MatMut<'_, f64>,
+        _dim: usize,
+    ) -> Result<(), GprError> {
+        Err(GprError::CoordGradientUnsupported)
+    }
+
     /// Clones this leaf into a new box. Used by [`super::KernelSpec::clone`].
     fn clone_box(&self) -> Box<dyn KernelTerm>;
 
@@ -415,6 +434,16 @@ impl CustomKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         self.inner.hess_points(x, d2_k, i, j, uplo)
+    }
+
+    pub(super) fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        self.inner.grad_wrt_coord_dim(x1, x2, d_k, dim)
     }
 }
 
