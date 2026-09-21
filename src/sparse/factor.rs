@@ -1,4 +1,4 @@
-//! VFE assembly, derivatives, and rank-1 updates.
+//! VFE assembly, derivatives, rank-1 `X` updates, and inducing `m` updates.
 
 use std::marker::PhantomData;
 
@@ -1265,4 +1265,246 @@ pub(crate) fn solve_lmm(k_mm_l: MatRef<'_, f64>, mut col: MatMut<'_, f64>) {
         col.as_mut(),
         faer_par_dims(m, 1),
     );
+}
+
+/// Appends one inducing point at the end by a bordered LLT of `K_mm` and `B`.
+///
+/// `A` gains a row. `k_diag_sum` is unchanged. `w` is solved from the new `B`.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // kernel, data, and new `Z` stay explicit for the spike helper
+pub(crate) fn inducing_insert(
+    state: &mut VfeState,
+    kernel: &KernelSpec,
+    noise: f64,
+    x: &[f64],
+    n: usize,
+    d: usize,
+    y: &[f64],
+    z: &[f64],
+    m: usize,
+    z_new: &[f64],
+) -> Result<(), GprError> {
+    validate_inducing(z, m, d)?;
+    validate_inducing(z_new, 1, d)?;
+    if n == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    let compiled = kernel.compile();
+    let z_mat = pack_points(z, m, d);
+    let z_new_mat = pack_points(z_new, 1, d);
+    let x_mat = pack_points(x, n, d);
+    let mut k_zz = kernel_cross(&compiled, z_mat.as_ref(), z_new_mat.as_ref())?;
+    let k_nn = kernel_diag_at(kernel, z_new, d)?;
+    let k_zx = kernel_cross(&compiled, z_new_mat.as_ref(), x_mat.as_ref())?;
+    solve_lmm(state.k_mm_l.as_ref(), k_zz.as_mut());
+    let mut ell2 = k_nn;
+    for i in 0..m {
+        let li = k_zz[(i, 0)];
+        ell2 -= li * li;
+    }
+    if ell2 <= 0.0 || !ell2.is_finite() {
+        return Err(GprError::CholeskyFailed {
+            jitter: 0.0,
+            matrix_size: m + 1,
+            stage: CholeskyStage::OnlineInsert,
+        });
+    }
+    let ell = ell2.sqrt();
+    let mut a_new = vec![0.0; n];
+    let mut a_new_norm2 = 0.0;
+    for j in 0..n {
+        let mut dot = 0.0;
+        for i in 0..m {
+            dot += k_zz[(i, 0)] * state.a[(i, j)];
+        }
+        let value = (k_zx[(0, j)] - dot) / ell;
+        a_new[j] = value;
+        a_new_norm2 += value * value;
+    }
+    let mut v = vec![0.0; m];
+    for (i, slot) in v.iter_mut().enumerate() {
+        let mut sum = 0.0;
+        for (j, a_val) in a_new.iter().enumerate() {
+            sum += state.a[(i, j)] * a_val;
+        }
+        *slot = sum;
+    }
+    let mut b_border = Mat::zeros(m, 1);
+    for i in 0..m {
+        b_border[(i, 0)] = v[i];
+    }
+    solve_lmm(state.b_l.as_ref(), b_border.as_mut());
+    let mut beta2 = noise + a_new_norm2;
+    for i in 0..m {
+        let bi = b_border[(i, 0)];
+        beta2 -= bi * bi;
+    }
+    if beta2 <= 0.0 || !beta2.is_finite() {
+        return Err(GprError::CholeskyFailed {
+            jitter: 0.0,
+            matrix_size: m + 1,
+            stage: CholeskyStage::OnlineInsert,
+        });
+    }
+    let mut l_col = vec![0.0; m];
+    for i in 0..m {
+        l_col[i] = k_zz[(i, 0)];
+    }
+    let mut b_col = vec![0.0; m];
+    for i in 0..m {
+        b_col[i] = b_border[(i, 0)];
+    }
+    state.k_mm_l = append_chol_border(&state.k_mm_l, &l_col, ell);
+    state.b_l = append_chol_border(&state.b_l, &b_col, beta2.sqrt());
+    state.a = append_row(&state.a, &a_new);
+    state.a_frobenius2 += a_new_norm2;
+    state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y);
+    Ok(())
+}
+
+/// Drops inducing row `idx` by a trailing cholupdate of `L_mm`.
+///
+/// Reuses `K(Z, X) = L A`, drops that row, and solves the reduced `A`.
+/// `B` is formed again from the new `A`. `k_diag_sum` is unchanged.
+#[cfg(test)]
+pub(crate) fn inducing_delete(
+    state: &mut VfeState,
+    noise: f64,
+    y: &[f64],
+    idx: usize,
+) -> Result<(), GprError> {
+    let m = state.a.nrows();
+    if m <= 1 {
+        return Err(GprError::EmptyInput);
+    }
+    if idx >= m {
+        return Err(GprError::InvalidHyperparameter {
+            reason: "inducing index is out of range".to_owned(),
+        });
+    }
+    let k_zx = mul_lower_left(state.k_mm_l.as_ref(), state.a.as_ref());
+    let k_zx = remove_row(&k_zx, idx);
+    state.k_mm_l = delete_chol_row(&state.k_mm_l, idx);
+    let mut a = k_zx;
+    solve_lower(state.k_mm_l.as_ref(), a.as_mut());
+    let mut b = gram_aat_plus_noise(a.as_ref(), noise);
+    factor_lower_in_place(&mut b, CholeskyStage::OnlineDelete)?;
+    state.a = a;
+    state.b_l = b;
+    state.a_frobenius2 = frobenius2(state.a.as_ref());
+    state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y);
+    Ok(())
+}
+
+#[cfg(test)]
+fn append_chol_border(l: &Mat<f64>, row: &[f64], ell: f64) -> Mat<f64> {
+    let m = l.nrows();
+    let mut out = Mat::zeros(m + 1, m + 1);
+    for j in 0..m {
+        for i in j..m {
+            out[(i, j)] = l[(i, j)];
+        }
+        out[(m, j)] = row[j];
+    }
+    out[(m, m)] = ell;
+    out
+}
+
+#[cfg(test)]
+fn delete_chol_row(l: &Mat<f64>, idx: usize) -> Mat<f64> {
+    let m = l.nrows();
+    let trail = m - idx - 1;
+    let mut work = l.clone();
+    if trail > 0 {
+        let mut l22 = Mat::zeros(trail, trail);
+        let mut v = vec![0.0; trail];
+        for j in 0..trail {
+            for i in j..trail {
+                l22[(i, j)] = work[(idx + 1 + i, idx + 1 + j)];
+            }
+            v[j] = work[(idx + 1 + j, idx)];
+        }
+        chol_rank1_update(&mut l22, &mut v);
+        for j in 0..trail {
+            for i in j..trail {
+                work[(idx + 1 + i, idx + 1 + j)] = l22[(i, j)];
+            }
+        }
+    }
+    let mut out = Mat::zeros(m - 1, m - 1);
+    let mut jo = 0;
+    for j in 0..m {
+        if j == idx {
+            continue;
+        }
+        let mut io = 0;
+        for i in 0..m {
+            if i == idx {
+                continue;
+            }
+            if io >= jo {
+                out[(io, jo)] = work[(i, j)];
+            }
+            io += 1;
+        }
+        jo += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+fn append_row(a: &Mat<f64>, row: &[f64]) -> Mat<f64> {
+    let m = a.nrows();
+    let n = a.ncols();
+    let mut out = Mat::zeros(m + 1, n);
+    for j in 0..n {
+        for i in 0..m {
+            out[(i, j)] = a[(i, j)];
+        }
+        out[(m, j)] = row[j];
+    }
+    out
+}
+
+#[cfg(test)]
+fn remove_row(a: &Mat<f64>, idx: usize) -> Mat<f64> {
+    let m = a.nrows();
+    let n = a.ncols();
+    let mut out = Mat::zeros(m - 1, n);
+    let mut dest = 0;
+    for i in 0..m {
+        if i == idx {
+            continue;
+        }
+        for j in 0..n {
+            out[(dest, j)] = a[(i, j)];
+        }
+        dest += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+fn mul_lower_left(l: MatRef<'_, f64>, a: MatRef<'_, f64>) -> Mat<f64> {
+    let m = l.nrows();
+    let n = a.ncols();
+    let mut out = Mat::zeros(m, n);
+    for j in 0..n {
+        for i in 0..m {
+            let mut sum = 0.0;
+            for t in 0..=i {
+                sum += l[(i, t)] * a[(t, j)];
+            }
+            out[(i, j)] = sum;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn factor_lower_in_place(mat: &mut Mat<f64>, stage: CholeskyStage) -> Result<(), GprError> {
+    let n = mat.nrows();
+    let req = llt::factor::cholesky_in_place_scratch::<f64>(n, faer_par(n), Default::default());
+    let mut scratch = MemBuffer::new(req);
+    cholesky_lower_with_policy(mat, &mut scratch, JitterPolicy::default(), stage)
 }
