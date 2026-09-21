@@ -417,7 +417,7 @@ Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は�
 
 **既定は呼び出し側が Z を渡し、最適化対象はカーネルハイパラとノイズのみとする。** 自由 Z は `FixedInducing` / `FreeInducing` で切り替え、カーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。区間は訓練 `X` の箱を少し開いて広げた生座標。L-BFGS 履歴の長さは `p = p_θ + m×d` で、増分は `history_size × m × d` 個の `f64`（`m` が小さいので VFE の `O(nm²)` に対して小さい）。交互は載らない。
 
-Sparse GPRのオンライン学習は誘導点ZとデータXの非対称性がある。P4-7。
+オンラインは X だけ増減する。VFE 因子は rank-1 で更新する。理由は [ADR 0004](adr/0004-sparse-online-rank1.md)。公開のオンライン型は P4-8。誘導点の増減は P4-9。
 
 ### 6.2 `Gpr` のMLLと勾配(P0追加)
 
@@ -857,7 +857,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-6（[#186](https://github.com/YUKIKEDA/gprx/issues/186)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-7（[#188](https://github.com/YUKIKEDA/gprx/issues/188)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
@@ -865,12 +865,12 @@ impl OnlineGpr<O, S, C, B> {
 - **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
 - **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）、transform ファイル分割の判断（P2B-20 / [#116](https://github.com/YUKIKEDA/gprx/issues/116)）。P2B-14…20 の DoD は Grill 後
 - **Phase 3(オンライン学習)**: 2b のあと。`OnlineGpr` でデータ点の追加削除。`into_online` と自前末尾 insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
-- **Phase 4(Sparse GPR)**: VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。既定は**誘導点Z固定**（`FixedInducing`）。自由 Z は `FreeInducing` で同時最適化。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。P4-7 で Sparse オンライン
+- **Phase 4(Sparse GPR)**: VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。既定は**誘導点Z固定**（`FixedInducing`）。自由 Z は `FreeInducing` で同時最適化。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。オンラインは X だけ増減。因子は [ADR 0004](adr/0004-sparse-online-rank1.md)。公開型は P4-8
 - **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
 
 ## 14. 未解決事項
 
-1. **Sparse GPRのオンライン学習**: 誘導点ZとデータXの非対称。方式は P4-7 の Issue / Grill で決める
+1. **Sparse GPRのオンライン学習**: X だけ増減。因子は [ADR 0004](adr/0004-sparse-online-rank1.md)。公開型は P4-8。誘導点の増減は P4-9
 2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
 3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
 4. **Sparse GPRの誘導点Zの最適化**: 既定は `FixedInducing`。自由 Z は `FreeInducing` で同時。理由は [ADR 0003](adr/0003-sparse-z-joint.md)
