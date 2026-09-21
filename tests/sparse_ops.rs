@@ -1,14 +1,16 @@
-//! Random insert/delete sequences vs [`SparseGpr<Fixed>::factor`] (P4-8).
+//! Random insert/delete sequences vs [`SparseGpr<Fixed>::factor`] (P4-8 / P4-10).
 //!
-//! Each step compares public [`OnlineSparseGpr`] numerics and point identity
-//! to a batch factor at the same `θ` and `Z`. This file uses only the public API.
+//! Each `X` step compares public [`OnlineSparseGpr`] numerics and point
+//! identity to a batch factor at the same `θ` and `Z`. Each inducing step
+//! compares the same public numerics at the same `θ` and `X` after `m`
+//! changes. This file uses only the public API.
 
 use std::collections::HashSet;
 
 use gprx::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use gprx::{
-    Fixed, FreeInducing, GaussianLikelihood, GprError, OnlineSparseGpr, PointId, Prediction,
-    SparseGpr,
+    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSparseGpr, PointId,
+    Prediction, SparseGpr,
 };
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -16,6 +18,7 @@ use rand::{RngExt, SeedableRng};
 const TOL: f64 = 1e-12;
 const OPS: usize = 32;
 const N_MAX: usize = 16;
+const M_MAX: usize = 16;
 const SEEDS: [u64; 3] = [0, 1, 2];
 const Y0: [f64; 4] = [0.0, 1.0, 0.5, 0.25];
 const X1: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
@@ -24,10 +27,15 @@ const X2: [f64; 8] = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0];
 const Z2: [f64; 4] = [0.25, 0.75, 0.25, 0.75];
 
 fn assert_close(actual: f64, expected: f64) {
+    assert_close_named(actual, expected, "");
+}
+
+fn assert_close_named(actual: f64, expected: f64, label: &str) {
     let scale = expected.abs().max(1.0);
     assert!(
         (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
+        "{label} actual={actual}, expected={expected}, diff={}",
+        (actual - expected).abs()
     );
 }
 
@@ -367,4 +375,222 @@ fn free_inducing_into_online_drops_z_params() {
     assert_eq!(online.m(), 2);
     let fitted_back = online.into_fitted();
     assert_eq!(fitted_back.num_params(), 2);
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+#[allow(clippy::too_many_arguments)]
+fn assert_matches_factor_inducing(
+    online: &OnlineSparseGpr<Fixed>,
+    kernel: KernelSpec,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    xs: &[f64],
+    d: usize,
+    deleted: &HashSet<InducingId>,
+    ctx: &str,
+) {
+    let n = online.n();
+    let m = online.m();
+    assert_eq!(n, y.len());
+    assert_eq!(online.inducing_ids().len(), m);
+    assert_eq!(online.z().len(), m * d);
+    assert_eq!(online.x().len(), n * d);
+    for id in deleted {
+        assert!(
+            !online.inducing_ids().contains(id),
+            "deleted InducingId still present"
+        );
+    }
+
+    let full = factor_oracle(kernel, likelihood, x, n, d, y, z, m);
+    assert_eq!(full.n(), n);
+    assert_eq!(full.m(), m);
+    assert_slice_close(online.x(), full.x());
+    assert_slice_close(online.y(), full.y());
+    assert_slice_close(online.z(), full.z());
+    assert_slice_close(online.z(), z);
+
+    let n_query = xs.len() / d;
+    let got = online.predict(xs, n_query, d).expect("online predict");
+    let want = full.predict(xs, n_query, d).expect("factor predict");
+    assert_eq!(got.mean.len(), want.mean.len());
+    for (i, (a, b)) in got.mean.iter().zip(want.mean.iter()).enumerate() {
+        assert_close_named(*a, *b, &format!("{ctx} mean[{i}] m={m}"));
+    }
+    for (i, (a, b)) in got.variance.iter().zip(want.variance.iter()).enumerate() {
+        assert_close_named(*a, *b, &format!("{ctx} var[{i}] m={m}"));
+    }
+
+    let nlml_online = online.neg_log_marginal_likelihood().expect("online nlml");
+    let nlml_full = full.neg_log_marginal_likelihood().expect("factor nlml");
+    assert_close_named(nlml_online, nlml_full, &format!("{ctx} nlml m={m}"));
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+#[allow(clippy::too_many_arguments)]
+fn run_inducing_sequence(
+    kernel: KernelSpec,
+    x0: &[f64],
+    y0: &[f64],
+    z0: &[f64],
+    m0: usize,
+    d: usize,
+    xs: &[f64],
+    seed: u64,
+) {
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let fitted = factor_oracle(kernel.clone(), likelihood, x0, y0.len(), d, y0, z0, m0);
+    let mut online = fitted.into_online();
+    let mut z = z0.to_vec();
+    let mut deleted = HashSet::new();
+    let mut rng = SmallRng::seed_from_u64(seed);
+
+    assert_matches_factor_inducing(
+        &online,
+        kernel.clone(),
+        likelihood,
+        x0,
+        y0,
+        &z,
+        xs,
+        d,
+        &deleted,
+        &format!("seed={seed} start"),
+    );
+
+    for step in 0..OPS {
+        let m = online.m();
+        let insert = m == 1 || (m < M_MAX && rng.random::<bool>());
+        if insert {
+            let mut z_new = vec![0.0; d];
+            for value in &mut z_new {
+                *value = sample_coord(&mut rng);
+            }
+            let id = online.insert_inducing(&z_new).expect("insert inducing");
+            assert!(!deleted.contains(&id), "insert reused a deleted InducingId");
+            assert_eq!(online.inducing_ids().last().copied(), Some(id));
+            append_colmajor(&mut z, m, d, &z_new);
+        } else {
+            let ids = online.inducing_ids();
+            let index = rng.random_range(0..ids.len());
+            let id = ids[index];
+            online.delete_inducing(id).expect("delete inducing");
+            deleted.insert(id);
+            remove_colmajor(&mut z, m, d, index);
+        }
+        assert_matches_factor_inducing(
+            &online,
+            kernel.clone(),
+            likelihood,
+            x0,
+            y0,
+            &z,
+            xs,
+            d,
+            &deleted,
+            &format!("seed={seed} step={step}"),
+        );
+    }
+}
+
+fn run_inducing_seeds(
+    kernel: KernelSpec,
+    x0: &[f64],
+    y0: &[f64],
+    z0: &[f64],
+    m0: usize,
+    d: usize,
+    xs: &[f64],
+) {
+    for seed in SEEDS {
+        run_inducing_sequence(kernel.clone(), x0, y0, z0, m0, d, xs, seed);
+    }
+}
+
+#[test]
+fn inducing_ops_rbf_matches_factor() {
+    run_inducing_seeds(
+        KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+        &X1,
+        &Y0,
+        &Z1,
+        2,
+        1,
+        &[0.5],
+    );
+}
+
+#[test]
+fn inducing_ops_matern_three_halves_matches_factor() {
+    run_inducing_seeds(
+        KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves).expect("ℓ")),
+        &X1,
+        &Y0,
+        &Z1,
+        2,
+        1,
+        &[0.5],
+    );
+}
+
+#[test]
+fn inducing_ops_rbf_ard_2d_matches_factor() {
+    run_inducing_seeds(
+        KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ")),
+        &X2,
+        &Y0,
+        &Z2,
+        2,
+        2,
+        &[0.25, 0.75],
+    );
+}
+
+#[test]
+fn inducing_ops_rbf_plus_white_matches_factor() {
+    run_inducing_seeds(
+        KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+            + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
+        &X1,
+        &Y0,
+        &Z1,
+        2,
+        1,
+        &[0.5],
+    );
+}
+
+#[test]
+fn delete_unknown_inducing_id_is_invalid() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let fitted = factor_oracle(kernel, likelihood, &X1, 4, 1, &Y0, &Z1, 2);
+    let mut online = fitted.into_online();
+    let id = online.inducing_ids()[0];
+    online.insert_inducing(&[1.5]).expect("insert inducing");
+    online.delete_inducing(id).expect("delete inducing");
+    assert!(matches!(
+        online.delete_inducing(id),
+        Err(GprError::InvalidInducingId)
+    ));
+}
+
+#[test]
+fn delete_last_inducing_is_empty_input() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let fitted = factor_oracle(kernel, likelihood, &X1, 4, 1, &Y0, &Z1, 2);
+    let mut online = fitted.into_online();
+    while online.m() > 1 {
+        let id = online.inducing_ids()[0];
+        online.delete_inducing(id).expect("delete inducing");
+    }
+    let last = online.inducing_ids()[0];
+    assert!(matches!(
+        online.delete_inducing(last),
+        Err(GprError::EmptyInput)
+    ));
+    assert_eq!(online.m(), 1);
 }

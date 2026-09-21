@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-9（誘導点の増分 insert / delete）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-10（誘導点の増減）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
