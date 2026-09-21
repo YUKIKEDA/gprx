@@ -35,7 +35,7 @@ pub(crate) struct PointRegistry {
 }
 
 impl PointRegistry {
-    fn from_count(n: usize) -> Self {
+    pub(crate) fn from_count(n: usize) -> Self {
         let index_to_id: Vec<PointId> = (0..n as u64).map(PointId::from_raw).collect();
         let id_to_index = index_to_id
             .iter()
@@ -76,7 +76,7 @@ impl PointRegistry {
         })
     }
 
-    fn ids(&self) -> &[PointId] {
+    pub(crate) fn ids(&self) -> &[PointId] {
         &self.index_to_id
     }
 
@@ -88,14 +88,14 @@ impl PointRegistry {
         self.index_to_id.len()
     }
 
-    fn index_of(&self, id: PointId) -> Result<usize, GprError> {
+    pub(crate) fn index_of(&self, id: PointId) -> Result<usize, GprError> {
         self.id_to_index
             .get(&id)
             .copied()
             .ok_or(GprError::InvalidPointId)
     }
 
-    fn insert(&mut self) -> PointId {
+    pub(crate) fn insert(&mut self) -> PointId {
         let id = PointId::from_raw(self.next_id);
         let index = self.index_to_id.len();
         self.next_id = self.next_id.saturating_add(1);
@@ -200,7 +200,7 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
 }
 
 impl PointRegistry {
-    fn remove_at(&mut self, index: usize) {
+    pub(crate) fn remove_at(&mut self, index: usize) {
         let id = self.index_to_id.remove(index);
         self.id_to_index.remove(&id);
         for (shifted, remaining) in self.index_to_id.iter().enumerate().skip(index) {
