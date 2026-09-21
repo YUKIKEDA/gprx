@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-3（対角予測と MLL）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-4（ハイパラ最適化、Z は params に入れない）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

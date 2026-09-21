@@ -2,14 +2,17 @@
 //!
 //! [`GprObjective`] borrows [`FittedGpr`] during `fit` / `refit` and forwards
 //! concatenated kernel-then-likelihood `θ` to the model, which owns the
-//! source of truth. Capability is split so a derivative-free solver can
-//! require only [`Objective`], L-BFGS can require [`Differentiable`], and a
-//! Newton solver can require [`TwiceDifferentiable`].
+//! source of truth. [`SparseGprObjective`] does the same for
+//! [`crate::FittedSparseGpr`] and the VFE evidence lower bound. Capability
+//! is split so a derivative-free solver can require only [`Objective`],
+//! L-BFGS can require [`Differentiable`], and a Newton solver can require
+//! [`TwiceDifferentiable`].
 
 use crate::error::GprError;
 use crate::gpr::{DistanceCacheSlot, FittedGpr};
 use crate::optimizer::{FullRecompute, IncrementalRecompute};
 use crate::param::Interval;
+use crate::sparse::FittedSparseGpr;
 use faer::Mat;
 
 /// Optimizer-facing scalar objective (`value` only).
@@ -288,6 +291,58 @@ where
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
 {
+    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        self.model.fill_intervals(out)
+    }
+}
+
+/// Sparse VFE objective. Parameters are kernel `θ` followed by likelihood `θ`.
+///
+/// Does not own hyperparameters. After a successful evaluation,
+/// [`FittedSparseGpr`]'s kernel and likelihood match `params`. Inducing
+/// coordinates `Z` are not parameters.
+pub(crate) struct SparseGprObjective<'a, O> {
+    model: &'a mut FittedSparseGpr<O>,
+}
+
+impl<'a, O> SparseGprObjective<'a, O> {
+    pub(crate) fn new(model: &'a mut FittedSparseGpr<O>) -> Self {
+        Self { model }
+    }
+}
+
+impl<O> Objective for SparseGprObjective<'_, O> {
+    fn num_params(&self) -> usize {
+        self.model.num_params()
+    }
+
+    fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        self.model.set_params(params)?;
+        self.model.neg_log_marginal_likelihood()
+    }
+}
+
+impl<O> Differentiable for SparseGprObjective<'_, O> {
+    fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        self.model.value_and_gradient_into(params, out).map(|_| ())
+    }
+
+    fn value_and_gradient_into(
+        &mut self,
+        params: &[f64],
+        out: &mut [f64],
+    ) -> Result<f64, GprError> {
+        self.model.value_and_gradient_into(params, out)
+    }
+}
+
+impl<O> TwiceDifferentiable for SparseGprObjective<'_, O> {
+    fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        self.model.hessian_into(params, out)
+    }
+}
+
+impl<O> HasBounds for SparseGprObjective<'_, O> {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)
     }

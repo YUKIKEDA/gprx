@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P4-3（対角予測と MLL）。** Phase 2 / 2b / 3 / P4-1 / P4-2 は閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P4-4（ハイパラ最適化、Z は params に入れない）。** Phase 2 / 2b / 3 / P4-1 / P4-2 / P4-3 は閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -203,14 +203,14 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 4 — Sparse GPR
 
-設計 §6.1。2b / 3 のあと。P4-1 / P4-2 は閉じた（VFE / `SparseGpr` factor）。着手は P4-3（[#37](https://github.com/YUKIKEDA/gprx/issues/37)）の対角予測と MLL。初期は呼び出し側の Z を固定。Z の最適化と Sparse オンラインはあとの行。
+設計 §6.1。2b / 3 のあと。P4-1 / P4-2 / P4-3 は閉じた（VFE / `SparseGpr` factor / 対角予測と MLL）。着手は P4-4（[#38](https://github.com/YUKIKEDA/gprx/issues/38)）のハイパラ最適化。初期は呼び出し側の Z を固定。Z の最適化と Sparse オンラインはあとの行。
 
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
 | P4-1 | Spike | VFE か FITC か一つ選ぶ                   | 1b   | VFE を選ぶ。FITC は載せず、両方もしない。`.dev/adr/0002-sparse-vfe.md` に文脈・決定・根拠（Titsias 2009、GPyTorch SGPR / GPflow、FITC の棄却理由）。ELBO の展開・`SparseGpr` の API・数値実験は置かない（P4-2）。§6.1 と §13 を「VFE。理由は ADR 0002」現在形。`src/sparse.rs` / 新しい `tests/` / golden なし。`layout.mdc` は変えない。着手点を P4-1（[#35](https://github.com/YUKIKEDA/gprx/issues/35)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just perf` は合否にしない |
 | P4-2 | Feat  | `SparseGpr`、誘導点固定                   | P4-1 | `SparseGpr` / `FittedSparseGpr` を公開する（crate ルート再エクスポート）。`src/sparse.rs` だけ。`SparseGpr<Fixed>::factor` のみ（`fit` / predict / ELBO は置かない。それらは P4-4 / P4-3）。Z は呼び出し側が渡す。k-means なし。カーネルは RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n = 4`・`m = 2` で `factor` が `FittedSparseGpr` を返し、`n` / `m` / `d` / `x` / `y` / `z` が入力と一致。RBF の `n = 2`・`Z = X` は `K_mm` の LLT 再構成が解析 Gram と相対 `1e-12`。空入力・次元不一致・`m = 0` は既存 `GprError`。新しい `GprError` / golden / `tests/` なし。`tests/alloc.rs` 上限は上げない。`layout.mdc` に `src/sparse.rs` と公開型。§6.1 を `SparseGpr` / `factor` / 呼び出し側 Z の現在形。着手点を P4-2（[#36](https://github.com/YUKIKEDA/gprx/issues/36)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just perf` は合否にしない |
 | P4-3 | Feat  | 対角予測と MLL                           | P4-2 | `FittedSparseGpr` に `predict` / `predict_with` / `neg_log_marginal_likelihood` を置く（`src/sparse.rs` だけ。`predict_into` / `predict_covariance` / `sample` / `loo_predict` / `fit` は置かない。`fit` は P4-4）。`neg_log_marginal_likelihood` は VFE の負の ELBO。`predict` は既定 Observation、`predict_with` で `VarianceKind::Observation` と `Latent`。対角だけ。カーネルは RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n = 4`・`Z = X` で `Gpr<Fixed>::factor` と、訓練点 `X` および `X` に含まれないクエリ 2 点の平均・Observation 分散・Latent 分散と NLML が相対 `1e-12`。RBF の `n = 4`・`m = 2` は `predict` と NLML が成功する（数値一致は要求しない）。空クエリ・次元不一致は既存 `GprError`。新しい `GprError` / golden / `tests/` なし。`tests/alloc.rs` 上限は上げない。`layout.mdc` を `predict` / `predict_with` / NLML の現在形（`fit` / 共分散は置かない）。§6.1 を対角 `predict` / NLML（VFE ELBO）の現在形。着手点を P4-3（[#37](https://github.com/YUKIKEDA/gprx/issues/37)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just perf` は合否にしない |
-| P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3, P2B-9 | 2b と同じ公開 Optimizer 経路。Z は params に入れない |
+| P4-4 | Feat  | ハイパラ最適化（Z は params に入れない） | P4-3, P2B-9 | `SparseGpr<O: Optimizer = Lbfgs>`。`new` は L-BFGS。`fit` / `with_optimizer` は `SparseGpr<O>`。`factor` は `SparseGpr<Fixed>` だけ（`new().with_optimizer(Fixed).factor()`）。Z は呼び出し側。`get_params` / `set_params` / `num_params` は学習前と `FittedSparseGpr`（カーネル θ のあと尤度 θ。Z は入れない）。`SparseGprObjective` を `src/objective.rs` に置き `Objective` / `Differentiable` / `TwiceDifferentiable`。`fit` / `with_optimizer` / `value_and_gradient_into` / `hessian_into` は `src/sparse.rs`。`hessian_into` は Exact と同じ（row-major p×p）。`predict_into` / 共分散 / sample / LOO は置かない。カーネルは RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n = 4`・`Z = X` で `Gpr<Fixed>::factor` と value / grad / Hess が相対 `1e-12`。同じ 4 カーネルで解析 grad と value の有限差分が相対 `1e-5`。RBF の Hess と grad の有限差分が相対 `2e-4`。RBF の `n = 4`・`m = 2` で L-BFGS / NCG / Nelder–Mead / Newton / FSA の `fit` が成功し、NLML が開始時以下。新しい `GprError` / golden / `tests/` なし。`tests/alloc.rs` 上限は上げない。`layout.mdc` と §6.1 を `fit` / params / Hessian 現在形。着手点を P4-4（[#38](https://github.com/YUKIKEDA/gprx/issues/38)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない |
 | P4-5 | Spike | 誘導点 Z の最適化方式                     | P4-4 | 同時最適化か交互最適化かを `.dev/` に1ページ。理由とメモリ（`m×d`） |
 | P4-6 | Feat  | Z を最適化対象にする                      | P4-5 | P4-5 の方式。カーネル・ノイズに加え Z が動く。小問題で固定 Z より NLML が下がるか記録 |
 | P4-7 | Feat  | Sparse のオンライン学習                   | P4-4, P3-5 | 点の追加削除。Exact Phase 3 と同じ不変条件は要求しない。設計 §14 の非対称を `.dev/` に残し、incremental == その Sparse のフル再 fit |
