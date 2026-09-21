@@ -2,12 +2,11 @@
 
 pub(crate) mod factor;
 mod model;
-mod online;
+pub(crate) mod online;
 mod types;
 
 pub use model::{FittedGpr, Gpr};
 pub use online::OnlineGpr;
-pub(crate) use online::PointRegistry;
 #[cfg(feature = "insert-stages")]
 #[doc(hidden)]
 pub use online::take_insert_stages;
