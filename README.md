@@ -6,7 +6,7 @@ Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::
 
 Local **0.1.0** quality: `Gpr` / `FittedGpr`, kernels, `fit` / `predict` / `predict_into` / leave-one-out, English rustdoc, and `examples/`. Depend on git or a path, not crates.io.
 
-Design: [`.dev/gprx-design.md`](.dev/gprx-design.md). Tasks: [`.dev/roadmap.md`](.dev/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`.dev/bench-log.md`](.dev/bench-log.md) (P2B-16; `compare/perf/`, not criterion).
+Design: [`.dev/gprx-design.md`](.dev/gprx-design.md). Tasks: [`.dev/roadmap.md`](.dev/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`.dev/bench-log.md`](.dev/bench-log.md) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; `compare/perf/`, not criterion).
 
 ## Example
 

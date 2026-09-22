@@ -409,7 +409,7 @@ struct PredictOptions {
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
-Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`Svgp<Adam>::fit` が同じ prior からミニバッチ Adam でカーネル `θ`・尤度 `θ`・whitened `q` を動かす。`Adam` は `Optimizer` ではない。`FittedSvgp` は対角の `predict` / `predict_with`、`neg_elbo`、全データ `value_and_gradient_into` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する。公開型は `Sgpr` / `FittedSgpr`。既定は `Sgpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`Sgpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSgpr` は対角の `predict` / `predict_with`、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。k-means は置かない。バッチの外部照合は P4-11（同じ初期 θ の GPyTorch 潰し SGPR / whitened prior SVGP、相対 `1e-8`）。
+Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`Svgp<Adam>::fit` が同じ prior からミニバッチ Adam でカーネル `θ`・尤度 `θ`・whitened `q` を動かす。`Adam` は `Optimizer` ではない。`FittedSvgp` は対角の `predict` / `predict_with`、`neg_elbo`、全データ `value_and_gradient_into` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する。公開型は `Sgpr` / `FittedSgpr`。既定は `Sgpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`Sgpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSgpr` は対角の `predict` / `predict_with`、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。k-means は置かない。バッチの外部照合は P4-11（同じ初期 θ の GPyTorch 潰し SGPR / whitened prior SVGP、相対 `1e-8`）。バッチの時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPflow / GPy。CPU。正しさゲートは置かない）。
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。
 
@@ -847,7 +847,7 @@ impl OnlineGpr<O, S, C, B> {
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
 5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順は `SmallRng` でランダム化する
 5b. **オンライン insert の外部照合**(P3-6): 同じ θ の libgp `add_pattern` と predict（平均・観測分散）および NLML を相対 `1e-8`。delete の外部 API は無い。`cargo test` はコミット済み JSON を読む（C++ を呼ばない）
-5c. **Sparse の外部照合**(P4-11): 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch 潰し SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）。オンラインは P4-13。時間は P4-12 / P4-14
+5c. **Sparse の外部照合**(P4-11): 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch 潰し SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）。オンラインは P4-13。時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPflow / GPy。手動、CI なし） / P4-14
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのf64フォールバック
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)。sklearn JSON は数値の第二照合であり、公開 API の契約ではない。アルゴリズムの正本は GPML / Rasmussen
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
@@ -858,7 +858,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-16（[#202](https://github.com/YUKIKEDA/gprx/issues/202)）。P4-12…14 の DoD は Grill 後。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-12（[#197](https://github.com/YUKIKEDA/gprx/issues/197)）。P4-13…14 の DoD は Grill 後。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
@@ -875,7 +875,7 @@ impl OnlineGpr<O, S, C, B> {
 2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
 3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
 4. **Sparse GPRの誘導点Zの最適化**: 既定は `FixedInducing`。自由 Z は `FreeInducing` で同時。理由は [ADR 0003](adr/0003-sparse-z-joint.md)
-5. **Sparse の外部照合**: バッチは P4-11（GPyTorch、相対 `1e-8`）。オンラインは P4-13。時間は P4-12 / P4-14
+5. **Sparse の外部照合**: バッチ正しさは P4-11（GPyTorch、相対 `1e-8`）。バッチ時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPflow / GPy）。オンラインは P4-13 / P4-14
 6. **SVGP**: 別公開型 `Svgp` / `FittedSvgp`。`factor` / 全データ ELBO / 対角予測 / `value_and_gradient_into` / `Svgp<Adam>::fit` は載った。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Adam` は `Optimizer` ではない。VFE の `Sgpr` は残す
 
 ## 15. ベンチマーク戦略
@@ -920,7 +920,7 @@ impl OnlineGpr<O, S, C, B> {
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
 | Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。P2-5: 等方 RBF と距離に SIMD。可否は `kernel_rbf` / `predict` / `FIXED` で判断し、`mll_and_grad` の勾配項だけを分母にしない。NLML 定数項は P2-6 で測り、差はノイズなので `L(θ)` は一本のまま。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never。埋めと RBF ARD は Rayon + SIMD |
 | 2 完了（P2-9） | 名前付き baseline `phase-2` を取り、機械名と数値を `.dev/bench-log.md` に残す。等方は `phase-1b` と比較。ARD は Always vs Never。`FittedGpr` 経路で `just test` と alloc 0 |
-| Phase 3+ | insert/delete などを同じ問題定義で足す。比較の基準は `phase-2` |
+| Phase 3+ | insert/delete などを同じ問題定義で足す。比較の基準は `phase-2`。Sparse の壁時計・RSS は `just perf-sparse`（P4-12）。criterion に Sparse グループは足さない |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。
 

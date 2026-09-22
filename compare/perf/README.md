@@ -32,3 +32,7 @@ Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench
 `just perf-online-stages` rebuilds gprx-perf with `--features insert-stages` and prints kernel / bordered LDLT / X·y medians for Forrester `n = 256 / 1024`. It does not change the gate clock.
 
 `just perf-online-delete` times gprx `OnlineGpr::delete` from `n` down to 2 (last remaining `PointId` each step; insert is untimed). No libgp cell. Used to record before / after of the P3-7 delete path.
+
+## Sparse SGPR / SVGP (P4-12)
+
+`just perf-sparse` times `Sgpr<Fixed>::factor` and `Svgp<Fixed>::factor` (prior `q`) against GPyTorch / GPflow / GPy. Same Forrester / sphere `n` as P2B-16, `m = 16` (k-means seed `0` at generation time), population-standardized `y`, CPU, no `fit`. Clock matches P2B-16. Gate: factor / joint / predict and peak RSS each smaller than every opponent that wrote the cell (5% inconclusive). Unwritable cells are N/A. GPflow / TensorFlow are installed only when `sys_platform != 'win32'` (`tensorflow-io-gcs-filesystem` has no Windows wheel in the GPflow 2.9 / TF 2.15 set). Windows GPflow cells are N/A. Results: `compare/perf/out/sparse_results.json`. Pass / fail is recorded in `.dev/bench-log.md`. `just perf` / `just perf-online` stay Exact / online. `cargo test` must not run this. NumPy stays `>=1.26,<2` so the non-Windows GPflow extra can lock.

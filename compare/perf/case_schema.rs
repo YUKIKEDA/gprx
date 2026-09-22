@@ -18,6 +18,26 @@ pub struct Case {
     pub joint_evals: u64,
 }
 
+/// P4-12 Sparse cell. `y` is already population-standardized.
+#[derive(Debug, Deserialize)]
+pub struct SparseCase {
+    pub name: String,
+    pub model: String,
+    pub ard: bool,
+    pub n_rows: usize,
+    pub n_cols: usize,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub z: Vec<f64>,
+    pub n_inducing: usize,
+    pub xs_n_rows: usize,
+    pub xs_n_cols: usize,
+    pub xs: Vec<f64>,
+    pub lengthscales_init: Vec<f64>,
+    pub noise_variance_init: f64,
+    pub joint_evals: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ResultRow {
     pub lib: String,
