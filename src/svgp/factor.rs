@@ -12,7 +12,7 @@ use crate::gpr::factor::{
 };
 use crate::kernel::{KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
-use crate::sparse::{kernel_cross, validate_inducing};
+use crate::sgpr::{kernel_cross, validate_inducing};
 use crate::workspace::{faer_par, faer_par_dims};
 use crate::{PredictOptions, Prediction, VarianceKind};
 

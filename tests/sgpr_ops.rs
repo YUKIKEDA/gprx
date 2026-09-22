@@ -1,6 +1,6 @@
-//! Random insert/delete sequences vs [`SparseGpr<Fixed>::factor`] (P4-8 / P4-10).
+//! Random insert/delete sequences vs [`Sgpr<Fixed>::factor`] (P4-8 / P4-10).
 //!
-//! Each `X` step compares public [`OnlineSparseGpr`] numerics and point
+//! Each `X` step compares public [`OnlineSgpr`] numerics and point
 //! identity to a batch factor at the same `θ` and `Z`. Each inducing step
 //! compares the same public numerics at the same `θ` and `X` after `m`
 //! changes. This file uses only the public API.
@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use gprx::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use gprx::{
-    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSparseGpr, PointId,
-    Prediction, SparseGpr,
+    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSgpr, PointId, Prediction,
+    Sgpr,
 };
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -94,8 +94,8 @@ fn factor_oracle(
     y: &[f64],
     z: &[f64],
     m: usize,
-) -> gprx::FittedSparseGpr<Fixed> {
-    SparseGpr::new(kernel, likelihood)
+) -> gprx::FittedSgpr<Fixed> {
+    Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(x, n, d, y, z, m)
         .map_err(|(_, e)| e)
@@ -105,7 +105,7 @@ fn factor_oracle(
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 #[allow(clippy::too_many_arguments)]
 fn assert_matches_factor(
-    online: &OnlineSparseGpr<Fixed>,
+    online: &OnlineSgpr<Fixed>,
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x: &[f64],
@@ -233,7 +233,7 @@ fn run_seeds(
 }
 
 #[test]
-fn sparse_ops_rbf_matches_factor() {
+fn sgpr_ops_rbf_matches_factor() {
     run_seeds(
         KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
         &X1,
@@ -246,7 +246,7 @@ fn sparse_ops_rbf_matches_factor() {
 }
 
 #[test]
-fn sparse_ops_matern_three_halves_matches_factor() {
+fn sgpr_ops_matern_three_halves_matches_factor() {
     run_seeds(
         KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves).expect("ℓ")),
         &X1,
@@ -259,7 +259,7 @@ fn sparse_ops_matern_three_halves_matches_factor() {
 }
 
 #[test]
-fn sparse_ops_rbf_ard_2d_matches_factor() {
+fn sgpr_ops_rbf_ard_2d_matches_factor() {
     run_seeds(
         KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ")),
         &X2,
@@ -272,7 +272,7 @@ fn sparse_ops_rbf_ard_2d_matches_factor() {
 }
 
 #[test]
-fn sparse_ops_rbf_plus_white_matches_factor() {
+fn sgpr_ops_rbf_plus_white_matches_factor() {
     run_seeds(
         KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
             + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
@@ -320,7 +320,7 @@ fn into_online_value_grad_hess_match_fitted() {
 fn rbf_refit_does_not_raise_nlml() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .fit(&X1, 4, 1, &Y0, &Z1, 2)
         .map_err(|(_, e)| e)
         .expect("fit");
@@ -364,7 +364,7 @@ fn delete_last_point_is_empty_input() {
 fn free_inducing_into_online_drops_z_params() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .with_inducing(FreeInducing)
         .fit(&X1, 4, 1, &Y0, &[0.2, 0.4], 2)
         .map_err(|(_, e)| e)
@@ -380,7 +380,7 @@ fn free_inducing_into_online_drops_z_params() {
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 #[allow(clippy::too_many_arguments)]
 fn assert_matches_factor_inducing(
-    online: &OnlineSparseGpr<Fixed>,
+    online: &OnlineSgpr<Fixed>,
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x: &[f64],
