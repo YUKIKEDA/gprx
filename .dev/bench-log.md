@@ -484,3 +484,32 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 
 時間 fail の主因は joint（GPy が n≥1024 で短い。GPyTorch は球 SGPR n=1024 の eval が短い）。n=4096 の RSS は gprx 約 263 MiB、GPy 約 123 MiB、GPyTorch 約 250 MiB。factor は全セルで gprx が短い。
 
+## P4-14（Sparse オンライン時間、[#199](https://github.com/YUKIKEDA/gprx/issues/199)）
+
+同一機械。日付 2026-09-23。`just perf-sparse-online`。生の `y`。`m_max = 16`（生成時 k-means、seed `0`）。初期はプレフィックス `start_n = 32/128/512`・`start_m = 8`。32 操作はハーネス生成（`ops_seed = 0`、RBF probe の PD フィルタ。P4-13 の JSON は読まない）。全部 CPU。プレフィックスは計時外。時計は 32 手を 1 本の壁時計（捨て 1 回 + 中央値。`n ≤ 256` で 51、`n ≤ 1024` で 21、それ以外 7）。predict / NLML は時計に入れない。GPy は置かない。
+
+ゲートは 3 段×2 問題すべてで増分の中央値が自前 `Sgpr<Fixed>::factor` フルより小さく、かつ GPyTorch Titsias 組み立て（クエリなし）より小さい（5% 以内は判定不能）。RSS は記録。6 セルは pass。改善行は足さない。criterion は合否にしない。
+
+| 問題      | n    | lib       | ops 32  | peak RSS  | vs inc |
+| --------- | ---- | --------- | ------- | --------- | ------ |
+| Forrester | 256  | gprx-inc  | 1.49 ms | 5.3 MiB   | -      |
+| Forrester | 256  | gprx-full | 2.56 ms | 5.1 MiB   | pass   |
+| Forrester | 256  | gpytorch  | 1.900 s | 208.7 MiB | pass   |
+| Forrester | 1024 | gprx-inc  | 1.65 ms | 5.3 MiB   | -      |
+| Forrester | 1024 | gprx-full | 2.89 ms | 5.2 MiB   | pass   |
+| Forrester | 1024 | gpytorch  | 2.704 s | 207.4 MiB | pass   |
+| Forrester | 4096 | gprx-inc  | 5.71 ms | 5.7 MiB   | -      |
+| Forrester | 4096 | gprx-full | 6.53 ms | 5.5 MiB   | pass   |
+| Forrester | 4096 | gpytorch  | 2.896 s | 208.9 MiB | pass   |
+| 球 ARD    | 256  | gprx-inc  | 1.47 ms | 5.3 MiB   | -      |
+| 球 ARD    | 256  | gprx-full | 2.01 ms | 5.2 MiB   | pass   |
+| 球 ARD    | 256  | gpytorch  | 1.834 s | 207.4 MiB | pass   |
+| 球 ARD    | 1024 | gprx-inc  | 1.87 ms | 5.4 MiB   | -      |
+| 球 ARD    | 1024 | gprx-full | 2.51 ms | 5.3 MiB   | pass   |
+| 球 ARD    | 1024 | gpytorch  | 2.922 s | 207.5 MiB | pass   |
+| 球 ARD    | 4096 | gprx-inc  | 5.62 ms | 5.9 MiB   | -      |
+| 球 ARD    | 4096 | gprx-full | 6.09 ms | 5.8 MiB   | pass   |
+| 球 ARD    | 4096 | gpytorch  | 2.619 s | 209.4 MiB | pass   |
+
+増分は全セルで自前フルより短い。GPyTorch は秒オーダー（Python + 毎回の kernel 密行列）。RSS は記録のみ（gprx 約 5–6 MiB、GPyTorch 約 208 MiB）。
+
