@@ -1,4 +1,4 @@
-//! Factored variational sparse GPR.
+//! Factored collapsed variational SGPR.
 
 use std::marker::PhantomData;
 
@@ -10,7 +10,7 @@ use crate::error::GprError;
 use crate::gpr::factor::{require_param_len, write_params};
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::SparseGprObjective;
+use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
 use crate::param::Interval;
 use crate::{PredictOptions, Prediction};
@@ -19,21 +19,21 @@ use super::factor::{
     VfeState, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
     vfe_neg_log_marginal_likelihood, vfe_predict,
 };
-use super::model::SparseGpr;
-use super::online::OnlineSparseGpr;
+use super::model::Sgpr;
+use super::online::OnlineSgpr;
 use super::{FixedInducing, InducingLayout};
 
-/// Factored variational sparse GPR at the `θ` used by [`SparseGpr::fit`] or
-/// [`SparseGpr<Fixed>::factor`].
+/// Factored collapsed variational SGPR at the `θ` used by [`Sgpr::fit`] or
+/// [`Sgpr<Fixed>::factor`].
 ///
 /// Stores the LLT of `K_mm = k(Z, Z)` and the VFE factors used by
 /// [`Self::predict`] and [`Self::neg_log_marginal_likelihood`]. Observation
 /// noise is not added to `K_mm`. Hyperparameters are kernel `θ` then
 /// likelihood `θ`. [`FreeInducing`] then appends column-major `Z`.
-/// [`Self::into_online`] yields [`OnlineSparseGpr`] for training-point and
+/// [`Self::into_online`] yields [`OnlineSgpr`] for training-point and
 /// inducing-point updates.
 #[derive(Clone, Debug)]
-pub struct FittedSparseGpr<O = Lbfgs, I = FixedInducing> {
+pub struct FittedSgpr<O = Lbfgs, I = FixedInducing> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
@@ -57,7 +57,7 @@ pub struct FittedSparseGpr<O = Lbfgs, I = FixedInducing> {
 }
 
 #[allow(private_bounds)]
-impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
+impl<O, I: InducingLayout> FittedSgpr<O, I> {
     /// Returns the number of training points.
     pub fn n(&self) -> usize {
         self.n
@@ -141,10 +141,10 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let mut fitted = SparseGpr::new(
+    /// let mut fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -228,10 +228,10 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let mut fitted = SparseGpr::new(
+    /// let mut fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -280,10 +280,10 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let mut fitted = SparseGpr::new(
+    /// let mut fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -315,19 +315,19 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
 
     /// Converts this model into an online sparse GPR.
     ///
-    /// [`OnlineSparseGpr`] can append or drop training points and inducing
+    /// [`OnlineSgpr`] can append or drop training points and inducing
     /// points. [`FixedInducing`] and [`FreeInducing`] both produce
-    /// [`OnlineSparseGpr<O>`] whose parameters are kernel then likelihood
+    /// [`OnlineSgpr<O>`] whose parameters are kernel then likelihood
     /// `θ`. The stored VFE factors are reused.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = SparseGpr::new(
+    /// let fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -347,8 +347,8 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(self) -> OnlineSparseGpr<O> {
-        OnlineSparseGpr::from_fitted(self)
+    pub fn into_online(self) -> OnlineSgpr<O> {
+        OnlineSgpr::from_fitted(self)
     }
 
     fn inducing_equals_training(&self) -> bool {
@@ -371,8 +371,8 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
         self.a_frobenius2 = state.a_frobenius2;
     }
 
-    pub(crate) fn into_trainer(self) -> SparseGpr<O, I> {
-        SparseGpr {
+    pub(crate) fn into_trainer(self) -> Sgpr<O, I> {
+        Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
@@ -382,14 +382,14 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
 
     pub(crate) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<SparseGprObjective<'a, O, I>>,
+        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
         let before = self.clone();
         let optimizer = self.optimizer.clone();
         let result = {
-            let mut obj = SparseGprObjective::new(self);
+            let mut obj = SgprObjective::new(self);
             optimizer.minimize(&mut obj, &init)
         };
         self.commit_or_revert_optimize(before, result)
@@ -434,12 +434,12 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_optimizer(Fixed)
     ///     .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
     ///     .map_err(|(_, e)| e)?;
@@ -478,12 +478,12 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_optimizer(Fixed)
     ///     .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
     ///     .map_err(|(_, e)| e)?;
@@ -514,12 +514,12 @@ impl<O, I: InducingLayout> FittedSparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, PredictOptions, SparseGpr, VarianceKind};
+    /// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, VarianceKind};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_optimizer(Fixed)
     ///     .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
     ///     .map_err(|(_, e)| e)?;

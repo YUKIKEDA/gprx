@@ -1,4 +1,4 @@
-//! Trainer for variational sparse GPR.
+//! Trainer for collapsed variational SGPR.
 
 use std::marker::PhantomData;
 
@@ -6,30 +6,30 @@ use crate::error::GprError;
 use crate::gpr::factor::{require_param_len, write_params};
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::SparseGprObjective;
+use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 
 use super::factor::assemble_fitted;
-use super::fitted::FittedSparseGpr;
+use super::fitted::FittedSgpr;
 use super::{FixedInducing, FreeInducing, InducingLayout};
 
-/// Trainer for variational sparse GPR at a caller-supplied inducing set `Z`.
+/// Trainer for collapsed variational SGPR at a caller-supplied inducing set `Z`.
 ///
 /// The default [`FixedInducing`] searches kernel and likelihood `θ` only.
 /// [`Self::with_inducing`]`(`[`FreeInducing`]`)` searches `θ` and `Z`
-/// together. [`SparseGpr<Fixed, I>::factor`] prepares the VFE system at the
+/// together. [`Sgpr<Fixed, I>::factor`] prepares the VFE system at the
 /// current `θ` with no search.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, SparseGpr};
+/// use gprx::{GaussianLikelihood, Sgpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let fitted = SparseGpr::new(kernel, likelihood)
+/// let fitted = Sgpr::new(kernel, likelihood)
 ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
 ///     .map_err(|(_, e)| e)?;
 /// assert_eq!(fitted.n(), 4);
@@ -38,18 +38,18 @@ use super::{FixedInducing, FreeInducing, InducingLayout};
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct SparseGpr<O = Lbfgs, I = FixedInducing> {
+pub struct Sgpr<O = Lbfgs, I = FixedInducing> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
     pub(crate) inducing: PhantomData<I>,
 }
-impl SparseGpr {
+impl Sgpr {
     /// Builds a trainer with identity transforms, the current kernel `θ`, and
     /// [`Lbfgs`].
     ///
-    /// Inducing coordinates are an argument of [`SparseGpr::fit`] /
-    /// [`SparseGpr<Fixed>::factor`], not of this constructor. Call
+    /// Inducing coordinates are an argument of [`Sgpr::fit`] /
+    /// [`Sgpr<Fixed>::factor`], not of this constructor. Call
     /// [`Self::with_optimizer`] to switch to [`Fixed`] or another
     /// [`Optimizer`].
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
@@ -62,19 +62,19 @@ impl SparseGpr {
     }
 }
 
-impl<O, I> SparseGpr<O, I> {
+impl<O, I> Sgpr<O, I> {
     /// Replaces the optimizer type parameter.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_optimizer(Fixed)
     ///     .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
     ///     .map_err(|(_, e)| e)?;
@@ -82,8 +82,8 @@ impl<O, I> SparseGpr<O, I> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> SparseGpr<O2, I> {
-        SparseGpr {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I> {
+        Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer,
@@ -101,12 +101,12 @@ impl<O, I> SparseGpr<O, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{FreeInducing, GaussianLikelihood, SparseGpr};
+    /// use gprx::{FreeInducing, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_inducing(FreeInducing)
     ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
     ///     .map_err(|(_, e)| e)?;
@@ -114,8 +114,8 @@ impl<O, I> SparseGpr<O, I> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_inducing<I2>(self, _inducing: I2) -> SparseGpr<O, I2> {
-        SparseGpr {
+    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2> {
+        Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
@@ -175,10 +175,10 @@ impl<O, I> SparseGpr<O, I> {
     }
 }
 
-#[allow(private_bounds)] // `SparseGprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
-impl<O> SparseGpr<O, FixedInducing>
+#[allow(private_bounds)] // `SgprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
+impl<O> Sgpr<O, FixedInducing>
 where
-    O: Clone + for<'a> Optimizer<SparseGprObjective<'a, O, FixedInducing>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,
 {
     /// Factors the VFE system and searches kernel and likelihood `θ`.
     ///
@@ -200,12 +200,12 @@ where
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, SparseGpr};
+    /// use gprx::{GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
     ///     .map_err(|(_, e)| e)?;
     /// let nlml = fitted.neg_log_marginal_likelihood()?;
@@ -222,7 +222,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSparseGpr<O>, (Self, GprError)> {
+    ) -> Result<FittedSgpr<O>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
@@ -244,9 +244,9 @@ where
 }
 
 #[allow(private_bounds)]
-impl<O> SparseGpr<O, FreeInducing>
+impl<O> Sgpr<O, FreeInducing>
 where
-    O: Clone + for<'a> Optimizer<SparseGprObjective<'a, O, FreeInducing>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing>>,
 {
     /// Factors the VFE system and searches kernel `θ`, likelihood `θ`, and `Z`.
     ///
@@ -257,7 +257,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same input errors as [`SparseGpr<O, FixedInducing>::fit`], plus
+    /// Same input errors as [`Sgpr<O, FixedInducing>::fit`], plus
     /// [`GprError::CoordGradientUnsupported`] when the kernel has no
     /// coordinate derivative.
     ///
@@ -265,12 +265,12 @@ where
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{FreeInducing, GaussianLikelihood, SparseGpr};
+    /// use gprx::{FreeInducing, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_inducing(FreeInducing)
     ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.2, 0.4], 2)
     ///     .map_err(|(_, e)| e)?;
@@ -287,7 +287,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSparseGpr<O, FreeInducing>, (Self, GprError)> {
+    ) -> Result<FittedSgpr<O, FreeInducing>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
@@ -309,14 +309,14 @@ where
 }
 
 #[allow(private_bounds)]
-impl<I: InducingLayout> SparseGpr<Fixed, I> {
+impl<I: InducingLayout> Sgpr<Fixed, I> {
     /// Factors `K_mm = k(Z, Z)` at the current `θ` without a search.
     ///
     /// `x` and `z` are column-major (`n` / `m` points by `d` features). `Z`
     /// is supplied by the caller and is not moved. Likelihood noise is not
     /// added to `K_mm`. Also forms the VFE factors used by
-    /// [`FittedSparseGpr::predict`] and
-    /// [`FittedSparseGpr::neg_log_marginal_likelihood`].
+    /// [`FittedSgpr::predict`] and
+    /// [`FittedSgpr::neg_log_marginal_likelihood`].
     ///
     /// # Errors
     ///
@@ -331,12 +331,12 @@ impl<I: InducingLayout> SparseGpr<Fixed, I> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = SparseGpr::new(kernel, likelihood)
+    /// let fitted = Sgpr::new(kernel, likelihood)
     ///     .with_optimizer(Fixed)
     ///     .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
     ///     .map_err(|(_, e)| e)?;
@@ -353,7 +353,7 @@ impl<I: InducingLayout> SparseGpr<Fixed, I> {
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSparseGpr<Fixed, I>, (Self, GprError)> {
+    ) -> Result<FittedSgpr<Fixed, I>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,

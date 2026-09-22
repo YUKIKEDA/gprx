@@ -5,7 +5,7 @@ use crate::gpr::factor::cholesky_lower_with_policy;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::workspace::{faer_par, faer_par_dims};
-use crate::{Fixed, PredictOptions, SparseGpr, VarianceKind};
+use crate::{Fixed, PredictOptions, Sgpr, VarianceKind};
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatRef};
@@ -97,8 +97,8 @@ fn factor_vfe(
     n: usize,
     d: usize,
     z: &[f64],
-) -> crate::FittedSparseGpr<Fixed> {
-    SparseGpr::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+) -> crate::FittedSgpr<Fixed> {
+    Sgpr::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
         .with_optimizer(Fixed)
         .factor(x, n, d, &Y, z, 2)
         .map_err(|(_, e)| e)
@@ -118,7 +118,7 @@ fn cholesky_lower(mat: &mut Mat<f64>) {
     .expect("chol");
 }
 
-fn titsias_whitened_q(vfe: &crate::FittedSparseGpr<Fixed>) -> (Vec<f64>, Mat<f64>) {
+fn titsias_whitened_q(vfe: &crate::FittedSgpr<Fixed>) -> (Vec<f64>, Mat<f64>) {
     let m = vfe.m();
     let noise = vfe.likelihood().noise_variance();
     let mean = vfe.w.clone();

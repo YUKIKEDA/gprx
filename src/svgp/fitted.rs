@@ -170,7 +170,7 @@ impl FittedSvgp {
     /// Returns the negative variational ELBO on the full training set.
     ///
     /// This is the un-collapsed bound. At the Titsias-optimal whitened `q`
-    /// it matches [`crate::FittedSparseGpr::neg_log_marginal_likelihood`] on
+    /// it matches [`crate::FittedSgpr::neg_log_marginal_likelihood`] on
     /// the same `θ`, `X`, and `Z`.
     ///
     /// # Errors
