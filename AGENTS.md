@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-17（`SparseGpr` を `Sgpr` に改名）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-11（Sparse の GPyTorch 照合）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

@@ -18,6 +18,10 @@ gen-goldens:
 gen-online-goldens:
     $env:PYTHONUTF8 = "1"; uv run --directory compare python generate_online_libgp.py
 
+# Regenerates GPyTorch sparse / SVGP goldens (P4-11). cargo test must not run this.
+gen-sparse-goldens:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare python generate_sparse_gpytorch.py
+
 bench:
     cargo bench --bench exact
 
