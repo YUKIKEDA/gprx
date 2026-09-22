@@ -12,6 +12,8 @@ pub use fitted::FittedSparseGpr;
 pub use model::SparseGpr;
 pub use online::{InducingId, OnlineSparseGpr};
 
+pub(crate) use factor::{kernel_cross, validate_inducing};
+
 /// Keeps inducing coordinates fixed during [`SparseGpr::fit`].
 ///
 /// `Z` is an argument of `fit` / `factor` and is not a parameter.
