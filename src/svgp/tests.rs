@@ -5,7 +5,7 @@ use crate::gpr::factor::cholesky_lower_with_policy;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::workspace::{faer_par, faer_par_dims};
-use crate::{Fixed, PredictOptions, Sgpr, VarianceKind};
+use crate::{Adam, Fixed, PredictOptions, Sgpr, VarianceKind};
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatRef};
@@ -290,5 +290,159 @@ fn shifted_q_matches_independent_elbo() {
             svgp.likelihood().noise_variance(),
         );
         assert_close(svgp.neg_elbo().expect("elbo"), independent);
+    }
+}
+
+const GRAD_FD: f64 = 1e-5;
+const GRAD_TOL: f64 = 1e-8;
+
+fn fd_grad(model: &mut FittedSvgp, params: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; params.len()];
+    let mut plus = params.to_vec();
+    let mut minus = params.to_vec();
+    for i in 0..params.len() {
+        plus.copy_from_slice(params);
+        minus.copy_from_slice(params);
+        plus[i] += GRAD_FD;
+        minus[i] -= GRAD_FD;
+        model.set_params(&plus).expect("plus");
+        let fp = model.neg_elbo().expect("fp");
+        model.set_params(&minus).expect("minus");
+        let fm = model.neg_elbo().expect("fm");
+        out[i] = (fp - fm) / (2.0 * GRAD_FD);
+    }
+    model.set_params(params).expect("restore");
+    out
+}
+
+fn assert_grad_close(analytic: &[f64], fd: &[f64]) {
+    for (i, (a, e)) in analytic.iter().zip(fd).enumerate() {
+        let scale = e.abs().max(1.0);
+        assert!(
+            (a - e).abs() <= GRAD_TOL * scale,
+            "i={i} analytic={a} fd={e}"
+        );
+    }
+}
+
+fn check_full_grad(kernel: KernelSpec, x: &[f64], n: usize, d: usize, z: &[f64]) {
+    let mut fitted = factor_svgp(kernel, x, n, d, z);
+    let mut params = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut params).expect("get");
+    let mut analytic = vec![0.0; params.len()];
+    let value = fitted
+        .value_and_gradient_into(&params, &mut analytic)
+        .expect("grad");
+    assert_close(value, fitted.neg_elbo().expect("elbo"));
+    let fd = fd_grad(&mut fitted, &params);
+    assert_grad_close(&analytic, &fd);
+}
+
+#[test]
+fn rbf_prior_grad_matches_fd() {
+    check_full_grad(kernel_rbf(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn matern_prior_grad_matches_fd() {
+    check_full_grad(kernel_matern(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn rbf_ard_prior_grad_matches_fd() {
+    check_full_grad(kernel_ard(), &X_ARD, 4, 2, &Z_ARD);
+}
+
+#[test]
+fn rbf_white_prior_grad_matches_fd() {
+    check_full_grad(kernel_rbf_white(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn shifted_q_grad_matches_fd() {
+    for case in cases() {
+        let vfe = factor_vfe(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let mut svgp = factor_svgp(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let (mut mean, mut l) = titsias_whitened_q(&vfe);
+        mean[0] += 0.15;
+        l[(0, 0)] *= 1.1;
+        l[(1, 0)] += 0.05;
+        let params = write_q_params(&svgp, &mean, l.as_ref());
+        svgp.set_params(&params).expect("set q");
+        let mut analytic = vec![0.0; params.len()];
+        svgp.value_and_gradient_into(&params, &mut analytic)
+            .expect("grad");
+        let fd = fd_grad(&mut svgp, &params);
+        assert_grad_close(&analytic, &fd);
+    }
+}
+
+fn fit_svgp(
+    kernel: KernelSpec,
+    x: &[f64],
+    n: usize,
+    d: usize,
+    z: &[f64],
+    adam: Adam,
+) -> FittedSvgp {
+    Svgp::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .with_optimizer(adam)
+        .fit(x, n, d, &Y, z, 2)
+        .map_err(|(_, e)| e)
+        .expect("svgp fit")
+}
+
+fn check_fit_seed_and_elbo(kernel: KernelSpec, x: &[f64], n: usize, d: usize, z: &[f64]) {
+    let start = factor_svgp(kernel.clone(), x, n, d, z)
+        .neg_elbo()
+        .expect("start");
+    let a = fit_svgp(kernel.clone(), x, n, d, z, Adam::new());
+    let b = fit_svgp(kernel, x, n, d, z, Adam::new());
+    let mut pa = vec![0.0; a.num_params()];
+    let mut pb = vec![0.0; b.num_params()];
+    a.get_params(&mut pa).expect("a");
+    b.get_params(&mut pb).expect("b");
+    for (x, y) in pa.iter().zip(&pb) {
+        assert_close(*x, *y);
+    }
+    let end = a.neg_elbo().expect("end");
+    assert!(
+        end <= start + GRAD_TOL * start.abs().max(1.0),
+        "end={end} start={start}"
+    );
+}
+
+#[test]
+fn rbf_fit_reproduces_and_does_not_worsen() {
+    check_fit_seed_and_elbo(kernel_rbf(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn matern_fit_reproduces_and_does_not_worsen() {
+    check_fit_seed_and_elbo(kernel_matern(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn rbf_ard_fit_reproduces_and_does_not_worsen() {
+    check_fit_seed_and_elbo(kernel_ard(), &X_ARD, 4, 2, &Z_ARD);
+}
+
+#[test]
+fn rbf_white_fit_reproduces_and_does_not_worsen() {
+    check_fit_seed_and_elbo(kernel_rbf_white(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn mini_batch_fit_reproduces() {
+    use std::num::NonZeroUsize;
+    let adam = Adam::new().with_batch_size(NonZeroUsize::MIN);
+    let a = fit_svgp(kernel_rbf(), &X_1D, 4, 1, &Z_1D, adam.clone());
+    let b = fit_svgp(kernel_rbf(), &X_1D, 4, 1, &Z_1D, adam);
+    let mut pa = vec![0.0; a.num_params()];
+    let mut pb = vec![0.0; b.num_params()];
+    a.get_params(&mut pa).expect("a");
+    b.get_params(&mut pb).expect("b");
+    for (x, y) in pa.iter().zip(&pb) {
+        assert_close(*x, *y);
     }
 }

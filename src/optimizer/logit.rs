@@ -103,7 +103,7 @@ pub(super) fn keep_better(best: &mut Option<OptResult>, candidate: OptResult) {
     }
 }
 
-pub(super) fn log_theta_to_z(
+pub(crate) fn log_theta_to_z(
     log_theta: &[f64],
     intervals: &[Interval],
 ) -> Result<Vec<f64>, GprError> {
@@ -119,7 +119,7 @@ pub(super) fn log_theta_to_z(
     Ok(z)
 }
 
-pub(super) fn z_to_log_theta(z: &[f64], intervals: &[Interval]) -> Result<Vec<f64>, GprError> {
+pub(crate) fn z_to_log_theta(z: &[f64], intervals: &[Interval]) -> Result<Vec<f64>, GprError> {
     let mut log_theta = vec![0.0; z.len()];
     z_to_log_theta_into(z, intervals, &mut log_theta)?;
     Ok(log_theta)
@@ -138,7 +138,12 @@ fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Re
     Ok(())
 }
 
-fn chain_logit_grad(z: &[f64], intervals: &[Interval], log_theta: &[f64], grad: &mut [f64]) {
+pub(crate) fn chain_logit_grad(
+    z: &[f64],
+    intervals: &[Interval],
+    log_theta: &[f64],
+    grad: &mut [f64],
+) {
     for i in 0..z.len() {
         grad[i] *= dlog_dz(z[i], intervals[i], log_theta[i]);
     }
