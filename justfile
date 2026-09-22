@@ -40,3 +40,7 @@ perf-online-stages:
 # P3-7 delete n→2 (gprx only). cargo test must not run this.
 perf-online-delete:
     $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_online.py --delete
+
+# Manual P4-12 Sparse harness. cargo test must not run this.
+perf-sparse:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_sparse.py
