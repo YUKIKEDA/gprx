@@ -20,7 +20,7 @@ VFE のコストは `O(nm²)` である。`Z` と `m` を固定して訓練点 `
 - 公開のオンライン型と insert API は置かない（P4-8）
 - `m` の増減はこの行に入れない（P4-9）
 
-RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で、1 点 insert と真ん中 1 点 delete のあと、`A` / 再構成 `B` / `w` / `k_diag_sum` / `‖A‖_F²` が同じ `θ`・`Z` の `SparseGpr<Fixed>::factor` と相対 `1e-12` で一致した。insert と delete はどちらも rank-1 で通った。
+RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で、1 点 insert と真ん中 1 点 delete のあと、`A` / 再構成 `B` / `w` / `k_diag_sum` / `‖A‖_F²` が同じ `θ`・`Z` の `Sgpr<Fixed>::factor` と相対 `1e-12` で一致した。insert と delete はどちらも rank-1 で通った。
 
 ## 根拠
 

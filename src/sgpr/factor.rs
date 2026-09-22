@@ -21,7 +21,7 @@ use crate::workspace::{faer_par, faer_par_dims};
 use crate::{PredictOptions, Prediction, VarianceKind};
 
 use super::InducingLayout;
-use super::fitted::FittedSparseGpr;
+use super::fitted::FittedSgpr;
 
 pub(crate) struct VfeState {
     pub(crate) k_mm_l: Mat<f64>,
@@ -43,9 +43,9 @@ pub(crate) fn assemble_fitted<O, I: InducingLayout>(
     y: &[f64],
     z: &[f64],
     n_inducing: usize,
-) -> Result<FittedSparseGpr<O, I>, GprError> {
+) -> Result<FittedSgpr<O, I>, GprError> {
     let state = assemble_vfe(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
-    Ok(FittedSparseGpr {
+    Ok(FittedSgpr {
         kernel,
         likelihood,
         optimizer,
@@ -219,7 +219,7 @@ pub(crate) struct VfeEngine {
 }
 
 impl VfeEngine {
-    fn from_model<O, I>(model: &FittedSparseGpr<O, I>) -> Self {
+    fn from_model<O, I>(model: &FittedSgpr<O, I>) -> Self {
         Self {
             l: model.k_mm_l.clone(),
             a: model.a.clone(),
@@ -369,7 +369,7 @@ pub(crate) struct VfeTangent {
 }
 
 pub(crate) fn analytic_gradient<O, I>(
-    model: &FittedSparseGpr<O, I>,
+    model: &FittedSgpr<O, I>,
     out: &mut [f64],
     include_z: bool,
 ) -> Result<(), GprError> {
@@ -382,7 +382,7 @@ pub(crate) fn analytic_gradient<O, I>(
 }
 
 pub(crate) fn analytic_hessian<O, I>(
-    model: &FittedSparseGpr<O, I>,
+    model: &FittedSgpr<O, I>,
     out: &mut [f64],
     include_z: bool,
 ) -> Result<(), GprError> {
@@ -402,7 +402,7 @@ pub(crate) fn analytic_hessian<O, I>(
 }
 
 pub(crate) fn collect_first_vars<O, I>(
-    model: &FittedSparseGpr<O, I>,
+    model: &FittedSgpr<O, I>,
     include_z: bool,
 ) -> Result<Vec<KernelVar>, GprError> {
     let compiled = model.kernel.compile();
@@ -517,7 +517,7 @@ pub(crate) fn z_coord_var(
 }
 
 pub(crate) fn second_var<O, I>(
-    model: &FittedSparseGpr<O, I>,
+    model: &FittedSgpr<O, I>,
     i: usize,
     j: usize,
     include_z: bool,
