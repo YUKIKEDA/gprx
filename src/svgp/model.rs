@@ -1,21 +1,21 @@
 //! Trainer for stochastic variational GPR.
 
-use std::marker::PhantomData;
-
 use crate::error::GprError;
 use crate::gpr::factor::{require_param_len, write_params};
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::optimizer::Fixed;
+use crate::optimizer::{Adam, Fixed};
 
-use super::factor::assemble_fitted;
+use super::factor::{assemble_fitted, run_adam_fit};
 use super::fitted::FittedSvgp;
 
 /// Trainer for stochastic variational GPR at a caller-supplied inducing set `Z`.
 ///
 /// [`Svgp<Fixed>::factor`] prepares `K_mm` and a whitened prior `q(u)`
-/// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`. Mini-batch
-/// `fit` is a later type parameter, not a flag on this trainer.
+/// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`.
+/// [`Svgp<Adam>::fit`] starts from that prior and runs mini-batch Adam.
+/// [`Self::with_optimizer`] switches the type parameter; there is no fit
+/// flag.
 ///
 /// # Examples
 ///
@@ -38,7 +38,7 @@ use super::fitted::FittedSvgp;
 pub struct Svgp<O = Fixed> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
-    pub(crate) optimizer: PhantomData<O>,
+    pub(crate) optimizer: O,
 }
 
 impl Svgp {
@@ -51,12 +51,42 @@ impl Svgp {
         Self {
             kernel,
             likelihood,
-            optimizer: PhantomData,
+            optimizer: Fixed,
         }
     }
 }
 
 impl<O> Svgp<O> {
+    /// Replaces the optimizer type parameter.
+    ///
+    /// [`Fixed`] keeps [`Svgp<Fixed>::factor`]. [`Adam`] enables
+    /// [`Svgp<Adam>::fit`]. [`Adam`] is not an [`crate::Optimizer`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Adam, GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let fitted = Svgp::new(kernel, likelihood)
+    ///     .with_optimizer(Adam::new())
+    ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// assert!(fitted.neg_elbo()?.is_finite());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2> {
+        Svgp {
+            kernel: self.kernel,
+            likelihood: self.likelihood,
+            optimizer,
+        }
+    }
+
     /// Returns the kernel whose hyperparameters this trainer owns.
     pub fn kernel(&self) -> &KernelSpec {
         &self.kernel
@@ -163,6 +193,72 @@ impl Svgp<Fixed> {
             None,
         ) {
             Ok(fitted) => Ok(fitted),
+            Err(err) => Err((self, err)),
+        }
+    }
+}
+
+impl Svgp<Adam> {
+    /// Factors a whitened prior `q` and runs mini-batch Adam on `θ` and `q`.
+    ///
+    /// Starts from the same prior as [`Svgp<Fixed>::factor`]. Kernel and
+    /// likelihood `θ` move in the existing [`crate::Interval`] logit.
+    /// The diagonal of `L` moves in log space without that interval. The
+    /// variational mean and the off-diagonal of `L` stay in user units.
+    /// Each epoch shuffles the training indices. A remainder batch is kept.
+    /// When `batch_size ≥ n` the epoch is one full-data step. Public
+    /// [`FittedSvgp::value_and_gradient_into`] stays a full-data sum; this
+    /// loop scales the data term by `n / b_actual` and leaves the KL full.
+    ///
+    /// # Errors
+    ///
+    /// Same input errors as [`Svgp<Fixed>::factor`].
+    /// [`GprError::CholeskyFailed`] when `K_mm` cannot be factored.
+    /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`]
+    /// when a trial `θ` or `L` is rejected.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Adam, GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let fitted = Svgp::new(kernel, likelihood)
+    ///     .with_optimizer(Adam::new())
+    ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.n(), 4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(clippy::result_large_err)]
+    pub fn fit(
+        self,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+        z: &[f64],
+        n_inducing: usize,
+    ) -> Result<FittedSvgp, (Self, GprError)> {
+        match assemble_fitted(
+            self.kernel.clone(),
+            self.likelihood,
+            x,
+            n_rows,
+            n_cols,
+            y,
+            z,
+            n_inducing,
+            None,
+        ) {
+            Ok(mut fitted) => match run_adam_fit(&mut fitted, &self.optimizer) {
+                Ok(()) => Ok(fitted),
+                Err(err) => Err((self, err)),
+            },
             Err(err) => Err((self, err)),
         }
     }
