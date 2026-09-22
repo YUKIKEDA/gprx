@@ -51,6 +51,7 @@ pub mod persist;
 mod precision;
 mod rng;
 mod sparse;
+mod svgp;
 pub mod transform;
 mod workspace;
 
@@ -78,6 +79,7 @@ pub use precision::{DoublePrecision, PrecisionPolicy};
 pub use sparse::{
     FittedSparseGpr, FixedInducing, FreeInducing, InducingId, OnlineSparseGpr, SparseGpr,
 };
+pub use svgp::{FittedSvgp, Svgp};
 
 #[cfg(test)]
 mod tests {
