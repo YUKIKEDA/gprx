@@ -1,4 +1,4 @@
-//! Online variational sparse GPR.
+//! Online collapsed variational SGPR.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -11,7 +11,7 @@ use crate::gpr::factor::write_params;
 use crate::gpr::online::PointRegistry;
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::SparseGprObjective;
+use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::{PredictOptions, Prediction};
 
@@ -22,23 +22,23 @@ use super::factor::{
     refresh_w, remove_column, remove_point, solve_lmm, vfe_neg_log_marginal_likelihood,
     vfe_predict,
 };
-use super::fitted::FittedSparseGpr;
+use super::fitted::FittedSgpr;
 
-/// Stable identity of one inducing point on [`OnlineSparseGpr`].
+/// Stable identity of one inducing point on [`OnlineSgpr`].
 ///
-/// [`crate::FittedSparseGpr::into_online`] assigns identifiers `0 .. m-1` in
-/// buffer order. Later [`OnlineSparseGpr::insert_inducing`] values increase
+/// [`crate::FittedSgpr::into_online`] assigns identifiers `0 .. m-1` in
+/// buffer order. Later [`OnlineSgpr::insert_inducing`] values increase
 /// monotonically and are never reused after
-/// [`OnlineSparseGpr::delete_inducing`]. There is no public constructor.
+/// [`OnlineSgpr::delete_inducing`]. There is no public constructor.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let fitted = SparseGpr::new(
+/// let fitted = Sgpr::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
 ///     GaussianLikelihood::new(0.1)?,
 /// )
@@ -119,7 +119,7 @@ impl InducingRegistry {
     }
 }
 
-/// Online variational sparse GPR after [`FittedSparseGpr::into_online`].
+/// Online collapsed variational SGPR after [`FittedSgpr::into_online`].
 ///
 /// [`Self::insert`] appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
@@ -134,10 +134,10 @@ impl InducingRegistry {
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let fitted = SparseGpr::new(
+/// let fitted = Sgpr::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
 ///     GaussianLikelihood::new(0.1)?,
 /// )
@@ -159,7 +159,7 @@ impl InducingRegistry {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct OnlineSparseGpr<O = Lbfgs> {
+pub struct OnlineSgpr<O = Lbfgs> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     optimizer: O,
@@ -179,8 +179,8 @@ pub struct OnlineSparseGpr<O = Lbfgs> {
     inducing: InducingRegistry,
 }
 
-impl<O> OnlineSparseGpr<O> {
-    pub(crate) fn from_fitted<I>(fitted: FittedSparseGpr<O, I>) -> Self {
+impl<O> OnlineSgpr<O> {
+    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
         let inducing = InducingRegistry::from_count(fitted.m);
         Self {
@@ -204,11 +204,11 @@ impl<O> OnlineSparseGpr<O> {
         }
     }
 
-    fn snapshot_fitted(&self) -> FittedSparseGpr<O, FixedInducing>
+    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing>
     where
         O: Clone,
     {
-        FittedSparseGpr {
+        FittedSgpr {
             kernel: self.kernel.clone(),
             likelihood: self.likelihood,
             optimizer: self.optimizer.clone(),
@@ -228,7 +228,7 @@ impl<O> OnlineSparseGpr<O> {
         }
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedSparseGpr<O, FixedInducing>) {
+    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing>) {
         self.kernel = fitted.kernel;
         self.likelihood = fitted.likelihood;
         self.optimizer = fitted.optimizer;
@@ -360,7 +360,7 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSparseGpr::set_params`].
+    /// Same as [`FittedSgpr::set_params`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError>
     where
         O: Clone,
@@ -378,7 +378,7 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSparseGpr::value_and_gradient_into`].
+    /// Same as [`FittedSgpr::value_and_gradient_into`].
     pub fn value_and_gradient_into(
         &mut self,
         params: &[f64],
@@ -397,7 +397,7 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSparseGpr::hessian_into`].
+    /// Same as [`FittedSgpr::hessian_into`].
     pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>
     where
         O: Clone,
@@ -431,7 +431,7 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSparseGpr::predict`].
+    /// Same as [`FittedSgpr::predict`].
     pub fn predict(
         &self,
         xs: &[f64],
@@ -445,7 +445,7 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSparseGpr::predict_with`].
+    /// Same as [`FittedSgpr::predict_with`].
     pub fn predict_with(
         &self,
         xs: &[f64],
@@ -525,10 +525,10 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = SparseGpr::new(
+    /// let fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -618,10 +618,10 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = SparseGpr::new(
+    /// let fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -690,10 +690,10 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = SparseGpr::new(
+    /// let fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -740,10 +740,10 @@ impl<O> OnlineSparseGpr<O> {
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, SparseGpr};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = SparseGpr::new(
+    /// let fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
@@ -763,8 +763,8 @@ impl<O> OnlineSparseGpr<O> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_fitted(self) -> FittedSparseGpr<O, FixedInducing> {
-        FittedSparseGpr {
+    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing> {
+        FittedSgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
@@ -786,9 +786,9 @@ impl<O> OnlineSparseGpr<O> {
 }
 
 #[allow(private_bounds)]
-impl<O> OnlineSparseGpr<O>
+impl<O> OnlineSgpr<O>
 where
-    O: Clone + for<'a> Optimizer<SparseGprObjective<'a, O, FixedInducing>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///
@@ -797,16 +797,16 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`SparseGpr<O, FixedInducing>::fit`].
+    /// Same as [`Sgpr<O, FixedInducing>::fit`].
     ///
     /// # Examples
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, SparseGpr};
+    /// use gprx::{GaussianLikelihood, Sgpr};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = SparseGpr::new(
+    /// let fitted = Sgpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )

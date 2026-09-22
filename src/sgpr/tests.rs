@@ -4,7 +4,7 @@ use crate::error::GprError;
 use crate::gpr::factor::pack_points;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::SparseGprObjective;
+use crate::objective::SgprObjective;
 use crate::workspace::faer_par_dims;
 use crate::{
     FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Newton, NonlinearCg,
@@ -34,7 +34,7 @@ struct Rank1Vfe {
 }
 
 impl Rank1Vfe {
-    fn from_fitted(fitted: &FittedSparseGpr<Fixed>) -> Self {
+    fn from_fitted(fitted: &FittedSgpr<Fixed>) -> Self {
         Self {
             a: fitted.a.clone(),
             b_l: fitted.b_l.clone(),
@@ -273,9 +273,9 @@ fn factor_sparse(
     y: &[f64],
     z: &[f64],
     m: usize,
-) -> FittedSparseGpr<Fixed> {
+) -> FittedSgpr<Fixed> {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    SparseGpr::new(kernel, likelihood)
+    Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(x, n, d, y, z, m)
         .map_err(|(_, e)| e)
@@ -302,7 +302,7 @@ fn assert_matches_exact(
     n_extra: usize,
 ) {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let sparse = SparseGpr::new(kernel.clone(), likelihood)
+    let sparse = Sgpr::new(kernel.clone(), likelihood)
         .with_optimizer(Fixed)
         .factor(x, n, d, y, x, n)
         .map_err(|(_, e)| e)
@@ -321,7 +321,7 @@ fn assert_matches_exact(
 }
 
 fn assert_pred_close(
-    sparse: &FittedSparseGpr<Fixed>,
+    sparse: &FittedSgpr<Fixed>,
     exact: &crate::FittedGpr<Fixed>,
     xs: &[f64],
     n_rows: usize,
@@ -405,7 +405,7 @@ fn rbf_n2_z_eq_x_matches_analytic_gram() {
     let x = [0.0, 1.0];
     let y = [0.0, 1.0];
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(
+    let fitted = Sgpr::new(
         KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
         likelihood,
     )
@@ -484,7 +484,7 @@ fn rbf_plus_white_n4_z_eq_x_matches_exact() {
 #[test]
 fn rbf_n4_m2_predict_and_nlml_succeed() {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(
+    let fitted = Sgpr::new(
         KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
         likelihood,
     )
@@ -511,7 +511,7 @@ fn rbf_n4_m2_predict_and_nlml_succeed() {
 fn empty_training_is_empty_input() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let err = SparseGpr::new(kernel, likelihood)
+    let err = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&[], 0, 1, &[], &[0.0], 1)
         .map_err(|(_, e)| e)
@@ -523,7 +523,7 @@ fn empty_training_is_empty_input() {
 fn zero_inducing_is_empty_input() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let err = SparseGpr::new(kernel, likelihood)
+    let err = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[], 0)
         .map_err(|(_, e)| e)
@@ -535,7 +535,7 @@ fn zero_inducing_is_empty_input() {
 fn inducing_feature_mismatch_is_dimension_mismatch() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let err = SparseGpr::new(kernel, likelihood)
+    let err = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0, 0.0, 1.0], 2)
         .map_err(|(_, e)| e)
@@ -553,7 +553,7 @@ fn inducing_feature_mismatch_is_dimension_mismatch() {
 fn inducing_length_mismatch_is_invalid_hyperparameter() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let err = SparseGpr::new(kernel, likelihood)
+    let err = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0], 2)
         .map_err(|(_, e)| e)
@@ -565,7 +565,7 @@ fn inducing_length_mismatch_is_invalid_hyperparameter() {
 fn empty_query_is_empty_input() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
         .map_err(|(_, e)| e)
@@ -578,7 +578,7 @@ fn empty_query_is_empty_input() {
 fn query_feature_mismatch_is_dimension_mismatch() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
         .map_err(|(_, e)| e)
@@ -609,7 +609,7 @@ fn assert_slice_close(actual: &[f64], expected: &[f64], tol: f64) {
 }
 
 fn fd_grad_from_value<I: InducingLayout>(
-    model: &mut FittedSparseGpr<Fixed, I>,
+    model: &mut FittedSgpr<Fixed, I>,
     params: &[f64],
 ) -> Vec<f64> {
     let mut out = vec![0.0; params.len()];
@@ -631,7 +631,7 @@ fn fd_grad_from_value<I: InducingLayout>(
 }
 
 fn fd_hess_from_grad<I: InducingLayout>(
-    model: &mut FittedSparseGpr<Fixed, I>,
+    model: &mut FittedSgpr<Fixed, I>,
     params: &[f64],
 ) -> Vec<f64> {
     let p = params.len();
@@ -667,7 +667,7 @@ fn assert_z_eq_x_matches_exact_derivs(
     y: &[f64],
 ) {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let mut sparse = SparseGpr::new(kernel.clone(), likelihood)
+    let mut sparse = Sgpr::new(kernel.clone(), likelihood)
         .with_optimizer(Fixed)
         .factor(x, n, d, y, x, n)
         .map_err(|(_, e)| e)
@@ -767,21 +767,21 @@ fn rbf_n4_z_eq_x_hessian_matches_grad_fd() {
 
 fn assert_fit_finishes_and_nlml_drops<O>(optimizer: O)
 where
-    O: Clone + for<'a> Optimizer<SparseGprObjective<'a, O, FixedInducing>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,
 {
     let x = [0.0, 1.0, 2.0, 3.0];
     let y = [0.0, 1.0, 0.5, 0.25];
     let z = [0.5, 2.5];
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let start = SparseGpr::new(kernel.clone(), likelihood)
+    let start = Sgpr::new(kernel.clone(), likelihood)
         .with_optimizer(Fixed)
         .factor(&x, 4, 1, &y, &z, 2)
         .map_err(|(_, e)| e)
         .expect("start")
         .neg_log_marginal_likelihood()
         .expect("start nlml");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .with_optimizer(optimizer)
         .fit(&x, 4, 1, &y, &z, 2)
         .map_err(|(_, e)| e)
@@ -819,10 +819,10 @@ fn rbf_n4_m2_fit_fsa_drops_nlml() {
 #[test]
 fn is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<SparseGpr>();
-    assert_send_sync::<FittedSparseGpr>();
-    assert_send_sync::<SparseGpr<Lbfgs, FreeInducing>>();
-    assert_send_sync::<FittedSparseGpr<Lbfgs, FreeInducing>>();
+    assert_send_sync::<Sgpr>();
+    assert_send_sync::<FittedSgpr>();
+    assert_send_sync::<Sgpr<Lbfgs, FreeInducing>>();
+    assert_send_sync::<FittedSgpr<Lbfgs, FreeInducing>>();
 }
 
 fn free_rbf_n8() -> (KernelSpec, [f64; 8], [f64; 8], [f64; 2]) {
@@ -838,7 +838,7 @@ fn free_rbf_n8() -> (KernelSpec, [f64; 8], [f64; 8], [f64; 2]) {
 
 fn free_fit_ok(kernel: KernelSpec, x: &[f64], n: usize, d: usize, y: &[f64], z: &[f64], m: usize) {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .with_inducing(FreeInducing)
         .fit(x, n, d, y, z, m)
         .map_err(|(_, e)| e)
@@ -855,14 +855,14 @@ fn free_fit_ok(kernel: KernelSpec, x: &[f64], n: usize, d: usize, y: &[f64], z: 
 fn rbf_n8_m2_free_lbfgs_beats_fixed_factor() {
     let (kernel, x, y, z) = free_rbf_n8();
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let fixed = SparseGpr::new(kernel.clone(), likelihood)
+    let fixed = Sgpr::new(kernel.clone(), likelihood)
         .with_optimizer(Fixed)
         .factor(&x, 8, 1, &y, &z, 2)
         .map_err(|(_, e)| e)
         .expect("factor")
         .neg_log_marginal_likelihood()
         .expect("fixed nlml");
-    let free = SparseGpr::new(kernel, likelihood)
+    let free = Sgpr::new(kernel, likelihood)
         .with_inducing(FreeInducing)
         .fit(&x, 8, 1, &y, &z, 2)
         .map_err(|(_, e)| e)
@@ -914,11 +914,11 @@ fn rbf_plus_white_n8_m2_free_fit_succeeds() {
 
 fn assert_free_solver_nlml_drops<O>(optimizer: O)
 where
-    O: Clone + for<'a> Optimizer<SparseGprObjective<'a, O, FreeInducing>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing>>,
 {
     let (kernel, x, y, z) = free_rbf_n8();
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let start = SparseGpr::new(kernel.clone(), likelihood)
+    let start = Sgpr::new(kernel.clone(), likelihood)
         .with_optimizer(Fixed)
         .with_inducing(FreeInducing)
         .factor(&x, 8, 1, &y, &z, 2)
@@ -926,7 +926,7 @@ where
         .expect("start")
         .neg_log_marginal_likelihood()
         .expect("start nlml");
-    let fitted = SparseGpr::new(kernel, likelihood)
+    let fitted = Sgpr::new(kernel, likelihood)
         .with_inducing(FreeInducing)
         .with_optimizer(optimizer)
         .fit(&x, 8, 1, &y, &z, 2)
@@ -972,7 +972,7 @@ fn assert_free_derivs(
     m: usize,
 ) {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
-    let mut fitted = SparseGpr::new(kernel, likelihood)
+    let mut fitted = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
         .with_inducing(FreeInducing)
         .factor(x, n, d, y, z, m)
@@ -1038,7 +1038,7 @@ fn rbf_plus_white_n8_m2_free_grad_hess_match_fd() {
     );
 }
 
-fn assert_rank1_matches_factor(got: &Rank1Vfe, want: &FittedSparseGpr<Fixed>) {
+fn assert_rank1_matches_factor(got: &Rank1Vfe, want: &FittedSgpr<Fixed>) {
     assert_eq!(got.a.nrows(), want.a.nrows());
     assert_eq!(got.a.ncols(), want.a.ncols());
     for j in 0..got.a.ncols() {
@@ -1189,7 +1189,7 @@ fn rank1_rbf_plus_white_n4_m2_matches_factor() {
     });
 }
 
-fn vfe_from_fitted(fitted: &FittedSparseGpr<Fixed>) -> VfeState {
+fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState {
     VfeState {
         k_mm_l: fitted.k_mm_l.clone(),
         a: fitted.a.clone(),
@@ -1200,7 +1200,7 @@ fn vfe_from_fitted(fitted: &FittedSparseGpr<Fixed>) -> VfeState {
     }
 }
 
-fn assert_inducing_matches_factor(got: &VfeState, want: &FittedSparseGpr<Fixed>) {
+fn assert_inducing_matches_factor(got: &VfeState, want: &FittedSgpr<Fixed>) {
     assert_eq!(got.a.nrows(), want.a.nrows());
     assert_eq!(got.a.ncols(), want.a.ncols());
     for j in 0..got.a.ncols() {

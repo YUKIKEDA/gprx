@@ -1,4 +1,4 @@
-//! Variational sparse GPR with caller-supplied inducing points.
+//! Collapsed variational SGPR (Titsias / VFE) with caller-supplied inducing points.
 
 mod factor;
 mod fitted;
@@ -8,13 +8,13 @@ mod online;
 #[cfg(test)]
 mod tests;
 
-pub use fitted::FittedSparseGpr;
-pub use model::SparseGpr;
-pub use online::{InducingId, OnlineSparseGpr};
+pub use fitted::FittedSgpr;
+pub use model::Sgpr;
+pub use online::{InducingId, OnlineSgpr};
 
 pub(crate) use factor::{kernel_cross, validate_inducing};
 
-/// Keeps inducing coordinates fixed during [`SparseGpr::fit`].
+/// Keeps inducing coordinates fixed during [`Sgpr::fit`].
 ///
 /// `Z` is an argument of `fit` / `factor` and is not a parameter.
 #[derive(Clone, Copy, Debug, Default)]
@@ -22,7 +22,7 @@ pub struct FixedInducing;
 
 /// Optimizes inducing coordinates jointly with kernel and likelihood `θ`.
 ///
-/// Switch with [`SparseGpr::with_inducing`]. Params append column-major `Z`
+/// Switch with [`Sgpr::with_inducing`]. Params append column-major `Z`
 /// after kernel and likelihood `θ`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FreeInducing;

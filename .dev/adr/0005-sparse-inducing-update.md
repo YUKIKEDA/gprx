@@ -6,7 +6,7 @@
 
 ## 文脈
 
-`OnlineSparseGpr` は `X` だけを rank-1 で増減する。理由は [ADR 0004](0004-sparse-online-rank1.md)。`n` が増えると、近似品質のために `m` も増やしたくなる。毎回 `assemble_vfe` すると `K_mm` の LLT と `A` の全列を `O(nm²)` でやり直す。公開の `InducingId` / `insert_inducing` はまだ無い。このメモは因子の更新だけを固定する。
+`OnlineSgpr` は `X` だけを rank-1 で増減する。理由は [ADR 0004](0004-sparse-online-rank1.md)。`n` が増えると、近似品質のために `m` も増やしたくなる。毎回 `assemble_vfe` すると `K_mm` の LLT と `A` の全列を `O(nm²)` でやり直す。公開の `InducingId` / `insert_inducing` はまだ無い。このメモは因子の更新だけを固定する。
 
 ## 決定
 
@@ -19,7 +19,7 @@
 - 公開 `InducingId` / `insert_inducing` / `delete_inducing` は置かない（P4-10）
 - 座標は呼び出し側。k-means はこの行に入れない
 
-RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で、末尾 1 点 insert と先頭 1 点 delete（`m = 2` では末尾以外）のあと、再構成 `K_mm` / `A` / 再構成 `B` / `w` / `k_diag_sum` / `‖A‖_F²` が同じ `θ`・`X`・`Z` の `SparseGpr<Fixed>::factor` と相対 `1e-12` で一致した。insert と delete はどちらも増分で通った。
+RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で、末尾 1 点 insert と先頭 1 点 delete（`m = 2` では末尾以外）のあと、再構成 `K_mm` / `A` / 再構成 `B` / `w` / `k_diag_sum` / `‖A‖_F²` が同じ `θ`・`X`・`Z` の `Sgpr<Fixed>::factor` と相対 `1e-12` で一致した。insert と delete はどちらも増分で通った。
 
 ## 根拠
 
