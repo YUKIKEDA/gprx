@@ -439,7 +439,7 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 
 ## P4-12（Sparse 時間・RSS、[#197](https://github.com/YUKIKEDA/gprx/issues/197)）
 
-同一機械。日付 2026-09-22。`just perf-sparse`。`y` は母集団 σ で標準化。`m = 16`（生成時 k-means、seed `0`）。全部 CPU。時計は P2B-16 と同じ（捨て 1 回 + 中央値。`n ≤ 256` で 51、`n ≤ 1024` で 21、それ以外 7。eval は 10 × 1 回の中央値）。Exact の `Gpr` 列は無い。GPflow は Windows で TensorFlow を入れず N/A。
+同一機械。日付 2026-09-22。`just perf-sparse`。`y` は母集団 σ で標準化。`m = 16`（生成時 k-means、seed `0`）。全部 CPU。時計は P2B-16 と同じ（捨て 1 回 + 中央値。`n ≤ 256` で 51、`n ≤ 1024` で 21、それ以外 7。eval は 10 × 1 回の中央値）。Exact の `Gpr` 列は無い。GPflow は置かない。
 
 ゲートは書けた相手すべてで factor / joint / predict とピーク RSS が小さい（5% 以内は判定不能）。時間負けは P4-18 / [#209](https://github.com/YUKIKEDA/gprx/issues/209)。RSS 負けは P4-19 / [#210](https://github.com/YUKIKEDA/gprx/issues/210)。criterion は合否にしない。
 
@@ -447,51 +447,39 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 | ---- | --------- | ---- | -------- | --------- | --------- | ----- | ----------- | --------- | -------- |
 | sgpr | forrester | 256  | gprx     | 0.68 ms   | 10.51 ms  | 10    | 0.10 ms     | 6.2 MiB   | -        |
 | sgpr | forrester | 256  | gpytorch | 554.94 ms | 2.766 s   | 10    | 170.11 ms   | 246.9 MiB | pass     |
-| sgpr | forrester | 256  | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | sgpr | forrester | 256  | gpy      | 12.62 ms  | 18.05 ms  | 10    | 0.19 ms     | 115.6 MiB | pass     |
 | svgp | forrester | 256  | gprx     | 0.65 ms   | 9.36 ms   | 10    | 0.11 ms     | 6.1 MiB   | -        |
 | svgp | forrester | 256  | gpytorch | 527.18 ms | 1.841 s   | 10    | 83.09 ms    | 246.3 MiB | pass     |
-| svgp | forrester | 256  | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | svgp | forrester | 256  | gpy      | 10.90 ms  | 10.84 ms  | 10    | 0.29 ms     | 116.0 MiB | pass     |
 | sgpr | forrester | 1024 | gprx     | 1.36 ms   | 81.23 ms  | 10    | 0.12 ms     | 21.6 MiB  | -        |
 | sgpr | forrester | 1024 | gpytorch | 556.19 ms | 3.978 s   | 10    | 300.36 ms   | 247.8 MiB | pass     |
-| sgpr | forrester | 1024 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | sgpr | forrester | 1024 | gpy      | 16.29 ms  | 20.26 ms  | 10    | 0.20 ms     | 117.0 MiB | fail     |
 | svgp | forrester | 1024 | gprx     | 0.76 ms   | 74.72 ms  | 10    | 0.13 ms     | 21.5 MiB  | -        |
 | svgp | forrester | 1024 | gpytorch | 663.92 ms | 2.370 s   | 10    | 34.29 ms    | 246.6 MiB | pass     |
-| svgp | forrester | 1024 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | svgp | forrester | 1024 | gpy      | 15.63 ms  | 21.24 ms  | 10    | 0.66 ms     | 117.1 MiB | fail     |
 | sgpr | forrester | 4096 | gprx     | 1.83 ms   | 1.052 s   | 10    | 0.26 ms     | 263.4 MiB | -        |
 | sgpr | forrester | 4096 | gpytorch | 741.54 ms | 5.925 s   | 10    | 763.64 ms   | 251.1 MiB | 判定不能 |
-| sgpr | forrester | 4096 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | sgpr | forrester | 4096 | gpy      | 50.18 ms  | 45.32 ms  | 10    | 0.24 ms     | 123.0 MiB | fail     |
 | svgp | forrester | 4096 | gprx     | 1.60 ms   | 952.15 ms | 10    | 0.43 ms     | 263.0 MiB | -        |
 | svgp | forrester | 4096 | gpytorch | 974.55 ms | 7.112 s   | 10    | 108.23 ms   | 249.4 MiB | fail     |
-| svgp | forrester | 4096 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | svgp | forrester | 4096 | gpy      | 24.82 ms  | 33.47 ms  | 10    | 0.44 ms     | 123.0 MiB | fail     |
 | sgpr | sphere    | 256  | gprx     | 0.84 ms   | 16.51 ms  | 10    | 0.08 ms     | 6.2 MiB   | -        |
 | sgpr | sphere    | 256  | gpytorch | 459.22 ms | 76.98 ms  | 10    | 423.97 ms   | 246.1 MiB | pass     |
-| sgpr | sphere    | 256  | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | sgpr | sphere    | 256  | gpy      | 13.86 ms  | 19.41 ms  | 10    | 0.22 ms     | 115.9 MiB | pass     |
 | svgp | sphere    | 256  | gprx     | 0.60 ms   | 12.95 ms  | 10    | 0.23 ms     | 6.1 MiB   | -        |
 | svgp | sphere    | 256  | gpytorch | 573.35 ms | 2.343 s   | 10    | 108.32 ms   | 246.4 MiB | pass     |
-| svgp | sphere    | 256  | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | svgp | sphere    | 256  | gpy      | 11.11 ms  | 11.28 ms  | 10    | 0.24 ms     | 115.8 MiB | fail     |
 | sgpr | sphere    | 1024 | gprx     | 0.78 ms   | 135.01 ms | 10    | 0.09 ms     | 21.8 MiB  | -        |
 | sgpr | sphere    | 1024 | gpytorch | 629.68 ms | 74.32 ms  | 10    | 112.38 ms   | 248.2 MiB | fail     |
-| sgpr | sphere    | 1024 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | sgpr | sphere    | 1024 | gpy      | 15.76 ms  | 22.37 ms  | 10    | 0.21 ms     | 117.2 MiB | fail     |
 | svgp | sphere    | 1024 | gprx     | 0.81 ms   | 136.05 ms | 10    | 0.10 ms     | 21.5 MiB  | -        |
 | svgp | sphere    | 1024 | gpytorch | 477.15 ms | 2.998 s   | 10    | 114.84 ms   | 246.7 MiB | pass     |
-| svgp | sphere    | 1024 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | svgp | sphere    | 1024 | gpy      | 12.79 ms  | 14.83 ms  | 10    | 0.24 ms     | 117.4 MiB | fail     |
 | sgpr | sphere    | 4096 | gprx     | 1.56 ms   | 1.807 s   | 10    | 0.14 ms     | 264.0 MiB | -        |
 | sgpr | sphere    | 4096 | gpytorch | 590.70 ms | 9.462 s   | 10    | 947.17 ms   | 251.2 MiB | fail     |
-| sgpr | sphere    | 4096 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | sgpr | sphere    | 4096 | gpy      | 29.74 ms  | 40.20 ms  | 10    | 0.21 ms     | 123.2 MiB | fail     |
 | svgp | sphere    | 4096 | gprx     | 1.21 ms   | 1.955 s   | 10    | 0.20 ms     | 263.0 MiB | -        |
 | svgp | sphere    | 4096 | gpytorch | 617.85 ms | 5.931 s   | 10    | 97.22 ms    | 251.2 MiB | 判定不能 |
-| svgp | sphere    | 4096 | gpflow   | N/A       | N/A       | N/A   | N/A         | N/A       | N/A      |
 | svgp | sphere    | 4096 | gpy      | 29.29 ms  | 33.18 ms  | 10    | 0.28 ms     | 122.9 MiB | fail     |
 
 時間 fail の主因は joint（GPy が n≥1024 で短い。GPyTorch は球 SGPR n=1024 の eval が短い）。n=4096 の RSS は gprx 約 263 MiB、GPy 約 123 MiB、GPyTorch 約 250 MiB。factor は全セルで gprx が短い。

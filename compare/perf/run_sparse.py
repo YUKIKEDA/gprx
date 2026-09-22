@@ -15,7 +15,7 @@ REPO = ROOT.parent.parent
 OUT = ROOT / "out"
 PROBLEMS = OUT / "sparse_problems"
 BAND = 0.05
-LIBS = ("gprx", "gpytorch", "gpflow", "gpy")
+LIBS = ("gprx", "gpytorch", "gpy")
 
 
 def run_cmd(args: list[str], cwd: Path | None = None) -> dict[str, Any]:
@@ -174,7 +174,6 @@ def main() -> int:
     runners = (
         ("gprx", run_gprx),
         ("gpytorch", lambda p: run_python("gpytorch_sparse.py", p)),
-        ("gpflow", lambda p: run_python("gpflow_sparse.py", p)),
         ("gpy", lambda p: run_python("gpy_sparse.py", p)),
     )
     for case_path in cases:
