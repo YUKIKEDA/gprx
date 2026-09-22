@@ -22,9 +22,9 @@ src/persist/        # P2B-14。`config.json` + `model.safetensors`。`LoadedGpr`
 src/online.rs       # P3-2。crate-private `OnlineWorkspace` と `ensure_capacity`
 src/sgpr/         # P4-2 / P4-3 / P4-4 / P4-6 / P4-8 / P4-10。`mod.rs` 再エクスポート。`Sgpr` は `model.rs`。`FittedSgpr` の impl は `fitted.rs`。`OnlineSgpr` は `online.rs`。VFE assemble / rank-1 / 誘導点増分は `factor.rs`、単体テストは `tests.rs`。公開 `Sgpr` / `FittedSgpr` / `FixedInducing` / `FreeInducing` / `OnlineSgpr` / `InducingId`。`Sgpr<O: Optimizer = Lbfgs, I = FixedInducing>` の `fit` / `with_optimizer` / `with_inducing`。`Sgpr<Fixed, I>::factor`。`FittedSgpr::into_online`。対角 `predict` / `predict_with` / NLML / `value_and_gradient_into` / `hessian_into`。自由 Z の params はカーネル θ・尤度 θ・列優先 Z。`OnlineSgpr` は X の `insert` / `delete` / `point_ids` と `insert_inducing` / `delete_inducing` / `inducing_ids`（params はカーネル θ・尤度 θ）。`SgprObjective` は `src/objective.rs`
 src/svgp/           # P4-15。`mod.rs` 再エクスポート。`Svgp` は `model.rs`。`FittedSvgp` の impl は `fitted.rs`。assemble は `factor.rs`、単体は `tests.rs`。公開 `Svgp` / `FittedSvgp`
-tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs, nelder_mead_goldens.rs; M0: cholesky_smoke.rs。P3-1: ldlt_delete.rs。P3-5: online_ops.rs。P3-6: online_libgp.rs。P4-8: sgpr_ops.rs
+tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs, nelder_mead_goldens.rs; M0: cholesky_smoke.rs。P3-1: ldlt_delete.rs。P3-5: online_ops.rs。P3-6: online_libgp.rs。P4-8: sgpr_ops.rs。P4-11: sparse_gpytorch.rs
 benches/            # criterion; from P1A-18 (after first `Gpr` path)
-compare/            # uv + sklearn + goldens/*.json。P2B-16 は compare/perf/（gprx / sklearn / libgp / friedrich。手動、CI なし）。P3-6 は `just gen-online-goldens` と `just perf-online`
+compare/            # uv + sklearn + goldens/*.json。P2B-16 は compare/perf/（gprx / sklearn / libgp / friedrich。手動、CI なし）。P3-6 は `just gen-online-goldens` と `just perf-online`。P4-11 は `just gen-sparse-goldens`（GPyTorch。sklearn の `gen-goldens` に混ぜない）
 examples/           # Phase 1b; P2-9 updates to `Gpr` + `FittedGpr`
 .dev/               # design, roadmap, bench-log.md
 ```

@@ -1,12 +1,14 @@
 [project]
 name = "gprx-compare"
 version = "0.0.0"
-description = "sklearn golden generator for gprx (P1A-12 / P1A-17 / P1B-6 / P1B-7). Not a published package."
+description = "sklearn / GPyTorch golden generator for gprx. Not a published package."
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
     "scikit-learn==1.6.1",
     "scipy>=1.11",
+    "torch>=2.4",
+    "gpytorch>=1.13",
 ]
 
 [tool.uv]
