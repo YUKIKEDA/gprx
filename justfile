@@ -48,3 +48,7 @@ perf-online-delete:
 # Manual P4-12 Sparse harness. cargo test must not run this.
 perf-sparse:
     $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_sparse.py
+
+# Manual P4-14 Sparse-online harness. cargo test must not run this.
+perf-sparse-online:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare/perf python run_sparse_online.py
