@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P4-11（Sparse の GPyTorch 照合）。** Phase 2 / 2b / 3 / P4-1…10 / P4-15 / P4-17 は閉じた。P4-16 の DoD は Grill 後。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P4-16（SVGP の Adam / ミニバッチ fit）。** Phase 2 / 2b / 3 / P4-1…11 / P4-15 / P4-17 は閉じた。P4-12…14 の DoD は Grill 後。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -207,7 +207,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 4 — Sparse GPR
 
-設計 §6.1。2b / 3 のあと。P4-1…10 / P4-15 / P4-17 は閉じた。着手は P4-11（[#196](https://github.com/YUKIKEDA/gprx/issues/196)）の GPyTorch 照合。P4-16 の DoD は Grill 後。既定は呼び出し側の Z を固定。
+設計 §6.1。2b / 3 のあと。P4-1…11 / P4-15 / P4-17 は閉じた。着手は P4-16（[#202](https://github.com/YUKIKEDA/gprx/issues/202)）の Adam / ミニバッチ `fit`。P4-12…14 の DoD は Grill 後。既定は呼び出し側の Z を固定。
 
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
@@ -226,7 +226,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P4-13 | Spike | Sparse オンラインの GPyTorch 照合         | P4-10, P4-11 | Grill 後に [#198](https://github.com/YUKIKEDA/gprx/issues/198) で確定 |
 | P4-14 | Spike | Sparse オンラインの時間比較               | P4-13 | Grill 後に [#199](https://github.com/YUKIKEDA/gprx/issues/199) で確定 |
 | P4-15 | Feat  | SVGP の factor / ELBO / 対角予測          | P4-3, P4-10 | crate ルート `Svgp` / `FittedSvgp`。`src/svgp/`（`mod.rs` 再エクスポート。`Svgp` は `model.rs`。`FittedSvgp` の impl は `fitted.rs`。assemble は `factor.rs`、単体は `tests.rs`）。`Svgp<Fixed>::factor` のみ（`fit` / `Adam` は P4-16）。`q(u)` は whitened full-rank Cholesky。`factor` が Z の `m` で prior（`m = 0`, `L = I`）。未学習 params はカーネル θ・尤度 θ。学習済み params はカーネル θ・尤度 θ・`m`・`L` 下三角。Z は呼び出し側、params に入れない。k-means なし。`FittedSvgp` は対角 `predict` / `predict_with`、`neg_elbo`、`get_params` / `set_params` / `num_params`。`value_and_gradient_into` / `hessian_into` / persist / オンライン / `predict_into` / 共分散 / sample / LOO は置かない。カーネル RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n = 4`・`m = 2`。1-D `x = [0,1,2,3]`、`y = [0,1,0.5,0.25]`、`Z = [0.5, 2.5]`。ARD は 2×2 格子。最適 `q`（Titsias）で同じ θ・X・Z の `FittedSparseGpr` の NLML と対角 predict が相対 `1e-12`。ずらした `q` は独立 ELBO と相対 `1e-12`。新しい `GprError` / golden / `tests/` なし。`tests/alloc.rs` 上限は上げない。`.dev/adr/0006-sparse-svgp.md` に文脈・決定・根拠（VFE は残す、SVGP は別型、FITC は載らない）。`layout.mdc` に `Svgp` / `FittedSvgp` / `src/svgp/`。§6.1 と §14 を SVGP 現在形。着手点を P4-15（[#201](https://github.com/YUKIKEDA/gprx/issues/201)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない |
-| P4-16 | Feat  | SVGP の Adam / ミニバッチ fit             | P4-15 | Grill 後に [#202](https://github.com/YUKIKEDA/gprx/issues/202) で確定 |
+| P4-16 | Feat  | SVGP の Adam / ミニバッチ fit             | P4-15 | crate ルート `Adam`（`src/optimizer/adam.rs`）。`Optimizer` は実装しない。`Gpr<Adam>` は置かない。`Svgp<O>::with_optimizer`。`Svgp<Adam>::fit`。`Svgp<Fixed>` は `factor` のみ。`FittedSvgp` に `O` は無い。公開 `value_and_gradient_into` は全データ和。`hessian_into` / persist / オンライン / 自由 Z / 自然勾配 / weight decay / AMSGrad は置かない。Adam 内部は非拘束：カーネル・尤度は既存 `Interval` logit、`L` 対角は log（`DEFAULT_POSITIVE` は使わない）、q 平均と `L` 非対角は生。公開勾配はユーザー単位。`fit` がヤコビを掛ける。バイアス補正は常に ON。ミニバッチはデータ項を `n/b_actual`、KL は全データ。余りバッチは残す。`batch_size >= n` は全データ 1 バッチ。停止は epoch 数のみ。ノブは Kingma 既定（`lr=1e-3`、`β1=0.9`、`β2=0.999`、`ε=1e-8`、`batch_size=32`（`NonZeroUsize`）、`epochs=100`（`NonZeroU64`）、`seed=0`（`SmallRng`、FSA と同じヘルパ））。照合は `src/svgp/tests.rs` だけ。全データ勾配の FD 相対 `1e-8`。同じ seed の `fit` が params を再現。全データ `neg_elbo` が開始時以下。カーネル RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n=4`・`m=2`。点は P4-15 と同じ。新しい `GprError` / `tests/` / golden なし。`sparse_gpytorch.rs` は増やさない。`tests/alloc.rs` 上限は上げない。`layout.mdc` に `Adam` / `with_optimizer` / `fit` / `value_and_gradient_into`。§6.1 と ADR 0006 と §14 を SVGP Adam 現在形。着手点を P4-16（[#202](https://github.com/YUKIKEDA/gprx/issues/202)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない |
 | P4-17 | Feat  | `SparseGpr` を `Sgpr` に改名              | P4-15 | crate ルート `Sgpr` / `FittedSgpr` / `OnlineSgpr`。旧名は残さない。`src/sgpr/`（旧 `src/sparse/`）。`SgprObjective`。`FixedInducing` / `FreeInducing` / `InducingId` はそのまま。照合は `tests/sgpr_ops.rs`。`layout.mdc` と §6.1 / §14 の公開型を `Sgpr` 現在形。着手点を P4-17（[#205](https://github.com/YUKIKEDA/gprx/issues/205)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない。`tests/alloc.rs` 上限は上げない |
 
 ---

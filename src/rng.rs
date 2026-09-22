@@ -1,4 +1,4 @@
-//! Seeded [`rand::rngs::SmallRng`] shared by sampling, restarts, and FSA.
+//! Seeded [`rand::rngs::SmallRng`] shared by sampling, restarts, FSA, and Adam.
 
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};

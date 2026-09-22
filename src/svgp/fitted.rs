@@ -8,9 +8,13 @@ use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
 use crate::{PredictOptions, Prediction};
 
-use super::factor::{assemble_svgp, pack_q, q_param_len, svgp_neg_elbo, svgp_predict, unpack_q};
+use super::factor::{
+    assemble_svgp, pack_q, q_param_len, svgp_neg_elbo, svgp_predict, svgp_value_and_gradient,
+    unpack_q,
+};
 
-/// Factored stochastic variational GPR at the `θ` used by [`crate::Svgp<Fixed>::factor`].
+/// Factored stochastic variational GPR at the `θ` used by [`crate::Svgp<Fixed>::factor`]
+/// or [`crate::Svgp<crate::Adam>::fit`].
 ///
 /// Stores the LLT of `K_mm = k(Z, Z)` and a whitened variational posterior
 /// `q(v) = N(m, L Lᵀ)` used by [`Self::predict`] and [`Self::neg_elbo`].
@@ -205,6 +209,55 @@ impl FittedSvgp {
             self.n,
             self.m,
         ))
+    }
+
+    /// Sets parameters, rebuilds `K_mm` / `q`, and writes `∂/∂θ` of the
+    /// full-data negative ELBO.
+    ///
+    /// `params` and `out` match [`Self::get_params`]. The returned value is
+    /// the same as [`Self::neg_elbo`] after a successful call. Mini-batch
+    /// scaling lives in [`crate::Svgp<crate::Adam>::fit`], not here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidHyperparameter`] if a slice length is wrong
+    /// or an `L` diagonal entry is not positive,
+    /// [`GprError::NonFiniteInput`] if a variational value is not finite,
+    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
+    /// or [`GprError::CholeskyFailed`] if `K_mm` cannot be factored.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let mut fitted = Svgp::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// let mut params = [0.0; 7];
+    /// fitted.get_params(&mut params)?;
+    /// let mut grad = [0.0; 7];
+    /// let value = fitted.value_and_gradient_into(&params, &mut grad)?;
+    /// assert!(value.is_finite());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn value_and_gradient_into(
+        &mut self,
+        params: &[f64],
+        out: &mut [f64],
+    ) -> Result<f64, GprError> {
+        let n_params = self.num_params();
+        require_param_len(params.len(), n_params)?;
+        require_param_len(out.len(), n_params)?;
+        self.set_params(params)?;
+        let batch: Vec<usize> = (0..self.n).collect();
+        svgp_value_and_gradient(self, out, &batch)
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
