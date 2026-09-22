@@ -40,4 +40,5 @@ RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で�
 
 - P4-10 の公開誘導点 API は、この増分を `m` の増減に使う
 - delete の trailing update や `B` の再 factor が大きな問題で落ちたら、同じ ADR のまま delete だけ再 assemble に落とす。新しい Grill は要らない
+- insert の bordered Schur が非正（1-D で近い `Z`、ℓ が大きいとき）なら、同じ ADR のままその 1 点だけ再 assemble する。新しい Grill は要らない
 - `X` の増減はこの ADR の外である（[ADR 0004](0004-sparse-online-rank1.md)）

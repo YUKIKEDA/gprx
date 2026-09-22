@@ -22,6 +22,10 @@ gen-online-goldens:
 gen-sparse-goldens:
     $env:PYTHONUTF8 = "1"; uv run --directory compare python generate_sparse_gpytorch.py
 
+# Regenerates GPyTorch OnlineSgpr goldens (P4-13). cargo test must not run this.
+gen-sparse-online-goldens:
+    $env:PYTHONUTF8 = "1"; uv run --directory compare python generate_sparse_online_gpytorch.py
+
 bench:
     cargo bench --bench exact
 
