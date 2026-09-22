@@ -604,15 +604,16 @@ impl<O> OnlineSgpr<O> {
     ///
     /// `z_new` has length [`Self::d`]. Training `X` / `y` are not moved.
     /// The returned [`InducingId`] is new and is never reused after a later
-    /// [`Self::delete_inducing`].
+    /// [`Self::delete_inducing`]. If the bordered Schur complement is
+    /// non-positive, the enlarged inducing set is assembled again.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::DimensionMismatch`] if `z_new` is the wrong length,
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
     /// [`GprError::EmptyInput`] if `d` is zero, or
-    /// [`GprError::CholeskyFailed`] if the bordered factor loses positive
-    /// definiteness.
+    /// [`GprError::CholeskyFailed`] if the full reassemble of the enlarged
+    /// inducing set fails.
     ///
     /// # Examples
     ///
@@ -655,7 +656,7 @@ impl<O> OnlineSgpr<O> {
             return Err(GprError::NonFiniteInput);
         }
         let mut state = self.vfe_state();
-        inducing_insert(
+        match inducing_insert(
             &mut state,
             &self.kernel,
             self.likelihood.noise_variance(),
@@ -666,10 +667,18 @@ impl<O> OnlineSgpr<O> {
             &self.z_obs,
             self.m,
             z_new,
-        )?;
-        self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
-        self.apply_vfe(state);
-        self.m += 1;
+        ) {
+            Ok(()) => {
+                self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
+                self.apply_vfe(state);
+                self.m += 1;
+            }
+            Err(GprError::CholeskyFailed { .. }) => {
+                self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
+                self.m += 1;
+            }
+            Err(err) => return Err(err),
+        }
         self.refresh_vfe()?;
         Ok(self.inducing.insert())
     }
