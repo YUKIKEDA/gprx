@@ -1,12 +1,18 @@
 [project]
 name = "gprx-perf"
 version = "0.0.0"
-description = "P2B-16 cross-library wall-time and peak-RSS harness. Manual; not invoked by cargo test."
+description = "P2B-16 / P4-12 cross-library wall-time and peak-RSS harness. Manual; not invoked by cargo test."
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=2.0",
+    "numpy>=1.26,<2",
     "psutil>=6.0",
     "scikit-learn==1.6.1",
+    "torch>=2.4",
+    "gpytorch>=1.13",
+    "GPy>=1.13",
+    "matplotlib>=3.8",
+    "tensorflow==2.15.1; sys_platform != 'win32'",
+    "gpflow>=2.9.2,<2.10; sys_platform != 'win32'",
 ]
 
 [tool.uv]
