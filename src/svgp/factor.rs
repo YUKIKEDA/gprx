@@ -18,6 +18,11 @@ use crate::{PredictOptions, Prediction, VarianceKind};
 
 use super::fitted::FittedSvgp;
 
+// `K_mm` only. Public default stays Fixed(0). Forrester m=16 / ℓ=1 is not PD in f64.
+fn k_mm_jitter_policy() -> JitterPolicy {
+    JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
+}
+
 pub(crate) struct SvgpState {
     pub(crate) k_mm_l: Mat<f64>,
     pub(crate) a: Mat<f64>,
@@ -89,7 +94,7 @@ pub(crate) fn assemble_svgp(
     cholesky_lower_with_policy(
         &mut k_mm,
         &mut chol_scratch,
-        JitterPolicy::default(),
+        k_mm_jitter_policy(),
         CholeskyStage::Fit,
     )?;
     // Same packed `X` and `Z` share a training White diagonal. Rectangular
