@@ -15,7 +15,7 @@ Phase 4 は誘導点 Sparse を [ADR 0002](0002-sparse-vfe.md) で VFE（Titsias
 - FITC は載らない（ADR 0002 のまま）
 - 最初の `q(u)` は whitened の full-rank Cholesky。`factor` は呼び出し側 `Z` の `m` で prior（平均 0、`L = I`）を置く
 - `Z` は呼び出し側。params に入れない。k-means は置かない
-- `Svgp<Fixed>::factor` と全データ ELBO・対角予測は P4-15。`Adam` / ミニバッチ `fit` は P4-16
+- `Svgp<Fixed>::factor` と全データ ELBO・対角予測は P4-15。`Adam` / ミニバッチ `fit` と全データ `value_and_gradient_into` は P4-16
 
 ## 根拠
 
@@ -33,5 +33,5 @@ FITC を足す理由は ADR 0002 から増えていない。尤度の過大評�
 
 - P4-15 は `Svgp<Fixed>::factor`、`neg_elbo`、対角 `predict` から始める
 - 最適 whitened `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する
-- `Adam` とミニバッチは P4-16。L-BFGS にノイズ付き勾配は渡さない
+- `Adam` とミニバッチは `Svgp<Adam>::fit`。`Adam` は `Optimizer` を実装しない。L-BFGS にノイズ付き勾配は渡さない
 - FITC を後から足す行は切らない。戻すなら新しい Grill → Issue

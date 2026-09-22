@@ -67,7 +67,7 @@ pub use gpr::{
 pub use likelihood::GaussianLikelihood;
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
-    AcceptsRecompute, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
+    AcceptsRecompute, Adam, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
     IncrementalRecompute, Lbfgs, NelderMead, Newton, NonlinearCg, OptResult, Optimizer,
     PoleRecompute, RecomputeStrategy, UsesChangeIndices,
 };

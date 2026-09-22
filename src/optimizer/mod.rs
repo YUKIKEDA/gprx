@@ -9,11 +9,14 @@
 //! point, one [`crate::Differentiable::value_and_gradient_into`] call fills
 //! both. [`Newton`] also maps the analytic Hessian to logit coordinates.
 //! [`NelderMead`] evaluates [`crate::Objective::value`] only.
+//! [`Adam`] is a mini-batch loop for [`crate::Svgp`] and does not implement
+//! [`Optimizer`].
 //! [`FastSimulatedAnnealing`] is a homemade value-only solver that walks
 //! log-`θ` with Cauchy / Metropolis steps instead of a logit map. The first
 //! evaluation and each restart use [`crate::Objective::value`]; each
 //! coordinate step uses [`crate::Objective::value_at_changes`].
 
+mod adam;
 mod fsa;
 mod lbfgs;
 mod logit;
@@ -23,8 +26,10 @@ mod newton;
 
 use std::num::NonZeroU32;
 
+pub use adam::Adam;
 pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
+pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta};
 pub use ncg::NonlinearCg;
 pub use neldermead::NelderMead;
 pub use newton::Newton;
