@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-13（Sparse オンラインの GPyTorch 照合）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-14（Sparse オンラインの時間比較）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
