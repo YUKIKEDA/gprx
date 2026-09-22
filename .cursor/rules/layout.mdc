@@ -24,7 +24,7 @@ src/sgpr/         # P4-2 / P4-3 / P4-4 / P4-6 / P4-8 / P4-10。`mod.rs` 再エ�
 src/svgp/           # P4-15 / P4-16。`mod.rs` 再エクスポート。`Svgp` は `model.rs`。`FittedSvgp` の impl は `fitted.rs`。assemble / ELBO 勾配は `factor.rs`、単体は `tests.rs`。公開 `Svgp` / `FittedSvgp`。`Svgp<O = Fixed>` の `with_optimizer`。`Svgp<Fixed>::factor`。`Svgp<Adam>::fit`。`FittedSvgp` に `O` は無い。対角 `predict` / `predict_with`、`neg_elbo`、全データ `value_and_gradient_into`
 tests/              # analytic.rs, goldens.rs, alloc.rs, recovery.rs, fit_goldens.rs, nelder_mead_goldens.rs; M0: cholesky_smoke.rs。P3-1: ldlt_delete.rs。P3-5: online_ops.rs。P3-6: online_libgp.rs。P4-8: sgpr_ops.rs。P4-11: sparse_gpytorch.rs。P4-13: online_sgpr_gpytorch.rs
 benches/            # criterion; from P1A-18 (after first `Gpr` path)
-compare/            # uv + sklearn + goldens/*.json。P2B-16 は compare/perf/（gprx / sklearn / libgp / friedrich。手動、CI なし）。P3-6 は `just gen-online-goldens` と `just perf-online`。P4-11 は `just gen-sparse-goldens`（GPyTorch。sklearn の `gen-goldens` に混ぜない）。P4-12 は `just perf-sparse`（GPyTorch / GPy。`just perf` に混ぜない）。P4-13 は `just gen-sparse-online-goldens`（GPyTorch。`just gen-sparse-goldens` に混ぜない）
+compare/            # uv + sklearn + goldens/*.json。P2B-16 は compare/perf/（gprx / sklearn / libgp / friedrich。手動、CI なし）。P3-6 は `just gen-online-goldens` と `just perf-online`。P4-11 は `just gen-sparse-goldens`（GPyTorch。sklearn の `gen-goldens` に混ぜない）。P4-12 は `just perf-sparse`（GPyTorch / GPy。`just perf` に混ぜない）。P4-13 は `just gen-sparse-online-goldens`（GPyTorch。`just gen-sparse-goldens` に混ぜない）。P4-14 は `just perf-sparse-online`（GPyTorch Titsias。`just perf-sparse` に混ぜない）
 examples/           # Phase 1b; P2-9 updates to `Gpr` + `FittedGpr`
 .dev/               # design, roadmap, bench-log.md
 ```
