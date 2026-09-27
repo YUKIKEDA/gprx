@@ -3,6 +3,7 @@
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatRef};
+use wide::f64x4;
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -18,7 +19,7 @@ use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
 use crate::rng::small_rng;
-use crate::sgpr::{kernel_cross, validate_inducing};
+use crate::sgpr::{kernel_cross, mat_mul_into, validate_inducing};
 use crate::workspace::{faer_par, faer_par_dims};
 use crate::{PredictOptions, Prediction, VarianceKind};
 
@@ -364,29 +365,129 @@ fn accumulate_kl_grad(model: &FittedSvgp, out: &mut [f64], n_theta: usize, m: us
     0.5 * (tr_s + mean_norm2 - m as f64 - log_det_s)
 }
 
+struct ColMajor<'a> {
+    data: &'a [f64],
+    m: usize,
+}
+
+impl<'a> ColMajor<'a> {
+    fn new(mat: MatRef<'a, f64>) -> Option<Self> {
+        let m = mat.nrows();
+        let n = mat.ncols();
+        if m == 0 || n == 0 {
+            return Some(Self { data: &[], m });
+        }
+        if mat.row_stride() != 1 || mat.col_stride() != m as isize {
+            return None;
+        }
+        let len = m * n;
+        // SAFETY: row stride is +1 and column stride equals `m`, so the
+        // values are one contiguous column-major buffer.
+        let data = unsafe { std::slice::from_raw_parts(mat.as_ptr(), len) };
+        Some(Self { data, m })
+    }
+
+    fn col(&self, j: usize) -> &'a [f64] {
+        let start = j * self.m;
+        &self.data[start..start + self.m]
+    }
+}
+
+fn load4(src: &[f64], i: usize) -> f64x4 {
+    f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
+}
+
+fn dot(left: &[f64], right: &[f64]) -> f64 {
+    let n = left.len().min(right.len());
+    let mut acc = f64x4::new([0.0; 4]);
+    let mut i = 0;
+    while i + 4 <= n {
+        acc += load4(left, i) * load4(right, i);
+        i += 4;
+    }
+    let parts = acc.to_array();
+    let mut sum = parts[0] + parts[1] + parts[2] + parts[3];
+    while i < n {
+        sum += left[i] * right[i];
+        i += 1;
+    }
+    sum
+}
+
+fn norm2(values: &[f64]) -> f64 {
+    dot(values, values)
+}
+
 struct PointCache {
     resid: Vec<f64>,
     var: Vec<f64>,
-    /// `m` entries per batch row, in batch order.
-    u: Vec<f64>,
+    /// Columns are batch rows. `u[(j, b)] = (Lᵀ a)[j]` for that row.
+    u: Mat<f64>,
 }
 
 fn point_cache(model: &FittedSvgp, batch: &[usize], m: usize) -> PointCache {
-    let mut resid = Vec::with_capacity(batch.len());
-    let mut var = Vec::with_capacity(batch.len());
-    let mut u_all = vec![0.0; batch.len() * m];
-    let mut u = vec![0.0; m];
+    let b = batch.len();
+    let a = batch_columns(model.a.as_ref(), batch);
+    let mut u = Mat::zeros(m, b);
+    mat_mul_into(&mut u, model.q_l.transpose(), a.as_ref());
+    let mut resid = vec![0.0; b];
+    let mut var = vec![0.0; b];
+    let a_ref = a.as_ref();
+    if let (Some(a_cm), Some(u_cm)) = (ColMajor::new(a_ref), ColMajor::new(u.as_ref())) {
+        let mean = model.q_mean.as_slice();
+        for (b_idx, &col) in batch.iter().enumerate() {
+            let a_col = a_cm.col(b_idx);
+            let u_col = u_cm.col(b_idx);
+            let mu = dot(a_col, mean);
+            var[b_idx] = model.k_diag[col] - norm2(a_col) + norm2(u_col);
+            resid[b_idx] = model.y[col] - mu;
+        }
+    } else {
+        for (b_idx, &col) in batch.iter().enumerate() {
+            let mut mu = 0.0;
+            let mut a_norm = 0.0;
+            let mut lt_norm = 0.0;
+            for j in 0..m {
+                let a_j = a_ref[(j, b_idx)];
+                let u_j = u[(j, b_idx)];
+                mu += a_j * model.q_mean[j];
+                a_norm += a_j * a_j;
+                lt_norm += u_j * u_j;
+            }
+            var[b_idx] = model.k_diag[col] - a_norm + lt_norm;
+            resid[b_idx] = model.y[col] - mu;
+        }
+    }
+    PointCache { resid, var, u }
+}
+
+enum BatchCols<'a> {
+    Full(MatRef<'a, f64>),
+    Owned(Mat<f64>),
+}
+
+impl<'a> BatchCols<'a> {
+    fn as_ref(&self) -> MatRef<'_, f64> {
+        match self {
+            Self::Full(mat) => *mat,
+            Self::Owned(mat) => mat.as_ref(),
+        }
+    }
+}
+
+fn batch_columns<'a>(full: MatRef<'a, f64>, batch: &[usize]) -> BatchCols<'a> {
+    let n = full.ncols();
+    if batch.len() == n && batch.iter().enumerate().all(|(i, col)| *col == i) {
+        return BatchCols::Full(full);
+    }
+    let m = full.nrows();
+    let mut owned = Mat::zeros(m, batch.len());
     for (b_idx, &col) in batch.iter().enumerate() {
-        let (v, r) = point_stats(model, col, m, &mut u);
-        resid.push(r);
-        var.push(v);
-        u_all[b_idx * m..(b_idx + 1) * m].copy_from_slice(&u);
+        for row in 0..m {
+            owned[(row, b_idx)] = full[(row, col)];
+        }
     }
-    PointCache {
-        resid,
-        var,
-        u: u_all,
-    }
+    BatchCols::Owned(owned)
 }
 
 fn accumulate_data_q_grad(
@@ -403,43 +504,32 @@ fn accumulate_data_q_grad(
     let log_2pi_noise = (2.0 * std::f64::consts::PI * noise).ln();
     let mut ell = 0.0;
     let mut resid2_var = 0.0;
-    for (b_idx, &col) in batch.iter().enumerate() {
-        let resid = cache.resid[b_idx];
+    let b = batch.len();
+    let mut resid_col = Mat::zeros(b, 1);
+    for (b_idx, &resid) in cache.resid.iter().enumerate() {
         let var = cache.var[b_idx];
-        let u = &cache.u[b_idx * m..(b_idx + 1) * m];
         ell += -0.5 * log_2pi_noise - 0.5 * inv_noise * (resid * resid + var);
         resid2_var += resid * resid + var;
-        for k in 0..m {
-            out[n_theta + k] -= scale * inv_noise * resid * model.a[(k, col)];
-        }
-        let mut packed = 0;
-        for (j, u_j) in u.iter().enumerate() {
-            for i in j..m {
-                out[n_theta + m + packed] += scale * inv_noise * *u_j * model.a[(i, col)];
-                packed += 1;
-            }
+        resid_col[(b_idx, 0)] = resid;
+    }
+    let a = batch_columns(model.a.as_ref(), batch);
+    let mut mean = Mat::zeros(m, 1);
+    mat_mul_into(&mut mean, a.as_ref(), resid_col.as_ref());
+    let c = scale * inv_noise;
+    for k in 0..m {
+        out[n_theta + k] -= c * mean[(k, 0)];
+    }
+    // `M_ij = Σ_b a_i u_j` for `i ≥ j`, the packed `L` derivative.
+    let mut gram = Mat::zeros(m, m);
+    mat_mul_into(&mut gram, a.as_ref(), cache.u.transpose());
+    let mut packed = 0;
+    for j in 0..m {
+        for i in j..m {
+            out[n_theta + m + packed] += c * gram[(i, j)];
+            packed += 1;
         }
     }
     (ell, resid2_var)
-}
-
-fn point_stats(model: &FittedSvgp, col: usize, m: usize, u: &mut [f64]) -> (f64, f64) {
-    let mut mu = 0.0;
-    let mut a_norm = 0.0;
-    for (j, u_j) in u.iter_mut().enumerate() {
-        let a_j = model.a[(j, col)];
-        mu += a_j * model.q_mean[j];
-        a_norm += a_j * a_j;
-        let mut lt_j = 0.0;
-        for i in j..m {
-            lt_j += model.q_l[(i, j)] * model.a[(i, col)];
-        }
-        *u_j = lt_j;
-    }
-    let lt_norm: f64 = u.iter().map(|v| v * v).sum();
-    let var = model.k_diag[col] - a_norm + lt_norm;
-    let resid = model.y[col] - mu;
-    (var, resid)
 }
 
 fn accumulate_kernel_grad(
@@ -456,9 +546,16 @@ fn accumulate_kernel_grad(
     let x_mat = pack_points(&model.x_obs, model.n, model.d);
     let z_mat = pack_points(&model.z_obs, model.m, model.d);
     let same_xz = model.x_obs == model.z_obs;
-    let mut da_col = vec![0.0; m];
-    let mut l_t_da = vec![0.0; m];
+    let mut ard_cross = match &compiled {
+        crate::kernel::CompiledKernel::RbfArd(leaf) if !same_xz => {
+            Some(leaf.grad_cross_all_from_coords(z_mat.as_ref(), x_mat.as_ref())?)
+        }
+        _ => None,
+    };
     for (param_idx, slot) in out.iter_mut().take(n_kernel).enumerate() {
+        let pre = ard_cross
+            .as_mut()
+            .map(|mats| std::mem::replace(&mut mats[param_idx], Mat::zeros(0, 0)));
         let (d_a, d_kdiag) = kernel_theta_tangents(
             &compiled,
             x_mat.as_ref(),
@@ -466,34 +563,44 @@ fn accumulate_kernel_grad(
             model,
             same_xz,
             param_idx,
+            pre,
         )?;
+        let da_b = batch_columns(d_a.as_ref(), batch);
+        let mut lt = Mat::zeros(m, batch.len());
+        mat_mul_into(&mut lt, model.q_l.transpose(), da_b.as_ref());
+        let da_ref = da_b.as_ref();
         let mut g = 0.0;
-        for (b_idx, &col) in batch.iter().enumerate() {
-            let resid = cache.resid[b_idx];
-            let u = &cache.u[b_idx * m..(b_idx + 1) * m];
-            for (r, dest) in da_col.iter_mut().enumerate() {
-                *dest = d_a[(r, col)];
+        if let (Some(da_cm), Some(a_cm), Some(u_cm), Some(lt_cm)) = (
+            ColMajor::new(da_ref),
+            ColMajor::new(model.a.as_ref()),
+            ColMajor::new(cache.u.as_ref()),
+            ColMajor::new(lt.as_ref()),
+        ) {
+            let mean = model.q_mean.as_slice();
+            for (b_idx, &col) in batch.iter().enumerate() {
+                let da_col = da_cm.col(b_idx);
+                let dmu = dot(da_col, mean);
+                let d_anorm = 2.0 * dot(a_cm.col(col), da_col);
+                let d_lt = 2.0 * dot(u_cm.col(b_idx), lt_cm.col(b_idx));
+                let dvar = d_kdiag[col] - d_anorm + d_lt;
+                let resid = cache.resid[b_idx];
+                g += inv_noise * resid * dmu - 0.5 * inv_noise * dvar;
             }
-            let mut dmu = 0.0;
-            let mut d_anorm = 0.0;
-            for (r, da_r) in da_col.iter().enumerate() {
-                dmu += da_r * model.q_mean[r];
-                d_anorm += 2.0 * model.a[(r, col)] * da_r;
-            }
-            for (j, dest) in l_t_da.iter_mut().enumerate() {
-                let mut acc = 0.0;
-                for (i, da_i) in da_col.iter().enumerate().skip(j) {
-                    acc += model.q_l[(i, j)] * da_i;
+        } else {
+            for (b_idx, &col) in batch.iter().enumerate() {
+                let resid = cache.resid[b_idx];
+                let mut dmu = 0.0;
+                let mut d_anorm = 0.0;
+                let mut d_lt = 0.0;
+                for r in 0..m {
+                    let da_r = da_ref[(r, b_idx)];
+                    dmu += da_r * model.q_mean[r];
+                    d_anorm += 2.0 * model.a[(r, col)] * da_r;
+                    d_lt += 2.0 * cache.u[(r, b_idx)] * lt[(r, b_idx)];
                 }
-                *dest = acc;
+                let dvar = d_kdiag[col] - d_anorm + d_lt;
+                g += inv_noise * resid * dmu - 0.5 * inv_noise * dvar;
             }
-            let d_lt: f64 = u
-                .iter()
-                .zip(l_t_da.iter())
-                .map(|(uj, lj)| 2.0 * uj * lj)
-                .sum();
-            let dvar = d_kdiag[col] - d_anorm + d_lt;
-            g += inv_noise * resid * dmu - 0.5 * inv_noise * dvar;
         }
         *slot = -scale * g;
     }
@@ -507,6 +614,7 @@ fn kernel_theta_tangents(
     model: &FittedSvgp,
     same_xz: bool,
     param_idx: usize,
+    pre_cross: Option<Mat<f64>>,
 ) -> Result<(Mat<f64>, Vec<f64>), GprError> {
     let m = model.m;
     let n = model.n;
@@ -519,7 +627,9 @@ fn kernel_theta_tangents(
         Triangle::Full,
         scratch_mm.as_mut(),
     )?;
-    let mut d_kmn = if same_xz {
+    let mut d_kmn = if let Some(pre) = pre_cross {
+        pre
+    } else if same_xz {
         let mut gram = Mat::zeros(n, n);
         let mut scratch = Mat::zeros(n, n);
         compiled.grad_points(

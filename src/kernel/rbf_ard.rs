@@ -8,7 +8,9 @@ use super::simd::{
 use super::{ArdLengthscales, Triangle, visit_triangle};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
-use faer::{MatMut, MatRef};
+use faer::{Mat, MatMut, MatRef};
+use rayon::prelude::*;
+use wide::f64x4;
 
 /// ARD RBF: `k = exp( -½ Σ_d (x_d - x'_d)² / ℓ_d² )`.
 ///
@@ -527,12 +529,46 @@ impl RbfArdKernel {
         }
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_grad_rbf_ard_cross(x1, x2, d_k.rb_mut(), inv_ell_sq, param_idx)? {
+            return Ok(());
+        }
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 d_k[(row, col)] = ard_kernel_grad_pair(x1, row, x2, col, inv_ell_sq, param_idx)?;
             }
         }
         Ok(())
+    }
+
+    /// One pass of `∂k/∂θ_d` for every lengthscale. Same values as
+    /// [`Self::grad_cross_from_coords`] called once per `d`.
+    pub(crate) fn grad_cross_all_from_coords(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+    ) -> Result<Vec<Mat<f64>>, GprError> {
+        let d = self.num_params();
+        let mut out = Vec::with_capacity(d);
+        for _ in 0..d {
+            out.push(Mat::zeros(x1.nrows(), x2.nrows()));
+        }
+        if d == 0 {
+            return Ok(out);
+        }
+        super::require_coord_grad(x1, x2, out[0].as_ref(), 0)?;
+        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        if try_grad_rbf_ard_cross_all(x1, x2, &mut out, inv_ell_sq)? {
+            return Ok(out);
+        }
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let (k, terms) = ard_kernel_grad_terms(x1, row, x2, col, inv_ell_sq)?;
+                for (param, dest) in out.iter_mut().enumerate() {
+                    dest[(row, col)] = k * terms[param];
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub(crate) fn hess_cross_from_coords(
@@ -557,6 +593,375 @@ impl RbfArdKernel {
             }
         }
         Ok(())
+    }
+}
+
+fn try_grad_rbf_ard_cross(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    d_k: MatMut<'_, f64>,
+    inv_ell_sq: &[f64],
+    param_idx: usize,
+) -> Result<bool, GprError> {
+    if param_idx >= inv_ell_sq.len() {
+        return Ok(false);
+    }
+    let mut write = vec![false; inv_ell_sq.len()];
+    write[param_idx] = true;
+    let mut one = [d_k];
+    try_fill_ard_cross(x1, x2, &mut one, inv_ell_sq, &write)
+}
+
+fn try_grad_rbf_ard_cross_all(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    out: &mut [Mat<f64>],
+    inv_ell_sq: &[f64],
+) -> Result<bool, GprError> {
+    if out.len() != inv_ell_sq.len() {
+        return Ok(false);
+    }
+    let mut slots: Vec<MatMut<'_, f64>> = out.iter_mut().map(|m| m.as_mut()).collect();
+    let write = vec![true; inv_ell_sq.len()];
+    try_fill_ard_cross(x1, x2, &mut slots, inv_ell_sq, &write)
+}
+
+/// `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²` with one `exp` for every lengthscale.
+fn try_fill_ard_cross(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    out: &mut [MatMut<'_, f64>],
+    inv_ell_sq: &[f64],
+    write: &[bool],
+) -> Result<bool, GprError> {
+    let m = x1.nrows();
+    let n = x2.nrows();
+    let d = inv_ell_sq.len();
+    if d == 0 || write.len() != d || out.len() != d || x1.ncols() != d || x2.ncols() != d {
+        return Ok(false);
+    }
+    if !ard_unit_cols(x1) || !ard_unit_cols(x2) {
+        return Ok(false);
+    }
+    for dest in out.iter() {
+        if dest.nrows() != m || dest.ncols() != n || !ard_unit_cols(dest.as_ref()) {
+            return Ok(false);
+        }
+    }
+    for dim in 0..d {
+        ard_finite(ard_col(x1, dim)?)?;
+        ard_finite(ard_col(x2, dim)?)?;
+    }
+    if n <= 1024 {
+        write_ard_cross(x1, x2, out, inv_ell_sq, write, 0, n)?;
+        return Ok(true);
+    }
+    let n_parts = super::dist::worker_count();
+    let mut slots = Vec::with_capacity(d);
+    for mat in out.iter_mut() {
+        slots.push(packed_mut(mat));
+    }
+    let shared = ShareBases(slots);
+    let results: Vec<Result<(), GprError>> = (0..n_parts)
+        .into_par_iter()
+        .map(|idx| {
+            let (start, len) = super::dist::col_chunk(n, idx, n_parts);
+            write_packed(
+                x1,
+                x2,
+                shared.slots(),
+                inv_ell_sq,
+                write,
+                ArdSpan {
+                    x_begin: start,
+                    dest_col: start,
+                    len,
+                },
+            )
+        })
+        .collect();
+    for result in results {
+        result?;
+    }
+    Ok(true)
+}
+
+fn write_ard_cross(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    dest: &mut [MatMut<'_, f64>],
+    inv_ell_sq: &[f64],
+    write: &[bool],
+    start: usize,
+    len: usize,
+) -> Result<(), GprError> {
+    let d = inv_ell_sq.len();
+    for mat in dest.iter() {
+        if mat.ncols() > 0 && mat.row_stride() != 1 {
+            return Err(GprError::UnsupportedKernelOperation {
+                reason: "expected unit row-stride for ARD cross grad".to_owned(),
+            });
+        }
+    }
+    let mut packed = Vec::with_capacity(d);
+    for mat in dest.iter_mut() {
+        packed.push(packed_mut(mat));
+    }
+    write_packed(
+        x1,
+        x2,
+        &packed,
+        inv_ell_sq,
+        write,
+        ArdSpan {
+            x_begin: start,
+            dest_col: 0,
+            len,
+        },
+    )
+}
+
+fn write_packed(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    packed: &[PackedMut],
+    inv_ell_sq: &[f64],
+    write: &[bool],
+    span: ArdSpan,
+) -> Result<(), GprError> {
+    let m = x1.nrows();
+    let d = inv_ell_sq.len();
+    let len = span.len;
+    let mut r2 = vec![0.0; len];
+    let mut scratch = vec![0.0; len];
+    let mut saved: Vec<Vec<f64>> = write
+        .iter()
+        .map(|flag| if *flag { vec![0.0; len] } else { Vec::new() })
+        .collect();
+    let mut k = vec![0.0; len];
+    let half = f64x4::new([-0.5; 4]);
+    let mut x_dim = Vec::with_capacity(d);
+    for dim in 0..d {
+        x_dim.push(ard_col(x2, dim)?);
+    }
+    for row in 0..m {
+        r2.fill(0.0);
+        for dim in 0..d {
+            let z = ard_col(x1, dim)?[row];
+            let acc = if write[dim] {
+                &mut saved[dim]
+            } else {
+                &mut scratch
+            };
+            acc.fill(0.0);
+            add_weighted_sq(
+                &x_dim[dim][span.x_begin..span.x_begin + len],
+                z,
+                inv_ell_sq[dim],
+                acc,
+            );
+            add_slice(acc, &mut r2);
+        }
+        exp_scaled(&r2, &mut k, half)?;
+        for dim in 0..d {
+            if !write[dim] {
+                continue;
+            }
+            let src = &saved[dim];
+            let mut i = 0;
+            while i + 4 <= len {
+                let dk = load4(&k, i) * load4(src, i);
+                if !all_finite4(dk) {
+                    return Err(GprError::NonFiniteKernelValue);
+                }
+                let lanes = dk.to_array();
+                let col = span.dest_col + i;
+                store_packed(&packed[dim], row, col, lanes[0]);
+                store_packed(&packed[dim], row, col + 1, lanes[1]);
+                store_packed(&packed[dim], row, col + 2, lanes[2]);
+                store_packed(&packed[dim], row, col + 3, lanes[3]);
+                i += 4;
+            }
+            while i < len {
+                let dk = k[i] * src[i];
+                if !dk.is_finite() {
+                    return Err(GprError::NonFiniteKernelValue);
+                }
+                store_packed(&packed[dim], row, span.dest_col + i, dk);
+                i += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ArdSpan {
+    x_begin: usize,
+    dest_col: usize,
+    len: usize,
+}
+
+struct PackedMut {
+    ptr: *mut f64,
+    stride: isize,
+}
+
+struct ShareBases(Vec<PackedMut>);
+
+impl ShareBases {
+    fn slots(&self) -> &[PackedMut] {
+        &self.0
+    }
+}
+
+/// # Safety
+///
+/// Each pointer is a column-major matrix. Parallel callers write disjoint
+/// columns of those matrices and do not read the columns they write.
+unsafe impl Send for ShareBases {}
+
+/// # Safety
+///
+/// Each pointer is a column-major matrix. Parallel callers write disjoint
+/// columns of those matrices and do not read the columns they write.
+unsafe impl Sync for ShareBases {}
+
+fn packed_mut(mat: &mut MatMut<'_, f64>) -> PackedMut {
+    let view = mat.rb_mut();
+    debug_assert!(view.ncols() == 0 || view.row_stride() == 1);
+    PackedMut {
+        ptr: view.as_ptr_mut(),
+        stride: view.col_stride(),
+    }
+}
+
+/// # Safety
+///
+/// `slot` addresses a column-major matrix whose row stride is `+1`.
+/// `row` is inside that matrix and `col` is inside its column count.
+#[inline(always)]
+fn store_packed(slot: &PackedMut, row: usize, col: usize, value: f64) {
+    // SAFETY: row stride is +1 and `(row, col)` is inside this matrix.
+    unsafe {
+        *slot.ptr.offset(row as isize + col as isize * slot.stride) = value;
+    }
+}
+
+fn add_slice(src: &[f64], acc: &mut [f64]) {
+    let mut i = 0;
+    while i + 4 <= src.len() {
+        store4(acc, i, load4(acc, i) + load4(src, i));
+        i += 4;
+    }
+    while i < src.len() {
+        acc[i] += src[i];
+        i += 1;
+    }
+}
+
+fn ard_unit_cols(mat: MatRef<'_, f64>) -> bool {
+    mat.ncols() == 0 || mat.col(0).try_as_col_major().is_some()
+}
+
+fn ard_col<'a>(mat: MatRef<'a, f64>, col: usize) -> Result<&'a [f64], GprError> {
+    mat.col(col)
+        .try_as_col_major()
+        .map(|c| c.as_slice())
+        .ok_or_else(|| GprError::UnsupportedKernelOperation {
+            reason: "expected unit row-stride for ARD cross grad".to_owned(),
+        })
+}
+
+fn ard_finite(values: &[f64]) -> Result<(), GprError> {
+    if values.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(GprError::NonFiniteInput)
+    }
+}
+
+fn load4(src: &[f64], i: usize) -> f64x4 {
+    f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
+}
+
+fn store4(dest: &mut [f64], i: usize, v: f64x4) {
+    let a = v.to_array();
+    dest[i] = a[0];
+    dest[i + 1] = a[1];
+    dest[i + 2] = a[2];
+    dest[i + 3] = a[3];
+}
+
+fn all_finite4(v: f64x4) -> bool {
+    let a = v.to_array();
+    a[0].is_finite() && a[1].is_finite() && a[2].is_finite() && a[3].is_finite()
+}
+
+fn add_weighted_sq(x: &[f64], x0: f64, w: f64, acc: &mut [f64]) {
+    let x0v = f64x4::new([x0; 4]);
+    let wv = f64x4::new([w; 4]);
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let d = load4(x, i) - x0v;
+        let av = load4(acc, i);
+        store4(acc, i, av + d * d * wv);
+        i += 4;
+    }
+    while i < x.len() {
+        let d = x[i] - x0;
+        acc[i] += d * d * w;
+        i += 1;
+    }
+}
+
+fn exp_scaled(src: &[f64], dest: &mut [f64], scale: f64x4) -> Result<(), GprError> {
+    let mut i = 0;
+    while i + 4 <= src.len() {
+        let v = (load4(src, i) * scale).exp();
+        if !all_finite4(v) {
+            return Err(GprError::NonFiniteKernelValue);
+        }
+        store4(dest, i, v);
+        i += 4;
+    }
+    let s = scale.to_array()[0];
+    while i < src.len() {
+        let v = (src[i] * s).exp();
+        if !v.is_finite() {
+            return Err(GprError::NonFiniteKernelValue);
+        }
+        dest[i] = v;
+        i += 1;
+    }
+    Ok(())
+}
+
+fn ard_kernel_grad_terms(
+    x: MatRef<'_, f64>,
+    row: usize,
+    xs: MatRef<'_, f64>,
+    col: usize,
+    inv_ell_sq: &[f64],
+) -> Result<(f64, Vec<f64>), GprError> {
+    let mut r2 = 0.0;
+    let mut terms = vec![0.0; inv_ell_sq.len()];
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let diff = x[(row, dim)] - xs[(col, dim)];
+        if !diff.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = diff * diff * w;
+        r2 += term;
+        terms[dim] = term;
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    let k = (-0.5 * r2).exp();
+    if k.is_finite() {
+        Ok((k, terms))
+    } else {
+        Err(GprError::NonFiniteKernelValue)
     }
 }
 
