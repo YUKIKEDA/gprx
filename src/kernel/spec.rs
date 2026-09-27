@@ -156,7 +156,16 @@ impl KernelSpec {
     /// points-mode leaves (Linear, ARD) evaluates each leaf in its own mode.
     ///
     /// See [`super::KernelTerm`] for a Sum example.
-    pub fn custom(term: impl super::KernelTerm) -> Self {
+    pub fn custom<K>(term: K) -> Self
+    where
+        K: super::KernelTerm<f64>
+            + super::KernelTerm<f32>
+            + Clone
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + 'static,
+    {
         Self::Custom(CustomKernel::new(term))
     }
 
@@ -234,8 +243,17 @@ impl KernelSpec {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn compile(&self) -> crate::kernel::CompiledKernel {
-        crate::kernel::CompiledKernel::from_spec(self)
+    pub fn compile(&self) -> crate::kernel::CompiledKernel<f64> {
+        crate::kernel::CompiledKernel::<f64>::from_spec(self)
+    }
+
+    /// Compiles this tree for compute scalar `T`.
+    ///
+    /// [`Self::compile`] is `T = f64`. `f32` and `f64` run the same operations.
+    /// Parameters stay `f64`. There is no conversion between the two compiled
+    /// types: each call builds the tree for the scalar you name.
+    pub fn compile_as<T: crate::kernel::KernelScalar>(&self) -> crate::kernel::CompiledKernel<T> {
+        crate::kernel::CompiledKernel::<T>::from_spec(self)
     }
 
     fn write_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {

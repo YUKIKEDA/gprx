@@ -130,7 +130,7 @@ struct DoublePrecision; // Storage=f64, Refine=f64
 4. f32の`L`で`delta = solve(L, r)`、`alpha_1 = alpha_0 + delta`
 5. 収束するまで数回繰り返す
 
-実装優先度: `DoublePrecision`をデフォルトとし、`MixedPrecision`は P5-1 / P5-2。`A_resid`の方式はP5-1で上記2通りを実装可能にしてベンチマークで選ぶ。
+実装優先度: `DoublePrecision`をデフォルトとし、`MixedPrecision`は P5-2 の predict。`A_resid`の2方式は P5-1 でクレート内部ソルバの型パラメータ（保存した f32 行列で引く型と、カーネルを f64 で計算し直す型）。コード上の別名は置かない。Forrester `n=1024` の release 中央値は、保存した f32 行列で引く型が 22.40 ms、カーネルを f64 で計算し直す型が 48.77 ms で、5% の外である。省略時の既定は bench-log の保存した f32 行列で引く型。`Gpr` の `fit` と `predict` は f64 のまま。
 
 ### 4.2 混合精度反復改良の収束判定パラメータ
 
@@ -194,7 +194,11 @@ impl KernelSpec {
     fn parameter_bindings(&self) -> Vec<ParameterBinding>;
     fn compile<T: Scalar>(&self) -> CompiledKernel<T>;
 }
+```
 
+P5-1 の実体: 葉のパラメータは f64 のまま。公開の計算スカラーは `CompiledKernel<T = f64>`。型を省略した `compile()` は f64。`compile_as::<T>()` は apply・勾配・ヘッセ・組み込みの葉・和・積・ユーザー定義の葉を f32 と f64 で同じ操作にする。f64 の距離キャッシュと SIMD は f64 側。f32 は同じ式のスカラー。f32 と f64 の入れ替え変換は置かない。
+
+```rust
 /// 実行層。組み込みはenumで静的ディスパッチ、ユーザー定義のみ dyn。
 enum CompiledKernel<T: Scalar> {
     Rbf(RbfKernel<T>),
@@ -860,7 +864,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-21（[#217](https://github.com/YUKIKEDA/gprx/issues/217)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 5 の P5-1（[#39](https://github.com/YUKIKEDA/gprx/issues/39)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）

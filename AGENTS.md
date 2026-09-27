@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-21（SVGP joint の残り、GPy 比）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 5 の P5-1（混合精度の残差、`PromoteStorage` vs `ReevaluateKernel`）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

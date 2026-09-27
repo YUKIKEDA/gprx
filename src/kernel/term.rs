@@ -1,10 +1,11 @@
 //! User-defined distance kernel leaf ([`KernelTerm`] / [`CustomKernel`]).
 
-use std::fmt::{self, Debug};
-
 use faer::{MatMut, MatRef};
+use std::fmt::{self, Debug};
+use std::marker::PhantomData;
 
 use crate::error::GprError;
+use crate::kernel::KernelScalar;
 use crate::param::Interval;
 
 use super::Triangle;
@@ -31,13 +32,13 @@ use super::Triangle;
 ///
 /// ```rust
 /// use faer::{MatMut, MatRef};
-/// use gprx::kernel::{KernelSpec, KernelTerm, RbfKernel, Triangle};
+/// use gprx::kernel::{KernelScalar, KernelSpec, KernelTerm, RbfKernel, Triangle};
 /// use gprx::{GaussianLikelihood, Gpr, Interval};
 ///
 /// #[derive(Clone, Debug)]
 /// struct UnitKernel;
 ///
-/// impl KernelTerm for UnitKernel {
+/// impl<T: KernelScalar> KernelTerm<T> for UnitKernel {
 ///     fn num_params(&self) -> usize {
 ///         0
 ///     }
@@ -53,7 +54,7 @@ use super::Triangle;
 ///     }
 ///
 ///     fn set_params(&mut self, params: &[f64]) -> Result<(), gprx::GprError> {
-///         self.get_params(&mut params.to_vec())
+///         KernelTerm::<T>::get_params(self, &mut params.to_vec())
 ///     }
 ///
 ///     fn bounds_into(&self, out: &mut [Interval]) -> Result<(), gprx::GprError> {
@@ -68,8 +69,8 @@ use super::Triangle;
 ///
 ///     fn apply(
 ///         &self,
-///         dist: MatRef<'_, f64>,
-///         mut out: MatMut<'_, f64>,
+///         dist: MatRef<'_, T>,
+///         mut out: MatMut<'_, T>,
 ///         uplo: Triangle,
 ///     ) -> Result<(), gprx::GprError> {
 ///         if dist.nrows() != dist.ncols()
@@ -94,7 +95,7 @@ use super::Triangle;
 ///                 Triangle::Lower | Triangle::Full => n,
 ///             };
 ///             for row in start..end {
-///                 out[(row, col)] = 1.0;
+///                 out[(row, col)] = T::from_f64(1.0);
 ///             }
 ///         }
 ///         Ok(())
@@ -102,8 +103,8 @@ use super::Triangle;
 ///
 ///     fn apply_cross(
 ///         &self,
-///         dist: MatRef<'_, f64>,
-///         mut out: MatMut<'_, f64>,
+///         dist: MatRef<'_, T>,
+///         mut out: MatMut<'_, T>,
 ///     ) -> Result<(), gprx::GprError> {
 ///         if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
 ///             return Err(gprx::GprError::InvalidHyperparameter {
@@ -115,21 +116,21 @@ use super::Triangle;
 ///         }
 ///         for col in 0..out.ncols() {
 ///             for row in 0..out.nrows() {
-///                 out[(row, col)] = 1.0;
+///                 out[(row, col)] = T::from_f64(1.0);
 ///             }
 ///         }
 ///         Ok(())
 ///     }
 ///
-///     fn fill_diag(&self, out: &mut [f64]) -> Result<(), gprx::GprError> {
-///         out.fill(1.0);
+///     fn fill_diag(&self, out: &mut [T]) -> Result<(), gprx::GprError> {
+///         out.fill(T::from_f64(1.0));
 ///         Ok(())
 ///     }
 ///
 ///     fn grad(
 ///         &self,
-///         _dist: MatRef<'_, f64>,
-///         _d_k: MatMut<'_, f64>,
+///         _dist: MatRef<'_, T>,
+///         _d_k: MatMut<'_, T>,
 ///         param_idx: usize,
 ///         _uplo: Triangle,
 ///     ) -> Result<(), gprx::GprError> {
@@ -140,8 +141,8 @@ use super::Triangle;
 ///
 ///     fn hess(
 ///         &self,
-///         _dist: MatRef<'_, f64>,
-///         _d2_k: MatMut<'_, f64>,
+///         _dist: MatRef<'_, T>,
+///         _d2_k: MatMut<'_, T>,
 ///         i: usize,
 ///         j: usize,
 ///         _uplo: Triangle,
@@ -153,8 +154,8 @@ use super::Triangle;
 ///
 ///     fn hess_points(
 ///         &self,
-///         _x: MatRef<'_, f64>,
-///         _d2_k: MatMut<'_, f64>,
+///         _x: MatRef<'_, T>,
+///         _d2_k: MatMut<'_, T>,
 ///         i: usize,
 ///         j: usize,
 ///         _uplo: Triangle,
@@ -164,7 +165,7 @@ use super::Triangle;
 ///         })
 ///     }
 ///
-///     fn clone_box(&self) -> Box<dyn KernelTerm> {
+///     fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
 ///         Box::new(self.clone())
 ///     }
 /// }
@@ -177,7 +178,7 @@ use super::Triangle;
 /// # Ok(())
 /// # }
 /// ```
-pub trait KernelTerm: Send + Sync + Debug + 'static {
+pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// Returns the number of flattened log-`θ` parameters.
     fn num_params(&self) -> usize;
 
@@ -211,8 +212,8 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     /// distance is non-finite.
     fn apply(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError>;
 
@@ -221,14 +222,14 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     /// # Errors
     ///
     /// Same shape / non-finite errors as [`Self::apply`].
-    fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError>;
+    fn apply_cross(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError>;
 
     /// Writes the stationary diagonal `k(x, x)` into `out`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError`] if the leaf cannot fill `out`.
-    fn fill_diag(&self, out: &mut [f64]) -> Result<(), GprError>;
+    fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError>;
 
     /// Writes `∂K/∂θ_{param_idx}` from squared distances into `d_k`.
     ///
@@ -238,8 +239,8 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     /// range, or the same shape errors as [`Self::apply`].
     fn grad(
         &self,
-        dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError>;
@@ -254,8 +255,8 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     /// range, or the same shape errors as [`Self::apply`].
     fn hess(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
@@ -271,8 +272,8 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     /// Same index and shape errors as [`Self::hess`].
     fn hess_points(
         &self,
-        x: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
@@ -289,16 +290,16 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     /// coordinate derivative, or the same shape errors as [`Self::apply_cross`].
     fn grad_wrt_coord_dim(
         &self,
-        _x1: MatRef<'_, f64>,
-        _x2: MatRef<'_, f64>,
-        _d_k: MatMut<'_, f64>,
+        _x1: MatRef<'_, T>,
+        _x2: MatRef<'_, T>,
+        _d_k: MatMut<'_, T>,
         _dim: usize,
     ) -> Result<(), GprError> {
         Err(GprError::CoordGradientUnsupported)
     }
 
     /// Clones this leaf into a new box. Used by [`super::KernelSpec::clone`].
-    fn clone_box(&self) -> Box<dyn KernelTerm>;
+    fn clone_box(&self) -> Box<dyn KernelTerm<T>>;
 
     /// Stable registry key for persist. Must not start with `gprx.`.
     ///
@@ -320,28 +321,327 @@ pub trait KernelTerm: Send + Sync + Debug + 'static {
     }
 }
 
-/// Wrapper stored as [`super::KernelSpec::Custom`] / [`super::CompiledKernel::Custom`].
-///
-/// Cloning copies the boxed leaf via [`KernelTerm::clone_box`].
-/// [`PartialEq`] compares [`std::any::type_name_of_val`] and log-`θ` bits.
-///
-/// See [`KernelTerm`] for construction.
-pub struct CustomKernel {
-    inner: Box<dyn KernelTerm>,
+trait DualLeaf: Send + Sync + Debug {
+    fn num_params(&self) -> usize;
+    fn get_params(&self, out: &mut [f64]) -> Result<(), GprError>;
+    fn set_params(&mut self, params: &[f64]) -> Result<(), GprError>;
+    fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError>;
+    fn persist_id(&self) -> &'static str;
+    fn persist_state(&self) -> Result<serde_json::Value, GprError>;
+    fn clone_dual(&self) -> Box<dyn DualLeaf>;
+    fn type_label(&self) -> &'static str;
+    fn apply_f64(
+        &self,
+        dist: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn apply_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        out: MatMut<'_, f32>,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn apply_cross_f64(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError>;
+    fn apply_cross_f32(&self, dist: MatRef<'_, f32>, out: MatMut<'_, f32>) -> Result<(), GprError>;
+    fn fill_diag_f64(&self, out: &mut [f64]) -> Result<(), GprError>;
+    fn fill_diag_f32(&self, out: &mut [f32]) -> Result<(), GprError>;
+    fn grad_f64(
+        &self,
+        dist: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn grad_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn hess_f64(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn hess_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn hess_points_f64(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn hess_points_f32(
+        &self,
+        x: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError>;
+    fn grad_wrt_coord_dim_f64(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError>;
+    fn grad_wrt_coord_dim_f32(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        dim: usize,
+    ) -> Result<(), GprError>;
 }
 
-impl CustomKernel {
-    /// Boxes a user leaf. See [`KernelTerm`].
-    pub fn new(term: impl KernelTerm) -> Self {
+#[derive(Debug)]
+struct Erased<K>(K);
+
+impl<K> DualLeaf for Erased<K>
+where
+    K: KernelTerm<f64> + KernelTerm<f32> + Clone + Debug + Send + Sync + 'static,
+{
+    fn num_params(&self) -> usize {
+        KernelTerm::<f64>::num_params(&self.0)
+    }
+    fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+        KernelTerm::<f64>::get_params(&self.0, out)
+    }
+    fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
+        KernelTerm::<f64>::set_params(&mut self.0, params)
+    }
+    fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        KernelTerm::<f64>::bounds_into(&self.0, out)
+    }
+    fn persist_id(&self) -> &'static str {
+        KernelTerm::<f64>::persist_id(&self.0)
+    }
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        KernelTerm::<f64>::persist_state(&self.0)
+    }
+    fn clone_dual(&self) -> Box<dyn DualLeaf> {
+        Box::new(Erased(self.0.clone()))
+    }
+    fn type_label(&self) -> &'static str {
+        std::any::type_name::<K>()
+    }
+    fn apply_f64(
+        &self,
+        dist: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f64>::apply(&self.0, dist, out, uplo)
+    }
+    fn apply_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        out: MatMut<'_, f32>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f32>::apply(&self.0, dist, out, uplo)
+    }
+    fn apply_cross_f64(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
+        KernelTerm::<f64>::apply_cross(&self.0, dist, out)
+    }
+    fn apply_cross_f32(&self, dist: MatRef<'_, f32>, out: MatMut<'_, f32>) -> Result<(), GprError> {
+        KernelTerm::<f32>::apply_cross(&self.0, dist, out)
+    }
+    fn fill_diag_f64(&self, out: &mut [f64]) -> Result<(), GprError> {
+        KernelTerm::<f64>::fill_diag(&self.0, out)
+    }
+    fn fill_diag_f32(&self, out: &mut [f32]) -> Result<(), GprError> {
+        KernelTerm::<f32>::fill_diag(&self.0, out)
+    }
+    fn grad_f64(
+        &self,
+        dist: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f64>::grad(&self.0, dist, d_k, param_idx, uplo)
+    }
+    fn grad_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f32>::grad(&self.0, dist, d_k, param_idx, uplo)
+    }
+    fn hess_f64(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f64>::hess(&self.0, dist, d2_k, i, j, uplo)
+    }
+    fn hess_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f32>::hess(&self.0, dist, d2_k, i, j, uplo)
+    }
+    fn hess_points_f64(
+        &self,
+        x: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f64>::hess_points(&self.0, x, d2_k, i, j, uplo)
+    }
+    fn hess_points_f32(
+        &self,
+        x: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f32>::hess_points(&self.0, x, d2_k, i, j, uplo)
+    }
+    fn grad_wrt_coord_dim_f64(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f64>::grad_wrt_coord_dim(&self.0, x1, x2, d_k, dim)
+    }
+    fn grad_wrt_coord_dim_f32(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        KernelTerm::<f32>::grad_wrt_coord_dim(&self.0, x1, x2, d_k, dim)
+    }
+}
+
+/// Wrapper stored as [`super::KernelSpec::Custom`] / [`super::CompiledKernel::Custom`].
+///
+/// The leaf implements the same operations at `f32` and `f64`. Cloning copies
+/// that leaf. [`PartialEq`] compares the leaf type and log-`θ` bits.
+///
+/// See [`KernelTerm`] for construction.
+pub struct CustomKernel<T: KernelScalar = f64> {
+    inner: Box<dyn DualLeaf>,
+    _scalar: PhantomData<fn() -> T>,
+}
+
+impl CustomKernel<f64> {
+    /// Boxes a user leaf that implements the same operations at `f32` and `f64`.
+    pub fn new<K>(term: K) -> Self
+    where
+        K: KernelTerm<f64> + KernelTerm<f32> + Clone + Debug + Send + Sync + 'static,
+    {
         Self {
-            inner: Box::new(term),
+            inner: Box::new(Erased(term)),
+            _scalar: PhantomData,
         }
     }
 
-    pub(crate) fn from_box(inner: Box<dyn KernelTerm>) -> Self {
-        Self { inner }
+    pub(crate) fn with_scalar<T: KernelScalar>(&self) -> CustomKernel<T> {
+        CustomKernel {
+            inner: self.inner.clone_dual(),
+            _scalar: PhantomData,
+        }
+    }
+}
+
+impl CustomKernel<f32> {
+    pub(super) fn apply_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        out: MatMut<'_, f32>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.inner.apply_f32(dist, out, uplo)
     }
 
+    pub(super) fn apply_cross_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        out: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        self.inner.apply_cross_f32(dist, out)
+    }
+
+    pub(super) fn fill_diag_f32(&self, out: &mut [f32]) -> Result<(), GprError> {
+        self.inner.fill_diag_f32(out)
+    }
+
+    pub(super) fn grad_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.inner.grad_f32(dist, d_k, param_idx, uplo)
+    }
+
+    pub(super) fn hess_f32(
+        &self,
+        dist: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.inner.hess_f32(dist, d2_k, i, j, uplo)
+    }
+
+    pub(super) fn hess_points_f32(
+        &self,
+        x: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.inner.hess_points_f32(x, d2_k, i, j, uplo)
+    }
+
+    pub(super) fn grad_wrt_coord_dim_f32(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        self.inner.grad_wrt_coord_dim_f32(x1, x2, d_k, dim)
+    }
+}
+
+impl<T: KernelScalar> CustomKernel<T> {
     pub(super) fn num_params(&self) -> usize {
         self.inner.num_params()
     }
@@ -389,7 +689,7 @@ impl CustomKernel {
         out: MatMut<'_, f64>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.inner.apply(dist, out, uplo)
+        self.inner.apply_f64(dist, out, uplo)
     }
 
     pub(super) fn apply_cross(
@@ -397,11 +697,11 @@ impl CustomKernel {
         dist: MatRef<'_, f64>,
         out: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
-        self.inner.apply_cross(dist, out)
+        self.inner.apply_cross_f64(dist, out)
     }
 
     pub(super) fn fill_diag(&self, out: &mut [f64]) -> Result<(), GprError> {
-        self.inner.fill_diag(out)
+        self.inner.fill_diag_f64(out)
     }
 
     pub(super) fn grad(
@@ -411,7 +711,7 @@ impl CustomKernel {
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.inner.grad(dist, d_k, param_idx, uplo)
+        self.inner.grad_f64(dist, d_k, param_idx, uplo)
     }
 
     pub(super) fn hess(
@@ -422,7 +722,7 @@ impl CustomKernel {
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.inner.hess(dist, d2_k, i, j, uplo)
+        self.inner.hess_f64(dist, d2_k, i, j, uplo)
     }
 
     pub(super) fn hess_points(
@@ -433,7 +733,7 @@ impl CustomKernel {
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.inner.hess_points(x, d2_k, i, j, uplo)
+        self.inner.hess_points_f64(x, d2_k, i, j, uplo)
     }
 
     pub(super) fn grad_wrt_coord_dim(
@@ -443,27 +743,28 @@ impl CustomKernel {
         d_k: MatMut<'_, f64>,
         dim: usize,
     ) -> Result<(), GprError> {
-        self.inner.grad_wrt_coord_dim(x1, x2, d_k, dim)
+        self.inner.grad_wrt_coord_dim_f64(x1, x2, d_k, dim)
     }
 }
 
-impl Clone for CustomKernel {
+impl<T: KernelScalar> Clone for CustomKernel<T> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone_box(),
+            inner: self.inner.clone_dual(),
+            _scalar: PhantomData,
         }
     }
 }
 
-impl Debug for CustomKernel {
+impl<T: KernelScalar> Debug for CustomKernel<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("CustomKernel").field(&self.inner).finish()
     }
 }
 
-impl PartialEq for CustomKernel {
+impl<T: KernelScalar> PartialEq for CustomKernel<T> {
     fn eq(&self, other: &Self) -> bool {
-        if std::any::type_name_of_val(&*self.inner) != std::any::type_name_of_val(&*other.inner) {
+        if self.inner.type_label() != other.inner.type_label() {
             return false;
         }
         let n = self.inner.num_params();
@@ -495,7 +796,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct UnitKernel;
 
-    impl KernelTerm for UnitKernel {
+    impl<T: crate::kernel::KernelScalar> KernelTerm<T> for UnitKernel {
         fn num_params(&self) -> usize {
             0
         }
@@ -511,7 +812,7 @@ mod tests {
         }
 
         fn set_params(&mut self, params: &[f64]) -> Result<(), crate::GprError> {
-            self.get_params(&mut params.to_vec())
+            KernelTerm::<T>::get_params(self, &mut params.to_vec())
         }
 
         fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
@@ -526,8 +827,8 @@ mod tests {
 
         fn apply(
             &self,
-            dist: MatRef<'_, f64>,
-            mut out: MatMut<'_, f64>,
+            dist: MatRef<'_, T>,
+            mut out: MatMut<'_, T>,
             uplo: Triangle,
         ) -> Result<(), crate::GprError> {
             if dist.nrows() != dist.ncols()
@@ -552,7 +853,7 @@ mod tests {
                     Triangle::Lower | Triangle::Full => n,
                 };
                 for row in start..end {
-                    out[(row, col)] = 1.0;
+                    out[(row, col)] = T::from_f64(1.0);
                 }
             }
             Ok(())
@@ -560,8 +861,8 @@ mod tests {
 
         fn apply_cross(
             &self,
-            dist: MatRef<'_, f64>,
-            mut out: MatMut<'_, f64>,
+            dist: MatRef<'_, T>,
+            mut out: MatMut<'_, T>,
         ) -> Result<(), crate::GprError> {
             if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
                 return Err(crate::GprError::InvalidHyperparameter {
@@ -573,21 +874,21 @@ mod tests {
             }
             for col in 0..out.ncols() {
                 for row in 0..out.nrows() {
-                    out[(row, col)] = 1.0;
+                    out[(row, col)] = T::from_f64(1.0);
                 }
             }
             Ok(())
         }
 
-        fn fill_diag(&self, out: &mut [f64]) -> Result<(), crate::GprError> {
-            out.fill(1.0);
+        fn fill_diag(&self, out: &mut [T]) -> Result<(), crate::GprError> {
+            out.fill(T::from_f64(1.0));
             Ok(())
         }
 
         fn grad(
             &self,
-            _dist: MatRef<'_, f64>,
-            _d_k: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _d_k: MatMut<'_, T>,
             param_idx: usize,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
@@ -598,8 +899,8 @@ mod tests {
 
         fn hess(
             &self,
-            _dist: MatRef<'_, f64>,
-            _d2_k: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _d2_k: MatMut<'_, T>,
             i: usize,
             j: usize,
             _uplo: Triangle,
@@ -611,8 +912,8 @@ mod tests {
 
         fn hess_points(
             &self,
-            _x: MatRef<'_, f64>,
-            _d2_k: MatMut<'_, f64>,
+            _x: MatRef<'_, T>,
+            _d2_k: MatMut<'_, T>,
             i: usize,
             j: usize,
             _uplo: Triangle,
@@ -622,7 +923,7 @@ mod tests {
             })
         }
 
-        fn clone_box(&self) -> Box<dyn KernelTerm> {
+        fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
             Box::new(self.clone())
         }
     }
@@ -652,7 +953,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct FailingRead;
 
-    impl KernelTerm for FailingRead {
+    impl<T: crate::kernel::KernelScalar> KernelTerm<T> for FailingRead {
         fn num_params(&self) -> usize {
             1
         }
@@ -691,8 +992,8 @@ mod tests {
 
         fn apply(
             &self,
-            _dist: MatRef<'_, f64>,
-            _out: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _out: MatMut<'_, T>,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
             Ok(())
@@ -700,20 +1001,20 @@ mod tests {
 
         fn apply_cross(
             &self,
-            _dist: MatRef<'_, f64>,
-            _out: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _out: MatMut<'_, T>,
         ) -> Result<(), crate::GprError> {
             Ok(())
         }
 
-        fn fill_diag(&self, _out: &mut [f64]) -> Result<(), crate::GprError> {
+        fn fill_diag(&self, _out: &mut [T]) -> Result<(), crate::GprError> {
             Ok(())
         }
 
         fn grad(
             &self,
-            _dist: MatRef<'_, f64>,
-            _d_k: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _d_k: MatMut<'_, T>,
             _param_idx: usize,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
@@ -722,8 +1023,8 @@ mod tests {
 
         fn hess(
             &self,
-            _dist: MatRef<'_, f64>,
-            _d2_k: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _d2_k: MatMut<'_, T>,
             _i: usize,
             _j: usize,
             _uplo: Triangle,
@@ -733,8 +1034,8 @@ mod tests {
 
         fn hess_points(
             &self,
-            _x: MatRef<'_, f64>,
-            _d2_k: MatMut<'_, f64>,
+            _x: MatRef<'_, T>,
+            _d2_k: MatMut<'_, T>,
             _i: usize,
             _j: usize,
             _uplo: Triangle,
@@ -742,7 +1043,7 @@ mod tests {
             Ok(())
         }
 
-        fn clone_box(&self) -> Box<dyn KernelTerm> {
+        fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
             Box::new(self.clone())
         }
     }

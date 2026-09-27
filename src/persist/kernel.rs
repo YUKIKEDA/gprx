@@ -205,12 +205,9 @@ impl KernelJson {
                 let k = WhiteKernel::new(variance.value)?.with_bounds(variance.interval()?)?;
                 Ok(KernelSpec::from(k))
             }
-            Self::Custom { persist_id, state } => {
-                let term = registry.restore_kernel(&persist_id, &state)?;
-                Ok(KernelSpec::from(crate::kernel::CustomKernel::from_box(
-                    term,
-                )))
-            }
+            Self::Custom { persist_id, state } => Ok(KernelSpec::from(
+                registry.restore_kernel(&persist_id, &state)?,
+            )),
             Self::Sum { left, right } => Ok(KernelSpec::Sum(
                 Box::new(left.decode(registry)?),
                 Box::new(right.decode(registry)?),
