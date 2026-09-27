@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-18（Sparse の時間、GPy / GPyTorch 比）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-19（Sparse のピーク RSS）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
