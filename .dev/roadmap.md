@@ -2,7 +2,7 @@
 
 進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。設計の詳細は `.dev/gprx-design.md`。
 
-**今やること: P4-14（Sparse オンラインの時間比較）。** Phase 2 / 2b / 3 / P4-1…13 / P4-15…17 は閉じた。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
+**今やること: P4-18（Sparse の時間、GPy / GPyTorch 比）。** Phase 2 / 2b / 3 / P4-1…14 / P4-15…17 は閉じた。P4-19 と P4-20 の DoD は Grill 後。比較の基準は [`.dev/bench-log.md`](bench-log.md) の `phase-2`。
 
 進め方の正本は `.cursor/rules/workflow.mdc`: Grill（必要なとき）→ Issue 作成 → Grill で DoD を確定して Issue を更新 → 作業 → PR → 人間レビュー → マージ。DoD をエージェントが先に書かない。1 Issue = 1 PR。ブランチは `type/{issue}-{slug}`（例: `chore/1-crate-bootstrap`）。
 
@@ -40,7 +40,7 @@
 | P4-10   | [#193](https://github.com/YUKIKEDA/gprx/issues/193) | P4-11   | [#196](https://github.com/YUKIKEDA/gprx/issues/196) | P4-12   | [#197](https://github.com/YUKIKEDA/gprx/issues/197) |
 | P4-13   | [#198](https://github.com/YUKIKEDA/gprx/issues/198) | P4-14   | [#199](https://github.com/YUKIKEDA/gprx/issues/199) | P4-15   | [#201](https://github.com/YUKIKEDA/gprx/issues/201) |
 | P4-16   | [#202](https://github.com/YUKIKEDA/gprx/issues/202) | P4-17   | [#205](https://github.com/YUKIKEDA/gprx/issues/205) | P4-18   | [#209](https://github.com/YUKIKEDA/gprx/issues/209) |
-| P4-19   | [#210](https://github.com/YUKIKEDA/gprx/issues/210) |         |                                                   |         |                                                   |
+| P4-19   | [#210](https://github.com/YUKIKEDA/gprx/issues/210) | P4-20   | [#214](https://github.com/YUKIKEDA/gprx/issues/214) |         |                                                   |
 
 ## マイルストーン
 
@@ -208,7 +208,7 @@ M0 → 1a → 1b → 2 → 2b → 3
 
 ## Phase 4 — Sparse GPR
 
-設計 §6.1。2b / 3 のあと。P4-1…13 / P4-15…17 は閉じた。着手は P4-14（[#199](https://github.com/YUKIKEDA/gprx/issues/199)）のオンライン時間比較。既定は呼び出し側の Z を固定。
+設計 §6.1。2b / 3 のあと。P4-1…14 / P4-15…17 は閉じた。着手は P4-18（[#209](https://github.com/YUKIKEDA/gprx/issues/209)）の joint 時間。P4-19 と P4-20 の DoD は Grill 後。既定は呼び出し側の Z を固定。
 
 | ID   | 種別  | タイトル                                 | 依存 | DoD                                           |
 | ---- | ----- | ---------------------------------------- | ---- | --------------------------------------------- |
@@ -229,8 +229,9 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P4-15 | Feat  | SVGP の factor / ELBO / 対角予測          | P4-3, P4-10 | crate ルート `Svgp` / `FittedSvgp`。`src/svgp/`（`mod.rs` 再エクスポート。`Svgp` は `model.rs`。`FittedSvgp` の impl は `fitted.rs`。assemble は `factor.rs`、単体は `tests.rs`）。`Svgp<Fixed>::factor` のみ（`fit` / `Adam` は P4-16）。`q(u)` は whitened full-rank Cholesky。`factor` が Z の `m` で prior（`m = 0`, `L = I`）。未学習 params はカーネル θ・尤度 θ。学習済み params はカーネル θ・尤度 θ・`m`・`L` 下三角。Z は呼び出し側、params に入れない。k-means なし。`FittedSvgp` は対角 `predict` / `predict_with`、`neg_elbo`、`get_params` / `set_params` / `num_params`。`value_and_gradient_into` / `hessian_into` / persist / オンライン / `predict_into` / 共分散 / sample / LOO は置かない。カーネル RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n = 4`・`m = 2`。1-D `x = [0,1,2,3]`、`y = [0,1,0.5,0.25]`、`Z = [0.5, 2.5]`。ARD は 2×2 格子。最適 `q`（Titsias）で同じ θ・X・Z の `FittedSparseGpr` の NLML と対角 predict が相対 `1e-12`。ずらした `q` は独立 ELBO と相対 `1e-12`。新しい `GprError` / golden / `tests/` なし。`tests/alloc.rs` 上限は上げない。`.dev/adr/0006-sparse-svgp.md` に文脈・決定・根拠（VFE は残す、SVGP は別型、FITC は載らない）。`layout.mdc` に `Svgp` / `FittedSvgp` / `src/svgp/`。§6.1 と §14 を SVGP 現在形。着手点を P4-15（[#201](https://github.com/YUKIKEDA/gprx/issues/201)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない |
 | P4-16 | Feat  | SVGP の Adam / ミニバッチ fit             | P4-15 | crate ルート `Adam`（`src/optimizer/adam.rs`）。`Optimizer` は実装しない。`Gpr<Adam>` は置かない。`Svgp<O>::with_optimizer`。`Svgp<Adam>::fit`。`Svgp<Fixed>` は `factor` のみ。`FittedSvgp` に `O` は無い。公開 `value_and_gradient_into` は全データ和。`hessian_into` / persist / オンライン / 自由 Z / 自然勾配 / weight decay / AMSGrad は置かない。Adam 内部は非拘束：カーネル・尤度は既存 `Interval` logit、`L` 対角は log（`DEFAULT_POSITIVE` は使わない）、q 平均と `L` 非対角は生。公開勾配はユーザー単位。`fit` がヤコビを掛ける。バイアス補正は常に ON。ミニバッチはデータ項を `n/b_actual`、KL は全データ。余りバッチは残す。`batch_size >= n` は全データ 1 バッチ。停止は epoch 数のみ。ノブは Kingma 既定（`lr=1e-3`、`β1=0.9`、`β2=0.999`、`ε=1e-8`、`batch_size=32`（`NonZeroUsize`）、`epochs=100`（`NonZeroU64`）、`seed=0`（`SmallRng`、FSA と同じヘルパ））。照合は `src/svgp/tests.rs` だけ。全データ勾配の FD 相対 `1e-8`。同じ seed の `fit` が params を再現。全データ `neg_elbo` が開始時以下。カーネル RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White。各 `n=4`・`m=2`。点は P4-15 と同じ。新しい `GprError` / `tests/` / golden なし。`sparse_gpytorch.rs` は増やさない。`tests/alloc.rs` 上限は上げない。`layout.mdc` に `Adam` / `with_optimizer` / `fit` / `value_and_gradient_into`。§6.1 と ADR 0006 と §14 を SVGP Adam 現在形。着手点を P4-16（[#202](https://github.com/YUKIKEDA/gprx/issues/202)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない |
 | P4-17 | Feat  | `SparseGpr` を `Sgpr` に改名              | P4-15 | crate ルート `Sgpr` / `FittedSgpr` / `OnlineSgpr`。旧名は残さない。`src/sgpr/`（旧 `src/sparse/`）。`SgprObjective`。`FixedInducing` / `FreeInducing` / `InducingId` はそのまま。照合は `tests/sgpr_ops.rs`。`layout.mdc` と §6.1 / §14 の公開型を `Sgpr` 現在形。着手点を P4-17（[#205](https://github.com/YUKIKEDA/gprx/issues/205)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。`just lint` / `just test`。criterion / `just bench` は合否にしない。`tests/alloc.rs` 上限は上げない |
-| P4-18 | Spike | Sparse の時間（GPy / GPyTorch 比）        | P4-12 | Grill 後に [#209](https://github.com/YUKIKEDA/gprx/issues/209) で確定 |
+| P4-18 | Spike | Sparse の時間（GPy / GPyTorch 比）        | P4-12 | 正しさは既存の有限差分のまま。許容は緩めない。新しい `tests/` / golden / `GprError` は置かない。`tests/alloc.rs` 上限は上げない。P4-12 で joint が GPy より長かったセルと、球 SGPR `n=1024` の GPyTorch eval だけを速くする。factor・predict・RSS は合否にしない（RSS は P4-19。記録だけ）。式は今の解析のまま。`K(X,X)` の勾配とヘッセは対角だけを `O(n)` で足す。`n×n` は作らない。`K(Z,Z)` と `K(Z,X)` の密勾配はそのまま。対象は `FittedSgpr` の `value_and_gradient_into` と `hessian_into`、`FittedSvgp` の `value_and_gradient_into`。`FittedSvgp` にヘッセは置かない。`OnlineSgpr` は `FittedSgpr` 経由。Exact の密 Gram 勾配は残す。`Z = X` の Exact 委譲も残す。置き場所は `CompiledKernel` のクレート私有。公開 API は増やさない。SIMD は足さない。速度は同じ時計の `just perf-sparse`。P4-12 で joint が GPy より長かったセルは、増分後の eval 中央値が GPy より小さいこと。球 SGPR `n=1024` の eval は GPyTorch より小さいこと。5% 以内は判定不能。すでに joint で勝っていたセルは 5% を超えて遅くしない。残った joint 負けは同じ変更で改善行を足してこの Spike を閉じる（各行の DoD は Grill 後にその Issue で確定）。`just bench` は合否にしない。criterion に Sparse グループは足さない。Verification には Exact の密 Gram 勾配を触らないので等方・ARD が動かない理由を書く。ゲートは `just lint` と `just test`。`layout.mdc` と README は触らない。着手点を P4-18（[#209](https://github.com/YUKIKEDA/gprx/issues/209)）にする（roadmap / `AGENTS.md` / `workflow.mdc` / §13）。§6.1 は joint の `K(X,X)` 勾配・ヘッセが対角の `O(n)` であることを現在形にする。記録は `.dev/bench-log.md`。 |
 | P4-19 | Spike | Sparse のピーク RSS（n=4096）             | P4-12 | Grill 後に [#210](https://github.com/YUKIKEDA/gprx/issues/210) で確定 |
+| P4-20 | Spike | Sparse joint の残り（GPy 比）             | P4-18 | Grill 後に [#214](https://github.com/YUKIKEDA/gprx/issues/214) で確定 |
 
 ---
 

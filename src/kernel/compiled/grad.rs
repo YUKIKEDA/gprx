@@ -90,6 +90,67 @@ impl CompiledKernel {
         }
     }
 
+    /// Writes `∂k(x_i, x_i)/∂θ_{param_idx}` into `out[i]`.
+    ///
+    /// The off-diagonal Gram derivative is not formed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `x` is empty,
+    /// [`GprError::InvalidHyperparameter`] if `param_idx` is out of range or
+    /// `out.len()` is not `x.nrows()`, or the leaf error for that diagonal entry.
+    pub(crate) fn grad_diag_points(
+        &self,
+        x: MatRef<'_, f64>,
+        out: &mut [f64],
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Linear(leaf) => {
+                require_diag_len(x, out)?;
+                let one = x.submatrix(0, 0, 1, x.ncols());
+                let mut cell = Mat::zeros(1, 1);
+                leaf.grad(one.as_ref(), cell.as_mut(), param_idx, Triangle::Lower)?;
+                leaf.fill_diag_points(x, out)
+            }
+            Self::Rbf(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Matern(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Periodic(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::RationalQuadratic(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Custom(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                grad_custom_from_coords(leaf, one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::MaternArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::RationalQuadraticArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Constant(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_points(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_points(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_diag_points(x, out, local)
+            }
+            Self::Product(terms) => product_grad_diag(terms, x, out, param_idx),
+        }
+    }
+
     pub(crate) fn grad_from_ard_cache(
         &self,
         cache: MatRef<'_, f64>,
@@ -438,6 +499,74 @@ fn product_grad(
         terms[owner_i].grad(dist, d_k.as_mut(), local, uplo, scratch.as_mut())?;
     }
     Ok(())
+}
+
+pub(super) fn require_diag_len(x: MatRef<'_, f64>, out: &[f64]) -> Result<(), GprError> {
+    if x.nrows() == 0 || x.ncols() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if out.len() != x.nrows() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn broadcast_self_diag(
+    x: MatRef<'_, f64>,
+    out: &mut [f64],
+    eval: impl FnOnce(MatRef<'_, f64>, MatMut<'_, f64>) -> Result<(), GprError>,
+) -> Result<(), GprError> {
+    require_diag_len(x, out)?;
+    let one = x.submatrix(0, 0, 1, x.ncols());
+    let mut cell = Mat::zeros(1, 1);
+    eval(one.as_ref(), cell.as_mut())?;
+    out.fill(cell[(0, 0)]);
+    Ok(())
+}
+
+pub(super) fn scale_by_other_diags(
+    terms: &[CompiledKernel],
+    skip_a: usize,
+    skip_b: Option<usize>,
+    x: MatRef<'_, f64>,
+    out: &mut [f64],
+) -> Result<(), GprError> {
+    let mut tmp = vec![0.0; out.len()];
+    for (index, term) in terms.iter().enumerate() {
+        if index == skip_a || Some(index) == skip_b {
+            continue;
+        }
+        term.fill_diag_points(x, &mut tmp)?;
+        for (dst, src) in out.iter_mut().zip(tmp.iter()) {
+            *dst *= *src;
+        }
+    }
+    Ok(())
+}
+
+fn product_grad_diag(
+    terms: &[CompiledKernel],
+    x: MatRef<'_, f64>,
+    out: &mut [f64],
+    param_idx: usize,
+) -> Result<(), GprError> {
+    let mut offset = 0;
+    let mut found = None;
+    for (index, term) in terms.iter().enumerate() {
+        let count = term.num_params();
+        if param_idx < offset + count {
+            found = Some((index, param_idx - offset));
+            break;
+        }
+        offset += count;
+    }
+    let (owner, local) = found.ok_or_else(|| GprError::InvalidHyperparameter {
+        reason: format!("kernel parameter index {param_idx} is out of range"),
+    })?;
+    terms[owner].grad_diag_points(x, out, local)?;
+    scale_by_other_diags(terms, owner, None, x, out)
 }
 
 fn product_grad_points(

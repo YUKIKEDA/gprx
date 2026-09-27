@@ -460,19 +460,9 @@ pub(crate) fn kernel_theta_var(
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
     compiled.grad_cross_points(z, x, d_kmn.as_mut(), param_idx, scratch_mn.as_mut())?;
-    let mut d_xx = Mat::zeros(n, n);
-    let mut scratch_xx = Mat::zeros(n, n);
-    compiled.grad_points(
-        x,
-        d_xx.as_mut(),
-        param_idx,
-        Triangle::Lower,
-        scratch_xx.as_mut(),
-    )?;
-    let mut d_kdiag = 0.0;
-    for i in 0..n {
-        d_kdiag += d_xx[(i, i)];
-    }
+    let mut diag = vec![0.0; n];
+    compiled.grad_diag_points(x, &mut diag, param_idx)?;
+    let d_kdiag = diag.iter().sum();
     Ok(KernelVar {
         d_kmm,
         d_kmn,
@@ -600,13 +590,9 @@ pub(crate) fn kernel_theta_second(
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
     compiled.hess_cross_points(z, x, d_kmn.as_mut(), i, j, scratch_mn.as_mut())?;
-    let mut d_xx = Mat::zeros(n, n);
-    let mut scratch_xx = Mat::zeros(n, n);
-    compiled.hess_points(x, d_xx.as_mut(), i, j, Triangle::Lower, scratch_xx.as_mut())?;
-    let mut d_kdiag = 0.0;
-    for r in 0..n {
-        d_kdiag += d_xx[(r, r)];
-    }
+    let mut diag = vec![0.0; n];
+    compiled.hess_diag_points(x, &mut diag, i, j)?;
+    let d_kdiag = diag.iter().sum();
     Ok(KernelVar {
         d_kmm,
         d_kmn,
