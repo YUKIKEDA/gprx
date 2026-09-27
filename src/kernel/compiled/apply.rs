@@ -6,7 +6,7 @@ use crate::error::GprError;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
 
-impl CompiledKernel {
+impl CompiledKernel<f64> {
     /// Writes `k` into `out` for `uplo`. `scratch` must match `out`.
     ///
     /// Entries outside the requested triangle are left unchanged. `scratch`

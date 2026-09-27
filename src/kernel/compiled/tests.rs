@@ -108,6 +108,155 @@ impl KernelTerm for RbfAsTerm {
     }
 }
 
+impl crate::kernel::KernelTerm<f32> for RbfAsTerm {
+    fn num_params(&self) -> usize {
+        self.0.num_params()
+    }
+
+    fn get_params(&self, out: &mut [f64]) -> Result<(), crate::GprError> {
+        self.0.get_params(out)
+    }
+
+    fn set_params(&mut self, params: &[f64]) -> Result<(), crate::GprError> {
+        self.0.set_params(params)
+    }
+
+    fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
+        if out.len() != 1 {
+            return Err(crate::GprError::InvalidHyperparameter {
+                reason: format!("expected 1 bound, got {}", out.len()),
+            });
+        }
+        out[0] = self.0.bounds();
+        Ok(())
+    }
+
+    fn apply(
+        &self,
+        dist: MatRef<'_, f32>,
+        mut out: faer::MatMut<'_, f32>,
+        uplo: Triangle,
+    ) -> Result<(), crate::GprError> {
+        let ell = self.0.lengthscale() as f32;
+        let inv_two = 0.5 / (ell * ell);
+        write_f32_triangle(dist, out.as_mut(), uplo, |d| Ok((-d * inv_two).exp()))
+    }
+
+    fn apply_cross(
+        &self,
+        dist: MatRef<'_, f32>,
+        mut out: faer::MatMut<'_, f32>,
+    ) -> Result<(), crate::GprError> {
+        let ell = self.0.lengthscale() as f32;
+        let inv_two = 0.5 / (ell * ell);
+        for col in 0..dist.ncols() {
+            for row in 0..dist.nrows() {
+                out[(row, col)] = (-dist[(row, col)] * inv_two).exp();
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_diag(&self, out: &mut [f32]) -> Result<(), crate::GprError> {
+        out.fill(1.0);
+        Ok(())
+    }
+
+    fn grad(
+        &self,
+        dist: MatRef<'_, f32>,
+        mut d_k: faer::MatMut<'_, f32>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), crate::GprError> {
+        if param_idx != 0 {
+            return Err(crate::GprError::InvalidHyperparameter {
+                reason: "RBF term has a single parameter at index 0".to_owned(),
+            });
+        }
+        let ell = self.0.lengthscale() as f32;
+        let inv_two = 0.5 / (ell * ell);
+        let inv_ell_sq = 1.0 / (ell * ell);
+        write_f32_triangle(dist, d_k.as_mut(), uplo, |d| {
+            let k = (-d * inv_two).exp();
+            Ok(k * d * inv_ell_sq)
+        })
+    }
+
+    fn hess(
+        &self,
+        dist: MatRef<'_, f32>,
+        mut d2_k: faer::MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), crate::GprError> {
+        if i != 0 || j != 0 {
+            return Err(crate::GprError::InvalidHyperparameter {
+                reason: format!("RBF term has a single parameter; got pair ({i}, {j})"),
+            });
+        }
+        let ell = self.0.lengthscale() as f32;
+        let inv_two = 0.5 / (ell * ell);
+        let inv_ell_sq = 1.0 / (ell * ell);
+        write_f32_triangle(dist, d2_k.as_mut(), uplo, |d| {
+            let k = (-d * inv_two).exp();
+            let u = d * inv_ell_sq;
+            Ok(k * u * (u - 2.0))
+        })
+    }
+
+    fn hess_points(
+        &self,
+        x: MatRef<'_, f32>,
+        d2_k: faer::MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), crate::GprError> {
+        let n = x.nrows();
+        let mut dist = Mat::zeros(n, n);
+        for col in 0..n {
+            for row in 0..n {
+                let mut s = 0.0_f32;
+                for dim in 0..x.ncols() {
+                    let delta = x[(row, dim)] - x[(col, dim)];
+                    s += delta * delta;
+                }
+                dist[(row, col)] = s;
+            }
+        }
+        self.hess(dist.as_ref(), d2_k, i, j, uplo)
+    }
+
+    fn clone_box(&self) -> Box<dyn crate::kernel::KernelTerm<f32>> {
+        Box::new(self.clone())
+    }
+}
+
+fn write_f32_triangle(
+    dist: MatRef<'_, f32>,
+    mut out: faer::MatMut<'_, f32>,
+    uplo: Triangle,
+    mut f: impl FnMut(f32) -> Result<f32, crate::GprError>,
+) -> Result<(), crate::GprError> {
+    let n = dist.nrows();
+    for col in 0..n {
+        let start = match uplo {
+            Triangle::Lower => col,
+            Triangle::Upper | Triangle::Full => 0,
+        };
+        let end = match uplo {
+            Triangle::Upper => col + 1,
+            Triangle::Lower | Triangle::Full => n,
+        };
+        for row in start..end {
+            out[(row, col)] = f(dist[(row, col)])?;
+        }
+    }
+    Ok(())
+}
+
 fn custom_rbf(ell: f64) -> KernelSpec {
     KernelSpec::custom(RbfAsTerm(RbfKernel::new(ell).expect("valid")))
 }
@@ -607,7 +756,7 @@ fn rejects_bad_index_and_scratch_shape() {
 
 #[test]
 fn empty_sum_is_unsupported() {
-    let compiled = CompiledKernel::Sum(Vec::new());
+    let compiled = CompiledKernel::<f64>::Sum(Vec::new());
     let dist = sq_dist_1d(&[0.0, 1.0]);
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);

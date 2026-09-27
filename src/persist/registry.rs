@@ -5,15 +5,17 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::error::GprError;
-use crate::kernel::KernelTerm;
+use crate::kernel::CustomKernel;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 
 use super::RESERVED_PREFIX;
 use super::persist_err;
 
-/// Rebuilds a [`KernelTerm`] from its persist JSON.
+/// Rebuilds a [`CustomKernel`] from its persist JSON.
+///
+/// The restored leaf implements the same operations at `f32` and `f64`.
 pub type KernelRestore =
-    Arc<dyn Fn(&serde_json::Value) -> Result<Box<dyn KernelTerm>, GprError> + Send + Sync>;
+    Arc<dyn Fn(&serde_json::Value) -> Result<CustomKernel, GprError> + Send + Sync>;
 
 /// Rebuilds an unfitted input map from its persist JSON.
 pub type UnfittedInputRestore =
@@ -69,10 +71,7 @@ impl PersistRegistry {
     pub fn register_kernel(
         &mut self,
         persist_id: impl Into<String>,
-        restore: impl Fn(&serde_json::Value) -> Result<Box<dyn KernelTerm>, GprError>
-        + Send
-        + Sync
-        + 'static,
+        restore: impl Fn(&serde_json::Value) -> Result<CustomKernel, GprError> + Send + Sync + 'static,
     ) -> Result<(), GprError> {
         insert_unique(
             &mut self.kernels,
@@ -170,7 +169,7 @@ impl PersistRegistry {
         &self,
         persist_id: &str,
         state: &serde_json::Value,
-    ) -> Result<Box<dyn KernelTerm>, GprError> {
+    ) -> Result<CustomKernel, GprError> {
         lookup(&self.kernels, persist_id, "kernel")?(state)
     }
 
