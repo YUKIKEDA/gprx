@@ -506,18 +506,13 @@ fn kernel_theta_tangents(
         compiled.grad_cross_points(z, x, cross.as_mut(), param_idx, scratch.as_mut())?;
         cross
     };
-    let mut d_xx = Mat::zeros(n, n);
-    let mut scratch_xx = Mat::zeros(n, n);
-    compiled.grad_points(
-        x,
-        d_xx.as_mut(),
-        param_idx,
-        Triangle::Lower,
-        scratch_xx.as_mut(),
-    )?;
     let mut d_kdiag = vec![0.0; n];
-    for i in 0..n {
-        d_kdiag[i] = d_xx[(i, i)];
+    if same_xz {
+        for i in 0..n {
+            d_kdiag[i] = d_kmn[(i, i)];
+        }
+    } else {
+        compiled.grad_diag_points(x, &mut d_kdiag, param_idx)?;
     }
     let mut d_l = Mat::zeros(m, m);
     cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
