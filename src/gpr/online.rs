@@ -1,6 +1,5 @@
 //! Incremental tail insert and delete on a converted [`crate::FittedGpr`].
 
-use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -10,19 +9,21 @@ use std::time::Instant;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, CoordMode, KernelSpec, fill_squared_euclidean_cross};
+use crate::kernel::{
+    CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, FullRecompute, Optimizer, PoleRecompute};
 use crate::persist::{self, PersistedModel, persist_err};
-use crate::precision::DoublePrecision;
+use crate::precision::{DoublePrecision, GpScalar, StorageScalar};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::QueryWorkspace;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::factor::{pack_points_into, require_param_len, validate_query};
+use super::factor::{pack_storage, require_param_len, validate_query};
 use super::{
     AllocWorkspace, DistanceCacheSlot, FittedGpr, Gpr, JitterPolicy, PointId, RetainCholesky,
 };
@@ -102,60 +103,6 @@ impl PointRegistry {
         self.index_to_id.push(id);
         self.id_to_index.insert(id, index);
         id
-    }
-}
-
-/// `α` materialized on read. Insert and delete only mark it stale.
-struct LazyAlpha {
-    values: UnsafeCell<Vec<f64>>,
-    ready: Cell<bool>,
-}
-
-impl LazyAlpha {
-    fn from_ready(values: Vec<f64>) -> Self {
-        Self {
-            values: UnsafeCell::new(values),
-            ready: Cell::new(true),
-        }
-    }
-
-    fn invalidate(&self) {
-        self.ready.set(false);
-    }
-
-    fn is_ready(&self) -> bool {
-        self.ready.get()
-    }
-
-    fn get(&self) -> &[f64] {
-        // SAFETY: `OnlineGpr` is not `Sync`. Callers do not hold this slice
-        // across a `&mut self` method, and `&self` writes happen only in
-        // `fill` while `ready` is false.
-        unsafe { (*self.values.get()).as_slice() }
-    }
-
-    fn fill(&self, values: &[f64]) {
-        // SAFETY: same as `get`; no live slice from `get` exists because this
-        // is called only while `ready` is false.
-        unsafe {
-            (*self.values.get()).clear();
-            (*self.values.get()).extend_from_slice(values);
-        }
-        self.ready.set(true);
-    }
-
-    fn clone_vec(&self) -> Vec<f64> {
-        // SAFETY: shared read of the cached vector; `OnlineGpr` is not `Sync`.
-        unsafe { (*self.values.get()).clone() }
-    }
-}
-
-impl Clone for LazyAlpha {
-    fn clone(&self) -> Self {
-        Self {
-            values: UnsafeCell::new(self.clone_vec()),
-            ready: Cell::new(self.ready.get()),
-        }
     }
 }
 
@@ -246,9 +193,10 @@ pub struct OnlineGpr<
     S = FullRecompute,
     C: DistanceCacheSlot = crate::CachedDistances,
     B: AllocWorkspace = RetainCholesky,
+    P: GpScalar = DoublePrecision,
 > {
     pub(crate) kernel: KernelSpec,
-    pub(crate) compiled: CompiledKernel,
+    pub(crate) compiled: CompiledKernel<P::Storage>,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) x_unfitted: Box<dyn UnfittedTransform>,
     pub(crate) y_unfitted: Box<dyn UnfittedTarget>,
@@ -257,13 +205,16 @@ pub struct OnlineGpr<
     pub(crate) optimizer: O,
     pub(crate) distance_cache: C,
     pub(crate) jitter_policy: JitterPolicy,
-    pub(crate) workspace: OnlineWorkspace,
-    pub(crate) query: QueryWorkspace<DoublePrecision>,
+    pub(crate) workspace: OnlineWorkspace<P::Storage>,
+    pub(crate) query: QueryWorkspace<P>,
     pub(crate) x_obs: Vec<f64>,
     pub(crate) y_obs: Vec<f64>,
     pub(crate) x: Mat<f64>,
     pub(crate) y_train: Vec<f64>,
-    alpha: LazyAlpha,
+    pub(crate) factor_alpha: Vec<P::Storage>,
+    pub(crate) alpha: Vec<P::Refine>,
+    pub(crate) x_cast: <P::Storage as StorageScalar>::ColCast,
+    pub(crate) y_cast: <P::Storage as StorageScalar>::RowCast,
     pub(crate) n: usize,
     pub(crate) d: usize,
     pub(crate) registry: PointRegistry,
@@ -271,7 +222,13 @@ pub struct OnlineGpr<
     pub(crate) _cholesky: PhantomData<B>,
 }
 
-impl<O: Clone, S, C: Copy + DistanceCacheSlot, B: AllocWorkspace> Clone for OnlineGpr<O, S, C, B> {
+impl<O, S, C, B, P> Clone for OnlineGpr<O, S, C, B, P>
+where
+    O: Clone,
+    C: Copy + DistanceCacheSlot,
+    B: AllocWorkspace,
+    P: GpScalar,
+{
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -290,7 +247,10 @@ impl<O: Clone, S, C: Copy + DistanceCacheSlot, B: AllocWorkspace> Clone for Onli
             y_obs: self.y_obs.clone(),
             x: self.x.clone(),
             y_train: self.y_train.clone(),
+            factor_alpha: self.factor_alpha.clone(),
             alpha: self.alpha.clone(),
+            x_cast: self.x_cast.clone(),
+            y_cast: self.y_cast.clone(),
             n: self.n,
             d: self.d,
             registry: self.registry.clone(),
@@ -300,10 +260,12 @@ impl<O: Clone, S, C: Copy + DistanceCacheSlot, B: AllocWorkspace> Clone for Onli
     }
 }
 
-impl<O, S, C, B: AllocWorkspace> fmt::Debug for OnlineGpr<O, S, C, B>
+impl<O, S, C, B, P> fmt::Debug for OnlineGpr<O, S, C, B, P>
 where
     O: fmt::Debug,
     C: fmt::Debug + DistanceCacheSlot,
+    B: AllocWorkspace,
+    P: GpScalar,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnlineGpr")
@@ -318,11 +280,17 @@ where
 }
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; insert and predict read it.
-impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
+impl<O, S, C, B, P> OnlineGpr<O, S, C, B, P>
+where
+    C: DistanceCacheSlot,
+    B: AllocWorkspace,
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         kernel: KernelSpec,
-        compiled: CompiledKernel,
+        compiled: CompiledKernel<P::Storage>,
         likelihood: GaussianLikelihood,
         x_unfitted: Box<dyn UnfittedTransform>,
         y_unfitted: Box<dyn UnfittedTarget>,
@@ -331,13 +299,14 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         optimizer: O,
         distance_cache: C,
         jitter_policy: JitterPolicy,
-        workspace: OnlineWorkspace,
-        query: QueryWorkspace<DoublePrecision>,
+        workspace: OnlineWorkspace<P::Storage>,
+        query: QueryWorkspace<P>,
         x_obs: Vec<f64>,
         y_obs: Vec<f64>,
         x: Mat<f64>,
         y_train: Vec<f64>,
-        alpha: Vec<f64>,
+        factor_alpha: Vec<P::Storage>,
+        alpha: Vec<P::Refine>,
         n: usize,
         d: usize,
     ) -> Self {
@@ -358,7 +327,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             y_obs,
             x,
             y_train,
-            alpha: LazyAlpha::from_ready(alpha),
+            factor_alpha,
+            alpha,
+            x_cast: P::Storage::empty_cols(),
+            y_cast: P::Storage::empty_rows(),
             n,
             d,
             registry: PointRegistry::from_count(n),
@@ -369,7 +341,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
 
     /// Drops the LDLT factor and returns a trainer with the current kernel,
     /// likelihood, transforms, optimizer, and policies.
-    pub fn into_trainer(self) -> Gpr<O, S, C, B> {
+    pub fn into_trainer(self) -> Gpr<O, S, C, B, P> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
@@ -387,7 +359,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     pub fn with_optimizer<O2: PoleRecompute<B>>(
         self,
         optimizer: O2,
-    ) -> OnlineGpr<O2, O2::Strategy, C, B> {
+    ) -> OnlineGpr<O2, O2::Strategy, C, B, P> {
         OnlineGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -405,7 +377,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             y_obs: self.y_obs,
             x: self.x,
             y_train: self.y_train,
+            factor_alpha: self.factor_alpha,
             alpha: self.alpha,
+            x_cast: self.x_cast,
+            y_cast: self.y_cast,
             n: self.n,
             d: self.d,
             registry: self.registry,
@@ -434,27 +409,39 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         &self.likelihood
     }
 
-    /// Returns `α = A⁻¹ y` after the last insert, delete, or hyperparameter write.
-    pub fn alpha(&self) -> &[f64] {
-        self.ensure_alpha();
-        self.alpha.get()
+    /// Returns predict `α` after the last insert, delete, or hyperparameter write.
+    pub fn alpha(&self) -> &[P::Refine] {
+        &self.alpha
     }
 
-    fn ensure_alpha(&self) {
-        if self.alpha.is_ready() {
-            return;
-        }
+    fn refresh_factor_alpha(&mut self) {
         let n = self.n;
-        let mut rhs = Mat::zeros(n, 1);
+        let mut rhs = Mat::<P::Storage>::zeros(n, 1);
         for i in 0..n {
-            rhs[(i, 0)] = self.y_train[i];
+            rhs[(i, 0)] = P::Storage::from_f64(self.y_train[i]);
         }
         OnlineWorkspace::solve_ldlt_in_place(self.workspace.ld_factor.as_ref(), rhs.as_mut(), n);
-        let mut values = vec![0.0; n];
-        for (i, slot) in values.iter_mut().enumerate() {
-            *slot = rhs[(i, 0)];
+        if self.factor_alpha.len() != n {
+            self.factor_alpha.resize(n, P::Storage::from_f64(0.0));
         }
-        self.alpha.fill(&values);
+        for i in 0..n {
+            let value = rhs[(i, 0)];
+            self.factor_alpha[i] = value;
+            self.workspace.alpha[i] = value;
+        }
+    }
+
+    fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
+        let x = self.x.as_ref().submatrix(0, 0, self.n, self.d);
+        P::publish_predict_alpha(
+            &self.kernel,
+            &self.compiled,
+            x,
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            &self.factor_alpha,
+            &mut self.alpha,
+        )
     }
 
     /// Returns the original training features in column-major order.
@@ -497,7 +484,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         Ok(())
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedGpr<O, S, C, B>) -> Result<(), GprError> {
+    fn adopt_fitted(&mut self, fitted: FittedGpr<O, S, C, B, P>) -> Result<(), GprError> {
         let registry = self.registry.clone();
         *self = fitted.into_online()?;
         debug_assert_eq!(self.n, registry.len());
@@ -529,7 +516,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.y_transform.as_ref()
     }
 
-    pub(crate) fn ld_factor(&self) -> MatRef<'_, f64> {
+    pub(crate) fn ld_factor(&self) -> MatRef<'_, P::Storage> {
         self.workspace
             .ld_factor
             .as_ref()
@@ -583,6 +570,8 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         let mut y_trans = [y_new];
         self.y_transform.transform(&mut y_trans)?;
         {
+            let x_train =
+                P::Storage::storage_cols(self.x.as_ref().submatrix(0, 0, n, d), &mut self.x_cast);
             let dest = self.workspace.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
             let QueryWorkspace {
                 query_xs,
@@ -591,7 +580,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
                 query_scratch,
                 ..
             } = &mut self.query;
-            pack_points_into(
+            pack_storage(
                 &query_xs[..xs_len],
                 1,
                 d,
@@ -599,21 +588,21 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             );
             fill_train_query_kernel(
                 &self.compiled,
-                self.x.as_ref().submatrix(0, 0, n, d),
+                x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
                 query_dist.as_mut().submatrix_mut(0, 0, n, 1),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
             )?;
         }
-        let mut kss = [0.0];
+        let mut kss = [P::Storage::from_f64(0.0)];
         match self.compiled.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => self.compiled.fill_diag(&mut kss)?,
             CoordMode::Points | CoordMode::Mixed => self
                 .compiled
                 .fill_diag_points(self.query.query_x.as_ref().submatrix(0, 0, 1, d), &mut kss)?,
         }
-        let k_new = kss[0] + self.likelihood.noise_variance();
+        let k_new = kss[0] + P::Storage::from_f64(self.likelihood.noise_variance());
         #[cfg(feature = "insert-stages")]
         insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -628,8 +617,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         append_point_mat_inplace(&mut self.x, n, &self.query.query_xs[..xs_len]);
         self.y_train.push(y_trans[0]);
         self.n += 1;
-        OnlineWorkspace::set_vector_prefix(&mut self.workspace.y, &self.y_train);
-        self.alpha.invalidate();
+        OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.y_train);
+        self.refresh_factor_alpha();
+        self.publish_predict_alpha()?;
         let id = self.registry.insert();
         #[cfg(feature = "insert-stages")]
         insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
@@ -682,8 +672,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.y_train.remove(index);
         self.registry.remove_at(index);
         self.n -= 1;
-        OnlineWorkspace::set_vector_prefix(&mut self.workspace.y, &self.y_train);
-        self.alpha.invalidate();
+        OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.y_train);
+        self.refresh_factor_alpha();
+        self.publish_predict_alpha()?;
         Ok(())
     }
 
@@ -718,10 +709,12 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     ///
     /// Returns [`GprError::CholeskyFailed`] if a stored `Dᵢ` is not positive.
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
+        let mut y_cast = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut y_cast);
         Ok(neg_mll_from_ldlt(
             self.workspace.ld_factor.as_ref(),
-            &self.y_train,
-            self.alpha(),
+            y,
+            &self.factor_alpha,
             self.n,
         ))
     }
@@ -808,7 +801,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
@@ -822,7 +815,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-        out: &mut Prediction,
+        out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         self.predict_with_into(xs, n_rows, n_cols, PredictOptions::default(), out)
     }
@@ -841,7 +834,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
         self.write_prediction(xs, n_rows, n_cols, options, &mut out)?;
         Ok(out)
@@ -858,7 +851,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-        out: &mut Prediction,
+        out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
@@ -867,6 +860,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
             });
         }
         validate_query(xs, n_rows, n_cols)?;
+        self.publish_predict_alpha()?;
         let n = self.n;
         let m = n_rows;
         self.query.ensure(n, m, n_cols)?;
@@ -874,6 +868,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.x_transform
             .apply(&mut self.query.query_xs, n_rows, n_cols)?;
         {
+            let x_train = P::Storage::storage_cols(
+                self.x.as_ref().submatrix(0, 0, n, n_cols),
+                &mut self.x_cast,
+            );
             let QueryWorkspace {
                 query_xs,
                 query_x,
@@ -882,26 +880,34 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
                 query_scratch,
                 ..
             } = &mut self.query;
-            pack_points_into(query_xs, n_rows, n_cols, query_x.as_mut());
+            pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
             fill_train_query_kernel(
                 &self.compiled,
-                self.x.as_ref().submatrix(0, 0, n, n_cols),
+                x_train,
                 query_x.as_ref(),
                 query_dist.as_mut(),
                 query_k_star.as_mut(),
                 query_scratch.as_mut(),
             )?;
         }
-        self.ensure_alpha();
-        write_ldlt_prediction(
-            self.workspace.ld_factor.as_ref(),
-            self.alpha.get(),
+        let ld = self
+            .workspace
+            .ld_factor
+            .as_ref()
+            .submatrix(0, 0, self.n, self.n);
+        write_ldlt_prediction::<P>(
+            &self.kernel,
+            ld,
+            &self.alpha,
             &self.compiled,
+            self.x.as_ref().submatrix(0, 0, self.n, self.d),
+            &self.query.query_xs,
             self.query.query_x.as_ref(),
             self.query.query_k_star.as_mut(),
             &mut self.query.query_kss,
             n,
             m,
+            n_cols,
             self.likelihood.noise_variance(),
             options,
             self.y_transform.as_ref(),
@@ -915,7 +921,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-        out: &mut Prediction,
+        out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
@@ -926,31 +932,47 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         validate_query(xs, n_rows, n_cols)?;
         let n = self.n;
         let m = n_rows;
-        let mut query_xs = xs.to_vec();
-        self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
-        let mut query_x = Mat::zeros(m, n_cols);
-        pack_points_into(&query_xs, n_rows, n_cols, query_x.as_mut());
-        let mut query_dist = Mat::zeros(n, m);
-        let mut query_k_star = Mat::zeros(n, m);
-        let mut query_scratch = Mat::zeros(n, m);
-        let mut query_kss = vec![0.0; m];
-        fill_train_query_kernel(
+        let mut alpha = Vec::new();
+        P::publish_predict_alpha(
+            &self.kernel,
             &self.compiled,
             self.x_active(),
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            &self.factor_alpha,
+            &mut alpha,
+        )?;
+        let mut query_xs = xs.to_vec();
+        self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
+        let mut x_cast = P::Storage::empty_cols();
+        let x_train = P::Storage::storage_cols(self.x_active(), &mut x_cast);
+        let mut query_x = Mat::<P::Storage>::zeros(m, n_cols);
+        pack_storage(&query_xs, n_rows, n_cols, query_x.as_mut());
+        let mut query_dist = Mat::<P::Storage>::zeros(n, m);
+        let mut query_k_star = Mat::<P::Storage>::zeros(n, m);
+        let mut query_scratch = Mat::<P::Storage>::zeros(n, m);
+        let mut query_kss = vec![P::Storage::from_f64(0.0); m];
+        fill_train_query_kernel(
+            &self.compiled,
+            x_train,
             query_x.as_ref(),
             query_dist.as_mut(),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
         )?;
-        write_ldlt_prediction(
-            self.workspace.ld_factor.as_ref(),
-            self.alpha(),
+        write_ldlt_prediction::<P>(
+            &self.kernel,
+            self.ld_factor(),
+            &alpha,
             &self.compiled,
+            self.x_active(),
+            &query_xs,
             query_x.as_ref(),
             query_k_star.as_mut(),
             &mut query_kss,
             n,
             m,
+            n_cols,
             self.likelihood.noise_variance(),
             options,
             self.y_transform.as_ref(),
@@ -968,7 +990,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<PredictiveCovariance, GprError>
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -987,7 +1009,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<PredictiveCovariance, GprError>
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1008,7 +1030,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         n_cols: usize,
         n_draws: usize,
         seed: u64,
-    ) -> Result<Vec<f64>, GprError>
+    ) -> Result<Vec<P::Refine>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1029,7 +1051,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         options: PredictOptions,
         n_draws: usize,
         seed: u64,
-    ) -> Result<Vec<f64>, GprError>
+    ) -> Result<Vec<P::Refine>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1043,7 +1065,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     /// # Errors
     ///
     /// Same as [`FittedGpr::loo_predict`].
-    pub fn loo_predict(&self) -> Result<Prediction, GprError>
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1056,7 +1078,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
     /// # Errors
     ///
     /// Same as [`Self::loo_predict`].
-    pub fn loo_predict_with(&self, options: PredictOptions) -> Result<Prediction, GprError>
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1064,7 +1089,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
         self.to_fitted()?.loo_predict_with(options)
     }
 
-    fn to_fitted(&self) -> Result<FittedGpr<O, S, C, B>, GprError>
+    fn to_fitted(&self) -> Result<FittedGpr<O, S, C, B, P>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1074,11 +1099,13 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> OnlineGpr<O, S, C, B> {
 }
 
 #[allow(private_bounds)]
-impl<O, S, C, B> OnlineGpr<O, S, C, B>
+impl<O, S, C, B, P> OnlineGpr<O, S, C, B, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B>>,
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///
@@ -1096,11 +1123,12 @@ where
 }
 
 #[allow(private_bounds)]
-impl<C: DistanceCacheSlot> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky> {
-    pub(crate) fn from_persisted(parts: PersistedModel<C>) -> Result<Self, GprError> {
-        FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
-    }
-
+impl<C, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, P>
+where
+    C: DistanceCacheSlot,
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     /// Rebuilds the LDLT factor at the current `θ` without a search.
     ///
     /// # Errors
@@ -1113,25 +1141,39 @@ impl<C: DistanceCacheSlot> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky> {
     }
 }
 
-fn fill_train_query_kernel(
-    compiled: &CompiledKernel,
-    x_train: MatRef<'_, f64>,
-    query_x: MatRef<'_, f64>,
-    query_dist: MatMut<'_, f64>,
-    query_k_star: MatMut<'_, f64>,
-    query_scratch: MatMut<'_, f64>,
-) -> Result<(), GprError> {
-    let mut query_dist = query_dist;
+#[allow(private_bounds)]
+impl<C, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, P>
+where
+    C: DistanceCacheSlot,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
+    pub(crate) fn from_persisted(parts: PersistedModel<C, P>) -> Result<Self, GprError> {
+        FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
+    }
+}
+
+fn fill_train_query_kernel<K: GramKernel>(
+    compiled: &K,
+    x_train: MatRef<'_, K::T>,
+    query_x: MatRef<'_, K::T>,
+    mut query_dist: MatMut<'_, K::T>,
+    query_k_star: MatMut<'_, K::T>,
+    query_scratch: MatMut<'_, K::T>,
+) -> Result<(), GprError>
+where
+    K::T: FillDistances,
+{
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            fill_squared_euclidean_cross(x_train, query_x, query_dist.as_mut(), &mut []);
+            K::T::write_cross(x_train, query_x, query_dist.as_mut(), &mut []);
             compiled.apply_cross(query_dist.as_ref(), query_k_star, query_scratch)
         }
         CoordMode::Points => {
             compiled.apply_cross_points(x_train, query_x, query_k_star, query_scratch)
         }
         CoordMode::Mixed => {
-            fill_squared_euclidean_cross(x_train, query_x, query_dist.as_mut(), &mut []);
+            K::T::write_cross(x_train, query_x, query_dist.as_mut(), &mut []);
             compiled.apply_cross_mixed(
                 query_dist.as_ref(),
                 x_train,
@@ -1144,68 +1186,83 @@ fn fill_train_query_kernel(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_ldlt_prediction(
-    ld: MatRef<'_, f64>,
-    alpha: &[f64],
-    compiled: &CompiledKernel,
-    query_x: MatRef<'_, f64>,
-    mut query_k_star: MatMut<'_, f64>,
-    query_kss: &mut [f64],
+fn write_ldlt_prediction<P>(
+    kernel: &KernelSpec,
+    ld: MatRef<'_, P::Storage>,
+    alpha: &[P::Refine],
+    compiled: &CompiledKernel<P::Storage>,
+    x_train: MatRef<'_, f64>,
+    x_query: &[f64],
+    query_x: MatRef<'_, P::Storage>,
+    mut query_k_star: MatMut<'_, P::Storage>,
+    query_kss: &mut [P::Storage],
     n: usize,
     m: usize,
+    n_cols: usize,
     noise: f64,
     options: PredictOptions,
     y_transform: &dyn TargetTransform,
-    out: &mut Prediction,
-) -> Result<(), GprError> {
+    out: &mut Prediction<P::Refine>,
+) -> Result<(), GprError>
+where
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    let zero = P::Refine::from_f64(0.0);
     if out.mean.len() != m {
-        out.mean.resize(m, 0.0);
+        out.mean.resize(m, zero);
     }
     if out.variance.len() != m {
-        out.variance.resize(m, 0.0);
+        out.variance.resize(m, zero);
     }
     for (col, mean) in out.mean.iter_mut().enumerate() {
-        let mut sum = 0.0;
-        for (row, &a) in alpha.iter().enumerate() {
-            sum += query_k_star[(row, col)] * a;
-        }
-        *mean = sum;
+        *mean = P::column_mean(
+            kernel,
+            query_k_star.as_ref(),
+            x_train,
+            x_query,
+            n_cols,
+            alpha,
+            col,
+        )?;
     }
     OnlineWorkspace::apply_inv_l(ld, query_k_star.as_mut(), n);
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => compiled.fill_diag(query_kss)?,
         CoordMode::Points | CoordMode::Mixed => compiled.fill_diag_points(query_x, query_kss)?,
     }
+    let noise_s = P::Storage::from_f64(noise);
+    let zero_s = P::Storage::from_f64(0.0);
     for col in 0..m {
-        let mut quad = 0.0;
+        let mut quad = 0.0f64;
         for row in 0..n {
-            let w = query_k_star[(row, col)];
-            quad += w * w / ld[(row, row)];
+            let w = query_k_star[(row, col)].to_f64();
+            quad += w * w / ld[(row, row)].to_f64();
         }
-        let mut latent = query_kss[col] - quad;
-        if latent < 0.0 {
-            latent = 0.0;
+        let mut latent = query_kss[col] - P::Storage::from_f64(quad);
+        if latent.to_f64() < 0.0 {
+            latent = zero_s;
         }
-        out.variance[col] = match options.variance_kind {
+        let stored = match options.variance_kind {
             crate::VarianceKind::Latent => latent,
-            crate::VarianceKind::Observation => latent + noise,
+            crate::VarianceKind::Observation => latent + noise_s,
         };
+        out.variance[col] = P::Refine::from_f64(stored.to_f64());
     }
-    y_transform.inverse_transform_mean(&mut out.mean)?;
-    y_transform.inverse_transform_variance(&mut out.variance)?;
+    P::inverse_mean_variance(y_transform, &mut out.mean, &mut out.variance)?;
     out.variance_kind = options.variance_kind;
     Ok(())
 }
 
-fn neg_mll_from_ldlt(ld: MatRef<'_, f64>, y: &[f64], alpha: &[f64], n: usize) -> f64 {
-    let mut quad = 0.0;
-    let mut log_det = 0.0;
+fn neg_mll_from_ldlt<T: StorageScalar>(ld: MatRef<'_, T>, y: &[T], alpha: &[T], n: usize) -> f64 {
+    let mut quad = T::from_f64(0.0);
+    let mut log_det = T::from_f64(0.0);
     for i in 0..n {
         quad += y[i] * alpha[i];
         log_det += ld[(i, i)].ln();
     }
     let log_two_pi = (2.0 * std::f64::consts::PI).ln();
-    0.5 * (quad + log_det + n as f64 * log_two_pi)
+    0.5 * (quad.to_f64() + log_det.to_f64() + n as f64 * log_two_pi)
 }
 
 fn append_colmajor(x: &mut Vec<f64>, n: usize, d: usize, x_new: &[f64]) {

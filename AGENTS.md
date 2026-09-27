@@ -12,6 +12,7 @@
 | `.cursor/rules/pull-requests.mdc`        | PR タイトルと本文                             |
 | `.cursor/rules/workflow.mdc`             | Grill → Issue → Grill で DoD 確定 → 作業 → PR → 人間レビュー → マージ。DoD を先に書かない |
 | `.cursor/rules/defer.mdc`                | 計画のない「暫定」「今はやらない」は禁止      |
+| `.cursor/rules/scope.mdc`                | 部分実装を実装量で推奨しない。分けるなら同時に計画する |
 | `.cursor/rules/layout.mdc`               | ディレクトリと公開 API                        |
 | `.cursor/rules/rust.mdc`                 | 安全性、Clippy、浮動小数の比較                |
 | `.cursor/rules/rust-api.mdc`             | 命名、所有権、公開面（API Guidelines）        |
@@ -26,4 +27,4 @@
 
 ## 今の着手点
 
-Phase 5 の P5-1（混合精度の残差、`PromoteStorage` vs `ReevaluateKernel`）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 5 の P5-2（f32・f64・混合精度、[#40](https://github.com/YUKIKEDA/gprx/issues/40)）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

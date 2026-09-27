@@ -1,18 +1,109 @@
-//! Storage scalar and the crate-private mixed-precision residual solver.
+//! Storage scalar and the mixed-precision residual solver.
 //!
-//! [`DoublePrecision`] is the public policy. `Gpr` fit and predict stay `f64`.
-//! [`PromoteStorage`] and [`ReevaluateKernel`] are type parameters of
-//! [`refine`]: one subtracts a saved `f32` matrix, the other recomputes the
-//! kernel in `f64`. There is no flag and no alias that picks one of them.
+//! Omitted model precision is [`DoublePrecision`] (`f64`). [`SinglePrecision`]
+//! runs the same procedures in `f32` and keeps the factorization as-is.
+//! [`MixedPrecision`] factors in `f32` and refines the predict `α` in `f64`.
+//! The residual type parameter exists only on [`MixedPrecision`]. There is no
+//! flag and no alias that picks a residual formula.
+
+use std::ops::{Add, Div, Mul, Sub};
 
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, Triangle};
+use crate::kernel::{CompiledKernel, FillDistances, KernelScalar, KernelSpec, Triangle};
+use crate::transform::TargetTransform;
 use crate::workspace::{faer_par, faer_par_dims};
+
+/// Scalar stored in a Gram factor. Only `f32` and `f64`.
+pub(crate) trait StorageScalar:
+    KernelScalar
+    + faer_traits::ComplexField<Real = Self>
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+{
+    /// Scratch that holds `y` cast to this scalar. `f64` uses no buffer.
+    type RowCast: Clone + Send + Sync + 'static;
+    /// Scratch that holds `X` cast to this scalar. `f64` uses no buffer.
+    type ColCast: Clone + Send + Sync + 'static;
+
+    fn ln(self) -> Self;
+
+    fn empty_rows() -> Self::RowCast;
+
+    fn empty_cols() -> Self::ColCast;
+
+    /// Views `y` as this scalar. `f64` returns `y`. `f32` fills `cast`.
+    fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self];
+
+    /// Views `x` as this scalar. `f64` returns `x`. `f32` fills `cast`.
+    fn storage_cols<'a>(x: MatRef<'a, f64>, cast: &'a mut Self::ColCast) -> MatRef<'a, Self>;
+}
+
+impl StorageScalar for f32 {
+    type RowCast = Vec<f32>;
+    type ColCast = Mat<f32>;
+
+    fn ln(self) -> Self {
+        f32::ln(self)
+    }
+
+    fn empty_rows() -> Self::RowCast {
+        Vec::new()
+    }
+
+    fn empty_cols() -> Self::ColCast {
+        Mat::zeros(0, 0)
+    }
+
+    fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self] {
+        if cast.len() != y.len() {
+            cast.resize(y.len(), 0.0);
+        }
+        for (slot, &value) in cast.iter_mut().zip(y.iter()) {
+            *slot = value as f32;
+        }
+        cast.as_slice()
+    }
+
+    fn storage_cols<'a>(x: MatRef<'a, f64>, cast: &'a mut Self::ColCast) -> MatRef<'a, Self> {
+        if cast.nrows() != x.nrows() || cast.ncols() != x.ncols() {
+            *cast = Mat::zeros(x.nrows(), x.ncols());
+        }
+        for col in 0..x.ncols() {
+            for row in 0..x.nrows() {
+                cast[(row, col)] = x[(row, col)] as f32;
+            }
+        }
+        cast.as_ref()
+    }
+}
+
+impl StorageScalar for f64 {
+    type RowCast = ();
+    type ColCast = ();
+
+    fn ln(self) -> Self {
+        f64::ln(self)
+    }
+
+    fn empty_rows() -> Self::RowCast {}
+
+    fn empty_cols() -> Self::ColCast {}
+
+    fn storage_rows<'a>(y: &'a [f64], _cast: &'a mut Self::RowCast) -> &'a [Self] {
+        y
+    }
+
+    fn storage_cols<'a>(x: MatRef<'a, f64>, _cast: &'a mut Self::ColCast) -> MatRef<'a, Self> {
+        x
+    }
+}
 
 /// Selects storage and residual-refinement scalar types for GP computations.
 pub trait PrecisionPolicy {
@@ -22,10 +113,10 @@ pub trait PrecisionPolicy {
     type Refine;
 }
 
-/// Uses `f64` for both stored buffers and residual refinement.
+/// Uses `f64` for stored factors and for refinement.
 ///
-/// Fit and predict on [`crate::Gpr`] stay in this precision. The crate-private
-/// solver in this module refines an `f32` factor with an `f64` residual.
+/// This is the precision when a model omits the parameter. Fit and predict
+/// stay on the `f64` factorization.
 ///
 /// # Examples
 ///
@@ -43,20 +134,66 @@ impl PrecisionPolicy for DoublePrecision {
     type Refine = f64;
 }
 
-/// Residual `r = y − Aα` from the `f32` matrix promoted to `f64`.
+/// Uses `f32` for stored factors and keeps that factorization as-is.
 ///
-/// `Gpr` fit and predict stay `f64`, so only the unit tests call this solver.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct PromoteStorage;
-
-/// Residual `r = y − Aα` from a fresh `f64` kernel evaluation.
+/// The same Gram, Cholesky, and predict steps as [`DoublePrecision`] run in
+/// `f32`. There is no residual type parameter.
 ///
-/// `Gpr` fit and predict stay `f64`, so only the unit tests call this solver.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct ReevaluateKernel;
+/// # Examples
+///
+/// ```rust
+/// use gprx::{PrecisionPolicy, SinglePrecision};
+///
+/// type Storage = <SinglePrecision as PrecisionPolicy>::Storage;
+/// let _: Storage = 0.0_f32;
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SinglePrecision;
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) trait ResidualFormula {
+impl PrecisionPolicy for SinglePrecision {
+    type Storage = f32;
+    type Refine = f32;
+}
+
+/// Factors in `f32` and refines the predict `α` in `f64`.
+///
+/// `R` is the residual formula. Omitting it selects [`PromoteStorage`].
+/// [`ReevaluateKernel`] recomputes the kernel in `f64` for each residual.
+/// Training marginal likelihood uses the `f32` factor and does not refine `α`.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel};
+///
+/// type DefaultResidual = MixedPrecision;
+/// type FreshKernel = MixedPrecision<ReevaluateKernel>;
+/// let _: <DefaultResidual as PrecisionPolicy>::Storage = 0.0_f32;
+/// let _: <FreshKernel as PrecisionPolicy>::Refine = 0.0_f64;
+/// let _ = core::marker::PhantomData::<PromoteStorage>;
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MixedPrecision<R: ResidualFormula = PromoteStorage>(core::marker::PhantomData<R>);
+
+impl<R: ResidualFormula> PrecisionPolicy for MixedPrecision<R> {
+    type Storage = f32;
+    type Refine = f64;
+}
+
+mod residual_seal {
+    pub trait Sealed {}
+}
+
+/// How [`MixedPrecision`] builds `r = y − Aα`.
+///
+/// The only implementations are [`PromoteStorage`] and [`ReevaluateKernel`].
+pub trait ResidualFormula: residual_seal::Sealed {
+    /// Writes the residual and returns `‖A‖∞` for the stopping test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError`] when the kernel evaluation fails or a value is
+    /// non-finite.
     fn residual(
         saved: MatRef<'_, f32>,
         kernel: &CompiledKernel<f64>,
@@ -67,6 +204,19 @@ pub(crate) trait ResidualFormula {
         r: &mut [f64],
     ) -> Result<f64, GprError>;
 }
+
+/// Residual `r = y − Aα` from the saved `f32` matrix promoted to `f64`.
+///
+/// This is the residual when [`MixedPrecision`] omits its type parameter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PromoteStorage;
+
+/// Residual `r = y − Aα` from a fresh `f64` kernel evaluation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReevaluateKernel;
+
+impl residual_seal::Sealed for PromoteStorage {}
+impl residual_seal::Sealed for ReevaluateKernel {}
 
 impl ResidualFormula for PromoteStorage {
     fn residual(
@@ -334,6 +484,459 @@ fn solve_f64(l: MatRef<'_, f64>, rhs: &mut Mat<f64>) {
     llt::solve::solve_in_place(l, rhs.as_mut(), par, MemStack::new(&mut scratch));
 }
 
+/// Which precision a persist directory records. Absent on disk means double.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PersistKind {
+    Double,
+    Single,
+    MixedPromote,
+    MixedReevaluate,
+}
+
+pub(crate) trait ResidualTag: ResidualFormula {
+    const REEVALUATES: bool;
+}
+
+impl ResidualTag for PromoteStorage {
+    const REEVALUATES: bool = false;
+}
+
+impl ResidualTag for ReevaluateKernel {
+    const REEVALUATES: bool = true;
+}
+
+/// Bounds a model precision so distance fills and both scalars are known.
+pub(crate) trait ModelPrecision:
+    PrecisionPolicy<Storage: StorageScalar + FillDistances, Refine: StorageScalar>
+    + Copy
+    + Send
+    + Sync
+    + 'static
+{
+    fn persist_kind() -> PersistKind;
+}
+
+impl ModelPrecision for DoublePrecision {
+    fn persist_kind() -> PersistKind {
+        PersistKind::Double
+    }
+}
+impl ModelPrecision for SinglePrecision {
+    fn persist_kind() -> PersistKind {
+        PersistKind::Single
+    }
+}
+impl<R> ModelPrecision for MixedPrecision<R>
+where
+    R: ResidualTag + Copy + Send + Sync + 'static,
+{
+    fn persist_kind() -> PersistKind {
+        if R::REEVALUATES {
+            PersistKind::MixedReevaluate
+        } else {
+            PersistKind::MixedPromote
+        }
+    }
+}
+
+/// Writes predict `α` from the storage factor, or refines it.
+pub(crate) trait PublishPredictAlpha: ModelPrecision {
+    /// Stores predict weights in `alpha`.
+    ///
+    /// [`DoublePrecision`] and [`SinglePrecision`] copy `factor_alpha`.
+    /// [`MixedPrecision`] calls [`refine`].
+    fn publish_predict_alpha(
+        kernel: &KernelSpec,
+        compiled: &CompiledKernel<Self::Storage>,
+        x: MatRef<'_, f64>,
+        y: &[f64],
+        noise: f64,
+        factor_alpha: &[Self::Storage],
+        alpha: &mut Vec<Self::Refine>,
+    ) -> Result<(), GprError>;
+}
+
+fn copy_factor_to_refine<P: ModelPrecision>(
+    factor_alpha: &[P::Storage],
+    alpha: &mut Vec<P::Refine>,
+) {
+    if alpha.len() != factor_alpha.len() {
+        alpha.resize(factor_alpha.len(), P::Refine::from_f64(0.0));
+    }
+    for (slot, &value) in alpha.iter_mut().zip(factor_alpha.iter()) {
+        *slot = P::Refine::from_f64(value.to_f64());
+    }
+}
+
+impl PublishPredictAlpha for DoublePrecision {
+    fn publish_predict_alpha(
+        kernel: &KernelSpec,
+        compiled: &CompiledKernel<Self::Storage>,
+        x: MatRef<'_, f64>,
+        y: &[f64],
+        noise: f64,
+        factor_alpha: &[Self::Storage],
+        alpha: &mut Vec<Self::Refine>,
+    ) -> Result<(), GprError> {
+        let _ = (kernel, compiled, x, y, noise);
+        copy_factor_to_refine::<Self>(factor_alpha, alpha);
+        Ok(())
+    }
+}
+
+impl PublishPredictAlpha for SinglePrecision {
+    fn publish_predict_alpha(
+        kernel: &KernelSpec,
+        compiled: &CompiledKernel<Self::Storage>,
+        x: MatRef<'_, f64>,
+        y: &[f64],
+        noise: f64,
+        factor_alpha: &[Self::Storage],
+        alpha: &mut Vec<Self::Refine>,
+    ) -> Result<(), GprError> {
+        let _ = (kernel, compiled, x, y, noise);
+        copy_factor_to_refine::<Self>(factor_alpha, alpha);
+        Ok(())
+    }
+}
+
+impl<R> PublishPredictAlpha for MixedPrecision<R>
+where
+    R: ResidualTag + Copy + Send + Sync + 'static,
+{
+    fn publish_predict_alpha(
+        kernel: &KernelSpec,
+        compiled: &CompiledKernel<Self::Storage>,
+        x: MatRef<'_, f64>,
+        y: &[f64],
+        noise: f64,
+        factor_alpha: &[Self::Storage],
+        alpha: &mut Vec<Self::Refine>,
+    ) -> Result<(), GprError> {
+        let _ = factor_alpha;
+        let kernel_f64 = kernel.compile();
+        *alpha = refine::<R>(compiled, &kernel_f64, x, y, noise)?;
+        Ok(())
+    }
+}
+
+/// Predictive mean from storage `k_*`, or a fresh `f64` column for [`ReevaluateKernel`].
+pub(crate) trait PredictMean: ModelPrecision {
+    /// Dot of query column `col` with predict `α`, as [`PrecisionPolicy::Refine`].
+    fn column_mean(
+        kernel: &KernelSpec,
+        k_storage: MatRef<'_, Self::Storage>,
+        x_train: MatRef<'_, f64>,
+        x_query: &[f64],
+        n_cols: usize,
+        alpha: &[Self::Refine],
+        col: usize,
+    ) -> Result<Self::Refine, GprError>;
+}
+
+fn storage_column_mean<P: ModelPrecision>(
+    k_storage: MatRef<'_, P::Storage>,
+    alpha: &[P::Refine],
+    col: usize,
+) -> P::Refine {
+    let mut sum = 0.0f64;
+    for (row, &weight) in alpha.iter().enumerate() {
+        sum += k_storage[(row, col)].to_f64() * weight.to_f64();
+    }
+    P::Refine::from_f64(sum)
+}
+
+impl PredictMean for DoublePrecision {
+    fn column_mean(
+        kernel: &KernelSpec,
+        k_storage: MatRef<'_, Self::Storage>,
+        x_train: MatRef<'_, f64>,
+        x_query: &[f64],
+        n_cols: usize,
+        alpha: &[Self::Refine],
+        col: usize,
+    ) -> Result<Self::Refine, GprError> {
+        let _ = (kernel, x_train, x_query, n_cols);
+        Ok(storage_column_mean::<Self>(k_storage, alpha, col))
+    }
+}
+
+impl PredictMean for SinglePrecision {
+    fn column_mean(
+        kernel: &KernelSpec,
+        k_storage: MatRef<'_, Self::Storage>,
+        x_train: MatRef<'_, f64>,
+        x_query: &[f64],
+        n_cols: usize,
+        alpha: &[Self::Refine],
+        col: usize,
+    ) -> Result<Self::Refine, GprError> {
+        let _ = (kernel, x_train, x_query, n_cols);
+        Ok(storage_column_mean::<Self>(k_storage, alpha, col))
+    }
+}
+
+impl PredictMean for MixedPrecision<PromoteStorage> {
+    fn column_mean(
+        kernel: &KernelSpec,
+        k_storage: MatRef<'_, Self::Storage>,
+        x_train: MatRef<'_, f64>,
+        x_query: &[f64],
+        n_cols: usize,
+        alpha: &[Self::Refine],
+        col: usize,
+    ) -> Result<Self::Refine, GprError> {
+        let _ = k_storage;
+        f64_cross_dot(kernel, x_train, x_query, n_cols, alpha, col)
+    }
+}
+
+impl PredictMean for MixedPrecision<ReevaluateKernel> {
+    fn column_mean(
+        kernel: &KernelSpec,
+        k_storage: MatRef<'_, Self::Storage>,
+        x_train: MatRef<'_, f64>,
+        x_query: &[f64],
+        n_cols: usize,
+        alpha: &[Self::Refine],
+        col: usize,
+    ) -> Result<Self::Refine, GprError> {
+        let _ = k_storage;
+        f64_cross_dot(kernel, x_train, x_query, n_cols, alpha, col)
+    }
+}
+
+fn f64_cross_dot(
+    kernel: &KernelSpec,
+    x_train: MatRef<'_, f64>,
+    x_query: &[f64],
+    n_cols: usize,
+    alpha: &[f64],
+    col: usize,
+) -> Result<f64, GprError> {
+    let kernel_f64 = kernel.compile();
+    let n = x_train.nrows();
+    let n_rows = x_query.len() / n_cols;
+    let mut row = Mat::<f64>::zeros(1, n_cols);
+    for dim in 0..n_cols {
+        row[(0, dim)] = x_query[dim * n_rows + col];
+    }
+    let mut k_col = Mat::<f64>::zeros(n, 1);
+    let mut scratch = Mat::<f64>::zeros(n, 1);
+    match kernel_f64.coord_mode()? {
+        crate::kernel::CoordMode::Points => {
+            kernel_f64.apply_cross_points(
+                x_train,
+                row.as_ref(),
+                k_col.as_mut(),
+                scratch.as_mut(),
+            )?;
+        }
+        crate::kernel::CoordMode::Dist | crate::kernel::CoordMode::Either => {
+            let mut dist = Mat::<f64>::zeros(n, 1);
+            f64::write_cross(x_train, row.as_ref(), dist.as_mut(), &mut []);
+            kernel_f64.apply_cross(dist.as_ref(), k_col.as_mut(), scratch.as_mut())?;
+        }
+        crate::kernel::CoordMode::Mixed => {
+            let mut dist = Mat::<f64>::zeros(n, 1);
+            f64::write_cross(x_train, row.as_ref(), dist.as_mut(), &mut []);
+            kernel_f64.apply_cross_mixed(
+                dist.as_ref(),
+                x_train,
+                row.as_ref(),
+                k_col.as_mut(),
+                scratch.as_mut(),
+            )?;
+        }
+    }
+    let mut sum = 0.0;
+    for i in 0..n {
+        sum += k_col[(i, 0)] * alpha[i];
+    }
+    Ok(sum)
+}
+
+/// Inverse target map. `f32` predictions pass through an `f64` buffer.
+pub(crate) trait ScalePrediction: ModelPrecision {
+    fn inverse_mean_variance(
+        transform: &dyn TargetTransform,
+        mean: &mut [Self::Refine],
+        variance: &mut [Self::Refine],
+    ) -> Result<(), GprError>;
+
+    fn inverse_covariance(
+        transform: &dyn TargetTransform,
+        covariance: &mut [Self::Refine],
+    ) -> Result<(), GprError>;
+}
+
+fn inverse_f64_mean_variance(
+    transform: &dyn TargetTransform,
+    mean: &mut [f64],
+    variance: &mut [f64],
+) -> Result<(), GprError> {
+    transform.inverse_transform_mean(mean)?;
+    transform.inverse_transform_variance(variance)
+}
+
+impl ScalePrediction for DoublePrecision {
+    fn inverse_mean_variance(
+        transform: &dyn TargetTransform,
+        mean: &mut [Self::Refine],
+        variance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        inverse_f64_mean_variance(transform, mean, variance)
+    }
+
+    fn inverse_covariance(
+        transform: &dyn TargetTransform,
+        covariance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        transform.inverse_transform_covariance(covariance)
+    }
+}
+
+impl ScalePrediction for MixedPrecision<PromoteStorage> {
+    fn inverse_mean_variance(
+        transform: &dyn TargetTransform,
+        mean: &mut [Self::Refine],
+        variance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        inverse_f64_mean_variance(transform, mean, variance)
+    }
+
+    fn inverse_covariance(
+        transform: &dyn TargetTransform,
+        covariance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        transform.inverse_transform_covariance(covariance)
+    }
+}
+
+impl ScalePrediction for MixedPrecision<ReevaluateKernel> {
+    fn inverse_mean_variance(
+        transform: &dyn TargetTransform,
+        mean: &mut [Self::Refine],
+        variance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        inverse_f64_mean_variance(transform, mean, variance)
+    }
+
+    fn inverse_covariance(
+        transform: &dyn TargetTransform,
+        covariance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        transform.inverse_transform_covariance(covariance)
+    }
+}
+
+impl ScalePrediction for SinglePrecision {
+    fn inverse_mean_variance(
+        transform: &dyn TargetTransform,
+        mean: &mut [Self::Refine],
+        variance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        let mut mean64: Vec<f64> = mean.iter().copied().map(f32::to_f64).collect();
+        let mut var64: Vec<f64> = variance.iter().copied().map(f32::to_f64).collect();
+        inverse_f64_mean_variance(transform, &mut mean64, &mut var64)?;
+        for (slot, value) in mean.iter_mut().zip(mean64) {
+            *slot = f32::from_f64(value);
+        }
+        for (slot, value) in variance.iter_mut().zip(var64) {
+            *slot = f32::from_f64(value);
+        }
+        Ok(())
+    }
+
+    fn inverse_covariance(
+        transform: &dyn TargetTransform,
+        covariance: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        let mut buf: Vec<f64> = covariance.iter().copied().map(f32::to_f64).collect();
+        transform.inverse_transform_covariance(&mut buf)?;
+        for (slot, value) in covariance.iter_mut().zip(buf) {
+            *slot = f32::from_f64(value);
+        }
+        Ok(())
+    }
+}
+
+/// Training factor view. Only [`DoublePrecision`] reads a mapped `f64` `L`.
+pub(crate) trait ViewFactor: ModelPrecision {
+    fn view_factor<'a>(
+        mapped_l: Option<MatRef<'a, f64>>,
+        workspace_l: MatRef<'a, Self::Storage>,
+    ) -> MatRef<'a, Self::Storage>;
+
+    fn copy_mapped_l(src: MatRef<'_, f64>, dest: MatMut<'_, Self::Storage>);
+}
+
+impl ViewFactor for DoublePrecision {
+    fn view_factor<'a>(
+        mapped_l: Option<MatRef<'a, f64>>,
+        workspace_l: MatRef<'a, Self::Storage>,
+    ) -> MatRef<'a, Self::Storage> {
+        match mapped_l {
+            Some(mapped) => mapped,
+            None => workspace_l,
+        }
+    }
+
+    fn copy_mapped_l(src: MatRef<'_, f64>, mut dest: MatMut<'_, Self::Storage>) {
+        let n = src.nrows().min(dest.nrows());
+        let cols = src.ncols().min(dest.ncols());
+        for col in 0..cols {
+            for row in 0..n {
+                dest[(row, col)] = src[(row, col)];
+            }
+        }
+    }
+}
+
+impl ViewFactor for SinglePrecision {
+    fn view_factor<'a>(
+        _mapped_l: Option<MatRef<'a, f64>>,
+        workspace_l: MatRef<'a, Self::Storage>,
+    ) -> MatRef<'a, Self::Storage> {
+        workspace_l
+    }
+
+    fn copy_mapped_l(_src: MatRef<'_, f64>, _dest: MatMut<'_, Self::Storage>) {}
+}
+
+impl ViewFactor for MixedPrecision<PromoteStorage> {
+    fn view_factor<'a>(
+        _mapped_l: Option<MatRef<'a, f64>>,
+        workspace_l: MatRef<'a, Self::Storage>,
+    ) -> MatRef<'a, Self::Storage> {
+        workspace_l
+    }
+
+    fn copy_mapped_l(_src: MatRef<'_, f64>, _dest: MatMut<'_, Self::Storage>) {}
+}
+
+impl ViewFactor for MixedPrecision<ReevaluateKernel> {
+    fn view_factor<'a>(
+        _mapped_l: Option<MatRef<'a, f64>>,
+        workspace_l: MatRef<'a, Self::Storage>,
+    ) -> MatRef<'a, Self::Storage> {
+        workspace_l
+    }
+
+    fn copy_mapped_l(_src: MatRef<'_, f64>, _dest: MatMut<'_, Self::Storage>) {}
+}
+
+/// Storage, predict-`α`, and target scaling for one precision policy.
+pub(crate) trait GpScalar:
+    ModelPrecision + PublishPredictAlpha + PredictMean + ScalePrediction + ViewFactor
+{
+}
+
+impl GpScalar for DoublePrecision {}
+impl GpScalar for SinglePrecision {}
+impl GpScalar for MixedPrecision<PromoteStorage> {}
+impl GpScalar for MixedPrecision<ReevaluateKernel> {}
+
 #[cfg(test)]
 mod tests {
     use super::{DoublePrecision, PrecisionPolicy};
@@ -346,6 +949,25 @@ mod tests {
         let refine: <DoublePrecision as PrecisionPolicy>::Refine = 0.0;
         let _ = (storage, refine);
         assert_send_sync::<DoublePrecision>();
+    }
+
+    #[test]
+    fn single_precision_is_f32() {
+        let storage: <super::SinglePrecision as PrecisionPolicy>::Storage = 0.0;
+        let refine: <super::SinglePrecision as PrecisionPolicy>::Refine = 0.0;
+        let _ = (storage, refine);
+        assert_send_sync::<super::SinglePrecision>();
+    }
+
+    #[test]
+    fn mixed_precision_stores_f32_and_refines_f64() {
+        let storage: <super::MixedPrecision as PrecisionPolicy>::Storage = 0.0;
+        let refine: <super::MixedPrecision as PrecisionPolicy>::Refine = 0.0;
+        let fresh: <super::MixedPrecision<super::ReevaluateKernel> as PrecisionPolicy>::Refine =
+            0.0;
+        let _ = (storage, refine, fresh);
+        assert_send_sync::<super::MixedPrecision>();
+        assert_send_sync::<super::MixedPrecision<super::ReevaluateKernel>>();
     }
 
     use super::{PromoteStorage, ReevaluateKernel, ResidualFormula, f64_alpha, refine};
@@ -502,5 +1124,617 @@ mod tests {
         median("reevaluate", &|| {
             refine::<ReevaluateKernel>(&k32, &k64, x.as_ref(), &y, 0.1).expect("reevaluate");
         });
+    }
+
+    use crate::kernel::KernelScalar;
+    use crate::{Fixed, GaussianLikelihood, Gpr, MixedPrecision, Sgpr, SinglePrecision, Svgp};
+
+    fn must<T>(result: Result<T, crate::GprError>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(err) => panic!("gpr call failed: {err}"),
+        }
+    }
+
+    fn likelihood_at(noise: f64) -> GaussianLikelihood {
+        if crate::param::Interval::DEFAULT_POSITIVE.contains(noise) {
+            return must(GaussianLikelihood::new(noise));
+        }
+        let interval = match crate::Interval::new(1.0e-12, 1.0e5) {
+            Ok(interval) => interval,
+            Err(err) => panic!("noise interval: {err}"),
+        };
+        let mut likelihood = match GaussianLikelihood::new(0.1) {
+            Ok(likelihood) => match likelihood.with_bounds(interval) {
+                Ok(likelihood) => likelihood,
+                Err(err) => panic!("noise bounds: {err}"),
+            },
+            Err(err) => panic!("gpr call failed: {err}"),
+        };
+        must(likelihood.set_params(&[noise.ln()]));
+        likelihood
+    }
+
+    fn digit_tol(n: usize) -> f64 {
+        10.0 * n as f64 * f64::from(f32::EPSILON)
+    }
+
+    fn near(got: f64, expect: f64, n: usize) -> bool {
+        let tol = digit_tol(n);
+        let err = (got - expect).abs();
+        if expect.abs() < tol {
+            err < tol
+        } else {
+            err / expect.abs() < tol
+        }
+    }
+
+    fn assert_near(got: f64, expect: f64, n: usize) {
+        assert!(
+            near(got, expect, n),
+            "got {got} expect {expect} tol {}",
+            digit_tol(n)
+        );
+    }
+
+    fn pack_col(x: &Mat<f64>) -> Vec<f64> {
+        (0..x.nrows()).map(|i| x[(i, 0)]).collect()
+    }
+
+    fn inducing8() -> Vec<f64> {
+        (0..8).map(|i| i as f64 / 7.0).collect()
+    }
+
+    fn queries() -> [f64; 2] {
+        [0.25, 0.75]
+    }
+
+    fn factor_exact<P>(
+        x: &[f64],
+        y: &[f64],
+        ell: f64,
+        noise: f64,
+    ) -> crate::FittedGpr<
+        Fixed,
+        crate::FullRecompute,
+        crate::CachedDistances,
+        crate::RetainCholesky,
+        P,
+    >
+    where
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
+        let likelihood = likelihood_at(noise);
+        let n = y.len();
+        must(
+            Gpr::new(kernel, likelihood)
+                .with_optimizer(Fixed)
+                .with_precision::<P>()
+                .factor(x, n, 1, y)
+                .map_err(|(_, err)| err),
+        )
+    }
+
+    fn assert_predict_pair<T: KernelScalar, U: KernelScalar>(
+        got_mean: &[T],
+        got_var: &[T],
+        exp_mean: &[U],
+        exp_var: &[U],
+        n: usize,
+        digits: bool,
+    ) {
+        for (got, expect) in got_mean.iter().zip(exp_mean) {
+            let g = got.to_f64();
+            let e = expect.to_f64();
+            if digits {
+                assert!(
+                    near(g, e, n),
+                    "mean got {g} expect {e} tol {}",
+                    digit_tol(n)
+                );
+            } else {
+                assert!(g.is_finite(), "mean {g}");
+            }
+        }
+        for (got, expect) in got_var.iter().zip(exp_var) {
+            let g = got.to_f64();
+            let e = expect.to_f64();
+            if digits {
+                assert!(near(g, e, n), "var got {g} expect {e} tol {}", digit_tol(n));
+            } else {
+                assert!(g.is_finite(), "variance {g}");
+            }
+        }
+    }
+
+    fn exact_digits(n: usize) {
+        let (x, y) = forrester(n);
+        let packed = pack_col(&x);
+        let f64_model = factor_exact::<DoublePrecision>(&packed, &y, 1.0, 0.1);
+        let single = factor_exact::<SinglePrecision>(&packed, &y, 1.0, 0.1);
+        let promote = factor_exact::<MixedPrecision<PromoteStorage>>(&packed, &y, 1.0, 0.1);
+        let fresh = factor_exact::<MixedPrecision<ReevaluateKernel>>(&packed, &y, 1.0, 0.1);
+        let q = queries();
+        let truth = must(f64_model.predict(&q, 2, 1));
+        let s = must(single.predict(&q, 2, 1));
+        let p = must(promote.predict(&q, 2, 1));
+        let r = must(fresh.predict(&q, 2, 1));
+        assert_predict_pair(&s.mean, &s.variance, &truth.mean, &truth.variance, n, true);
+        assert_predict_pair(&p.mean, &p.variance, &truth.mean, &truth.variance, n, true);
+        assert_predict_pair(&r.mean, &r.variance, &truth.mean, &truth.variance, n, true);
+        let cov_t = must(f64_model.predict_covariance(&q, 2, 1));
+        let cov_s = must(single.predict_covariance(&q, 2, 1));
+        let cov_p = must(promote.predict_covariance(&q, 2, 1));
+        let cov_r = must(fresh.predict_covariance(&q, 2, 1));
+        for (got, expect) in cov_s.covariance.iter().zip(&cov_t.covariance) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        for (got, expect) in cov_p.covariance.iter().zip(&cov_t.covariance) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        for (got, expect) in cov_r.covariance.iter().zip(&cov_t.covariance) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        let loo_t = must(f64_model.loo_predict());
+        let loo_s = must(single.loo_predict());
+        let loo_p = must(promote.loo_predict());
+        let loo_r = must(fresh.loo_predict());
+        assert_predict_pair(
+            &loo_s.mean,
+            &loo_s.variance,
+            &loo_t.mean,
+            &loo_t.variance,
+            n,
+            true,
+        );
+        assert_predict_pair(
+            &loo_p.mean,
+            &loo_p.variance,
+            &loo_t.mean,
+            &loo_t.variance,
+            n,
+            true,
+        );
+        assert_predict_pair(
+            &loo_r.mean,
+            &loo_r.variance,
+            &loo_t.mean,
+            &loo_t.variance,
+            n,
+            true,
+        );
+        let draws = must(single.sample(&q, 2, 1, 3, 7));
+        assert_eq!(draws.len(), 6);
+        assert!(draws.iter().all(|v| v.is_finite()));
+        let draws_m = must(promote.sample(&q, 2, 1, 3, 7));
+        assert_eq!(draws_m.len(), 6);
+        assert!(draws_m.iter().all(|v| v.is_finite()));
+        let draws_r = must(fresh.sample(&q, 2, 1, 3, 7));
+        assert_eq!(draws_r.len(), 6);
+        assert!(draws_r.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn single_and_mixed_predict_match_f64_digits() {
+        exact_digits(256);
+    }
+
+    #[test]
+    fn single_and_mixed_predict_match_f64_digits_n1024() {
+        exact_digits(1024);
+    }
+
+    #[test]
+    fn ill_conditioned_single_is_finite_and_mixed_mean_hits_digits() {
+        let (x, y) = forrester(256);
+        let packed = pack_col(&x);
+        let n = y.len();
+        let noise = ILL_NOISE;
+        let f64_model = factor_exact::<DoublePrecision>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let single = factor_exact::<SinglePrecision>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let promote =
+            factor_exact::<MixedPrecision<PromoteStorage>>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let fresh =
+            factor_exact::<MixedPrecision<ReevaluateKernel>>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let q = queries();
+        let truth = must(f64_model.predict(&q, 2, 1));
+        let s = must(single.predict(&q, 2, 1));
+        let p = must(promote.predict(&q, 2, 1));
+        let r = must(fresh.predict(&q, 2, 1));
+        assert_predict_pair(&s.mean, &s.variance, &truth.mean, &truth.variance, n, false);
+        assert_predict_pair(&p.mean, &p.variance, &truth.mean, &truth.variance, n, false);
+        assert_predict_pair(&r.mean, &r.variance, &truth.mean, &truth.variance, n, false);
+        for (got, expect) in p.mean.iter().zip(&truth.mean) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        for (got, expect) in r.mean.iter().zip(&truth.mean) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        let cov_s = must(single.predict_covariance(&q, 2, 1));
+        assert!(cov_s.covariance.iter().all(|v| v.is_finite()));
+        let cov_p = must(promote.predict_covariance(&q, 2, 1));
+        assert!(cov_p.covariance.iter().all(|v| v.is_finite()));
+    }
+
+    fn factor_sgpr<P>(
+        x: &[f64],
+        y: &[f64],
+        ell: f64,
+        noise: f64,
+    ) -> crate::FittedSgpr<Fixed, crate::FixedInducing, P>
+    where
+        P: crate::precision::GpScalar
+            + crate::sgpr::factor::MeanDot
+            + crate::sgpr::factor::PublishSgprWeights,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
+        let likelihood = likelihood_at(noise);
+        let z = inducing8();
+        must(
+            Sgpr::new(kernel, likelihood)
+                .with_optimizer(Fixed)
+                .with_precision::<P>()
+                .factor(x, y.len(), 1, y, &z, 8)
+                .map_err(|(_, err)| err),
+        )
+    }
+
+    fn sgpr_case(n: usize, ell: f64, noise: f64, mean_digits: bool, var_digits: bool) {
+        let (x, y) = forrester(n);
+        let packed = pack_col(&x);
+        let truth = factor_sgpr::<DoublePrecision>(&packed, &y, ell, noise);
+        let single = factor_sgpr::<SinglePrecision>(&packed, &y, ell, noise);
+        let promote = factor_sgpr::<MixedPrecision<PromoteStorage>>(&packed, &y, ell, noise);
+        let fresh = factor_sgpr::<MixedPrecision<ReevaluateKernel>>(&packed, &y, ell, noise);
+        let q = queries();
+        let t = must(truth.predict(&q, 2, 1));
+        let s = must(single.predict(&q, 2, 1));
+        let p = must(promote.predict(&q, 2, 1));
+        let r = must(fresh.predict(&q, 2, 1));
+        let single_mean_digits = mean_digits && ell < ILL_LENGTHSCALE;
+        assert_predict_pair(
+            &s.mean,
+            &s.variance,
+            &t.mean,
+            &t.variance,
+            n,
+            single_mean_digits,
+        );
+        assert_predict_pair(&p.mean, &p.variance, &t.mean, &t.variance, n, var_digits);
+        assert_predict_pair(&r.mean, &r.variance, &t.mean, &t.variance, n, var_digits);
+        if !var_digits {
+            for (got, expect) in p.mean.iter().zip(&t.mean) {
+                assert_near(got.to_f64(), expect.to_f64(), n);
+            }
+            for (got, expect) in r.mean.iter().zip(&t.mean) {
+                assert_near(got.to_f64(), expect.to_f64(), n);
+            }
+        }
+    }
+
+    #[test]
+    fn sgpr_precisions_match_f64_predict() {
+        sgpr_case(256, 1.0, 0.1, true, true);
+        sgpr_case(256, ILL_LENGTHSCALE, ILL_NOISE, false, false);
+    }
+
+    #[test]
+    fn sgpr_precisions_match_f64_predict_n1024() {
+        sgpr_case(1024, 1.0, 0.1, true, true);
+    }
+
+    fn factor_svgp<P>(x: &[f64], y: &[f64], ell: f64, noise: f64) -> crate::FittedSvgp<P>
+    where
+        P: crate::precision::GpScalar + crate::svgp::factor::SvgpMean,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
+        let likelihood = likelihood_at(noise);
+        let z = inducing8();
+        must(
+            Svgp::new(kernel, likelihood)
+                .with_precision::<P>()
+                .factor(x, y.len(), 1, y, &z, 8)
+                .map_err(|(_, err)| err),
+        )
+    }
+
+    #[test]
+    fn svgp_precisions_match_f64_predict() {
+        for (n, ell, noise, var_digits) in [
+            (256usize, 1.0, 0.1, true),
+            (1024usize, 1.0, 0.1, true),
+            (256usize, ILL_LENGTHSCALE, ILL_NOISE, false),
+        ] {
+            let (x, y) = forrester(n);
+            let packed = pack_col(&x);
+            let truth = factor_svgp::<DoublePrecision>(&packed, &y, ell, noise);
+            let single = factor_svgp::<SinglePrecision>(&packed, &y, ell, noise);
+            let promote = factor_svgp::<MixedPrecision<PromoteStorage>>(&packed, &y, ell, noise);
+            let fresh = factor_svgp::<MixedPrecision<ReevaluateKernel>>(&packed, &y, ell, noise);
+            let q = queries();
+            let t = must(truth.predict(&q, 2, 1));
+            let s = must(single.predict(&q, 2, 1));
+            let p = must(promote.predict(&q, 2, 1));
+            let r = must(fresh.predict(&q, 2, 1));
+            assert_predict_pair(&s.mean, &s.variance, &t.mean, &t.variance, n, var_digits);
+            assert_predict_pair(&p.mean, &p.variance, &t.mean, &t.variance, n, var_digits);
+            assert_predict_pair(&r.mean, &r.variance, &t.mean, &t.variance, n, var_digits);
+            if !var_digits {
+                for (got, expect) in p.mean.iter().zip(&t.mean) {
+                    assert_near(got.to_f64(), expect.to_f64(), n);
+                }
+                for (got, expect) in r.mean.iter().zip(&t.mean) {
+                    assert_near(got.to_f64(), expect.to_f64(), n);
+                }
+            }
+        }
+    }
+
+    fn online_exact_round<P>(
+        packed: &[f64],
+        y: &[f64],
+        ell: f64,
+        noise: f64,
+    ) -> crate::OnlineGpr<
+        Fixed,
+        crate::FullRecompute,
+        crate::CachedDistances,
+        crate::RetainCholesky,
+        P,
+    >
+    where
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let mut online = must(factor_exact::<P>(packed, y, ell, noise).into_online());
+        must(online.insert(&[0.33], 0.2));
+        must(online.delete(online.point_ids()[0]));
+        online
+    }
+
+    #[test]
+    fn online_exact_insert_delete_matches_f64() {
+        for n in [256usize, 1024] {
+            let (x, y) = forrester(n);
+            let packed = pack_col(&x);
+            let base = online_exact_round::<DoublePrecision>(&packed, &y, 1.0, 0.1);
+            let single = online_exact_round::<SinglePrecision>(&packed, &y, 1.0, 0.1);
+            let promote =
+                online_exact_round::<MixedPrecision<PromoteStorage>>(&packed, &y, 1.0, 0.1);
+            let fresh =
+                online_exact_round::<MixedPrecision<ReevaluateKernel>>(&packed, &y, 1.0, 0.1);
+            let q = queries();
+            let t = must(base.predict(&q, 2, 1));
+            let s = must(single.predict(&q, 2, 1));
+            let p = must(promote.predict(&q, 2, 1));
+            let r = must(fresh.predict(&q, 2, 1));
+            assert_predict_pair(&s.mean, &s.variance, &t.mean, &t.variance, n, true);
+            assert_predict_pair(&p.mean, &p.variance, &t.mean, &t.variance, n, true);
+            assert_predict_pair(&r.mean, &r.variance, &t.mean, &t.variance, n, true);
+        }
+        let (x, y) = forrester(256);
+        let packed = pack_col(&x);
+        let n = y.len();
+        let noise = ILL_NOISE;
+        let base = online_exact_round::<DoublePrecision>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let single = online_exact_round::<SinglePrecision>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let promote = online_exact_round::<MixedPrecision<PromoteStorage>>(
+            &packed,
+            &y,
+            ILL_LENGTHSCALE,
+            noise,
+        );
+        let fresh = online_exact_round::<MixedPrecision<ReevaluateKernel>>(
+            &packed,
+            &y,
+            ILL_LENGTHSCALE,
+            noise,
+        );
+        let q = queries();
+        let t = must(base.predict(&q, 2, 1));
+        let s = must(single.predict(&q, 2, 1));
+        let p = must(promote.predict(&q, 2, 1));
+        let r = must(fresh.predict(&q, 2, 1));
+        assert_predict_pair(&s.mean, &s.variance, &t.mean, &t.variance, n, false);
+        assert_predict_pair(&p.mean, &p.variance, &t.mean, &t.variance, n, false);
+        assert_predict_pair(&r.mean, &r.variance, &t.mean, &t.variance, n, false);
+        for (got, expect) in p.mean.iter().zip(&t.mean) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        for (got, expect) in r.mean.iter().zip(&t.mean) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+    }
+
+    fn online_sgpr_round<P>(
+        packed: &[f64],
+        y: &[f64],
+        ell: f64,
+        noise: f64,
+    ) -> crate::OnlineSgpr<Fixed, P>
+    where
+        P: crate::precision::GpScalar
+            + crate::sgpr::factor::MeanDot
+            + crate::sgpr::factor::PublishSgprWeights,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let mut online = factor_sgpr::<P>(packed, y, ell, noise).into_online();
+        must(online.insert(&[0.33], 0.2));
+        must(online.delete(online.point_ids()[0]));
+        online
+    }
+
+    #[test]
+    fn online_sgpr_insert_delete_matches_f64() {
+        let (x, y) = forrester(256);
+        let packed = pack_col(&x);
+        let n = y.len();
+        let base = online_sgpr_round::<DoublePrecision>(&packed, &y, 1.0, 0.1);
+        let single = online_sgpr_round::<SinglePrecision>(&packed, &y, 1.0, 0.1);
+        let promote = online_sgpr_round::<MixedPrecision<PromoteStorage>>(&packed, &y, 1.0, 0.1);
+        let fresh = online_sgpr_round::<MixedPrecision<ReevaluateKernel>>(&packed, &y, 1.0, 0.1);
+        let q = queries();
+        let t = must(base.predict(&q, 2, 1));
+        let s = must(single.predict(&q, 2, 1));
+        let p = must(promote.predict(&q, 2, 1));
+        let r = must(fresh.predict(&q, 2, 1));
+        assert_predict_pair(&s.mean, &s.variance, &t.mean, &t.variance, n, true);
+        assert_predict_pair(&p.mean, &p.variance, &t.mean, &t.variance, n, true);
+        assert_predict_pair(&r.mean, &r.variance, &t.mean, &t.variance, n, true);
+
+        let noise = ILL_NOISE;
+        let base = online_sgpr_round::<DoublePrecision>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let single = online_sgpr_round::<SinglePrecision>(&packed, &y, ILL_LENGTHSCALE, noise);
+        let promote = online_sgpr_round::<MixedPrecision<PromoteStorage>>(
+            &packed,
+            &y,
+            ILL_LENGTHSCALE,
+            noise,
+        );
+        let fresh = online_sgpr_round::<MixedPrecision<ReevaluateKernel>>(
+            &packed,
+            &y,
+            ILL_LENGTHSCALE,
+            noise,
+        );
+        let t = must(base.predict(&q, 2, 1));
+        let s = must(single.predict(&q, 2, 1));
+        let p = must(promote.predict(&q, 2, 1));
+        let r = must(fresh.predict(&q, 2, 1));
+        assert_predict_pair(&s.mean, &s.variance, &t.mean, &t.variance, n, false);
+        assert_predict_pair(&p.mean, &p.variance, &t.mean, &t.variance, n, false);
+        assert_predict_pair(&r.mean, &r.variance, &t.mean, &t.variance, n, false);
+        for (got, expect) in p.mean.iter().zip(&t.mean) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+        for (got, expect) in r.mean.iter().zip(&t.mean) {
+            assert_near(got.to_f64(), expect.to_f64(), n);
+        }
+    }
+
+    #[test]
+    fn single_and_mixed_gradient_matches_own_nlml() {
+        let n = 8usize;
+        let (x, y) = forrester(n);
+        let packed = pack_col(&x);
+        check_grad::<SinglePrecision>(&packed, &y);
+        check_grad::<MixedPrecision<PromoteStorage>>(&packed, &y);
+        check_grad::<MixedPrecision<ReevaluateKernel>>(&packed, &y);
+    }
+
+    fn check_grad<P>(x: &[f64], y: &[f64])
+    where
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let mut fitted = factor_exact::<P>(x, y, 1.0, 0.1);
+        let mut params = [0.0; 2];
+        must(fitted.get_params(&mut params));
+        let mut grad = [0.0; 2];
+        let _ = must(fitted.value_and_gradient_into(&params, &mut grad));
+        let step = 1.0e-3;
+        for i in 0..2 {
+            let mut up = params;
+            let mut down = params;
+            up[i] += step;
+            down[i] -= step;
+            must(fitted.set_params(&up));
+            let plus = must(fitted.neg_log_marginal_likelihood());
+            must(fitted.set_params(&down));
+            let minus = must(fitted.neg_log_marginal_likelihood());
+            let fd = (plus - minus) / (2.0 * step);
+            let scale = fd.abs().max(1.0);
+            let err = (grad[i] - fd).abs() / scale;
+            assert!(err < 2.0e-3, "param {i} grad {} fd {fd} rel {err}", grad[i]);
+        }
+    }
+
+    #[test]
+    fn single_and_mixed_hessian_matches_own_gradient() {
+        let n = 8usize;
+        let (x, y) = forrester(n);
+        let packed = pack_col(&x);
+        check_hess_exact::<SinglePrecision>(&packed, &y);
+        check_hess_exact::<MixedPrecision<PromoteStorage>>(&packed, &y);
+        check_hess_exact::<MixedPrecision<ReevaluateKernel>>(&packed, &y);
+        check_hess_sgpr::<SinglePrecision>(&packed, &y);
+        check_hess_sgpr::<MixedPrecision<PromoteStorage>>(&packed, &y);
+        check_hess_sgpr::<MixedPrecision<ReevaluateKernel>>(&packed, &y);
+    }
+
+    fn check_hess_exact<P>(x: &[f64], y: &[f64])
+    where
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let mut fitted = factor_exact::<P>(x, y, 1.0, 0.1);
+        let mut params = [0.0; 2];
+        must(fitted.get_params(&mut params));
+        let mut hess = [0.0; 4];
+        must(fitted.hessian_into(&params, &mut hess));
+        let step = 1.0e-3;
+        for j in 0..2 {
+            let mut up = params;
+            let mut down = params;
+            up[j] += step;
+            down[j] -= step;
+            let mut grad_up = [0.0; 2];
+            let mut grad_down = [0.0; 2];
+            must(fitted.set_params(&up));
+            let _ = must(fitted.value_and_gradient_into(&up, &mut grad_up));
+            must(fitted.set_params(&down));
+            let _ = must(fitted.value_and_gradient_into(&down, &mut grad_down));
+            for i in 0..2 {
+                let fd = (grad_up[i] - grad_down[i]) / (2.0 * step);
+                let analytic = hess[i * 2 + j];
+                let scale = fd.abs().max(1.0);
+                let err = (analytic - fd).abs() / scale;
+                assert!(
+                    err < 5.0e-2,
+                    "exact hess[{i},{j}] {analytic} fd {fd} rel {err}"
+                );
+            }
+        }
+    }
+
+    fn check_hess_sgpr<P>(x: &[f64], y: &[f64])
+    where
+        P: crate::precision::GpScalar
+            + crate::sgpr::factor::MeanDot
+            + crate::sgpr::factor::PublishSgprWeights,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    {
+        let mut fitted = factor_sgpr::<P>(x, y, 1.0, 0.1);
+        let mut params = [0.0; 2];
+        must(fitted.get_params(&mut params));
+        let mut hess = [0.0; 4];
+        must(fitted.hessian_into(&params, &mut hess));
+        let step = 1.0e-3;
+        for j in 0..2 {
+            let mut up = params;
+            let mut down = params;
+            up[j] += step;
+            down[j] -= step;
+            let mut grad_up = [0.0; 2];
+            let mut grad_down = [0.0; 2];
+            must(fitted.set_params(&up));
+            let _ = must(fitted.value_and_gradient_into(&up, &mut grad_up));
+            must(fitted.set_params(&down));
+            let _ = must(fitted.value_and_gradient_into(&down, &mut grad_down));
+            for i in 0..2 {
+                let fd = (grad_up[i] - grad_down[i]) / (2.0 * step);
+                let analytic = hess[i * 2 + j];
+                let scale = fd.abs().max(1.0);
+                let err = (analytic - fd).abs() / scale;
+                assert!(
+                    err < 5.0e-2,
+                    "sgpr hess[{i},{j}] {analytic} fd {fd} rel {err}"
+                );
+            }
+        }
     }
 }

@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use faer::{MatMut, MatRef};
+use faer::MatRef;
 use memmap2::Mmap;
 use safetensors::tensor::{Dtype, TensorView};
 use safetensors::{SafeTensors, serialize};
@@ -63,13 +63,39 @@ impl MappedTensors {
     }
 }
 
+pub(super) struct FactorBytes<'a> {
+    pub l_dtype: Dtype,
+    pub l: &'a [u8],
+    pub alpha_dtype: Dtype,
+    pub alpha: &'a [u8],
+}
+
+pub(super) fn scalar_bytes<T>(values: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+    }
+}
+
+pub(super) fn pack_lower<T: crate::kernel::KernelScalar>(l: MatRef<'_, T>, out: &mut [T]) {
+    let n = l.nrows();
+    debug_assert_eq!(l.ncols(), n);
+    debug_assert_eq!(out.len(), n * n);
+    let zero = T::from_f64(0.0);
+    out.fill(zero);
+    for col in 0..n {
+        for row in col..n {
+            out[col * n + row] = l[(row, col)];
+        }
+    }
+}
+
 pub(super) fn write_tensors(
     dir: &Path,
     x: &[f64],
     y: &[f64],
     n: usize,
     d: usize,
-    factor: Option<(&[f64], &[f64])>,
+    factor: Option<FactorBytes<'_>>,
 ) -> Result<(), GprError> {
     if x.len() != n * d {
         return Err(persist_err(format!(
@@ -90,25 +116,37 @@ pub(super) fn write_tensors(
         .map_err(|err| persist_err(format!("x tensor: {err}")))?;
     let y_view = TensorView::new(Dtype::F64, vec![n], y_bytes)
         .map_err(|err| persist_err(format!("y tensor: {err}")))?;
-    let bytes = if let Some((l, alpha)) = factor {
-        if l.len() != n * n {
+    let bytes = if let Some(factor) = factor {
+        let l_cells = match factor.l_dtype {
+            Dtype::F32 => factor.l.len() / size_of::<f32>(),
+            Dtype::F64 => factor.l.len() / size_of::<f64>(),
+            other => {
+                return Err(persist_err(format!("L dtype {other:?} is not f32 or f64")));
+            }
+        };
+        let alpha_cells = match factor.alpha_dtype {
+            Dtype::F32 => factor.alpha.len() / size_of::<f32>(),
+            Dtype::F64 => factor.alpha.len() / size_of::<f64>(),
+            other => {
+                return Err(persist_err(format!(
+                    "alpha dtype {other:?} is not f32 or f64"
+                )));
+            }
+        };
+        if l_cells != n * n {
             return Err(persist_err(format!(
-                "L has {} values, expected n*n = {}",
-                l.len(),
+                "L has {l_cells} values, expected n*n = {}",
                 n * n
             )));
         }
-        if alpha.len() != n {
+        if alpha_cells != n {
             return Err(persist_err(format!(
-                "alpha has {} values, expected n = {n}",
-                alpha.len()
+                "alpha has {alpha_cells} values, expected n = {n}"
             )));
         }
-        let l_bytes = f64_as_bytes(l);
-        let alpha_bytes = f64_as_bytes(alpha);
-        let l_view = TensorView::new(Dtype::F64, vec![n, n], l_bytes)
+        let l_view = TensorView::new(factor.l_dtype, vec![n, n], factor.l)
             .map_err(|err| persist_err(format!("L tensor: {err}")))?;
-        let alpha_view = TensorView::new(Dtype::F64, vec![n], alpha_bytes)
+        let alpha_view = TensorView::new(factor.alpha_dtype, vec![n], factor.alpha)
             .map_err(|err| persist_err(format!("alpha tensor: {err}")))?;
         serialize(
             [
@@ -138,32 +176,34 @@ pub(super) fn read_xy(dir: &Path, n: usize, d: usize) -> Result<(Vec<f64>, Vec<f
 }
 
 pub(super) fn read_alpha(dir: &Path, n: usize) -> Result<Vec<f64>, GprError> {
+    read_scalars::<f64>(dir, TENSOR_ALPHA, &[n], Dtype::F64)
+}
+
+pub(super) fn read_scalars<T: Copy>(
+    dir: &Path,
+    name: &str,
+    shape: &[usize],
+    dtype: Dtype,
+) -> Result<Vec<T>, GprError> {
     let path = dir.join(TENSOR_FILE);
     let bytes = std::fs::read(&path).map_err(|err| persist_err(format!("read {path:?}: {err}")))?;
     let tensors = SafeTensors::deserialize(&bytes)
         .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
-    copy_f64_tensor(&tensors, TENSOR_ALPHA, &[n])
+    let tensor = tensors
+        .tensor(name)
+        .map_err(|err| persist_err(format!("missing tensor {name}: {err}")))?;
+    validate_shape(&tensor, shape, name, dtype)?;
+    let data = scalar_slice::<T>(tensor.data())?;
+    Ok(data.to_vec())
 }
 
-pub(super) fn pack_lower_l(l: MatRef<'_, f64>, out: &mut [f64]) {
-    let n = l.nrows();
-    debug_assert_eq!(l.ncols(), n);
-    debug_assert_eq!(out.len(), n * n);
-    out.fill(0.0);
-    for col in 0..n {
-        for row in col..n {
-            out[col * n + row] = l[(row, col)];
-        }
-    }
-}
-
-pub(crate) fn copy_l_into(mut dest: MatMut<'_, f64>, src: MatRef<'_, f64>) {
-    let n = src.nrows();
-    for col in 0..n {
-        for row in 0..n {
-            dest[(row, col)] = src[(row, col)];
-        }
-    }
+pub(super) fn read_matrix<T: Copy>(
+    dir: &Path,
+    n: usize,
+    dtype: Dtype,
+) -> Result<faer::Mat<T>, GprError> {
+    let values = read_scalars::<T>(dir, TENSOR_L, &[n, n], dtype)?;
+    Ok(faer::Mat::from_fn(n, n, |row, col| values[col * n + row]))
 }
 
 fn copy_f64_tensor(
@@ -179,14 +219,15 @@ fn copy_f64_tensor(
     Ok(data.to_vec())
 }
 
-fn validate_f64_shape(
+fn validate_shape(
     tensor: &TensorView<'_>,
     shape: &[usize],
     name: &str,
+    dtype: Dtype,
 ) -> Result<(), GprError> {
-    if tensor.dtype() != Dtype::F64 {
+    if tensor.dtype() != dtype {
         return Err(persist_err(format!(
-            "tensor {name} dtype is {:?}, expected F64",
+            "tensor {name} dtype is {:?}, expected {dtype:?}",
             tensor.dtype()
         )));
     }
@@ -196,6 +237,15 @@ fn validate_f64_shape(
             tensor.shape()
         )));
     }
+    Ok(())
+}
+
+fn validate_f64_shape(
+    tensor: &TensorView<'_>,
+    shape: &[usize],
+    name: &str,
+) -> Result<(), GprError> {
+    validate_shape(tensor, shape, name, Dtype::F64)?;
     Ok(())
 }
 
@@ -214,14 +264,22 @@ fn f64_as_bytes(values: &[f64]) -> &[u8] {
     }
 }
 
+fn scalar_slice<T: Copy>(bytes: &[u8]) -> Result<&[T], GprError> {
+    if bytes.as_ptr() as usize % align_of::<T>() != 0 {
+        return Err(persist_err("tensor is not aligned"));
+    }
+    if bytes.len() % size_of::<T>() != 0 {
+        return Err(persist_err(
+            "tensor length is not a multiple of the scalar size",
+        ));
+    }
+    Ok(unsafe {
+        std::slice::from_raw_parts(bytes.as_ptr().cast::<T>(), bytes.len() / size_of::<T>())
+    })
+}
+
 fn f64_slice(bytes: &[u8]) -> Result<&[f64], GprError> {
-    if bytes.as_ptr() as usize % align_of::<f64>() != 0 {
-        return Err(persist_err("f64 tensor is not aligned"));
-    }
-    if bytes.len() % size_of::<f64>() != 0 {
-        return Err(persist_err("f64 tensor length is not a multiple of 8"));
-    }
-    Ok(unsafe { f64_slice_unchecked(bytes) })
+    scalar_slice::<f64>(bytes)
 }
 
 unsafe fn f64_slice_unchecked(bytes: &[u8]) -> &[f64] {

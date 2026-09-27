@@ -125,19 +125,22 @@ pub(crate) struct GprObjective<
     S,
     C: crate::gpr::DistanceCacheSlot = crate::CachedDistances,
     B: crate::gpr::AllocWorkspace = crate::RetainCholesky,
+    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
 > {
-    model: &'a mut FittedGpr<O, S, C, B>,
+    model: &'a mut FittedGpr<O, S, C, B, P>,
     scratch: Vec<f64>,
-    leaf_grams: Vec<Mat<f64>>,
+    leaf_grams: Vec<Mat<P::Storage>>,
     leaves_primed: bool,
 }
 
-impl<'a, O, S, C, B> GprObjective<'a, O, S, C, B>
+impl<'a, O, S, C, B, P> GprObjective<'a, O, S, C, B, P>
 where
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
-    pub(crate) fn new(model: &'a mut FittedGpr<O, S, C, B>) -> Self {
+    pub(crate) fn new(model: &'a mut FittedGpr<O, S, C, B, P>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self {
             model,
@@ -149,22 +152,26 @@ where
 }
 
 pub(crate) trait EvalObjective: Sized {
-    fn eval_value<O, C, B>(
-        obj: &mut GprObjective<'_, O, Self, C, B>,
+    fn eval_value<O, C, B, P>(
+        obj: &mut GprObjective<'_, O, Self, C, B, P>,
         params: &[f64],
     ) -> Result<f64, GprError>
     where
         C: DistanceCacheSlot,
-        B: crate::gpr::AllocWorkspace;
+        B: crate::gpr::AllocWorkspace,
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>;
 
-    fn eval_at_changes<O, C, B>(
-        obj: &mut GprObjective<'_, O, Self, C, B>,
+    fn eval_at_changes<O, C, B, P>(
+        obj: &mut GprObjective<'_, O, Self, C, B, P>,
         params: &[f64],
         indices: &[usize],
     ) -> Result<f64, GprError>
     where
         C: DistanceCacheSlot,
         B: crate::gpr::AllocWorkspace,
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let _ = indices;
         Self::eval_value(obj, params)
@@ -172,13 +179,15 @@ pub(crate) trait EvalObjective: Sized {
 }
 
 impl EvalObjective for FullRecompute {
-    fn eval_value<O, C, B>(
-        obj: &mut GprObjective<'_, O, Self, C, B>,
+    fn eval_value<O, C, B, P>(
+        obj: &mut GprObjective<'_, O, Self, C, B, P>,
         params: &[f64],
     ) -> Result<f64, GprError>
     where
         C: DistanceCacheSlot,
         B: crate::gpr::AllocWorkspace,
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let n = obj.model.num_params();
         if obj.scratch.len() != n {
@@ -190,26 +199,30 @@ impl EvalObjective for FullRecompute {
 }
 
 impl EvalObjective for IncrementalRecompute {
-    fn eval_value<O, C, B>(
-        obj: &mut GprObjective<'_, O, Self, C, B>,
+    fn eval_value<O, C, B, P>(
+        obj: &mut GprObjective<'_, O, Self, C, B, P>,
         params: &[f64],
     ) -> Result<f64, GprError>
     where
         C: DistanceCacheSlot,
         B: crate::gpr::AllocWorkspace,
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         obj.model
             .value_from_leaf_grams(params, None, &mut obj.leaf_grams, &mut obj.leaves_primed)
     }
 
-    fn eval_at_changes<O, C, B>(
-        obj: &mut GprObjective<'_, O, Self, C, B>,
+    fn eval_at_changes<O, C, B, P>(
+        obj: &mut GprObjective<'_, O, Self, C, B, P>,
         params: &[f64],
         indices: &[usize],
     ) -> Result<f64, GprError>
     where
         C: DistanceCacheSlot,
         B: crate::gpr::AllocWorkspace,
+        P: crate::precision::GpScalar,
+        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         obj.model.value_from_leaf_grams(
             params,
@@ -220,11 +233,13 @@ impl EvalObjective for IncrementalRecompute {
     }
 }
 
-impl<O, S, C, B> Objective for GprObjective<'_, O, S, C, B>
+impl<O, S, C, B, P> Objective for GprObjective<'_, O, S, C, B, P>
 where
     S: EvalObjective,
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
@@ -239,10 +254,12 @@ where
     }
 }
 
-impl<O, C, B> IncrementalObjective for GprObjective<'_, O, IncrementalRecompute, C, B>
+impl<O, C, B, P> IncrementalObjective for GprObjective<'_, O, IncrementalRecompute, C, B, P>
 where
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
         self.model.value_from_leaf_grams(
@@ -254,11 +271,13 @@ where
     }
 }
 
-impl<O, S, C, B> Differentiable for GprObjective<'_, O, S, C, B>
+impl<O, S, C, B, P> Differentiable for GprObjective<'_, O, S, C, B, P>
 where
     S: EvalObjective,
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model
@@ -275,21 +294,25 @@ where
     }
 }
 
-impl<O, S, C, B> TwiceDifferentiable for GprObjective<'_, O, S, C, B>
+impl<O, S, C, B, P> TwiceDifferentiable for GprObjective<'_, O, S, C, B, P>
 where
     S: EvalObjective,
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into_fit(params, out)
     }
 }
 
-impl<O, S, C, B> HasBounds for GprObjective<'_, O, S, C, B>
+impl<O, S, C, B, P> HasBounds for GprObjective<'_, O, S, C, B, P>
 where
     C: DistanceCacheSlot,
     B: crate::gpr::AllocWorkspace,
+    P: crate::precision::GpScalar,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)
@@ -301,17 +324,39 @@ where
 /// Does not own hyperparameters. After a successful evaluation,
 /// [`FittedSgpr`]'s kernel and likelihood match `params`. [`FreeInducing`]
 /// also treats column-major `Z` as parameters.
-pub(crate) struct SgprObjective<'a, O, I = crate::FixedInducing> {
-    model: &'a mut FittedSgpr<O, I>,
+#[allow(private_bounds)]
+pub(crate) struct SgprObjective<
+    'a,
+    O,
+    I = crate::FixedInducing,
+    P: crate::precision::GpScalar + crate::sgpr::factor::MeanDot + crate::sgpr::factor::PublishSgprWeights = crate::precision::DoublePrecision,
+>
+where
+    crate::kernel::CompiledKernel<P::Storage>:
+        crate::kernel::GramKernel<T = P::Storage>,
+{
+    model: &'a mut FittedSgpr<O, I, P>,
 }
 
-impl<'a, O, I> SgprObjective<'a, O, I> {
-    pub(crate) fn new(model: &'a mut FittedSgpr<O, I>) -> Self {
+impl<'a, O, I, P> SgprObjective<'a, O, I, P>
+where
+    P: crate::precision::GpScalar
+        + crate::sgpr::factor::MeanDot
+        + crate::sgpr::factor::PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
+    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, P>) -> Self {
         Self { model }
     }
 }
 
-impl<O, I: InducingLayout> Objective for SgprObjective<'_, O, I> {
+impl<O, I: InducingLayout, P> Objective for SgprObjective<'_, O, I, P>
+where
+    P: crate::precision::GpScalar
+        + crate::sgpr::factor::MeanDot
+        + crate::sgpr::factor::PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
     fn num_params(&self) -> usize {
         self.model.num_params()
     }
@@ -325,7 +370,13 @@ impl<O, I: InducingLayout> Objective for SgprObjective<'_, O, I> {
     }
 }
 
-impl<O, I: InducingLayout> Differentiable for SgprObjective<'_, O, I> {
+impl<O, I: InducingLayout, P> Differentiable for SgprObjective<'_, O, I, P>
+where
+    P: crate::precision::GpScalar
+        + crate::sgpr::factor::MeanDot
+        + crate::sgpr::factor::PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.value_and_gradient_into(params, out).map(|_| ())
     }
@@ -339,13 +390,25 @@ impl<O, I: InducingLayout> Differentiable for SgprObjective<'_, O, I> {
     }
 }
 
-impl<O, I: InducingLayout> TwiceDifferentiable for SgprObjective<'_, O, I> {
+impl<O, I: InducingLayout, P> TwiceDifferentiable for SgprObjective<'_, O, I, P>
+where
+    P: crate::precision::GpScalar
+        + crate::sgpr::factor::MeanDot
+        + crate::sgpr::factor::PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into(params, out)
     }
 }
 
-impl<O, I: InducingLayout> HasBounds for SgprObjective<'_, O, I> {
+impl<O, I: InducingLayout, P> HasBounds for SgprObjective<'_, O, I, P>
+where
+    P: crate::precision::GpScalar
+        + crate::sgpr::factor::MeanDot
+        + crate::sgpr::factor::PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)
     }

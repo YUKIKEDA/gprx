@@ -1,10 +1,15 @@
 //! Trainer for stochastic variational GPR.
 
+use std::marker::PhantomData;
+
+use super::factor::SvgpMean;
 use crate::error::GprError;
 use crate::gpr::factor::{require_param_len, write_params};
 use crate::kernel::KernelSpec;
+use crate::kernel::{CompiledKernel, GramKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Adam, Fixed};
+use crate::precision::{DoublePrecision, GpScalar};
 
 use super::factor::{assemble_fitted, run_adam_fit};
 use super::fitted::FittedSvgp;
@@ -35,10 +40,11 @@ use super::fitted::FittedSvgp;
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Svgp<O = Fixed> {
+pub struct Svgp<O = Fixed, P = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
+    pub(crate) _precision: PhantomData<P>,
 }
 
 impl Svgp {
@@ -52,11 +58,12 @@ impl Svgp {
             kernel,
             likelihood,
             optimizer: Fixed,
+            _precision: PhantomData,
         }
     }
 }
 
-impl<O> Svgp<O> {
+impl<O, P> Svgp<O, P> {
     /// Replaces the optimizer type parameter.
     ///
     /// [`Fixed`] keeps [`Svgp<Fixed>::factor`]. [`Adam`] enables
@@ -79,11 +86,26 @@ impl<O> Svgp<O> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, P> {
         Svgp {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer,
+            _precision: PhantomData,
+        }
+    }
+
+    /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
+    #[allow(private_bounds)]
+    pub fn with_precision<P2: GpScalar + SvgpMean>(self) -> Svgp<O, P2>
+    where
+        CompiledKernel<P2::Storage>: GramKernel<T = P2::Storage>,
+    {
+        Svgp {
+            kernel: self.kernel,
+            likelihood: self.likelihood,
+            optimizer: self.optimizer,
+            _precision: PhantomData,
         }
     }
 
@@ -139,7 +161,12 @@ impl<O> Svgp<O> {
     }
 }
 
-impl Svgp<Fixed> {
+#[allow(private_bounds)]
+impl<P> Svgp<Fixed, P>
+where
+    P: GpScalar + SvgpMean,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     /// Factors `K_mm` and installs a whitened prior `q(u)` at the current `θ`.
     ///
     /// `x` and `z` are column-major (`n` / `m` points by `d` features). `Z`
@@ -180,7 +207,7 @@ impl Svgp<Fixed> {
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSvgp, (Self, GprError)> {
+    ) -> Result<FittedSvgp<P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
@@ -198,7 +225,12 @@ impl Svgp<Fixed> {
     }
 }
 
-impl Svgp<Adam> {
+#[allow(private_bounds)]
+impl<P> Svgp<Adam, P>
+where
+    P: GpScalar + SvgpMean,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     /// Factors a whitened prior `q` and runs mini-batch Adam on `θ` and `q`.
     ///
     /// Starts from the same prior as [`Svgp<Fixed>::factor`]. Kernel and
@@ -243,7 +275,7 @@ impl Svgp<Adam> {
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSvgp, (Self, GprError)> {
+    ) -> Result<FittedSvgp<P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,

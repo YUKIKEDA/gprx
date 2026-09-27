@@ -37,11 +37,12 @@ mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
+pub(crate) use compiled::gram::GramKernel;
 pub(crate) use compiled::{CoordMode, MixedKernelViews};
 pub use constant::ConstantKernel;
-pub(crate) use dist::{
-    fill_ard_squared_diff, fill_squared_euclidean, fill_squared_euclidean_cross,
-};
+#[cfg(test)]
+pub(crate) use dist::fill_ard_squared_diff;
+pub(crate) use dist::{FillDistances, fill_squared_euclidean};
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};

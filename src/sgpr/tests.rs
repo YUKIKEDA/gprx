@@ -1189,8 +1189,8 @@ fn rank1_rbf_plus_white_n4_m2_matches_factor() {
     });
 }
 
-fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState {
-    VfeState {
+fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState<f64> {
+    VfeState::<f64> {
         k_mm_l: fitted.k_mm_l.clone(),
         a: fitted.a.clone(),
         b_l: fitted.b_l.clone(),
@@ -1200,7 +1200,7 @@ fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState {
     }
 }
 
-fn assert_inducing_matches_factor(got: &VfeState, want: &FittedSgpr<Fixed>) {
+fn assert_inducing_matches_factor(got: &VfeState<f64>, want: &FittedSgpr<Fixed>) {
     assert_eq!(got.a.nrows(), want.a.nrows());
     assert_eq!(got.a.ncols(), want.a.ncols());
     for j in 0..got.a.ncols() {

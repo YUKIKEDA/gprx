@@ -9,18 +9,19 @@ use crate::error::GprError;
 use crate::gpr::PointId;
 use crate::gpr::factor::write_params;
 use crate::gpr::online::PointRegistry;
-use crate::kernel::KernelSpec;
+use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
+use crate::precision::{DoublePrecision, ModelPrecision, StorageScalar};
 use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
 use super::factor::{
-    VfeState, append_column, append_point, assemble_vfe, chol_rank1_downdate, chol_rank1_update,
-    frobenius2, inducing_delete, inducing_insert, kernel_column, kernel_diag_at, point_at,
-    refresh_w, remove_column, remove_point, solve_lmm, vfe_neg_log_marginal_likelihood,
-    vfe_predict,
+    PublishSgprWeights, VfeState, append_column, append_point, assemble_vfe, chol_rank1_downdate,
+    chol_rank1_update, frobenius2, inducing_delete, inducing_insert, kernel_column, kernel_diag_at,
+    point_at, publish_sgpr_weights, refresh_w, remove_column, remove_point, solve_lmm,
+    vfe_neg_log_marginal_likelihood, vfe_predict,
 };
 use super::fitted::FittedSgpr;
 
@@ -159,19 +160,21 @@ impl InducingRegistry {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct OnlineSgpr<O = Lbfgs> {
+#[allow(private_bounds)]
+pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     optimizer: O,
     x_obs: Vec<f64>,
     z_obs: Vec<f64>,
     y: Vec<f64>,
-    k_mm_l: Mat<f64>,
-    a: Mat<f64>,
-    b_l: Mat<f64>,
-    w: Vec<f64>,
-    k_diag_sum: f64,
-    a_frobenius2: f64,
+    k_mm_l: Mat<P::Storage>,
+    a: Mat<P::Storage>,
+    b_l: Mat<P::Storage>,
+    w: Vec<P::Storage>,
+    predict_w: Vec<P::Refine>,
+    k_diag_sum: P::Storage,
+    a_frobenius2: P::Storage,
     n: usize,
     m: usize,
     d: usize,
@@ -179,8 +182,13 @@ pub struct OnlineSgpr<O = Lbfgs> {
     inducing: InducingRegistry,
 }
 
-impl<O> OnlineSgpr<O> {
-    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I>) -> Self {
+#[allow(private_bounds)]
+impl<O, P> OnlineSgpr<O, P>
+where
+    P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+{
+    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
         let inducing = InducingRegistry::from_count(fitted.m);
         Self {
@@ -194,6 +202,7 @@ impl<O> OnlineSgpr<O> {
             a: fitted.a,
             b_l: fitted.b_l,
             w: fitted.w,
+            predict_w: fitted.predict_w,
             k_diag_sum: fitted.k_diag_sum,
             a_frobenius2: fitted.a_frobenius2,
             n: fitted.n,
@@ -204,7 +213,7 @@ impl<O> OnlineSgpr<O> {
         }
     }
 
-    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing>
+    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing, P>
     where
         O: Clone,
     {
@@ -220,6 +229,7 @@ impl<O> OnlineSgpr<O> {
             a: self.a.clone(),
             b_l: self.b_l.clone(),
             w: self.w.clone(),
+            predict_w: self.predict_w.clone(),
             k_diag_sum: self.k_diag_sum,
             a_frobenius2: self.a_frobenius2,
             n: self.n,
@@ -228,7 +238,7 @@ impl<O> OnlineSgpr<O> {
         }
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing>) {
+    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
         self.kernel = fitted.kernel;
         self.likelihood = fitted.likelihood;
         self.optimizer = fitted.optimizer;
@@ -239,6 +249,7 @@ impl<O> OnlineSgpr<O> {
         self.a = fitted.a;
         self.b_l = fitted.b_l;
         self.w = fitted.w;
+        self.predict_w = fitted.predict_w;
         self.k_diag_sum = fitted.k_diag_sum;
         self.a_frobenius2 = fitted.a_frobenius2;
         self.n = fitted.n;
@@ -246,8 +257,8 @@ impl<O> OnlineSgpr<O> {
         self.d = fitted.d;
     }
 
-    fn vfe_state(&self) -> VfeState {
-        VfeState {
+    fn vfe_state(&self) -> VfeState<P::Storage> {
+        VfeState::<P::Storage> {
             k_mm_l: self.k_mm_l.clone(),
             a: self.a.clone(),
             b_l: self.b_l.clone(),
@@ -257,13 +268,14 @@ impl<O> OnlineSgpr<O> {
         }
     }
 
-    fn apply_vfe(&mut self, state: VfeState) {
+    fn apply_vfe(&mut self, state: VfeState<P::Storage>) -> Result<(), GprError> {
         self.k_mm_l = state.k_mm_l;
         self.a = state.a;
         self.b_l = state.b_l;
         self.w = state.w;
         self.k_diag_sum = state.k_diag_sum;
         self.a_frobenius2 = state.a_frobenius2;
+        self.refresh_predict_w()
     }
 
     /// Rebuilds the stored VFE factors from the current `X` / `Z` / `θ`.
@@ -271,7 +283,7 @@ impl<O> OnlineSgpr<O> {
     /// ADR 0005 applies first. This refresh keeps `L` aligned with `k(Z, Z)`
     /// so a long insert/delete sequence stays within the public 1e-12 check.
     fn refresh_vfe(&mut self) -> Result<(), GprError> {
-        let state = assemble_vfe(
+        let state = assemble_vfe::<P::Storage>(
             &self.kernel,
             self.likelihood,
             &self.x_obs,
@@ -281,8 +293,53 @@ impl<O> OnlineSgpr<O> {
             &self.z_obs,
             self.m,
         )?;
-        self.apply_vfe(state);
+        self.apply_vfe(state)
+    }
+
+    fn refresh_predict_w(&mut self) -> Result<(), GprError> {
+        if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
+            && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>()
+        {
+            self.predict_w = assemble_vfe::<f64>(
+                &self.kernel,
+                self.likelihood,
+                &self.x_obs,
+                self.n,
+                self.d,
+                &self.y,
+                &self.z_obs,
+                self.m,
+            )?
+            .w
+            .into_iter()
+            .map(P::Refine::from_f64)
+            .collect();
+            return Ok(());
+        }
+        self.predict_w = publish_sgpr_weights::<P>(
+            &self.kernel,
+            self.a.as_ref(),
+            self.b_l.as_ref(),
+            &self.w,
+            &self.x_obs,
+            &self.y,
+            &self.z_obs,
+            self.likelihood.noise_variance(),
+            self.n,
+            self.m,
+            self.d,
+        )?;
         Ok(())
+    }
+
+    fn recompute_w(&mut self) -> Result<(), GprError> {
+        let w = {
+            let mut y_cast = P::Storage::empty_rows();
+            let y_s = P::Storage::storage_rows(&self.y, &mut y_cast);
+            refresh_w(self.a.as_ref(), self.b_l.as_ref(), y_s)
+        };
+        self.w = w;
+        self.refresh_predict_w()
     }
 
     /// Returns the number of training points.
@@ -437,7 +494,7 @@ impl<O> OnlineSgpr<O> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
@@ -452,13 +509,13 @@ impl<O> OnlineSgpr<O> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<Prediction, GprError> {
-        vfe_predict(
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        vfe_predict::<P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
-            &self.w,
+            &self.predict_w,
             self.likelihood.noise_variance(),
             self.m,
             self.d,
@@ -493,20 +550,21 @@ impl<O> OnlineSgpr<O> {
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        let mut a_col = kernel_column(&self.kernel, &self.z_obs, self.m, x_new, self.d)?;
+        let mut a_col =
+            kernel_column::<P::Storage>(&self.kernel, &self.z_obs, self.m, x_new, self.d)?;
         solve_lmm(self.k_mm_l.as_ref(), a_col.as_mut());
-        let mut v = vec![0.0; self.m];
+        let mut v = vec![P::Storage::from_f64(0.0); self.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = a_col[(i, 0)];
         }
         self.a_frobenius2 += frobenius2(a_col.as_ref());
-        self.k_diag_sum += kernel_diag_at(&self.kernel, x_new, self.d)?;
+        self.k_diag_sum += kernel_diag_at::<P::Storage>(&self.kernel, x_new, self.d)?;
         self.a = append_column(&self.a, a_col.as_ref());
         chol_rank1_update(&mut self.b_l, &mut v);
         self.x_obs = append_point(&self.x_obs, self.n, self.d, x_new);
         self.y.push(y_new);
         self.n += 1;
-        self.w = refresh_w(self.a.as_ref(), self.b_l.as_ref(), &self.y);
+        self.recompute_w()?;
         Ok(self.registry.insert())
     }
 
@@ -554,13 +612,16 @@ impl<O> OnlineSgpr<O> {
             return Err(GprError::EmptyInput);
         }
         let idx = self.registry.index_of(id)?;
-        let mut v = vec![0.0; self.m];
+        let mut v = vec![P::Storage::from_f64(0.0); self.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = self.a[(i, idx)];
         }
         let x_pt = point_at(&self.x_obs, self.n, self.d, idx);
-        let diag = kernel_diag_at(&self.kernel, &x_pt, self.d)?;
-        let col_norm: f64 = v.iter().map(|value| *value * *value).sum();
+        let diag = kernel_diag_at::<P::Storage>(&self.kernel, &x_pt, self.d)?;
+        let mut col_norm = P::Storage::from_f64(0.0);
+        for value in &v {
+            col_norm += *value * *value;
+        }
         let x_next = remove_point(&self.x_obs, self.n, self.d, idx);
         let mut y_next = self.y.clone();
         y_next.remove(idx);
@@ -574,9 +635,9 @@ impl<O> OnlineSgpr<O> {
             self.x_obs = x_next;
             self.y = y_next;
             self.n -= 1;
-            self.w = refresh_w(self.a.as_ref(), self.b_l.as_ref(), &self.y);
+            self.recompute_w()?;
         } else {
-            let state = assemble_vfe(
+            let state = assemble_vfe::<P::Storage>(
                 &self.kernel,
                 self.likelihood,
                 &x_next,
@@ -670,7 +731,7 @@ impl<O> OnlineSgpr<O> {
         ) {
             Ok(()) => {
                 self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
-                self.apply_vfe(state);
+                self.apply_vfe(state)?;
                 self.m += 1;
             }
             Err(GprError::CholeskyFailed { .. }) => {
@@ -731,7 +792,7 @@ impl<O> OnlineSgpr<O> {
         let mut state = self.vfe_state();
         inducing_delete(&mut state, self.likelihood.noise_variance(), &self.y, idx)?;
         self.z_obs = remove_point(&self.z_obs, self.m, self.d, idx);
-        self.apply_vfe(state);
+        self.apply_vfe(state)?;
         self.m -= 1;
         self.inducing.remove_at(idx);
         self.refresh_vfe()?;
@@ -772,7 +833,7 @@ impl<O> OnlineSgpr<O> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing> {
+    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
         FittedSgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -785,6 +846,7 @@ impl<O> OnlineSgpr<O> {
             a: self.a,
             b_l: self.b_l,
             w: self.w,
+            predict_w: self.predict_w,
             k_diag_sum: self.k_diag_sum,
             a_frobenius2: self.a_frobenius2,
             n: self.n,
@@ -795,9 +857,11 @@ impl<O> OnlineSgpr<O> {
 }
 
 #[allow(private_bounds)]
-impl<O> OnlineSgpr<O>
+impl<O, P> OnlineSgpr<O, P>
 where
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,
+    P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
+    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///

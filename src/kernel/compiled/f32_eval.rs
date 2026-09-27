@@ -3,7 +3,7 @@
 //! Parameters stay `f64` and are cast once at the start of each leaf. The `f64`
 //! distance cache and SIMD paths are not used here.
 
-use super::{CompiledKernel, ard_needs_coords, iso_needs_dist, split_terms};
+use super::{CompiledKernel, MixedKernelViews, ard_needs_coords, iso_needs_dist, split_terms};
 use crate::error::GprError;
 use crate::kernel::{MaternNu, Triangle, visit_triangle};
 use faer::{Mat, MatMut, MatRef};
@@ -189,11 +189,17 @@ impl CompiledKernel<f32> {
     ) -> Result<(), GprError> {
         scratch_ok(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_)
-            | Self::Matern(_)
-            | Self::Periodic(_)
-            | Self::RationalQuadratic(_)
-            | Self::Custom(_) => Err(iso_needs_dist()),
+            Self::Rbf(leaf) => map_rect_sq(x, xs, out, |s| rbf_k(s, leaf.lengthscale())),
+            Self::Matern(leaf) => {
+                map_rect_sq(x, xs, out, |s| matern_k(s, leaf.lengthscale(), leaf.nu()))
+            }
+            Self::Periodic(leaf) => map_rect_sq(x, xs, out, |s| {
+                periodic_k(s, leaf.lengthscale(), leaf.period())
+            }),
+            Self::RationalQuadratic(leaf) => {
+                map_rect_sq(x, xs, out, |s| rq_k(s, leaf.lengthscale(), leaf.alpha()))
+            }
+            Self::Custom(_) => Err(iso_needs_dist()),
             Self::RbfArd(leaf) => rbf_ard_cross(leaf, x, xs, out),
             Self::Linear(leaf) => linear_cross(leaf.variance(), x, xs, out),
             Self::MaternArd(leaf) => matern_ard_cross(leaf, x, xs, out),
@@ -466,6 +472,393 @@ impl CompiledKernel<f32> {
                     add_rect(d_k.as_mut(), scratch.as_ref());
                 }
                 Ok(())
+            }
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn apply_from_ard_cache(
+        &self,
+        cache: MatRef<'_, f32>,
+        x: MatRef<'_, f32>,
+        out: MatMut<'_, f32>,
+        uplo: Triangle,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        let _ = cache;
+        self.apply_points(x, out, uplo, scratch)
+    }
+
+    pub(crate) fn apply_mixed(
+        &self,
+        views: MixedKernelViews<'_, f32>,
+        out: MatMut<'_, f32>,
+        uplo: Triangle,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        scratch_ok(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.apply(views.dist, out, uplo, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => self.apply_points(views.x, out, uplo, scratch),
+            Self::Sum(_) | Self::Product(_) => self.apply_points(views.x, out, uplo, scratch),
+        }
+    }
+
+    pub(crate) fn apply_cross_mixed(
+        &self,
+        dist: MatRef<'_, f32>,
+        x: MatRef<'_, f32>,
+        xs: MatRef<'_, f32>,
+        mut out: MatMut<'_, f32>,
+        mut scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        scratch_ok(out.as_ref(), scratch.as_ref())?;
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.apply_cross(dist, out, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => self.apply_cross_points(x, xs, out, scratch),
+            Self::Sum(terms) => {
+                fold_cross_mixed(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
+            }
+            Self::Product(terms) => {
+                fold_cross_mixed(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), mul_rect)
+            }
+        }
+    }
+
+    pub(crate) fn grad_from_ard_cache(
+        &self,
+        cache: MatRef<'_, f32>,
+        x: MatRef<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        let _ = cache;
+        self.grad_points(x, d_k, param_idx, uplo, scratch)
+    }
+
+    pub(crate) fn grad_mixed(
+        &self,
+        views: MixedKernelViews<'_, f32>,
+        d_k: MatMut<'_, f32>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.grad(views.dist, d_k, param_idx, uplo, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_)
+            | Self::Sum(_)
+            | Self::Product(_) => self.grad_points(views.x, d_k, param_idx, uplo, scratch),
+        }
+    }
+
+    pub(crate) fn hess_from_ard_cache(
+        &self,
+        cache: MatRef<'_, f32>,
+        x: MatRef<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        pair: (usize, usize),
+        uplo: Triangle,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        let _ = cache;
+        let (i, j) = pair;
+        self.hess_points(x, d2_k, i, j, uplo, scratch)
+    }
+
+    pub(crate) fn hess_mixed(
+        &self,
+        views: MixedKernelViews<'_, f32>,
+        d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_)
+            | Self::Constant(_)
+            | Self::White(_) => self.hess(views.dist, d2_k, i, j, uplo, scratch),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_)
+            | Self::Sum(_)
+            | Self::Product(_) => self.hess_points(views.x, d2_k, i, j, uplo, scratch),
+        }
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    pub(crate) fn grad_cross_points(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        mut d_k: MatMut<'_, f32>,
+        param_idx: usize,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => {
+                map_rect_sq(x1, x2, d_k, |s| rbf_dk(s, leaf.lengthscale(), param_idx))
+            }
+            Self::Matern(leaf) => map_rect_sq(x1, x2, d_k, |s| {
+                matern_dk(s, leaf.lengthscale(), leaf.nu(), param_idx)
+            }),
+            Self::Periodic(leaf) => map_rect_sq(x1, x2, d_k, |s| {
+                periodic_dk(s, leaf.lengthscale(), leaf.period(), param_idx)
+            }),
+            Self::RationalQuadratic(leaf) => map_rect_sq(x1, x2, d_k, |s| {
+                rq_dk(s, leaf.lengthscale(), leaf.alpha(), param_idx)
+            }),
+            Self::RbfArd(leaf) => rbf_ard_grad_cross(leaf, x1, x2, d_k, param_idx),
+            Self::MaternArd(leaf) => matern_ard_grad_cross(leaf, x1, x2, d_k, param_idx),
+            Self::RationalQuadraticArd(leaf) => rq_ard_grad_cross(leaf, x1, x2, d_k, param_idx),
+            Self::Linear(leaf) => {
+                one_index(param_idx, "linear kernel")?;
+                linear_cross(leaf.variance(), x1, x2, d_k)
+            }
+            Self::Constant(leaf) => {
+                one_index(param_idx, "constant")?;
+                require_cross_points(x1, x2, d_k.as_ref())?;
+                d_k.fill(f32_of(leaf.constant()));
+                Ok(())
+            }
+            Self::White(_) => {
+                let _ = param_idx;
+                if x1.ncols() == 0 {
+                    return Err(GprError::EmptyInput);
+                }
+                self.grad_wrt_coord_dim(x1, x2, d_k, 0)
+            }
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_cross_points(x1, x2, d_k, local, scratch)
+            }
+            Self::Custom(_) | Self::Product(_) => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn grad_diag_points(
+        &self,
+        x: MatRef<'_, f32>,
+        out: &mut [f32],
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        require_diag(x, out)?;
+        match self {
+            Self::Rbf(leaf) => each_self_sq(x, out, |s| rbf_dk(s, leaf.lengthscale(), param_idx)),
+            Self::Matern(leaf) => each_self_sq(x, out, |s| {
+                matern_dk(s, leaf.lengthscale(), leaf.nu(), param_idx)
+            }),
+            Self::Periodic(leaf) => each_self_sq(x, out, |s| {
+                periodic_dk(s, leaf.lengthscale(), leaf.period(), param_idx)
+            }),
+            Self::RationalQuadratic(leaf) => each_self_sq(x, out, |s| {
+                rq_dk(s, leaf.lengthscale(), leaf.alpha(), param_idx)
+            }),
+            Self::RbfArd(leaf) => rbf_ard_grad_diag(leaf, x, out, param_idx),
+            Self::MaternArd(leaf) => matern_ard_grad_diag(leaf, x, out, param_idx),
+            Self::RationalQuadraticArd(leaf) => rq_ard_grad_diag(leaf, x, out, param_idx),
+            Self::Linear(leaf) => {
+                one_index(param_idx, "linear kernel")?;
+                linear_diag(leaf.variance(), x, out)
+            }
+            Self::Constant(leaf) => {
+                one_index(param_idx, "constant")?;
+                out.fill(f32_of(leaf.constant()));
+                Ok(())
+            }
+            Self::White(leaf) => {
+                one_index(param_idx, "white kernel")?;
+                out.fill(f32_of(leaf.variance()));
+                Ok(())
+            }
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_diag_points(x, out, local)
+            }
+            Self::Custom(_) | Self::Product(_) => {
+                copy_lower_diag(x.nrows(), out, |full, scratch| {
+                    self.grad_points(x, full, param_idx, Triangle::Lower, scratch)
+                })
+            }
+        }
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    pub(crate) fn hess_cross_points(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        mut d2_k: MatMut<'_, f32>,
+        i: usize,
+        j: usize,
+        scratch: MatMut<'_, f32>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => map_rect_sq(x1, x2, d2_k, |s| rbf_d2(s, leaf.lengthscale(), i, j)),
+            Self::Matern(leaf) => map_rect_sq(x1, x2, d2_k, |s| {
+                matern_d2(s, leaf.lengthscale(), leaf.nu(), i, j)
+            }),
+            Self::RationalQuadratic(leaf) => map_rect_sq(x1, x2, d2_k, |s| {
+                rq_d2(s, leaf.lengthscale(), leaf.alpha(), i, j)
+            }),
+            Self::RbfArd(leaf) => rbf_ard_hess_cross(leaf, x1, x2, d2_k, i, j),
+            Self::MaternArd(leaf) => matern_ard_hess_cross(leaf, x1, x2, d2_k, i, j),
+            Self::RationalQuadraticArd(leaf) => rq_ard_hess_cross(leaf, x1, x2, d2_k, i, j),
+            Self::White(_) => {
+                let _ = (i, j);
+                if x1.ncols() == 0 {
+                    return Err(GprError::EmptyInput);
+                }
+                self.grad_wrt_coord_dim(x1, x2, d2_k, 0)
+            }
+            Self::Sum(terms) => match owners(terms, i, j)? {
+                Owners::Same {
+                    term,
+                    local_i,
+                    local_j,
+                } => term.hess_cross_points(x1, x2, d2_k, local_i, local_j, scratch),
+                Owners::Distinct { .. } => {
+                    d2_k.fill(0.0);
+                    Ok(())
+                }
+            },
+            Self::Periodic(_)
+            | Self::Linear(_)
+            | Self::Constant(_)
+            | Self::Custom(_)
+            | Self::Product(_) => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_diag_points(
+        &self,
+        x: MatRef<'_, f32>,
+        out: &mut [f32],
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_diag(x, out)?;
+        copy_lower_diag(x.nrows(), out, |full, scratch| {
+            self.hess_points(x, full, i, j, Triangle::Lower, scratch)
+        })
+    }
+
+    pub(crate) fn hess_wrt_coord_dims(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        mut d2_k: MatMut<'_, f32>,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => rbf_hess_coord_dims(leaf.lengthscale(), x1, x2, d2_k, dim_a, dim_b),
+            Self::Matern(leaf) => {
+                matern_hess_coord_dims(leaf.nu(), leaf.lengthscale(), x1, x2, d2_k, dim_a, dim_b)
+            }
+            Self::RbfArd(leaf) => rbf_ard_hess_coord_dims(leaf, x1, x2, d2_k, dim_a, dim_b),
+            Self::White(_) => {
+                require_coord(x1, x2, d2_k.as_ref(), dim_a)?;
+                require_coord(x1, x2, d2_k.as_ref(), dim_b)?;
+                d2_k.fill(0.0);
+                Ok(())
+            }
+            Self::Sum(terms) => fold_coord_sum(terms, d2_k, |term, dest| {
+                term.hess_wrt_coord_dims(x1, x2, dest, dim_a, dim_b)
+            }),
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        mut d2_k: MatMut<'_, f32>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => {
+                rbf_hess_coord_mixed(leaf.lengthscale(), x1, x2, d2_k, dim_x1, dim_x2)
+            }
+            Self::Matern(leaf) => {
+                matern_hess_coord_mixed(leaf.nu(), leaf.lengthscale(), x1, x2, d2_k, dim_x1, dim_x2)
+            }
+            Self::RbfArd(leaf) => rbf_ard_hess_coord_mixed(leaf, x1, x2, d2_k, dim_x1, dim_x2),
+            Self::White(_) => {
+                require_coord(x1, x2, d2_k.as_ref(), dim_x1)?;
+                require_coord(x1, x2, d2_k.as_ref(), dim_x2)?;
+                d2_k.fill(0.0);
+                Ok(())
+            }
+            Self::Sum(terms) => fold_coord_sum(terms, d2_k, |term, dest| {
+                term.hess_wrt_coord_mixed(x1, x2, dest, dim_x1, dim_x2)
+            }),
+            _ => Err(GprError::CoordGradientUnsupported),
+        }
+    }
+
+    pub(crate) fn hess_theta_coord_dim(
+        &self,
+        x1: MatRef<'_, f32>,
+        x2: MatRef<'_, f32>,
+        mut d2_k: MatMut<'_, f32>,
+        param_idx: usize,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => {
+                rbf_hess_theta_coord(leaf.lengthscale(), x1, x2, d2_k, param_idx, dim)
+            }
+            Self::Matern(leaf) => {
+                matern_hess_theta_coord(leaf.nu(), leaf.lengthscale(), x1, x2, d2_k, param_idx, dim)
+            }
+            Self::RbfArd(leaf) => rbf_ard_hess_theta_coord(leaf, x1, x2, d2_k, param_idx, dim),
+            Self::White(_) => {
+                one_index(param_idx, "white kernel")?;
+                require_coord(x1, x2, d2_k.as_ref(), dim)?;
+                d2_k.fill(0.0);
+                Ok(())
+            }
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.hess_theta_coord_dim(x1, x2, d2_k, local, dim)
             }
             _ => Err(GprError::CoordGradientUnsupported),
         }
@@ -1835,6 +2228,655 @@ fn rbf_ard_coord(
             let k = finite((-0.5 * r2).exp())?;
             let delta = x1[(row, dim)] - x2[(col, dim)];
             d_k[(row, col)] = finite(k * delta * w[dim])?;
+        }
+    }
+    Ok(())
+}
+
+fn map_rect_sq(
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    mut kernel: impl FnMut(f32) -> Result<f32, GprError>,
+) -> Result<(), GprError> {
+    require_cross_points(x1, x2, out.as_ref())?;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            out[(row, col)] = kernel(sq_pair(x1, row, x2, col)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_diag(x: MatRef<'_, f32>, out: &[f32]) -> Result<(), GprError> {
+    if x.nrows() == 0 || x.ncols() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if out.len() != x.nrows() {
+        return Err(GprError::InvalidHyperparameter {
+            reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
+        });
+    }
+    Ok(())
+}
+
+fn each_self_sq(
+    x: MatRef<'_, f32>,
+    out: &mut [f32],
+    mut kernel: impl FnMut(f32) -> Result<f32, GprError>,
+) -> Result<(), GprError> {
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = kernel(sq_pair(x, i, x, i)?)?;
+    }
+    Ok(())
+}
+
+fn copy_lower_diag(
+    n: usize,
+    out: &mut [f32],
+    fill: impl FnOnce(MatMut<'_, f32>, MatMut<'_, f32>) -> Result<(), GprError>,
+) -> Result<(), GprError> {
+    let mut full = Mat::zeros(n, n);
+    let mut scratch = Mat::zeros(n, n);
+    fill(full.as_mut(), scratch.as_mut())?;
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = full[(i, i)];
+    }
+    Ok(())
+}
+
+fn fold_cross_mixed(
+    terms: &[CompiledKernel<f32>],
+    dist: MatRef<'_, f32>,
+    x: MatRef<'_, f32>,
+    xs: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    mut scratch: MatMut<'_, f32>,
+    combine: fn(MatMut<'_, f32>, MatRef<'_, f32>),
+) -> Result<(), GprError> {
+    let (first, rest) = split_terms(terms)?;
+    first.apply_cross_mixed(dist, x, xs, out.as_mut(), scratch.as_mut())?;
+    let rows = out.nrows();
+    let cols = out.ncols();
+    let mut extra = None;
+    for term in rest {
+        if term.needs_internal_scratch() {
+            let buf = extra.get_or_insert_with(|| Mat::zeros(rows, cols));
+            term.apply_cross_mixed(dist, x, xs, scratch.as_mut(), buf.as_mut())?;
+        } else {
+            term.apply_cross_mixed(dist, x, xs, scratch.as_mut(), out.as_mut())?;
+        }
+        combine(out.as_mut(), scratch.as_ref());
+    }
+    Ok(())
+}
+
+fn fold_coord_sum(
+    terms: &[CompiledKernel<f32>],
+    mut out: MatMut<'_, f32>,
+    mut eval: impl FnMut(&CompiledKernel<f32>, MatMut<'_, f32>) -> Result<(), GprError>,
+) -> Result<(), GprError> {
+    let (first, rest) = terms
+        .split_first()
+        .ok_or(GprError::CoordGradientUnsupported)?;
+    eval(first, out.as_mut())?;
+    if rest.is_empty() {
+        return Ok(());
+    }
+    let mut scratch = Mat::zeros(out.nrows(), out.ncols());
+    for term in rest {
+        eval(term, scratch.as_mut())?;
+        add_rect(out.as_mut(), scratch.as_ref());
+    }
+    Ok(())
+}
+
+fn rbf_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
+    if idx >= d {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("ARD RBF parameter {idx} is out of range (d={d})"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn matern_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
+    if idx >= d {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("ARD Matern parameter index {idx} is out of range (d={d})"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn rq_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
+    if idx > d {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("rational quadratic ARD parameter {idx} is out of range"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn coord_in_ard(dim: usize, d: usize) -> Result<(), GprError> {
+    if dim >= d {
+        Err(GprError::InvalidHyperparameter {
+            reason: format!("coordinate dimension {dim} is out of range for d={d}"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn rbf_ard_grad_cross(
+    leaf: &crate::kernel::RbfArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    idx: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    rbf_ard_param(idx, d)?;
+    require_feature(x1, d)?;
+    require_cross_points(x1, x2, out.as_ref())?;
+    let w = weights(leaf.lengthscales());
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, terms) = ard_terms(x1, row, x2, col, &w)?;
+            let k = finite((-0.5 * r2).exp())?;
+            out[(row, col)] = finite(k * terms[idx])?;
+        }
+    }
+    Ok(())
+}
+
+fn matern_ard_grad_cross(
+    leaf: &crate::kernel::MaternArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    idx: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    matern_ard_param(idx, d)?;
+    require_feature(x1, d)?;
+    require_cross_points(x1, x2, out.as_ref())?;
+    let w = weights(leaf.lengthscales());
+    let nu = leaf.nu();
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, terms) = ard_terms(x1, row, x2, col, &w)?;
+            out[(row, col)] = finite(matern_dk_ard(nu, r2.max(0.0).sqrt(), terms[idx]))?;
+        }
+    }
+    Ok(())
+}
+
+fn rq_ard_grad_cross(
+    leaf: &crate::kernel::RationalQuadraticArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    idx: usize,
+) -> Result<(), GprError> {
+    let d = leaf.lengthscales().num_params();
+    rq_ard_param(idx, d)?;
+    require_feature(x1, d)?;
+    require_cross_points(x1, x2, out.as_ref())?;
+    let (w, alpha) = rq_ard_parts(leaf)?;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, terms) = ard_terms(x1, row, x2, col, &w)?;
+            let u = 1.0 + r2 / (2.0 * alpha);
+            let k = rq_from(r2, alpha)?;
+            out[(row, col)] = if idx == d {
+                finite(alpha * k * (-u.ln() + 1.0 - 1.0 / u))?
+            } else {
+                finite((k / u) * terms[idx])?
+            };
+        }
+    }
+    Ok(())
+}
+
+fn rbf_ard_grad_diag(
+    leaf: &crate::kernel::RbfArdKernel,
+    x: MatRef<'_, f32>,
+    out: &mut [f32],
+    idx: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    rbf_ard_param(idx, d)?;
+    require_feature(x, d)?;
+    let w = weights(leaf.lengthscales());
+    for (i, slot) in out.iter_mut().enumerate() {
+        let (r2, terms) = ard_terms(x, i, x, i, &w)?;
+        let k = finite((-0.5 * r2).exp())?;
+        *slot = finite(k * terms[idx])?;
+    }
+    Ok(())
+}
+
+fn matern_ard_grad_diag(
+    leaf: &crate::kernel::MaternArdKernel,
+    x: MatRef<'_, f32>,
+    out: &mut [f32],
+    idx: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    matern_ard_param(idx, d)?;
+    require_feature(x, d)?;
+    let w = weights(leaf.lengthscales());
+    let nu = leaf.nu();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let (r2, terms) = ard_terms(x, i, x, i, &w)?;
+        *slot = finite(matern_dk_ard(nu, r2.max(0.0).sqrt(), terms[idx]))?;
+    }
+    Ok(())
+}
+
+fn rq_ard_grad_diag(
+    leaf: &crate::kernel::RationalQuadraticArdKernel,
+    x: MatRef<'_, f32>,
+    out: &mut [f32],
+    idx: usize,
+) -> Result<(), GprError> {
+    let d = leaf.lengthscales().num_params();
+    rq_ard_param(idx, d)?;
+    require_feature(x, d)?;
+    let (w, alpha) = rq_ard_parts(leaf)?;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let (r2, terms) = ard_terms(x, i, x, i, &w)?;
+        let u = 1.0 + r2 / (2.0 * alpha);
+        let k = rq_from(r2, alpha)?;
+        *slot = if idx == d {
+            finite(alpha * k * (-u.ln() + 1.0 - 1.0 / u))?
+        } else {
+            finite((k / u) * terms[idx])?
+        };
+    }
+    Ok(())
+}
+
+fn rbf_ard_hess_cross(
+    leaf: &crate::kernel::RbfArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    i: usize,
+    j: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    pair_index(i, j, d, "ARD RBF")?;
+    require_feature(x1, d)?;
+    require_cross_points(x1, x2, out.as_ref())?;
+    let w = weights(leaf.lengthscales());
+    let same = i == j;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, terms) = ard_terms(x1, row, x2, col, &w)?;
+            let k = finite((-0.5 * r2).exp())?;
+            let h = if same {
+                k * terms[i] * (terms[i] - 2.0)
+            } else {
+                k * terms[i] * terms[j]
+            };
+            out[(row, col)] = finite(h)?;
+        }
+    }
+    Ok(())
+}
+
+fn matern_ard_hess_cross(
+    leaf: &crate::kernel::MaternArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    i: usize,
+    j: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    pair_index(i, j, d, "ARD Matern")?;
+    require_feature(x1, d)?;
+    require_cross_points(x1, x2, out.as_ref())?;
+    let w = weights(leaf.lengthscales());
+    let nu = leaf.nu();
+    let same = i == j;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, terms) = ard_terms(x1, row, x2, col, &w)?;
+            out[(row, col)] = finite(matern_d2_ard(
+                nu,
+                r2.max(0.0).sqrt(),
+                terms[i],
+                terms[j],
+                same,
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+fn rq_ard_hess_cross(
+    leaf: &crate::kernel::RationalQuadraticArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut out: MatMut<'_, f32>,
+    i: usize,
+    j: usize,
+) -> Result<(), GprError> {
+    let d = leaf.lengthscales().num_params();
+    pair_index(i, j, d + 1, "rational quadratic ARD")?;
+    require_feature(x1, d)?;
+    require_cross_points(x1, x2, out.as_ref())?;
+    let (w, alpha) = rq_ard_parts(leaf)?;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, terms) = ard_terms(x1, row, x2, col, &w)?;
+            let u = 1.0 + r2 / (2.0 * alpha);
+            let k = rq_from(r2, alpha)?;
+            let (a, b) = if i <= j { (i, j) } else { (j, i) };
+            let h = if a == d && b == d {
+                let v = -u.ln() + 1.0 - 1.0 / u;
+                let dv = (1.0 - u) * (1.0 - u) / (u * u);
+                let h = alpha * k * v;
+                h + (h * h) / k + alpha * k * dv
+            } else if b == d {
+                (k / u) * terms[a] * (-alpha * u.ln() + (alpha + 1.0) * (u - 1.0) / u)
+            } else if a == b {
+                -2.0 * (k / u) * terms[a] + (1.0 + 1.0 / alpha) * terms[a] * terms[a] * k / (u * u)
+            } else {
+                (1.0 + 1.0 / alpha) * terms[a] * terms[b] * k / (u * u)
+            };
+            out[(row, col)] = finite(h)?;
+        }
+    }
+    Ok(())
+}
+
+fn rbf_hess_coord_dims(
+    ell: f64,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    dim_a: usize,
+    dim_b: usize,
+) -> Result<(), GprError> {
+    require_coord(x1, x2, d2_k.as_ref(), dim_a)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim_b)?;
+    let ell = f32_of(ell);
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let inv_two = 0.5 * inv_ell_sq;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let s = sq_pair(x1, row, x2, col)?;
+            let k = finite((-s * inv_two).exp())?;
+            let da = x1[(row, dim_a)] - x2[(col, dim_a)];
+            let db = x1[(row, dim_b)] - x2[(col, dim_b)];
+            let mut value = k * da * db * inv_ell_sq * inv_ell_sq;
+            if dim_a == dim_b {
+                value -= k * inv_ell_sq;
+            }
+            d2_k[(row, col)] = finite(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn rbf_hess_coord_mixed(
+    ell: f64,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    dim_x1: usize,
+    dim_x2: usize,
+) -> Result<(), GprError> {
+    require_coord(x1, x2, d2_k.as_ref(), dim_x1)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim_x2)?;
+    let ell = f32_of(ell);
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let inv_two = 0.5 * inv_ell_sq;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let s = sq_pair(x1, row, x2, col)?;
+            let k = finite((-s * inv_two).exp())?;
+            let d1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
+            let d2 = x1[(row, dim_x2)] - x2[(col, dim_x2)];
+            let mut value = -k * d1 * d2 * inv_ell_sq * inv_ell_sq;
+            if dim_x1 == dim_x2 {
+                value += k * inv_ell_sq;
+            }
+            d2_k[(row, col)] = finite(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn rbf_hess_theta_coord(
+    ell: f64,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    param_idx: usize,
+    dim: usize,
+) -> Result<(), GprError> {
+    one_index(param_idx, "RBF")?;
+    require_coord(x1, x2, d2_k.as_ref(), dim)?;
+    let ell = f32_of(ell);
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let inv_two = 0.5 * inv_ell_sq;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let s = sq_pair(x1, row, x2, col)?;
+            let k = finite((-s * inv_two).exp())?;
+            let delta = x1[(row, dim)] - x2[(col, dim)];
+            d2_k[(row, col)] = finite(k * delta * inv_ell_sq * (s * inv_ell_sq - 2.0))?;
+        }
+    }
+    Ok(())
+}
+
+fn matern_hess_coord_dims(
+    nu: MaternNu,
+    ell: f64,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    dim_a: usize,
+    dim_b: usize,
+) -> Result<(), GprError> {
+    if nu != MaternNu::ThreeHalves {
+        return Err(GprError::CoordGradientUnsupported);
+    }
+    require_coord(x1, x2, d2_k.as_ref(), dim_a)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim_b)?;
+    let ell = f32_of(ell);
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let scale = 3.0f32.sqrt() / ell;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let s = sq_pair(x1, row, x2, col)?;
+            let r = finite(s.max(0.0).sqrt())?;
+            let da = x1[(row, dim_a)] - x2[(col, dim_a)];
+            let db = x1[(row, dim_b)] - x2[(col, dim_b)];
+            let psi = (-scale * r).exp();
+            let mut value = -3.0 * inv_ell_sq * psi;
+            if dim_a != dim_b {
+                value = 0.0;
+            }
+            if r > 0.0 {
+                value = 3.0 * inv_ell_sq * psi * (scale * da * db / r);
+                if dim_a == dim_b {
+                    value -= 3.0 * inv_ell_sq * psi;
+                }
+            }
+            d2_k[(row, col)] = finite(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn matern_hess_coord_mixed(
+    nu: MaternNu,
+    ell: f64,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    dim_x1: usize,
+    dim_x2: usize,
+) -> Result<(), GprError> {
+    if nu != MaternNu::ThreeHalves {
+        return Err(GprError::CoordGradientUnsupported);
+    }
+    require_coord(x1, x2, d2_k.as_ref(), dim_x1)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim_x2)?;
+    let ell = f32_of(ell);
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let scale = 3.0f32.sqrt() / ell;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let s = sq_pair(x1, row, x2, col)?;
+            let r = finite(s.max(0.0).sqrt())?;
+            let d1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
+            let d2 = x1[(row, dim_x2)] - x2[(col, dim_x2)];
+            let psi = (-scale * r).exp();
+            let mut value = if dim_x1 == dim_x2 {
+                3.0 * inv_ell_sq * psi
+            } else {
+                0.0
+            };
+            if r > 0.0 {
+                value = 3.0 * inv_ell_sq * psi * (-scale * d1 * d2 / r);
+                if dim_x1 == dim_x2 {
+                    value += 3.0 * inv_ell_sq * psi;
+                }
+            }
+            d2_k[(row, col)] = finite(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn matern_hess_theta_coord(
+    nu: MaternNu,
+    ell: f64,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    param_idx: usize,
+    dim: usize,
+) -> Result<(), GprError> {
+    one_index(param_idx, "Matern")?;
+    if nu != MaternNu::ThreeHalves {
+        return Err(GprError::CoordGradientUnsupported);
+    }
+    require_coord(x1, x2, d2_k.as_ref(), dim)?;
+    let ell = f32_of(ell);
+    let inv_ell_sq = 1.0 / (ell * ell);
+    let scale = 3.0f32.sqrt() / ell;
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let s = sq_pair(x1, row, x2, col)?;
+            let r = finite(s.max(0.0).sqrt())?;
+            let delta = x1[(row, dim)] - x2[(col, dim)];
+            let psi = (-scale * r).exp();
+            d2_k[(row, col)] = finite(3.0 * inv_ell_sq * psi * delta * (scale * r - 2.0))?;
+        }
+    }
+    Ok(())
+}
+
+fn rbf_ard_hess_coord_dims(
+    leaf: &crate::kernel::RbfArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    dim_a: usize,
+    dim_b: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    require_coord(x1, x2, d2_k.as_ref(), dim_a)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim_b)?;
+    coord_in_ard(dim_a, d)?;
+    coord_in_ard(dim_b, d)?;
+    require_feature(x1, d)?;
+    let w = weights(leaf.lengthscales());
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, _) = ard_terms(x1, row, x2, col, &w)?;
+            let k = finite((-0.5 * r2).exp())?;
+            let da = x1[(row, dim_a)] - x2[(col, dim_a)];
+            let db = x1[(row, dim_b)] - x2[(col, dim_b)];
+            let mut value = k * da * db * w[dim_a] * w[dim_b];
+            if dim_a == dim_b {
+                value -= k * w[dim_a];
+            }
+            d2_k[(row, col)] = finite(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn rbf_ard_hess_coord_mixed(
+    leaf: &crate::kernel::RbfArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    dim_x1: usize,
+    dim_x2: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    require_coord(x1, x2, d2_k.as_ref(), dim_x1)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim_x2)?;
+    coord_in_ard(dim_x1, d)?;
+    coord_in_ard(dim_x2, d)?;
+    require_feature(x1, d)?;
+    let w = weights(leaf.lengthscales());
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, _) = ard_terms(x1, row, x2, col, &w)?;
+            let k = finite((-0.5 * r2).exp())?;
+            let d1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
+            let d2 = x1[(row, dim_x2)] - x2[(col, dim_x2)];
+            let mut value = -k * d1 * d2 * w[dim_x1] * w[dim_x2];
+            if dim_x1 == dim_x2 {
+                value += k * w[dim_x1];
+            }
+            d2_k[(row, col)] = finite(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn rbf_ard_hess_theta_coord(
+    leaf: &crate::kernel::RbfArdKernel,
+    x1: MatRef<'_, f32>,
+    x2: MatRef<'_, f32>,
+    mut d2_k: MatMut<'_, f32>,
+    param_idx: usize,
+    dim: usize,
+) -> Result<(), GprError> {
+    let d = leaf.num_params();
+    rbf_ard_param(param_idx, d)?;
+    require_coord(x1, x2, d2_k.as_ref(), dim)?;
+    coord_in_ard(dim, d)?;
+    require_feature(x1, d)?;
+    let w = weights(leaf.lengthscales());
+    for col in 0..x2.nrows() {
+        for row in 0..x1.nrows() {
+            let (r2, _) = ard_terms(x1, row, x2, col, &w)?;
+            let k = finite((-0.5 * r2).exp())?;
+            let delta_theta = x1[(row, param_idx)] - x2[(col, param_idx)];
+            let delta_dim = x1[(row, dim)] - x2[(col, dim)];
+            let dk_dtheta = k * delta_theta * delta_theta * w[param_idx];
+            let mut value = dk_dtheta * delta_dim * w[dim];
+            if param_idx == dim {
+                value += k * delta_dim * (-2.0 * w[dim]);
+            }
+            d2_k[(row, col)] = finite(value)?;
         }
     }
     Ok(())
