@@ -333,9 +333,11 @@ pub(crate) fn svgp_value_and_gradient(
     let inv_noise = 1.0 / noise;
     let scale = n as f64 / batch.len() as f64;
     let kl = accumulate_kl_grad(model, out, n_theta, m);
-    let (ell, resid2_var) = accumulate_data_q_grad(model, out, batch, n_theta, m, inv_noise, scale);
+    let cache = point_cache(model, batch, m);
+    let (ell, resid2_var) =
+        accumulate_data_q_grad(model, out, batch, &cache, n_theta, inv_noise, scale);
     out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
-    accumulate_kernel_grad(model, out, batch, n_kernel, m, inv_noise, scale)?;
+    accumulate_kernel_grad(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
     Ok(kl - scale * ell)
 }
 
@@ -362,22 +364,49 @@ fn accumulate_kl_grad(model: &FittedSvgp, out: &mut [f64], n_theta: usize, m: us
     0.5 * (tr_s + mean_norm2 - m as f64 - log_det_s)
 }
 
+struct PointCache {
+    resid: Vec<f64>,
+    var: Vec<f64>,
+    /// `m` entries per batch row, in batch order.
+    u: Vec<f64>,
+}
+
+fn point_cache(model: &FittedSvgp, batch: &[usize], m: usize) -> PointCache {
+    let mut resid = Vec::with_capacity(batch.len());
+    let mut var = Vec::with_capacity(batch.len());
+    let mut u_all = vec![0.0; batch.len() * m];
+    let mut u = vec![0.0; m];
+    for (b_idx, &col) in batch.iter().enumerate() {
+        let (v, r) = point_stats(model, col, m, &mut u);
+        resid.push(r);
+        var.push(v);
+        u_all[b_idx * m..(b_idx + 1) * m].copy_from_slice(&u);
+    }
+    PointCache {
+        resid,
+        var,
+        u: u_all,
+    }
+}
+
 fn accumulate_data_q_grad(
     model: &FittedSvgp,
     out: &mut [f64],
     batch: &[usize],
+    cache: &PointCache,
     n_theta: usize,
-    m: usize,
     inv_noise: f64,
     scale: f64,
 ) -> (f64, f64) {
+    let m = model.m;
     let noise = model.likelihood.noise_variance();
     let log_2pi_noise = (2.0 * std::f64::consts::PI * noise).ln();
     let mut ell = 0.0;
     let mut resid2_var = 0.0;
-    let mut u = vec![0.0; m];
-    for &col in batch {
-        let (var, resid) = point_stats(model, col, m, &mut u);
+    for (b_idx, &col) in batch.iter().enumerate() {
+        let resid = cache.resid[b_idx];
+        let var = cache.var[b_idx];
+        let u = &cache.u[b_idx * m..(b_idx + 1) * m];
         ell += -0.5 * log_2pi_noise - 0.5 * inv_noise * (resid * resid + var);
         resid2_var += resid * resid + var;
         for k in 0..m {
@@ -386,7 +415,7 @@ fn accumulate_data_q_grad(
         let mut packed = 0;
         for (j, u_j) in u.iter().enumerate() {
             for i in j..m {
-                out[n_theta + m + packed] += scale * inv_noise * u_j * model.a[(i, col)];
+                out[n_theta + m + packed] += scale * inv_noise * *u_j * model.a[(i, col)];
                 packed += 1;
             }
         }
@@ -417,16 +446,16 @@ fn accumulate_kernel_grad(
     model: &FittedSvgp,
     out: &mut [f64],
     batch: &[usize],
+    cache: &PointCache,
     n_kernel: usize,
-    m: usize,
     inv_noise: f64,
     scale: f64,
 ) -> Result<(), GprError> {
+    let m = model.m;
     let compiled = model.kernel.compile();
     let x_mat = pack_points(&model.x_obs, model.n, model.d);
     let z_mat = pack_points(&model.z_obs, model.m, model.d);
     let same_xz = model.x_obs == model.z_obs;
-    let mut u = vec![0.0; m];
     let mut da_col = vec![0.0; m];
     let mut l_t_da = vec![0.0; m];
     for (param_idx, slot) in out.iter_mut().take(n_kernel).enumerate() {
@@ -439,8 +468,9 @@ fn accumulate_kernel_grad(
             param_idx,
         )?;
         let mut g = 0.0;
-        for &col in batch {
-            let (_var, resid) = point_stats(model, col, m, &mut u);
+        for (b_idx, &col) in batch.iter().enumerate() {
+            let resid = cache.resid[b_idx];
+            let u = &cache.u[b_idx * m..(b_idx + 1) * m];
             for (r, dest) in da_col.iter_mut().enumerate() {
                 *dest = d_a[(r, col)];
             }
@@ -516,15 +546,8 @@ fn kernel_theta_tangents(
     }
     let mut d_l = Mat::zeros(m, m);
     cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
-    for col in 0..n {
-        for i in 0..m {
-            let mut acc = 0.0;
-            for k in 0..=i {
-                acc += d_l[(i, k)] * model.a[(k, col)];
-            }
-            d_kmn[(i, col)] -= acc;
-        }
-    }
+    // Upper of `d_l` stays zero, so this is the lower-triangular product.
+    crate::sgpr::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
         model.k_mm_l.as_ref(),
         d_kmn.as_mut(),
