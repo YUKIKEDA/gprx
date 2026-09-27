@@ -860,7 +860,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-18（[#209](https://github.com/YUKIKEDA/gprx/issues/209)）。P4-19 と P4-20 の DoD は Grill 後。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-19（[#210](https://github.com/YUKIKEDA/gprx/issues/210)）。P4-20 の DoD は Grill 後。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
@@ -877,7 +877,7 @@ impl OnlineGpr<O, S, C, B> {
 2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
 3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
 4. **Sparse GPRの誘導点Zの最適化**: 既定は `FixedInducing`。自由 Z は `FreeInducing` で同時。理由は [ADR 0003](adr/0003-sparse-z-joint.md)
-5. **Sparse の外部照合**: バッチ正しさは P4-11（GPyTorch、相対 `1e-8`）。バッチ時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPy）。オンライン正しさは P4-13（GPyTorch 潰し SGPR、相対 `1e-8`）。オンライン時間は P4-14（`just perf-sparse-online`。自前フルと GPyTorch Titsias。CPU。正しさゲートは置かない）
+5. **Sparse の外部照合**: バッチ正しさは P4-11（GPyTorch、相対 `1e-8`）。バッチ時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPy）。`n=4096` のピーク RSS は P4-19（P4-18 の同じ時計。sgpr / svgp × Forrester / 球は GPy と GPyTorch より小さい）。オンライン正しさは P4-13（GPyTorch 潰し SGPR、相対 `1e-8`）。オンライン時間は P4-14（`just perf-sparse-online`。自前フルと GPyTorch Titsias。CPU。正しさゲートは置かない）
 6. **SVGP**: 別公開型 `Svgp` / `FittedSvgp`。`factor` / 全データ ELBO / 対角予測 / `value_and_gradient_into` / `Svgp<Adam>::fit` は載った。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Adam` は `Optimizer` ではない。VFE の `Sgpr` は残す
 
 ## 15. ベンチマーク戦略
