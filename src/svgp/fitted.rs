@@ -2,10 +2,13 @@
 
 use faer::Mat;
 
+use super::factor::SvgpMean;
 use crate::error::GprError;
 use crate::gpr::factor::{require_param_len, write_params};
 use crate::kernel::KernelSpec;
+use crate::kernel::{CompiledKernel, GramKernel};
 use crate::likelihood::GaussianLikelihood;
+use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
 use crate::{PredictOptions, Prediction};
 
 use super::factor::{
@@ -22,26 +25,32 @@ use super::factor::{
 /// likelihood `θ`, the whitened mean vector, then the packed column-major
 /// lower triangle of `L`.
 #[derive(Clone, Debug)]
-pub struct FittedSvgp {
+#[allow(private_bounds)]
+pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) x_obs: Vec<f64>,
     pub(crate) z_obs: Vec<f64>,
     pub(crate) y: Vec<f64>,
     /// Lower `L_mm` from `K_mm = L_mm L_mmᵀ`.
-    pub(crate) k_mm_l: Mat<f64>,
+    pub(crate) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
-    pub(crate) a: Mat<f64>,
+    pub(crate) a: Mat<P::Storage>,
     pub(crate) q_mean: Vec<f64>,
     /// Lower `L` from the whitened `S = L Lᵀ`.
     pub(crate) q_l: Mat<f64>,
-    pub(crate) k_diag: Vec<f64>,
+    pub(crate) k_diag: Vec<P::Storage>,
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
 }
 
-impl FittedSvgp {
+#[allow(private_bounds)]
+impl<P> FittedSvgp<P>
+where
+    P: GpScalar + SvgpMean,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     /// Returns the number of training points.
     pub fn n(&self) -> usize {
         self.n
@@ -160,7 +169,7 @@ impl FittedSvgp {
         let mut likelihood = self.likelihood;
         likelihood.set_params(&params[n_kernel..n_theta])?;
         let q = unpack_q(&params[n_theta..], self.m)?;
-        let state = assemble_svgp(
+        let state = assemble_svgp::<P::Storage>(
             &kernel,
             &self.x_obs,
             self.n,
@@ -303,7 +312,7 @@ impl FittedSvgp {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
@@ -346,14 +355,14 @@ impl FittedSvgp {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
                 expected_dim: self.d,
             });
         }
-        svgp_predict(
+        svgp_predict::<P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),

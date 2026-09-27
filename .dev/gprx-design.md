@@ -130,7 +130,7 @@ struct DoublePrecision; // Storage=f64, Refine=f64
 4. f32の`L`で`delta = solve(L, r)`、`alpha_1 = alpha_0 + delta`
 5. 収束するまで数回繰り返す
 
-実装優先度: `DoublePrecision`をデフォルトとし、`MixedPrecision`は P5-2 の predict。`A_resid`の2方式は P5-1 でクレート内部ソルバの型パラメータ（保存した f32 行列で引く型と、カーネルを f64 で計算し直す型）。コード上の別名は置かない。Forrester `n=1024` の release 中央値は、保存した f32 行列で引く型が 22.40 ms、カーネルを f64 で計算し直す型が 48.77 ms で、5% の外である。省略時の既定は bench-log の保存した f32 行列で引く型。`Gpr` の `fit` と `predict` は f64 のまま。
+実装優先度: 省略時は `DoublePrecision`（Storage = f64、Refine = f64、今の f64 経路）。`SinglePrecision` は Storage = f32、Refine = f32 で同じ手順を f32 で計算し、分解結果をそのまま使う。残差の型パラメータは持たない。`MixedPrecision<R = PromoteStorage>` は Storage = f32、Refine = f64。f32 で分解し、予測用の α だけ反復改良する。学習中の MLL と勾配は、その精度の因子を使い、反復改良は学習ループの中では行わない。残差の型は `MixedPrecision` にだけ付く。`PromoteStorage` は保存した f32 行列で引き、`ReevaluateKernel` はカーネルを f64 で計算し直す。両方を残す。省略は `PromoteStorage`。フラグと、コード上の別名は置かない。Forrester `n=1024` の release 中央値は、保存した f32 行列で引く型が 22.40 ms、カーネルを f64 で計算し直す型が 48.77 ms で、5% の外である。対象は Exact、`Sgpr`、`Svgp` と、f64 が既に持つオンライン。最適化は f64 にあるものすべて。P5-2（[#40](https://github.com/YUKIKEDA/gprx/issues/40)）。
 
 ### 4.2 混合精度反復改良の収束判定パラメータ
 
@@ -864,7 +864,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 5 の P5-1（[#39](https://github.com/YUKIKEDA/gprx/issues/39)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 5 の P5-2（[#40](https://github.com/YUKIKEDA/gprx/issues/40)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
@@ -873,7 +873,7 @@ impl OnlineGpr<O, S, C, B> {
 - **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）、transform ファイル分割の判断（P2B-20 / [#116](https://github.com/YUKIKEDA/gprx/issues/116)）。P2B-14…20 の DoD は Grill 後
 - **Phase 3(オンライン学習)**: 2b のあと。`OnlineGpr` でデータ点の追加削除。`into_online` と自前末尾 insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
 - **Phase 4(Sparse GPR)**: VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。SVGP は別型（P4-15 / P4-16）。既定は**誘導点Z固定**（`FixedInducing`）。自由 Z は `FreeInducing` で同時最適化。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。オンラインは X と誘導点を増減。X の因子は [ADR 0004](adr/0004-sparse-online-rank1.md)。誘導点の増分は [ADR 0005](adr/0005-sparse-inducing-update.md)。公開型は `OnlineSgpr`。`InducingId` / `insert_inducing` / `delete_inducing`。外部照合は P4-11…14（SVGP factor のあと）
-- **Phase 5(高度な最適化)**: 混合精度(predict中心、`A_resid`の2方式)、低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
+- **Phase 5(高度な最適化)**: `DoublePrecision` / `SinglePrecision` / `MixedPrecision`（Exact・`Sgpr`・`Svgp` と、f64 が既に持つ最適化・オンライン。P5-2）。低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
 
 ## 14. 未解決事項
 

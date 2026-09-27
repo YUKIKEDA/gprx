@@ -3,7 +3,7 @@
 use std::fmt;
 
 use crate::error::GprError;
-use crate::precision::DoublePrecision;
+use crate::precision::{PrecisionPolicy, StorageScalar};
 use crate::workspace::{FitWorkspace, WithDist, WithW, WorkspaceCore};
 
 /// Which predictive variance [`Prediction`] reports.
@@ -107,14 +107,21 @@ pub(crate) enum DistanceCachePersist {
 pub(crate) trait DistanceCacheSlot:
     Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {
-    type DistWrap<W: FitWorkspace>: FitWorkspace;
+    type DistWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const CACHES_DISTANCES: bool;
 
     fn persist(self) -> Option<DistanceCachePersist>;
 }
 
 impl DistanceCacheSlot for CachedDistances {
-    type DistWrap<W: FitWorkspace> = WithDist<W>;
+    type DistWrap<W: FitWorkspace>
+        = WithDist<W, <W::Policy as PrecisionPolicy>::Storage>
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const CACHES_DISTANCES: bool = true;
 
     fn persist(self) -> Option<DistanceCachePersist> {
@@ -123,7 +130,11 @@ impl DistanceCacheSlot for CachedDistances {
 }
 
 impl DistanceCacheSlot for UncachedDistances {
-    type DistWrap<W: FitWorkspace> = W;
+    type DistWrap<W: FitWorkspace>
+        = W
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const CACHES_DISTANCES: bool = false;
 
     fn persist(self) -> Option<DistanceCachePersist> {
@@ -140,7 +151,11 @@ impl DistanceCacheSlot for UncachedDistances {
 pub struct NoDistanceCache;
 
 impl DistanceCacheSlot for NoDistanceCache {
-    type DistWrap<W: FitWorkspace> = W;
+    type DistWrap<W: FitWorkspace>
+        = W
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const CACHES_DISTANCES: bool = false;
 
     fn persist(self) -> Option<DistanceCachePersist> {
@@ -149,9 +164,8 @@ impl DistanceCacheSlot for NoDistanceCache {
 }
 
 /// Composed fit buffers for cache policy `C` and Cholesky policy `B`.
-pub(crate) type FitBuffers<C, B> = <C as DistanceCacheSlot>::DistWrap<
-    <B as AllocWorkspace>::CholWrap<WorkspaceCore<DoublePrecision>>,
->;
+pub(crate) type FitBuffers<C, B, P = crate::precision::DoublePrecision> =
+    <C as DistanceCacheSlot>::DistWrap<<B as AllocWorkspace>::CholWrap<WorkspaceCore<P>>>;
 
 /// Numerical Cholesky stabilizer, distinct from observation noise.
 ///
@@ -371,12 +385,12 @@ impl Iterator for RetryJitters {
 /// [`FittedGpr::predict_into`] reuses `mean` / `variance` capacity when the
 /// query length matches a previous call. Query–query covariance is
 /// [`PredictiveCovariance`], not a field here.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Prediction {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prediction<T = f64> {
     /// Predictive mean on the original target scale.
-    pub mean: Vec<f64>,
+    pub mean: Vec<T>,
     /// Predictive variance on the original target scale.
-    pub variance: Vec<f64>,
+    pub variance: Vec<T>,
     /// Whether [`Self::variance`] is latent or observation variance.
     pub variance_kind: VarianceKind,
 }
@@ -406,14 +420,34 @@ pub struct Prediction {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PredictiveCovariance {
+#[derive(Clone, Debug, PartialEq)]
+pub struct PredictiveCovariance<T = f64> {
     /// Predictive mean on the original target scale.
-    pub mean: Vec<f64>,
+    pub mean: Vec<T>,
     /// Predictive covariance, packed column-major `m × m`.
-    pub covariance: Vec<f64>,
+    pub covariance: Vec<T>,
     /// Whether the diagonal of [`Self::covariance`] is latent or observation.
     pub variance_kind: VarianceKind,
+}
+
+impl<T> Default for Prediction<T> {
+    fn default() -> Self {
+        Self {
+            mean: Vec::new(),
+            variance: Vec::new(),
+            variance_kind: VarianceKind::default(),
+        }
+    }
+}
+
+impl<T> Default for PredictiveCovariance<T> {
+    fn default() -> Self {
+        Self {
+            mean: Vec::new(),
+            covariance: Vec::new(),
+            variance_kind: VarianceKind::default(),
+        }
+    }
 }
 
 /// Keeps a dedicated gradient matrix so the Cholesky factor stays in place.
@@ -482,17 +516,28 @@ impl CholeskyBuffer for ReuseCholesky {}
 
 /// Crate-private workspace allocation for a [`CholeskyBuffer`].
 pub(crate) trait AllocWorkspace: CholeskyBuffer {
-    type CholWrap<W: FitWorkspace>: FitWorkspace;
+    type CholWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const OVERWRITES_CHOLESKY: bool;
 }
 
 impl AllocWorkspace for RetainCholesky {
-    type CholWrap<W: FitWorkspace> = WithW<W>;
+    type CholWrap<W: FitWorkspace>
+        = WithW<W, <W::Policy as PrecisionPolicy>::Storage>
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const OVERWRITES_CHOLESKY: bool = false;
 }
 
 impl AllocWorkspace for ReuseCholesky {
-    type CholWrap<W: FitWorkspace> = W;
+    type CholWrap<W: FitWorkspace>
+        = W
+    where
+        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
     const OVERWRITES_CHOLESKY: bool = true;
 }
 

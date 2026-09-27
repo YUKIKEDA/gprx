@@ -219,14 +219,6 @@ impl CompiledKernel<f64> {
         }
     }
 
-    pub(crate) fn needs_product_grad_scratch(&self) -> bool {
-        match self {
-            Self::Product(_) => true,
-            Self::Sum(terms) => terms.iter().any(Self::needs_product_grad_scratch),
-            _ => false,
-        }
-    }
-
     /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
     ///
     /// # Errors

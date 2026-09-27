@@ -7,6 +7,8 @@ alwaysApply: true
 
 Do not ship a design or implementation gap as 「暫定」「今はやらない」「until Px-y」 unless `.dev/roadmap.md` already has a **named row** that owns the follow-up (ID + DoD), or the item is **already** listed under **意図的に今やらない**.
 
+Do not recommend that gap because the slice is smaller or easier to implement. That is not a requirement (`.cursor/rules/scope.mdc`).
+
 Do not grow that out-of-scope list in the same change that notices a gap. Adding or removing a bullet is a scope decision: Grill → Issue (`.cursor/rules/workflow.mdc`). An ungrilled dump into 「やらない」is not a plan.
 
 If there is no row and it is not in that out-of-scope list:
