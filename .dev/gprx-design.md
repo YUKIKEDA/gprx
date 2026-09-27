@@ -860,7 +860,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-20（[#214](https://github.com/YUKIKEDA/gprx/issues/214)）。P4-21 の DoD は Grill 後。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 4 の P4-21（[#217](https://github.com/YUKIKEDA/gprx/issues/217)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
@@ -877,7 +877,7 @@ impl OnlineGpr<O, S, C, B> {
 2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
 3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
 4. **Sparse GPRの誘導点Zの最適化**: 既定は `FixedInducing`。自由 Z は `FreeInducing` で同時。理由は [ADR 0003](adr/0003-sparse-z-joint.md)
-5. **Sparse の外部照合**: バッチ正しさは P4-11（GPyTorch、相対 `1e-8`）。バッチ時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPy）。`n=4096` のピーク RSS は P4-19（P4-18 の同じ時計。sgpr / svgp × Forrester / 球は GPy と GPyTorch より小さい）。P4-20（2026-09-27 の `just perf-sparse`）では、ゲートの 7 比較のうち svgp Forrester `n=4096`（23.22 ms 対 GPy 18.38 ms）、svgp 球 `n=1024`（13.32 ms 対 9.15 ms）、svgp 球 `n=4096`（34.57 ms 対 22.93 ms）がまだ GPy より長い。球 `n=4096` は GPyTorch より短い（sgpr 24.00 ms 対 58.47 ms、svgp 34.57 ms 対 54.60 ms）。sgpr 球 `n=4096` は GPy（26.35 ms）より短い。オンライン正しさは P4-13（GPyTorch 潰し SGPR、相対 `1e-8`）。オンライン時間は P4-14（`just perf-sparse-online`。自前フルと GPyTorch Titsias。CPU。正しさゲートは置かない）
+5. **Sparse の外部照合**: バッチ正しさは P4-11（GPyTorch、相対 `1e-8`）。バッチ時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPy）。`n=4096` のピーク RSS は P4-19（P4-18 の同じ時計。sgpr / svgp × Forrester / 球は GPy と GPyTorch より小さい）。P4-20（2026-09-27 の `just perf-sparse`）では、ゲートの 7 比較のうち svgp Forrester `n=4096`（23.22 ms 対 GPy 18.38 ms）、svgp 球 `n=1024`（13.32 ms 対 9.15 ms）、svgp 球 `n=4096`（34.57 ms 対 22.93 ms）がまだ GPy より長い。球 `n=4096` は GPyTorch より短い（sgpr 24.00 ms 対 58.47 ms、svgp 34.57 ms 対 54.60 ms）。sgpr 球 `n=4096` は GPy（26.35 ms）より短い。P4-21（2026-09-27 の `just perf-sparse`）では、残っていた 3 セルが GPy より短い（svgp Forrester `n=4096` は 15.04 ms 対 18.89 ms、svgp 球 `n=1024` は 6.27 ms 対 10.82 ms、svgp 球 `n=4096` は 17.12 ms 対 21.12 ms）。オンライン正しさは P4-13（GPyTorch 潰し SGPR、相対 `1e-8`）。オンライン時間は P4-14（`just perf-sparse-online`。自前フルと GPyTorch Titsias。CPU。正しさゲートは置かない）
 6. **SVGP**: 別公開型 `Svgp` / `FittedSvgp`。`factor` / 全データ ELBO / 対角予測 / `value_and_gradient_into` / `Svgp<Adam>::fit` は載った。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Adam` は `Optimizer` ではない。VFE の `Sgpr` は残す
 
 ## 15. ベンチマーク戦略
