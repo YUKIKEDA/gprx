@@ -26,4 +26,4 @@
 
 ## 今の着手点
 
-Phase 4 の P4-20（Sparse joint の残り、GPy 比）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 4 の P4-21（SVGP joint の残り、GPy 比）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

@@ -888,6 +888,10 @@ pub(crate) fn mat_add_mul(dest: &mut Mat<f64>, left: MatRef<'_, f64>, right: Mat
     gemm(dest.as_mut(), Accum::Add, left, right, 1.0);
 }
 
+pub(crate) fn mat_mul_into(dest: &mut Mat<f64>, left: MatRef<'_, f64>, right: MatRef<'_, f64>) {
+    gemm(dest.as_mut(), Accum::Replace, left, right, 1.0);
+}
+
 fn gemm(
     dest: MatMut<'_, f64>,
     accum: Accum,
