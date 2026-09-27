@@ -252,7 +252,13 @@ impl KernelSpec {
     /// [`Self::compile`] is `T = f64`. `f32` and `f64` run the same operations.
     /// Parameters stay `f64`. There is no conversion between the two compiled
     /// types: each call builds the tree for the scalar you name.
-    pub fn compile_as<T: crate::kernel::KernelScalar>(&self) -> crate::kernel::CompiledKernel<T> {
+    pub fn compile_as<T>(&self) -> crate::kernel::CompiledKernel<T>
+    where
+        T: crate::kernel::KernelScalar
+            + faer_traits::ComplexField
+            + std::ops::Add<Output = T>
+            + std::ops::Mul<Output = T>,
+    {
         crate::kernel::CompiledKernel::<T>::from_spec(self)
     }
 

@@ -7,10 +7,10 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, CoordMode, KernelSpec, MixedKernelViews, Triangle, fill_ard_squared_diff,
-    fill_squared_euclidean,
+    CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, MixedKernelViews, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
+use crate::precision::{PrecisionPolicy, StorageScalar};
 use crate::workspace::{FitWorkspace, faer_par, faer_par_dims};
 
 use super::JitterPolicy;
@@ -20,11 +20,12 @@ use super::JitterPolicy;
 /// [`crate::CachedDistances`] fills `dist_cache` (and ARD `ard_sq_diff`) once
 /// and reuses them. [`crate::UncachedDistances`] has no those tensors;
 /// isotropic and mixed trees compute distances from `X`.
-fn apply_train_kernel<W: FitWorkspace>(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
-    ws: &mut W,
-) -> Result<(), GprError> {
+fn apply_train_kernel<K, W>(compiled: &K, x: MatRef<'_, K::T>, ws: &mut W) -> Result<(), GprError>
+where
+    K: GramKernel,
+    K::T: FillDistances + StorageScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
+{
     let (core, dist) = ws.split_fit();
     apply_compiled_views(
         compiled,
@@ -37,12 +38,17 @@ fn apply_train_kernel<W: FitWorkspace>(
 }
 
 /// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
-pub(crate) fn apply_compiled_to<W: FitWorkspace>(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
+pub(crate) fn apply_compiled_to<K, W>(
+    compiled: &K,
+    x: MatRef<'_, K::T>,
     ws: &mut W,
-    dest: MatMut<'_, f64>,
-) -> Result<(), GprError> {
+    dest: MatMut<'_, K::T>,
+) -> Result<(), GprError>
+where
+    K: GramKernel,
+    K::T: FillDistances + StorageScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
+{
     let (core, dist) = ws.split_fit();
     apply_compiled_views(
         compiled,
@@ -54,20 +60,24 @@ pub(crate) fn apply_compiled_to<W: FitWorkspace>(
     )
 }
 
-fn apply_compiled_views(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
-    dist: Option<crate::workspace::DistBufs<'_>>,
-    dest: MatMut<'_, f64>,
-    scratch: MatMut<'_, f64>,
-    thread_scratch: &mut Vec<Mat<f64>>,
-) -> Result<(), GprError> {
+fn apply_compiled_views<K: GramKernel>(
+    compiled: &K,
+    x: MatRef<'_, K::T>,
+    dist: Option<crate::workspace::DistBufs<'_, K::T>>,
+    dest: MatMut<'_, K::T>,
+    scratch: MatMut<'_, K::T>,
+    thread_scratch: &mut Vec<Mat<K::T>>,
+) -> Result<(), GprError>
+where
+    K::T: FillDistances,
+{
+    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             if let Some(d) = dist {
                 if !*d.dist_ready {
                     let mut pool = std::mem::take(thread_scratch);
-                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut pool);
+                    K::T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
                     *thread_scratch = pool;
                     *d.dist_ready = true;
                 }
@@ -77,13 +87,14 @@ fn apply_compiled_views(
             }
         }
         CoordMode::Points => {
-            if compiled.needs_ard_sq_diff()
+            if reads_ard
+                && compiled.needs_ard_sq_diff()
                 && let Some(d) = dist
                 && d.ard_sq_diff.ncols() > 0
             {
                 if !*d.ard_sq_diff_ready {
                     let mut pool = std::mem::take(thread_scratch);
-                    fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut pool);
+                    K::T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
                     *thread_scratch = pool;
                     *d.ard_sq_diff_ready = true;
                 }
@@ -102,15 +113,15 @@ fn apply_compiled_views(
             if let Some(d) = dist {
                 if !*d.dist_ready {
                     let mut pool = std::mem::take(thread_scratch);
-                    fill_squared_euclidean(x, d.dist_cache.as_mut(), &mut pool);
+                    K::T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
                     *thread_scratch = pool;
                     *d.dist_ready = true;
                 }
                 let mut views = MixedKernelViews::new(d.dist_cache.as_ref(), x);
-                if compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0 {
+                if reads_ard && compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0 {
                     if !*d.ard_sq_diff_ready {
                         let mut pool = std::mem::take(thread_scratch);
-                        fill_ard_squared_diff(x, d.ard_sq_diff.as_mut(), &mut pool);
+                        K::T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
                         *thread_scratch = pool;
                         *d.ard_sq_diff_ready = true;
                     }
@@ -182,26 +193,26 @@ pub(crate) fn pack_points_into(x: &[f64], n_rows: usize, n_cols: usize, mut dest
     }
 }
 
-pub(crate) fn add_noise_to_diag(mut k: MatMut<'_, f64>, noise: f64) {
+pub(crate) fn add_noise_to_diag<T: StorageScalar>(mut k: MatMut<'_, T>, noise: f64) {
     let n = k.nrows();
+    let noise = T::from_f64(noise);
     for i in 0..n {
         k[(i, i)] += noise;
     }
 }
 
-pub(crate) fn finish_train_system<W: FitWorkspace>(
-    ws: &mut W,
-    y: &[f64],
-    noise: f64,
-    extra_diag: f64,
-) {
+pub(crate) fn finish_train_system<W>(ws: &mut W, y: &[f64], noise: f64, extra_diag: f64)
+where
+    W: FitWorkspace,
+    <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+{
     let core = ws.core_mut();
     add_noise_to_diag(core.k_matrix.as_mut(), noise);
     if extra_diag != 0.0 {
         add_noise_to_diag(core.k_matrix.as_mut(), extra_diag);
     }
     for (i, &yi) in y.iter().enumerate() {
-        core.rhs[(i, 0)] = yi;
+        core.rhs[(i, 0)] = <W::Policy as PrecisionPolicy>::Storage::from_f64(yi);
     }
 }
 
@@ -223,14 +234,19 @@ fn map_cholesky_jitter(err: GprError, jitter: f64) -> GprError {
     }
 }
 
-pub(crate) fn factor_train_with_policy<W: FitWorkspace>(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
+pub(crate) fn factor_train_with_policy<K, W>(
+    compiled: &K,
+    x: MatRef<'_, K::T>,
     ws: &mut W,
     y: &[f64],
     noise: f64,
     policy: FactorPolicy,
-) -> Result<(), GprError> {
+) -> Result<(), GprError>
+where
+    K: GramKernel,
+    K::T: FillDistances + StorageScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
+{
     factor_written_k_with_policy(ws, y, noise, policy, |ws| {
         apply_train_kernel(compiled, x, ws)
     })
@@ -251,6 +267,7 @@ pub(crate) fn factor_written_k_with_policy<W, F>(
 ) -> Result<(), GprError>
 where
     W: FitWorkspace,
+    <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
     F: FnMut(&mut W) -> Result<(), GprError>,
 {
     clear_train_gram(ws);
@@ -297,26 +314,36 @@ where
     })
 }
 
-fn clear_train_gram<W: FitWorkspace>(ws: &mut W) {
-    ws.core_mut().k_matrix.fill(0.0);
+fn clear_train_gram<W>(ws: &mut W)
+where
+    W: FitWorkspace,
+    <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
+{
+    let zero = <W::Policy as PrecisionPolicy>::Storage::from_f64(0.0);
+    ws.core_mut().k_matrix.fill(zero);
 }
 
-pub(crate) fn log_det_from_l(l: MatRef<'_, f64>, n: usize) -> f64 {
-    let mut log_diag = 0.0;
+pub(crate) fn log_det_from_l<T: StorageScalar>(l: MatRef<'_, T>, n: usize) -> T {
+    let mut log_diag = T::from_f64(0.0);
     for i in 0..n {
-        log_diag += l[(i, i)].ln();
+        log_diag += StorageScalar::ln(l[(i, i)]);
     }
-    2.0 * log_diag
+    T::from_f64(2.0) * log_diag
 }
 
-pub(crate) fn neg_mll_from_factor(l: MatRef<'_, f64>, y: &[f64], alpha: &[f64], n: usize) -> f64 {
-    let mut quad = 0.0;
+pub(crate) fn neg_mll_from_factor<T: StorageScalar>(
+    l: MatRef<'_, T>,
+    y: &[T],
+    alpha: &[T],
+    n: usize,
+) -> T {
+    let mut quad = T::from_f64(0.0);
     for i in 0..n {
         quad += y[i] * alpha[i];
     }
     let log_det = log_det_from_l(l, n);
-    let log_two_pi = (2.0 * std::f64::consts::PI).ln();
-    0.5 * (quad + log_det + n as f64 * log_two_pi)
+    let log_two_pi = T::from_f64((2.0 * std::f64::consts::PI).ln());
+    T::from_f64(0.5) * (quad + log_det + T::from_f64(n as f64) * log_two_pi)
 }
 
 pub(crate) fn write_params(
@@ -340,32 +367,41 @@ pub(crate) fn require_param_len(actual: usize, expected: usize) -> Result<(), Gp
     }
 }
 
-pub(crate) fn frobenius_lower(w: MatRef<'_, f64>, d_k: MatRef<'_, f64>, n: usize) -> f64 {
-    let mut inner = 0.0;
+pub(crate) fn frobenius_lower<T: StorageScalar>(
+    w: MatRef<'_, T>,
+    d_k: MatRef<'_, T>,
+    n: usize,
+) -> T {
+    let mut inner = T::from_f64(0.0);
+    let two = T::from_f64(2.0);
     for col in 0..n {
         inner += w[(col, col)] * d_k[(col, col)];
         for row in col + 1..n {
-            inner += 2.0 * w[(row, col)] * d_k[(row, col)];
+            inner += two * w[(row, col)] * d_k[(row, col)];
         }
     }
     inner
 }
 
-pub(crate) fn write_kernel_grad(
-    compiled: &CompiledKernel,
-    dist: MatRef<'_, f64>,
-    x: MatRef<'_, f64>,
-    ard_cache: Option<MatRef<'_, f64>>,
-    d_k: MatMut<'_, f64>,
-    scratch: MatMut<'_, f64>,
+pub(crate) fn write_kernel_grad<K: GramKernel>(
+    compiled: &K,
+    dist: MatRef<'_, K::T>,
+    x: MatRef<'_, K::T>,
+    ard_cache: Option<MatRef<'_, K::T>>,
+    d_k: MatMut<'_, K::T>,
+    scratch: MatMut<'_, K::T>,
     param_idx: usize,
-) -> Result<(), GprError> {
+) -> Result<(), GprError>
+where
+    K::T: FillDistances,
+{
+    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             compiled.grad(dist, d_k, param_idx, Triangle::Lower, scratch)
         }
         CoordMode::Points => {
-            if let Some(cache) = ard_cache {
+            if reads_ard && let Some(cache) = ard_cache {
                 compiled.grad_from_ard_cache(cache, x, d_k, param_idx, Triangle::Lower, scratch)
             } else {
                 compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
@@ -381,32 +417,36 @@ pub(crate) fn write_kernel_grad(
     }
 }
 
-pub(crate) fn write_kernel_grad_from_coords(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
-    d_k: MatMut<'_, f64>,
-    scratch: MatMut<'_, f64>,
+pub(crate) fn write_kernel_grad_from_coords<K: GramKernel>(
+    compiled: &K,
+    x: MatRef<'_, K::T>,
+    d_k: MatMut<'_, K::T>,
+    scratch: MatMut<'_, K::T>,
     param_idx: usize,
 ) -> Result<(), GprError> {
     compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
 }
 
-pub(crate) fn write_kernel_hess(
-    compiled: &CompiledKernel,
-    dist: MatRef<'_, f64>,
-    x: MatRef<'_, f64>,
-    ard_cache: Option<MatRef<'_, f64>>,
-    d2_k: MatMut<'_, f64>,
-    scratch: MatMut<'_, f64>,
+pub(crate) fn write_kernel_hess<K: GramKernel>(
+    compiled: &K,
+    dist: MatRef<'_, K::T>,
+    x: MatRef<'_, K::T>,
+    ard_cache: Option<MatRef<'_, K::T>>,
+    d2_k: MatMut<'_, K::T>,
+    scratch: MatMut<'_, K::T>,
     pair: (usize, usize),
-) -> Result<(), GprError> {
+) -> Result<(), GprError>
+where
+    K::T: FillDistances,
+{
     let (i, j) = pair;
+    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             compiled.hess(dist, d2_k, i, j, Triangle::Lower, scratch)
         }
         CoordMode::Points => {
-            if let Some(cache) = ard_cache {
+            if reads_ard && let Some(cache) = ard_cache {
                 compiled.hess_from_ard_cache(cache, x, d2_k, pair, Triangle::Lower, scratch)
             } else {
                 compiled.hess_points(x, d2_k, i, j, Triangle::Lower, scratch)
@@ -423,18 +463,33 @@ pub(crate) fn write_kernel_hess(
     }
 }
 
-pub(crate) fn write_kernel_hess_from_coords(
-    compiled: &CompiledKernel,
-    x: MatRef<'_, f64>,
-    d2_k: MatMut<'_, f64>,
-    scratch: MatMut<'_, f64>,
+pub(crate) fn write_kernel_hess_from_coords<K: GramKernel>(
+    compiled: &K,
+    x: MatRef<'_, K::T>,
+    d2_k: MatMut<'_, K::T>,
+    scratch: MatMut<'_, K::T>,
     i: usize,
     j: usize,
 ) -> Result<(), GprError> {
     compiled.hess_points(x, d2_k, i, j, Triangle::Lower, scratch)
 }
 
-pub(crate) fn symmetrize_lower(mut a: MatMut<'_, f64>, n: usize) {
+pub(crate) fn pack_storage<T: StorageScalar>(
+    x: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    mut dest: MatMut<'_, T>,
+) {
+    debug_assert_eq!(dest.nrows(), n_rows);
+    debug_assert_eq!(dest.ncols(), n_cols);
+    for col in 0..n_cols {
+        for row in 0..n_rows {
+            dest[(row, col)] = T::from_f64(x[col * n_rows + row]);
+        }
+    }
+}
+
+pub(crate) fn symmetrize_lower<T: StorageScalar>(mut a: MatMut<'_, T>, n: usize) {
     for col in 0..n {
         for row in col + 1..n {
             a[(col, row)] = a[(row, col)];
@@ -442,7 +497,7 @@ pub(crate) fn symmetrize_lower(mut a: MatMut<'_, f64>, n: usize) {
     }
 }
 
-pub(crate) fn gemv_sym_lower(a: MatRef<'_, f64>, x: &[f64], y: &mut [f64], n: usize) {
+pub(crate) fn gemv_sym_lower<T: StorageScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
     for i in 0..n {
         let mut s = a[(i, i)] * x[i];
         for j in 0..i {
@@ -455,9 +510,10 @@ pub(crate) fn gemv_sym_lower(a: MatRef<'_, f64>, x: &[f64], y: &mut [f64], n: us
     }
 }
 
-pub(crate) fn gemv_full(a: MatRef<'_, f64>, x: &[f64], y: &mut [f64], n: usize) {
+pub(crate) fn gemv_full<T: StorageScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
+    let zero = T::from_f64(0.0);
     for i in 0..n {
-        let mut s = 0.0;
+        let mut s = zero;
         for j in 0..n {
             s += a[(i, j)] * x[j];
         }
@@ -465,8 +521,8 @@ pub(crate) fn gemv_full(a: MatRef<'_, f64>, x: &[f64], y: &mut [f64], n: usize) 
     }
 }
 
-pub(crate) fn trace_product(a: MatRef<'_, f64>, b: MatRef<'_, f64>, n: usize) -> f64 {
-    let mut tr = 0.0;
+pub(crate) fn trace_product<T: StorageScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>, n: usize) -> T {
+    let mut tr = T::from_f64(0.0);
     for col in 0..n {
         for row in 0..n {
             tr += a[(row, col)] * b[(col, row)];
@@ -479,13 +535,37 @@ pub(crate) fn trace_product(a: MatRef<'_, f64>, b: MatRef<'_, f64>, n: usize) ->
 ///
 /// `A⁻¹ = L^{-T} L^{-1}`, so entry `i` is the squared Euclidean norm of
 /// column `i` of `L⁻¹`.
-pub(crate) fn inv_diag_from_chol_l(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn inv_diag_from_chol_l<T: StorageScalar>(l: MatRef<'_, T>, q_diag: &mut [T]) {
     let n = l.nrows();
     debug_assert_eq!(q_diag.len(), n);
-    let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { 1.0 } else { 0.0 });
+    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
+        for i in 0..n {
+            let mut col = vec![0.0f64; n];
+            for row in 0..n {
+                col[row] = if row == i { 1.0 } else { 0.0 };
+            }
+            for row in 0..n {
+                let mut sum = col[row];
+                for k in 0..row {
+                    sum -= l[(row, k)].to_f64() * col[k];
+                }
+                col[row] = sum / l[(row, row)].to_f64();
+            }
+            let mut q = 0.0f64;
+            for v in &col {
+                q += v * v;
+            }
+            q_diag[i] = T::from_f64(q);
+        }
+        return;
+    }
+    let one = T::from_f64(1.0);
+    let zero = T::from_f64(0.0);
+    let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { one } else { zero });
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, inv_l.as_mut(), faer_par(n));
     for (i, qi) in q_diag.iter_mut().enumerate() {
-        let mut q = 0.0;
+        let mut q = zero;
         for k in 0..n {
             let v = inv_l[(k, i)];
             q += v * v;
@@ -495,16 +575,19 @@ pub(crate) fn inv_diag_from_chol_l(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
 }
 
 /// Factors `A` in place as `L Lᵀ`. The strictly upper triangle is unspecified.
-pub(crate) fn cholesky_lower(
-    a: &mut Mat<f64>,
+pub(crate) fn cholesky_lower<T: StorageScalar>(
+    a: &mut Mat<T>,
     scratch: &mut MemBuffer,
     jitter: f64,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
     let n = a.nrows();
+    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
+        return cholesky_lower_f32_accum(a, jitter, stage);
+    }
     let regularization = LltRegularization {
-        dynamic_regularization_delta: jitter,
-        dynamic_regularization_epsilon: 0.0,
+        dynamic_regularization_delta: T::from_f64(jitter),
+        dynamic_regularization_epsilon: T::from_f64(0.0),
     };
     let stack = MemStack::new(scratch);
     match llt::factor::cholesky_in_place(
@@ -523,13 +606,43 @@ pub(crate) fn cholesky_lower(
     }
 }
 
+fn cholesky_lower_f32_accum<T: StorageScalar>(
+    a: &mut Mat<T>,
+    jitter: f64,
+    stage: CholeskyStage,
+) -> Result<(), GprError> {
+    let n = a.nrows();
+    for j in 0..n {
+        for i in j..n {
+            let mut sum = a[(i, j)].to_f64();
+            for k in 0..j {
+                sum -= a[(i, k)].to_f64() * a[(j, k)].to_f64();
+            }
+            if i == j {
+                if sum.is_nan() || sum <= 0.0 {
+                    return Err(GprError::CholeskyFailed {
+                        jitter,
+                        matrix_size: n,
+                        stage,
+                    });
+                }
+                a[(j, j)] = T::from_f64(sum.sqrt());
+            } else {
+                let diag = a[(j, j)].to_f64();
+                a[(i, j)] = T::from_f64(sum / diag);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Factors `A` in place as `L Lᵀ`, retrying with [`JitterPolicy`] on failure.
 ///
 /// The first attempt uses `A` as given. Each retry restores that snapshot and
 /// adds `j` to the diagonal. Used for the posterior covariance in
 /// [`crate::FittedGpr::sample`].
-pub(crate) fn cholesky_lower_with_policy(
-    a: &mut Mat<f64>,
+pub(crate) fn cholesky_lower_with_policy<T: StorageScalar>(
+    a: &mut Mat<T>,
     scratch: &mut MemBuffer,
     policy: JitterPolicy,
     stage: CholeskyStage,
@@ -561,17 +674,49 @@ pub(crate) fn cholesky_lower_with_policy(
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
 ///
 /// P1A-18 can call this on the same `Workspace` buffers as [`crate::Gpr::fit`].
-pub(crate) fn cholesky_and_solve(
-    a: &mut Mat<f64>,
-    rhs: &mut Mat<f64>,
+pub(crate) fn cholesky_and_solve<T: StorageScalar>(
+    a: &mut Mat<T>,
+    rhs: &mut Mat<T>,
     scratch: &mut MemBuffer,
     jitter: f64,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
     cholesky_lower(a, scratch, jitter, stage)?;
-    let n = a.nrows();
-    let n_rhs = rhs.ncols();
-    let stack = MemStack::new(scratch);
-    llt::solve::solve_in_place(a.as_ref(), rhs.as_mut(), faer_par_dims(n, n_rhs), stack);
+    solve_llt_in_place(a.as_ref(), rhs.as_mut(), scratch);
     Ok(())
+}
+
+pub(crate) fn solve_llt_in_place<T: StorageScalar>(
+    l: MatRef<'_, T>,
+    mut rhs: MatMut<'_, T>,
+    scratch: &mut MemBuffer,
+) {
+    let n = l.nrows();
+    let n_rhs = rhs.ncols();
+    if std::mem::size_of::<T>() != std::mem::size_of::<f32>() {
+        let stack = MemStack::new(scratch);
+        llt::solve::solve_in_place(l, rhs.as_mut(), faer_par_dims(n, n_rhs), stack);
+        return;
+    }
+    for col in 0..n_rhs {
+        let mut y = vec![0.0f64; n];
+        let mut x = vec![0.0f64; n];
+        for i in 0..n {
+            let mut sum = rhs[(i, col)].to_f64();
+            for j in 0..i {
+                sum -= l[(i, j)].to_f64() * y[j];
+            }
+            y[i] = sum / l[(i, i)].to_f64();
+        }
+        for i in (0..n).rev() {
+            let mut sum = y[i];
+            for j in (i + 1)..n {
+                sum -= l[(j, i)].to_f64() * x[j];
+            }
+            x[i] = sum / l[(i, i)].to_f64();
+        }
+        for i in 0..n {
+            rhs[(i, col)] = T::from_f64(x[i]);
+        }
+    }
 }

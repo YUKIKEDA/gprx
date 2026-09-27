@@ -13,7 +13,8 @@ use faer::linalg::cholesky::llt;
 use faer::{Mat, MatRef, Par};
 
 use crate::error::GprError;
-use crate::precision::{DoublePrecision, PrecisionPolicy};
+use crate::kernel::KernelScalar;
+use crate::precision::{DoublePrecision, PrecisionPolicy, StorageScalar};
 
 /// Shared fit buffers: `L` (or `W` while a reuse gradient is in progress)
 /// and Cholesky scratch. No distance cache.
@@ -38,33 +39,33 @@ pub(crate) struct WorkspaceCore<P: PrecisionPolicy> {
 }
 
 /// Training-distance cache wrapping an inner workspace ([`crate::CachedDistances`]).
-pub(crate) struct WithDist<W> {
+pub(crate) struct WithDist<W, S = f64> {
     pub(crate) inner: W,
     /// Pairwise squared distances for isotropic (distance-mode) leaves.
-    pub(crate) dist_cache: Mat<f64>,
+    pub(crate) dist_cache: Mat<S>,
     /// Whether `dist_cache` matches the current training `X`.
     pub(crate) dist_ready: bool,
     /// Raw `(Δx_d)²` for ARD leaves: `n × (n·d)`. Empty for isotropic.
-    pub(crate) ard_sq_diff: Mat<f64>,
+    pub(crate) ard_sq_diff: Mat<S>,
     /// Whether `ard_sq_diff` matches the current training `X`.
     pub(crate) ard_sq_diff_ready: bool,
 }
 
 /// Dedicated `W = ααᵀ - K⁻¹` wrapping an inner workspace ([`crate::RetainCholesky`]).
-pub(crate) struct WithW<W> {
+pub(crate) struct WithW<W, S = f64> {
     pub(crate) inner: W,
-    pub(crate) w_matrix: Mat<f64>,
+    pub(crate) w_matrix: Mat<S>,
 }
 
 /// Mutable view of the distance tensors on [`WithDist`].
-pub(crate) struct DistBufs<'a> {
-    pub dist_cache: &'a mut Mat<f64>,
+pub(crate) struct DistBufs<'a, S = f64> {
+    pub dist_cache: &'a mut Mat<S>,
     pub dist_ready: &'a mut bool,
-    pub ard_sq_diff: &'a mut Mat<f64>,
+    pub ard_sq_diff: &'a mut Mat<S>,
     pub ard_sq_diff_ready: &'a mut bool,
 }
 
-impl DistBufs<'_> {
+impl<S: StorageScalar> DistBufs<'_, S> {
     pub(crate) fn ensure_ard_sq_diff(&mut self, n: usize, d: usize) -> Result<(), GprError> {
         if n == 0 || d == 0 {
             return Err(GprError::EmptyInput);
@@ -73,7 +74,7 @@ impl DistBufs<'_> {
         if self.ard_sq_diff.nrows() == n && self.ard_sq_diff.ncols() == cols {
             return Ok(());
         }
-        *self.ard_sq_diff = Mat::<f64>::zeros(n, cols);
+        *self.ard_sq_diff = Mat::<S>::zeros(n, cols);
         *self.ard_sq_diff_ready = false;
         Ok(())
     }
@@ -81,28 +82,33 @@ impl DistBufs<'_> {
 
 /// Construction and core access for composed fit buffers.
 pub(crate) trait FitWorkspace: Clone + Send + Sync + 'static {
+    type Policy: PrecisionPolicy;
+
     fn new(n: usize) -> Result<Self, GprError>
     where
         Self: Sized;
 
-    fn core(&self) -> &WorkspaceCore<DoublePrecision>;
+    fn core(&self) -> &WorkspaceCore<Self::Policy>;
 
-    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision>;
+    fn core_mut(&mut self) -> &mut WorkspaceCore<Self::Policy>;
 
     /// Splits core buffers from an optional distance cache.
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<DoublePrecision>, Option<DistBufs<'_>>);
+    #[allow(clippy::type_complexity)]
+    fn split_fit(
+        &mut self,
+    ) -> (
+        &mut WorkspaceCore<Self::Policy>,
+        Option<DistBufs<'_, <Self::Policy as PrecisionPolicy>::Storage>>,
+    );
 
     /// Forms `W = ααᵀ - K⁻¹` after `k_matrix` holds `L`.
-    fn form_gradient_w(&mut self, alpha: &[f64], n: usize);
+    fn form_gradient_w(&mut self, alpha: &[<Self::Policy as PrecisionPolicy>::Storage], n: usize);
 
     /// `W` after [`Self::form_gradient_w`].
-    fn gradient_w(&self) -> MatRef<'_, f64>;
+    fn gradient_w(&self) -> MatRef<'_, <Self::Policy as PrecisionPolicy>::Storage>;
 
     /// Sizes ARD `(Δx_d)²` when this workspace has a distance cache.
-    fn ensure_ard_if_cached(&mut self, n: usize, d: usize) -> Result<(), GprError> {
-        if let (_, Some(mut bufs)) = self.split_fit() {
-            bufs.ensure_ard_sq_diff(n, d)?;
-        }
+    fn ensure_ard_if_cached(&mut self, _n: usize, _d: usize) -> Result<(), GprError> {
         Ok(())
     }
 
@@ -145,12 +151,12 @@ pub(crate) struct QueryWorkspace<P: PrecisionPolicy> {
     /// Train–test squared distances (`n×m`).
     pub(crate) query_dist: Mat<P::Storage>,
     /// `k(x*_j, x*_j)` for each query column.
-    pub(crate) query_kss: Vec<f64>,
+    pub(crate) query_kss: Vec<P::Storage>,
 }
 
-pub(crate) fn empty_thread_scratch() -> Vec<Mat<f64>> {
+pub(crate) fn empty_thread_scratch<T: StorageScalar>() -> Vec<Mat<T>> {
     let n = rayon::current_num_threads().max(1);
-    (0..n).map(|_| Mat::<f64>::zeros(0, 0)).collect()
+    (0..n).map(|_| Mat::<T>::zeros(0, 0)).collect()
 }
 
 /// Caps a square `n×n` faer kernel at `min(pool, n/64, n²/16384)`.
@@ -182,27 +188,32 @@ pub(crate) fn faer_degree(nrows: usize, ncols: usize, pool: usize) -> usize {
     pool.min(by_n).min(by_work).min(by_rhs)
 }
 
-fn faer_scratch_req(n: usize) -> StackReq {
+fn faer_scratch_req<T: faer_traits::ComplexField>(n: usize) -> StackReq {
     let par = faer_par(n);
-    let chol = llt::factor::cholesky_in_place_scratch::<f64>(n, par, Default::default());
-    let solve_vec = llt::solve::solve_in_place_scratch::<f64>(n, 1, par);
-    let solve_mat = llt::solve::solve_in_place_scratch::<f64>(n, n, par);
+    let chol = llt::factor::cholesky_in_place_scratch::<T>(n, par, Default::default());
+    let solve_vec = llt::solve::solve_in_place_scratch::<T>(n, 1, par);
+    let solve_mat = llt::solve::solve_in_place_scratch::<T>(n, n, par);
     chol.or(solve_vec).or(solve_mat)
 }
 
-impl WorkspaceCore<DoublePrecision> {
+impl<P> WorkspaceCore<P>
+where
+    P: PrecisionPolicy,
+    P::Storage: StorageScalar,
+    P::Refine: faer_traits::ComplexField,
+{
     fn new(n: usize) -> Result<Self, GprError> {
         if n == 0 {
             return Err(GprError::EmptyInput);
         }
         Ok(Self {
-            k_matrix: Mat::<f64>::zeros(n, n),
-            exp_buf: Mat::<f64>::zeros(n, n),
-            kernel_scratch: Mat::<f64>::zeros(0, 0),
-            thread_scratch: empty_thread_scratch(),
-            rhs: Mat::<f64>::zeros(n, 1),
+            k_matrix: Mat::<P::Storage>::zeros(n, n),
+            exp_buf: Mat::<P::Storage>::zeros(n, n),
+            kernel_scratch: Mat::<P::Storage>::zeros(0, 0),
+            thread_scratch: empty_thread_scratch::<P::Storage>(),
+            rhs: Mat::<P::Storage>::zeros(n, 1),
             refine_buf: None,
-            faer_scratch: MemBuffer::new(faer_scratch_req(n)),
+            faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(n)),
         })
     }
 
@@ -223,12 +234,17 @@ impl WorkspaceCore<DoublePrecision> {
         if self.kernel_scratch.nrows() == n && self.kernel_scratch.ncols() == n {
             return Ok(());
         }
-        self.kernel_scratch = Mat::<f64>::zeros(n, n);
+        self.kernel_scratch = Mat::<P::Storage>::zeros(n, n);
         Ok(())
     }
 }
 
-impl Clone for WorkspaceCore<DoublePrecision> {
+impl<P> Clone for WorkspaceCore<P>
+where
+    P: PrecisionPolicy,
+    P::Storage: StorageScalar,
+    P::Refine: faer_traits::ComplexField,
+{
     fn clone(&self) -> Self {
         Self {
             k_matrix: self.k_matrix.clone(),
@@ -237,12 +253,12 @@ impl Clone for WorkspaceCore<DoublePrecision> {
             thread_scratch: self.thread_scratch.clone(),
             rhs: self.rhs.clone(),
             refine_buf: self.refine_buf.clone(),
-            faer_scratch: MemBuffer::new(faer_scratch_req(self.n())),
+            faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(self.n())),
         }
     }
 }
 
-impl<W: FitWorkspace> WithDist<W> {
+impl<W: FitWorkspace<Policy = DoublePrecision>> WithDist<W> {
     #[cfg(test)]
     pub(crate) fn ensure_ard_sq_diff(&mut self, n: usize, d: usize) -> Result<(), GprError> {
         let mut bufs = DistBufs {
@@ -273,7 +289,7 @@ impl<W: FitWorkspace> WithDist<W> {
     }
 }
 
-impl<W> Deref for WithDist<W> {
+impl<W, S> Deref for WithDist<W, S> {
     type Target = W;
 
     fn deref(&self) -> &Self::Target {
@@ -281,13 +297,13 @@ impl<W> Deref for WithDist<W> {
     }
 }
 
-impl<W> DerefMut for WithDist<W> {
+impl<W, S> DerefMut for WithDist<W, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<W: Clone> Clone for WithDist<W> {
+impl<W: Clone, S: StorageScalar> Clone for WithDist<W, S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -299,7 +315,7 @@ impl<W: Clone> Clone for WithDist<W> {
     }
 }
 
-impl<W> Deref for WithW<W> {
+impl<W, S> Deref for WithW<W, S> {
     type Target = W;
 
     fn deref(&self) -> &Self::Target {
@@ -307,13 +323,13 @@ impl<W> Deref for WithW<W> {
     }
 }
 
-impl<W> DerefMut for WithW<W> {
+impl<W, S> DerefMut for WithW<W, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<W: Clone> Clone for WithW<W> {
+impl<W: Clone, S: StorageScalar> Clone for WithW<W, S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -322,16 +338,23 @@ impl<W: Clone> Clone for WithW<W> {
     }
 }
 
-fn fill_identity(mut a: faer::MatMut<'_, f64>) {
+fn fill_identity<T: KernelScalar>(mut a: faer::MatMut<'_, T>) {
     let n = a.nrows();
     for col in 0..n {
         for row in 0..n {
-            a[(row, col)] = if row == col { 1.0 } else { 0.0 };
+            a[(row, col)] = if row == col {
+                T::from_f64(1.0)
+            } else {
+                T::from_f64(0.0)
+            };
         }
     }
 }
 
-fn form_w_lower(mut w: faer::MatMut<'_, f64>, alpha: &[f64], n: usize) {
+fn form_w_lower<T>(mut w: faer::MatMut<'_, T>, alpha: &[T], n: usize)
+where
+    T: KernelScalar + std::ops::Mul<Output = T> + std::ops::Sub<Output = T>,
+{
     for col in 0..n {
         for row in col..n {
             w[(row, col)] = alpha[row] * alpha[col] - w[(row, col)];
@@ -339,12 +362,14 @@ fn form_w_lower(mut w: faer::MatMut<'_, f64>, alpha: &[f64], n: usize) {
     }
 }
 
-fn form_w_from_inverse(
-    mut dest: faer::MatMut<'_, f64>,
-    k_inv: MatRef<'_, f64>,
-    alpha: &[f64],
+fn form_w_from_inverse<T>(
+    mut dest: faer::MatMut<'_, T>,
+    k_inv: MatRef<'_, T>,
+    alpha: &[T],
     n: usize,
-) {
+) where
+    T: KernelScalar + std::ops::Mul<Output = T> + std::ops::Sub<Output = T>,
+{
     for col in 0..n {
         for row in col..n {
             dest[(row, col)] = alpha[row] * alpha[col] - k_inv[(row, col)];
@@ -352,24 +377,31 @@ fn form_w_from_inverse(
     }
 }
 
-impl FitWorkspace for WorkspaceCore<DoublePrecision> {
+impl<P> FitWorkspace for WorkspaceCore<P>
+where
+    P: PrecisionPolicy + 'static,
+    P::Storage: StorageScalar,
+    P::Refine: faer_traits::ComplexField,
+{
+    type Policy = P;
+
     fn new(n: usize) -> Result<Self, GprError> {
         Self::new(n)
     }
 
-    fn core(&self) -> &WorkspaceCore<DoublePrecision> {
+    fn core(&self) -> &WorkspaceCore<P> {
         self
     }
 
-    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision> {
+    fn core_mut(&mut self) -> &mut WorkspaceCore<P> {
         self
     }
 
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<DoublePrecision>, Option<DistBufs<'_>>) {
+    fn split_fit(&mut self) -> (&mut WorkspaceCore<P>, Option<DistBufs<'_, P::Storage>>) {
         (self, None)
     }
 
-    fn form_gradient_w(&mut self, alpha: &[f64], n: usize) {
+    fn form_gradient_w(&mut self, alpha: &[P::Storage], n: usize) {
         fill_identity(self.exp_buf.as_mut());
         {
             let stack = MemStack::new(&mut self.faer_scratch);
@@ -383,32 +415,39 @@ impl FitWorkspace for WorkspaceCore<DoublePrecision> {
         form_w_from_inverse(self.k_matrix.as_mut(), self.exp_buf.as_ref(), alpha, n);
     }
 
-    fn gradient_w(&self) -> MatRef<'_, f64> {
+    fn gradient_w(&self) -> MatRef<'_, P::Storage> {
         self.k_matrix.as_ref()
     }
 }
 
-impl<W: FitWorkspace> FitWorkspace for WithW<W> {
+impl<W, S> FitWorkspace for WithW<W, S>
+where
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = S>> + 'static,
+    S: StorageScalar,
+    <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField,
+{
+    type Policy = W::Policy;
+
     fn new(n: usize) -> Result<Self, GprError> {
         Ok(Self {
             inner: W::new(n)?,
-            w_matrix: Mat::<f64>::zeros(n, n),
+            w_matrix: Mat::<S>::zeros(n, n),
         })
     }
 
-    fn core(&self) -> &WorkspaceCore<DoublePrecision> {
+    fn core(&self) -> &WorkspaceCore<W::Policy> {
         self.inner.core()
     }
 
-    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision> {
+    fn core_mut(&mut self) -> &mut WorkspaceCore<W::Policy> {
         self.inner.core_mut()
     }
 
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<DoublePrecision>, Option<DistBufs<'_>>) {
+    fn split_fit(&mut self) -> (&mut WorkspaceCore<W::Policy>, Option<DistBufs<'_, S>>) {
         self.inner.split_fit()
     }
 
-    fn form_gradient_w(&mut self, alpha: &[f64], n: usize) {
+    fn form_gradient_w(&mut self, alpha: &[S], n: usize) {
         fill_identity(self.w_matrix.as_mut());
         {
             let WithW { inner, w_matrix } = self;
@@ -424,7 +463,7 @@ impl<W: FitWorkspace> FitWorkspace for WithW<W> {
         form_w_lower(self.w_matrix.as_mut(), alpha, n);
     }
 
-    fn gradient_w(&self) -> MatRef<'_, f64> {
+    fn gradient_w(&self) -> MatRef<'_, S> {
         self.w_matrix.as_ref()
     }
 
@@ -433,26 +472,33 @@ impl<W: FitWorkspace> FitWorkspace for WithW<W> {
     }
 }
 
-impl<W: FitWorkspace> FitWorkspace for WithDist<W> {
+impl<W, S> FitWorkspace for WithDist<W, S>
+where
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = S>> + 'static,
+    S: StorageScalar,
+    <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField,
+{
+    type Policy = W::Policy;
+
     fn new(n: usize) -> Result<Self, GprError> {
         Ok(Self {
             inner: W::new(n)?,
-            dist_cache: Mat::<f64>::zeros(n, n),
+            dist_cache: Mat::<S>::zeros(n, n),
             dist_ready: false,
-            ard_sq_diff: Mat::<f64>::zeros(0, 0),
+            ard_sq_diff: Mat::<S>::zeros(0, 0),
             ard_sq_diff_ready: false,
         })
     }
 
-    fn core(&self) -> &WorkspaceCore<DoublePrecision> {
+    fn core(&self) -> &WorkspaceCore<W::Policy> {
         self.inner.core()
     }
 
-    fn core_mut(&mut self) -> &mut WorkspaceCore<DoublePrecision> {
+    fn core_mut(&mut self) -> &mut WorkspaceCore<W::Policy> {
         self.inner.core_mut()
     }
 
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<DoublePrecision>, Option<DistBufs<'_>>) {
+    fn split_fit(&mut self) -> (&mut WorkspaceCore<W::Policy>, Option<DistBufs<'_, S>>) {
         (
             self.inner.core_mut(),
             Some(DistBufs {
@@ -464,12 +510,22 @@ impl<W: FitWorkspace> FitWorkspace for WithDist<W> {
         )
     }
 
-    fn form_gradient_w(&mut self, alpha: &[f64], n: usize) {
+    fn form_gradient_w(&mut self, alpha: &[S], n: usize) {
         self.inner.form_gradient_w(alpha, n);
     }
 
-    fn gradient_w(&self) -> MatRef<'_, f64> {
+    fn gradient_w(&self) -> MatRef<'_, S> {
         self.inner.gradient_w()
+    }
+
+    fn ensure_ard_if_cached(&mut self, n: usize, d: usize) -> Result<(), GprError> {
+        let mut bufs = DistBufs {
+            dist_cache: &mut self.dist_cache,
+            dist_ready: &mut self.dist_ready,
+            ard_sq_diff: &mut self.ard_sq_diff,
+            ard_sq_diff_ready: &mut self.ard_sq_diff_ready,
+        };
+        bufs.ensure_ard_sq_diff(n, d)
     }
 
     fn has_distance_cache(&self) -> bool {
@@ -481,15 +537,20 @@ impl<W: FitWorkspace> FitWorkspace for WithDist<W> {
     }
 }
 
-impl QueryWorkspace<DoublePrecision> {
+impl<P> QueryWorkspace<P>
+where
+    P: PrecisionPolicy + 'static,
+    P::Storage: StorageScalar,
+    P::Refine: faer_traits::ComplexField,
+{
     /// Builds empty query buffers. [`Self::ensure`] sizes them on first use.
     pub(crate) fn new() -> Self {
         Self {
             query_xs: Vec::new(),
-            query_x: Mat::<f64>::zeros(0, 0),
-            query_k_star: Mat::<f64>::zeros(0, 0),
-            query_scratch: Mat::<f64>::zeros(0, 0),
-            query_dist: Mat::<f64>::zeros(0, 0),
+            query_x: Mat::<P::Storage>::zeros(0, 0),
+            query_k_star: Mat::<P::Storage>::zeros(0, 0),
+            query_scratch: Mat::<P::Storage>::zeros(0, 0),
+            query_dist: Mat::<P::Storage>::zeros(0, 0),
             query_kss: Vec::new(),
         }
     }
@@ -512,11 +573,11 @@ impl QueryWorkspace<DoublePrecision> {
         }
         self.query_xs
             .resize(m.checked_mul(d).ok_or(GprError::EmptyInput)?, 0.0);
-        self.query_x = Mat::<f64>::zeros(m, d);
-        self.query_k_star = Mat::<f64>::zeros(n, m);
-        self.query_scratch = Mat::<f64>::zeros(n, m);
-        self.query_dist = Mat::<f64>::zeros(n, m);
-        self.query_kss.resize(m, 0.0);
+        self.query_x = Mat::<P::Storage>::zeros(m, d);
+        self.query_k_star = Mat::<P::Storage>::zeros(n, m);
+        self.query_scratch = Mat::<P::Storage>::zeros(n, m);
+        self.query_dist = Mat::<P::Storage>::zeros(n, m);
+        self.query_kss.resize(m, P::Storage::from_f64(0.0));
         Ok(())
     }
 
@@ -541,7 +602,7 @@ impl QueryWorkspace<DoublePrecision> {
                 self.query_xs.resize(m * d, 0.0);
             }
             if self.query_kss.len() < m {
-                self.query_kss.resize(m, 0.0);
+                self.query_kss.resize(m, P::Storage::from_f64(0.0));
             }
             return Ok(());
         }
@@ -557,11 +618,11 @@ impl QueryWorkspace<DoublePrecision> {
         };
         self.query_xs
             .resize(new_m.checked_mul(d).ok_or(GprError::EmptyInput)?, 0.0);
-        self.query_x = Mat::<f64>::zeros(new_m, d);
-        self.query_k_star = Mat::<f64>::zeros(new_n, new_m);
-        self.query_scratch = Mat::<f64>::zeros(new_n, new_m);
-        self.query_dist = Mat::<f64>::zeros(new_n, new_m);
-        self.query_kss.resize(new_m, 0.0);
+        self.query_x = Mat::<P::Storage>::zeros(new_m, d);
+        self.query_k_star = Mat::<P::Storage>::zeros(new_n, new_m);
+        self.query_scratch = Mat::<P::Storage>::zeros(new_n, new_m);
+        self.query_dist = Mat::<P::Storage>::zeros(new_n, new_m);
+        self.query_kss.resize(new_m, P::Storage::from_f64(0.0));
         Ok(())
     }
 }
@@ -665,7 +726,10 @@ mod tests {
                 .all(|m| m.nrows() == 0 && m.ncols() == 0)
         );
         assert!(ws.refine_buf.is_none());
-        assert_eq!(ws.faer_scratch.len(), faer_scratch_req(n).size_bytes());
+        assert_eq!(
+            ws.faer_scratch.len(),
+            faer_scratch_req::<f64>(n).size_bytes()
+        );
         assert_send_sync::<Workspace<DoublePrecision>>();
         assert_send_sync::<QueryWorkspace<DoublePrecision>>();
     }

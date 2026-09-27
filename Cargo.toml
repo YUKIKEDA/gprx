@@ -30,6 +30,7 @@ argmin = { version = "0.11.0", default-features = false }
 argmin-math = { version = "0.5.1", default-features = false, features = ["vec"] }
 dyn-stack = "0.13"
 faer = "0.24.4"
+faer-traits = "0.24.0"
 memmap2 = "0.9"
 rand = "0.10.2"
 rayon = "1.12"

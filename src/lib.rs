@@ -75,7 +75,10 @@ pub use param::{BoundedParam, Interval, IntervalError};
 pub use persist::{
     FORMAT_VERSION, LoadedDistance, LoadedGpr, LoadedOnlineDistance, PersistRegistry,
 };
-pub use precision::{DoublePrecision, PrecisionPolicy};
+pub use precision::{
+    DoublePrecision, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
+    ResidualFormula, SinglePrecision,
+};
 pub use sgpr::{FittedSgpr, FixedInducing, FreeInducing, InducingId, OnlineSgpr, Sgpr};
 pub use svgp::{FittedSvgp, Svgp};
 
