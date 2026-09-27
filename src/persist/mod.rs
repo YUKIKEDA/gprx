@@ -535,7 +535,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct PersistUnit;
 
-    impl KernelTerm for PersistUnit {
+    impl<T: crate::kernel::KernelScalar> KernelTerm<T> for PersistUnit {
         fn num_params(&self) -> usize {
             0
         }
@@ -551,7 +551,7 @@ mod tests {
         }
 
         fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-            self.get_params(&mut params.to_vec())
+            KernelTerm::<T>::get_params(self, &mut params.to_vec())
         }
 
         fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError> {
@@ -566,40 +566,36 @@ mod tests {
 
         fn apply(
             &self,
-            dist: MatRef<'_, f64>,
-            mut out: MatMut<'_, f64>,
+            dist: MatRef<'_, T>,
+            mut out: MatMut<'_, T>,
             _uplo: Triangle,
         ) -> Result<(), GprError> {
             for col in 0..dist.ncols() {
                 for row in 0..dist.nrows() {
-                    out[(row, col)] = 1.0;
+                    out[(row, col)] = T::from_f64(1.0);
                 }
             }
             Ok(())
         }
 
-        fn apply_cross(
-            &self,
-            dist: MatRef<'_, f64>,
-            mut out: MatMut<'_, f64>,
-        ) -> Result<(), GprError> {
+        fn apply_cross(&self, dist: MatRef<'_, T>, mut out: MatMut<'_, T>) -> Result<(), GprError> {
             for col in 0..dist.ncols() {
                 for row in 0..dist.nrows() {
-                    out[(row, col)] = 1.0;
+                    out[(row, col)] = T::from_f64(1.0);
                 }
             }
             Ok(())
         }
 
-        fn fill_diag(&self, out: &mut [f64]) -> Result<(), GprError> {
-            out.fill(1.0);
+        fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
+            out.fill(T::from_f64(1.0));
             Ok(())
         }
 
         fn grad(
             &self,
-            _dist: MatRef<'_, f64>,
-            _d_k: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _d_k: MatMut<'_, T>,
             param_idx: usize,
             _uplo: Triangle,
         ) -> Result<(), GprError> {
@@ -610,8 +606,8 @@ mod tests {
 
         fn hess(
             &self,
-            _dist: MatRef<'_, f64>,
-            _d2_k: MatMut<'_, f64>,
+            _dist: MatRef<'_, T>,
+            _d2_k: MatMut<'_, T>,
             i: usize,
             j: usize,
             _uplo: Triangle,
@@ -623,8 +619,8 @@ mod tests {
 
         fn hess_points(
             &self,
-            _x: MatRef<'_, f64>,
-            _d2_k: MatMut<'_, f64>,
+            _x: MatRef<'_, T>,
+            _d2_k: MatMut<'_, T>,
             i: usize,
             j: usize,
             _uplo: Triangle,
@@ -634,7 +630,7 @@ mod tests {
             })
         }
 
-        fn clone_box(&self) -> Box<dyn KernelTerm> {
+        fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
             Box::new(self.clone())
         }
 
@@ -785,7 +781,7 @@ mod tests {
         let mut registry = PersistRegistry::new();
         let err = registry
             .register_kernel("gprx.rbf", |_state| {
-                Ok(Box::new(PersistUnit) as Box<dyn KernelTerm>)
+                Ok(crate::kernel::CustomKernel::new(PersistUnit))
             })
             .expect_err("reserved");
         match err {
@@ -817,7 +813,7 @@ mod tests {
         let mut registry = PersistRegistry::new();
         registry
             .register_kernel("test.persist_unit", |_state| {
-                Ok(Box::new(PersistUnit) as Box<dyn KernelTerm>)
+                Ok(crate::kernel::CustomKernel::new(PersistUnit))
             })
             .expect("register");
         let loaded = LoadedGpr::load(&dir, &registry).expect("load");

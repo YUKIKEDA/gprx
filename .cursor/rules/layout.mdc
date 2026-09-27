@@ -12,7 +12,7 @@ src/lib.rs          # small public re-exports
 src/error.rs        # P1A-1
 src/workspace.rs    # P1A-2。`Workspace`（fit）と `QueryWorkspace`（predict_into）。同じ struct に詰め込まない
 src/likelihood.rs   # P1A-3
-src/kernel/         # all kernel leaves; never at src/*.rs。`compiled/` は `mod.rs`（enum・葉ナビ）+ `apply.rs` + `grad.rs` + `hess.rs` + `tests.rs`
+src/kernel/         # all kernel leaves; never at src/*.rs。`compiled/` は `mod.rs`（enum・葉ナビ）+ `apply.rs` + `grad.rs` + `hess.rs` + `f32_eval.rs` + `tests.rs`。`CompiledKernel<T = f64>`。`compile()` は f64。`compile_as::<T>()` は同じ操作。`KernelTerm<T = f64>`。f64 は距離キャッシュと SIMD。f32 は同じ式のスカラー。パラメータは f64
 src/transform/      # target.rs, input.rs, pipeline.rs, columnwise.rs。葉に分けない（P2B-20）。空ファイルは先に置かない
 src/gpr/            # `mod.rs` 再エクスポート。`Gpr` と `FittedGpr` は `model.rs`。`FittedGpr` の impl は `fitted.rs`。`OnlineGpr` は `online.rs`。公開の小さい型は `types.rs`、Gram / Cholesky / MLL は `factor.rs`、単体テストは `tests.rs`
 src/objective.rs    # Phase 1b
