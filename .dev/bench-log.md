@@ -558,5 +558,18 @@ n=1024 の中央は当初 sklearn が短い（3.47 vs 2.94）。段階計時で�
 | svgp | sphere    | 4096 | gpytorch | 4.53 ms  | 46.71 ms  | 10    | 1.59 ms     | 252.4 MiB | 記録  |
 | svgp | sphere    | 4096 | gpy      | 19.95 ms | 20.42 ms  | 10    | 0.12 ms     | 151.6 MiB | fail  |
 
-P4-12 の GPy 負けのうち pass は sgpr Forrester n=1024（14.36 ms 対 15.74 ms）と svgp 球 n=256（4.09 ms 対 7.65 ms）。球 SGPR n=1024 の GPyTorch eval は 20.18 ms 対 60.57 ms で pass。残る GPy 負けは 7 セル（svgp Forrester n=1024、Forrester n=4096 の sgpr / svgp、球 n=1024 の sgpr / svgp、球 n=4096 の sgpr / svgp）。すでに勝っていた joint はすべて 2026-09-22 の自前中央値より短い。n=4096 の RSS は gprx 約 8–9 MiB（記録。合否は P4-19）。
+P4-12 の GPy 負けのうち pass は sgpr Forrester n=1024（14.36 ms 対 15.74 ms）と svgp 球 n=256（4.09 ms 対 7.65 ms）。球 SGPR n=1024 の GPyTorch eval は 20.18 ms 対 60.57 ms で pass。残る GPy 負けは 7 セル（svgp Forrester n=1024、Forrester n=4096 の sgpr / svgp、球 n=1024 の sgpr / svgp、球 n=4096 の sgpr / svgp）。すでに勝っていた joint はすべて 2026-09-22 の自前中央値より短い。n=4096 の RSS は gprx 約 8–9 MiB。合否は下の P4-19 節。
+
+## P4-19（Sparse のピーク RSS、[#210](https://github.com/YUKIKEDA/gprx/issues/210)）
+
+再計測はしていない。数値は上の P4-18 節（2026-09-27、`just perf-sparse`）。ゲートは `n=4096` の 4 セル。ピーク RSS が GPy と GPyTorch の両方より小さい。5% 以内は判定不能。`n≤1024` は記録。criterion は合否にしない。
+
+| 面   | 問題      | gprx    | GPy       | GPyTorch  | rss  |
+| ---- | --------- | ------- | --------- | --------- | ---- |
+| sgpr | forrester | 8.5 MiB | 152.9 MiB | 260.6 MiB | pass |
+| svgp | forrester | 8.0 MiB | 151.7 MiB | 250.8 MiB | pass |
+| sgpr | sphere    | 9.2 MiB | 153.5 MiB | 259.6 MiB | pass |
+| svgp | sphere    | 8.0 MiB | 151.6 MiB | 252.4 MiB | pass |
+
+4 セルとも pass。改善行は足さない。
 
