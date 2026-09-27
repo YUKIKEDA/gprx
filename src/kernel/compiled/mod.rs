@@ -12,6 +12,7 @@ use faer::{Mat, MatMut, MatRef};
 mod apply;
 mod f32_eval;
 mod grad;
+pub(crate) mod gram;
 mod hess;
 
 #[cfg(test)]
@@ -32,14 +33,14 @@ pub(crate) enum CoordMode {
 
 /// Distance matrix, coordinates, and optional ARD `(Δx_d)²` for a Mixed tree.
 #[derive(Clone, Copy)]
-pub(crate) struct MixedKernelViews<'a> {
-    pub(crate) dist: MatRef<'a, f64>,
-    pub(crate) x: MatRef<'a, f64>,
-    pub(crate) ard_cache: Option<MatRef<'a, f64>>,
+pub(crate) struct MixedKernelViews<'a, T = f64> {
+    pub(crate) dist: MatRef<'a, T>,
+    pub(crate) x: MatRef<'a, T>,
+    pub(crate) ard_cache: Option<MatRef<'a, T>>,
 }
 
-impl<'a> MixedKernelViews<'a> {
-    pub(crate) fn new(dist: MatRef<'a, f64>, x: MatRef<'a, f64>) -> Self {
+impl<'a, T> MixedKernelViews<'a, T> {
+    pub(crate) fn new(dist: MatRef<'a, T>, x: MatRef<'a, T>) -> Self {
         Self {
             dist,
             x,
@@ -99,7 +100,13 @@ pub enum CompiledKernel<T: KernelScalar = f64> {
     Product(Vec<CompiledKernel<T>>),
 }
 
-impl<T: KernelScalar> CompiledKernel<T> {
+impl<
+    T: KernelScalar
+        + faer_traits::ComplexField
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+> CompiledKernel<T>
+{
     pub(crate) fn from_spec(spec: &KernelSpec) -> Self {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
@@ -251,11 +258,19 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// `scratch` must match `out`. Nested products may allocate one extra
     /// `n×n` buffer.
+    pub(crate) fn needs_product_grad_scratch(&self) -> bool {
+        match self {
+            Self::Product(_) => true,
+            Self::Sum(terms) => terms.iter().any(Self::needs_product_grad_scratch),
+            _ => false,
+        }
+    }
+
     pub(crate) fn combine_from_leaf_grams(
         &self,
-        grams: &[Mat<f64>],
-        mut out: MatMut<'_, f64>,
-        mut scratch: MatMut<'_, f64>,
+        grams: &[Mat<T>],
+        mut out: MatMut<'_, T>,
+        mut scratch: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if grams.len() != self.leaf_count() {
@@ -269,7 +284,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         visit_triangle(out.nrows(), uplo, |row, col| {
-            out[(row, col)] = 0.0;
+            out[(row, col)] = T::from_f64(0.0);
         });
         let mut index = 0;
         self.write_from_leaf_grams(grams, &mut index, out.as_mut(), scratch.as_mut(), uplo)?;
@@ -283,10 +298,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
 
     fn write_from_leaf_grams(
         &self,
-        grams: &[Mat<f64>],
+        grams: &[Mat<T>],
         index: &mut usize,
-        dest: MatMut<'_, f64>,
-        scratch: MatMut<'_, f64>,
+        dest: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         match self {
@@ -500,7 +515,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 }
 
-fn flatten_sum<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
+fn flatten_sum<
+    T: KernelScalar
+        + faer_traits::ComplexField
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+>(
+    spec: &KernelSpec,
+    out: &mut Vec<CompiledKernel<T>>,
+) {
     match spec {
         KernelSpec::Sum(left, right) => {
             flatten_sum(left, out);
@@ -510,7 +533,15 @@ fn flatten_sum<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<
     }
 }
 
-fn flatten_product<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
+fn flatten_product<
+    T: KernelScalar
+        + faer_traits::ComplexField
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+>(
+    spec: &KernelSpec,
+    out: &mut Vec<CompiledKernel<T>>,
+) {
     match spec {
         KernelSpec::Product(left, right) => {
             flatten_product(left, out);
@@ -530,7 +561,7 @@ fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
     }
 }
 
-fn require_scratch_shape(out: MatRef<'_, f64>, scratch: MatRef<'_, f64>) -> Result<(), GprError> {
+fn require_scratch_shape<T>(out: MatRef<'_, T>, scratch: MatRef<'_, T>) -> Result<(), GprError> {
     if scratch.nrows() == out.nrows() && scratch.ncols() == out.ncols() {
         Ok(())
     } else {
@@ -570,14 +601,19 @@ fn split_terms<T: KernelScalar>(
         })
 }
 
-fn fold_cached_leaves<T: KernelScalar>(
+fn fold_cached_leaves<
+    T: KernelScalar
+        + faer_traits::ComplexField
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+>(
     terms: &[CompiledKernel<T>],
-    grams: &[Mat<f64>],
+    grams: &[Mat<T>],
     index: &mut usize,
-    mut dest: MatMut<'_, f64>,
-    mut scratch: MatMut<'_, f64>,
+    mut dest: MatMut<'_, T>,
+    mut scratch: MatMut<'_, T>,
     uplo: Triangle,
-    combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
+    combine: fn(MatMut<'_, T>, MatRef<'_, T>, Triangle),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
     first.write_from_leaf_grams(grams, index, dest.as_mut(), scratch.as_mut(), uplo)?;
@@ -595,20 +631,28 @@ fn fold_cached_leaves<T: KernelScalar>(
     Ok(())
 }
 
-fn copy_triangle(mut dest: MatMut<'_, f64>, src: MatRef<'_, f64>, uplo: Triangle) {
+fn copy_triangle<T: Copy>(mut dest: MatMut<'_, T>, src: MatRef<'_, T>, uplo: Triangle) {
     visit_triangle(dest.nrows(), uplo, |row, col| {
         dest[(row, col)] = src[(row, col)];
     });
 }
 
-fn add_triangle(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>, uplo: Triangle) {
+fn add_triangle<T: Copy + std::ops::Add<Output = T>>(
+    mut acc: MatMut<'_, T>,
+    src: MatRef<'_, T>,
+    uplo: Triangle,
+) {
     visit_triangle(acc.nrows(), uplo, |row, col| {
-        acc[(row, col)] += src[(row, col)];
+        acc[(row, col)] = acc[(row, col)] + src[(row, col)];
     });
 }
 
-fn mul_triangle(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>, uplo: Triangle) {
+fn mul_triangle<T: Copy + std::ops::Mul<Output = T>>(
+    mut acc: MatMut<'_, T>,
+    src: MatRef<'_, T>,
+    uplo: Triangle,
+) {
     visit_triangle(acc.nrows(), uplo, |row, col| {
-        acc[(row, col)] *= src[(row, col)];
+        acc[(row, col)] = acc[(row, col)] * src[(row, col)];
     });
 }

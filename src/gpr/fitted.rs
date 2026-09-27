@@ -8,8 +8,8 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, CoordMode, KernelSpec, MixedKernelViews, Triangle, fill_squared_euclidean,
-    fill_squared_euclidean_cross,
+    CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec,
+    MixedKernelViews, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
@@ -17,6 +17,7 @@ use crate::online::OnlineWorkspace;
 use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute};
 use crate::param::Interval;
 use crate::persist::{self, PersistedModel};
+use crate::precision::{GpScalar, StorageScalar};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{
     FitWorkspace, QueryWorkspace, empty_thread_scratch, faer_par, faer_par_dims,
@@ -26,25 +27,32 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 use super::super::online::OnlineGpr;
 
 use super::super::factor::{
-    FactorPolicy, apply_compiled_to, cholesky_lower_with_policy, factor_train_with_policy,
-    factor_written_k_with_policy, frobenius_lower, gemv_full, gemv_sym_lower, inv_diag_from_chol_l,
-    neg_mll_from_factor, pack_points, pack_points_into, require_param_len, symmetrize_lower,
-    trace_product, validate_query, validate_training, write_kernel_grad,
-    write_kernel_grad_from_coords, write_kernel_hess, write_kernel_hess_from_coords, write_params,
+    FactorPolicy, apply_compiled_to, cholesky_lower, cholesky_lower_with_policy,
+    factor_train_with_policy, factor_written_k_with_policy, frobenius_lower, gemv_full,
+    gemv_sym_lower, inv_diag_from_chol_l, neg_mll_from_factor, pack_points, pack_storage,
+    require_param_len, solve_llt_in_place, symmetrize_lower, trace_product, validate_query,
+    validate_training, write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
+    write_kernel_hess_from_coords, write_params,
 };
 use super::{AllocWorkspace, DistanceCacheSlot, FitBuffers, JitterPolicy, RetainCholesky};
 use super::{FittedGpr, Gpr};
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; factorization reads it.
-impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
+impl<O, S, C, B, P> FittedGpr<O, S, C, B, P>
+where
+    C: DistanceCacheSlot,
+    B: AllocWorkspace,
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
     pub(crate) fn prepare(
-        gpr: Gpr<O, S, C, B>,
+        gpr: Gpr<O, S, C, B, P>,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<Self, (Gpr<O, S, C, B>, GprError)> {
+    ) -> Result<Self, (Gpr<O, S, C, B, P>, GprError)> {
         if let Err(err) = validate_training(x, n_rows, n_cols, y) {
             return Err((gpr, err));
         }
@@ -64,11 +72,11 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         if let Err(err) = y_fitted.transform(&mut y_buf) {
             return Err((gpr, err));
         }
-        let mut workspace = match FitBuffers::<C, B>::new(n_rows) {
+        let mut workspace = match FitBuffers::<C, B, P>::new(n_rows) {
             Ok(ws) => ws,
             Err(err) => return Err((gpr, err)),
         };
-        let compiled = gpr.kernel.compile();
+        let compiled = gpr.kernel.compile_as::<P::Storage>();
         if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
             if let Err(err) = workspace.ensure_ard_if_cached(n_rows, n_cols) {
                 return Err((gpr, err));
@@ -91,7 +99,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             y_obs: y.to_vec(),
             x: pack_points(&x_buf, n_rows, n_cols),
             y_train: y_buf,
-            alpha: vec![0.0; n_rows],
+            factor_alpha: vec![P::Storage::from_f64(0.0); n_rows],
+            alpha: vec![P::Refine::from_f64(0.0); n_rows],
+            x_cast: P::Storage::empty_cols(),
+            y_cast: P::Storage::empty_rows(),
             n: n_rows,
             d: n_cols,
             mapped_factor: None,
@@ -102,7 +113,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// Drops `L` / `α` / training data and returns a trainer with the current
     /// kernel, likelihood, transforms, optimizer, distance-cache slot, and
     /// jitter policy.
-    pub fn into_trainer(self) -> Gpr<O, S, C, B> {
+    pub fn into_trainer(self) -> Gpr<O, S, C, B, P> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
@@ -146,12 +157,13 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(self) -> Result<OnlineGpr<O, S, C, B>, GprError> {
+    pub fn into_online(mut self) -> Result<OnlineGpr<O, S, C, B, P>, GprError> {
+        self.publish_predict_alpha()?;
         let n = self.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
         workspace.fill_ld_from_llt(self.chol_l(), n)?;
-        OnlineWorkspace::set_vector_prefix(&mut workspace.y, &self.y_train);
-        OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.alpha);
+        OnlineWorkspace::set_f64_prefix(&mut workspace.y, &self.y_train);
+        OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.factor_alpha);
         Ok(OnlineGpr::from_parts(
             self.kernel,
             self.compiled,
@@ -169,20 +181,21 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             self.y_obs,
             self.x,
             self.y_train,
+            self.factor_alpha,
             self.alpha,
             self.n,
             self.d,
         ))
     }
 
-    pub(crate) fn from_online_snapshot(online: &OnlineGpr<O, S, C, B>) -> Result<Self, GprError>
+    pub(crate) fn from_online_snapshot(online: &OnlineGpr<O, S, C, B, P>) -> Result<Self, GprError>
     where
         O: Clone,
         C: Copy,
     {
         let n = online.n;
         let d = online.d;
-        let mut workspace = FitBuffers::<C, B>::new(n)?;
+        let mut workspace = FitBuffers::<C, B, P>::new(n)?;
         let compiled = online.compiled.clone();
         if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
             workspace.ensure_ard_if_cached(n, d)?;
@@ -204,7 +217,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             y_obs: online.y_obs.clone(),
             x: compact_train_x(&online.x, n, d),
             y_train: online.y_train.clone(),
-            alpha: online.alpha().to_vec(),
+            factor_alpha: online.factor_alpha.clone(),
+            alpha: online.alpha.clone(),
+            x_cast: online.x_cast.clone(),
+            y_cast: online.y_cast.clone(),
             n,
             d,
             mapped_factor: None,
@@ -235,7 +251,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     }
 
     /// Returns `α = A⁻¹ y` from the last successful fit.
-    pub fn alpha(&self) -> &[f64] {
+    pub fn alpha(&self) -> &[P::Refine] {
         &self.alpha
     }
 
@@ -295,9 +311,11 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
 
     /// Writes this fitted model including the Cholesky factor `L` and `α`.
     ///
-    /// `L` is stored as a column-major `n×n` `f64` tensor; the lower triangle
-    /// is canonical. [`crate::persist::LoadedGpr::load`] keeps the safetensors
-    /// file mapped for `L`.
+    /// `L` is stored column-major. Its dtype is `F64` when storage is `f64`
+    /// and `F32` when storage is `f32`. `α` uses the predict scalar: `F32`
+    /// for [`crate::SinglePrecision`], `F64` for [`crate::DoublePrecision`]
+    /// and [`crate::MixedPrecision`]. [`crate::persist::LoadedGpr::load`]
+    /// keeps an `f64` factor memory-mapped.
     ///
     /// # Errors
     ///
@@ -347,7 +365,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     pub fn with_optimizer<O2: PoleRecompute<B>>(
         self,
         optimizer: O2,
-    ) -> FittedGpr<O2, O2::Strategy, C, B> {
+    ) -> FittedGpr<O2, O2::Strategy, C, B, P> {
         FittedGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -365,7 +383,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             y_obs: self.y_obs,
             x: self.x,
             y_train: self.y_train,
+            factor_alpha: self.factor_alpha,
             alpha: self.alpha,
+            x_cast: self.x_cast,
+            y_cast: self.y_cast,
             n: self.n,
             d: self.d,
             mapped_factor: self.mapped_factor,
@@ -397,11 +418,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         self.y_transform.as_ref()
     }
 
-    pub(crate) fn chol_l(&self) -> MatRef<'_, f64> {
-        match &self.mapped_factor {
-            Some(mapped) => mapped.l_view(),
-            None => self.workspace.core().k_matrix.as_ref(),
-        }
+    pub(crate) fn chol_l(&self) -> MatRef<'_, P::Storage> {
+        let mapped = self.mapped_factor.as_ref().map(|mapped| mapped.l_view());
+        P::view_factor(mapped, self.workspace.core().k_matrix.as_ref())
     }
 
     /// Returns the negative log marginal likelihood of the last successful fit.
@@ -428,12 +447,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// # }
     /// ```
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
-        Ok(neg_mll_from_factor(
-            self.chol_l(),
-            &self.y_train,
-            &self.alpha,
-            self.n,
-        ))
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut rows);
+        Ok(neg_mll_from_factor(self.chol_l(), y, &self.factor_alpha, self.n).to_f64())
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
@@ -507,9 +523,14 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let workspace = self.workspace.clone();
         let alpha = self.alpha.clone();
+        let factor_alpha = self.factor_alpha.clone();
+        let kernel_before = self.kernel.clone();
+        let likelihood_before = self.likelihood;
+        let mapped_before = self.mapped_factor.take();
+        let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         if let Err(err) = factor_train_with_policy(
             &compiled,
-            self.x.as_ref(),
+            x,
             &mut self.workspace,
             &self.y_train,
             likelihood.noise_variance(),
@@ -520,17 +541,28 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         ) {
             self.workspace = workspace;
             self.alpha = alpha;
+            self.factor_alpha = factor_alpha;
+            self.mapped_factor = mapped_before;
             return Err(err);
         }
-        self.copy_alpha_from_rhs();
+        self.copy_factor_alpha();
         self.kernel = kernel;
         self.compiled = compiled;
         self.likelihood = likelihood;
-        self.mapped_factor = None;
+        if let Err(err) = self.publish_predict_alpha() {
+            self.workspace = workspace;
+            self.alpha = alpha;
+            self.factor_alpha = factor_alpha;
+            self.kernel = kernel_before;
+            self.likelihood = likelihood_before;
+            self.compiled = self.kernel.compile_as::<P::Storage>();
+            self.mapped_factor = mapped_before;
+            return Err(err);
+        }
         Ok(())
     }
 
-    pub(crate) fn objective(&mut self) -> GprObjective<'_, O, S, C, B> {
+    pub(crate) fn objective(&mut self) -> GprObjective<'_, O, S, C, B, P> {
         GprObjective::new(self)
     }
 
@@ -602,6 +634,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     ) -> Result<f64, GprError> {
         let nlml = self.value_and_gradient_into_fit(params, out)?;
         self.restore_cholesky_if_overwritten()?;
+        self.publish_predict_alpha()?;
         Ok(nlml)
     }
 
@@ -618,9 +651,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         require_param_len(out.len(), n_params)?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
+        let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         if let Err(err) = factor_train_with_policy(
             &compiled,
-            self.x.as_ref(),
+            x,
             &mut self.workspace,
             &self.y_train,
             likelihood.noise_variance(),
@@ -632,17 +666,20 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             let _ = self.factorize_current();
             return Err(err);
         }
-        self.copy_alpha_from_rhs();
+        self.copy_factor_alpha();
         self.kernel = kernel;
         self.likelihood = likelihood;
         self.compiled = compiled;
         self.mapped_factor = None;
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut rows);
         let nlml = neg_mll_from_factor(
             self.workspace.core().k_matrix.as_ref(),
-            &self.y_train,
-            &self.alpha,
+            y,
+            &self.factor_alpha,
             n,
-        );
+        )
+        .to_f64();
         self.fill_gradient_from_factor(n_kernel, n, out)?;
         Ok(nlml)
     }
@@ -652,7 +689,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         &mut self,
         params: &[f64],
         indices: Option<&[usize]>,
-        leaf_grams: &mut Vec<Mat<f64>>,
+        leaf_grams: &mut Vec<Mat<P::Storage>>,
         primed: &mut bool,
     ) -> Result<f64, GprError> {
         let n_kernel = self.kernel.num_params();
@@ -665,7 +702,9 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         let n = self.n;
         let n_leaves = compiled.leaf_count();
         if leaf_grams.len() != n_leaves || leaf_grams.first().is_none_or(|m| m.nrows() != n) {
-            *leaf_grams = (0..n_leaves).map(|_| Mat::zeros(n, n)).collect();
+            *leaf_grams = (0..n_leaves)
+                .map(|_| Mat::<P::Storage>::zeros(n, n))
+                .collect();
             *primed = false;
         }
         let mut dirty = vec![true; n_leaves];
@@ -681,12 +720,8 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         }
         for (i, slot) in leaf_grams.iter_mut().enumerate() {
             if dirty[i] {
-                apply_compiled_to(
-                    compiled.leaf_at(i)?,
-                    self.x.as_ref(),
-                    &mut self.workspace,
-                    slot.as_mut(),
-                )?;
+                let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
+                apply_compiled_to(compiled.leaf_at(i)?, x, &mut self.workspace, slot.as_mut())?;
             }
         }
         if let Err(err) = factor_written_k_with_policy(
@@ -712,17 +747,20 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             return Err(err);
         }
         *primed = true;
-        self.copy_alpha_from_rhs();
+        self.copy_factor_alpha();
         self.kernel = kernel;
         self.likelihood = likelihood;
         self.compiled = compiled;
         self.mapped_factor = None;
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut rows);
         Ok(neg_mll_from_factor(
             self.workspace.core().k_matrix.as_ref(),
-            &self.y_train,
-            &self.alpha,
+            y,
+            &self.factor_alpha,
             n,
-        ))
+        )
+        .to_f64())
     }
 
     /// Writes the analytic NLML Hessian (row-major `p×p`) at `params`.
@@ -759,6 +797,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.hessian_into_fit(params, out)?;
         self.restore_cholesky_if_overwritten()?;
+        self.publish_predict_alpha()?;
         Ok(())
     }
 
@@ -773,9 +812,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         require_param_len(out.len(), n_params * n_params)?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
+        let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         if let Err(err) = factor_train_with_policy(
             &compiled,
-            self.x.as_ref(),
+            x,
             &mut self.workspace,
             &self.y_train,
             likelihood.noise_variance(),
@@ -787,7 +827,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             let _ = self.factorize_current();
             return Err(err);
         }
-        self.copy_alpha_from_rhs();
+        self.copy_factor_alpha();
         self.kernel = kernel;
         self.likelihood = likelihood;
         self.compiled = compiled;
@@ -805,7 +845,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         if self.compiled.needs_product_grad_scratch() {
             self.workspace.core_mut().ensure_kernel_scratch(n)?;
         }
-        self.workspace.form_gradient_w(&self.alpha, n);
+        self.workspace.form_gradient_w(&self.factor_alpha, n);
         out.fill(0.0);
         let n_params = n_kernel + 1;
         let noise = self.likelihood.noise_variance();
@@ -819,7 +859,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                         self.workspace.core().exp_buf.as_ref(),
                         n,
                     );
-                    let hij = -0.5 * inner;
+                    let hij = -0.5 * inner.to_f64();
                     out[i * n_params + j] = hij;
                     out[j * n_params + i] = hij;
                 }
@@ -851,6 +891,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             );
             return Ok(());
         }
+        let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         let (core, dist) = self.workspace.split_fit();
         if let Some(d) = dist {
             let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready {
@@ -861,7 +902,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             write_kernel_hess(
                 &self.compiled,
                 d.dist_cache.as_ref(),
-                self.x.as_ref(),
+                x,
                 ard_cache,
                 core.exp_buf.as_mut(),
                 core.kernel_scratch.as_mut(),
@@ -870,7 +911,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         } else {
             write_kernel_hess_from_coords(
                 &self.compiled,
-                self.x.as_ref(),
+                x,
                 core.exp_buf.as_mut(),
                 core.kernel_scratch.as_mut(),
                 i,
@@ -880,6 +921,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     }
 
     fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
+        let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         let (core, dist) = self.workspace.split_fit();
         if let Some(d) = dist {
             let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready {
@@ -890,7 +932,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             write_kernel_grad(
                 &self.compiled,
                 d.dist_cache.as_ref(),
-                self.x.as_ref(),
+                x,
                 ard_cache,
                 core.exp_buf.as_mut(),
                 core.kernel_scratch.as_mut(),
@@ -899,7 +941,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         } else {
             write_kernel_grad_from_coords(
                 &self.compiled,
-                self.x.as_ref(),
+                x,
                 core.exp_buf.as_mut(),
                 core.kernel_scratch.as_mut(),
                 idx,
@@ -915,34 +957,40 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         out: &mut [f64],
     ) -> Result<(), GprError> {
         let n_params = n_kernel + 1;
+        let zero = P::Storage::from_f64(0.0);
+        let two = P::Storage::from_f64(2.0);
+        let noise_s = P::Storage::from_f64(noise);
         let (kinv_alpha, tr_kinv2) = {
             let w = self.workspace.gradient_w();
-            let mut w_alpha = vec![0.0; n];
-            gemv_sym_lower(w, &self.alpha, &mut w_alpha, n);
-            let alpha_dot: f64 = self.alpha.iter().map(|a| a * a).sum();
-            let mut kinv_alpha = vec![0.0; n];
-            for i in 0..n {
-                kinv_alpha[i] = self.alpha[i] * alpha_dot - w_alpha[i];
+            let mut w_alpha = vec![zero; n];
+            gemv_sym_lower(w, &self.factor_alpha, &mut w_alpha, n);
+            let mut alpha_dot = zero;
+            for a in &self.factor_alpha {
+                alpha_dot += *a * *a;
             }
-            let mut tr_kinv2 = 0.0;
+            let mut kinv_alpha = vec![zero; n];
+            for i in 0..n {
+                kinv_alpha[i] = self.factor_alpha[i] * alpha_dot - w_alpha[i];
+            }
+            let mut tr_kinv2 = zero;
             for col in 0..n {
-                let kinv_cc = self.alpha[col] * self.alpha[col] - w[(col, col)];
+                let kinv_cc = self.factor_alpha[col] * self.factor_alpha[col] - w[(col, col)];
                 tr_kinv2 += kinv_cc * kinv_cc;
                 for row in col + 1..n {
-                    let kinv_rc = self.alpha[row] * self.alpha[col] - w[(row, col)];
-                    tr_kinv2 += 2.0 * kinv_rc * kinv_rc;
+                    let kinv_rc = self.factor_alpha[row] * self.factor_alpha[col] - w[(row, col)];
+                    tr_kinv2 += two * kinv_rc * kinv_rc;
                 }
             }
             (kinv_alpha, tr_kinv2)
         };
-        let u_n: Vec<f64> = self.alpha.iter().map(|a| noise * a).collect();
-        let w_n: Vec<f64> = kinv_alpha.iter().map(|a| noise * a).collect();
-        let mut un_wn = 0.0;
+        let u_n: Vec<P::Storage> = self.factor_alpha.iter().map(|a| noise_s * *a).collect();
+        let w_n: Vec<P::Storage> = kinv_alpha.iter().map(|a| noise_s * *a).collect();
+        let mut un_wn = zero;
         for i in 0..n {
             un_wn += u_n[i] * w_n[i];
         }
         let nn = n_kernel;
-        out[nn * n_params + nn] += -0.5 * noise * noise * tr_kinv2 + un_wn;
+        out[nn * n_params + nn] += -0.5 * noise * noise * tr_kinv2.to_f64() + un_wn.to_f64();
 
         self.workspace.core_mut().ensure_kernel_scratch(n)?;
         let thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
@@ -952,21 +1000,21 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                 let tr = trace_ki_kinv2(
                     self.workspace.core().exp_buf.as_ref(),
                     self.workspace.gradient_w(),
-                    &self.alpha,
+                    &self.factor_alpha,
                     n,
                 );
-                let mut u_i = vec![0.0; n];
+                let mut u_i = vec![P::Storage::from_f64(0.0); n];
                 gemv_sym_lower(
                     self.workspace.core().exp_buf.as_ref(),
-                    &self.alpha,
+                    &self.factor_alpha,
                     &mut u_i,
                     n,
                 );
-                let mut ui_wn = 0.0;
+                let mut ui_wn = P::Storage::from_f64(0.0);
                 for k in 0..n {
                     ui_wn += u_i[k] * w_n[k];
                 }
-                let hij = -0.5 * noise * tr + ui_wn;
+                let hij = -0.5 * noise * tr.to_f64() + ui_wn.to_f64();
                 out[i * n_params + nn] += hij;
                 out[nn * n_params + i] += hij;
             }
@@ -991,17 +1039,17 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         let result = (|| {
             for j in 0..n_kernel {
                 self.write_first_deriv(j)?;
-                let mut u_j = vec![0.0; n];
+                let mut u_j = vec![P::Storage::from_f64(0.0); n];
                 gemv_sym_lower(
                     self.workspace.core().exp_buf.as_ref(),
-                    &self.alpha,
+                    &self.factor_alpha,
                     &mut u_j,
                     n,
                 );
                 symmetrize_lower(self.workspace.core_mut().exp_buf.as_mut(), n);
                 self.solve_exp_against_l(n);
                 // `write_first_deriv` for a product reuses `kernel_scratch`.
-                let mut q_j = Mat::zeros(n, n);
+                let mut q_j = Mat::<P::Storage>::zeros(n, n);
                 {
                     let core = self.workspace.core();
                     for col in 0..n {
@@ -1010,11 +1058,11 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                         }
                     }
                 }
-                let mut w_j = vec![0.0; n];
-                gemv_full(q_j.as_ref(), &self.alpha, &mut w_j, n);
+                let mut w_j = vec![P::Storage::from_f64(0.0); n];
+                gemv_full(q_j.as_ref(), &self.factor_alpha, &mut w_j, n);
                 for i in 0..=j {
                     let tr;
-                    let mut ui_wj = 0.0;
+                    let mut ui_wj = P::Storage::from_f64(0.0);
                     if i == j {
                         tr = trace_product(q_j.as_ref(), q_j.as_ref(), n);
                         for k in 0..n {
@@ -1022,10 +1070,10 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                         }
                     } else {
                         self.write_first_deriv(i)?;
-                        let mut u_i = vec![0.0; n];
+                        let mut u_i = vec![P::Storage::from_f64(0.0); n];
                         gemv_sym_lower(
                             self.workspace.core().exp_buf.as_ref(),
-                            &self.alpha,
+                            &self.factor_alpha,
                             &mut u_i,
                             n,
                         );
@@ -1036,7 +1084,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                             ui_wj += u_i[k] * w_j[k];
                         }
                     }
-                    let add = -0.5 * tr + ui_wj;
+                    let add = -0.5 * tr.to_f64() + ui_wj.to_f64();
                     out[i * n_params + j] += add;
                     if i != j {
                         out[j * n_params + i] += add;
@@ -1069,44 +1117,17 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         if self.compiled.needs_product_grad_scratch() {
             self.workspace.core_mut().ensure_kernel_scratch(n)?;
         }
-        self.workspace.form_gradient_w(&self.alpha, n);
+        self.workspace.form_gradient_w(&self.factor_alpha, n);
         let thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
         let result = (|| {
             for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-                {
-                    let (core, dist) = self.workspace.split_fit();
-                    if let Some(d) = dist {
-                        let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready
-                        {
-                            Some(d.ard_sq_diff.as_ref())
-                        } else {
-                            None
-                        };
-                        write_kernel_grad(
-                            &self.compiled,
-                            d.dist_cache.as_ref(),
-                            self.x.as_ref(),
-                            ard_cache,
-                            core.exp_buf.as_mut(),
-                            core.kernel_scratch.as_mut(),
-                            i,
-                        )?;
-                    } else {
-                        write_kernel_grad_from_coords(
-                            &self.compiled,
-                            self.x.as_ref(),
-                            core.exp_buf.as_mut(),
-                            core.kernel_scratch.as_mut(),
-                            i,
-                        )?;
-                    }
-                }
+                self.write_first_deriv(i)?;
                 let inner = frobenius_lower(
                     self.workspace.gradient_w(),
                     self.workspace.core().exp_buf.as_ref(),
                     n,
                 );
-                *slot = -0.5 * inner;
+                *slot = -0.5 * inner.to_f64();
             }
             Ok::<(), GprError>(())
         })();
@@ -1116,7 +1137,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         let d_noise = self.likelihood.noise_variance();
         let w = self.workspace.gradient_w();
         for i in 0..n {
-            noise_inner += w[(i, i)] * d_noise;
+            noise_inner += w[(i, i)].to_f64() * d_noise;
         }
         out[n_kernel] = -0.5 * noise_inner;
         Ok(())
@@ -1138,7 +1159,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         &self,
         params: &[f64],
         n_kernel: usize,
-    ) -> Result<(KernelSpec, CompiledKernel, GaussianLikelihood), GprError> {
+    ) -> Result<(KernelSpec, CompiledKernel<P::Storage>, GaussianLikelihood), GprError> {
         let mut likelihood = self.likelihood;
         likelihood.set_params(&params[n_kernel..])?;
         let mut kernel = self.kernel.clone();
@@ -1150,7 +1171,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
 
     pub(super) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B>>,
+        O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -1190,15 +1211,16 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {
         self.kernel = kernel;
         self.likelihood = likelihood;
-        self.compiled = self.kernel.compile();
+        self.compiled = self.kernel.compile_as::<P::Storage>();
         let _ = self.factorize_current();
     }
 
     pub(crate) fn factorize_current(&mut self) -> Result<(), GprError> {
         self.mapped_factor = None;
+        let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         factor_train_with_policy(
             &self.compiled,
-            self.x.as_ref(),
+            x,
             &mut self.workspace,
             &self.y_train,
             self.likelihood.noise_variance(),
@@ -1207,16 +1229,28 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                 stage: CholeskyStage::Fit,
             },
         )?;
-        self.copy_alpha_from_rhs();
+        self.copy_factor_alpha();
         Ok(())
     }
 
-    fn copy_alpha_from_rhs(&mut self) {
+    pub(crate) fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
+        P::publish_predict_alpha(
+            &self.kernel,
+            &self.compiled,
+            self.x.as_ref(),
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            &self.factor_alpha,
+            &mut self.alpha,
+        )
+    }
+
+    fn copy_factor_alpha(&mut self) {
         let n = self.n;
-        if self.alpha.len() != n {
-            self.alpha.resize(n, 0.0);
+        if self.factor_alpha.len() != n {
+            self.factor_alpha.resize(n, P::Storage::from_f64(0.0));
         }
-        for (i, slot) in self.alpha.iter_mut().enumerate() {
+        for (i, slot) in self.factor_alpha.iter_mut().enumerate() {
             *slot = self.workspace.core().rhs[(i, 0)];
         }
     }
@@ -1239,7 +1273,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
@@ -1272,7 +1306,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-        out: &mut Prediction,
+        out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         self.predict_with_into(xs, n_rows, n_cols, PredictOptions::default(), out)
     }
@@ -1292,7 +1326,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
         self.write_prediction(xs, n_rows, n_cols, options, &mut out)?;
         Ok(out)
@@ -1310,7 +1344,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-        out: &mut Prediction,
+        out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
@@ -1318,6 +1352,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
                 expected_dim: self.d,
             });
         }
+        self.publish_predict_alpha()?;
         validate_query(xs, n_rows, n_cols)?;
         let n = self.n;
         let m = n_rows;
@@ -1325,107 +1360,79 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         self.query.query_xs.copy_from_slice(xs);
         self.x_transform
             .apply(&mut self.query.query_xs, n_rows, n_cols)?;
-        pack_points_into(
+        pack_storage(
             &self.query.query_xs,
             n_rows,
             n_cols,
             self.query.query_x.as_mut(),
         );
-        let compiled = &self.compiled;
-        let x_train = self.x.as_ref();
-        let alpha = self.alpha.as_slice();
-        let query = &mut self.query;
-        match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => {
-                let mut thread_scratch =
-                    std::mem::take(&mut self.workspace.core_mut().thread_scratch);
-                fill_squared_euclidean_cross(
-                    x_train.as_ref(),
-                    query.query_x.as_ref(),
-                    query.query_dist.as_mut(),
-                    &mut thread_scratch,
-                );
-                self.workspace.core_mut().thread_scratch = thread_scratch;
-                compiled.apply_cross(
-                    query.query_dist.as_ref(),
-                    query.query_k_star.as_mut(),
-                    query.query_scratch.as_mut(),
-                )?;
-            }
-            CoordMode::Points => {
-                compiled.apply_cross_points(
-                    x_train.as_ref(),
-                    query.query_x.as_ref(),
-                    query.query_k_star.as_mut(),
-                    query.query_scratch.as_mut(),
-                )?;
-            }
-            CoordMode::Mixed => {
-                let mut thread_scratch =
-                    std::mem::take(&mut self.workspace.core_mut().thread_scratch);
-                fill_squared_euclidean_cross(
-                    x_train.as_ref(),
-                    query.query_x.as_ref(),
-                    query.query_dist.as_mut(),
-                    &mut thread_scratch,
-                );
-                self.workspace.core_mut().thread_scratch = thread_scratch;
-                compiled.apply_cross_mixed(
-                    query.query_dist.as_ref(),
-                    x_train.as_ref(),
-                    query.query_x.as_ref(),
-                    query.query_k_star.as_mut(),
-                    query.query_scratch.as_mut(),
-                )?;
-            }
+        {
+            let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
+            let mut thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
+            let applied = apply_cross_kernel(
+                &self.compiled,
+                x_train,
+                self.query.query_x.as_ref(),
+                self.query.query_dist.as_mut(),
+                self.query.query_k_star.as_mut(),
+                self.query.query_scratch.as_mut(),
+                &mut thread_scratch,
+            );
+            self.workspace.core_mut().thread_scratch = thread_scratch;
+            applied?;
         }
+        let zero = P::Refine::from_f64(0.0);
         if out.mean.len() != m {
-            out.mean.resize(m, 0.0);
+            out.mean.resize(m, zero);
         }
         if out.variance.len() != m {
-            out.variance.resize(m, 0.0);
+            out.variance.resize(m, zero);
         }
         for (col, mean) in out.mean.iter_mut().enumerate() {
-            let mut sum = 0.0;
-            for (row, &a) in alpha.iter().enumerate() {
-                sum += query.query_k_star[(row, col)] * a;
-            }
-            *mean = sum;
+            *mean = P::column_mean(
+                &self.kernel,
+                self.query.query_k_star.as_ref(),
+                self.x.as_ref(),
+                &self.query.query_xs,
+                n_cols,
+                &self.alpha,
+                col,
+            )?;
         }
-        let l = match &self.mapped_factor {
-            Some(mapped) => mapped.l_view(),
-            None => self.workspace.core().k_matrix.as_ref(),
-        };
+        let chol = P::view_factor(
+            self.mapped_factor.as_ref().map(|mapped| mapped.l_view()),
+            self.workspace.core().k_matrix.as_ref(),
+        );
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-            l,
-            query.query_k_star.as_mut(),
+            chol,
+            self.query.query_k_star.as_mut(),
             faer_par_dims(n, m),
         );
-        match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query.query_kss)?,
-            CoordMode::Points | CoordMode::Mixed => {
-                compiled.fill_diag_points(query.query_x.as_ref(), &mut query.query_kss)?
-            }
-        }
+        fill_query_diag(
+            &self.compiled,
+            self.query.query_x.as_ref(),
+            &mut self.query.query_kss,
+        )?;
         let noise = self.likelihood.noise_variance();
+        let noise_s = P::Storage::from_f64(noise);
+        let zero_s = P::Storage::from_f64(0.0);
         for col in 0..m {
-            let mut vnorm = 0.0;
+            let mut vnorm = 0.0f64;
             for row in 0..n {
-                let v = query.query_k_star[(row, col)];
+                let v = self.query.query_k_star[(row, col)].to_f64();
                 vnorm += v * v;
             }
-            let mut latent = query.query_kss[col] - vnorm;
-            if latent < 0.0 {
-                latent = 0.0;
+            let mut latent = self.query.query_kss[col] - P::Storage::from_f64(vnorm);
+            if latent.to_f64() < 0.0 {
+                latent = zero_s;
             }
-            out.variance[col] = match options.variance_kind {
+            let var_s = match options.variance_kind {
                 VarianceKind::Latent => latent,
-                VarianceKind::Observation => latent + noise,
+                VarianceKind::Observation => latent + noise_s,
             };
+            out.variance[col] = P::Refine::from_f64(var_s.to_f64());
         }
-        self.y_transform.inverse_transform_mean(&mut out.mean)?;
-        self.y_transform
-            .inverse_transform_variance(&mut out.variance)?;
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut out.mean, &mut out.variance)?;
         out.variance_kind = options.variance_kind;
         Ok(())
     }
@@ -1436,7 +1443,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-        out: &mut Prediction,
+        out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
@@ -1445,101 +1452,82 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        let compiled = &self.compiled;
-        let x_train = self.x.as_ref();
-        let alpha = self.alpha.as_slice();
+        let mut alpha = Vec::new();
+        P::publish_predict_alpha(
+            &self.kernel,
+            &self.compiled,
+            self.x.as_ref(),
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            &self.factor_alpha,
+            &mut alpha,
+        )?;
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
         self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
-        let mut query_x = Mat::zeros(m, n_cols);
-        pack_points_into(&query_xs, n_rows, n_cols, query_x.as_mut());
-        let mut query_dist = Mat::zeros(n, m);
-        let mut query_k_star = Mat::zeros(n, m);
-        let mut query_scratch = Mat::zeros(n, m);
-        let mut query_kss = vec![0.0; m];
-        let mut thread_scratch = empty_thread_scratch();
-        match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => {
-                fill_squared_euclidean_cross(
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_dist.as_mut(),
-                    &mut thread_scratch,
-                );
-                compiled.apply_cross(
-                    query_dist.as_ref(),
-                    query_k_star.as_mut(),
-                    query_scratch.as_mut(),
-                )?;
-            }
-            CoordMode::Points => {
-                compiled.apply_cross_points(
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_k_star.as_mut(),
-                    query_scratch.as_mut(),
-                )?;
-            }
-            CoordMode::Mixed => {
-                fill_squared_euclidean_cross(
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_dist.as_mut(),
-                    &mut thread_scratch,
-                );
-                compiled.apply_cross_mixed(
-                    query_dist.as_ref(),
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_k_star.as_mut(),
-                    query_scratch.as_mut(),
-                )?;
-            }
-        }
+        let mut query_x = Mat::<P::Storage>::zeros(m, n_cols);
+        pack_storage(&query_xs, n_rows, n_cols, query_x.as_mut());
+        let mut query_dist = Mat::<P::Storage>::zeros(n, m);
+        let mut query_k_star = Mat::<P::Storage>::zeros(n, m);
+        let mut query_scratch = Mat::<P::Storage>::zeros(n, m);
+        let mut query_kss = vec![P::Storage::from_f64(0.0); m];
+        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
+        let mut x_cast = P::Storage::empty_cols();
+        let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
+        apply_cross_kernel(
+            &self.compiled,
+            x_train,
+            query_x.as_ref(),
+            query_dist.as_mut(),
+            query_k_star.as_mut(),
+            query_scratch.as_mut(),
+            &mut thread_scratch,
+        )?;
+        let zero = P::Refine::from_f64(0.0);
         if out.mean.len() != m {
-            out.mean.resize(m, 0.0);
+            out.mean.resize(m, zero);
         }
         if out.variance.len() != m {
-            out.variance.resize(m, 0.0);
+            out.variance.resize(m, zero);
         }
         for (col, mean) in out.mean.iter_mut().enumerate() {
-            let mut sum = 0.0;
-            for (row, &a) in alpha.iter().enumerate() {
-                sum += query_k_star[(row, col)] * a;
-            }
-            *mean = sum;
+            *mean = P::column_mean(
+                &self.kernel,
+                query_k_star.as_ref(),
+                self.x.as_ref(),
+                &query_xs,
+                n_cols,
+                &alpha,
+                col,
+            )?;
         }
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
             faer_par_dims(n, m),
         );
-        match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => compiled.fill_diag(&mut query_kss)?,
-            CoordMode::Points | CoordMode::Mixed => {
-                compiled.fill_diag_points(query_x.as_ref(), &mut query_kss)?
-            }
-        }
+        fill_query_diag(&self.compiled, query_x.as_ref(), &mut query_kss)?;
         let noise = self.likelihood.noise_variance();
+        let noise_s = P::Storage::from_f64(noise);
+        let zero_s = P::Storage::from_f64(0.0);
         for col in 0..m {
-            let mut vnorm = 0.0;
+            let mut vnorm = 0.0f64;
             for row in 0..n {
-                let v = query_k_star[(row, col)];
+                let v = query_k_star[(row, col)].to_f64();
                 vnorm += v * v;
             }
-            let mut latent = query_kss[col] - vnorm;
-            if latent < 0.0 {
-                latent = 0.0;
+            let mut latent = query_kss[col] - P::Storage::from_f64(vnorm);
+            if latent.to_f64() < 0.0 {
+                latent = zero_s;
             }
-            out.variance[col] = match options.variance_kind {
+            let var_s = match options.variance_kind {
                 VarianceKind::Latent => latent,
-                VarianceKind::Observation => latent + noise,
+                VarianceKind::Observation => latent + noise_s,
             };
+            out.variance[col] = P::Refine::from_f64(var_s.to_f64());
         }
-        self.y_transform.inverse_transform_mean(&mut out.mean)?;
-        self.y_transform
-            .inverse_transform_variance(&mut out.variance)?;
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut out.mean, &mut out.variance)?;
         out.variance_kind = options.variance_kind;
         Ok(())
     }
@@ -1577,7 +1565,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<PredictiveCovariance, GprError> {
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         self.predict_covariance_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
@@ -1597,7 +1585,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<PredictiveCovariance, GprError> {
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         self.write_covariance(xs, n_rows, n_cols, options)
     }
 
@@ -1638,7 +1626,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         n_cols: usize,
         n_draws: usize,
         seed: u64,
-    ) -> Result<Vec<f64>, GprError> {
+    ) -> Result<Vec<P::Refine>, GprError> {
         self.sample_with(xs, n_rows, n_cols, PredictOptions::default(), n_draws, seed)
     }
 
@@ -1655,19 +1643,20 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         options: PredictOptions,
         n_draws: usize,
         seed: u64,
-    ) -> Result<Vec<f64>, GprError> {
+    ) -> Result<Vec<P::Refine>, GprError> {
         let cov = self.write_covariance(xs, n_rows, n_cols, options)?;
         if n_draws == 0 {
             return Ok(Vec::new());
         }
         let m = cov.mean.len();
-        let mut a = Mat::zeros(m, m);
+        let mut a = Mat::<P::Refine>::zeros(m, m);
         for col in 0..m {
             for row in 0..m {
                 a[(row, col)] = cov.covariance[col * m + row];
             }
         }
-        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
+        let req =
+            llt::factor::cholesky_in_place_scratch::<P::Refine>(m, faer_par(m), Default::default());
         let mut scratch = MemBuffer::new(req);
         cholesky_lower_with_policy(
             &mut a,
@@ -1676,12 +1665,13 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             CholeskyStage::Predict,
         )?;
         let mut rng = crate::rng::small_rng(seed);
-        let mut out = vec![0.0; m * n_draws];
-        let mut z = vec![0.0; m];
-        let mut lz = vec![0.0; m];
+        let zero = P::Refine::from_f64(0.0);
+        let mut out = vec![zero; m * n_draws];
+        let mut z = vec![zero; m];
+        let mut lz = vec![zero; m];
         for draw in 0..n_draws {
             for slot in &mut z {
-                *slot = crate::rng::unit_normal(&mut rng);
+                *slot = P::Refine::from_f64(crate::rng::unit_normal(&mut rng));
             }
             mul_lower_chol(a.as_ref(), &z, &mut lz);
             let col = &mut out[draw * m..(draw + 1) * m];
@@ -1698,7 +1688,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<PredictiveCovariance, GprError> {
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
@@ -1706,108 +1696,92 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        let compiled = &self.compiled;
-        let x_train = self.x.as_ref();
-        let alpha = self.alpha.as_slice();
+        let mut alpha = Vec::new();
+        P::publish_predict_alpha(
+            &self.kernel,
+            &self.compiled,
+            self.x.as_ref(),
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            &self.factor_alpha,
+            &mut alpha,
+        )?;
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
         self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
-        let mut query_x = Mat::zeros(m, n_cols);
-        pack_points_into(&query_xs, n_rows, n_cols, query_x.as_mut());
-        let mut query_dist = Mat::zeros(n, m);
-        let mut query_k_star = Mat::zeros(n, m);
-        let mut query_scratch = Mat::zeros(n, m);
-        let mut thread_scratch = empty_thread_scratch();
-        match compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => {
-                fill_squared_euclidean_cross(
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_dist.as_mut(),
-                    &mut thread_scratch,
-                );
-                compiled.apply_cross(
-                    query_dist.as_ref(),
-                    query_k_star.as_mut(),
-                    query_scratch.as_mut(),
-                )?;
-            }
-            CoordMode::Points => {
-                compiled.apply_cross_points(
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_k_star.as_mut(),
-                    query_scratch.as_mut(),
-                )?;
-            }
-            CoordMode::Mixed => {
-                fill_squared_euclidean_cross(
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_dist.as_mut(),
-                    &mut thread_scratch,
-                );
-                compiled.apply_cross_mixed(
-                    query_dist.as_ref(),
-                    x_train.as_ref(),
-                    query_x.as_ref(),
-                    query_k_star.as_mut(),
-                    query_scratch.as_mut(),
-                )?;
-            }
-        }
-        let mut mean = vec![0.0; m];
+        let mut query_x = Mat::<P::Storage>::zeros(m, n_cols);
+        pack_storage(&query_xs, n_rows, n_cols, query_x.as_mut());
+        let mut query_dist = Mat::<P::Storage>::zeros(n, m);
+        let mut query_k_star = Mat::<P::Storage>::zeros(n, m);
+        let mut query_scratch = Mat::<P::Storage>::zeros(n, m);
+        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
+        let mut x_cast = P::Storage::empty_cols();
+        let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
+        apply_cross_kernel(
+            &self.compiled,
+            x_train,
+            query_x.as_ref(),
+            query_dist.as_mut(),
+            query_k_star.as_mut(),
+            query_scratch.as_mut(),
+            &mut thread_scratch,
+        )?;
+        let mut mean = vec![P::Refine::from_f64(0.0); m];
         for (col, slot) in mean.iter_mut().enumerate() {
-            let mut sum = 0.0;
-            for (row, &a) in alpha.iter().enumerate() {
-                sum += query_k_star[(row, col)] * a;
-            }
-            *slot = sum;
+            *slot = P::column_mean(
+                &self.kernel,
+                query_k_star.as_ref(),
+                self.x.as_ref(),
+                &query_xs,
+                n_cols,
+                &alpha,
+                col,
+            )?;
         }
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
             faer_par_dims(n, m),
         );
-        let mut kss = Mat::zeros(m, m);
-        let mut kss_scratch = Mat::zeros(m, m);
+        let mut kss = Mat::<P::Storage>::zeros(m, m);
+        let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
         fill_query_query_kernel(
-            compiled,
+            &self.compiled,
             query_x.as_ref(),
             kss.as_mut(),
             kss_scratch.as_mut(),
             &mut thread_scratch,
         )?;
+        let zero_s = P::Storage::from_f64(0.0);
         for col in 0..m {
             for row in 0..m {
-                let mut dot = 0.0;
+                let mut dot = 0.0f64;
                 for k in 0..n {
-                    dot += query_k_star[(k, row)] * query_k_star[(k, col)];
+                    dot += query_k_star[(k, row)].to_f64() * query_k_star[(k, col)].to_f64();
                 }
-                kss[(row, col)] -= dot;
+                kss[(row, col)] -= P::Storage::from_f64(dot);
             }
         }
-        let noise = self.likelihood.noise_variance();
+        let noise_s = P::Storage::from_f64(self.likelihood.noise_variance());
         for i in 0..m {
             let mut latent = kss[(i, i)];
-            if latent < 0.0 {
-                latent = 0.0;
+            if latent.to_f64() < 0.0 {
+                latent = zero_s;
             }
             kss[(i, i)] = match options.variance_kind {
                 VarianceKind::Latent => latent,
-                VarianceKind::Observation => latent + noise,
+                VarianceKind::Observation => latent + noise_s,
             };
         }
-        self.y_transform.inverse_transform_mean(&mut mean)?;
-        let mut covariance = vec![0.0; m * m];
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut [])?;
+        let mut covariance = vec![P::Refine::from_f64(0.0); m * m];
         for col in 0..m {
             for row in 0..m {
-                covariance[col * m + row] = kss[(row, col)];
+                covariance[col * m + row] = P::Refine::from_f64(kss[(row, col)].to_f64());
             }
         }
-        self.y_transform
-            .inverse_transform_covariance(&mut covariance)?;
+        P::inverse_covariance(self.y_transform.as_ref(), &mut covariance)?;
         Ok(PredictiveCovariance {
             mean,
             covariance,
@@ -1844,7 +1818,7 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn loo_predict(&self) -> Result<Prediction, GprError> {
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
         self.loo_predict_with(PredictOptions::default())
     }
 
@@ -1857,29 +1831,123 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
     /// # Errors
     ///
     /// Same as [`Self::loo_predict`].
-    pub fn loo_predict_with(&self, options: PredictOptions) -> Result<Prediction, GprError> {
-        let y = self.y_train.as_slice();
-        let alpha = self.alpha.as_slice();
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>() {
+            return self.loo_from_rounded_kernel(options);
+        }
+        let mut alpha = Vec::new();
+        P::publish_predict_alpha(
+            &self.kernel,
+            &self.compiled,
+            self.x.as_ref(),
+            &self.y_train,
+            self.likelihood.noise_variance(),
+            &self.factor_alpha,
+            &mut alpha,
+        )?;
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut rows);
         let n = self.n;
-        let mut q_diag = vec![0.0; n];
+        let mut q_diag = vec![P::Storage::from_f64(0.0); n];
         inv_diag_from_chol_l(self.chol_l(), &mut q_diag);
         let noise = self.likelihood.noise_variance();
-        let mut mean = vec![0.0; n];
-        let mut variance = vec![0.0; n];
+        let mut mean = vec![P::Refine::from_f64(0.0); n];
+        let mut variance = vec![P::Refine::from_f64(0.0); n];
         for i in 0..n {
-            let qii = q_diag[i];
+            let qii = q_diag[i].to_f64();
             if !qii.is_finite() || qii <= 0.0 {
                 return Err(GprError::NonPositiveDefiniteMatrix);
             }
-            mean[i] = y[i] - alpha[i] / qii;
+            mean[i] = P::Refine::from_f64(y[i].to_f64() - alpha[i].to_f64() / qii);
             let obs = 1.0 / qii;
-            variance[i] = match options.variance_kind {
+            variance[i] = P::Refine::from_f64(match options.variance_kind {
                 VarianceKind::Observation => obs,
                 VarianceKind::Latent => (obs - noise).max(0.0),
-            };
+            });
         }
-        self.y_transform.inverse_transform_mean(&mut mean)?;
-        self.y_transform.inverse_transform_variance(&mut variance)?;
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut variance)?;
+        Ok(Prediction {
+            mean,
+            variance,
+            variance_kind: options.variance_kind,
+        })
+    }
+
+    /// Leave-one-out from an `f64` factor of the kernel rounded to `f32`.
+    ///
+    /// The stored `f32` Cholesky is the predict factor. A cancelled
+    /// `y_i - α_i / Q_ii` needs the inverse diagonal of that rounded matrix
+    /// solved in `f64`, which is the same LOO formula with a tighter residual.
+    fn loo_from_rounded_kernel(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let n = self.n;
+        let kernel = self.kernel.compile();
+        let mut a = Mat::<f64>::zeros(n, n);
+        let mut scratch_k = Mat::<f64>::zeros(n, n);
+        kernel.apply_points(
+            self.x.as_ref(),
+            a.as_mut(),
+            Triangle::Lower,
+            scratch_k.as_mut(),
+        )?;
+        let noise = self.likelihood.noise_variance();
+        for i in 0..n {
+            a[(i, i)] += noise;
+        }
+        for col in 0..n {
+            for row in (col + 1)..n {
+                a[(col, row)] = a[(row, col)];
+            }
+        }
+        for col in 0..n {
+            for row in 0..n {
+                a[(row, col)] = f64::from(a[(row, col)] as f32);
+            }
+        }
+        let par = faer_par(n);
+        let factor_req = llt::factor::cholesky_in_place_scratch::<f64>(n, par, Default::default());
+        let mut factor_scratch = MemBuffer::new(factor_req);
+        cholesky_lower(&mut a, &mut factor_scratch, 0.0, CholeskyStage::Predict)?;
+        let solve_par = faer_par_dims(n, 1);
+        let solve_req = llt::solve::solve_in_place_scratch::<f64>(n, 1, solve_par);
+        let mut solve_scratch = MemBuffer::new(solve_req);
+        let mut rhs = Mat::<f64>::from_fn(n, 1, |i, _| self.y_train[i]);
+        llt::solve::solve_in_place(
+            a.as_ref(),
+            rhs.as_mut(),
+            solve_par,
+            MemStack::new(&mut solve_scratch),
+        );
+        let alpha: Vec<f64> = (0..n).map(|i| rhs[(i, 0)]).collect();
+        let mut mean = vec![P::Refine::from_f64(0.0); n];
+        let mut variance = vec![P::Refine::from_f64(0.0); n];
+        for i in 0..n {
+            for row in 0..n {
+                rhs[(row, 0)] = if row == i { 1.0 } else { 0.0 };
+            }
+            llt::solve::solve_in_place(
+                a.as_ref(),
+                rhs.as_mut(),
+                solve_par,
+                MemStack::new(&mut solve_scratch),
+            );
+            let qii = rhs[(i, 0)];
+            if !qii.is_finite() || qii <= 0.0 {
+                return Err(GprError::NonPositiveDefiniteMatrix);
+            }
+            mean[i] = P::Refine::from_f64(self.y_train[i] - alpha[i] / qii);
+            let obs = 1.0 / qii;
+            variance[i] = P::Refine::from_f64(match options.variance_kind {
+                VarianceKind::Observation => obs,
+                VarianceKind::Latent => (obs - noise).max(0.0),
+            });
+        }
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut variance)?;
         Ok(Prediction {
             mean,
             variance,
@@ -1889,11 +1957,13 @@ impl<O, S, C: DistanceCacheSlot, B: AllocWorkspace> FittedGpr<O, S, C, B> {
 }
 
 #[allow(private_bounds)] // `GprObjective` is crate-private; `refit` still needs `O: Optimizer` for it.
-impl<O, S, C, B> FittedGpr<O, S, C, B>
+impl<O, S, C, B, P> FittedGpr<O, S, C, B, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B>>,
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
     ///
@@ -1905,23 +1975,26 @@ where
     /// Same as [`Gpr::fit`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         self.optimize_hyperparameters()?;
-        self.restore_cholesky_if_overwritten()
+        self.restore_cholesky_if_overwritten()?;
+        self.publish_predict_alpha()
     }
 }
 
-#[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; `refit` still needs it.
-impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
+#[allow(private_bounds)]
+impl<C, P> FittedGpr<Fixed, FullRecompute, C, RetainCholesky, P>
+where
+    C: DistanceCacheSlot,
+    P: GpScalar,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     pub(crate) fn into_online_preserving_factor(
         self,
-    ) -> Result<OnlineGpr<Fixed, FullRecompute, C, RetainCholesky>, GprError> {
-        if self.mapped_factor.is_none() {
-            return self.into_online();
-        }
+    ) -> Result<OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, P>, GprError> {
         let n = self.n;
-        let mut workspace = OnlineWorkspace::from_active(n)?;
+        let mut workspace = OnlineWorkspace::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
-        OnlineWorkspace::set_vector_prefix(&mut workspace.y, &self.y_train);
-        OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.alpha);
+        OnlineWorkspace::set_f64_prefix(&mut workspace.y, &self.y_train);
+        OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.factor_alpha);
         Ok(OnlineGpr::from_parts(
             self.kernel,
             self.compiled,
@@ -1939,13 +2012,14 @@ impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
             self.y_obs,
             self.x,
             self.y_train,
+            self.factor_alpha,
             self.alpha,
             self.n,
             self.d,
         ))
     }
 
-    pub(crate) fn from_persisted(parts: PersistedModel<C>) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(mut parts: PersistedModel<C, P>) -> Result<Self, GprError> {
         let n = parts.y_obs.len();
         if n == 0 {
             return Err(GprError::EmptyInput);
@@ -1964,11 +2038,24 @@ impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
         parts.x_transform.apply(&mut x_buf, n, d)?;
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let mut workspace = FitBuffers::<C, RetainCholesky>::new(n)?;
-        let compiled = parts.kernel.compile();
+        let mut workspace = FitBuffers::<C, RetainCholesky, P>::new(n)?;
+        let compiled = parts.kernel.compile_as::<P::Storage>();
         if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
             workspace.ensure_ard_if_cached(n, d)?;
         }
+        if let Some(l) = parts.owned_l.take() {
+            let mut dest = workspace.core_mut().k_matrix.as_mut();
+            for col in 0..n {
+                for row in 0..n {
+                    dest[(row, col)] = l[(row, col)];
+                }
+            }
+        }
+        let factor_alpha = storage_alpha_from_saved::<P>(
+            workspace.core().k_matrix.as_ref(),
+            &y_buf,
+            &parts.alpha,
+        )?;
         Ok(Self {
             kernel: parts.kernel,
             compiled,
@@ -1986,7 +2073,10 @@ impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
             y_train: y_buf,
             x_obs: parts.x_obs,
             y_obs: parts.y_obs,
+            factor_alpha,
             alpha: parts.alpha,
+            x_cast: P::Storage::empty_cols(),
+            y_cast: P::Storage::empty_rows(),
             n,
             d,
             mapped_factor: parts.mapped,
@@ -2002,29 +2092,102 @@ impl<C: DistanceCacheSlot> FittedGpr<Fixed, FullRecompute, C, RetainCholesky> {
     ///
     /// Same as [`Gpr<Fixed>::factor`].
     pub fn refit(&mut self) -> Result<(), GprError> {
-        self.factorize_current()
+        self.factorize_current()?;
+        self.publish_predict_alpha()
     }
 }
 
-fn fill_query_query_kernel(
-    compiled: &CompiledKernel,
-    query_x: MatRef<'_, f64>,
-    kss: MatMut<'_, f64>,
-    scratch: MatMut<'_, f64>,
-    thread_scratch: &mut [Mat<f64>],
+fn storage_alpha_from_saved<P: GpScalar>(
+    l: MatRef<'_, P::Storage>,
+    y: &[f64],
+    saved: &[P::Refine],
+) -> Result<Vec<P::Storage>, GprError> {
+    let mixed = std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
+        && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>();
+    if !mixed {
+        return Ok(saved
+            .iter()
+            .map(|weight| P::Storage::from_f64(weight.to_f64()))
+            .collect());
+    }
+    let n = y.len();
+    let mut rhs = Mat::<P::Storage>::zeros(n, 1);
+    for (i, &yi) in y.iter().enumerate() {
+        rhs[(i, 0)] = P::Storage::from_f64(yi);
+    }
+    let par = faer_par_dims(n, 1);
+    let req = llt::solve::solve_in_place_scratch::<P::Storage>(n, 1, par);
+    let mut scratch = MemBuffer::new(req);
+    solve_llt_in_place(l, rhs.as_mut(), &mut scratch);
+    Ok((0..n).map(|i| rhs[(i, 0)]).collect())
+}
+
+fn apply_cross_kernel<K: GramKernel>(
+    compiled: &K,
+    x_train: MatRef<'_, K::T>,
+    query_x: MatRef<'_, K::T>,
+    mut query_dist: MatMut<'_, K::T>,
+    query_k_star: MatMut<'_, K::T>,
+    query_scratch: MatMut<'_, K::T>,
+    thread_scratch: &mut [Mat<K::T>],
+) -> Result<(), GprError>
+where
+    K::T: FillDistances,
+{
+    match compiled.coord_mode()? {
+        CoordMode::Dist | CoordMode::Either => {
+            K::T::write_cross(x_train, query_x, query_dist.as_mut(), thread_scratch);
+            compiled.apply_cross(query_dist.as_ref(), query_k_star, query_scratch)
+        }
+        CoordMode::Points => {
+            compiled.apply_cross_points(x_train, query_x, query_k_star, query_scratch)
+        }
+        CoordMode::Mixed => {
+            K::T::write_cross(x_train, query_x, query_dist.as_mut(), thread_scratch);
+            compiled.apply_cross_mixed(
+                query_dist.as_ref(),
+                x_train,
+                query_x,
+                query_k_star,
+                query_scratch,
+            )
+        }
+    }
+}
+
+fn fill_query_diag<K: GramKernel>(
+    compiled: &K,
+    query_x: MatRef<'_, K::T>,
+    query_kss: &mut [K::T],
 ) -> Result<(), GprError> {
+    match compiled.coord_mode()? {
+        CoordMode::Dist | CoordMode::Either => compiled.fill_diag(query_kss),
+        CoordMode::Points | CoordMode::Mixed => compiled.fill_diag_points(query_x, query_kss),
+    }
+}
+
+fn fill_query_query_kernel<K: GramKernel>(
+    compiled: &K,
+    query_x: MatRef<'_, K::T>,
+    kss: MatMut<'_, K::T>,
+    scratch: MatMut<'_, K::T>,
+    thread_scratch: &mut [Mat<K::T>],
+) -> Result<(), GprError>
+where
+    K::T: FillDistances + faer_traits::ComplexField,
+{
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             let m = query_x.nrows();
-            let mut dist_ss = Mat::zeros(m, m);
-            fill_squared_euclidean(query_x, dist_ss.as_mut(), thread_scratch);
+            let mut dist_ss = Mat::<K::T>::zeros(m, m);
+            K::T::write_squared(query_x, dist_ss.as_mut(), thread_scratch);
             compiled.apply(dist_ss.as_ref(), kss, Triangle::Full, scratch)
         }
         CoordMode::Points => compiled.apply_points(query_x, kss, Triangle::Full, scratch),
         CoordMode::Mixed => {
             let m = query_x.nrows();
-            let mut dist_ss = Mat::zeros(m, m);
-            fill_squared_euclidean(query_x, dist_ss.as_mut(), thread_scratch);
+            let mut dist_ss = Mat::<K::T>::zeros(m, m);
+            K::T::write_squared(query_x, dist_ss.as_mut(), thread_scratch);
             compiled.apply_mixed(
                 MixedKernelViews::new(dist_ss.as_ref(), query_x),
                 kss,
@@ -2058,20 +2221,31 @@ fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprE
     Ok(())
 }
 
-fn zero_and_maybe_noise(mut out: MatMut<'_, f64>, n: usize, noise_diag: bool, noise: f64) {
+fn zero_and_maybe_noise<T: StorageScalar>(
+    mut out: MatMut<'_, T>,
+    n: usize,
+    noise_diag: bool,
+    noise: f64,
+) {
+    let noise_s = T::from_f64(noise);
+    let zero = T::from_f64(0.0);
     for col in 0..n {
         for row in col..n {
-            out[(row, col)] = if noise_diag && row == col { noise } else { 0.0 };
+            out[(row, col)] = if noise_diag && row == col {
+                noise_s
+            } else {
+                zero
+            };
         }
     }
 }
 
-fn kinv_from_w(alpha: &[f64], w: MatRef<'_, f64>, row: usize, col: usize) -> f64 {
+fn kinv_from_w<T: StorageScalar>(alpha: &[T], w: MatRef<'_, T>, row: usize, col: usize) -> T {
     let (r, c) = if row >= col { (row, col) } else { (col, row) };
     alpha[row] * alpha[col] - w[(r, c)]
 }
 
-fn ki_sym(ki: MatRef<'_, f64>, row: usize, col: usize) -> f64 {
+fn ki_sym<T: Copy>(ki: MatRef<'_, T>, row: usize, col: usize) -> T {
     if row >= col {
         ki[(row, col)]
     } else {
@@ -2079,11 +2253,16 @@ fn ki_sym(ki: MatRef<'_, f64>, row: usize, col: usize) -> f64 {
     }
 }
 
-fn trace_ki_kinv2(ki: MatRef<'_, f64>, w: MatRef<'_, f64>, alpha: &[f64], n: usize) -> f64 {
-    let mut tr = 0.0;
+fn trace_ki_kinv2<T: StorageScalar>(
+    ki: MatRef<'_, T>,
+    w: MatRef<'_, T>,
+    alpha: &[T],
+    n: usize,
+) -> T {
+    let mut tr = T::from_f64(0.0);
     for c in 0..n {
         for b in 0..n {
-            let mut m_bc = 0.0;
+            let mut m_bc = T::from_f64(0.0);
             for k in 0..n {
                 m_bc += ki_sym(ki, b, k) * kinv_from_w(alpha, w, k, c);
             }
@@ -2100,12 +2279,12 @@ fn compact_train_x(x: &Mat<f64>, n: usize, d: usize) -> Mat<f64> {
     Mat::from_fn(n, d, |i, j| x[(i, j)])
 }
 
-fn mul_lower_chol(l: MatRef<'_, f64>, z: &[f64], out: &mut [f64]) {
+fn mul_lower_chol<T: StorageScalar>(l: MatRef<'_, T>, z: &[T], out: &mut [T]) {
     let m = l.nrows();
     debug_assert_eq!(z.len(), m);
     debug_assert_eq!(out.len(), m);
     for i in 0..m {
-        let mut s = 0.0;
+        let mut s = T::from_f64(0.0);
         for (j, &zj) in z.iter().enumerate().take(i + 1) {
             s += l[(i, j)] * zj;
         }

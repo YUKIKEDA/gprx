@@ -8,16 +8,17 @@ use faer::MatRef;
 
 use crate::error::GprError;
 use crate::gpr::factor::{require_param_len, write_params};
-use crate::kernel::KernelSpec;
+use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
 use crate::param::Interval;
+use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::{PredictOptions, Prediction};
 
 use super::factor::{
-    VfeState, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
-    vfe_neg_log_marginal_likelihood, vfe_predict,
+    MeanDot, PublishSgprWeights, VfeState, analytic_gradient, analytic_hessian, assemble_vfe,
+    fill_z_intervals, publish_sgpr_weights, vfe_neg_log_marginal_likelihood, vfe_predict,
 };
 use super::model::Sgpr;
 use super::online::OnlineSgpr;
@@ -32,8 +33,9 @@ use super::{FixedInducing, InducingLayout};
 /// likelihood `θ`. [`FreeInducing`] then appends column-major `Z`.
 /// [`Self::into_online`] yields [`OnlineSgpr`] for training-point and
 /// inducing-point updates.
+#[allow(private_bounds)]
 #[derive(Clone, Debug)]
-pub struct FittedSgpr<O = Lbfgs, I = FixedInducing> {
+pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
@@ -42,22 +44,29 @@ pub struct FittedSgpr<O = Lbfgs, I = FixedInducing> {
     pub(crate) z_obs: Vec<f64>,
     pub(crate) y: Vec<f64>,
     /// Lower `L` from `K_mm = L Lᵀ`.
-    pub(crate) k_mm_l: Mat<f64>,
+    pub(crate) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
-    pub(crate) a: Mat<f64>,
+    pub(crate) a: Mat<P::Storage>,
     /// Lower `L_B` from `B = σn² I + A Aᵀ`.
-    pub(crate) b_l: Mat<f64>,
-    /// `B⁻¹ A y`.
-    pub(crate) w: Vec<f64>,
-    pub(crate) k_diag_sum: f64,
-    pub(crate) a_frobenius2: f64,
+    pub(crate) b_l: Mat<P::Storage>,
+    /// Storage solve `B w = A y`. Marginal likelihood uses this.
+    pub(crate) w: Vec<P::Storage>,
+    /// Predict weights. [`DoublePrecision`] and [`SinglePrecision`] promote `w`.
+    /// [`MixedPrecision`] stores the refined `f64` weights.
+    pub(crate) predict_w: Vec<P::Refine>,
+    pub(crate) k_diag_sum: P::Storage,
+    pub(crate) a_frobenius2: P::Storage,
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
 }
 
 #[allow(private_bounds)]
-impl<O, I: InducingLayout> FittedSgpr<O, I> {
+impl<O, I: InducingLayout, P> FittedSgpr<O, I, P>
+where
+    P: crate::precision::GpScalar + MeanDot + PublishSgprWeights,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     /// Returns the number of training points.
     pub fn n(&self) -> usize {
         self.n
@@ -259,7 +268,10 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         &mut self,
         params: &[f64],
         out: &mut [f64],
-    ) -> Result<f64, GprError> {
+    ) -> Result<f64, GprError>
+    where
+        P: crate::precision::GpScalar,
+    {
         let n_params = self.num_params();
         require_param_len(params.len(), n_params)?;
         require_param_len(out.len(), n_params)?;
@@ -307,7 +319,10 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+    pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>
+    where
+        P: crate::precision::GpScalar,
+    {
         let n_params = self.num_params();
         require_param_len(params.len(), n_params)?;
         require_param_len(out.len(), n_params * n_params)?;
@@ -356,7 +371,7 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(self) -> OnlineSgpr<O> {
+    pub fn into_online(self) -> OnlineSgpr<O, P> {
         OnlineSgpr::from_fitted(self)
     }
 
@@ -364,14 +379,47 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         self.x_obs == self.z_obs
     }
 
-    fn exact_fitted(&self) -> Result<crate::FittedGpr<Fixed>, GprError> {
+    fn exact_fitted(
+        &self,
+    ) -> Result<
+        crate::FittedGpr<
+            Fixed,
+            crate::FullRecompute,
+            crate::CachedDistances,
+            crate::RetainCholesky,
+            P,
+        >,
+        GprError,
+    >
+    where
+        P: crate::precision::GpScalar,
+    {
         crate::Gpr::new(self.kernel.clone(), self.likelihood)
             .with_optimizer(Fixed)
+            .with_precision::<P>()
             .factor(&self.x_obs, self.n, self.d, &self.y)
             .map_err(|(_, e)| e)
     }
 
-    pub(crate) fn apply_vfe(&mut self, state: VfeState) {
+    pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
+        self.predict_w = publish_sgpr_weights::<P>(
+            &self.kernel,
+            self.a.as_ref(),
+            self.b_l.as_ref(),
+            &self.w,
+            &self.x_obs,
+            &self.y,
+            &self.z_obs,
+            self.likelihood.noise_variance(),
+            self.n,
+            self.m,
+            self.d,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn apply_vfe(&mut self, state: VfeState<P::Storage>) {
+        self.predict_w = promote_predict_w::<P>(&state.w);
         self.k_mm_l = state.k_mm_l;
         self.a = state.a;
         self.b_l = state.b_l;
@@ -380,18 +428,19 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         self.a_frobenius2 = state.a_frobenius2;
     }
 
-    pub(crate) fn into_trainer(self) -> Sgpr<O, I> {
+    pub(crate) fn into_trainer(self) -> Sgpr<O, I, P> {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
+            _precision: PhantomData,
         }
     }
 
     pub(crate) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I>>,
+        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I, P>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -418,6 +467,10 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
                     });
                 }
                 if let Err(err) = self.set_params(&opt.params) {
+                    *self = before;
+                    return Err(err);
+                }
+                if let Err(err) = self.refresh_predict_w() {
                     *self = before;
                     return Err(err);
                 }
@@ -506,7 +559,7 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
@@ -550,19 +603,19 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         n_rows: usize,
         n_cols: usize,
         options: PredictOptions,
-    ) -> Result<Prediction, GprError> {
+    ) -> Result<Prediction<P::Refine>, GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
                 expected_dim: self.d,
             });
         }
-        vfe_predict(
+        vfe_predict::<P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
-            &self.w,
+            &self.predict_w,
             self.likelihood.noise_variance(),
             self.m,
             self.d,
@@ -574,7 +627,13 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
     }
 
     #[cfg(test)]
-    pub(crate) fn k_mm_l(&self) -> MatRef<'_, f64> {
+    pub(crate) fn k_mm_l(&self) -> MatRef<'_, P::Storage> {
         self.k_mm_l.as_ref()
     }
+}
+
+pub(crate) fn promote_predict_w<P: ModelPrecision>(w: &[P::Storage]) -> Vec<P::Refine> {
+    w.iter()
+        .map(|value| P::Refine::from_f64(value.to_f64()))
+        .collect()
 }

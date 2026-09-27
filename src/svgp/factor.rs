@@ -11,13 +11,16 @@ use rand::rngs::SmallRng;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
 use crate::gpr::factor::{
-    cholesky_lower_with_policy, pack_points, pack_points_into, require_param_len, symmetrize_lower,
-    validate_query, validate_training,
+    cholesky_lower_with_policy, pack_points, require_param_len, symmetrize_lower, validate_query,
+    validate_training,
 };
-use crate::kernel::{KernelSpec, Triangle};
+use crate::kernel::{
+    CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
+use crate::precision::{ModelPrecision, StorageScalar};
 use crate::rng::small_rng;
 use crate::sgpr::{kernel_cross, mat_mul_into, validate_inducing};
 use crate::workspace::{faer_par, faer_par_dims};
@@ -30,16 +33,16 @@ fn k_mm_jitter_policy() -> JitterPolicy {
     JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
 }
 
-pub(crate) struct SvgpState {
-    pub(crate) k_mm_l: Mat<f64>,
-    pub(crate) a: Mat<f64>,
+pub(crate) struct SvgpState<T: StorageScalar> {
+    pub(crate) k_mm_l: Mat<T>,
+    pub(crate) a: Mat<T>,
     pub(crate) q_mean: Vec<f64>,
     pub(crate) q_l: Mat<f64>,
-    pub(crate) k_diag: Vec<f64>,
+    pub(crate) k_diag: Vec<T>,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_fitted(
+pub(crate) fn assemble_fitted<P>(
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x: &[f64],
@@ -49,8 +52,13 @@ pub(crate) fn assemble_fitted(
     z: &[f64],
     n_inducing: usize,
     q: Option<(Vec<f64>, Mat<f64>)>,
-) -> Result<FittedSvgp, GprError> {
-    let state = assemble_svgp(&kernel, x, n_rows, n_cols, y, z, n_inducing, q)?;
+) -> Result<FittedSvgp<P>, GprError>
+where
+    P: ModelPrecision,
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    let state = assemble_svgp::<P::Storage>(&kernel, x, n_rows, n_cols, y, z, n_inducing, q)?;
     Ok(FittedSvgp {
         kernel,
         likelihood,
@@ -69,7 +77,7 @@ pub(crate) fn assemble_fitted(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_svgp(
+pub(crate) fn assemble_svgp<T>(
     kernel: &KernelSpec,
     x: &[f64],
     n_rows: usize,
@@ -78,21 +86,24 @@ pub(crate) fn assemble_svgp(
     z: &[f64],
     n_inducing: usize,
     q: Option<(Vec<f64>, Mat<f64>)>,
-) -> Result<SvgpState, GprError> {
+) -> Result<SvgpState<T>, GprError>
+where
+    T: StorageScalar + FillDistances,
+    CompiledKernel<T>: GramKernel<T = T>,
+{
     validate_training(x, n_rows, n_cols, y)?;
     validate_inducing(z, n_inducing, n_cols)?;
-    let compiled = kernel.compile();
-    let x_mat = pack_points(x, n_rows, n_cols);
-    let z_mat = pack_points(z, n_inducing, n_cols);
+    let compiled = kernel.compile_as::<T>();
+    let x64 = pack_points(x, n_rows, n_cols);
+    let z64 = pack_points(z, n_inducing, n_cols);
+    let mut x_cast = T::empty_cols();
+    let mut z_cast = T::empty_cols();
+    let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
+    let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     let mut scratch = Mat::zeros(n_inducing, n_inducing);
-    compiled.apply_points(
-        z_mat.as_ref(),
-        k_mm.as_mut(),
-        Triangle::Lower,
-        scratch.as_mut(),
-    )?;
-    let req = llt::factor::cholesky_in_place_scratch::<f64>(
+    compiled.apply_points(z_mat, k_mm.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    let req = llt::factor::cholesky_in_place_scratch::<T>(
         n_inducing,
         faer_par(n_inducing),
         Default::default(),
@@ -109,29 +120,24 @@ pub(crate) fn assemble_svgp(
     let mut a = if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
         let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.apply_points(
-            x_mat.as_ref(),
-            gram.as_mut(),
-            Triangle::Lower,
-            gram_scratch.as_mut(),
-        )?;
+        compiled.apply_points(x_mat, gram.as_mut(), Triangle::Lower, gram_scratch.as_mut())?;
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
     } else {
-        kernel_cross(&compiled, z_mat.as_ref(), x_mat.as_ref())?
+        kernel_cross(&compiled, z_mat, x_mat)?
     };
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
         k_mm.as_ref(),
         a.as_mut(),
         faer_par_dims(n_inducing, n_rows),
     );
-    let mut k_diag = vec![0.0; n_rows];
-    compiled.fill_diag_points(x_mat.as_ref(), &mut k_diag)?;
+    let mut k_diag = vec![T::from_f64(0.0); n_rows];
+    compiled.fill_diag_points(x_mat, &mut k_diag)?;
     let (q_mean, q_l) = match q {
         Some((mean, l)) => (mean, l),
         None => prior_q(n_inducing),
     };
-    Ok(SvgpState {
+    Ok(SvgpState::<T> {
         k_mm_l: k_mm,
         a,
         q_mean,
@@ -201,60 +207,64 @@ pub(crate) fn unpack_q(params: &[f64], m: usize) -> Result<(Vec<f64>, Mat<f64>),
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn svgp_neg_elbo(
-    a: MatRef<'_, f64>,
+pub(crate) fn svgp_neg_elbo<T: StorageScalar>(
+    a: MatRef<'_, T>,
     q_mean: &[f64],
     q_l: MatRef<'_, f64>,
     y: &[f64],
-    k_diag: &[f64],
+    k_diag: &[T],
     noise: f64,
     n: usize,
     m: usize,
 ) -> f64 {
-    let mut tr_s = 0.0;
-    let mut log_det_s = 0.0;
+    let noise_s = T::from_f64(noise);
+    let mut tr_s = T::from_f64(0.0);
+    let mut log_det_s = T::from_f64(0.0);
     for j in 0..m {
-        log_det_s += q_l[(j, j)].ln();
+        log_det_s += StorageScalar::ln(T::from_f64(q_l[(j, j)]));
         for i in j..m {
-            let v = q_l[(i, j)];
+            let v = T::from_f64(q_l[(i, j)]);
             tr_s += v * v;
         }
     }
-    log_det_s *= 2.0;
-    let mut mean_norm2 = 0.0;
+    log_det_s *= T::from_f64(2.0);
+    let mut mean_norm2 = T::from_f64(0.0);
     for &v in q_mean {
-        mean_norm2 += v * v;
+        let v_s = T::from_f64(v);
+        mean_norm2 += v_s * v_s;
     }
-    let kl = 0.5 * (tr_s + mean_norm2 - m as f64 - log_det_s);
-    let log_2pi_noise = (2.0 * std::f64::consts::PI * noise).ln();
-    let inv_noise = 1.0 / noise;
-    let mut expected_ll = 0.0;
+    let kl = T::from_f64(0.5) * (tr_s + mean_norm2 - T::from_f64(m as f64) - log_det_s);
+    let log_2pi_noise = T::from_f64((2.0 * std::f64::consts::PI * noise).ln());
+    let inv_noise = T::from_f64(1.0) / noise_s;
+    let mut expected_ll = T::from_f64(0.0);
+    let half = T::from_f64(0.5);
     for col in 0..n {
-        let mut mu = 0.0;
-        let mut a_norm = 0.0;
-        let mut lt_norm = 0.0;
+        let mut mu = T::from_f64(0.0);
+        let mut a_norm = T::from_f64(0.0);
+        let mut lt_norm = T::from_f64(0.0);
         for j in 0..m {
             let a_j = a[(j, col)];
-            mu += a_j * q_mean[j];
+            mu += a_j * T::from_f64(q_mean[j]);
             a_norm += a_j * a_j;
-            let mut lt_j = 0.0;
+            let mut lt_j = T::from_f64(0.0);
             for i in j..m {
-                lt_j += q_l[(i, j)] * a[(i, col)];
+                lt_j += T::from_f64(q_l[(i, j)]) * a[(i, col)];
             }
             lt_norm += lt_j * lt_j;
         }
         let var = k_diag[col] - a_norm + lt_norm;
-        let resid = y[col] - mu;
-        expected_ll += -0.5 * log_2pi_noise - 0.5 * inv_noise * (resid * resid + var);
+        let resid = T::from_f64(y[col]) - mu;
+        expected_ll =
+            expected_ll + -half * log_2pi_noise + -half * inv_noise * (resid * resid + var);
     }
-    -(expected_ll - kl)
+    (-(expected_ll - kl)).to_f64()
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn svgp_predict(
+pub(crate) fn svgp_predict<P: ModelPrecision + SvgpMean>(
     kernel: &KernelSpec,
     z_obs: &[f64],
-    k_mm_l: MatRef<'_, f64>,
+    k_mm_l: MatRef<'_, P::Storage>,
     q_mean: &[f64],
     q_l: MatRef<'_, f64>,
     noise: f64,
@@ -264,7 +274,11 @@ pub(crate) fn svgp_predict(
     n_rows: usize,
     n_cols: usize,
     options: PredictOptions,
-) -> Result<Prediction, GprError> {
+) -> Result<Prediction<P::Refine>, GprError>
+where
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     if n_cols != d {
         return Err(GprError::DimensionMismatch {
             x_dim: n_cols,
@@ -272,51 +286,629 @@ pub(crate) fn svgp_predict(
         });
     }
     validate_query(xs, n_rows, n_cols)?;
-    let compiled = kernel.compile();
-    let z_mat = pack_points(z_obs, m, d);
-    let mut query_x = Mat::zeros(n_rows, n_cols);
-    pack_points_into(xs, n_rows, n_cols, query_x.as_mut());
-    let mut k_sz = kernel_cross(&compiled, z_mat.as_ref(), query_x.as_ref())?;
+    let compiled = kernel.compile_as::<P::Storage>();
+    let z64 = pack_points(z_obs, m, d);
+    let query64 = pack_points(xs, n_rows, n_cols);
+    let mut z_cast = P::Storage::empty_cols();
+    let mut q_cast = P::Storage::empty_cols();
+    let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
+    let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
+    let mut k_sz = kernel_cross(&compiled, z_mat, query_x)?;
+    let rhs = k_sz.clone();
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
         k_mm_l,
         k_sz.as_mut(),
         faer_par_dims(m, n_rows),
     );
-    let mut kss = vec![0.0; n_rows];
-    compiled.fill_diag_points(query_x.as_ref(), &mut kss)?;
+    let mut kss = vec![P::Storage::from_f64(0.0); n_rows];
+    compiled.fill_diag_points(query_x, &mut kss)?;
+    let zero = P::Refine::from_f64(0.0);
     let mut out = Prediction {
-        mean: vec![0.0; n_rows],
-        variance: vec![0.0; n_rows],
+        mean: vec![zero; n_rows],
+        variance: vec![zero; n_rows],
         variance_kind: options.variance_kind,
     };
     for col in 0..n_rows {
-        let mut mean = 0.0;
-        let mut a_norm = 0.0;
-        let mut lt_norm = 0.0;
+        let mut solved = vec![P::Storage::from_f64(0.0); m];
+        let mut rhs_col = vec![P::Storage::from_f64(0.0); m];
+        let mut a_norm = P::Storage::from_f64(0.0);
+        let mut lt_norm = P::Storage::from_f64(0.0);
         for j in 0..m {
             let a_star = k_sz[(j, col)];
-            mean += a_star * q_mean[j];
+            solved[j] = a_star;
+            rhs_col[j] = rhs[(j, col)];
             a_norm += a_star * a_star;
-            let mut lt_j = 0.0;
+            let mut lt_j = P::Storage::from_f64(0.0);
             for i in j..m {
-                lt_j += q_l[(i, j)] * k_sz[(i, col)];
+                lt_j += P::Storage::from_f64(q_l[(i, j)]) * k_sz[(i, col)];
             }
             lt_norm += lt_j * lt_j;
         }
         let mut latent = kss[col] - a_norm + lt_norm;
-        if latent < 0.0 {
-            latent = 0.0;
+        if latent.to_f64() < 0.0 {
+            latent = P::Storage::from_f64(0.0);
         }
-        out.mean[col] = mean;
+        let latent_r = P::Refine::from_f64(latent.to_f64());
+        let mut query_row = vec![0.0; d];
+        for dim in 0..d {
+            query_row[dim] = xs[col + n_rows * dim];
+        }
+        out.mean[col] =
+            P::mean_from_factor(kernel, z_obs, &query_row, k_mm_l, &solved, &rhs_col, q_mean)?;
         out.variance[col] = match options.variance_kind {
-            VarianceKind::Latent => latent,
-            VarianceKind::Observation => latent + noise,
+            VarianceKind::Latent => latent_r,
+            VarianceKind::Observation => P::Refine::from_f64(latent.to_f64() + noise),
         };
     }
+    let _ = kernel;
     Ok(out)
 }
 
-pub(crate) fn svgp_value_and_gradient(
+/// Mean from the storage triangular solve, or a refined `f64` solve for mixed precision.
+pub(crate) trait SvgpMean: ModelPrecision {
+    fn mean_from_factor(
+        kernel: &KernelSpec,
+        z_obs: &[f64],
+        query: &[f64],
+        k_mm_l: MatRef<'_, Self::Storage>,
+        solved: &[Self::Storage],
+        rhs: &[Self::Storage],
+        q_mean: &[f64],
+    ) -> Result<Self::Refine, GprError>;
+}
+
+fn storage_q_dot<T: StorageScalar>(solved: &[T], q_mean: &[f64]) -> T {
+    let mut sum = T::from_f64(0.0);
+    for (weight, mean) in solved.iter().zip(q_mean.iter()) {
+        sum += *weight * T::from_f64(*mean);
+    }
+    sum
+}
+
+impl SvgpMean for crate::precision::DoublePrecision {
+    fn mean_from_factor(
+        _kernel: &KernelSpec,
+        _z_obs: &[f64],
+        _query: &[f64],
+        k_mm_l: MatRef<'_, Self::Storage>,
+        solved: &[Self::Storage],
+        rhs: &[Self::Storage],
+        q_mean: &[f64],
+    ) -> Result<Self::Refine, GprError> {
+        let _ = (k_mm_l, rhs);
+        Ok(storage_q_dot(solved, q_mean))
+    }
+}
+
+impl SvgpMean for crate::precision::SinglePrecision {
+    fn mean_from_factor(
+        _kernel: &KernelSpec,
+        _z_obs: &[f64],
+        _query: &[f64],
+        k_mm_l: MatRef<'_, Self::Storage>,
+        solved: &[Self::Storage],
+        rhs: &[Self::Storage],
+        q_mean: &[f64],
+    ) -> Result<Self::Refine, GprError> {
+        let _ = (k_mm_l, rhs);
+        Ok(storage_q_dot(solved, q_mean))
+    }
+}
+
+fn refine_triangular(
+    l: MatRef<'_, f32>,
+    solved: &[f32],
+    _rhs: &[f32],
+    l64: MatRef<'_, f64>,
+    rhs64: &[f64],
+) -> Vec<f64> {
+    let m = solved.len();
+    let mut v: Vec<f64> = solved.iter().map(|value| f64::from(*value)).collect();
+    let tol = 10.0 * m as f64 * f64::EPSILON;
+    let mut prev: Option<f64> = None;
+    let mut streak = 0usize;
+    for _ in 0..10 {
+        let mut r = vec![0.0; m];
+        let mut l_inf = 0.0f64;
+        for i in 0..m {
+            let mut row = 0.0;
+            let mut sum = 0.0;
+            for j in 0..=i {
+                let lij = f64::from(l[(i, j)]);
+                row += lij.abs();
+                sum += lij * v[j];
+            }
+            l_inf = l_inf.max(row);
+            r[i] = rhs64[i] - sum;
+        }
+        let r_inf = r.iter().fold(0.0f64, |acc, value| acc.max(value.abs()));
+        let v_inf = v.iter().fold(0.0f64, |acc, value| acc.max(value.abs()));
+        let b_inf = rhs64.iter().fold(0.0f64, |acc, value| acc.max(value.abs()));
+        let denom = l_inf * v_inf + b_inf;
+        if denom > 0.0 && r_inf / denom < tol {
+            return v;
+        }
+        if let Some(prev_r) = prev {
+            let ratio = if prev_r > 0.0 { r_inf / prev_r } else { 0.0 };
+            if ratio > 0.9 {
+                streak += 1;
+                if streak >= 2 {
+                    return forward_f64(l64, rhs64);
+                }
+            } else {
+                streak = 0;
+            }
+        }
+        prev = Some(r_inf);
+        let r32: Vec<f32> = r.iter().map(|value| *value as f32).collect();
+        let delta = forward_f32(l, &r32);
+        for i in 0..m {
+            v[i] += f64::from(delta[i]);
+        }
+    }
+    forward_f64(l64, rhs64)
+}
+
+fn forward_f32(l: MatRef<'_, f32>, b: &[f32]) -> Vec<f32> {
+    let m = b.len();
+    let mut x = vec![0.0f32; m];
+    for i in 0..m {
+        let mut sum = b[i];
+        for j in 0..i {
+            sum -= l[(i, j)] * x[j];
+        }
+        let diag = l[(i, i)];
+        x[i] = if diag.to_f64().abs() > 0.0 {
+            sum / diag
+        } else {
+            0.0
+        };
+    }
+    x
+}
+
+fn forward_f64(l: MatRef<'_, f64>, b: &[f64]) -> Vec<f64> {
+    let m = b.len();
+    let mut x = vec![0.0; m];
+    for i in 0..m {
+        let mut sum = b[i];
+        for j in 0..i {
+            sum -= l[(i, j)] * x[j];
+        }
+        let diag = l[(i, i)];
+        x[i] = if diag.abs() > 0.0 { sum / diag } else { 0.0 };
+    }
+    x
+}
+
+impl SvgpMean for crate::precision::MixedPrecision<crate::precision::PromoteStorage> {
+    fn mean_from_factor(
+        _kernel: &KernelSpec,
+        _z_obs: &[f64],
+        _query: &[f64],
+        k_mm_l: MatRef<'_, Self::Storage>,
+        solved: &[Self::Storage],
+        rhs: &[Self::Storage],
+        q_mean: &[f64],
+    ) -> Result<Self::Refine, GprError> {
+        let m = solved.len();
+        let mut l64 = Mat::<f64>::zeros(m, m);
+        let mut rhs64 = vec![0.0; m];
+        for i in 0..m {
+            rhs64[i] = rhs[i].to_f64();
+            for j in 0..=i {
+                l64[(i, j)] = k_mm_l[(i, j)].to_f64();
+            }
+        }
+        let v = refine_triangular(k_mm_l, solved, rhs, l64.as_ref(), &rhs64);
+        let mut sum = 0.0;
+        for (weight, mean) in v.iter().zip(q_mean.iter()) {
+            sum += *weight * *mean;
+        }
+        Ok(sum)
+    }
+}
+
+impl SvgpMean for crate::precision::MixedPrecision<crate::precision::ReevaluateKernel> {
+    fn mean_from_factor(
+        kernel: &KernelSpec,
+        z_obs: &[f64],
+        query: &[f64],
+        k_mm_l: MatRef<'_, Self::Storage>,
+        solved: &[Self::Storage],
+        rhs: &[Self::Storage],
+        q_mean: &[f64],
+    ) -> Result<Self::Refine, GprError> {
+        let _ = rhs;
+        let m = solved.len();
+        let d = query.len();
+        let compiled = kernel.compile();
+        let z64 = pack_points(z_obs, m, d);
+        let q64 = pack_points(query, 1, d);
+        let mut k_mm = Mat::<f64>::zeros(m, m);
+        let mut scratch = Mat::<f64>::zeros(m, m);
+        compiled.apply_points(
+            z64.as_ref(),
+            k_mm.as_mut(),
+            Triangle::Lower,
+            scratch.as_mut(),
+        )?;
+        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
+        let mut chol_scratch = MemBuffer::new(req);
+        cholesky_lower_with_policy(
+            &mut k_mm,
+            &mut chol_scratch,
+            k_mm_jitter_policy(),
+            CholeskyStage::Predict,
+        )?;
+        let k_star = kernel_cross(&compiled, z64.as_ref(), q64.as_ref())?;
+        let l64 = k_mm;
+        let rhs64: Vec<f64> = (0..m).map(|i| k_star[(i, 0)]).collect();
+        let v = refine_triangular(k_mm_l, solved, solved, l64.as_ref(), &rhs64);
+        let mut sum = 0.0;
+        for (weight, mean) in v.iter().zip(q_mean.iter()) {
+            sum += *weight * *mean;
+        }
+        Ok(sum)
+    }
+}
+
+pub(crate) fn svgp_value_and_gradient<P>(
+    model: &FittedSvgp<P>,
+    out: &mut [f64],
+    batch: &[usize],
+) -> Result<f64, GprError>
+where
+    P: ModelPrecision,
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f64>() {
+        let shadow = promote_svgp_f64(model)?;
+        return svgp_value_and_gradient_f64(&shadow, out, batch);
+    }
+    svgp_value_and_gradient_storage(model, out, batch)
+}
+
+fn svgp_value_and_gradient_storage<P>(
+    model: &FittedSvgp<P>,
+    out: &mut [f64],
+    batch: &[usize],
+) -> Result<f64, GprError>
+where
+    P: ModelPrecision,
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    let n = model.n;
+    let m = model.m;
+    let n_kernel = model.kernel.num_params();
+    let n_theta = n_kernel + model.likelihood.num_params();
+    require_param_len(out.len(), n_theta + q_param_len(m))?;
+    if batch.is_empty() {
+        return Err(GprError::EmptyInput);
+    }
+    out.fill(0.0);
+    let noise = model.likelihood.noise_variance();
+    let inv_noise = 1.0 / noise;
+    let scale = n as f64 / batch.len() as f64;
+    let kl = storage_kl_grad::<P>(model, out, n_theta, m);
+    let cache = storage_point_cache::<P>(model, batch, m);
+    let (ell, resid2_var) =
+        storage_data_q_grad::<P>(model, out, batch, &cache, n_theta, inv_noise, scale);
+    out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
+    storage_kernel_grad::<P>(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
+    Ok(kl - scale * ell)
+}
+
+fn storage_kl_grad<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
+    out: &mut [f64],
+    n_theta: usize,
+    m: usize,
+) -> f64 {
+    let mut tr_s = P::Storage::from_f64(0.0);
+    let mut log_det_s = P::Storage::from_f64(0.0);
+    let mut packed = 0;
+    for j in 0..m {
+        let diag = P::Storage::from_f64(model.q_l[(j, j)]);
+        log_det_s += StorageScalar::ln(diag);
+        for i in j..m {
+            let v = P::Storage::from_f64(model.q_l[(i, j)]);
+            tr_s += v * v;
+            let grad = if i == j {
+                v - P::Storage::from_f64(1.0) / v
+            } else {
+                v
+            };
+            out[n_theta + m + packed] = grad.to_f64();
+            packed += 1;
+        }
+    }
+    log_det_s *= P::Storage::from_f64(2.0);
+    let mut mean_norm2 = P::Storage::from_f64(0.0);
+    for k in 0..m {
+        let v = P::Storage::from_f64(model.q_mean[k]);
+        mean_norm2 += v * v;
+        out[n_theta + k] = v.to_f64();
+    }
+    (P::Storage::from_f64(0.5) * (tr_s + mean_norm2 - P::Storage::from_f64(m as f64) - log_det_s))
+        .to_f64()
+}
+
+struct StoragePointCache<T: StorageScalar> {
+    resid: Vec<T>,
+    var: Vec<T>,
+    u: Mat<T>,
+}
+
+fn storage_point_cache<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
+    batch: &[usize],
+    m: usize,
+) -> StoragePointCache<P::Storage> {
+    let b = batch.len();
+    let a = storage_batch_columns(model.a.as_ref(), batch);
+    let mut q_l = Mat::<P::Storage>::zeros(m, m);
+    for j in 0..m {
+        for i in 0..m {
+            q_l[(i, j)] = P::Storage::from_f64(model.q_l[(i, j)]);
+        }
+    }
+    let mut u = Mat::<P::Storage>::zeros(m, b);
+    crate::sgpr::mat_mul_into(&mut u, q_l.transpose(), a.as_ref());
+    let mut resid = vec![P::Storage::from_f64(0.0); b];
+    let mut var = vec![P::Storage::from_f64(0.0); b];
+    let a_ref = a.as_ref();
+    for (b_idx, &col) in batch.iter().enumerate() {
+        let mut mu = P::Storage::from_f64(0.0);
+        let mut a_norm = P::Storage::from_f64(0.0);
+        let mut lt_norm = P::Storage::from_f64(0.0);
+        for j in 0..m {
+            let a_j = a_ref[(j, b_idx)];
+            let u_j = u[(j, b_idx)];
+            mu += a_j * P::Storage::from_f64(model.q_mean[j]);
+            a_norm += a_j * a_j;
+            lt_norm += u_j * u_j;
+        }
+        var[b_idx] = model.k_diag[col] - a_norm + lt_norm;
+        resid[b_idx] = P::Storage::from_f64(model.y[col]) - mu;
+    }
+    StoragePointCache { resid, var, u }
+}
+
+fn storage_batch_columns<T: StorageScalar>(full: MatRef<'_, T>, batch: &[usize]) -> Mat<T> {
+    let m = full.nrows();
+    let mut owned = Mat::zeros(m, batch.len());
+    for (b_idx, &col) in batch.iter().enumerate() {
+        for row in 0..m {
+            owned[(row, b_idx)] = full[(row, col)];
+        }
+    }
+    owned
+}
+
+fn storage_data_q_grad<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
+    out: &mut [f64],
+    batch: &[usize],
+    cache: &StoragePointCache<P::Storage>,
+    n_theta: usize,
+    inv_noise: f64,
+    scale: f64,
+) -> (f64, f64) {
+    let m = model.m;
+    let noise = model.likelihood.noise_variance();
+    let log_2pi_noise = P::Storage::from_f64((2.0 * std::f64::consts::PI * noise).ln());
+    let inv = P::Storage::from_f64(inv_noise);
+    let half = P::Storage::from_f64(0.5);
+    let mut ell = P::Storage::from_f64(0.0);
+    let mut resid2_var = P::Storage::from_f64(0.0);
+    let b = batch.len();
+    let mut resid_col = Mat::<P::Storage>::zeros(b, 1);
+    for (b_idx, resid) in cache.resid.iter().enumerate() {
+        let var = cache.var[b_idx];
+        ell = ell + -half * log_2pi_noise + -half * inv * (*resid * *resid + var);
+        resid2_var = resid2_var + *resid * *resid + var;
+        resid_col[(b_idx, 0)] = *resid;
+    }
+    let a = storage_batch_columns(model.a.as_ref(), batch);
+    let mut mean = Mat::<P::Storage>::zeros(m, 1);
+    crate::sgpr::mat_mul_into(&mut mean, a.as_ref(), resid_col.as_ref());
+    let c = scale * inv_noise;
+    for k in 0..m {
+        out[n_theta + k] -= c * mean[(k, 0)].to_f64();
+    }
+    let mut gram = Mat::<P::Storage>::zeros(m, m);
+    crate::sgpr::mat_mul_into(&mut gram, a.as_ref(), cache.u.transpose());
+    let mut packed = 0;
+    for j in 0..m {
+        for i in j..m {
+            out[n_theta + m + packed] += c * gram[(i, j)].to_f64();
+            packed += 1;
+        }
+    }
+    (ell.to_f64(), resid2_var.to_f64())
+}
+
+fn storage_kernel_grad<P>(
+    model: &FittedSvgp<P>,
+    out: &mut [f64],
+    batch: &[usize],
+    cache: &StoragePointCache<P::Storage>,
+    n_kernel: usize,
+    inv_noise: f64,
+    scale: f64,
+) -> Result<(), GprError>
+where
+    P: ModelPrecision,
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    let m = model.m;
+    let compiled = model.kernel.compile_as::<P::Storage>();
+    let x64 = pack_points(&model.x_obs, model.n, model.d);
+    let z64 = pack_points(&model.z_obs, model.m, model.d);
+    let mut x_cast = P::Storage::empty_cols();
+    let mut z_cast = P::Storage::empty_cols();
+    let x_mat = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
+    let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
+    let same_xz = model.x_obs == model.z_obs;
+    let mut q_l = Mat::<P::Storage>::zeros(m, m);
+    for j in 0..m {
+        for i in 0..m {
+            q_l[(i, j)] = P::Storage::from_f64(model.q_l[(i, j)]);
+        }
+    }
+    for (param_idx, slot) in out.iter_mut().take(n_kernel).enumerate() {
+        let (d_a, d_kdiag) =
+            storage_kernel_tangents::<P>(&compiled, x_mat, z_mat, model, same_xz, param_idx)?;
+        let da_b = storage_batch_columns(d_a.as_ref(), batch);
+        let mut lt = Mat::<P::Storage>::zeros(m, batch.len());
+        crate::sgpr::mat_mul_into(&mut lt, q_l.transpose(), da_b.as_ref());
+        let mut g = P::Storage::from_f64(0.0);
+        let inv = P::Storage::from_f64(inv_noise);
+        let two = P::Storage::from_f64(2.0);
+        let half = P::Storage::from_f64(0.5);
+        for (b_idx, &col) in batch.iter().enumerate() {
+            let mut dmu = P::Storage::from_f64(0.0);
+            let mut d_anorm = P::Storage::from_f64(0.0);
+            let mut d_lt = P::Storage::from_f64(0.0);
+            for r in 0..m {
+                let da_r = da_b[(r, b_idx)];
+                dmu += da_r * P::Storage::from_f64(model.q_mean[r]);
+                d_anorm += two * model.a[(r, col)] * da_r;
+                d_lt += two * cache.u[(r, b_idx)] * lt[(r, b_idx)];
+            }
+            let dvar = d_kdiag[col] - d_anorm + d_lt;
+            let resid = cache.resid[b_idx];
+            g = g + inv * resid * dmu - half * inv * dvar;
+        }
+        *slot = -scale * g.to_f64();
+    }
+    Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+fn storage_kernel_tangents<P>(
+    compiled: &CompiledKernel<P::Storage>,
+    x: MatRef<'_, P::Storage>,
+    z: MatRef<'_, P::Storage>,
+    model: &FittedSvgp<P>,
+    same_xz: bool,
+    param_idx: usize,
+) -> Result<(Mat<P::Storage>, Vec<P::Storage>), GprError>
+where
+    P: ModelPrecision,
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    let m = model.m;
+    let n = model.n;
+    let mut d_kmm = Mat::<P::Storage>::zeros(m, m);
+    let mut scratch_mm = Mat::<P::Storage>::zeros(m, m);
+    compiled.grad_points(
+        z,
+        d_kmm.as_mut(),
+        param_idx,
+        Triangle::Full,
+        scratch_mm.as_mut(),
+    )?;
+    let mut d_kmn = if same_xz {
+        let mut gram = Mat::<P::Storage>::zeros(n, n);
+        let mut scratch = Mat::<P::Storage>::zeros(n, n);
+        compiled.grad_points(
+            x,
+            gram.as_mut(),
+            param_idx,
+            Triangle::Full,
+            scratch.as_mut(),
+        )?;
+        gram
+    } else {
+        let mut cross = Mat::<P::Storage>::zeros(m, n);
+        let mut scratch = Mat::<P::Storage>::zeros(m, n);
+        compiled.grad_cross_points(z, x, cross.as_mut(), param_idx, scratch.as_mut())?;
+        cross
+    };
+    let mut d_kdiag = vec![P::Storage::from_f64(0.0); n];
+    if same_xz {
+        for i in 0..n {
+            d_kdiag[i] = d_kmn[(i, i)];
+        }
+    } else {
+        compiled.grad_diag_points(x, &mut d_kdiag, param_idx)?;
+    }
+    let mut d_l = Mat::<P::Storage>::zeros(m, m);
+    storage_cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
+    crate::sgpr::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
+    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+        model.k_mm_l.as_ref(),
+        d_kmn.as_mut(),
+        faer_par_dims(m, n),
+    );
+    Ok((d_kmn, d_kdiag))
+}
+
+fn storage_cholesky_sensitivity<T: StorageScalar>(
+    l: MatRef<'_, T>,
+    d_k: MatRef<'_, T>,
+    mut d_l: faer::MatMut<'_, T>,
+    m: usize,
+) {
+    let two = T::from_f64(2.0);
+    for j in 0..m {
+        let mut acc = d_k[(j, j)];
+        for k in 0..j {
+            acc -= two * l[(j, k)] * d_l[(j, k)];
+        }
+        d_l[(j, j)] = acc / (two * l[(j, j)]);
+        for i in j + 1..m {
+            let mut acc = d_k[(i, j)];
+            for k in 0..j {
+                acc = acc - d_l[(i, k)] * l[(j, k)] - l[(i, k)] * d_l[(j, k)];
+            }
+            acc -= l[(i, j)] * d_l[(j, j)];
+            d_l[(i, j)] = acc / l[(j, j)];
+        }
+    }
+}
+
+fn promote_svgp_f64<P: ModelPrecision>(model: &FittedSvgp<P>) -> Result<FittedSvgp, GprError>
+where
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
+    let mut k_mm_l = Mat::<f64>::zeros(model.m, model.m);
+    let mut a = Mat::<f64>::zeros(model.m, model.n);
+    for j in 0..model.m {
+        for i in j..model.m {
+            k_mm_l[(i, j)] = model.k_mm_l[(i, j)].to_f64();
+        }
+    }
+    for col in 0..model.n {
+        for row in 0..model.m {
+            a[(row, col)] = model.a[(row, col)].to_f64();
+        }
+    }
+    let k_diag: Vec<f64> = model.k_diag.iter().map(|value| value.to_f64()).collect();
+    Ok(FittedSvgp {
+        kernel: model.kernel.clone(),
+        likelihood: model.likelihood,
+        x_obs: model.x_obs.clone(),
+        z_obs: model.z_obs.clone(),
+        y: model.y.clone(),
+        k_mm_l,
+        a,
+        q_mean: model.q_mean.clone(),
+        q_l: model.q_l.clone(),
+        k_diag,
+        n: model.n,
+        m: model.m,
+        d: model.d,
+    })
+}
+
+fn svgp_value_and_gradient_f64(
     model: &FittedSvgp,
     out: &mut [f64],
     batch: &[usize],
@@ -779,7 +1371,12 @@ fn shuffle_indices(idx: &mut [usize], rng: &mut SmallRng) {
     }
 }
 
-pub(crate) fn run_adam_fit(model: &mut FittedSvgp, adam: &Adam) -> Result<(), GprError> {
+pub(crate) fn run_adam_fit<P>(model: &mut FittedSvgp<P>, adam: &Adam) -> Result<(), GprError>
+where
+    P: crate::precision::GpScalar + SvgpMean,
+    P::Storage: FillDistances,
+    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
+{
     let n = model.n;
     let m = model.m;
     let n_theta = model.kernel.num_params() + model.likelihood.num_params();

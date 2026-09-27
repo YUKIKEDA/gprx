@@ -19,6 +19,13 @@ pub(super) struct ModelConfig {
     pub d: usize,
     pub has_factor: bool,
     pub factor_kind: FactorKind,
+    /// Omitted on disk means [`PrecisionJson::Double`].
+    #[serde(default, skip_serializing_if = "PrecisionJson::is_double")]
+    pub precision: PrecisionJson,
+    /// Omitted on disk means [`ResidualJson::PromoteStorage`]. Used when
+    /// [`Self::precision`] is [`PrecisionJson::Mixed`].
+    #[serde(default, skip_serializing_if = "ResidualJson::is_promote_storage")]
+    pub residual: ResidualJson,
     pub kernel: KernelJson,
     pub likelihood: LikelihoodJson,
     pub jitter: JitterJson,
@@ -71,6 +78,53 @@ impl ModelConfig {
 pub(super) enum FactorKind {
     Llt,
     Ldlt,
+}
+
+/// Storage and predict scalar recorded in `config.json`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PrecisionJson {
+    #[default]
+    Double,
+    Single,
+    Mixed,
+}
+
+impl PrecisionJson {
+    fn is_double(kind: &Self) -> bool {
+        matches!(kind, Self::Double)
+    }
+
+    pub(super) fn from_persist(kind: crate::precision::PersistKind) -> Self {
+        match kind {
+            crate::precision::PersistKind::Double => Self::Double,
+            crate::precision::PersistKind::Single => Self::Single,
+            crate::precision::PersistKind::MixedPromote
+            | crate::precision::PersistKind::MixedReevaluate => Self::Mixed,
+        }
+    }
+}
+
+/// Mixed-precision residual. Ignored unless [`PrecisionJson`] is `mixed`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ResidualJson {
+    #[default]
+    PromoteStorage,
+    ReevaluateKernel,
+}
+
+impl ResidualJson {
+    fn is_promote_storage(kind: &Self) -> bool {
+        matches!(kind, Self::PromoteStorage)
+    }
+
+    pub(super) fn from_persist(kind: crate::precision::PersistKind) -> Self {
+        match kind {
+            crate::precision::PersistKind::MixedReevaluate => Self::ReevaluateKernel,
+            _ => Self::PromoteStorage,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

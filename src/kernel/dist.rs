@@ -278,6 +278,108 @@ fn copy_lower_to_upper(mut dist: MatMut<'_, f64>) {
     }
 }
 
+/// Squared-distance fills. `f64` keeps the SIMD path. `f32` is the same formula in scalar.
+pub(crate) trait FillDistances: Copy {
+    const READS_ARD_CACHE: bool;
+
+    fn write_squared(x: MatRef<'_, Self>, dist: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
+
+    fn write_cross(
+        x_train: MatRef<'_, Self>,
+        x_test: MatRef<'_, Self>,
+        dist: MatMut<'_, Self>,
+        scratch: &mut [Mat<Self>],
+    );
+
+    fn write_ard(x: MatRef<'_, Self>, cache: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
+}
+
+impl FillDistances for f64 {
+    const READS_ARD_CACHE: bool = true;
+
+    fn write_squared(x: MatRef<'_, Self>, dist: MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
+        fill_squared_euclidean(x, dist, scratch);
+    }
+
+    fn write_cross(
+        x_train: MatRef<'_, Self>,
+        x_test: MatRef<'_, Self>,
+        dist: MatMut<'_, Self>,
+        scratch: &mut [Mat<Self>],
+    ) {
+        fill_squared_euclidean_cross(x_train, x_test, dist, scratch);
+    }
+
+    fn write_ard(x: MatRef<'_, Self>, cache: MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
+        fill_ard_squared_diff(x, cache, scratch);
+    }
+}
+
+impl FillDistances for f32 {
+    const READS_ARD_CACHE: bool = false;
+
+    fn write_squared(x: MatRef<'_, Self>, mut dist: MatMut<'_, Self>, _scratch: &mut [Mat<Self>]) {
+        fill_squared_scalar(x, dist.as_mut());
+    }
+
+    fn write_cross(
+        x_train: MatRef<'_, Self>,
+        x_test: MatRef<'_, Self>,
+        mut dist: MatMut<'_, Self>,
+        _scratch: &mut [Mat<Self>],
+    ) {
+        fill_cross_scalar(x_train, x_test, dist.as_mut());
+    }
+
+    fn write_ard(x: MatRef<'_, Self>, mut cache: MatMut<'_, Self>, _scratch: &mut [Mat<Self>]) {
+        fill_ard_scalar(x, cache.as_mut());
+    }
+}
+
+fn fill_squared_scalar(x: MatRef<'_, f32>, mut dist: MatMut<'_, f32>) {
+    let n = x.nrows();
+    let d = x.ncols();
+    for col in 0..n {
+        for row in 0..n {
+            let mut sum = 0.0f32;
+            for dim in 0..d {
+                let diff = x[(row, dim)] - x[(col, dim)];
+                sum += diff * diff;
+            }
+            dist[(row, col)] = sum;
+        }
+    }
+}
+
+fn fill_cross_scalar(x_train: MatRef<'_, f32>, x_test: MatRef<'_, f32>, mut dist: MatMut<'_, f32>) {
+    let n = x_train.nrows();
+    let m = x_test.nrows();
+    let d = x_train.ncols();
+    for col in 0..m {
+        for row in 0..n {
+            let mut sum = 0.0f32;
+            for dim in 0..d {
+                let diff = x_train[(row, dim)] - x_test[(col, dim)];
+                sum += diff * diff;
+            }
+            dist[(row, col)] = sum;
+        }
+    }
+}
+
+fn fill_ard_scalar(x: MatRef<'_, f32>, mut cache: MatMut<'_, f32>) {
+    let n = x.nrows();
+    let d = x.ncols();
+    for dim in 0..d {
+        for col in 0..n {
+            for row in 0..n {
+                let diff = x[(row, dim)] - x[(col, dim)];
+                cache[(row, dim * n + col)] = diff * diff;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
