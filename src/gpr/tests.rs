@@ -386,7 +386,7 @@ fn indefinite_matrix_returns_cholesky_failed() {
 #[derive(Clone, Debug)]
 struct IndefiniteLeaf;
 
-impl KernelTerm for IndefiniteLeaf {
+impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
     fn num_params(&self) -> usize {
         0
     }
@@ -402,7 +402,7 @@ impl KernelTerm for IndefiniteLeaf {
     }
 
     fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        self.get_params(&mut params.to_vec())
+        KernelTerm::<T>::get_params(self, &mut params.to_vec())
     }
 
     fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError> {
@@ -417,8 +417,8 @@ impl KernelTerm for IndefiniteLeaf {
 
     fn apply(
         &self,
-        dist: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let n = dist.nrows();
@@ -437,31 +437,39 @@ impl KernelTerm for IndefiniteLeaf {
                 Triangle::Lower | Triangle::Full => n,
             };
             for row in start..end {
-                out[(row, col)] = if row == col { 1.0 } else { 2.0 };
+                out[(row, col)] = if row == col {
+                    T::from_f64(1.0)
+                } else {
+                    T::from_f64(2.0)
+                };
             }
         }
         Ok(())
     }
 
-    fn apply_cross(&self, dist: MatRef<'_, f64>, mut out: MatMut<'_, f64>) -> Result<(), GprError> {
+    fn apply_cross(&self, dist: MatRef<'_, T>, mut out: MatMut<'_, T>) -> Result<(), GprError> {
         for col in 0..out.ncols() {
             for row in 0..out.nrows() {
-                out[(row, col)] = if row == col { 1.0 } else { 2.0 };
+                out[(row, col)] = if row == col {
+                    T::from_f64(1.0)
+                } else {
+                    T::from_f64(2.0)
+                };
             }
         }
         let _ = dist;
         Ok(())
     }
 
-    fn fill_diag(&self, out: &mut [f64]) -> Result<(), GprError> {
-        out.fill(1.0);
+    fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
+        out.fill(T::from_f64(1.0));
         Ok(())
     }
 
     fn grad(
         &self,
-        _dist: MatRef<'_, f64>,
-        _d_k: MatMut<'_, f64>,
+        _dist: MatRef<'_, T>,
+        _d_k: MatMut<'_, T>,
         param_idx: usize,
         _uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -472,8 +480,8 @@ impl KernelTerm for IndefiniteLeaf {
 
     fn hess(
         &self,
-        _dist: MatRef<'_, f64>,
-        _d2_k: MatMut<'_, f64>,
+        _dist: MatRef<'_, T>,
+        _d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         _uplo: Triangle,
@@ -485,8 +493,8 @@ impl KernelTerm for IndefiniteLeaf {
 
     fn hess_points(
         &self,
-        _x: MatRef<'_, f64>,
-        _d2_k: MatMut<'_, f64>,
+        _x: MatRef<'_, T>,
+        _d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         _uplo: Triangle,
@@ -496,7 +504,7 @@ impl KernelTerm for IndefiniteLeaf {
         })
     }
 
-    fn clone_box(&self) -> Box<dyn KernelTerm> {
+    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
         Box::new(self.clone())
     }
 }

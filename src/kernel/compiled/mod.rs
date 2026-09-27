@@ -6,10 +6,11 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
-use crate::kernel::KernelSpec;
+use crate::kernel::{KernelScalar, KernelSpec};
 use faer::{Mat, MatMut, MatRef};
 
 mod apply;
+mod f32_eval;
 mod grad;
 mod hess;
 
@@ -69,7 +70,7 @@ impl<'a> MixedKernelViews<'a> {
 /// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
-pub enum CompiledKernel {
+pub enum CompiledKernel<T: KernelScalar = f64> {
     /// Isotropic RBF.
     Rbf(RbfKernel),
     /// ARD RBF (`θ_d = log(ℓ_d)`).
@@ -91,14 +92,14 @@ pub enum CompiledKernel {
     /// White nugget.
     White(WhiteKernel),
     /// User-defined distance leaf ([`super::KernelTerm`]).
-    Custom(CustomKernel),
+    Custom(CustomKernel<T>),
     /// Flattened sum of compiled terms.
-    Sum(Vec<CompiledKernel>),
+    Sum(Vec<CompiledKernel<T>>),
     /// Flattened Hadamard product of compiled terms.
-    Product(Vec<CompiledKernel>),
+    Product(Vec<CompiledKernel<T>>),
 }
 
-impl CompiledKernel {
+impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn from_spec(spec: &KernelSpec) -> Self {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
@@ -111,7 +112,7 @@ impl CompiledKernel {
             KernelSpec::Constant(leaf) => Self::Constant(*leaf),
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
-            KernelSpec::Custom(leaf) => Self::Custom(leaf.clone()),
+            KernelSpec::Custom(leaf) => Self::Custom(leaf.with_scalar()),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
                 flatten_sum(left, &mut terms);
@@ -499,23 +500,23 @@ impl CompiledKernel {
     }
 }
 
-fn flatten_sum(spec: &KernelSpec, out: &mut Vec<CompiledKernel>) {
+fn flatten_sum<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
     match spec {
         KernelSpec::Sum(left, right) => {
             flatten_sum(left, out);
             flatten_sum(right, out);
         }
-        other => out.push(CompiledKernel::from_spec(other)),
+        other => out.push(CompiledKernel::<T>::from_spec(other)),
     }
 }
 
-fn flatten_product(spec: &KernelSpec, out: &mut Vec<CompiledKernel>) {
+fn flatten_product<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
     match spec {
         KernelSpec::Product(left, right) => {
             flatten_product(left, out);
             flatten_product(right, out);
         }
-        other => out.push(CompiledKernel::from_spec(other)),
+        other => out.push(CompiledKernel::<T>::from_spec(other)),
     }
 }
 
@@ -559,7 +560,9 @@ fn merge_coord_mode(a: CoordMode, b: CoordMode) -> CoordMode {
     }
 }
 
-fn split_terms(terms: &[CompiledKernel]) -> Result<(&CompiledKernel, &[CompiledKernel]), GprError> {
+fn split_terms<T: KernelScalar>(
+    terms: &[CompiledKernel<T>],
+) -> Result<(&CompiledKernel<T>, &[CompiledKernel<T>]), GprError> {
     terms
         .split_first()
         .ok_or(GprError::UnsupportedKernelOperation {
@@ -567,8 +570,8 @@ fn split_terms(terms: &[CompiledKernel]) -> Result<(&CompiledKernel, &[CompiledK
         })
 }
 
-fn fold_cached_leaves(
-    terms: &[CompiledKernel],
+fn fold_cached_leaves<T: KernelScalar>(
+    terms: &[CompiledKernel<T>],
     grams: &[Mat<f64>],
     index: &mut usize,
     mut dest: MatMut<'_, f64>,

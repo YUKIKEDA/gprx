@@ -8,7 +8,7 @@ use crate::error::GprError;
 use crate::kernel::{Triangle, visit_triangle};
 use faer::{Mat, MatMut, MatRef};
 
-impl CompiledKernel {
+impl CompiledKernel<f64> {
     /// Writes `∂²K/∂θ_i ∂θ_j` from squared distances into `d2_k`.
     ///
     /// Product trees need `scratch` the same shape as `d2_k`. Leaves ignore it.
