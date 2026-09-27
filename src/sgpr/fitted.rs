@@ -122,6 +122,12 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         Ok(())
     }
 
+    fn same_stored_params(&self, params: &[f64]) -> Result<bool, GprError> {
+        let mut current = vec![0.0; params.len()];
+        self.get_params(&mut current)?;
+        Ok(current == params)
+    }
+
     /// Sets kernel then likelihood `θ` and rebuilds the VFE factors.
     ///
     /// `params` matches [`Self::get_params`]. [`FreeInducing`] also writes
@@ -162,6 +168,9 @@ impl<O, I: InducingLayout> FittedSgpr<O, I> {
         let n_kernel = self.kernel.num_params();
         let n_theta = n_kernel + self.likelihood.num_params();
         require_param_len(params.len(), self.num_params())?;
+        if self.same_stored_params(params)? {
+            return Ok(());
+        }
         let mut kernel = self.kernel.clone();
         kernel.set_params(&params[..n_kernel])?;
         let mut likelihood = self.likelihood;
