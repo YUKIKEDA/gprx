@@ -1,4 +1,6 @@
-use super::grad::write_product_grad;
+use super::grad::{
+    broadcast_self_diag, require_diag_len, scale_by_other_diags, write_product_grad,
+};
 use super::{
     CompiledKernel, MixedKernelViews, ard_needs_coords, mul_triangle, require_scratch_shape,
 };
@@ -97,6 +99,74 @@ impl CompiledKernel {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
                 product_hess_points(terms, x, d2_k.as_mut(), i, j, uplo, scratch.as_mut())
             }
+        }
+    }
+
+    /// Writes `∂²k(x_r, x_r)/∂θ_i ∂θ_j` into `out[r]`.
+    ///
+    /// The off-diagonal Gram Hessian is not formed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `x` is empty,
+    /// [`GprError::InvalidHyperparameter`] if `i` or `j` is out of range or
+    /// `out.len()` is not `x.nrows()`, or the leaf error for that diagonal entry.
+    pub(crate) fn hess_diag_points(
+        &self,
+        x: MatRef<'_, f64>,
+        out: &mut [f64],
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Linear(leaf) => {
+                require_diag_len(x, out)?;
+                let one = x.submatrix(0, 0, 1, x.ncols());
+                let mut cell = Mat::zeros(1, 1);
+                leaf.hess(one.as_ref(), cell.as_mut(), i, j, Triangle::Lower)?;
+                leaf.fill_diag_points(x, out)
+            }
+            Self::Rbf(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess_from_coords(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::Matern(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess_from_coords(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::Periodic(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess_from_coords(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::RationalQuadratic(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess_from_coords(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::Custom(leaf) => custom_hess_diag(leaf, x, out, i, j),
+            Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::MaternArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::RationalQuadraticArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::Constant(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess_points(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.hess_points(one, cell, i, j, Triangle::Lower)
+            }),
+            Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
+                PairOwners::Same {
+                    term,
+                    local_i,
+                    local_j,
+                } => term.hess_diag_points(x, out, local_i, local_j),
+                PairOwners::Distinct { .. } => {
+                    require_diag_len(x, out)?;
+                    out.fill(0.0);
+                    Ok(())
+                }
+            },
+            Self::Product(terms) => product_hess_diag(terms, x, out, i, j),
         }
     }
 
@@ -279,6 +349,56 @@ fn product_hess(
             |term, dest, scratch| term.grad(dist, dest, local_i, uplo, scratch),
             |term, dest, scratch| term.grad(dist, dest, local_j, uplo, scratch),
         ),
+    }
+}
+
+fn custom_hess_diag(
+    leaf: &crate::kernel::CustomKernel,
+    x: MatRef<'_, f64>,
+    out: &mut [f64],
+    i: usize,
+    j: usize,
+) -> Result<(), GprError> {
+    require_diag_len(x, out)?;
+    let mut cell = Mat::zeros(1, 1);
+    let width = x.ncols();
+    for (row, slot) in out.iter_mut().enumerate() {
+        let one = x.submatrix(row, 0, 1, width);
+        leaf.hess_points(one.as_ref(), cell.as_mut(), i, j, Triangle::Lower)?;
+        *slot = cell[(0, 0)];
+    }
+    Ok(())
+}
+
+fn product_hess_diag(
+    terms: &[CompiledKernel],
+    x: MatRef<'_, f64>,
+    out: &mut [f64],
+    i: usize,
+    j: usize,
+) -> Result<(), GprError> {
+    match owners_for_pair(terms, i, j)? {
+        PairOwners::Same {
+            local_i, local_j, ..
+        } => {
+            let (owner, _) = term_index_for_param(terms, i)?;
+            terms[owner].hess_diag_points(x, out, local_i, local_j)?;
+            scale_by_other_diags(terms, owner, None, x, out)
+        }
+        PairOwners::Distinct {
+            owner_i,
+            local_i,
+            owner_j,
+            local_j,
+        } => {
+            terms[owner_i].grad_diag_points(x, out, local_i)?;
+            let mut tmp = vec![0.0; out.len()];
+            terms[owner_j].grad_diag_points(x, &mut tmp, local_j)?;
+            for (dst, src) in out.iter_mut().zip(tmp.iter()) {
+                *dst *= *src;
+            }
+            scale_by_other_diags(terms, owner_i, Some(owner_j), x, out)
+        }
     }
 }
 
