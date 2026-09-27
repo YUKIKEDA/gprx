@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
-use faer::{Mat, MatMut, MatRef};
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
@@ -210,57 +211,65 @@ pub(crate) struct KernelVar {
     pub(crate) d_noise: f64,
 }
 
-pub(crate) struct VfeEngine {
-    pub(crate) l: Mat<f64>,
-    pub(crate) a: Mat<f64>,
-    pub(crate) b_l: Mat<f64>,
-    pub(crate) w: Vec<f64>,
+pub(crate) struct VfeEngine<'a> {
+    pub(crate) l: MatRef<'a, f64>,
+    pub(crate) a: MatRef<'a, f64>,
+    pub(crate) b_l: MatRef<'a, f64>,
+    pub(crate) w: &'a [f64],
     pub(crate) noise: f64,
-    pub(crate) k_diag_sum: f64,
-    pub(crate) a_fro: f64,
-    pub(crate) y: Vec<f64>,
+    pub(crate) y: &'a [f64],
     pub(crate) n: usize,
     pub(crate) m: usize,
+    quad: f64,
+    trace: f64,
 }
 
-impl VfeEngine {
-    fn from_model<O, I>(model: &FittedSgpr<O, I>) -> Self {
-        Self {
-            l: model.k_mm_l.clone(),
-            a: model.a.clone(),
-            b_l: model.b_l.clone(),
-            w: model.w.clone(),
-            noise: model.likelihood.noise_variance(),
-            k_diag_sum: model.k_diag_sum,
-            a_fro: model.a_frobenius2,
-            y: model.y.clone(),
-            n: model.n,
-            m: model.m,
+impl<'a> VfeEngine<'a> {
+    fn from_model<O, I>(model: &'a FittedSgpr<O, I>) -> Self {
+        let m = model.m;
+        let n = model.n;
+        let noise = model.likelihood.noise_variance();
+        let y = model.y.as_slice();
+        let a = model.a.as_ref();
+        let w = model.w.as_slice();
+        let mut y_norm2 = 0.0;
+        for v in y {
+            y_norm2 += v * v;
         }
-    }
-
-    fn quad_and_trace(&self) -> (f64, f64) {
-        let y_norm2: f64 = self.y.iter().map(|v| v * v).sum();
         let mut ay_dot_w = 0.0;
-        for i in 0..self.m {
+        for i in 0..m {
             let mut ay_i = 0.0;
-            for j in 0..self.n {
-                ay_i += self.a[(i, j)] * self.y[j];
+            for j in 0..n {
+                ay_i += a[(i, j)] * y[j];
             }
-            ay_dot_w += ay_i * self.w[i];
+            ay_dot_w += ay_i * w[i];
         }
-        let quad = (y_norm2 - ay_dot_w) / self.noise;
-        let trace = (self.k_diag_sum - self.a_fro) / (2.0 * self.noise);
-        (quad, trace)
+        Self {
+            l: model.k_mm_l.as_ref(),
+            a,
+            b_l: model.b_l.as_ref(),
+            w,
+            noise,
+            y,
+            n,
+            m,
+            quad: (y_norm2 - ay_dot_w) / noise,
+            trace: (model.k_diag_sum - model.a_frobenius2) / (2.0 * noise),
+        }
     }
 
-    fn first_tangent(&self, var: &KernelVar) -> VfeTangent {
-        let phi = chol_phi(self.l.as_ref(), var.d_kmm.as_ref());
+    fn tangent_from(
+        &self,
+        d_kmm: MatRef<'_, f64>,
+        mut da: Mat<f64>,
+        d_kdiag: f64,
+        d_noise: f64,
+    ) -> VfeTangent {
+        let phi = chol_phi(self.l, d_kmm);
         let phi_l = tril_half(phi.as_ref());
-        let mut da = var.d_kmn.clone();
-        solve_lower(self.l.as_ref(), da.as_mut());
-        mat_sub_mul(&mut da, phi_l.as_ref(), self.a.as_ref());
-        let db = noise_plus_sym_prod(da.as_ref(), self.a.as_ref(), var.d_noise);
+        solve_lower(self.l, da.as_mut());
+        mat_sub_mul(&mut da, phi_l.as_ref(), self.a);
+        let db = noise_plus_sym_prod(da.as_ref(), self.a, d_noise);
         let mut u = vec![0.0; self.m];
         for i in 0..self.m {
             let mut sum = 0.0;
@@ -275,21 +284,48 @@ impl VfeEngine {
             da,
             db,
             u,
-            d_kdiag: var.d_kdiag,
-            d_noise: var.d_noise,
+            d_kdiag,
+            d_noise,
         }
     }
 
-    fn directional(&self, var: &KernelVar) -> f64 {
-        let t = self.first_tangent(var);
+    fn first_tangent(&self, var: &KernelVar) -> VfeTangent {
+        self.tangent_from(
+            var.d_kmm.as_ref(),
+            var.d_kmn.clone(),
+            var.d_kdiag,
+            var.d_noise,
+        )
+    }
+
+    fn directional_owned(&self, var: KernelVar) -> f64 {
+        let t = self.tangent_from(var.d_kmm.as_ref(), var.d_kmn, var.d_kdiag, var.d_noise);
         self.directional_from_tangent(&t)
     }
 
+    /// Likelihood `θ` has `∂K = 0` and `∂σn² = σn²`, so the `m×n` products are zero.
+    fn directional_noise(&self, d_noise: f64) -> f64 {
+        let m = self.m;
+        let mut db = Mat::zeros(m, m);
+        for i in 0..m {
+            db[(i, i)] = d_noise;
+        }
+        let quad = self.quad;
+        let trace = self.trace;
+        let d_logdet_b = trace_solve(self.b_l, db.as_ref());
+        let d_q = -quad_form(self.w, db.as_ref());
+        let d_quad = -d_q / self.noise - quad * d_noise / self.noise;
+        let d_trace = -trace * d_noise / self.noise;
+        let n_minus_m = self.n as f64 - self.m as f64;
+        0.5 * (n_minus_m * d_noise / self.noise + d_logdet_b + d_quad) + d_trace
+    }
+
     fn directional_from_tangent(&self, t: &VfeTangent) -> f64 {
-        let (quad, trace) = self.quad_and_trace();
-        let d_logdet_b = trace_solve(self.b_l.as_ref(), t.db.as_ref());
-        let d_q = 2.0 * dot(&self.w, &t.u) - quad_form(&self.w, t.db.as_ref());
-        let d_af = 2.0 * frobenius_dot(self.a.as_ref(), t.da.as_ref());
+        let quad = self.quad;
+        let trace = self.trace;
+        let d_logdet_b = trace_solve(self.b_l, t.db.as_ref());
+        let d_q = 2.0 * dot(self.w, &t.u) - quad_form(self.w, t.db.as_ref());
+        let d_af = 2.0 * frobenius_dot(self.a, t.da.as_ref());
         let d_quad = -d_q / self.noise - quad * t.d_noise / self.noise;
         let d_trace = (t.d_kdiag - d_af) / (2.0 * self.noise) - trace * t.d_noise / self.noise;
         let n_minus_m = self.n as f64 - self.m as f64;
@@ -297,22 +333,23 @@ impl VfeEngine {
     }
 
     fn second_directional(&self, ti: &VfeTangent, tj: &VfeTangent, dd: &KernelVar) -> f64 {
-        let (quad, trace) = self.quad_and_trace();
-        let phi_dd = chol_phi(self.l.as_ref(), dd.d_kmm.as_ref());
+        let quad = self.quad;
+        let trace = self.trace;
+        let phi_dd = chol_phi(self.l, dd.d_kmm.as_ref());
         let dphi_j_on_i = dphi_from(ti.phi.as_ref(), tj.phi_l.as_ref(), phi_dd.as_ref());
         let dphi_l = tril_half(dphi_j_on_i.as_ref());
         let mut linv_di_kmn = ti.da.clone();
-        mat_add_mul(&mut linv_di_kmn, ti.phi_l.as_ref(), self.a.as_ref());
+        mat_add_mul(&mut linv_di_kmn, ti.phi_l.as_ref(), self.a);
         let mut dda = dd.d_kmn.clone();
-        solve_lower(self.l.as_ref(), dda.as_mut());
+        solve_lower(self.l, dda.as_mut());
         mat_sub_mul(&mut dda, tj.phi_l.as_ref(), linv_di_kmn.as_ref());
-        mat_sub_mul(&mut dda, dphi_l.as_ref(), self.a.as_ref());
+        mat_sub_mul(&mut dda, dphi_l.as_ref(), self.a);
         mat_sub_mul(&mut dda, ti.phi_l.as_ref(), tj.da.as_ref());
         let ddb = second_db(
             ti.da.as_ref(),
             tj.da.as_ref(),
             dda.as_ref(),
-            self.a.as_ref(),
+            self.a,
             dd.d_noise,
         );
         let mut ddu = vec![0.0; self.m];
@@ -323,26 +360,21 @@ impl VfeEngine {
             }
             ddu[i] = sum;
         }
-        let d_logdet_b_i = trace_solve(self.b_l.as_ref(), ti.db.as_ref());
+        let d_logdet_b_i = trace_solve(self.b_l, ti.db.as_ref());
         let _ = d_logdet_b_i;
-        let d2_logdet_b = second_logdet_b(
-            self.b_l.as_ref(),
-            ti.db.as_ref(),
-            tj.db.as_ref(),
-            ddb.as_ref(),
-        );
-        let dwi = dw_from(self.b_l.as_ref(), &self.w, ti.db.as_ref(), &ti.u);
-        let dwj = dw_from(self.b_l.as_ref(), &self.w, tj.db.as_ref(), &tj.u);
-        let d_q_i = 2.0 * dot(&self.w, &ti.u) - quad_form(&self.w, ti.db.as_ref());
-        let d_q_j = 2.0 * dot(&self.w, &tj.u) - quad_form(&self.w, tj.db.as_ref());
-        let d2_q = 2.0 * dot(&dwj, &ti.u) + 2.0 * dot(&self.w, &ddu)
-            - dot(&dwj, &mat_vec(ti.db.as_ref(), &self.w))
-            - quad_form(&self.w, ddb.as_ref())
-            - dot(&self.w, &mat_vec(ti.db.as_ref(), &dwj));
-        let d_af_i = 2.0 * frobenius_dot(self.a.as_ref(), ti.da.as_ref());
-        let d_af_j = 2.0 * frobenius_dot(self.a.as_ref(), tj.da.as_ref());
+        let d2_logdet_b = second_logdet_b(self.b_l, ti.db.as_ref(), tj.db.as_ref(), ddb.as_ref());
+        let dwi = dw_from(self.b_l, self.w, ti.db.as_ref(), &ti.u);
+        let dwj = dw_from(self.b_l, self.w, tj.db.as_ref(), &tj.u);
+        let d_q_i = 2.0 * dot(self.w, &ti.u) - quad_form(self.w, ti.db.as_ref());
+        let d_q_j = 2.0 * dot(self.w, &tj.u) - quad_form(self.w, tj.db.as_ref());
+        let d2_q = 2.0 * dot(&dwj, &ti.u) + 2.0 * dot(self.w, &ddu)
+            - dot(&dwj, &mat_vec(ti.db.as_ref(), self.w))
+            - quad_form(self.w, ddb.as_ref())
+            - dot(self.w, &mat_vec(ti.db.as_ref(), &dwj));
+        let d_af_i = 2.0 * frobenius_dot(self.a, ti.da.as_ref());
+        let d_af_j = 2.0 * frobenius_dot(self.a, tj.da.as_ref());
         let d2_af = 2.0 * frobenius_dot(tj.da.as_ref(), ti.da.as_ref())
-            + 2.0 * frobenius_dot(self.a.as_ref(), dda.as_ref());
+            + 2.0 * frobenius_dot(self.a, dda.as_ref());
         let d_quad_j = -d_q_j / self.noise - quad * tj.d_noise / self.noise;
         let d2_quad = -d2_q / self.noise + d_q_i * tj.d_noise / (self.noise * self.noise)
             - d_quad_j * ti.d_noise / self.noise
@@ -379,9 +411,24 @@ pub(crate) fn analytic_gradient<O, I>(
     include_z: bool,
 ) -> Result<(), GprError> {
     let engine = VfeEngine::from_model(model);
-    let vars = collect_first_vars(model, include_z)?;
-    for (i, var) in vars.iter().enumerate() {
-        out[i] = engine.directional(var);
+    let compiled = model.kernel.compile();
+    let x = pack_points(&model.x_obs, model.n, model.d);
+    let z = pack_points(&model.z_obs, model.m, model.d);
+    let n_kernel = model.kernel.num_params();
+    for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
+        let var = kernel_theta_var(&compiled, x.as_ref(), z.as_ref(), model.n, i)?;
+        *slot = engine.directional_owned(var);
+    }
+    out[n_kernel] = engine.directional_noise(model.likelihood.noise_variance());
+    if include_z {
+        let mut idx = n_kernel + 1;
+        for dim in 0..model.d {
+            for p in 0..model.m {
+                let var = z_coord_var(&compiled, x.as_ref(), z.as_ref(), p, dim)?;
+                out[idx] = engine.directional_owned(var);
+                idx += 1;
+            }
+        }
     }
     Ok(())
 }
@@ -739,17 +786,11 @@ pub(crate) fn noise_plus_sym_prod(
     d_noise: f64,
 ) -> Mat<f64> {
     let m = da.nrows();
-    let n = da.ncols();
     let mut db = Mat::zeros(m, m);
+    // `da Aᵀ + A daᵀ`. Diagonal terms are `2 Σ_k da_ik a_ik`, matching the scalar sum.
+    gemm(db.as_mut(), Accum::Replace, da, a.transpose(), 1.0);
+    gemm(db.as_mut(), Accum::Add, a, da.transpose(), 1.0);
     for j in 0..m {
-        for i in j..m {
-            let mut sum = 0.0;
-            for k in 0..n {
-                sum += da[(i, k)] * a[(j, k)] + a[(i, k)] * da[(j, k)];
-            }
-            db[(i, j)] = sum;
-            db[(j, i)] = sum;
-        }
         db[(j, j)] += d_noise;
     }
     db
@@ -763,20 +804,12 @@ pub(crate) fn second_db(
     dd_noise: f64,
 ) -> Mat<f64> {
     let m = a.nrows();
-    let n = a.ncols();
     let mut db = Mat::zeros(m, m);
+    gemm(db.as_mut(), Accum::Replace, dda, a.transpose(), 1.0);
+    gemm(db.as_mut(), Accum::Add, a, dda.transpose(), 1.0);
+    gemm(db.as_mut(), Accum::Add, dai, daj.transpose(), 1.0);
+    gemm(db.as_mut(), Accum::Add, daj, dai.transpose(), 1.0);
     for col in 0..m {
-        for row in col..m {
-            let mut sum = 0.0;
-            for k in 0..n {
-                sum += dda[(row, k)] * a[(col, k)]
-                    + a[(row, k)] * dda[(col, k)]
-                    + dai[(row, k)] * daj[(col, k)]
-                    + daj[(row, k)] * dai[(col, k)];
-            }
-            db[(row, col)] = sum;
-            db[(col, row)] = sum;
-        }
         db[(col, col)] += dd_noise;
     }
     db
@@ -848,33 +881,22 @@ pub(crate) fn copy_mat(src: MatRef<'_, f64>, mut dest: MatMut<'_, f64>) {
 }
 
 pub(crate) fn mat_sub_mul(dest: &mut Mat<f64>, left: MatRef<'_, f64>, right: MatRef<'_, f64>) {
-    let m = dest.nrows();
-    let n = dest.ncols();
-    let k = left.ncols();
-    for col in 0..n {
-        for row in 0..m {
-            let mut sum = 0.0;
-            for t in 0..k {
-                sum += left[(row, t)] * right[(t, col)];
-            }
-            dest[(row, col)] -= sum;
-        }
-    }
+    gemm(dest.as_mut(), Accum::Add, left, right, -1.0);
 }
 
 pub(crate) fn mat_add_mul(dest: &mut Mat<f64>, left: MatRef<'_, f64>, right: MatRef<'_, f64>) {
-    let m = dest.nrows();
-    let n = dest.ncols();
-    let k = left.ncols();
-    for col in 0..n {
-        for row in 0..m {
-            let mut sum = 0.0;
-            for t in 0..k {
-                sum += left[(row, t)] * right[(t, col)];
-            }
-            dest[(row, col)] += sum;
-        }
-    }
+    gemm(dest.as_mut(), Accum::Add, left, right, 1.0);
+}
+
+fn gemm(
+    dest: MatMut<'_, f64>,
+    accum: Accum,
+    lhs: MatRef<'_, f64>,
+    rhs: MatRef<'_, f64>,
+    alpha: f64,
+) {
+    let par = faer_par_dims(dest.nrows(), dest.ncols());
+    matmul(dest, accum, lhs, rhs, alpha, par);
 }
 
 pub(crate) fn frobenius_dot(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> f64 {
@@ -939,16 +961,9 @@ pub(crate) fn kernel_cross(
 
 pub(crate) fn gram_aat_plus_noise(a: MatRef<'_, f64>, noise: f64) -> Mat<f64> {
     let m = a.nrows();
-    let n = a.ncols();
     let mut b = Mat::zeros(m, m);
+    gemm(b.as_mut(), Accum::Replace, a, a.transpose(), 1.0);
     for j in 0..m {
-        for i in j..m {
-            let mut sum = 0.0;
-            for k in 0..n {
-                sum += a[(i, k)] * a[(j, k)];
-            }
-            b[(i, j)] = sum;
-        }
         b[(j, j)] += noise;
     }
     b
