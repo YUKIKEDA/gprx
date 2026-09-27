@@ -620,3 +620,50 @@ P4-12 の GPy 負けのうち pass は sgpr Forrester n=1024（14.36 ms 対 15.7
 
 7 比較のうち pass は svgp Forrester `n=1024`（6.39 ms 対 10.78 ms）、sgpr Forrester `n=4096`（14.37 ms 対 23.60 ms）、sgpr 球 `n=1024`（7.59 ms 対 15.10 ms）、sgpr 球 `n=4096`（24.00 ms 対 26.35 ms）。球 `n=4096` の GPyTorch は sgpr 24.00 ms 対 58.47 ms、svgp 34.57 ms 対 54.60 ms で pass。残る GPy 負けは 3 セル（svgp Forrester `n=4096`、svgp 球 `n=1024`、svgp 球 `n=4096`）。改善行は P4-21 / [#217](https://github.com/YUKIKEDA/gprx/issues/217)。
 
+## P4-21（SVGP joint の残り、[#217](https://github.com/YUKIKEDA/gprx/issues/217)）
+
+同一機械。日付 2026-09-27。`just perf-sparse`。式は解析のまま。`∂K(Z,X)/∂θ` の密行列は残した。点ごとの ELBO 勾配は列方向の内積にし、RBF と RBF ARD の対の勾配は `f64x4` にした。ARD は長さスケールを 1 回の exp にまとめ、`n>1024` は出力の列へ直接書いた。Matern は式を増やさないのでスカラーのまま。段階計時では対の勾配が残りの joint を支配していた。Exact の密 Gram は触っていない。eval は 10 回。factor / predict / RSS は記録。criterion は合否にしない。
+
+ゲートは、P4-20 で GPy より長かった 3 比較（svgp Forrester `n=4096`、svgp 球 `n=1024`、svgp 球 `n=4096`）の eval 中央値が、この実行の GPy より小さいこと。5% 以内は判定不能。P4-20 で joint が相手より短かったセルは、その自前中央値から 5% を超えて遅くしない。
+
+| 面   | 問題      | n    | lib      | factor   | eval N   | evals | predict 100 | peak RSS  | joint |
+| ---- | --------- | ---- | -------- | -------- | -------- | ----- | ----------- | --------- | ----- |
+| sgpr | forrester | 256  | gprx     | 0.12 ms  | 1.08 ms  | 10    | 0.04 ms     | 5.8 MiB   | -     |
+| sgpr | forrester | 256  | gpytorch | 4.94 ms  | 58.91 ms | 10    | 3.15 ms     | 247.8 MiB | 記録  |
+| sgpr | forrester | 256  | gpy      | 9.82 ms  | 15.81 ms | 10    | 0.11 ms     | 132.8 MiB | 記録  |
+| svgp | forrester | 256  | gprx     | 0.11 ms  | 1.52 ms  | 10    | 0.05 ms     | 5.8 MiB   | -     |
+| svgp | forrester | 256  | gpytorch | 5.26 ms  | 47.32 ms | 10    | 2.58 ms     | 246.0 MiB | 記録  |
+| svgp | forrester | 256  | gpy      | 7.16 ms  | 8.62 ms  | 10    | 0.11 ms     | 133.1 MiB | 記録  |
+| sgpr | forrester | 1024 | gprx     | 0.28 ms  | 3.41 ms  | 10    | 0.05 ms     | 6.2 MiB   | -     |
+| sgpr | forrester | 1024 | gpytorch | 5.47 ms  | 59.73 ms | 10    | 2.08 ms     | 249.9 MiB | 記録  |
+| sgpr | forrester | 1024 | gpy      | 11.19 ms | 16.84 ms | 10    | 0.11 ms     | 136.3 MiB | 記録  |
+| svgp | forrester | 1024 | gprx     | 0.28 ms  | 4.42 ms  | 10    | 0.05 ms     | 6.3 MiB   | -     |
+| svgp | forrester | 1024 | gpytorch | 5.68 ms  | 46.48 ms | 10    | 2.72 ms     | 246.7 MiB | 記録  |
+| svgp | forrester | 1024 | gpy      | 8.27 ms  | 10.72 ms | 10    | 0.11 ms     | 136.2 MiB | 記録  |
+| sgpr | forrester | 4096 | gprx     | 0.73 ms  | 11.05 ms | 10    | 0.04 ms     | 7.7 MiB   | -     |
+| sgpr | forrester | 4096 | gpytorch | 6.25 ms  | 78.05 ms | 10    | 3.49 ms     | 260.0 MiB | 記録  |
+| sgpr | forrester | 4096 | gpy      | 18.06 ms | 24.10 ms | 10    | 0.11 ms     | 153.0 MiB | 記録  |
+| svgp | forrester | 4096 | gprx     | 0.72 ms  | 15.04 ms | 10    | 0.05 ms     | 8.2 MiB   | -     |
+| svgp | forrester | 4096 | gpytorch | 4.02 ms  | 58.22 ms | 10    | 2.69 ms     | 250.1 MiB | 記録  |
+| svgp | forrester | 4096 | gpy      | 21.27 ms | 18.89 ms | 10    | 0.12 ms     | 151.3 MiB | pass  |
+| sgpr | sphere    | 256  | gprx     | 0.09 ms  | 2.34 ms  | 10    | 0.03 ms     | 5.9 MiB   | -     |
+| sgpr | sphere    | 256  | gpytorch | 3.33 ms  | 56.23 ms | 10    | 3.18 ms     | 247.2 MiB | 記録  |
+| sgpr | sphere    | 256  | gpy      | 9.89 ms  | 15.46 ms | 10    | 0.11 ms     | 132.8 MiB | 記録  |
+| svgp | sphere    | 256  | gprx     | 0.07 ms  | 2.31 ms  | 10    | 0.03 ms     | 5.9 MiB   | -     |
+| svgp | sphere    | 256  | gpytorch | 3.57 ms  | 56.21 ms | 10    | 2.73 ms     | 247.5 MiB | 記録  |
+| svgp | sphere    | 256  | gpy      | 7.20 ms  | 8.80 ms  | 10    | 0.11 ms     | 132.9 MiB | 記録  |
+| sgpr | sphere    | 1024 | gprx     | 0.22 ms  | 7.18 ms  | 10    | 0.03 ms     | 6.2 MiB   | -     |
+| sgpr | sphere    | 1024 | gpytorch | 6.22 ms  | 66.13 ms | 10    | 3.45 ms     | 249.4 MiB | 記録  |
+| sgpr | sphere    | 1024 | gpy      | 11.63 ms | 18.45 ms | 10    | 0.11 ms     | 135.3 MiB | 記録  |
+| svgp | sphere    | 1024 | gprx     | 0.20 ms  | 6.27 ms  | 10    | 0.04 ms     | 6.5 MiB   | -     |
+| svgp | sphere    | 1024 | gpytorch | 5.48 ms  | 62.71 ms | 10    | 2.67 ms     | 247.1 MiB | 記録  |
+| svgp | sphere    | 1024 | gpy      | 8.59 ms  | 10.82 ms | 10    | 0.11 ms     | 135.2 MiB | pass  |
+| sgpr | sphere    | 4096 | gprx     | 0.84 ms  | 24.02 ms | 10    | 0.03 ms     | 7.7 MiB   | -     |
+| sgpr | sphere    | 4096 | gpytorch | 6.25 ms  | 80.52 ms | 10    | 2.71 ms     | 260.0 MiB | 記録  |
+| sgpr | sphere    | 4096 | gpy      | 26.86 ms | 29.73 ms | 10    | 0.12 ms     | 153.4 MiB | 記録  |
+| svgp | sphere    | 4096 | gprx     | 0.63 ms  | 17.12 ms | 10    | 0.05 ms     | 9.1 MiB   | -     |
+| svgp | sphere    | 4096 | gpytorch | 6.88 ms  | 77.79 ms | 10    | 2.71 ms     | 252.4 MiB | 記録  |
+| svgp | sphere    | 4096 | gpy      | 15.28 ms | 21.12 ms | 10    | 0.11 ms     | 152.8 MiB | pass  |
+
+3 比較とも pass。svgp Forrester `n=4096` は 15.04 ms 対 GPy 18.89 ms、svgp 球 `n=1024` は 6.27 ms 対 10.82 ms、svgp 球 `n=4096` は 17.12 ms 対 21.12 ms。いずれも 5% 帯の外。P4-20 で相手より短かったセルは、その自前中央値から 5% を超えて遅くなっていない（最も近いのは sgpr 球 `n=4096` の 24.02 ms 対 24.00 ms）。残った負けはない。改善行は足さない。
+

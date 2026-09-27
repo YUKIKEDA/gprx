@@ -7,6 +7,7 @@ use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
+use wide::f64x4;
 
 /// Isotropic RBF: `k = exp( -‖x-x'‖² / (2ℓ²) )`.
 ///
@@ -388,6 +389,9 @@ impl RbfKernel {
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
         let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
+        if try_grad_rbf_cross(x1, x2, d_k.rb_mut(), inv_two_ell_sq, inv_ell_sq)? {
+            return Ok(());
+        }
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (k, _, s) = rbf_pair_with_s(x1, row, x2, col, 0, inv_two_ell_sq)?;
@@ -416,6 +420,117 @@ impl RbfKernel {
             }
         }
         Ok(())
+    }
+}
+
+/// `∂k/∂θ = k s / ℓ²` on a rectangular pair. Stays off the square Gram helpers.
+fn try_grad_rbf_cross(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    mut d_k: MatMut<'_, f64>,
+    inv_two_ell_sq: f64,
+    inv_ell_sq: f64,
+) -> Result<bool, GprError> {
+    let m = x1.nrows();
+    let n = x2.nrows();
+    let d = x1.ncols();
+    if d == 0 || x2.ncols() != d || d_k.nrows() != m || d_k.ncols() != n {
+        return Ok(false);
+    }
+    if !unit_cols(x1) || !unit_cols(x2) || !unit_cols(d_k.as_ref()) {
+        return Ok(false);
+    }
+    for dim in 0..d {
+        finite_slice(col_slice(x1, dim)?)?;
+        finite_slice(col_slice(x2, dim)?)?;
+    }
+    let mut s = vec![0.0; n];
+    let mut dk = vec![0.0; n];
+    let neg = f64x4::new([-inv_two_ell_sq; 4]);
+    let scale = f64x4::new([inv_ell_sq; 4]);
+    for row in 0..m {
+        s.fill(0.0);
+        for dim in 0..d {
+            let z = col_slice(x1, dim)?[row];
+            add_squared(col_slice(x2, dim)?, z, &mut s);
+        }
+        let mut i = 0;
+        while i + 4 <= n {
+            let sv = load4(&s, i);
+            let value = (sv * neg).exp() * sv * scale;
+            if !all_finite4(value) {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+            store4(&mut dk, i, value);
+            i += 4;
+        }
+        while i < n {
+            let k = (-s[i] * inv_two_ell_sq).exp();
+            let value = k * s[i] * inv_ell_sq;
+            if !value.is_finite() {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+            dk[i] = value;
+            i += 1;
+        }
+        for (col, value) in dk.iter().enumerate() {
+            d_k[(row, col)] = *value;
+        }
+    }
+    Ok(true)
+}
+
+fn unit_cols(mat: MatRef<'_, f64>) -> bool {
+    mat.ncols() == 0 || mat.col(0).try_as_col_major().is_some()
+}
+
+fn col_slice<'a>(mat: MatRef<'a, f64>, col: usize) -> Result<&'a [f64], GprError> {
+    mat.col(col)
+        .try_as_col_major()
+        .map(|c| c.as_slice())
+        .ok_or_else(|| GprError::UnsupportedKernelOperation {
+            reason: "expected unit row-stride for RBF cross grad".to_owned(),
+        })
+}
+
+fn finite_slice(values: &[f64]) -> Result<(), GprError> {
+    if values.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(GprError::NonFiniteInput)
+    }
+}
+
+fn load4(src: &[f64], i: usize) -> f64x4 {
+    f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
+}
+
+fn store4(dest: &mut [f64], i: usize, v: f64x4) {
+    let a = v.to_array();
+    dest[i] = a[0];
+    dest[i + 1] = a[1];
+    dest[i + 2] = a[2];
+    dest[i + 3] = a[3];
+}
+
+fn all_finite4(v: f64x4) -> bool {
+    let a = v.to_array();
+    a[0].is_finite() && a[1].is_finite() && a[2].is_finite() && a[3].is_finite()
+}
+
+fn add_squared(x: &[f64], x0: f64, acc: &mut [f64]) {
+    let x0v = f64x4::new([x0; 4]);
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let d = load4(x, i) - x0v;
+        let av = load4(acc, i);
+        store4(acc, i, av + d * d);
+        i += 4;
+    }
+    while i < x.len() {
+        let d = x[i] - x0;
+        acc[i] += d * d;
+        i += 1;
     }
 }
 
