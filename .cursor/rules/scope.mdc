@@ -9,7 +9,7 @@ alwaysApply: true
 
 一部分だけ実装する案を、コードが少ないことや PR が小さいことを理由に推奨しない。最適化されている経路とされていない経路、対応している経路と対応していない経路が混在すると、維持できなくなる。
 
-タスクを分けるときは、後回しにした部分をいつやるかを、同じ決定の中で計画する。計画は `docs/roadmap.md` の名前付きの行（ID と Issue。未 Grill なら状態は `Grill 後に #<n> で確定`）か、既にある **意図的に今やらない** だけ。行もそのリストも無い分割は、現在の Issue で全部やる。
+タスクを分けるときは、後回しにした部分をいつやるかを、同じ決定の中で計画する。計画は `docs/roadmap.md` の名前付きの行（ID と Issue。未 Grill なら状態は `Set after Grill on #<n>`）か、既にある **Intentionally out of scope** だけ。行もそのリストも無い分割は、現在の Issue で全部やる。
 
 ```text
 # BAD — 推奨の理由が実装量
@@ -18,7 +18,7 @@ Sgpr は後で
 
 # GOOD — 要件で選ぶ。分けるなら同じ決定で行を置く
 f64 と同じ手順を、Exact / Sgpr / Svgp の f32 でもやる
-分けるなら、同じ変更で roadmap に ID と Issue を足す。未 Grill なら状態は Grill 後に #<n> で確定。完了条件は Issue に書く
+分けるなら、同じ変更で roadmap に ID と Issue を足す。未 Grill なら状態は Set after Grill on #<n>。完了条件は Issue に書く
 ```
 
 行の追加は Grill → Issue（`.cursor/rules/workflow.mdc`）。質問のターンで roadmap は埋めない（`.cursor/rules/consent.mdc`）。完了条件は Issue に書き、ロードマップには写さない。

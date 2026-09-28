@@ -1,47 +1,47 @@
-# ADR 0003: Sparse GPR の誘導点 Z は同時最適化
+# ADR 0003: Sparse GPR optimizes inducing locations Z jointly
 
-- 状態: 採用
-- 日付: 2026-09-21
-- Issue: [#184](https://github.com/YUKIKEDA/gprx/issues/184)（P4-5）
+- Status: accepted
+- Date: 2026-09-21
+- Issue: [#184](https://github.com/YUKIKEDA/gprx/issues/184) (P4-5)
 
-## 文脈
+## Context
 
-P4-4 の `SparseGpr::fit` はカーネルと尤度の `θ` だけを動かす。誘導点 `Z` は呼び出し側が渡し、params に入らない。P4-6 で `Z` を動かすとき、`θ` と同時に一本の `Optimizer` で動かすか、交互に動かすかを先に決める。
+`SparseGpr::fit` in P4-4 moves only the kernel and likelihood `θ`. The caller passes inducing locations `Z`, and they are not in params. When P4-6 moves `Z`, decide first whether one `Optimizer` moves `θ` and `Z` together, or whether they alternate.
 
-同時にするとパラメータが `m×d` 増える。L-BFGS の履歴はその長さのベクトルを `history_size` 本持つ。交互にすると内側回数と順序が設定の組合せになる。型の識別子と実装は P4-6。このメモは動かし方だけを固定する。
+Joint optimization adds `m×d` parameters. L-BFGS history holds `history_size` vectors of that length. Alternating makes the inner count and the order a combination of settings. Type names and the implementation are P4-6. This note fixes only how `Z` moves.
 
-## 決定
+## Decision
 
-- 自由 `Z` の `fit` はカーネル `θ`・尤度 `θ`・`Z` を同時に動かす。交互は載らない。両方の実装も置かない
-- `θ` だけ動かして `Z` を固定する `fit` は残す。固定と自由は型で分ける。フラグは置かない。識別子は P4-6
-- `factor` はどちらも `θ` と `Z` を動かさない
-- 自由 `Z` の params はカーネル `θ`、尤度 `θ`、そのあと列優先の `Z`（`m×d`）
-- `Z` は生座標。区間は訓練 `X` の各次元 min/max を少し開いて広げた開区間
-- `Z` の勾配は `grad_wrt_coord_dim`。点ごとではなく次元一括。未対応カーネルは `GprError::CoordGradientUnsupported`
+- `fit` with free `Z` moves kernel `θ`, likelihood `θ`, and `Z` together. Alternating is not shipped. An implementation of both is not shipped either
+- The `fit` that moves only `θ` and keeps `Z` fixed stays. Fixed and free are different types. There is no flag. Identifiers are P4-6
+- `factor` moves neither `θ` nor `Z`
+- Params for free `Z` are kernel `θ`, likelihood `θ`, then column-major `Z` (`m×d`)
+- `Z` is raw coordinates. The interval is the open box of per-dimension min/max of training `X`, widened a little
+- The `Z` gradient is `grad_wrt_coord_dim`. One call per dimension, not per point. An unsupported kernel returns `GprError::CoordGradientUnsupported`
 
-## 根拠
+## Rationale
 
-同時は `Optimizer` が 1 スロットのままである。交互は「どちらを先に何回か」が要り、無視するフィールドか実行時エラーになる。gprx は取れない状態を型で表す。
+Joint keeps `Optimizer` as one slot. Alternating needs "which one first, and how many times", which becomes an ignored field or a runtime error. gprx represents impossible states as types.
 
-GPyTorch の SGPR と Titsias (2009) は `Z` とハイパラを同時に動かすのが普通である。`m` は Sparse では小さく、VFE のコストは `O(nm²)` である。
+GPyTorch SGPR and Titsias (2009) normally move `Z` and the hyperparameters together. `m` is small for Sparse, and the VFE cost is `O(nm²)`.
 
-L-BFGS 履歴の増分は `history_size × m × d` 個の `f64` である。自由 `Z` の長さは `p = p_θ + m×d`（`p_θ` はカーネルと尤度）。例: `m = 64`、`d = 8`、`history_size = 10` なら増分は 5120 個（約 40 KiB）で、`K_mn` / `B` の作業領域に対して小さい。§6.1 が以前書いた「`m×d` で L-BFGS が破綻する」は、この大きさでは当たらない。
+The L-BFGS history grows by `history_size × m × d` values of `f64`. The free-`Z` length is `p = p_θ + m×d` (`p_θ` is kernel plus likelihood). Example: `m = 64`, `d = 8`, `history_size = 10` adds 5120 values (about 40 KiB), which is small next to the `K_mn` / `B` workspace. The earlier §6.1 claim that "`m×d` breaks L-BFGS" does not hold at this size.
 
-`θ` だけの経路を消すと、P4-4 の「呼び出し側の `Z` を固定して `θ` を探す」が無くなる。型で分ければ既定は今の `fit` のままである。
+Removing the `θ`-only path would remove P4-4's "keep the caller's `Z` fixed and search `θ`". Splitting the type leaves the current `fit` as the default.
 
-params を `θ` の接頭辞のままにし、`Z` を末尾に足すと、固定型と自由型でカーネル／尤度の添字がずれない。列優先は訓練 `X` / `Z` と同じである。
+Keeping params as a `θ` prefix and appending `Z` means kernel and likelihood indices do not shift between the fixed type and the free type. Column-major matches training `X` / `Z`.
 
-生座標を訓練箱の開区間に載せると、既存の logit が使える。有限差分で `Z` を差すと VFE を `m×d` 回回すので、同時最適化の意味が薄れる。座標微分は §5.1 の `grad_wrt_coord_dim` に既にある。
+Putting raw coordinates on an open interval of the training box reuses the existing logit. Finite-differencing `Z` runs VFE `m×d` times and empties the point of joint optimization. The coordinate derivative is already `grad_wrt_coord_dim` in §5.1.
 
-## 棄却した案
+## Rejected
 
-- **交互最適化**: 各ステップの次元は小さい。内側回数・順序・停留が要る。2 本の目的関数とスケジュールが同じ行の公開面になる
-- **`fit` は常に `θ+Z`**: 経路は 1 本。良い `Z` を渡して `θ` だけ探す経路が消える
-- **`optimize_z: bool`**: 片方のフィールドが無視される。型規則に合わない
-- **有限差分の `Z` 勾配**: 葉を増やさなくてよい。評価回数が `m×d` 倍になる
+- **Alternating optimization**: each step is lower dimensional. It needs an inner count, an order, and a stopping rule. Two objectives and a schedule become the public surface of the same row
+- **`fit` always moves `θ+Z`**: one path. The path that receives a good `Z` and searches only `θ` disappears
+- **`optimize_z: bool`**: one field is ignored. That breaks the type rule
+- **Finite-difference gradient of `Z`**: no new leaves. The number of evaluations grows by `m×d`
 
-## 帰結
+## Consequences
 
-- P4-6 は自由 `Z` の型を足し、同時の `fit` を載せる。固定 `Z` の `fit` は残す
-- 交互を後から足す行は切らない。戻すなら新しい Grill → Issue
-- 型名と数値実験はこの ADR に書かない
+- P4-6 adds the free-`Z` type and ships the joint `fit`. The fixed-`Z` `fit` stays
+- No later row adds alternating. Reversing this is a new Grill → Issue
+- Type names and numerical experiments are not written in this ADR
