@@ -17,6 +17,8 @@ missing_docs = "deny"
 [features]
 # compare/perf `--stages` only. Default `just test` / `just perf-online` stay off.
 insert-stages = []
+# benches/exact.rs only: exposes `gprx::internals` fills.
+bench-internals = []
 
 [lints.clippy]
 unwrap_used = "deny"
@@ -52,3 +54,4 @@ stats_alloc = "0.1.10"
 [[bench]]
 name = "exact"
 harness = false
+required-features = ["bench-internals"]

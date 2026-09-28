@@ -7,7 +7,6 @@ use crate::kernel::KernelScalar;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
 
-#[allow(private_bounds)]
 impl<T: KernelScalar> CompiledKernel<T> {
     /// Writes `∂K/∂θ_{param_idx}` into `d_k`.
     ///
@@ -75,9 +74,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Periodic(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
             Self::RationalQuadratic(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
             Self::Custom(leaf) => grad_custom_from_coords(leaf, x, d_k, param_idx, uplo),
-            Self::RbfArd(leaf) => leaf.grad::<M, _>(x, d_k, param_idx, uplo),
+            Self::RbfArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
             Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
-            Self::MaternArd(leaf) => leaf.grad::<M, _>(x, d_k, param_idx, uplo),
+            Self::MaternArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
@@ -138,10 +137,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 grad_custom_from_coords(leaf, one, cell, param_idx, Triangle::Lower)
             }),
             Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad::<M, _>(one, cell, param_idx, Triangle::Lower)
+                leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
             }),
             Self::MaternArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad::<M, _>(one, cell, param_idx, Triangle::Lower)
+                leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
             }),
             Self::RationalQuadraticArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
                 leaf.grad(one, cell, param_idx, Triangle::Lower)
@@ -160,8 +159,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
-    #[doc(hidden)]
-    pub fn grad_from_ard_cache<M: crate::math::KernelMath>(
+    pub(crate) fn grad_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, T>,
         x: MatRef<'_, T>,
@@ -245,7 +243,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         match self {
             Self::Rbf(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
             Self::Matern(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
-            Self::RbfArd(leaf) => leaf.grad_wrt_coord_dim::<M, _>(x1, x2, d_k, dim),
+            Self::RbfArd(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
             Self::White(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
             Self::Custom(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
             Self::Sum(terms) => {

@@ -43,8 +43,34 @@ pub struct Accurate;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FastApprox;
 
+/// Kernel `exp` mode: [`Accurate`] or [`FastApprox`].
+///
+/// This is the `M` parameter of [`crate::Gpr::with_math`] and of the
+/// [`crate::kernel::CompiledKernel`] evaluators. It is sealed: only those two
+/// types implement it, and its operations are crate-private.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{Accurate, FastApprox, KernelMath};
+///
+/// fn mode_name<M: KernelMath>() -> &'static str {
+///     std::any::type_name::<M>()
+/// }
+///
+/// assert!(mode_name::<Accurate>().ends_with("Accurate"));
+/// assert!(mode_name::<FastApprox>().ends_with("FastApprox"));
+/// ```
+pub trait KernelMath: MathOps {}
+
+impl KernelMath for Accurate {}
+impl KernelMath for FastApprox {}
+
 /// Kernel `exp` and its derivatives with respect to the exponent.
-pub(crate) trait KernelMath: Copy + Send + Sync + 'static {
+///
+/// `pub` in a private module: nameable only inside the crate, so
+/// [`KernelMath`] stays sealed.
+pub trait MathOps: Copy + Send + Sync + 'static {
     /// `true` keeps the libm `exp` algebra. `false` differentiates the polynomial.
     const ACCURATE: bool;
 
@@ -61,7 +87,7 @@ pub(crate) trait KernelMath: Copy + Send + Sync + 'static {
     fn d1_f64x4(x: f64x4) -> f64x4;
 }
 
-impl KernelMath for Accurate {
+impl MathOps for Accurate {
     const ACCURATE: bool = true;
 
     #[inline(always)]
@@ -86,7 +112,7 @@ impl KernelMath for Accurate {
     }
 }
 
-impl KernelMath for FastApprox {
+impl MathOps for FastApprox {
     const ACCURATE: bool = false;
 
     #[inline(always)]
@@ -330,7 +356,7 @@ fn fast_d1_f64x4(x: f64x4) -> f64x4 {
 #[cfg(test)]
 mod tests {
     use super::FastApprox;
-    use super::KernelMath;
+    use super::MathOps;
     use wide::f64x4;
 
     fn assert_exp_f64(x: f64) {

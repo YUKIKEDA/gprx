@@ -96,7 +96,6 @@ mod residual_seal {
 /// How [`MixedPrecision`] builds `r = y − Aα`.
 ///
 /// The only implementations are [`PromoteStorage`] and [`ReevaluateKernel`].
-#[allow(private_bounds)]
 pub trait ResidualFormula: residual_seal::Sealed {
     /// Writes the residual and returns `‖A‖∞` for the stopping test.
     ///
@@ -128,7 +127,6 @@ pub struct ReevaluateKernel;
 impl residual_seal::Sealed for PromoteStorage {}
 impl residual_seal::Sealed for ReevaluateKernel {}
 
-#[allow(private_bounds)]
 impl ResidualFormula for PromoteStorage {
     fn residual<M: crate::math::KernelMath>(
         saved: MatRef<'_, f32>,
@@ -144,7 +142,6 @@ impl ResidualFormula for PromoteStorage {
     }
 }
 
-#[allow(private_bounds)]
 impl ResidualFormula for ReevaluateKernel {
     fn residual<M: crate::math::KernelMath>(
         saved: MatRef<'_, f32>,
@@ -328,7 +325,7 @@ fn f64_alpha<M: crate::math::KernelMath>(
 
 /// Which precision a persist directory records. Absent on disk means double.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PersistKind {
+pub enum PersistKind {
     Double,
     Single,
     MixedPromote,
@@ -348,7 +345,7 @@ impl ResidualTag for ReevaluateKernel {
 }
 
 /// Bounds a model precision so distance fills and both scalars are known.
-pub(crate) trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
+pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     /// `true` when predict weights are refined in `f64` from an `f32` factor.
     const REFINES_IN_F64: bool;
 
@@ -385,7 +382,7 @@ where
 }
 
 /// Writes predict `α` from the storage factor, or refines it.
-pub(crate) trait PublishPredictAlpha: ModelPrecision {
+pub trait PublishPredictAlpha: ModelPrecision {
     /// Stores predict weights in `alpha`.
     ///
     /// [`DoublePrecision`] and [`SinglePrecision`] copy `factor_alpha`.
@@ -466,7 +463,7 @@ where
 }
 
 /// Predictive mean from storage `k_*`, or a fresh `f64` column for [`ReevaluateKernel`].
-pub(crate) trait PredictMean: ModelPrecision {
+pub trait PredictMean: ModelPrecision {
     /// Dot of query column `col` with predict `α`, as [`PrecisionPolicy::Refine`].
     fn column_mean<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
@@ -584,7 +581,7 @@ fn f64_cross_dot<M: crate::math::KernelMath>(
 }
 
 /// Inverse target map. `f32` predictions pass through an `f64` buffer.
-pub(crate) trait ScalePrediction: ModelPrecision {
+pub trait ScalePrediction: ModelPrecision {
     fn inverse_mean_variance(
         transform: &dyn TargetTransform,
         mean: &mut [Self::Refine],
@@ -689,7 +686,7 @@ impl ScalePrediction for SinglePrecision {
 }
 
 /// Training factor view. Only [`DoublePrecision`] reads a mapped `f64` `L`.
-pub(crate) trait ViewFactor: ModelPrecision {
+pub trait ViewFactor: ModelPrecision {
     fn view_factor<'a>(
         mapped_l: Option<MatRef<'a, f64>>,
         workspace_l: MatRef<'a, Self::Storage>,
@@ -753,9 +750,45 @@ impl ViewFactor for MixedPrecision<ReevaluateKernel> {
     fn copy_mapped_l(_src: MatRef<'_, f64>, _dest: MatMut<'_, Self::Storage>) {}
 }
 
-/// Storage, predict-`α`, and target scaling for one precision policy.
-pub(crate) trait GpScalar:
-    ModelPrecision + PublishPredictAlpha + PredictMean + ScalePrediction + ViewFactor
+/// A model precision: [`DoublePrecision`], [`SinglePrecision`], or a
+/// [`MixedPrecision`].
+///
+/// This is the `P` parameter of `with_precision` on [`crate::Gpr`],
+/// [`crate::Sgpr`], and [`crate::Svgp`]. It is sealed: only those four
+/// precisions implement it, and its operations are crate-private.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{DoublePrecision, GaussianLikelihood, GpScalar, Gpr, SinglePrecision};
+///
+/// fn mean_at_zero<P: GpScalar>() -> Result<f64, gprx::GprError> {
+///     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+///     let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+///         .with_precision::<P>()
+///         .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+///         .map_err(|(_, e)| e)?;
+///     let pred = fitted.predict(&[0.0], 1, 1)?;
+///     Ok(gprx::kernel::KernelScalar::to_f64(pred.mean[0]))
+/// }
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let a = mean_at_zero::<DoublePrecision>()?;
+/// let b = mean_at_zero::<SinglePrecision>()?;
+/// assert!((a - b).abs() < 1e-4);
+/// # Ok(())
+/// # }
+/// ```
+pub trait GpScalar:
+    ModelPrecision
+    + PublishPredictAlpha
+    + PredictMean
+    + ScalePrediction
+    + ViewFactor
+    + crate::sgpr::factor::MeanDot
+    + crate::sgpr::factor::PublishSgprWeights
+    + crate::svgp::factor::SvgpMean
 {
 }
 
@@ -1187,9 +1220,7 @@ mod tests {
         noise: f64,
     ) -> crate::FittedSgpr<Fixed, crate::FixedInducing, crate::Accurate, P>
     where
-        P: crate::precision::GpScalar
-            + crate::sgpr::factor::MeanDot
-            + crate::sgpr::factor::PublishSgprWeights,
+        P: crate::precision::GpScalar,
     {
         let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
         let likelihood = likelihood_at(noise);
@@ -1254,7 +1285,7 @@ mod tests {
         noise: f64,
     ) -> crate::FittedSvgp<crate::Accurate, P>
     where
-        P: crate::precision::GpScalar + crate::svgp::factor::SvgpMean,
+        P: crate::precision::GpScalar,
     {
         let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
         let likelihood = likelihood_at(noise);
@@ -1382,9 +1413,7 @@ mod tests {
         noise: f64,
     ) -> crate::OnlineSgpr<Fixed, crate::Accurate, P>
     where
-        P: crate::precision::GpScalar
-            + crate::sgpr::factor::MeanDot
-            + crate::sgpr::factor::PublishSgprWeights,
+        P: crate::precision::GpScalar,
     {
         let mut online = factor_sgpr::<P>(packed, y, ell, noise).into_online();
         must(online.insert(&[0.33], 0.2));
@@ -1525,9 +1554,7 @@ mod tests {
 
     fn check_hess_sgpr<P>(x: &[f64], y: &[f64])
     where
-        P: crate::precision::GpScalar
-            + crate::sgpr::factor::MeanDot
-            + crate::sgpr::factor::PublishSgprWeights,
+        P: crate::precision::GpScalar,
     {
         let mut fitted = factor_sgpr::<P>(x, y, 1.0, 0.1);
         let mut params = [0.0; 2];

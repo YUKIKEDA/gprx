@@ -74,8 +74,7 @@ pub(crate) fn fill_squared_euclidean(
 
 /// Writes raw `(Δx_d)²` into an `n × (n·d)` cache (dimension `k` uses columns
 /// `[k n, (k+1) n)`). Only the lower triangle of each `n×n` block is filled.
-#[doc(hidden)]
-pub fn fill_ard_squared_diff(
+pub(crate) fn fill_ard_squared_diff(
     x: MatRef<'_, f64>,
     mut cache: MatMut<'_, f64>,
     thread_scratch: &mut [Mat<f64>],

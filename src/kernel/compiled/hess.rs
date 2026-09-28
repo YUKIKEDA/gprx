@@ -9,7 +9,6 @@ use crate::kernel::KernelScalar;
 use crate::kernel::{Triangle, visit_triangle};
 use faer::{Mat, MatMut, MatRef};
 
-#[allow(private_bounds)]
 impl<T: KernelScalar> CompiledKernel<T> {
     /// Writes `∂²K/∂θ_i ∂θ_j` from squared distances into `d2_k`.
     ///
@@ -80,9 +79,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Periodic(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
             Self::RationalQuadratic(leaf) => leaf.hess_from_coords(x, d2_k, i, j, uplo),
             Self::Custom(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
-            Self::RbfArd(leaf) => leaf.hess::<M, _>(x, d2_k, i, j, uplo),
+            Self::RbfArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
             Self::Linear(leaf) => leaf.hess(x, d2_k, i, j, uplo),
-            Self::MaternArd(leaf) => leaf.hess::<M, _>(x, d2_k, i, j, uplo),
+            Self::MaternArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.hess(x, d2_k, i, j, uplo),
             Self::Constant(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
             Self::White(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
@@ -142,10 +141,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
             }),
             Self::Custom(leaf) => custom_hess_diag(leaf, x, out, i, j),
             Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.hess::<M, _>(one, cell, i, j, Triangle::Lower)
+                leaf.hess_math::<M, _>(one, cell, i, j, Triangle::Lower)
             }),
             Self::MaternArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.hess::<M, _>(one, cell, i, j, Triangle::Lower)
+                leaf.hess_math::<M, _>(one, cell, i, j, Triangle::Lower)
             }),
             Self::RationalQuadraticArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
                 leaf.hess(one, cell, i, j, Triangle::Lower)

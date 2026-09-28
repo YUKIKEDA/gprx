@@ -140,7 +140,6 @@ mod insert_stages {
 ///
 /// Enabled only with the `insert-stages` crate feature used by `compare/perf`.
 #[cfg(feature = "insert-stages")]
-#[doc(hidden)]
 pub fn take_insert_stages() -> (f64, f64, f64) {
     insert_stages::take()
 }
@@ -186,7 +185,6 @@ impl PointRegistry {
 /// # Ok(())
 /// # }
 /// ```
-#[allow(private_bounds)] // `DistanceCacheSlot` / `AllocWorkspace` are crate-private.
 pub struct OnlineGpr<
     O = Lbfgs,
     S = FullRecompute,
@@ -281,7 +279,6 @@ where
     }
 }
 
-#[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; insert and predict read it.
 impl<O, S, C, B, M, P> OnlineGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
@@ -1098,7 +1095,6 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<O, S, C, B, M, P> OnlineGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
@@ -1122,7 +1118,6 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<C, M, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
 where
     C: DistanceCacheSlot,
@@ -1141,7 +1136,6 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<C, M, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
 where
     C: DistanceCacheSlot,

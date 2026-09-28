@@ -42,6 +42,8 @@
 mod data;
 mod error;
 mod gpr;
+#[cfg(any(feature = "bench-internals", feature = "insert-stages"))]
+pub mod internals;
 pub mod kernel;
 mod likelihood;
 mod linalg;
@@ -67,16 +69,13 @@ pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GprError};
-#[cfg(feature = "insert-stages")]
-#[doc(hidden)]
-pub use gpr::take_insert_stages;
 pub use gpr::{
     AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter,
     Gpr, JitterPolicy, NoDistanceCache, OnlineGpr, PointId, PredictOptions, Prediction,
     PredictiveCovariance, RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
 };
 pub use likelihood::GaussianLikelihood;
-pub use math::{Accurate, FastApprox};
+pub use math::{Accurate, FastApprox, KernelMath};
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
     AcceptsRecompute, Adam, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
@@ -88,7 +87,7 @@ pub use persist::{
     FORMAT_VERSION, LoadedDistance, LoadedGpr, LoadedOnlineDistance, PersistRegistry,
 };
 pub use precision::{
-    DoublePrecision, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
+    DoublePrecision, GpScalar, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
     ResidualFormula, SinglePrecision,
 };
 pub use sgpr::{FittedSgpr, FixedInducing, FreeInducing, InducingId, OnlineSgpr, Sgpr};
