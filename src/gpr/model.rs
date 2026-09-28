@@ -70,6 +70,7 @@ pub struct Gpr<
     S = FullRecompute,
     C = CachedDistances,
     B = RetainCholesky,
+    M = crate::math::Accurate,
     P = DoublePrecision,
 > {
     kernel: KernelSpec,
@@ -81,10 +82,11 @@ pub struct Gpr<
     jitter_policy: JitterPolicy,
     _recompute: PhantomData<S>,
     _cholesky: PhantomData<B>,
+    _math: PhantomData<M>,
     _precision: PhantomData<P>,
 }
 
-impl<O, S, C, B, P> fmt::Debug for Gpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> fmt::Debug for Gpr<O, S, C, B, M, P>
 where
     O: fmt::Debug,
     C: fmt::Debug,
@@ -100,7 +102,7 @@ where
     }
 }
 
-impl<O: Clone, S, C: Copy, B, P> Clone for Gpr<O, S, C, B, P> {
+impl<O: Clone, S, C: Copy, B, M, P> Clone for Gpr<O, S, C, B, M, P> {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -112,6 +114,7 @@ impl<O: Clone, S, C: Copy, B, P> Clone for Gpr<O, S, C, B, P> {
             jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -159,6 +162,7 @@ pub struct FittedGpr<
     S = FullRecompute,
     C: DistanceCacheSlot = CachedDistances,
     B: AllocWorkspace = RetainCholesky,
+    M = crate::math::Accurate,
     P: GpScalar = DoublePrecision,
 > {
     kernel: KernelSpec,
@@ -188,9 +192,10 @@ pub struct FittedGpr<
     d: usize,
     mapped_factor: Option<MappedTensors>,
     _recompute: PhantomData<S>,
+    _math: PhantomData<M>,
 }
 
-impl<O, S, C, B, P> Clone for FittedGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> Clone for FittedGpr<O, S, C, B, M, P>
 where
     O: Clone,
     C: Copy + DistanceCacheSlot,
@@ -227,11 +232,12 @@ where
             d: self.d,
             mapped_factor: None,
             _recompute: PhantomData,
+            _math: PhantomData,
         }
     }
 }
 
-impl<O, S, C, B, P> fmt::Debug for FittedGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> fmt::Debug for FittedGpr<O, S, C, B, M, P>
 where
     O: fmt::Debug,
     C: fmt::Debug + DistanceCacheSlot,
@@ -274,6 +280,7 @@ impl Gpr {
             jitter_policy: JitterPolicy::default(),
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -318,12 +325,13 @@ impl Gpr {
             jitter_policy: JitterPolicy::default(),
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
+impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     /// Replaces the input (`X`) transform. Intended to be called before fit.
     ///
     /// A single map, a [`crate::transform::Pipeline`], or
@@ -336,7 +344,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
     #[allow(private_bounds)]
-    pub fn with_precision<P2>(self) -> Gpr<O, S, C, B, P2>
+    pub fn with_precision<P2>(self) -> Gpr<O, S, C, B, M, P2>
     where
         P2: GpScalar,
     {
@@ -350,6 +358,50 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
             jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
+            _precision: PhantomData,
+        }
+    }
+
+    /// Selects the kernel `exp`. Omitting it leaves [`crate::Accurate`].
+    ///
+    /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
+    /// unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{FastApprox, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_math::<FastApprox>();
+    /// let _fitted = gpr
+    ///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(private_bounds)]
+    pub fn with_math<M2>(self) -> Gpr<O, S, C, B, M2, P>
+    where
+        M2: crate::math::KernelMath,
+    {
+        Gpr {
+            kernel: self.kernel,
+            likelihood: self.likelihood,
+            x_transform: self.x_transform,
+            y_transform: self.y_transform,
+            optimizer: self.optimizer,
+            distance_cache: self.distance_cache,
+            jitter_policy: self.jitter_policy,
+            _recompute: PhantomData,
+            _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -390,6 +442,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
             jitter_policy,
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -466,7 +519,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
     pub fn with_optimizer<O2: PoleRecompute<B>>(
         self,
         optimizer: O2,
-    ) -> Gpr<O2, O2::Strategy, C, B, P> {
+    ) -> Gpr<O2, O2::Strategy, C, B, M, P> {
         Gpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -477,6 +530,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
             jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -484,7 +538,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
     /// Selects whether the Cholesky factor keeps a dedicated `W` buffer.
     ///
     /// Public callers use [`Gpr::with_prefer_memory`] / [`Gpr::with_prefer_speed`].
-    pub(crate) fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, O::Strategy, C, B2, P>
+    pub(crate) fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, O::Strategy, C, B2, M, P>
     where
         B2: crate::CholeskyBuffer,
         O: PoleRecompute<B2>,
@@ -499,6 +553,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
             jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -529,7 +584,7 @@ impl<O, S, C, B, P> Gpr<O, S, C, B, P> {
     }
 }
 
-impl<O, S, C: DistanceCachePolicy, B, P> Gpr<O, S, C, B, P> {
+impl<O, S, C: DistanceCachePolicy, B, M, P> Gpr<O, S, C, B, M, P> {
     /// Selects the memory pole: no distance cache and a reused Cholesky buffer.
     ///
     /// The returned trainer is [`UncachedDistances`] + [`ReuseCholesky`].
@@ -554,7 +609,7 @@ impl<O, S, C: DistanceCachePolicy, B, P> Gpr<O, S, C, B, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, UncachedDistances, ReuseCholesky, P>
+    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, UncachedDistances, ReuseCholesky, M, P>
     where
         O: PoleRecompute<ReuseCholesky, Strategy = FullRecompute>,
     {
@@ -584,7 +639,7 @@ impl<O, S, C: DistanceCachePolicy, B, P> Gpr<O, S, C, B, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, CachedDistances, RetainCholesky, P>
+    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, CachedDistances, RetainCholesky, M, P>
     where
         O: PoleRecompute<RetainCholesky>,
     {
@@ -598,7 +653,7 @@ impl<O, S, C: DistanceCachePolicy, B, P> Gpr<O, S, C, B, P> {
     pub(crate) fn with_distance_cache_policy<C2: DistanceCachePolicy>(
         self,
         _: C2,
-    ) -> Gpr<O, S, C2, B, P> {
+    ) -> Gpr<O, S, C2, B, M, P> {
         Gpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -609,12 +664,13 @@ impl<O, S, C: DistanceCachePolicy, B, P> Gpr<O, S, C, B, P> {
             jitter_policy: self.jitter_policy,
             _recompute: PhantomData,
             _cholesky: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, S, B, P> Gpr<O, S, NoDistanceCache, B, P> {
+impl<O, S, B, M, P> Gpr<O, S, NoDistanceCache, B, M, P> {
     /// Selects the memory-pole Cholesky layout. The cache slot stays
     /// [`NoDistanceCache`].
     ///
@@ -634,7 +690,7 @@ impl<O, S, B, P> Gpr<O, S, NoDistanceCache, B, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, NoDistanceCache, ReuseCholesky, P>
+    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, NoDistanceCache, ReuseCholesky, M, P>
     where
         O: PoleRecompute<ReuseCholesky, Strategy = FullRecompute>,
     {
@@ -661,7 +717,7 @@ impl<O, S, B, P> Gpr<O, S, NoDistanceCache, B, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, NoDistanceCache, RetainCholesky, P>
+    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, NoDistanceCache, RetainCholesky, M, P>
     where
         O: PoleRecompute<RetainCholesky>,
     {
@@ -670,14 +726,15 @@ impl<O, S, B, P> Gpr<O, S, NoDistanceCache, B, P> {
 }
 
 #[allow(private_bounds)] // `GprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
-impl<O, S, C, B, P> Gpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P>
 where
     S: AcceptsRecompute<O>,
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
 {
     /// Factors `A = K + σn² I`, solves `A α = y`, and updates `θ` with `O`.
     ///
@@ -723,7 +780,7 @@ where
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<FittedGpr<O, S, C, B, P>, (Self, GprError)> {
+    ) -> Result<FittedGpr<O, S, C, B, M, P>, (Self, GprError)> {
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
         match model.optimize_hyperparameters() {
             Ok(()) => {
@@ -741,11 +798,12 @@ where
 }
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; `factor` still needs it.
-impl<C, B, P> Gpr<Fixed, FullRecompute, C, B, P>
+impl<C, B, M, P> Gpr<Fixed, FullRecompute, C, B, M, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Factors at the current kernel and likelihood `θ` without a search.
@@ -782,7 +840,7 @@ where
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<FittedGpr<Fixed, FullRecompute, C, B, P>, (Self, GprError)> {
+    ) -> Result<FittedGpr<Fixed, FullRecompute, C, B, M, P>, (Self, GprError)> {
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
         if let Err(err) = model.factorize_current() {
             return Err((model.into_trainer(), err));
@@ -795,8 +853,8 @@ where
 }
 
 /// Drops the trainer and keeps the error so `?` works in `Result<_, GprError>`.
-impl<O, S, C, B, P> From<(Gpr<O, S, C, B, P>, GprError)> for GprError {
-    fn from((_, err): (Gpr<O, S, C, B, P>, GprError)) -> Self {
+impl<O, S, C, B, M, P> From<(Gpr<O, S, C, B, M, P>, GprError)> for GprError {
+    fn from((_, err): (Gpr<O, S, C, B, M, P>, GprError)) -> Self {
         err
     }
 }

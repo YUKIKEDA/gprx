@@ -6,6 +6,7 @@ use crate::error::GprError;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
 
+#[allow(private_bounds)]
 impl CompiledKernel<f64> {
     /// Writes `k` into `out` for `uplo`. `scratch` must match `out`.
     ///
@@ -16,7 +17,7 @@ impl CompiledKernel<f64> {
     ///
     /// Returns [`GprError`] if shapes mismatch, `scratch` is the wrong size, a
     /// leaf fails, or a sum/product has no terms.
-    pub fn apply(
+    pub fn apply<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, f64>,
         mut out: MatMut<'_, f64>,
@@ -25,18 +26,18 @@ impl CompiledKernel<f64> {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(leaf) => leaf.apply(dist, out, uplo),
+            Self::Rbf(leaf) => leaf.apply_math::<M>(dist, out, uplo),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
-            Self::Matern(leaf) => leaf.apply(dist, out, uplo),
-            Self::Periodic(leaf) => leaf.apply(dist, out, uplo),
+            Self::Matern(leaf) => leaf.apply_math::<M>(dist, out, uplo),
+            Self::Periodic(leaf) => leaf.apply_math::<M>(dist, out, uplo),
             Self::RationalQuadratic(leaf) => leaf.apply(dist, out, uplo),
             Self::Constant(leaf) => leaf.apply(dist, out, uplo),
             Self::White(leaf) => leaf.apply(dist, out, uplo),
             Self::Custom(leaf) => leaf.apply(dist, out, uplo),
-            Self::Sum(terms) => fold_terms(
+            Self::Sum(terms) => fold_terms::<M>(
                 terms,
                 dist,
                 out.as_mut(),
@@ -44,7 +45,7 @@ impl CompiledKernel<f64> {
                 scratch.as_mut(),
                 add_triangle,
             ),
-            Self::Product(terms) => fold_terms(
+            Self::Product(terms) => fold_terms::<M>(
                 terms,
                 dist,
                 out.as_mut(),
@@ -62,7 +63,7 @@ impl CompiledKernel<f64> {
     /// # Errors
     ///
     /// Returns the same shape errors as [`Self::apply`].
-    pub fn apply_cross(
+    pub fn apply_cross<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, f64>,
         mut out: MatMut<'_, f64>,
@@ -70,20 +71,22 @@ impl CompiledKernel<f64> {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(leaf) => leaf.apply_cross(dist, out),
+            Self::Rbf(leaf) => leaf.apply_cross_math::<M>(dist, out),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
-            Self::Matern(leaf) => leaf.apply_cross(dist, out),
-            Self::Periodic(leaf) => leaf.apply_cross(dist, out),
+            Self::Matern(leaf) => leaf.apply_cross_math::<M>(dist, out),
+            Self::Periodic(leaf) => leaf.apply_cross_math::<M>(dist, out),
             Self::RationalQuadratic(leaf) => leaf.apply_cross(dist, out),
             Self::Constant(leaf) => leaf.apply_cross(dist, out),
             Self::White(leaf) => leaf.apply_cross(dist, out),
             Self::Custom(leaf) => leaf.apply_cross(dist, out),
-            Self::Sum(terms) => fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), add_rect),
+            Self::Sum(terms) => {
+                fold_rect::<M>(terms, dist, out.as_mut(), scratch.as_mut(), add_rect)
+            }
             Self::Product(terms) => {
-                fold_rect(terms, dist, out.as_mut(), scratch.as_mut(), mul_rect)
+                fold_rect::<M>(terms, dist, out.as_mut(), scratch.as_mut(), mul_rect)
             }
         }
     }
@@ -245,7 +248,7 @@ impl CompiledKernel<f64> {
     /// # Errors
     ///
     /// Same shape errors as [`Self::apply`].
-    pub fn apply_points(
+    pub fn apply_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         mut out: MatMut<'_, f64>,
@@ -254,22 +257,22 @@ impl CompiledKernel<f64> {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(leaf) => leaf.apply_from_coords(x, out, uplo),
-            Self::Matern(leaf) => leaf.apply_from_coords(x, out, uplo),
-            Self::Periodic(leaf) => leaf.apply_from_coords(x, out, uplo),
+            Self::Rbf(leaf) => leaf.apply_from_coords::<M>(x, out, uplo),
+            Self::Matern(leaf) => leaf.apply_from_coords::<M>(x, out, uplo),
+            Self::Periodic(leaf) => leaf.apply_from_coords::<M>(x, out, uplo),
             Self::RationalQuadratic(leaf) => leaf.apply_from_coords(x, out, uplo),
             Self::Custom(leaf) => apply_custom_from_coords(leaf, x, out, uplo),
-            Self::RbfArd(leaf) => leaf.apply(x, out, uplo),
+            Self::RbfArd(leaf) => leaf.apply::<M>(x, out, uplo),
             Self::Linear(leaf) => leaf.apply(x, out, uplo),
-            Self::MaternArd(leaf) => leaf.apply(x, out, uplo),
+            Self::MaternArd(leaf) => leaf.apply::<M>(x, out, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.apply(x, out, uplo),
             Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
             Self::White(leaf) => leaf.apply_points(x, out, uplo),
             Self::Sum(terms) => {
-                fold_terms_points(terms, x, out.as_mut(), uplo, scratch.as_mut(), add_triangle)
+                fold_terms_points::<M>(terms, x, out.as_mut(), uplo, scratch.as_mut(), add_triangle)
             }
             Self::Product(terms) => {
-                fold_terms_points(terms, x, out.as_mut(), uplo, scratch.as_mut(), mul_triangle)
+                fold_terms_points::<M>(terms, x, out.as_mut(), uplo, scratch.as_mut(), mul_triangle)
             }
         }
     }
@@ -279,7 +282,7 @@ impl CompiledKernel<f64> {
     /// # Errors
     ///
     /// Same as [`Self::apply_points`].
-    pub fn apply_cross_points(
+    pub fn apply_cross_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         xs: MatRef<'_, f64>,
@@ -293,22 +296,23 @@ impl CompiledKernel<f64> {
             | Self::Periodic(_)
             | Self::RationalQuadratic(_)
             | Self::Custom(_) => Err(iso_needs_dist()),
-            Self::RbfArd(leaf) => leaf.apply_cross(x, xs, out),
+            Self::RbfArd(leaf) => leaf.apply_cross::<M>(x, xs, out),
             Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
-            Self::MaternArd(leaf) => leaf.apply_cross(x, xs, out),
+            Self::MaternArd(leaf) => leaf.apply_cross::<M>(x, xs, out),
             Self::RationalQuadraticArd(leaf) => leaf.apply_cross(x, xs, out),
             Self::Constant(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::White(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::Sum(terms) => {
-                fold_rect_points(terms, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
+                fold_rect_points::<M>(terms, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
             }
             Self::Product(terms) => {
-                fold_rect_points(terms, x, xs, out.as_mut(), scratch.as_mut(), mul_rect)
+                fold_rect_points::<M>(terms, x, xs, out.as_mut(), scratch.as_mut(), mul_rect)
             }
         }
     }
 
-    pub(crate) fn apply_from_ard_cache(
+    #[doc(hidden)]
+    pub fn apply_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, f64>,
         x: MatRef<'_, f64>,
@@ -318,20 +322,20 @@ impl CompiledKernel<f64> {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::RbfArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
-            Self::MaternArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
+            Self::RbfArd(leaf) => leaf.apply_from_sq_diff::<M>(cache, out, uplo),
+            Self::MaternArd(leaf) => leaf.apply_from_sq_diff::<M>(cache, out, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
             Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
             Self::White(leaf) => leaf.apply_points(x, out, uplo),
             Self::Sum(terms) => {
-                fold_terms_ard_cache(terms, cache, x, out.as_mut(), uplo, scratch.as_mut())
+                fold_terms_ard_cache::<M>(terms, cache, x, out.as_mut(), uplo, scratch.as_mut())
             }
-            _ => self.apply_points(x, out, uplo, scratch),
+            _ => self.apply_points::<M>(x, out, uplo, scratch),
         }
     }
 
     /// Writes `K` from a distance matrix and coordinates, one mode per leaf.
-    pub(crate) fn apply_mixed(
+    pub(crate) fn apply_mixed<M: crate::math::KernelMath>(
         &self,
         views: MixedKernelViews<'_>,
         mut out: MatMut<'_, f64>,
@@ -346,18 +350,18 @@ impl CompiledKernel<f64> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.apply(views.dist, out, uplo, scratch),
+            | Self::White(_) => self.apply::<M>(views.dist, out, uplo, scratch),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => {
                 if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
-                    self.apply_from_ard_cache(cache, views.x, out, uplo, scratch)
+                    self.apply_from_ard_cache::<M>(cache, views.x, out, uplo, scratch)
                 } else {
-                    self.apply_points(views.x, out, uplo, scratch)
+                    self.apply_points::<M>(views.x, out, uplo, scratch)
                 }
             }
-            Self::Sum(terms) => fold_terms_mixed(
+            Self::Sum(terms) => fold_terms_mixed::<M>(
                 terms,
                 views,
                 out.as_mut(),
@@ -365,7 +369,7 @@ impl CompiledKernel<f64> {
                 scratch.as_mut(),
                 add_triangle,
             ),
-            Self::Product(terms) => fold_terms_mixed(
+            Self::Product(terms) => fold_terms_mixed::<M>(
                 terms,
                 views,
                 out.as_mut(),
@@ -377,7 +381,7 @@ impl CompiledKernel<f64> {
     }
 
     /// Writes rectangular `k` from train–query distances and coordinates.
-    pub(crate) fn apply_cross_mixed(
+    pub(crate) fn apply_cross_mixed<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, f64>,
         x: MatRef<'_, f64>,
@@ -393,16 +397,16 @@ impl CompiledKernel<f64> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.apply_cross(dist, out, scratch),
+            | Self::White(_) => self.apply_cross::<M>(dist, out, scratch),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
-            | Self::RationalQuadraticArd(_) => self.apply_cross_points(x, xs, out, scratch),
+            | Self::RationalQuadraticArd(_) => self.apply_cross_points::<M>(x, xs, out, scratch),
             Self::Sum(terms) => {
-                fold_rect_mixed(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
+                fold_rect_mixed::<M>(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), add_rect)
             }
             Self::Product(terms) => {
-                fold_rect_mixed(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), mul_rect)
+                fold_rect_mixed::<M>(terms, dist, x, xs, out.as_mut(), scratch.as_mut(), mul_rect)
             }
         }
     }
@@ -420,7 +424,7 @@ fn apply_custom_from_coords(
     leaf.apply(dist.as_ref(), out.as_mut(), uplo)
 }
 
-fn fold_terms(
+fn fold_terms<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     dist: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
@@ -429,11 +433,11 @@ fn fold_terms(
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply(dist, out.as_mut(), uplo, scratch.as_mut())?;
+    first.apply::<M>(dist, out.as_mut(), uplo, scratch.as_mut())?;
     let n = out.nrows();
     let mut extra = None;
     for term in rest {
-        apply_into(
+        apply_into::<M>(
             term,
             dist,
             scratch.as_mut(),
@@ -447,7 +451,7 @@ fn fold_terms(
     Ok(())
 }
 
-pub(super) fn apply_into(
+pub(super) fn apply_into<M: crate::math::KernelMath>(
     term: &CompiledKernel,
     dist: MatRef<'_, f64>,
     dest: MatMut<'_, f64>,
@@ -458,13 +462,13 @@ pub(super) fn apply_into(
 ) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-        term.apply(dist, dest, uplo, buf.as_mut())
+        term.apply::<M>(dist, dest, uplo, buf.as_mut())
     } else {
-        term.apply(dist, dest, uplo, fallback_scratch)
+        term.apply::<M>(dist, dest, uplo, fallback_scratch)
     }
 }
 
-fn fold_terms_points(
+fn fold_terms_points<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     x: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
@@ -473,17 +477,17 @@ fn fold_terms_points(
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_points(x, out.as_mut(), uplo, scratch.as_mut())?;
+    first.apply_points::<M>(x, out.as_mut(), uplo, scratch.as_mut())?;
     let n = out.nrows();
     let mut extra = None;
     for term in rest {
-        apply_into_points(term, x, scratch.as_mut(), out.as_mut(), uplo, &mut extra, n)?;
+        apply_into_points::<M>(term, x, scratch.as_mut(), out.as_mut(), uplo, &mut extra, n)?;
         combine(out.as_mut(), scratch.as_ref(), uplo);
     }
     Ok(())
 }
 
-pub(super) fn apply_into_points(
+pub(super) fn apply_into_points<M: crate::math::KernelMath>(
     term: &CompiledKernel,
     x: MatRef<'_, f64>,
     dest: MatMut<'_, f64>,
@@ -494,13 +498,13 @@ pub(super) fn apply_into_points(
 ) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-        term.apply_points(x, dest, uplo, buf.as_mut())
+        term.apply_points::<M>(x, dest, uplo, buf.as_mut())
     } else {
-        term.apply_points(x, dest, uplo, fallback_scratch)
+        term.apply_points::<M>(x, dest, uplo, fallback_scratch)
     }
 }
 
-fn fold_terms_ard_cache(
+fn fold_terms_ard_cache<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     cache: MatRef<'_, f64>,
     x: MatRef<'_, f64>,
@@ -509,15 +513,15 @@ fn fold_terms_ard_cache(
     mut scratch: MatMut<'_, f64>,
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_from_ard_cache(cache, x, out.as_mut(), uplo, scratch.as_mut())?;
+    first.apply_from_ard_cache::<M>(cache, x, out.as_mut(), uplo, scratch.as_mut())?;
     let n = out.nrows();
     let mut extra = None;
     for term in rest {
         if term.needs_internal_scratch() {
             let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            term.apply_from_ard_cache(cache, x, scratch.as_mut(), uplo, buf.as_mut())?;
+            term.apply_from_ard_cache::<M>(cache, x, scratch.as_mut(), uplo, buf.as_mut())?;
         } else {
-            term.apply_from_ard_cache(cache, x, scratch.as_mut(), uplo, out.as_mut())?;
+            term.apply_from_ard_cache::<M>(cache, x, scratch.as_mut(), uplo, out.as_mut())?;
         }
         add_triangle(out.as_mut(), scratch.as_ref(), uplo);
     }
@@ -540,7 +544,7 @@ fn mul_rect(mut acc: MatMut<'_, f64>, src: MatRef<'_, f64>) {
     }
 }
 
-fn fold_rect(
+fn fold_rect<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     dist: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
@@ -548,12 +552,12 @@ fn fold_rect(
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_cross(dist, out.as_mut(), scratch.as_mut())?;
+    first.apply_cross::<M>(dist, out.as_mut(), scratch.as_mut())?;
     let nrows = out.nrows();
     let ncols = out.ncols();
     let mut extra = None;
     for term in rest {
-        apply_into_cross(
+        apply_into_cross::<M>(
             term,
             dist,
             scratch.as_mut(),
@@ -567,7 +571,7 @@ fn fold_rect(
     Ok(())
 }
 
-fn apply_into_cross(
+fn apply_into_cross<M: crate::math::KernelMath>(
     term: &CompiledKernel,
     dist: MatRef<'_, f64>,
     dest: MatMut<'_, f64>,
@@ -578,13 +582,13 @@ fn apply_into_cross(
 ) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(nrows, ncols));
-        term.apply_cross(dist, dest, buf.as_mut())
+        term.apply_cross::<M>(dist, dest, buf.as_mut())
     } else {
-        term.apply_cross(dist, dest, fallback_scratch)
+        term.apply_cross::<M>(dist, dest, fallback_scratch)
     }
 }
 
-fn fold_rect_points(
+fn fold_rect_points<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     x: MatRef<'_, f64>,
     xs: MatRef<'_, f64>,
@@ -593,16 +597,16 @@ fn fold_rect_points(
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_cross_points(x, xs, out.as_mut(), scratch.as_mut())?;
+    first.apply_cross_points::<M>(x, xs, out.as_mut(), scratch.as_mut())?;
     let mut extra = None;
     for term in rest {
-        apply_into_cross_points(term, x, xs, scratch.as_mut(), out.as_mut(), &mut extra)?;
+        apply_into_cross_points::<M>(term, x, xs, scratch.as_mut(), out.as_mut(), &mut extra)?;
         combine(out.as_mut(), scratch.as_ref());
     }
     Ok(())
 }
 
-fn apply_into_cross_points(
+fn apply_into_cross_points<M: crate::math::KernelMath>(
     term: &CompiledKernel,
     x: MatRef<'_, f64>,
     xs: MatRef<'_, f64>,
@@ -612,13 +616,13 @@ fn apply_into_cross_points(
 ) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(dest.nrows(), dest.ncols()));
-        term.apply_cross_points(x, xs, dest, buf.as_mut())
+        term.apply_cross_points::<M>(x, xs, dest, buf.as_mut())
     } else {
-        term.apply_cross_points(x, xs, dest, fallback_scratch)
+        term.apply_cross_points::<M>(x, xs, dest, fallback_scratch)
     }
 }
 
-fn fold_terms_mixed(
+fn fold_terms_mixed<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     views: MixedKernelViews<'_>,
     mut out: MatMut<'_, f64>,
@@ -627,11 +631,11 @@ fn fold_terms_mixed(
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>, Triangle),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_mixed(views, out.as_mut(), uplo, scratch.as_mut())?;
+    first.apply_mixed::<M>(views, out.as_mut(), uplo, scratch.as_mut())?;
     let n = out.nrows();
     let mut extra = None;
     for term in rest {
-        apply_into_mixed(
+        apply_into_mixed::<M>(
             term,
             views,
             scratch.as_mut(),
@@ -645,7 +649,7 @@ fn fold_terms_mixed(
     Ok(())
 }
 
-pub(super) fn apply_into_mixed(
+pub(super) fn apply_into_mixed<M: crate::math::KernelMath>(
     term: &CompiledKernel,
     views: MixedKernelViews<'_>,
     dest: MatMut<'_, f64>,
@@ -656,13 +660,13 @@ pub(super) fn apply_into_mixed(
 ) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-        term.apply_mixed(views, dest, uplo, buf.as_mut())
+        term.apply_mixed::<M>(views, dest, uplo, buf.as_mut())
     } else {
-        term.apply_mixed(views, dest, uplo, fallback_scratch)
+        term.apply_mixed::<M>(views, dest, uplo, fallback_scratch)
     }
 }
 
-fn fold_rect_mixed(
+fn fold_rect_mixed<M: crate::math::KernelMath>(
     terms: &[CompiledKernel],
     dist: MatRef<'_, f64>,
     x: MatRef<'_, f64>,
@@ -672,10 +676,10 @@ fn fold_rect_mixed(
     combine: fn(MatMut<'_, f64>, MatRef<'_, f64>),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_cross_mixed(dist, x, xs, out.as_mut(), scratch.as_mut())?;
+    first.apply_cross_mixed::<M>(dist, x, xs, out.as_mut(), scratch.as_mut())?;
     let mut extra = None;
     for term in rest {
-        apply_into_cross_mixed(
+        apply_into_cross_mixed::<M>(
             term,
             dist,
             x,
@@ -689,7 +693,7 @@ fn fold_rect_mixed(
     Ok(())
 }
 
-fn apply_into_cross_mixed(
+fn apply_into_cross_mixed<M: crate::math::KernelMath>(
     term: &CompiledKernel,
     dist: MatRef<'_, f64>,
     x: MatRef<'_, f64>,
@@ -700,8 +704,8 @@ fn apply_into_cross_mixed(
 ) -> Result<(), GprError> {
     if term.needs_internal_scratch() {
         let buf = extra.get_or_insert_with(|| Mat::zeros(dest.nrows(), dest.ncols()));
-        term.apply_cross_mixed(dist, x, xs, dest, buf.as_mut())
+        term.apply_cross_mixed::<M>(dist, x, xs, dest, buf.as_mut())
     } else {
-        term.apply_cross_mixed(dist, x, xs, dest, fallback_scratch)
+        term.apply_cross_mixed::<M>(dist, x, xs, dest, fallback_scratch)
     }
 }

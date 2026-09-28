@@ -38,21 +38,22 @@ use super::{AllocWorkspace, DistanceCacheSlot, FitBuffers, JitterPolicy, RetainC
 use super::{FittedGpr, Gpr};
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; factorization reads it.
-impl<O, S, C, B, P> FittedGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> FittedGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
     pub(crate) fn prepare(
-        gpr: Gpr<O, S, C, B, P>,
+        gpr: Gpr<O, S, C, B, M, P>,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<Self, (Gpr<O, S, C, B, P>, GprError)> {
+    ) -> Result<Self, (Gpr<O, S, C, B, M, P>, GprError)> {
         if let Err(err) = validate_training(x, n_rows, n_cols, y) {
             return Err((gpr, err));
         }
@@ -107,13 +108,14 @@ where
             d: n_cols,
             mapped_factor: None,
             _recompute: PhantomData,
+            _math: PhantomData,
         })
     }
 
     /// Drops `L` / `α` / training data and returns a trainer with the current
     /// kernel, likelihood, transforms, optimizer, distance-cache slot, and
     /// jitter policy.
-    pub fn into_trainer(self) -> Gpr<O, S, C, B, P> {
+    pub fn into_trainer(self) -> Gpr<O, S, C, B, M, P> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
@@ -157,7 +159,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(mut self) -> Result<OnlineGpr<O, S, C, B, P>, GprError> {
+    pub fn into_online(mut self) -> Result<OnlineGpr<O, S, C, B, M, P>, GprError> {
         self.publish_predict_alpha()?;
         let n = self.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
@@ -188,7 +190,9 @@ where
         ))
     }
 
-    pub(crate) fn from_online_snapshot(online: &OnlineGpr<O, S, C, B, P>) -> Result<Self, GprError>
+    pub(crate) fn from_online_snapshot(
+        online: &OnlineGpr<O, S, C, B, M, P>,
+    ) -> Result<Self, GprError>
     where
         O: Clone,
         C: Copy,
@@ -225,6 +229,7 @@ where
             d,
             mapped_factor: None,
             _recompute: PhantomData,
+            _math: PhantomData,
         };
         fitted.factorize_current()?;
         Ok(fitted)
@@ -365,7 +370,7 @@ where
     pub fn with_optimizer<O2: PoleRecompute<B>>(
         self,
         optimizer: O2,
-    ) -> FittedGpr<O2, O2::Strategy, C, B, P> {
+    ) -> FittedGpr<O2, O2::Strategy, C, B, M, P> {
         FittedGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -391,6 +396,7 @@ where
             d: self.d,
             mapped_factor: self.mapped_factor,
             _recompute: PhantomData,
+            _math: PhantomData,
         }
     }
 
@@ -528,7 +534,7 @@ where
         let likelihood_before = self.likelihood;
         let mapped_before = self.mapped_factor.take();
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        if let Err(err) = factor_train_with_policy(
+        if let Err(err) = factor_train_with_policy::<_, _, M>(
             &compiled,
             x,
             &mut self.workspace,
@@ -562,7 +568,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn objective(&mut self) -> GprObjective<'_, O, S, C, B, P> {
+    pub(crate) fn objective(&mut self) -> GprObjective<'_, O, S, C, B, M, P> {
         GprObjective::new(self)
     }
 
@@ -652,7 +658,7 @@ where
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        if let Err(err) = factor_train_with_policy(
+        if let Err(err) = factor_train_with_policy::<_, _, M>(
             &compiled,
             x,
             &mut self.workspace,
@@ -721,7 +727,12 @@ where
         for (i, slot) in leaf_grams.iter_mut().enumerate() {
             if dirty[i] {
                 let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-                apply_compiled_to(compiled.leaf_at(i)?, x, &mut self.workspace, slot.as_mut())?;
+                apply_compiled_to::<_, _, M>(
+                    compiled.leaf_at(i)?,
+                    x,
+                    &mut self.workspace,
+                    slot.as_mut(),
+                )?;
             }
         }
         if let Err(err) = factor_written_k_with_policy(
@@ -813,7 +824,7 @@ where
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        if let Err(err) = factor_train_with_policy(
+        if let Err(err) = factor_train_with_policy::<_, _, M>(
             &compiled,
             x,
             &mut self.workspace,
@@ -899,7 +910,7 @@ where
             } else {
                 None
             };
-            write_kernel_hess(
+            write_kernel_hess::<_, M>(
                 &self.compiled,
                 d.dist_cache.as_ref(),
                 x,
@@ -909,7 +920,7 @@ where
                 (i, j),
             )
         } else {
-            write_kernel_hess_from_coords(
+            write_kernel_hess_from_coords::<_, M>(
                 &self.compiled,
                 x,
                 core.exp_buf.as_mut(),
@@ -929,7 +940,7 @@ where
             } else {
                 None
             };
-            write_kernel_grad(
+            write_kernel_grad::<_, M>(
                 &self.compiled,
                 d.dist_cache.as_ref(),
                 x,
@@ -939,7 +950,7 @@ where
                 idx,
             )
         } else {
-            write_kernel_grad_from_coords(
+            write_kernel_grad_from_coords::<_, M>(
                 &self.compiled,
                 x,
                 core.exp_buf.as_mut(),
@@ -1171,7 +1182,7 @@ where
 
     pub(super) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
+        O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -1218,7 +1229,7 @@ where
     pub(crate) fn factorize_current(&mut self) -> Result<(), GprError> {
         self.mapped_factor = None;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        factor_train_with_policy(
+        factor_train_with_policy::<_, _, M>(
             &self.compiled,
             x,
             &mut self.workspace,
@@ -1234,7 +1245,7 @@ where
     }
 
     pub(crate) fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
-        P::publish_predict_alpha(
+        P::publish_predict_alpha::<M>(
             &self.kernel,
             &self.compiled,
             self.x.as_ref(),
@@ -1369,7 +1380,7 @@ where
         {
             let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
             let mut thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
-            let applied = apply_cross_kernel(
+            let applied = apply_cross_kernel::<_, M>(
                 &self.compiled,
                 x_train,
                 self.query.query_x.as_ref(),
@@ -1389,7 +1400,7 @@ where
             out.variance.resize(m, zero);
         }
         for (col, mean) in out.mean.iter_mut().enumerate() {
-            *mean = P::column_mean(
+            *mean = P::column_mean::<M>(
                 &self.kernel,
                 self.query.query_k_star.as_ref(),
                 self.x.as_ref(),
@@ -1453,7 +1464,7 @@ where
         }
         validate_query(xs, n_rows, n_cols)?;
         let mut alpha = Vec::new();
-        P::publish_predict_alpha(
+        P::publish_predict_alpha::<M>(
             &self.kernel,
             &self.compiled,
             self.x.as_ref(),
@@ -1475,7 +1486,7 @@ where
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         let mut x_cast = P::Storage::empty_cols();
         let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
-        apply_cross_kernel(
+        apply_cross_kernel::<_, M>(
             &self.compiled,
             x_train,
             query_x.as_ref(),
@@ -1492,7 +1503,7 @@ where
             out.variance.resize(m, zero);
         }
         for (col, mean) in out.mean.iter_mut().enumerate() {
-            *mean = P::column_mean(
+            *mean = P::column_mean::<M>(
                 &self.kernel,
                 query_k_star.as_ref(),
                 self.x.as_ref(),
@@ -1697,7 +1708,7 @@ where
         }
         validate_query(xs, n_rows, n_cols)?;
         let mut alpha = Vec::new();
-        P::publish_predict_alpha(
+        P::publish_predict_alpha::<M>(
             &self.kernel,
             &self.compiled,
             self.x.as_ref(),
@@ -1718,7 +1729,7 @@ where
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         let mut x_cast = P::Storage::empty_cols();
         let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
-        apply_cross_kernel(
+        apply_cross_kernel::<_, M>(
             &self.compiled,
             x_train,
             query_x.as_ref(),
@@ -1729,7 +1740,7 @@ where
         )?;
         let mut mean = vec![P::Refine::from_f64(0.0); m];
         for (col, slot) in mean.iter_mut().enumerate() {
-            *slot = P::column_mean(
+            *slot = P::column_mean::<M>(
                 &self.kernel,
                 query_k_star.as_ref(),
                 self.x.as_ref(),
@@ -1746,7 +1757,7 @@ where
         );
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        fill_query_query_kernel(
+        fill_query_query_kernel::<_, M>(
             &self.compiled,
             query_x.as_ref(),
             kss.as_mut(),
@@ -1839,7 +1850,7 @@ where
             return self.loo_from_rounded_kernel(options);
         }
         let mut alpha = Vec::new();
-        P::publish_predict_alpha(
+        P::publish_predict_alpha::<M>(
             &self.kernel,
             &self.compiled,
             self.x.as_ref(),
@@ -1889,7 +1900,7 @@ where
         let kernel = self.kernel.compile();
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch_k = Mat::<f64>::zeros(n, n);
-        kernel.apply_points(
+        kernel.apply_points::<M>(
             self.x.as_ref(),
             a.as_mut(),
             Triangle::Lower,
@@ -1957,13 +1968,14 @@ where
 }
 
 #[allow(private_bounds)] // `GprObjective` is crate-private; `refit` still needs `O: Optimizer` for it.
-impl<O, S, C, B, P> FittedGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> FittedGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
     ///
@@ -1981,15 +1993,16 @@ where
 }
 
 #[allow(private_bounds)]
-impl<C, P> FittedGpr<Fixed, FullRecompute, C, RetainCholesky, P>
+impl<C, M, P> FittedGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
 where
     C: DistanceCacheSlot,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     pub(crate) fn into_online_preserving_factor(
         self,
-    ) -> Result<OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, P>, GprError> {
+    ) -> Result<OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>, GprError> {
         let n = self.n;
         let mut workspace = OnlineWorkspace::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
@@ -2081,6 +2094,7 @@ where
             d,
             mapped_factor: parts.mapped,
             _recompute: PhantomData,
+            _math: PhantomData,
         })
     }
 
@@ -2122,7 +2136,7 @@ fn storage_alpha_from_saved<P: GpScalar>(
     Ok((0..n).map(|i| rhs[(i, 0)]).collect())
 }
 
-fn apply_cross_kernel<K: GramKernel>(
+fn apply_cross_kernel<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     x_train: MatRef<'_, K::T>,
     query_x: MatRef<'_, K::T>,
@@ -2137,14 +2151,14 @@ where
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             K::T::write_cross(x_train, query_x, query_dist.as_mut(), thread_scratch);
-            compiled.apply_cross(query_dist.as_ref(), query_k_star, query_scratch)
+            compiled.apply_cross::<M>(query_dist.as_ref(), query_k_star, query_scratch)
         }
         CoordMode::Points => {
-            compiled.apply_cross_points(x_train, query_x, query_k_star, query_scratch)
+            compiled.apply_cross_points::<M>(x_train, query_x, query_k_star, query_scratch)
         }
         CoordMode::Mixed => {
             K::T::write_cross(x_train, query_x, query_dist.as_mut(), thread_scratch);
-            compiled.apply_cross_mixed(
+            compiled.apply_cross_mixed::<M>(
                 query_dist.as_ref(),
                 x_train,
                 query_x,
@@ -2166,7 +2180,7 @@ fn fill_query_diag<K: GramKernel>(
     }
 }
 
-fn fill_query_query_kernel<K: GramKernel>(
+fn fill_query_query_kernel<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     query_x: MatRef<'_, K::T>,
     kss: MatMut<'_, K::T>,
@@ -2181,14 +2195,14 @@ where
             let m = query_x.nrows();
             let mut dist_ss = Mat::<K::T>::zeros(m, m);
             K::T::write_squared(query_x, dist_ss.as_mut(), thread_scratch);
-            compiled.apply(dist_ss.as_ref(), kss, Triangle::Full, scratch)
+            compiled.apply::<M>(dist_ss.as_ref(), kss, Triangle::Full, scratch)
         }
-        CoordMode::Points => compiled.apply_points(query_x, kss, Triangle::Full, scratch),
+        CoordMode::Points => compiled.apply_points::<M>(query_x, kss, Triangle::Full, scratch),
         CoordMode::Mixed => {
             let m = query_x.nrows();
             let mut dist_ss = Mat::<K::T>::zeros(m, m);
             K::T::write_squared(query_x, dist_ss.as_mut(), thread_scratch);
-            compiled.apply_mixed(
+            compiled.apply_mixed::<M>(
                 MixedKernelViews::new(dist_ss.as_ref(), query_x),
                 kss,
                 Triangle::Full,

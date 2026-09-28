@@ -191,7 +191,7 @@ fn kernel_column(
     let compiled = kernel.compile();
     let z_mat = pack_points(z, m, d);
     let x_mat = pack_points(x_pt, 1, d);
-    kernel_cross(&compiled, z_mat.as_ref(), x_mat.as_ref())
+    kernel_cross::<crate::math::Accurate, _>(&compiled, z_mat.as_ref(), x_mat.as_ref())
 }
 
 fn kernel_diag_at(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<f64, GprError> {
@@ -797,6 +797,76 @@ fn rbf_n4_m2_fit_lbfgs_drops_nlml() {
 }
 
 #[test]
+fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let z = [0.5, 2.5];
+    let kernel = || KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = || GaussianLikelihood::new(0.1).expect("noise");
+    let start = Sgpr::new(kernel(), likelihood())
+        .with_math::<crate::FastApprox>()
+        .with_optimizer(Fixed)
+        .factor(&x, 4, 1, &y, &z, 2)
+        .map_err(|(_, err)| err)
+        .expect("start")
+        .neg_log_marginal_likelihood()
+        .expect("start nlml");
+    let check = |end: f64| {
+        assert!(end.is_finite(), "nlml={end}");
+        assert!(end <= start, "end={end} start={start}");
+    };
+    check(
+        Sgpr::new(kernel(), likelihood())
+            .with_math::<crate::FastApprox>()
+            .fit(&x, 4, 1, &y, &z, 2)
+            .map_err(|(_, err)| err)
+            .expect("lbfgs")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Sgpr::new(kernel(), likelihood())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(NonlinearCg::new())
+            .fit(&x, 4, 1, &y, &z, 2)
+            .map_err(|(_, err)| err)
+            .expect("ncg")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Sgpr::new(kernel(), likelihood())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(NelderMead::new())
+            .fit(&x, 4, 1, &y, &z, 2)
+            .map_err(|(_, err)| err)
+            .expect("nelder")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Sgpr::new(kernel(), likelihood())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(Newton::new())
+            .fit(&x, 4, 1, &y, &z, 2)
+            .map_err(|(_, err)| err)
+            .expect("newton")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Sgpr::new(kernel(), likelihood())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(FastSimulatedAnnealing::new())
+            .fit(&x, 4, 1, &y, &z, 2)
+            .map_err(|(_, err)| err)
+            .expect("fsa")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+}
+
+#[test]
 fn rbf_n4_m2_fit_ncg_drops_nlml() {
     assert_fit_finishes_and_nlml_drops(NonlinearCg::new());
 }
@@ -1259,8 +1329,19 @@ fn assert_inducing_insert_delete(case: InducingCase<'_>) {
     let fitted = factor_sparse(kernel.clone(), x, n, d, y, z, m);
     let noise = fitted.likelihood.noise_variance();
     let mut inserted = vfe_from_fitted(&fitted);
-    inducing_insert(&mut inserted, &kernel, noise, x, n, d, y, z, m, z_new)
-        .expect("insert inducing");
+    inducing_insert::<crate::math::Accurate, _>(
+        &mut inserted,
+        &kernel,
+        noise,
+        x,
+        n,
+        d,
+        y,
+        z,
+        m,
+        z_new,
+    )
+    .expect("insert inducing");
     let z_ins = append_point(z, m, d, z_new);
     let oracle_ins = factor_sparse(kernel.clone(), x, n, d, y, &z_ins, m + 1);
     assert_inducing_matches_factor(&inserted, &oracle_ins);

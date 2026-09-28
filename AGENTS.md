@@ -27,4 +27,4 @@
 
 ## 今の着手点
 
-Phase 5 の P5-2（f32・f64・混合精度、[#40](https://github.com/YUKIKEDA/gprx/issues/40)）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。
+Phase 5 の P5-4（`FastApprox`、[#42](https://github.com/YUKIKEDA/gprx/issues/42)）。比較の基準は [`.dev/bench-log.md`](.dev/bench-log.md) の `phase-2`。

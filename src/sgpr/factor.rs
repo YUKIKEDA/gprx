@@ -96,7 +96,7 @@ pub(crate) trait PublishSgprWeights: ModelPrecision {
     /// Returns [`GprError::CholeskyFailed`] when the `f64` fallback factor
     /// is not positive definite. Iterative refinement does not add jitter.
     #[allow(clippy::too_many_arguments)]
-    fn publish_weights(
+    fn publish_weights<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
@@ -112,7 +112,7 @@ pub(crate) trait PublishSgprWeights: ModelPrecision {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn publish_sgpr_weights<P: PublishSgprWeights>(
+pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: PublishSgprWeights>(
     kernel: &KernelSpec,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
@@ -125,7 +125,7 @@ pub(crate) fn publish_sgpr_weights<P: PublishSgprWeights>(
     m: usize,
     d: usize,
 ) -> Result<Vec<P::Refine>, GprError> {
-    P::publish_weights(kernel, a, b_l, w, x, y, z, noise, n, m, d)
+    P::publish_weights::<M>(kernel, a, b_l, w, x, y, z, noise, n, m, d)
 }
 
 fn copy_storage_weights<P: ModelPrecision>(w: &[P::Storage]) -> Vec<P::Refine> {
@@ -135,7 +135,7 @@ fn copy_storage_weights<P: ModelPrecision>(w: &[P::Storage]) -> Vec<P::Refine> {
 }
 
 impl PublishSgprWeights for crate::precision::DoublePrecision {
-    fn publish_weights(
+    fn publish_weights<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
@@ -154,7 +154,7 @@ impl PublishSgprWeights for crate::precision::DoublePrecision {
 }
 
 impl PublishSgprWeights for crate::precision::SinglePrecision {
-    fn publish_weights(
+    fn publish_weights<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
@@ -173,7 +173,7 @@ impl PublishSgprWeights for crate::precision::SinglePrecision {
 }
 
 impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::PromoteStorage> {
-    fn publish_weights(
+    fn publish_weights<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
@@ -186,14 +186,14 @@ impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::P
         m: usize,
         d: usize,
     ) -> Result<Vec<Self::Refine>, GprError> {
-        refine_mixed_weights::<crate::precision::PromoteStorage>(
+        refine_mixed_weights::<M, crate::precision::PromoteStorage>(
             kernel, a, b_l, w, x, y, z, noise, n, m, d,
         )
     }
 }
 
 impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::ReevaluateKernel> {
-    fn publish_weights(
+    fn publish_weights<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
@@ -206,7 +206,7 @@ impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::R
         m: usize,
         d: usize,
     ) -> Result<Vec<Self::Refine>, GprError> {
-        refine_mixed_weights::<crate::precision::ReevaluateKernel>(
+        refine_mixed_weights::<M, crate::precision::ReevaluateKernel>(
             kernel, a, b_l, w, x, y, z, noise, n, m, d,
         )
     }
@@ -214,7 +214,7 @@ impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::R
 
 trait MixedWeightSystem: crate::precision::ResidualFormula {
     #[allow(clippy::too_many_arguments)]
-    fn weight_system(
+    fn weight_system<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, f32>,
         x: &[f64],
@@ -234,7 +234,7 @@ struct WeightSystem {
 }
 
 impl MixedWeightSystem for crate::precision::PromoteStorage {
-    fn weight_system(
+    fn weight_system<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, f32>,
         x: &[f64],
@@ -255,7 +255,7 @@ impl MixedWeightSystem for crate::precision::PromoteStorage {
 }
 
 impl MixedWeightSystem for crate::precision::ReevaluateKernel {
-    fn weight_system(
+    fn weight_system<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         a: MatRef<'_, f32>,
         x: &[f64],
@@ -267,7 +267,7 @@ impl MixedWeightSystem for crate::precision::ReevaluateKernel {
         d: usize,
     ) -> Result<WeightSystem, GprError> {
         let _ = a;
-        let state = assemble_vfe::<f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
+        let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
         Ok(WeightSystem {
             b32: None,
             b64: Some(gram_b64(state.a.as_ref(), noise)),
@@ -385,7 +385,7 @@ fn inf_norm_f64(values: &[f64]) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn refine_mixed_weights<R: MixedWeightSystem>(
+fn refine_mixed_weights<M: crate::math::KernelMath, R: MixedWeightSystem>(
     kernel: &KernelSpec,
     a: MatRef<'_, f32>,
     b_l: MatRef<'_, f32>,
@@ -401,7 +401,7 @@ fn refine_mixed_weights<R: MixedWeightSystem>(
     if m == 0 {
         return Ok(Vec::new());
     }
-    let system = R::weight_system(kernel, a, x, y, z, noise, n, m, d)?;
+    let system = R::weight_system::<M>(kernel, a, x, y, z, noise, n, m, d)?;
     let mut w: Vec<f64> = w_storage.iter().map(|value| f64::from(*value)).collect();
     let tol = 10.0 * m as f64 * f64::EPSILON;
     let mut resid = vec![0.0; m];
@@ -421,7 +421,7 @@ fn refine_mixed_weights<R: MixedWeightSystem>(
             if ratio > 0.9 {
                 streak += 1;
                 if streak >= 2 {
-                    return f64_assembly_w(kernel, x, y, z, noise, n, m, d);
+                    return f64_assembly_w::<M>(kernel, x, y, z, noise, n, m, d);
                 }
             } else {
                 streak = 0;
@@ -434,11 +434,11 @@ fn refine_mixed_weights<R: MixedWeightSystem>(
             w[i] += f64::from(delta[(i, 0)]);
         }
     }
-    f64_assembly_w(kernel, x, y, z, noise, n, m, d)
+    f64_assembly_w::<M>(kernel, x, y, z, noise, n, m, d)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn f64_assembly_w(
+fn f64_assembly_w<M: crate::math::KernelMath>(
     kernel: &KernelSpec,
     x: &[f64],
     y: &[f64],
@@ -448,7 +448,7 @@ fn f64_assembly_w(
     m: usize,
     d: usize,
 ) -> Result<Vec<f64>, GprError> {
-    let state = assemble_vfe::<f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
+    let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
     Ok(state.w)
 }
 
@@ -466,7 +466,7 @@ pub(crate) struct VfeState<T: StorageScalar> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_fitted<O, I: InducingLayout, P>(
+pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P>(
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     optimizer: O,
@@ -476,24 +476,24 @@ pub(crate) fn assemble_fitted<O, I: InducingLayout, P>(
     y: &[f64],
     z: &[f64],
     n_inducing: usize,
-) -> Result<FittedSgpr<O, I, P>, GprError>
+) -> Result<FittedSgpr<O, I, M, P>, GprError>
 where
     P: ModelPrecision + PublishSgprWeights,
     P::Storage: FillDistances,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let state =
-        assemble_vfe::<P::Storage>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
+        assemble_vfe::<M, P::Storage>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
     let predict_w = if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
         && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>()
     {
-        assemble_vfe::<f64>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?
+        assemble_vfe::<M, f64>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?
             .w
             .into_iter()
             .map(P::Refine::from_f64)
             .collect()
     } else {
-        publish_sgpr_weights::<P>(
+        publish_sgpr_weights::<M, P>(
             &kernel,
             state.a.as_ref(),
             state.b_l.as_ref(),
@@ -512,6 +512,7 @@ where
         likelihood,
         optimizer,
         inducing: PhantomData,
+        _math: PhantomData,
         x_obs: x.to_vec(),
         z_obs: z.to_vec(),
         y: y.to_vec(),
@@ -529,7 +530,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_vfe<T>(
+pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
     kernel: &KernelSpec,
     likelihood: GaussianLikelihood,
     x: &[f64],
@@ -546,7 +547,8 @@ where
     validate_training(x, n_rows, n_cols, y)?;
     validate_inducing(z, n_inducing, n_cols)?;
     if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        let state = assemble_vfe::<f64>(kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
+        let state =
+            assemble_vfe::<M, f64>(kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
         return Ok(VfeState {
             k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
             a: round_mat::<T>(state.a.as_ref()),
@@ -571,7 +573,7 @@ where
         let compiled64 = kernel.compile();
         let mut k64 = Mat::<f64>::zeros(n_inducing, n_inducing);
         let mut scratch64 = Mat::<f64>::zeros(n_inducing, n_inducing);
-        compiled64.apply_points(
+        compiled64.apply_points::<M>(
             z64.as_ref(),
             k64.as_mut(),
             Triangle::Lower,
@@ -584,7 +586,7 @@ where
         }
     } else {
         let mut scratch = Mat::zeros(n_inducing, n_inducing);
-        compiled.apply_points(
+        compiled.apply_points::<M>(
             z_mat.as_ref(),
             k_mm.as_mut(),
             Triangle::Lower,
@@ -610,7 +612,7 @@ where
         if x == z {
             let mut gram64 = Mat::<f64>::zeros(n_rows, n_rows);
             let mut gram_scratch = Mat::<f64>::zeros(n_rows, n_rows);
-            compiled64.apply_points(
+            compiled64.apply_points::<M>(
                 x64.as_ref(),
                 gram64.as_mut(),
                 Triangle::Lower,
@@ -625,7 +627,7 @@ where
             symmetrize_lower(gram.as_mut(), n_rows);
             gram
         } else {
-            let cross = kernel_cross::<f64>(&compiled64, z64.as_ref(), x64.as_ref())?;
+            let cross = kernel_cross::<M, f64>(&compiled64, z64.as_ref(), x64.as_ref())?;
             let mut stored = Mat::<T>::zeros(n_inducing, n_rows);
             for col in 0..n_rows {
                 for row in 0..n_inducing {
@@ -637,7 +639,7 @@ where
     } else if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
         let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.apply_points(
+        compiled.apply_points::<M>(
             x_mat.as_ref(),
             gram.as_mut(),
             Triangle::Lower,
@@ -646,7 +648,7 @@ where
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
     } else {
-        kernel_cross(&compiled, z_mat.as_ref(), x_mat.as_ref())?
+        kernel_cross::<M, _>(&compiled, z_mat.as_ref(), x_mat.as_ref())?
     };
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
@@ -759,7 +761,10 @@ pub(crate) struct VfeEngine<'a, T: StorageScalar> {
 }
 
 impl<'a, T: StorageScalar> VfeEngine<'a, T> {
-    fn from_model<O, I, P>(model: &'a FittedSgpr<O, I, P>, y: &'a [T]) -> Self
+    fn from_model<O, I, M: crate::math::KernelMath, P>(
+        model: &'a FittedSgpr<O, I, M, P>,
+        y: &'a [T],
+    ) -> Self
     where
         P: ModelPrecision<Storage = T>,
     {
@@ -943,8 +948,8 @@ pub(crate) struct VfeTangent<T: StorageScalar> {
     pub(crate) d_noise: T,
 }
 
-pub(crate) fn analytic_gradient<O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P>(
+    model: &FittedSgpr<O, I, M, P>,
     out: &mut [f64],
     include_z: bool,
 ) -> Result<(), GprError>
@@ -965,7 +970,7 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let n_kernel = model.kernel.num_params();
     for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-        let var = kernel_theta_var(&compiled, x, z, model.n, i)?;
+        let var = kernel_theta_var::<M, _>(&compiled, x, z, model.n, i)?;
         *slot = engine.directional_owned(var).to_f64();
     }
     out[n_kernel] = engine
@@ -975,7 +980,7 @@ where
         let mut idx = n_kernel + 1;
         for dim in 0..model.d {
             for p in 0..model.m {
-                let var = z_coord_var(&compiled, x, z, p, dim)?;
+                let var = z_coord_var::<M, _>(&compiled, x, z, p, dim)?;
                 out[idx] = engine.directional_owned(var).to_f64();
                 idx += 1;
             }
@@ -984,8 +989,8 @@ where
     Ok(())
 }
 
-pub(crate) fn analytic_hessian<O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P>(
+    model: &FittedSgpr<O, I, M, P>,
     out: &mut [f64],
     include_z: bool,
 ) -> Result<(), GprError>
@@ -1014,8 +1019,8 @@ where
     Ok(())
 }
 
-pub(crate) fn collect_first_vars<O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P>(
+    model: &FittedSgpr<O, I, M, P>,
     include_z: bool,
 ) -> Result<Vec<KernelVar<P::Storage>>, GprError>
 where
@@ -1034,7 +1039,7 @@ where
     let n_theta = n_kernel + model.likelihood.num_params();
     let mut vars = Vec::with_capacity(n_theta + if include_z { model.m * model.d } else { 0 });
     for i in 0..n_kernel {
-        vars.push(kernel_theta_var(&compiled, x, z, model.n, i)?);
+        vars.push(kernel_theta_var::<M, _>(&compiled, x, z, model.n, i)?);
     }
     vars.push(likelihood_var(
         model.m,
@@ -1044,14 +1049,14 @@ where
     if include_z {
         for dim in 0..model.d {
             for p in 0..model.m {
-                vars.push(z_coord_var(&compiled, x, z, p, dim)?);
+                vars.push(z_coord_var::<M, _>(&compiled, x, z, p, dim)?);
             }
         }
     }
     Ok(vars)
 }
 
-pub(crate) fn kernel_theta_var<T>(
+pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
@@ -1065,7 +1070,7 @@ where
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
     let mut scratch_mm = Mat::zeros(m, m);
-    compiled.grad_points(
+    compiled.grad_points::<M>(
         z,
         d_kmm.as_mut(),
         param_idx,
@@ -1074,9 +1079,9 @@ where
     )?;
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
-    compiled.grad_cross_points(z, x, d_kmn.as_mut(), param_idx, scratch_mn.as_mut())?;
+    compiled.grad_cross_points::<M>(z, x, d_kmn.as_mut(), param_idx, scratch_mn.as_mut())?;
     let mut diag = vec![lit::<T>(0.0); n];
-    compiled.grad_diag_points(x, &mut diag, param_idx)?;
+    compiled.grad_diag_points::<M>(x, &mut diag, param_idx)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
     Ok(KernelVar::<T> {
         d_kmm,
@@ -1096,7 +1101,7 @@ pub(crate) fn likelihood_var<T: StorageScalar>(m: usize, n: usize, noise: f64) -
     }
 }
 
-pub(crate) fn z_coord_var<T>(
+pub(crate) fn z_coord_var<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
@@ -1110,9 +1115,9 @@ where
     let m = z.nrows();
     let n = x.nrows();
     let mut g2 = Mat::zeros(m, m);
-    compiled.grad_wrt_coord_dim(z, z, g2.as_mut(), dim)?;
+    compiled.grad_wrt_coord_dim::<M>(z, z, g2.as_mut(), dim)?;
     let mut g_xz = Mat::zeros(n, m);
-    compiled.grad_wrt_coord_dim(x, z, g_xz.as_mut(), dim)?;
+    compiled.grad_wrt_coord_dim::<M>(x, z, g_xz.as_mut(), dim)?;
     let mut d_kmm = Mat::zeros(m, m);
     for i in 0..m {
         d_kmm[(i, point)] += g2[(i, point)];
@@ -1130,8 +1135,8 @@ where
     })
 }
 
-pub(crate) fn second_var<O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P>(
+    model: &FittedSgpr<O, I, M, P>,
     i: usize,
     j: usize,
     include_z: bool,
@@ -1161,7 +1166,7 @@ where
         }
     };
     if i < n_kernel && j < n_kernel {
-        return kernel_theta_second(&compiled, x, z, n, i, j);
+        return kernel_theta_second::<M, _>(&compiled, x, z, n, i, j);
     }
     if i == n_kernel && j == n_kernel {
         return Ok(likelihood_var(m, n, model.likelihood.noise_variance()));
@@ -1175,7 +1180,7 @@ where
         });
     }
     if let (Some((pi, ei)), Some((pj, ej))) = (z_index(i), z_index(j)) {
-        return z_z_second(&compiled, x, z, pi, ei, pj, ej);
+        return z_z_second::<M, _>(&compiled, x, z, pi, ei, pj, ej);
     }
     let (theta, (p, e)) = if i < n_theta {
         (
@@ -1200,10 +1205,10 @@ where
             d_noise: lit::<P::Storage>(0.0),
         });
     }
-    theta_z_second(&compiled, x, z, theta, p, e)
+    theta_z_second::<M, _>(&compiled, x, z, theta, p, e)
 }
 
-pub(crate) fn kernel_theta_second<T>(
+pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
@@ -1218,12 +1223,12 @@ where
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
     let mut scratch_mm = Mat::zeros(m, m);
-    compiled.hess_points(z, d_kmm.as_mut(), i, j, Triangle::Full, scratch_mm.as_mut())?;
+    compiled.hess_points::<M>(z, d_kmm.as_mut(), i, j, Triangle::Full, scratch_mm.as_mut())?;
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
-    compiled.hess_cross_points(z, x, d_kmn.as_mut(), i, j, scratch_mn.as_mut())?;
+    compiled.hess_cross_points::<M>(z, x, d_kmn.as_mut(), i, j, scratch_mn.as_mut())?;
     let mut diag = vec![lit::<T>(0.0); n];
-    compiled.hess_diag_points(x, &mut diag, i, j)?;
+    compiled.hess_diag_points::<M>(x, &mut diag, i, j)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
     Ok(KernelVar::<T> {
         d_kmm,
@@ -1233,7 +1238,7 @@ where
     })
 }
 
-pub(crate) fn z_z_second<T>(
+pub(crate) fn z_z_second<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
@@ -1249,7 +1254,7 @@ where
     let m = z.nrows();
     let n = x.nrows();
     let mut h22 = Mat::zeros(m, m);
-    compiled.hess_wrt_coord_dims(z, z, h22.as_mut(), e, f)?;
+    compiled.hess_wrt_coord_dims::<M>(z, z, h22.as_mut(), e, f)?;
     let mut d_kmm = Mat::zeros(m, m);
     if p == q {
         for i in 0..m {
@@ -1260,16 +1265,16 @@ where
         }
     } else {
         let mut h12 = Mat::zeros(m, m);
-        compiled.hess_wrt_coord_mixed(z, z, h12.as_mut(), e, f)?;
+        compiled.hess_wrt_coord_mixed::<M>(z, z, h12.as_mut(), e, f)?;
         let mut h21 = Mat::zeros(m, m);
-        compiled.hess_wrt_coord_mixed(z, z, h21.as_mut(), f, e)?;
+        compiled.hess_wrt_coord_mixed::<M>(z, z, h21.as_mut(), f, e)?;
         d_kmm[(p, q)] = h12[(p, q)];
         d_kmm[(q, p)] = h21[(q, p)];
     }
     let mut d_kmn = Mat::zeros(m, n);
     if p == q {
         let mut h_xz = Mat::zeros(n, m);
-        compiled.hess_wrt_coord_dims(x, z, h_xz.as_mut(), e, f)?;
+        compiled.hess_wrt_coord_dims::<M>(x, z, h_xz.as_mut(), e, f)?;
         for col in 0..n {
             d_kmn[(p, col)] = h_xz[(col, p)];
         }
@@ -1282,7 +1287,7 @@ where
     })
 }
 
-pub(crate) fn theta_z_second<T>(
+pub(crate) fn theta_z_second<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
@@ -1297,14 +1302,14 @@ where
     let m = z.nrows();
     let n = x.nrows();
     let mut g2 = Mat::zeros(m, m);
-    compiled.hess_theta_coord_dim(z, z, g2.as_mut(), theta, e)?;
+    compiled.hess_theta_coord_dim::<M>(z, z, g2.as_mut(), theta, e)?;
     let mut d_kmm = Mat::zeros(m, m);
     for i in 0..m {
         d_kmm[(i, p)] += g2[(i, p)];
         d_kmm[(p, i)] += g2[(i, p)];
     }
     let mut g_xz = Mat::zeros(n, m);
-    compiled.hess_theta_coord_dim(x, z, g_xz.as_mut(), theta, e)?;
+    compiled.hess_theta_coord_dim::<M>(x, z, g_xz.as_mut(), theta, e)?;
     let mut d_kmn = Mat::zeros(m, n);
     for col in 0..n {
         d_kmn[(p, col)] = g_xz[(col, p)];
@@ -1602,7 +1607,7 @@ fn promote_mat<T: StorageScalar>(src: MatRef<'_, T>) -> Mat<f64> {
     out
 }
 
-pub(crate) fn kernel_cross<T>(
+pub(crate) fn kernel_cross<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
     xs: MatRef<'_, T>,
@@ -1620,16 +1625,22 @@ where
             let mut dist = Mat::zeros(n, q);
             let mut thread_scratch = Vec::new();
             T::write_cross(x, xs, dist.as_mut(), &mut thread_scratch);
-            compiled.apply_cross(dist.as_ref(), out.as_mut(), scratch.as_mut())?;
+            compiled.apply_cross::<M>(dist.as_ref(), out.as_mut(), scratch.as_mut())?;
         }
         CoordMode::Points => {
-            compiled.apply_cross_points(x, xs, out.as_mut(), scratch.as_mut())?;
+            compiled.apply_cross_points::<M>(x, xs, out.as_mut(), scratch.as_mut())?;
         }
         CoordMode::Mixed => {
             let mut dist = Mat::zeros(n, q);
             let mut thread_scratch = Vec::new();
             T::write_cross(x, xs, dist.as_mut(), &mut thread_scratch);
-            compiled.apply_cross_mixed(dist.as_ref(), x, xs, out.as_mut(), scratch.as_mut())?;
+            compiled.apply_cross_mixed::<M>(
+                dist.as_ref(),
+                x,
+                xs,
+                out.as_mut(),
+                scratch.as_mut(),
+            )?;
         }
     }
     Ok(out)
@@ -1773,7 +1784,7 @@ pub(crate) fn vfe_neg_log_marginal_likelihood<T: StorageScalar>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn vfe_predict<P>(
+pub(crate) fn vfe_predict<M: crate::math::KernelMath, P>(
     kernel: &KernelSpec,
     z_obs: &[f64],
     k_mm_l: MatRef<'_, P::Storage>,
@@ -1804,7 +1815,7 @@ where
         let z64 = pack_points(z_obs, m, d);
         let mut k64 = Mat::<f64>::zeros(m, m);
         let mut scratch_k = Mat::<f64>::zeros(m, m);
-        compiled64.apply_points(
+        compiled64.apply_points::<M>(
             z64.as_ref(),
             k64.as_mut(),
             Triangle::Lower,
@@ -1820,7 +1831,7 @@ where
         )?;
         let b64 = promote_mat(b_l);
         let w64: Vec<f64> = predict_w.iter().map(|value| value.to_f64()).collect();
-        let pred = vfe_predict::<crate::precision::DoublePrecision>(
+        let pred = vfe_predict::<M, crate::precision::DoublePrecision>(
             kernel,
             z_obs,
             k64.as_ref(),
@@ -1853,7 +1864,7 @@ where
     let query64 = pack_points(xs, n_rows, n_cols);
     let mut k_sz = if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>() {
         let compiled64 = kernel.compile();
-        let cross = kernel_cross::<f64>(&compiled64, z64.as_ref(), query64.as_ref())?;
+        let cross = kernel_cross::<M, f64>(&compiled64, z64.as_ref(), query64.as_ref())?;
         let mut stored = Mat::<P::Storage>::zeros(m, n_rows);
         for col in 0..cross.ncols() {
             for row in 0..cross.nrows() {
@@ -1866,7 +1877,7 @@ where
         let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
         let mut q_cast = P::Storage::empty_cols();
         let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
-        kernel_cross(&compiled, z_mat, query_x)?
+        kernel_cross::<M, _>(&compiled, z_mat, query_x)?
     };
     solve_lower(k_mm_l, k_sz.as_mut());
     let mut kss = vec![lit::<P::Storage>(0.0); n_rows];
@@ -2039,7 +2050,7 @@ pub(crate) fn point_at(x: &[f64], n: usize, d: usize, idx: usize) -> Vec<f64> {
     out
 }
 
-pub(crate) fn kernel_column<T>(
+pub(crate) fn kernel_column<M: crate::math::KernelMath, T>(
     kernel: &KernelSpec,
     z: &[f64],
     m: usize,
@@ -2057,7 +2068,7 @@ where
     let mut x_cast = T::empty_cols();
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
-    kernel_cross(&compiled, z_mat, x_mat)
+    kernel_cross::<M, _>(&compiled, z_mat, x_mat)
 }
 
 pub(crate) fn kernel_diag_at<T>(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<T, GprError>
@@ -2082,7 +2093,7 @@ pub(crate) fn solve_lmm<T: StorageScalar>(k_mm_l: MatRef<'_, T>, col: MatMut<'_,
 ///
 /// `A` gains a row. `k_diag_sum` is unchanged. `w` is solved from the new `B`.
 #[allow(clippy::too_many_arguments)] // kernel, data, and new `Z` stay explicit
-pub(crate) fn inducing_insert<T>(
+pub(crate) fn inducing_insert<M: crate::math::KernelMath, T>(
     state: &mut VfeState<T>,
     kernel: &KernelSpec,
     noise: f64,
@@ -2115,9 +2126,9 @@ where
     let z_new_mat = T::storage_cols(z_new64.as_ref(), &mut zn_cast);
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
-    let mut k_zz = kernel_cross(&compiled, z_mat, z_new_mat)?;
+    let mut k_zz = kernel_cross::<M, _>(&compiled, z_mat, z_new_mat)?;
     let k_nn = kernel_diag_at(kernel, z_new, d)?;
-    let k_zx = kernel_cross(&compiled, z_new_mat, x_mat)?;
+    let k_zx = kernel_cross::<M, _>(&compiled, z_new_mat, x_mat)?;
     solve_lmm(state.k_mm_l.as_ref(), k_zz.as_mut());
     let mut ell2 = k_nn;
     for i in 0..m {
