@@ -2621,7 +2621,7 @@ fn assert_incremental_matches_full(kernel: KernelSpec, noise: f64, change: usize
         obj.value(&params).expect("full")
     };
     let v_incr = {
-        let mut obj = incr.objective();
+        let mut obj = incr.objective().with_change_indices(true);
         let primed = obj.value(&start).expect("prime");
         assert!(primed.is_finite());
         IncrementalObjective::value_with_changes(&mut obj, &params, &[change]).expect("incr")
@@ -2664,7 +2664,7 @@ fn incremental_cached_leaves_match_full_after_later_steps() {
     let mut rejected_then_other = start.clone();
     rejected_then_other[1] += 0.2;
     {
-        let mut obj = incr.objective();
+        let mut obj = incr.objective().with_change_indices(true);
         obj.value(&start).expect("prime");
         IncrementalObjective::value_with_changes(&mut obj, &after_first, &[0]).expect("leaf 0");
         let sequential = IncrementalObjective::value_with_changes(&mut obj, &after_second, &[1])
@@ -2678,7 +2678,7 @@ fn incremental_cached_leaves_match_full_after_later_steps() {
         0.16,
     );
     let v_incr = {
-        let mut obj = incr.objective();
+        let mut obj = incr.objective().with_change_indices(true);
         obj.value(&start).expect("prime");
         IncrementalObjective::value_with_changes(&mut obj, &after_first, &[0]).expect("rejected");
         IncrementalObjective::value_with_changes(&mut obj, &rejected_then_other, &[1])
@@ -2712,7 +2712,11 @@ fn incremental_sum_jitter_retry_matches_full() {
     let mut params = vec![0.0; full.num_params()];
     full.get_params(&mut params).expect("len");
     let v_full = full.objective().value(&params).expect("full");
-    let v_incr = incr.objective().value(&params).expect("incr");
+    let v_incr = incr
+        .objective()
+        .with_change_indices(true)
+        .value(&params)
+        .expect("incr");
     assert_close(v_incr, v_full, TOL);
 }
 
@@ -2737,7 +2741,7 @@ fn incremental_rejects_empty_duplicate_and_oob_indices() {
     let n = incr.num_params();
     let mut params = vec![0.0; n];
     incr.get_params(&mut params).expect("len");
-    let mut obj = incr.objective();
+    let mut obj = incr.objective().with_change_indices(true);
     obj.value(&params).expect("prime");
     assert!(matches!(
         obj.value_at_changes(&params, &[]),
