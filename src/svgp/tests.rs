@@ -377,6 +377,28 @@ fn shifted_q_grad_matches_fd() {
     }
 }
 
+#[test]
+fn fast_approx_adam_elbo_does_not_rise() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ell"));
+    let start = Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1).expect("noise"))
+        .with_math::<crate::FastApprox>()
+        .factor(&X_1D, 4, 1, &Y, &Z_1D, 2)
+        .map_err(|(_, err)| err)
+        .expect("factor")
+        .neg_elbo()
+        .expect("start");
+    let end = Svgp::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .with_math::<crate::FastApprox>()
+        .with_optimizer(Adam::new())
+        .fit(&X_1D, 4, 1, &Y, &Z_1D, 2)
+        .map_err(|(_, err)| err)
+        .expect("adam")
+        .neg_elbo()
+        .expect("end");
+    assert!(end.is_finite(), "elbo={end}");
+    assert!(end <= start, "end={end} start={start}");
+}
+
 fn fit_svgp(
     kernel: KernelSpec,
     x: &[f64],

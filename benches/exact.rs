@@ -16,8 +16,8 @@ use faer::{Mat, MatMut, Par};
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_pairwise_sq_euclidean};
 use gprx::transform::StandardizeTarget;
 use gprx::{
-    FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr, Prediction, ReuseCholesky,
-    UncachedDistances,
+    CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
+    Prediction, RetainCholesky, ReuseCholesky, UncachedDistances,
 };
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -134,7 +134,7 @@ fn kernel_and_a() -> (Mat<f64>, Mat<f64>) {
     let mut scratch = Mat::zeros(N, N);
     fill_pairwise_sq_euclidean(x_mat.as_ref(), dist.as_mut());
     compiled
-        .apply(dist.as_ref(), a.as_mut(), Triangle::Lower, scratch.as_mut())
+        .apply::<gprx::Accurate>(dist.as_ref(), a.as_mut(), Triangle::Lower, scratch.as_mut())
         .expect("shape");
     add_noise_to_diag(a.as_mut(), NOISE);
     let rhs = Mat::from_fn(N, 1, |i, _| y[i]);
@@ -164,7 +164,7 @@ fn kernel_rbf(c: &mut Criterion) {
         b.iter(|| {
             fill_pairwise_sq_euclidean(x_mat.as_ref(), dist.as_mut());
             compiled
-                .apply(
+                .apply::<gprx::Accurate>(
                     std::hint::black_box(dist.as_ref()),
                     k.as_mut(),
                     Triangle::Lower,
@@ -225,20 +225,42 @@ fn predict_100(c: &mut Criterion) {
     });
 }
 
-fn mll_and_grad(c: &mut Criterion) {
-    let (mut gpr, _) = fitted_model();
-    let mut params = vec![0.0; gpr.num_params()];
-    gpr.get_params(&mut params).expect("param length");
-    let mut grad = vec![0.0; params.len()];
-    c.bench_function("mll_and_grad", |b| {
-        b.iter(|| {
-            let value = gpr.value_and_gradient_into(
-                std::hint::black_box(&params),
-                std::hint::black_box(&mut grad),
-            );
-            std::hint::black_box(value)
+fn fitted_fast() -> FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox> {
+    let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
+    let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+    let (x, y) = forrester_xy();
+    Gpr::new(kernel, likelihood)
+        .with_target_transform(StandardizeTarget::new())
+        .with_math::<FastApprox>()
+        .with_optimizer(Fixed)
+        .factor(&x, N, D_ISO, &y)
+        .expect("training Cholesky")
+}
+
+macro_rules! bench_mll {
+    ($group:expr, $name:expr, $gpr:expr) => {{
+        let mut gpr = $gpr;
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("param length");
+        let mut grad = vec![0.0; params.len()];
+        $group.bench_function($name, |b| {
+            b.iter(|| {
+                let value = gpr.value_and_gradient_into(
+                    std::hint::black_box(&params),
+                    std::hint::black_box(&mut grad),
+                );
+                std::hint::black_box(value)
+            });
         });
-    });
+    }};
+}
+
+fn mll_and_grad(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mll_and_grad");
+    let (accurate, _) = fitted_model();
+    bench_mll!(group, "accurate", accurate);
+    bench_mll!(group, "fast_approx", fitted_fast());
+    group.finish();
 }
 
 fn fit_lbfgs(c: &mut Criterion) {
@@ -266,6 +288,21 @@ fn fit_lbfgs(c: &mut Criterion) {
         );
     });
     group.finish();
+}
+
+fn fitted_ard_fast() -> FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox>
+{
+    let ells = [ELL_ARD; D_ARD];
+    let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
+    let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+    let (x, y) = sphere_xy();
+    Gpr::new(kernel, likelihood)
+        .with_prefer_speed()
+        .with_target_transform(StandardizeTarget::new())
+        .with_math::<FastApprox>()
+        .with_optimizer(Fixed)
+        .factor(&x, N, D_ARD, &y)
+        .expect("training Cholesky")
 }
 
 fn fitted_ard_speed() -> FittedGpr<Fixed> {
@@ -319,6 +356,7 @@ fn bench_mll_ard<F>(
 fn mll_and_grad_ard(c: &mut Criterion) {
     let mut group = c.benchmark_group("mll_and_grad_ard");
     bench_mll_ard(&mut group, "always", fitted_ard_speed);
+    bench_mll!(group, "fast_approx", fitted_ard_fast());
     let mut gpr = fitted_ard_memory();
     let mut params = vec![0.0; gpr.num_params()];
     gpr.get_params(&mut params).expect("param length");

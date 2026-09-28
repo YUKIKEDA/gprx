@@ -17,7 +17,7 @@ use crate::kernel::{
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::{IncrementalObjective, Objective};
 use crate::optimizer::{
-    FastSimulatedAnnealing, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead,
+    FastSimulatedAnnealing, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead, Newton,
     NonlinearCg, OptResult, Optimizer, PoleRecompute, UsesChangeIndices,
 };
 use crate::param::Interval;
@@ -64,7 +64,7 @@ fn dense_a(kernel: &KernelSpec, noise: f64, x: &[f64], n: usize, d: usize) -> Ma
     let mut k = Mat::zeros(n, n);
     let mut scratch = Mat::zeros(n, n);
     compiled
-        .apply(dist.as_ref(), k.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply::<crate::math::Accurate>(dist.as_ref(), k.as_mut(), Triangle::Full, scratch.as_mut())
         .expect("shape");
     add_noise_to_diag(k.as_mut(), noise);
     k
@@ -2751,4 +2751,108 @@ fn fsa_speed_and_memory_poles_fit_and_match() {
     for (a, b) in speed_theta.iter().zip(memory_theta.iter()) {
         assert_close(*a, *b);
     }
+}
+
+#[test]
+fn fast_approx_fit_nlml_does_not_rise() {
+    let x = [0.0, 0.8, 1.7];
+    let y = [0.4, -0.2, 0.9];
+    let kernel = || KernelSpec::from(RbfKernel::new(1.25).expect("ell"));
+    let noise = || GaussianLikelihood::new(0.16).expect("noise");
+    let mut factored = Gpr::new(kernel(), noise())
+        .with_math::<crate::FastApprox>()
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 1, &y)
+        .map_err(|(_, err)| err)
+        .expect("factor");
+    let mut params = [0.0; 2];
+    factored.get_params(&mut params).expect("len");
+    let mut grad = [0.0; 2];
+    let value = factored
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("grad");
+    let h = 1e-5;
+    let mut dummy = [0.0; 2];
+    for i in 0..2 {
+        let mut plus = params;
+        let mut minus = params;
+        plus[i] += h;
+        minus[i] -= h;
+        let v_plus = factored
+            .value_and_gradient_into(&plus, &mut dummy)
+            .expect("plus");
+        let v_minus = factored
+            .value_and_gradient_into(&minus, &mut dummy)
+            .expect("minus");
+        let fd = (v_plus - v_minus) / (2.0 * h);
+        let scale = fd.abs().max(1.0);
+        assert!(
+            (grad[i] - fd).abs() <= 1e-4 * scale,
+            "param {i}: analytic={}, fd={}",
+            grad[i],
+            fd
+        );
+    }
+    let _ = value;
+    let start = Gpr::new(kernel(), noise())
+        .with_math::<crate::FastApprox>()
+        .with_optimizer(Fixed)
+        .factor(&x, 3, 1, &y)
+        .map_err(|(_, err)| err)
+        .expect("factor")
+        .neg_log_marginal_likelihood()
+        .expect("start");
+    let check = |end: f64| {
+        assert!(end.is_finite(), "nlml={end}");
+        assert!(end <= start, "end={end} start={start}");
+    };
+    check(
+        Gpr::new(kernel(), noise())
+            .with_math::<crate::FastApprox>()
+            .fit(&x, 3, 1, &y)
+            .map_err(|(_, err)| err)
+            .expect("lbfgs")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Gpr::new(kernel(), noise())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(NonlinearCg::new())
+            .fit(&x, 3, 1, &y)
+            .map_err(|(_, err)| err)
+            .expect("ncg")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Gpr::new(kernel(), noise())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(NelderMead::new())
+            .fit(&x, 3, 1, &y)
+            .map_err(|(_, err)| err)
+            .expect("nelder")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Gpr::new(kernel(), noise())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(Newton::new())
+            .fit(&x, 3, 1, &y)
+            .map_err(|(_, err)| err)
+            .expect("newton")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
+    check(
+        Gpr::new(kernel(), noise())
+            .with_math::<crate::FastApprox>()
+            .with_optimizer(FastSimulatedAnnealing::new())
+            .fit(&x, 3, 1, &y)
+            .map_err(|(_, err)| err)
+            .expect("fsa")
+            .neg_log_marginal_likelihood()
+            .expect("end"),
+    );
 }

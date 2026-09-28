@@ -19,7 +19,7 @@ pub(crate) trait GramKernel: Clone {
 
     fn needs_ard_sq_diff(&self) -> bool;
 
-    fn apply(
+    fn apply<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, Self::T>,
         out: MatMut<'_, Self::T>,
@@ -27,7 +27,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn apply_points(
+    fn apply_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, Self::T>,
         out: MatMut<'_, Self::T>,
@@ -35,7 +35,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn apply_from_ard_cache(
+    fn apply_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, Self::T>,
         x: MatRef<'_, Self::T>,
@@ -44,7 +44,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn apply_mixed(
+    fn apply_mixed<M: crate::math::KernelMath>(
         &self,
         views: MixedKernelViews<'_, Self::T>,
         out: MatMut<'_, Self::T>,
@@ -52,14 +52,14 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn apply_cross(
+    fn apply_cross<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, Self::T>,
         out: MatMut<'_, Self::T>,
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn apply_cross_points(
+    fn apply_cross_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, Self::T>,
         xs: MatRef<'_, Self::T>,
@@ -67,7 +67,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn apply_cross_mixed(
+    fn apply_cross_mixed<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, Self::T>,
         x: MatRef<'_, Self::T>,
@@ -81,7 +81,7 @@ pub(crate) trait GramKernel: Clone {
     fn fill_diag_points(&self, x: MatRef<'_, Self::T>, out: &mut [Self::T])
     -> Result<(), GprError>;
 
-    fn grad(
+    fn grad<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, Self::T>,
         d_k: MatMut<'_, Self::T>,
@@ -90,7 +90,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn grad_points(
+    fn grad_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, Self::T>,
         d_k: MatMut<'_, Self::T>,
@@ -99,7 +99,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn grad_from_ard_cache(
+    fn grad_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, Self::T>,
         x: MatRef<'_, Self::T>,
@@ -109,7 +109,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn grad_mixed(
+    fn grad_mixed<M: crate::math::KernelMath>(
         &self,
         views: MixedKernelViews<'_, Self::T>,
         d_k: MatMut<'_, Self::T>,
@@ -118,7 +118,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn grad_cross_points(
+    fn grad_cross_points<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, Self::T>,
         x2: MatRef<'_, Self::T>,
@@ -127,14 +127,14 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn grad_diag_points(
+    fn grad_diag_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, Self::T>,
         out: &mut [Self::T],
         param_idx: usize,
     ) -> Result<(), GprError>;
 
-    fn grad_wrt_coord_dim(
+    fn grad_wrt_coord_dim<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, Self::T>,
         x2: MatRef<'_, Self::T>,
@@ -142,7 +142,7 @@ pub(crate) trait GramKernel: Clone {
         dim: usize,
     ) -> Result<(), GprError>;
 
-    fn hess(
+    fn hess<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, Self::T>,
         d2_k: MatMut<'_, Self::T>,
@@ -152,7 +152,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn hess_points(
+    fn hess_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, Self::T>,
         d2_k: MatMut<'_, Self::T>,
@@ -162,7 +162,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn hess_from_ard_cache(
+    fn hess_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, Self::T>,
         x: MatRef<'_, Self::T>,
@@ -172,7 +172,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn hess_mixed(
+    fn hess_mixed<M: crate::math::KernelMath>(
         &self,
         views: MixedKernelViews<'_, Self::T>,
         d2_k: MatMut<'_, Self::T>,
@@ -182,7 +182,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn hess_cross_points(
+    fn hess_cross_points<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, Self::T>,
         x2: MatRef<'_, Self::T>,
@@ -192,7 +192,7 @@ pub(crate) trait GramKernel: Clone {
         scratch: MatMut<'_, Self::T>,
     ) -> Result<(), GprError>;
 
-    fn hess_diag_points(
+    fn hess_diag_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, Self::T>,
         out: &mut [Self::T],
@@ -200,7 +200,7 @@ pub(crate) trait GramKernel: Clone {
         j: usize,
     ) -> Result<(), GprError>;
 
-    fn hess_wrt_coord_dims(
+    fn hess_wrt_coord_dims<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, Self::T>,
         x2: MatRef<'_, Self::T>,
@@ -209,7 +209,7 @@ pub(crate) trait GramKernel: Clone {
         dim_b: usize,
     ) -> Result<(), GprError>;
 
-    fn hess_wrt_coord_mixed(
+    fn hess_wrt_coord_mixed<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, Self::T>,
         x2: MatRef<'_, Self::T>,
@@ -218,7 +218,7 @@ pub(crate) trait GramKernel: Clone {
         dim_x2: usize,
     ) -> Result<(), GprError>;
 
-    fn hess_theta_coord_dim(
+    fn hess_theta_coord_dim<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, Self::T>,
         x2: MatRef<'_, Self::T>,
@@ -241,27 +241,27 @@ macro_rules! forward_gram {
                 CompiledKernel::<$t>::needs_ard_sq_diff(self)
             }
 
-            fn apply(
+            fn apply<M: crate::math::KernelMath>(
                 &self,
                 dist: MatRef<'_, Self::T>,
                 out: MatMut<'_, Self::T>,
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply(self, dist, out, uplo, scratch)
+                CompiledKernel::<$t>::apply::<M>(self, dist, out, uplo, scratch)
             }
 
-            fn apply_points(
+            fn apply_points<M: crate::math::KernelMath>(
                 &self,
                 x: MatRef<'_, Self::T>,
                 out: MatMut<'_, Self::T>,
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply_points(self, x, out, uplo, scratch)
+                CompiledKernel::<$t>::apply_points::<M>(self, x, out, uplo, scratch)
             }
 
-            fn apply_from_ard_cache(
+            fn apply_from_ard_cache<M: crate::math::KernelMath>(
                 &self,
                 cache: MatRef<'_, Self::T>,
                 x: MatRef<'_, Self::T>,
@@ -269,39 +269,39 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply_from_ard_cache(self, cache, x, out, uplo, scratch)
+                CompiledKernel::<$t>::apply_from_ard_cache::<M>(self, cache, x, out, uplo, scratch)
             }
 
-            fn apply_mixed(
+            fn apply_mixed<M: crate::math::KernelMath>(
                 &self,
                 views: MixedKernelViews<'_, Self::T>,
                 out: MatMut<'_, Self::T>,
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply_mixed(self, views, out, uplo, scratch)
+                CompiledKernel::<$t>::apply_mixed::<M>(self, views, out, uplo, scratch)
             }
 
-            fn apply_cross(
+            fn apply_cross<M: crate::math::KernelMath>(
                 &self,
                 dist: MatRef<'_, Self::T>,
                 out: MatMut<'_, Self::T>,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply_cross(self, dist, out, scratch)
+                CompiledKernel::<$t>::apply_cross::<M>(self, dist, out, scratch)
             }
 
-            fn apply_cross_points(
+            fn apply_cross_points<M: crate::math::KernelMath>(
                 &self,
                 x: MatRef<'_, Self::T>,
                 xs: MatRef<'_, Self::T>,
                 out: MatMut<'_, Self::T>,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply_cross_points(self, x, xs, out, scratch)
+                CompiledKernel::<$t>::apply_cross_points::<M>(self, x, xs, out, scratch)
             }
 
-            fn apply_cross_mixed(
+            fn apply_cross_mixed<M: crate::math::KernelMath>(
                 &self,
                 dist: MatRef<'_, Self::T>,
                 x: MatRef<'_, Self::T>,
@@ -309,7 +309,7 @@ macro_rules! forward_gram {
                 out: MatMut<'_, Self::T>,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::apply_cross_mixed(self, dist, x, xs, out, scratch)
+                CompiledKernel::<$t>::apply_cross_mixed::<M>(self, dist, x, xs, out, scratch)
             }
 
             fn fill_diag(&self, out: &mut [Self::T]) -> Result<(), GprError> {
@@ -324,7 +324,7 @@ macro_rules! forward_gram {
                 CompiledKernel::<$t>::fill_diag_points(self, x, out)
             }
 
-            fn grad(
+            fn grad<M: crate::math::KernelMath>(
                 &self,
                 dist: MatRef<'_, Self::T>,
                 d_k: MatMut<'_, Self::T>,
@@ -332,10 +332,10 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad(self, dist, d_k, param_idx, uplo, scratch)
+                CompiledKernel::<$t>::grad::<M>(self, dist, d_k, param_idx, uplo, scratch)
             }
 
-            fn grad_points(
+            fn grad_points<M: crate::math::KernelMath>(
                 &self,
                 x: MatRef<'_, Self::T>,
                 d_k: MatMut<'_, Self::T>,
@@ -343,10 +343,10 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad_points(self, x, d_k, param_idx, uplo, scratch)
+                CompiledKernel::<$t>::grad_points::<M>(self, x, d_k, param_idx, uplo, scratch)
             }
 
-            fn grad_from_ard_cache(
+            fn grad_from_ard_cache<M: crate::math::KernelMath>(
                 &self,
                 cache: MatRef<'_, Self::T>,
                 x: MatRef<'_, Self::T>,
@@ -355,12 +355,12 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad_from_ard_cache(
+                CompiledKernel::<$t>::grad_from_ard_cache::<M>(
                     self, cache, x, d_k, param_idx, uplo, scratch,
                 )
             }
 
-            fn grad_mixed(
+            fn grad_mixed<M: crate::math::KernelMath>(
                 &self,
                 views: MixedKernelViews<'_, Self::T>,
                 d_k: MatMut<'_, Self::T>,
@@ -368,10 +368,10 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad_mixed(self, views, d_k, param_idx, uplo, scratch)
+                CompiledKernel::<$t>::grad_mixed::<M>(self, views, d_k, param_idx, uplo, scratch)
             }
 
-            fn grad_cross_points(
+            fn grad_cross_points<M: crate::math::KernelMath>(
                 &self,
                 x1: MatRef<'_, Self::T>,
                 x2: MatRef<'_, Self::T>,
@@ -379,29 +379,29 @@ macro_rules! forward_gram {
                 param_idx: usize,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad_cross_points(self, x1, x2, d_k, param_idx, scratch)
+                CompiledKernel::<$t>::grad_cross_points::<M>(self, x1, x2, d_k, param_idx, scratch)
             }
 
-            fn grad_diag_points(
+            fn grad_diag_points<M: crate::math::KernelMath>(
                 &self,
                 x: MatRef<'_, Self::T>,
                 out: &mut [Self::T],
                 param_idx: usize,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad_diag_points(self, x, out, param_idx)
+                CompiledKernel::<$t>::grad_diag_points::<M>(self, x, out, param_idx)
             }
 
-            fn grad_wrt_coord_dim(
+            fn grad_wrt_coord_dim<M: crate::math::KernelMath>(
                 &self,
                 x1: MatRef<'_, Self::T>,
                 x2: MatRef<'_, Self::T>,
                 d_k: MatMut<'_, Self::T>,
                 dim: usize,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::grad_wrt_coord_dim(self, x1, x2, d_k, dim)
+                CompiledKernel::<$t>::grad_wrt_coord_dim::<M>(self, x1, x2, d_k, dim)
             }
 
-            fn hess(
+            fn hess<M: crate::math::KernelMath>(
                 &self,
                 dist: MatRef<'_, Self::T>,
                 d2_k: MatMut<'_, Self::T>,
@@ -410,10 +410,10 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess(self, dist, d2_k, i, j, uplo, scratch)
+                CompiledKernel::<$t>::hess::<M>(self, dist, d2_k, i, j, uplo, scratch)
             }
 
-            fn hess_points(
+            fn hess_points<M: crate::math::KernelMath>(
                 &self,
                 x: MatRef<'_, Self::T>,
                 d2_k: MatMut<'_, Self::T>,
@@ -422,10 +422,10 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_points(self, x, d2_k, i, j, uplo, scratch)
+                CompiledKernel::<$t>::hess_points::<M>(self, x, d2_k, i, j, uplo, scratch)
             }
 
-            fn hess_from_ard_cache(
+            fn hess_from_ard_cache<M: crate::math::KernelMath>(
                 &self,
                 cache: MatRef<'_, Self::T>,
                 x: MatRef<'_, Self::T>,
@@ -434,10 +434,12 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_from_ard_cache(self, cache, x, d2_k, pair, uplo, scratch)
+                CompiledKernel::<$t>::hess_from_ard_cache::<M>(
+                    self, cache, x, d2_k, pair, uplo, scratch,
+                )
             }
 
-            fn hess_mixed(
+            fn hess_mixed<M: crate::math::KernelMath>(
                 &self,
                 views: MixedKernelViews<'_, Self::T>,
                 d2_k: MatMut<'_, Self::T>,
@@ -446,10 +448,10 @@ macro_rules! forward_gram {
                 uplo: Triangle,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_mixed(self, views, d2_k, i, j, uplo, scratch)
+                CompiledKernel::<$t>::hess_mixed::<M>(self, views, d2_k, i, j, uplo, scratch)
             }
 
-            fn hess_cross_points(
+            fn hess_cross_points<M: crate::math::KernelMath>(
                 &self,
                 x1: MatRef<'_, Self::T>,
                 x2: MatRef<'_, Self::T>,
@@ -458,20 +460,20 @@ macro_rules! forward_gram {
                 j: usize,
                 scratch: MatMut<'_, Self::T>,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_cross_points(self, x1, x2, d2_k, i, j, scratch)
+                CompiledKernel::<$t>::hess_cross_points::<M>(self, x1, x2, d2_k, i, j, scratch)
             }
 
-            fn hess_diag_points(
+            fn hess_diag_points<M: crate::math::KernelMath>(
                 &self,
                 x: MatRef<'_, Self::T>,
                 out: &mut [Self::T],
                 i: usize,
                 j: usize,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_diag_points(self, x, out, i, j)
+                CompiledKernel::<$t>::hess_diag_points::<M>(self, x, out, i, j)
             }
 
-            fn hess_wrt_coord_dims(
+            fn hess_wrt_coord_dims<M: crate::math::KernelMath>(
                 &self,
                 x1: MatRef<'_, Self::T>,
                 x2: MatRef<'_, Self::T>,
@@ -479,10 +481,10 @@ macro_rules! forward_gram {
                 dim_a: usize,
                 dim_b: usize,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_wrt_coord_dims(self, x1, x2, d2_k, dim_a, dim_b)
+                CompiledKernel::<$t>::hess_wrt_coord_dims::<M>(self, x1, x2, d2_k, dim_a, dim_b)
             }
 
-            fn hess_wrt_coord_mixed(
+            fn hess_wrt_coord_mixed<M: crate::math::KernelMath>(
                 &self,
                 x1: MatRef<'_, Self::T>,
                 x2: MatRef<'_, Self::T>,
@@ -490,10 +492,10 @@ macro_rules! forward_gram {
                 dim_x1: usize,
                 dim_x2: usize,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_wrt_coord_mixed(self, x1, x2, d2_k, dim_x1, dim_x2)
+                CompiledKernel::<$t>::hess_wrt_coord_mixed::<M>(self, x1, x2, d2_k, dim_x1, dim_x2)
             }
 
-            fn hess_theta_coord_dim(
+            fn hess_theta_coord_dim<M: crate::math::KernelMath>(
                 &self,
                 x1: MatRef<'_, Self::T>,
                 x2: MatRef<'_, Self::T>,
@@ -501,7 +503,7 @@ macro_rules! forward_gram {
                 param_idx: usize,
                 dim: usize,
             ) -> Result<(), GprError> {
-                CompiledKernel::<$t>::hess_theta_coord_dim(self, x1, x2, d2_k, param_idx, dim)
+                CompiledKernel::<$t>::hess_theta_coord_dim::<M>(self, x1, x2, d2_k, param_idx, dim)
             }
         }
     };

@@ -164,9 +164,18 @@ impl MaternKernel {
         out: MatMut<'_, f64>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        self.apply_math::<crate::math::Accurate>(dist, out, uplo)
+    }
+
+    pub(crate) fn apply_math<M: crate::math::KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
         let ell = self.lengthscale();
         let nu = self.nu;
-        write_triangle(dist, out, uplo, |d| matern_from_sq_dist(d, ell, nu))
+        write_triangle(dist, out, uplo, |d| matern_from_sq_dist::<M>(d, ell, nu))
     }
 
     /// Writes rectangular `k(dist)` into `out` (train × test).
@@ -176,9 +185,17 @@ impl MaternKernel {
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
     pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
+        self.apply_cross_math::<crate::math::Accurate>(dist, out)
+    }
+
+    pub(crate) fn apply_cross_math<M: crate::math::KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+    ) -> Result<(), GprError> {
         let ell = self.lengthscale();
         let nu = self.nu;
-        write_dense(dist, out, |d| matern_from_sq_dist(d, ell, nu))
+        write_dense(dist, out, |d| matern_from_sq_dist::<M>(d, ell, nu))
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
@@ -201,6 +218,16 @@ impl MaternKernel {
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        self.grad_math::<crate::math::Accurate>(dist, d_k, param_idx, uplo)
+    }
+
+    pub(crate) fn grad_math<M: crate::math::KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
         if param_idx != 0 {
             return Err(GprError::InvalidHyperparameter {
                 reason: "Matern has a single parameter at index 0".to_owned(),
@@ -210,11 +237,11 @@ impl MaternKernel {
         let nu = self.nu;
         write_triangle(dist, d_k, uplo, |d| {
             let r = scaled_distance(d, ell)?;
-            finite_kernel(matern_dk_dtheta_iso(nu, r))
+            finite_kernel(matern_dk_dtheta_iso::<M>(nu, r))
         })
     }
 
-    pub(crate) fn apply_from_coords(
+    pub(crate) fn apply_from_coords<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         out: MatMut<'_, f64>,
@@ -222,10 +249,10 @@ impl MaternKernel {
     ) -> Result<(), GprError> {
         let ell = self.lengthscale();
         let nu = self.nu;
-        write_square_from_coords(x, out, uplo, |d| matern_from_sq_dist(d, ell, nu))
+        write_square_from_coords(x, out, uplo, |d| matern_from_sq_dist::<M>(d, ell, nu))
     }
 
-    pub(crate) fn grad_from_coords(
+    pub(crate) fn grad_from_coords<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         d_k: MatMut<'_, f64>,
@@ -241,7 +268,7 @@ impl MaternKernel {
         let nu = self.nu;
         write_square_from_coords(x, d_k, uplo, |d| {
             let r = scaled_distance(d, ell)?;
-            finite_kernel(matern_dk_dtheta_iso(nu, r))
+            finite_kernel(matern_dk_dtheta_iso::<M>(nu, r))
         })
     }
 
@@ -259,16 +286,27 @@ impl MaternKernel {
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        self.hess_math::<crate::math::Accurate>(dist, d2_k, i, j, uplo)
+    }
+
+    pub(crate) fn hess_math<M: crate::math::KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
         require_matern_hess_idx(i, j)?;
         let ell = self.lengthscale();
         let nu = self.nu;
         write_triangle(dist, d2_k, uplo, |d| {
             let r = scaled_distance(d, ell)?;
-            finite_kernel(matern_d2k_dtheta2_iso(nu, r))
+            finite_kernel(matern_d2k_dtheta2_iso::<M>(nu, r))
         })
     }
 
-    pub(crate) fn hess_from_coords(
+    pub(crate) fn hess_from_coords<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         d2_k: MatMut<'_, f64>,
@@ -281,7 +319,7 @@ impl MaternKernel {
         let nu = self.nu;
         write_square_from_coords(x, d2_k, uplo, |d| {
             let r = scaled_distance(d, ell)?;
-            finite_kernel(matern_d2k_dtheta2_iso(nu, r))
+            finite_kernel(matern_d2k_dtheta2_iso::<M>(nu, r))
         })
     }
 
@@ -292,6 +330,16 @@ impl MaternKernel {
     /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is not `3/2`,
     /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`].
     pub fn grad_wrt_coord_dim(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        self.grad_wrt_coord_dim_math::<crate::math::Accurate>(x1, x2, d_k, dim)
+    }
+
+    pub(crate) fn grad_wrt_coord_dim_math<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -307,14 +355,23 @@ impl MaternKernel {
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (r, delta) = euclid_pair(x1, row, x2, col, dim)?;
-                let psi = (-scale * r).exp();
-                d_k[(row, col)] = 3.0 * inv_ell_sq * psi * delta;
+                d_k[(row, col)] = if M::ACCURATE {
+                    let psi = (-scale * r).exp();
+                    3.0 * inv_ell_sq * psi * delta
+                } else if r == 0.0 {
+                    0.0
+                } else {
+                    let rho = scale * r;
+                    let jet = M::jet_f64(-rho);
+                    let psi = (1.0 + rho) * jet.d1 - jet.v;
+                    psi * scale * delta / r
+                };
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_wrt_coord_dims(
+    pub(crate) fn hess_wrt_coord_dims<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -333,24 +390,26 @@ impl MaternKernel {
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (r, da, db) = euclid_pair_two(x1, row, x2, col, dim_a, dim_b)?;
-                let psi = (-scale * r).exp();
-                let mut value = -3.0 * inv_ell_sq * psi;
-                if dim_a != dim_b {
-                    value = 0.0;
-                }
-                if r > 0.0 {
-                    value = 3.0 * inv_ell_sq * psi * (scale * da * db / r);
-                    if dim_a == dim_b {
-                        value -= 3.0 * inv_ell_sq * psi;
+                let same = dim_a == dim_b;
+                d2_k[(row, col)] = if M::ACCURATE {
+                    let psi = (-scale * r).exp();
+                    let mut value = if same { -3.0 * inv_ell_sq * psi } else { 0.0 };
+                    if r > 0.0 {
+                        value = 3.0 * inv_ell_sq * psi * (scale * da * db / r);
+                        if same {
+                            value -= 3.0 * inv_ell_sq * psi;
+                        }
                     }
-                }
-                d2_k[(row, col)] = value;
+                    value
+                } else {
+                    matern_fast_coord_hess(scale, r, da, db, same, false)
+                };
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_wrt_coord_mixed(
+    pub(crate) fn hess_wrt_coord_mixed<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -369,25 +428,26 @@ impl MaternKernel {
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (r, d1, d2) = euclid_pair_two(x1, row, x2, col, dim_x1, dim_x2)?;
-                let psi = (-scale * r).exp();
-                let mut value = if dim_x1 == dim_x2 {
-                    3.0 * inv_ell_sq * psi
-                } else {
-                    0.0
-                };
-                if r > 0.0 {
-                    value = 3.0 * inv_ell_sq * psi * (-scale * d1 * d2 / r);
-                    if dim_x1 == dim_x2 {
-                        value += 3.0 * inv_ell_sq * psi;
+                let same = dim_x1 == dim_x2;
+                d2_k[(row, col)] = if M::ACCURATE {
+                    let psi = (-scale * r).exp();
+                    let mut value = if same { 3.0 * inv_ell_sq * psi } else { 0.0 };
+                    if r > 0.0 {
+                        value = 3.0 * inv_ell_sq * psi * (-scale * d1 * d2 / r);
+                        if same {
+                            value += 3.0 * inv_ell_sq * psi;
+                        }
                     }
-                }
-                d2_k[(row, col)] = value;
+                    value
+                } else {
+                    matern_fast_coord_hess(scale, r, d1, d2, same, true)
+                };
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_theta_coord_dim(
+    pub(crate) fn hess_theta_coord_dim<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -410,14 +470,24 @@ impl MaternKernel {
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (r, delta) = euclid_pair(x1, row, x2, col, dim)?;
-                let psi = (-scale * r).exp();
-                d2_k[(row, col)] = 3.0 * inv_ell_sq * psi * delta * (scale * r - 2.0);
+                d2_k[(row, col)] = if M::ACCURATE {
+                    let psi = (-scale * r).exp();
+                    3.0 * inv_ell_sq * psi * delta * (scale * r - 2.0)
+                } else if r == 0.0 {
+                    0.0
+                } else {
+                    let rho = scale * r;
+                    let jet = M::jet_f64(-rho);
+                    let psi = (1.0 + rho) * jet.d1 - jet.v;
+                    let dpsi = 2.0 * jet.d1 - (1.0 + rho) * jet.d2;
+                    -scale * delta / r * (rho * dpsi + psi)
+                };
             }
         }
         Ok(())
     }
 
-    pub(crate) fn grad_cross_from_coords(
+    pub(crate) fn grad_cross_from_coords<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -435,13 +505,13 @@ impl MaternKernel {
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (r, _) = euclid_pair(x1, row, x2, col, 0)?;
-                d_k[(row, col)] = finite_kernel(matern_dk_dtheta_iso(nu, r / ell))?;
+                d_k[(row, col)] = finite_kernel(matern_dk_dtheta_iso::<M>(nu, r / ell))?;
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_cross_from_coords(
+    pub(crate) fn hess_cross_from_coords<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -456,11 +526,41 @@ impl MaternKernel {
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
                 let (r, _) = euclid_pair(x1, row, x2, col, 0)?;
-                d2_k[(row, col)] = finite_kernel(matern_d2k_dtheta2_iso(nu, r / ell))?;
+                d2_k[(row, col)] = finite_kernel(matern_d2k_dtheta2_iso::<M>(nu, r / ell))?;
             }
         }
         Ok(())
     }
+}
+
+/// Second derivative of Matérn 3/2 w.r.t. coordinates, for [`crate::FastApprox`].
+///
+/// `from_x1` differentiates the `x2` gradient with respect to `x1`.
+fn matern_fast_coord_hess(scale: f64, r: f64, da: f64, db: f64, same: bool, from_x1: bool) -> f64 {
+    let jet0 = <crate::math::FastApprox as crate::math::KernelMath>::jet_f64(0.0);
+    let dpsi0 = 2.0 * jet0.d1 - jet0.d2;
+    if r == 0.0 {
+        return if same {
+            let sign = if from_x1 { 1.0 } else { -1.0 };
+            sign * scale * scale * dpsi0
+        } else {
+            0.0
+        };
+    }
+    let rho = scale * r;
+    let jet = <crate::math::FastApprox as crate::math::KernelMath>::jet_f64(-rho);
+    let psi = (1.0 + rho) * jet.d1 - jet.v;
+    let dpsi = 2.0 * jet.d1 - (1.0 + rho) * jet.d2;
+    let sign = if from_x1 { 1.0 } else { -1.0 };
+    let same_term = if same {
+        if from_x1 { psi / r } else { -psi / r }
+    } else {
+        0.0
+    };
+    scale
+        * (dpsi * (sign * scale * da / r) * db / r
+            + same_term
+            + psi * (-sign * da * db) / (r * r * r))
 }
 
 fn euclid_pair(
@@ -499,73 +599,137 @@ fn euclid_pair_two(
     ))
 }
 
-pub(crate) fn matern_from_r(nu: MaternNu, r: f64) -> f64 {
+pub(crate) fn matern_from_r<M: crate::math::KernelMath>(nu: MaternNu, r: f64) -> f64 {
     match nu {
-        MaternNu::Half => (-r).exp(),
+        MaternNu::Half => M::exp_f64(-r),
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            (1.0 + rho) * (-rho).exp()
+            (1.0 + rho) * M::exp_f64(-rho)
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            (1.0 + rho + rho * rho / 3.0) * (-rho).exp()
+            (1.0 + rho + rho * rho / 3.0) * M::exp_f64(-rho)
         }
     }
 }
 
 /// `∂k/∂θ` for isotropic `θ = log(ℓ)` at scaled distance `r = ‖x-x'‖ / ℓ`.
-pub(crate) fn matern_dk_dtheta_iso(nu: MaternNu, r: f64) -> f64 {
+pub(crate) fn matern_dk_dtheta_iso<M: crate::math::KernelMath>(nu: MaternNu, r: f64) -> f64 {
+    if M::ACCURATE {
+        return match nu {
+            MaternNu::Half => matern_from_r::<M>(nu, r) * r,
+            MaternNu::ThreeHalves => {
+                let rho = 3.0_f64.sqrt() * r;
+                rho * rho * (-rho).exp()
+            }
+            MaternNu::FiveHalves => {
+                let rho = 5.0_f64.sqrt() * r;
+                (rho * rho / 3.0) * (1.0 + rho) * (-rho).exp()
+            }
+        };
+    }
     match nu {
-        MaternNu::Half => matern_from_r(nu, r) * r,
+        MaternNu::Half => r * M::jet_f64(-r).d1,
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            rho * rho * (-rho).exp()
+            let jet = M::jet_f64(-rho);
+            rho * ((1.0 + rho) * jet.d1 - jet.v)
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            (rho * rho / 3.0) * (1.0 + rho) * (-rho).exp()
+            let jet = M::jet_f64(-rho);
+            let a = 1.0 + rho + rho * rho / 3.0;
+            rho * (a * jet.d1 - (1.0 + 2.0 * rho / 3.0) * jet.v)
         }
     }
 }
 
 /// `∂²k/∂θ²` for isotropic `θ = log(ℓ)` at scaled distance `r = ‖x-x'‖ / ℓ`.
-pub(crate) fn matern_d2k_dtheta2_iso(nu: MaternNu, r: f64) -> f64 {
+pub(crate) fn matern_d2k_dtheta2_iso<M: crate::math::KernelMath>(nu: MaternNu, r: f64) -> f64 {
+    if M::ACCURATE {
+        return match nu {
+            MaternNu::Half => {
+                let k = matern_from_r::<M>(nu, r);
+                k * r * (r - 1.0)
+            }
+            MaternNu::ThreeHalves => {
+                let rho = 3.0_f64.sqrt() * r;
+                rho * rho * (rho - 2.0) * (-rho).exp()
+            }
+            MaternNu::FiveHalves => {
+                let rho = 5.0_f64.sqrt() * r;
+                (rho * rho / 3.0) * (rho * rho - 2.0 * rho - 2.0) * (-rho).exp()
+            }
+        };
+    }
     match nu {
         MaternNu::Half => {
-            let k = matern_from_r(nu, r);
-            k * r * (r - 1.0)
+            let jet = M::jet_f64(-r);
+            r * r * jet.d2 - r * jet.d1
         }
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            rho * rho * (rho - 2.0) * (-rho).exp()
+            let jet = M::jet_f64(-rho);
+            let u = (1.0 + rho) * jet.d1 - jet.v;
+            rho * (-u + rho * ((1.0 + rho) * jet.d2 - 2.0 * jet.d1))
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            (rho * rho / 3.0) * (rho * rho - 2.0 * rho - 2.0) * (-rho).exp()
+            let jet = M::jet_f64(-rho);
+            let a = 1.0 + rho + rho * rho / 3.0;
+            let ap = 1.0 + 2.0 * rho / 3.0;
+            let app = 2.0 / 3.0;
+            let dk_drho = ap * jet.v - a * jet.d1;
+            let d2_drho = app * jet.v - 2.0 * ap * jet.d1 + a * jet.d2;
+            rho * (dk_drho + rho * d2_drho)
         }
     }
 }
 
 /// `∂k/∂θ_d` for ARD `θ_d = log(ℓ_d)`. `dim_term` is `(x_d-x'_d)² / ℓ_d²`.
-pub(crate) fn matern_dk_dtheta_ard(nu: MaternNu, r: f64, dim_term: f64) -> f64 {
-    match nu {
-        MaternNu::Half => {
-            if r <= 0.0 {
-                0.0
-            } else {
-                matern_from_r(nu, r) * dim_term / r
+pub(crate) fn matern_dk_dtheta_ard<M: crate::math::KernelMath>(
+    nu: MaternNu,
+    r: f64,
+    dim_term: f64,
+) -> f64 {
+    if M::ACCURATE {
+        return match nu {
+            MaternNu::Half => {
+                if r <= 0.0 {
+                    0.0
+                } else {
+                    matern_from_r::<M>(nu, r) * dim_term / r
+                }
             }
+            MaternNu::ThreeHalves => 3.0 * dim_term * (-(3.0_f64.sqrt() * r)).exp(),
+            MaternNu::FiveHalves => {
+                let rho = 5.0_f64.sqrt() * r;
+                (5.0 / 3.0) * (1.0 + rho) * (-rho).exp() * dim_term
+            }
+        };
+    }
+    if r <= 0.0 {
+        return 0.0;
+    }
+    match nu {
+        MaternNu::Half => M::jet_f64(-r).d1 * dim_term / r,
+        MaternNu::ThreeHalves => {
+            let rho = 3.0_f64.sqrt() * r;
+            let jet = M::jet_f64(-rho);
+            ((1.0 + rho) * jet.d1 - jet.v) * 3.0_f64.sqrt() * dim_term / r
         }
-        MaternNu::ThreeHalves => 3.0 * dim_term * (-(3.0_f64.sqrt() * r)).exp(),
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            (5.0 / 3.0) * (1.0 + rho) * (-rho).exp() * dim_term
+            let jet = M::jet_f64(-rho);
+            let a = 1.0 + rho + rho * rho / 3.0;
+            let ap = 1.0 + 2.0 * rho / 3.0;
+            (a * jet.d1 - ap * jet.v) * 5.0_f64.sqrt() * dim_term / r
         }
     }
 }
 
 /// `∂²k/∂θ_d ∂θ_e` for ARD lengthscales. `same` is `d == e`.
-pub(crate) fn matern_d2k_dtheta_ard(
+pub(crate) fn matern_d2k_dtheta_ard<M: crate::math::KernelMath>(
     nu: MaternNu,
     r: f64,
     dim_i: f64,
@@ -575,33 +739,87 @@ pub(crate) fn matern_d2k_dtheta_ard(
     if r <= 0.0 {
         return 0.0;
     }
+    if M::ACCURATE {
+        return match nu {
+            MaternNu::Half => {
+                let k = matern_from_r::<M>(nu, r);
+                if same {
+                    k * (dim_i * dim_i / (r * r) - 2.0 * dim_i / r + dim_i * dim_i / (r * r * r))
+                } else {
+                    k * dim_i * dim_j * (1.0 / (r * r) + 1.0 / (r * r * r))
+                }
+            }
+            MaternNu::ThreeHalves => {
+                let rho = 3.0_f64.sqrt() * r;
+                let e = (-rho).exp();
+                if same {
+                    3.0 * e * (rho * dim_i * dim_i / (r * r) - 2.0 * dim_i)
+                } else {
+                    3.0 * e * (rho * dim_i * dim_j / (r * r))
+                }
+            }
+            MaternNu::FiveHalves => {
+                let rho = 5.0_f64.sqrt() * r;
+                let e = (-rho).exp();
+                if same {
+                    (5.0 / 3.0)
+                        * e
+                        * (rho * rho * dim_i * dim_i / (r * r) - 2.0 * (1.0 + rho) * dim_i)
+                } else {
+                    (5.0 / 3.0) * e * (rho * rho * dim_i * dim_j / (r * r))
+                }
+            }
+        };
+    }
     match nu {
         MaternNu::Half => {
-            let k = matern_from_r(nu, r);
+            let jet = M::jet_f64(-r);
+            let rr = r * r;
             if same {
-                k * (dim_i * dim_i / (r * r) - 2.0 * dim_i / r + dim_i * dim_i / (r * r * r))
+                jet.d2 * dim_i * dim_i / rr + jet.d1 * (-2.0 * dim_i / r + dim_i * dim_i / (rr * r))
             } else {
-                k * dim_i * dim_j * (1.0 / (r * r) + 1.0 / (r * r * r))
+                jet.d2 * dim_i * dim_j / rr + jet.d1 * dim_i * dim_j / (rr * r)
             }
         }
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            let e = (-rho).exp();
-            if same {
-                3.0 * e * (rho * dim_i * dim_i / (r * r) - 2.0 * dim_i)
-            } else {
-                3.0 * e * (rho * dim_i * dim_j / (r * r))
-            }
+            let jet = M::jet_f64(-rho);
+            let phi_p = jet.v - (1.0 + rho) * jet.d1;
+            let phi_pp = (1.0 + rho) * jet.d2 - 2.0 * jet.d1;
+            matern_ard_hess_from_phi(phi_p, phi_pp, r, dim_i, dim_j, same, 3.0_f64.sqrt())
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            let e = (-rho).exp();
-            if same {
-                (5.0 / 3.0) * e * (rho * rho * dim_i * dim_i / (r * r) - 2.0 * (1.0 + rho) * dim_i)
-            } else {
-                (5.0 / 3.0) * e * (rho * rho * dim_i * dim_j / (r * r))
-            }
+            let jet = M::jet_f64(-rho);
+            let a = 1.0 + rho + rho * rho / 3.0;
+            let ap = 1.0 + 2.0 * rho / 3.0;
+            let app = 2.0 / 3.0;
+            let phi_p = ap * jet.v - a * jet.d1;
+            let phi_pp = app * jet.v - 2.0 * ap * jet.d1 + a * jet.d2;
+            matern_ard_hess_from_phi(phi_p, phi_pp, r, dim_i, dim_j, same, 5.0_f64.sqrt())
         }
+    }
+}
+
+/// `∂²k/∂θ_i ∂θ_j` from `φ'(ρ)` and `φ''(ρ)`, with `ρ = scale · r`.
+fn matern_ard_hess_from_phi(
+    phi_p: f64,
+    phi_pp: f64,
+    r: f64,
+    dim_i: f64,
+    dim_j: f64,
+    same: bool,
+    scale: f64,
+) -> f64 {
+    let rr = r * r;
+    if same {
+        let g2 = scale * scale * dim_i * dim_i / rr;
+        let dg = -scale * (-2.0 * dim_i / r + dim_i * dim_i / (rr * r));
+        phi_pp * g2 + phi_p * dg
+    } else {
+        let g_ij = scale * scale * dim_i * dim_j / rr;
+        let dg = -scale * dim_i * dim_j / (rr * r);
+        phi_pp * g_ij + phi_p * dg
     }
 }
 
@@ -623,9 +841,13 @@ pub(crate) fn finite_kernel(value: f64) -> Result<f64, GprError> {
     }
 }
 
-fn matern_from_sq_dist(d: f64, ell: f64, nu: MaternNu) -> Result<f64, GprError> {
+fn matern_from_sq_dist<M: crate::math::KernelMath>(
+    d: f64,
+    ell: f64,
+    nu: MaternNu,
+) -> Result<f64, GprError> {
     let r = scaled_distance(d, ell)?;
-    finite_kernel(matern_from_r(nu, r))
+    finite_kernel(matern_from_r::<M>(nu, r))
 }
 
 fn scaled_distance(sq_dist: f64, ell: f64) -> Result<f64, GprError> {
