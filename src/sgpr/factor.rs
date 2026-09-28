@@ -12,25 +12,26 @@ use crate::gpr::JitterPolicy;
 use crate::gpr::factor::{
     cholesky_lower_with_policy, pack_points, symmetrize_lower, validate_query, validate_training,
 };
+use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::param::Interval;
-use crate::precision::{ModelPrecision, StorageScalar};
+use crate::precision::ModelPrecision;
 use crate::workspace::{faer_par, faer_par_dims};
 use crate::{PredictOptions, Prediction, VarianceKind};
 
-fn lit<T: StorageScalar>(value: f64) -> T {
+fn lit<T: KernelScalar>(value: f64) -> T {
     T::from_f64(value)
 }
 
-fn storage_hypot<T: StorageScalar>(a: T, b: T) -> T {
+fn storage_hypot<T: KernelScalar>(a: T, b: T) -> T {
     let sq = a * a + b * b;
     faer_traits::math_utils::sqrt(&sq)
 }
 
-fn storage_sqrt<T: StorageScalar>(value: T) -> T {
+fn storage_sqrt<T: KernelScalar>(value: T) -> T {
     faer_traits::math_utils::sqrt(&value)
 }
 
@@ -39,7 +40,7 @@ pub(crate) trait MeanDot: ModelPrecision {
     fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine;
 }
 
-fn storage_dot<T: StorageScalar>(column: &[T], weights: &[T]) -> T {
+fn storage_dot<T: KernelScalar>(column: &[T], weights: &[T]) -> T {
     let mut sum = lit::<T>(0.0);
     for (kernel, weight) in column.iter().zip(weights.iter()) {
         sum += *kernel * *weight;
@@ -456,7 +457,7 @@ fn k_mm_jitter_policy() -> JitterPolicy {
     JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
 }
 
-pub(crate) struct VfeState<T: StorageScalar> {
+pub(crate) struct VfeState<T: KernelScalar> {
     pub(crate) k_mm_l: Mat<T>,
     pub(crate) a: Mat<T>,
     pub(crate) b_l: Mat<T>,
@@ -484,9 +485,7 @@ where
 {
     let state =
         assemble_vfe::<M, P::Storage>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
-    let predict_w = if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
-        && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>()
-    {
+    let predict_w = if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?
             .w
             .into_iter()
@@ -541,12 +540,12 @@ pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
     n_inducing: usize,
 ) -> Result<VfeState<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     validate_training(x, n_rows, n_cols, y)?;
     validate_inducing(z, n_inducing, n_cols)?;
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
+    if T::ROUNDS_FROM_F64 {
         let state =
             assemble_vfe::<M, f64>(kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
         return Ok(VfeState {
@@ -567,7 +566,7 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
-    let round_kernel = std::mem::size_of::<T>() == std::mem::size_of::<f32>();
+    let round_kernel = T::ROUNDS_FROM_F64;
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     if round_kernel {
         let compiled64 = kernel.compile();
@@ -740,14 +739,14 @@ pub(crate) fn fill_z_intervals(
     Ok(())
 }
 
-pub(crate) struct KernelVar<T: StorageScalar> {
+pub(crate) struct KernelVar<T: KernelScalar> {
     pub(crate) d_kmm: Mat<T>,
     pub(crate) d_kmn: Mat<T>,
     pub(crate) d_kdiag: T,
     pub(crate) d_noise: T,
 }
 
-pub(crate) struct VfeEngine<'a, T: StorageScalar> {
+pub(crate) struct VfeEngine<'a, T: KernelScalar> {
     pub(crate) l: MatRef<'a, T>,
     pub(crate) a: MatRef<'a, T>,
     pub(crate) b_l: MatRef<'a, T>,
@@ -760,7 +759,7 @@ pub(crate) struct VfeEngine<'a, T: StorageScalar> {
     trace: T,
 }
 
-impl<'a, T: StorageScalar> VfeEngine<'a, T> {
+impl<'a, T: KernelScalar> VfeEngine<'a, T> {
     fn from_model<O, I, M: crate::math::KernelMath, P>(
         model: &'a FittedSgpr<O, I, M, P>,
         y: &'a [T],
@@ -938,7 +937,7 @@ impl<'a, T: StorageScalar> VfeEngine<'a, T> {
     }
 }
 
-pub(crate) struct VfeTangent<T: StorageScalar> {
+pub(crate) struct VfeTangent<T: KernelScalar> {
     pub(crate) phi: Mat<T>,
     pub(crate) phi_l: Mat<T>,
     pub(crate) da: Mat<T>,
@@ -1064,7 +1063,7 @@ pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
     param_idx: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let m = z.nrows();
@@ -1091,7 +1090,7 @@ where
     })
 }
 
-pub(crate) fn likelihood_var<T: StorageScalar>(m: usize, n: usize, noise: f64) -> KernelVar<T> {
+pub(crate) fn likelihood_var<T: KernelScalar>(m: usize, n: usize, noise: f64) -> KernelVar<T> {
     let _ = n;
     KernelVar::<T> {
         d_kmm: Mat::zeros(m, m),
@@ -1109,7 +1108,7 @@ pub(crate) fn z_coord_var<M: crate::math::KernelMath, T>(
     dim: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let m = z.nrows();
@@ -1217,7 +1216,7 @@ pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T>(
     j: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let m = z.nrows();
@@ -1248,7 +1247,7 @@ pub(crate) fn z_z_second<M: crate::math::KernelMath, T>(
     f: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let m = z.nrows();
@@ -1296,7 +1295,7 @@ pub(crate) fn theta_z_second<M: crate::math::KernelMath, T>(
     e: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let m = z.nrows();
@@ -1322,7 +1321,7 @@ where
     })
 }
 
-pub(crate) fn chol_phi<T: StorageScalar>(l: MatRef<'_, T>, dk: MatRef<'_, T>) -> Mat<T> {
+pub(crate) fn chol_phi<T: KernelScalar>(l: MatRef<'_, T>, dk: MatRef<'_, T>) -> Mat<T> {
     let m = l.nrows();
     let mut tmp = Mat::zeros(m, m);
     copy_mat(dk, tmp.as_mut());
@@ -1343,7 +1342,7 @@ pub(crate) fn chol_phi<T: StorageScalar>(l: MatRef<'_, T>, dk: MatRef<'_, T>) ->
     phi
 }
 
-pub(crate) fn tril_half<T: StorageScalar>(phi: MatRef<'_, T>) -> Mat<T> {
+pub(crate) fn tril_half<T: KernelScalar>(phi: MatRef<'_, T>) -> Mat<T> {
     let m = phi.nrows();
     let mut out = Mat::zeros(m, m);
     for j in 0..m {
@@ -1358,7 +1357,7 @@ pub(crate) fn tril_half<T: StorageScalar>(phi: MatRef<'_, T>) -> Mat<T> {
     out
 }
 
-pub(crate) fn dphi_from<T: StorageScalar>(
+pub(crate) fn dphi_from<T: KernelScalar>(
     phi_i: MatRef<'_, T>,
     phi_l_j: MatRef<'_, T>,
     phi_dd: MatRef<'_, T>,
@@ -1378,7 +1377,7 @@ pub(crate) fn dphi_from<T: StorageScalar>(
     out
 }
 
-pub(crate) fn noise_plus_sym_prod<T: StorageScalar>(
+pub(crate) fn noise_plus_sym_prod<T: KernelScalar>(
     da: MatRef<'_, T>,
     a: MatRef<'_, T>,
     d_noise: T,
@@ -1400,7 +1399,7 @@ pub(crate) fn noise_plus_sym_prod<T: StorageScalar>(
     db
 }
 
-pub(crate) fn second_db<T: StorageScalar>(
+pub(crate) fn second_db<T: KernelScalar>(
     dai: MatRef<'_, T>,
     daj: MatRef<'_, T>,
     dda: MatRef<'_, T>,
@@ -1425,7 +1424,7 @@ pub(crate) fn second_db<T: StorageScalar>(
     db
 }
 
-pub(crate) fn trace_solve<T: StorageScalar>(b_l: MatRef<'_, T>, db: MatRef<'_, T>) -> T {
+pub(crate) fn trace_solve<T: KernelScalar>(b_l: MatRef<'_, T>, db: MatRef<'_, T>) -> T {
     let mut solved = Mat::zeros(db.nrows(), db.ncols());
     copy_mat(db, solved.as_mut());
     solve_llt_in_place(b_l, solved.as_mut());
@@ -1436,7 +1435,7 @@ pub(crate) fn trace_solve<T: StorageScalar>(b_l: MatRef<'_, T>, db: MatRef<'_, T
     tr
 }
 
-pub(crate) fn second_logdet_b<T: StorageScalar>(
+pub(crate) fn second_logdet_b<T: KernelScalar>(
     b_l: MatRef<'_, T>,
     dbi: MatRef<'_, T>,
     dbj: MatRef<'_, T>,
@@ -1457,7 +1456,7 @@ pub(crate) fn second_logdet_b<T: StorageScalar>(
     tr + trace_solve(b_l, ddb)
 }
 
-pub(crate) fn dw_from<T: StorageScalar>(
+pub(crate) fn dw_from<T: KernelScalar>(
     b_l: MatRef<'_, T>,
     w: &[T],
     db: MatRef<'_, T>,
@@ -1477,7 +1476,7 @@ pub(crate) fn dw_from<T: StorageScalar>(
     out
 }
 
-pub(crate) fn solve_lower<T: StorageScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>) {
+pub(crate) fn solve_lower<T: KernelScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>) {
     let n = l.nrows();
     let n_rhs = rhs.ncols();
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
@@ -1487,29 +1486,33 @@ pub(crate) fn solve_lower<T: StorageScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>
     );
 }
 
-fn matvec_columns<T: StorageScalar>(a: MatRef<'_, T>, y: &[T], mut ay: MatMut<'_, T>) {
-    let m = a.nrows();
-    let n = a.ncols();
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        for i in 0..m {
-            let mut sum = 0.0f64;
-            for j in 0..n {
-                sum += a[(i, j)].to_f64() * y[j].to_f64();
-            }
-            ay[(i, 0)] = T::from_f64(sum);
+fn matvec_columns<T: KernelScalar>(a: MatRef<'_, T>, y: &[T], ay: MatMut<'_, T>) {
+    T::matvec_columns(a, y, ay);
+}
+
+/// [`matvec_columns`] for `f32`: each row sum in `f64`.
+pub(crate) fn matvec_columns_f64_accum(a: MatRef<'_, f32>, y: &[f32], mut ay: MatMut<'_, f32>) {
+    for i in 0..a.nrows() {
+        let mut sum = 0.0f64;
+        for j in 0..a.ncols() {
+            sum += f64::from(a[(i, j)]) * f64::from(y[j]);
         }
-        return;
+        ay[(i, 0)] = sum as f32;
     }
-    for i in 0..m {
-        let mut sum = lit::<T>(0.0);
-        for j in 0..n {
+}
+
+/// [`matvec_columns`] for `f64`.
+pub(crate) fn matvec_columns_native(a: MatRef<'_, f64>, y: &[f64], mut ay: MatMut<'_, f64>) {
+    for i in 0..a.nrows() {
+        let mut sum = 0.0;
+        for j in 0..a.ncols() {
             sum += a[(i, j)] * y[j];
         }
         ay[(i, 0)] = sum;
     }
 }
 
-pub(crate) fn copy_mat<T: StorageScalar>(src: MatRef<'_, T>, mut dest: MatMut<'_, T>) {
+pub(crate) fn copy_mat<T: KernelScalar>(src: MatRef<'_, T>, mut dest: MatMut<'_, T>) {
     for j in 0..src.ncols() {
         for i in 0..src.nrows() {
             dest[(i, j)] = src[(i, j)];
@@ -1517,7 +1520,7 @@ pub(crate) fn copy_mat<T: StorageScalar>(src: MatRef<'_, T>, mut dest: MatMut<'_
     }
 }
 
-pub(crate) fn mat_sub_mul<T: StorageScalar>(
+pub(crate) fn mat_sub_mul<T: KernelScalar>(
     dest: &mut Mat<T>,
     left: MatRef<'_, T>,
     right: MatRef<'_, T>,
@@ -1525,7 +1528,7 @@ pub(crate) fn mat_sub_mul<T: StorageScalar>(
     gemm(dest.as_mut(), Accum::Add, left, right, lit::<T>(-1.0));
 }
 
-pub(crate) fn mat_add_mul<T: StorageScalar>(
+pub(crate) fn mat_add_mul<T: KernelScalar>(
     dest: &mut Mat<T>,
     left: MatRef<'_, T>,
     right: MatRef<'_, T>,
@@ -1533,7 +1536,7 @@ pub(crate) fn mat_add_mul<T: StorageScalar>(
     gemm(dest.as_mut(), Accum::Add, left, right, lit::<T>(1.0));
 }
 
-pub(crate) fn mat_mul_into<T: StorageScalar>(
+pub(crate) fn mat_mul_into<T: KernelScalar>(
     dest: &mut Mat<T>,
     left: MatRef<'_, T>,
     right: MatRef<'_, T>,
@@ -1541,7 +1544,7 @@ pub(crate) fn mat_mul_into<T: StorageScalar>(
     gemm(dest.as_mut(), Accum::Replace, left, right, lit::<T>(1.0));
 }
 
-fn gemm<T: StorageScalar>(
+fn gemm<T: KernelScalar>(
     dest: MatMut<'_, T>,
     accum: Accum,
     lhs: MatRef<'_, T>,
@@ -1552,7 +1555,7 @@ fn gemm<T: StorageScalar>(
     matmul(dest, accum, lhs, rhs, alpha, par);
 }
 
-pub(crate) fn frobenius_dot<T: StorageScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> T {
+pub(crate) fn frobenius_dot<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> T {
     let mut sum = lit::<T>(0.0);
     for col in 0..a.ncols() {
         for row in 0..a.nrows() {
@@ -1562,7 +1565,7 @@ pub(crate) fn frobenius_dot<T: StorageScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>
     sum
 }
 
-pub(crate) fn dot<T: StorageScalar>(a: &[T], b: &[T]) -> T {
+pub(crate) fn dot<T: KernelScalar>(a: &[T], b: &[T]) -> T {
     let mut sum = lit::<T>(0.0);
     for (x, y) in a.iter().zip(b.iter()) {
         sum += *x * *y;
@@ -1570,12 +1573,12 @@ pub(crate) fn dot<T: StorageScalar>(a: &[T], b: &[T]) -> T {
     sum
 }
 
-pub(crate) fn quad_form<T: StorageScalar>(w: &[T], m: MatRef<'_, T>) -> T {
+pub(crate) fn quad_form<T: KernelScalar>(w: &[T], m: MatRef<'_, T>) -> T {
     let mw = mat_vec(m, w);
     dot(w, &mw)
 }
 
-pub(crate) fn mat_vec<T: StorageScalar>(m: MatRef<'_, T>, v: &[T]) -> Vec<T> {
+pub(crate) fn mat_vec<T: KernelScalar>(m: MatRef<'_, T>, v: &[T]) -> Vec<T> {
     let mut out = vec![lit::<T>(0.0); m.nrows()];
     for i in 0..m.nrows() {
         let mut sum = lit::<T>(0.0);
@@ -1587,7 +1590,7 @@ pub(crate) fn mat_vec<T: StorageScalar>(m: MatRef<'_, T>, v: &[T]) -> Vec<T> {
     out
 }
 
-fn round_mat<T: StorageScalar>(src: MatRef<'_, f64>) -> Mat<T> {
+fn round_mat<T: KernelScalar>(src: MatRef<'_, f64>) -> Mat<T> {
     let mut out = Mat::<T>::zeros(src.nrows(), src.ncols());
     for col in 0..src.ncols() {
         for row in 0..src.nrows() {
@@ -1597,7 +1600,7 @@ fn round_mat<T: StorageScalar>(src: MatRef<'_, f64>) -> Mat<T> {
     out
 }
 
-fn promote_mat<T: StorageScalar>(src: MatRef<'_, T>) -> Mat<f64> {
+fn promote_mat<T: KernelScalar>(src: MatRef<'_, T>) -> Mat<f64> {
     let mut out = Mat::<f64>::zeros(src.nrows(), src.ncols());
     for col in 0..src.ncols() {
         for row in 0..src.nrows() {
@@ -1613,7 +1616,7 @@ pub(crate) fn kernel_cross<M: crate::math::KernelMath, T>(
     xs: MatRef<'_, T>,
 ) -> Result<Mat<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let n = x.nrows();
@@ -1646,30 +1649,37 @@ where
     Ok(out)
 }
 
-pub(crate) fn gram_aat_plus_noise<T: StorageScalar>(a: MatRef<'_, T>, noise: f64) -> Mat<T> {
+pub(crate) fn gram_aat_plus_noise<T: KernelScalar>(a: MatRef<'_, T>, noise: f64) -> Mat<T> {
     let m = a.nrows();
-    let n = a.ncols();
     let mut b = Mat::zeros(m, m);
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        for i in 0..m {
-            for j in 0..m {
-                let mut sum = 0.0f64;
-                for t in 0..n {
-                    sum += a[(i, t)].to_f64() * a[(j, t)].to_f64();
-                }
-                b[(i, j)] = T::from_f64(sum);
-            }
-        }
-    } else {
-        gemm(b.as_mut(), Accum::Replace, a, a.transpose(), lit::<T>(1.0));
-    }
+    T::gram_aat(a, b.as_mut());
     for j in 0..m {
         b[(j, j)] += lit::<T>(noise);
     }
     b
 }
 
-pub(crate) fn frobenius2<T: StorageScalar>(a: MatRef<'_, T>) -> T {
+/// `a aᵀ` for `f32`: each entry in `f64`.
+pub(crate) fn gram_aat_f64_accum(a: MatRef<'_, f32>, mut b: MatMut<'_, f32>) {
+    let m = a.nrows();
+    let n = a.ncols();
+    for i in 0..m {
+        for j in 0..m {
+            let mut sum = 0.0f64;
+            for t in 0..n {
+                sum += f64::from(a[(i, t)]) * f64::from(a[(j, t)]);
+            }
+            b[(i, j)] = sum as f32;
+        }
+    }
+}
+
+/// `a aᵀ` for `f64` through faer's matmul.
+pub(crate) fn gram_aat_faer(a: MatRef<'_, f64>, b: MatMut<'_, f64>) {
+    gemm(b, Accum::Replace, a, a.transpose(), 1.0);
+}
+
+pub(crate) fn frobenius2<T: KernelScalar>(a: MatRef<'_, T>) -> T {
     let mut sum = lit::<T>(0.0);
     for col in 0..a.ncols() {
         for row in 0..a.nrows() {
@@ -1680,38 +1690,19 @@ pub(crate) fn frobenius2<T: StorageScalar>(a: MatRef<'_, T>) -> T {
     sum
 }
 
-pub(crate) fn solve_llt_in_place<T: StorageScalar>(l: MatRef<'_, T>, mut rhs: MatMut<'_, T>) {
+pub(crate) fn solve_llt_in_place<T: KernelScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>) {
+    T::solve_llt_owned_scratch(l, rhs);
+}
+
+/// [`solve_llt_in_place`] for `f64` with a scratch buffer sized per call.
+pub(crate) fn solve_llt_faer_owned(l: MatRef<'_, f64>, rhs: MatMut<'_, f64>) {
     let n = l.nrows();
     let n_rhs = rhs.ncols();
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        for col in 0..n_rhs {
-            let mut y = vec![0.0f64; n];
-            let mut x = vec![0.0f64; n];
-            for i in 0..n {
-                let mut sum = rhs[(i, col)].to_f64();
-                for j in 0..i {
-                    sum -= l[(i, j)].to_f64() * y[j];
-                }
-                y[i] = sum / l[(i, i)].to_f64();
-            }
-            for i in (0..n).rev() {
-                let mut sum = y[i];
-                for j in (i + 1)..n {
-                    sum -= l[(j, i)].to_f64() * x[j];
-                }
-                x[i] = sum / l[(i, i)].to_f64();
-            }
-            for i in 0..n {
-                rhs[(i, col)] = T::from_f64(x[i]);
-            }
-        }
-        return;
-    }
     let par = faer_par_dims(n, n_rhs);
-    let req = llt::solve::solve_in_place_scratch::<T>(n, n_rhs, par);
+    let req = llt::solve::solve_in_place_scratch::<f64>(n, n_rhs, par);
     let mut buf = MemBuffer::new(req);
     let stack = MemStack::new(&mut buf);
-    llt::solve::solve_in_place(l, rhs.as_mut(), par, stack);
+    llt::solve::solve_in_place(l, rhs, par, stack);
 }
 
 pub(crate) fn validate_inducing(z: &[f64], m: usize, d: usize) -> Result<(), GprError> {
@@ -1743,7 +1734,7 @@ pub(crate) fn validate_inducing(z: &[f64], m: usize, d: usize) -> Result<(), Gpr
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn vfe_neg_log_marginal_likelihood<T: StorageScalar>(
+pub(crate) fn vfe_neg_log_marginal_likelihood<T: KernelScalar>(
     a: MatRef<'_, T>,
     b_l: MatRef<'_, T>,
     w: &[T],
@@ -1759,11 +1750,11 @@ pub(crate) fn vfe_neg_log_marginal_likelihood<T: StorageScalar>(
     let noise_s = lit::<T>(noise);
     let mut log_det_b = lit::<T>(0.0);
     for i in 0..m {
-        log_det_b += StorageScalar::ln(b_l[(i, i)]);
+        log_det_b += KernelScalar::ln(b_l[(i, i)]);
     }
     log_det_b *= lit::<T>(2.0);
     let n_minus_m = lit::<T>(n as f64) - lit::<T>(m as f64);
-    let log_det = n_minus_m * StorageScalar::ln(noise_s) + log_det_b;
+    let log_det = n_minus_m * KernelScalar::ln(noise_s) + log_det_b;
     let mut y_norm2 = lit::<T>(0.0);
     for value in y_s {
         y_norm2 += *value * *value;
@@ -1810,7 +1801,7 @@ where
         });
     }
     validate_query(xs, n_rows, n_cols)?;
-    if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>() {
+    if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let compiled64 = kernel.compile();
         let z64 = pack_points(z_obs, m, d);
         let mut k64 = Mat::<f64>::zeros(m, m);
@@ -1862,7 +1853,7 @@ where
     let compiled = kernel.compile_as::<P::Storage>();
     let z64 = pack_points(z_obs, m, d);
     let query64 = pack_points(xs, n_rows, n_cols);
-    let mut k_sz = if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>() {
+    let mut k_sz = if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let compiled64 = kernel.compile();
         let cross = kernel_cross::<M, f64>(&compiled64, z64.as_ref(), query64.as_ref())?;
         let mut stored = Mat::<P::Storage>::zeros(m, n_rows);
@@ -1881,7 +1872,7 @@ where
     };
     solve_lower(k_mm_l, k_sz.as_mut());
     let mut kss = vec![lit::<P::Storage>(0.0); n_rows];
-    if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>() {
+    if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let compiled64 = kernel.compile();
         let mut diag = vec![0.0f64; n_rows];
         compiled64.fill_diag_points(query64.as_ref(), &mut diag)?;
@@ -1927,7 +1918,7 @@ where
     Ok(out)
 }
 
-pub(crate) fn chol_rank1_update<T: StorageScalar>(l: &mut Mat<T>, v: &mut [T]) {
+pub(crate) fn chol_rank1_update<T: KernelScalar>(l: &mut Mat<T>, v: &mut [T]) {
     let n = l.nrows();
     for k in 0..n {
         let lkk = l[(k, k)];
@@ -1945,7 +1936,7 @@ pub(crate) fn chol_rank1_update<T: StorageScalar>(l: &mut Mat<T>, v: &mut [T]) {
     }
 }
 
-pub(crate) fn chol_rank1_downdate<T: StorageScalar>(l: &mut Mat<T>, v: &mut [T]) -> bool {
+pub(crate) fn chol_rank1_downdate<T: KernelScalar>(l: &mut Mat<T>, v: &mut [T]) -> bool {
     let n = l.nrows();
     for k in 0..n {
         let lkk = l[(k, k)];
@@ -1972,7 +1963,7 @@ pub(crate) fn chol_rank1_downdate<T: StorageScalar>(l: &mut Mat<T>, v: &mut [T])
     true
 }
 
-pub(crate) fn refresh_w<T: StorageScalar>(a: MatRef<'_, T>, b_l: MatRef<'_, T>, y: &[T]) -> Vec<T> {
+pub(crate) fn refresh_w<T: KernelScalar>(a: MatRef<'_, T>, b_l: MatRef<'_, T>, y: &[T]) -> Vec<T> {
     let m = a.nrows();
     let mut ay = Mat::zeros(m, 1);
     matvec_columns(a, y, ay.as_mut());
@@ -1984,7 +1975,7 @@ pub(crate) fn refresh_w<T: StorageScalar>(a: MatRef<'_, T>, b_l: MatRef<'_, T>, 
     w
 }
 
-pub(crate) fn append_column<T: StorageScalar>(a: &Mat<T>, col: MatRef<'_, T>) -> Mat<T> {
+pub(crate) fn append_column<T: KernelScalar>(a: &Mat<T>, col: MatRef<'_, T>) -> Mat<T> {
     let m = a.nrows();
     let n = a.ncols();
     let mut out = Mat::zeros(m, n + 1);
@@ -1999,7 +1990,7 @@ pub(crate) fn append_column<T: StorageScalar>(a: &Mat<T>, col: MatRef<'_, T>) ->
     out
 }
 
-pub(crate) fn remove_column<T: StorageScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
+pub(crate) fn remove_column<T: KernelScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
     let m = a.nrows();
     let n = a.ncols();
     let mut out = Mat::zeros(m, n - 1);
@@ -2058,7 +2049,7 @@ pub(crate) fn kernel_column<M: crate::math::KernelMath, T>(
     d: usize,
 ) -> Result<Mat<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let compiled = kernel.compile_as::<T>();
@@ -2073,7 +2064,7 @@ where
 
 pub(crate) fn kernel_diag_at<T>(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<T, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     let compiled = kernel.compile_as::<T>();
@@ -2085,7 +2076,7 @@ where
     Ok(diag[0])
 }
 
-pub(crate) fn solve_lmm<T: StorageScalar>(k_mm_l: MatRef<'_, T>, col: MatMut<'_, T>) {
+pub(crate) fn solve_lmm<T: KernelScalar>(k_mm_l: MatRef<'_, T>, col: MatMut<'_, T>) {
     solve_lower(k_mm_l, col);
 }
 
@@ -2106,7 +2097,7 @@ pub(crate) fn inducing_insert<M: crate::math::KernelMath, T>(
     z_new: &[f64],
 ) -> Result<(), GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     validate_inducing(z, m, d)?;
@@ -2199,7 +2190,7 @@ where
 ///
 /// Reuses `K(Z, X) = L A`, drops that row, and solves the reduced `A`.
 /// `B` is formed again from the new `A`. `k_diag_sum` is unchanged.
-pub(crate) fn inducing_delete<T: StorageScalar>(
+pub(crate) fn inducing_delete<T: KernelScalar>(
     state: &mut VfeState<T>,
     noise: f64,
     y: &[f64],
@@ -2230,7 +2221,7 @@ pub(crate) fn inducing_delete<T: StorageScalar>(
     Ok(())
 }
 
-fn append_chol_border<T: StorageScalar>(l: &Mat<T>, row: &[T], ell: T) -> Mat<T> {
+fn append_chol_border<T: KernelScalar>(l: &Mat<T>, row: &[T], ell: T) -> Mat<T> {
     let m = l.nrows();
     let mut out = Mat::zeros(m + 1, m + 1);
     for j in 0..m {
@@ -2243,7 +2234,7 @@ fn append_chol_border<T: StorageScalar>(l: &Mat<T>, row: &[T], ell: T) -> Mat<T>
     out
 }
 
-fn delete_chol_row<T: StorageScalar>(l: &Mat<T>, idx: usize) -> Mat<T> {
+fn delete_chol_row<T: KernelScalar>(l: &Mat<T>, idx: usize) -> Mat<T> {
     let m = l.nrows();
     let trail = m - idx - 1;
     let mut work = l.clone();
@@ -2284,7 +2275,7 @@ fn delete_chol_row<T: StorageScalar>(l: &Mat<T>, idx: usize) -> Mat<T> {
     out
 }
 
-fn append_row<T: StorageScalar>(a: &Mat<T>, row: &[T]) -> Mat<T> {
+fn append_row<T: KernelScalar>(a: &Mat<T>, row: &[T]) -> Mat<T> {
     let m = a.nrows();
     let n = a.ncols();
     let mut out = Mat::zeros(m + 1, n);
@@ -2297,7 +2288,7 @@ fn append_row<T: StorageScalar>(a: &Mat<T>, row: &[T]) -> Mat<T> {
     out
 }
 
-fn remove_row<T: StorageScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
+fn remove_row<T: KernelScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
     let m = a.nrows();
     let n = a.ncols();
     let mut out = Mat::zeros(m - 1, n);
@@ -2314,7 +2305,7 @@ fn remove_row<T: StorageScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
     out
 }
 
-fn mul_lower_left<T: StorageScalar>(l: MatRef<'_, T>, a: MatRef<'_, T>) -> Mat<T> {
+fn mul_lower_left<T: KernelScalar>(l: MatRef<'_, T>, a: MatRef<'_, T>) -> Mat<T> {
     let m = l.nrows();
     let n = a.ncols();
     let mut out = Mat::zeros(m, n);
@@ -2330,7 +2321,7 @@ fn mul_lower_left<T: StorageScalar>(l: MatRef<'_, T>, a: MatRef<'_, T>) -> Mat<T
     out
 }
 
-fn factor_lower_in_place<T: StorageScalar>(
+fn factor_lower_in_place<T: KernelScalar>(
     mat: &mut Mat<T>,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {

@@ -10,7 +10,7 @@ use crate::kernel::{
     CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, MixedKernelViews, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
-use crate::precision::{PrecisionPolicy, StorageScalar};
+use crate::precision::PrecisionPolicy;
 use crate::workspace::{FitWorkspace, faer_par, faer_par_dims};
 
 use super::JitterPolicy;
@@ -27,7 +27,7 @@ fn apply_train_kernel<K, W, M: crate::math::KernelMath>(
 ) -> Result<(), GprError>
 where
     K: GramKernel,
-    K::T: FillDistances + StorageScalar,
+    K::T: FillDistances + KernelScalar,
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
 {
     let (core, dist) = ws.split_fit();
@@ -50,7 +50,7 @@ pub(crate) fn apply_compiled_to<K, W, M: crate::math::KernelMath>(
 ) -> Result<(), GprError>
 where
     K: GramKernel,
-    K::T: FillDistances + StorageScalar,
+    K::T: FillDistances + KernelScalar,
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
 {
     let (core, dist) = ws.split_fit();
@@ -197,7 +197,7 @@ pub(crate) fn pack_points_into(x: &[f64], n_rows: usize, n_cols: usize, mut dest
     }
 }
 
-pub(crate) fn add_noise_to_diag<T: StorageScalar>(mut k: MatMut<'_, T>, noise: f64) {
+pub(crate) fn add_noise_to_diag<T: KernelScalar>(mut k: MatMut<'_, T>, noise: f64) {
     let n = k.nrows();
     let noise = T::from_f64(noise);
     for i in 0..n {
@@ -208,7 +208,6 @@ pub(crate) fn add_noise_to_diag<T: StorageScalar>(mut k: MatMut<'_, T>, noise: f
 pub(crate) fn finish_train_system<W>(ws: &mut W, y: &[f64], noise: f64, extra_diag: f64)
 where
     W: FitWorkspace,
-    <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
 {
     let core = ws.core_mut();
     add_noise_to_diag(core.k_matrix.as_mut(), noise);
@@ -248,7 +247,7 @@ pub(crate) fn factor_train_with_policy<K, W, M: crate::math::KernelMath>(
 ) -> Result<(), GprError>
 where
     K: GramKernel,
-    K::T: FillDistances + StorageScalar,
+    K::T: FillDistances + KernelScalar,
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
 {
     factor_written_k_with_policy(ws, y, noise, policy, |ws| {
@@ -271,7 +270,6 @@ pub(crate) fn factor_written_k_with_policy<W, F>(
 ) -> Result<(), GprError>
 where
     W: FitWorkspace,
-    <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
     F: FnMut(&mut W) -> Result<(), GprError>,
 {
     clear_train_gram(ws);
@@ -321,21 +319,20 @@ where
 fn clear_train_gram<W>(ws: &mut W)
 where
     W: FitWorkspace,
-    <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
 {
     let zero = <W::Policy as PrecisionPolicy>::Storage::from_f64(0.0);
     ws.core_mut().k_matrix.fill(zero);
 }
 
-pub(crate) fn log_det_from_l<T: StorageScalar>(l: MatRef<'_, T>, n: usize) -> T {
+pub(crate) fn log_det_from_l<T: KernelScalar>(l: MatRef<'_, T>, n: usize) -> T {
     let mut log_diag = T::from_f64(0.0);
     for i in 0..n {
-        log_diag += StorageScalar::ln(l[(i, i)]);
+        log_diag += KernelScalar::ln(l[(i, i)]);
     }
     T::from_f64(2.0) * log_diag
 }
 
-pub(crate) fn neg_mll_from_factor<T: StorageScalar>(
+pub(crate) fn neg_mll_from_factor<T: KernelScalar>(
     l: MatRef<'_, T>,
     y: &[T],
     alpha: &[T],
@@ -371,7 +368,7 @@ pub(crate) fn require_param_len(actual: usize, expected: usize) -> Result<(), Gp
     }
 }
 
-pub(crate) fn frobenius_lower<T: StorageScalar>(
+pub(crate) fn frobenius_lower<T: KernelScalar>(
     w: MatRef<'_, T>,
     d_k: MatRef<'_, T>,
     n: usize,
@@ -485,7 +482,7 @@ pub(crate) fn write_kernel_hess_from_coords<K: GramKernel, M: crate::math::Kerne
     compiled.hess_points::<M>(x, d2_k, i, j, Triangle::Lower, scratch)
 }
 
-pub(crate) fn pack_storage<T: StorageScalar>(
+pub(crate) fn pack_storage<T: KernelScalar>(
     x: &[f64],
     n_rows: usize,
     n_cols: usize,
@@ -500,7 +497,7 @@ pub(crate) fn pack_storage<T: StorageScalar>(
     }
 }
 
-pub(crate) fn symmetrize_lower<T: StorageScalar>(mut a: MatMut<'_, T>, n: usize) {
+pub(crate) fn symmetrize_lower<T: KernelScalar>(mut a: MatMut<'_, T>, n: usize) {
     for col in 0..n {
         for row in col + 1..n {
             a[(col, row)] = a[(row, col)];
@@ -508,7 +505,7 @@ pub(crate) fn symmetrize_lower<T: StorageScalar>(mut a: MatMut<'_, T>, n: usize)
     }
 }
 
-pub(crate) fn gemv_sym_lower<T: StorageScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
+pub(crate) fn gemv_sym_lower<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
     for i in 0..n {
         let mut s = a[(i, i)] * x[i];
         for j in 0..i {
@@ -521,7 +518,7 @@ pub(crate) fn gemv_sym_lower<T: StorageScalar>(a: MatRef<'_, T>, x: &[T], y: &mu
     }
 }
 
-pub(crate) fn gemv_full<T: StorageScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
+pub(crate) fn gemv_full<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
     let zero = T::from_f64(0.0);
     for i in 0..n {
         let mut s = zero;
@@ -532,7 +529,7 @@ pub(crate) fn gemv_full<T: StorageScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T]
     }
 }
 
-pub(crate) fn trace_product<T: StorageScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>, n: usize) -> T {
+pub(crate) fn trace_product<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>, n: usize) -> T {
     let mut tr = T::from_f64(0.0);
     for col in 0..n {
         for row in 0..n {
@@ -546,37 +543,43 @@ pub(crate) fn trace_product<T: StorageScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>
 ///
 /// `A⁻¹ = L^{-T} L^{-1}`, so entry `i` is the squared Euclidean norm of
 /// column `i` of `L⁻¹`.
+pub(crate) fn inv_diag_from_chol_l<T: KernelScalar>(l: MatRef<'_, T>, q_diag: &mut [T]) {
+    T::inv_diag_from_chol_l(l, q_diag);
+}
+
+/// [`inv_diag_from_chol_l`] for `f32`: each column of `L⁻¹` in `f64`.
 #[allow(clippy::needless_range_loop)]
-pub(crate) fn inv_diag_from_chol_l<T: StorageScalar>(l: MatRef<'_, T>, q_diag: &mut [T]) {
+pub(crate) fn inv_diag_from_chol_l_f64_accum(l: MatRef<'_, f32>, q_diag: &mut [f32]) {
     let n = l.nrows();
     debug_assert_eq!(q_diag.len(), n);
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        for i in 0..n {
-            let mut col = vec![0.0f64; n];
-            for row in 0..n {
-                col[row] = if row == i { 1.0 } else { 0.0 };
-            }
-            for row in 0..n {
-                let mut sum = col[row];
-                for k in 0..row {
-                    sum -= l[(row, k)].to_f64() * col[k];
-                }
-                col[row] = sum / l[(row, row)].to_f64();
-            }
-            let mut q = 0.0f64;
-            for v in &col {
-                q += v * v;
-            }
-            q_diag[i] = T::from_f64(q);
+    for i in 0..n {
+        let mut col = vec![0.0f64; n];
+        for row in 0..n {
+            col[row] = if row == i { 1.0 } else { 0.0 };
         }
-        return;
+        for row in 0..n {
+            let mut sum = col[row];
+            for k in 0..row {
+                sum -= f64::from(l[(row, k)]) * col[k];
+            }
+            col[row] = sum / f64::from(l[(row, row)]);
+        }
+        let mut q = 0.0f64;
+        for v in &col {
+            q += v * v;
+        }
+        q_diag[i] = q as f32;
     }
-    let one = T::from_f64(1.0);
-    let zero = T::from_f64(0.0);
-    let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { one } else { zero });
+}
+
+/// [`inv_diag_from_chol_l`] for `f64` through faer's triangular solve.
+pub(crate) fn inv_diag_from_chol_l_faer(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
+    let n = l.nrows();
+    debug_assert_eq!(q_diag.len(), n);
+    let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { 1.0 } else { 0.0 });
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, inv_l.as_mut(), faer_par(n));
     for (i, qi) in q_diag.iter_mut().enumerate() {
-        let mut q = zero;
+        let mut q = 0.0;
         for k in 0..n {
             let v = inv_l[(k, i)];
             q += v * v;
@@ -586,19 +589,26 @@ pub(crate) fn inv_diag_from_chol_l<T: StorageScalar>(l: MatRef<'_, T>, q_diag: &
 }
 
 /// Factors `A` in place as `L Lᵀ`. The strictly upper triangle is unspecified.
-pub(crate) fn cholesky_lower<T: StorageScalar>(
+pub(crate) fn cholesky_lower<T: KernelScalar>(
     a: &mut Mat<T>,
     scratch: &mut MemBuffer,
     jitter: f64,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
+    T::cholesky_lower(a, scratch, jitter, stage)
+}
+
+/// [`cholesky_lower`] for `f64` through faer's blocked factorization.
+pub(crate) fn cholesky_lower_faer(
+    a: &mut Mat<f64>,
+    scratch: &mut MemBuffer,
+    jitter: f64,
+    stage: CholeskyStage,
+) -> Result<(), GprError> {
     let n = a.nrows();
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        return cholesky_lower_f32_accum(a, jitter, stage);
-    }
     let regularization = LltRegularization {
-        dynamic_regularization_delta: T::from_f64(jitter),
-        dynamic_regularization_epsilon: T::from_f64(0.0),
+        dynamic_regularization_delta: jitter,
+        dynamic_regularization_epsilon: 0.0,
     };
     let stack = MemStack::new(scratch);
     match llt::factor::cholesky_in_place(
@@ -617,17 +627,18 @@ pub(crate) fn cholesky_lower<T: StorageScalar>(
     }
 }
 
-fn cholesky_lower_f32_accum<T: StorageScalar>(
-    a: &mut Mat<T>,
+/// [`cholesky_lower`] for `f32`, accumulating each dot product in `f64`.
+pub(crate) fn cholesky_lower_f64_accum(
+    a: &mut Mat<f32>,
     jitter: f64,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
     let n = a.nrows();
     for j in 0..n {
         for i in j..n {
-            let mut sum = a[(i, j)].to_f64();
+            let mut sum = f64::from(a[(i, j)]);
             for k in 0..j {
-                sum -= a[(i, k)].to_f64() * a[(j, k)].to_f64();
+                sum -= f64::from(a[(i, k)]) * f64::from(a[(j, k)]);
             }
             if i == j {
                 if sum.is_nan() || sum <= 0.0 {
@@ -637,10 +648,10 @@ fn cholesky_lower_f32_accum<T: StorageScalar>(
                         stage,
                     });
                 }
-                a[(j, j)] = T::from_f64(sum.sqrt());
+                a[(j, j)] = sum.sqrt() as f32;
             } else {
-                let diag = a[(j, j)].to_f64();
-                a[(i, j)] = T::from_f64(sum / diag);
+                let diag = f64::from(a[(j, j)]);
+                a[(i, j)] = (sum / diag) as f32;
             }
         }
     }
@@ -652,7 +663,7 @@ fn cholesky_lower_f32_accum<T: StorageScalar>(
 /// The first attempt uses `A` as given. Each retry restores that snapshot and
 /// adds `j` to the diagonal. Used for the posterior covariance in
 /// [`crate::FittedGpr::sample`].
-pub(crate) fn cholesky_lower_with_policy<T: StorageScalar>(
+pub(crate) fn cholesky_lower_with_policy<T: KernelScalar>(
     a: &mut Mat<T>,
     scratch: &mut MemBuffer,
     policy: JitterPolicy,
@@ -685,7 +696,7 @@ pub(crate) fn cholesky_lower_with_policy<T: StorageScalar>(
 /// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
 ///
 /// P1A-18 can call this on the same `Workspace` buffers as [`crate::Gpr::fit`].
-pub(crate) fn cholesky_and_solve<T: StorageScalar>(
+pub(crate) fn cholesky_and_solve<T: KernelScalar>(
     a: &mut Mat<T>,
     rhs: &mut Mat<T>,
     scratch: &mut MemBuffer,
@@ -697,37 +708,45 @@ pub(crate) fn cholesky_and_solve<T: StorageScalar>(
     Ok(())
 }
 
-pub(crate) fn solve_llt_in_place<T: StorageScalar>(
+pub(crate) fn solve_llt_in_place<T: KernelScalar>(
     l: MatRef<'_, T>,
-    mut rhs: MatMut<'_, T>,
+    rhs: MatMut<'_, T>,
     scratch: &mut MemBuffer,
 ) {
+    T::solve_llt_in_place(l, rhs, scratch);
+}
+
+/// [`solve_llt_in_place`] for `f64` through faer.
+pub(crate) fn solve_llt_faer(l: MatRef<'_, f64>, rhs: MatMut<'_, f64>, scratch: &mut MemBuffer) {
     let n = l.nrows();
     let n_rhs = rhs.ncols();
-    if std::mem::size_of::<T>() != std::mem::size_of::<f32>() {
-        let stack = MemStack::new(scratch);
-        llt::solve::solve_in_place(l, rhs.as_mut(), faer_par_dims(n, n_rhs), stack);
-        return;
-    }
+    let stack = MemStack::new(scratch);
+    llt::solve::solve_in_place(l, rhs, faer_par_dims(n, n_rhs), stack);
+}
+
+/// [`solve_llt_in_place`] for `f32`: both triangular sweeps in `f64`.
+pub(crate) fn solve_llt_f64_accum(l: MatRef<'_, f32>, mut rhs: MatMut<'_, f32>) {
+    let n = l.nrows();
+    let n_rhs = rhs.ncols();
     for col in 0..n_rhs {
         let mut y = vec![0.0f64; n];
         let mut x = vec![0.0f64; n];
         for i in 0..n {
-            let mut sum = rhs[(i, col)].to_f64();
+            let mut sum = f64::from(rhs[(i, col)]);
             for j in 0..i {
-                sum -= l[(i, j)].to_f64() * y[j];
+                sum -= f64::from(l[(i, j)]) * y[j];
             }
-            y[i] = sum / l[(i, i)].to_f64();
+            y[i] = sum / f64::from(l[(i, i)]);
         }
         for i in (0..n).rev() {
             let mut sum = y[i];
             for j in (i + 1)..n {
-                sum -= l[(j, i)].to_f64() * x[j];
+                sum -= f64::from(l[(j, i)]) * x[j];
             }
-            x[i] = sum / l[(i, i)].to_f64();
+            x[i] = sum / f64::from(l[(i, i)]);
         }
         for i in 0..n {
-            rhs[(i, col)] = T::from_f64(x[i]);
+            rhs[(i, col)] = x[i] as f32;
         }
     }
 }

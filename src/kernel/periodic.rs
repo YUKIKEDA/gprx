@@ -344,7 +344,7 @@ fn euclidean_from_sq(sq_dist: f64) -> Result<f64, GprError> {
 fn periodic_from_r<M: KernelMath>(r: f64, ell: f64, period: f64) -> f64 {
     let s = (std::f64::consts::PI * r / period).sin();
     let inv_ell = 1.0 / ell;
-    M::exp_f64(-2.0 * s * s * inv_ell * inv_ell)
+    M::exp(-2.0 * s * s * inv_ell * inv_ell)
 }
 
 fn periodic_from_sq_dist<M: KernelMath>(
@@ -373,7 +373,7 @@ fn periodic_grad_from_sq_dist<M: KernelMath>(
         let k = z.exp();
         if param_idx == 0 { k * beta } else { k * gamma }
     } else {
-        let d1 = M::jet_f64(z).d1;
+        let d1 = M::jet(z).d1;
         if param_idx == 0 {
             d1 * beta
         } else {
@@ -413,7 +413,7 @@ fn periodic_hess_from_sq_dist<M: KernelMath>(
             _ => 0.0,
         }
     } else {
-        let jet = M::jet_f64(z);
+        let jet = M::jet(z);
         match (a, b) {
             (0, 0) => beta * (jet.d2 * beta - 2.0 * jet.d1),
             (0, 1) => gamma * (jet.d2 * beta - 2.0 * jet.d1),

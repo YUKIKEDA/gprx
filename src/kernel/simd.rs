@@ -119,7 +119,7 @@ fn rbf_exp_slice_lanes<M: KernelMath>(
     }
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
-        out[i] = M::exp_f64(-d * inv_two_ell_sq);
+        out[i] = M::exp(-d * inv_two_ell_sq);
         i += 1;
     }
     Ok(())
@@ -139,7 +139,7 @@ fn rbf_exp_slice_fast(dist: &[f64], out: &mut [f64], inv_two_ell_sq: f64) -> Res
     }
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
-        out[i] = FastApprox::exp_f64(-d * inv_two_ell_sq);
+        out[i] = FastApprox::exp(-d * inv_two_ell_sq);
         i += 1;
     }
     Ok(())
@@ -179,7 +179,7 @@ fn rbf_grad_slice_lanes<M: KernelMath>(
     }
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
-        let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+        let dk = M::jet(-d * inv_two_ell_sq).d1;
         out[i] = dk * d * inv_ell_sq;
         i += 1;
     }
@@ -207,7 +207,7 @@ fn rbf_grad_slice_fast(
     }
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
-        let dk = FastApprox::jet_f64(-d * inv_two_ell_sq).d1;
+        let dk = FastApprox::jet(-d * inv_two_ell_sq).d1;
         out[i] = dk * d * inv_ell_sq;
         i += 1;
     }
@@ -655,7 +655,7 @@ fn rbf_exp_in_place<M: KernelMath>(buf: &mut [f64], inv_two: f64) -> Result<(), 
     }
     while i < buf.len() {
         let d = finite_dist(buf[i])?;
-        buf[i] = M::exp_f64(-d * inv_two);
+        buf[i] = M::exp(-d * inv_two);
         i += 1;
     }
     Ok(())
@@ -685,7 +685,7 @@ fn rbf_ard_grad_from_points<M: KernelMath>(
     while i < r2.len() {
         let d = finite_dist(r2[i])?;
         let delta = xdim[i] - x0;
-        r2[i] = M::jet_f64(-0.5 * d).d1 * delta * delta * inv_dim;
+        r2[i] = M::jet(-0.5 * d).d1 * delta * delta * inv_dim;
         i += 1;
     }
     Ok(())
@@ -713,7 +713,7 @@ fn rbf_ard_grad_in_place<M: KernelMath>(
     while i < r2.len() {
         let d = finite_dist(r2[i])?;
         let sq = finite_dist(dim_sq[i])?;
-        r2[i] = M::jet_f64(-0.5 * d).d1 * sq * inv_dim;
+        r2[i] = M::jet(-0.5 * d).d1 * sq * inv_dim;
         i += 1;
     }
     Ok(())
@@ -1141,7 +1141,7 @@ mod tests {
         rbf_exp_slice::<FastApprox>(&dist, &mut value, inv_two).expect("finite");
         rbf_grad_slice::<FastApprox>(&dist, &mut grad, inv_two, inv_ell).expect("finite");
         for (i, &d) in dist.iter().enumerate() {
-            let jet = FastApprox::jet_f64(-d * inv_two);
+            let jet = FastApprox::jet(-d * inv_two);
             assert_eq!(value[i].to_bits(), jet.v.to_bits());
             assert_eq!(grad[i].to_bits(), (jet.d1 * d * inv_ell).to_bits());
         }

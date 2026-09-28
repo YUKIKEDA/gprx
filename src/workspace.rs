@@ -14,7 +14,7 @@ use faer::{Mat, MatRef, Par};
 
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
-use crate::precision::{DoublePrecision, PrecisionPolicy, StorageScalar};
+use crate::precision::{DoublePrecision, PrecisionPolicy};
 
 /// Shared fit buffers: `L` (or `W` while a reuse gradient is in progress)
 /// and Cholesky scratch. No distance cache.
@@ -65,7 +65,7 @@ pub(crate) struct DistBufs<'a, S = f64> {
     pub ard_sq_diff_ready: &'a mut bool,
 }
 
-impl<S: StorageScalar> DistBufs<'_, S> {
+impl<S: KernelScalar> DistBufs<'_, S> {
     pub(crate) fn ensure_ard_sq_diff(&mut self, n: usize, d: usize) -> Result<(), GprError> {
         if n == 0 || d == 0 {
             return Err(GprError::EmptyInput);
@@ -154,7 +154,7 @@ pub(crate) struct QueryWorkspace<P: PrecisionPolicy> {
     pub(crate) query_kss: Vec<P::Storage>,
 }
 
-pub(crate) fn empty_thread_scratch<T: StorageScalar>() -> Vec<Mat<T>> {
+pub(crate) fn empty_thread_scratch<T: KernelScalar>() -> Vec<Mat<T>> {
     let n = rayon::current_num_threads().max(1);
     (0..n).map(|_| Mat::<T>::zeros(0, 0)).collect()
 }
@@ -199,8 +199,6 @@ fn faer_scratch_req<T: faer_traits::ComplexField>(n: usize) -> StackReq {
 impl<P> WorkspaceCore<P>
 where
     P: PrecisionPolicy,
-    P::Storage: StorageScalar,
-    P::Refine: faer_traits::ComplexField,
 {
     fn new(n: usize) -> Result<Self, GprError> {
         if n == 0 {
@@ -242,8 +240,6 @@ where
 impl<P> Clone for WorkspaceCore<P>
 where
     P: PrecisionPolicy,
-    P::Storage: StorageScalar,
-    P::Refine: faer_traits::ComplexField,
 {
     fn clone(&self) -> Self {
         Self {
@@ -303,7 +299,7 @@ impl<W, S> DerefMut for WithDist<W, S> {
     }
 }
 
-impl<W: Clone, S: StorageScalar> Clone for WithDist<W, S> {
+impl<W: Clone, S: KernelScalar> Clone for WithDist<W, S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -329,7 +325,7 @@ impl<W, S> DerefMut for WithW<W, S> {
     }
 }
 
-impl<W: Clone, S: StorageScalar> Clone for WithW<W, S> {
+impl<W: Clone, S: KernelScalar> Clone for WithW<W, S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -353,7 +349,7 @@ fn fill_identity<T: KernelScalar>(mut a: faer::MatMut<'_, T>) {
 
 fn form_w_lower<T>(mut w: faer::MatMut<'_, T>, alpha: &[T], n: usize)
 where
-    T: KernelScalar + std::ops::Mul<Output = T> + std::ops::Sub<Output = T>,
+    T: KernelScalar,
 {
     for col in 0..n {
         for row in col..n {
@@ -368,7 +364,7 @@ fn form_w_from_inverse<T>(
     alpha: &[T],
     n: usize,
 ) where
-    T: KernelScalar + std::ops::Mul<Output = T> + std::ops::Sub<Output = T>,
+    T: KernelScalar,
 {
     for col in 0..n {
         for row in col..n {
@@ -380,8 +376,6 @@ fn form_w_from_inverse<T>(
 impl<P> FitWorkspace for WorkspaceCore<P>
 where
     P: PrecisionPolicy + 'static,
-    P::Storage: StorageScalar,
-    P::Refine: faer_traits::ComplexField,
 {
     type Policy = P;
 
@@ -423,8 +417,7 @@ where
 impl<W, S> FitWorkspace for WithW<W, S>
 where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = S>> + 'static,
-    S: StorageScalar,
-    <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField,
+    S: KernelScalar,
 {
     type Policy = W::Policy;
 
@@ -475,8 +468,7 @@ where
 impl<W, S> FitWorkspace for WithDist<W, S>
 where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = S>> + 'static,
-    S: StorageScalar,
-    <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField,
+    S: KernelScalar,
 {
     type Policy = W::Policy;
 
@@ -540,8 +532,6 @@ where
 impl<P> QueryWorkspace<P>
 where
     P: PrecisionPolicy + 'static,
-    P::Storage: StorageScalar,
-    P::Refine: faer_traits::ComplexField,
 {
     /// Builds empty query buffers. [`Self::ensure`] sizes them on first use.
     pub(crate) fn new() -> Self {

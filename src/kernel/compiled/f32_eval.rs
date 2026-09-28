@@ -1224,7 +1224,7 @@ fn mul_rect(mut acc: MatMut<'_, f32>, src: MatRef<'_, f32>) {
 fn rbf_k<M: crate::math::KernelMath>(s: f32, ell: f64) -> Result<f32, GprError> {
     let ell = f32_of(ell);
     let inv_two = 0.5 / (ell * ell);
-    finite(M::exp_f32(-s * inv_two))
+    finite(M::exp(-s * inv_two))
 }
 
 fn rbf_dk<M: crate::math::KernelMath>(s: f32, ell: f64, idx: usize) -> Result<f32, GprError> {
@@ -1237,7 +1237,7 @@ fn rbf_dk<M: crate::math::KernelMath>(s: f32, ell: f64, idx: usize) -> Result<f3
         let k = finite(z.exp())?;
         return finite(k * u);
     }
-    finite(M::jet_f32(z).d1 * u)
+    finite(M::jet(z).d1 * u)
 }
 
 fn rbf_d2<M: crate::math::KernelMath>(
@@ -1255,12 +1255,12 @@ fn rbf_d2<M: crate::math::KernelMath>(
         let k = finite(z.exp())?;
         return finite(k * u * (u - 2.0));
     }
-    let jet = M::jet_f32(z);
+    let jet = M::jet(z);
     finite(u * (jet.d2 * u - 2.0 * jet.d1))
 }
 
 fn f32_rbf_value<M: crate::math::KernelMath>(r2: f32) -> Result<f32, GprError> {
-    finite(M::exp_f32(-0.5 * r2))
+    finite(M::exp(-0.5 * r2))
 }
 
 fn f32_rbf_d1<M: crate::math::KernelMath>(r2: f32) -> Result<f32, GprError> {
@@ -1268,7 +1268,7 @@ fn f32_rbf_d1<M: crate::math::KernelMath>(r2: f32) -> Result<f32, GprError> {
     if M::ACCURATE {
         finite(z.exp())
     } else {
-        finite(M::jet_f32(z).d1)
+        finite(M::jet(z).d1)
     }
 }
 
@@ -1286,7 +1286,7 @@ fn f32_rbf_hess<M: crate::math::KernelMath>(
             k * di * dj
         })
     } else {
-        let jet = M::jet_f32(-0.5 * r2);
+        let jet = M::jet(-0.5 * r2);
         let h = if same {
             di * (jet.d2 * di - 2.0 * jet.d1)
         } else {
@@ -1336,14 +1336,14 @@ fn rbf_hess<M: crate::math::KernelMath>(
 
 fn matern_from_r<M: crate::math::KernelMath>(nu: MaternNu, r: f32) -> f32 {
     match nu {
-        MaternNu::Half => M::exp_f32(-r),
+        MaternNu::Half => M::exp(-r),
         MaternNu::ThreeHalves => {
             let rho = 3.0f32.sqrt() * r;
-            (1.0 + rho) * M::exp_f32(-rho)
+            (1.0 + rho) * M::exp(-rho)
         }
         MaternNu::FiveHalves => {
             let rho = 5.0f32.sqrt() * r;
-            (1.0 + rho + rho * rho / 3.0) * M::exp_f32(-rho)
+            (1.0 + rho + rho * rho / 3.0) * M::exp(-rho)
         }
     }
 }
@@ -1363,15 +1363,15 @@ fn matern_dk_iso<M: crate::math::KernelMath>(nu: MaternNu, r: f32) -> f32 {
         };
     }
     match nu {
-        MaternNu::Half => r * M::jet_f32(-r).d1,
+        MaternNu::Half => r * M::jet(-r).d1,
         MaternNu::ThreeHalves => {
             let rho = 3.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             rho * ((1.0 + rho) * jet.d1 - jet.v)
         }
         MaternNu::FiveHalves => {
             let rho = 5.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             rho * (a * jet.d1 - (1.0 + 2.0 * rho / 3.0) * jet.v)
         }
@@ -1397,18 +1397,18 @@ fn matern_d2_iso<M: crate::math::KernelMath>(nu: MaternNu, r: f32) -> f32 {
     }
     match nu {
         MaternNu::Half => {
-            let jet = M::jet_f32(-r);
+            let jet = M::jet(-r);
             r * r * jet.d2 - r * jet.d1
         }
         MaternNu::ThreeHalves => {
             let rho = 3.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             let u = (1.0 + rho) * jet.d1 - jet.v;
             rho * (-u + rho * ((1.0 + rho) * jet.d2 - 2.0 * jet.d1))
         }
         MaternNu::FiveHalves => {
             let rho = 5.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             let ap = 1.0 + 2.0 * rho / 3.0;
             let app = 2.0 / 3.0;
@@ -1440,15 +1440,15 @@ fn matern_dk_ard<M: crate::math::KernelMath>(nu: MaternNu, r: f32, dim_term: f32
         return 0.0;
     }
     match nu {
-        MaternNu::Half => M::jet_f32(-r).d1 * dim_term / r,
+        MaternNu::Half => M::jet(-r).d1 * dim_term / r,
         MaternNu::ThreeHalves => {
             let rho = 3.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             ((1.0 + rho) * jet.d1 - jet.v) * 3.0f32.sqrt() * dim_term / r
         }
         MaternNu::FiveHalves => {
             let rho = 5.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             let ap = 1.0 + 2.0 * rho / 3.0;
             (a * jet.d1 - ap * jet.v) * 5.0f32.sqrt() * dim_term / r
@@ -1500,7 +1500,7 @@ fn matern_d2_ard<M: crate::math::KernelMath>(
     }
     match nu {
         MaternNu::Half => {
-            let jet = M::jet_f32(-r);
+            let jet = M::jet(-r);
             let rr = r * r;
             if same {
                 jet.d2 * dim_i * dim_i / rr + jet.d1 * (-2.0 * dim_i / r + dim_i * dim_i / (rr * r))
@@ -1510,14 +1510,14 @@ fn matern_d2_ard<M: crate::math::KernelMath>(
         }
         MaternNu::ThreeHalves => {
             let rho = 3.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             let phi_p = jet.v - (1.0 + rho) * jet.d1;
             let phi_pp = (1.0 + rho) * jet.d2 - 2.0 * jet.d1;
             f32_ard_hess(phi_p, phi_pp, r, dim_i, dim_j, same, 3.0f32.sqrt())
         }
         MaternNu::FiveHalves => {
             let rho = 5.0f32.sqrt() * r;
-            let jet = M::jet_f32(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             let ap = 1.0 + 2.0 * rho / 3.0;
             let app = 2.0 / 3.0;
@@ -1536,7 +1536,7 @@ fn f32_matern_coord_hess<M: crate::math::KernelMath>(
     same: bool,
     from_x1: bool,
 ) -> f32 {
-    let jet0 = M::jet_f32(0.0);
+    let jet0 = M::jet(0.0);
     let dpsi0 = 2.0 * jet0.d1 - jet0.d2;
     if r == 0.0 {
         return if same {
@@ -1547,7 +1547,7 @@ fn f32_matern_coord_hess<M: crate::math::KernelMath>(
         };
     }
     let rho = scale * r;
-    let jet = M::jet_f32(-rho);
+    let jet = M::jet(-rho);
     let psi = (1.0 + rho) * jet.d1 - jet.v;
     let dpsi = 2.0 * jet.d1 - (1.0 + rho) * jet.d2;
     let sign = if from_x1 { 1.0 } else { -1.0 };
@@ -1661,7 +1661,7 @@ fn periodic_k<M: crate::math::KernelMath>(s: f32, ell: f64, period: f64) -> Resu
     let period = f32_of(period);
     let sine = (std::f32::consts::PI * r / period).sin();
     let inv = 1.0 / ell;
-    finite(M::exp_f32(-2.0 * sine * sine * inv * inv))
+    finite(M::exp(-2.0 * sine * sine * inv * inv))
 }
 
 fn periodic_dk<M: crate::math::KernelMath>(
@@ -1684,7 +1684,7 @@ fn periodic_dk<M: crate::math::KernelMath>(
         let k = z.exp();
         if idx == 0 { k * beta } else { k * gamma }
     } else {
-        let d1 = M::jet_f32(z).d1;
+        let d1 = M::jet(z).d1;
         if idx == 0 { d1 * beta } else { d1 * gamma }
     };
     finite(dk)
@@ -1724,7 +1724,7 @@ fn periodic_d2<M: crate::math::KernelMath>(
             _ => 0.0,
         }
     } else {
-        let jet = M::jet_f32(z);
+        let jet = M::jet(z);
         match (a, b) {
             (0, 0) => beta * (jet.d2 * beta - 2.0 * jet.d1),
             (0, 1) => gamma * (jet.d2 * beta - 2.0 * jet.d1),
@@ -2450,7 +2450,7 @@ fn rbf_coord<M: crate::math::KernelMath>(
             let k = if M::ACCURATE {
                 finite(z.exp())?
             } else {
-                finite(M::jet_f32(z).d1)?
+                finite(M::jet(z).d1)?
             };
             let delta = x1[(row, dim)] - x2[(col, dim)];
             d_k[(row, col)] = finite(k * delta * inv_ell_sq)?;
@@ -2486,7 +2486,7 @@ fn matern_coord<M: crate::math::KernelMath>(
                 0.0
             } else {
                 let rho = scale * r;
-                let jet = M::jet_f32(-rho);
+                let jet = M::jet(-rho);
                 let psi = (1.0 + rho) * jet.d1 - jet.v;
                 psi * scale * delta / r
             };
@@ -2903,7 +2903,7 @@ fn rbf_hess_coord_dims<M: crate::math::KernelMath>(
                 let k = finite(z.exp())?;
                 (k, k)
             } else {
-                let jet = M::jet_f32(z);
+                let jet = M::jet(z);
                 (finite(jet.d1)?, finite(jet.d2)?)
             };
             let da = x1[(row, dim_a)] - x2[(col, dim_a)];
@@ -2939,7 +2939,7 @@ fn rbf_hess_coord_mixed<M: crate::math::KernelMath>(
                 let k = finite(z.exp())?;
                 (k, k)
             } else {
-                let jet = M::jet_f32(z);
+                let jet = M::jet(z);
                 (finite(jet.d1)?, finite(jet.d2)?)
             };
             let dx1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
@@ -2977,7 +2977,7 @@ fn rbf_hess_theta_coord<M: crate::math::KernelMath>(
                 let k = finite(z.exp())?;
                 k * delta * inv_ell_sq * (u - 2.0)
             } else {
-                let jet = M::jet_f32(z);
+                let jet = M::jet(z);
                 delta * inv_ell_sq * (jet.d2 * u - 2.0 * jet.d1)
             };
             d2_k[(row, col)] = finite(h)?;
@@ -3101,7 +3101,7 @@ fn matern_hess_theta_coord<M: crate::math::KernelMath>(
                 0.0
             } else {
                 let rho = scale * r;
-                let jet = M::jet_f32(-rho);
+                let jet = M::jet(-rho);
                 let psi = (1.0 + rho) * jet.d1 - jet.v;
                 let dpsi = 2.0 * jet.d1 - (1.0 + rho) * jet.d2;
                 -scale * delta / r * (rho * dpsi + psi)
@@ -3134,7 +3134,7 @@ fn rbf_ard_hess_coord_dims<M: crate::math::KernelMath>(
                 let k = finite((-0.5 * r2).exp())?;
                 (k, k)
             } else {
-                let jet = M::jet_f32(-0.5 * r2);
+                let jet = M::jet(-0.5 * r2);
                 (finite(jet.d1)?, finite(jet.d2)?)
             };
             let da = x1[(row, dim_a)] - x2[(col, dim_a)];
@@ -3171,7 +3171,7 @@ fn rbf_ard_hess_coord_mixed<M: crate::math::KernelMath>(
                 let k = finite((-0.5 * r2).exp())?;
                 (k, k)
             } else {
-                let jet = M::jet_f32(-0.5 * r2);
+                let jet = M::jet(-0.5 * r2);
                 (finite(jet.d1)?, finite(jet.d2)?)
             };
             let dx1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
@@ -3214,7 +3214,7 @@ fn rbf_ard_hess_theta_coord<M: crate::math::KernelMath>(
                 }
                 value
             } else {
-                let jet = M::jet_f32(-0.5 * r2);
+                let jet = M::jet(-0.5 * r2);
                 let dim_term = delta_theta * delta_theta * w[param_idx];
                 let mut value = jet.d2 * dim_term * delta_dim * w[dim];
                 if param_idx == dim {

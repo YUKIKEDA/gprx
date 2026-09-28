@@ -53,6 +53,7 @@ pub use rbf_ard::RbfArdKernel;
 pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
+pub(crate) use scalar::sealed::ScalarOps;
 pub use spec::{KernelSpec, ParameterBinding};
 pub use term::{CustomKernel, KernelTerm};
 pub use white::WhiteKernel;
