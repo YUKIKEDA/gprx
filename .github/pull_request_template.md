@@ -24,6 +24,6 @@ N/A
 
 ## Checklist
 
-- [ ] Matches `AGENTS.md`, `.cursor/rules/`, and `.dev/roadmap.md`
+- [ ] Matches `AGENTS.md`, `.cursor/rules/`, and `docs/roadmap.md`
 - [ ] No `unwrap` / `expect` / `panic` on library paths
 - [ ] rustdoc in English for new public API

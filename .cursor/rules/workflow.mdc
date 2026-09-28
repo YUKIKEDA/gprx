@@ -1,44 +1,27 @@
 ---
-description: Issue/PR flow, phase order, and local quality gates
+description: Issue/PR prohibitions and local quality gates
 alwaysApply: true
 ---
 
 # Workflow
 
-## Cycle
+Human procedure: `CONTRIBUTING.md`. Current row: `docs/roadmap.md`. Do not name that ID in this rule.
 
-開発は次の順だけ。飛ばさない。エージェントは人間レビューのあと自分で merge しない。
+## Forbidden
 
-1. **Grill**（必要なとき） — 設計・範囲・「やる / やらない / どのフェーズ」が未決なら、実装も Issue も roadmap の DoD 埋めもせず Grill する（`.cursor/skills/grill-me/SKILL.md`、`.cursor/rules/consent.mdc`）。質問のターンで成果物を閉じない。
-2. **Issue 作成** — 1 Issue = 1 PR。テンプレートは Bug / Feat / Task / Spike。ブランチは `{type}/{number}-{slug}`（例: `chore/1-crate-bootstrap`）。
-3. **Grill → タスク詳細化** — 分解・**DoD**・依存を具体化し、**同じ Issue を更新**してから roadmap の DoD 欄へ写す。DoD はここまで書かない。roadmap の ID / DoD を変えるなら、その Issue が対象を指名してから。
-4. **作業** — その Issue（現行 roadmap 行）だけ。今の行: **P5-4**。DoD が Grill 前の行は作業しない。P5-5 を先に始めない。計画のない先送り: `.cursor/rules/defer.mdc`。取れない状態は型: `.cursor/rules/types.mdc`。
-5. **PR 開始** — `Closes #N`。本文は `.github/pull_request_template.md`。ゲート: `just lint` と `just test`。
-6. **人間レビュー**
-7. **マージ**（人間） — そのあと 1 に戻る。
+- Starting implementation without an Issue number and a branch
+- Copying acceptance text into the roadmap. The roadmap keeps ID, title, Issue, and status. Acceptance text stays on the Issue
+- Starting a row whose status is `Grill 後に #n で確定`
+- Writing pass/fail numbers, formats, or file layouts into the roadmap before Grill on that row finishes
+- Merging. A human merges
+- Adding or removing a roadmap row, or editing **意図的に今やらない**, without Grill → Issue (`.cursor/rules/consent.mdc`)
 
-「進めなさい」は現行行の **Issue があるとき**の作業・PR であり、Issue 作成や範囲決定の代用ではない。履歴改変: `.cursor/rules/git.mdc`。範囲の質問: `.cursor/rules/consent.mdc`。
-
-## DoD
-
-完了条件は Cycle の **3**（Grill → タスク詳細化）で人間と決める。選択肢表の「推奨」、エージェントの「とりあえず」、Issue 本文の叩き台を roadmap に写して確定してはならない。
-
-禁止:
-
-- 行を足すときにフォーマット・合否ライン・ファイル配置・保存する行列を DoD に書く
-- 前回の推奨案を Grill なしで DoD 欄へ入れる
-- Grill 前の行で実装や PR を始める
+「進めなさい」は、Issue があるときの作業である。Issue 作成や範囲決定の代用ではない。履歴改変: `.cursor/rules/git.mdc`。
 
 未 Grill の行を載せるとき（ユーザーが ID と Issue を指名したとき）:
 
-- ID、種別、タイトル、依存（**その Issue が既に書いたものだけ**）
-- DoD 欄は `Grill 後に #<n> で確定` だけ。具体リストは置かない
-
-DoD を roadmap に書くのは、Grill が終わり、ユーザーがその Issue と文言を指名したあと。
-
-## 範囲の出し入れ
-
-`.dev/roadmap.md` の行の追加・削除・DoD 変更と、**意図的に今やらない** への追加・削除は、上の Cycle の Grill → Issue を経る。エージェントは合意なしに「やらない」リストへ載せない。未 Grill の行を足すときは上の **DoD** 節。
+- ID、種別、タイトル、依存（その Issue が既に書いたものだけ）
+- 状態は `Grill 後に #n で確定` だけ。完了条件の本文は置かない
 
 ## 品質ゲート
 
@@ -51,6 +34,6 @@ DoD を roadmap に書くのは、Grill が終わり、ユーザーがその Iss
   - `just gen-goldens` = regenerate sklearn JSON under `compare/goldens/` (manual)
 - Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
 - Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in kernel composition. Adding both at large values double-counts noise; that is the caller's choice, not a crate ban.
-- Default trainer is `Gpr<Lbfgs>`. Other argmin solvers and user `Optimizer` replace the type parameter (P2B-1 / P2B-2 / P2B-9). `Gpr<Fixed>` is `factor` only. Do not write a custom L-BFGS / quasi-Newton in this crate. Config exclusivity: `.cursor/rules/types.mdc`.
-- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io (`publish = false`). Phase 2 does not lift this; the roadmap still lists crates.io as out of scope.
+- Default trainer is `Gpr<Lbfgs>`. Other argmin solvers and user `Optimizer` replace the type parameter. `Gpr<Fixed>` is `factor` only. Do not write a custom L-BFGS / quasi-Newton in this crate. Config exclusivity: `.cursor/rules/types.mdc`.
+- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. Do not publish to crates.io (`publish = false`). The roadmap still lists crates.io as out of scope.
 - `just bench` = criterion. See `.cursor/rules/bench.mdc`. Speed work without a number is out of scope.
