@@ -199,69 +199,28 @@ impl<P: GpScalar> GprCore<P> {
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        self.require_query_dim(n_cols)?;
-        validate_query(xs, n_rows, n_cols)?;
-        let n = self.n;
-        let m = n_rows;
-        self.query.ensure(n, m, n_cols)?;
-        self.query.query_xs.copy_from_slice(xs);
-        self.x_transform
-            .apply(&mut self.query.query_xs, n_rows, n_cols)?;
-        {
-            let x_train = P::Storage::storage_cols(
-                self.x.as_ref().submatrix(0, 0, n, self.d),
-                &mut self.x_cast,
-            );
-            let QueryWorkspace {
-                query_xs,
-                query_x,
-                query_dist,
-                query_k_star,
-                query_scratch,
-                ..
-            } = &mut self.query;
-            pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
-            with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
-                x_train,
-                query_x.as_ref(),
-                Some(query_dist.as_mut()),
-                query_k_star.as_mut(),
-                query_scratch.as_mut(),
+        let mut query = std::mem::replace(&mut self.query, QueryWorkspace::new());
+        let mut x_cast = std::mem::replace(&mut self.x_cast, P::Storage::empty_cols());
+        let predicted = self.predict_query(
+            QueryBuffers {
+                query: &mut query,
+                x_cast: &mut x_cast,
                 thread_scratch,
-            ))?;
-        }
-        let x_active = self.x.as_ref().submatrix(0, 0, n, self.d);
-        let QueryWorkspace {
-            query_xs,
-            query_x,
-            query_k_star,
-            query_kss,
-            ..
-        } = &mut self.query;
-        write_moments::<P>(
-            MomentInputs {
-                core: CoreRefs {
-                    kernel: &self.kernel,
-                    compiled: &self.compiled,
-                    alpha: &self.alpha,
-                    x_train: x_active,
-                    noise: self.likelihood.noise_variance(),
-                    y_transform: self.y_transform.as_ref(),
-                    math: self.policies.math,
-                },
-                factor,
-                query_xs,
-                query_x: query_x.as_ref(),
-                k_star: query_k_star.as_mut(),
-                kss: query_kss,
-                n_cols,
-                options,
             },
+            factor,
+            &self.alpha,
+            xs,
+            n_rows,
+            n_cols,
+            options,
             out,
-        )
+        );
+        self.query = query;
+        self.x_cast = x_cast;
+        predicted
     }
 
-    /// Predicts into `out` with buffers allocated for this call.
+    /// Predicts into `out` with query buffers allocated for this call.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_prediction(
         &self,
@@ -273,21 +232,54 @@ impl<P: GpScalar> GprCore<P> {
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        self.require_query_dim(n_cols)?;
-        validate_query(xs, n_rows, n_cols)?;
-        let n = self.n;
-        let m = n_rows;
-        let (query_xs, query_x, mut k_star) = self.cross_kernel(xs, n_rows, n_cols)?;
-        let mut kss = vec![P::Storage::from_f64(0.0); m];
-        debug_assert_eq!(k_star.nrows(), n);
+        let mut query = QueryWorkspace::new();
+        let mut x_cast = P::Storage::empty_cols();
+        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
+        self.predict_query(
+            QueryBuffers {
+                query: &mut query,
+                x_cast: &mut x_cast,
+                thread_scratch: &mut thread_scratch,
+            },
+            factor,
+            alpha,
+            xs,
+            n_rows,
+            n_cols,
+            options,
+            out,
+        )
+    }
+
+    /// The one predict body: [`Self::fill_query`], then the moments.
+    #[allow(clippy::too_many_arguments)]
+    fn predict_query(
+        &self,
+        buffers: QueryBuffers<'_, P>,
+        factor: StoredFactor<'_, P::Storage>,
+        alpha: &[P::Refine],
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        let query = self.fill_query(buffers, xs, n_rows, n_cols)?;
+        let QueryWorkspace {
+            query_xs,
+            query_x,
+            query_k_star,
+            query_kss,
+            ..
+        } = query;
         write_moments::<P>(
             MomentInputs {
                 core: self.refs(alpha),
                 factor,
-                query_xs: &query_xs,
+                query_xs,
                 query_x: query_x.as_ref(),
-                k_star: k_star.as_mut(),
-                kss: &mut kss,
+                k_star: query_k_star.as_mut(),
+                kss: query_kss,
                 n_cols,
                 options,
             },
@@ -307,34 +299,45 @@ impl<P: GpScalar> GprCore<P> {
         }
     }
 
-    /// Transforms and packs `xs`, then writes `K(X, xs)` (`n × m`).
-    fn cross_kernel(
+    /// Checks and transforms `xs`, packs it into `query`, and writes
+    /// `K(X, xs)` (`n × m`) into `query.query_k_star`.
+    fn fill_query<'q>(
         &self,
+        buffers: QueryBuffers<'q, P>,
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<CrossKernel<P::Storage>, GprError> {
-        let n = self.n;
-        let m = n_rows;
-        let mut query_xs = xs.to_vec();
-        self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
-        let mut query_x = Mat::<P::Storage>::zeros(m, n_cols);
-        pack_storage(&query_xs, n_rows, n_cols, query_x.as_mut());
-        let mut query_dist = Mat::<P::Storage>::zeros(n, m);
-        let mut k_star = Mat::<P::Storage>::zeros(n, m);
-        let mut scratch = Mat::<P::Storage>::zeros(n, m);
-        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
-        let mut x_cast = P::Storage::empty_cols();
-        let x_train = P::Storage::storage_cols(self.x_active(), &mut x_cast);
+    ) -> Result<&'q mut QueryWorkspace<P>, GprError> {
+        let QueryBuffers {
+            query,
+            x_cast,
+            thread_scratch,
+        } = buffers;
+        self.require_query_dim(n_cols)?;
+        validate_query(xs, n_rows, n_cols)?;
+        query.ensure(self.n, n_rows, n_cols)?;
+        query.query_xs.copy_from_slice(xs);
+        self.x_transform
+            .apply(&mut query.query_xs, n_rows, n_cols)?;
+        let x_train = P::Storage::storage_cols(self.x_active(), x_cast);
+        let QueryWorkspace {
+            query_xs,
+            query_x,
+            query_dist,
+            query_k_star,
+            query_scratch,
+            ..
+        } = &mut *query;
+        pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
         with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
             Some(query_dist.as_mut()),
-            k_star.as_mut(),
-            scratch.as_mut(),
-            &mut thread_scratch,
+            query_k_star.as_mut(),
+            query_scratch.as_mut(),
+            thread_scratch,
         ))?;
-        Ok((query_xs, query_x, k_star))
+        Ok(query)
     }
 
     /// Predictive mean and query–query covariance at `xs`.
@@ -347,11 +350,27 @@ impl<P: GpScalar> GprCore<P> {
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        self.require_query_dim(n_cols)?;
-        validate_query(xs, n_rows, n_cols)?;
         let n = self.n;
         let m = n_rows;
-        let (query_xs, query_x, mut k_star) = self.cross_kernel(xs, n_rows, n_cols)?;
+        let mut query = QueryWorkspace::new();
+        let mut x_cast = P::Storage::empty_cols();
+        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
+        self.fill_query(
+            QueryBuffers {
+                query: &mut query,
+                x_cast: &mut x_cast,
+                thread_scratch: &mut thread_scratch,
+            },
+            xs,
+            n_rows,
+            n_cols,
+        )?;
+        let QueryWorkspace {
+            query_xs,
+            query_x,
+            query_k_star: mut k_star,
+            ..
+        } = query;
         let mut mean = vec![P::Refine::from_f64(0.0); m];
         with_kernel_exp!(self.policies.math, M => P::predict_means::<M>(
             &self.kernel,
@@ -365,7 +384,6 @@ impl<P: GpScalar> GprCore<P> {
         factor.inv_l_in_place(k_star.as_mut());
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
             query_x.as_ref(),
             kss.as_mut(),
@@ -582,8 +600,13 @@ impl<P: GpScalar> GprCore<P> {
     }
 }
 
-/// Transformed query (column-major), packed query `m × d`, and `K(X, xs)`.
-type CrossKernel<S> = (Vec<f64>, Mat<S>, Mat<S>);
+/// Query buffers a predict fills: the workspace, the cast cache for the
+/// training inputs, and per-thread kernel scratch.
+struct QueryBuffers<'a, P: GpScalar> {
+    query: &'a mut QueryWorkspace<P>,
+    x_cast: &'a mut <P::Storage as ScalarOps>::ColCast,
+    thread_scratch: &'a mut [Mat<P::Storage>],
+}
 
 /// Borrowed model pieces the predictive moments read.
 struct CoreRefs<'a, P: GpScalar> {
