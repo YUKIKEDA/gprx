@@ -9,8 +9,7 @@
 //! [`TwiceDifferentiable`].
 
 use crate::error::GprError;
-use crate::gpr::{DistanceCacheSlot, FittedGpr};
-use crate::optimizer::{FullRecompute, IncrementalRecompute};
+use crate::gpr::FittedGpr;
 use crate::param::Interval;
 use crate::sgpr::{FittedSgpr, InducingLayout};
 use faer::Mat;
@@ -34,9 +33,10 @@ pub trait Objective {
 
     /// Returns the objective after the coordinates in `indices` changed.
     ///
-    /// The default rebuilds everything through [`Self::value`].
-    /// [`crate::IncrementalRecompute`] forwards to
-    /// [`IncrementalObjective::value_with_changes`].
+    /// The default rebuilds everything through [`Self::value`]. The GPR fit
+    /// objective rebuilds only the touched kernel leaves when the optimizer
+    /// sets [`crate::Optimizer::USES_CHANGE_INDICES`] and the fit keeps a
+    /// dedicated `W` ([`crate::CholeskyBuffer::Retain`]).
     ///
     /// # Errors
     ///
@@ -96,8 +96,8 @@ pub trait TwiceDifferentiable: Differentiable {
 ///
 /// `indices` is the list of flat `θ` positions that changed. Empty, duplicate,
 /// or out-of-range indices are a [`GprError`] at this boundary. Full rebuilds
-/// use [`Objective::value`]. [`crate::FullRecompute`] does not implement this
-/// trait. The GPR fit objective with [`crate::IncrementalRecompute`] does.
+/// use [`Objective::value`]. The GPR fit objective implements this for every
+/// optimizer and buffer policy.
 pub trait IncrementalObjective: Objective {
     /// Returns the objective after rebuilding only the leaves that `indices`
     /// touch.
@@ -119,166 +119,101 @@ pub(crate) trait HasBounds {
 ///
 /// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
 /// kernel and likelihood match `params`.
-pub struct GprObjective<
-    'a,
-    O,
-    S,
-    C: crate::gpr::DistanceCacheSlot = crate::CachedDistances,
-    B: crate::gpr::AllocWorkspace = crate::RetainCholesky,
-    M = crate::math::Accurate,
-    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
-> {
-    model: &'a mut FittedGpr<O, S, C, B, M, P>,
+pub struct GprObjective<'a, O, P: crate::precision::GpScalar = crate::precision::DoublePrecision> {
+    model: &'a mut FittedGpr<O, P>,
     scratch: Vec<f64>,
     leaf_grams: Vec<Mat<P::Storage>>,
     leaves_primed: bool,
+    /// Rebuild only dirty leaves in [`Objective::value`] /
+    /// [`Objective::value_at_changes`]. Set when the optimizer reports changed
+    /// coordinates and the fit keeps a dedicated `W`.
+    incremental: bool,
 }
 
-impl<'a, O, S, C, B, M, P> GprObjective<'a, O, S, C, B, M, P>
+impl<'a, O, P> GprObjective<'a, O, P>
 where
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
 {
-    pub(crate) fn new(model: &'a mut FittedGpr<O, S, C, B, M, P>) -> Self {
+    pub(crate) fn new(model: &'a mut FittedGpr<O, P>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self {
             model,
             scratch,
             leaf_grams: Vec::new(),
             leaves_primed: false,
+            incremental: false,
         }
     }
-}
 
-pub(crate) trait EvalObjective: Sized {
-    fn eval_value<O, C, B, M, P>(
-        obj: &mut GprObjective<'_, O, Self, C, B, M, P>,
-        params: &[f64],
-    ) -> Result<f64, GprError>
-    where
-        C: DistanceCacheSlot,
-        B: crate::gpr::AllocWorkspace,
-        P: crate::precision::GpScalar,
-        M: crate::math::KernelMath;
-
-    fn eval_at_changes<O, C, B, M, P>(
-        obj: &mut GprObjective<'_, O, Self, C, B, M, P>,
-        params: &[f64],
-        indices: &[usize],
-    ) -> Result<f64, GprError>
-    where
-        C: DistanceCacheSlot,
-        B: crate::gpr::AllocWorkspace,
-        P: crate::precision::GpScalar,
-        M: crate::math::KernelMath,
-    {
-        let _ = indices;
-        Self::eval_value(obj, params)
+    /// Enables leaf-level rebuilds for an optimizer with
+    /// [`crate::Optimizer::USES_CHANGE_INDICES`], unless a gradient
+    /// overwrites `L`.
+    pub(crate) fn with_change_indices(mut self, uses_change_indices: bool) -> Self {
+        self.incremental = uses_change_indices && !self.model.overwrites_cholesky();
+        self
     }
-}
 
-impl EvalObjective for FullRecompute {
-    fn eval_value<O, C, B, M, P>(
-        obj: &mut GprObjective<'_, O, Self, C, B, M, P>,
-        params: &[f64],
-    ) -> Result<f64, GprError>
-    where
-        C: DistanceCacheSlot,
-        B: crate::gpr::AllocWorkspace,
-        P: crate::precision::GpScalar,
-        M: crate::math::KernelMath,
-    {
-        let n = obj.model.num_params();
-        if obj.scratch.len() != n {
-            obj.scratch.resize(n, 0.0);
+    #[cfg(test)]
+    pub(crate) fn is_incremental(&self) -> bool {
+        self.incremental
+    }
+
+    fn full_value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        let n = self.model.num_params();
+        if self.scratch.len() != n {
+            self.scratch.resize(n, 0.0);
         }
-        obj.model
-            .value_and_gradient_into_fit(params, &mut obj.scratch)
-    }
-}
-
-impl EvalObjective for IncrementalRecompute {
-    fn eval_value<O, C, B, M, P>(
-        obj: &mut GprObjective<'_, O, Self, C, B, M, P>,
-        params: &[f64],
-    ) -> Result<f64, GprError>
-    where
-        C: DistanceCacheSlot,
-        B: crate::gpr::AllocWorkspace,
-        P: crate::precision::GpScalar,
-        M: crate::math::KernelMath,
-    {
-        obj.model
-            .value_from_leaf_grams(params, None, &mut obj.leaf_grams, &mut obj.leaves_primed)
+        self.model
+            .value_and_gradient_into_fit(params, &mut self.scratch)
     }
 
-    fn eval_at_changes<O, C, B, M, P>(
-        obj: &mut GprObjective<'_, O, Self, C, B, M, P>,
-        params: &[f64],
-        indices: &[usize],
-    ) -> Result<f64, GprError>
-    where
-        C: DistanceCacheSlot,
-        B: crate::gpr::AllocWorkspace,
-        P: crate::precision::GpScalar,
-        M: crate::math::KernelMath,
-    {
-        obj.model.value_from_leaf_grams(
-            params,
-            Some(indices),
-            &mut obj.leaf_grams,
-            &mut obj.leaves_primed,
-        )
-    }
-}
-
-impl<O, S, C, B, M, P> Objective for GprObjective<'_, O, S, C, B, M, P>
-where
-    S: EvalObjective,
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
-    P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
-{
-    fn num_params(&self) -> usize {
-        self.model.num_params()
-    }
-
-    fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
-        S::eval_value(self, params)
-    }
-
-    fn value_at_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
-        S::eval_at_changes(self, params, indices)
-    }
-}
-
-impl<O, C, B, M, P> IncrementalObjective for GprObjective<'_, O, IncrementalRecompute, C, B, M, P>
-where
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
-    P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
-{
-    fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
+    fn leaf_value(&mut self, params: &[f64], indices: Option<&[usize]>) -> Result<f64, GprError> {
         self.model.value_from_leaf_grams(
             params,
-            Some(indices),
+            indices,
             &mut self.leaf_grams,
             &mut self.leaves_primed,
         )
     }
 }
 
-impl<O, S, C, B, M, P> Differentiable for GprObjective<'_, O, S, C, B, M, P>
+impl<O, P> Objective for GprObjective<'_, O, P>
 where
-    S: EvalObjective,
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
+{
+    fn num_params(&self) -> usize {
+        self.model.num_params()
+    }
+
+    fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        if self.incremental {
+            self.leaf_value(params, None)
+        } else {
+            self.full_value(params)
+        }
+    }
+
+    fn value_at_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
+        if self.incremental {
+            self.leaf_value(params, Some(indices))
+        } else {
+            self.full_value(params)
+        }
+    }
+}
+
+impl<O, P> IncrementalObjective for GprObjective<'_, O, P>
+where
+    P: crate::precision::GpScalar,
+{
+    fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
+        self.leaf_value(params, Some(indices))
+    }
+}
+
+impl<O, P> Differentiable for GprObjective<'_, O, P>
+where
+    P: crate::precision::GpScalar,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model
@@ -295,25 +230,18 @@ where
     }
 }
 
-impl<O, S, C, B, M, P> TwiceDifferentiable for GprObjective<'_, O, S, C, B, M, P>
+impl<O, P> TwiceDifferentiable for GprObjective<'_, O, P>
 where
-    S: EvalObjective,
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into_fit(params, out)
     }
 }
 
-impl<O, S, C, B, M, P> HasBounds for GprObjective<'_, O, S, C, B, M, P>
+impl<O, P> HasBounds for GprObjective<'_, O, P>
 where
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
 {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)

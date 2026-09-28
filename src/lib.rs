@@ -70,22 +70,18 @@ mod workspace;
 
 pub use error::{CholeskyStage, GprError};
 pub use gpr::{
-    AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter,
-    Gpr, JitterPolicy, NoDistanceCache, OnlineGpr, PointId, PredictOptions, Prediction,
-    PredictiveCovariance, RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
+    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter, Gpr, JitterPolicy,
+    KernelExp, OnlineGpr, PointId, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
 };
 pub use likelihood::GaussianLikelihood;
 pub use math::{Accurate, FastApprox, KernelMath};
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
-    AcceptsRecompute, Adam, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
-    IncrementalRecompute, Lbfgs, NelderMead, Newton, NonlinearCg, OptResult, Optimizer,
-    PoleRecompute, RecomputeStrategy, UsesChangeIndices,
+    Adam, BoundaryPolicy, FastSimulatedAnnealing, Fixed, Lbfgs, NelderMead, Newton, NonlinearCg,
+    OptResult, Optimizer,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
-pub use persist::{
-    FORMAT_VERSION, LoadedDistance, LoadedGpr, LoadedOnlineDistance, PersistRegistry,
-};
+pub use persist::{FORMAT_VERSION, LoadedGpr, PersistRegistry};
 pub use precision::{
     DoublePrecision, GpScalar, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
     ResidualFormula, SinglePrecision,

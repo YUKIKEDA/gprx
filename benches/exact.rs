@@ -18,10 +18,7 @@ use gprx::internals::{
 };
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
 use gprx::transform::StandardizeTarget;
-use gprx::{
-    CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
-    MixedPrecision, Prediction, RetainCholesky, ReuseCholesky, UncachedDistances,
-};
+use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, KernelExp, MixedPrecision, Prediction};
 
 #[path = "../tests/common/problems.rs"]
 mod problems;
@@ -40,7 +37,7 @@ fn forrester_query() -> Vec<f64> {
 
 /// Weighted sphere on a `SPHERE_SIDE²` grid. Same seed as `sphere_bench_xy`
 /// in `src/optimizer/lbfgs.rs`. Seed 0 walks a ridge on the memory pole
-/// (`UncachedDistances`).
+/// (`DistanceCachePolicy::Uncached`).
 fn sphere_xy() -> (Vec<f64>, Vec<f64>) {
     problems::sphere_xy(SPHERE_SIDE, 9, NOISE_STD)
 }
@@ -297,14 +294,7 @@ fn predict_100(c: &mut Criterion) {
     });
 }
 
-type MixedFitted = FittedGpr<
-    Fixed,
-    FullRecompute,
-    CachedDistances,
-    RetainCholesky,
-    gprx::Accurate,
-    MixedPrecision,
->;
+type MixedFitted = FittedGpr<Fixed, MixedPrecision>;
 
 /// Same problem as [`fitted_model`] at [`MixedPrecision`] (f32 factor, f64 `α`).
 fn fitted_mixed() -> (MixedFitted, Vec<f64>) {
@@ -341,13 +331,13 @@ fn predict_100_mixed(c: &mut Criterion) {
     });
 }
 
-fn fitted_fast() -> FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox> {
+fn fitted_fast() -> FittedGpr<Fixed> {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
     let (x, y) = forrester_xy();
     Gpr::new(kernel, likelihood)
         .with_target_transform(StandardizeTarget::new())
-        .with_math::<FastApprox>()
+        .with_math(KernelExp::FastApprox)
         .with_optimizer(Fixed)
         .factor(&x, N, D_ISO, &y)
         .expect("training Cholesky")
@@ -406,8 +396,7 @@ fn fit_lbfgs(c: &mut Criterion) {
     group.finish();
 }
 
-fn fitted_ard_fast() -> FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox>
-{
+fn fitted_ard_fast() -> FittedGpr<Fixed> {
     let ells = [ELL_ARD; D_ARD];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
@@ -415,7 +404,7 @@ fn fitted_ard_fast() -> FittedGpr<Fixed, FullRecompute, CachedDistances, RetainC
     Gpr::new(kernel, likelihood)
         .with_prefer_speed()
         .with_target_transform(StandardizeTarget::new())
-        .with_math::<FastApprox>()
+        .with_math(KernelExp::FastApprox)
         .with_optimizer(Fixed)
         .factor(&x, N, D_ARD, &y)
         .expect("training Cholesky")
@@ -434,7 +423,7 @@ fn fitted_ard_speed() -> FittedGpr<Fixed> {
         .expect("training Cholesky")
 }
 
-fn fitted_ard_memory() -> FittedGpr<Fixed, FullRecompute, UncachedDistances, ReuseCholesky> {
+fn fitted_ard_memory() -> FittedGpr<Fixed> {
     let ells = [ELL_ARD; D_ARD];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");

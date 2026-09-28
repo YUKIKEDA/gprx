@@ -1,10 +1,6 @@
 //! Public prediction, cache, and jitter types for [`crate::Gpr`].
 
-use std::fmt;
-
 use crate::error::GprError;
-use crate::precision::PrecisionPolicy;
-use crate::workspace::{FitWorkspace, WithDist, WithW, WorkspaceCore};
 
 /// Which predictive variance [`Prediction`] reports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,124 +28,104 @@ impl Default for PredictOptions {
     }
 }
 
-/// Marker for whether [`crate::Gpr`] caches training distances.
+/// Whether [`crate::Gpr`] caches training distances between kernel builds.
 ///
-/// The only implementations are [`CachedDistances`] and
-/// [`UncachedDistances`]. Public callers switch poles with
-/// [`crate::Gpr::with_prefer_memory`] / [`crate::Gpr::with_prefer_speed`].
-/// Standalone Linear, Constant, and White trainers use
-/// [`crate::Gpr::from_points`] and have no cache slot.
-pub trait DistanceCachePolicy:
-    DistanceCacheSlot + Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
-{
-}
-
-/// Fills training distances once per fit and reuses them while `X` is
-/// unchanged.
-///
-/// This is the default [`crate::Gpr`] cache policy. Isotropic fits store an
-/// `n×n` squared-Euclidean matrix. ARD fits also store raw `(Δx_d)²` as
-/// `n × (n·d)`.
+/// [`Self::Cached`] (the default) fills the distances once per fit and reuses
+/// them while `X` is unchanged: isotropic fits store an `n×n`
+/// squared-Euclidean matrix, ARD fits also store raw `(Δx_d)²` as
+/// `n × (n·d)`. [`Self::Uncached`] recomputes them from `X` on every kernel
+/// build. A kernel that does not read distances (standalone Linear,
+/// Constant, White) never allocates the cache.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr};
+/// use gprx::{DistanceCachePolicy, GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let gpr = Gpr::new(kernel, likelihood).with_prefer_speed();
+/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+///     .with_distance_cache_policy(DistanceCachePolicy::Uncached);
+/// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Uncached);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CachedDistances;
-
-/// Recomputes training distances from `X` on every kernel build.
-///
-/// The workspace has no `dist_cache` / `ard_sq_diff`. Isotropic leaves
-/// evaluate `‖x_i-x_j‖²` from coordinates. [`crate::Gpr::with_prefer_memory`]
-/// pairs this with [`crate::ReuseCholesky`].
-///
-/// # Examples
-///
-/// ```rust
-/// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr};
-///
-/// # fn main() -> Result<(), gprx::GprError> {
-/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let gpr = Gpr::new(kernel, likelihood).with_prefer_memory();
-/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct UncachedDistances;
-
-impl DistanceCachePolicy for CachedDistances {}
-
-impl DistanceCachePolicy for UncachedDistances {}
-
-/// Persist tag written as `always` / `never` in `config.json`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DistanceCachePersist {
+pub enum DistanceCachePolicy {
+    /// Fill once per fit and reuse (the speed pole).
+    #[default]
     Cached,
+    /// Recompute from `X` on every kernel build (the memory pole).
     Uncached,
 }
 
-/// Maps a trainer cache slot to workspace wrapping and persist tags.
-pub trait DistanceCacheSlot:
-    Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
-{
-    type DistWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>;
-    const CACHES_DISTANCES: bool;
-
-    fn persist(self) -> Option<DistanceCachePersist>;
-}
-
-impl DistanceCacheSlot for CachedDistances {
-    type DistWrap<W: FitWorkspace> = WithDist<W, <W::Policy as PrecisionPolicy>::Storage>;
-    const CACHES_DISTANCES: bool = true;
-
-    fn persist(self) -> Option<DistanceCachePersist> {
-        Some(DistanceCachePersist::Cached)
-    }
-}
-
-impl DistanceCacheSlot for UncachedDistances {
-    type DistWrap<W: FitWorkspace> = W;
-    const CACHES_DISTANCES: bool = false;
-
-    fn persist(self) -> Option<DistanceCachePersist> {
-        Some(DistanceCachePersist::Uncached)
-    }
-}
-
-/// Marks a trainer that does not store a [`DistanceCachePolicy`].
+/// Where the gradient matrix `W = ααᵀ - K⁻¹` lives during a fit.
 ///
-/// [`crate::Gpr::from_points`] builds this slot for a standalone Linear,
-/// Constant, or White kernel. Distance kernels keep [`CachedDistances`]
-/// or [`UncachedDistances`] on [`crate::Gpr::new`].
+/// [`Self::Retain`] (the default) keeps a dedicated `n×n` `W`, so the
+/// Cholesky factor stays in place and optimizers that report changed
+/// parameters rebuild only the touched kernel leaves. [`Self::Reuse`]
+/// overwrites the factor with `W` and refactors afterwards; it saves one
+/// `n×n` matrix and always rebuilds the full kernel.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{CholeskyBuffer, GaussianLikelihood, Gpr};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+///     .with_cholesky_buffer(CholeskyBuffer::Reuse);
+/// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Reuse);
+/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct NoDistanceCache;
-
-impl DistanceCacheSlot for NoDistanceCache {
-    type DistWrap<W: FitWorkspace> = W;
-    const CACHES_DISTANCES: bool = false;
-
-    fn persist(self) -> Option<DistanceCachePersist> {
-        None
-    }
+pub enum CholeskyBuffer {
+    /// Keep a dedicated `W` (the speed pole).
+    #[default]
+    Retain,
+    /// Overwrite the factor with `W`, then refactor (the memory pole).
+    Reuse,
 }
 
-/// Composed fit buffers for cache policy `C` and Cholesky policy `B`.
-pub(crate) type FitBuffers<C, B, P = crate::precision::DoublePrecision> =
-    <C as DistanceCacheSlot>::DistWrap<<B as AllocWorkspace>::CholWrap<WorkspaceCore<P>>>;
+/// Which kernel `exp` [`crate::Gpr`] evaluates with.
+///
+/// [`Self::Accurate`] (the default) is libm / SIMD `exp`
+/// ([`crate::Accurate`]). [`Self::FastApprox`] is the polynomial
+/// ([`crate::FastApprox`]); fit and predict use the same one.
+/// Hyperparameter `exp(θ)` is unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum KernelExp {
+    /// Exact libm / SIMD `exp`.
+    #[default]
+    Accurate,
+    /// Degree-7 polynomial `exp`.
+    FastApprox,
+}
+
+/// Runs `$body` with the type alias `$M` bound to the [`crate::KernelMath`]
+/// type of `$mode`. The body is monomorphized once per mode, as a generic
+/// `M` parameter was before.
+macro_rules! with_kernel_exp {
+    ($mode:expr, $M:ident => $body:expr) => {
+        match $mode {
+            $crate::gpr::KernelExp::Accurate => {
+                type $M = $crate::math::Accurate;
+                $body
+            }
+            $crate::gpr::KernelExp::FastApprox => {
+                type $M = $crate::math::FastApprox;
+                $body
+            }
+        }
+    };
+}
+pub(crate) use with_kernel_exp;
 
 /// Numerical Cholesky stabilizer, distinct from observation noise.
 ///
@@ -432,86 +408,6 @@ impl<T> Default for PredictiveCovariance<T> {
             variance_kind: VarianceKind::default(),
         }
     }
-}
-
-/// Keeps a dedicated gradient matrix so the Cholesky factor stays in place.
-///
-/// This is the default [`crate::Gpr`] buffer policy. Joint MLL+grad does not
-/// rebuild `L` afterwards.
-///
-/// # Examples
-///
-/// ```rust
-/// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr};
-///
-/// # fn main() -> Result<(), gprx::GprError> {
-/// let gpr = Gpr::new(
-///     KernelSpec::from(RbfKernel::new(1.0)?),
-///     GaussianLikelihood::new(0.1)?,
-/// )
-/// .with_prefer_speed();
-/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RetainCholesky;
-
-/// Reuses the Cholesky buffer as the gradient matrix `W`, then refactors.
-///
-/// [`crate::Gpr::fit`] restores `L` once after the optimizer. A standalone
-/// [`crate::FittedGpr::value_and_gradient_into`] restores `L` after the call
-/// so [`crate::FittedGpr::predict`] stays available. Optimizer iterations do
-/// not restore between steps.
-///
-/// # Examples
-///
-/// ```rust
-/// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Gpr};
-///
-/// # fn main() -> Result<(), gprx::GprError> {
-/// let gpr = Gpr::new(
-///     KernelSpec::from(RbfKernel::new(1.0)?),
-///     GaussianLikelihood::new(0.1)?,
-/// )
-/// .with_prefer_memory();
-/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ReuseCholesky;
-
-/// Marker for how [`crate::Gpr`] stores the Cholesky factor versus `W`.
-///
-/// The only implementations are [`RetainCholesky`] and [`ReuseCholesky`].
-/// Public callers switch poles with [`crate::Gpr::with_prefer_memory`] /
-/// [`crate::Gpr::with_prefer_speed`].
-pub trait CholeskyBuffer:
-    Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
-{
-}
-
-impl CholeskyBuffer for RetainCholesky {}
-
-impl CholeskyBuffer for ReuseCholesky {}
-
-/// Crate-private workspace allocation for a [`CholeskyBuffer`].
-pub trait AllocWorkspace: CholeskyBuffer {
-    type CholWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>;
-    const OVERWRITES_CHOLESKY: bool;
-}
-
-impl AllocWorkspace for RetainCholesky {
-    type CholWrap<W: FitWorkspace> = WithW<W, <W::Policy as PrecisionPolicy>::Storage>;
-    const OVERWRITES_CHOLESKY: bool = false;
-}
-
-impl AllocWorkspace for ReuseCholesky {
-    type CholWrap<W: FitWorkspace> = W;
-    const OVERWRITES_CHOLESKY: bool = true;
 }
 
 /// Stable identity of one training point on [`crate::OnlineGpr`].
