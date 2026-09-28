@@ -643,7 +643,7 @@ fit()終了 → FittedGpr が L, α, X を保持（Reuse はここで Chol し�
   → predict_into(&mut self): query_* に上書き、`Prediction` の容量を再利用
 ```
 
-バッチfitのWorkspaceはn固定。オンライン学習の容量成長は`OnlineWorkspace`(§11)が担当し、バッチ用Workspaceとはメモリ管理方針を分ける。
+バッチfitのWorkspaceはn固定。オンライン学習の容量成長は`OnlineWorkspace`(§11)が担当し、バッチ用Workspaceとはメモリ管理方針を分ける。`Workspace`、`QueryWorkspace`、`OnlineWorkspace`、faer の型はクレート私有。
 
 ## 8. 並列化・SIMD、数学関数バックエンド
 
@@ -660,7 +660,7 @@ trait MathBackend<T: Scalar>: Send + Sync {
 enum MathMode { Accurate, FastApprox }
 ```
 
-デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` は型パラメータで、カーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。精度の型パラメータは最後のまま、数学モードはその直前。
+デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` は型パラメータで、カーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。精度の型パラメータは最後のまま、数学モードはその直前。公開の切り替えは `with_math`。上の `MathMode` 列挙は置かない。`FittedGpr` と `OnlineGpr` の save はモードを記録し、欄が無いファイルは `Accurate`。
 
 ## 9. Optimizer設計
 
@@ -834,7 +834,7 @@ impl OnlineGpr<O, S, C, B> {
 }
 ```
 
-`insert` / `delete` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private で `OnlineGpr` が持つ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse GPRのオンライン学習はスコープ外(§14)。
+`insert` / `delete` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private で `OnlineGpr` が持つ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse のオンラインは `OnlineSgpr`（§6）。
 
 ## 12. テスト計画
 
@@ -862,27 +862,12 @@ impl OnlineGpr<O, S, C, B> {
 
 ## 13. 実装ロードマップ
 
-混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
-
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 5 の P5-4（[#42](https://github.com/YUKIKEDA/gprx/issues/42)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
-
-- **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
-- **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）
-- **Phase 1b(Optimizer と 0.1 API)**: argmin の L-BFGS、README / rustdoc / 例。crates.io には出さない
-- **Phase 2(高速化)**: `phase-1b` の数値を見て距離キャッシュ・Rayon。P2-5 で等方 RBF と二乗距離に `wide::f64x4` を入れた。P2-6 で NLML 定数項の差はノイズなので `L(θ)` は一本のまま。P2-7 で ARD `(Δx_d)²` キャッシュと RBF ARD の Rayon + SIMD。P2-8 で `Gpr` / `FittedGpr` の typestate。P2-9 で名前付き `phase-2`、alloc 0 の再確認、README / rustdoc / 例（Phase 2 の出口）
-- **Phase 2b(Exact GPR 公開骨格)**: P2-9 のあと、P3-1 の前。`Gpr<O>` / `Gpr<Fixed>`、argmin ソルバと自作 `Optimizer` は同じ型スロット、`KernelSpec::Custom`、`JitterPolicy`、学習済みの `set_params` / Clone（`FittedGpr` の `Option` も外す）、予測共分散は別経路、`Pipeline`、列ごと入力変換、Product の points 勾配（P2B-12）、Dist+Points 合成（P2B-13）、ファイル persist（P2B-14 / [#63](https://github.com/YUKIKEDA/gprx/issues/63)）、カスタム Optimizer 例（P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）、他ライブラリ比較（P2B-16 / [#103](https://github.com/YUKIKEDA/gprx/issues/103)）、NLML ヘッセ impl（P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/109)）、`IncrementalRecompute`（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）、fit 中の `L`/`W` 共用（P2B-19 / [#111](https://github.com/YUKIKEDA/gprx/issues/111)）、transform ファイル分割の判断（P2B-20 / [#116](https://github.com/YUKIKEDA/gprx/issues/116)）。P2B-14…20 の DoD は Grill 後
-- **Phase 3(オンライン学習)**: 2b のあと。`OnlineGpr` でデータ点の追加削除。`into_online` と自前末尾 insert、LDLT delete、PointId、容量拡張、フル再fitとの一致およびプロパティテスト(§12-4, §12-5)
-- **Phase 4(Sparse GPR)**: VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。SVGP は別型（P4-15 / P4-16）。既定は**誘導点Z固定**（`FixedInducing`）。自由 Z は `FreeInducing` で同時最適化。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。オンラインは X と誘導点を増減。X の因子は [ADR 0004](adr/0004-sparse-online-rank1.md)。誘導点の増分は [ADR 0005](adr/0005-sparse-inducing-update.md)。公開型は `OnlineSgpr`。`InducingId` / `insert_inducing` / `delete_inducing`。外部照合は P4-11…14（SVGP factor のあと）
-- **Phase 5(高度な最適化)**: `DoublePrecision` / `SinglePrecision` / `MixedPrecision`（Exact・`Sgpr`・`Svgp` と、f64 が既に持つ最適化・オンライン。P5-2）。低ランク更新、MathBackendのFastApprox、DistanceCachePolicy::Auto
+並びと状態は [roadmap.md](roadmap.md)。完了条件は各 Issue に残す。
 
 ## 14. 未解決事項
 
-1. **Sparse GPRの誘導点の増減**: 公開 API は `OnlineSgpr` の `insert_inducing` / `delete_inducing`（`InducingId`）。因子は [ADR 0005](adr/0005-sparse-inducing-update.md)
-2. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
-3. **DistanceCachePolicy::Autoの具体的な閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5）
-4. **Sparse GPRの誘導点Zの最適化**: 既定は `FixedInducing`。自由 Z は `FreeInducing` で同時。理由は [ADR 0003](adr/0003-sparse-z-joint.md)
-5. **Sparse の外部照合**: バッチ正しさは P4-11（GPyTorch、相対 `1e-8`）。バッチ時間・RSS は P4-12（`just perf-sparse`。GPyTorch / GPy）。`n=4096` のピーク RSS は P4-19（P4-18 の同じ時計。sgpr / svgp × Forrester / 球は GPy と GPyTorch より小さい）。P4-20（2026-09-27 の `just perf-sparse`）では、ゲートの 7 比較のうち svgp Forrester `n=4096`（23.22 ms 対 GPy 18.38 ms）、svgp 球 `n=1024`（13.32 ms 対 9.15 ms）、svgp 球 `n=4096`（34.57 ms 対 22.93 ms）がまだ GPy より長い。球 `n=4096` は GPyTorch より短い（sgpr 24.00 ms 対 58.47 ms、svgp 34.57 ms 対 54.60 ms）。sgpr 球 `n=4096` は GPy（26.35 ms）より短い。P4-21（2026-09-27 の `just perf-sparse`）では、残っていた 3 セルが GPy より短い（svgp Forrester `n=4096` は 15.04 ms 対 18.89 ms、svgp 球 `n=1024` は 6.27 ms 対 10.82 ms、svgp 球 `n=4096` は 17.12 ms 対 21.12 ms）。オンライン正しさは P4-13（GPyTorch 潰し SGPR、相対 `1e-8`）。オンライン時間は P4-14（`just perf-sparse-online`。自前フルと GPyTorch Titsias。CPU。正しさゲートは置かない）
-6. **SVGP**: 別公開型 `Svgp` / `FittedSvgp`。`factor` / 全データ ELBO / 対角予測 / `value_and_gradient_into` / `Svgp<Adam>::fit` は載った。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Adam` は `Optimizer` ではない。VFE の `Sgpr` は残す
+1. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
+2. **`DistanceCachePolicy::Auto` の閾値**: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要（P5-5。完了条件は Grill 後）
 
 ## 15. ベンチマーク戦略
 
