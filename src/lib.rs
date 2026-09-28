@@ -43,6 +43,7 @@ mod error;
 mod gpr;
 pub mod kernel;
 mod likelihood;
+mod linalg;
 mod math;
 mod objective;
 mod online;

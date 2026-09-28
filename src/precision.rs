@@ -6,15 +6,12 @@
 //! The residual type parameter exists only on [`MixedPrecision`]. There is no
 //! flag and no alias that picks a residual formula.
 
-use dyn_stack::{MemBuffer, MemStack};
-use faer::linalg::cholesky::llt;
-use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CompiledKernel, FillDistances, KernelScalar, KernelSpec, Triangle};
+use crate::linalg::{cholesky_lower_faer_owned, inf_norm, solve_llt_faer_owned, symmetrize_lower};
 use crate::transform::TargetTransform;
-use crate::workspace::{faer_par, faer_par_dims};
 
 /// Selects storage and residual-refinement scalar types for GP computations.
 pub trait PrecisionPolicy {
@@ -200,11 +197,11 @@ pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
     for i in 0..n {
         a[(i, i)] += noise32;
     }
-    mirror_lower(&mut a);
+    symmetrize_lower(a.as_mut(), n);
     let saved = a.clone();
-    factor_f32(&mut a)?;
+    cholesky_lower_faer_owned(&mut a, CholeskyStage::Predict)?;
     let mut rhs = Mat::<f32>::from_fn(n, 1, |i, _| y[i] as f32);
-    solve_f32(a.as_ref(), &mut rhs);
+    solve_llt_faer_owned(a.as_ref(), rhs.as_mut());
     let mut alpha = vec![0.0; n];
     for i in 0..n {
         alpha[i] = f64::from(rhs[(i, 0)]);
@@ -236,7 +233,7 @@ pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
         for i in 0..n {
             rhs[(i, 0)] = resid[i] as f32;
         }
-        solve_f32(a.as_ref(), &mut rhs);
+        solve_llt_faer_owned(a.as_ref(), rhs.as_mut());
         for i in 0..n {
             alpha[i] += f64::from(rhs[(i, 0)]);
         }
@@ -307,95 +304,10 @@ fn f64_alpha<M: crate::math::KernelMath>(
     for i in 0..n {
         a[(i, i)] += noise;
     }
-    factor_f64(&mut a)?;
+    cholesky_lower_faer_owned(&mut a, CholeskyStage::Predict)?;
     let mut rhs = Mat::<f64>::from_fn(n, 1, |i, _| y[i]);
-    solve_f64(a.as_ref(), &mut rhs);
+    solve_llt_faer_owned(a.as_ref(), rhs.as_mut());
     Ok((0..n).map(|i| rhs[(i, 0)]).collect())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn mirror_lower(a: &mut Mat<f32>) {
-    let n = a.nrows();
-    for col in 0..n {
-        for row in (col + 1)..n {
-            a[(col, row)] = a[(row, col)];
-        }
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn inf_norm(values: &[f64]) -> f64 {
-    values.iter().fold(0.0, |acc, v| acc.max(v.abs()))
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn factor_f32(a: &mut Mat<f32>) -> Result<(), GprError> {
-    let n = a.nrows();
-    let par = faer_par(n);
-    let req = llt::factor::cholesky_in_place_scratch::<f32>(n, par, Default::default());
-    let mut scratch = MemBuffer::new(req);
-    let regularization = LltRegularization::<f32> {
-        dynamic_regularization_delta: 0.0,
-        dynamic_regularization_epsilon: 0.0,
-    };
-    match llt::factor::cholesky_in_place(
-        a.as_mut(),
-        regularization,
-        par,
-        MemStack::new(&mut scratch),
-        Default::default(),
-    ) {
-        Ok(_) => Ok(()),
-        Err(LltError::NonPositivePivot { .. }) => Err(GprError::CholeskyFailed {
-            jitter: 0.0,
-            matrix_size: n,
-            stage: CholeskyStage::Predict,
-        }),
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn factor_f64(a: &mut Mat<f64>) -> Result<(), GprError> {
-    let n = a.nrows();
-    let par = faer_par(n);
-    let req = llt::factor::cholesky_in_place_scratch::<f64>(n, par, Default::default());
-    let mut scratch = MemBuffer::new(req);
-    let regularization = LltRegularization::<f64> {
-        dynamic_regularization_delta: 0.0,
-        dynamic_regularization_epsilon: 0.0,
-    };
-    match llt::factor::cholesky_in_place(
-        a.as_mut(),
-        regularization,
-        par,
-        MemStack::new(&mut scratch),
-        Default::default(),
-    ) {
-        Ok(_) => Ok(()),
-        Err(LltError::NonPositivePivot { .. }) => Err(GprError::CholeskyFailed {
-            jitter: 0.0,
-            matrix_size: n,
-            stage: CholeskyStage::Predict,
-        }),
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn solve_f32(l: MatRef<'_, f32>, rhs: &mut Mat<f32>) {
-    let n = l.nrows();
-    let par = faer_par_dims(n, 1);
-    let req = llt::solve::solve_in_place_scratch::<f32>(n, 1, par);
-    let mut scratch = MemBuffer::new(req);
-    llt::solve::solve_in_place(l, rhs.as_mut(), par, MemStack::new(&mut scratch));
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn solve_f64(l: MatRef<'_, f64>, rhs: &mut Mat<f64>) {
-    let n = l.nrows();
-    let par = faer_par_dims(n, 1);
-    let req = llt::solve::solve_in_place_scratch::<f64>(n, 1, par);
-    let mut scratch = MemBuffer::new(req);
-    llt::solve::solve_in_place(l, rhs.as_mut(), par, MemStack::new(&mut scratch));
 }
 
 /// Which precision a persist directory records. Absent on disk means double.
@@ -976,11 +888,12 @@ mod tests {
         }
         let lam_max = v.iter().zip(&av).map(|(vi, avi)| vi * avi).sum::<f64>();
         let mut factor = a.clone();
-        super::factor_f64(&mut factor).expect("f64 factor");
+        crate::linalg::cholesky_lower_faer_owned(&mut factor, crate::error::CholeskyStage::Predict)
+            .expect("f64 factor");
         let mut z = v.clone();
         for _ in 0..40 {
             let mut rhs = Mat::<f64>::from_fn(n, 1, |i, _| z[i]);
-            super::solve_f64(factor.as_ref(), &mut rhs);
+            crate::linalg::solve_llt_faer_owned(factor.as_ref(), rhs.as_mut());
             let mut norm = 0.0;
             for i in 0..n {
                 z[i] = rhs[(i, 0)];

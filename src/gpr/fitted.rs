@@ -13,6 +13,11 @@ use crate::kernel::{
     MixedKernelViews, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{
+    cholesky_lower, cholesky_lower_with_retries, faer_par, faer_par_dims, frobenius_lower,
+    gemv_full, gemv_sym_lower, inv_diag_from_chol_l, mul_lower_vec, solve_llt_in_place,
+    symmetrize_lower, trace_product,
+};
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
 use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute};
@@ -20,18 +25,14 @@ use crate::param::Interval;
 use crate::persist::{self, PersistedModel};
 use crate::precision::GpScalar;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::workspace::{
-    FitWorkspace, QueryWorkspace, empty_thread_scratch, faer_par, faer_par_dims,
-};
+use crate::workspace::{FitWorkspace, QueryWorkspace, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 
 use super::super::online::OnlineGpr;
 
 use super::super::factor::{
-    FactorPolicy, apply_compiled_to, cholesky_lower, cholesky_lower_with_policy,
-    factor_train_with_policy, factor_written_k_with_policy, frobenius_lower, gemv_full,
-    gemv_sym_lower, inv_diag_from_chol_l, neg_mll_from_factor, pack_points, pack_storage,
-    require_param_len, solve_llt_in_place, symmetrize_lower, trace_product, validate_query,
+    FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
+    neg_mll_from_factor, pack_points, pack_storage, require_param_len, validate_query,
     validate_training, write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
     write_kernel_hess_from_coords, write_params,
 };
@@ -1670,10 +1671,10 @@ where
         let req =
             llt::factor::cholesky_in_place_scratch::<P::Refine>(m, faer_par(m), Default::default());
         let mut scratch = MemBuffer::new(req);
-        cholesky_lower_with_policy(
+        cholesky_lower_with_retries(
             &mut a,
             &mut scratch,
-            self.jitter_policy,
+            self.jitter_policy.retry_jitters(),
             CholeskyStage::Predict,
         )?;
         let mut rng = crate::rng::small_rng(seed);
@@ -1685,7 +1686,7 @@ where
             for slot in &mut z {
                 *slot = P::Refine::from_f64(crate::rng::unit_normal(&mut rng));
             }
-            mul_lower_chol(a.as_ref(), &z, &mut lz);
+            mul_lower_vec(a.as_ref(), &z, &mut lz);
             let col = &mut out[draw * m..(draw + 1) * m];
             for i in 0..m {
                 col[i] = cov.mean[i] + lz[i];
@@ -2291,17 +2292,4 @@ fn compact_train_x(x: &Mat<f64>, n: usize, d: usize) -> Mat<f64> {
         return x.clone();
     }
     Mat::from_fn(n, d, |i, j| x[(i, j)])
-}
-
-fn mul_lower_chol<T: KernelScalar>(l: MatRef<'_, T>, z: &[T], out: &mut [T]) {
-    let m = l.nrows();
-    debug_assert_eq!(z.len(), m);
-    debug_assert_eq!(out.len(), m);
-    for i in 0..m {
-        let mut s = T::from_f64(0.0);
-        for (j, &zj) in z.iter().enumerate().take(i + 1) {
-            s += l[(i, j)] * zj;
-        }
-        out[i] = s;
-    }
 }
