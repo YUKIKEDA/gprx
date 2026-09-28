@@ -42,15 +42,15 @@ fn uses_change_indices<Obj, O: Optimizer<Obj>>(_obj: &Obj) -> bool {
 
 /// Allocates fit buffers for `n` points under `policies`.
 ///
-/// A kernel that never reads pairwise distances gets no distance cache,
-/// whatever the policy says.
+/// A kernel that reads neither pairwise distances nor the ARD `(Δx_d)²`
+/// tensor gets no distance cache, whatever the policy says.
 pub(crate) fn fit_buffers<P: GpScalar>(
     n: usize,
     d: usize,
     policies: Policies,
     compiled: &CompiledKernel<P::Storage>,
 ) -> Result<FitBuffers<P>, GprError> {
-    let cache = if compiled.reads_distances()? {
+    let cache = if compiled.reads_distances()? || compiled.needs_ard_sq_diff() {
         policies.distance_cache
     } else {
         DistanceCachePolicy::Uncached
