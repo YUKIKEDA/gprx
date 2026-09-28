@@ -10,8 +10,9 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
+use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
-use crate::linalg::{cholesky_lower_faer_owned, inf_norm, solve_llt_faer_owned, symmetrize_lower};
+use crate::linalg::{cholesky_lower_owned, inf_norm, symmetrize_lower};
 use crate::transform::TargetTransform;
 
 /// Selects storage and residual-refinement scalar types for GP computations.
@@ -90,7 +91,10 @@ impl<R: ResidualFormula> PrecisionPolicy for MixedPrecision<R> {
 }
 
 mod residual_seal {
-    pub trait Sealed {}
+    pub trait Sealed {
+        /// Whether the residual reads the `f32` training matrix.
+        const READS_STORAGE: bool;
+    }
 }
 
 /// How [`MixedPrecision`] builds `r = y − Aα`.
@@ -124,8 +128,12 @@ pub struct PromoteStorage;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReevaluateKernel;
 
-impl residual_seal::Sealed for PromoteStorage {}
-impl residual_seal::Sealed for ReevaluateKernel {}
+impl residual_seal::Sealed for PromoteStorage {
+    const READS_STORAGE: bool = true;
+}
+impl residual_seal::Sealed for ReevaluateKernel {
+    const READS_STORAGE: bool = false;
+}
 
 impl ResidualFormula for PromoteStorage {
     fn residual<M: crate::math::KernelMath>(
@@ -157,68 +165,94 @@ impl ResidualFormula for ReevaluateKernel {
     }
 }
 
-/// Solves `Aα = y` with an `f32` Cholesky factor and an `f64` residual.
+/// The training factor that fit or an online update left behind.
+#[derive(Clone, Copy)]
+pub enum StoredFactor<'a, T> {
+    /// Lower `L` of `L Lᵀ` ([`crate::FittedGpr`]).
+    Llt(MatRef<'a, T>),
+    /// Unit-lower `L` with `D` on the diagonal ([`crate::OnlineGpr`]).
+    Ldlt(MatRef<'a, T>),
+}
+
+impl<T: KernelScalar> StoredFactor<'_, T> {
+    /// Overwrites `rhs` with `(A + (σn² + j) I)⁻¹ rhs` through the stored factor.
+    fn solve_in_place(&self, rhs: MatMut<'_, T>) {
+        match *self {
+            Self::Llt(l) => T::solve_llt_owned_scratch(l, rhs),
+            Self::Ldlt(ld) => {
+                let n = rhs.nrows();
+                crate::online::OnlineWorkspace::<T>::solve_ldlt_in_place(ld, rhs, n);
+            }
+        }
+    }
+}
+
+/// The training system `A + (σn² + j) I` that the stored factor solves.
 ///
-/// `A = K + σn² I`. The residual formula is `R`. At most 10 corrections are
-/// applied. The stop test is `‖r‖∞ / (‖A‖∞ ‖α‖∞ + ‖y‖∞) < 10 n u_r` with
-/// `u_r = f64::EPSILON`. Two consecutive residual-norm ratios above `0.9`,
-/// or exhausting the 10 corrections, replaces `α` with the `f64` Cholesky
-/// solution. A failed `f32` factorization returns [`GprError::CholeskyFailed`]
-/// and does not add jitter.
+/// `j` is the jitter the last factorization added (`0` without a retry).
+pub struct TrainSystem<'a, T: KernelScalar> {
+    pub kernel: &'a KernelSpec,
+    pub compiled: &'a CompiledKernel<T>,
+    /// Transformed training inputs (`n × d`).
+    pub x: MatRef<'a, f64>,
+    /// Transformed training targets.
+    pub y: &'a [f64],
+    pub noise: f64,
+    pub jitter: f64,
+    pub factor: StoredFactor<'a, T>,
+    /// `factor⁻¹ y` in the storage scalar.
+    pub factor_alpha: &'a [T],
+    /// Retries for the `f64` fallback factor.
+    pub policy: crate::gpr::JitterPolicy,
+    /// Reported on a failed fallback factor.
+    pub stage: CholeskyStage,
+}
+
+/// Solves `(A + (σn² + j) I) α = y` from the stored `f32` factor with `f64` residuals.
+///
+/// `α₀` is the training `factor_alpha`; each correction solves through the
+/// same factor, so there is no second `f32` factorization. The residual
+/// formula is `R`. At most 10 corrections are applied. The stop test is
+/// `‖r‖∞ / (‖A‖∞ ‖α‖∞ + ‖y‖∞) < 10 n u_r` with `u_r = f64::EPSILON`. Two
+/// consecutive residual-norm ratios above `0.9`, or exhausting the 10
+/// corrections, replaces `α` with the `f64` Cholesky solution of the same
+/// system (retrying with `sys.policy`).
 ///
 /// # Errors
 ///
-/// Returns the kernel's shape errors, or [`GprError::CholeskyFailed`] when the
-/// `f32` or fallback `f64` factor is not positive definite.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Returns the kernel's shape errors, or [`GprError::CholeskyFailed`] at
+/// `sys.stage` when the fallback `f64` factor is not positive definite.
 pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
-    kernel_f32: &CompiledKernel<f32>,
+    sys: &TrainSystem<'_, f32>,
     kernel_f64: &CompiledKernel<f64>,
-    x: MatRef<'_, f64>,
-    y: &[f64],
-    noise: f64,
 ) -> Result<Vec<f64>, GprError> {
+    let x = sys.x;
+    let y = sys.y;
     let n = x.nrows();
-    if n == 0 || y.len() != n {
+    if n == 0 || y.len() != n || sys.factor_alpha.len() != n {
         return Err(GprError::EmptyInput);
     }
-    let mut x32 = Mat::<f32>::zeros(n, x.ncols());
-    for col in 0..x.ncols() {
-        for row in 0..n {
-            x32[(row, col)] = x[(row, col)] as f32;
-        }
-    }
-    let mut a = Mat::<f32>::zeros(n, n);
-    let mut scratch = Mat::<f32>::zeros(n, n);
-    kernel_f32.eval_gram::<M>(
-        GramInputs::points(x32.as_ref()),
-        a.as_mut(),
-        Triangle::Lower,
-        scratch.as_mut(),
-    )?;
-    let noise32 = noise as f32;
-    for i in 0..n {
-        a[(i, i)] += noise32;
-    }
-    symmetrize_lower(a.as_mut(), n);
-    let saved = a.clone();
-    cholesky_lower_faer_owned(&mut a, CholeskyStage::Predict)?;
-    let mut rhs = Mat::<f32>::from_fn(n, 1, |i, _| y[i] as f32);
-    solve_llt_faer_owned(a.as_ref(), rhs.as_mut());
-    let mut alpha = vec![0.0; n];
-    for i in 0..n {
-        alpha[i] = f64::from(rhs[(i, 0)]);
-    }
+    let diag = sys.noise + sys.jitter;
+    let saved = if R::READS_STORAGE {
+        storage_system::<M>(sys)?
+    } else {
+        Mat::<f32>::zeros(0, 0)
+    };
+    let mut alpha: Vec<f64> = sys.factor_alpha.iter().map(|&v| f64::from(v)).collect();
+    let mut rhs = Mat::<f32>::zeros(n, 1);
 
     let tol = 10.0 * n as f64 * f64::EPSILON;
     let mut resid = vec![0.0; n];
     let mut prev: Option<f64> = None;
     let mut streak = 0usize;
     for _ in 0..10 {
-        let a_inf = R::residual::<M>(saved.as_ref(), kernel_f64, x, noise, &alpha, y, &mut resid)?;
+        let a_inf = R::residual::<M>(saved.as_ref(), kernel_f64, x, diag, &alpha, y, &mut resid)?;
         let r_inf = inf_norm(&resid);
         let denom = a_inf * inf_norm(&alpha) + inf_norm(y);
         if denom > 0.0 && r_inf / denom < tol {
+            if R::READS_STORAGE && !meets_f64_system::<M>(kernel_f64, sys, diag, &alpha, tol)? {
+                return f64_alpha::<M>(kernel_f64, sys, diag);
+            }
             return Ok(alpha);
         }
         if let Some(prev_r) = prev {
@@ -226,7 +260,7 @@ pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
             if ratio > 0.9 {
                 streak += 1;
                 if streak >= 2 {
-                    return f64_alpha::<M>(kernel_f64, x, y, noise);
+                    return f64_alpha::<M>(kernel_f64, sys, diag);
                 }
             } else {
                 streak = 0;
@@ -236,12 +270,62 @@ pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
         for i in 0..n {
             rhs[(i, 0)] = resid[i] as f32;
         }
-        solve_llt_faer_owned(a.as_ref(), rhs.as_mut());
+        sys.factor.solve_in_place(rhs.as_mut());
         for i in 0..n {
             alpha[i] += f64::from(rhs[(i, 0)]);
         }
     }
-    f64_alpha::<M>(kernel_f64, x, y, noise)
+    f64_alpha::<M>(kernel_f64, sys, diag)
+}
+
+/// Whether `α` also meets the stop test on the `f64` system.
+///
+/// [`PromoteStorage`] converges to the solution of the rounded `f32` system.
+/// When `κ(A) u_f32` is large that solution is far from the `f64` one, so the
+/// converged `α` is checked once against `K_f64 + diag · I` before it is kept.
+fn meets_f64_system<M: crate::math::KernelMath>(
+    kernel_f64: &CompiledKernel<f64>,
+    sys: &TrainSystem<'_, f32>,
+    diag: f64,
+    alpha: &[f64],
+    tol: f64,
+) -> Result<bool, GprError> {
+    let mut resid = vec![0.0; alpha.len()];
+    let a_inf = fresh_residual::<M>(kernel_f64, sys.x, diag, alpha, sys.y, &mut resid)?;
+    let denom = a_inf * inf_norm(alpha) + inf_norm(sys.y);
+    Ok(denom > 0.0 && inf_norm(&resid) / denom < tol)
+}
+
+/// The `f32` training matrix `A + σn² I + j I`, full, as fit assembled it.
+fn storage_system<M: crate::math::KernelMath>(
+    sys: &TrainSystem<'_, f32>,
+) -> Result<Mat<f32>, GprError> {
+    let x = sys.x;
+    let n = x.nrows();
+    let mut x32 = Mat::<f32>::zeros(n, x.ncols());
+    for col in 0..x.ncols() {
+        for row in 0..n {
+            x32[(row, col)] = x[(row, col)] as f32;
+        }
+    }
+    let mut a = Mat::<f32>::zeros(n, n);
+    let mut scratch = Mat::<f32>::zeros(n, n);
+    sys.compiled.eval_gram::<M>(
+        GramInputs::points(x32.as_ref()),
+        a.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+    )?;
+    let noise32 = sys.noise as f32;
+    let jitter32 = sys.jitter as f32;
+    for i in 0..n {
+        a[(i, i)] += noise32;
+        if sys.jitter != 0.0 {
+            a[(i, i)] += jitter32;
+        }
+    }
+    symmetrize_lower(a.as_mut(), n);
+    Ok(a)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -262,49 +346,70 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
     a_inf
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// `r = y − (K + diag · I) α` with `K` evaluated in `f64`, [`MEAN_BLOCK`]
+/// training columns at a time, so no `n×n` `f64` matrix is held. Returns
+/// `‖K + diag · I‖∞`.
 fn fresh_residual<M: crate::math::KernelMath>(
     kernel: &CompiledKernel<f64>,
     x: MatRef<'_, f64>,
-    noise: f64,
+    diag: f64,
     alpha: &[f64],
     y: &[f64],
     r: &mut [f64],
 ) -> Result<f64, GprError> {
     let n = y.len();
-    let mut k = Mat::<f64>::zeros(n, n);
-    let mut scratch = Mat::<f64>::zeros(n, n);
-    kernel.eval_gram::<M>(
-        GramInputs::points(x),
-        k.as_mut(),
-        Triangle::Lower,
-        scratch.as_mut(),
-    )?;
-    for i in 0..n {
-        k[(i, i)] += noise;
-    }
-    let mut a_inf = 0.0f64;
-    for i in 0..n {
-        let mut row = 0.0;
-        let mut sum = 0.0;
-        for j in 0..n {
-            let kij = if i >= j { k[(i, j)] } else { k[(j, i)] };
-            row += kij.abs();
-            sum += kij * alpha[j];
+    let d = x.ncols();
+    let block = MEAN_BLOCK.min(n.max(1));
+    let mut rows = Mat::<f64>::zeros(block, d);
+    let mut k_block = Mat::<f64>::zeros(n, block);
+    let mut scratch = Mat::<f64>::zeros(n, block);
+    let mut dist = Mat::<f64>::zeros(n, block);
+    let mut row_abs = vec![0.0f64; n];
+    let mut sum = vec![0.0f64; n];
+    let mut start = 0;
+    while start < n {
+        let len = block.min(n - start);
+        for dim in 0..d {
+            for jj in 0..len {
+                rows[(jj, dim)] = x[(start + jj, dim)];
+            }
         }
-        a_inf = a_inf.max(row);
-        r[i] = y[i] - sum;
+        kernel.eval_cross::<M>(
+            x,
+            rows.as_ref().submatrix(0, 0, len, d),
+            Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
+            k_block.as_mut().submatrix_mut(0, 0, n, len),
+            scratch.as_mut().submatrix_mut(0, 0, n, len),
+            &mut [],
+        )?;
+        for jj in 0..len {
+            let j = start + jj;
+            let aj = alpha[j];
+            for i in 0..n {
+                let mut kij = k_block[(i, jj)];
+                if i == j {
+                    kij += diag;
+                }
+                row_abs[i] += kij.abs();
+                sum[i] += kij * aj;
+            }
+        }
+        start += len;
     }
-    Ok(a_inf)
+    for i in 0..n {
+        r[i] = y[i] - sum[i];
+    }
+    Ok(row_abs.iter().fold(0.0f64, |acc, &v| acc.max(v)))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// `f64` Cholesky solution of `(A + diag · I) α = y`, retrying with `sys.policy`.
 fn f64_alpha<M: crate::math::KernelMath>(
     kernel: &CompiledKernel<f64>,
-    x: MatRef<'_, f64>,
-    y: &[f64],
-    noise: f64,
+    sys: &TrainSystem<'_, f32>,
+    diag: f64,
 ) -> Result<Vec<f64>, GprError> {
+    let x = sys.x;
+    let y = sys.y;
     let n = y.len();
     let mut a = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
@@ -315,11 +420,11 @@ fn f64_alpha<M: crate::math::KernelMath>(
         scratch.as_mut(),
     )?;
     for i in 0..n {
-        a[(i, i)] += noise;
+        a[(i, i)] += diag;
     }
-    cholesky_lower_faer_owned(&mut a, CholeskyStage::Predict)?;
+    cholesky_lower_owned(&mut a, sys.policy.retry_jitters(), sys.stage)?;
     let mut rhs = Mat::<f64>::from_fn(n, 1, |i, _| y[i]);
-    solve_llt_faer_owned(a.as_ref(), rhs.as_mut());
+    f64::solve_llt_owned_scratch(a.as_ref(), rhs.as_mut());
     Ok((0..n).map(|i| rhs[(i, 0)]).collect())
 }
 
@@ -385,15 +490,10 @@ where
 pub trait PublishPredictAlpha: ModelPrecision {
     /// Stores predict weights in `alpha`.
     ///
-    /// [`DoublePrecision`] and [`SinglePrecision`] copy `factor_alpha`.
-    /// [`MixedPrecision`] calls [`refine`].
+    /// [`DoublePrecision`] and [`SinglePrecision`] copy `sys.factor_alpha`.
+    /// [`MixedPrecision`] calls [`refine`] on the stored factor.
     fn publish_predict_alpha<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        compiled: &CompiledKernel<Self::Storage>,
-        x: MatRef<'_, f64>,
-        y: &[f64],
-        noise: f64,
-        factor_alpha: &[Self::Storage],
+        sys: &TrainSystem<'_, Self::Storage>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError>;
 }
@@ -412,32 +512,20 @@ fn copy_factor_to_refine<P: ModelPrecision>(
 
 impl PublishPredictAlpha for DoublePrecision {
     fn publish_predict_alpha<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        compiled: &CompiledKernel<Self::Storage>,
-        x: MatRef<'_, f64>,
-        y: &[f64],
-        noise: f64,
-        factor_alpha: &[Self::Storage],
+        sys: &TrainSystem<'_, Self::Storage>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError> {
-        let _ = (kernel, compiled, x, y, noise);
-        copy_factor_to_refine::<Self>(factor_alpha, alpha);
+        copy_factor_to_refine::<Self>(sys.factor_alpha, alpha);
         Ok(())
     }
 }
 
 impl PublishPredictAlpha for SinglePrecision {
     fn publish_predict_alpha<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        compiled: &CompiledKernel<Self::Storage>,
-        x: MatRef<'_, f64>,
-        y: &[f64],
-        noise: f64,
-        factor_alpha: &[Self::Storage],
+        sys: &TrainSystem<'_, Self::Storage>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError> {
-        let _ = (kernel, compiled, x, y, noise);
-        copy_factor_to_refine::<Self>(factor_alpha, alpha);
+        copy_factor_to_refine::<Self>(sys.factor_alpha, alpha);
         Ok(())
     }
 }
@@ -447,17 +535,11 @@ where
     R: ResidualTag + Copy + Send + Sync + 'static,
 {
     fn publish_predict_alpha<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        compiled: &CompiledKernel<Self::Storage>,
-        x: MatRef<'_, f64>,
-        y: &[f64],
-        noise: f64,
-        factor_alpha: &[Self::Storage],
+        sys: &TrainSystem<'_, Self::Storage>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError> {
-        let _ = factor_alpha;
-        let kernel_f64 = kernel.compile();
-        *alpha = refine::<M, R>(compiled, &kernel_f64, x, y, noise)?;
+        let kernel_f64 = sys.kernel.compile();
+        *alpha = refine::<M, R>(sys, &kernel_f64)?;
         Ok(())
     }
 }
@@ -838,7 +920,12 @@ mod tests {
         assert_send_sync::<super::MixedPrecision<super::ReevaluateKernel>>();
     }
 
-    use super::{PromoteStorage, ReevaluateKernel, ResidualFormula, f64_alpha, refine};
+    use super::{
+        PromoteStorage, ReevaluateKernel, ResidualFormula, StoredFactor, TrainSystem, f64_alpha,
+        refine,
+    };
+    use crate::error::CholeskyStage;
+    use crate::kernel::ScalarOps;
     use crate::kernel::{KernelSpec, RbfKernel, Triangle};
     use faer::{Mat, MatRef};
     use std::time::Instant;
@@ -872,10 +959,60 @@ mod tests {
         num / den
     }
 
+    /// Factors `A + σn² I` in `f32` the way fit does, then refines on that
+    /// factor. Returns the refined `α` and the `f64` Cholesky `α`.
+    fn refine_fresh<R: ResidualFormula>(
+        ell: f64,
+        noise: f64,
+        x: MatRef<'_, f64>,
+        y: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let spec = KernelSpec::from(RbfKernel::new(ell).expect("lengthscale"));
+        let (k32, k64) = (spec.compile_as::<f32>(), spec.compile());
+        let n = x.nrows();
+        let x32 = Mat::<f32>::from_fn(n, x.ncols(), |i, j| x[(i, j)] as f32);
+        let mut l = Mat::<f32>::zeros(n, n);
+        let mut scratch = Mat::<f32>::zeros(n, n);
+        k32.apply_points::<crate::math::Accurate>(
+            x32.as_ref(),
+            l.as_mut(),
+            Triangle::Lower,
+            scratch.as_mut(),
+        )
+        .expect("gram");
+        for i in 0..n {
+            l[(i, i)] += noise as f32;
+        }
+        let req = faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<f32>(
+            n,
+            faer::Par::Seq,
+            Default::default(),
+        );
+        let mut buf = dyn_stack::MemBuffer::new(req);
+        <f32 as ScalarOps>::cholesky_lower(&mut l, &mut buf, 0.0, CholeskyStage::Fit)
+            .expect("f32 factor");
+        let mut rhs = Mat::<f32>::from_fn(n, 1, |i, _| y[i] as f32);
+        f32::solve_llt_owned_scratch(l.as_ref(), rhs.as_mut());
+        let factor_alpha: Vec<f32> = (0..n).map(|i| rhs[(i, 0)]).collect();
+        let sys = TrainSystem {
+            kernel: &spec,
+            compiled: &k32,
+            x,
+            y,
+            noise,
+            jitter: 0.0,
+            factor: StoredFactor::Llt(l.as_ref()),
+            factor_alpha: &factor_alpha,
+            policy: crate::gpr::JitterPolicy::default(),
+            stage: CholeskyStage::Fit,
+        };
+        let alpha = refine::<crate::math::Accurate, R>(&sys, &k64).expect("refine");
+        let truth = f64_alpha::<crate::math::Accurate>(&k64, &sys, noise).expect("f64");
+        (alpha, truth)
+    }
+
     fn digits<R: ResidualFormula>(ell: f64, noise: f64, x: MatRef<'_, f64>, y: &[f64]) {
-        let (k32, k64) = rbf(ell);
-        let alpha = refine::<crate::math::Accurate, R>(&k32, &k64, x, y, noise).expect("refine");
-        let truth = f64_alpha::<crate::math::Accurate>(&k64, x, y, noise).expect("f64");
+        let (alpha, truth) = refine_fresh::<R>(ell, noise, x, y);
         let rel = rel_inf(&alpha, &truth);
         let bar = 10.0 * y.len() as f64 * f64::from(f32::EPSILON);
         assert!(rel < bar, "relative {rel} bar {bar}");
@@ -917,7 +1054,7 @@ mod tests {
         }
         let lam_max = v.iter().zip(&av).map(|(vi, avi)| vi * avi).sum::<f64>();
         let mut factor = a.clone();
-        crate::linalg::cholesky_lower_faer_owned(&mut factor, crate::error::CholeskyStage::Predict)
+        crate::linalg::cholesky_lower_owned(&mut factor, [], crate::error::CholeskyStage::Predict)
             .expect("f64 factor");
         let mut z = v.clone();
         for _ in 0..40 {
@@ -967,7 +1104,6 @@ mod tests {
     #[ignore]
     fn time_forrester_1024() {
         let (x, y) = forrester(1024);
-        let (k32, k64) = rbf(1.0);
         let median = |tag: &str, run: &dyn Fn()| {
             run();
             let mut samples = [0.0; 11];
@@ -980,12 +1116,10 @@ mod tests {
             println!("{tag} {:.4} ms", samples[5]);
         };
         median("promote", &|| {
-            refine::<crate::math::Accurate, PromoteStorage>(&k32, &k64, x.as_ref(), &y, 0.1)
-                .expect("promote");
+            refine_fresh::<PromoteStorage>(1.0, 0.1, x.as_ref(), &y);
         });
         median("reevaluate", &|| {
-            refine::<crate::math::Accurate, ReevaluateKernel>(&k32, &k64, x.as_ref(), &y, 0.1)
-                .expect("reevaluate");
+            refine_fresh::<ReevaluateKernel>(1.0, 0.1, x.as_ref(), &y);
         });
     }
 
@@ -1050,6 +1184,80 @@ mod tests {
 
     fn queries() -> [f64; 2] {
         [0.25, 0.75]
+    }
+
+    /// 32 near-duplicate pairs: the `f32` factor of `K + σn² I` needs a jitter retry.
+    fn jitter_problem() -> (Vec<f64>, Vec<f64>) {
+        let mut x = Vec::new();
+        for i in 0..32 {
+            let t = f64::from(i) * 0.25;
+            x.push(t);
+            x.push(t + 1e-4);
+        }
+        let y = x.iter().map(|t| (1.7 * t).sin()).collect();
+        (x, y)
+    }
+
+    fn jitter_fit<R>(
+        x: &[f64],
+        y: &[f64],
+        noise: f64,
+    ) -> crate::FittedGpr<
+        Fixed,
+        crate::FullRecompute,
+        crate::CachedDistances,
+        crate::RetainCholesky,
+        crate::Accurate,
+        MixedPrecision<R>,
+    >
+    where
+        MixedPrecision<R>: crate::precision::GpScalar,
+        R: ResidualFormula,
+    {
+        let kernel = KernelSpec::from(must(RbfKernel::new(1.0)));
+        let policy = must(crate::JitterPolicy::adaptive(1e-6, 10.0, 8, 1e-1));
+        must(
+            Gpr::new(kernel, likelihood_at(noise))
+                .with_optimizer(Fixed)
+                .with_jitter_policy(policy)
+                .with_precision::<MixedPrecision<R>>()
+                .factor(x, y.len(), 1, y)
+                .map_err(|(_, err)| err),
+        )
+    }
+
+    /// R3-2 (#237): refinement solves the jittered system fit factored, with
+    /// that factor, so fit and predict succeed and match `f64` on `A + (σn² + j) I`.
+    #[test]
+    fn mixed_refines_on_the_fit_factor_and_jitter() {
+        let (x, y) = jitter_problem();
+        let n = y.len();
+        let noise = 1e-8;
+        let q = [0.3, 2.0, 5.1];
+        let check = |mean: &[f64], jitter: f64| {
+            assert!(jitter > 0.0, "the f32 factor should need a jitter retry");
+            let truth = factor_exact_noise(&x, &y, noise + jitter);
+            let expect = must(truth.predict(&q, q.len(), 1));
+            for (got, want) in mean.iter().zip(&expect.mean) {
+                assert_near(*got, *want, n);
+            }
+        };
+        let promote = jitter_fit::<PromoteStorage>(&x, &y, noise);
+        let p = must(promote.predict(&q, q.len(), 1));
+        check(&p.mean, promote.factor_jitter());
+        let fresh = jitter_fit::<ReevaluateKernel>(&x, &y, noise);
+        let r = must(fresh.predict(&q, q.len(), 1));
+        check(&r.mean, fresh.factor_jitter());
+    }
+
+    fn factor_exact_noise(x: &[f64], y: &[f64], noise: f64) -> crate::FittedGpr<Fixed> {
+        let kernel = KernelSpec::from(must(RbfKernel::new(1.0)));
+        must(
+            Gpr::new(kernel, likelihood_at(noise))
+                .with_optimizer(Fixed)
+                .factor(x, y.len(), 1, y)
+                .map_err(|(_, err)| err),
+        )
     }
 
     fn factor_exact<P>(

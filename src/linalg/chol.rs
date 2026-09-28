@@ -11,7 +11,8 @@ use crate::kernel::KernelScalar;
 use super::dense::add_to_diag;
 use super::par::{faer_par, faer_par_dims};
 
-/// Tries `attempt(0)`, then `attempt(j)` for each retry offset `j`.
+/// Tries `attempt(0)`, then `attempt(j)` for each retry offset `j`, and
+/// returns the `j` that succeeded.
 ///
 /// `attempt(j)` factors `A + j I`. Only [`GprError::CholeskyFailed`] moves to
 /// the next offset; any other error returns at once. After the last offset,
@@ -21,17 +22,17 @@ pub(crate) fn retry_with_jitter(
     matrix_size: usize,
     stage: CholeskyStage,
     mut attempt: impl FnMut(f64) -> Result<(), GprError>,
-) -> Result<(), GprError> {
+) -> Result<f64, GprError> {
     match attempt(0.0) {
         Err(GprError::CholeskyFailed { .. }) => {}
-        other => return other,
+        other => return other.map(|()| 0.0),
     }
     let mut last_j = 0.0;
     for j in retries {
         last_j = j;
         match attempt(j) {
             Err(GprError::CholeskyFailed { .. }) => {}
-            other => return other,
+            other => return other.map(|()| j),
         }
     }
     Err(GprError::CholeskyFailed {
@@ -60,6 +61,7 @@ pub(crate) fn cholesky_lower_with_retries<T: KernelScalar>(
         }
         cholesky_lower(a, scratch, 0.0, stage)
     })
+    .map(|_| ())
 }
 
 /// [`cholesky_lower_with_retries`] with a scratch buffer sized for this call.
@@ -102,17 +104,6 @@ pub(crate) fn cholesky_lower_faer<T: KernelScalar>(
             stage,
         }),
     }
-}
-
-/// [`cholesky_lower_faer`] with no jitter and a scratch buffer sized for this call.
-pub(crate) fn cholesky_lower_faer_owned<T: KernelScalar>(
-    a: &mut Mat<T>,
-    stage: CholeskyStage,
-) -> Result<(), GprError> {
-    let n = a.nrows();
-    let req = llt::factor::cholesky_in_place_scratch::<T>(n, faer_par(n), Default::default());
-    let mut scratch = MemBuffer::new(req);
-    cholesky_lower_faer(a, &mut scratch, 0.0, stage)
 }
 
 /// Overwrites `rhs` with `(L Lᵀ)⁻¹ rhs` through faer, for any scalar, with a
