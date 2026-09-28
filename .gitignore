@@ -1,4 +1,5 @@
 /target
+.dev/
 **/*.rs.bk
 .idea/
 .vscode/

@@ -35,8 +35,9 @@ benches/exact.rs           criterion
 compare/                   sklearn and GPyTorch generation. perf/ is manual wall time and RSS
 examples/fit_predict.rs
 docs/                      design, roadmap, this file, adr/
-.dev/                      bench-log.md, reviews/, issue-seed.json. Decisions do not stay here
 ```
+
+`.dev/` is local scratch (measurement logs, reviews, drafts). It is not committed. Decisions do not stay there.
 
 `Workspace`, `QueryWorkspace`, `OnlineWorkspace`, and faer types are crate-private.
 

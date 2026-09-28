@@ -1,8 +1,6 @@
 # Developing gprx
 
-Procedure for humans. Agent entry: [AGENTS.md](AGENTS.md). Enforcement: `.cursor/rules/`. Design: [docs/design.md](docs/design.md). Order and status: [docs/roadmap.md](docs/roadmap.md). Directories: [docs/conventions.md](docs/conventions.md).
-
-`.dev/` holds measurement logs, reviews, and drafts only. Decisions do not stay there.
+Procedure for humans. Agent entry: [AGENTS.md](AGENTS.md). Enforcement: `.cursor/rules/`. Design: [docs/design.md](docs/design.md). Order and status: [docs/roadmap.md](docs/roadmap.md). Directories: [docs/conventions.md](docs/conventions.md). `.dev/` is local scratch and is not committed.
 
 ## Order
 

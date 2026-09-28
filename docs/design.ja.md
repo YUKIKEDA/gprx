@@ -890,7 +890,7 @@ impl OnlineGpr<O, S, C, B> {
 - 等方: 1 次元 Forrester `f(x)=(6x-2)² sin(12x-4)`、`x ∈ [0, 1]`、RBF + `GaussianLikelihood` + `StandardizeTarget`。初期ハイパラ `ℓ = 1`、`σn² = 0.1`
 - ARD: 2 次元重み付き球 `f=(x/0.25)²+(y/1)²`、`[0, 1]²` の 16×16 格子。初期 `ℓ_d = 4`（`ℓ_d = 1` では線探索が初手で止まる）
 - `y` は上記の関数 + `N(0, 1)`（`SmallRng`。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は Never で尾根を歩く）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
-- 歴史的な `phase-1a` / `phase-1b` ログの一部は `d = 8` と独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9（`.dev/bench-log.md`）。d = 8 の時間とは混ぜない
+- 歴史的な `phase-1a` / `phase-1b` ログの一部は `d = 8` と独立乱数 `y`。Forrester 上の `phase-1b` 再測は P2-9（`.dev/bench-log.md`（ローカル。コミットしない））。d = 8 の時間とは混ぜない
 - グループ（存在する経路だけ。無いものはまだ書かない）:
   1. `kernel_rbf` — K の下三角構築
   2. `cholesky_alpha` — `A` の LLT と `α`
@@ -908,10 +908,10 @@ impl OnlineGpr<O, S, C, B> {
 | M0 | 箱だけ。空の `benches/` は置かない |
 | P1A-7 の直後（P1A-18） | criterion と `just bench`。`kernel_rbf` と `cholesky_alpha` |
 | P1A-8 / P1A-10 | 同じファイルに `predict_100` / `mll_and_grad` を足す。P1A-19 で確保 ratchet |
-| 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md` に残す |
+| 1a 完了 | 名前付き baseline `phase-1a` を取り、機械名と数値を `.dev/bench-log.md`（ローカル。コミットしない） に残す |
 | 1b 完了 | `fit_lbfgs` を足し、baseline `phase-1b` |
 | Phase 2 | **新しいハーネスは不要。** `phase-1b` を見てボトルネック順に最適化する。P2-5: 等方 RBF と距離に SIMD。可否は `kernel_rbf` / `predict` / `FIXED` で判断し、`mll_and_grad` の勾配項だけを分母にしない。NLML 定数項は P2-6 で測り、差はノイズなので `L(θ)` は一本のまま。ARD 距離キャッシュは P2-7 で `mll_and_grad_ard` / `fit_lbfgs_ard` の Always vs Never。埋めと RBF ARD は Rayon + SIMD |
-| 2 完了（P2-9） | 名前付き baseline `phase-2` を取り、機械名と数値を `.dev/bench-log.md` に残す。等方は `phase-1b` と比較。ARD は Always vs Never。`FittedGpr` 経路で `just test` と alloc 0 |
+| 2 完了（P2-9） | 名前付き baseline `phase-2` を取り、機械名と数値を `.dev/bench-log.md`（ローカル。コミットしない） に残す。等方は `phase-1b` と比較。ARD は Always vs Never。`FittedGpr` 経路で `just test` と alloc 0 |
 | Phase 3+ | insert/delete などを同じ問題定義で足す。比較の基準は `phase-2`。Sparse の壁時計・RSS は `just perf-sparse`（P4-12）。オンライン時間は `just perf-sparse-online`（P4-14）。criterion に Sparse グループは足さない |
 
 ホットパス（`src/kernel/`、`workspace`、`exact`、`objective`、`online`）の PR は、Verification に前回 baseline との criterion 結果を貼る。速さと無関係ならその理由を書く。

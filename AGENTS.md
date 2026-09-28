@@ -8,9 +8,6 @@ Entry point for agents. Procedure: [CONTRIBUTING.md](CONTRIBUTING.md). Enforceme
 | Order and status | [docs/roadmap.md](docs/roadmap.md) |
 | Directories | [docs/conventions.md](docs/conventions.md) |
 | Why a decision was made | [docs/adr/](docs/adr/) |
-| Measurements | [.dev/bench-log.md](.dev/bench-log.md) |
-
-`.dev/` holds measurement logs, reviews, and drafts only. Decisions do not stay there.
 
 ## Required rules
 

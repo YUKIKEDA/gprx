@@ -1,6 +1,6 @@
 # gprx implementation roadmap
 
-Procedure: [CONTRIBUTING.md](../CONTRIBUTING.md). Design: [design.md](design.md). Measurements: [.dev/bench-log.md](../.dev/bench-log.md).
+Procedure: [CONTRIBUTING.md](../CONTRIBUTING.md). Design: [design.md](design.md).
 
 Acceptance text stays on each Issue. This file keeps ID, title, Issue, and status.
 
