@@ -144,23 +144,18 @@ Implementation priority: the omitted precision is `DoublePrecision` (Storage = f
 
 From classical iterative refinement (Higham), with factorization precision u_f (f32 ≈ 1.19×10⁻⁷) and refinement precision u_r (f64 ≈ 2.22×10⁻¹⁶), the rate depends on κ(A)·u_f. **The actual stopping test uses the measured residual, not the theoretical value.**
 
-```rust
-struct RefinementConfig {
-    max_iterations: usize,   // default 10
-    relative_tolerance: f64, // default: 10.0 × n × u_r. The test is the measured residual norm
-    stagnation_ratio: f64,   // default 0.9
-    fallback: RefinementFallback,
-}
+The parameters are fixed crate constants in `src/precision/refine.rs`, not a public configuration:
 
-enum RefinementFallback {
-    FallbackToDoublePrecision, // first choice. A failed IR is treated as an accuracy problem
-    ReturnError,
-}
-```
+| Parameter | Value |
+| --- | --- |
+| Most corrections | 10 |
+| Relative tolerance | `10 · dim · u_r` (`u_r = f64::EPSILON`), on the measured residual |
+| Stagnation | two consecutive residual-norm ratios above `0.9` |
+| Not converged | the `f64` solution of the same system (never an error) |
 
-Stopping test: `||r_k||∞ / (||A||∞ ||alpha_k||∞ + ||y||∞) < relative_tolerance`. Two consecutive failures of `stagnation_ratio` are `RefinementNotConverged` (§10).
+Stopping test: `||r_k||∞ / (||B||∞ ||w_k||∞ + ||b||∞) < 10 · dim · u_r`. One loop (`refine` over a `RefineSystem`) serves Exact `α`, Sgpr weights, and the Svgp triangular solve; each system supplies its residual, the solve through its stored factor, and its `f64` fallback (R3-3, [#238](https://github.com/YUKIKEDA/gprx/issues/238)). Refinement never returns a convergence error: the fallback is always the `f64` solve.
 
-**Do not raise jitter when IR fails to converge.** Raising only the factorization jitter widens the gap between the preconditioner `LLᵀ` and the target `A`, and IR can diverge. The first choice on a failed IR is `FallbackToDoublePrecision`. Adaptive jitter stays reserved for Cholesky failure, as in §4.0.
+**Do not raise jitter when IR fails to converge.** Raising only the factorization jitter widens the gap between the preconditioner `LLᵀ` and the target `A`, and IR can diverge. A failed IR falls back to the `f64` solution. Adaptive jitter stays reserved for Cholesky failure, as in §4.0.
 
 **Standing**: the theory holds, and checking the parameters on a real workload is still open (§14).
 
@@ -596,7 +591,6 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     kernel_scratch: Mat<P::Storage>, // product ∂K/∂θ. Empty for isotropic RBF
     thread_scratch: Vec<Mat<P::Storage>>, // split ahead of time, one per Rayon thread
     rhs: Mat<P::Storage>,            // n×1, training Cholesky right-hand side y → α
-    refine_buf: Option<Mat<P::Refine>>, // only for MixedPrecision. None for DoublePrecision
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
 }
 
@@ -720,8 +714,6 @@ pub enum GprError {
     CholeskyFailed { jitter: f64, matrix_size: usize, stage: CholeskyStage },
     #[error("matrix is not positive semidefinite")]
     NonPositiveDefiniteMatrix,
-    #[error("mixed-precision iterative refinement did not converge (after {iterations} iterations, residual norm={residual_norm})")]
-    RefinementNotConverged { iterations: usize, residual_norm: f64 },
     #[error("this kernel term does not implement the Sparse GPR coordinate derivative (grad_wrt_coord_dim)")]
     CoordGradientUnsupported,
     #[error("optimization did not converge (after {iterations} iterations)")]
