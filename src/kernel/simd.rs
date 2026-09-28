@@ -8,13 +8,15 @@
 use super::dist::{col_chunk, worker_count};
 use super::{Triangle, finite_dist, require_same_shape, require_square_pair};
 use crate::error::GprError;
-use crate::math::KernelMath;
+use crate::math::{FastApprox, KernelMath, f64x4_all_finite};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 use rayon::prelude::*;
 use wide::f64x4;
 
 const LANES: usize = 4;
+
+const _: () = assert!(std::mem::size_of::<f64x4>() == 32);
 
 fn load4(src: &[f64], i: usize) -> f64x4 {
     f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
@@ -66,7 +68,40 @@ pub(crate) fn add_squared_diff(x: &[f64], x0: f64, acc: &mut [f64]) {
     }
 }
 
+fn load4_raw(src: &[f64], i: usize) -> f64x4 {
+    let mut v = f64x4::ZERO;
+    // SAFETY: caller keeps `i + 4 <= src.len()`. `f64x4` is four contiguous lanes;
+    // the source is only required to be 8-byte aligned.
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr().add(i), (&mut v as *mut f64x4).cast::<f64>(), 4);
+    }
+    v
+}
+
+fn store4_raw(dest: &mut [f64], i: usize, v: f64x4) {
+    // SAFETY: caller keeps `i + 4 <= dest.len()`. `f64x4` is four contiguous lanes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (&v as *const f64x4).cast::<f64>(),
+            dest.as_mut_ptr().add(i),
+            4,
+        );
+    }
+}
+
 fn rbf_exp_slice<M: KernelMath>(
+    dist: &[f64],
+    out: &mut [f64],
+    inv_two_ell_sq: f64,
+) -> Result<(), GprError> {
+    if M::ACCURATE {
+        rbf_exp_slice_lanes::<M>(dist, out, inv_two_ell_sq)
+    } else {
+        rbf_exp_slice_fast(dist, out, inv_two_ell_sq)
+    }
+}
+
+fn rbf_exp_slice_lanes<M: KernelMath>(
     dist: &[f64],
     out: &mut [f64],
     inv_two_ell_sq: f64,
@@ -90,7 +125,40 @@ fn rbf_exp_slice<M: KernelMath>(
     Ok(())
 }
 
+fn rbf_exp_slice_fast(dist: &[f64], out: &mut [f64], inv_two_ell_sq: f64) -> Result<(), GprError> {
+    debug_assert_eq!(dist.len(), out.len());
+    let scale = f64x4::splat(-inv_two_ell_sq);
+    let mut i = 0;
+    while i + LANES <= dist.len() {
+        let d = load4_raw(dist, i);
+        if !f64x4_all_finite(d) {
+            return Err(GprError::NonFiniteInput);
+        }
+        store4_raw(out, i, FastApprox::exp_f64x4(d * scale));
+        i += LANES;
+    }
+    while i < dist.len() {
+        let d = finite_dist(dist[i])?;
+        out[i] = FastApprox::exp_f64(-d * inv_two_ell_sq);
+        i += 1;
+    }
+    Ok(())
+}
+
 fn rbf_grad_slice<M: KernelMath>(
+    dist: &[f64],
+    out: &mut [f64],
+    inv_two_ell_sq: f64,
+    inv_ell_sq: f64,
+) -> Result<(), GprError> {
+    if M::ACCURATE {
+        rbf_grad_slice_lanes::<M>(dist, out, inv_two_ell_sq, inv_ell_sq)
+    } else {
+        rbf_grad_slice_fast(dist, out, inv_two_ell_sq, inv_ell_sq)
+    }
+}
+
+fn rbf_grad_slice_lanes<M: KernelMath>(
     dist: &[f64],
     out: &mut [f64],
     inv_two_ell_sq: f64,
@@ -112,6 +180,34 @@ fn rbf_grad_slice<M: KernelMath>(
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
         let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+        out[i] = dk * d * inv_ell_sq;
+        i += 1;
+    }
+    Ok(())
+}
+
+fn rbf_grad_slice_fast(
+    dist: &[f64],
+    out: &mut [f64],
+    inv_two_ell_sq: f64,
+    inv_ell_sq: f64,
+) -> Result<(), GprError> {
+    debug_assert_eq!(dist.len(), out.len());
+    let scale = f64x4::splat(-inv_two_ell_sq);
+    let inv = f64x4::splat(inv_ell_sq);
+    let mut i = 0;
+    while i + LANES <= dist.len() {
+        let d = load4_raw(dist, i);
+        if !f64x4_all_finite(d) {
+            return Err(GprError::NonFiniteInput);
+        }
+        let dk = FastApprox::d1_f64x4(d * scale);
+        store4_raw(out, i, dk * d * inv);
+        i += LANES;
+    }
+    while i < dist.len() {
+        let d = finite_dist(dist[i])?;
+        let dk = FastApprox::jet_f64(-d * inv_two_ell_sq).d1;
         out[i] = dk * d * inv_ell_sq;
         i += 1;
     }
@@ -955,7 +1051,7 @@ pub(crate) fn try_grad_rbf_ard_points<M: KernelMath>(
 mod tests {
     use super::{add_squared_diff, add_squared_diff_scaled, rbf_exp_slice, rbf_grad_slice};
     use crate::error::GprError;
-    use crate::math::Accurate;
+    use crate::math::{Accurate, FastApprox, KernelMath};
 
     const TOL: f64 = 1e-12;
 
@@ -1029,5 +1125,25 @@ mod tests {
             rbf_exp_slice::<Accurate>(&dist, &mut out, 0.5),
             Err(GprError::NonFiniteInput)
         ));
+        assert!(matches!(
+            rbf_exp_slice::<FastApprox>(&dist, &mut out, 0.5),
+            Err(GprError::NonFiniteInput)
+        ));
+    }
+
+    #[test]
+    fn rbf_fast_slice_matches_scalar_polynomial() {
+        let dist: Vec<f64> = (0..11).map(|i| (i as f64) * 0.35).collect();
+        let inv_two = 0.5;
+        let inv_ell = 1.0;
+        let mut value = vec![0.0; dist.len()];
+        let mut grad = vec![0.0; dist.len()];
+        rbf_exp_slice::<FastApprox>(&dist, &mut value, inv_two).expect("finite");
+        rbf_grad_slice::<FastApprox>(&dist, &mut grad, inv_two, inv_ell).expect("finite");
+        for (i, &d) in dist.iter().enumerate() {
+            let jet = FastApprox::jet_f64(-d * inv_two);
+            assert_eq!(value[i].to_bits(), jet.v.to_bits());
+            assert_eq!(grad[i].to_bits(), (jet.d1 * d * inv_ell).to_bits());
+        }
     }
 }

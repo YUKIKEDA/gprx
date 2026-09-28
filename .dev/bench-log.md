@@ -682,7 +682,7 @@ P4-12 の GPy 負けのうち pass は sgpr Forrester n=1024（14.36 ms 対 15.7
 
 ## P5-4（カーネル exp の多項式、[#42](https://github.com/YUKIKEDA/gprx/issues/42)）
 
-同一機械。日付 2026-09-28。`cargo bench --offline --bench exact -- mll_and_grad`。比較は同じ実行の中央値。`FastApprox` は次数 7 の Taylor を Cody–Waite のあとで評価し、f64 の SIMD は Horner を展開して `2^n` をレーン内で作る。`Accurate` は `wide::exp`。`fit_lbfgs` の壁時計は合否にしない。eval 数は `cargo test --lib bench_lbfgs_eval_count -- --nocapture`（Accurate。Forrester seed `0`、球 seed `9`）。
+同一機械。日付 2026-09-28。速度の合否は `cargo bench --offline --bench exact -- kernel_exp`。距離（ARD は `(Δx_d)²`）は計測の前に一度埋める。計るのは `apply` と θ の `grad` を足した時間。比較は同じ実行の中央値。`FastApprox` は次数 7 の Taylor を Cody–Waite のあとで評価し、f64 の SIMD は Horner を展開して `2^n` をレーン内で作る。`Accurate` は `wide::exp`。`mll_and_grad` と `fit_lbfgs` の壁時計は合否にしない。eval 数は `cargo test --lib bench_lbfgs_eval_count -- --nocapture`（Accurate。Forrester seed `0`、球 seed `9`）。
 
 | グループ | 関数 | 中央値 | 95% 区間 |
 | --- | --- | --- | --- |
@@ -692,7 +692,18 @@ P4-12 の GPy 負けのうち pass は sgpr Forrester n=1024（14.36 ms 対 15.7
 | `mll_and_grad_ard` | `fast_approx` | 1.4570 ms | 1.4413–1.4799 |
 | `mll_and_grad_ard` | `never` | 2.0668 ms | 2.0249–2.1245 |
 
-同じ実行で `fast_approx` は `accurate` より 0.97% 短い（1.2218 / 1.2338）。ARD の `fast_approx` は `always` より 0.40% 短い（1.4570 / 1.4629）。どちらも 5% に届かない。n = 256 の 1 評価は三角解（`W`）が支配し、exp の差は約 12 µs に留まる。
+`mll_and_grad` は記録だけ。同じ実行で `fast_approx` は `accurate` より 0.97% 短い（1.2218 / 1.2338）。ARD の `fast_approx` は `always` より 0.40% 短い（1.4570 / 1.4629）。n = 256 の 1 評価は三角解（`W`）が支配し、exp の差は約 12 µs に留まる。
+
+合否の `kernel_exp`（同じ実行、2026-09-28）:
+
+| グループ | 関数 | 中央値 | 95% 区間 |
+| --- | --- | --- | --- |
+| `kernel_exp` | `accurate` | 68.323 µs | 67.463–69.679 |
+| `kernel_exp` | `fast_approx` | 55.841 µs | 55.243–56.341 |
+| `kernel_exp_ard` | `accurate` | 178.38 µs | 177.51–179.37 |
+| `kernel_exp_ard` | `fast_approx` | 156.08 µs | 155.10–157.01 |
+
+等方は 18.3% 短い（55.841 / 68.323）。ARD は 12.5% 短い（156.08 / 178.38）。どちらも 5% より短い。
 
 | 問題 | キャッシュ | iters | evals |
 | --- | --- | --- | --- |

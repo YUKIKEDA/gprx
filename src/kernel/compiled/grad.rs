@@ -152,7 +152,8 @@ impl CompiledKernel<f64> {
         }
     }
 
-    pub(crate) fn grad_from_ard_cache<M: crate::math::KernelMath>(
+    #[doc(hidden)]
+    pub fn grad_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, f64>,
         x: MatRef<'_, f64>,

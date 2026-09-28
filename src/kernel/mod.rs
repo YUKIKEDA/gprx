@@ -40,8 +40,8 @@ pub use compiled::CompiledKernel;
 pub(crate) use compiled::gram::GramKernel;
 pub(crate) use compiled::{CoordMode, MixedKernelViews};
 pub use constant::ConstantKernel;
-#[cfg(test)]
-pub(crate) use dist::fill_ard_squared_diff;
+#[doc(hidden)]
+pub use dist::fill_ard_squared_diff;
 pub(crate) use dist::{FillDistances, fill_squared_euclidean};
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;

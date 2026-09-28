@@ -4,7 +4,7 @@
 //! evaluates one Taylor polynomial in the storage scalar. Hyperparameter
 //! `exp(θ)` does not use this module.
 
-use wide::{CmpGt, CmpLt, f64x4, i64x4};
+use wide::{CmpEq, CmpGt, CmpLe, CmpLt, f64x4, i64x4};
 
 /// Value and the first two derivatives of the kernel `exp` approximation.
 #[derive(Clone, Copy, Debug)]
@@ -293,27 +293,23 @@ fn bitcast_i64x4_to_f64x4(v: i64x4) -> f64x4 {
     unsafe { std::mem::transmute(v) }
 }
 
+/// True when every lane is finite.
+#[inline(always)]
+pub(crate) fn f64x4_all_finite(v: f64x4) -> bool {
+    // `NaN` fails equality. `±Inf` is the only value whose magnitude exceeds `f64::MAX`.
+    v.cmp_eq(v).all() && v.abs().cmp_le(f64x4::splat(f64::MAX)).all()
+}
+
 /// `2^n` for an integer-valued `n`, matching [`pow2_f64`] on normal exponents.
 #[inline(always)]
 fn pow2_f64x4(n: f64x4) -> f64x4 {
     let magic = n + f64x4::splat(1023.0 + 4_503_599_627_370_496.0);
     let normal = bitcast_i64x4_to_f64x4(bitcast_f64x4_to_i64x4(magic) << 52);
+    // Subnormals flush to zero. Their magnitude is below the `2^{-23}` absolute bound.
     let too_small = n.cmp_lt(f64x4::splat(-1022.0));
     let too_big = n.cmp_gt(f64x4::splat(1023.0));
-    let mut scale = too_small.blend(f64x4::ZERO, normal);
-    scale = too_big.blend(f64x4::splat(f64::INFINITY), scale);
-    if too_small.any() {
-        let ns = n.to_array();
-        let mut lanes = scale.to_array();
-        for (lane, &value) in lanes.iter_mut().zip(ns.iter()) {
-            let k = value as i32;
-            if (-1074..-1022).contains(&k) {
-                *lane = pow2_f64(k);
-            }
-        }
-        scale = f64x4::new(lanes);
-    }
-    scale
+    let scale = too_small.blend(f64x4::ZERO, normal);
+    too_big.blend(f64x4::splat(f64::INFINITY), scale)
 }
 
 #[inline(always)]
@@ -467,12 +463,22 @@ mod tests {
         let got = FastApprox::exp_f64x4(f64x4::new(extreme)).to_array();
         for (lane, &x) in extreme.iter().enumerate() {
             let scalar = FastApprox::exp_f64(x);
-            assert_eq!(
-                got[lane].to_bits(),
-                scalar.to_bits(),
-                "lane={lane} x={x} simd={} scalar={scalar}",
-                got[lane]
-            );
+            if scalar.is_infinite() {
+                assert!(got[lane].is_infinite(), "lane={lane} x={x}");
+            } else if scalar.abs() < 2.0_f64.powi(-23) {
+                assert!(
+                    (got[lane] - scalar).abs() < 2.0_f64.powi(-23),
+                    "lane={lane} x={x} simd={} scalar={scalar}",
+                    got[lane]
+                );
+            } else {
+                assert_eq!(
+                    got[lane].to_bits(),
+                    scalar.to_bits(),
+                    "lane={lane} x={x} simd={} scalar={scalar}",
+                    got[lane]
+                );
+            }
         }
     }
 }

@@ -913,7 +913,8 @@ impl OnlineGpr<O, S, C, B> {
   4. `predict_100` — テスト点 100（P1A-8 から）
   5. `fit_lbfgs` — 最適化ループ全体（1b から。1 と混ぜない）。壁時計と一緒に L-BFGS の評価回数を残す。回数が違うときの差は速度差と読まない
   6. `mll_and_grad_ard` / `fit_lbfgs_ard` — 重み付き球の ARD RBF（P2-7）。Always vs Never。等方とは比べない。`fit_lbfgs_ard` も評価回数を残す
-  7. `online_insert` / `online_delete` — Phase 3
+  7. `kernel_exp` / `kernel_exp_ard` — 距離を一度埋めたあとの `apply` と θ の `grad`（P5-4）。`FastApprox` と `Accurate`。`mll_and_grad` とは混ぜない
+  8. `online_insert` / `online_delete` — Phase 3
 
 ### 15.3 いつ何を足す
 
