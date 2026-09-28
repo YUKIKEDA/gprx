@@ -4,8 +4,8 @@ use crate::error::GprError;
 use crate::gpr::factor::pack_points;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{faer_par_dims, frobenius2, solve_llt};
 use crate::objective::SgprObjective;
-use crate::workspace::faer_par_dims;
 use crate::{
     FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Newton, NonlinearCg,
     Optimizer, PredictOptions, VarianceKind,
@@ -107,7 +107,7 @@ fn refresh_w(a: MatRef<'_, f64>, b_l: MatRef<'_, f64>, y: &[f64]) -> Vec<f64> {
         }
         ay[(i, 0)] = sum;
     }
-    solve_llt_in_place(b_l, ay.as_mut());
+    solve_llt(b_l, ay.as_mut());
     let mut w = vec![0.0; m];
     for i in 0..m {
         w[i] = ay[(i, 0)];

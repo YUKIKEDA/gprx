@@ -1,9 +1,6 @@
 use super::{FittedGpr, Gpr};
 use crate::error::{CholeskyStage, GprError};
-use crate::gpr::factor::{
-    FactorPolicy, add_noise_to_diag, cholesky_and_solve, factor_written_k_with_policy,
-    log_det_from_l, pack_points,
-};
+use crate::gpr::factor::{FactorPolicy, factor_written_k_with_policy, pack_points};
 use crate::gpr::{
     AdaptiveJitter, CachedDistances, DistanceCacheSlot, FixedJitter, JitterPolicy, NoDistanceCache,
     PredictOptions, Prediction, PredictiveCovariance, RetainCholesky, ReuseCholesky,
@@ -15,6 +12,7 @@ use crate::kernel::{
     Triangle, WhiteKernel,
 };
 use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l};
 use crate::objective::{IncrementalObjective, Objective};
 use crate::optimizer::{
     FastSimulatedAnnealing, Fixed, FullRecompute, IncrementalRecompute, Lbfgs, NelderMead, Newton,
@@ -66,7 +64,7 @@ fn dense_a(kernel: &KernelSpec, noise: f64, x: &[f64], n: usize, d: usize) -> Ma
     compiled
         .apply::<crate::math::Accurate>(dist.as_ref(), k.as_mut(), Triangle::Full, scratch.as_mut())
         .expect("shape");
-    add_noise_to_diag(k.as_mut(), noise);
+    add_to_diag(k.as_mut(), noise);
     k
 }
 

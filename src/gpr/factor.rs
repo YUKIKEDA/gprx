@@ -1,8 +1,5 @@
 //! Training Gram assembly, Cholesky, and MLL helpers.
 
-use dyn_stack::{MemBuffer, MemStack};
-use faer::linalg::cholesky::llt;
-use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
@@ -10,8 +7,9 @@ use crate::kernel::{
     CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, MixedKernelViews, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
-use crate::workspace::{FitWorkspace, faer_par, faer_par_dims};
+use crate::workspace::FitWorkspace;
 
 use super::JitterPolicy;
 
@@ -197,22 +195,14 @@ pub(crate) fn pack_points_into(x: &[f64], n_rows: usize, n_cols: usize, mut dest
     }
 }
 
-pub(crate) fn add_noise_to_diag<T: KernelScalar>(mut k: MatMut<'_, T>, noise: f64) {
-    let n = k.nrows();
-    let noise = T::from_f64(noise);
-    for i in 0..n {
-        k[(i, i)] += noise;
-    }
-}
-
 pub(crate) fn finish_train_system<W>(ws: &mut W, y: &[f64], noise: f64, extra_diag: f64)
 where
     W: FitWorkspace,
 {
     let core = ws.core_mut();
-    add_noise_to_diag(core.k_matrix.as_mut(), noise);
+    add_to_diag(core.k_matrix.as_mut(), noise);
     if extra_diag != 0.0 {
-        add_noise_to_diag(core.k_matrix.as_mut(), extra_diag);
+        add_to_diag(core.k_matrix.as_mut(), extra_diag);
     }
     for (i, &yi) in y.iter().enumerate() {
         core.rhs[(i, 0)] = <W::Policy as PrecisionPolicy>::Storage::from_f64(yi);
@@ -222,19 +212,6 @@ where
 pub(crate) struct FactorPolicy {
     pub(crate) jitter: JitterPolicy,
     pub(crate) stage: CholeskyStage,
-}
-
-fn map_cholesky_jitter(err: GprError, jitter: f64) -> GprError {
-    match err {
-        GprError::CholeskyFailed {
-            matrix_size, stage, ..
-        } => GprError::CholeskyFailed {
-            jitter,
-            matrix_size,
-            stage,
-        },
-        other => other,
-    }
 }
 
 pub(crate) fn factor_train_with_policy<K, W, M: crate::math::KernelMath>(
@@ -272,47 +249,19 @@ where
     W: FitWorkspace,
     F: FnMut(&mut W) -> Result<(), GprError>,
 {
-    clear_train_gram(ws);
-    write_k(ws)?;
-    finish_train_system(ws, y, noise, 0.0);
-    {
-        let core = ws.core_mut();
-        match cholesky_and_solve(
-            &mut core.k_matrix,
-            &mut core.rhs,
-            &mut core.faer_scratch,
-            0.0,
-            policy.stage,
-        ) {
-            Ok(()) => return Ok(()),
-            Err(GprError::CholeskyFailed { .. }) => {}
-            Err(err) => return Err(err),
-        }
-    }
-    let mut last_j = 0.0;
-    for j in policy.jitter.retry_jitters() {
-        last_j = j;
+    let n = ws.core().k_matrix.nrows();
+    retry_with_jitter(policy.jitter.retry_jitters(), n, policy.stage, |j| {
         clear_train_gram(ws);
         write_k(ws)?;
         finish_train_system(ws, y, noise, j);
         let core = ws.core_mut();
-        match cholesky_and_solve(
+        cholesky_and_solve(
             &mut core.k_matrix,
             &mut core.rhs,
             &mut core.faer_scratch,
             0.0,
             policy.stage,
-        ) {
-            Ok(()) => return Ok(()),
-            Err(GprError::CholeskyFailed { .. }) => {}
-            Err(err) => return Err(map_cholesky_jitter(err, j)),
-        }
-    }
-    let n = ws.core().k_matrix.nrows();
-    Err(GprError::CholeskyFailed {
-        jitter: last_j,
-        matrix_size: n,
-        stage: policy.stage,
+        )
     })
 }
 
@@ -322,14 +271,6 @@ where
 {
     let zero = <W::Policy as PrecisionPolicy>::Storage::from_f64(0.0);
     ws.core_mut().k_matrix.fill(zero);
-}
-
-pub(crate) fn log_det_from_l<T: KernelScalar>(l: MatRef<'_, T>, n: usize) -> T {
-    let mut log_diag = T::from_f64(0.0);
-    for i in 0..n {
-        log_diag += KernelScalar::ln(l[(i, i)]);
-    }
-    T::from_f64(2.0) * log_diag
 }
 
 pub(crate) fn neg_mll_from_factor<T: KernelScalar>(
@@ -366,22 +307,6 @@ pub(crate) fn require_param_len(actual: usize, expected: usize) -> Result<(), Gp
             reason: format!("expected {expected} parameters, got {actual}"),
         })
     }
-}
-
-pub(crate) fn frobenius_lower<T: KernelScalar>(
-    w: MatRef<'_, T>,
-    d_k: MatRef<'_, T>,
-    n: usize,
-) -> T {
-    let mut inner = T::from_f64(0.0);
-    let two = T::from_f64(2.0);
-    for col in 0..n {
-        inner += w[(col, col)] * d_k[(col, col)];
-        for row in col + 1..n {
-            inner += two * w[(row, col)] * d_k[(row, col)];
-        }
-    }
-    inner
 }
 
 pub(crate) fn write_kernel_grad<K: GramKernel, M: crate::math::KernelMath>(
@@ -493,260 +418,6 @@ pub(crate) fn pack_storage<T: KernelScalar>(
     for col in 0..n_cols {
         for row in 0..n_rows {
             dest[(row, col)] = T::from_f64(x[col * n_rows + row]);
-        }
-    }
-}
-
-pub(crate) fn symmetrize_lower<T: KernelScalar>(mut a: MatMut<'_, T>, n: usize) {
-    for col in 0..n {
-        for row in col + 1..n {
-            a[(col, row)] = a[(row, col)];
-        }
-    }
-}
-
-pub(crate) fn gemv_sym_lower<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
-    for i in 0..n {
-        let mut s = a[(i, i)] * x[i];
-        for j in 0..i {
-            s += a[(i, j)] * x[j];
-        }
-        for j in i + 1..n {
-            s += a[(j, i)] * x[j];
-        }
-        y[i] = s;
-    }
-}
-
-pub(crate) fn gemv_full<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
-    let zero = T::from_f64(0.0);
-    for i in 0..n {
-        let mut s = zero;
-        for j in 0..n {
-            s += a[(i, j)] * x[j];
-        }
-        y[i] = s;
-    }
-}
-
-pub(crate) fn trace_product<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>, n: usize) -> T {
-    let mut tr = T::from_f64(0.0);
-    for col in 0..n {
-        for row in 0..n {
-            tr += a[(row, col)] * b[(col, row)];
-        }
-    }
-    tr
-}
-
-/// Writes `diag(A⁻¹)` given the lower Cholesky factor `L` of `A = L Lᵀ`.
-///
-/// `A⁻¹ = L^{-T} L^{-1}`, so entry `i` is the squared Euclidean norm of
-/// column `i` of `L⁻¹`.
-pub(crate) fn inv_diag_from_chol_l<T: KernelScalar>(l: MatRef<'_, T>, q_diag: &mut [T]) {
-    T::inv_diag_from_chol_l(l, q_diag);
-}
-
-/// [`inv_diag_from_chol_l`] for `f32`: each column of `L⁻¹` in `f64`.
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn inv_diag_from_chol_l_f64_accum(l: MatRef<'_, f32>, q_diag: &mut [f32]) {
-    let n = l.nrows();
-    debug_assert_eq!(q_diag.len(), n);
-    for i in 0..n {
-        let mut col = vec![0.0f64; n];
-        for row in 0..n {
-            col[row] = if row == i { 1.0 } else { 0.0 };
-        }
-        for row in 0..n {
-            let mut sum = col[row];
-            for k in 0..row {
-                sum -= f64::from(l[(row, k)]) * col[k];
-            }
-            col[row] = sum / f64::from(l[(row, row)]);
-        }
-        let mut q = 0.0f64;
-        for v in &col {
-            q += v * v;
-        }
-        q_diag[i] = q as f32;
-    }
-}
-
-/// [`inv_diag_from_chol_l`] for `f64` through faer's triangular solve.
-pub(crate) fn inv_diag_from_chol_l_faer(l: MatRef<'_, f64>, q_diag: &mut [f64]) {
-    let n = l.nrows();
-    debug_assert_eq!(q_diag.len(), n);
-    let mut inv_l = Mat::from_fn(n, n, |row, col| if row == col { 1.0 } else { 0.0 });
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, inv_l.as_mut(), faer_par(n));
-    for (i, qi) in q_diag.iter_mut().enumerate() {
-        let mut q = 0.0;
-        for k in 0..n {
-            let v = inv_l[(k, i)];
-            q += v * v;
-        }
-        *qi = q;
-    }
-}
-
-/// Factors `A` in place as `L Lᵀ`. The strictly upper triangle is unspecified.
-pub(crate) fn cholesky_lower<T: KernelScalar>(
-    a: &mut Mat<T>,
-    scratch: &mut MemBuffer,
-    jitter: f64,
-    stage: CholeskyStage,
-) -> Result<(), GprError> {
-    T::cholesky_lower(a, scratch, jitter, stage)
-}
-
-/// [`cholesky_lower`] for `f64` through faer's blocked factorization.
-pub(crate) fn cholesky_lower_faer(
-    a: &mut Mat<f64>,
-    scratch: &mut MemBuffer,
-    jitter: f64,
-    stage: CholeskyStage,
-) -> Result<(), GprError> {
-    let n = a.nrows();
-    let regularization = LltRegularization {
-        dynamic_regularization_delta: jitter,
-        dynamic_regularization_epsilon: 0.0,
-    };
-    let stack = MemStack::new(scratch);
-    match llt::factor::cholesky_in_place(
-        a.as_mut(),
-        regularization,
-        faer_par(n),
-        stack,
-        Default::default(),
-    ) {
-        Ok(_) => Ok(()),
-        Err(LltError::NonPositivePivot { .. }) => Err(GprError::CholeskyFailed {
-            jitter,
-            matrix_size: n,
-            stage,
-        }),
-    }
-}
-
-/// [`cholesky_lower`] for `f32`, accumulating each dot product in `f64`.
-pub(crate) fn cholesky_lower_f64_accum(
-    a: &mut Mat<f32>,
-    jitter: f64,
-    stage: CholeskyStage,
-) -> Result<(), GprError> {
-    let n = a.nrows();
-    for j in 0..n {
-        for i in j..n {
-            let mut sum = f64::from(a[(i, j)]);
-            for k in 0..j {
-                sum -= f64::from(a[(i, k)]) * f64::from(a[(j, k)]);
-            }
-            if i == j {
-                if sum.is_nan() || sum <= 0.0 {
-                    return Err(GprError::CholeskyFailed {
-                        jitter,
-                        matrix_size: n,
-                        stage,
-                    });
-                }
-                a[(j, j)] = sum.sqrt() as f32;
-            } else {
-                let diag = f64::from(a[(j, j)]);
-                a[(i, j)] = (sum / diag) as f32;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Factors `A` in place as `L Lᵀ`, retrying with [`JitterPolicy`] on failure.
-///
-/// The first attempt uses `A` as given. Each retry restores that snapshot and
-/// adds `j` to the diagonal. Used for the posterior covariance in
-/// [`crate::FittedGpr::sample`].
-pub(crate) fn cholesky_lower_with_policy<T: KernelScalar>(
-    a: &mut Mat<T>,
-    scratch: &mut MemBuffer,
-    policy: JitterPolicy,
-    stage: CholeskyStage,
-) -> Result<(), GprError> {
-    let backup = a.clone();
-    match cholesky_lower(a, scratch, 0.0, stage) {
-        Ok(()) => return Ok(()),
-        Err(GprError::CholeskyFailed { .. }) => {}
-        Err(err) => return Err(err),
-    }
-    let mut last_j = 0.0;
-    for j in policy.retry_jitters() {
-        last_j = j;
-        *a = backup.clone();
-        add_noise_to_diag(a.as_mut(), j);
-        match cholesky_lower(a, scratch, 0.0, stage) {
-            Ok(()) => return Ok(()),
-            Err(GprError::CholeskyFailed { .. }) => {}
-            Err(err) => return Err(map_cholesky_jitter(err, j)),
-        }
-    }
-    Err(GprError::CholeskyFailed {
-        jitter: last_j,
-        matrix_size: a.nrows(),
-        stage,
-    })
-}
-
-/// Factors `A` in place as `L Lᵀ` and overwrites `rhs` with `A⁻¹ rhs`.
-///
-/// P1A-18 can call this on the same `Workspace` buffers as [`crate::Gpr::fit`].
-pub(crate) fn cholesky_and_solve<T: KernelScalar>(
-    a: &mut Mat<T>,
-    rhs: &mut Mat<T>,
-    scratch: &mut MemBuffer,
-    jitter: f64,
-    stage: CholeskyStage,
-) -> Result<(), GprError> {
-    cholesky_lower(a, scratch, jitter, stage)?;
-    solve_llt_in_place(a.as_ref(), rhs.as_mut(), scratch);
-    Ok(())
-}
-
-pub(crate) fn solve_llt_in_place<T: KernelScalar>(
-    l: MatRef<'_, T>,
-    rhs: MatMut<'_, T>,
-    scratch: &mut MemBuffer,
-) {
-    T::solve_llt_in_place(l, rhs, scratch);
-}
-
-/// [`solve_llt_in_place`] for `f64` through faer.
-pub(crate) fn solve_llt_faer(l: MatRef<'_, f64>, rhs: MatMut<'_, f64>, scratch: &mut MemBuffer) {
-    let n = l.nrows();
-    let n_rhs = rhs.ncols();
-    let stack = MemStack::new(scratch);
-    llt::solve::solve_in_place(l, rhs, faer_par_dims(n, n_rhs), stack);
-}
-
-/// [`solve_llt_in_place`] for `f32`: both triangular sweeps in `f64`.
-pub(crate) fn solve_llt_f64_accum(l: MatRef<'_, f32>, mut rhs: MatMut<'_, f32>) {
-    let n = l.nrows();
-    let n_rhs = rhs.ncols();
-    for col in 0..n_rhs {
-        let mut y = vec![0.0f64; n];
-        let mut x = vec![0.0f64; n];
-        for i in 0..n {
-            let mut sum = f64::from(rhs[(i, col)]);
-            for j in 0..i {
-                sum -= f64::from(l[(i, j)]) * y[j];
-            }
-            y[i] = sum / f64::from(l[(i, i)]);
-        }
-        for i in (0..n).rev() {
-            let mut sum = y[i];
-            for j in (i + 1)..n {
-                sum -= f64::from(l[(j, i)]) * x[j];
-            }
-            x[i] = sum / f64::from(l[(i, i)]);
-        }
-        for i in 0..n {
-            rhs[(i, col)] = x[i] as f32;
         }
     }
 }
