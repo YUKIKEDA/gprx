@@ -99,7 +99,7 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        expect_one_param(out.len())?;
+        crate::data::require_count(out.len(), 1, "RBF parameter")?;
         out[0] = self.lengthscale.ln();
         Ok(())
     }
@@ -111,7 +111,7 @@ impl RbfKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        expect_one_param(params.len())?;
+        crate::data::require_count(params.len(), 1, "RBF parameter")?;
         let log_lengthscale = validate_log_lengthscale(params[0])?;
         self.lengthscale = BoundedParam::new(log_lengthscale.exp(), self.lengthscale.interval())?;
         Ok(())
@@ -675,16 +675,6 @@ fn require_rbf_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     } else {
         Err(GprError::InvalidHyperparameter {
             reason: format!("RBF has a single parameter; got pair ({i}, {j})"),
-        })
-    }
-}
-
-fn expect_one_param(len: usize) -> Result<(), GprError> {
-    if len == 1 {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected 1 RBF parameter, got {len}"),
         })
     }
 }

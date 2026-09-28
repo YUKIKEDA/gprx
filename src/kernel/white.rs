@@ -1,7 +1,7 @@
 //! White kernel `k(x, x') = σw² δ_{xx'}`.
 
 use super::{
-    Triangle, expect_one_param, require_same_shape, require_square_pair, validate_log_positive,
+    Triangle, require_same_shape, require_square_pair, validate_log_positive,
     validate_positive_finite, write_square,
 };
 use crate::error::GprError;
@@ -96,7 +96,7 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        expect_one_param(out.len(), "white")?;
+        crate::data::require_count(out.len(), 1, "white parameter")?;
         out[0] = self.variance.ln();
         Ok(())
     }
@@ -108,7 +108,7 @@ impl WhiteKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        expect_one_param(params.len(), "white")?;
+        crate::data::require_count(params.len(), 1, "white parameter")?;
         let log_variance = validate_log_positive(params[0], "white kernel variance")?;
         self.variance = BoundedParam::new(log_variance.exp(), self.variance.interval())?;
         Ok(())

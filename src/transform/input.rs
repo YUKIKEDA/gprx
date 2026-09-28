@@ -2,7 +2,7 @@
 
 use std::any::Any;
 
-use super::{column_major_len, population_std, require_finite, require_len, require_nonempty};
+use super::population_std;
 use crate::error::GprError;
 
 /// Unfitted input map. [`Self::fit`] consumes it and returns a [`Transform`].
@@ -81,8 +81,8 @@ pub trait Transform: Send + Sync {
 }
 
 fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
-    let expected = column_major_len(n_rows, n_cols)?;
-    require_len(x, expected)
+    let expected = crate::data::column_major_len(n_rows, n_cols)?;
+    crate::data::require_count(x.len(), expected, "values")
 }
 
 /// Leaves features unchanged.
@@ -115,7 +115,7 @@ impl IdentityInput {
     /// a non-finite value.
     pub fn fit(self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<Self, GprError> {
         require_pack(x, n_rows, n_cols)?;
-        require_finite(x)?;
+        crate::data::require_finite(x)?;
         Ok(self)
     }
 }
@@ -142,7 +142,7 @@ impl UnfittedTransform for IdentityInput {
 impl Transform for IdentityInput {
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_pack(x, n_rows, n_cols)?;
-        require_finite(x)
+        crate::data::require_finite(x)
     }
 
     fn clone_box(&self) -> Box<dyn Transform> {
@@ -194,7 +194,7 @@ impl StandardizeInput {
         n_cols: usize,
     ) -> Result<FittedStandardizeInput, GprError> {
         require_pack(x, n_rows, n_cols)?;
-        require_finite(x)?;
+        crate::data::require_finite(x)?;
         let mut mean = Vec::with_capacity(n_cols);
         let mut std = Vec::with_capacity(n_cols);
         for col in 0..n_cols {
@@ -246,9 +246,9 @@ impl FittedStandardizeInput {
     }
 
     pub(crate) fn from_parts(mean: Vec<f64>, std: Vec<f64>) -> Result<Self, GprError> {
-        require_len(&std, mean.len())?;
-        require_finite(&mean)?;
-        require_finite(&std)?;
+        crate::data::require_count(std.len(), mean.len(), "values")?;
+        crate::data::require_finite(&mean)?;
+        crate::data::require_finite(&std)?;
         if mean.is_empty() {
             return Err(GprError::EmptyInput);
         }
@@ -270,9 +270,12 @@ impl Transform for FittedStandardizeInput {
                 expected_dim: expected_cols,
             });
         }
-        require_nonempty(n_rows)?;
-        require_len(x, n_rows * n_cols)?;
-        require_finite(x)?;
+        crate::data::require_count(
+            x.len(),
+            crate::data::column_major_len(n_rows, n_cols)?,
+            "values",
+        )?;
+        crate::data::require_finite(x)?;
         for col in 0..n_cols {
             let mean = self.mean[col];
             let std = self.std[col];
@@ -358,7 +361,7 @@ impl MinMaxInput {
         n_cols: usize,
     ) -> Result<FittedMinMaxInput, GprError> {
         require_pack(x, n_rows, n_cols)?;
-        require_finite(x)?;
+        crate::data::require_finite(x)?;
         let mut data_min = Vec::with_capacity(n_cols);
         let mut data_max = Vec::with_capacity(n_cols);
         for col in 0..n_cols {
@@ -446,9 +449,9 @@ impl FittedMinMaxInput {
         range_hi: f64,
     ) -> Result<Self, GprError> {
         require_feature_range(range_lo, range_hi)?;
-        require_len(&data_max, data_min.len())?;
-        require_finite(&data_min)?;
-        require_finite(&data_max)?;
+        crate::data::require_count(data_max.len(), data_min.len(), "values")?;
+        crate::data::require_finite(&data_min)?;
+        crate::data::require_finite(&data_max)?;
         if data_min.is_empty() {
             return Err(GprError::EmptyInput);
         }
@@ -470,9 +473,12 @@ impl Transform for FittedMinMaxInput {
                 expected_dim: expected_cols,
             });
         }
-        require_nonempty(n_rows)?;
-        require_len(x, n_rows * n_cols)?;
-        require_finite(x)?;
+        crate::data::require_count(
+            x.len(),
+            crate::data::column_major_len(n_rows, n_cols)?,
+            "values",
+        )?;
+        crate::data::require_finite(x)?;
         let out_span = self.range_hi - self.range_lo;
         for col in 0..n_cols {
             let min = self.data_min[col];

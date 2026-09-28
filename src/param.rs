@@ -2,6 +2,10 @@
 
 use thiserror::Error;
 
+use crate::error::GprError;
+use crate::kernel::KernelSpec;
+use crate::likelihood::GaussianLikelihood;
+
 /// Why an [`Interval`] or [`BoundedParam`] could not be constructed.
 ///
 /// Invalid bounds are not [`crate::GprError::InvalidHyperparameter`]. That
@@ -171,6 +175,19 @@ impl BoundedParam {
     pub fn with_interval(self, interval: Interval) -> Result<Self, IntervalError> {
         Self::new(self.value, interval)
     }
+}
+
+/// Writes kernel `θ` then likelihood `θ` into `out`, the layout every model's
+/// optimizer sees.
+pub(crate) fn write_params(
+    kernel: &KernelSpec,
+    likelihood: &GaussianLikelihood,
+    out: &mut [f64],
+) -> Result<(), GprError> {
+    let n_kernel = kernel.num_params();
+    crate::data::require_count(out.len(), n_kernel + likelihood.num_params(), "parameters")?;
+    kernel.get_params(&mut out[..n_kernel])?;
+    likelihood.get_params(&mut out[n_kernel..])
 }
 
 #[cfg(test)]

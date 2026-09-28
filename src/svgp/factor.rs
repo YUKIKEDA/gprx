@@ -9,9 +9,10 @@ use faer::{Mat, MatRef};
 use rand::RngExt;
 use rand::rngs::SmallRng;
 
+use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
-use crate::gpr::factor::{pack_points, require_param_len, validate_query, validate_training};
+
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
@@ -25,7 +26,7 @@ use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
 use crate::precision::ModelPrecision;
 use crate::rng::small_rng;
-use crate::sgpr::{kernel_cross, validate_inducing};
+use crate::sgpr::kernel_cross;
 use crate::{PredictOptions, Prediction, VarianceKind};
 
 use super::fitted::FittedSvgp;
@@ -180,7 +181,7 @@ pub(crate) fn pack_q(mean: &[f64], l: MatRef<'_, f64>, out: &mut [f64]) {
 }
 
 pub(crate) fn unpack_q(params: &[f64], m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
-    require_param_len(params.len(), q_param_len(m))?;
+    crate::data::require_count(params.len(), q_param_len(m), "parameters")?;
     let mut mean = vec![0.0; m];
     for (i, slot) in mean.iter_mut().enumerate() {
         let v = params[i];
@@ -555,7 +556,7 @@ where
     let m = model.m;
     let n_kernel = model.kernel.num_params();
     let n_theta = n_kernel + model.likelihood.num_params();
-    require_param_len(out.len(), n_theta + q_param_len(m))?;
+    crate::data::require_count(out.len(), n_theta + q_param_len(m), "parameters")?;
     if batch.is_empty() {
         return Err(GprError::EmptyInput);
     }
@@ -891,7 +892,7 @@ fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     let m = model.m;
     let n_kernel = model.kernel.num_params();
     let n_theta = n_kernel + model.likelihood.num_params();
-    require_param_len(out.len(), n_theta + q_param_len(m))?;
+    crate::data::require_count(out.len(), n_theta + q_param_len(m), "parameters")?;
     if batch.is_empty() {
         return Err(GprError::EmptyInput);
     }
