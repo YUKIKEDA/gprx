@@ -8,11 +8,9 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{pack_points, pack_storage, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
+use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{
-    CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec,
-    MixedKernelViews, Triangle,
-};
+use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower, cholesky_lower_with_retries, faer_par, faer_par_dims, frobenius_lower,
@@ -27,15 +25,14 @@ use crate::param::write_params;
 use crate::persist::{self, PersistedModel};
 use crate::precision::GpScalar;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::workspace::{FitWorkspace, QueryWorkspace, empty_thread_scratch};
+use crate::workspace::{FitWorkspace, QueryWorkspace, WorkspaceCore, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 
 use super::super::online::OnlineGpr;
 
 use super::super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
-    neg_mll_from_factor, write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
-    write_kernel_hess_from_coords,
+    fill_cached_inputs, neg_mll_from_factor,
 };
 use super::{AllocWorkspace, DistanceCacheSlot, FitBuffers, JitterPolicy, RetainCholesky};
 use super::{FittedGpr, Gpr};
@@ -907,60 +904,39 @@ where
         }
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         let (core, dist) = self.workspace.split_fit();
-        if let Some(d) = dist {
-            let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready {
-                Some(d.ard_sq_diff.as_ref())
-            } else {
-                None
-            };
-            write_kernel_hess::<_, M>(
-                &self.compiled,
-                d.dist_cache.as_ref(),
-                x,
-                ard_cache,
-                core.exp_buf.as_mut(),
-                core.kernel_scratch.as_mut(),
-                (i, j),
-            )
-        } else {
-            write_kernel_hess_from_coords::<_, M>(
-                &self.compiled,
-                x,
-                core.exp_buf.as_mut(),
-                core.kernel_scratch.as_mut(),
-                i,
-                j,
-            )
-        }
+        let WorkspaceCore {
+            exp_buf,
+            kernel_scratch,
+            thread_scratch,
+            ..
+        } = core;
+        let inputs = fill_cached_inputs(&self.compiled, x, dist, thread_scratch)?;
+        self.compiled.hess_gram::<M>(
+            inputs,
+            exp_buf.as_mut(),
+            (i, j),
+            Triangle::Lower,
+            kernel_scratch.as_mut(),
+        )
     }
 
     fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
         let (core, dist) = self.workspace.split_fit();
-        if let Some(d) = dist {
-            let ard_cache = if self.compiled.needs_ard_sq_diff() && *d.ard_sq_diff_ready {
-                Some(d.ard_sq_diff.as_ref())
-            } else {
-                None
-            };
-            write_kernel_grad::<_, M>(
-                &self.compiled,
-                d.dist_cache.as_ref(),
-                x,
-                ard_cache,
-                core.exp_buf.as_mut(),
-                core.kernel_scratch.as_mut(),
-                idx,
-            )
-        } else {
-            write_kernel_grad_from_coords::<_, M>(
-                &self.compiled,
-                x,
-                core.exp_buf.as_mut(),
-                core.kernel_scratch.as_mut(),
-                idx,
-            )
-        }
+        let WorkspaceCore {
+            exp_buf,
+            kernel_scratch,
+            thread_scratch,
+            ..
+        } = core;
+        let inputs = fill_cached_inputs(&self.compiled, x, dist, thread_scratch)?;
+        self.compiled.grad_gram::<M>(
+            inputs,
+            exp_buf.as_mut(),
+            idx,
+            Triangle::Lower,
+            kernel_scratch.as_mut(),
+        )
     }
 
     fn add_noise_first_order(
@@ -1383,11 +1359,10 @@ where
         {
             let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
             let mut thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
-            let applied = apply_cross_kernel::<_, M>(
-                &self.compiled,
+            let applied = self.compiled.eval_cross::<M>(
                 x_train,
                 self.query.query_x.as_ref(),
-                self.query.query_dist.as_mut(),
+                Some(self.query.query_dist.as_mut()),
                 self.query.query_k_star.as_mut(),
                 self.query.query_scratch.as_mut(),
                 &mut thread_scratch,
@@ -1422,11 +1397,8 @@ where
             self.query.query_k_star.as_mut(),
             faer_par_dims(n, m),
         );
-        fill_query_diag(
-            &self.compiled,
-            self.query.query_x.as_ref(),
-            &mut self.query.query_kss,
-        )?;
+        self.compiled
+            .eval_diag(self.query.query_x.as_ref(), &mut self.query.query_kss)?;
         let noise = self.likelihood.noise_variance();
         let noise_s = P::Storage::from_f64(noise);
         let zero_s = P::Storage::from_f64(0.0);
@@ -1489,11 +1461,10 @@ where
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         let mut x_cast = P::Storage::empty_cols();
         let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
-        apply_cross_kernel::<_, M>(
-            &self.compiled,
+        self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
-            query_dist.as_mut(),
+            Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
             &mut thread_scratch,
@@ -1521,7 +1492,7 @@ where
             query_k_star.as_mut(),
             faer_par_dims(n, m),
         );
-        fill_query_diag(&self.compiled, query_x.as_ref(), &mut query_kss)?;
+        self.compiled.eval_diag(query_x.as_ref(), &mut query_kss)?;
         let noise = self.likelihood.noise_variance();
         let noise_s = P::Storage::from_f64(noise);
         let zero_s = P::Storage::from_f64(0.0);
@@ -1732,11 +1703,10 @@ where
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         let mut x_cast = P::Storage::empty_cols();
         let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
-        apply_cross_kernel::<_, M>(
-            &self.compiled,
+        self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
-            query_dist.as_mut(),
+            Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
             &mut thread_scratch,
@@ -1760,10 +1730,10 @@ where
         );
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        fill_query_query_kernel::<_, M>(
-            &self.compiled,
+        self.compiled.eval_gram_from_points::<M>(
             query_x.as_ref(),
             kss.as_mut(),
+            Triangle::Full,
             kss_scratch.as_mut(),
             &mut thread_scratch,
         )?;
@@ -1903,8 +1873,8 @@ where
         let kernel = self.kernel.compile();
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch_k = Mat::<f64>::zeros(n, n);
-        kernel.apply_points::<M>(
-            self.x.as_ref(),
+        kernel.eval_gram::<M>(
+            GramInputs::points(self.x.as_ref()),
             a.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),
@@ -2136,82 +2106,6 @@ fn storage_alpha_from_saved<P: GpScalar>(
     let mut scratch = MemBuffer::new(req);
     solve_llt_in_place(l, rhs.as_mut(), &mut scratch);
     Ok((0..n).map(|i| rhs[(i, 0)]).collect())
-}
-
-fn apply_cross_kernel<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    x_train: MatRef<'_, K::T>,
-    query_x: MatRef<'_, K::T>,
-    mut query_dist: MatMut<'_, K::T>,
-    query_k_star: MatMut<'_, K::T>,
-    query_scratch: MatMut<'_, K::T>,
-    thread_scratch: &mut [Mat<K::T>],
-) -> Result<(), GprError>
-where
-    K::T: FillDistances,
-{
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            K::T::write_cross(x_train, query_x, query_dist.as_mut(), thread_scratch);
-            compiled.apply_cross::<M>(query_dist.as_ref(), query_k_star, query_scratch)
-        }
-        CoordMode::Points => {
-            compiled.apply_cross_points::<M>(x_train, query_x, query_k_star, query_scratch)
-        }
-        CoordMode::Mixed => {
-            K::T::write_cross(x_train, query_x, query_dist.as_mut(), thread_scratch);
-            compiled.apply_cross_mixed::<M>(
-                query_dist.as_ref(),
-                x_train,
-                query_x,
-                query_k_star,
-                query_scratch,
-            )
-        }
-    }
-}
-
-fn fill_query_diag<K: GramKernel>(
-    compiled: &K,
-    query_x: MatRef<'_, K::T>,
-    query_kss: &mut [K::T],
-) -> Result<(), GprError> {
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => compiled.fill_diag(query_kss),
-        CoordMode::Points | CoordMode::Mixed => compiled.fill_diag_points(query_x, query_kss),
-    }
-}
-
-fn fill_query_query_kernel<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    query_x: MatRef<'_, K::T>,
-    kss: MatMut<'_, K::T>,
-    scratch: MatMut<'_, K::T>,
-    thread_scratch: &mut [Mat<K::T>],
-) -> Result<(), GprError>
-where
-    K::T: FillDistances + faer_traits::ComplexField,
-{
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            let m = query_x.nrows();
-            let mut dist_ss = Mat::<K::T>::zeros(m, m);
-            K::T::write_squared(query_x, dist_ss.as_mut(), thread_scratch);
-            compiled.apply::<M>(dist_ss.as_ref(), kss, Triangle::Full, scratch)
-        }
-        CoordMode::Points => compiled.apply_points::<M>(query_x, kss, Triangle::Full, scratch),
-        CoordMode::Mixed => {
-            let m = query_x.nrows();
-            let mut dist_ss = Mat::<K::T>::zeros(m, m);
-            K::T::write_squared(query_x, dist_ss.as_mut(), thread_scratch);
-            compiled.apply_mixed::<M>(
-                MixedKernelViews::new(dist_ss.as_ref(), query_x),
-                kss,
-                Triangle::Full,
-                scratch,
-            )
-        }
-    }
 }
 
 fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprError> {

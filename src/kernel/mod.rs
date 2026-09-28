@@ -37,8 +37,7 @@ mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
-pub(crate) use compiled::gram::GramKernel;
-pub(crate) use compiled::{CoordMode, MixedKernelViews};
+pub(crate) use compiled::gram::{GramInputs, GramKernel};
 pub use constant::ConstantKernel;
 #[doc(hidden)]
 pub use dist::fill_ard_squared_diff;
