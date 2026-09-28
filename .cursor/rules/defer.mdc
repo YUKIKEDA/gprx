@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Deferral
 
-Do not ship a design or implementation gap as 「暫定」「今はやらない」「until Px-y」 unless `docs/roadmap.md` already has a **named row** that owns the follow-up (ID + Issue), or the item is **already** listed under **意図的に今やらない**.
+Do not ship a design or implementation gap as 「暫定」「今はやらない」「until Px-y」 unless `docs/roadmap.md` already has a **named row** that owns the follow-up (ID + Issue), or the item is **already** listed under **Intentionally out of scope**.
 
 Do not recommend that gap because the slice is smaller or easier to implement. That is not a requirement (`.cursor/rules/scope.mdc`).
 
@@ -14,7 +14,7 @@ Do not grow that out-of-scope list in the same change that notices a gap. Adding
 If there is no row and it is not in that out-of-scope list:
 
 - do the work in the current Issue, or
-- add the row in the **same change** that introduces the gap: ID, タイトル, Issue。状態は、Grill 済みならその Issue を指す。未 Grill なら `Grill 後に #<n> で確定`。完了条件の本文はロードマップに書かない。エージェントが完成条件を作って埋めない
+- add the row in the **same change** that introduces the gap: ID, タイトル, Issue。状態は、Grill 済みならその Issue を指す。未 Grill なら `Set after Grill on #<n>`。完了条件の本文はロードマップに書かない。エージェントが完成条件を作って埋めない
 
 Forbidden:
 

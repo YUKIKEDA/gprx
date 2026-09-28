@@ -1,27 +1,27 @@
-# ADR 0001: faer の並列度
+# ADR 0001: faer parallelism
 
-- 状態: 採用
-- 日付: 2026-09-19
-- Issue: [#143](https://github.com/YUKIKEDA/gprx/issues/143)（P2B-22）
+- Status: accepted
+- Date: 2026-09-19
+- Issue: [#143](https://github.com/YUKIKEDA/gprx/issues/143) (P2B-22)
 
-## 文脈
+## Context
 
-n=4096 の joint MLL+grad は Cholesky と `W` 用の n 本三角ソルブが壁時計の 97% 以上を占める。sklearn も `cho_solve(L, I)` で A⁻¹ を作る。gprx は `Par::Seq` だった。未設定の Rayon プール（この機では 16 本）で常時 `Par::rayon(0)` にすると、n=256 の eval が数倍遅くなる。
+At n=4096, Cholesky and the n triangular solves that form `W` are more than 97% of the wall time of one joint MLL+grad. sklearn also builds A⁻¹ with `cho_solve(L, I)`. gprx used `Par::Seq`. Always using `Par::rayon(0)` on an unset Rayon pool (16 threads on this machine) makes an n=256 eval several times slower.
 
-## 決定
+## Decision
 
-- factor の Cholesky と `W`（n 本 RHS）は `faer_par(n) = Par::rayon(min(pool, n/64))`
-- α（1 本）と predict / `predict_covariance` の `L⁻¹ k_*`（`n×m`）は `faer_par_dims(n, k) = Par::rayon(min(pool, n/64, n·k/16384, k/12))`。`k = n` なら正方の式と同じ（`k/12` は緩い）
-- カーネル埋めはプロセス広域プールのまま
-- 公開の `n_jobs` / 並列 on-off は置かない。`RAYON_NUM_THREADS=1` は 1 本
-- `Workspace` の faer scratch は同じ `Par` で取る
-- `benches/exact.rs` の Cholesky は Seq のまま
+- Cholesky of the factor and `W` (n right-hand sides) use `faer_par(n) = Par::rayon(min(pool, n/64))`
+- α (one right-hand side) and `L⁻¹ k_*` in predict / `predict_covariance` (`n×m`) use `faer_par_dims(n, k) = Par::rayon(min(pool, n/64, n·k/16384, k/12))`. When `k = n` this matches the square formula (`k/12` is the loose term)
+- Kernel fill stays on the process-wide pool
+- There is no public `n_jobs` and no public parallel on/off. `RAYON_NUM_THREADS=1` is one thread
+- faer scratch on `Workspace` is taken with the same `Par`
+- Cholesky in `benches/exact.rs` stays Seq
 
-## 根拠（この機、16 論理、各 5 回）
+## Evidence (this machine, 16 logical processors, 5 runs each)
 
-eval 10 の平均。1 本に対する比。
+Mean of eval 10. Ratio against one thread.
 
-| n | 問題 | 1 本 | 4 本 | 8 本 | 16 本 |
+| n | Problem | 1 thread | 4 | 8 | 16 |
 |---:|---|---:|---:|---:|---:|
 | 256 | Forrester | 12.3 ms | **10.5 ms** | 18.5 ms | 105 ms |
 | 256 | sphere | 14.5 ms | **10.2 ms** | 31.2 ms | 32.8 ms |
@@ -32,14 +32,14 @@ eval 10 の平均。1 本に対する比。
 | 4096 | Forrester | 38.8 s | 11.7 s | 8.68 s | **8.34 s** |
 | 4096 | sphere | 37.8 s | 12.1 s | 9.09 s | **8.68 s** |
 
-`n/64` は 256→4、1024→16、4096→16。faer だけ 4 本・カーネル 16 本の混在は、256 で 16 本事故を避け、両方 4 本より数 ms 遅い。n≥1024 では式がプール全本数になり、カーネルを絞っても差は出ない。
+`n/64` is 256→4, 1024→16, 4096→16. Mixing faer at 4 threads with the kernel at 16 avoids the 16-thread accident at 256 and is a few milliseconds slower than both at 4. For n≥1024 the formula uses the whole pool, so narrowing the kernel does not change the time.
 
-predict 100 は `k = 100`。`faer_par(n)` のままだと n=1024 で 16 本になり、三角ソルブが 1.5–22 ms で跳ぶ（確保・カーネルは 0.2–0.8 ms で安定）。n=4096 でも 16 本のまま 5 回中 1 回が 103 ms。同じセルで Seq / 1 本は 2.4–3.0 ms、4 本は 1.6–2.1 ms、8 本は 1.5–1.8 ms。`n·k/16384` は n=256 の eval 4 本点（`256²/4`）。`k/12` は 100 列を 8 本までに落とす。1024×100 は 6 本、4096×100 は 8 本。
+predict 100 has `k = 100`. Leaving `faer_par(n)` in place uses 16 threads at n=1024, and the triangular solve jumps between 1.5 and 22 ms (allocation and the kernel stay at 0.2–0.8 ms). At n=4096, still on 16 threads, one of five runs was 103 ms. In the same cell Seq / 1 thread is 2.4–3.0 ms, 4 threads is 1.6–2.1 ms, and 8 threads is 1.5–1.8 ms. `n·k/16384` is the 4-thread eval point at n=256 (`256²/4`). `k/12` caps 100 columns at 8 threads. 1024×100 is 6 threads. 4096×100 is 8 threads.
 
-壁時計は一面である。アルゴリズム（A⁻¹ の n 本ソルブ）は sklearn と同じ。アロケーション（`I` / `W` の n×n）は #142 / P2B-19。
+Wall time is one face of the cost. The algorithm (n solves for A⁻¹) is the same as sklearn. The `n×n` allocation of `I` / `W` is #142 / P2B-19.
 
-## 帰結
+## Consequences
 
-- 未設定 16 本でも n=256 の正方核は faer 4 本、n=1024 の predict 100 は 6 本、n=4096 の predict 100 は 8 本
-- 並列は bitwise を変えうる。数値テストは公差
-- 合否は `compare/perf` と `.dev/bench-log.md`。criterion は使わない
+- On an unset 16-thread pool, the square kernel at n=256 uses 4 faer threads, predict 100 at n=1024 uses 6, and predict 100 at n=4096 uses 8
+- Parallelism can change bitwise results. Numerical tests use a tolerance
+- Pass/fail is `compare/perf`. criterion is not used. The machine log is local `.dev/bench-log.md` and is not committed

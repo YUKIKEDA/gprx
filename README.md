@@ -1,3 +1,5 @@
+English | [日本語](README.ja.md)
+
 # gprx
 
 Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, runs argmin L-BFGS on the negative log marginal likelihood, and returns `FittedGpr`. The crate is **not** published to crates.io (`publish = false` in `Cargo.toml`).
@@ -6,7 +8,7 @@ Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::
 
 Local **0.1.0** quality: `Gpr` / `FittedGpr`, kernels, `fit` / `predict` / `predict_into` / leave-one-out, English rustdoc, and `examples/`. Depend on git or a path, not crates.io.
 
-Design: [`docs/design.md`](docs/design.md). Tasks: [`docs/roadmap.md`](docs/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`.dev/bench-log.md`](.dev/bench-log.md) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; `compare/perf/`, not criterion).
+Design: [`docs/design.md`](docs/design.md). Tasks: [`docs/roadmap.md`](docs/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`compare/perf/`](compare/perf/) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; not criterion).
 
 ## Example
 
