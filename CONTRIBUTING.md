@@ -1,29 +1,27 @@
-# gprx の開発手順
+# Developing gprx
 
-人間向けの手順。エージェントの入口は [AGENTS.md](AGENTS.md)。強制は `.cursor/rules/`。設計は [docs/design.md](docs/design.md)。並びと状態は [docs/roadmap.md](docs/roadmap.md)。ディレクトリは [docs/conventions.md](docs/conventions.md)。
+Procedure for humans. Agent entry: [AGENTS.md](AGENTS.md). Enforcement: `.cursor/rules/`. Design: [docs/design.md](docs/design.md). Order and status: [docs/roadmap.md](docs/roadmap.md). Directories: [docs/conventions.md](docs/conventions.md). `.dev/` is local scratch and is not committed.
 
-`.dev/` は計測ログ、レビュー、下書きだけ。決定は残さない。
+## Order
 
-## 順
-
-コードと規約に触れる作業は、この順だけ。
+Work that touches code or conventions follows this order only.
 
 ```text
-Grill（設計が分岐するとき）→ Issue → 完了条件は Issue に書く → ブランチ → 作業 → PR → 人間レビュー → マージ
+Grill (when the design branches) → Issue → acceptance text stays on the Issue → branch → work → PR → human review → merge
 ```
 
-1. **Grill** — API、意味、フェーズの境界が分岐するとき。スキルは [`.cursor/skills/grill-me/SKILL.md`](.cursor/skills/grill-me/SKILL.md)。Issue に完了条件があり、[docs/design.md](docs/design.md) と矛盾しないときは省いてよい。質問のターンで成果物を閉じない。
-2. **Issue** — テンプレートは Bug / Feat / Task / Spike。1 Issue = 1 PR。
-3. **完了条件** — Grill で決めた文を、その Issue に書く。ロードマップには写さない。ロードマップは ID、タイトル、Issue、状態だけ。
-4. **ブランチ** — `{type}/{issue番号}-{slug}`（例: `docs/223-rehome-docs`）。
-5. **作業** — その Issue だけ。状態が `Grill 後に #n で確定` の行は作業しない。現在地は [docs/roadmap.md](docs/roadmap.md)。
-6. **PR** — [`.github/pull_request_template.md`](.github/pull_request_template.md)。`## Related` に `Closes #N`。ゲートは `just lint` と `just test`。
-7. **人間がレビューしてマージする。** エージェントはマージしない。
+1. **Grill** — when the API, the meaning, or a phase boundary branches. Skill: [`.cursor/skills/grill-me/SKILL.md`](.cursor/skills/grill-me/SKILL.md). Skip it when the Issue already has acceptance text and that text does not contradict [docs/design.md](docs/design.md). Do not close an artifact in the same turn as a question.
+2. **Issue** — template is Bug / Feat / Task / Spike. One Issue, one PR.
+3. **Acceptance** — write the text decided in Grill on that Issue. Do not copy it onto the roadmap. The roadmap keeps ID, title, Issue, and status.
+4. **Branch** — `{type}/{issue}-{slug}` (example: `docs/223-rehome-docs`).
+5. **Work** — that Issue only. Do not start a row whose status is `Set after Grill on #n`. The current row is [docs/roadmap.md](docs/roadmap.md).
+6. **PR** — [`.github/pull_request_template.md`](.github/pull_request_template.md). `Closes #N` under `## Related`. Gates: `just lint` and `just test`.
+7. **A human reviews and merges.** Agents do not merge.
 
-「進めなさい」は、Issue があるときの作業である。Issue の作成や範囲の決定の代用ではない。
+「進めなさい」 is work on an Issue that already exists. It is not a substitute for creating an Issue or deciding scope.
 
-## ゲート
+## Gates
 
-- `just lint` は `cargo fmt --check` と `cargo clippy --all-targets -- -D warnings`
-- `just test` は `cargo test`。Python を呼ばない
-- `just bench` は criterion。速度の作業は数がないと範囲に入らない。詳細は `.cursor/rules/bench.mdc`
+- `just lint` is `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+- `just test` is `cargo test`. It does not invoke Python
+- `just bench` is criterion. Speed work without a number is out of scope. Detail: `.cursor/rules/bench.mdc`

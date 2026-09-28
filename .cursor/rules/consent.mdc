@@ -33,7 +33,7 @@ When listing options:
 1. Mark one as **推奨** and say why
 2. Give every option a short 利点 / 欠点 (table or bullets)
 3. Do not implement, file Issues, or edit roadmap until the user names the artifact and the action
-4. Do not append to **意図的に今やらない** (or delete from it) as a way to settle scope. That list changes only through Grill → Issue (workflow.mdc)
+4. Do not append to **Intentionally out of scope** (or delete from it) as a way to settle scope. That list changes only through Grill → Issue (workflow.mdc)
 5. A recommended pick is not acceptance text. Do not write formats, pass/fail numbers, or file layouts into `docs/roadmap.md`. Acceptance text stays on the Issue. The roadmap keeps ID, title, Issue, and status (`.cursor/rules/workflow.mdc`)
 6. The reason for **推奨** is a functional or non-functional requirement. Implementation ease and code volume are not reasons. A partial slice is planned in the same decision, or it is not a recommendation (`.cursor/rules/scope.mdc`)
 

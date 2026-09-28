@@ -3,22 +3,22 @@ description: Do not recommend a partial implementation because it is smaller or 
 alwaysApply: true
 ---
 
-# 範囲（部分実装）
+# Scope (partial implementation)
 
-推奨の根拠は機能要件か非機能要件だけである。実装の簡単さと実装量は根拠にしない。その項目は要件に無い。
+The reason for a recommendation is a functional or non-functional requirement only. Ease of implementation and the amount of code are not reasons. Those are not requirements.
 
-一部分だけ実装する案を、コードが少ないことや PR が小さいことを理由に推奨しない。最適化されている経路とされていない経路、対応している経路と対応していない経路が混在すると、維持できなくなる。
+Do not recommend implementing only part of a path because the code is smaller or the PR is smaller. A mix of a path that is optimized and a path that is not, or a path that is supported and a path that is not, cannot be maintained.
 
-タスクを分けるときは、後回しにした部分をいつやるかを、同じ決定の中で計画する。計画は `docs/roadmap.md` の名前付きの行（ID と Issue。未 Grill なら状態は `Grill 後に #<n> で確定`）か、既にある **意図的に今やらない** だけ。行もそのリストも無い分割は、現在の Issue で全部やる。
+When a task is split, plan in the same decision when the deferred part is done. The plan is a named row in `docs/roadmap.md` (ID and Issue. If it is not grilled, the status is `Set after Grill on #<n>`) or an item already under **Intentionally out of scope**. A split with neither a row nor that list is done entirely in the current Issue.
 
 ```text
-# BAD — 推奨の理由が実装量
-この行は Exact だけ。1 本の PR に収まる
-Sgpr は後で
+# BAD — the reason is the amount of code
+This row is Exact only. It fits in one PR
+Sgpr later
 
-# GOOD — 要件で選ぶ。分けるなら同じ決定で行を置く
-f64 と同じ手順を、Exact / Sgpr / Svgp の f32 でもやる
-分けるなら、同じ変更で roadmap に ID と Issue を足す。未 Grill なら状態は Grill 後に #<n> で確定。完了条件は Issue に書く
+# GOOD — choose by the requirement. If you split, put the row in the same decision
+Do the same steps as f64 for f32 of Exact / Sgpr / Svgp
+If you split, add the ID and Issue to the roadmap in the same change. If it is not grilled, the status is `Set after Grill on #<n>`. Write the acceptance text on the Issue
 ```
 
-行の追加は Grill → Issue（`.cursor/rules/workflow.mdc`）。質問のターンで roadmap は埋めない（`.cursor/rules/consent.mdc`）。完了条件は Issue に書き、ロードマップには写さない。
+Adding a row is Grill → Issue (`.cursor/rules/workflow.mdc`). Do not fill the roadmap in the same turn as a question (`.cursor/rules/consent.mdc`). Write the acceptance text on the Issue. Do not copy it onto the roadmap.
