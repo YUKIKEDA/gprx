@@ -109,14 +109,16 @@ impl<P: GpScalar> GprCore<P> {
         write_params(&self.kernel, &self.likelihood, out)
     }
 
-    /// Solves `factor⁻¹ y` into [`Self::factor_alpha`].
-    pub(crate) fn solve_factor_alpha(&mut self, factor: StoredFactor<'_, P::Storage>) {
+    /// Returns `factor⁻¹ y` in the storage scalar.
+    pub(crate) fn solve_factor_alpha(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+    ) -> Vec<P::Storage> {
         let n = self.n;
         let mut rhs =
             Mat::<P::Storage>::from_fn(n, 1, |i, _| P::Storage::from_f64(self.y_train[i]));
         factor.solve_in_place(rhs.as_mut());
-        self.factor_alpha.clear();
-        self.factor_alpha.extend((0..n).map(|i| rhs[(i, 0)]));
+        (0..n).map(|i| rhs[(i, 0)]).collect()
     }
 
     /// Writes the predict `α` from `factor` and [`Self::factor_alpha`].
@@ -126,28 +128,47 @@ impl<P: GpScalar> GprCore<P> {
         jitter: f64,
         stage: CholeskyStage,
     ) -> Result<(), GprError> {
-        let x = self.x.as_ref().submatrix(0, 0, self.n, self.d);
+        let mut alpha = std::mem::take(&mut self.alpha);
+        let written =
+            self.write_predict_alpha(factor, &self.factor_alpha, jitter, stage, &mut alpha);
+        self.alpha = alpha;
+        written
+    }
+
+    /// Writes the predict `α` for `factor_alpha = factor⁻¹ y` into `out`.
+    pub(crate) fn write_predict_alpha(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+        factor_alpha: &[P::Storage],
+        jitter: f64,
+        stage: CholeskyStage,
+        out: &mut Vec<P::Refine>,
+    ) -> Result<(), GprError> {
         let sys = TrainSystem {
             kernel: &self.kernel,
             compiled: &self.compiled,
-            x,
+            x: self.x_active(),
             y: &self.y_train,
             noise: self.likelihood.noise_variance(),
             jitter,
             factor,
-            factor_alpha: &self.factor_alpha,
+            factor_alpha,
             policy: self.policies.jitter,
             stage,
         };
-        with_kernel_exp!(self.policies.math, M => P::publish_predict_alpha::<M>(&sys, &mut self.alpha))
+        with_kernel_exp!(self.policies.math, M => P::publish_predict_alpha::<M>(&sys, out))
     }
 
-    /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` from `factor` and the stored `α`.
-    pub(crate) fn neg_log_marginal_likelihood(&self, factor: StoredFactor<'_, P::Storage>) -> f64 {
+    /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` from `factor` and `factor_alpha`.
+    pub(crate) fn neg_log_marginal_likelihood(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+        factor_alpha: &[P::Storage],
+    ) -> f64 {
         let mut rows = P::Storage::empty_rows();
         let y = P::Storage::storage_rows(&self.y_train, &mut rows);
         let mut quad = P::Storage::from_f64(0.0);
-        for (yi, ai) in y.iter().zip(&self.factor_alpha).take(self.n) {
+        for (yi, ai) in y.iter().zip(factor_alpha).take(self.n) {
             quad += *yi * *ai;
         }
         let log_two_pi = P::Storage::from_f64((2.0 * std::f64::consts::PI).ln());
@@ -241,9 +262,11 @@ impl<P: GpScalar> GprCore<P> {
     }
 
     /// Predicts into `out` with buffers allocated for this call.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_prediction(
         &self,
         factor: StoredFactor<'_, P::Storage>,
+        alpha: &[P::Refine],
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
@@ -259,7 +282,7 @@ impl<P: GpScalar> GprCore<P> {
         debug_assert_eq!(k_star.nrows(), n);
         write_moments::<P>(
             MomentInputs {
-                core: self.refs(),
+                core: self.refs(alpha),
                 factor,
                 query_xs: &query_xs,
                 query_x: query_x.as_ref(),
@@ -272,11 +295,11 @@ impl<P: GpScalar> GprCore<P> {
         )
     }
 
-    fn refs(&self) -> CoreRefs<'_, P> {
+    fn refs<'a>(&'a self, alpha: &'a [P::Refine]) -> CoreRefs<'a, P> {
         CoreRefs {
             kernel: &self.kernel,
             compiled: &self.compiled,
-            alpha: &self.alpha,
+            alpha,
             x_train: self.x_active(),
             noise: self.likelihood.noise_variance(),
             y_transform: self.y_transform.as_ref(),
@@ -318,6 +341,7 @@ impl<P: GpScalar> GprCore<P> {
     pub(crate) fn write_covariance(
         &self,
         factor: StoredFactor<'_, P::Storage>,
+        alpha: &[P::Refine],
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
@@ -335,7 +359,7 @@ impl<P: GpScalar> GprCore<P> {
             self.x_active(),
             &query_xs,
             n_cols,
-            &self.alpha,
+            alpha,
             &mut mean,
         ))?;
         factor.inv_l_in_place(k_star.as_mut());
@@ -394,6 +418,7 @@ impl<P: GpScalar> GprCore<P> {
     pub(crate) fn sample_with(
         &self,
         factor: StoredFactor<'_, P::Storage>,
+        alpha: &[P::Refine],
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
@@ -401,7 +426,7 @@ impl<P: GpScalar> GprCore<P> {
         n_draws: usize,
         seed: u64,
     ) -> Result<Vec<P::Refine>, GprError> {
-        let cov = self.write_covariance(factor, xs, n_rows, n_cols, options)?;
+        let cov = self.write_covariance(factor, alpha, xs, n_rows, n_cols, options)?;
         if n_draws == 0 {
             return Ok(Vec::new());
         }
@@ -443,6 +468,7 @@ impl<P: GpScalar> GprCore<P> {
     pub(crate) fn loo_predict_with(
         &self,
         factor: StoredFactor<'_, P::Storage>,
+        alpha: &[P::Refine],
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
@@ -461,7 +487,7 @@ impl<P: GpScalar> GprCore<P> {
             if !qii.is_finite() || qii <= 0.0 {
                 return Err(GprError::NonPositiveDefiniteMatrix);
             }
-            mean[i] = P::Refine::from_f64(y[i].to_f64() - self.alpha[i].to_f64() / qii);
+            mean[i] = P::Refine::from_f64(y[i].to_f64() - alpha[i].to_f64() / qii);
             let obs = 1.0 / qii;
             variance[i] = P::Refine::from_f64(match options.variance_kind {
                 VarianceKind::Observation => obs,
