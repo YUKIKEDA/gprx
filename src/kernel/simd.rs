@@ -904,7 +904,7 @@ fn require_ard_cache(cache: MatRef<'_, f64>, n: usize, d: usize) -> Result<(), G
     if cache.nrows() == n && cache.ncols() == n.saturating_mul(d) {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::ShapeMismatch {
             reason: format!(
                 "ARD cache is {}x{}, expected {}x{}",
                 cache.nrows(),

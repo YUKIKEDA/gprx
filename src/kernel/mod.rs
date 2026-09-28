@@ -102,7 +102,7 @@ pub(crate) fn visit_triangle(n: usize, uplo: Triangle, mut visit: impl FnMut(usi
 
 fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usize, GprError> {
     if dist.nrows() != dist.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "distance matrix must be square, got {}x{}",
                 dist.nrows(),
@@ -111,7 +111,7 @@ fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<us
         });
     }
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -143,7 +143,7 @@ pub(crate) fn require_coord_grad(
         });
     }
     if dim >= x1.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: format!(
                 "coordinate dimension {dim} is out of range for d={}",
                 x1.ncols()
@@ -151,7 +151,7 @@ pub(crate) fn require_coord_grad(
         });
     }
     if d_k.nrows() != x1.nrows() || d_k.ncols() != x2.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 d_k.nrows(),
@@ -166,7 +166,7 @@ pub(crate) fn require_coord_grad(
 
 fn require_same_shape(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(), GprError> {
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -290,7 +290,7 @@ pub(crate) fn write_square_from_coords(
 ) -> Result<(), GprError> {
     let n = out.nrows();
     if out.ncols() != n {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!("output must be square, got {}x{}", out.nrows(), out.ncols()),
         });
     }
@@ -333,7 +333,7 @@ fn write_square(
     mut kernel: impl FnMut(usize, usize) -> Result<f64, GprError>,
 ) -> Result<(), GprError> {
     if out.nrows() != out.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!("output must be square, got {}x{}", out.nrows(), out.ncols()),
         });
     }

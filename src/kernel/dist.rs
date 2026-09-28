@@ -113,11 +113,11 @@ pub(crate) fn require_ard_sq_diff_shape(
     n: usize,
     d: usize,
 ) -> Result<(), GprError> {
-    let cols = n.checked_mul(d).ok_or(GprError::EmptyInput)?;
+    let cols = n.checked_mul(d).ok_or(GprError::SizeOverflow)?;
     if cache.nrows() == n && cache.ncols() == cols {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::ShapeMismatch {
             reason: format!(
                 "ARD cache is {}x{}, expected {}x{}",
                 cache.nrows(),

@@ -15,7 +15,7 @@ impl CompiledKernel<f64> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is
     /// the wrong size, or the same shape errors as [`Self::apply`].
     pub fn grad<M: crate::math::KernelMath>(
@@ -56,7 +56,7 @@ impl CompiledKernel<f64> {
     ///
     /// # Errors
     ///
-    /// [`GprError::InvalidHyperparameter`] if `param_idx` is out of range,
+    /// [`GprError::IndexOutOfRange`] if `param_idx` is out of range,
     /// [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is the
     /// wrong size, or the same shape errors as [`Self::apply_points`].
     #[allow(clippy::only_used_in_recursion)] // leaves ignore scratch; Sum forwards it
@@ -98,7 +98,7 @@ impl CompiledKernel<f64> {
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `x` is empty,
-    /// [`GprError::InvalidHyperparameter`] if `param_idx` is out of range or
+    /// [`GprError::IndexOutOfRange`] if `param_idx` is out of range or
     /// `out.len()` is not `x.nrows()`, or the leaf error for that diagonal entry.
     pub(crate) fn grad_diag_points<M: crate::math::KernelMath>(
         &self,
@@ -431,7 +431,7 @@ fn term_for_param(
         }
         offset += n;
     }
-    Err(GprError::InvalidHyperparameter {
+    Err(GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })
 }
@@ -454,7 +454,7 @@ fn product_grad<M: crate::math::KernelMath>(
         }
         offset += n;
     }
-    let (owner_i, local) = owner.ok_or_else(|| GprError::InvalidHyperparameter {
+    let (owner_i, local) = owner.ok_or_else(|| GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })?;
 
@@ -500,7 +500,7 @@ pub(super) fn require_diag_len(x: MatRef<'_, f64>, out: &[f64]) -> Result<(), Gp
         return Err(GprError::EmptyInput);
     }
     if out.len() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
         });
     }
@@ -556,7 +556,7 @@ fn product_grad_diag<M: crate::math::KernelMath>(
         }
         offset += count;
     }
-    let (owner, local) = found.ok_or_else(|| GprError::InvalidHyperparameter {
+    let (owner, local) = found.ok_or_else(|| GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })?;
     terms[owner].grad_diag_points::<M>(x, out, local)?;
@@ -581,7 +581,7 @@ fn product_grad_points<M: crate::math::KernelMath>(
         }
         offset += n;
     }
-    let (owner_i, local) = owner.ok_or_else(|| GprError::InvalidHyperparameter {
+    let (owner_i, local) = owner.ok_or_else(|| GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })?;
 
@@ -632,7 +632,7 @@ fn product_grad_mixed<M: crate::math::KernelMath>(
         }
         offset += n;
     }
-    let (owner_i, local) = owner.ok_or_else(|| GprError::InvalidHyperparameter {
+    let (owner_i, local) = owner.ok_or_else(|| GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })?;
 

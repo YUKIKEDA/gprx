@@ -151,7 +151,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "kernel parameters")?;
@@ -163,7 +163,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length or a leaf rejects its slice.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;
@@ -185,7 +185,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns the leaf that owns kernel parameter `param_idx`.
     pub(crate) fn leaf_index_for_param(&self, param_idx: usize) -> Result<usize, GprError> {
         if param_idx >= self.num_params() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("kernel parameter index {param_idx} is out of range"),
             });
         }
@@ -194,7 +194,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         if self.locate_leaf(param_idx, &mut offset, &mut leaf) {
             Ok(leaf)
         } else {
-            Err(GprError::InvalidHyperparameter {
+            Err(GprError::IndexOutOfRange {
                 reason: format!("kernel parameter index {param_idx} is out of range"),
             })
         }
@@ -222,7 +222,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn leaf_at(&self, leaf: usize) -> Result<&Self, GprError> {
         let mut remaining = leaf;
         self.find_leaf_at(&mut remaining)
-            .ok_or(GprError::InvalidHyperparameter {
+            .ok_or(GprError::IndexOutOfRange {
                 reason: format!("leaf index {leaf} is out of range"),
             })
     }
@@ -268,7 +268,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if grams.len() != self.leaf_count() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!(
                     "expected {} leaf Grams, got {}",
                     self.leaf_count(),
@@ -283,7 +283,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         let mut index = 0;
         self.write_from_leaf_grams(grams, &mut index, out.as_mut(), scratch.as_mut(), uplo)?;
         if index != grams.len() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: "leaf Gram walk did not consume every leaf".to_owned(),
             });
         }
@@ -307,7 +307,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             }
             _ => {
                 if *index >= grams.len() {
-                    return Err(GprError::InvalidHyperparameter {
+                    return Err(GprError::LengthMismatch {
                         reason: "leaf Gram walk ran past the cache".to_owned(),
                     });
                 }

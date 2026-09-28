@@ -93,7 +93,7 @@ impl ConstantKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "constant parameter")?;
         out[0] = self.constant.ln();
@@ -104,8 +104,8 @@ impl ConstantKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
-    /// or if the new `θ` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
+    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "constant parameter")?;
         let log_constant = validate_log_positive(params[0], "constant value")?;
@@ -194,7 +194,7 @@ impl ConstantKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0, or
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -229,7 +229,7 @@ impl ConstantKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape errors as [`Self::apply`].
     pub fn hess(
         &self,
@@ -272,7 +272,7 @@ fn require_param_idx(param_idx: usize) -> Result<(), GprError> {
     if param_idx == 0 {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: "constant kernel has a single parameter at index 0".to_owned(),
         })
     }
@@ -282,7 +282,7 @@ fn require_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     if i == 0 && j == 0 {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("constant kernel has a single parameter; got pair ({i}, {j})"),
         })
     }
@@ -293,7 +293,7 @@ fn require_points_square(x: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(),
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -315,7 +315,7 @@ fn require_cross_points(
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -435,7 +435,7 @@ mod tests {
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             kernel.grad(dist.as_ref(), dk.as_mut(), 1, Triangle::Lower),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
     }
 }

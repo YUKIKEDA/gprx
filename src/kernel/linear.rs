@@ -90,7 +90,7 @@ impl LinearKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "linear parameter")?;
         out[0] = self.variance.ln();
@@ -101,8 +101,8 @@ impl LinearKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
-    /// or if the new `θ` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
+    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "linear parameter")?;
         let log_variance = validate_log_positive(params[0], "linear variance")?;
@@ -143,7 +143,7 @@ impl LinearKernel {
     ) -> Result<(), GprError> {
         require_feature_pair(x, xs)?;
         if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: format!(
                     "output is {}x{}, expected {}x{}",
                     out.nrows(),
@@ -170,14 +170,14 @@ impl LinearKernel {
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `x` is empty,
-    /// [`GprError::InvalidHyperparameter`] if `out.len()` is not `x.nrows()`,
+    /// [`GprError::LengthMismatch`] if `out.len()` is not `x.nrows()`,
     /// or [`GprError::NonFiniteInput`] if a coordinate is non-finite.
     pub fn fill_diag_points(&self, x: MatRef<'_, f64>, out: &mut [f64]) -> Result<(), GprError> {
         if x.nrows() == 0 || x.ncols() == 0 {
             return Err(GprError::EmptyInput);
         }
         if out.len() != x.nrows() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
             });
         }
@@ -194,7 +194,7 @@ impl LinearKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0, or
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -204,7 +204,7 @@ impl LinearKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: "linear kernel has a single parameter at index 0".to_owned(),
             });
         }
@@ -215,7 +215,7 @@ impl LinearKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
     pub fn hess(
         &self,
@@ -226,7 +226,7 @@ impl LinearKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if i != 0 || j != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("linear kernel has a single parameter; got pair ({i}, {j})"),
             });
         }
@@ -270,7 +270,7 @@ fn require_square_points(x: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usi
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -394,7 +394,7 @@ mod tests {
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             kernel.grad(x.as_ref(), dk.as_mut(), 1, Triangle::Lower),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
     }
 }

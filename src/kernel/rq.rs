@@ -123,7 +123,7 @@ impl RationalQuadraticKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 2.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not length 2.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_two_params(out.len())?;
         out[0] = self.lengthscale.ln();
@@ -135,8 +135,8 @@ impl RationalQuadraticKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 2
-    /// or a `θ` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not length 2,
+    /// or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_two_params(params.len())?;
         let ell = validate_log_lengthscale(params[0])?.exp();
@@ -189,7 +189,7 @@ impl RationalQuadraticKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0 or
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0 or
     /// 1, or the same shape / non-finite errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -199,7 +199,7 @@ impl RationalQuadraticKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx > 1 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("rational quadratic parameter index {param_idx} is out of range"),
             });
         }
@@ -234,7 +234,7 @@ impl RationalQuadraticKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx > 1 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("rational quadratic parameter index {param_idx} is out of range"),
             });
         }
@@ -254,7 +254,7 @@ impl RationalQuadraticKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
     pub fn hess(
         &self,
@@ -361,7 +361,7 @@ fn require_rq_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     if i <= 1 && j <= 1 {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("rational quadratic parameter pair ({i}, {j}) is out of range"),
         })
     }
@@ -379,7 +379,7 @@ fn expect_two_params(len: usize) -> Result<(), GprError> {
     if len == 2 {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::LengthMismatch {
             reason: format!("expected 2 rational quadratic parameters, got {len}"),
         })
     }
@@ -626,7 +626,7 @@ mod tests {
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             kernel.grad(dist.as_ref(), dk.as_mut(), 2, Triangle::Lower),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
     }
 

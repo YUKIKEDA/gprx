@@ -73,11 +73,11 @@ impl Lbfgs {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `tolerance` is not finite
+    /// Returns [`GprError::InvalidConfig`] if `tolerance` is not finite
     /// or is negative.
     pub fn with_tolerance(mut self, tolerance: f64) -> Result<Self, GprError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "L-BFGS gradient tolerance must be finite and >= 0".to_owned(),
             });
         }
@@ -114,7 +114,7 @@ impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {n} parameters, got {}", init.len()),
             });
         }
@@ -168,7 +168,7 @@ fn run_lbfgs<P: Differentiable>(
 ) -> Result<OptResult, GprError> {
     let n = objective.num_params();
     if init.len() != n {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {n} parameters, got {}", init.len()),
         });
     }
@@ -244,7 +244,7 @@ mod tests {
             out: &mut [f64],
         ) -> Result<f64, GprError> {
             if params.len() != 2 || out.len() != 2 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "quadratic is 2-D".to_owned(),
                 });
             }
@@ -261,7 +261,7 @@ mod tests {
         let err = Lbfgs::new()
             .minimize_unconstrained(&mut obj, &[0.0])
             .expect_err("len");
-        assert!(matches!(err, GprError::InvalidHyperparameter { .. }));
+        assert!(matches!(err, GprError::LengthMismatch { .. }));
         assert_eq!(obj.joint_evals, 0);
     }
 

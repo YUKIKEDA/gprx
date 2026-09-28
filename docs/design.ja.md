@@ -717,6 +717,16 @@ pub enum GprError {
     OptimizationNotConverged { iterations: usize },
     #[error("ハイパーパラメータが不正です: {reason}")]
     InvalidHyperparameter { reason: String },
+    #[error("shape mismatch: {reason}")]
+    ShapeMismatch { reason: String },
+    #[error("length mismatch: {reason}")]
+    LengthMismatch { reason: String },
+    #[error("index out of range: {reason}")]
+    IndexOutOfRange { reason: String },
+    #[error("invalid configuration: {reason}")]
+    InvalidConfig { reason: String },
+    #[error("size overflows usize")]
+    SizeOverflow,
     #[error("観測ノイズ分散が不正です: {reason}")]
     InvalidNoiseVariance { reason: String },
     #[error("未対応のカーネル操作です: {reason}")]
@@ -730,6 +740,8 @@ pub enum GprError {
 #[derive(Debug)]
 pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 ```
+
+`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。
 
 **Error/panicの線引き**: ユーザー入力起因(`DimensionMismatch`等)、モデル/データ起因(`CholeskyFailed`等)は`Result`で返し回復可能にする。`CoordGradientUnsupported`はライブラリ内部panic対象ではないため`unimplemented!()`ではなく本Errorを返す。
 
