@@ -725,6 +725,16 @@ pub enum GprError {
     OptimizationNotConverged { iterations: usize },
     #[error("invalid hyperparameter: {reason}")]
     InvalidHyperparameter { reason: String },
+    #[error("shape mismatch: {reason}")]
+    ShapeMismatch { reason: String },
+    #[error("length mismatch: {reason}")]
+    LengthMismatch { reason: String },
+    #[error("index out of range: {reason}")]
+    IndexOutOfRange { reason: String },
+    #[error("invalid configuration: {reason}")]
+    InvalidConfig { reason: String },
+    #[error("size overflows usize")]
+    SizeOverflow,
     #[error("invalid observation-noise variance: {reason}")]
     InvalidNoiseVariance { reason: String },
     #[error("unsupported kernel operation: {reason}")]
@@ -738,6 +748,8 @@ pub enum GprError {
 #[derive(Debug)]
 pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 ```
+
+`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`.
 
 **Error versus panic**: failures caused by user input (`DimensionMismatch` and similar) and by the model or the data (`CholeskyFailed` and similar) return `Result` and stay recoverable. `CoordGradientUnsupported` is not an internal panic, so it returns this error instead of `unimplemented!()`. There is no `NotFitted` variant. An unfitted call cannot be formed.
 

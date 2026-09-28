@@ -52,7 +52,7 @@ impl<P: TwiceDifferentiable> TwiceDifferentiable for LogitMapped<'_, P> {
         z_to_log_theta_into(params, self.intervals, &mut self.log_scratch)?;
         let n = params.len();
         if out.len() != n * n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {} Hessian entries, got {}", n * n, out.len()),
             });
         }
@@ -127,7 +127,7 @@ pub(crate) fn z_to_log_theta(z: &[f64], intervals: &[Interval]) -> Result<Vec<f6
 
 fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Result<(), GprError> {
     if z.len() != intervals.len() || out.len() != z.len() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: "logit map length mismatch".to_owned(),
         });
     }
@@ -467,7 +467,7 @@ mod tests {
             out: &mut [f64],
         ) -> Result<f64, GprError> {
             if params.len() != 2 || out.len() != 2 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "quadratic is 2-D".to_owned(),
                 });
             }

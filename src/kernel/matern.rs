@@ -127,7 +127,7 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "Matern parameter")?;
         out[0] = self.lengthscale.ln();
@@ -138,8 +138,8 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
-    /// or if the new `θ` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
+    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "Matern parameter")?;
         let log_lengthscale = validate_log_lengthscale(params[0])?;
@@ -207,7 +207,7 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0, or
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -227,7 +227,7 @@ impl MaternKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: "Matern has a single parameter at index 0".to_owned(),
             });
         }
@@ -258,7 +258,7 @@ impl MaternKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: "Matern has a single parameter at index 0".to_owned(),
             });
         }
@@ -274,7 +274,7 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is not 0, or
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
     pub fn hess(
         &self,
@@ -454,7 +454,7 @@ impl MaternKernel {
         dim: usize,
     ) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: "Matern has a single parameter at index 0".to_owned(),
             });
         }
@@ -493,7 +493,7 @@ impl MaternKernel {
         param_idx: usize,
     ) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: "Matern has a single parameter at index 0".to_owned(),
             });
         }
@@ -825,7 +825,7 @@ fn require_matern_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     if i == 0 && j == 0 {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("Matern has a single parameter; got pair ({i}, {j})"),
         })
     }
@@ -1101,7 +1101,7 @@ mod tests {
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             kernel.grad(dist.as_ref(), dk.as_mut(), 1, Triangle::Lower),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
     }
 

@@ -118,7 +118,7 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `dim` is out of range.
+    /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.lengthscales.lengthscale(dim)
     }
@@ -137,11 +137,11 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if out.len() != d + 1 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!(
                     "expected {} rational quadratic parameters, got {}",
                     d + 1,
@@ -158,12 +158,12 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
-    /// length or a `θ` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
+    /// length, or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if params.len() != d + 1 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!(
                     "expected {} rational quadratic parameters, got {}",
                     d + 1,
@@ -230,7 +230,7 @@ impl RationalQuadraticArdKernel {
         require_feature_dim(x, d)?;
         require_feature_dim(xs, d)?;
         if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: format!(
                     "output is {}x{}, expected {}x{}",
                     out.nrows(),
@@ -262,7 +262,7 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
     pub fn grad(
         &self,
@@ -273,7 +273,7 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if param_idx > d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD rational quadratic parameter index {param_idx} is out of range (d={d})"
                 ),
@@ -306,7 +306,7 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let n = out.nrows();
         if out.ncols() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
             });
         }
@@ -341,7 +341,7 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if param_idx > d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD rational quadratic parameter index {param_idx} is out of range (d={d})"
                 ),
@@ -349,7 +349,7 @@ impl RationalQuadraticArdKernel {
         }
         let n = d_k.nrows();
         if d_k.ncols() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: format!("output is {}x{}, expected square", d_k.nrows(), d_k.ncols()),
             });
         }
@@ -393,7 +393,7 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
     pub fn hess(
         &self,
@@ -405,7 +405,7 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if i > d || j > d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD rational quadratic parameter pair ({i}, {j}) is out of range (d={d})"
                 ),
@@ -440,7 +440,7 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if i > d || j > d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD rational quadratic parameter pair ({i}, {j}) is out of range (d={d})"
                 ),
@@ -448,7 +448,7 @@ impl RationalQuadraticArdKernel {
         }
         let n = d2_k.nrows();
         if d2_k.ncols() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: format!(
                     "output is {}x{}, expected square",
                     d2_k.nrows(),
@@ -496,7 +496,7 @@ fn require_square_points(
 ) -> Result<usize, GprError> {
     require_feature_dim(x, expected_d)?;
     if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -862,7 +862,7 @@ mod tests {
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             kernel.grad(x.as_ref(), dk.as_mut(), 3, Triangle::Lower),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
         let bad_d = Mat::from_fn(2, 3, |_, _| 0.0);
         let mut k = fill(2, 0.0);

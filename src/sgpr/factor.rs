@@ -637,7 +637,7 @@ pub(crate) fn fill_z_intervals(
     out: &mut [Interval],
 ) -> Result<(), GprError> {
     if d == 0 || out.len() % d != 0 {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: "inducing interval length is not a multiple of d".to_owned(),
         });
     }
@@ -1110,14 +1110,14 @@ where
     let (theta, (p, e)) = if i < n_theta {
         (
             i,
-            z_index(j).ok_or_else(|| GprError::InvalidHyperparameter {
+            z_index(j).ok_or_else(|| GprError::IndexOutOfRange {
                 reason: "expected a free inducing coordinate".to_owned(),
             })?,
         )
     } else {
         (
             j,
-            z_index(i).ok_or_else(|| GprError::InvalidHyperparameter {
+            z_index(i).ok_or_else(|| GprError::IndexOutOfRange {
                 reason: "expected a free inducing coordinate".to_owned(),
             })?,
         )
@@ -1864,7 +1864,7 @@ pub(crate) fn inducing_delete<T: KernelScalar>(
         return Err(GprError::EmptyInput);
     }
     if idx >= m {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: "inducing index is out of range".to_owned(),
         });
     }

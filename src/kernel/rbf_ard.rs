@@ -81,7 +81,7 @@ impl RbfArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `dim` is out of range.
+    /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.lengthscales.lengthscale(dim)
     }
@@ -115,7 +115,7 @@ impl RbfArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.lengthscales.get_params(out)
     }
@@ -124,8 +124,8 @@ impl RbfArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
-    /// length or a `θ_d` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
+    /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.lengthscales.set_params(params)
     }
@@ -182,7 +182,7 @@ impl RbfArdKernel {
         require_feature_dim(x, d)?;
         require_feature_dim(xs, d)?;
         if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: format!(
                     "output is {}x{}, expected {}x{}",
                     out.nrows(),
@@ -217,7 +217,7 @@ impl RbfArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
     pub fn grad<M: KernelMath>(
         &self,
@@ -227,7 +227,7 @@ impl RbfArdKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx >= self.num_params() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD RBF parameter index {param_idx} is out of range (d={})",
                     self.num_params()
@@ -292,7 +292,7 @@ impl RbfArdKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if param_idx >= self.num_params() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD RBF parameter index {param_idx} is out of range (d={})",
                     self.num_params()
@@ -326,7 +326,7 @@ impl RbfArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
     pub fn hess<M: KernelMath>(
         &self,
@@ -338,7 +338,7 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         let d = self.num_params();
         if i >= d || j >= d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
             });
         }
@@ -370,7 +370,7 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         let d = self.num_params();
         if i >= d || j >= d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
             });
         }
@@ -400,7 +400,7 @@ impl RbfArdKernel {
     /// # Errors
     ///
     /// Same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`], or
-    /// [`GprError::InvalidHyperparameter`] when `dim` does not match `ℓ_d`.
+    /// [`GprError::IndexOutOfRange`] when `dim` does not match `ℓ_d`.
     pub fn grad_wrt_coord_dim<M: KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
@@ -410,7 +410,7 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
         if dim >= self.num_params() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "coordinate dimension {dim} is out of range for d={}",
                     self.num_params()
@@ -515,7 +515,7 @@ impl RbfArdKernel {
         dim: usize,
     ) -> Result<(), GprError> {
         if param_idx >= self.num_params() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD RBF parameter {param_idx} is out of range (d={})",
                     self.num_params()
@@ -562,7 +562,7 @@ impl RbfArdKernel {
         param_idx: usize,
     ) -> Result<(), GprError> {
         if param_idx >= self.num_params() {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!(
                     "ARD RBF parameter {param_idx} is out of range (d={})",
                     self.num_params()
@@ -624,7 +624,7 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         let d = self.num_params();
         if i >= d || j >= d {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
             });
         }
@@ -1115,7 +1115,7 @@ fn require_square_out(out: MatRef<'_, f64>) -> Result<usize, GprError> {
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != out.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
         });
     }
@@ -1200,7 +1200,7 @@ fn require_square_points(
 ) -> Result<usize, GprError> {
     require_feature_dim(x, expected_d)?;
     if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -1660,7 +1660,7 @@ mod tests {
         let mut dk = fill(2, 0.0);
         assert!(matches!(
             rbf.grad::<Accurate>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
         let bad_d = Mat::from_fn(2, 3, |_, _| 0.0);
         let mut k = fill(2, 0.0);
