@@ -8,6 +8,7 @@
 use super::dist::{col_chunk, worker_count};
 use super::{Triangle, finite_dist, require_same_shape, require_square_pair};
 use crate::error::GprError;
+use crate::math::KernelMath;
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 use rayon::prelude::*;
@@ -65,7 +66,11 @@ pub(crate) fn add_squared_diff(x: &[f64], x0: f64, acc: &mut [f64]) {
     }
 }
 
-fn rbf_exp_slice(dist: &[f64], out: &mut [f64], inv_two_ell_sq: f64) -> Result<(), GprError> {
+fn rbf_exp_slice<M: KernelMath>(
+    dist: &[f64],
+    out: &mut [f64],
+    inv_two_ell_sq: f64,
+) -> Result<(), GprError> {
     debug_assert_eq!(dist.len(), out.len());
     let scale = f64x4::new([-inv_two_ell_sq; LANES]);
     let mut i = 0;
@@ -74,18 +79,18 @@ fn rbf_exp_slice(dist: &[f64], out: &mut [f64], inv_two_ell_sq: f64) -> Result<(
         if !all_finite4(d) {
             return Err(GprError::NonFiniteInput);
         }
-        store4(out, i, (d * scale).exp());
+        store4(out, i, M::exp_f64x4(d * scale));
         i += LANES;
     }
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
-        out[i] = (-d * inv_two_ell_sq).exp();
+        out[i] = M::exp_f64(-d * inv_two_ell_sq);
         i += 1;
     }
     Ok(())
 }
 
-fn rbf_grad_slice(
+fn rbf_grad_slice<M: KernelMath>(
     dist: &[f64],
     out: &mut [f64],
     inv_two_ell_sq: f64,
@@ -100,14 +105,14 @@ fn rbf_grad_slice(
         if !all_finite4(d) {
             return Err(GprError::NonFiniteInput);
         }
-        let k = (d * scale).exp();
-        store4(out, i, k * d * inv);
+        let dk = M::d1_f64x4(d * scale);
+        store4(out, i, dk * d * inv);
         i += LANES;
     }
     while i < dist.len() {
         let d = finite_dist(dist[i])?;
-        let k = (-d * inv_two_ell_sq).exp();
-        out[i] = k * d * inv_ell_sq;
+        let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+        out[i] = dk * d * inv_ell_sq;
         i += 1;
     }
     Ok(())
@@ -216,18 +221,18 @@ fn map_column_range(
     )
 }
 
-fn apply_rbf_range(
+fn apply_rbf_range<M: KernelMath>(
     dist: MatRef<'_, f64>,
     out: MatMut<'_, f64>,
     window: ColWindow,
     inv_two_ell_sq: f64,
 ) -> Result<(), GprError> {
     map_column_range(dist, out, window, |src, dest| {
-        rbf_exp_slice(src, dest, inv_two_ell_sq)
+        rbf_exp_slice::<M>(src, dest, inv_two_ell_sq)
     })
 }
 
-fn grad_rbf_range(
+fn grad_rbf_range<M: KernelMath>(
     dist: MatRef<'_, f64>,
     out: MatMut<'_, f64>,
     window: ColWindow,
@@ -235,11 +240,11 @@ fn grad_rbf_range(
     inv_ell_sq: f64,
 ) -> Result<(), GprError> {
     map_column_range(dist, out, window, |src, dest| {
-        rbf_grad_slice(src, dest, inv_two_ell_sq, inv_ell_sq)
+        rbf_grad_slice::<M>(src, dest, inv_two_ell_sq, inv_ell_sq)
     })
 }
 
-fn rbf_lower_parallel(
+fn rbf_lower_parallel<M: KernelMath>(
     dist: MatRef<'_, f64>,
     out: MatMut<'_, f64>,
     inv_two_ell_sq: f64,
@@ -254,7 +259,7 @@ fn rbf_lower_parallel(
             for local in 0..len {
                 let col = start + local;
                 match inv_ell_sq {
-                    None => apply_rbf_range(
+                    None => apply_rbf_range::<M>(
                         dist,
                         part.rb_mut(),
                         ColWindow {
@@ -265,7 +270,7 @@ fn rbf_lower_parallel(
                         },
                         inv_two_ell_sq,
                     )?,
-                    Some(inv_ell) => grad_rbf_range(
+                    Some(inv_ell) => grad_rbf_range::<M>(
                         dist,
                         part.rb_mut(),
                         ColWindow {
@@ -287,7 +292,7 @@ fn rbf_lower_parallel(
 ///
 /// Returns `Ok(false)` if SIMD cannot run so the caller uses the scalar
 /// [`super::write_triangle`] path.
-pub(crate) fn try_apply_rbf(
+pub(crate) fn try_apply_rbf<M: KernelMath>(
     dist: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
@@ -298,10 +303,10 @@ pub(crate) fn try_apply_rbf(
         return Ok(false);
     }
     match uplo {
-        Triangle::Lower => rbf_lower_parallel(dist, out, inv_two_ell_sq, None)?,
+        Triangle::Lower => rbf_lower_parallel::<M>(dist, out, inv_two_ell_sq, None)?,
         Triangle::Full => {
             for col in 0..n {
-                apply_rbf_range(
+                apply_rbf_range::<M>(
                     dist,
                     out.rb_mut(),
                     ColWindow {
@@ -316,7 +321,7 @@ pub(crate) fn try_apply_rbf(
         }
         Triangle::Upper => {
             for col in 0..n {
-                apply_rbf_range(
+                apply_rbf_range::<M>(
                     dist,
                     out.rb_mut(),
                     ColWindow {
@@ -334,7 +339,7 @@ pub(crate) fn try_apply_rbf(
 }
 
 /// Writes rectangular RBF `k(X, X*)` when views are column-major.
-pub(crate) fn try_apply_rbf_cross(
+pub(crate) fn try_apply_rbf_cross<M: KernelMath>(
     dist: MatRef<'_, f64>,
     out: MatMut<'_, f64>,
     inv_two_ell_sq: f64,
@@ -346,7 +351,7 @@ pub(crate) fn try_apply_rbf_cross(
     let n = dist.nrows();
     let m = dist.ncols();
     if m == 1 {
-        apply_rbf_range(
+        apply_rbf_range::<M>(
             dist,
             out,
             ColWindow {
@@ -366,7 +371,7 @@ pub(crate) fn try_apply_rbf_cross(
             let (start, len) = col_chunk(m, chunk_idx, n_parts);
             for local in 0..len {
                 let col = start + local;
-                apply_rbf_range(
+                apply_rbf_range::<M>(
                     dist,
                     part.rb_mut(),
                     ColWindow {
@@ -384,7 +389,7 @@ pub(crate) fn try_apply_rbf_cross(
 }
 
 /// Writes rectangular ARD RBF `k(X, X*)` when views are column-major.
-pub(crate) fn try_apply_rbf_ard_cross(
+pub(crate) fn try_apply_rbf_ard_cross<M: KernelMath>(
     x: MatRef<'_, f64>,
     xs: MatRef<'_, f64>,
     out: MatMut<'_, f64>,
@@ -400,7 +405,7 @@ pub(crate) fn try_apply_rbf_ard_cross(
         return Ok(false);
     }
     if m == 1 {
-        map_ard_cross_column(x, xs, out, 0, 0, inv_ell_sq)?;
+        map_ard_cross_column::<M>(x, xs, out, 0, 0, inv_ell_sq)?;
         return Ok(true);
     }
     let n_parts = worker_count();
@@ -410,14 +415,14 @@ pub(crate) fn try_apply_rbf_ard_cross(
             let (start, len) = col_chunk(m, chunk_idx, n_parts);
             for local in 0..len {
                 let col = start + local;
-                map_ard_cross_column(x, xs, part.rb_mut(), local, col, inv_ell_sq)?;
+                map_ard_cross_column::<M>(x, xs, part.rb_mut(), local, col, inv_ell_sq)?;
             }
             Ok::<(), GprError>(())
         })?;
     Ok(true)
 }
 
-fn map_ard_cross_column(
+fn map_ard_cross_column<M: KernelMath>(
     x: MatRef<'_, f64>,
     xs: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
@@ -444,11 +449,11 @@ fn map_ard_cross_column(
         };
         add_squared_diff_scaled(xdim, xs_dim[query_col], w, dest);
     }
-    rbf_exp_in_place(dest, 0.5)
+    rbf_exp_in_place::<M>(dest, 0.5)
 }
 
 /// Writes `∂k/∂θ = k · d / ℓ²` when views are column-major.
-pub(crate) fn try_grad_rbf(
+pub(crate) fn try_grad_rbf<M: KernelMath>(
     dist: MatRef<'_, f64>,
     mut d_k: MatMut<'_, f64>,
     uplo: Triangle,
@@ -461,11 +466,11 @@ pub(crate) fn try_grad_rbf(
     }
     match uplo {
         Triangle::Lower => {
-            rbf_lower_parallel(dist, d_k, inv_two_ell_sq, Some(inv_ell_sq))?;
+            rbf_lower_parallel::<M>(dist, d_k, inv_two_ell_sq, Some(inv_ell_sq))?;
         }
         Triangle::Full => {
             for col in 0..n {
-                grad_rbf_range(
+                grad_rbf_range::<M>(
                     dist,
                     d_k.rb_mut(),
                     ColWindow {
@@ -481,7 +486,7 @@ pub(crate) fn try_grad_rbf(
         }
         Triangle::Upper => {
             for col in 0..n {
-                grad_rbf_range(
+                grad_rbf_range::<M>(
                     dist,
                     d_k.rb_mut(),
                     ColWindow {
@@ -541,7 +546,7 @@ pub(crate) fn add_squared_diff_scaled(x: &[f64], x0: f64, scale: f64, acc: &mut 
     }
 }
 
-fn rbf_exp_in_place(buf: &mut [f64], inv_two: f64) -> Result<(), GprError> {
+fn rbf_exp_in_place<M: KernelMath>(buf: &mut [f64], inv_two: f64) -> Result<(), GprError> {
     let scale = f64x4::new([-inv_two; LANES]);
     let mut i = 0;
     while i + LANES <= buf.len() {
@@ -549,18 +554,18 @@ fn rbf_exp_in_place(buf: &mut [f64], inv_two: f64) -> Result<(), GprError> {
         if !all_finite4(d) {
             return Err(GprError::NonFiniteInput);
         }
-        store4(buf, i, (d * scale).exp());
+        store4(buf, i, M::exp_f64x4(d * scale));
         i += LANES;
     }
     while i < buf.len() {
         let d = finite_dist(buf[i])?;
-        buf[i] = (-d * inv_two).exp();
+        buf[i] = M::exp_f64(-d * inv_two);
         i += 1;
     }
     Ok(())
 }
 
-fn rbf_ard_grad_from_points(
+fn rbf_ard_grad_from_points<M: KernelMath>(
     r2: &mut [f64],
     xdim: &[f64],
     x0: f64,
@@ -577,20 +582,24 @@ fn rbf_ard_grad_from_points(
             return Err(GprError::NonFiniteInput);
         }
         let delta = load4(xdim, i) - x0v;
-        let k = (d * half).exp();
-        store4(r2, i, k * delta * delta * inv);
+        let dk = M::d1_f64x4(d * half);
+        store4(r2, i, dk * delta * delta * inv);
         i += LANES;
     }
     while i < r2.len() {
         let d = finite_dist(r2[i])?;
         let delta = xdim[i] - x0;
-        r2[i] = (-0.5 * d).exp() * delta * delta * inv_dim;
+        r2[i] = M::jet_f64(-0.5 * d).d1 * delta * delta * inv_dim;
         i += 1;
     }
     Ok(())
 }
 
-fn rbf_ard_grad_in_place(r2: &mut [f64], dim_sq: &[f64], inv_dim: f64) -> Result<(), GprError> {
+fn rbf_ard_grad_in_place<M: KernelMath>(
+    r2: &mut [f64],
+    dim_sq: &[f64],
+    inv_dim: f64,
+) -> Result<(), GprError> {
     debug_assert_eq!(r2.len(), dim_sq.len());
     let half = f64x4::new([-0.5; LANES]);
     let inv = f64x4::new([inv_dim; LANES]);
@@ -601,14 +610,14 @@ fn rbf_ard_grad_in_place(r2: &mut [f64], dim_sq: &[f64], inv_dim: f64) -> Result
         if !all_finite4(d) || !all_finite4(sq) {
             return Err(GprError::NonFiniteInput);
         }
-        let k = (d * half).exp();
-        store4(r2, i, k * sq * inv);
+        let dk = M::d1_f64x4(d * half);
+        store4(r2, i, dk * sq * inv);
         i += LANES;
     }
     while i < r2.len() {
         let d = finite_dist(r2[i])?;
         let sq = finite_dist(dim_sq[i])?;
-        r2[i] = (-0.5 * d).exp() * sq * inv_dim;
+        r2[i] = M::jet_f64(-0.5 * d).d1 * sq * inv_dim;
         i += 1;
     }
     Ok(())
@@ -655,7 +664,7 @@ fn accumulate_ard_r2(
     Ok(())
 }
 
-fn map_ard_column(
+fn map_ard_column<M: KernelMath>(
     cache: Option<MatRef<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     mut out: MatMut<'_, f64>,
@@ -678,7 +687,7 @@ fn map_ard_column(
         window.row_start,
     )?;
     match param_idx {
-        None => rbf_exp_in_place(dest, 0.5),
+        None => rbf_exp_in_place::<M>(dest, 0.5),
         Some(dim) => {
             if let Some(cache) = cache {
                 let n = cache.nrows();
@@ -687,7 +696,7 @@ fn map_ard_column(
                         reason: "expected unit row-stride for SIMD ARD".to_owned(),
                     });
                 };
-                rbf_ard_grad_in_place(
+                rbf_ard_grad_in_place::<M>(
                     dest,
                     &src[window.row_start..window.row_end],
                     inv_ell_sq[dim],
@@ -701,7 +710,7 @@ fn map_ard_column(
                         reason: "expected unit row-stride for SIMD ARD".to_owned(),
                     });
                 };
-                rbf_ard_grad_from_points(
+                rbf_ard_grad_from_points::<M>(
                     dest,
                     &xdim[window.row_start..window.row_end],
                     xdim[window.dist_col],
@@ -712,7 +721,7 @@ fn map_ard_column(
     }
 }
 
-fn rbf_ard_lower_parallel(
+fn rbf_ard_lower_parallel<M: KernelMath>(
     cache: Option<MatRef<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     out: MatMut<'_, f64>,
@@ -727,7 +736,7 @@ fn rbf_ard_lower_parallel(
             let (start, len) = col_chunk(n, chunk_idx, n_parts);
             for local in 0..len {
                 let col = start + local;
-                map_ard_column(
+                map_ard_column::<M>(
                     cache,
                     x,
                     part.rb_mut(),
@@ -745,7 +754,7 @@ fn rbf_ard_lower_parallel(
         })
 }
 
-fn rbf_ard_serial_uplo(
+fn rbf_ard_serial_uplo<M: KernelMath>(
     cache: Option<MatRef<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     mut out: MatMut<'_, f64>,
@@ -755,10 +764,10 @@ fn rbf_ard_serial_uplo(
 ) -> Result<(), GprError> {
     let n = out.nrows();
     match uplo {
-        Triangle::Lower => rbf_ard_lower_parallel(cache, x, out, inv_ell_sq, param_idx),
+        Triangle::Lower => rbf_ard_lower_parallel::<M>(cache, x, out, inv_ell_sq, param_idx),
         Triangle::Full => {
             for col in 0..n {
-                map_ard_column(
+                map_ard_column::<M>(
                     cache,
                     x,
                     out.rb_mut(),
@@ -776,7 +785,7 @@ fn rbf_ard_serial_uplo(
         }
         Triangle::Upper => {
             for col in 0..n {
-                map_ard_column(
+                map_ard_column::<M>(
                     cache,
                     x,
                     out.rb_mut(),
@@ -849,7 +858,7 @@ pub(crate) fn try_fill_ard_chunk(
 }
 
 /// Writes ARD RBF from a raw `(Δx_d)²` cache when views are column-major.
-pub(crate) fn try_apply_rbf_ard_cache(
+pub(crate) fn try_apply_rbf_ard_cache<M: KernelMath>(
     cache: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
@@ -863,12 +872,12 @@ pub(crate) fn try_apply_rbf_ard_cache(
     if !unit_row_stride(cache) || !unit_row_stride(out.as_ref()) {
         return Ok(false);
     }
-    rbf_ard_serial_uplo(Some(cache), None, out.rb_mut(), uplo, inv_ell_sq, None)?;
+    rbf_ard_serial_uplo::<M>(Some(cache), None, out.rb_mut(), uplo, inv_ell_sq, None)?;
     Ok(true)
 }
 
 /// Writes ARD RBF from coordinates when views are column-major.
-pub(crate) fn try_apply_rbf_ard_points(
+pub(crate) fn try_apply_rbf_ard_points<M: KernelMath>(
     x: MatRef<'_, f64>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
@@ -881,12 +890,12 @@ pub(crate) fn try_apply_rbf_ard_points(
     if !unit_row_stride(x) || !unit_row_stride(out.as_ref()) {
         return Ok(false);
     }
-    rbf_ard_serial_uplo(None, Some(x), out.rb_mut(), uplo, inv_ell_sq, None)?;
+    rbf_ard_serial_uplo::<M>(None, Some(x), out.rb_mut(), uplo, inv_ell_sq, None)?;
     Ok(true)
 }
 
 /// Writes ARD RBF `∂k/∂θ_d` from a raw `(Δx_d)²` cache.
-pub(crate) fn try_grad_rbf_ard_cache(
+pub(crate) fn try_grad_rbf_ard_cache<M: KernelMath>(
     cache: MatRef<'_, f64>,
     mut d_k: MatMut<'_, f64>,
     uplo: Triangle,
@@ -901,7 +910,7 @@ pub(crate) fn try_grad_rbf_ard_cache(
     if !unit_row_stride(cache) || !unit_row_stride(d_k.as_ref()) {
         return Ok(false);
     }
-    rbf_ard_serial_uplo(
+    rbf_ard_serial_uplo::<M>(
         Some(cache),
         None,
         d_k.rb_mut(),
@@ -913,7 +922,7 @@ pub(crate) fn try_grad_rbf_ard_cache(
 }
 
 /// Writes ARD RBF `∂k/∂θ_d` from coordinates.
-pub(crate) fn try_grad_rbf_ard_points(
+pub(crate) fn try_grad_rbf_ard_points<M: KernelMath>(
     x: MatRef<'_, f64>,
     mut d_k: MatMut<'_, f64>,
     uplo: Triangle,
@@ -931,7 +940,7 @@ pub(crate) fn try_grad_rbf_ard_points(
     if !unit_row_stride(x) || !unit_row_stride(d_k.as_ref()) {
         return Ok(false);
     }
-    rbf_ard_serial_uplo(
+    rbf_ard_serial_uplo::<M>(
         None,
         Some(x),
         d_k.rb_mut(),
@@ -946,6 +955,7 @@ pub(crate) fn try_grad_rbf_ard_points(
 mod tests {
     use super::{add_squared_diff, add_squared_diff_scaled, rbf_exp_slice, rbf_grad_slice};
     use crate::error::GprError;
+    use crate::math::Accurate;
 
     const TOL: f64 = 1e-12;
 
@@ -991,7 +1001,7 @@ mod tests {
         let dist: Vec<f64> = (0..10).map(|i| (i as f64) * 0.4).collect();
         let inv = 0.5;
         let mut out = vec![0.0; 10];
-        rbf_exp_slice(&dist, &mut out, inv).expect("finite");
+        rbf_exp_slice::<Accurate>(&dist, &mut out, inv).expect("finite");
         for i in 0..10 {
             let expected = (-dist[i] * inv).exp();
             assert_close(out[i], expected);
@@ -1004,7 +1014,7 @@ mod tests {
         let inv_two = 0.25;
         let inv_ell = 0.5;
         let mut out = vec![0.0; 9];
-        rbf_grad_slice(&dist, &mut out, inv_two, inv_ell).expect("finite");
+        rbf_grad_slice::<Accurate>(&dist, &mut out, inv_two, inv_ell).expect("finite");
         for i in 0..9 {
             let k = (-dist[i] * inv_two).exp();
             assert_close(out[i], k * dist[i] * inv_ell);
@@ -1016,7 +1026,7 @@ mod tests {
         let dist = [0.0, 1.0, f64::NAN, 3.0, 4.0];
         let mut out = [0.0; 5];
         assert!(matches!(
-            rbf_exp_slice(&dist, &mut out, 0.5),
+            rbf_exp_slice::<Accurate>(&dist, &mut out, 0.5),
             Err(GprError::NonFiniteInput)
         ));
     }

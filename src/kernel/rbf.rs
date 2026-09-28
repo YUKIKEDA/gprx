@@ -4,6 +4,7 @@ use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
 use super::{Triangle, finite_dist, write_dense, write_square_from_coords, write_triangle};
 use crate::error::GprError;
+use crate::math::{Accurate, ExpJet, KernelMath};
 use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
@@ -128,14 +129,25 @@ impl RbfKernel {
     pub fn apply(
         &self,
         dist: MatRef<'_, f64>,
+        out: MatMut<'_, f64>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.apply_math::<Accurate>(dist, out, uplo)
+    }
+
+    pub(crate) fn apply_math<M: KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
         mut out: MatMut<'_, f64>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        if try_apply_rbf(dist, out.rb_mut(), uplo, inv_two_ell_sq)? {
+        if try_apply_rbf::<M>(dist, out.rb_mut(), uplo, inv_two_ell_sq)? {
             return Ok(());
         }
-        write_triangle(dist, out, uplo, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+        write_triangle(dist, out, uplo, |d| {
+            rbf_from_sq_dist::<M>(d, inv_two_ell_sq)
+        })
     }
 
     /// Writes rectangular `k(dist)` into `out` (train × test).
@@ -144,16 +156,20 @@ impl RbfKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
-    pub fn apply_cross(
+    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
+        self.apply_cross_math::<Accurate>(dist, out)
+    }
+
+    pub(crate) fn apply_cross_math<M: KernelMath>(
         &self,
         dist: MatRef<'_, f64>,
         mut out: MatMut<'_, f64>,
     ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        if try_apply_rbf_cross(dist, out.rb_mut(), inv_two_ell_sq)? {
+        if try_apply_rbf_cross::<M>(dist, out.rb_mut(), inv_two_ell_sq)? {
             return Ok(());
         }
-        write_dense(dist, out, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+        write_dense(dist, out, |d| rbf_from_sq_dist::<M>(d, inv_two_ell_sq))
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
@@ -172,6 +188,16 @@ impl RbfKernel {
     pub fn grad(
         &self,
         dist: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.grad_math::<Accurate>(dist, d_k, param_idx, uplo)
+    }
+
+    pub(crate) fn grad_math<M: KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
         mut d_k: MatMut<'_, f64>,
         param_idx: usize,
         uplo: Triangle,
@@ -184,13 +210,13 @@ impl RbfKernel {
         let ell_sq = self.lengthscale() * self.lengthscale();
         let inv_two_ell_sq = 0.5 / ell_sq;
         let inv_ell_sq = 1.0 / ell_sq;
-        if try_grad_rbf(dist, d_k.rb_mut(), uplo, inv_two_ell_sq, inv_ell_sq)? {
+        if try_grad_rbf::<M>(dist, d_k.rb_mut(), uplo, inv_two_ell_sq, inv_ell_sq)? {
             return Ok(());
         }
         write_triangle(dist, d_k, uplo, |d| {
             let d = finite_dist(d)?;
-            let k = (-d * inv_two_ell_sq).exp();
-            Ok(k * d * inv_ell_sq)
+            let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+            Ok(dk * d * inv_ell_sq)
         })
     }
 
@@ -210,26 +236,37 @@ impl RbfKernel {
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        self.hess_math::<Accurate>(dist, d2_k, i, j, uplo)
+    }
+
+    pub(crate) fn hess_math<M: KernelMath>(
+        &self,
+        dist: MatRef<'_, f64>,
+        d2_k: MatMut<'_, f64>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
         require_rbf_hess_idx(i, j)?;
         let ell_sq = self.lengthscale() * self.lengthscale();
         let inv_two_ell_sq = 0.5 / ell_sq;
         let inv_ell_sq = 1.0 / ell_sq;
         write_triangle(dist, d2_k, uplo, |d| {
-            rbf_hess_from_sq_dist(d, inv_two_ell_sq, inv_ell_sq)
+            rbf_hess_from_sq_dist::<M>(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
 
-    pub(crate) fn apply_from_coords(
+    pub(crate) fn apply_from_coords<M: KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         out: MatMut<'_, f64>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        write_square_from_coords(x, out, uplo, |d| rbf_from_sq_dist(d, inv_two_ell_sq))
+        write_square_from_coords(x, out, uplo, |d| rbf_from_sq_dist::<M>(d, inv_two_ell_sq))
     }
 
-    pub(crate) fn grad_from_coords(
+    pub(crate) fn grad_from_coords<M: KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         d_k: MatMut<'_, f64>,
@@ -246,12 +283,12 @@ impl RbfKernel {
         let inv_ell_sq = 1.0 / ell_sq;
         write_square_from_coords(x, d_k, uplo, |d| {
             let d = finite_dist(d)?;
-            let k = (-d * inv_two_ell_sq).exp();
-            Ok(k * d * inv_ell_sq)
+            let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+            Ok(dk * d * inv_ell_sq)
         })
     }
 
-    pub(crate) fn hess_from_coords(
+    pub(crate) fn hess_from_coords<M: KernelMath>(
         &self,
         x: MatRef<'_, f64>,
         d2_k: MatMut<'_, f64>,
@@ -264,7 +301,7 @@ impl RbfKernel {
         let inv_two_ell_sq = 0.5 / ell_sq;
         let inv_ell_sq = 1.0 / ell_sq;
         write_square_from_coords(x, d2_k, uplo, |d| {
-            rbf_hess_from_sq_dist(d, inv_two_ell_sq, inv_ell_sq)
+            rbf_hess_from_sq_dist::<M>(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
 
@@ -282,6 +319,16 @@ impl RbfKernel {
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
+        d_k: MatMut<'_, f64>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        self.grad_wrt_coord_dim_math::<Accurate>(x1, x2, d_k, dim)
+    }
+
+    pub(crate) fn grad_wrt_coord_dim_math<M: KernelMath>(
+        &self,
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
         mut d_k: MatMut<'_, f64>,
         dim: usize,
     ) -> Result<(), GprError> {
@@ -290,14 +337,14 @@ impl RbfKernel {
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (k, delta) = rbf_pair(x1, row, x2, col, dim, inv_two_ell_sq)?;
+                let (k, delta) = rbf_pair::<M>(x1, row, x2, col, dim, inv_two_ell_sq)?;
                 d_k[(row, col)] = k * delta * inv_ell_sq;
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_wrt_coord_dims(
+    pub(crate) fn hess_wrt_coord_dims<M: KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -311,11 +358,11 @@ impl RbfKernel {
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (k, da, db) =
-                    rbf_pair_two_dims(x1, row, x2, col, dim_a, dim_b, inv_two_ell_sq)?;
-                let mut value = k * da * db * inv_ell_sq * inv_ell_sq;
+                let (jet, da, db) =
+                    rbf_pair_two_dims::<M>(x1, row, x2, col, dim_a, dim_b, inv_two_ell_sq)?;
+                let mut value = jet.d2 * da * db * inv_ell_sq * inv_ell_sq;
                 if dim_a == dim_b {
-                    value -= k * inv_ell_sq;
+                    value -= jet.d1 * inv_ell_sq;
                 }
                 d2_k[(row, col)] = value;
             }
@@ -323,7 +370,7 @@ impl RbfKernel {
         Ok(())
     }
 
-    pub(crate) fn hess_wrt_coord_mixed(
+    pub(crate) fn hess_wrt_coord_mixed<M: KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -337,11 +384,11 @@ impl RbfKernel {
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (k, d1, d2) =
-                    rbf_pair_two_dims(x1, row, x2, col, dim_x1, dim_x2, inv_two_ell_sq)?;
-                let mut value = -k * d1 * d2 * inv_ell_sq * inv_ell_sq;
+                let (jet, d1, d2) =
+                    rbf_pair_two_dims::<M>(x1, row, x2, col, dim_x1, dim_x2, inv_two_ell_sq)?;
+                let mut value = -jet.d2 * d1 * d2 * inv_ell_sq * inv_ell_sq;
                 if dim_x1 == dim_x2 {
-                    value += k * inv_ell_sq;
+                    value += jet.d1 * inv_ell_sq;
                 }
                 d2_k[(row, col)] = value;
             }
@@ -349,7 +396,7 @@ impl RbfKernel {
         Ok(())
     }
 
-    pub(crate) fn hess_theta_coord_dim(
+    pub(crate) fn hess_theta_coord_dim<M: KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -367,14 +414,14 @@ impl RbfKernel {
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (k, delta, s) = rbf_pair_with_s(x1, row, x2, col, dim, inv_two_ell_sq)?;
-                d2_k[(row, col)] = k * delta * inv_ell_sq * (s * inv_ell_sq - 2.0);
+                let (jet, delta, s) = rbf_pair_with_s::<M>(x1, row, x2, col, dim, inv_two_ell_sq)?;
+                d2_k[(row, col)] = delta * inv_ell_sq * (jet.d2 * s * inv_ell_sq - 2.0 * jet.d1);
             }
         }
         Ok(())
     }
 
-    pub(crate) fn grad_cross_from_coords(
+    pub(crate) fn grad_cross_from_coords<M: KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -389,19 +436,19 @@ impl RbfKernel {
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
         let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        if try_grad_rbf_cross(x1, x2, d_k.rb_mut(), inv_two_ell_sq, inv_ell_sq)? {
+        if try_grad_rbf_cross::<M>(x1, x2, d_k.rb_mut(), inv_two_ell_sq, inv_ell_sq)? {
             return Ok(());
         }
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (k, _, s) = rbf_pair_with_s(x1, row, x2, col, 0, inv_two_ell_sq)?;
-                d_k[(row, col)] = k * s * inv_ell_sq;
+                let (jet, _, s) = rbf_pair_with_s::<M>(x1, row, x2, col, 0, inv_two_ell_sq)?;
+                d_k[(row, col)] = jet.d1 * s * inv_ell_sq;
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_cross_from_coords(
+    pub(crate) fn hess_cross_from_coords<M: KernelMath>(
         &self,
         x1: MatRef<'_, f64>,
         x2: MatRef<'_, f64>,
@@ -415,8 +462,8 @@ impl RbfKernel {
         let inv_two_ell_sq = 0.5 * inv_ell_sq;
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (_, _, s) = rbf_pair_with_s(x1, row, x2, col, 0, inv_two_ell_sq)?;
-                d2_k[(row, col)] = rbf_hess_from_sq_dist(s, inv_two_ell_sq, inv_ell_sq)?;
+                let (_, _, s) = rbf_pair_with_s::<M>(x1, row, x2, col, 0, inv_two_ell_sq)?;
+                d2_k[(row, col)] = rbf_hess_from_sq_dist::<M>(s, inv_two_ell_sq, inv_ell_sq)?;
             }
         }
         Ok(())
@@ -424,7 +471,7 @@ impl RbfKernel {
 }
 
 /// `∂k/∂θ = k s / ℓ²` on a rectangular pair. Stays off the square Gram helpers.
-fn try_grad_rbf_cross(
+fn try_grad_rbf_cross<M: KernelMath>(
     x1: MatRef<'_, f64>,
     x2: MatRef<'_, f64>,
     mut d_k: MatMut<'_, f64>,
@@ -457,7 +504,7 @@ fn try_grad_rbf_cross(
         let mut i = 0;
         while i + 4 <= n {
             let sv = load4(&s, i);
-            let value = (sv * neg).exp() * sv * scale;
+            let value = M::d1_f64x4(sv * neg) * sv * scale;
             if !all_finite4(value) {
                 return Err(GprError::NonFiniteKernelValue);
             }
@@ -465,8 +512,8 @@ fn try_grad_rbf_cross(
             i += 4;
         }
         while i < n {
-            let k = (-s[i] * inv_two_ell_sq).exp();
-            let value = k * s[i] * inv_ell_sq;
+            let d1 = M::jet_f64(-s[i] * inv_two_ell_sq).d1;
+            let value = d1 * s[i] * inv_ell_sq;
             if !value.is_finite() {
                 return Err(GprError::NonFiniteKernelValue);
             }
@@ -534,7 +581,7 @@ fn add_squared(x: &[f64], x0: f64, acc: &mut [f64]) {
     }
 }
 
-fn rbf_pair(
+fn rbf_pair<M: KernelMath>(
     x1: MatRef<'_, f64>,
     i: usize,
     x2: MatRef<'_, f64>,
@@ -542,11 +589,11 @@ fn rbf_pair(
     dim: usize,
     inv_two_ell_sq: f64,
 ) -> Result<(f64, f64), GprError> {
-    let (k, delta, _) = rbf_pair_with_s(x1, i, x2, j, dim, inv_two_ell_sq)?;
-    Ok((k, delta))
+    let (jet, delta, _) = rbf_pair_with_s::<M>(x1, i, x2, j, dim, inv_two_ell_sq)?;
+    Ok((jet.d1, delta))
 }
 
-fn rbf_pair_two_dims(
+fn rbf_pair_two_dims<M: KernelMath>(
     x1: MatRef<'_, f64>,
     i: usize,
     x2: MatRef<'_, f64>,
@@ -554,7 +601,7 @@ fn rbf_pair_two_dims(
     dim_a: usize,
     dim_b: usize,
     inv_two_ell_sq: f64,
-) -> Result<(f64, f64, f64), GprError> {
+) -> Result<(ExpJet<f64>, f64, f64), GprError> {
     let mut s = 0.0;
     for d in 0..x1.ncols() {
         let a = x1[(i, d)];
@@ -565,25 +612,25 @@ fn rbf_pair_two_dims(
         let delta = a - b;
         s += delta * delta;
     }
-    let k = (-s * inv_two_ell_sq).exp();
-    if !k.is_finite() {
+    let jet = M::jet_f64(-s * inv_two_ell_sq);
+    if !jet.v.is_finite() {
         return Err(GprError::NonFiniteKernelValue);
     }
     Ok((
-        k,
+        jet,
         x1[(i, dim_a)] - x2[(j, dim_a)],
         x1[(i, dim_b)] - x2[(j, dim_b)],
     ))
 }
 
-fn rbf_pair_with_s(
+fn rbf_pair_with_s<M: KernelMath>(
     x1: MatRef<'_, f64>,
     i: usize,
     x2: MatRef<'_, f64>,
     j: usize,
     dim: usize,
     inv_two_ell_sq: f64,
-) -> Result<(f64, f64, f64), GprError> {
+) -> Result<(ExpJet<f64>, f64, f64), GprError> {
     let mut s = 0.0;
     for d in 0..x1.ncols() {
         let a = x1[(i, d)];
@@ -594,23 +641,27 @@ fn rbf_pair_with_s(
         let delta = a - b;
         s += delta * delta;
     }
-    let k = (-s * inv_two_ell_sq).exp();
-    if !k.is_finite() {
+    let jet = M::jet_f64(-s * inv_two_ell_sq);
+    if !jet.v.is_finite() {
         return Err(GprError::NonFiniteKernelValue);
     }
-    Ok((k, x1[(i, dim)] - x2[(j, dim)], s))
+    Ok((jet, x1[(i, dim)] - x2[(j, dim)], s))
 }
 
-fn rbf_from_sq_dist(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
+fn rbf_from_sq_dist<M: KernelMath>(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
     let d = finite_dist(d)?;
-    Ok((-d * inv_two_ell_sq).exp())
+    Ok(M::exp_f64(-d * inv_two_ell_sq))
 }
 
-fn rbf_hess_from_sq_dist(d: f64, inv_two_ell_sq: f64, inv_ell_sq: f64) -> Result<f64, GprError> {
+fn rbf_hess_from_sq_dist<M: KernelMath>(
+    d: f64,
+    inv_two_ell_sq: f64,
+    inv_ell_sq: f64,
+) -> Result<f64, GprError> {
     let d = finite_dist(d)?;
-    let k = (-d * inv_two_ell_sq).exp();
+    let jet = M::jet_f64(-d * inv_two_ell_sq);
     let u = d * inv_ell_sq;
-    let h = k * u * (u - 2.0);
+    let h = u * (jet.d2 * u - 2.0 * jet.d1);
     if h.is_finite() {
         Ok(h)
     } else {

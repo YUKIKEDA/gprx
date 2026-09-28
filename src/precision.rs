@@ -187,6 +187,7 @@ mod residual_seal {
 /// How [`MixedPrecision`] builds `r = y − Aα`.
 ///
 /// The only implementations are [`PromoteStorage`] and [`ReevaluateKernel`].
+#[allow(private_bounds)]
 pub trait ResidualFormula: residual_seal::Sealed {
     /// Writes the residual and returns `‖A‖∞` for the stopping test.
     ///
@@ -194,7 +195,7 @@ pub trait ResidualFormula: residual_seal::Sealed {
     ///
     /// Returns [`GprError`] when the kernel evaluation fails or a value is
     /// non-finite.
-    fn residual(
+    fn residual<M: crate::math::KernelMath>(
         saved: MatRef<'_, f32>,
         kernel: &CompiledKernel<f64>,
         x: MatRef<'_, f64>,
@@ -218,8 +219,9 @@ pub struct ReevaluateKernel;
 impl residual_seal::Sealed for PromoteStorage {}
 impl residual_seal::Sealed for ReevaluateKernel {}
 
+#[allow(private_bounds)]
 impl ResidualFormula for PromoteStorage {
-    fn residual(
+    fn residual<M: crate::math::KernelMath>(
         saved: MatRef<'_, f32>,
         kernel: &CompiledKernel<f64>,
         x: MatRef<'_, f64>,
@@ -233,8 +235,9 @@ impl ResidualFormula for PromoteStorage {
     }
 }
 
+#[allow(private_bounds)]
 impl ResidualFormula for ReevaluateKernel {
-    fn residual(
+    fn residual<M: crate::math::KernelMath>(
         saved: MatRef<'_, f32>,
         kernel: &CompiledKernel<f64>,
         x: MatRef<'_, f64>,
@@ -244,7 +247,7 @@ impl ResidualFormula for ReevaluateKernel {
         r: &mut [f64],
     ) -> Result<f64, GprError> {
         let _ = saved;
-        fresh_residual(kernel, x, noise, alpha, y, r)
+        fresh_residual::<M>(kernel, x, noise, alpha, y, r)
     }
 }
 
@@ -262,7 +265,7 @@ impl ResidualFormula for ReevaluateKernel {
 /// Returns the kernel's shape errors, or [`GprError::CholeskyFailed`] when the
 /// `f32` or fallback `f64` factor is not positive definite.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn refine<R: ResidualFormula>(
+pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
     kernel_f32: &CompiledKernel<f32>,
     kernel_f64: &CompiledKernel<f64>,
     x: MatRef<'_, f64>,
@@ -281,7 +284,7 @@ pub(crate) fn refine<R: ResidualFormula>(
     }
     let mut a = Mat::<f32>::zeros(n, n);
     let mut scratch = Mat::<f32>::zeros(n, n);
-    kernel_f32.apply_points(x32.as_ref(), a.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    kernel_f32.apply_points::<M>(x32.as_ref(), a.as_mut(), Triangle::Lower, scratch.as_mut())?;
     let noise32 = noise as f32;
     for i in 0..n {
         a[(i, i)] += noise32;
@@ -301,7 +304,7 @@ pub(crate) fn refine<R: ResidualFormula>(
     let mut prev: Option<f64> = None;
     let mut streak = 0usize;
     for _ in 0..10 {
-        let a_inf = R::residual(saved.as_ref(), kernel_f64, x, noise, &alpha, y, &mut resid)?;
+        let a_inf = R::residual::<M>(saved.as_ref(), kernel_f64, x, noise, &alpha, y, &mut resid)?;
         let r_inf = inf_norm(&resid);
         let denom = a_inf * inf_norm(&alpha) + inf_norm(y);
         if denom > 0.0 && r_inf / denom < tol {
@@ -312,7 +315,7 @@ pub(crate) fn refine<R: ResidualFormula>(
             if ratio > 0.9 {
                 streak += 1;
                 if streak >= 2 {
-                    return f64_alpha(kernel_f64, x, y, noise);
+                    return f64_alpha::<M>(kernel_f64, x, y, noise);
                 }
             } else {
                 streak = 0;
@@ -327,7 +330,7 @@ pub(crate) fn refine<R: ResidualFormula>(
             alpha[i] += f64::from(rhs[(i, 0)]);
         }
     }
-    f64_alpha(kernel_f64, x, y, noise)
+    f64_alpha::<M>(kernel_f64, x, y, noise)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -349,7 +352,7 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn fresh_residual(
+fn fresh_residual<M: crate::math::KernelMath>(
     kernel: &CompiledKernel<f64>,
     x: MatRef<'_, f64>,
     noise: f64,
@@ -360,7 +363,7 @@ fn fresh_residual(
     let n = y.len();
     let mut k = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
-    kernel.apply_points(x, k.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    kernel.apply_points::<M>(x, k.as_mut(), Triangle::Lower, scratch.as_mut())?;
     for i in 0..n {
         k[(i, i)] += noise;
     }
@@ -380,7 +383,7 @@ fn fresh_residual(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn f64_alpha(
+fn f64_alpha<M: crate::math::KernelMath>(
     kernel: &CompiledKernel<f64>,
     x: MatRef<'_, f64>,
     y: &[f64],
@@ -389,7 +392,7 @@ fn f64_alpha(
     let n = y.len();
     let mut a = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
-    kernel.apply_points(x, a.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    kernel.apply_points::<M>(x, a.as_mut(), Triangle::Lower, scratch.as_mut())?;
     for i in 0..n {
         a[(i, i)] += noise;
     }
@@ -545,7 +548,7 @@ pub(crate) trait PublishPredictAlpha: ModelPrecision {
     ///
     /// [`DoublePrecision`] and [`SinglePrecision`] copy `factor_alpha`.
     /// [`MixedPrecision`] calls [`refine`].
-    fn publish_predict_alpha(
+    fn publish_predict_alpha<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         compiled: &CompiledKernel<Self::Storage>,
         x: MatRef<'_, f64>,
@@ -569,7 +572,7 @@ fn copy_factor_to_refine<P: ModelPrecision>(
 }
 
 impl PublishPredictAlpha for DoublePrecision {
-    fn publish_predict_alpha(
+    fn publish_predict_alpha<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         compiled: &CompiledKernel<Self::Storage>,
         x: MatRef<'_, f64>,
@@ -585,7 +588,7 @@ impl PublishPredictAlpha for DoublePrecision {
 }
 
 impl PublishPredictAlpha for SinglePrecision {
-    fn publish_predict_alpha(
+    fn publish_predict_alpha<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         compiled: &CompiledKernel<Self::Storage>,
         x: MatRef<'_, f64>,
@@ -604,7 +607,7 @@ impl<R> PublishPredictAlpha for MixedPrecision<R>
 where
     R: ResidualTag + Copy + Send + Sync + 'static,
 {
-    fn publish_predict_alpha(
+    fn publish_predict_alpha<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         compiled: &CompiledKernel<Self::Storage>,
         x: MatRef<'_, f64>,
@@ -615,7 +618,7 @@ where
     ) -> Result<(), GprError> {
         let _ = factor_alpha;
         let kernel_f64 = kernel.compile();
-        *alpha = refine::<R>(compiled, &kernel_f64, x, y, noise)?;
+        *alpha = refine::<M, R>(compiled, &kernel_f64, x, y, noise)?;
         Ok(())
     }
 }
@@ -623,7 +626,7 @@ where
 /// Predictive mean from storage `k_*`, or a fresh `f64` column for [`ReevaluateKernel`].
 pub(crate) trait PredictMean: ModelPrecision {
     /// Dot of query column `col` with predict `α`, as [`PrecisionPolicy::Refine`].
-    fn column_mean(
+    fn column_mean<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
@@ -647,7 +650,7 @@ fn storage_column_mean<P: ModelPrecision>(
 }
 
 impl PredictMean for DoublePrecision {
-    fn column_mean(
+    fn column_mean<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
@@ -662,7 +665,7 @@ impl PredictMean for DoublePrecision {
 }
 
 impl PredictMean for SinglePrecision {
-    fn column_mean(
+    fn column_mean<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
@@ -677,7 +680,7 @@ impl PredictMean for SinglePrecision {
 }
 
 impl PredictMean for MixedPrecision<PromoteStorage> {
-    fn column_mean(
+    fn column_mean<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
@@ -687,12 +690,12 @@ impl PredictMean for MixedPrecision<PromoteStorage> {
         col: usize,
     ) -> Result<Self::Refine, GprError> {
         let _ = k_storage;
-        f64_cross_dot(kernel, x_train, x_query, n_cols, alpha, col)
+        f64_cross_dot::<M>(kernel, x_train, x_query, n_cols, alpha, col)
     }
 }
 
 impl PredictMean for MixedPrecision<ReevaluateKernel> {
-    fn column_mean(
+    fn column_mean<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
@@ -702,11 +705,11 @@ impl PredictMean for MixedPrecision<ReevaluateKernel> {
         col: usize,
     ) -> Result<Self::Refine, GprError> {
         let _ = k_storage;
-        f64_cross_dot(kernel, x_train, x_query, n_cols, alpha, col)
+        f64_cross_dot::<M>(kernel, x_train, x_query, n_cols, alpha, col)
     }
 }
 
-fn f64_cross_dot(
+fn f64_cross_dot<M: crate::math::KernelMath>(
     kernel: &KernelSpec,
     x_train: MatRef<'_, f64>,
     x_query: &[f64],
@@ -725,7 +728,7 @@ fn f64_cross_dot(
     let mut scratch = Mat::<f64>::zeros(n, 1);
     match kernel_f64.coord_mode()? {
         crate::kernel::CoordMode::Points => {
-            kernel_f64.apply_cross_points(
+            kernel_f64.apply_cross_points::<M>(
                 x_train,
                 row.as_ref(),
                 k_col.as_mut(),
@@ -735,12 +738,12 @@ fn f64_cross_dot(
         crate::kernel::CoordMode::Dist | crate::kernel::CoordMode::Either => {
             let mut dist = Mat::<f64>::zeros(n, 1);
             f64::write_cross(x_train, row.as_ref(), dist.as_mut(), &mut []);
-            kernel_f64.apply_cross(dist.as_ref(), k_col.as_mut(), scratch.as_mut())?;
+            kernel_f64.apply_cross::<M>(dist.as_ref(), k_col.as_mut(), scratch.as_mut())?;
         }
         crate::kernel::CoordMode::Mixed => {
             let mut dist = Mat::<f64>::zeros(n, 1);
             f64::write_cross(x_train, row.as_ref(), dist.as_mut(), &mut []);
-            kernel_f64.apply_cross_mixed(
+            kernel_f64.apply_cross_mixed::<M>(
                 dist.as_ref(),
                 x_train,
                 row.as_ref(),
@@ -1014,8 +1017,8 @@ mod tests {
 
     fn digits<R: ResidualFormula>(ell: f64, noise: f64, x: MatRef<'_, f64>, y: &[f64]) {
         let (k32, k64) = rbf(ell);
-        let alpha = refine::<R>(&k32, &k64, x, y, noise).expect("refine");
-        let truth = f64_alpha(&k64, x, y, noise).expect("f64");
+        let alpha = refine::<crate::math::Accurate, R>(&k32, &k64, x, y, noise).expect("refine");
+        let truth = f64_alpha::<crate::math::Accurate>(&k64, x, y, noise).expect("f64");
         let rel = rel_inf(&alpha, &truth);
         let bar = 10.0 * y.len() as f64 * f64::from(f32::EPSILON);
         assert!(rel < bar, "relative {rel} bar {bar}");
@@ -1026,7 +1029,7 @@ mod tests {
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch = Mat::<f64>::zeros(n, n);
         kernel
-            .apply_points(x, a.as_mut(), Triangle::Lower, scratch.as_mut())
+            .apply_points::<crate::math::Accurate>(x, a.as_mut(), Triangle::Lower, scratch.as_mut())
             .expect("gram");
         for i in 0..n {
             a[(i, i)] += noise;
@@ -1119,10 +1122,12 @@ mod tests {
             println!("{tag} {:.4} ms", samples[5]);
         };
         median("promote", &|| {
-            refine::<PromoteStorage>(&k32, &k64, x.as_ref(), &y, 0.1).expect("promote");
+            refine::<crate::math::Accurate, PromoteStorage>(&k32, &k64, x.as_ref(), &y, 0.1)
+                .expect("promote");
         });
         median("reevaluate", &|| {
-            refine::<ReevaluateKernel>(&k32, &k64, x.as_ref(), &y, 0.1).expect("reevaluate");
+            refine::<crate::math::Accurate, ReevaluateKernel>(&k32, &k64, x.as_ref(), &y, 0.1)
+                .expect("reevaluate");
         });
     }
 
@@ -1199,6 +1204,7 @@ mod tests {
         crate::FullRecompute,
         crate::CachedDistances,
         crate::RetainCholesky,
+        crate::Accurate,
         P,
     >
     where
@@ -1363,7 +1369,7 @@ mod tests {
         y: &[f64],
         ell: f64,
         noise: f64,
-    ) -> crate::FittedSgpr<Fixed, crate::FixedInducing, P>
+    ) -> crate::FittedSgpr<Fixed, crate::FixedInducing, crate::Accurate, P>
     where
         P: crate::precision::GpScalar
             + crate::sgpr::factor::MeanDot
@@ -1426,7 +1432,12 @@ mod tests {
         sgpr_case(1024, 1.0, 0.1, true, true);
     }
 
-    fn factor_svgp<P>(x: &[f64], y: &[f64], ell: f64, noise: f64) -> crate::FittedSvgp<P>
+    fn factor_svgp<P>(
+        x: &[f64],
+        y: &[f64],
+        ell: f64,
+        noise: f64,
+    ) -> crate::FittedSvgp<crate::Accurate, P>
     where
         P: crate::precision::GpScalar + crate::svgp::factor::SvgpMean,
         crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
@@ -1484,6 +1495,7 @@ mod tests {
         crate::FullRecompute,
         crate::CachedDistances,
         crate::RetainCholesky,
+        crate::Accurate,
         P,
     >
     where
@@ -1555,7 +1567,7 @@ mod tests {
         y: &[f64],
         ell: f64,
         noise: f64,
-    ) -> crate::OnlineSgpr<Fixed, P>
+    ) -> crate::OnlineSgpr<Fixed, crate::Accurate, P>
     where
         P: crate::precision::GpScalar
             + crate::sgpr::factor::MeanDot

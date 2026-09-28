@@ -40,10 +40,11 @@ use super::fitted::FittedSvgp;
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Svgp<O = Fixed, P = DoublePrecision> {
+pub struct Svgp<O = Fixed, M = crate::math::Accurate, P = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
+    pub(crate) _math: PhantomData<M>,
     pub(crate) _precision: PhantomData<P>,
 }
 
@@ -58,12 +59,13 @@ impl Svgp {
             kernel,
             likelihood,
             optimizer: Fixed,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, P> Svgp<O, P> {
+impl<O, M, P> Svgp<O, M, P> {
     /// Replaces the optimizer type parameter.
     ///
     /// [`Fixed`] keeps [`Svgp<Fixed>::factor`]. [`Adam`] enables
@@ -86,18 +88,19 @@ impl<O, P> Svgp<O, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, M, P> {
         Svgp {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
     #[allow(private_bounds)]
-    pub fn with_precision<P2: GpScalar + SvgpMean>(self) -> Svgp<O, P2>
+    pub fn with_precision<P2: GpScalar + SvgpMean>(self) -> Svgp<O, M, P2>
     where
         CompiledKernel<P2::Storage>: GramKernel<T = P2::Storage>,
     {
@@ -105,6 +108,25 @@ impl<O, P> Svgp<O, P> {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
+            _math: PhantomData,
+            _precision: PhantomData,
+        }
+    }
+
+    /// Selects the kernel `exp`. Omitting it leaves [`crate::Accurate`].
+    ///
+    /// `factor`, `fit`, and predict use the same polynomial. Hyperparameter
+    /// `exp(θ)` is unchanged.
+    #[allow(private_bounds)]
+    pub fn with_math<M2>(self) -> Svgp<O, M2, P>
+    where
+        M2: crate::math::KernelMath,
+    {
+        Svgp {
+            kernel: self.kernel,
+            likelihood: self.likelihood,
+            optimizer: self.optimizer,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -162,8 +184,9 @@ impl<O, P> Svgp<O, P> {
 }
 
 #[allow(private_bounds)]
-impl<P> Svgp<Fixed, P>
+impl<M, P> Svgp<Fixed, M, P>
 where
+    M: crate::math::KernelMath,
     P: GpScalar + SvgpMean,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
@@ -207,7 +230,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSvgp<P>, (Self, GprError)> {
+    ) -> Result<FittedSvgp<M, P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
@@ -226,8 +249,9 @@ where
 }
 
 #[allow(private_bounds)]
-impl<P> Svgp<Adam, P>
+impl<M, P> Svgp<Adam, M, P>
 where
+    M: crate::math::KernelMath,
     P: GpScalar + SvgpMean,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
@@ -275,7 +299,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSvgp<P>, (Self, GprError)> {
+    ) -> Result<FittedSvgp<M, P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,

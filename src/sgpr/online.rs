@@ -161,7 +161,7 @@ impl InducingRegistry {
 /// ```
 #[derive(Clone, Debug)]
 #[allow(private_bounds)]
-pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
+pub struct OnlineSgpr<O = Lbfgs, M = crate::math::Accurate, P: ModelPrecision = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     optimizer: O,
@@ -180,15 +180,17 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     d: usize,
     registry: PointRegistry,
     inducing: InducingRegistry,
+    _math: PhantomData<M>,
 }
 
 #[allow(private_bounds)]
-impl<O, P> OnlineSgpr<O, P>
+impl<O, M, P> OnlineSgpr<O, M, P>
 where
+    M: crate::math::KernelMath,
     P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
     crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
-    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P>) -> Self {
+    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, M, P>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
         let inducing = InducingRegistry::from_count(fitted.m);
         Self {
@@ -210,10 +212,11 @@ where
             d: fitted.d,
             registry,
             inducing,
+            _math: PhantomData,
         }
     }
 
-    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing, P>
+    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing, M, P>
     where
         O: Clone,
     {
@@ -222,6 +225,7 @@ where
             likelihood: self.likelihood,
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
+            _math: PhantomData,
             x_obs: self.x_obs.clone(),
             z_obs: self.z_obs.clone(),
             y: self.y.clone(),
@@ -238,7 +242,7 @@ where
         }
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
+    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, M, P>) {
         self.kernel = fitted.kernel;
         self.likelihood = fitted.likelihood;
         self.optimizer = fitted.optimizer;
@@ -283,7 +287,7 @@ where
     /// ADR 0005 applies first. This refresh keeps `L` aligned with `k(Z, Z)`
     /// so a long insert/delete sequence stays within the public 1e-12 check.
     fn refresh_vfe(&mut self) -> Result<(), GprError> {
-        let state = assemble_vfe::<P::Storage>(
+        let state = assemble_vfe::<M, P::Storage>(
             &self.kernel,
             self.likelihood,
             &self.x_obs,
@@ -300,7 +304,7 @@ where
         if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
             && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>()
         {
-            self.predict_w = assemble_vfe::<f64>(
+            self.predict_w = assemble_vfe::<M, f64>(
                 &self.kernel,
                 self.likelihood,
                 &self.x_obs,
@@ -316,7 +320,7 @@ where
             .collect();
             return Ok(());
         }
-        self.predict_w = publish_sgpr_weights::<P>(
+        self.predict_w = publish_sgpr_weights::<M, P>(
             &self.kernel,
             self.a.as_ref(),
             self.b_l.as_ref(),
@@ -510,7 +514,7 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_predict::<P>(
+        vfe_predict::<M, P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),
@@ -551,7 +555,7 @@ where
             return Err(GprError::NonFiniteInput);
         }
         let mut a_col =
-            kernel_column::<P::Storage>(&self.kernel, &self.z_obs, self.m, x_new, self.d)?;
+            kernel_column::<M, P::Storage>(&self.kernel, &self.z_obs, self.m, x_new, self.d)?;
         solve_lmm(self.k_mm_l.as_ref(), a_col.as_mut());
         let mut v = vec![P::Storage::from_f64(0.0); self.m];
         for (i, slot) in v.iter_mut().enumerate() {
@@ -637,7 +641,7 @@ where
             self.n -= 1;
             self.recompute_w()?;
         } else {
-            let state = assemble_vfe::<P::Storage>(
+            let state = assemble_vfe::<M, P::Storage>(
                 &self.kernel,
                 self.likelihood,
                 &x_next,
@@ -717,7 +721,7 @@ where
             return Err(GprError::NonFiniteInput);
         }
         let mut state = self.vfe_state();
-        match inducing_insert(
+        match inducing_insert::<M, _>(
             &mut state,
             &self.kernel,
             self.likelihood.noise_variance(),
@@ -833,12 +837,13 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
+    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, M, P> {
         FittedSgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
+            _math: PhantomData,
             x_obs: self.x_obs,
             z_obs: self.z_obs,
             y: self.y,
@@ -857,11 +862,12 @@ where
 }
 
 #[allow(private_bounds)]
-impl<O, P> OnlineSgpr<O, P>
+impl<O, M, P> OnlineSgpr<O, M, P>
 where
+    M: crate::math::KernelMath,
     P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
     crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///

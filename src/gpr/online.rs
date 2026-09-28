@@ -193,6 +193,7 @@ pub struct OnlineGpr<
     S = FullRecompute,
     C: DistanceCacheSlot = crate::CachedDistances,
     B: AllocWorkspace = RetainCholesky,
+    M = crate::math::Accurate,
     P: GpScalar = DoublePrecision,
 > {
     pub(crate) kernel: KernelSpec,
@@ -219,10 +220,11 @@ pub struct OnlineGpr<
     pub(crate) d: usize,
     pub(crate) registry: PointRegistry,
     pub(crate) _recompute: PhantomData<S>,
+    pub(crate) _math: PhantomData<M>,
     pub(crate) _cholesky: PhantomData<B>,
 }
 
-impl<O, S, C, B, P> Clone for OnlineGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> Clone for OnlineGpr<O, S, C, B, M, P>
 where
     O: Clone,
     C: Copy + DistanceCacheSlot,
@@ -255,12 +257,13 @@ where
             d: self.d,
             registry: self.registry.clone(),
             _recompute: PhantomData,
+            _math: PhantomData,
             _cholesky: PhantomData,
         }
     }
 }
 
-impl<O, S, C, B, P> fmt::Debug for OnlineGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> fmt::Debug for OnlineGpr<O, S, C, B, M, P>
 where
     O: fmt::Debug,
     C: fmt::Debug + DistanceCacheSlot,
@@ -280,11 +283,12 @@ where
 }
 
 #[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; insert and predict read it.
-impl<O, S, C, B, P> OnlineGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> OnlineGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     #[allow(clippy::too_many_arguments)]
@@ -335,13 +339,14 @@ where
             d,
             registry: PointRegistry::from_count(n),
             _recompute: PhantomData,
+            _math: PhantomData,
             _cholesky: PhantomData,
         }
     }
 
     /// Drops the LDLT factor and returns a trainer with the current kernel,
     /// likelihood, transforms, optimizer, and policies.
-    pub fn into_trainer(self) -> Gpr<O, S, C, B, P> {
+    pub fn into_trainer(self) -> Gpr<O, S, C, B, M, P> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
@@ -359,7 +364,7 @@ where
     pub fn with_optimizer<O2: PoleRecompute<B>>(
         self,
         optimizer: O2,
-    ) -> OnlineGpr<O2, O2::Strategy, C, B, P> {
+    ) -> OnlineGpr<O2, O2::Strategy, C, B, M, P> {
         OnlineGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -385,6 +390,7 @@ where
             d: self.d,
             registry: self.registry,
             _recompute: PhantomData,
+            _math: PhantomData,
             _cholesky: PhantomData,
         }
     }
@@ -433,7 +439,7 @@ where
 
     fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
         let x = self.x.as_ref().submatrix(0, 0, self.n, self.d);
-        P::publish_predict_alpha(
+        P::publish_predict_alpha::<M>(
             &self.kernel,
             &self.compiled,
             x,
@@ -484,7 +490,7 @@ where
         Ok(())
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedGpr<O, S, C, B, P>) -> Result<(), GprError> {
+    fn adopt_fitted(&mut self, fitted: FittedGpr<O, S, C, B, M, P>) -> Result<(), GprError> {
         let registry = self.registry.clone();
         *self = fitted.into_online()?;
         debug_assert_eq!(self.n, registry.len());
@@ -586,7 +592,7 @@ where
                 d,
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
-            fill_train_query_kernel(
+            fill_train_query_kernel::<_, M>(
                 &self.compiled,
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
@@ -881,7 +887,7 @@ where
                 ..
             } = &mut self.query;
             pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
-            fill_train_query_kernel(
+            fill_train_query_kernel::<_, M>(
                 &self.compiled,
                 x_train,
                 query_x.as_ref(),
@@ -895,7 +901,7 @@ where
             .ld_factor
             .as_ref()
             .submatrix(0, 0, self.n, self.n);
-        write_ldlt_prediction::<P>(
+        write_ldlt_prediction::<M, P>(
             &self.kernel,
             ld,
             &self.alpha,
@@ -933,7 +939,7 @@ where
         let n = self.n;
         let m = n_rows;
         let mut alpha = Vec::new();
-        P::publish_predict_alpha(
+        P::publish_predict_alpha::<M>(
             &self.kernel,
             &self.compiled,
             self.x_active(),
@@ -952,7 +958,7 @@ where
         let mut query_k_star = Mat::<P::Storage>::zeros(n, m);
         let mut query_scratch = Mat::<P::Storage>::zeros(n, m);
         let mut query_kss = vec![P::Storage::from_f64(0.0); m];
-        fill_train_query_kernel(
+        fill_train_query_kernel::<_, M>(
             &self.compiled,
             x_train,
             query_x.as_ref(),
@@ -960,7 +966,7 @@ where
             query_k_star.as_mut(),
             query_scratch.as_mut(),
         )?;
-        write_ldlt_prediction::<P>(
+        write_ldlt_prediction::<M, P>(
             &self.kernel,
             self.ld_factor(),
             &alpha,
@@ -1089,7 +1095,7 @@ where
         self.to_fitted()?.loo_predict_with(options)
     }
 
-    fn to_fitted(&self) -> Result<FittedGpr<O, S, C, B, P>, GprError>
+    fn to_fitted(&self) -> Result<FittedGpr<O, S, C, B, M, P>, GprError>
     where
         O: Clone,
         C: Copy,
@@ -1099,13 +1105,14 @@ where
 }
 
 #[allow(private_bounds)]
-impl<O, S, C, B, P> OnlineGpr<O, S, C, B, P>
+impl<O, S, C, B, M, P> OnlineGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
     B: AllocWorkspace,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, P>>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///
@@ -1123,10 +1130,11 @@ where
 }
 
 #[allow(private_bounds)]
-impl<C, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, P>
+impl<C, M, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
 where
     C: DistanceCacheSlot,
     P: GpScalar,
+    M: crate::math::KernelMath,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Rebuilds the LDLT factor at the current `θ` without a search.
@@ -1142,10 +1150,11 @@ where
 }
 
 #[allow(private_bounds)]
-impl<C, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, P>
+impl<C, M, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
 where
     C: DistanceCacheSlot,
     P: crate::precision::GpScalar,
+    M: crate::math::KernelMath,
     crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     pub(crate) fn from_persisted(parts: PersistedModel<C, P>) -> Result<Self, GprError> {
@@ -1153,7 +1162,7 @@ where
     }
 }
 
-fn fill_train_query_kernel<K: GramKernel>(
+fn fill_train_query_kernel<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     x_train: MatRef<'_, K::T>,
     query_x: MatRef<'_, K::T>,
@@ -1167,14 +1176,14 @@ where
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
             K::T::write_cross(x_train, query_x, query_dist.as_mut(), &mut []);
-            compiled.apply_cross(query_dist.as_ref(), query_k_star, query_scratch)
+            compiled.apply_cross::<M>(query_dist.as_ref(), query_k_star, query_scratch)
         }
         CoordMode::Points => {
-            compiled.apply_cross_points(x_train, query_x, query_k_star, query_scratch)
+            compiled.apply_cross_points::<M>(x_train, query_x, query_k_star, query_scratch)
         }
         CoordMode::Mixed => {
             K::T::write_cross(x_train, query_x, query_dist.as_mut(), &mut []);
-            compiled.apply_cross_mixed(
+            compiled.apply_cross_mixed::<M>(
                 query_dist.as_ref(),
                 x_train,
                 query_x,
@@ -1186,7 +1195,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_ldlt_prediction<P>(
+fn write_ldlt_prediction<M: crate::math::KernelMath, P>(
     kernel: &KernelSpec,
     ld: MatRef<'_, P::Storage>,
     alpha: &[P::Refine],
@@ -1216,7 +1225,7 @@ where
         out.variance.resize(m, zero);
     }
     for (col, mean) in out.mean.iter_mut().enumerate() {
-        *mean = P::column_mean(
+        *mean = P::column_mean::<M>(
             kernel,
             query_k_star.as_ref(),
             x_train,

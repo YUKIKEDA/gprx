@@ -20,14 +20,18 @@ use super::JitterPolicy;
 /// [`crate::CachedDistances`] fills `dist_cache` (and ARD `ard_sq_diff`) once
 /// and reuses them. [`crate::UncachedDistances`] has no those tensors;
 /// isotropic and mixed trees compute distances from `X`.
-fn apply_train_kernel<K, W>(compiled: &K, x: MatRef<'_, K::T>, ws: &mut W) -> Result<(), GprError>
+fn apply_train_kernel<K, W, M: crate::math::KernelMath>(
+    compiled: &K,
+    x: MatRef<'_, K::T>,
+    ws: &mut W,
+) -> Result<(), GprError>
 where
     K: GramKernel,
     K::T: FillDistances + StorageScalar,
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
 {
     let (core, dist) = ws.split_fit();
-    apply_compiled_views(
+    apply_compiled_views::<K, M>(
         compiled,
         x,
         dist,
@@ -38,7 +42,7 @@ where
 }
 
 /// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
-pub(crate) fn apply_compiled_to<K, W>(
+pub(crate) fn apply_compiled_to<K, W, M: crate::math::KernelMath>(
     compiled: &K,
     x: MatRef<'_, K::T>,
     ws: &mut W,
@@ -50,7 +54,7 @@ where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
 {
     let (core, dist) = ws.split_fit();
-    apply_compiled_views(
+    apply_compiled_views::<K, M>(
         compiled,
         x,
         dist,
@@ -60,7 +64,7 @@ where
     )
 }
 
-fn apply_compiled_views<K: GramKernel>(
+fn apply_compiled_views<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     x: MatRef<'_, K::T>,
     dist: Option<crate::workspace::DistBufs<'_, K::T>>,
@@ -81,9 +85,9 @@ where
                     *thread_scratch = pool;
                     *d.dist_ready = true;
                 }
-                compiled.apply(d.dist_cache.as_ref(), dest, Triangle::Lower, scratch)
+                compiled.apply::<M>(d.dist_cache.as_ref(), dest, Triangle::Lower, scratch)
             } else {
-                compiled.apply_points(x, dest, Triangle::Lower, scratch)
+                compiled.apply_points::<M>(x, dest, Triangle::Lower, scratch)
             }
         }
         CoordMode::Points => {
@@ -98,7 +102,7 @@ where
                     *thread_scratch = pool;
                     *d.ard_sq_diff_ready = true;
                 }
-                compiled.apply_from_ard_cache(
+                compiled.apply_from_ard_cache::<M>(
                     d.ard_sq_diff.as_ref(),
                     x,
                     dest,
@@ -106,7 +110,7 @@ where
                     scratch,
                 )
             } else {
-                compiled.apply_points(x, dest, Triangle::Lower, scratch)
+                compiled.apply_points::<M>(x, dest, Triangle::Lower, scratch)
             }
         }
         CoordMode::Mixed => {
@@ -127,9 +131,9 @@ where
                     }
                     views.ard_cache = Some(d.ard_sq_diff.as_ref());
                 }
-                compiled.apply_mixed(views, dest, Triangle::Lower, scratch)
+                compiled.apply_mixed::<M>(views, dest, Triangle::Lower, scratch)
             } else {
-                compiled.apply_points(x, dest, Triangle::Lower, scratch)
+                compiled.apply_points::<M>(x, dest, Triangle::Lower, scratch)
             }
         }
     }
@@ -234,7 +238,7 @@ fn map_cholesky_jitter(err: GprError, jitter: f64) -> GprError {
     }
 }
 
-pub(crate) fn factor_train_with_policy<K, W>(
+pub(crate) fn factor_train_with_policy<K, W, M: crate::math::KernelMath>(
     compiled: &K,
     x: MatRef<'_, K::T>,
     ws: &mut W,
@@ -248,7 +252,7 @@ where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
 {
     factor_written_k_with_policy(ws, y, noise, policy, |ws| {
-        apply_train_kernel(compiled, x, ws)
+        apply_train_kernel::<K, W, M>(compiled, x, ws)
     })
 }
 
@@ -383,7 +387,7 @@ pub(crate) fn frobenius_lower<T: StorageScalar>(
     inner
 }
 
-pub(crate) fn write_kernel_grad<K: GramKernel>(
+pub(crate) fn write_kernel_grad<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     dist: MatRef<'_, K::T>,
     x: MatRef<'_, K::T>,
@@ -398,16 +402,23 @@ where
     let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            compiled.grad(dist, d_k, param_idx, Triangle::Lower, scratch)
+            compiled.grad::<M>(dist, d_k, param_idx, Triangle::Lower, scratch)
         }
         CoordMode::Points => {
             if reads_ard && let Some(cache) = ard_cache {
-                compiled.grad_from_ard_cache(cache, x, d_k, param_idx, Triangle::Lower, scratch)
+                compiled.grad_from_ard_cache::<M>(
+                    cache,
+                    x,
+                    d_k,
+                    param_idx,
+                    Triangle::Lower,
+                    scratch,
+                )
             } else {
-                compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
+                compiled.grad_points::<M>(x, d_k, param_idx, Triangle::Lower, scratch)
             }
         }
-        CoordMode::Mixed => compiled.grad_mixed(
+        CoordMode::Mixed => compiled.grad_mixed::<M>(
             MixedKernelViews::new(dist, x),
             d_k,
             param_idx,
@@ -417,17 +428,17 @@ where
     }
 }
 
-pub(crate) fn write_kernel_grad_from_coords<K: GramKernel>(
+pub(crate) fn write_kernel_grad_from_coords<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     x: MatRef<'_, K::T>,
     d_k: MatMut<'_, K::T>,
     scratch: MatMut<'_, K::T>,
     param_idx: usize,
 ) -> Result<(), GprError> {
-    compiled.grad_points(x, d_k, param_idx, Triangle::Lower, scratch)
+    compiled.grad_points::<M>(x, d_k, param_idx, Triangle::Lower, scratch)
 }
 
-pub(crate) fn write_kernel_hess<K: GramKernel>(
+pub(crate) fn write_kernel_hess<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     dist: MatRef<'_, K::T>,
     x: MatRef<'_, K::T>,
@@ -443,16 +454,16 @@ where
     let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
     match compiled.coord_mode()? {
         CoordMode::Dist | CoordMode::Either => {
-            compiled.hess(dist, d2_k, i, j, Triangle::Lower, scratch)
+            compiled.hess::<M>(dist, d2_k, i, j, Triangle::Lower, scratch)
         }
         CoordMode::Points => {
             if reads_ard && let Some(cache) = ard_cache {
-                compiled.hess_from_ard_cache(cache, x, d2_k, pair, Triangle::Lower, scratch)
+                compiled.hess_from_ard_cache::<M>(cache, x, d2_k, pair, Triangle::Lower, scratch)
             } else {
-                compiled.hess_points(x, d2_k, i, j, Triangle::Lower, scratch)
+                compiled.hess_points::<M>(x, d2_k, i, j, Triangle::Lower, scratch)
             }
         }
-        CoordMode::Mixed => compiled.hess_mixed(
+        CoordMode::Mixed => compiled.hess_mixed::<M>(
             MixedKernelViews::new(dist, x),
             d2_k,
             i,
@@ -463,7 +474,7 @@ where
     }
 }
 
-pub(crate) fn write_kernel_hess_from_coords<K: GramKernel>(
+pub(crate) fn write_kernel_hess_from_coords<K: GramKernel, M: crate::math::KernelMath>(
     compiled: &K,
     x: MatRef<'_, K::T>,
     d2_k: MatMut<'_, K::T>,
@@ -471,7 +482,7 @@ pub(crate) fn write_kernel_hess_from_coords<K: GramKernel>(
     i: usize,
     j: usize,
 ) -> Result<(), GprError> {
-    compiled.hess_points(x, d2_k, i, j, Triangle::Lower, scratch)
+    compiled.hess_points::<M>(x, d2_k, i, j, Triangle::Lower, scratch)
 }
 
 pub(crate) fn pack_storage<T: StorageScalar>(

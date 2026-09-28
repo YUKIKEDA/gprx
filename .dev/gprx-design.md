@@ -660,7 +660,7 @@ trait MathBackend<T: Scalar>: Send + Sync {
 enum MathMode { Accurate, FastApprox }
 ```
 
-デフォルトは`Accurate`(`StdExp`または`SleefBackend`)。`FastApprox`(`PolyApproxExp`)は明示的なfeatureや設定でオプトインし、**fit(ハイパラ最適化)では使わず、ハイパラ固定後の推論や大量predictに限定するのが安全**という位置づけにする。Phase 5。
+デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` は型パラメータで、カーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。精度の型パラメータは最後のまま、数学モードはその直前。
 
 ## 9. Optimizer設計
 
@@ -864,7 +864,7 @@ impl OnlineGpr<O, S, C, B> {
 
 混合精度・Sparse GPR・オンライン学習・IncrementalRecompute・SIMDバックエンドを同時に進めると問題の切り分けが困難になるため、段階的に実装する。
 
-**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 5 の P5-2（[#40](https://github.com/YUKIKEDA/gprx/issues/40)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
+**タスク分解・完了条件・Issue 化は [.dev/roadmap.md](roadmap.md)。進め方は [AGENTS.md](../AGENTS.md) と `.cursor/rules/`。** 今の着手点は Phase 5 の P5-4（[#42](https://github.com/YUKIKEDA/gprx/issues/42)）。比較の基準は [bench-log.md](bench-log.md) の `phase-2`。Phase 1 は 1a（固定ハイパラ）→ 1b（argmin L-BFGS）で 0.1.0 相当。
 
 - **M0(Spike)**: クレート初期化と faer 0.24 の Cholesky 往復。GPR は書かない
 - **Phase 1a(固定ハイパラ Exact GPR)**: f64、RBF で経路を通したあと Constant/Linear/Matern/Periodic/RQ/White、LLT、§6.2 の MLL と勾配、`TargetTransform`、分散種別、解析解と sklearn golden JSON。**criterion と確保 ratchet も 1a で始める**（§15）

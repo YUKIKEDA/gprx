@@ -39,11 +39,12 @@ use super::{FixedInducing, FreeInducing, InducingLayout};
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision> {
+pub struct Sgpr<O = Lbfgs, I = FixedInducing, M = crate::math::Accurate, P = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
     pub(crate) inducing: PhantomData<I>,
+    pub(crate) _math: PhantomData<M>,
     pub(crate) _precision: PhantomData<P>,
 }
 impl Sgpr {
@@ -60,12 +61,13 @@ impl Sgpr {
             likelihood,
             optimizer: Lbfgs::new(),
             inducing: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, I, P> Sgpr<O, I, P> {
+impl<O, I, M, P> Sgpr<O, I, M, P> {
     /// Replaces the optimizer type parameter.
     ///
     /// # Examples
@@ -85,19 +87,20 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, M, P> {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer,
             inducing: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
     #[allow(private_bounds)]
-    pub fn with_precision<P2: GpScalar + MeanDot + PublishSgprWeights>(self) -> Sgpr<O, I, P2>
+    pub fn with_precision<P2: GpScalar + MeanDot + PublishSgprWeights>(self) -> Sgpr<O, I, M, P2>
     where
         CompiledKernel<P2::Storage>: GramKernel<T = P2::Storage>,
     {
@@ -106,6 +109,26 @@ impl<O, I, P> Sgpr<O, I, P> {
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
+            _math: PhantomData,
+            _precision: PhantomData,
+        }
+    }
+
+    /// Selects the kernel `exp`. Omitting it leaves [`crate::Accurate`].
+    ///
+    /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
+    /// unchanged.
+    #[allow(private_bounds)]
+    pub fn with_math<M2>(self) -> Sgpr<O, I, M2, P>
+    where
+        M2: crate::math::KernelMath,
+    {
+        Sgpr {
+            kernel: self.kernel,
+            likelihood: self.likelihood,
+            optimizer: self.optimizer,
+            inducing: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -133,12 +156,13 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, P> {
+    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, M, P> {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
+            _math: PhantomData,
             _precision: PhantomData,
         }
     }
@@ -196,11 +220,12 @@ impl<O, I, P> Sgpr<O, I, P> {
 }
 
 #[allow(private_bounds)] // `SgprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
-impl<O, P> Sgpr<O, FixedInducing, P>
+impl<O, M, P> Sgpr<O, FixedInducing, M, P>
 where
     P: GpScalar + MeanDot + PublishSgprWeights,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P>>,
+    M: crate::math::KernelMath,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
 {
     /// Factors the VFE system and searches kernel and likelihood `θ`.
     ///
@@ -244,7 +269,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSgpr<O, FixedInducing, P>, (Self, GprError)> {
+    ) -> Result<FittedSgpr<O, FixedInducing, M, P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
@@ -266,11 +291,12 @@ where
 }
 
 #[allow(private_bounds)]
-impl<O, P> Sgpr<O, FreeInducing, P>
+impl<O, M, P> Sgpr<O, FreeInducing, M, P>
 where
     P: GpScalar + MeanDot + PublishSgprWeights,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing, P>>,
+    M: crate::math::KernelMath,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing, M, P>>,
 {
     /// Factors the VFE system and searches kernel `θ`, likelihood `θ`, and `Z`.
     ///
@@ -311,7 +337,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSgpr<O, FreeInducing, P>, (Self, GprError)> {
+    ) -> Result<FittedSgpr<O, FreeInducing, M, P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
@@ -333,8 +359,9 @@ where
 }
 
 #[allow(private_bounds)]
-impl<I: InducingLayout, P> Sgpr<Fixed, I, P>
+impl<I: InducingLayout, M, P> Sgpr<Fixed, I, M, P>
 where
+    M: crate::math::KernelMath,
     P: GpScalar + MeanDot + PublishSgprWeights,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
@@ -381,7 +408,7 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSgpr<Fixed, I, P>, (Self, GprError)> {
+    ) -> Result<FittedSgpr<Fixed, I, M, P>, (Self, GprError)> {
         match assemble_fitted(
             self.kernel.clone(),
             self.likelihood,
