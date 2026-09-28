@@ -227,13 +227,7 @@ mod tests {
 
     const TOL: f64 = 1e-6;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     struct Quadratic {
         joint_evals: usize,
@@ -279,8 +273,8 @@ mod tests {
             .with_max_iterations(50)
             .minimize_unconstrained(&mut obj, &[1.0, -0.5])
             .expect("bowl");
-        assert_close(result.params[0], 0.0);
-        assert_close(result.params[1], 0.0);
+        assert_close(result.params[0], 0.0, TOL);
+        assert_close(result.params[1], 0.0, TOL);
         assert!(result.value < 1e-10);
         assert!(obj.joint_evals > 0);
     }
@@ -313,7 +307,7 @@ mod tests {
         );
         let mut got = [0.0; 2];
         gpr.get_params(&mut got).expect("len 2");
-        assert_close(got[0], result.params[0]);
-        assert_close(got[1], result.params[1]);
+        assert_close(got[0], result.params[0], TOL);
+        assert_close(got[1], result.params[1], TOL);
     }
 }

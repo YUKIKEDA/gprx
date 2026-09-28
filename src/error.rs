@@ -154,7 +154,7 @@ pub enum GprError {
 mod tests {
     use super::{CholeskyStage, GprError};
 
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::assert_send_sync;
 
     #[test]
     fn error_is_send_sync() {

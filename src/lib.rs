@@ -55,6 +55,14 @@ mod precision;
 mod rng;
 mod sgpr;
 mod svgp;
+#[cfg(test)]
+#[path = "../tests/common/check.rs"]
+#[allow(dead_code)]
+mod test_check;
+#[cfg(test)]
+#[path = "../tests/common/problems.rs"]
+#[allow(dead_code)]
+mod test_problems;
 pub mod transform;
 mod workspace;
 

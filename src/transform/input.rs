@@ -528,15 +528,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::{assert_close, assert_send_sync};
 
     #[test]
     fn is_send_sync() {
@@ -554,8 +546,8 @@ mod tests {
             .expect("valid");
         let mut x = [1.0, 2.0, 3.0, 4.0];
         t.apply(&mut x, 2, 2).expect("valid");
-        assert_close(x[0], 1.0);
-        assert_close(x[3], 4.0);
+        assert_close(x[0], 1.0, TOL);
+        assert_close(x[3], 4.0, TOL);
     }
 
     #[test]
@@ -564,17 +556,17 @@ mod tests {
         let t = StandardizeInput::new().fit(&x, 3, 2).expect("valid");
         let mean = t.mean();
         let std = t.std();
-        assert_close(mean[0], 2.0);
-        assert_close(std[0], (8.0 / 3.0_f64).sqrt());
-        assert_close(mean[1], 1.0);
-        assert_close(std[1], 1.0);
+        assert_close(mean[0], 2.0, TOL);
+        assert_close(std[0], (8.0 / 3.0_f64).sqrt(), TOL);
+        assert_close(mean[1], 1.0, TOL);
+        assert_close(std[1], 1.0, TOL);
         let mut z = x;
         t.apply(&mut z, 3, 2).expect("fitted");
         let z0 = z[0] + z[1] + z[2];
-        assert_close(z0 / 3.0, 0.0);
-        assert_close(z[3], 0.0);
-        assert_close(z[4], 0.0);
-        assert_close(z[5], 0.0);
+        assert_close(z0 / 3.0, 0.0, TOL);
+        assert_close(z[3], 0.0, TOL);
+        assert_close(z[4], 0.0, TOL);
+        assert_close(z[5], 0.0, TOL);
     }
 
     #[test]
@@ -609,19 +601,19 @@ mod tests {
         let t = MinMaxInput::new().fit(&x, 3, 2).expect("valid");
         let min = t.min();
         let max = t.max();
-        assert_close(min[0], 0.0);
-        assert_close(max[0], 4.0);
-        assert_close(min[1], 1.0);
-        assert_close(max[1], 1.0);
+        assert_close(min[0], 0.0, TOL);
+        assert_close(max[0], 4.0, TOL);
+        assert_close(min[1], 1.0, TOL);
+        assert_close(max[1], 1.0, TOL);
         assert_eq!(t.feature_range(), (0.0, 1.0));
         let mut z = x;
         t.apply(&mut z, 3, 2).expect("fitted");
-        assert_close(z[0], 0.0);
-        assert_close(z[1], 0.5);
-        assert_close(z[2], 1.0);
-        assert_close(z[3], 0.0);
-        assert_close(z[4], 0.0);
-        assert_close(z[5], 0.0);
+        assert_close(z[0], 0.0, TOL);
+        assert_close(z[1], 0.5, TOL);
+        assert_close(z[2], 1.0, TOL);
+        assert_close(z[3], 0.0, TOL);
+        assert_close(z[4], 0.0, TOL);
+        assert_close(z[5], 0.0, TOL);
     }
 
     #[test]
@@ -631,8 +623,8 @@ mod tests {
         let t = spec.fit(&x, 2, 1).expect("valid");
         let mut z = x;
         t.apply(&mut z, 2, 1).expect("fitted");
-        assert_close(z[0], -1.0);
-        assert_close(z[1], 1.0);
+        assert_close(z[0], -1.0, TOL);
+        assert_close(z[1], 1.0, TOL);
         assert!(MinMaxInput::with_feature_range(1.0, 1.0).is_err());
         assert!(MinMaxInput::with_feature_range(0.0, f64::NAN).is_err());
     }

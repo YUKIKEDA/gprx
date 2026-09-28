@@ -95,13 +95,8 @@ struct LeafGolden {
     leaves: Vec<LeafGolden>,
 }
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
+mod common;
+use common::assert_close;
 
 fn golden_err(reason: String) -> GprError {
     GprError::InvalidHyperparameter { reason }
@@ -207,13 +202,14 @@ fn check_predictions<O, S>(
     let pred_obs = gpr.predict(golden.xs, golden.xs_n_rows, golden.xs_n_cols)?;
     assert_eq!(pred_lat.mean.len(), golden.mean.len(), "{name}");
     for i in 0..golden.mean.len() {
-        assert_close(pred_lat.mean[i], golden.mean[i]);
-        assert_close(pred_obs.mean[i], golden.mean[i]);
-        assert_close(pred_lat.variance[i], golden.latent_variance[i]);
-        assert_close(pred_obs.variance[i], golden.observation_variance[i]);
+        assert_close(pred_lat.mean[i], golden.mean[i], TOL);
+        assert_close(pred_obs.mean[i], golden.mean[i], TOL);
+        assert_close(pred_lat.variance[i], golden.latent_variance[i], TOL);
+        assert_close(pred_obs.variance[i], golden.observation_variance[i], TOL);
         assert_close(
             pred_obs.variance[i],
             pred_lat.variance[i] + golden.noise_variance,
+            TOL,
         );
     }
     Ok(())
@@ -240,13 +236,13 @@ fn check_rbf_golden(name: &str, golden: &RbfGolden) -> Result<(), GprError> {
         },
     )?;
     let nlml = gpr.neg_log_marginal_likelihood()?;
-    assert_close(-nlml, golden.log_marginal_likelihood);
+    assert_close(-nlml, golden.log_marginal_likelihood, TOL);
     let mut params = vec![0.0; gpr.num_params()];
     gpr.get_params(&mut params)?;
     let mut grad = vec![0.0; params.len()];
     let value = gpr.value_and_gradient_into(&params, &mut grad)?;
-    assert_close(value, nlml);
-    assert_close(-grad[0], golden.grad_log_lengthscale);
+    assert_close(value, nlml, TOL);
+    assert_close(-grad[0], golden.grad_log_lengthscale, TOL);
     Ok(())
 }
 
@@ -256,7 +252,7 @@ fn check_composite_golden(name: &str, golden: &CompositeGolden) -> Result<(), Gp
     let mut kernel_params = vec![0.0; spec.num_params()];
     spec.get_params(&mut kernel_params)?;
     for (actual, expected) in kernel_params.iter().zip(&golden.theta) {
-        assert_close(*actual, *expected);
+        assert_close(*actual, *expected, TOL);
     }
     let mut gpr = Gpr::new(spec, GaussianLikelihood::new(golden.noise_variance)?)
         .with_optimizer(Fixed)
@@ -275,16 +271,16 @@ fn check_composite_golden(name: &str, golden: &CompositeGolden) -> Result<(), Gp
         },
     )?;
     let nlml = gpr.neg_log_marginal_likelihood()?;
-    assert_close(-nlml, golden.log_marginal_likelihood);
+    assert_close(-nlml, golden.log_marginal_likelihood, TOL);
     if let Some(grad_theta) = &golden.grad_theta {
         let mut params = vec![0.0; gpr.num_params()];
         gpr.get_params(&mut params)?;
         let mut grad = vec![0.0; params.len()];
         let value = gpr.value_and_gradient_into(&params, &mut grad)?;
-        assert_close(value, nlml);
+        assert_close(value, nlml, TOL);
         assert_eq!(grad_theta.len(), kernel_params.len(), "{name} grad flatten");
         for i in 0..grad_theta.len() {
-            assert_close(-grad[i], grad_theta[i]);
+            assert_close(-grad[i], grad_theta[i], TOL);
         }
     }
     Ok(())

@@ -9,15 +9,9 @@ use faer::{Mat, MatRef, mat};
 
 const TOL: f64 = 1e-9;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
-
-fn assert_send_sync<T: Send + Sync>() {}
+use crate::test_check::{
+    assert_close, assert_lower_close, assert_send_sync, fill, points_2d, sq_dist_1d,
+};
 
 fn rbf(ell: f64) -> KernelSpec {
     KernelSpec::from(RbfKernel::new(ell).expect("valid"))
@@ -262,18 +256,6 @@ fn custom_rbf(ell: f64) -> KernelSpec {
     KernelSpec::custom(RbfAsTerm(RbfKernel::new(ell).expect("valid")))
 }
 
-fn sq_dist_1d(x: &[f64]) -> Mat<f64> {
-    let n = x.len();
-    Mat::from_fn(n, n, |i, j| {
-        let d = x[i] - x[j];
-        d * d
-    })
-}
-
-fn fill(n: usize, value: f64) -> Mat<f64> {
-    Mat::from_fn(n, n, |_, _| value)
-}
-
 fn apply_compiled(compiled: &CompiledKernel, dist: MatRef<'_, f64>) -> Mat<f64> {
     let n = dist.nrows();
     let mut out = fill(n, 0.0);
@@ -304,15 +286,6 @@ fn apply_rbf(ell: f64, dist: MatRef<'_, f64>) -> Mat<f64> {
     out
 }
 
-fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-    let n = actual.nrows();
-    for col in 0..n {
-        for row in col..n {
-            assert_close(actual[(row, col)], expected[(row, col)]);
-        }
-    }
-}
-
 #[test]
 fn is_send_sync() {
     assert_send_sync::<CompiledKernel>();
@@ -327,7 +300,7 @@ fn custom_plus_rbf_apply_matches_two_rbf() {
     let expected = apply_compiled(&builtin, dist.as_ref());
     for col in 0..3 {
         for row in 0..3 {
-            assert_close(out[(row, col)], expected[(row, col)]);
+            assert_close(out[(row, col)], expected[(row, col)], TOL);
         }
     }
 }
@@ -339,8 +312,8 @@ fn custom_times_rbf_apply_matches_two_rbf() {
     let dist = sq_dist_1d(&[0.0, 1.2]);
     let out = apply_compiled(&compiled, dist.as_ref());
     let expected = apply_compiled(&builtin, dist.as_ref());
-    assert_close(out[(0, 1)], expected[(0, 1)]);
-    assert_close(out[(0, 0)], expected[(0, 0)]);
+    assert_close(out[(0, 1)], expected[(0, 1)], TOL);
+    assert_close(out[(0, 0)], expected[(0, 0)], TOL);
 }
 
 #[test]
@@ -413,7 +386,7 @@ fn combine_sum_from_leaf_grams_overwrites_dirty_dest() {
     compiled
         .combine_from_leaf_grams(&grams, dirty.as_mut(), scratch.as_mut(), Triangle::Lower)
         .expect("combine");
-    lower_matches(dirty.as_ref(), expected.as_ref());
+    assert_lower_close(dirty.as_ref(), expected.as_ref(), TOL);
 }
 
 #[test]
@@ -425,7 +398,7 @@ fn sum_apply_adds_leaves() {
     let k2 = apply_rbf(2.0, dist.as_ref());
     for col in 0..3 {
         for row in 0..3 {
-            assert_close(out[(row, col)], k1[(row, col)] + k2[(row, col)]);
+            assert_close(out[(row, col)], k1[(row, col)] + k2[(row, col)], TOL);
         }
     }
 }
@@ -437,8 +410,8 @@ fn product_apply_multiplies_leaves() {
     let out = apply_compiled(&compiled, dist.as_ref());
     let k1 = apply_rbf(1.0, dist.as_ref());
     let k2 = apply_rbf(0.5, dist.as_ref());
-    assert_close(out[(0, 1)], k1[(0, 1)] * k2[(0, 1)]);
-    assert_close(out[(0, 0)], 1.0);
+    assert_close(out[(0, 1)], k1[(0, 1)] * k2[(0, 1)], TOL);
+    assert_close(out[(0, 0)], 1.0, TOL);
 }
 
 #[test]
@@ -455,6 +428,7 @@ fn mixed_product_of_sum_matches_leaves() {
             assert_close(
                 out[(row, col)],
                 k1[(row, col)] * (k2[(row, col)] + k3[(row, col)]),
+                TOL,
             );
         }
     }
@@ -475,6 +449,7 @@ fn product_of_two_sums_matches_leaves() {
             assert_close(
                 out[(row, col)],
                 (a[(row, col)] + b[(row, col)]) * (c[(row, col)] + d[(row, col)]),
+                TOL,
             );
         }
     }
@@ -496,10 +471,10 @@ fn sum_lower_matches_full_and_leaves_upper() {
             scratch.as_mut(),
         )
         .expect("shape");
-    lower_matches(lower.as_ref(), full.as_ref());
-    assert_close(lower[(0, 1)], sentinel);
-    assert_close(lower[(0, 2)], sentinel);
-    assert_close(lower[(1, 2)], sentinel);
+    assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+    assert_close(lower[(0, 1)], sentinel, TOL);
+    assert_close(lower[(0, 2)], sentinel, TOL);
+    assert_close(lower[(1, 2)], sentinel, TOL);
 }
 
 #[test]
@@ -532,7 +507,7 @@ fn sum_grad_matches_finite_difference() {
     for col in 0..3 {
         for row in 0..3 {
             let fd = (kp[(row, col)] - km[(row, col)]) / (2.0 * h);
-            assert_close(dk[(row, col)], fd);
+            assert_close(dk[(row, col)], fd, TOL);
         }
     }
 }
@@ -589,7 +564,7 @@ fn product_hess_matches_finite_difference_of_grad() {
             )
             .expect("hess");
         let fd = (gp[(0, 1)] - gm[(0, 1)]) / (2.0 * h);
-        assert_close(d2[(0, 1)], fd);
+        assert_close(d2[(0, 1)], fd, TOL);
     }
 }
 
@@ -621,7 +596,7 @@ fn product_grad_matches_finite_difference() {
         )
         .expect("idx 0");
     let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
-    assert_close(dk[(0, 1)], fd);
+    assert_close(dk[(0, 1)], fd, TOL);
 }
 
 #[test]
@@ -652,7 +627,7 @@ fn nested_product_grad_matches_finite_difference() {
         )
         .expect("idx 2");
     let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
-    assert_close(dk[(0, 1)], fd);
+    assert_close(dk[(0, 1)], fd, TOL);
 }
 
 fn assert_points_product_grad_fd(spec: KernelSpec, x: Mat<f64>, param_idx: usize) {
@@ -680,7 +655,7 @@ fn assert_points_product_grad_fd(spec: KernelSpec, x: Mat<f64>, param_idx: usize
         )
         .expect("grad");
     let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
-    assert_close(dk[(0, 1)], fd);
+    assert_close(dk[(0, 1)], fd, TOL);
 }
 
 #[test]
@@ -721,12 +696,12 @@ fn get_set_params_roundtrip_and_atomic() {
     let mut compiled = (rbf(1.0) + rbf(2.0)).compile();
     let mut params = [0.0; 2];
     compiled.get_params(&mut params).expect("len 2");
-    assert_close(params[0], 1.0_f64.ln());
-    assert_close(params[1], 2.0_f64.ln());
+    assert_close(params[0], 1.0_f64.ln(), TOL);
+    assert_close(params[1], 2.0_f64.ln(), TOL);
     params[0] = 0.5_f64.ln();
     compiled.set_params(&params).expect("valid");
     compiled.get_params(&mut params).expect("len 2");
-    assert_close(params[0], 0.5_f64.ln());
+    assert_close(params[0], 0.5_f64.ln(), TOL);
     let before = compiled.clone();
     assert!(compiled.set_params(&[0.0, f64::INFINITY]).is_err());
     assert_eq!(compiled, before);
@@ -782,8 +757,8 @@ fn fill_diag_adds_rbf_leaves() {
     let compiled = (rbf(1.0) + rbf(2.0)).compile();
     let mut diag = [0.0, 0.0];
     compiled.fill_diag(&mut diag).expect("two terms");
-    assert_close(diag[0], 2.0);
-    assert_close(diag[1], 2.0);
+    assert_close(diag[0], 2.0, TOL);
+    assert_close(diag[1], 2.0, TOL);
 }
 
 #[test]
@@ -810,12 +785,8 @@ fn apply_cross_matches_full_block() {
             scratch_cross.as_mut(),
         )
         .expect("rect");
-    assert_close(k_cross[(0, 0)], k_nn[(0, 0)]);
-    assert_close(k_cross[(0, 1)], k_nn[(0, 1)]);
-}
-
-fn points_2d(rows: &[[f64; 2]]) -> Mat<f64> {
-    Mat::from_fn(rows.len(), 2, |i, j| rows[i][j])
+    assert_close(k_cross[(0, 0)], k_nn[(0, 0)], TOL);
+    assert_close(k_cross[(0, 1)], k_nn[(0, 1)], TOL);
 }
 
 #[test]
@@ -856,7 +827,7 @@ fn ard_apply_dist_is_unsupported_points_match_isotropic() {
     let iso = apply_rbf(ell, dist.as_ref());
     for col in 0..3 {
         for row in 0..3 {
-            assert_close(out[(row, col)], iso[(row, col)]);
+            assert_close(out[(row, col)], iso[(row, col)], TOL);
         }
     }
 }
@@ -901,7 +872,7 @@ fn rbf_plus_linear_apply_adds_leaves() {
         .expect("linear");
     for col in 0..2 {
         for row in 0..2 {
-            assert_close(out[(row, col)], kr[(row, col)] + kl[(row, col)]);
+            assert_close(out[(row, col)], kr[(row, col)] + kl[(row, col)], TOL);
         }
     }
 }
@@ -932,7 +903,7 @@ fn rbf_times_linear_apply_multiplies_leaves() {
         .expect("linear");
     for col in 0..2 {
         for row in 0..2 {
-            assert_close(out[(row, col)], kr[(row, col)] * kl[(row, col)]);
+            assert_close(out[(row, col)], kr[(row, col)] * kl[(row, col)], TOL);
         }
     }
 }
@@ -985,7 +956,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
         )
         .expect("grad");
     let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
-    assert_close(dk[(0, 1)], fd);
+    assert_close(dk[(0, 1)], fd, TOL);
 }
 
 #[test]
@@ -1007,8 +978,8 @@ fn rbf_plus_white_is_distance_mode() {
             scratch.as_mut(),
         )
         .expect("shape");
-    assert_close(out[(0, 0)], 1.0 + 0.1);
-    assert_close(out[(0, 1)], apply_rbf(1.0, dist.as_ref())[(0, 1)]);
+    assert_close(out[(0, 0)], 1.0 + 0.1, TOL);
+    assert_close(out[(0, 1)], apply_rbf(1.0, dist.as_ref())[(0, 1)], TOL);
 }
 
 #[test]
@@ -1031,9 +1002,9 @@ fn linear_plus_constant_is_points_mode() {
             scratch.as_mut(),
         )
         .expect("points");
-    assert_close(out[(0, 0)], 0.5);
-    assert_close(out[(1, 1)], 1.0 + 0.5);
-    assert_close(out[(1, 0)], 0.5);
+    assert_close(out[(0, 0)], 0.5, TOL);
+    assert_close(out[(1, 1)], 1.0 + 0.5, TOL);
+    assert_close(out[(1, 0)], 0.5, TOL);
 }
 
 #[test]
@@ -1058,8 +1029,8 @@ fn matern_plus_white_is_distance_mode() {
         .expect("shape");
     let rho = 3.0_f64.sqrt();
     let k01 = (1.0 + rho) * (-rho).exp();
-    assert_close(out[(0, 0)], 1.0 + 0.1);
-    assert_close(out[(0, 1)], k01);
+    assert_close(out[(0, 0)], 1.0 + 0.1, TOL);
+    assert_close(out[(0, 1)], k01, TOL);
 }
 
 #[test]
@@ -1082,9 +1053,9 @@ fn matern_ard_plus_constant_is_points_mode() {
             scratch.as_mut(),
         )
         .expect("points");
-    assert_close(out[(0, 0)], 1.5);
-    assert_close(out[(1, 1)], 1.5);
-    assert_close(out[(1, 0)], (-1.0_f64).exp() + 0.5);
+    assert_close(out[(0, 0)], 1.5, TOL);
+    assert_close(out[(1, 1)], 1.5, TOL);
+    assert_close(out[(1, 0)], (-1.0_f64).exp() + 0.5, TOL);
 }
 
 #[test]
@@ -1109,8 +1080,8 @@ fn periodic_plus_white_is_distance_mode() {
         .expect("shape");
     let s = (std::f64::consts::PI * 0.5).sin();
     let k01 = (-2.0 * s * s).exp();
-    assert_close(out[(0, 0)], 1.0 + 0.1);
-    assert_close(out[(0, 1)], k01);
+    assert_close(out[(0, 0)], 1.0 + 0.1, TOL);
+    assert_close(out[(0, 1)], k01, TOL);
 }
 
 #[test]
@@ -1133,8 +1104,8 @@ fn rational_quadratic_plus_white_is_distance_mode() {
             scratch.as_mut(),
         )
         .expect("shape");
-    assert_close(out[(0, 0)], 1.1);
-    assert_close(out[(0, 1)], 2.0 / 3.0);
+    assert_close(out[(0, 0)], 1.1, TOL);
+    assert_close(out[(0, 1)], 2.0 / 3.0, TOL);
 }
 
 #[test]
@@ -1157,9 +1128,9 @@ fn rational_quadratic_ard_plus_constant_is_points_mode() {
             scratch.as_mut(),
         )
         .expect("points");
-    assert_close(out[(0, 0)], 1.5);
-    assert_close(out[(1, 1)], 1.5);
-    assert_close(out[(1, 0)], 2.0 / 3.0 + 0.5);
+    assert_close(out[(0, 0)], 1.5, TOL);
+    assert_close(out[(1, 1)], 1.5, TOL);
+    assert_close(out[(1, 0)], 2.0 / 3.0 + 0.5, TOL);
 }
 
 fn fast_exp(x: f64) -> f64 {
@@ -1185,7 +1156,7 @@ fn fast_rbf_matches_polynomial_and_grad_fd() {
     for col in 0..3 {
         for row in 0..3 {
             let d = x[(row, 0)] - x[(col, 0)];
-            assert_close(k[(row, col)], fast_exp(-0.5 * d * d * inv));
+            assert_close(k[(row, col)], fast_exp(-0.5 * d * d * inv), TOL);
         }
     }
     let h = 1e-6;
@@ -1214,7 +1185,7 @@ fn fast_rbf_matches_polynomial_and_grad_fd() {
     for col in 0..3 {
         for row in 0..3 {
             let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
-            assert_close(dk[(row, col)], fd);
+            assert_close(dk[(row, col)], fd, TOL);
         }
     }
 }

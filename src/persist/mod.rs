@@ -1300,13 +1300,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1464,8 +1458,8 @@ mod tests {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
-        assert_close(got.mean[0], want.mean[0]);
-        assert_close(got.variance[0], want.variance[0]);
+        assert_close(got.mean[0], want.mean[0], TOL);
+        assert_close(got.variance[0], want.variance[0], TOL);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1486,8 +1480,8 @@ mod tests {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[0.25], 1, 1).expect("loaded predict");
-        assert_close(got.mean[0], want.mean[0]);
-        assert_close(got.variance[0], want.variance[0]);
+        assert_close(got.mean[0], want.mean[0], TOL);
+        assert_close(got.variance[0], want.variance[0], TOL);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1508,8 +1502,8 @@ mod tests {
             panic!("standalone Linear is a points kernel");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
-        assert_close(got.mean[0], want.mean[0]);
-        assert_close(got.variance[0], want.variance[0]);
+        assert_close(got.mean[0], want.mean[0], TOL);
+        assert_close(got.variance[0], want.variance[0], TOL);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1532,7 +1526,7 @@ mod tests {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[1.0], 1, 1).expect("loaded predict");
-        assert_close(got.mean[0], want.mean[0]);
+        assert_close(got.mean[0], want.mean[0], TOL);
         let mut retrained = model.with_optimizer(Lbfgs::new());
         retrained.refit().expect("refit");
         let after = retrained.predict(&[1.0], 1, 1).expect("refit predict");
@@ -1671,8 +1665,8 @@ mod tests {
             panic!("single RBF loads as CachedSingle");
         };
         let got = must(model.predict(&[0.25], 1, 1));
-        assert_close(f64::from(got.mean[0]), f64::from(want.mean[0]));
-        assert_close(f64::from(got.variance[0]), f64::from(want.variance[0]));
+        assert_close(f64::from(got.mean[0]), f64::from(want.mean[0]), TOL);
+        assert_close(f64::from(got.variance[0]), f64::from(want.variance[0]), TOL);
         let _ = std::fs::remove_dir_all(&dir_single);
 
         let online = must(single.into_online());
@@ -1684,8 +1678,8 @@ mod tests {
             panic!("single online RBF loads as CachedSingle");
         };
         let got = must(model.predict(&[0.25], 1, 1));
-        assert_close(f64::from(got.mean[0]), f64::from(want.mean[0]));
-        assert_close(f64::from(got.variance[0]), f64::from(want.variance[0]));
+        assert_close(f64::from(got.mean[0]), f64::from(want.mean[0]), TOL);
+        assert_close(f64::from(got.variance[0]), f64::from(want.variance[0]), TOL);
         let _ = std::fs::remove_dir_all(&dir_online);
 
         let dir_mixed = temp_dir("prec-mixed");
@@ -1705,8 +1699,8 @@ mod tests {
             panic!("mixed RBF loads as CachedMixed");
         };
         let got = must(model.predict(&[0.25], 1, 1));
-        assert_close(got.mean[0], want.mean[0]);
-        assert_close(got.variance[0], want.variance[0]);
+        assert_close(got.mean[0], want.mean[0], TOL);
+        assert_close(got.variance[0], want.variance[0], TOL);
         let _ = std::fs::remove_dir_all(&dir_mixed);
     }
 
@@ -1743,8 +1737,8 @@ mod tests {
             panic!("fast RBF loads as CachedFast");
         };
         let got = must(model.predict(&[0.25], 1, 1));
-        assert_close(got.mean[0], want.mean[0]);
-        assert_close(got.variance[0], want.variance[0]);
+        assert_close(got.mean[0], want.mean[0], TOL);
+        assert_close(got.variance[0], want.variance[0], TOL);
         let online = must(fitted.into_online());
         let dir_online = temp_dir("math-fast-online");
         must(online.save_with_factor(&dir_online));

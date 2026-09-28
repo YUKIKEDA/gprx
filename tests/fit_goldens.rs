@@ -55,17 +55,8 @@ struct FitGolden {
     loo_observation_variance: Vec<f64>,
 }
 
-fn rel_err(actual: f64, expected: f64) -> f64 {
-    (actual - expected).abs() / expected.abs().max(1.0)
-}
-
-fn assert_near(label: &str, actual: f64, expected: f64, tol: f64) {
-    let err = rel_err(actual, expected);
-    assert!(
-        err <= tol,
-        "{label}: actual={actual}, expected={expected}, rel_err={err}, tol={tol}"
-    );
-}
+mod common;
+use common::assert_close_named;
 
 fn assert_theta_near(label: &str, actual: f64, expected: f64) {
     let err = (actual.ln() - expected.ln()).abs();
@@ -108,7 +99,7 @@ fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
     .fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
 
     let nlml = gpr.neg_log_marginal_likelihood()?;
-    assert_near(
+    assert_close_named(
         &format!("{name} nlml"),
         -nlml,
         golden.log_marginal_likelihood,
@@ -150,19 +141,19 @@ fn check_fit_golden(name: &str, golden: &FitGolden) -> Result<(), GprError> {
     let pred_obs = gpr.predict(&golden.xs, golden.xs_n_rows, golden.xs_n_cols)?;
     assert_eq!(pred_lat.mean.len(), golden.mean.len(), "{name}");
     for i in 0..golden.mean.len() {
-        assert_near(
+        assert_close_named(
             &format!("{name} mean[{i}]"),
             pred_lat.mean[i],
             golden.mean[i],
             REL_TOL,
         );
-        assert_near(
+        assert_close_named(
             &format!("{name} latent_var[{i}]"),
             pred_lat.variance[i],
             golden.latent_variance[i],
             REL_TOL,
         );
-        assert_near(
+        assert_close_named(
             &format!("{name} obs_var[{i}]"),
             pred_obs.variance[i],
             golden.observation_variance[i],
@@ -187,19 +178,19 @@ fn check_loo_at_sklearn_theta(name: &str, golden: &FitGolden) -> Result<(), GprE
     })?;
     assert_eq!(loo_obs.mean.len(), golden.loo_mean.len(), "{name}");
     for i in 0..golden.loo_mean.len() {
-        assert_near(
+        assert_close_named(
             &format!("{name} loo_mean[{i}]"),
             loo_obs.mean[i],
             golden.loo_mean[i],
             LOO_REL_TOL,
         );
-        assert_near(
+        assert_close_named(
             &format!("{name} loo_latent_var[{i}]"),
             loo_lat.variance[i],
             golden.loo_latent_variance[i],
             LOO_REL_TOL,
         );
-        assert_near(
+        assert_close_named(
             &format!("{name} loo_obs_var[{i}]"),
             loo_obs.variance[i],
             golden.loo_observation_variance[i],
@@ -230,7 +221,7 @@ fn check_newton_forrester(golden: &FitGolden) -> Result<(), GprError> {
     .fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
 
     let nlml = gpr.neg_log_marginal_likelihood()?;
-    assert_near(
+    assert_close_named(
         "newton forrester nlml",
         -nlml,
         golden.log_marginal_likelihood,
@@ -260,19 +251,19 @@ fn check_newton_forrester(golden: &FitGolden) -> Result<(), GprError> {
     )?;
     let pred_obs = gpr.predict(&golden.xs, golden.xs_n_rows, golden.xs_n_cols)?;
     for i in 0..golden.mean.len() {
-        assert_near(
+        assert_close_named(
             &format!("newton forrester mean[{i}]"),
             pred_lat.mean[i],
             golden.mean[i],
             REL_TOL,
         );
-        assert_near(
+        assert_close_named(
             &format!("newton forrester latent_var[{i}]"),
             pred_lat.variance[i],
             golden.latent_variance[i],
             REL_TOL,
         );
-        assert_near(
+        assert_close_named(
             &format!("newton forrester obs_var[{i}]"),
             pred_obs.variance[i],
             golden.observation_variance[i],

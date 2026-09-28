@@ -439,13 +439,7 @@ mod tests {
 
     const TOL: f64 = 1e-6;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     struct Quadratic {
         joint_evals: usize,
@@ -494,9 +488,9 @@ mod tests {
             };
             let cost = problem.cost(&param).expect("cost");
             let grad = problem.gradient(&param).expect("grad");
-            assert_close(cost, 0.5 * (0.3 * 0.3 + 0.2 * 0.2));
-            assert_close(grad[0], 0.3);
-            assert_close(grad[1], -0.2);
+            assert_close(cost, 0.5 * (0.3 * 0.3 + 0.2 * 0.2), TOL);
+            assert_close(grad[0], 0.3, TOL);
+            assert_close(grad[1], -0.2, TOL);
         }
         assert_eq!(obj.joint_evals, 1);
         {
@@ -605,9 +599,9 @@ mod tests {
         let z = user_to_z(x, interval).expect("inside");
         let mut out = [0.0];
         z_to_log_theta_into(&[z], &[interval], &mut out).expect("map");
-        assert_close(out[0], x);
+        assert_close(out[0], x, TOL);
         let back = log_theta_to_z(&out, &[interval]).expect("z");
-        assert_close(z_to_user(back[0], interval), x);
+        assert_close(z_to_user(back[0], interval), x, TOL);
     }
 
     #[test]
@@ -616,8 +610,8 @@ mod tests {
         let x = 2.5;
         let z = user_to_z(x, interval).expect("inside");
         let back = z_to_user(z, interval);
-        assert_close(back, x);
+        assert_close(back, x, TOL);
         assert!(interval.contains(back));
-        assert_close(sigmoid(logit(0.25)), 0.25);
+        assert_close(sigmoid(logit(0.25)), 0.25, TOL);
     }
 }
