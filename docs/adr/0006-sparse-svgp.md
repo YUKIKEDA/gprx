@@ -1,37 +1,37 @@
-# ADR 0006: SVGP は VFE と別型
+# ADR 0006: SVGP is a type separate from VFE
 
-- 状態: 採用
-- 日付: 2026-09-22
-- Issue: [#201](https://github.com/YUKIKEDA/gprx/issues/201)（P4-15）
+- Status: accepted
+- Date: 2026-09-22
+- Issue: [#201](https://github.com/YUKIKEDA/gprx/issues/201) (P4-15)
 
-## 文脈
+## Context
 
-Phase 4 は誘導点 Sparse を [ADR 0002](0002-sparse-vfe.md) で VFE（Titsias / SGPR）に固定し、`Sgpr` に載せた。FITC は載らない。同じ誘導点近似でも、変分事後 `q(u)` を陽に持つ SVGP（Hensman et al.）はミニバッチ ELBO ができる。P4-11 の外部照合の前に、全データ ELBO と対角予測が要る。VFE を置き換えるか、同じ型にフラグを足すかは、取れない状態を型で表す規則と衝突する。
+Phase 4 fixed inducing-point Sparse as VFE (Titsias / SGPR) in [ADR 0002](0002-sparse-vfe.md) and shipped it as `Sgpr`. FITC is not shipped. The same inducing-point approximation, with an explicit variational posterior `q(u)`, is SVGP (Hensman et al.) and can take a minibatch ELBO. Before the external check in P4-11, the full-data ELBO and diagonal prediction are required. Replacing VFE, or adding a flag on the same type, collides with the rule that impossible states are types.
 
-## 決定
+## Decision
 
-- VFE の `Sgpr` / `FittedSgpr` は残す
-- SVGP は別公開型 `Svgp` / `FittedSvgp`
-- FITC は載らない（ADR 0002 のまま）
-- 最初の `q(u)` は whitened の full-rank Cholesky。`factor` は呼び出し側 `Z` の `m` で prior（平均 0、`L = I`）を置く
-- `Z` は呼び出し側。params に入れない。k-means は置かない
-- `Svgp<Fixed>::factor` と全データ ELBO・対角予測は P4-15。`Adam` / ミニバッチ `fit` と全データ `value_and_gradient_into` は P4-16
+- VFE `Sgpr` / `FittedSgpr` stay
+- SVGP is a separate public type, `Svgp` / `FittedSvgp`
+- FITC is not shipped (ADR 0002 stands)
+- The first `q(u)` is a whitened full-rank Cholesky. `factor` places the prior at the caller's `Z` of length `m` (mean 0, `L = I`)
+- `Z` comes from the caller. It is not in params. There is no k-means
+- `Svgp<Fixed>::factor`, the full-data ELBO, and diagonal prediction are P4-15. `Adam` / minibatch `fit` and the full-data `value_and_gradient_into` are P4-16
 
-## 根拠
+## Rationale
 
-VFE は `q(u)` を閉じた形で消す。既に `Z = X` で Exact と一致し、オンラインの rank-1 もその因子に載っている。SVGP は同じ ELBO の未崩壊形で、最適 `q` では VFE に戻る。置き換えると P4-2…10 の経路を捨てる。同じ struct に `q` の有無をフラグで足すと、無視されるフィールドか実行時エラーになる。別型なら VFE は今のまま、SVGP は `q` を常に持つ。
+VFE eliminates `q(u)` in closed form. It already matches Exact at `Z = X`, and the online rank-1 update sits on that factor. SVGP is the uncollapsed form of the same ELBO, and the optimal `q` returns to VFE. Replacing VFE would throw away the P4-2…10 path. A flag for whether `q` is present adds an ignored field or a runtime error. A separate type leaves VFE as it is, and SVGP always has `q`.
 
-FITC を足す理由は ADR 0002 から増えていない。尤度の過大評価と、参照実装の既定から外れる点が同じである。
+Nothing new has been added to the reason for shipping FITC since ADR 0002. Overestimating the likelihood, and leaving the default of the reference implementations, is the same mismatch.
 
-## 棄却した案
+## Rejected
 
-- **VFE を SVGP に置き換える**: 崩壊形の因子とオンライン更新を作り直す。最適 `q` 以外では Exact 一致も消える
-- **`Sgpr` に `q` フラグを足す**: 未使用フィールドか実行時の設定エラーになる。型で分けられない
-- **FITC を載せる**: ADR 0002 を覆す。この行の対象ではない
+- **Replace VFE with SVGP**: rebuild the collapsed factor and the online update. The Exact match also disappears away from the optimal `q`
+- **Add a `q` flag on `Sgpr`**: an unused field or a runtime configuration error. The types would not be separate
+- **Ship FITC**: overturns ADR 0002. It is not the subject of this row
 
-## 帰結
+## Consequences
 
-- P4-15 は `Svgp<Fixed>::factor`、`neg_elbo`、対角 `predict` から始める
-- 最適 whitened `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する
-- `Adam` とミニバッチは `Svgp<Adam>::fit`。`Adam` は `Optimizer` を実装しない。L-BFGS にノイズ付き勾配は渡さない
-- FITC を後から足す行は切らない。戻すなら新しい Grill → Issue
+- P4-15 starts from `Svgp<Fixed>::factor`, `neg_elbo`, and diagonal `predict`
+- At the optimal whitened `q` (Titsias), it matches `FittedSgpr` at the same `θ`, `X`, and `Z`
+- `Adam` and minibatches are `Svgp<Adam>::fit`. `Adam` does not implement `Optimizer`. A noisy gradient is not passed to L-BFGS
+- No later row adds FITC. Reversing this is a new Grill → Issue
