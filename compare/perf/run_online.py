@@ -49,6 +49,8 @@ def run_gprx_online(
         "--quiet",
         "--manifest-path",
         str(ROOT / "gprx" / "Cargo.toml"),
+        "--bin",
+        "gprx-perf",
     ]
     if stages:
         cmd.extend(["--features", "insert-stages"])
