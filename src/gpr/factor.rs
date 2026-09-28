@@ -4,9 +4,8 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, MixedKernelViews, Triangle,
+    CoordMode, FillDistances, GramKernel, KernelScalar, MixedKernelViews, Triangle,
 };
-use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
@@ -137,64 +136,6 @@ where
     }
 }
 
-pub(crate) fn validate_training(
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-) -> Result<(), GprError> {
-    if n_rows == 0 || n_cols == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    let expected_x = n_rows.checked_mul(n_cols).ok_or(GprError::EmptyInput)?;
-    if x.len() != expected_x {
-        return Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {expected_x} feature values, got {}", x.len()),
-        });
-    }
-    if y.len() != n_rows {
-        return Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {n_rows} targets, got {}", y.len()),
-        });
-    }
-    if x.iter().any(|v| !v.is_finite()) || y.iter().any(|v| !v.is_finite()) {
-        return Err(GprError::NonFiniteInput);
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_query(xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
-    if n_rows == 0 || n_cols == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    let expected = n_rows.checked_mul(n_cols).ok_or(GprError::EmptyInput)?;
-    if xs.len() != expected {
-        return Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {expected} feature values, got {}", xs.len()),
-        });
-    }
-    if xs.iter().any(|v| !v.is_finite()) {
-        return Err(GprError::NonFiniteInput);
-    }
-    Ok(())
-}
-
-pub(crate) fn pack_points(x: &[f64], n_rows: usize, n_cols: usize) -> Mat<f64> {
-    let mut dest = Mat::zeros(n_rows, n_cols);
-    pack_points_into(x, n_rows, n_cols, dest.as_mut());
-    dest
-}
-
-pub(crate) fn pack_points_into(x: &[f64], n_rows: usize, n_cols: usize, mut dest: MatMut<'_, f64>) {
-    debug_assert_eq!(dest.nrows(), n_rows);
-    debug_assert_eq!(dest.ncols(), n_cols);
-    for col in 0..n_cols {
-        for row in 0..n_rows {
-            dest[(row, col)] = x[col * n_rows + row];
-        }
-    }
-}
-
 pub(crate) fn finish_train_system<W>(ws: &mut W, y: &[f64], noise: f64, extra_diag: f64)
 where
     W: FitWorkspace,
@@ -286,27 +227,6 @@ pub(crate) fn neg_mll_from_factor<T: KernelScalar>(
     let log_det = log_det_from_l(l, n);
     let log_two_pi = T::from_f64((2.0 * std::f64::consts::PI).ln());
     T::from_f64(0.5) * (quad + log_det + T::from_f64(n as f64) * log_two_pi)
-}
-
-pub(crate) fn write_params(
-    kernel: &KernelSpec,
-    likelihood: &GaussianLikelihood,
-    out: &mut [f64],
-) -> Result<(), GprError> {
-    let n_kernel = kernel.num_params();
-    require_param_len(out.len(), n_kernel + likelihood.num_params())?;
-    kernel.get_params(&mut out[..n_kernel])?;
-    likelihood.get_params(&mut out[n_kernel..])
-}
-
-pub(crate) fn require_param_len(actual: usize, expected: usize) -> Result<(), GprError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {expected} parameters, got {actual}"),
-        })
-    }
 }
 
 pub(crate) fn write_kernel_grad<K: GramKernel, M: crate::math::KernelMath>(
@@ -405,19 +325,4 @@ pub(crate) fn write_kernel_hess_from_coords<K: GramKernel, M: crate::math::Kerne
     j: usize,
 ) -> Result<(), GprError> {
     compiled.hess_points::<M>(x, d2_k, i, j, Triangle::Lower, scratch)
-}
-
-pub(crate) fn pack_storage<T: KernelScalar>(
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    mut dest: MatMut<'_, T>,
-) {
-    debug_assert_eq!(dest.nrows(), n_rows);
-    debug_assert_eq!(dest.ncols(), n_cols);
-    for col in 0..n_cols {
-        for row in 0..n_rows {
-            dest[(row, col)] = T::from_f64(x[col * n_rows + row]);
-        }
-    }
 }

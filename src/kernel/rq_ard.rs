@@ -240,8 +240,8 @@ impl RationalQuadraticArdKernel {
                 ),
             });
         }
-        require_finite_points(x)?;
-        require_finite_points(xs)?;
+        crate::data::require_finite_points(x)?;
+        crate::data::require_finite_points(xs)?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
         let alpha = self.alpha();
         for col in 0..xs.nrows() {
@@ -489,17 +489,6 @@ fn require_feature_dim(x: MatRef<'_, f64>, expected_d: usize) -> Result<(), GprE
     Ok(())
 }
 
-fn require_finite_points(x: MatRef<'_, f64>) -> Result<(), GprError> {
-    for col in 0..x.ncols() {
-        for row in 0..x.nrows() {
-            if !x[(row, col)].is_finite() {
-                return Err(GprError::NonFiniteInput);
-            }
-        }
-    }
-    Ok(())
-}
-
 fn require_square_points(
     x: MatRef<'_, f64>,
     out: MatRef<'_, f64>,
@@ -517,7 +506,7 @@ fn require_square_points(
             ),
         });
     }
-    require_finite_points(x)?;
+    crate::data::require_finite_points(x)?;
     Ok(x.nrows())
 }
 

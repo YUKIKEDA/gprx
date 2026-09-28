@@ -6,7 +6,8 @@ use faer::Mat;
 
 use super::factor::SvgpMean;
 use crate::error::GprError;
-use crate::gpr::factor::{require_param_len, write_params};
+use crate::param::write_params;
+
 use crate::kernel::KernelSpec;
 use crate::kernel::{CompiledKernel, GramKernel};
 use crate::likelihood::GaussianLikelihood;
@@ -113,7 +114,7 @@ where
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        require_param_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         let n_theta = self.kernel.num_params() + self.likelihood.num_params();
         write_params(&self.kernel, &self.likelihood, &mut out[..n_theta])?;
         pack_q(&self.q_mean, self.q_l.as_ref(), &mut out[n_theta..]);
@@ -164,7 +165,7 @@ where
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
         let n_theta = n_kernel + self.likelihood.num_params();
-        require_param_len(params.len(), self.num_params())?;
+        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         if self.same_stored_params(params)? {
             return Ok(());
         }
@@ -275,8 +276,8 @@ where
         out: &mut [f64],
     ) -> Result<f64, GprError> {
         let n_params = self.num_params();
-        require_param_len(params.len(), n_params)?;
-        require_param_len(out.len(), n_params)?;
+        crate::data::require_count(params.len(), n_params, "parameters")?;
+        crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let batch: Vec<usize> = (0..self.n).collect();
         svgp_value_and_gradient(self, out, &batch)

@@ -7,7 +7,6 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::gpr::PointId;
-use crate::gpr::factor::write_params;
 use crate::gpr::online::PointRegistry;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
@@ -15,6 +14,7 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
 use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
+use crate::param::write_params;
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::{PredictOptions, Prediction};
 

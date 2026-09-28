@@ -102,7 +102,7 @@ impl GaussianLikelihood {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        expect_one_param(out.len())?;
+        crate::data::require_count(out.len(), 1, "likelihood parameter")?;
         out[0] = self.noise_variance.ln();
         Ok(())
     }
@@ -114,7 +114,7 @@ impl GaussianLikelihood {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1,
     /// or [`GprError::InvalidNoiseVariance`] if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        expect_one_param(params.len())?;
+        crate::data::require_count(params.len(), 1, "likelihood parameter")?;
         let log_noise_variance = validate_log_noise_variance(params[0])?;
         self.noise_variance =
             BoundedParam::new(log_noise_variance.exp(), self.noise_variance.interval())?;
@@ -168,16 +168,6 @@ fn validate_log_noise_variance(theta: f64) -> Result<f64, GprError> {
         return Err(invalid_noise("noise variance underflowed to zero"));
     }
     Ok(theta)
-}
-
-fn expect_one_param(len: usize) -> Result<(), GprError> {
-    if len == 1 {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected 1 likelihood parameter, got {len}"),
-        })
-    }
 }
 
 #[cfg(test)]

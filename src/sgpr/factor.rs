@@ -6,9 +6,10 @@ use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
 use faer::{Accum, Mat, MatMut, MatRef};
 
+use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
-use crate::gpr::factor::{pack_points, validate_query, validate_training};
+
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
@@ -1438,34 +1439,6 @@ where
         }
     }
     Ok(out)
-}
-
-pub(crate) fn validate_inducing(z: &[f64], m: usize, d: usize) -> Result<(), GprError> {
-    if m == 0 || d == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    if z.len() % m == 0 {
-        let z_dim = z.len() / m;
-        if z_dim != d {
-            return Err(GprError::DimensionMismatch {
-                x_dim: z_dim,
-                expected_dim: d,
-            });
-        }
-    }
-    let expected = m.checked_mul(d).ok_or(GprError::EmptyInput)?;
-    if z.len() != expected {
-        return Err(GprError::InvalidHyperparameter {
-            reason: format!(
-                "expected {expected} inducing feature values, got {}",
-                z.len()
-            ),
-        });
-    }
-    if z.iter().any(|v| !v.is_finite()) {
-        return Err(GprError::NonFiniteInput);
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
