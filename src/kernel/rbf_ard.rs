@@ -1,11 +1,13 @@
 //! ARD squared-exponential (RBF) kernel.
 
+use super::ard::{self, ArdR2, Pick};
 use super::dist::require_ard_sq_diff_shape;
+use super::scalar::f64_pair;
 use super::simd::{
     try_apply_rbf_ard_cache, try_apply_rbf_ard_cross, try_apply_rbf_ard_points,
     try_grad_rbf_ard_cache, try_grad_rbf_ard_points,
 };
-use super::{ArdLengthscales, Triangle, visit_triangle};
+use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
 use crate::error::GprError;
 use crate::math::KernelMath;
 use faer::reborrow::ReborrowMut;
@@ -132,6 +134,8 @@ impl RbfArdKernel {
 
     /// Writes `k(x, x')` into `out` for the requested triangle.
     ///
+    /// Writes `k(x, x')` into `out` for the requested triangle.
+    ///
     /// `x` is `n×d` (rows are points). The default contract is
     /// [`Triangle::Lower`]. Entries outside that triangle are left unchanged.
     ///
@@ -139,31 +143,22 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
-    pub fn apply<M: KernelMath>(
+    pub fn apply<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let n = require_square_points(x, out.as_ref(), self.num_params())?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_apply_rbf_ard_points::<M>(x, out.rb_mut(), uplo, inv_ell_sq)? {
+        ard::require_square_points(x, out.as_ref(), self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        if let Some((xf, of)) = f64_pair(x, out.rb_mut())
+            && try_apply_rbf_ard_points::<M>(xf, of, uplo, w)?
+        {
             return Ok(());
         }
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel::<M>(x, row, col, inv_ell_sq) {
-                Ok(value) => out[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        write_square(out, uplo, |row, col| {
+            rbf_value::<M, T>(ard::r2_from_coords(x, row, x, col, w, Pick::NONE)?)
+        })
     }
 
     /// Writes rectangular `k(x, xs)` (train × test) into `out`.
@@ -172,43 +167,27 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
-    pub fn apply_cross<M: KernelMath>(
+    pub fn apply_cross<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        xs: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        require_feature_dim(x, d)?;
-        require_feature_dim(xs, d)?;
-        if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-            return Err(GprError::ShapeMismatch {
-                reason: format!(
-                    "output is {}x{}, expected {}x{}",
-                    out.nrows(),
-                    out.ncols(),
-                    x.nrows(),
-                    xs.nrows()
-                ),
-            });
-        }
-        crate::data::require_finite_points(x)?;
-        crate::data::require_finite_points(xs)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_apply_rbf_ard_cross::<M>(x, xs, out.rb_mut(), inv_ell_sq)? {
+        ard::require_cross(x, xs, out.as_ref(), self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        if let (Some(xf), Some((xsf, of))) = (T::as_f64_ref(x), f64_pair(xs, out.rb_mut()))
+            && try_apply_rbf_ard_cross::<M>(xf, xsf, of, w)?
+        {
             return Ok(());
         }
-        for col in 0..xs.nrows() {
-            for row in 0..x.nrows() {
-                out[(row, col)] = ard_kernel_pair::<M>(x, row, xs, col, inv_ell_sq)?;
-            }
-        }
-        Ok(())
+        super::write_rect(out, |row, col| {
+            rbf_value::<M, T>(ard::r2_from_coords(x, row, xs, col, w, Pick::NONE)?)
+        })
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(1.0);
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(1.0));
     }
 
     /// Writes `∂K/∂θ_d` for `θ_d = log(ℓ_d)` into `d_k`.
@@ -219,107 +198,78 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad<M: KernelMath>(
+    pub fn grad<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        if param_idx >= self.num_params() {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD RBF parameter index {param_idx} is out of range (d={})",
-                    self.num_params()
-                ),
-            });
-        }
-        let n = require_square_points(x, d_k.as_ref(), self.num_params())?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_grad_rbf_ard_points::<M>(x, d_k.rb_mut(), uplo, inv_ell_sq, param_idx)? {
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        ard::require_square_points(x, d_k.as_ref(), self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        if let Some((xf, of)) = f64_pair(x, d_k.rb_mut())
+            && try_grad_rbf_ard_points::<M>(xf, of, uplo, w, param_idx)?
+        {
             return Ok(());
         }
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_grad::<M>(x, row, col, inv_ell_sq, param_idx) {
-                Ok(value) => d_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        write_square(d_k, uplo, |row, col| {
+            rbf_grad::<M, T>(ard::r2_from_coords(
+                x,
+                row,
+                x,
+                col,
+                w,
+                Pick::one(param_idx),
+            )?)
+        })
     }
 
-    pub(crate) fn apply_from_sq_diff<M: KernelMath>(
+    pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let n = require_square_out(out.as_ref())?;
-        let d = self.num_params();
-        require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_apply_rbf_ard_cache::<M>(cache, out.rb_mut(), uplo, inv_ell_sq)? {
+        let n = ard::require_square_out(out.as_ref())?;
+        require_ard_sq_diff_shape(cache, n, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        if let Some((cf, of)) = f64_pair(cache, out.rb_mut())
+            && try_apply_rbf_ard_cache::<M>(cf, of, uplo, w)?
+        {
             return Ok(());
         }
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_from_cache::<M>(cache, n, row, col, inv_ell_sq) {
-                Ok(value) => out[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        write_square(out, uplo, |row, col| {
+            rbf_value::<M, T>(ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?)
+        })
     }
 
-    pub(crate) fn grad_from_sq_diff<M: KernelMath>(
+    pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        if param_idx >= self.num_params() {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD RBF parameter index {param_idx} is out of range (d={})",
-                    self.num_params()
-                ),
-            });
-        }
-        let n = require_square_out(d_k.as_ref())?;
-        let d = self.num_params();
-        require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_grad_rbf_ard_cache::<M>(cache, d_k.rb_mut(), uplo, inv_ell_sq, param_idx)? {
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        let n = ard::require_square_out(d_k.as_ref())?;
+        require_ard_sq_diff_shape(cache, n, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        if let Some((cf, of)) = f64_pair(cache, d_k.rb_mut())
+            && try_grad_rbf_ard_cache::<M>(cf, of, uplo, w, param_idx)?
+        {
             return Ok(());
         }
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_grad_from_cache::<M>(cache, n, row, col, inv_ell_sq, param_idx) {
-                Ok(value) => d_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        write_square(d_k, uplo, |row, col| {
+            rbf_grad::<M, T>(ard::r2_from_cache(
+                cache,
+                n,
+                row,
+                col,
+                w,
+                Pick::one(param_idx),
+            )?)
+        })
     }
 
     /// Writes `∂²K/∂θ_i ∂θ_j` for `θ_d = log(ℓ_d)` into `d2_k`.
@@ -328,69 +278,40 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess<M: KernelMath>(
+    pub fn hess<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        if i >= d || j >= d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
-            });
-        }
-        let n = require_square_points(x, d2_k.as_ref(), d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_hess::<M>(x, row, col, inv_ell_sq, i, j) {
-                Ok(value) => d2_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_points(x, d2_k, self.num_params(), uplo, |row, col| {
+            rbf_hess::<M, T>(
+                ard::r2_from_coords(x, row, x, col, w, Pick::pair(i, j))?,
+                i == j,
+            )
+        })
     }
 
-    pub(crate) fn hess_from_sq_diff<M: KernelMath>(
+    pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        if i >= d || j >= d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
-            });
-        }
-        let n = require_square_out(d2_k.as_ref())?;
-        require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_hess_from_cache::<M>(cache, n, row, col, inv_ell_sq, i, j) {
-                Ok(value) => d2_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
+            rbf_hess::<M, T>(
+                ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?,
+                i == j,
+            )
+        })
     }
 
     /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
@@ -401,11 +322,11 @@ impl RbfArdKernel {
     ///
     /// Same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`], or
     /// [`GprError::IndexOutOfRange`] when `dim` does not match `ℓ_d`.
-    pub fn grad_wrt_coord_dim<M: KernelMath>(
+    pub fn grad_wrt_coord_dim<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         dim: usize,
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
@@ -418,226 +339,190 @@ impl RbfArdKernel {
             });
         }
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let r2 = ard_r2_pair(x1, row, x2, col, inv_ell_sq)?;
-                let delta = x1[(row, dim)] - x2[(col, dim)];
-                d_k[(row, col)] = ard_d1::<M>(r2) * delta * inv_ell_sq[dim];
-            }
-        }
-        Ok(())
+        let w_dim = T::from_f64(inv_ell_sq[dim]);
+        super::write_rect(d_k, |row, col| {
+            let t = ard::r2_from_coords(x1, row, x2, col, inv_ell_sq, Pick::NONE)?;
+            let delta = x1[(row, dim)] - x2[(col, dim)];
+            Ok(ard_d1::<M, T>(t.r2) * delta * w_dim)
+        })
     }
 
-    pub(crate) fn hess_wrt_coord_dims<M: KernelMath>(
+    pub(crate) fn hess_wrt_coord_dims<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         dim_a: usize,
         dim_b: usize,
+    ) -> Result<(), GprError> {
+        self.coord_hess::<M, T>(x1, x2, d2_k, (dim_a, dim_b), T::from_f64(-1.0))
+    }
+
+    pub(crate) fn hess_wrt_coord_mixed<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        dim_x1: usize,
+        dim_x2: usize,
+    ) -> Result<(), GprError> {
+        self.coord_hess::<M, T>(x1, x2, d2_k, (dim_x1, dim_x2), T::from_f64(1.0))
+    }
+
+    /// `sign · (−k'' Δ_a Δ_b w_a w_b + [a = b] k' w_a)`: `sign = −1` for two
+    /// derivatives in `X2`, `+1` for one in `X1` and one in `X2`.
+    fn coord_hess<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        (dim_a, dim_b): (usize, usize),
+        sign: T,
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let r2 = ard_r2_pair(x1, row, x2, col, inv_ell_sq)?;
-                let da = x1[(row, dim_a)] - x2[(col, dim_a)];
-                let db = x1[(row, dim_b)] - x2[(col, dim_b)];
-                let wa = inv_ell_sq[dim_a];
-                let wb = inv_ell_sq[dim_b];
-                let value = if M::ACCURATE {
-                    let k = ard_value::<M>(r2);
-                    let mut value = k * da * db * wa * wb;
-                    if dim_a == dim_b {
-                        value -= k * wa;
-                    }
-                    value
-                } else {
-                    let jet = M::jet(-0.5 * r2);
-                    let mut value = jet.d2 * da * db * wa * wb;
-                    if dim_a == dim_b {
-                        value -= jet.d1 * wa;
-                    }
-                    value
-                };
-                d2_k[(row, col)] = value;
+        let wa = T::from_f64(inv_ell_sq[dim_a]);
+        let wb = T::from_f64(inv_ell_sq[dim_b]);
+        super::write_rect(d2_k, |row, col| {
+            let r2 = ard::r2_from_coords(x1, row, x2, col, inv_ell_sq, Pick::NONE)?.r2;
+            let da = x1[(row, dim_a)] - x2[(col, dim_a)];
+            let db = x1[(row, dim_b)] - x2[(col, dim_b)];
+            let (d1, d2) = if M::ACCURATE {
+                let k = ard_value::<M, T>(r2);
+                (k, k)
+            } else {
+                let jet = M::jet(T::from_f64(-0.5) * r2);
+                (jet.d1, jet.d2)
+            };
+            let mut value = -sign * d2 * da * db * wa * wb;
+            if dim_a == dim_b {
+                value += sign * d1 * wa;
             }
-        }
-        Ok(())
+            Ok(value)
+        })
     }
 
-    pub(crate) fn hess_wrt_coord_mixed<M: KernelMath>(
+    pub(crate) fn hess_theta_coord_dim<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
-        dim_x1: usize,
-        dim_x2: usize,
-    ) -> Result<(), GprError> {
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let r2 = ard_r2_pair(x1, row, x2, col, inv_ell_sq)?;
-                let dx1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
-                let dx2 = x1[(row, dim_x2)] - x2[(col, dim_x2)];
-                let wa = inv_ell_sq[dim_x1];
-                let wb = inv_ell_sq[dim_x2];
-                let value = if M::ACCURATE {
-                    let k = ard_value::<M>(r2);
-                    let mut value = -k * dx1 * dx2 * wa * wb;
-                    if dim_x1 == dim_x2 {
-                        value += k * wa;
-                    }
-                    value
-                } else {
-                    let jet = M::jet(-0.5 * r2);
-                    let mut value = -jet.d2 * dx1 * dx2 * wa * wb;
-                    if dim_x1 == dim_x2 {
-                        value += jet.d1 * wa;
-                    }
-                    value
-                };
-                d2_k[(row, col)] = value;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn hess_theta_coord_dim<M: KernelMath>(
-        &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         param_idx: usize,
         dim: usize,
     ) -> Result<(), GprError> {
-        if param_idx >= self.num_params() {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD RBF parameter {param_idx} is out of range (d={})",
-                    self.num_params()
-                ),
-            });
-        }
+        ard::require_param(NAME, param_idx, self.num_params())?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
         let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let r2 = ard_r2_pair(x1, row, x2, col, inv_ell_sq)?;
-                let delta_theta = x1[(row, param_idx)] - x2[(col, param_idx)];
-                let delta_dim = x1[(row, dim)] - x2[(col, dim)];
-                let w_theta = inv_ell_sq[param_idx];
-                let w_dim = inv_ell_sq[dim];
-                let value = if M::ACCURATE {
-                    let k = ard_value::<M>(r2);
-                    let dk_dtheta = k * delta_theta * delta_theta * w_theta;
-                    let mut value = dk_dtheta * delta_dim * w_dim;
-                    if param_idx == dim {
-                        value += k * delta_dim * (-2.0 * w_dim);
-                    }
-                    value
-                } else {
-                    let jet = M::jet(-0.5 * r2);
-                    let dim_term = delta_theta * delta_theta * w_theta;
-                    let mut value = jet.d2 * dim_term * delta_dim * w_dim;
-                    if param_idx == dim {
-                        value += jet.d1 * delta_dim * (-2.0 * w_dim);
-                    }
-                    value
-                };
-                d2_k[(row, col)] = value;
-            }
-        }
-        Ok(())
+        let w_theta = T::from_f64(inv_ell_sq[param_idx]);
+        let w_dim = T::from_f64(inv_ell_sq[dim]);
+        let minus_two = T::from_f64(-2.0);
+        super::write_rect(d2_k, |row, col| {
+            let r2 = ard::r2_from_coords(x1, row, x2, col, inv_ell_sq, Pick::NONE)?.r2;
+            let delta_theta = x1[(row, param_idx)] - x2[(col, param_idx)];
+            let delta_dim = x1[(row, dim)] - x2[(col, dim)];
+            let value = if M::ACCURATE {
+                let k = ard_value::<M, T>(r2);
+                let dk_dtheta = k * delta_theta * delta_theta * w_theta;
+                let mut value = dk_dtheta * delta_dim * w_dim;
+                if param_idx == dim {
+                    value += k * delta_dim * (minus_two * w_dim);
+                }
+                value
+            } else {
+                let jet = M::jet(T::from_f64(-0.5) * r2);
+                let dim_term = delta_theta * delta_theta * w_theta;
+                let mut value = jet.d2 * dim_term * delta_dim * w_dim;
+                if param_idx == dim {
+                    value += jet.d1 * delta_dim * (minus_two * w_dim);
+                }
+                value
+            };
+            Ok(value)
+        })
     }
 
-    pub(crate) fn grad_cross_from_coords<M: KernelMath>(
+    pub(crate) fn grad_cross_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
         param_idx: usize,
     ) -> Result<(), GprError> {
-        if param_idx >= self.num_params() {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD RBF parameter {param_idx} is out of range (d={})",
-                    self.num_params()
-                ),
-            });
-        }
+        ard::require_param(NAME, param_idx, self.num_params())?;
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_grad_rbf_ard_cross::<M>(x1, x2, d_k.rb_mut(), inv_ell_sq, param_idx)? {
+        let w = self.lengthscales.inv_ell_sq();
+        if let (Some(af), Some((bf, of))) = (T::as_f64_ref(x1), f64_pair(x2, d_k.rb_mut()))
+            && try_grad_rbf_ard_cross::<M>(af, bf, of, w, param_idx)?
+        {
             return Ok(());
         }
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                d_k[(row, col)] =
-                    ard_kernel_grad_pair::<M>(x1, row, x2, col, inv_ell_sq, param_idx)?;
-            }
-        }
-        Ok(())
+        super::write_rect(d_k, |row, col| {
+            rbf_grad::<M, T>(ard::r2_from_coords(
+                x1,
+                row,
+                x2,
+                col,
+                w,
+                Pick::one(param_idx),
+            )?)
+        })
     }
 
     /// One pass of `∂k/∂θ_d` for every lengthscale. Same values as
     /// [`Self::grad_cross_from_coords`] called once per `d`.
-    pub(crate) fn grad_cross_all_from_coords<M: KernelMath>(
+    pub(crate) fn grad_cross_all_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-    ) -> Result<Vec<Mat<f64>>, GprError> {
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+    ) -> Result<Vec<Mat<T>>, GprError> {
         let d = self.num_params();
-        let mut out = Vec::with_capacity(d);
-        for _ in 0..d {
-            out.push(Mat::zeros(x1.nrows(), x2.nrows()));
-        }
+        let mut out: Vec<Mat<T>> = (0..d).map(|_| Mat::zeros(x1.nrows(), x2.nrows())).collect();
         if d == 0 {
             return Ok(out);
         }
         super::require_coord_grad(x1, x2, out[0].as_ref(), 0)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        if try_grad_rbf_ard_cross_all::<M>(x1, x2, &mut out, inv_ell_sq)? {
+        let w = self.lengthscales.inv_ell_sq();
+        let slots: Option<Vec<MatMut<'_, f64>>> =
+            out.iter_mut().map(|m| T::as_f64_mut(m.as_mut())).collect();
+        if let (Some(af), Some(bf), Some(mut slots)) = (T::as_f64_ref(x1), T::as_f64_ref(x2), slots)
+            && try_grad_rbf_ard_cross_all::<M>(af, bf, &mut slots, w)?
+        {
             return Ok(out);
         }
+        let mut terms = vec![T::from_f64(0.0); d];
         for col in 0..x2.nrows() {
             for row in 0..x1.nrows() {
-                let (k, terms) = ard_kernel_grad_terms::<M>(x1, row, x2, col, inv_ell_sq)?;
-                for (param, dest) in out.iter_mut().enumerate() {
-                    dest[(row, col)] = k * terms[param];
+                let k = ard_grad_terms::<M, T>(x1, row, x2, col, w, &mut terms)?;
+                for (dest, &term) in out.iter_mut().zip(&terms) {
+                    dest[(row, col)] = k * term;
                 }
             }
         }
         Ok(out)
     }
 
-    pub(crate) fn hess_cross_from_coords<M: KernelMath>(
+    pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        if i >= d || j >= d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("ARD RBF parameter pair ({i}, {j}) is out of range (d={d})"),
-            });
-        }
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), 0)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                d2_k[(row, col)] = ard_kernel_hess_pair::<M>(x1, row, x2, col, inv_ell_sq, i, j)?;
-            }
-        }
-        Ok(())
+        let w = self.lengthscales.inv_ell_sq();
+        super::write_rect(d2_k, |row, col| {
+            rbf_hess::<M, T>(
+                ard::r2_from_coords(x1, row, x2, col, w, Pick::pair(i, j))?,
+                i == j,
+            )
+        })
     }
 }
+
+const NAME: &str = "RBF";
 
 fn try_grad_rbf_ard_cross<M: KernelMath>(
     x1: MatRef<'_, f64>,
@@ -658,15 +543,14 @@ fn try_grad_rbf_ard_cross<M: KernelMath>(
 fn try_grad_rbf_ard_cross_all<M: KernelMath>(
     x1: MatRef<'_, f64>,
     x2: MatRef<'_, f64>,
-    out: &mut [Mat<f64>],
+    slots: &mut [MatMut<'_, f64>],
     inv_ell_sq: &[f64],
 ) -> Result<bool, GprError> {
-    if out.len() != inv_ell_sq.len() {
+    if slots.len() != inv_ell_sq.len() {
         return Ok(false);
     }
-    let mut slots: Vec<MatMut<'_, f64>> = out.iter_mut().map(|m| m.as_mut()).collect();
     let write = vec![true; inv_ell_sq.len()];
-    try_fill_ard_cross::<M>(x1, x2, &mut slots, inv_ell_sq, &write)
+    try_fill_ard_cross::<M>(x1, x2, slots, inv_ell_sq, &write)
 }
 
 /// `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²` with one `exp` for every lengthscale.
@@ -957,42 +841,72 @@ fn add_weighted_sq(x: &[f64], x0: f64, w: f64, acc: &mut [f64]) {
     }
 }
 
-fn finite_kernel_value(value: f64) -> Result<f64, GprError> {
-    if value.is_finite() {
-        Ok(value)
+fn ard_value<M: KernelMath, T: KernelScalar>(r2: T) -> T {
+    M::exp(T::from_f64(-0.5) * r2)
+}
+
+fn ard_d1<M: KernelMath, T: KernelScalar>(r2: T) -> T {
+    if M::ACCURATE {
+        (T::from_f64(-0.5) * r2).exp()
     } else {
-        Err(GprError::NonFiniteKernelValue)
+        M::jet(T::from_f64(-0.5) * r2).d1
     }
 }
 
-fn ard_value<M: KernelMath>(r2: f64) -> f64 {
-    M::exp(-0.5 * r2)
-}
-
-fn ard_d1<M: KernelMath>(r2: f64) -> f64 {
+fn ard_hess_terms<M: KernelMath, T: KernelScalar>(r2: T, dim_i: T, dim_j: T, same: bool) -> T {
+    let two = T::from_f64(2.0);
     if M::ACCURATE {
-        (-0.5 * r2).exp()
-    } else {
-        M::jet(-0.5 * r2).d1
-    }
-}
-
-fn ard_hess_terms<M: KernelMath>(r2: f64, dim_i: f64, dim_j: f64, same: bool) -> f64 {
-    if M::ACCURATE {
-        let k = ard_value::<M>(r2);
+        let k = ard_value::<M, T>(r2);
         if same {
-            k * dim_i * (dim_i - 2.0)
+            k * dim_i * (dim_i - two)
         } else {
             k * dim_i * dim_j
         }
     } else {
-        let jet = M::jet(-0.5 * r2);
+        let jet = M::jet(T::from_f64(-0.5) * r2);
         if same {
-            dim_i * (jet.d2 * dim_i - 2.0 * jet.d1)
+            dim_i * (jet.d2 * dim_i - two * jet.d1)
         } else {
             jet.d2 * dim_i * dim_j
         }
     }
+}
+
+fn rbf_value<M: KernelMath, T: KernelScalar>(t: ArdR2<T>) -> Result<T, GprError> {
+    finite_kernel(ard_value::<M, T>(t.r2))
+}
+
+fn rbf_grad<M: KernelMath, T: KernelScalar>(t: ArdR2<T>) -> Result<T, GprError> {
+    finite_kernel(ard_d1::<M, T>(t.r2) * t.dim_i)
+}
+
+fn rbf_hess<M: KernelMath, T: KernelScalar>(t: ArdR2<T>, same: bool) -> Result<T, GprError> {
+    finite_kernel(ard_hess_terms::<M, T>(t.r2, t.dim_i, t.dim_j, same))
+}
+
+/// Writes `w_d Δ_d²` for every `d` into `terms` and returns `k'(r²)`.
+fn ard_grad_terms<M: KernelMath, T: KernelScalar>(
+    x: MatRef<'_, T>,
+    row: usize,
+    xs: MatRef<'_, T>,
+    col: usize,
+    inv_ell_sq: &[f64],
+    terms: &mut [T],
+) -> Result<T, GprError> {
+    let mut r2 = T::from_f64(0.0);
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let diff = x[(row, dim)] - xs[(col, dim)];
+        if !diff.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        let term = diff * diff * T::from_f64(w);
+        r2 += term;
+        terms[dim] = term;
+    }
+    if !r2.is_finite() {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    finite_kernel(ard_d1::<M, T>(r2))
 }
 
 fn exp_scaled<M: KernelMath>(src: &[f64], dest: &mut [f64], scale: f64x4) -> Result<(), GprError> {
@@ -1007,7 +921,7 @@ fn exp_scaled<M: KernelMath>(src: &[f64], dest: &mut [f64], scale: f64x4) -> Res
         i += 4;
     }
     while i < src.len() {
-        let v = ard_d1::<M>(src[i]);
+        let v = ard_d1::<M, f64>(src[i]);
         if !v.is_finite() {
             return Err(GprError::NonFiniteKernelValue);
         }
@@ -1015,344 +929,6 @@ fn exp_scaled<M: KernelMath>(src: &[f64], dest: &mut [f64], scale: f64x4) -> Res
         i += 1;
     }
     Ok(())
-}
-
-fn ard_kernel_grad_terms<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<(f64, Vec<f64>), GprError> {
-    let mut r2 = 0.0;
-    let mut terms = vec![0.0; inv_ell_sq.len()];
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        terms[dim] = term;
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let k = ard_d1::<M>(r2);
-    if k.is_finite() {
-        Ok((k, terms))
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_grad_pair<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-    param_idx: usize,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_term = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == param_idx {
-            dim_term = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let dk = ard_d1::<M>(r2) * dim_term;
-    if dk.is_finite() {
-        Ok(dk)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_hess_pair<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-    i: usize,
-    j: usize,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    finite_kernel_value(ard_hess_terms::<M>(r2, dim_i, dim_j, i == j))
-}
-
-fn require_square_out(out: MatRef<'_, f64>) -> Result<usize, GprError> {
-    if out.nrows() == 0 || out.ncols() == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    if out.nrows() != out.ncols() {
-        return Err(GprError::ShapeMismatch {
-            reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
-        });
-    }
-    Ok(out.nrows())
-}
-
-fn ard_kernel_from_cache<M: KernelMath>(
-    cache: MatRef<'_, f64>,
-    n: usize,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let v = cache[(row, dim * n + col)];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        r2 += v * w;
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let k = ard_value::<M>(r2);
-    if k.is_finite() {
-        Ok(k)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_grad_from_cache<M: KernelMath>(
-    cache: MatRef<'_, f64>,
-    n: usize,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    param_idx: usize,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_term = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let v = cache[(row, dim * n + col)];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = v * w;
-        r2 += term;
-        if dim == param_idx {
-            dim_term = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let dk = ard_d1::<M>(r2) * dim_term;
-    if dk.is_finite() {
-        Ok(dk)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn require_feature_dim(x: MatRef<'_, f64>, expected_d: usize) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    if x.ncols() != expected_d {
-        return Err(GprError::DimensionMismatch {
-            x_dim: x.ncols(),
-            expected_dim: expected_d,
-        });
-    }
-    Ok(())
-}
-
-fn require_square_points(
-    x: MatRef<'_, f64>,
-    out: MatRef<'_, f64>,
-    expected_d: usize,
-) -> Result<usize, GprError> {
-    require_feature_dim(x, expected_d)?;
-    if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::ShapeMismatch {
-            reason: format!(
-                "output is {}x{}, expected {}x{}",
-                out.nrows(),
-                out.ncols(),
-                x.nrows(),
-                x.nrows()
-            ),
-        });
-    }
-    crate::data::require_finite_points(x)?;
-    Ok(x.nrows())
-}
-
-fn ard_r2_pair(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        r2 += diff * diff * w;
-    }
-    if r2.is_finite() {
-        Ok(r2)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_pair<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<f64, GprError> {
-    let r2 = ard_r2_pair(x, row, xs, col, inv_ell_sq)?;
-    let k = ard_value::<M>(r2);
-    if k.is_finite() {
-        Ok(k)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<f64, GprError> {
-    ard_kernel_pair::<M>(x, row, x, col, inv_ell_sq)
-}
-
-fn ard_kernel_grad<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    param_idx: usize,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_term = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - x[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == param_idx {
-            dim_term = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let dk = ard_d1::<M>(r2) * dim_term;
-    if dk.is_finite() {
-        Ok(dk)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_hess<M: KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    i: usize,
-    j: usize,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - x[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    finite_kernel_value(ard_hess_terms::<M>(r2, dim_i, dim_j, i == j))
-}
-
-fn ard_kernel_hess_from_cache<M: KernelMath>(
-    cache: MatRef<'_, f64>,
-    n: usize,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    i: usize,
-    j: usize,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let v = cache[(row, dim * n + col)];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = v * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    finite_kernel_value(ard_hess_terms::<M>(r2, dim_i, dim_j, i == j))
 }
 
 #[cfg(test)]
@@ -1390,7 +966,7 @@ mod tests {
         let rbf = RbfArdKernel::new(&[1.0, 2.0]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3]]);
         let mut k = fill(3, f64::NAN);
-        rbf.apply::<Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
+        rbf.apply::<Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         assert_close(k[(0, 0)], 1.0, TOL);
         assert_close(k[(1, 1)], 1.0, TOL);
@@ -1404,7 +980,7 @@ mod tests {
         // (0,2) differs only in dim 1 by 2 ⇒ k = exp(-4/(2ℓ₁²)) = exp(-1/2)
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.0], [0.0, 2.0]]);
         let mut k = fill(3, 0.0);
-        rbf.apply::<Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
+        rbf.apply::<Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         assert_close(k[(1, 0)], (-0.5_f64).exp(), TOL);
         assert_close(k[(2, 0)], (-0.5_f64).exp(), TOL);
@@ -1422,7 +998,7 @@ mod tests {
         let mut k_ard = fill(4, 0.0);
         iso.apply(dist.as_ref(), k_iso.as_mut(), Triangle::Full)
             .expect("shape");
-        ard.apply::<Accurate>(x.as_ref(), k_ard.as_mut(), Triangle::Full)
+        ard.apply::<Accurate, _>(x.as_ref(), k_ard.as_mut(), Triangle::Full)
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
@@ -1441,9 +1017,9 @@ mod tests {
         crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
         let mut from_points = fill(n, 0.0);
         let mut from_cache = fill(n, f64::NAN);
-        rbf.apply::<Accurate>(x.as_ref(), from_points.as_mut(), Triangle::Lower)
+        rbf.apply::<Accurate, _>(x.as_ref(), from_points.as_mut(), Triangle::Lower)
             .expect("points");
-        rbf.apply_from_sq_diff::<crate::math::Accurate>(
+        rbf.apply_from_sq_diff::<crate::math::Accurate, _>(
             cache.as_ref(),
             from_cache.as_mut(),
             Triangle::Lower,
@@ -1463,9 +1039,9 @@ mod tests {
         for param_idx in 0..d {
             let mut from_points = fill(n, 0.0);
             let mut from_cache = fill(n, f64::NAN);
-            rbf.grad::<Accurate>(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
+            rbf.grad::<Accurate, _>(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
                 .expect("points");
-            rbf.grad_from_sq_diff::<crate::math::Accurate>(
+            rbf.grad_from_sq_diff::<crate::math::Accurate, _>(
                 cache.as_ref(),
                 from_cache.as_mut(),
                 param_idx,
@@ -1481,7 +1057,7 @@ mod tests {
         let rbf = RbfArdKernel::new(&[0.8, 1.7]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [0.5, 1.0], [2.0, -0.3], [2.5, 0.4]]);
         let mut k = fill(4, 0.0);
-        rbf.apply::<Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
+        rbf.apply::<Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
@@ -1495,11 +1071,11 @@ mod tests {
         let rbf = RbfArdKernel::new(&[0.75, 1.25]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.2], [2.0, -0.5]]);
         let mut full = fill(3, 0.0);
-        rbf.apply::<Accurate>(x.as_ref(), full.as_mut(), Triangle::Full)
+        rbf.apply::<Accurate, _>(x.as_ref(), full.as_mut(), Triangle::Full)
             .expect("shape");
         let sentinel = 42.0;
         let mut lower = fill(3, sentinel);
-        rbf.apply::<Accurate>(x.as_ref(), lower.as_mut(), Triangle::Lower)
+        rbf.apply::<Accurate, _>(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], sentinel, TOL);
@@ -1513,9 +1089,9 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 1.0], [2.0, 0.5]]);
         let mut full = fill(3, 0.0);
         let mut upper = fill(3, -1.0);
-        rbf.apply::<Accurate>(x.as_ref(), full.as_mut(), Triangle::Full)
+        rbf.apply::<Accurate, _>(x.as_ref(), full.as_mut(), Triangle::Full)
             .expect("shape");
-        rbf.apply::<Accurate>(x.as_ref(), upper.as_mut(), Triangle::Upper)
+        rbf.apply::<Accurate, _>(x.as_ref(), upper.as_mut(), Triangle::Upper)
             .expect("shape");
         for col in 0..3 {
             for row in 0..=col {
@@ -1545,12 +1121,12 @@ mod tests {
                 let mut g_plus = fill(3, 0.0);
                 let mut g_minus = fill(3, 0.0);
                 let mut d2 = fill(3, 0.0);
-                plus.grad::<Accurate>(x.as_ref(), g_plus.as_mut(), i, Triangle::Full)
+                plus.grad::<Accurate, _>(x.as_ref(), g_plus.as_mut(), i, Triangle::Full)
                     .expect("plus");
                 minus
-                    .grad::<Accurate>(x.as_ref(), g_minus.as_mut(), i, Triangle::Full)
+                    .grad::<Accurate, _>(x.as_ref(), g_minus.as_mut(), i, Triangle::Full)
                     .expect("minus");
-                rbf.hess::<Accurate>(x.as_ref(), d2.as_mut(), i, j, Triangle::Full)
+                rbf.hess::<Accurate, _>(x.as_ref(), d2.as_mut(), i, j, Triangle::Full)
                     .expect("pair");
                 for col in 0..3 {
                     for row in 0..3 {
@@ -1577,12 +1153,12 @@ mod tests {
             let mut k_plus = fill(3, 0.0);
             let mut k_minus = fill(3, 0.0);
             let mut dk = fill(3, 0.0);
-            plus.apply::<Accurate>(x.as_ref(), k_plus.as_mut(), Triangle::Full)
+            plus.apply::<Accurate, _>(x.as_ref(), k_plus.as_mut(), Triangle::Full)
                 .expect("shape");
             minus
-                .apply::<Accurate>(x.as_ref(), k_minus.as_mut(), Triangle::Full)
+                .apply::<Accurate, _>(x.as_ref(), k_minus.as_mut(), Triangle::Full)
                 .expect("shape");
-            rbf.grad::<Accurate>(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
+            rbf.grad::<Accurate, _>(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
                 .expect("index");
             for col in 0..3 {
                 for row in 0..3 {
@@ -1599,9 +1175,9 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.0]]);
         let mut dk0 = fill(2, 0.0);
         let mut dk1 = fill(2, 0.0);
-        rbf.grad::<Accurate>(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
+        rbf.grad::<Accurate, _>(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
             .expect("dim 0");
-        rbf.grad::<Accurate>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
+        rbf.grad::<Accurate, _>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
             .expect("dim 1");
         assert_close(dk1[(1, 0)], 0.0, TOL);
         assert!(dk0[(1, 0)].abs() > 1e-8);
@@ -1613,9 +1189,9 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [0.8, 0.3], [1.6, -0.2]]);
         let mut full = fill(3, 0.0);
         let mut lower = fill(3, 99.0);
-        rbf.grad::<Accurate>(x.as_ref(), full.as_mut(), 1, Triangle::Full)
+        rbf.grad::<Accurate, _>(x.as_ref(), full.as_mut(), 1, Triangle::Full)
             .expect("index 1");
-        rbf.grad::<Accurate>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
+        rbf.grad::<Accurate, _>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("index 1");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], 99.0, TOL);
@@ -1639,10 +1215,10 @@ mod tests {
         let train = points_2d(&[[0.0, 0.0], [1.0, 0.5]]);
         let test = points_2d(&[[0.2, -0.1], [1.0, 0.5]]);
         let mut square = fill(2, 0.0);
-        rbf.apply::<Accurate>(train.as_ref(), square.as_mut(), Triangle::Full)
+        rbf.apply::<Accurate, _>(train.as_ref(), square.as_mut(), Triangle::Full)
             .expect("square");
         let mut cross = fill(2, 0.0);
-        rbf.apply_cross::<crate::math::Accurate>(train.as_ref(), test.as_ref(), cross.as_mut())
+        rbf.apply_cross::<crate::math::Accurate, _>(train.as_ref(), test.as_ref(), cross.as_mut())
             .expect("rect");
         // test[:, 1] == train[:, 1]
         assert_close(cross[(0, 1)], square[(0, 1)], TOL);
@@ -1659,18 +1235,18 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 1.0]]);
         let mut dk = fill(2, 0.0);
         assert!(matches!(
-            rbf.grad::<Accurate>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
+            rbf.grad::<Accurate, _>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
             Err(GprError::IndexOutOfRange { .. })
         ));
         let bad_d = Mat::from_fn(2, 3, |_, _| 0.0);
         let mut k = fill(2, 0.0);
         assert!(matches!(
-            rbf.apply::<Accurate>(bad_d.as_ref(), k.as_mut(), Triangle::Full),
+            rbf.apply::<Accurate, _>(bad_d.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::DimensionMismatch { .. })
         ));
         let nan = points_2d(&[[0.0, 0.0], [f64::NAN, 1.0]]);
         assert!(matches!(
-            rbf.apply::<Accurate>(nan.as_ref(), k.as_mut(), Triangle::Full),
+            rbf.apply::<Accurate, _>(nan.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::NonFiniteInput)
         ));
     }

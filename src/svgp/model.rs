@@ -7,7 +7,6 @@ use crate::error::GprError;
 use crate::param::write_params;
 
 use crate::kernel::KernelSpec;
-use crate::kernel::{CompiledKernel, GramKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Adam, Fixed};
 use crate::precision::{DoublePrecision, GpScalar};
@@ -102,9 +101,7 @@ impl<O, M, P> Svgp<O, M, P> {
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
     #[allow(private_bounds)]
     pub fn with_precision<P2: GpScalar + SvgpMean>(self) -> Svgp<O, M, P2>
-    where
-        CompiledKernel<P2::Storage>: GramKernel<T = P2::Storage>,
-    {
+where {
         Svgp {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -189,7 +186,6 @@ impl<M, P> Svgp<Fixed, M, P>
 where
     M: crate::math::KernelMath,
     P: GpScalar + SvgpMean,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Factors `K_mm` and installs a whitened prior `q(u)` at the current `θ`.
     ///
@@ -254,7 +250,6 @@ impl<M, P> Svgp<Adam, M, P>
 where
     M: crate::math::KernelMath,
     P: GpScalar + SvgpMean,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Factors a whitened prior `q` and runs mini-batch Adam on `θ` and `q`.
     ///

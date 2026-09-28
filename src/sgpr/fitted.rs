@@ -9,7 +9,7 @@ use faer::MatRef;
 use crate::error::GprError;
 use crate::param::write_params;
 
-use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec};
+use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
@@ -73,7 +73,6 @@ impl<O, I: InducingLayout, M, P> FittedSgpr<O, I, M, P>
 where
     M: crate::math::KernelMath,
     P: crate::precision::GpScalar + MeanDot + PublishSgprWeights,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Returns the number of training points.
     pub fn n(&self) -> usize {

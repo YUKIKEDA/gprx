@@ -6,6 +6,7 @@ use super::{
     write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
+use crate::kernel::KernelScalar;
 use crate::math::KernelMath;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
@@ -159,25 +160,25 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
-    pub fn apply(
+    pub fn apply<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.apply_math::<crate::math::Accurate>(dist, out, uplo)
+        self.apply_math::<crate::math::Accurate, _>(dist, out, uplo)
     }
 
-    pub(crate) fn apply_math<M: KernelMath>(
+    pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let ell = self.lengthscale();
-        let period = self.period();
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
         write_triangle(dist, out, uplo, |d| {
-            periodic_from_sq_dist::<M>(d, ell, period)
+            periodic_from_sq_dist::<M, _>(d, ell, period)
         })
     }
 
@@ -187,23 +188,27 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
-    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
-        self.apply_cross_math::<crate::math::Accurate>(dist, out)
+    pub fn apply_cross<T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.apply_cross_math::<crate::math::Accurate, _>(dist, out)
     }
 
-    pub(crate) fn apply_cross_math<M: KernelMath>(
+    pub(crate) fn apply_cross_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        let ell = self.lengthscale();
-        let period = self.period();
-        write_dense(dist, out, |d| periodic_from_sq_dist::<M>(d, ell, period))
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_dense(dist, out, |d| periodic_from_sq_dist::<M, _>(d, ell, period))
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(1.0);
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(1.0));
     }
 
     /// Writes `∂K/∂θ` into `d_k`. Index 0 is `log(ℓ)`, index 1 is `log(p)`.
@@ -212,10 +217,10 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0 or
     /// 1, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad(
+    pub fn grad<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -224,13 +229,13 @@ impl PeriodicKernel {
                 reason: format!("periodic kernel parameter index {param_idx} is out of range"),
             });
         }
-        self.grad_math::<crate::math::Accurate>(dist, d_k, param_idx, uplo)
+        self.grad_math::<crate::math::Accurate, _>(dist, d_k, param_idx, uplo)
     }
 
-    pub(crate) fn grad_math<M: KernelMath>(
+    pub(crate) fn grad_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -239,28 +244,30 @@ impl PeriodicKernel {
                 reason: format!("periodic kernel parameter index {param_idx} is out of range"),
             });
         }
-        let ell = self.lengthscale();
-        let period = self.period();
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
         write_triangle(dist, d_k, uplo, |d| {
-            periodic_grad_from_sq_dist::<M>(d, ell, period, param_idx)
+            periodic_grad_from_sq_dist::<M, _>(d, ell, period, param_idx)
         })
     }
 
-    pub(crate) fn apply_from_coords<M: KernelMath>(
+    pub(crate) fn apply_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let ell = self.lengthscale();
-        let period = self.period();
-        write_square_from_coords(x, out, uplo, |d| periodic_from_sq_dist::<M>(d, ell, period))
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_square_from_coords(x, out, uplo, |d| {
+            periodic_from_sq_dist::<M, _>(d, ell, period)
+        })
     }
 
-    pub(crate) fn grad_from_coords<M: KernelMath>(
+    pub(crate) fn grad_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -269,10 +276,10 @@ impl PeriodicKernel {
                 reason: format!("periodic kernel parameter index {param_idx} is out of range"),
             });
         }
-        let ell = self.lengthscale();
-        let period = self.period();
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
         write_square_from_coords(x, d_k, uplo, |d| {
-            periodic_grad_from_sq_dist::<M>(d, ell, period, param_idx)
+            periodic_grad_from_sq_dist::<M, _>(d, ell, period, param_idx)
         })
     }
 
@@ -282,46 +289,46 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess(
+    pub fn hess<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.hess_math::<crate::math::Accurate>(dist, d2_k, i, j, uplo)
+        self.hess_math::<crate::math::Accurate, _>(dist, d2_k, i, j, uplo)
     }
 
-    pub(crate) fn hess_math<M: KernelMath>(
+    pub(crate) fn hess_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_periodic_hess_idx(i, j)?;
-        let ell = self.lengthscale();
-        let period = self.period();
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
         write_triangle(dist, d2_k, uplo, |d| {
-            periodic_hess_from_sq_dist::<M>(d, ell, period, i, j)
+            periodic_hess_from_sq_dist::<M, _>(d, ell, period, i, j)
         })
     }
 
-    pub(crate) fn hess_from_coords<M: KernelMath>(
+    pub(crate) fn hess_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_periodic_hess_idx(i, j)?;
-        let ell = self.lengthscale();
-        let period = self.period();
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
         write_square_from_coords(x, d2_k, uplo, |d| {
-            periodic_hess_from_sq_dist::<M>(d, ell, period, i, j)
+            periodic_hess_from_sq_dist::<M, _>(d, ell, period, i, j)
         })
     }
 }
@@ -336,39 +343,39 @@ fn expect_two_params(len: usize) -> Result<(), GprError> {
     }
 }
 
-fn euclidean_from_sq(sq_dist: f64) -> Result<f64, GprError> {
+fn euclidean_from_sq<T: KernelScalar>(sq_dist: T) -> Result<T, GprError> {
     let d = finite_dist(sq_dist)?;
-    Ok(d.max(0.0).sqrt())
+    Ok(d.max(T::from_f64(0.0)).sqrt())
 }
 
-fn periodic_from_r<M: KernelMath>(r: f64, ell: f64, period: f64) -> f64 {
-    let s = (std::f64::consts::PI * r / period).sin();
-    let inv_ell = 1.0 / ell;
-    M::exp(-2.0 * s * s * inv_ell * inv_ell)
+fn periodic_from_r<M: KernelMath, T: KernelScalar>(r: T, ell: T, period: T) -> T {
+    let s = (T::from_f64(std::f64::consts::PI) * r / period).sin();
+    let inv_ell = T::from_f64(1.0) / ell;
+    M::exp(-T::from_f64(2.0) * s * s * inv_ell * inv_ell)
 }
 
-fn periodic_from_sq_dist<M: KernelMath>(
-    sq_dist: f64,
-    ell: f64,
-    period: f64,
-) -> Result<f64, GprError> {
+fn periodic_from_sq_dist<M: KernelMath, T: KernelScalar>(
+    sq_dist: T,
+    ell: T,
+    period: T,
+) -> Result<T, GprError> {
     let r = euclidean_from_sq(sq_dist)?;
-    finite_kernel(periodic_from_r::<M>(r, ell, period))
+    finite_kernel(periodic_from_r::<M, _>(r, ell, period))
 }
 
-fn periodic_grad_from_sq_dist<M: KernelMath>(
-    sq_dist: f64,
-    ell: f64,
-    period: f64,
+fn periodic_grad_from_sq_dist<M: KernelMath, T: KernelScalar>(
+    sq_dist: T,
+    ell: T,
+    period: T,
     param_idx: usize,
-) -> Result<f64, GprError> {
+) -> Result<T, GprError> {
     let r = euclidean_from_sq(sq_dist)?;
-    let alpha = std::f64::consts::PI * r / period;
+    let alpha = T::from_f64(std::f64::consts::PI) * r / period;
     let s = alpha.sin();
-    let inv_ell_sq = 1.0 / (ell * ell);
-    let z = -2.0 * s * s * inv_ell_sq;
-    let beta = 4.0 * s * s * inv_ell_sq;
-    let gamma = 4.0 * s * alpha.cos() * alpha * inv_ell_sq;
+    let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
+    let z = -T::from_f64(2.0) * s * s * inv_ell_sq;
+    let beta = T::from_f64(4.0) * s * s * inv_ell_sq;
+    let gamma = T::from_f64(4.0) * s * alpha.cos() * alpha * inv_ell_sq;
     let dk = if M::ACCURATE {
         let k = z.exp();
         if param_idx == 0 { k * beta } else { k * gamma }
@@ -383,47 +390,47 @@ fn periodic_grad_from_sq_dist<M: KernelMath>(
     finite_kernel(dk)
 }
 
-fn periodic_hess_from_sq_dist<M: KernelMath>(
-    sq_dist: f64,
-    ell: f64,
-    period: f64,
+fn periodic_hess_from_sq_dist<M: KernelMath, T: KernelScalar>(
+    sq_dist: T,
+    ell: T,
+    period: T,
     i: usize,
     j: usize,
-) -> Result<f64, GprError> {
+) -> Result<T, GprError> {
     let r = euclidean_from_sq(sq_dist)?;
-    let alpha = std::f64::consts::PI * r / period;
+    let alpha = T::from_f64(std::f64::consts::PI) * r / period;
     let s = alpha.sin();
     let c = alpha.cos();
-    let inv_ell_sq = 1.0 / (ell * ell);
-    let z = -2.0 * s * s * inv_ell_sq;
-    let beta = 4.0 * s * s * inv_ell_sq;
-    let gamma = 4.0 * s * c * alpha * inv_ell_sq;
+    let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
+    let z = -T::from_f64(2.0) * s * s * inv_ell_sq;
+    let beta = T::from_f64(4.0) * s * s * inv_ell_sq;
+    let gamma = T::from_f64(4.0) * s * c * alpha * inv_ell_sq;
     let (a, b) = if i <= j { (i, j) } else { (j, i) };
     let h = if M::ACCURATE {
         let k = z.exp();
         match (a, b) {
-            (0, 0) => k * beta * (beta - 2.0),
-            (0, 1) => k * gamma * (beta - 2.0),
+            (0, 0) => k * beta * (beta - T::from_f64(2.0)),
+            (0, 1) => k * gamma * (beta - T::from_f64(2.0)),
             (1, 1) => {
-                let dgamma = 4.0
+                let dgamma = T::from_f64(4.0)
                     * inv_ell_sq
                     * (-alpha * alpha * c * c + alpha * alpha * s * s - alpha * s * c);
                 k * gamma * gamma + k * dgamma
             }
-            _ => 0.0,
+            _ => T::from_f64(0.0),
         }
     } else {
         let jet = M::jet(z);
         match (a, b) {
-            (0, 0) => beta * (jet.d2 * beta - 2.0 * jet.d1),
-            (0, 1) => gamma * (jet.d2 * beta - 2.0 * jet.d1),
+            (0, 0) => beta * (jet.d2 * beta - T::from_f64(2.0) * jet.d1),
+            (0, 1) => gamma * (jet.d2 * beta - T::from_f64(2.0) * jet.d1),
             (1, 1) => {
-                let dgamma = 4.0
+                let dgamma = T::from_f64(4.0)
                     * inv_ell_sq
                     * (-alpha * alpha * c * c + alpha * alpha * s * s - alpha * s * c);
                 jet.d2 * gamma * gamma + jet.d1 * dgamma
             }
-            _ => 0.0,
+            _ => T::from_f64(0.0),
         }
     };
     finite_kernel(h)
@@ -439,7 +446,7 @@ fn require_periodic_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     }
 }
 
-fn finite_kernel(value: f64) -> Result<f64, GprError> {
+fn finite_kernel<T: KernelScalar>(value: T) -> Result<T, GprError> {
     if value.is_finite() {
         Ok(value)
     } else {

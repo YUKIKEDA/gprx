@@ -1,8 +1,11 @@
 //! Isotropic squared-exponential (RBF) kernel.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
+use super::scalar::f64_pair;
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
-use super::{Triangle, finite_dist, write_dense, write_square_from_coords, write_triangle};
+use super::{
+    KernelScalar, Triangle, finite_dist, write_dense, write_square_from_coords, write_triangle,
+};
 use crate::error::GprError;
 use crate::math::{Accurate, ExpJet, KernelMath};
 use crate::param::{BoundedParam, Interval};
@@ -126,27 +129,30 @@ impl RbfKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
-    pub fn apply(
+    pub fn apply<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.apply_math::<Accurate>(dist, out, uplo)
+        self.apply_math::<Accurate, _>(dist, out, uplo)
     }
 
-    pub(crate) fn apply_math<M: KernelMath>(
+    pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        if try_apply_rbf::<M>(dist, out.rb_mut(), uplo, inv_two_ell_sq)? {
+        if let Some((d, o)) = f64_pair(dist, out.rb_mut())
+            && try_apply_rbf::<M>(d, o, uplo, inv_two_ell_sq)?
+        {
             return Ok(());
         }
+        let inv_two_ell_sq = T::from_f64(inv_two_ell_sq);
         write_triangle(dist, out, uplo, |d| {
-            rbf_from_sq_dist::<M>(d, inv_two_ell_sq)
+            rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq)
         })
     }
 
@@ -156,25 +162,32 @@ impl RbfKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
-    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
-        self.apply_cross_math::<Accurate>(dist, out)
+    pub fn apply_cross<T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.apply_cross_math::<Accurate, _>(dist, out)
     }
 
-    pub(crate) fn apply_cross_math<M: KernelMath>(
+    pub(crate) fn apply_cross_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        if try_apply_rbf_cross::<M>(dist, out.rb_mut(), inv_two_ell_sq)? {
+        if let Some((d, o)) = f64_pair(dist, out.rb_mut())
+            && try_apply_rbf_cross::<M>(d, o, inv_two_ell_sq)?
+        {
             return Ok(());
         }
-        write_dense(dist, out, |d| rbf_from_sq_dist::<M>(d, inv_two_ell_sq))
+        let inv_two_ell_sq = T::from_f64(inv_two_ell_sq);
+        write_dense(dist, out, |d| rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq))
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(1.0);
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(1.0));
     }
 
     /// Writes `∂K/∂θ` for `θ = log(ℓ)` into `d_k`.
@@ -185,38 +198,33 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad(
+    pub fn grad<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.grad_math::<Accurate>(dist, d_k, param_idx, uplo)
+        self.grad_math::<Accurate, _>(dist, d_k, param_idx, uplo)
     }
 
-    pub(crate) fn grad_math<M: KernelMath>(
+    pub(crate) fn grad_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        if param_idx != 0 {
-            return Err(GprError::IndexOutOfRange {
-                reason: "RBF has a single parameter at index 0".to_owned(),
-            });
-        }
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let inv_two_ell_sq = 0.5 / ell_sq;
-        let inv_ell_sq = 1.0 / ell_sq;
-        if try_grad_rbf::<M>(dist, d_k.rb_mut(), uplo, inv_two_ell_sq, inv_ell_sq)? {
+        require_rbf_param_idx(param_idx)?;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales();
+        if let Some((d, o)) = f64_pair(dist, d_k.rb_mut())
+            && try_grad_rbf::<M>(d, o, uplo, inv_two_ell_sq, inv_ell_sq)?
+        {
             return Ok(());
         }
+        let (inv_two_ell_sq, inv_ell_sq) = (T::from_f64(inv_two_ell_sq), T::from_f64(inv_ell_sq));
         write_triangle(dist, d_k, uplo, |d| {
-            let d = finite_dist(d)?;
-            let dk = M::jet(-d * inv_two_ell_sq).d1;
-            Ok(dk * d * inv_ell_sq)
+            rbf_grad_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
 
@@ -228,80 +236,70 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess(
+    pub fn hess<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        self.hess_math::<Accurate>(dist, d2_k, i, j, uplo)
+        self.hess_math::<Accurate, _>(dist, d2_k, i, j, uplo)
     }
 
-    pub(crate) fn hess_math<M: KernelMath>(
+    pub(crate) fn hess_math<M: KernelMath, T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_rbf_hess_idx(i, j)?;
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let inv_two_ell_sq = 0.5 / ell_sq;
-        let inv_ell_sq = 1.0 / ell_sq;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
         write_triangle(dist, d2_k, uplo, |d| {
-            rbf_hess_from_sq_dist::<M>(d, inv_two_ell_sq, inv_ell_sq)
+            rbf_hess_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
 
-    pub(crate) fn apply_from_coords<M: KernelMath>(
+    pub(crate) fn apply_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        write_square_from_coords(x, out, uplo, |d| rbf_from_sq_dist::<M>(d, inv_two_ell_sq))
+        let (inv_two_ell_sq, _) = self.inv_scales_t::<T>();
+        write_square_from_coords(x, out, uplo, |d| {
+            rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq)
+        })
     }
 
-    pub(crate) fn grad_from_coords<M: KernelMath>(
+    pub(crate) fn grad_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        if param_idx != 0 {
-            return Err(GprError::IndexOutOfRange {
-                reason: "RBF has a single parameter at index 0".to_owned(),
-            });
-        }
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let inv_two_ell_sq = 0.5 / ell_sq;
-        let inv_ell_sq = 1.0 / ell_sq;
+        require_rbf_param_idx(param_idx)?;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
         write_square_from_coords(x, d_k, uplo, |d| {
-            let d = finite_dist(d)?;
-            let dk = M::jet(-d * inv_two_ell_sq).d1;
-            Ok(dk * d * inv_ell_sq)
+            rbf_grad_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
 
-    pub(crate) fn hess_from_coords<M: KernelMath>(
+    pub(crate) fn hess_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_rbf_hess_idx(i, j)?;
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let inv_two_ell_sq = 0.5 / ell_sq;
-        let inv_ell_sq = 1.0 / ell_sq;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
         write_square_from_coords(x, d2_k, uplo, |d| {
-            rbf_hess_from_sq_dist::<M>(d, inv_two_ell_sq, inv_ell_sq)
+            rbf_hess_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
         })
     }
 
@@ -315,158 +313,144 @@ impl RbfKernel {
     /// the views are empty or `dim` is out of range, [`GprError::NonFiniteInput`]
     /// when a coordinate is not finite, or [`GprError::ShapeMismatch`]
     /// when `d_k` is the wrong shape.
-    pub fn grad_wrt_coord_dim(
+    pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         dim: usize,
     ) -> Result<(), GprError> {
-        self.grad_wrt_coord_dim_math::<Accurate>(x1, x2, d_k, dim)
+        self.grad_wrt_coord_dim_math::<Accurate, _>(x1, x2, d_k, dim)
     }
 
-    pub(crate) fn grad_wrt_coord_dim_math<M: KernelMath>(
+    pub(crate) fn grad_wrt_coord_dim_math<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         dim: usize,
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
-        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
-        let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let (k, delta) = rbf_pair::<M>(x1, row, x2, col, dim, inv_two_ell_sq)?;
-                d_k[(row, col)] = k * delta * inv_ell_sq;
-            }
-        }
-        Ok(())
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        super::write_rect(d_k, |row, col| {
+            let (jet, delta, _) = rbf_pair_with_s::<M, _>(x1, row, x2, col, dim, inv_two_ell_sq)?;
+            Ok(jet.d1 * delta * inv_ell_sq)
+        })
     }
 
-    pub(crate) fn hess_wrt_coord_dims<M: KernelMath>(
+    pub(crate) fn hess_wrt_coord_dims<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         dim_a: usize,
         dim_b: usize,
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
-        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
-        let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let (jet, da, db) =
-                    rbf_pair_two_dims::<M>(x1, row, x2, col, dim_a, dim_b, inv_two_ell_sq)?;
-                let mut value = jet.d2 * da * db * inv_ell_sq * inv_ell_sq;
-                if dim_a == dim_b {
-                    value -= jet.d1 * inv_ell_sq;
-                }
-                d2_k[(row, col)] = value;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        super::write_rect(d2_k, |row, col| {
+            let (jet, _, _) = rbf_pair_with_s::<M, _>(x1, row, x2, col, 0, inv_two_ell_sq)?;
+            let da = x1[(row, dim_a)] - x2[(col, dim_a)];
+            let db = x1[(row, dim_b)] - x2[(col, dim_b)];
+            let mut value = jet.d2 * da * db * inv_ell_sq * inv_ell_sq;
+            if dim_a == dim_b {
+                value -= jet.d1 * inv_ell_sq;
             }
-        }
-        Ok(())
+            Ok(value)
+        })
     }
 
-    pub(crate) fn hess_wrt_coord_mixed<M: KernelMath>(
+    pub(crate) fn hess_wrt_coord_mixed<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         dim_x1: usize,
         dim_x2: usize,
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
-        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
-        let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let (jet, d1, d2) =
-                    rbf_pair_two_dims::<M>(x1, row, x2, col, dim_x1, dim_x2, inv_two_ell_sq)?;
-                let mut value = -jet.d2 * d1 * d2 * inv_ell_sq * inv_ell_sq;
-                if dim_x1 == dim_x2 {
-                    value += jet.d1 * inv_ell_sq;
-                }
-                d2_k[(row, col)] = value;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        super::write_rect(d2_k, |row, col| {
+            let (jet, _, _) = rbf_pair_with_s::<M, _>(x1, row, x2, col, 0, inv_two_ell_sq)?;
+            let d1 = x1[(row, dim_x1)] - x2[(col, dim_x1)];
+            let d2 = x1[(row, dim_x2)] - x2[(col, dim_x2)];
+            let mut value = -jet.d2 * d1 * d2 * inv_ell_sq * inv_ell_sq;
+            if dim_x1 == dim_x2 {
+                value += jet.d1 * inv_ell_sq;
             }
-        }
-        Ok(())
+            Ok(value)
+        })
     }
 
-    pub(crate) fn hess_theta_coord_dim<M: KernelMath>(
+    pub(crate) fn hess_theta_coord_dim<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         param_idx: usize,
         dim: usize,
     ) -> Result<(), GprError> {
-        if param_idx != 0 {
-            return Err(GprError::IndexOutOfRange {
-                reason: "RBF has a single parameter at index 0".to_owned(),
-            });
-        }
+        require_rbf_param_idx(param_idx)?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
-        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
-        let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let (jet, delta, s) = rbf_pair_with_s::<M>(x1, row, x2, col, dim, inv_two_ell_sq)?;
-                d2_k[(row, col)] = delta * inv_ell_sq * (jet.d2 * s * inv_ell_sq - 2.0 * jet.d1);
-            }
-        }
-        Ok(())
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        let two = T::from_f64(2.0);
+        super::write_rect(d2_k, |row, col| {
+            let (jet, delta, s) = rbf_pair_with_s::<M, _>(x1, row, x2, col, dim, inv_two_ell_sq)?;
+            Ok(delta * inv_ell_sq * (jet.d2 * s * inv_ell_sq - two * jet.d1))
+        })
     }
 
-    pub(crate) fn grad_cross_from_coords<M: KernelMath>(
+    pub(crate) fn grad_cross_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
         param_idx: usize,
     ) -> Result<(), GprError> {
-        if param_idx != 0 {
-            return Err(GprError::IndexOutOfRange {
-                reason: "RBF has a single parameter at index 0".to_owned(),
-            });
-        }
+        require_rbf_param_idx(param_idx)?;
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
-        let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
-        let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        if try_grad_rbf_cross::<M>(x1, x2, d_k.rb_mut(), inv_two_ell_sq, inv_ell_sq)? {
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales();
+        if let (Some(a), Some((b, o))) = (T::as_f64_ref(x1), f64_pair(x2, d_k.rb_mut()))
+            && try_grad_rbf_cross::<M>(a, b, o, inv_two_ell_sq, inv_ell_sq)?
+        {
             return Ok(());
         }
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let (jet, _, s) = rbf_pair_with_s::<M>(x1, row, x2, col, 0, inv_two_ell_sq)?;
-                d_k[(row, col)] = jet.d1 * s * inv_ell_sq;
-            }
-        }
-        Ok(())
+        let (inv_two_ell_sq, inv_ell_sq) = (T::from_f64(inv_two_ell_sq), T::from_f64(inv_ell_sq));
+        super::write_rect(d_k, |row, col| {
+            let (jet, _, s) = rbf_pair_with_s::<M, _>(x1, row, x2, col, 0, inv_two_ell_sq)?;
+            Ok(jet.d1 * s * inv_ell_sq)
+        })
     }
 
-    pub(crate) fn hess_cross_from_coords<M: KernelMath>(
+    pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
     ) -> Result<(), GprError> {
         require_rbf_hess_idx(i, j)?;
         super::require_coord_grad(x1, x2, d2_k.as_ref(), 0)?;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        super::write_rect(d2_k, |row, col| {
+            let (_, _, s) = rbf_pair_with_s::<M, _>(x1, row, x2, col, 0, inv_two_ell_sq)?;
+            rbf_hess_from_sq_dist::<M, _>(s, inv_two_ell_sq, inv_ell_sq)
+        })
+    }
+
+    /// `(1 / (2ℓ²), 1 / ℓ²)` in `f64`.
+    fn inv_scales(&self) -> (f64, f64) {
         let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
-        let inv_two_ell_sq = 0.5 * inv_ell_sq;
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let (_, _, s) = rbf_pair_with_s::<M>(x1, row, x2, col, 0, inv_two_ell_sq)?;
-                d2_k[(row, col)] = rbf_hess_from_sq_dist::<M>(s, inv_two_ell_sq, inv_ell_sq)?;
-            }
-        }
-        Ok(())
+        (0.5 * inv_ell_sq, inv_ell_sq)
+    }
+
+    /// [`Self::inv_scales`] rounded into the compute scalar.
+    fn inv_scales_t<T: KernelScalar>(&self) -> (T, T) {
+        let (half, full) = self.inv_scales();
+        (T::from_f64(half), T::from_f64(full))
     }
 }
 
@@ -581,57 +565,15 @@ fn add_squared(x: &[f64], x0: f64, acc: &mut [f64]) {
     }
 }
 
-fn rbf_pair<M: KernelMath>(
-    x1: MatRef<'_, f64>,
+fn rbf_pair_with_s<M: KernelMath, T: KernelScalar>(
+    x1: MatRef<'_, T>,
     i: usize,
-    x2: MatRef<'_, f64>,
+    x2: MatRef<'_, T>,
     j: usize,
     dim: usize,
-    inv_two_ell_sq: f64,
-) -> Result<(f64, f64), GprError> {
-    let (jet, delta, _) = rbf_pair_with_s::<M>(x1, i, x2, j, dim, inv_two_ell_sq)?;
-    Ok((jet.d1, delta))
-}
-
-fn rbf_pair_two_dims<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    i: usize,
-    x2: MatRef<'_, f64>,
-    j: usize,
-    dim_a: usize,
-    dim_b: usize,
-    inv_two_ell_sq: f64,
-) -> Result<(ExpJet<f64>, f64, f64), GprError> {
-    let mut s = 0.0;
-    for d in 0..x1.ncols() {
-        let a = x1[(i, d)];
-        let b = x2[(j, d)];
-        if !a.is_finite() || !b.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let delta = a - b;
-        s += delta * delta;
-    }
-    let jet = M::jet(-s * inv_two_ell_sq);
-    if !jet.v.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    Ok((
-        jet,
-        x1[(i, dim_a)] - x2[(j, dim_a)],
-        x1[(i, dim_b)] - x2[(j, dim_b)],
-    ))
-}
-
-fn rbf_pair_with_s<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    i: usize,
-    x2: MatRef<'_, f64>,
-    j: usize,
-    dim: usize,
-    inv_two_ell_sq: f64,
-) -> Result<(ExpJet<f64>, f64, f64), GprError> {
-    let mut s = 0.0;
+    inv_two_ell_sq: T,
+) -> Result<(ExpJet<T>, T, T), GprError> {
+    let mut s = T::from_f64(0.0);
     for d in 0..x1.ncols() {
         let a = x1[(i, d)];
         let b = x2[(j, d)];
@@ -648,24 +590,47 @@ fn rbf_pair_with_s<M: KernelMath>(
     Ok((jet, x1[(i, dim)] - x2[(j, dim)], s))
 }
 
-fn rbf_from_sq_dist<M: KernelMath>(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
+fn rbf_from_sq_dist<M: KernelMath, T: KernelScalar>(
+    d: T,
+    inv_two_ell_sq: T,
+) -> Result<T, GprError> {
     let d = finite_dist(d)?;
     Ok(M::exp(-d * inv_two_ell_sq))
 }
 
-fn rbf_hess_from_sq_dist<M: KernelMath>(
-    d: f64,
-    inv_two_ell_sq: f64,
-    inv_ell_sq: f64,
-) -> Result<f64, GprError> {
+fn rbf_grad_from_sq_dist<M: KernelMath, T: KernelScalar>(
+    d: T,
+    inv_two_ell_sq: T,
+    inv_ell_sq: T,
+) -> Result<T, GprError> {
+    let d = finite_dist(d)?;
+    let dk = M::jet(-d * inv_two_ell_sq).d1;
+    Ok(dk * d * inv_ell_sq)
+}
+
+fn rbf_hess_from_sq_dist<M: KernelMath, T: KernelScalar>(
+    d: T,
+    inv_two_ell_sq: T,
+    inv_ell_sq: T,
+) -> Result<T, GprError> {
     let d = finite_dist(d)?;
     let jet = M::jet(-d * inv_two_ell_sq);
     let u = d * inv_ell_sq;
-    let h = u * (jet.d2 * u - 2.0 * jet.d1);
+    let h = u * (jet.d2 * u - T::from_f64(2.0) * jet.d1);
     if h.is_finite() {
         Ok(h)
     } else {
         Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn require_rbf_param_idx(param_idx: usize) -> Result<(), GprError> {
+    if param_idx == 0 {
+        Ok(())
+    } else {
+        Err(GprError::IndexOutOfRange {
+            reason: "RBF has a single parameter at index 0".to_owned(),
+        })
     }
 }
 
