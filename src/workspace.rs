@@ -37,6 +37,9 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     pub(crate) refine_buf: Option<Mat<P::Refine>>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
+    /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
+    /// (`0` without a retry). `k_matrix` then holds the factor of `A + (σn² + j) I`.
+    pub(crate) factor_jitter: f64,
 }
 
 /// Training-distance cache wrapping an inner workspace ([`crate::CachedDistances`]).
@@ -184,6 +187,7 @@ where
             rhs: Mat::<P::Storage>::zeros(n, 1),
             refine_buf: None,
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(n)),
+            factor_jitter: 0.0,
         })
     }
 
@@ -222,6 +226,7 @@ where
             rhs: self.rhs.clone(),
             refine_buf: self.refine_buf.clone(),
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(self.n())),
+            factor_jitter: self.factor_jitter,
         }
     }
 }

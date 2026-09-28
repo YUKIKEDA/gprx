@@ -28,6 +28,9 @@ pub(crate) struct OnlineWorkspace<T: KernelScalar = f64> {
     delete_scratch: MemBuffer,
     pub(crate) n_active: usize,
     pub(crate) n_capacity: usize,
+    /// Diagonal jitter `j` of the batch factor this workspace came from. Every
+    /// row, inserted ones included, factors `A + (σn² + j) I`.
+    pub(crate) factor_jitter: f64,
 }
 
 impl<T: KernelScalar> OnlineWorkspace<T> {
@@ -44,6 +47,7 @@ impl<T: KernelScalar> OnlineWorkspace<T> {
             delete_scratch: MemBuffer::new(delete_scratch_req::<T>(n)),
             n_active: n,
             n_capacity: n,
+            factor_jitter: 0.0,
         })
     }
 
@@ -213,6 +217,7 @@ impl<T: KernelScalar> Clone for OnlineWorkspace<T> {
             delete_scratch: MemBuffer::new(delete_scratch_req::<T>(self.n_capacity)),
             n_active: self.n_active,
             n_capacity: self.n_capacity,
+            factor_jitter: self.factor_jitter,
         }
     }
 }
