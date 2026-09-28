@@ -163,7 +163,7 @@ pub(crate) fn empty_thread_scratch<T: StorageScalar>() -> Vec<Mat<T>> {
 ///
 /// For square `n` this matches `min(pool, n/64)` used by Cholesky and the
 /// `W` n-RHS solve. See [`faer_par_dims`] and
-/// `.dev/adr/0001-faer-parallel-degree.md`.
+/// `docs/adr/0001-faer-parallel-degree.md`.
 #[inline]
 pub(crate) fn faer_par(n: usize) -> Par {
     faer_par_dims(n, n)

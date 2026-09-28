@@ -221,7 +221,7 @@ L-BFGS の joint eval（Forrester）: 1b は 69 回（12 iter）、phase-2 は 2
 
 ## P2B-22（faer 並列度、[#143](https://github.com/YUKIKEDA/gprx/issues/143)）
 
-同一機械。日付 2026-09-19。ADR [`.dev/adr/0001-faer-parallel-degree.md`](adr/0001-faer-parallel-degree.md)。正方核は `faer_par(n) = min(プール, n/64)`。`n×k` ソルブはさらに `n·k/16384` と `k/12`。カーネルはプール全部。criterion は合否に使っていない。
+同一機械。日付 2026-09-19。ADR [`docs/adr/0001-faer-parallel-degree.md`](../docs/adr/0001-faer-parallel-degree.md)。正方核は `faer_par(n) = min(プール, n/64)`。`n×k` ソルブはさらに `n·k/16384` と `k/12`。カーネルはプール全部。criterion は合否に使っていない。
 
 対照: PR 冒頭の HEAD（faer `Par::Seq`）5 回平均と、実装後 5 回。`RAYON_NUM_THREADS` 未設定（16 論理）。
 

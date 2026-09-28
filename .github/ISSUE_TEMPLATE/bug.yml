@@ -33,7 +33,7 @@ body:
     id: design
     attributes:
       label: Design section
-      description: Optional. Example - `.dev/gprx-design.md` §6.2
+      description: Optional. Example - `docs/design.md` §6.2
   - type: textarea
     id: env
     attributes:
