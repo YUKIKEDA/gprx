@@ -177,15 +177,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::{assert_close, assert_send_sync};
 
     #[test]
     fn is_send_sync() {
@@ -197,9 +189,9 @@ mod tests {
         let lik = GaussianLikelihood::new(0.25).expect("valid");
         let mut diag = [1.0, 2.0, 3.0];
         lik.add_noise_diag(&mut diag);
-        assert_close(diag[0], 1.25);
-        assert_close(diag[1], 2.25);
-        assert_close(diag[2], 3.25);
+        assert_close(diag[0], 1.25, TOL);
+        assert_close(diag[1], 2.25, TOL);
+        assert_close(diag[2], 3.25, TOL);
     }
 
     #[test]
@@ -208,8 +200,8 @@ mod tests {
         let lik = GaussianLikelihood::new(variance).expect("valid");
         let mut diag = [0.0, 0.0];
         lik.noise_grad_diag(&mut diag, 0).expect("index 0");
-        assert_close(diag[0], variance);
-        assert_close(diag[1], variance);
+        assert_close(diag[0], variance, TOL);
+        assert_close(diag[1], variance, TOL);
         let twice_sigma = 2.0 * variance.sqrt();
         assert!(
             (diag[0] - twice_sigma).abs() > 0.1,
@@ -227,8 +219,8 @@ mod tests {
         let fd = (plus.noise_variance() - minus.noise_variance()) / (2.0 * h);
         let mut diag = [0.0];
         lik.noise_grad_diag(&mut diag, 0).expect("index 0");
-        assert_close(diag[0], fd);
-        assert_close(diag[0], lik.noise_variance());
+        assert_close(diag[0], fd, TOL);
+        assert_close(diag[0], lik.noise_variance(), TOL);
     }
 
     #[test]
@@ -236,10 +228,10 @@ mod tests {
         let mut lik = GaussianLikelihood::new(0.5).expect("valid");
         let mut params = [0.0];
         lik.get_params(&mut params).expect("len 1");
-        assert_close(params[0], 0.5_f64.ln());
+        assert_close(params[0], 0.5_f64.ln(), TOL);
         params[0] = 0.25_f64.ln();
         lik.set_params(&params).expect("len 1");
-        assert_close(lik.noise_variance(), 0.25);
+        assert_close(lik.noise_variance(), 0.25, TOL);
     }
 
     #[test]

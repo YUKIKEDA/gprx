@@ -193,13 +193,7 @@ mod tests {
 
     const TOL: f64 = 1e-6;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     struct ValueBowl {
         evals: usize,
@@ -265,7 +259,7 @@ mod tests {
         );
         let mut got = [0.0; 2];
         gpr.get_params(&mut got).expect("len 2");
-        assert_close(got[0], result.params[0]);
-        assert_close(got[1], result.params[1]);
+        assert_close(got[0], result.params[0], TOL);
+        assert_close(got[1], result.params[1], TOL);
     }
 }

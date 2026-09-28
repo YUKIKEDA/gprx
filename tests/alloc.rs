@@ -7,13 +7,13 @@
 //! pins `RAYON_NUM_THREADS=1` in this binary so faer `Par::rayon(1)` does
 //! not allocate worker scratch that a multi-thread pool would.
 
+mod common;
+use common::rng::{open_unit, small_rng};
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::{
     CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
     GprError, Prediction, RetainCholesky,
 };
-use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 use std::sync::{Mutex, OnceLock};
@@ -44,22 +44,6 @@ fn ensure_one_rayon_worker() {
             std::env::set_var("RAYON_NUM_THREADS", "1");
         }
     });
-}
-
-fn small_rng(seed: u64) -> SmallRng {
-    SmallRng::seed_from_u64(seed)
-}
-
-fn open_unit(rng: &mut SmallRng) -> f64 {
-    let u: f64 = rng.random();
-    let eps = 1.0 / ((1u64 << 53) as f64);
-    if u <= eps {
-        eps
-    } else if u >= 1.0 - eps {
-        1.0 - eps
-    } else {
-        u
-    }
 }
 
 fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {

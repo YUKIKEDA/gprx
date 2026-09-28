@@ -29,17 +29,8 @@ struct NelderMeadGolden {
     log_marginal_likelihood: f64,
 }
 
-fn rel_err(actual: f64, expected: f64) -> f64 {
-    (actual - expected).abs() / expected.abs().max(1.0)
-}
-
-fn assert_near(label: &str, actual: f64, expected: f64, tol: f64) {
-    let err = rel_err(actual, expected);
-    assert!(
-        err <= tol,
-        "{label}: actual={actual}, expected={expected}, rel_err={err}, tol={tol}"
-    );
-}
+mod common;
+use common::assert_close_named;
 
 fn assert_theta_near(label: &str, actual: f64, expected: f64) {
     let err = (actual.ln() - expected.ln()).abs();
@@ -65,7 +56,7 @@ fn fit_matches_nelder_mead_rbf_n16_golden() {
         .fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)
         .expect("nm");
     let lml = -gpr.neg_log_marginal_likelihood().expect("nlml");
-    assert_near(
+    assert_close_named(
         "log_marginal_likelihood",
         lml,
         golden.log_marginal_likelihood,

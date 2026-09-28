@@ -405,15 +405,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::{assert_close, assert_send_sync};
 
     #[test]
     fn is_send_sync() {
@@ -431,8 +423,8 @@ mod tests {
         assert!(t.is_empty());
         let mut x = [1.0, 2.0, 3.0, 4.0];
         t.apply(&mut x, 2, 2).expect("valid");
-        assert_close(x[0], 1.0);
-        assert_close(x[3], 4.0);
+        assert_close(x[0], 1.0, TOL);
+        assert_close(x[3], 4.0, TOL);
     }
 
     #[test]
@@ -452,7 +444,7 @@ mod tests {
         let mut got = x;
         t.apply(&mut got, 3, 2).expect("ok");
         for (actual, want) in got.iter().zip(expected.iter()) {
-            assert_close(*actual, *want);
+            assert_close(*actual, *want, TOL);
         }
     }
 
@@ -476,8 +468,8 @@ mod tests {
         t.transform(&mut y).expect("finite");
         t.inverse_transform_mean(&mut y).expect("finite");
         t.inverse_transform_variance(&mut y).expect("finite");
-        assert_close(y[0], 1.0);
-        assert_close(y[1], 2.0);
+        assert_close(y[0], 1.0, TOL);
+        assert_close(y[1], 2.0, TOL);
     }
 
     #[test]
@@ -497,19 +489,19 @@ mod tests {
         let mut got = y;
         t.transform(&mut got).expect("ok");
         for (actual, want) in got.iter().zip(expected.iter()) {
-            assert_close(*actual, *want);
+            assert_close(*actual, *want, TOL);
         }
         t.inverse_transform_mean(&mut got).expect("ok");
-        assert_close(got[0], y[0]);
-        assert_close(got[1], y[1]);
-        assert_close(got[2], y[2]);
+        assert_close(got[0], y[0], TOL);
+        assert_close(got[1], y[1], TOL);
+        assert_close(got[2], y[2], TOL);
         let s = std.std();
         let minmax_scale = (minmax.max() - minmax.min()) / (1.0 - 0.0);
         let mut var = [1.0, 0.25];
         t.inverse_transform_variance(&mut var).expect("ok");
         let scale2 = (s * minmax_scale).powi(2);
-        assert_close(var[0], 1.0 * scale2);
-        assert_close(var[1], 0.25 * scale2);
+        assert_close(var[0], 1.0 * scale2, TOL);
+        assert_close(var[1], 0.25 * scale2, TOL);
     }
 
     #[test]

@@ -791,7 +791,7 @@ mod tests {
     use crate::{GaussianLikelihood, Gpr};
     use faer::{MatMut, MatRef};
 
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::assert_send_sync;
 
     #[derive(Clone, Debug)]
     struct UnitKernel;

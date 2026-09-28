@@ -6,7 +6,7 @@
 //! Python.
 
 use gprx::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
-use gprx::{Fixed, GaussianLikelihood, PredictOptions, Prediction, Sgpr, Svgp, VarianceKind};
+use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, Svgp, VarianceKind};
 use serde::Deserialize;
 
 const TOL: f64 = 1e-8;
@@ -40,24 +40,8 @@ struct SparseGpytorchKernel {
     latent_variance: Vec<f64>,
 }
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
-
-fn assert_pred_close(got: &Prediction, mean: &[f64], variance: &[f64]) {
-    assert_eq!(got.mean.len(), mean.len());
-    assert_eq!(got.variance.len(), variance.len());
-    for (a, b) in got.mean.iter().zip(mean.iter()) {
-        assert_close(*a, *b);
-    }
-    for (a, b) in got.variance.iter().zip(variance.iter()) {
-        assert_close(*a, *b);
-    }
-}
+mod common;
+use common::{assert_close, assert_mean_var_close};
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 #[allow(clippy::panic)]
@@ -96,7 +80,13 @@ fn replay_sgpr(golden: &SparseGpytorchGolden) {
         let obs = fitted
             .predict(&golden.xs, golden.xs_n_rows, d)
             .expect("predict");
-        assert_pred_close(&obs, &kernel.mean, &kernel.observation_variance);
+        assert_mean_var_close(
+            &obs.mean,
+            &obs.variance,
+            &kernel.mean,
+            &kernel.observation_variance,
+            TOL,
+        );
         let latent = fitted
             .predict_with(
                 &golden.xs,
@@ -107,10 +97,17 @@ fn replay_sgpr(golden: &SparseGpytorchGolden) {
                 },
             )
             .expect("predict latent");
-        assert_pred_close(&latent, &kernel.mean, &kernel.latent_variance);
+        assert_mean_var_close(
+            &latent.mean,
+            &latent.variance,
+            &kernel.mean,
+            &kernel.latent_variance,
+            TOL,
+        );
         assert_close(
             fitted.neg_log_marginal_likelihood().expect("nlml"),
             expected,
+            TOL,
         );
     }
 }
@@ -132,7 +129,13 @@ fn replay_svgp(golden: &SparseGpytorchGolden) {
         let obs = fitted
             .predict(&golden.xs, golden.xs_n_rows, d)
             .expect("predict");
-        assert_pred_close(&obs, &kernel.mean, &kernel.observation_variance);
+        assert_mean_var_close(
+            &obs.mean,
+            &obs.variance,
+            &kernel.mean,
+            &kernel.observation_variance,
+            TOL,
+        );
         let latent = fitted
             .predict_with(
                 &golden.xs,
@@ -143,8 +146,14 @@ fn replay_svgp(golden: &SparseGpytorchGolden) {
                 },
             )
             .expect("predict latent");
-        assert_pred_close(&latent, &kernel.mean, &kernel.latent_variance);
-        assert_close(fitted.neg_elbo().expect("elbo"), expected);
+        assert_mean_var_close(
+            &latent.mean,
+            &latent.variance,
+            &kernel.mean,
+            &kernel.latent_variance,
+            TOL,
+        );
+        assert_close(fitted.neg_elbo().expect("elbo"), expected, TOL);
     }
 }
 

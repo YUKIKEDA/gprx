@@ -10,34 +10,8 @@ use faer::{Mat, MatMut, MatRef, Par, mat};
 
 const TOL: f64 = 1e-12;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
-
-fn assert_mat_close(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-    assert_eq!(actual.nrows(), expected.nrows());
-    assert_eq!(actual.ncols(), expected.ncols());
-    for j in 0..actual.ncols() {
-        for i in 0..actual.nrows() {
-            assert_close(actual[(i, j)], expected[(i, j)]);
-        }
-    }
-}
-
-fn assert_lower_close(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-    assert_eq!(actual.nrows(), expected.nrows());
-    assert_eq!(actual.ncols(), expected.ncols());
-    let n = actual.nrows();
-    for j in 0..n {
-        for i in j..n {
-            assert_close(actual[(i, j)], expected[(i, j)]);
-        }
-    }
-}
+mod common;
+use common::{assert_lower_close, assert_mat_close};
 
 fn copy_lower(src: MatRef<'_, f64>) -> Mat<f64> {
     let n = src.nrows();
@@ -78,12 +52,12 @@ fn two_by_two_matches_analytic_llt_and_solve() {
     let mut l = k.clone();
     let info = factor_in_place(l.as_mut(), stack).expect("SPD test matrix must factor");
     assert_eq!(info.dynamic_regularization_count, 0);
-    assert_lower_close(l.as_ref(), l_true.as_ref());
-    assert_mat_close(reconstruct_k(l.as_ref()).as_ref(), k.as_ref());
+    assert_lower_close(l.as_ref(), l_true.as_ref(), TOL);
+    assert_mat_close(reconstruct_k(l.as_ref()).as_ref(), k.as_ref(), TOL);
 
     let mut x = b.clone();
     llt::solve::solve_in_place(l.as_ref(), x.as_mut(), Par::Seq, stack);
-    assert_mat_close(x.as_ref(), x_true.as_ref());
+    assert_mat_close(x.as_ref(), x_true.as_ref(), TOL);
 }
 
 #[test]
@@ -106,10 +80,10 @@ fn five_by_five_matches_analytic_llt_and_solve() {
     let mut l = k.clone();
     let info = factor_in_place(l.as_mut(), stack).expect("SPD test matrix must factor");
     assert_eq!(info.dynamic_regularization_count, 0);
-    assert_lower_close(l.as_ref(), l_true.as_ref());
-    assert_mat_close(reconstruct_k(l.as_ref()).as_ref(), k.as_ref());
+    assert_lower_close(l.as_ref(), l_true.as_ref(), TOL);
+    assert_mat_close(reconstruct_k(l.as_ref()).as_ref(), k.as_ref(), TOL);
 
     let mut x = b.clone();
     llt::solve::solve_in_place(l.as_ref(), x.as_mut(), Par::Seq, stack);
-    assert_mat_close(x.as_ref(), x_true.as_ref());
+    assert_mat_close(x.as_ref(), x_true.as_ref(), TOL);
 }

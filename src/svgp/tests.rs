@@ -11,13 +11,7 @@ use faer::{Mat, MatRef};
 
 const TOL: f64 = 1e-12;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
+use crate::test_check::assert_close;
 
 const X_1D: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
 const Y: [f64; 4] = [0.0, 1.0, 0.5, 0.25];
@@ -206,12 +200,12 @@ fn factor_installs_whitened_prior() {
     fitted.get_params(&mut params).expect("get");
     let n_theta = fitted.kernel().num_params() + fitted.likelihood().num_params();
     assert_eq!(n_theta, 2);
-    assert_close(params[n_theta], 0.0);
-    assert_close(params[n_theta + 1], 0.0);
+    assert_close(params[n_theta], 0.0, TOL);
+    assert_close(params[n_theta + 1], 0.0, TOL);
     // packed L = I: L00, L10, L11
-    assert_close(params[n_theta + 2], 1.0);
-    assert_close(params[n_theta + 3], 0.0);
-    assert_close(params[n_theta + 4], 1.0);
+    assert_close(params[n_theta + 2], 1.0, TOL);
+    assert_close(params[n_theta + 3], 0.0, TOL);
+    assert_close(params[n_theta + 4], 1.0, TOL);
 }
 
 #[test]
@@ -236,12 +230,13 @@ fn titsias_q_matches_vfe_nlml_and_predict() {
         assert_close(
             svgp.neg_elbo().expect("elbo"),
             vfe.neg_log_marginal_likelihood().expect("nlml"),
+            TOL,
         );
         let pred_s = svgp.predict(case.x, case.n, case.d).expect("svgp pred");
         let pred_v = vfe.predict(case.x, case.n, case.d).expect("vfe pred");
         for i in 0..case.n {
-            assert_close(pred_s.mean[i], pred_v.mean[i]);
-            assert_close(pred_s.variance[i], pred_v.variance[i]);
+            assert_close(pred_s.mean[i], pred_v.mean[i], TOL);
+            assert_close(pred_s.variance[i], pred_v.variance[i], TOL);
         }
         let latent_s = svgp
             .predict_with(
@@ -264,7 +259,7 @@ fn titsias_q_matches_vfe_nlml_and_predict() {
             )
             .expect("vfe latent");
         for i in 0..case.n {
-            assert_close(latent_s.variance[i], latent_v.variance[i]);
+            assert_close(latent_s.variance[i], latent_v.variance[i], TOL);
         }
     }
 }
@@ -288,7 +283,7 @@ fn shifted_q_matches_independent_elbo() {
             &svgp.k_diag,
             svgp.likelihood().noise_variance(),
         );
-        assert_close(svgp.neg_elbo().expect("elbo"), independent);
+        assert_close(svgp.neg_elbo().expect("elbo"), independent, TOL);
     }
 }
 
@@ -332,7 +327,7 @@ fn check_full_grad(kernel: KernelSpec, x: &[f64], n: usize, d: usize, z: &[f64])
     let value = fitted
         .value_and_gradient_into(&params, &mut analytic)
         .expect("grad");
-    assert_close(value, fitted.neg_elbo().expect("elbo"));
+    assert_close(value, fitted.neg_elbo().expect("elbo"), TOL);
     let fd = fd_grad(&mut fitted, &params);
     assert_grad_close(&analytic, &fd);
 }
@@ -424,7 +419,7 @@ fn check_fit_seed_and_elbo(kernel: KernelSpec, x: &[f64], n: usize, d: usize, z:
     a.get_params(&mut pa).expect("a");
     b.get_params(&mut pb).expect("b");
     for (x, y) in pa.iter().zip(&pb) {
-        assert_close(*x, *y);
+        assert_close(*x, *y, TOL);
     }
     let end = a.neg_elbo().expect("end");
     assert!(
@@ -464,6 +459,6 @@ fn mini_batch_fit_reproduces() {
     a.get_params(&mut pa).expect("a");
     b.get_params(&mut pb).expect("b");
     for (x, y) in pa.iter().zip(&pb) {
-        assert_close(*x, *y);
+        assert_close(*x, *y, TOL);
     }
 }

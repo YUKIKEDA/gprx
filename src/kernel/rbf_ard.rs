@@ -1365,23 +1365,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    fn fill(n: usize, value: f64) -> Mat<f64> {
-        Mat::from_fn(n, n, |_, _| value)
-    }
-
-    fn points_2d(rows: &[[f64; 2]]) -> Mat<f64> {
-        Mat::from_fn(rows.len(), 2, |i, j| rows[i][j])
-    }
+    use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, points_2d};
 
     fn sq_dist(x: MatRef<'_, f64>) -> Mat<f64> {
         let n = x.nrows();
@@ -1396,15 +1380,6 @@ mod tests {
         })
     }
 
-    fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-        let n = actual.nrows();
-        for col in 0..n {
-            for row in col..n {
-                assert_close(actual[(row, col)], expected[(row, col)]);
-            }
-        }
-    }
-
     #[test]
     fn is_send_sync() {
         assert_send_sync::<RbfArdKernel>();
@@ -1417,9 +1392,9 @@ mod tests {
         let mut k = fill(3, f64::NAN);
         rbf.apply::<Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
-        assert_close(k[(0, 0)], 1.0);
-        assert_close(k[(1, 1)], 1.0);
-        assert_close(k[(2, 2)], 1.0);
+        assert_close(k[(0, 0)], 1.0, TOL);
+        assert_close(k[(1, 1)], 1.0, TOL);
+        assert_close(k[(2, 2)], 1.0, TOL);
     }
 
     #[test]
@@ -1431,9 +1406,9 @@ mod tests {
         let mut k = fill(3, 0.0);
         rbf.apply::<Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
-        assert_close(k[(1, 0)], (-0.5_f64).exp());
-        assert_close(k[(2, 0)], (-0.5_f64).exp());
-        assert_close(k[(2, 1)], (-0.5_f64 * (1.0 + 1.0)).exp());
+        assert_close(k[(1, 0)], (-0.5_f64).exp(), TOL);
+        assert_close(k[(2, 0)], (-0.5_f64).exp(), TOL);
+        assert_close(k[(2, 1)], (-0.5_f64 * (1.0 + 1.0)).exp(), TOL);
     }
 
     #[test]
@@ -1451,7 +1426,7 @@ mod tests {
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
-                assert_close(k_ard[(row, col)], k_iso[(row, col)]);
+                assert_close(k_ard[(row, col)], k_iso[(row, col)], TOL);
             }
         }
     }
@@ -1474,7 +1449,7 @@ mod tests {
             Triangle::Lower,
         )
         .expect("cache");
-        lower_matches(from_cache.as_ref(), from_points.as_ref());
+        assert_lower_close(from_cache.as_ref(), from_points.as_ref(), TOL);
     }
 
     #[test]
@@ -1497,7 +1472,7 @@ mod tests {
                 Triangle::Lower,
             )
             .expect("cache");
-            lower_matches(from_cache.as_ref(), from_points.as_ref());
+            assert_lower_close(from_cache.as_ref(), from_points.as_ref(), TOL);
         }
     }
 
@@ -1510,7 +1485,7 @@ mod tests {
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
-                assert_close(k[(row, col)], k[(col, row)]);
+                assert_close(k[(row, col)], k[(col, row)], TOL);
             }
         }
     }
@@ -1526,10 +1501,10 @@ mod tests {
         let mut lower = fill(3, sentinel);
         rbf.apply::<Accurate>(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], sentinel);
-        assert_close(lower[(0, 2)], sentinel);
-        assert_close(lower[(1, 2)], sentinel);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], sentinel, TOL);
+        assert_close(lower[(0, 2)], sentinel, TOL);
+        assert_close(lower[(1, 2)], sentinel, TOL);
     }
 
     #[test]
@@ -1544,12 +1519,12 @@ mod tests {
             .expect("shape");
         for col in 0..3 {
             for row in 0..=col {
-                assert_close(upper[(row, col)], full[(row, col)]);
+                assert_close(upper[(row, col)], full[(row, col)], TOL);
             }
         }
-        assert_close(upper[(1, 0)], -1.0);
-        assert_close(upper[(2, 0)], -1.0);
-        assert_close(upper[(2, 1)], -1.0);
+        assert_close(upper[(1, 0)], -1.0, TOL);
+        assert_close(upper[(2, 0)], -1.0, TOL);
+        assert_close(upper[(2, 1)], -1.0, TOL);
     }
 
     #[test]
@@ -1580,7 +1555,7 @@ mod tests {
                 for col in 0..3 {
                     for row in 0..3 {
                         let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
-                        assert_close(d2[(row, col)], fd);
+                        assert_close(d2[(row, col)], fd, TOL);
                     }
                 }
             }
@@ -1612,7 +1587,7 @@ mod tests {
             for col in 0..3 {
                 for row in 0..3 {
                     let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
-                    assert_close(dk[(row, col)], fd);
+                    assert_close(dk[(row, col)], fd, TOL);
                 }
             }
         }
@@ -1628,7 +1603,7 @@ mod tests {
             .expect("dim 0");
         rbf.grad::<Accurate>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
             .expect("dim 1");
-        assert_close(dk1[(1, 0)], 0.0);
+        assert_close(dk1[(1, 0)], 0.0, TOL);
         assert!(dk0[(1, 0)].abs() > 1e-8);
     }
 
@@ -1642,8 +1617,8 @@ mod tests {
             .expect("index 1");
         rbf.grad::<Accurate>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("index 1");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 99.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 99.0, TOL);
     }
 
     #[test]
@@ -1651,11 +1626,11 @@ mod tests {
         let mut rbf = RbfArdKernel::new(&[2.0, 0.5]).expect("valid");
         let mut params = [0.0; 2];
         rbf.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 2.0_f64.ln());
-        assert_close(params[1], 0.5_f64.ln());
+        assert_close(params[0], 2.0_f64.ln(), TOL);
+        assert_close(params[1], 0.5_f64.ln(), TOL);
         params[0] = 0.5_f64.ln();
         rbf.set_params(&params).expect("len 2");
-        assert_close(rbf.lengthscale(0).expect("dim 0"), 0.5);
+        assert_close(rbf.lengthscale(0).expect("dim 0"), 0.5, TOL);
     }
 
     #[test]
@@ -1670,8 +1645,8 @@ mod tests {
         rbf.apply_cross::<crate::math::Accurate>(train.as_ref(), test.as_ref(), cross.as_mut())
             .expect("rect");
         // test[:, 1] == train[:, 1]
-        assert_close(cross[(0, 1)], square[(0, 1)]);
-        assert_close(cross[(1, 1)], square[(1, 1)]);
+        assert_close(cross[(0, 1)], square[(0, 1)], TOL);
+        assert_close(cross[(1, 1)], square[(1, 1)], TOL);
     }
 
     #[test]

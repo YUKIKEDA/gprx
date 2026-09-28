@@ -33,6 +33,7 @@ src/sgpr/                  model.rs, fitted.rs, factor.rs, online.rs, tests.rs
 src/svgp/                  model.rs, fitted.rs, factor.rs, tests.rs
 src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not split into leaves
 tests/                     integration tests. Goldens only under compare/goldens/
+tests/common/               check.rs (tolerance asserts) and problems.rs (Forrester / sphere). Unit tests and benches include them with #[path]
 benches/exact.rs           criterion
 compare/                   sklearn and GPyTorch generation. perf/ is manual wall time and RSS
 examples/fit_predict.rs

@@ -12,24 +12,8 @@ use faer::{Mat, MatMut, MatRef, Par, mat};
 
 const TOL: f64 = 1e-12;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
-
-fn assert_lower_close(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-    assert_eq!(actual.nrows(), expected.nrows());
-    assert_eq!(actual.ncols(), expected.ncols());
-    let n = actual.nrows();
-    for j in 0..n {
-        for i in j..n {
-            assert_close(actual[(i, j)], expected[(i, j)]);
-        }
-    }
-}
+mod common;
+use common::assert_lower_close;
 
 // Packed LDLT: diagonal is D, strictly lower is unit-L. `L D` is lower
 // triangular, so `A[i, j] = Σ_{k ≤ min(i, j)} L[i, k] D[k] L[j, k]`.
@@ -85,8 +69,8 @@ fn delete_matches_full_factor(a: MatRef<'_, f64>, indices: &mut [usize]) {
     factor_ldlt(full.as_mut(), stack);
     let from_full = reconstruct_a(full.as_ref());
 
-    assert_lower_close(deleted.as_ref(), from_full.as_ref());
-    assert_lower_close(deleted.as_ref(), expected_a.as_ref());
+    assert_lower_close(deleted.as_ref(), from_full.as_ref(), TOL);
+    assert_lower_close(deleted.as_ref(), expected_a.as_ref(), TOL);
 }
 
 fn two_by_two() -> Mat<f64> {

@@ -5,7 +5,7 @@
 //! Python.
 
 use gprx::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
-use gprx::{Fixed, GaussianLikelihood, OnlineSgpr, PredictOptions, Prediction, Sgpr, VarianceKind};
+use gprx::{Fixed, GaussianLikelihood, OnlineSgpr, PredictOptions, Sgpr, VarianceKind};
 use serde::Deserialize;
 
 const TOL: f64 = 1e-8;
@@ -55,25 +55,8 @@ struct OnlineSgprStep {
     neg_log_marginal_likelihood: f64,
 }
 
-fn assert_close(actual: f64, expected: f64, label: &str) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "{label} actual={actual}, expected={expected}, diff={}",
-        (actual - expected).abs()
-    );
-}
-
-fn assert_pred_close(got: &Prediction, mean: &[f64], variance: &[f64], label: &str) {
-    assert_eq!(got.mean.len(), mean.len());
-    assert_eq!(got.variance.len(), variance.len());
-    for (i, (a, b)) in got.mean.iter().zip(mean.iter()).enumerate() {
-        assert_close(*a, *b, &format!("{label} mean[{i}]"));
-    }
-    for (i, (a, b)) in got.variance.iter().zip(variance.iter()).enumerate() {
-        assert_close(*a, *b, &format!("{label} var[{i}]"));
-    }
-}
+mod common;
+use common::{assert_close_named, assert_mean_var_close_named};
 
 fn point_at(values: &[f64], n: usize, d: usize, index: usize) -> Vec<f64> {
     (0..d).map(|feature| values[feature * n + index]).collect()
@@ -116,7 +99,14 @@ fn check_step(
     assert_eq!(online.n(), step.n, "{label} n");
     assert_eq!(online.m(), step.m, "{label} m");
     let obs = online.predict(xs, n_query, d).expect("predict");
-    assert_pred_close(&obs, &step.mean, &step.observation_variance, label);
+    assert_mean_var_close_named(
+        label,
+        &obs.mean,
+        &obs.variance,
+        &step.mean,
+        &step.observation_variance,
+        TOL,
+    );
     let latent = online
         .predict_with(
             xs,
@@ -127,16 +117,19 @@ fn check_step(
             },
         )
         .expect("predict latent");
-    assert_pred_close(
-        &latent,
+    assert_mean_var_close_named(
+        &format!("{label} latent"),
+        &latent.mean,
+        &latent.variance,
         &step.mean,
         &step.latent_variance,
-        &format!("{label} latent"),
+        TOL,
     );
-    assert_close(
+    assert_close_named(
+        &format!("{label} nlml"),
         online.neg_log_marginal_likelihood().expect("nlml"),
         step.neg_log_marginal_likelihood,
-        &format!("{label} nlml"),
+        TOL,
     );
 }
 

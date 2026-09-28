@@ -1339,23 +1339,7 @@ mod tests {
 
     const TOL: f64 = 1e-12;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_pred_close(got: &Prediction, want: &Prediction) {
-        assert_eq!(got.mean.len(), want.mean.len());
-        for (a, b) in got.mean.iter().zip(want.mean.iter()) {
-            assert_close(*a, *b);
-        }
-        for (a, b) in got.variance.iter().zip(want.variance.iter()) {
-            assert_close(*a, *b);
-        }
-    }
+    use crate::test_check::assert_mean_var_close;
 
     #[allow(clippy::too_many_arguments)]
     fn insert_matches_factor(
@@ -1389,7 +1373,7 @@ mod tests {
             .map_err(|(_, e)| e)
             .expect("factor n+1");
         let want = full.predict(xs, n_query, d).expect("full predict");
-        assert_pred_close(&got, &want);
+        assert_mean_var_close(&got.mean, &got.variance, &want.mean, &want.variance, TOL);
     }
 
     #[test]
@@ -1482,7 +1466,7 @@ mod tests {
             panic!("online RBF should load as OnlineDistance::Cached");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
-        assert_pred_close(&got, &want);
+        assert_mean_var_close(&got.mean, &got.variance, &want.mean, &want.variance, TOL);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1521,7 +1505,7 @@ mod tests {
             .map_err(|(_, e)| e)
             .expect("factor remaining");
         let want = full.predict(xs, n_query, d).expect("full predict");
-        assert_pred_close(&got, &want);
+        assert_mean_var_close(&got.mean, &got.variance, &want.mean, &want.variance, TOL);
     }
 
     fn delete_each_index(
@@ -1663,7 +1647,7 @@ mod tests {
         };
         assert_eq!(model.point_ids(), want_ids.as_slice());
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
-        assert_pred_close(&got, &want);
+        assert_mean_var_close(&got.mean, &got.variance, &want.mean, &want.variance, TOL);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
