@@ -680,3 +680,36 @@ P4-12 の GPy 負けのうち pass は sgpr Forrester n=1024（14.36 ms 対 15.7
 
 桁は単体テスト。Forrester `n=256` と `n=1024`（`ℓ = 1`、`σn² = 0.1`）と、同じ `n=256` の `x,y` で `ℓ = 1e4`、`σn² = 1e-5`（f32 Cholesky は成功し、`κ(A)·u_f32 > 1`）の三本が、両方の残差で `‖α − α_f64‖∞ / ‖α_f64‖∞ < 10 · n · u_f32` に届いた。不収束は f64 の α。jitter は増やしていない。
 
+## P5-4（カーネル exp の多項式、[#42](https://github.com/YUKIKEDA/gprx/issues/42)）
+
+同一機械。日付 2026-09-28。速度の合否は `cargo bench --offline --bench exact -- kernel_exp`。距離（ARD は `(Δx_d)²`）は計測の前に一度埋める。計るのは `apply` と θ の `grad` を足した時間。比較は同じ実行の中央値。`FastApprox` は次数 7 の Taylor を Cody–Waite のあとで評価し、f64 の SIMD は Horner を展開して `2^n` をレーン内で作る。`Accurate` は `wide::exp`。`mll_and_grad` と `fit_lbfgs` の壁時計は合否にしない。eval 数は `cargo test --lib bench_lbfgs_eval_count -- --nocapture`（Accurate。Forrester seed `0`、球 seed `9`）。
+
+| グループ | 関数 | 中央値 | 95% 区間 |
+| --- | --- | --- | --- |
+| `mll_and_grad` | `accurate` | 1.2338 ms | 1.2310–1.2366 |
+| `mll_and_grad` | `fast_approx` | 1.2218 ms | 1.2189–1.2248 |
+| `mll_and_grad_ard` | `always` | 1.4629 ms | 1.4596–1.4661 |
+| `mll_and_grad_ard` | `fast_approx` | 1.4570 ms | 1.4413–1.4799 |
+| `mll_and_grad_ard` | `never` | 2.0668 ms | 2.0249–2.1245 |
+
+`mll_and_grad` は記録だけ。同じ実行で `fast_approx` は `accurate` より 0.97% 短い（1.2218 / 1.2338）。ARD の `fast_approx` は `always` より 0.40% 短い（1.4570 / 1.4629）。n = 256 の 1 評価は三角解（`W`）が支配し、exp の差は約 12 µs に留まる。
+
+合否の `kernel_exp`（同じ実行、2026-09-28）:
+
+| グループ | 関数 | 中央値 | 95% 区間 |
+| --- | --- | --- | --- |
+| `kernel_exp` | `accurate` | 68.323 µs | 67.463–69.679 |
+| `kernel_exp` | `fast_approx` | 55.841 µs | 55.243–56.341 |
+| `kernel_exp_ard` | `accurate` | 178.38 µs | 177.51–179.37 |
+| `kernel_exp_ard` | `fast_approx` | 156.08 µs | 155.10–157.01 |
+
+等方は 18.3% 短い（55.841 / 68.323）。ARD は 12.5% 短い（156.08 / 178.38）。どちらも 5% より短い。
+
+| 問題 | キャッシュ | iters | evals |
+| --- | --- | --- | --- |
+| Forrester `fit_lbfgs` | 既定 | 15 | 78 |
+| 球 `fit_lbfgs_ard` | Always | 9 | 15 |
+| 球 `fit_lbfgs_ard` | Never | 9 | 15 |
+
+確保: `mll_and_grad` と `fast_approx` の `value_and_gradient_into` は Workspace のあと 0（上限 0）。
+

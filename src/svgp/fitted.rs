@@ -1,5 +1,7 @@
 //! Factored stochastic variational GPR.
 
+use std::marker::PhantomData;
+
 use faer::Mat;
 
 use super::factor::SvgpMean;
@@ -26,7 +28,7 @@ use super::factor::{
 /// lower triangle of `L`.
 #[derive(Clone, Debug)]
 #[allow(private_bounds)]
-pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
+pub struct FittedSvgp<M = crate::math::Accurate, P: ModelPrecision = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) x_obs: Vec<f64>,
@@ -43,11 +45,13 @@ pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
+    pub(crate) _math: PhantomData<M>,
 }
 
 #[allow(private_bounds)]
-impl<P> FittedSvgp<P>
+impl<M, P> FittedSvgp<M, P>
 where
+    M: crate::math::KernelMath,
     P: GpScalar + SvgpMean,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
@@ -169,7 +173,7 @@ where
         let mut likelihood = self.likelihood;
         likelihood.set_params(&params[n_kernel..n_theta])?;
         let q = unpack_q(&params[n_theta..], self.m)?;
-        let state = assemble_svgp::<P::Storage>(
+        let state = assemble_svgp::<M, P::Storage>(
             &kernel,
             &self.x_obs,
             self.n,
@@ -362,7 +366,7 @@ where
                 expected_dim: self.d,
             });
         }
-        svgp_predict::<P>(
+        svgp_predict::<M, P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),

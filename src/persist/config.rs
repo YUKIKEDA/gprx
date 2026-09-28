@@ -26,6 +26,9 @@ pub(super) struct ModelConfig {
     /// [`Self::precision`] is [`PrecisionJson::Mixed`].
     #[serde(default, skip_serializing_if = "ResidualJson::is_promote_storage")]
     pub residual: ResidualJson,
+    /// Omitted on disk means [`MathJson::Accurate`].
+    #[serde(default, skip_serializing_if = "MathJson::is_accurate")]
+    pub math: MathJson,
     pub kernel: KernelJson,
     pub likelihood: LikelihoodJson,
     pub jitter: JitterJson,
@@ -101,6 +104,29 @@ impl PrecisionJson {
             crate::precision::PersistKind::Single => Self::Single,
             crate::precision::PersistKind::MixedPromote
             | crate::precision::PersistKind::MixedReevaluate => Self::Mixed,
+        }
+    }
+}
+
+/// Kernel `exp`. Omitted on disk means [`MathJson::Accurate`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MathJson {
+    #[default]
+    Accurate,
+    FastApprox,
+}
+
+impl MathJson {
+    fn is_accurate(kind: &Self) -> bool {
+        matches!(kind, Self::Accurate)
+    }
+
+    pub(super) fn from_math<M: crate::math::KernelMath>() -> Self {
+        if M::ACCURATE {
+            Self::Accurate
+        } else {
+            Self::FastApprox
         }
     }
 }

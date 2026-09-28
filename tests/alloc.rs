@@ -8,12 +8,15 @@
 //! not allocate worker scratch that a multi-thread pool would.
 
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, Prediction};
+use gprx::{
+    CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
+    GprError, Prediction, RetainCholesky,
+};
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -84,6 +87,12 @@ fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     Ok((gpr, xs))
 }
 
+fn alloc_lock() -> std::sync::MutexGuard<'static, ()> {
+    // `stats_alloc` counts the process, not the calling thread.
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn allocs_in(f: impl FnOnce()) -> usize {
     let region = Region::new(GLOBAL);
     f();
@@ -101,6 +110,7 @@ fn assert_alloc_cap(label: &str, count: usize, cap: usize) {
 
 #[test]
 fn mll_and_grad_allocs_after_workspace() {
+    let _guard = alloc_lock();
     let (mut gpr, _) = fitted_model().expect("spd");
     let mut params = vec![0.0; gpr.num_params()];
     gpr.get_params(&mut params).expect("len");
@@ -115,7 +125,35 @@ fn mll_and_grad_allocs_after_workspace() {
 }
 
 #[test]
+fn fast_approx_mll_and_grad_allocs_after_workspace() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
+    let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+    let x = fill_column_major(N, D, SEED);
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
+    let mut gpr = Gpr::new(kernel, likelihood)
+        .with_math::<FastApprox>()
+        .with_optimizer(Fixed)
+        .factor(&x, N, D, &y)
+        .expect("spd");
+    let mut params = vec![0.0; gpr.num_params()];
+    gpr.get_params(&mut params).expect("len");
+    let mut grad = vec![0.0; params.len()];
+    gpr.value_and_gradient_into(&params, &mut grad)
+        .expect("warmup");
+    let count = allocs_in(|| {
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("counted");
+    });
+    assert_alloc_cap("fast_mll_and_grad", count, MAX_MLL_AND_GRAD_ALLOCS);
+    let _typed: FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox> = gpr;
+}
+
+#[test]
 fn predict_100_allocs_after_workspace() {
+    let _guard = alloc_lock();
     let (mut gpr, xs) = fitted_model().expect("spd");
     let mut pred = Prediction::default();
     gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");

@@ -100,7 +100,8 @@ impl KernelTerm for RbfAsTerm {
         j: usize,
         uplo: Triangle,
     ) -> Result<(), crate::GprError> {
-        self.0.hess_from_coords(x, d2_k, i, j, uplo)
+        self.0
+            .hess_from_coords::<crate::math::Accurate>(x, d2_k, i, j, uplo)
     }
 
     fn clone_box(&self) -> Box<dyn KernelTerm> {
@@ -278,7 +279,7 @@ fn apply_compiled(compiled: &CompiledKernel, dist: MatRef<'_, f64>) -> Mat<f64> 
     let mut out = fill(n, 0.0);
     let mut scratch = fill(n, 0.0);
     compiled
-        .apply(dist, out.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply::<crate::math::Accurate>(dist, out.as_mut(), Triangle::Full, scratch.as_mut())
         .expect("shape");
     out
 }
@@ -288,7 +289,7 @@ fn apply_compiled_points(compiled: &CompiledKernel, x: MatRef<'_, f64>) -> Mat<f
     let mut out = fill(n, 0.0);
     let mut scratch = fill(n, 0.0);
     compiled
-        .apply_points(x, out.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply_points::<crate::math::Accurate>(x, out.as_mut(), Triangle::Full, scratch.as_mut())
         .expect("shape");
     out
 }
@@ -361,7 +362,7 @@ fn custom_sum_grad_matches_finite_difference() {
     let mut dk = fill(3, 0.0);
     let mut scratch = fill(3, 0.0);
     compiled
-        .grad(
+        .grad::<crate::math::Accurate>(
             dist.as_ref(),
             dk.as_mut(),
             1,
@@ -390,7 +391,7 @@ fn combine_sum_from_leaf_grams_overwrites_dirty_dest() {
     compiled
         .leaf_at(0)
         .expect("leaf 0")
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             grams[0].as_mut(),
             Triangle::Lower,
@@ -400,7 +401,7 @@ fn combine_sum_from_leaf_grams_overwrites_dirty_dest() {
     compiled
         .leaf_at(1)
         .expect("leaf 1")
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             grams[1].as_mut(),
             Triangle::Lower,
@@ -488,7 +489,7 @@ fn sum_lower_matches_full_and_leaves_upper() {
     let mut lower = fill(3, sentinel);
     let mut scratch = fill(3, 0.0);
     compiled
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             lower.as_mut(),
             Triangle::Lower,
@@ -520,7 +521,7 @@ fn sum_grad_matches_finite_difference() {
     let mut dk = fill(3, 0.0);
     let mut scratch = fill(3, 0.0);
     compiled
-        .grad(
+        .grad::<crate::math::Accurate>(
             dist.as_ref(),
             dk.as_mut(),
             1,
@@ -558,7 +559,7 @@ fn product_hess_matches_finite_difference_of_grad() {
         let mut scratch = fill(3, 0.0);
         spec_plus
             .compile()
-            .grad(
+            .grad::<crate::math::Accurate>(
                 dist.as_ref(),
                 gp.as_mut(),
                 0,
@@ -568,7 +569,7 @@ fn product_hess_matches_finite_difference_of_grad() {
             .expect("plus");
         spec_minus
             .compile()
-            .grad(
+            .grad::<crate::math::Accurate>(
                 dist.as_ref(),
                 gm.as_mut(),
                 0,
@@ -578,7 +579,7 @@ fn product_hess_matches_finite_difference_of_grad() {
             .expect("minus");
         let mut d2 = fill(3, 0.0);
         compiled
-            .hess(
+            .hess::<crate::math::Accurate>(
                 dist.as_ref(),
                 d2.as_mut(),
                 0,
@@ -611,7 +612,7 @@ fn product_grad_matches_finite_difference() {
     let mut dk = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .grad(
+        .grad::<crate::math::Accurate>(
             dist.as_ref(),
             dk.as_mut(),
             0,
@@ -642,7 +643,7 @@ fn nested_product_grad_matches_finite_difference() {
     let mut dk = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .grad(
+        .grad::<crate::math::Accurate>(
             dist.as_ref(),
             dk.as_mut(),
             2,
@@ -670,7 +671,7 @@ fn assert_points_product_grad_fd(spec: KernelSpec, x: Mat<f64>, param_idx: usize
     let mut dk = fill(x.nrows(), 0.0);
     let mut scratch = fill(x.nrows(), 0.0);
     compiled
-        .grad_points(
+        .grad_points::<crate::math::Accurate>(
             x.as_ref(),
             dk.as_mut(),
             param_idx,
@@ -738,7 +739,7 @@ fn rejects_bad_index_and_scratch_shape() {
     let mut dk = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     assert!(matches!(
-        compiled.grad(
+        compiled.grad::<crate::math::Accurate>(
             dist.as_ref(),
             dk.as_mut(),
             2,
@@ -749,7 +750,12 @@ fn rejects_bad_index_and_scratch_shape() {
     ));
     let mut small = fill(1, 0.0);
     assert!(matches!(
-        compiled.apply(dist.as_ref(), dk.as_mut(), Triangle::Full, small.as_mut()),
+        compiled.apply::<crate::math::Accurate>(
+            dist.as_ref(),
+            dk.as_mut(),
+            Triangle::Full,
+            small.as_mut()
+        ),
         Err(crate::error::GprError::WorkspaceTooSmall)
     ));
 }
@@ -761,7 +767,7 @@ fn empty_sum_is_unsupported() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     assert!(matches!(
-        compiled.apply(
+        compiled.apply::<crate::math::Accurate>(
             dist.as_ref(),
             out.as_mut(),
             Triangle::Full,
@@ -787,7 +793,7 @@ fn apply_cross_matches_full_block() {
     let mut k_nn = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply(
+        .apply::<crate::math::Accurate>(
             train.as_ref(),
             k_nn.as_mut(),
             Triangle::Full,
@@ -798,7 +804,7 @@ fn apply_cross_matches_full_block() {
     let mut k_cross = fill(2, 0.0);
     let mut scratch_cross = fill(2, 0.0);
     compiled
-        .apply_cross(
+        .apply_cross::<crate::math::Accurate>(
             dist_cross.as_ref(),
             k_cross.as_mut(),
             scratch_cross.as_mut(),
@@ -831,7 +837,7 @@ fn ard_apply_dist_is_unsupported_points_match_isotropic() {
     let mut out = fill(3, 0.0);
     let mut scratch = fill(3, 0.0);
     assert!(matches!(
-        compiled.apply(
+        compiled.apply::<crate::math::Accurate>(
             dist.as_ref(),
             out.as_mut(),
             Triangle::Full,
@@ -840,7 +846,12 @@ fn ard_apply_dist_is_unsupported_points_match_isotropic() {
         Err(crate::error::GprError::UnsupportedKernelOperation { .. })
     ));
     compiled
-        .apply_points(x.as_ref(), out.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply_points::<crate::math::Accurate>(
+            x.as_ref(),
+            out.as_mut(),
+            Triangle::Full,
+            scratch.as_mut(),
+        )
         .expect("points");
     let iso = apply_rbf(ell, dist.as_ref());
     for col in 0..3 {
@@ -875,7 +886,7 @@ fn rbf_plus_linear_apply_adds_leaves() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply_mixed(
+        .apply_mixed::<crate::math::Accurate>(
             MixedKernelViews::new(dist.as_ref(), x.as_ref()),
             out.as_mut(),
             Triangle::Full,
@@ -906,7 +917,7 @@ fn rbf_times_linear_apply_multiplies_leaves() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply_mixed(
+        .apply_mixed::<crate::math::Accurate>(
             MixedKernelViews::new(dist.as_ref(), x.as_ref()),
             out.as_mut(),
             Triangle::Full,
@@ -947,7 +958,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
     let mut scratch = fill(2, 0.0);
     spec_plus
         .compile()
-        .apply_mixed(
+        .apply_mixed::<crate::math::Accurate>(
             MixedKernelViews::new(dist.as_ref(), x.as_ref()),
             kp.as_mut(),
             Triangle::Full,
@@ -956,7 +967,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
         .expect("plus");
     spec_minus
         .compile()
-        .apply_mixed(
+        .apply_mixed::<crate::math::Accurate>(
             MixedKernelViews::new(dist.as_ref(), x.as_ref()),
             km.as_mut(),
             Triangle::Full,
@@ -965,7 +976,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
         .expect("minus");
     let mut dk = fill(2, 0.0);
     compiled
-        .grad_mixed(
+        .grad_mixed::<crate::math::Accurate>(
             MixedKernelViews::new(dist.as_ref(), x.as_ref()),
             dk.as_mut(),
             1,
@@ -989,7 +1000,7 @@ fn rbf_plus_white_is_distance_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             out.as_mut(),
             Triangle::Full,
@@ -1013,7 +1024,12 @@ fn linear_plus_constant_is_points_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply_points(x.as_ref(), out.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply_points::<crate::math::Accurate>(
+            x.as_ref(),
+            out.as_mut(),
+            Triangle::Full,
+            scratch.as_mut(),
+        )
         .expect("points");
     assert_close(out[(0, 0)], 0.5);
     assert_close(out[(1, 1)], 1.0 + 0.5);
@@ -1033,7 +1049,7 @@ fn matern_plus_white_is_distance_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             out.as_mut(),
             Triangle::Full,
@@ -1059,7 +1075,12 @@ fn matern_ard_plus_constant_is_points_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply_points(x.as_ref(), out.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply_points::<crate::math::Accurate>(
+            x.as_ref(),
+            out.as_mut(),
+            Triangle::Full,
+            scratch.as_mut(),
+        )
         .expect("points");
     assert_close(out[(0, 0)], 1.5);
     assert_close(out[(1, 1)], 1.5);
@@ -1079,7 +1100,7 @@ fn periodic_plus_white_is_distance_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             out.as_mut(),
             Triangle::Full,
@@ -1105,7 +1126,7 @@ fn rational_quadratic_plus_white_is_distance_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply(
+        .apply::<crate::math::Accurate>(
             dist.as_ref(),
             out.as_mut(),
             Triangle::Full,
@@ -1129,9 +1150,219 @@ fn rational_quadratic_ard_plus_constant_is_points_mode() {
     let mut out = fill(2, 0.0);
     let mut scratch = fill(2, 0.0);
     compiled
-        .apply_points(x.as_ref(), out.as_mut(), Triangle::Full, scratch.as_mut())
+        .apply_points::<crate::math::Accurate>(
+            x.as_ref(),
+            out.as_mut(),
+            Triangle::Full,
+            scratch.as_mut(),
+        )
         .expect("points");
     assert_close(out[(0, 0)], 1.5);
     assert_close(out[(1, 1)], 1.5);
     assert_close(out[(1, 0)], 2.0 / 3.0 + 0.5);
+}
+
+fn fast_exp(x: f64) -> f64 {
+    <crate::math::FastApprox as crate::math::KernelMath>::exp_f64(x)
+}
+
+fn apply_fast(spec: &KernelSpec, x: MatRef<'_, f64>, out: &mut Mat<f64>) {
+    let compiled = spec.compile();
+    let mut scratch = Mat::zeros(out.nrows(), out.ncols());
+    compiled
+        .apply_points::<crate::math::FastApprox>(x, out.as_mut(), Triangle::Full, scratch.as_mut())
+        .expect("fast apply");
+}
+
+#[test]
+fn fast_rbf_matches_polynomial_and_grad_fd() {
+    let ell = 1.3;
+    let spec = rbf(ell);
+    let x = Mat::from_fn(3, 1, |i, _| [0.0, 0.7, 1.6][i]);
+    let mut k = fill(3, 0.0);
+    apply_fast(&spec, x.as_ref(), &mut k);
+    let inv = 1.0 / (ell * ell);
+    for col in 0..3 {
+        for row in 0..3 {
+            let d = x[(row, 0)] - x[(col, 0)];
+            assert_close(k[(row, col)], fast_exp(-0.5 * d * d * inv));
+        }
+    }
+    let h = 1e-6;
+    let mut plus = spec.clone();
+    let mut minus = spec.clone();
+    let mut theta = vec![0.0; spec.num_params()];
+    spec.get_params(&mut theta).expect("theta");
+    plus.set_params(&[theta[0] + h]).expect("plus");
+    minus.set_params(&[theta[0] - h]).expect("minus");
+    let mut k_plus = fill(3, 0.0);
+    let mut k_minus = fill(3, 0.0);
+    apply_fast(&plus, x.as_ref(), &mut k_plus);
+    apply_fast(&minus, x.as_ref(), &mut k_minus);
+    let compiled = spec.compile();
+    let mut dk = fill(3, 0.0);
+    let mut scratch = fill(3, 0.0);
+    compiled
+        .grad_points::<crate::math::FastApprox>(
+            x.as_ref(),
+            dk.as_mut(),
+            0,
+            Triangle::Full,
+            scratch.as_mut(),
+        )
+        .expect("grad");
+    for col in 0..3 {
+        for row in 0..3 {
+            let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
+            assert_close(dk[(row, col)], fd);
+        }
+    }
+}
+
+fn fd_fast_grad_and_hess(label: &str, spec: &KernelSpec, x: MatRef<'_, f64>) {
+    let n = x.nrows();
+    let p = spec.num_params();
+    let mut theta = vec![0.0; p];
+    spec.get_params(&mut theta).expect("theta");
+    let compiled = spec.compile();
+    let h = 1e-5;
+    let tol = 1e-4;
+    for i in 0..p {
+        let mut plus = spec.clone();
+        let mut minus = spec.clone();
+        let mut tp = theta.clone();
+        let mut tm = theta.clone();
+        tp[i] += h;
+        tm[i] -= h;
+        plus.set_params(&tp).expect("plus");
+        minus.set_params(&tm).expect("minus");
+        let mut k_plus = fill(n, 0.0);
+        let mut k_minus = fill(n, 0.0);
+        apply_fast(&plus, x, &mut k_plus);
+        apply_fast(&minus, x, &mut k_minus);
+        let mut dk = fill(n, 0.0);
+        let mut scratch = fill(n, 0.0);
+        compiled
+            .grad_points::<crate::math::FastApprox>(
+                x,
+                dk.as_mut(),
+                i,
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("grad");
+        for col in 0..n {
+            for row in 0..n {
+                let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
+                let scale = fd.abs().max(1.0);
+                assert!(
+                    (dk[(row, col)] - fd).abs() <= tol * scale,
+                    "{label} grad i={i} ({row},{col}) analytic={} fd={fd}",
+                    dk[(row, col)]
+                );
+            }
+        }
+        for j in 0..=i {
+            let bump = |di: f64, dj: f64| {
+                let mut shifted = spec.clone();
+                let mut t = theta.clone();
+                t[i] += di;
+                t[j] += dj;
+                shifted.set_params(&t).expect("shift");
+                let mut k = fill(n, 0.0);
+                apply_fast(&shifted, x, &mut k);
+                k
+            };
+            let k_pp = bump(h, h);
+            let k_pm = bump(h, -h);
+            let k_mp = bump(-h, h);
+            let k_mm = bump(-h, -h);
+            let mut d2 = fill(n, 0.0);
+            let mut scratch = fill(n, 0.0);
+            compiled
+                .hess_points::<crate::math::FastApprox>(
+                    x,
+                    d2.as_mut(),
+                    i,
+                    j,
+                    Triangle::Full,
+                    scratch.as_mut(),
+                )
+                .expect("hess");
+            for col in 0..n {
+                for row in 0..n {
+                    let fd = (k_pp[(row, col)] - k_pm[(row, col)] - k_mp[(row, col)]
+                        + k_mm[(row, col)])
+                        / (4.0 * h * h);
+                    let scale = fd.abs().max(1.0);
+                    assert!(
+                        (d2[(row, col)] - fd).abs() <= tol * scale,
+                        "{label} hess i={i} j={j} ({row},{col}) analytic={} fd={fd}",
+                        d2[(row, col)]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fast_exp_leaves_match_polynomial_derivatives() {
+    let iso = Mat::from_fn(3, 1, |i, _| [0.0, 0.4, 1.1][i]);
+    let ard = Mat::from_fn(3, 2, |row, col| {
+        [[0.0, 0.2], [0.5, -0.3], [1.1, 0.7]][row][col]
+    });
+    for nu in [MaternNu::Half, MaternNu::ThreeHalves, MaternNu::FiveHalves] {
+        fd_fast_grad_and_hess(
+            &format!("matern {nu:?}"),
+            &KernelSpec::from(MaternKernel::new(1.1, nu).expect("matern")),
+            iso.as_ref(),
+        );
+        fd_fast_grad_and_hess(
+            &format!("matern-ard {nu:?}"),
+            &KernelSpec::from(MaternArdKernel::new(&[0.9, 1.4], nu).expect("matern ard")),
+            ard.as_ref(),
+        );
+    }
+    fd_fast_grad_and_hess(
+        "periodic",
+        &KernelSpec::from(PeriodicKernel::new(1.2, 0.7).expect("periodic")),
+        iso.as_ref(),
+    );
+    fd_fast_grad_and_hess(
+        "rbf-ard",
+        &KernelSpec::from(RbfArdKernel::new(&[1.2, 0.8]).expect("rbf ard")),
+        ard.as_ref(),
+    );
+    fd_fast_grad_and_hess("rbf", &rbf(1.3), iso.as_ref());
+}
+
+#[test]
+fn fast_approx_leaves_non_exp_kernels_unchanged() {
+    let x = Mat::from_fn(2, 1, |i, _| i as f64);
+    for spec in [
+        KernelSpec::from(RationalQuadraticKernel::new(1.0, 1.0).expect("rq")),
+        KernelSpec::from(LinearKernel::new(1.1).expect("linear")),
+        KernelSpec::from(ConstantKernel::new(0.4).expect("constant")),
+        KernelSpec::from(WhiteKernel::new(0.2).expect("white")),
+    ] {
+        let mut accurate = fill(2, 0.0);
+        let mut fast = fill(2, 0.0);
+        let compiled = spec.compile();
+        let mut scratch = fill(2, 0.0);
+        compiled
+            .apply_points::<crate::math::Accurate>(
+                x.as_ref(),
+                accurate.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+            )
+            .expect("accurate");
+        apply_fast(&spec, x.as_ref(), &mut fast);
+        for col in 0..2 {
+            for row in 0..2 {
+                assert_eq!(accurate[(row, col)].to_bits(), fast[(row, col)].to_bits());
+            }
+        }
+    }
 }

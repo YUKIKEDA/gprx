@@ -43,6 +43,7 @@ mod error;
 mod gpr;
 pub mod kernel;
 mod likelihood;
+mod math;
 mod objective;
 mod online;
 mod optimizer;
@@ -65,6 +66,7 @@ pub use gpr::{
     PredictiveCovariance, RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
 };
 pub use likelihood::GaussianLikelihood;
+pub use math::{Accurate, FastApprox};
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 pub use optimizer::{
     AcceptsRecompute, Adam, BoundaryPolicy, FastSimulatedAnnealing, Fixed, FullRecompute,
