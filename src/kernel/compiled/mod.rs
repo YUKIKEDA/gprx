@@ -100,13 +100,7 @@ pub enum CompiledKernel<T: KernelScalar = f64> {
     Product(Vec<CompiledKernel<T>>),
 }
 
-impl<
-    T: KernelScalar
-        + faer_traits::ComplexField
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-> CompiledKernel<T>
-{
+impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn from_spec(spec: &KernelSpec) -> Self {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
@@ -515,15 +509,7 @@ impl<
     }
 }
 
-fn flatten_sum<
-    T: KernelScalar
-        + faer_traits::ComplexField
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
->(
-    spec: &KernelSpec,
-    out: &mut Vec<CompiledKernel<T>>,
-) {
+fn flatten_sum<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
     match spec {
         KernelSpec::Sum(left, right) => {
             flatten_sum(left, out);
@@ -533,15 +519,7 @@ fn flatten_sum<
     }
 }
 
-fn flatten_product<
-    T: KernelScalar
-        + faer_traits::ComplexField
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
->(
-    spec: &KernelSpec,
-    out: &mut Vec<CompiledKernel<T>>,
-) {
+fn flatten_product<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
     match spec {
         KernelSpec::Product(left, right) => {
             flatten_product(left, out);
@@ -601,12 +579,7 @@ fn split_terms<T: KernelScalar>(
         })
 }
 
-fn fold_cached_leaves<
-    T: KernelScalar
-        + faer_traits::ComplexField
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
->(
+fn fold_cached_leaves<T: KernelScalar>(
     terms: &[CompiledKernel<T>],
     grams: &[Mat<T>],
     index: &mut usize,

@@ -254,10 +254,7 @@ impl KernelSpec {
     /// types: each call builds the tree for the scalar you name.
     pub fn compile_as<T>(&self) -> crate::kernel::CompiledKernel<T>
     where
-        T: crate::kernel::KernelScalar
-            + faer_traits::ComplexField
-            + std::ops::Add<Output = T>
-            + std::ops::Mul<Output = T>,
+        T: crate::kernel::KernelScalar,
     {
         crate::kernel::CompiledKernel::<T>::from_spec(self)
     }

@@ -3,7 +3,7 @@
 use std::fmt;
 
 use crate::error::GprError;
-use crate::precision::{PrecisionPolicy, StorageScalar};
+use crate::precision::PrecisionPolicy;
 use crate::workspace::{FitWorkspace, WithDist, WithW, WorkspaceCore};
 
 /// Which predictive variance [`Prediction`] reports.
@@ -107,21 +107,14 @@ pub(crate) enum DistanceCachePersist {
 pub(crate) trait DistanceCacheSlot:
     Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {
-    type DistWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type DistWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>;
     const CACHES_DISTANCES: bool;
 
     fn persist(self) -> Option<DistanceCachePersist>;
 }
 
 impl DistanceCacheSlot for CachedDistances {
-    type DistWrap<W: FitWorkspace>
-        = WithDist<W, <W::Policy as PrecisionPolicy>::Storage>
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type DistWrap<W: FitWorkspace> = WithDist<W, <W::Policy as PrecisionPolicy>::Storage>;
     const CACHES_DISTANCES: bool = true;
 
     fn persist(self) -> Option<DistanceCachePersist> {
@@ -130,11 +123,7 @@ impl DistanceCacheSlot for CachedDistances {
 }
 
 impl DistanceCacheSlot for UncachedDistances {
-    type DistWrap<W: FitWorkspace>
-        = W
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type DistWrap<W: FitWorkspace> = W;
     const CACHES_DISTANCES: bool = false;
 
     fn persist(self) -> Option<DistanceCachePersist> {
@@ -151,11 +140,7 @@ impl DistanceCacheSlot for UncachedDistances {
 pub struct NoDistanceCache;
 
 impl DistanceCacheSlot for NoDistanceCache {
-    type DistWrap<W: FitWorkspace>
-        = W
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type DistWrap<W: FitWorkspace> = W;
     const CACHES_DISTANCES: bool = false;
 
     fn persist(self) -> Option<DistanceCachePersist> {
@@ -516,28 +501,17 @@ impl CholeskyBuffer for ReuseCholesky {}
 
 /// Crate-private workspace allocation for a [`CholeskyBuffer`].
 pub(crate) trait AllocWorkspace: CholeskyBuffer {
-    type CholWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type CholWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>;
     const OVERWRITES_CHOLESKY: bool;
 }
 
 impl AllocWorkspace for RetainCholesky {
-    type CholWrap<W: FitWorkspace>
-        = WithW<W, <W::Policy as PrecisionPolicy>::Storage>
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type CholWrap<W: FitWorkspace> = WithW<W, <W::Policy as PrecisionPolicy>::Storage>;
     const OVERWRITES_CHOLESKY: bool = false;
 }
 
 impl AllocWorkspace for ReuseCholesky {
-    type CholWrap<W: FitWorkspace>
-        = W
-    where
-        <W::Policy as PrecisionPolicy>::Storage: StorageScalar,
-        <W::Policy as PrecisionPolicy>::Refine: faer_traits::ComplexField;
+    type CholWrap<W: FitWorkspace> = W;
     const OVERWRITES_CHOLESKY: bool = true;
 }
 

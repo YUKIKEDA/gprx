@@ -7,6 +7,7 @@ use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
+use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec,
     MixedKernelViews, Triangle,
@@ -17,7 +18,7 @@ use crate::online::OnlineWorkspace;
 use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute};
 use crate::param::Interval;
 use crate::persist::{self, PersistedModel};
-use crate::precision::{GpScalar, StorageScalar};
+use crate::precision::GpScalar;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{
     FitWorkspace, QueryWorkspace, empty_thread_scratch, faer_par, faer_par_dims,
@@ -1846,7 +1847,7 @@ where
         &self,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>() {
+        if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
             return self.loo_from_rounded_kernel(options);
         }
         let mut alpha = Vec::new();
@@ -2116,8 +2117,7 @@ fn storage_alpha_from_saved<P: GpScalar>(
     y: &[f64],
     saved: &[P::Refine],
 ) -> Result<Vec<P::Storage>, GprError> {
-    let mixed = std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
-        && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>();
+    let mixed = P::REFINES_IN_F64;
     if !mixed {
         return Ok(saved
             .iter()
@@ -2235,7 +2235,7 @@ fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprE
     Ok(())
 }
 
-fn zero_and_maybe_noise<T: StorageScalar>(
+fn zero_and_maybe_noise<T: KernelScalar>(
     mut out: MatMut<'_, T>,
     n: usize,
     noise_diag: bool,
@@ -2254,7 +2254,7 @@ fn zero_and_maybe_noise<T: StorageScalar>(
     }
 }
 
-fn kinv_from_w<T: StorageScalar>(alpha: &[T], w: MatRef<'_, T>, row: usize, col: usize) -> T {
+fn kinv_from_w<T: KernelScalar>(alpha: &[T], w: MatRef<'_, T>, row: usize, col: usize) -> T {
     let (r, c) = if row >= col { (row, col) } else { (col, row) };
     alpha[row] * alpha[col] - w[(r, c)]
 }
@@ -2267,7 +2267,7 @@ fn ki_sym<T: Copy>(ki: MatRef<'_, T>, row: usize, col: usize) -> T {
     }
 }
 
-fn trace_ki_kinv2<T: StorageScalar>(
+fn trace_ki_kinv2<T: KernelScalar>(
     ki: MatRef<'_, T>,
     w: MatRef<'_, T>,
     alpha: &[T],
@@ -2293,7 +2293,7 @@ fn compact_train_x(x: &Mat<f64>, n: usize, d: usize) -> Mat<f64> {
     Mat::from_fn(n, d, |i, j| x[(i, j)])
 }
 
-fn mul_lower_chol<T: StorageScalar>(l: MatRef<'_, T>, z: &[T], out: &mut [T]) {
+fn mul_lower_chol<T: KernelScalar>(l: MatRef<'_, T>, z: &[T], out: &mut [T]) {
     let m = l.nrows();
     debug_assert_eq!(z.len(), m);
     debug_assert_eq!(out.len(), m);

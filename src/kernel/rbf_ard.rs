@@ -454,7 +454,7 @@ impl RbfArdKernel {
                     }
                     value
                 } else {
-                    let jet = M::jet_f64(-0.5 * r2);
+                    let jet = M::jet(-0.5 * r2);
                     let mut value = jet.d2 * da * db * wa * wb;
                     if dim_a == dim_b {
                         value -= jet.d1 * wa;
@@ -493,7 +493,7 @@ impl RbfArdKernel {
                     }
                     value
                 } else {
-                    let jet = M::jet_f64(-0.5 * r2);
+                    let jet = M::jet(-0.5 * r2);
                     let mut value = -jet.d2 * dx1 * dx2 * wa * wb;
                     if dim_x1 == dim_x2 {
                         value += jet.d1 * wa;
@@ -540,7 +540,7 @@ impl RbfArdKernel {
                     }
                     value
                 } else {
-                    let jet = M::jet_f64(-0.5 * r2);
+                    let jet = M::jet(-0.5 * r2);
                     let dim_term = delta_theta * delta_theta * w_theta;
                     let mut value = jet.d2 * dim_term * delta_dim * w_dim;
                     if param_idx == dim {
@@ -966,14 +966,14 @@ fn finite_kernel_value(value: f64) -> Result<f64, GprError> {
 }
 
 fn ard_value<M: KernelMath>(r2: f64) -> f64 {
-    M::exp_f64(-0.5 * r2)
+    M::exp(-0.5 * r2)
 }
 
 fn ard_d1<M: KernelMath>(r2: f64) -> f64 {
     if M::ACCURATE {
         (-0.5 * r2).exp()
     } else {
-        M::jet_f64(-0.5 * r2).d1
+        M::jet(-0.5 * r2).d1
     }
 }
 
@@ -986,7 +986,7 @@ fn ard_hess_terms<M: KernelMath>(r2: f64, dim_i: f64, dim_j: f64, same: bool) ->
             k * dim_i * dim_j
         }
     } else {
-        let jet = M::jet_f64(-0.5 * r2);
+        let jet = M::jet(-0.5 * r2);
         if same {
             dim_i * (jet.d2 * dim_i - 2.0 * jet.d1)
         } else {

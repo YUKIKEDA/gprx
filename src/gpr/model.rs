@@ -11,7 +11,7 @@ use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{AcceptsRecompute, Fixed, FullRecompute, Lbfgs, Optimizer, PoleRecompute};
 use crate::persist::MappedTensors;
-use crate::precision::{DoublePrecision, GpScalar, StorageScalar};
+use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
 };
@@ -186,8 +186,8 @@ pub struct FittedGpr<
     /// Predict weights. [`DoublePrecision`] and [`SinglePrecision`] copy
     /// [`Self::factor_alpha`]. [`MixedPrecision`] stores the refined `f64` `α`.
     alpha: Vec<P::Refine>,
-    x_cast: <P::Storage as StorageScalar>::ColCast,
-    y_cast: <P::Storage as StorageScalar>::RowCast,
+    x_cast: <P::Storage as crate::kernel::ScalarOps>::ColCast,
+    y_cast: <P::Storage as crate::kernel::ScalarOps>::RowCast,
     n: usize,
     d: usize,
     mapped_factor: Option<MappedTensors>,
