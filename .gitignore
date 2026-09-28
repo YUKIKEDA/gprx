@@ -1,6 +1,11 @@
+## Build
 /target
-.dev/
-**/*.rs.bk
+*.pdb
+
+## Editor
 .idea/
 .vscode/
-*.pdb
+**/*.rs.bk
+
+## Local scratch
+.dev/
