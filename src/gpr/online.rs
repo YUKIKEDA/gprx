@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 #[cfg(feature = "insert-stages")]
 use std::time::Instant;
 
@@ -190,6 +191,69 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
     pub(crate) optimizer: O,
     pub(crate) workspace: OnlineWorkspace<P::Storage>,
     pub(crate) registry: PointRegistry,
+    pub(crate) alpha: AlphaState<P>,
+}
+
+/// `α` for an online model. Insert and delete only mark it stale (libgp's
+/// `alpha_needs_update`); the first read solves it.
+pub(crate) struct AlphaState<P: GpScalar> {
+    /// `core.factor_alpha` / `core.alpha` match the current factor.
+    fresh: bool,
+    /// Stage a failed stale solve reports.
+    stage: CholeskyStage,
+    /// Solved on the first `&self` read while stale; cleared by every update.
+    cache: OnceLock<Result<SolvedAlpha<P>, GprError>>,
+}
+
+/// Factor `α` (storage scalar) and predict `α`.
+type AlphaRefs<'a, P> = (
+    &'a [<P as crate::precision::PrecisionPolicy>::Storage],
+    &'a [<P as crate::precision::PrecisionPolicy>::Refine],
+);
+
+pub(crate) struct SolvedAlpha<P: GpScalar> {
+    factor: Vec<P::Storage>,
+    predict: Vec<P::Refine>,
+}
+
+impl<P: GpScalar> Clone for SolvedAlpha<P> {
+    fn clone(&self) -> Self {
+        Self {
+            factor: self.factor.clone(),
+            predict: self.predict.clone(),
+        }
+    }
+}
+
+impl<P: GpScalar> Clone for AlphaState<P> {
+    fn clone(&self) -> Self {
+        Self {
+            fresh: self.fresh,
+            stage: self.stage,
+            cache: self.cache.clone(),
+        }
+    }
+}
+
+impl<P: GpScalar> AlphaState<P> {
+    fn fresh() -> Self {
+        Self {
+            fresh: true,
+            stage: CholeskyStage::OnlineInsert,
+            cache: OnceLock::new(),
+        }
+    }
+
+    fn mark_stale(&mut self, stage: CholeskyStage) {
+        self.fresh = false;
+        self.stage = stage;
+        self.cache = OnceLock::new();
+    }
+
+    fn mark_fresh(&mut self) {
+        self.fresh = true;
+        self.cache = OnceLock::new();
+    }
 }
 
 impl<O, P> Clone for OnlineGpr<O, P>
@@ -203,6 +267,7 @@ where
             optimizer: self.optimizer.clone(),
             workspace: self.workspace.clone(),
             registry: self.registry.clone(),
+            alpha: self.alpha.clone(),
         }
     }
 }
@@ -242,6 +307,7 @@ where
             optimizer,
             workspace,
             registry,
+            alpha: AlphaState::fresh(),
         }
     }
 
@@ -260,6 +326,7 @@ where
             optimizer,
             workspace: self.workspace,
             registry: self.registry,
+            alpha: self.alpha,
         }
     }
 
@@ -283,9 +350,16 @@ where
         &self.core.likelihood
     }
 
-    /// Returns predict `α` after the last insert, delete, or hyperparameter write.
-    pub fn alpha(&self) -> &[P::Refine] {
-        &self.core.alpha
+    /// Returns predict `α` for the current training points.
+    ///
+    /// Insert and delete leave `α` stale; the first call after them solves it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::CholeskyFailed`] if a [`crate::MixedPrecision`]
+    /// model cannot build the `f64` fallback factor.
+    pub fn alpha(&self) -> Result<&[P::Refine], GprError> {
+        Ok(self.alphas()?.1)
     }
 
     /// Returns the original training features in column-major order.
@@ -302,18 +376,52 @@ where
         StoredFactor::Ldlt(self.ld_factor())
     }
 
-    fn refresh_factor_alpha(&mut self) {
-        let n = self.core.n;
-        let ld = self.workspace.ld_factor.as_ref().submatrix(0, 0, n, n);
-        self.core.solve_factor_alpha(StoredFactor::Ldlt(ld));
-        OnlineWorkspace::set_vector_prefix(&mut self.workspace.alpha, &self.core.factor_alpha);
+    /// Solves the factor and predict `α` from the stored LDLT.
+    fn solve_alpha(&self) -> Result<SolvedAlpha<P>, GprError> {
+        let factor = self.core.solve_factor_alpha(self.factor());
+        let mut predict = Vec::with_capacity(factor.len());
+        self.core.write_predict_alpha(
+            self.factor(),
+            &factor,
+            self.workspace.factor_jitter,
+            self.alpha.stage,
+            &mut predict,
+        )?;
+        Ok(SolvedAlpha { factor, predict })
     }
 
-    fn publish_predict_alpha(&mut self, stage: CholeskyStage) -> Result<(), GprError> {
-        let n = self.core.n;
-        let ld = self.workspace.ld_factor.as_ref().submatrix(0, 0, n, n);
-        self.core
-            .publish_predict_alpha(StoredFactor::Ldlt(ld), self.workspace.factor_jitter, stage)
+    /// Factor `α` and predict `α`, solving them once while stale.
+    fn alphas(&self) -> Result<AlphaRefs<'_, P>, GprError> {
+        if self.alpha.fresh {
+            return Ok((&self.core.factor_alpha, &self.core.alpha));
+        }
+        match self.alpha.cache.get_or_init(|| self.solve_alpha()) {
+            Ok(solved) => Ok((&solved.factor, &solved.predict)),
+            Err(err) => Err(err.clone()),
+        }
+    }
+
+    /// Makes `core.factor_alpha` / `core.alpha` current before a `&mut self` read.
+    fn refresh_alpha(&mut self) -> Result<(), GprError> {
+        if self.alpha.fresh {
+            return Ok(());
+        }
+        let solved = match self.alpha.cache.take() {
+            Some(result) => result?,
+            None => self.solve_alpha()?,
+        };
+        self.core.factor_alpha = solved.factor;
+        self.core.alpha = solved.predict;
+        self.alpha.mark_fresh();
+        Ok(())
+    }
+
+    /// Records the outcome of a hyperparameter write on the LDLT.
+    fn after_write<R>(&mut self, result: Result<R, GprError>) -> Result<R, GprError> {
+        if result.is_ok() {
+            self.alpha.mark_fresh();
+        }
+        result
     }
 
     /// Returns training-point identifiers in workspace buffer order.
@@ -488,8 +596,7 @@ where
         self.core.y_train.push(y_trans[0]);
         self.core.n += 1;
         OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
-        self.refresh_factor_alpha();
-        self.publish_predict_alpha(CholeskyStage::OnlineInsert)?;
+        self.alpha.mark_stale(CholeskyStage::OnlineInsert);
         let id = self.registry.insert();
         #[cfg(feature = "insert-stages")]
         insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
@@ -546,8 +653,7 @@ where
         self.registry.remove_at(index);
         self.core.n -= 1;
         OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
-        self.refresh_factor_alpha();
-        self.publish_predict_alpha(CholeskyStage::OnlineDelete)?;
+        self.alpha.mark_stale(CholeskyStage::OnlineDelete);
         Ok(())
     }
 
@@ -582,7 +688,10 @@ where
     ///
     /// Returns [`GprError::CholeskyFailed`] if a stored `Dᵢ` is not positive.
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
-        Ok(self.core.neg_log_marginal_likelihood(self.factor()))
+        let (factor_alpha, _) = self.alphas()?;
+        Ok(self
+            .core
+            .neg_log_marginal_likelihood(self.factor(), factor_alpha))
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
@@ -610,9 +719,10 @@ where
     ///
     /// Same as [`FittedGpr::set_params`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        with_llt_view(&mut self.core, &mut self.workspace, |view| {
+        let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
             view.set_params(params)
-        })
+        });
+        self.after_write(result)
     }
 
     /// Writes the joint NLML and gradient at `params`.
@@ -625,9 +735,10 @@ where
         params: &[f64],
         out: &mut [f64],
     ) -> Result<f64, GprError> {
-        with_llt_view(&mut self.core, &mut self.workspace, |view| {
+        let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
             view.value_and_gradient_into(params, out)
-        })
+        });
+        self.after_write(result)
     }
 
     /// Writes the analytic NLML Hessian (row-major `p×p`) at `params`.
@@ -636,9 +747,10 @@ where
     ///
     /// Same as [`FittedGpr::hessian_into`].
     pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
-        with_llt_view(&mut self.core, &mut self.workspace, |view| {
+        let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
             view.hessian_into(params, out)
-        })
+        });
+        self.after_write(result)
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
@@ -686,8 +798,9 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
+        let (_, alpha) = self.alphas()?;
         self.core
-            .write_prediction(self.factor(), xs, n_rows, n_cols, options, &mut out)?;
+            .write_prediction(self.factor(), alpha, xs, n_rows, n_cols, options, &mut out)?;
         Ok(out)
     }
 
@@ -704,6 +817,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
+        self.refresh_alpha()?;
         let n = self.core.n;
         let ld = self.workspace.ld_factor.as_ref().submatrix(0, 0, n, n);
         self.core.predict_with_into(
@@ -743,8 +857,9 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        let (_, alpha) = self.alphas()?;
         self.core
-            .write_covariance(self.factor(), xs, n_rows, n_cols, options)
+            .write_covariance(self.factor(), alpha, xs, n_rows, n_cols, options)
     }
 
     /// Draws posterior samples at `xs`.
@@ -777,8 +892,17 @@ where
         n_draws: usize,
         seed: u64,
     ) -> Result<Vec<P::Refine>, GprError> {
-        self.core
-            .sample_with(self.factor(), xs, n_rows, n_cols, options, n_draws, seed)
+        let (_, alpha) = self.alphas()?;
+        self.core.sample_with(
+            self.factor(),
+            alpha,
+            xs,
+            n_rows,
+            n_cols,
+            options,
+            n_draws,
+            seed,
+        )
     }
 
     /// Leave-one-out predictive mean and variance on the training set.
@@ -799,7 +923,8 @@ where
         &self,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        self.core.loo_predict_with(self.factor(), options)
+        let (_, alpha) = self.alphas()?;
+        self.core.loo_predict_with(self.factor(), alpha, options)
     }
 }
 
@@ -815,9 +940,10 @@ where
     /// Same as [`FittedGpr::refit`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         let optimizer = &self.optimizer;
-        with_llt_view(&mut self.core, &mut self.workspace, |view| {
+        let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
             view.optimize(optimizer)
-        })
+        });
+        self.after_write(result)
     }
 }
 
@@ -831,7 +957,8 @@ where
     ///
     /// Same as [`Gpr<Fixed>::factor`].
     pub fn refit(&mut self) -> Result<(), GprError> {
-        with_llt_view(&mut self.core, &mut self.workspace, |view| view.refactor())
+        let result = with_llt_view(&mut self.core, &mut self.workspace, |view| view.refactor());
+        self.after_write(result)
     }
 
     pub(crate) fn from_persisted(parts: PersistedModel<P>) -> Result<Self, GprError> {
@@ -1340,7 +1467,7 @@ mod tests {
         let want = batch.predict(&[0.5, 2.0], 2, 1).expect("batch predict");
         assert_all_close(&got.mean, &want.mean);
         assert_all_close(&got.variance, &want.variance);
-        assert_all_close(online.alpha(), batch.alpha());
+        assert_all_close(online.alpha().expect("alpha"), batch.alpha());
         assert_eq!(online.point_ids(), ids.as_slice());
         online.insert(&[3.1], 0.4).expect("insert after set_params");
         assert_eq!(online.n(), 5);
@@ -1351,7 +1478,7 @@ mod tests {
         let (mut online, _) = online_and_batch();
         let mut before = [0.0; 2];
         online.get_params(&mut before).expect("len");
-        let alpha = online.alpha().to_vec();
+        let alpha = online.alpha().expect("alpha").to_vec();
         let nlml = online.neg_log_marginal_likelihood().expect("nlml");
         let bad = [before[0], f64::INFINITY];
         assert!(matches!(
@@ -1361,7 +1488,7 @@ mod tests {
         let mut after = [0.0; 2];
         online.get_params(&mut after).expect("len");
         assert_eq!(after.map(f64::to_bits), before.map(f64::to_bits));
-        assert_eq!(online.alpha(), alpha.as_slice());
+        assert_eq!(online.alpha().expect("alpha"), alpha.as_slice());
         assert_eq!(
             online
                 .neg_log_marginal_likelihood()
@@ -1369,5 +1496,38 @@ mod tests {
                 .to_bits(),
             nlml.to_bits()
         );
+    }
+
+    #[test]
+    fn stale_alpha_is_solved_on_first_read() {
+        let (mut online, batch) = online_and_batch();
+        assert!(!online.alpha.fresh);
+        let cached = online.alpha().expect("stale alpha").to_vec();
+        assert!(!online.alpha.fresh);
+        assert_all_close(&cached, batch.alpha());
+        let mut into = Prediction::default();
+        online
+            .predict_into(&[0.5, 2.0], 2, 1, &mut into)
+            .expect("predict_into");
+        assert!(online.alpha.fresh);
+        let want = batch.predict(&[0.5, 2.0], 2, 1).expect("batch predict");
+        assert_all_close(&into.mean, &want.mean);
+        assert_all_close(&into.variance, &want.variance);
+        let id = online.point_ids()[1];
+        online.delete(id).expect("delete");
+        assert!(!online.alpha.fresh);
+        let rebuilt = Gpr::new(
+            KernelSpec::from(RbfKernel::new(0.8).expect("ell")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.9, 2.4], 3, 1, &[0.3, 0.8, 0.1])
+        .map_err(|(_, e)| e)
+        .expect("factor 3");
+        assert_all_close(
+            &[online.neg_log_marginal_likelihood().expect("online nlml")],
+            &[rebuilt.neg_log_marginal_likelihood().expect("batch nlml")],
+        );
+        assert_all_close(online.alpha().expect("alpha"), rebuilt.alpha());
     }
 }
