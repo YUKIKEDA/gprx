@@ -42,4 +42,4 @@ Wall time is one face of the cost. The algorithm (n solves for A⁻¹) is the sa
 
 - On an unset 16-thread pool, the square kernel at n=256 uses 4 faer threads, predict 100 at n=1024 uses 6, and predict 100 at n=4096 uses 8
 - Parallelism can change bitwise results. Numerical tests use a tolerance
-- Pass/fail is `compare/perf` and `.dev/bench-log.md`. criterion is not used
+- Pass/fail is `compare/perf`. criterion is not used. The machine log is local `.dev/bench-log.md` and is not committed

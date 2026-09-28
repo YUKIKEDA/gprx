@@ -898,7 +898,7 @@ The input has to be the same every time, or a faster run cannot be told from a d
 - Isotropic: 1-D Forrester `f(x)=(6x-2)² sin(12x-4)`, `x ∈ [0, 1]`, RBF + `GaussianLikelihood` + `StandardizeTarget`. Initial hyperparameters `ℓ = 1`, `σn² = 0.1`
 - ARD: 2-D weighted sphere `f=(x/0.25)²+(y/1)²`, a 16×16 grid on `[0, 1]²`. Initial `ℓ_d = 4` (`ℓ_d = 1` dies on the first line search)
 - `y` is that function plus `N(0, 1)` (`SmallRng`. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on Never). It is not an independent random series (L-BFGS eval counts move with the landscape)
-- Some of the historical `phase-1a` / `phase-1b` log used `d = 8` and an independent random `y`. The Forrester remeasure of `phase-1b` is P2-9 (`.dev/bench-log.md`). Do not mix those times with the d = 8 times
+- Some of the historical `phase-1a` / `phase-1b` log used `d = 8` and an independent random `y`. The Forrester remeasure of `phase-1b` is P2-9 (`.dev/bench-log.md` (local, not committed)). Do not mix those times with the d = 8 times
 - Groups (only paths that exist. Do not write a group that is not there yet):
   1. `kernel_rbf` — lower-triangle build of K
   2. `cholesky_alpha` — LLT of `A` and `α`
@@ -916,10 +916,10 @@ The input has to be the same every time, or a faster run cannot be told from a d
 | M0 | The crate only. Do not add an empty `benches/` |
 | Right after P1A-7 (P1A-18) | criterion and `just bench`. `kernel_rbf` and `cholesky_alpha` |
 | P1A-8 / P1A-10 | Add `predict_100` / `mll_and_grad` to the same file. P1A-19 adds the allocation ratchet |
-| End of 1a | Take the named baseline `phase-1a` and record the machine and the numbers in `.dev/bench-log.md` |
+| End of 1a | Take the named baseline `phase-1a` and record the machine and the numbers in `.dev/bench-log.md` (local, not committed) |
 | End of 1b | Add `fit_lbfgs` and the baseline `phase-1b` |
 | Phase 2 | **No new harness.** Read `phase-1b` and optimize in bottleneck order. P2-5: SIMD for isotropic RBF and distances. Judge it on `kernel_rbf` / `predict` / `FIXED`, not on the gradient term of `mll_and_grad` alone. The NLML constant is measured in P2-6, the difference is noise, and `L(θ)` stays one formula. The ARD distance cache is P2-7, Always versus Never on `mll_and_grad_ard` / `fit_lbfgs_ard`. The fill and RBF ARD are Rayon + SIMD |
-| End of 2 (P2-9) | Take the named baseline `phase-2` and record the machine and the numbers in `.dev/bench-log.md`. Isotropic is compared with `phase-1b`. ARD is Always versus Never. `just test` and alloc 0 on the `FittedGpr` path |
+| End of 2 (P2-9) | Take the named baseline `phase-2` and record the machine and the numbers in `.dev/bench-log.md` (local, not committed). Isotropic is compared with `phase-1b`. ARD is Always versus Never. `just test` and alloc 0 on the `FittedGpr` path |
 | Phase 3+ | Add insert/delete and the rest on the same problem definition. The comparison baseline is `phase-2`. Sparse wall time and RSS are `just perf-sparse` (P4-12). Online time is `just perf-sparse-online` (P4-14). Do not add a Sparse group to criterion |
 
 A PR that touches a hot path (`src/kernel/`, `workspace`, `exact`, `objective`, `online`) pastes criterion against the previous baseline in Verification. If the change cannot affect speed, say why.
