@@ -108,8 +108,8 @@ pub fn fill_ard_squared_diff(
     }
 }
 
-pub(crate) fn require_ard_sq_diff_shape(
-    cache: MatRef<'_, f64>,
+pub(crate) fn require_ard_sq_diff_shape<T>(
+    cache: MatRef<'_, T>,
     n: usize,
     d: usize,
 ) -> Result<(), GprError> {
@@ -126,34 +126,6 @@ pub(crate) fn require_ard_sq_diff_shape(
                 cols
             ),
         })
-    }
-}
-
-pub(crate) fn weighted_r2_from_cache(
-    cache: MatRef<'_, f64>,
-    n: usize,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    param_idx: Option<usize>,
-) -> Result<(f64, f64), GprError> {
-    let mut r2 = 0.0;
-    let mut dim_term = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let v = cache[(row, dim * n + col)];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = v * w;
-        r2 += term;
-        if param_idx == Some(dim) {
-            dim_term = term;
-        }
-    }
-    if r2.is_finite() {
-        Ok((r2, dim_term))
-    } else {
-        Err(GprError::NonFiniteKernelValue)
     }
 }
 
@@ -279,65 +251,8 @@ fn copy_lower_to_upper(mut dist: MatMut<'_, f64>) {
     }
 }
 
-/// Squared-distance fills. `f64` keeps the SIMD path. `f32` is the same formula in scalar.
-pub(crate) trait FillDistances: Copy {
-    const READS_ARD_CACHE: bool;
-
-    fn write_squared(x: MatRef<'_, Self>, dist: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
-
-    fn write_cross(
-        x_train: MatRef<'_, Self>,
-        x_test: MatRef<'_, Self>,
-        dist: MatMut<'_, Self>,
-        scratch: &mut [Mat<Self>],
-    );
-
-    fn write_ard(x: MatRef<'_, Self>, cache: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
-}
-
-impl FillDistances for f64 {
-    const READS_ARD_CACHE: bool = true;
-
-    fn write_squared(x: MatRef<'_, Self>, dist: MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
-        fill_squared_euclidean(x, dist, scratch);
-    }
-
-    fn write_cross(
-        x_train: MatRef<'_, Self>,
-        x_test: MatRef<'_, Self>,
-        dist: MatMut<'_, Self>,
-        scratch: &mut [Mat<Self>],
-    ) {
-        fill_squared_euclidean_cross(x_train, x_test, dist, scratch);
-    }
-
-    fn write_ard(x: MatRef<'_, Self>, cache: MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
-        fill_ard_squared_diff(x, cache, scratch);
-    }
-}
-
-impl FillDistances for f32 {
-    const READS_ARD_CACHE: bool = false;
-
-    fn write_squared(x: MatRef<'_, Self>, mut dist: MatMut<'_, Self>, _scratch: &mut [Mat<Self>]) {
-        fill_squared_scalar(x, dist.as_mut());
-    }
-
-    fn write_cross(
-        x_train: MatRef<'_, Self>,
-        x_test: MatRef<'_, Self>,
-        mut dist: MatMut<'_, Self>,
-        _scratch: &mut [Mat<Self>],
-    ) {
-        fill_cross_scalar(x_train, x_test, dist.as_mut());
-    }
-
-    fn write_ard(x: MatRef<'_, Self>, mut cache: MatMut<'_, Self>, _scratch: &mut [Mat<Self>]) {
-        fill_ard_scalar(x, cache.as_mut());
-    }
-}
-
-fn fill_squared_scalar(x: MatRef<'_, f32>, mut dist: MatMut<'_, f32>) {
+/// `f32` squared distances: the same formula as the `f64` fill, in scalar.
+pub(crate) fn fill_squared_scalar(x: MatRef<'_, f32>, mut dist: MatMut<'_, f32>) {
     let n = x.nrows();
     let d = x.ncols();
     for col in 0..n {
@@ -352,7 +267,11 @@ fn fill_squared_scalar(x: MatRef<'_, f32>, mut dist: MatMut<'_, f32>) {
     }
 }
 
-fn fill_cross_scalar(x_train: MatRef<'_, f32>, x_test: MatRef<'_, f32>, mut dist: MatMut<'_, f32>) {
+pub(crate) fn fill_cross_scalar(
+    x_train: MatRef<'_, f32>,
+    x_test: MatRef<'_, f32>,
+    mut dist: MatMut<'_, f32>,
+) {
     let n = x_train.nrows();
     let m = x_test.nrows();
     let d = x_train.ncols();
@@ -368,7 +287,7 @@ fn fill_cross_scalar(x_train: MatRef<'_, f32>, x_test: MatRef<'_, f32>, mut dist
     }
 }
 
-fn fill_ard_scalar(x: MatRef<'_, f32>, mut cache: MatMut<'_, f32>) {
+pub(crate) fn fill_ard_scalar(x: MatRef<'_, f32>, mut cache: MatMut<'_, f32>) {
     let n = x.nrows();
     let d = x.ncols();
     for dim in 0..d {

@@ -5,6 +5,7 @@ use super::{
     validate_positive_finite, write_square,
 };
 use crate::error::GprError;
+use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
@@ -123,10 +124,10 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched.
-    pub fn apply(
+    pub fn apply<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_square_pair(dist, out.as_ref())?;
@@ -138,15 +139,15 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if the matrices are empty or size mismatched.
-    pub fn apply_cross(
+    pub fn apply_cross<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         require_same_shape(dist, out.as_ref())?;
         for col in 0..out.ncols() {
             for row in 0..out.nrows() {
-                out[(row, col)] = 0.0;
+                out[(row, col)] = T::from_f64(0.0);
             }
         }
         Ok(())
@@ -157,10 +158,10 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if `x` is empty or `out` is not `n×n`.
-    pub fn apply_points(
+    pub fn apply_points<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_points_square(x, out.as_ref())?;
@@ -172,24 +173,24 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if a matrix is empty or `out` is the wrong shape.
-    pub fn apply_cross_points(
+    pub fn apply_cross_points<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        xs: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         require_cross_points(x, xs, out.as_ref())?;
         for col in 0..out.ncols() {
             for row in 0..out.nrows() {
-                out[(row, col)] = 0.0;
+                out[(row, col)] = T::from_f64(0.0);
             }
         }
         Ok(())
     }
 
     /// Writes the diagonal `k(x, x) = σw²` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(self.variance());
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(self.variance()));
     }
 
     /// Writes `∂K/∂θ` for `θ = log(σw²)` (`σw²` on the diagonal).
@@ -198,10 +199,10 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape errors as [`Self::apply`].
-    pub fn grad(
+    pub fn grad<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -215,10 +216,10 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Same as [`Self::grad`], with `x` in place of `dist`.
-    pub fn grad_points(
+    pub fn grad_points<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -233,10 +234,10 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape errors as [`Self::apply`].
-    pub fn hess(
+    pub fn hess<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
@@ -251,10 +252,10 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Same as [`Self::hess`], with `x` in place of `dist`.
-    pub fn hess_points(
+    pub fn hess_points<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
@@ -272,27 +273,27 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Same shape errors as [`RbfKernel::grad_wrt_coord_dim`].
-    pub fn grad_wrt_coord_dim(
+    pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
         dim: usize,
     ) -> Result<(), GprError> {
         super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
         for col in 0..d_k.ncols() {
             for row in 0..d_k.nrows() {
-                d_k[(row, col)] = 0.0;
+                d_k[(row, col)] = T::from_f64(0.0);
             }
         }
         Ok(())
     }
 
-    pub(crate) fn hess_wrt_coord_dims(
+    pub(crate) fn hess_wrt_coord_dims<T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
         dim_a: usize,
         dim_b: usize,
     ) -> Result<(), GprError> {
@@ -302,11 +303,11 @@ impl WhiteKernel {
         Ok(())
     }
 
-    pub(crate) fn hess_wrt_coord_mixed(
+    pub(crate) fn hess_wrt_coord_mixed<T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
         dim_x1: usize,
         dim_x2: usize,
     ) -> Result<(), GprError> {
@@ -316,11 +317,11 @@ impl WhiteKernel {
         Ok(())
     }
 
-    pub(crate) fn hess_theta_coord_dim(
+    pub(crate) fn hess_theta_coord_dim<T: KernelScalar>(
         &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
         param_idx: usize,
         dim: usize,
     ) -> Result<(), GprError> {
@@ -330,16 +331,22 @@ impl WhiteKernel {
         Ok(())
     }
 
-    fn write_square(&self, out: MatMut<'_, f64>, uplo: Triangle) -> Result<(), GprError> {
-        let var = self.variance();
-        write_square(out, uplo, |row, col| Ok(if row == col { var } else { 0.0 }))
+    fn write_square<T: KernelScalar>(
+        &self,
+        out: MatMut<'_, T>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let var = T::from_f64(self.variance());
+        write_square(out, uplo, |row, col| {
+            Ok(if row == col { var } else { T::from_f64(0.0) })
+        })
     }
 }
 
-fn fill_zero(mut out: MatMut<'_, f64>) {
+fn fill_zero<T: KernelScalar>(mut out: MatMut<'_, T>) {
     for col in 0..out.ncols() {
         for row in 0..out.nrows() {
-            out[(row, col)] = 0.0;
+            out[(row, col)] = T::from_f64(0.0);
         }
     }
 }
@@ -364,7 +371,10 @@ fn require_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     }
 }
 
-fn require_points_square(x: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(), GprError> {
+fn require_points_square<T: KernelScalar>(
+    x: MatRef<'_, T>,
+    out: MatRef<'_, T>,
+) -> Result<(), GprError> {
     if x.nrows() == 0 || x.ncols() == 0 {
         return Err(GprError::EmptyInput);
     }
@@ -382,10 +392,10 @@ fn require_points_square(x: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(),
     Ok(())
 }
 
-fn require_cross_points(
-    x: MatRef<'_, f64>,
-    xs: MatRef<'_, f64>,
-    out: MatRef<'_, f64>,
+fn require_cross_points<T: KernelScalar>(
+    x: MatRef<'_, T>,
+    xs: MatRef<'_, T>,
+    out: MatRef<'_, T>,
 ) -> Result<(), GprError> {
     if x.nrows() == 0 || x.ncols() == 0 || xs.nrows() == 0 || xs.ncols() == 0 {
         return Err(GprError::EmptyInput);

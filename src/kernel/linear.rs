@@ -2,6 +2,7 @@
 
 use super::{Triangle, validate_log_positive, validate_positive_finite, write_square};
 use crate::error::GprError;
+use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
@@ -116,15 +117,15 @@ impl LinearKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `out` is not `n×n`, or a
     /// coordinate is non-finite.
-    pub fn apply(
+    pub fn apply<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_square_points(x, out.as_ref())?;
         crate::data::require_finite_points(x)?;
-        let var = self.variance();
+        let var = T::from_f64(self.variance());
         let d = x.ncols();
         write_square(out, uplo, |row, col| Ok(var * dot_at(x, row, x, col, d)?))
     }
@@ -135,11 +136,11 @@ impl LinearKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
-    pub fn apply_cross(
+    pub fn apply_cross<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        xs: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         require_feature_pair(x, xs)?;
         if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
@@ -155,14 +156,9 @@ impl LinearKernel {
         }
         crate::data::require_finite_points(x)?;
         crate::data::require_finite_points(xs)?;
-        let var = self.variance();
+        let var = T::from_f64(self.variance());
         let d = x.ncols();
-        for col in 0..xs.nrows() {
-            for row in 0..x.nrows() {
-                out[(row, col)] = var * dot_at(x, row, xs, col, d)?;
-            }
-        }
-        Ok(())
+        super::write_rect(out, |row, col| Ok(var * dot_at(x, row, xs, col, d)?))
     }
 
     /// Writes the diagonal `k(x_i, x_i) = σ² ‖x_i‖²` into `out`.
@@ -172,7 +168,11 @@ impl LinearKernel {
     /// Returns [`GprError::EmptyInput`] if `x` is empty,
     /// [`GprError::LengthMismatch`] if `out.len()` is not `x.nrows()`,
     /// or [`GprError::NonFiniteInput`] if a coordinate is non-finite.
-    pub fn fill_diag_points(&self, x: MatRef<'_, f64>, out: &mut [f64]) -> Result<(), GprError> {
+    pub fn fill_diag_points<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        out: &mut [T],
+    ) -> Result<(), GprError> {
         if x.nrows() == 0 || x.ncols() == 0 {
             return Err(GprError::EmptyInput);
         }
@@ -182,7 +182,7 @@ impl LinearKernel {
             });
         }
         crate::data::require_finite_points(x)?;
-        let var = self.variance();
+        let var = T::from_f64(self.variance());
         let d = x.ncols();
         for (i, slot) in out.iter_mut().enumerate() {
             *slot = var * dot_at(x, i, x, i, d)?;
@@ -196,10 +196,10 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad(
+    pub fn grad<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -217,10 +217,10 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess(
+    pub fn hess<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
@@ -234,14 +234,14 @@ impl LinearKernel {
     }
 }
 
-fn dot_at(
-    x: MatRef<'_, f64>,
+fn dot_at<T: KernelScalar>(
+    x: MatRef<'_, T>,
     row: usize,
-    xs: MatRef<'_, f64>,
+    xs: MatRef<'_, T>,
     col: usize,
     d: usize,
-) -> Result<f64, GprError> {
-    let mut sum = 0.0;
+) -> Result<T, GprError> {
+    let mut sum = T::from_f64(0.0);
     for dim in 0..d {
         sum += x[(row, dim)] * xs[(col, dim)];
     }
@@ -252,7 +252,10 @@ fn dot_at(
     }
 }
 
-fn require_feature_pair(x: MatRef<'_, f64>, xs: MatRef<'_, f64>) -> Result<(), GprError> {
+fn require_feature_pair<T: KernelScalar>(
+    x: MatRef<'_, T>,
+    xs: MatRef<'_, T>,
+) -> Result<(), GprError> {
     if x.nrows() == 0 || x.ncols() == 0 || xs.nrows() == 0 || xs.ncols() == 0 {
         return Err(GprError::EmptyInput);
     }
@@ -265,7 +268,10 @@ fn require_feature_pair(x: MatRef<'_, f64>, xs: MatRef<'_, f64>) -> Result<(), G
     Ok(())
 }
 
-fn require_square_points(x: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usize, GprError> {
+fn require_square_points<T: KernelScalar>(
+    x: MatRef<'_, T>,
+    out: MatRef<'_, T>,
+) -> Result<usize, GprError> {
     if x.nrows() == 0 || x.ncols() == 0 {
         return Err(GprError::EmptyInput);
     }

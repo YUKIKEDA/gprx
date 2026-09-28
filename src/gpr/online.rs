@@ -11,7 +11,7 @@ use faer::{Mat, MatMut, MatRef};
 use crate::data::{pack_storage, validate_query};
 use crate::error::GprError;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
@@ -288,7 +288,6 @@ where
     B: AllocWorkspace,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
@@ -1106,7 +1105,6 @@ where
     B: AllocWorkspace,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
     O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
@@ -1130,7 +1128,6 @@ where
     C: DistanceCacheSlot,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Rebuilds the LDLT factor at the current `θ` without a search.
     ///
@@ -1150,7 +1147,6 @@ where
     C: DistanceCacheSlot,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     pub(crate) fn from_persisted(parts: PersistedModel<C, P>) -> Result<Self, GprError> {
         FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
@@ -1178,7 +1174,6 @@ fn write_ldlt_prediction<M: crate::math::KernelMath, P>(
 ) -> Result<(), GprError>
 where
     P: GpScalar,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let zero = P::Refine::from_f64(0.0);
     if out.mean.len() != m {

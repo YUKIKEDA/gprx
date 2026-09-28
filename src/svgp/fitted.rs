@@ -9,7 +9,6 @@ use crate::error::GprError;
 use crate::param::write_params;
 
 use crate::kernel::KernelSpec;
-use crate::kernel::{CompiledKernel, GramKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
 use crate::{PredictOptions, Prediction};
@@ -54,7 +53,6 @@ impl<M, P> FittedSvgp<M, P>
 where
     M: crate::math::KernelMath,
     P: GpScalar + SvgpMean,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Returns the number of training points.
     pub fn n(&self) -> usize {

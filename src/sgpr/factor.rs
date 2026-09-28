@@ -12,9 +12,7 @@ use crate::gpr::JitterPolicy;
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{
-    CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
-};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     append_chol_border, cholesky_lower_owned, cholesky_lower_with_retries, copy_mat,
@@ -407,8 +405,6 @@ pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, 
 ) -> Result<FittedSgpr<O, I, M, P>, GprError>
 where
     P: ModelPrecision + PublishSgprWeights,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let state =
         assemble_vfe::<M, P::Storage>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
@@ -467,8 +463,7 @@ pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
     n_inducing: usize,
 ) -> Result<VfeState<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     validate_training(x, n_rows, n_cols, y)?;
     validate_inducing(z, n_inducing, n_cols)?;
@@ -881,8 +876,6 @@ pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P>(
 ) -> Result<(), GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.y, &mut y_cast);
@@ -922,8 +915,6 @@ pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P>(
 ) -> Result<(), GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.y, &mut y_cast);
@@ -951,8 +942,6 @@ pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P>(
 ) -> Result<Vec<KernelVar<P::Storage>>, GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let compiled = model.kernel.compile_as::<P::Storage>();
     let x64 = pack_points(&model.x_obs, model.n, model.d);
@@ -990,8 +979,7 @@ pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
     param_idx: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
@@ -1035,8 +1023,7 @@ pub(crate) fn z_coord_var<M: crate::math::KernelMath, T>(
     dim: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let m = z.nrows();
     let n = x.nrows();
@@ -1069,8 +1056,6 @@ pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P>(
 ) -> Result<KernelVar<P::Storage>, GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let n_kernel = model.kernel.num_params();
     let n_theta = n_kernel + model.likelihood.num_params();
@@ -1143,8 +1128,7 @@ pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T>(
     j: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
@@ -1180,8 +1164,7 @@ pub(crate) fn z_z_second<M: crate::math::KernelMath, T>(
     f: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let m = z.nrows();
     let n = x.nrows();
@@ -1228,8 +1211,7 @@ pub(crate) fn theta_z_second<M: crate::math::KernelMath, T>(
     e: usize,
 ) -> Result<KernelVar<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let m = z.nrows();
     let n = x.nrows();
@@ -1415,8 +1397,7 @@ pub(crate) fn kernel_cross<M: crate::math::KernelMath, T>(
     xs: MatRef<'_, T>,
 ) -> Result<Mat<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let n = x.nrows();
     let q = xs.nrows();
@@ -1484,8 +1465,6 @@ pub(crate) fn vfe_predict<M: crate::math::KernelMath, P>(
 ) -> Result<Prediction<P::Refine>, GprError>
 where
     P: ModelPrecision + MeanDot,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     if n_cols != d {
         return Err(GprError::DimensionMismatch {
@@ -1697,8 +1676,7 @@ pub(crate) fn kernel_column<M: crate::math::KernelMath, T>(
     d: usize,
 ) -> Result<Mat<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let compiled = kernel.compile_as::<T>();
     let z64 = pack_points(z, m, d);
@@ -1712,8 +1690,7 @@ where
 
 pub(crate) fn kernel_diag_at<T>(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<T, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     let compiled = kernel.compile_as::<T>();
     let x64 = pack_points(x_pt, 1, d);
@@ -1745,8 +1722,7 @@ pub(crate) fn inducing_insert<M: crate::math::KernelMath, T>(
     z_new: &[f64],
 ) -> Result<(), GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     validate_inducing(z, m, d)?;
     validate_inducing(z_new, 1, d)?;
@@ -1766,7 +1742,7 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
     let mut k_zz = kernel_cross::<M, _>(&compiled, z_mat, z_new_mat)?;
-    let k_nn = kernel_diag_at(kernel, z_new, d)?;
+    let k_nn = kernel_diag_at::<T>(kernel, z_new, d)?;
     let k_zx = kernel_cross::<M, _>(&compiled, z_new_mat, x_mat)?;
     solve_lmm(state.k_mm_l.as_ref(), k_zz.as_mut());
     let mut ell2 = k_nn;

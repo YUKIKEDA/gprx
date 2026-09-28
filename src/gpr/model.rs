@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use faer::Mat;
 
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, GramKernel, KernelSpec};
+use crate::kernel::{CompiledKernel, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{AcceptsRecompute, Fixed, FullRecompute, Lbfgs, Optimizer, PoleRecompute};
@@ -733,7 +733,6 @@ where
     B: AllocWorkspace,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
     O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
 {
     /// Factors `A = K + σn² I`, solves `A α = y`, and updates `θ` with `O`.
@@ -804,7 +803,6 @@ where
     B: AllocWorkspace,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Factors at the current kernel and likelihood `θ` without a search.
     ///

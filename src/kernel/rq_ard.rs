@@ -1,8 +1,10 @@
 //! ARD rational quadratic kernel.
 
-use super::rq::{finite_kernel, rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
+use super::ard::{self, ArdR2, Pick};
+use super::finite_kernel;
+use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::{
-    ArdLengthscales, Triangle, validate_log_positive, validate_positive_finite, visit_triangle,
+    ArdLengthscales, KernelScalar, Triangle, validate_log_positive, validate_positive_finite,
 };
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
@@ -189,29 +191,17 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
-    pub fn apply(
+    pub fn apply<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let n = require_square_points(x, out.as_ref(), self.lengthscales.num_params())?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel(x, row, col, inv_ell_sq, alpha) {
-                Ok(value) => out[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_points(x, out, self.lengthscales.num_params(), uplo, |row, col| {
+            rq_value(ard::r2_from_coords(x, row, x, col, w, Pick::NONE)?, alpha)
+        })
     }
 
     /// Writes rectangular `k(x, xs)` (train × test) into `out`.
@@ -220,41 +210,23 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
-    pub fn apply_cross(
+    pub fn apply_cross<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        xs: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        let d = self.lengthscales.num_params();
-        require_feature_dim(x, d)?;
-        require_feature_dim(xs, d)?;
-        if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-            return Err(GprError::ShapeMismatch {
-                reason: format!(
-                    "output is {}x{}, expected {}x{}",
-                    out.nrows(),
-                    out.ncols(),
-                    x.nrows(),
-                    xs.nrows()
-                ),
-            });
-        }
-        crate::data::require_finite_points(x)?;
-        crate::data::require_finite_points(xs)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        for col in 0..xs.nrows() {
-            for row in 0..x.nrows() {
-                out[(row, col)] = ard_kernel_pair(x, row, xs, col, inv_ell_sq, alpha)?;
-            }
-        }
-        Ok(())
+        ard::require_cross(x, xs, out.as_ref(), self.lengthscales.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        super::write_rect(out, |row, col| {
+            rq_value(ard::r2_from_coords(x, row, xs, col, w, Pick::NONE)?, alpha)
+        })
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(1.0);
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(1.0));
     }
 
     /// Writes `∂K/∂θ` into `d_k`. Indices `0..d` are `log(ℓ_d)`; index `d` is
@@ -264,128 +236,60 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad(
+    pub fn grad<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
-        if param_idx > d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD rational quadratic parameter index {param_idx} is out of range (d={d})"
-                ),
-            });
-        }
-        let n = require_square_points(x, d_k.as_ref(), d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_grad(x, row, col, inv_ell_sq, param_idx, d, alpha) {
-                Ok(value) => d_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::require_param(NAME, param_idx, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_points(x, d_k, d, uplo, |row, col| {
+            let t = ard::r2_from_coords(x, row, x, col, w, Pick::one(param_idx))?;
+            rq_grad(t, alpha, param_idx == d)
+        })
     }
 
-    pub(crate) fn apply_from_sq_diff(
+    pub(crate) fn apply_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let n = out.nrows();
-        if out.ncols() != n {
-            return Err(GprError::ShapeMismatch {
-                reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
-            });
-        }
-        let d = self.lengthscales.num_params();
-        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match super::dist::weighted_r2_from_cache(cache, n, row, col, inv_ell_sq, None)
-                .and_then(|(r2, _)| finite_kernel(rq_from_r2(r2.max(0.0), alpha)))
-            {
-                Ok(value) => out[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_cache(
+            cache,
+            out,
+            self.lengthscales.num_params(),
+            uplo,
+            |n, row, col| {
+                rq_value(
+                    ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?,
+                    alpha,
+                )
+            },
+        )
     }
 
-    pub(crate) fn grad_from_sq_diff(
+    pub(crate) fn grad_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
-        if param_idx > d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD rational quadratic parameter index {param_idx} is out of range (d={d})"
-                ),
-            });
-        }
-        let n = d_k.nrows();
-        if d_k.ncols() != n {
-            return Err(GprError::ShapeMismatch {
-                reason: format!("output is {}x{}, expected square", d_k.nrows(), d_k.ncols()),
-            });
-        }
-        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match super::dist::weighted_r2_from_cache(
-                cache,
-                n,
-                row,
-                col,
-                inv_ell_sq,
-                if param_idx < d { Some(param_idx) } else { None },
-            )
-            .and_then(|(r2, dim_term)| {
-                let r2 = r2.max(0.0);
-                let dk = if param_idx == d {
-                    rq_dk_dtheta_alpha(r2, alpha)
-                } else {
-                    rq_dk_dtheta_ard_dim(r2, alpha, dim_term)
-                };
-                finite_kernel(dk)
-            }) {
-                Ok(value) => d_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::require_param(NAME, param_idx, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_cache(cache, d_k, d, uplo, |n, row, col| {
+            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::one(param_idx))?;
+            rq_grad(t, alpha, param_idx == d)
+        })
     }
 
     /// Writes `∂²K/∂θ_i ∂θ_j`. Indices `0..d` are `log(ℓ_d)`; index `d` is
@@ -395,264 +299,74 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess(
+    pub fn hess<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
-        if i > d || j > d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD rational quadratic parameter pair ({i}, {j}) is out of range (d={d})"
-                ),
-            });
-        }
-        let n = require_square_points(x, d2_k.as_ref(), d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_hess(x, row, col, inv_ell_sq, (i, j), d, alpha) {
-                Ok(value) => d2_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::require_param_pair(NAME, i, j, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_points(x, d2_k, d, uplo, |row, col| {
+            let t = ard::r2_from_coords(x, row, x, col, w, Pick::pair(i, j))?;
+            rq_hess(t, alpha, (i, j), d)
+        })
     }
 
-    pub(crate) fn hess_from_sq_diff(
+    pub(crate) fn hess_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
-        if i > d || j > d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD rational quadratic parameter pair ({i}, {j}) is out of range (d={d})"
-                ),
-            });
-        }
-        let n = d2_k.nrows();
-        if d2_k.ncols() != n {
-            return Err(GprError::ShapeMismatch {
-                reason: format!(
-                    "output is {}x{}, expected square",
-                    d2_k.nrows(),
-                    d2_k.ncols()
-                ),
-            });
-        }
-        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
-        let alpha = self.alpha();
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_hess_from_cache(cache, n, (row, col), inv_ell_sq, (i, j), d, alpha) {
-                Ok(value) => d2_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::require_param_pair(NAME, i, j, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_cache(cache, d2_k, d, uplo, |n, row, col| {
+            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+            rq_hess(t, alpha, (i, j), d)
+        })
     }
 }
 
-fn require_feature_dim(x: MatRef<'_, f64>, expected_d: usize) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    if x.ncols() != expected_d {
-        return Err(GprError::DimensionMismatch {
-            x_dim: x.ncols(),
-            expected_dim: expected_d,
-        });
-    }
-    Ok(())
+const NAME: &str = "rational quadratic";
+
+fn rq_value<T: KernelScalar>(t: ArdR2<T>, alpha: T) -> Result<T, GprError> {
+    finite_kernel(rq_from_r2(t.r2.max(T::from_f64(0.0)), alpha))
 }
 
-fn require_square_points(
-    x: MatRef<'_, f64>,
-    out: MatRef<'_, f64>,
-    expected_d: usize,
-) -> Result<usize, GprError> {
-    require_feature_dim(x, expected_d)?;
-    if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::ShapeMismatch {
-            reason: format!(
-                "output is {}x{}, expected {}x{}",
-                out.nrows(),
-                out.ncols(),
-                x.nrows(),
-                x.nrows()
-            ),
-        });
-    }
-    crate::data::require_finite_points(x)?;
-    Ok(x.nrows())
-}
-
-fn ard_r2_pair(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        r2 += diff * diff * w;
-    }
-    if r2.is_finite() {
-        Ok(r2.max(0.0))
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_pair(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-    alpha: f64,
-) -> Result<f64, GprError> {
-    let r2 = ard_r2_pair(x, row, xs, col, inv_ell_sq)?;
-    finite_kernel(rq_from_r2(r2, alpha))
-}
-
-fn ard_kernel(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    alpha: f64,
-) -> Result<f64, GprError> {
-    ard_kernel_pair(x, row, x, col, inv_ell_sq, alpha)
-}
-
-fn ard_kernel_grad(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    param_idx: usize,
-    d: usize,
-    alpha: f64,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_term = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - x[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == param_idx {
-            dim_term = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let r2 = r2.max(0.0);
-    let dk = if param_idx == d {
+/// `wrt_alpha` selects `∂/∂log(α)`; otherwise `∂/∂θ_d` from `t.dim_i`.
+fn rq_grad<T: KernelScalar>(t: ArdR2<T>, alpha: T, wrt_alpha: bool) -> Result<T, GprError> {
+    let r2 = t.r2.max(T::from_f64(0.0));
+    finite_kernel(if wrt_alpha {
         rq_dk_dtheta_alpha(r2, alpha)
     } else {
-        rq_dk_dtheta_ard_dim(r2, alpha, dim_term)
-    };
-    finite_kernel(dk)
+        rq_dk_dtheta_ard_dim(r2, alpha, t.dim_i)
+    })
 }
 
-fn ard_kernel_hess(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    pair: (usize, usize),
+fn rq_hess<T: KernelScalar>(
+    t: ArdR2<T>,
+    alpha: T,
+    (i, j): (usize, usize),
     d: usize,
-    alpha: f64,
-) -> Result<f64, GprError> {
-    let (i, j) = pair;
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - x[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    finite_kernel(rq_d2k_ard(r2.max(0.0), alpha, dim_i, dim_j, i, j, d))
-}
-
-fn ard_hess_from_cache(
-    cache: MatRef<'_, f64>,
-    n: usize,
-    rc: (usize, usize),
-    inv_ell_sq: &[f64],
-    pair: (usize, usize),
-    d: usize,
-    alpha: f64,
-) -> Result<f64, GprError> {
-    let (row, col) = rc;
-    let (i, j) = pair;
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let v = cache[(row, dim * n + col)];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = v * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    finite_kernel(rq_d2k_ard(r2.max(0.0), alpha, dim_i, dim_j, i, j, d))
+) -> Result<T, GprError> {
+    finite_kernel(rq_d2k_ard(
+        t.r2.max(T::from_f64(0.0)),
+        alpha,
+        t.dim_i,
+        t.dim_j,
+        i,
+        j,
+        d,
+    ))
 }
 
 #[cfg(test)]

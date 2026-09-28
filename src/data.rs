@@ -39,7 +39,7 @@ pub(crate) fn require_finite(values: &[f64]) -> Result<(), GprError> {
 }
 
 /// Rejects a `NaN` / `Inf` coordinate with [`GprError::NonFiniteInput`].
-pub(crate) fn require_finite_points(x: MatRef<'_, f64>) -> Result<(), GprError> {
+pub(crate) fn require_finite_points<T: KernelScalar>(x: MatRef<'_, T>) -> Result<(), GprError> {
     for col in 0..x.ncols() {
         for row in 0..x.nrows() {
             if !x[(row, col)].is_finite() {
