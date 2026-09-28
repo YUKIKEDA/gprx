@@ -3,23 +3,20 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use faer::Mat;
-
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, KernelSpec};
+use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::param::write_params;
 use crate::persist::MappedTensors;
 use crate::precision::{DoublePrecision, GpScalar};
-use crate::transform::{
-    IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
-};
-use crate::workspace::{FitWorkspace, QueryWorkspace};
+use crate::transform::{IdentityInput, IdentityTarget, UnfittedTarget, UnfittedTransform};
+use crate::workspace::FitWorkspace;
 
 use super::{
-    CholeskyBuffer, DistanceCachePolicy, FitBuffers, JitterPolicy, KernelExp, with_kernel_exp,
+    CholeskyBuffer, DistanceCachePolicy, FitBuffers, GprCore, JitterPolicy, KernelExp,
+    with_kernel_exp,
 };
 
 /// Unfitted Exact GPR trainer: kernel, likelihood, transforms, optimizer, and
@@ -151,30 +148,9 @@ impl<O: Clone, P> Clone for Gpr<O, P> {
 /// # }
 /// ```
 pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
-    kernel: KernelSpec,
-    compiled: CompiledKernel<P::Storage>,
-    likelihood: GaussianLikelihood,
-    x_unfitted: Box<dyn UnfittedTransform>,
-    y_unfitted: Box<dyn UnfittedTarget>,
-    x_transform: Box<dyn Transform>,
-    y_transform: Box<dyn TargetTransform>,
+    core: GprCore<P>,
     optimizer: O,
-    policies: Policies,
     workspace: FitBuffers<P>,
-    query: QueryWorkspace<P>,
-    x_obs: Vec<f64>,
-    y_obs: Vec<f64>,
-    x: Mat<f64>,
-    y_train: Vec<f64>,
-    /// Cholesky solve `α` in the storage scalar. Marginal likelihood uses this.
-    factor_alpha: Vec<P::Storage>,
-    /// Predict weights. [`DoublePrecision`] and [`SinglePrecision`] copy
-    /// [`Self::factor_alpha`]. [`MixedPrecision`] stores the refined `f64` `α`.
-    alpha: Vec<P::Refine>,
-    x_cast: <P::Storage as crate::kernel::ScalarOps>::ColCast,
-    y_cast: <P::Storage as crate::kernel::ScalarOps>::RowCast,
-    n: usize,
-    d: usize,
     mapped_factor: Option<MappedTensors>,
 }
 
@@ -189,27 +165,9 @@ where
             P::copy_mapped_l(mapped.l_view(), workspace.core_mut().k_matrix.as_mut());
         }
         Self {
-            kernel: self.kernel.clone(),
-            compiled: self.compiled.clone(),
-            likelihood: self.likelihood,
-            x_unfitted: self.x_unfitted.clone_box(),
-            y_unfitted: self.y_unfitted.clone_box(),
-            x_transform: self.x_transform.clone_box(),
-            y_transform: self.y_transform.clone_box(),
+            core: self.core.clone(),
             optimizer: self.optimizer.clone(),
-            policies: self.policies,
             workspace,
-            query: self.query.clone(),
-            x_obs: self.x_obs.clone(),
-            y_obs: self.y_obs.clone(),
-            x: self.x.clone(),
-            y_train: self.y_train.clone(),
-            factor_alpha: self.factor_alpha.clone(),
-            alpha: self.alpha.clone(),
-            x_cast: self.x_cast.clone(),
-            y_cast: self.y_cast.clone(),
-            n: self.n,
-            d: self.d,
             mapped_factor: None,
         }
     }
@@ -222,14 +180,15 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FittedGpr")
-            .field("n", &self.n)
-            .field("d", &self.d)
-            .field("kernel", &self.kernel)
-            .field("likelihood", &self.likelihood)
-            .field("distance_cache", &self.policies.distance_cache)
-            .field("cholesky_buffer", &self.policies.cholesky_buffer)
-            .field("math", &self.policies.math)
-            .field("jitter_policy", &self.policies.jitter)
+            .field("n", &self.core.n)
+            .field("d", &self.core.d)
+            .field("kernel", &self.core.kernel)
+            .field("likelihood", &self.core.likelihood)
+            .field("optimizer", &self.optimizer)
+            .field("distance_cache", &self.core.policies.distance_cache)
+            .field("cholesky_buffer", &self.core.policies.cholesky_buffer)
+            .field("math", &self.core.policies.math)
+            .field("jitter_policy", &self.core.policies.jitter)
             .finish_non_exhaustive()
     }
 }
@@ -523,7 +482,7 @@ impl<O, P> Gpr<O, P> {
 impl<O, P> Gpr<O, P>
 where
     P: GpScalar,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, P>>,
+    O: for<'a> Optimizer<GprObjective<'a, P>>,
 {
     /// Factors `A = K + σn² I`, solves `A α = y`, and updates `θ` with `O`.
     ///
@@ -571,16 +530,13 @@ where
         y: &[f64],
     ) -> Result<FittedGpr<O, P>, (Self, GprError)> {
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
-        match model.optimize_hyperparameters() {
-            Ok(()) => {
-                if let Err(err) = model.restore_cholesky_if_overwritten() {
-                    return Err((model.into_trainer(), err));
-                }
-                if let Err(err) = model.publish_predict_alpha() {
-                    return Err((model.into_trainer(), err));
-                }
-                Ok(model)
-            }
+        let mut view = ExactFit {
+            core: &mut model.core,
+            ws: &mut model.workspace,
+            mapped: &mut model.mapped_factor,
+        };
+        match view.optimize(&model.optimizer) {
+            Ok(()) => Ok(model),
             Err(err) => Err((model.into_trainer(), err)),
         }
     }
@@ -623,10 +579,7 @@ impl<P: GpScalar> Gpr<Fixed, P> {
         y: &[f64],
     ) -> Result<FittedGpr<Fixed, P>, (Self, GprError)> {
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
-        if let Err(err) = model.factorize_current() {
-            return Err((model.into_trainer(), err));
-        }
-        match model.publish_predict_alpha() {
+        match model.fit_view().refactor() {
             Ok(()) => Ok(model),
             Err(err) => Err((model.into_trainer(), err)),
         }
@@ -642,6 +595,8 @@ impl<O, P> From<(Gpr<O, P>, GprError)> for GprError {
 
 #[path = "fitted.rs"]
 mod fitted;
+
+pub(crate) use fitted::{ExactFit, fit_buffers};
 
 #[cfg(test)]
 #[path = "tests.rs"]

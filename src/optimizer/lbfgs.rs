@@ -310,12 +310,12 @@ mod tests {
         assert_close(got[1], result.params[1], TOL);
     }
 
-    struct CountingObj<'a, O> {
-        inner: crate::objective::GprObjective<'a, O>,
+    struct CountingObj<'a> {
+        inner: crate::objective::GprObjective<'a>,
         joint_evals: usize,
     }
 
-    impl<O> Objective for CountingObj<'_, O> {
+    impl Objective for CountingObj<'_> {
         fn num_params(&self) -> usize {
             self.inner.num_params()
         }
@@ -326,7 +326,7 @@ mod tests {
         }
     }
 
-    impl<O> Differentiable for CountingObj<'_, O> {
+    impl Differentiable for CountingObj<'_> {
         fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
             self.value_and_gradient_into(params, out).map(|_| ())
         }
@@ -341,7 +341,7 @@ mod tests {
         }
     }
 
-    impl<O> crate::objective::HasBounds for CountingObj<'_, O> {
+    impl crate::objective::HasBounds for CountingObj<'_> {
         fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
             self.inner.fill_intervals(out)
         }

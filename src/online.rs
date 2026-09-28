@@ -107,6 +107,17 @@ impl<T: KernelScalar> OnlineWorkspace<T> {
         Ok(())
     }
 
+    /// Writes the LLT factor `L √D` of the leading `n` into `dest` (lower triangle).
+    pub(crate) fn fill_llt_into(&self, mut dest: MatMut<'_, T>, n: usize) {
+        for j in 0..n {
+            let root = self.ld_factor[(j, j)].sqrt();
+            dest[(j, j)] = root;
+            for i in (j + 1)..n {
+                dest[(i, j)] = self.ld_factor[(i, j)] * root;
+            }
+        }
+    }
+
     /// Copies packed LDLT from `ld` into the leading `n`.
     pub(crate) fn copy_ld_from(&mut self, ld: MatRef<'_, T>, n: usize) -> Result<(), GprError> {
         if n == 0 || n > self.n_capacity || ld.nrows() < n || ld.ncols() < n {

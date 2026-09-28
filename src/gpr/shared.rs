@@ -1,0 +1,717 @@
+//! State and read paths shared by [`crate::FittedGpr`] and [`crate::OnlineGpr`].
+//!
+//! [`GprCore`] holds everything except the training factor. Prediction,
+//! covariance, sampling, leave-one-out, the marginal likelihood, and the
+//! predict `α` are written once here against a [`StoredFactor`] view, which
+//! is the LLT of a batch fit or the LDLT of an online model.
+
+use dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::llt;
+use faer::{Mat, MatMut, MatRef};
+
+use crate::data::{pack_storage, validate_query};
+use crate::error::{CholeskyStage, GprError};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
+use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{
+    cholesky_lower, cholesky_lower_with_retries, faer_par, faer_par_dims, inv_diag_from_chol_l,
+    log_det_from_l, mul_lower_vec,
+};
+use crate::online::OnlineWorkspace;
+use crate::param::write_params;
+use crate::precision::{GpScalar, StoredFactor, TrainSystem};
+use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
+use crate::workspace::{QueryWorkspace, empty_thread_scratch};
+use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
+
+use super::{Gpr, Policies, with_kernel_exp};
+
+/// Everything a fitted Exact GPR holds except its training factor.
+pub(crate) struct GprCore<P: GpScalar> {
+    pub(crate) kernel: KernelSpec,
+    pub(crate) compiled: CompiledKernel<P::Storage>,
+    pub(crate) likelihood: GaussianLikelihood,
+    pub(crate) x_unfitted: Box<dyn UnfittedTransform>,
+    pub(crate) y_unfitted: Box<dyn UnfittedTarget>,
+    pub(crate) x_transform: Box<dyn Transform>,
+    pub(crate) y_transform: Box<dyn TargetTransform>,
+    pub(crate) policies: Policies,
+    pub(crate) query: QueryWorkspace<P>,
+    /// Training features on the caller's scale, column-major `n × d`.
+    pub(crate) x_obs: Vec<f64>,
+    /// Training targets on the caller's scale.
+    pub(crate) y_obs: Vec<f64>,
+    /// Transformed training features. Rows past `n` are spare online capacity.
+    pub(crate) x: Mat<f64>,
+    /// Transformed training targets.
+    pub(crate) y_train: Vec<f64>,
+    /// Factor solve `α` in the storage scalar. The marginal likelihood uses this.
+    pub(crate) factor_alpha: Vec<P::Storage>,
+    /// Predict weights. [`crate::DoublePrecision`] and [`crate::SinglePrecision`]
+    /// copy [`Self::factor_alpha`]. [`crate::MixedPrecision`] stores the refined
+    /// `f64` `α`.
+    pub(crate) alpha: Vec<P::Refine>,
+    pub(crate) x_cast: <P::Storage as ScalarOps>::ColCast,
+    pub(crate) y_cast: <P::Storage as ScalarOps>::RowCast,
+    pub(crate) n: usize,
+    pub(crate) d: usize,
+}
+
+impl<P: GpScalar> Clone for GprCore<P> {
+    fn clone(&self) -> Self {
+        Self {
+            kernel: self.kernel.clone(),
+            compiled: self.compiled.clone(),
+            likelihood: self.likelihood,
+            x_unfitted: self.x_unfitted.clone_box(),
+            y_unfitted: self.y_unfitted.clone_box(),
+            x_transform: self.x_transform.clone_box(),
+            y_transform: self.y_transform.clone_box(),
+            policies: self.policies,
+            query: self.query.clone(),
+            x_obs: self.x_obs.clone(),
+            y_obs: self.y_obs.clone(),
+            x: self.x.clone(),
+            y_train: self.y_train.clone(),
+            factor_alpha: self.factor_alpha.clone(),
+            alpha: self.alpha.clone(),
+            x_cast: self.x_cast.clone(),
+            y_cast: self.y_cast.clone(),
+            n: self.n,
+            d: self.d,
+        }
+    }
+}
+
+impl<P: GpScalar> GprCore<P> {
+    /// Transformed training features of the live points (`n × d`).
+    pub(crate) fn x_active(&self) -> MatRef<'_, f64> {
+        self.x.as_ref().submatrix(0, 0, self.n, self.d)
+    }
+
+    /// Drops the training data and returns a trainer with `optimizer`.
+    pub(crate) fn into_trainer<O>(self, optimizer: O) -> Gpr<O, P> {
+        Gpr::from_owned(
+            self.kernel,
+            self.likelihood,
+            self.x_unfitted,
+            self.y_unfitted,
+            optimizer,
+            self.policies,
+        )
+    }
+
+    pub(crate) fn num_params(&self) -> usize {
+        self.kernel.num_params() + self.likelihood.num_params()
+    }
+
+    pub(crate) fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+        write_params(&self.kernel, &self.likelihood, out)
+    }
+
+    /// Solves `factor⁻¹ y` into [`Self::factor_alpha`].
+    pub(crate) fn solve_factor_alpha(&mut self, factor: StoredFactor<'_, P::Storage>) {
+        let n = self.n;
+        let mut rhs =
+            Mat::<P::Storage>::from_fn(n, 1, |i, _| P::Storage::from_f64(self.y_train[i]));
+        factor.solve_in_place(rhs.as_mut());
+        self.factor_alpha.clear();
+        self.factor_alpha.extend((0..n).map(|i| rhs[(i, 0)]));
+    }
+
+    /// Writes the predict `α` from `factor` and [`Self::factor_alpha`].
+    pub(crate) fn publish_predict_alpha(
+        &mut self,
+        factor: StoredFactor<'_, P::Storage>,
+        jitter: f64,
+        stage: CholeskyStage,
+    ) -> Result<(), GprError> {
+        let x = self.x.as_ref().submatrix(0, 0, self.n, self.d);
+        let sys = TrainSystem {
+            kernel: &self.kernel,
+            compiled: &self.compiled,
+            x,
+            y: &self.y_train,
+            noise: self.likelihood.noise_variance(),
+            jitter,
+            factor,
+            factor_alpha: &self.factor_alpha,
+            policy: self.policies.jitter,
+            stage,
+        };
+        with_kernel_exp!(self.policies.math, M => P::publish_predict_alpha::<M>(&sys, &mut self.alpha))
+    }
+
+    /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` from `factor` and the stored `α`.
+    pub(crate) fn neg_log_marginal_likelihood(&self, factor: StoredFactor<'_, P::Storage>) -> f64 {
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut rows);
+        let mut quad = P::Storage::from_f64(0.0);
+        for (yi, ai) in y.iter().zip(&self.factor_alpha).take(self.n) {
+            quad += *yi * *ai;
+        }
+        let log_two_pi = P::Storage::from_f64((2.0 * std::f64::consts::PI).ln());
+        (P::Storage::from_f64(0.5)
+            * (quad + factor.log_det() + P::Storage::from_f64(self.n as f64) * log_two_pi))
+            .to_f64()
+    }
+
+    fn require_query_dim(&self, n_cols: usize) -> Result<(), GprError> {
+        if n_cols != self.d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: n_cols,
+                expected_dim: self.d,
+            });
+        }
+        Ok(())
+    }
+
+    /// Predicts into `out` through [`Self::query`], reusing its buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn predict_with_into(
+        &mut self,
+        factor: StoredFactor<'_, P::Storage>,
+        thread_scratch: &mut [Mat<P::Storage>],
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        self.require_query_dim(n_cols)?;
+        validate_query(xs, n_rows, n_cols)?;
+        let n = self.n;
+        let m = n_rows;
+        self.query.ensure(n, m, n_cols)?;
+        self.query.query_xs.copy_from_slice(xs);
+        self.x_transform
+            .apply(&mut self.query.query_xs, n_rows, n_cols)?;
+        {
+            let x_train = P::Storage::storage_cols(
+                self.x.as_ref().submatrix(0, 0, n, self.d),
+                &mut self.x_cast,
+            );
+            let QueryWorkspace {
+                query_xs,
+                query_x,
+                query_dist,
+                query_k_star,
+                query_scratch,
+                ..
+            } = &mut self.query;
+            pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
+            with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
+                x_train,
+                query_x.as_ref(),
+                Some(query_dist.as_mut()),
+                query_k_star.as_mut(),
+                query_scratch.as_mut(),
+                thread_scratch,
+            ))?;
+        }
+        let x_active = self.x.as_ref().submatrix(0, 0, n, self.d);
+        let QueryWorkspace {
+            query_xs,
+            query_x,
+            query_k_star,
+            query_kss,
+            ..
+        } = &mut self.query;
+        write_moments::<P>(
+            MomentInputs {
+                core: CoreRefs {
+                    kernel: &self.kernel,
+                    compiled: &self.compiled,
+                    alpha: &self.alpha,
+                    x_train: x_active,
+                    noise: self.likelihood.noise_variance(),
+                    y_transform: self.y_transform.as_ref(),
+                    math: self.policies.math,
+                },
+                factor,
+                query_xs,
+                query_x: query_x.as_ref(),
+                k_star: query_k_star.as_mut(),
+                kss: query_kss,
+                n_cols,
+                options,
+            },
+            out,
+        )
+    }
+
+    /// Predicts into `out` with buffers allocated for this call.
+    pub(crate) fn write_prediction(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        self.require_query_dim(n_cols)?;
+        validate_query(xs, n_rows, n_cols)?;
+        let n = self.n;
+        let m = n_rows;
+        let (query_xs, query_x, mut k_star) = self.cross_kernel(xs, n_rows, n_cols)?;
+        let mut kss = vec![P::Storage::from_f64(0.0); m];
+        debug_assert_eq!(k_star.nrows(), n);
+        write_moments::<P>(
+            MomentInputs {
+                core: self.refs(),
+                factor,
+                query_xs: &query_xs,
+                query_x: query_x.as_ref(),
+                k_star: k_star.as_mut(),
+                kss: &mut kss,
+                n_cols,
+                options,
+            },
+            out,
+        )
+    }
+
+    fn refs(&self) -> CoreRefs<'_, P> {
+        CoreRefs {
+            kernel: &self.kernel,
+            compiled: &self.compiled,
+            alpha: &self.alpha,
+            x_train: self.x_active(),
+            noise: self.likelihood.noise_variance(),
+            y_transform: self.y_transform.as_ref(),
+            math: self.policies.math,
+        }
+    }
+
+    /// Transforms and packs `xs`, then writes `K(X, xs)` (`n × m`).
+    fn cross_kernel(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<CrossKernel<P::Storage>, GprError> {
+        let n = self.n;
+        let m = n_rows;
+        let mut query_xs = xs.to_vec();
+        self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
+        let mut query_x = Mat::<P::Storage>::zeros(m, n_cols);
+        pack_storage(&query_xs, n_rows, n_cols, query_x.as_mut());
+        let mut query_dist = Mat::<P::Storage>::zeros(n, m);
+        let mut k_star = Mat::<P::Storage>::zeros(n, m);
+        let mut scratch = Mat::<P::Storage>::zeros(n, m);
+        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
+        let mut x_cast = P::Storage::empty_cols();
+        let x_train = P::Storage::storage_cols(self.x_active(), &mut x_cast);
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
+            x_train,
+            query_x.as_ref(),
+            Some(query_dist.as_mut()),
+            k_star.as_mut(),
+            scratch.as_mut(),
+            &mut thread_scratch,
+        ))?;
+        Ok((query_xs, query_x, k_star))
+    }
+
+    /// Predictive mean and query–query covariance at `xs`.
+    pub(crate) fn write_covariance(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        self.require_query_dim(n_cols)?;
+        validate_query(xs, n_rows, n_cols)?;
+        let n = self.n;
+        let m = n_rows;
+        let (query_xs, query_x, mut k_star) = self.cross_kernel(xs, n_rows, n_cols)?;
+        let mut mean = vec![P::Refine::from_f64(0.0); m];
+        with_kernel_exp!(self.policies.math, M => P::predict_means::<M>(
+            &self.kernel,
+            k_star.as_ref(),
+            self.x_active(),
+            &query_xs,
+            n_cols,
+            &self.alpha,
+            &mut mean,
+        ))?;
+        factor.inv_l_in_place(k_star.as_mut());
+        let mut kss = Mat::<P::Storage>::zeros(m, m);
+        let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
+        let mut thread_scratch = empty_thread_scratch::<P::Storage>();
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
+            query_x.as_ref(),
+            kss.as_mut(),
+            Triangle::Full,
+            kss_scratch.as_mut(),
+            &mut thread_scratch,
+        ))?;
+        let zero_s = P::Storage::from_f64(0.0);
+        for col in 0..m {
+            for row in 0..m {
+                let mut dot = 0.0f64;
+                for k in 0..n {
+                    dot += factor.scaled_product(
+                        k,
+                        k_star[(k, row)].to_f64(),
+                        k_star[(k, col)].to_f64(),
+                    );
+                }
+                kss[(row, col)] -= P::Storage::from_f64(dot);
+            }
+        }
+        let noise_s = P::Storage::from_f64(self.likelihood.noise_variance());
+        for i in 0..m {
+            let mut latent = kss[(i, i)];
+            if latent.to_f64() < 0.0 {
+                latent = zero_s;
+            }
+            kss[(i, i)] = match options.variance_kind {
+                VarianceKind::Latent => latent,
+                VarianceKind::Observation => latent + noise_s,
+            };
+        }
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut [])?;
+        let mut covariance = vec![P::Refine::from_f64(0.0); m * m];
+        for col in 0..m {
+            for row in 0..m {
+                covariance[col * m + row] = P::Refine::from_f64(kss[(row, col)].to_f64());
+            }
+        }
+        P::inverse_covariance(self.y_transform.as_ref(), &mut covariance)?;
+        Ok(PredictiveCovariance {
+            mean,
+            covariance,
+            variance_kind: options.variance_kind,
+        })
+    }
+
+    /// Posterior draws at `xs` from [`Self::write_covariance`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_with(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        n_draws: usize,
+        seed: u64,
+    ) -> Result<Vec<P::Refine>, GprError> {
+        let cov = self.write_covariance(factor, xs, n_rows, n_cols, options)?;
+        if n_draws == 0 {
+            return Ok(Vec::new());
+        }
+        let m = cov.mean.len();
+        let mut a = Mat::<P::Refine>::zeros(m, m);
+        for col in 0..m {
+            for row in 0..m {
+                a[(row, col)] = cov.covariance[col * m + row];
+            }
+        }
+        let req =
+            llt::factor::cholesky_in_place_scratch::<P::Refine>(m, faer_par(m), Default::default());
+        let mut scratch = MemBuffer::new(req);
+        cholesky_lower_with_retries(
+            &mut a,
+            &mut scratch,
+            self.policies.jitter.retry_jitters(),
+            CholeskyStage::Predict,
+        )?;
+        let mut rng = crate::rng::small_rng(seed);
+        let zero = P::Refine::from_f64(0.0);
+        let mut out = vec![zero; m * n_draws];
+        let mut z = vec![zero; m];
+        let mut lz = vec![zero; m];
+        for draw in 0..n_draws {
+            for slot in &mut z {
+                *slot = P::Refine::from_f64(crate::rng::unit_normal(&mut rng));
+            }
+            mul_lower_vec(a.as_ref(), &z, &mut lz);
+            let col = &mut out[draw * m..(draw + 1) * m];
+            for i in 0..m {
+                col[i] = cov.mean[i] + lz[i];
+            }
+        }
+        Ok(out)
+    }
+
+    /// Leave-one-out mean and variance at every training point (GPML §5.4.2).
+    pub(crate) fn loo_predict_with(
+        &self,
+        factor: StoredFactor<'_, P::Storage>,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
+            return self.loo_from_rounded_kernel(options);
+        }
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.y_train, &mut rows);
+        let n = self.n;
+        let mut q_diag = vec![P::Storage::from_f64(0.0); n];
+        factor.inv_diag(&mut q_diag);
+        let noise = self.likelihood.noise_variance();
+        let mut mean = vec![P::Refine::from_f64(0.0); n];
+        let mut variance = vec![P::Refine::from_f64(0.0); n];
+        for i in 0..n {
+            let qii = q_diag[i].to_f64();
+            if !qii.is_finite() || qii <= 0.0 {
+                return Err(GprError::NonPositiveDefiniteMatrix);
+            }
+            mean[i] = P::Refine::from_f64(y[i].to_f64() - self.alpha[i].to_f64() / qii);
+            let obs = 1.0 / qii;
+            variance[i] = P::Refine::from_f64(match options.variance_kind {
+                VarianceKind::Observation => obs,
+                VarianceKind::Latent => (obs - noise).max(0.0),
+            });
+        }
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut variance)?;
+        Ok(Prediction {
+            mean,
+            variance,
+            variance_kind: options.variance_kind,
+        })
+    }
+
+    /// Leave-one-out from an `f64` factor of the kernel rounded to `f32`.
+    ///
+    /// The stored `f32` factor is the predict factor. A cancelled
+    /// `y_i - α_i / Q_ii` needs the inverse diagonal of that rounded matrix
+    /// solved in `f64`, which is the same LOO formula with a tighter residual.
+    fn loo_from_rounded_kernel(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let n = self.n;
+        let kernel = self.kernel.compile();
+        let mut a = Mat::<f64>::zeros(n, n);
+        let mut scratch_k = Mat::<f64>::zeros(n, n);
+        with_kernel_exp!(self.policies.math, M => kernel.eval_gram::<M>(
+            GramInputs::points(self.x_active()),
+            a.as_mut(),
+            Triangle::Lower,
+            scratch_k.as_mut(),
+        ))?;
+        let noise = self.likelihood.noise_variance();
+        for i in 0..n {
+            a[(i, i)] += noise;
+        }
+        for col in 0..n {
+            for row in (col + 1)..n {
+                a[(col, row)] = a[(row, col)];
+            }
+        }
+        for col in 0..n {
+            for row in 0..n {
+                a[(row, col)] = f64::from(a[(row, col)] as f32);
+            }
+        }
+        let par = faer_par(n);
+        let factor_req = llt::factor::cholesky_in_place_scratch::<f64>(n, par, Default::default());
+        let mut factor_scratch = MemBuffer::new(factor_req);
+        cholesky_lower(&mut a, &mut factor_scratch, 0.0, CholeskyStage::Predict)?;
+        let solve_par = faer_par_dims(n, 1);
+        let solve_req = llt::solve::solve_in_place_scratch::<f64>(n, 1, solve_par);
+        let mut solve_scratch = MemBuffer::new(solve_req);
+        let mut rhs = Mat::<f64>::from_fn(n, 1, |i, _| self.y_train[i]);
+        llt::solve::solve_in_place(
+            a.as_ref(),
+            rhs.as_mut(),
+            solve_par,
+            MemStack::new(&mut solve_scratch),
+        );
+        let alpha: Vec<f64> = (0..n).map(|i| rhs[(i, 0)]).collect();
+        let mut mean = vec![P::Refine::from_f64(0.0); n];
+        let mut variance = vec![P::Refine::from_f64(0.0); n];
+        for i in 0..n {
+            for row in 0..n {
+                rhs[(row, 0)] = if row == i { 1.0 } else { 0.0 };
+            }
+            llt::solve::solve_in_place(
+                a.as_ref(),
+                rhs.as_mut(),
+                solve_par,
+                MemStack::new(&mut solve_scratch),
+            );
+            let qii = rhs[(i, 0)];
+            if !qii.is_finite() || qii <= 0.0 {
+                return Err(GprError::NonPositiveDefiniteMatrix);
+            }
+            mean[i] = P::Refine::from_f64(self.y_train[i] - alpha[i] / qii);
+            let obs = 1.0 / qii;
+            variance[i] = P::Refine::from_f64(match options.variance_kind {
+                VarianceKind::Observation => obs,
+                VarianceKind::Latent => (obs - noise).max(0.0),
+            });
+        }
+        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut variance)?;
+        Ok(Prediction {
+            mean,
+            variance,
+            variance_kind: options.variance_kind,
+        })
+    }
+}
+
+/// Transformed query (column-major), packed query `m × d`, and `K(X, xs)`.
+type CrossKernel<S> = (Vec<f64>, Mat<S>, Mat<S>);
+
+/// Borrowed model pieces the predictive moments read.
+struct CoreRefs<'a, P: GpScalar> {
+    kernel: &'a KernelSpec,
+    compiled: &'a CompiledKernel<P::Storage>,
+    alpha: &'a [P::Refine],
+    x_train: MatRef<'a, f64>,
+    noise: f64,
+    y_transform: &'a dyn TargetTransform,
+    math: super::KernelExp,
+}
+
+struct MomentInputs<'a, P: GpScalar> {
+    core: CoreRefs<'a, P>,
+    factor: StoredFactor<'a, P::Storage>,
+    /// Transformed query, column-major `m × d`.
+    query_xs: &'a [f64],
+    query_x: MatRef<'a, P::Storage>,
+    /// `K(X, xs)` on entry; `L⁻¹ K(X, xs)` on return.
+    k_star: MatMut<'a, P::Storage>,
+    kss: &'a mut [P::Storage],
+    n_cols: usize,
+    options: PredictOptions,
+}
+
+/// Writes the predictive mean and diagonal variance from `K(X, xs)`.
+///
+/// Latent variance is `k(x*, x*) − k_*ᵀ A⁻¹ k_*`, clipped at 0. Observation
+/// variance adds `σn²` in the transformed space. Both are mapped back by the
+/// target transform.
+fn write_moments<P: GpScalar>(
+    inputs: MomentInputs<'_, P>,
+    out: &mut Prediction<P::Refine>,
+) -> Result<(), GprError> {
+    let MomentInputs {
+        core,
+        factor,
+        query_xs,
+        query_x,
+        mut k_star,
+        kss,
+        n_cols,
+        options,
+    } = inputs;
+    let n = k_star.nrows();
+    let m = k_star.ncols();
+    let zero = P::Refine::from_f64(0.0);
+    if out.mean.len() != m {
+        out.mean.resize(m, zero);
+    }
+    if out.variance.len() != m {
+        out.variance.resize(m, zero);
+    }
+    with_kernel_exp!(core.math, M => P::predict_means::<M>(
+        core.kernel,
+        k_star.as_ref(),
+        core.x_train,
+        query_xs,
+        n_cols,
+        core.alpha,
+        &mut out.mean,
+    ))?;
+    factor.inv_l_in_place(k_star.as_mut());
+    core.compiled.eval_diag(query_x, kss)?;
+    let noise_s = P::Storage::from_f64(core.noise);
+    let zero_s = P::Storage::from_f64(0.0);
+    for col in 0..m {
+        let mut quad = 0.0f64;
+        for row in 0..n {
+            let v = k_star[(row, col)].to_f64();
+            quad += factor.scaled_product(row, v, v);
+        }
+        let mut latent = kss[col] - P::Storage::from_f64(quad);
+        if latent.to_f64() < 0.0 {
+            latent = zero_s;
+        }
+        let var_s = match options.variance_kind {
+            VarianceKind::Latent => latent,
+            VarianceKind::Observation => latent + noise_s,
+        };
+        out.variance[col] = P::Refine::from_f64(var_s.to_f64());
+    }
+    P::inverse_mean_variance(core.y_transform, &mut out.mean, &mut out.variance)?;
+    out.variance_kind = options.variance_kind;
+    Ok(())
+}
+
+/// Factor operations the shared read paths need.
+///
+/// For LLT `A = L Lᵀ`; for LDLT `A = L D Lᵀ` with unit-lower `L`. Either way
+/// `kᵀ A⁻¹ c = Σᵢ (L⁻¹k)ᵢ (L⁻¹c)ᵢ / wᵢ` with `wᵢ = 1` (LLT) or `Dᵢ` (LDLT).
+impl<T: KernelScalar> StoredFactor<'_, T> {
+    fn order(&self) -> usize {
+        match *self {
+            Self::Llt(l) => l.nrows(),
+            Self::Ldlt(ld) => ld.nrows(),
+        }
+    }
+
+    /// Overwrites each column of `rhs` (`n × m`) with `L⁻¹` of that column.
+    pub(crate) fn inv_l_in_place(&self, rhs: MatMut<'_, T>) {
+        let n = self.order();
+        let m = rhs.ncols();
+        match *self {
+            Self::Llt(l) => faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+                l,
+                rhs,
+                faer_par_dims(n, m),
+            ),
+            Self::Ldlt(ld) => OnlineWorkspace::<T>::apply_inv_l(ld, rhs, n),
+        }
+    }
+
+    /// `a · b / wᵢ` for row `row` of two [`Self::inv_l_in_place`] columns.
+    pub(crate) fn scaled_product(&self, row: usize, a: f64, b: f64) -> f64 {
+        match *self {
+            Self::Llt(_) => a * b,
+            Self::Ldlt(ld) => a * b / ld[(row, row)].to_f64(),
+        }
+    }
+
+    /// `log |A|`.
+    pub(crate) fn log_det(&self) -> T {
+        match *self {
+            Self::Llt(l) => log_det_from_l(l, l.nrows()),
+            Self::Ldlt(ld) => {
+                let mut log_det = T::from_f64(0.0);
+                for i in 0..ld.nrows() {
+                    log_det += ld[(i, i)].ln();
+                }
+                log_det
+            }
+        }
+    }
+
+    /// Writes `diag(A⁻¹)` into `out`.
+    pub(crate) fn inv_diag(&self, out: &mut [T]) {
+        match *self {
+            Self::Llt(l) => inv_diag_from_chol_l(l, out),
+            Self::Ldlt(ld) => {
+                let n = ld.nrows();
+                let mut inv_l = Mat::<T>::from_fn(n, n, |row, col| {
+                    T::from_f64(if row == col { 1.0 } else { 0.0 })
+                });
+                OnlineWorkspace::<T>::apply_inv_l(ld, inv_l.as_mut(), n);
+                for (i, slot) in out.iter_mut().enumerate() {
+                    let mut q = 0.0f64;
+                    for k in i..n {
+                        let v = inv_l[(k, i)].to_f64();
+                        q += v * v / ld[(k, k)].to_f64();
+                    }
+                    *slot = T::from_f64(q);
+                }
+            }
+        }
+    }
+}

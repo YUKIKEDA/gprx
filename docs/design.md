@@ -477,6 +477,8 @@ The public surface splits the trainer from the fitted model (P2-8).
 
 `FittedGpr` holds what inference needs: `L`, `α`, training `X`, the kernel, the likelihood, and the transforms. `W`, `∂K`, and argmin state live only during `fit` and are not kept on the fitted value. Calling `predict` in the same process immediately after `fit` is treated as the minority path. The main path hands over a fitted model, so the inference object is `FittedGpr`.
 
+`FittedGpr` and `OnlineGpr` share one crate-private `GprCore` (kernel spec, compiled kernel, likelihood, transforms, policies, training data, `α`, query buffers) and differ only in the factor (R4-2 / [#240](https://github.com/YUKIKEDA/gprx/issues/240)): `FittedGpr` holds the LLT buffers (`FitBuffers`, or a memory-mapped `L`), `OnlineGpr` holds the LDLT `OnlineWorkspace` and the `PointId` table. `StoredFactor { Llt, Ldlt }` is the factor view: `solve`, `L⁻¹` on columns, the per-pivot weight (`1` or `1/Dᵢ`), `log|A|`, and `diag(A⁻¹)`. Predict, covariance, sampling, LOO, NLML, and the predict `α` are written once on `GprCore` against that view. Every hyperparameter write (`set_params`, gradient, Hessian, `fit`, `refit`) runs on one borrowed `ExactFit` view (core + LLT buffers). `OnlineGpr` lends it temporary LLT buffers filled with `L √D` in O(n²) and writes the new factor back; the training data is not copied, and the only O(n³) work is the refactor the new `θ` needs.
+
 The default `Gpr` is `Gpr<Lbfgs>`. `with_optimizer` replaces `O` (P2B-1). argmin `NonlinearCg` / `NelderMead` are P2B-2. argmin `Newton` is P2B-17. Leaf rebuilds follow §5.4 (P2B-18). There is no `with_recompute_strategy`. `Gpr<Fixed>::factor` only factors. The default `FittedGpr::predict` is a diagonal variance. Covariance between queries is a separate P2B-6 path (not a flag on diagonal `predict`). `loo_predict` returns per-training-point LOO from `L` and `α` as in GPML 5.4.2. Refactoring the same data at new hyperparameters is `FittedGpr::refit` (the fitted value keeps its `O`). `with_optimizer` / `factor` / `into_trainer` / `refit` keep the policies.
 
 ```rust
@@ -847,18 +849,18 @@ struct PointRegistry {
 An unfitted `Gpr` does not gain points. A batch `FittedGpr` has no `insert`.
 
 ```rust
-impl FittedGpr<O, S, C, B> {
-    fn into_online(self) -> Result<OnlineGpr<O, S, C, B>, GprError>;
+impl FittedGpr<O, P> {
+    fn into_online(self) -> Result<OnlineGpr<O, P>, GprError>;
 }
 
-impl OnlineGpr<O, S, C, B> {
+impl OnlineGpr<O, P> {
     fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError>;
     fn delete(&mut self, id: PointId) -> Result<(), GprError>;
     fn point_ids(&self) -> &[PointId];
 }
 ```
 
-`insert` / `delete` update LD and alpha at the current kernel and hyperparameters. Hyperparameters are reoptimized only when `OnlineGpr::refit` / `set_params` is called explicitly. `into_online` assigns `0 .. n-1` to the existing `n` points. Later `insert` ids increase and are not reused. `PointId` has no public constructor. `PointRegistry` is crate-private and owned by `OnlineGpr`. persist keeps `FORMAT_VERSION` 1 and requires `factor_kind` (`llt` / `ldlt`). `load` of `llt` is `FittedGpr`. `ldlt` is `OnlineGpr`, and `point_ids` plus `next_point_id` are also required. Sparse online is `OnlineSgpr` (§6).
+`insert` / `delete` update LD and alpha at the current kernel and hyperparameters. Hyperparameters are reoptimized only when `OnlineGpr::refit` / `set_params` is called explicitly. Those run the batch fit code on temporary LLT buffers (§6.3) and keep `PointId` values and workspace capacity. `into_online` assigns `0 .. n-1` to the existing `n` points. Later `insert` ids increase and are not reused. `PointId` has no public constructor. `PointRegistry` is crate-private and owned by `OnlineGpr`. persist keeps `FORMAT_VERSION` 1 and requires `factor_kind` (`llt` / `ldlt`). `load` of `llt` is `FittedGpr`. `ldlt` is `OnlineGpr`, and `point_ids` plus `next_point_id` are also required. Sparse online is `OnlineSgpr` (§6).
 
 ## 12. Test plan
 

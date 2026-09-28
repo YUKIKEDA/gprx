@@ -118,8 +118,8 @@ fn predict_restores_thread_scratch_when_apply_cross_fails() {
     let mut gpr = rbf_gpr(1.0, 0.1)
         .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
         .expect("spd");
-    gpr.query.ensure(2, 1, 1).expect("query");
-    gpr.query.query_scratch = Mat::<f64>::zeros(1, 1);
+    gpr.core.query.ensure(2, 1, 1).expect("query");
+    gpr.core.query.query_scratch = Mat::<f64>::zeros(1, 1);
     assert!(matches!(
         gpr.predict_into(&[0.5], 1, 1, &mut Prediction::default()),
         Err(GprError::WorkspaceTooSmall)
@@ -2332,6 +2332,7 @@ fn non_finite_optimize_result_restores_theta() {
     gpr.get_params(&mut mid).expect("len 2");
     assert!((mid[0] - before[0]).abs() > TOL);
     let err = gpr
+        .fit_view()
         .commit_or_revert_optimize(
             kernel_before,
             likelihood_before,
@@ -2368,16 +2369,17 @@ fn failed_optimize_err_restores_theta() {
     let mut grad = [0.0; 2];
     gpr.value_and_gradient_into(&moved, &mut grad)
         .expect("moved");
-    gpr.commit_or_revert_optimize(
-        kernel_before,
-        likelihood_before,
-        Err(GprError::CholeskyFailed {
-            jitter: 0.0,
-            matrix_size: 2,
-            stage: CholeskyStage::Fit,
-        }),
-    )
-    .expect_err("chol");
+    gpr.fit_view()
+        .commit_or_revert_optimize(
+            kernel_before,
+            likelihood_before,
+            Err(GprError::CholeskyFailed {
+                jitter: 0.0,
+                matrix_size: 2,
+                stage: CholeskyStage::Fit,
+            }),
+        )
+        .expect_err("chol");
     let mut after = [0.0; 2];
     gpr.get_params(&mut after).expect("len 2");
     assert_close(after[0], before[0], TOL);
