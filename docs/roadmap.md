@@ -6,7 +6,7 @@
 
 ## 今やること
 
-P5-5（[#43](https://github.com/YUKIKEDA/gprx/issues/43)、`DistanceCachePolicy::Auto` の閾値）。完了条件は Grill 後に #43 で確定。P5-4 までは済。比較の基準は `phase-2`。
+R1-1（[#227](https://github.com/YUKIKEDA/gprx/issues/227)、f32 / f64 共通の数値スカラー trait）。完了条件は Grill 後に #227 で確定。R 段（コードベース整理、親 [#226](https://github.com/YUKIKEDA/gprx/issues/226)）を P5-5 より先に進める。P5-5 は R4-1 のあと。
 
 ## 依存
 
@@ -14,9 +14,11 @@ P5-5（[#43](https://github.com/YUKIKEDA/gprx/issues/43)、`DistanceCachePolicy:
 M0 → 1a → 1b → 2 → 2b → 3
                      → 4
                 2 の計測のあと → 5
+R1 → R2 → R3 → R4 → R5 → R6
+R4-1 → P5-5
 ```
 
-3 は 2b のあと。4 の初期は 1b のあとでも並ぶ。5 は `phase-2` が無いと速くなったと言えない。
+3 は 2b のあと。4 の初期は 1b のあとでも並ぶ。5 は `phase-2` が無いと速くなったと言えない。R の各行の依存は各 Issue に書く。
 
 ## M0
 
@@ -150,6 +152,34 @@ M0 → 1a → 1b → 2 → 2b → 3
 | P5-2 | Feat | f32・f64・混合精度 | [#40](https://github.com/YUKIKEDA/gprx/issues/40) | 済 |
 | P5-4 | Feat | `MathMode::FastApprox` オプトイン | [#42](https://github.com/YUKIKEDA/gprx/issues/42) | 済 |
 | P5-5 | Task | `DistanceCachePolicy::Auto` の閾値 | [#43](https://github.com/YUKIKEDA/gprx/issues/43) | Grill 後に #43 で確定 |
+
+## R（コードベース整理、親 [#226](https://github.com/YUKIKEDA/gprx/issues/226)）
+
+| ID | 種別 | タイトル | Issue | 状態 |
+| --- | --- | --- | --- | --- |
+| R1-1 | Task | f32 / f64 共通の数値スカラー trait を導入し、size_of による型判定を無くす | [#227](https://github.com/YUKIKEDA/gprx/issues/227) | Grill 後に #227 で確定 |
+| R1-2 | Task | 線形代数の処理を linalg モジュールに集約する | [#228](https://github.com/YUKIKEDA/gprx/issues/228) | Grill 後に #228 で確定 |
+| R1-3 | Task | 入力検証と列優先パッキングを data モジュールに集約する | [#229](https://github.com/YUKIKEDA/gprx/issues/229) | Grill 後に #229 で確定 |
+| R1-4 | Task | テストの共通ヘルパーと問題データ生成を1か所にする | [#230](https://github.com/YUKIKEDA/gprx/issues/230) | Grill 後に #230 で確定 |
+| R1-5 | Task | `GprError` の分類を整理する | [#231](https://github.com/YUKIKEDA/gprx/issues/231) | Grill 後に #231 で確定 |
+| R2-1 | Task | カーネル評価の入口を1つの入力構造体に統一する | [#232](https://github.com/YUKIKEDA/gprx/issues/232) | Grill 後に #232 で確定 |
+| R2-2 | Task | 定常カーネルを式（profile）と走査（driver）に分け、f32_eval.rs を無くす | [#233](https://github.com/YUKIKEDA/gprx/issues/233) | Grill 後に #233 で確定 |
+| R2-3 | Feat | ユーザー定義カーネルを f32 / f64 共通の1実装で書けるようにする | [#234](https://github.com/YUKIKEDA/gprx/issues/234) | Grill 後に #234 で確定 |
+| R2-4 | Task | カーネルと crate の公開面の不揃いと漏れを直す | [#235](https://github.com/YUKIKEDA/gprx/issues/235) | Grill 後に #235 で確定 |
+| R3-1 | Bug | `MixedPrecision` の predict が呼ぶたびに反復改良とカーネル再コンパイルを行う | [#236](https://github.com/YUKIKEDA/gprx/issues/236) | Grill 後に #236 で確定 |
+| R3-2 | Bug | 反復改良が保存済みの因子と `JitterPolicy` を使わない | [#237](https://github.com/YUKIKEDA/gprx/issues/237) | Grill 後に #237 で確定 |
+| R3-3 | Task | 精度ポリシーの trait 群を1つにまとめ、反復改良を Refiner にする | [#238](https://github.com/YUKIKEDA/gprx/issues/238) | Grill 後に #238 で確定 |
+| R4-1 | Task | 距離キャッシュ・Cholesky バッファ・exp モード・再計算戦略を実行時の値にする | [#239](https://github.com/YUKIKEDA/gprx/issues/239) | Grill 後に #239 で確定 |
+| R4-2 | Task | 因子の抽象（LLT / LDLT）とモデル共通部で `FittedGpr` と `OnlineGpr` を統合する | [#240](https://github.com/YUKIKEDA/gprx/issues/240) | Grill 後に #240 で確定 |
+| R4-3 | Task | predict の経路の重複を1本にする | [#241](https://github.com/YUKIKEDA/gprx/issues/241) | Grill 後に #241 で確定 |
+| R4-4 | Task | 学習済みモデルの状態・ロールバック・任意バッファの表し方を統一する | [#242](https://github.com/YUKIKEDA/gprx/issues/242) | Grill 後に #242 で確定 |
+| R4-5 | Bug | `IncrementalRecompute` がビット差分で変更した葉を推定し、呼ぶたびに確保する | [#243](https://github.com/YUKIKEDA/gprx/issues/243) | Grill 後に #243 で確定 |
+| R4-6 | Task | persist の読み込み結果（Loaded* の 48 型）を縮約する | [#244](https://github.com/YUKIKEDA/gprx/issues/244) | Grill 後に #244 で確定 |
+| R4-7 | Task | src/gpr のファイル構成を整理する | [#245](https://github.com/YUKIKEDA/gprx/issues/245) | Grill 後に #245 で確定 |
+| R5-1 | Task | `Sgpr` / `Svgp` を共通の core・linalg・精度に載せ、依存方向を直す | [#246](https://github.com/YUKIKEDA/gprx/issues/246) | Grill 後に #246 で確定 |
+| R5-2 | Spike | `Sgpr` / `Svgp` と Exact の機能差を揃えるかを決める | [#247](https://github.com/YUKIKEDA/gprx/issues/247) | Grill 後に #247 で確定 |
+| R6-1 | Task | compare/ の Python ハーネスと問題定義の重複をまとめる | [#248](https://github.com/YUKIKEDA/gprx/issues/248) | Grill 後に #248 で確定 |
+| R6-2 | Task | design.md の擬似コードと記述を実装に合わせる | [#249](https://github.com/YUKIKEDA/gprx/issues/249) | Grill 後に #249 で確定 |
 
 ## 意図的に今やらない
 
