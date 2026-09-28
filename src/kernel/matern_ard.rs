@@ -16,7 +16,7 @@ use faer::{MatMut, MatRef};
 /// coordinate matrix. Amplitude is not stored here.
 ///
 /// Cloning copies the lengthscale vectors. When
-/// [`crate::CachedDistances`] is set, [`crate::Gpr`] caches raw
+/// [`crate::DistanceCachePolicy::Cached`] is set, [`crate::Gpr`] caches raw
 /// `(Δx_d)²`.
 ///
 /// # Examples

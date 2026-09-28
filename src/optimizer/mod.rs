@@ -61,101 +61,15 @@ pub trait Optimizer<P: ?Sized> {
     /// Returns [`GprError`] when `init` is the wrong length, the objective
     /// fails, or the solver stops without a best parameter vector.
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError>;
+
+    /// Whether this optimizer reports changed coordinates through
+    /// [`crate::Objective::value_at_changes`].
+    ///
+    /// When `true` and the trainer keeps a dedicated gradient buffer
+    /// ([`crate::CholeskyBuffer::Retain`]), a fit rebuilds only the kernel
+    /// leaves a step touches. The default is `false`.
+    const USES_CHANGE_INDICES: bool = false;
 }
-
-/// Marker for an optimizer that consumes changed-parameter indices.
-///
-/// [`Lbfgs`] does not implement this. At [`crate::RetainCholesky`] (the
-/// speed pole) [`crate::Gpr::with_optimizer`] / [`crate::Gpr::with_prefer_speed`]
-/// select [`IncrementalRecompute`] only when `O: UsesChangeIndices`.
-pub trait UsesChangeIndices {}
-
-/// Marker for how kernel matrices are rebuilt during fit.
-pub trait RecomputeStrategy:
-    Copy + Clone + core::fmt::Debug + Default + Send + Sync + 'static
-{
-}
-
-/// Bound that keeps [`IncrementalRecompute`] off optimizers without
-/// [`UsesChangeIndices`].
-///
-/// [`FullRecompute`] is valid for every optimizer. [`IncrementalRecompute`]
-/// is valid only when `O: `[`UsesChangeIndices`].
-pub trait AcceptsRecompute<O>: RecomputeStrategy {}
-
-/// Selects [`FullRecompute`] or [`IncrementalRecompute`] from the Cholesky pole.
-///
-/// [`ReuseCholesky`](crate::ReuseCholesky) (memory pole) is always [`FullRecompute`].
-/// [`crate::RetainCholesky`] is [`IncrementalRecompute`] when `O`
-/// implements [`UsesChangeIndices`], and [`FullRecompute`] for the
-/// built-in solvers that do not. A custom [`Optimizer`] that does not
-/// implement [`UsesChangeIndices`] implements this trait for
-/// [`crate::RetainCholesky`] with [`FullRecompute`].
-///
-/// # Examples
-///
-/// ```rust
-/// use gprx::{
-///     FastSimulatedAnnealing, FullRecompute, IncrementalRecompute, Lbfgs,
-///     PoleRecompute, RetainCholesky, ReuseCholesky,
-/// };
-///
-/// fn assert_full<T: PoleRecompute<B, Strategy = FullRecompute>, B>() {}
-/// fn assert_incr<T: PoleRecompute<B, Strategy = IncrementalRecompute>, B>() {}
-///
-/// assert_full::<Lbfgs, RetainCholesky>();
-/// assert_full::<Lbfgs, ReuseCholesky>();
-/// assert_incr::<FastSimulatedAnnealing, RetainCholesky>();
-/// assert_full::<FastSimulatedAnnealing, ReuseCholesky>();
-/// ```
-pub trait PoleRecompute<B> {
-    /// Strategy at pole `B`.
-    type Strategy: RecomputeStrategy;
-}
-
-impl<O> PoleRecompute<crate::ReuseCholesky> for O {
-    type Strategy = FullRecompute;
-}
-
-impl<O: UsesChangeIndices> PoleRecompute<crate::RetainCholesky> for O {
-    type Strategy = IncrementalRecompute;
-}
-
-impl PoleRecompute<crate::RetainCholesky> for Lbfgs {
-    type Strategy = FullRecompute;
-}
-
-impl PoleRecompute<crate::RetainCholesky> for NonlinearCg {
-    type Strategy = FullRecompute;
-}
-
-impl PoleRecompute<crate::RetainCholesky> for NelderMead {
-    type Strategy = FullRecompute;
-}
-
-impl PoleRecompute<crate::RetainCholesky> for Newton {
-    type Strategy = FullRecompute;
-}
-
-impl PoleRecompute<crate::RetainCholesky> for Fixed {
-    type Strategy = FullRecompute;
-}
-
-/// Always rebuild the full kernel matrix. This is the default.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct FullRecompute;
-
-impl RecomputeStrategy for FullRecompute {}
-
-impl<O> AcceptsRecompute<O> for FullRecompute {}
-
-/// Rebuild only compiled leaves touched by changed parameter indices.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct IncrementalRecompute;
-
-impl RecomputeStrategy for IncrementalRecompute {}
-
-impl<O: UsesChangeIndices> AcceptsRecompute<O> for IncrementalRecompute {}
 
 /// Fixed hyperparameters. [`crate::Gpr<Fixed>::factor`] only; not an [`Optimizer`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -8,14 +8,12 @@ mod transform;
 
 use std::path::Path;
 
+use crate::GaussianLikelihood;
 use crate::error::GprError;
-use crate::gpr::{DistanceCacheSlot, FittedGpr, OnlineGpr};
+use crate::gpr::{FittedGpr, OnlineGpr, Policies};
 use crate::kernel::KernelSpec;
-use crate::optimizer::{Fixed, FullRecompute};
+use crate::optimizer::Fixed;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::{
-    CachedDistances, GaussianLikelihood, JitterPolicy, NoDistanceCache, UncachedDistances,
-};
 
 use config::{
     DistanceCacheJson, FactorKind, JitterJson, LikelihoodJson, MathJson, ModelConfig,
@@ -48,18 +46,18 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 
 /// Prediction-only model loaded from a persist directory.
 ///
-/// Distance-path models (trainers from [`crate::Gpr::new`]) are
-/// [`Self::Distance`]. Standalone Linear / Constant / White models
-/// (trainers from [`crate::Gpr::from_points`]) are [`Self::Points`].
+/// One variant per precision and factor kind: `llt` loads a [`FittedGpr`],
+/// `ldlt` loads an [`OnlineGpr`]. The distance-cache policy, kernel `exp`,
+/// and jitter policy are read back into the model's runtime policies.
 /// Re-training is [`crate::FittedGpr::with_optimizer`] then
 /// [`crate::FittedGpr::refit`]. The file does not store a solver or a
-/// Cholesky buffer policy; load is always [`crate::RetainCholesky`].
+/// Cholesky buffer policy; load is always [`crate::CholeskyBuffer::Retain`].
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::persist::{LoadedDistance, LoadedGpr, PersistRegistry};
+/// use gprx::persist::{LoadedGpr, PersistRegistry};
 /// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
@@ -77,18 +75,11 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// fitted.save(&dir)?;
 /// let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
 /// match loaded {
-///     LoadedGpr::Distance(LoadedDistance::Cached(model)) => {
+///     LoadedGpr::Double(model) => {
 ///         let pred = model.predict(&[0.5], 1, 1)?;
 ///         assert_eq!(pred.mean.len(), 1);
 ///     }
-///     LoadedGpr::Distance(LoadedDistance::Uncached(_)) => {
-///         panic!("default save is CachedDistances")
-///     }
-///     LoadedGpr::Points(_) => panic!("RBF is a distance kernel"),
-///     LoadedGpr::OnlineDistance(_) | LoadedGpr::OnlinePoints(_) => {
-///         panic!("fitted save is llt")
-///     }
-///     _ => panic!("default save is double precision"),
+///     _ => panic!("default save is a double-precision llt model"),
 /// }
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
@@ -96,465 +87,22 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// ```
 #[derive(Clone, Debug)]
 pub enum LoadedGpr {
-    /// Model whose trainer stored a [`crate::DistanceCachePolicy`].
-    Distance(LoadedDistance),
-    /// Model whose trainer was [`crate::Gpr::from_points`].
-    Points(FittedGpr<Fixed, FullRecompute, NoDistanceCache>),
-    /// [`crate::SinglePrecision`] model from [`crate::Gpr::from_points`].
-    PointsSingle(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::MixedPrecision`] model from [`crate::Gpr::from_points`].
-    PointsMixed(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// Reevaluate mixed model from [`crate::Gpr::from_points`].
-    PointsReevaluate(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// Online model whose trainer stored a [`crate::DistanceCachePolicy`].
-    OnlineDistance(LoadedOnlineDistance),
-    /// Online model whose trainer was [`crate::Gpr::from_points`].
-    OnlinePoints(OnlineGpr<Fixed, FullRecompute, NoDistanceCache>),
-    /// [`crate::SinglePrecision`] online model from [`crate::Gpr::from_points`].
-    OnlinePointsSingle(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// Promoted-storage mixed online model from [`crate::Gpr::from_points`].
-    OnlinePointsMixed(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// Reevaluate mixed online model from [`crate::Gpr::from_points`].
-    OnlinePointsReevaluate(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::FastApprox`] model from [`crate::Gpr::from_points`].
-    PointsFast(
-        FittedGpr<Fixed, FullRecompute, NoDistanceCache, crate::RetainCholesky, crate::FastApprox>,
-    ),
-    /// [`crate::FastApprox`] and [`crate::SinglePrecision`] from [`crate::Gpr::from_points`].
-    PointsSingleFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and promoted-storage [`crate::MixedPrecision`] from [`crate::Gpr::from_points`].
-    PointsMixedFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and reevaluate mixed precision from [`crate::Gpr::from_points`].
-    PointsReevaluateFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::FastApprox`] online model from [`crate::Gpr::from_points`].
-    OnlinePointsFast(
-        OnlineGpr<Fixed, FullRecompute, NoDistanceCache, crate::RetainCholesky, crate::FastApprox>,
-    ),
-    /// [`crate::FastApprox`] and [`crate::SinglePrecision`] online model from [`crate::Gpr::from_points`].
-    OnlinePointsSingleFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and promoted-storage mixed online model from [`crate::Gpr::from_points`].
-    OnlinePointsMixedFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and reevaluate mixed online model from [`crate::Gpr::from_points`].
-    OnlinePointsReevaluateFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            NoDistanceCache,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-}
-
-/// Distance-path model loaded as [`CachedDistances`] or [`UncachedDistances`].
-#[derive(Clone, Debug)]
-pub enum LoadedDistance {
-    /// Trainer used [`CachedDistances`] (`always` in `config.json`).
-    Cached(FittedGpr<Fixed, FullRecompute, CachedDistances>),
-    /// Trainer used [`UncachedDistances`] (`never` in `config.json`).
-    Uncached(FittedGpr<Fixed, FullRecompute, UncachedDistances>),
-    /// [`crate::SinglePrecision`] with [`CachedDistances`].
-    CachedSingle(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::SinglePrecision`] with [`UncachedDistances`].
-    UncachedSingle(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::MixedPrecision`] with the promoted-storage residual and [`CachedDistances`].
-    CachedMixed(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::MixedPrecision`] with the promoted-storage residual and [`UncachedDistances`].
-    UncachedMixed(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` with [`CachedDistances`].
-    CachedReevaluate(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` with [`UncachedDistances`].
-    UncachedReevaluate(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::FastApprox`] with [`CachedDistances`].
-    CachedFast(
-        FittedGpr<Fixed, FullRecompute, CachedDistances, crate::RetainCholesky, crate::FastApprox>,
-    ),
-    /// [`crate::FastApprox`] with [`UncachedDistances`].
-    UncachedFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-        >,
-    ),
-    /// [`crate::FastApprox`] and [`crate::SinglePrecision`] with [`CachedDistances`].
-    CachedSingleFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and [`crate::SinglePrecision`] with [`UncachedDistances`].
-    UncachedSingleFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and promoted-storage [`crate::MixedPrecision`] with [`CachedDistances`].
-    CachedMixedFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and promoted-storage [`crate::MixedPrecision`] with [`UncachedDistances`].
-    UncachedMixedFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and reevaluate mixed precision with [`CachedDistances`].
-    CachedReevaluateFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::FastApprox`] and reevaluate mixed precision with [`UncachedDistances`].
-    UncachedReevaluateFast(
-        FittedGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-}
-
-/// Distance-path [`crate::OnlineGpr`] loaded as [`CachedDistances`] or
-/// [`UncachedDistances`].
-#[derive(Clone, Debug)]
-pub enum LoadedOnlineDistance {
-    /// Trainer used [`CachedDistances`] (`always` in `config.json`).
-    Cached(OnlineGpr<Fixed, FullRecompute, CachedDistances>),
-    /// Trainer used [`UncachedDistances`] (`never` in `config.json`).
-    Uncached(OnlineGpr<Fixed, FullRecompute, UncachedDistances>),
-    /// [`crate::SinglePrecision`] with [`CachedDistances`].
-    CachedSingle(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::SinglePrecision`] with [`UncachedDistances`].
-    UncachedSingle(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// Promoted-storage mixed precision with [`CachedDistances`].
-    CachedMixed(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// Promoted-storage mixed precision with [`UncachedDistances`].
-    UncachedMixed(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// Reevaluate mixed precision with [`CachedDistances`].
-    CachedReevaluate(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// Reevaluate mixed precision with [`UncachedDistances`].
-    UncachedReevaluate(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::FastApprox`] with [`CachedDistances`].
-    CachedFast(
-        OnlineGpr<Fixed, FullRecompute, CachedDistances, crate::RetainCholesky, crate::FastApprox>,
-    ),
-    /// [`crate::FastApprox`] with [`UncachedDistances`].
-    UncachedFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-        >,
-    ),
-    /// [`crate::FastApprox`] and [`crate::SinglePrecision`] with [`CachedDistances`].
-    CachedSingleFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and [`crate::SinglePrecision`] with [`UncachedDistances`].
-    UncachedSingleFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::SinglePrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and promoted-storage mixed precision with [`CachedDistances`].
-    CachedMixedFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and promoted-storage mixed precision with [`UncachedDistances`].
-    UncachedMixedFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision,
-        >,
-    ),
-    /// [`crate::FastApprox`] and reevaluate mixed precision with [`CachedDistances`].
-    CachedReevaluateFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            CachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
-    /// [`crate::FastApprox`] and reevaluate mixed precision with [`UncachedDistances`].
-    UncachedReevaluateFast(
-        OnlineGpr<
-            Fixed,
-            FullRecompute,
-            UncachedDistances,
-            crate::RetainCholesky,
-            crate::FastApprox,
-            crate::MixedPrecision<crate::ReevaluateKernel>,
-        >,
-    ),
+    /// [`crate::DoublePrecision`] model.
+    Double(FittedGpr<Fixed>),
+    /// [`crate::SinglePrecision`] model.
+    Single(FittedGpr<Fixed, crate::SinglePrecision>),
+    /// Promoted-storage [`crate::MixedPrecision`] model.
+    Mixed(FittedGpr<Fixed, crate::MixedPrecision>),
+    /// [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    Reevaluate(FittedGpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
+    /// [`crate::DoublePrecision`] online model.
+    OnlineDouble(OnlineGpr<Fixed>),
+    /// [`crate::SinglePrecision`] online model.
+    OnlineSingle(OnlineGpr<Fixed, crate::SinglePrecision>),
+    /// Promoted-storage [`crate::MixedPrecision`] online model.
+    OnlineMixed(OnlineGpr<Fixed, crate::MixedPrecision>),
+    /// [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` online model.
+    OnlineReevaluate(OnlineGpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
 impl LoadedGpr {
@@ -565,7 +113,7 @@ impl LoadedGpr {
     /// [`FittedGpr`], `ldlt` loads [`crate::OnlineGpr`] and requires
     /// `point_ids` plus `next_point_id`. When a factor is present, the
     /// safetensors file stays memory-mapped. The buffer policy is
-    /// [`crate::RetainCholesky`]. Unknown [`FORMAT_VERSION`] is rejected.
+    /// [`crate::CholeskyBuffer::Retain`]. Unknown [`FORMAT_VERSION`] is rejected.
     ///
     /// # Errors
     ///
@@ -579,18 +127,15 @@ impl LoadedGpr {
     }
 }
 
-pub(crate) struct PersistedModel<
-    C,
-    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
-> {
+pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precision::DoublePrecision>
+{
     pub kernel: KernelSpec,
     pub likelihood: GaussianLikelihood,
     pub x_unfitted: Box<dyn UnfittedTransform>,
     pub y_unfitted: Box<dyn UnfittedTarget>,
     pub x_transform: Box<dyn Transform>,
     pub y_transform: Box<dyn TargetTransform>,
-    pub distance_cache: C,
-    pub jitter_policy: JitterPolicy,
+    pub policies: Policies,
     pub x_obs: Vec<f64>,
     pub y_obs: Vec<f64>,
     pub alpha: Vec<P::Refine>,
@@ -631,15 +176,12 @@ where
     })
 }
 
-pub(crate) fn save_fitted<O, S, C, B, M, P>(
-    model: &FittedGpr<O, S, C, B, M, P>,
+pub(crate) fn save_fitted<O, P>(
+    model: &FittedGpr<O, P>,
     dir: &Path,
     with_factor: bool,
 ) -> Result<(), GprError>
 where
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
@@ -652,15 +194,12 @@ where
         factor_kind: FactorKind::Llt,
         precision: PrecisionJson::from_persist(kind),
         residual: ResidualJson::from_persist(kind),
-        math: MathJson::from_math::<M>(),
+        math: MathJson::encode(model.policies().math),
         kernel: KernelJson::encode(model.kernel())?,
         likelihood: LikelihoodJson::encode(model.likelihood()),
-        jitter: JitterJson::encode(model.jitter_policy()),
+        jitter: JitterJson::encode(model.policies().jitter),
         factor_jitter: model.factor_jitter(),
-        distance_cache: model
-            .distance_cache_slot()
-            .persist()
-            .map(DistanceCacheJson::encode),
+        distance_cache: Some(DistanceCacheJson::encode(model.policies().distance_cache)),
         x_unfitted: encode_unfitted_input(model.x_unfitted())?,
         y_unfitted: encode_unfitted_target(model.y_unfitted())?,
         x_transform: encode_fitted_input(model.x_transform())?,
@@ -687,15 +226,12 @@ where
     write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
 }
 
-pub(crate) fn save_online<O, S, C, B, M, P>(
-    model: &OnlineGpr<O, S, C, B, M, P>,
+pub(crate) fn save_online<O, P>(
+    model: &OnlineGpr<O, P>,
     dir: &Path,
     with_factor: bool,
 ) -> Result<(), GprError>
 where
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
@@ -708,15 +244,12 @@ where
         factor_kind: FactorKind::Ldlt,
         precision: PrecisionJson::from_persist(kind),
         residual: ResidualJson::from_persist(kind),
-        math: MathJson::from_math::<M>(),
+        math: MathJson::encode(model.policies().math),
         kernel: KernelJson::encode(model.kernel())?,
         likelihood: LikelihoodJson::encode(model.likelihood()),
-        jitter: JitterJson::encode(model.jitter_policy()),
+        jitter: JitterJson::encode(model.policies().jitter),
         factor_jitter: model.factor_jitter(),
-        distance_cache: model
-            .distance_cache_slot()
-            .persist()
-            .map(DistanceCacheJson::encode),
+        distance_cache: Some(DistanceCacheJson::encode(model.policies().distance_cache)),
         x_unfitted: encode_unfitted_input(model.x_unfitted())?,
         y_unfitted: encode_unfitted_target(model.y_unfitted())?,
         x_transform: encode_fitted_input(model.x_transform())?,
@@ -743,14 +276,11 @@ where
     write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
 }
 
-fn apply_online_ids<O, S, C, B, M, P>(
-    online: &mut OnlineGpr<O, S, C, B, M, P>,
+fn apply_online_ids<O, P>(
+    online: &mut OnlineGpr<O, P>,
     ids: &Option<(Vec<u64>, u64)>,
 ) -> Result<(), GprError>
 where
-    C: DistanceCacheSlot,
-    B: crate::gpr::AllocWorkspace,
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     let (ids, next_id) = ids
@@ -830,105 +360,19 @@ impl PersistLoad for crate::MixedPrecision<crate::ReevaluateKernel> {
     }
 }
 
-trait Seal<M: crate::math::KernelMath>: crate::precision::GpScalar {
-    fn seal_cached(
-        model: FittedGpr<Fixed, FullRecompute, CachedDistances, crate::RetainCholesky, M, Self>,
-    ) -> LoadedGpr;
-    fn seal_uncached(
-        model: FittedGpr<Fixed, FullRecompute, UncachedDistances, crate::RetainCholesky, M, Self>,
-    ) -> LoadedGpr;
-    fn seal_points(
-        model: FittedGpr<Fixed, FullRecompute, NoDistanceCache, crate::RetainCholesky, M, Self>,
-    ) -> LoadedGpr;
-    fn seal_online_cached(
-        model: OnlineGpr<Fixed, FullRecompute, CachedDistances, crate::RetainCholesky, M, Self>,
-    ) -> LoadedGpr;
-    fn seal_online_uncached(
-        model: OnlineGpr<Fixed, FullRecompute, UncachedDistances, crate::RetainCholesky, M, Self>,
-    ) -> LoadedGpr;
-    fn seal_online_points(
-        model: OnlineGpr<Fixed, FullRecompute, NoDistanceCache, crate::RetainCholesky, M, Self>,
-    ) -> LoadedGpr;
+trait Seal: crate::precision::GpScalar {
+    fn seal(model: FittedGpr<Fixed, Self>) -> LoadedGpr;
+    fn seal_online(model: OnlineGpr<Fixed, Self>) -> LoadedGpr;
 }
 
 macro_rules! impl_seal {
-    (
-        $prec:ty, $math:ty,
-        $cached:path, $uncached:path, $points:path,
-        $online_cached:path, $online_uncached:path, $online_points:path
-    ) => {
-        impl Seal<$math> for $prec {
-            fn seal_cached(
-                model: FittedGpr<
-                    Fixed,
-                    FullRecompute,
-                    CachedDistances,
-                    crate::RetainCholesky,
-                    $math,
-                    Self,
-                >,
-            ) -> LoadedGpr {
-                LoadedGpr::Distance($cached(model))
+    ($prec:ty, $fitted:path, $online:path) => {
+        impl Seal for $prec {
+            fn seal(model: FittedGpr<Fixed, Self>) -> LoadedGpr {
+                $fitted(model)
             }
-            fn seal_uncached(
-                model: FittedGpr<
-                    Fixed,
-                    FullRecompute,
-                    UncachedDistances,
-                    crate::RetainCholesky,
-                    $math,
-                    Self,
-                >,
-            ) -> LoadedGpr {
-                LoadedGpr::Distance($uncached(model))
-            }
-            fn seal_points(
-                model: FittedGpr<
-                    Fixed,
-                    FullRecompute,
-                    NoDistanceCache,
-                    crate::RetainCholesky,
-                    $math,
-                    Self,
-                >,
-            ) -> LoadedGpr {
-                $points(model)
-            }
-            fn seal_online_cached(
-                model: OnlineGpr<
-                    Fixed,
-                    FullRecompute,
-                    CachedDistances,
-                    crate::RetainCholesky,
-                    $math,
-                    Self,
-                >,
-            ) -> LoadedGpr {
-                LoadedGpr::OnlineDistance($online_cached(model))
-            }
-            fn seal_online_uncached(
-                model: OnlineGpr<
-                    Fixed,
-                    FullRecompute,
-                    UncachedDistances,
-                    crate::RetainCholesky,
-                    $math,
-                    Self,
-                >,
-            ) -> LoadedGpr {
-                LoadedGpr::OnlineDistance($online_uncached(model))
-            }
-            fn seal_online_points(
-                model: OnlineGpr<
-                    Fixed,
-                    FullRecompute,
-                    NoDistanceCache,
-                    crate::RetainCholesky,
-                    $math,
-                    Self,
-                >,
-            ) -> LoadedGpr {
-                $online_points(model)
+            fn seal_online(model: OnlineGpr<Fixed, Self>) -> LoadedGpr {
+                $online(model)
             }
         }
     };
@@ -936,83 +380,23 @@ macro_rules! impl_seal {
 
 impl_seal!(
     crate::precision::DoublePrecision,
-    crate::Accurate,
-    LoadedDistance::Cached,
-    LoadedDistance::Uncached,
-    LoadedGpr::Points,
-    LoadedOnlineDistance::Cached,
-    LoadedOnlineDistance::Uncached,
-    LoadedGpr::OnlinePoints
+    LoadedGpr::Double,
+    LoadedGpr::OnlineDouble
 );
 impl_seal!(
     crate::SinglePrecision,
-    crate::Accurate,
-    LoadedDistance::CachedSingle,
-    LoadedDistance::UncachedSingle,
-    LoadedGpr::PointsSingle,
-    LoadedOnlineDistance::CachedSingle,
-    LoadedOnlineDistance::UncachedSingle,
-    LoadedGpr::OnlinePointsSingle
+    LoadedGpr::Single,
+    LoadedGpr::OnlineSingle
 );
 impl_seal!(
     crate::MixedPrecision<crate::precision::PromoteStorage>,
-    crate::Accurate,
-    LoadedDistance::CachedMixed,
-    LoadedDistance::UncachedMixed,
-    LoadedGpr::PointsMixed,
-    LoadedOnlineDistance::CachedMixed,
-    LoadedOnlineDistance::UncachedMixed,
-    LoadedGpr::OnlinePointsMixed
+    LoadedGpr::Mixed,
+    LoadedGpr::OnlineMixed
 );
 impl_seal!(
     crate::MixedPrecision<crate::ReevaluateKernel>,
-    crate::Accurate,
-    LoadedDistance::CachedReevaluate,
-    LoadedDistance::UncachedReevaluate,
-    LoadedGpr::PointsReevaluate,
-    LoadedOnlineDistance::CachedReevaluate,
-    LoadedOnlineDistance::UncachedReevaluate,
-    LoadedGpr::OnlinePointsReevaluate
-);
-impl_seal!(
-    crate::precision::DoublePrecision,
-    crate::FastApprox,
-    LoadedDistance::CachedFast,
-    LoadedDistance::UncachedFast,
-    LoadedGpr::PointsFast,
-    LoadedOnlineDistance::CachedFast,
-    LoadedOnlineDistance::UncachedFast,
-    LoadedGpr::OnlinePointsFast
-);
-impl_seal!(
-    crate::SinglePrecision,
-    crate::FastApprox,
-    LoadedDistance::CachedSingleFast,
-    LoadedDistance::UncachedSingleFast,
-    LoadedGpr::PointsSingleFast,
-    LoadedOnlineDistance::CachedSingleFast,
-    LoadedOnlineDistance::UncachedSingleFast,
-    LoadedGpr::OnlinePointsSingleFast
-);
-impl_seal!(
-    crate::MixedPrecision<crate::precision::PromoteStorage>,
-    crate::FastApprox,
-    LoadedDistance::CachedMixedFast,
-    LoadedDistance::UncachedMixedFast,
-    LoadedGpr::PointsMixedFast,
-    LoadedOnlineDistance::CachedMixedFast,
-    LoadedOnlineDistance::UncachedMixedFast,
-    LoadedGpr::OnlinePointsMixedFast
-);
-impl_seal!(
-    crate::MixedPrecision<crate::ReevaluateKernel>,
-    crate::FastApprox,
-    LoadedDistance::CachedReevaluateFast,
-    LoadedDistance::UncachedReevaluateFast,
-    LoadedGpr::PointsReevaluateFast,
-    LoadedOnlineDistance::CachedReevaluateFast,
-    LoadedOnlineDistance::UncachedReevaluateFast,
-    LoadedGpr::OnlinePointsReevaluateFast
+    LoadedGpr::Reevaluate,
+    LoadedGpr::OnlineReevaluate
 );
 
 fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
@@ -1022,40 +406,27 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
     let config = config::parse_config(&bytes)?;
     match (config.precision, config.residual) {
         (PrecisionJson::Double, _) => {
-            load_math::<crate::precision::DoublePrecision>(dir, registry, config)
+            load_precision::<crate::precision::DoublePrecision>(dir, registry, config)
         }
-        (PrecisionJson::Single, _) => load_math::<crate::SinglePrecision>(dir, registry, config),
-        (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => load_math::<
+        (PrecisionJson::Single, _) => {
+            load_precision::<crate::SinglePrecision>(dir, registry, config)
+        }
+        (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => load_precision::<
             crate::MixedPrecision<crate::precision::PromoteStorage>,
         >(dir, registry, config),
         (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => {
-            load_math::<crate::MixedPrecision<crate::ReevaluateKernel>>(dir, registry, config)
+            load_precision::<crate::MixedPrecision<crate::ReevaluateKernel>>(dir, registry, config)
         }
     }
 }
 
-fn load_math<P>(
+fn load_precision<P>(
     dir: &Path,
     registry: &PersistRegistry,
     config: ModelConfig,
 ) -> Result<LoadedGpr, GprError>
 where
-    P: PersistLoad + Seal<crate::Accurate> + Seal<crate::FastApprox>,
-{
-    match config.math {
-        MathJson::Accurate => load_precision::<P, crate::Accurate>(dir, registry, config),
-        MathJson::FastApprox => load_precision::<P, crate::FastApprox>(dir, registry, config),
-    }
-}
-
-fn load_precision<P, M>(
-    dir: &Path,
-    registry: &PersistRegistry,
-    config: ModelConfig,
-) -> Result<LoadedGpr, GprError>
-where
-    P: PersistLoad + Seal<M>,
-    M: crate::math::KernelMath,
+    P: PersistLoad + Seal,
 {
     let ldlt_ids = match config.factor_kind {
         FactorKind::Ldlt => {
@@ -1066,224 +437,58 @@ where
     };
     let kernel = config.kernel.decode(registry)?;
     let likelihood = config.likelihood.decode()?;
-    let jitter = config.jitter.decode()?;
+    let policies = Policies {
+        distance_cache: config
+            .distance_cache
+            .map(DistanceCacheJson::decode)
+            .unwrap_or_default(),
+        cholesky_buffer: crate::CholeskyBuffer::Retain,
+        math: config.math.decode(),
+        jitter: config.jitter.decode()?,
+    };
     let x_unfitted = config.x_unfitted.decode(registry)?;
     let y_unfitted = config.y_unfitted.decode(registry)?;
     let x_transform = config.x_transform.decode(registry)?;
     let y_transform = config.y_transform.decode(registry)?;
     let (x_obs, y_obs) = read_xy(dir, config.n, config.d)?;
-    let cache = config.distance_cache.map(DistanceCacheJson::decode);
     if config.has_factor {
         let alpha = P::read_alpha(dir, config.n)?;
         let (owned_l, mapped) = P::read_factor(dir, config.n)?;
-        match (config.factor_kind, cache) {
-            (FactorKind::Llt, Some(crate::gpr::DistanceCachePersist::Cached)) => {
-                let model = FittedGpr::from_persisted(PersistedModel {
-                    kernel,
-                    likelihood,
-                    x_unfitted,
-                    y_unfitted,
-                    x_transform,
-                    y_transform,
-                    distance_cache: CachedDistances,
-                    jitter_policy: jitter,
-                    x_obs,
-                    y_obs,
-                    alpha,
-                    owned_l,
-                    mapped,
-                    factor_jitter: config.factor_jitter,
-                })?;
-                Ok(P::seal_cached(model))
-            }
-            (FactorKind::Llt, Some(crate::gpr::DistanceCachePersist::Uncached)) => {
-                let model = FittedGpr::from_persisted(PersistedModel {
-                    kernel,
-                    likelihood,
-                    x_unfitted,
-                    y_unfitted,
-                    x_transform,
-                    y_transform,
-                    distance_cache: UncachedDistances,
-                    jitter_policy: jitter,
-                    x_obs,
-                    y_obs,
-                    alpha,
-                    owned_l,
-                    mapped,
-                    factor_jitter: config.factor_jitter,
-                })?;
-                Ok(P::seal_uncached(model))
-            }
-            (FactorKind::Llt, None) => {
-                let model = FittedGpr::from_persisted(PersistedModel {
-                    kernel,
-                    likelihood,
-                    x_unfitted,
-                    y_unfitted,
-                    x_transform,
-                    y_transform,
-                    distance_cache: NoDistanceCache,
-                    jitter_policy: jitter,
-                    x_obs,
-                    y_obs,
-                    alpha,
-                    owned_l,
-                    mapped,
-                    factor_jitter: config.factor_jitter,
-                })?;
-                Ok(P::seal_points(model))
-            }
-            (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Cached)) => {
-                let mut online = OnlineGpr::from_persisted(PersistedModel {
-                    kernel,
-                    likelihood,
-                    x_unfitted,
-                    y_unfitted,
-                    x_transform,
-                    y_transform,
-                    distance_cache: CachedDistances,
-                    jitter_policy: jitter,
-                    x_obs,
-                    y_obs,
-                    alpha,
-                    owned_l,
-                    mapped,
-                    factor_jitter: config.factor_jitter,
-                })?;
+        let parts = PersistedModel {
+            kernel,
+            likelihood,
+            x_unfitted,
+            y_unfitted,
+            x_transform,
+            y_transform,
+            policies,
+            x_obs,
+            y_obs,
+            alpha,
+            owned_l,
+            mapped,
+            factor_jitter: config.factor_jitter,
+        };
+        match config.factor_kind {
+            FactorKind::Llt => Ok(P::seal(FittedGpr::from_persisted(parts)?)),
+            FactorKind::Ldlt => {
+                let mut online = OnlineGpr::from_persisted(parts)?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online_cached(online))
-            }
-            (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Uncached)) => {
-                let mut online = OnlineGpr::from_persisted(PersistedModel {
-                    kernel,
-                    likelihood,
-                    x_unfitted,
-                    y_unfitted,
-                    x_transform,
-                    y_transform,
-                    distance_cache: UncachedDistances,
-                    jitter_policy: jitter,
-                    x_obs,
-                    y_obs,
-                    alpha,
-                    owned_l,
-                    mapped,
-                    factor_jitter: config.factor_jitter,
-                })?;
-                apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online_uncached(online))
-            }
-            (FactorKind::Ldlt, None) => {
-                let mut online = OnlineGpr::from_persisted(PersistedModel {
-                    kernel,
-                    likelihood,
-                    x_unfitted,
-                    y_unfitted,
-                    x_transform,
-                    y_transform,
-                    distance_cache: NoDistanceCache,
-                    jitter_policy: jitter,
-                    x_obs,
-                    y_obs,
-                    alpha,
-                    owned_l,
-                    mapped,
-                    factor_jitter: config.factor_jitter,
-                })?;
-                apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online_points(online))
+                Ok(P::seal_online(online))
             }
         }
     } else {
-        match (config.factor_kind, cache) {
-            (FactorKind::Llt, Some(crate::gpr::DistanceCachePersist::Cached)) => {
-                let gpr = crate::Gpr::new(kernel, likelihood)
-                    .with_optimizer(Fixed)
-                    .with_boxed_input_transform(x_unfitted)
-                    .with_boxed_target_transform(y_unfitted)
-                    .with_jitter_policy(jitter)
-                    .with_distance_cache_policy(CachedDistances)
-                    .with_math::<M>()
-                    .with_precision::<P>();
-                Ok(P::seal_cached(
-                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
-                        .map_err(|(_, err)| err)?,
-                ))
-            }
-            (FactorKind::Llt, Some(crate::gpr::DistanceCachePersist::Uncached)) => {
-                let gpr = crate::Gpr::new(kernel, likelihood)
-                    .with_optimizer(Fixed)
-                    .with_boxed_input_transform(x_unfitted)
-                    .with_boxed_target_transform(y_unfitted)
-                    .with_jitter_policy(jitter)
-                    .with_distance_cache_policy(UncachedDistances)
-                    .with_math::<M>()
-                    .with_precision::<P>();
-                Ok(P::seal_uncached(
-                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
-                        .map_err(|(_, err)| err)?,
-                ))
-            }
-            (FactorKind::Llt, None) => {
-                let gpr = crate::Gpr::from_points(kernel, likelihood)
-                    .with_optimizer(Fixed)
-                    .with_boxed_input_transform(x_unfitted)
-                    .with_boxed_target_transform(y_unfitted)
-                    .with_jitter_policy(jitter)
-                    .with_math::<M>()
-                    .with_precision::<P>();
-                Ok(P::seal_points(
-                    gpr.factor(&x_obs, config.n, config.d, &y_obs)
-                        .map_err(|(_, err)| err)?,
-                ))
-            }
-            (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Cached)) => {
-                let gpr = crate::Gpr::new(kernel, likelihood)
-                    .with_optimizer(Fixed)
-                    .with_boxed_input_transform(x_unfitted)
-                    .with_boxed_target_transform(y_unfitted)
-                    .with_jitter_policy(jitter)
-                    .with_distance_cache_policy(CachedDistances)
-                    .with_math::<M>()
-                    .with_precision::<P>();
-                let mut online = gpr
-                    .factor(&x_obs, config.n, config.d, &y_obs)
-                    .map_err(|(_, err)| err)?
-                    .into_online()?;
+        let fitted = crate::Gpr::<Fixed, P>::from_owned(
+            kernel, likelihood, x_unfitted, y_unfitted, Fixed, policies,
+        )
+        .factor(&x_obs, config.n, config.d, &y_obs)
+        .map_err(|(_, err)| err)?;
+        match config.factor_kind {
+            FactorKind::Llt => Ok(P::seal(fitted)),
+            FactorKind::Ldlt => {
+                let mut online = fitted.into_online()?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online_cached(online))
-            }
-            (FactorKind::Ldlt, Some(crate::gpr::DistanceCachePersist::Uncached)) => {
-                let gpr = crate::Gpr::new(kernel, likelihood)
-                    .with_optimizer(Fixed)
-                    .with_boxed_input_transform(x_unfitted)
-                    .with_boxed_target_transform(y_unfitted)
-                    .with_jitter_policy(jitter)
-                    .with_distance_cache_policy(UncachedDistances)
-                    .with_math::<M>()
-                    .with_precision::<P>();
-                let mut online = gpr
-                    .factor(&x_obs, config.n, config.d, &y_obs)
-                    .map_err(|(_, err)| err)?
-                    .into_online()?;
-                apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online_uncached(online))
-            }
-            (FactorKind::Ldlt, None) => {
-                let gpr = crate::Gpr::from_points(kernel, likelihood)
-                    .with_optimizer(Fixed)
-                    .with_boxed_input_transform(x_unfitted)
-                    .with_boxed_target_transform(y_unfitted)
-                    .with_jitter_policy(jitter)
-                    .with_math::<M>()
-                    .with_precision::<P>();
-                let mut online = gpr
-                    .factor(&x_obs, config.n, config.d, &y_obs)
-                    .map_err(|(_, err)| err)?
-                    .into_online()?;
-                apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online_points(online))
+                Ok(P::seal_online(online))
             }
         }
     }
@@ -1292,8 +497,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_FILE, FORMAT_VERSION, LoadedDistance, LoadedGpr, LoadedOnlineDistance,
-        PersistRegistry, RESERVED_PREFIX, persist_err,
+        CONFIG_FILE, FORMAT_VERSION, LoadedGpr, PersistRegistry, RESERVED_PREFIX, persist_err,
     };
     use crate::kernel::{KernelSpec, KernelTerm, LinearKernel, RbfKernel, Triangle};
     use crate::param::Interval;
@@ -1458,7 +662,7 @@ mod tests {
         let dir = temp_dir("rbf-save");
         fitted.save(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Distance(LoadedDistance::Cached(model)) = loaded else {
+        let LoadedGpr::Double(model) = loaded else {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
@@ -1480,7 +684,7 @@ mod tests {
         let dir = temp_dir("rbf-factor");
         fitted.save_with_factor(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Distance(LoadedDistance::Cached(model)) = loaded else {
+        let LoadedGpr::Double(model) = loaded else {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[0.25], 1, 1).expect("loaded predict");
@@ -1490,8 +694,8 @@ mod tests {
     }
 
     #[test]
-    fn linear_from_points_loads_as_points() {
-        let fitted = Gpr::from_points(
+    fn linear_round_trips_without_distance_cache() {
+        let fitted = Gpr::new(
             KernelSpec::from(LinearKernel::new(1.0).expect("σ²")),
             GaussianLikelihood::new(0.1).expect("noise"),
         )
@@ -1502,8 +706,8 @@ mod tests {
         let dir = temp_dir("linear-points");
         fitted.save(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Points(model) = loaded else {
-            panic!("standalone Linear is a points kernel");
+        let LoadedGpr::Double(model) = loaded else {
+            panic!("default save is a double-precision llt model");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
         assert_close(got.mean[0], want.mean[0], TOL);
@@ -1526,7 +730,7 @@ mod tests {
         let dir = temp_dir("std-roundtrip");
         fitted.save(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::Distance(LoadedDistance::Cached(model)) = loaded else {
+        let LoadedGpr::Double(model) = loaded else {
             panic!("RBF is a distance kernel");
         };
         let got = model.predict(&[1.0], 1, 1).expect("loaded predict");
@@ -1605,7 +809,7 @@ mod tests {
             })
             .expect("register");
         let loaded = LoadedGpr::load(&dir, &registry).expect("load");
-        assert!(matches!(loaded, LoadedGpr::Distance(_)));
+        assert!(matches!(loaded, LoadedGpr::Double(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1665,7 +869,7 @@ mod tests {
         );
         let want = must(single.predict(&[0.25], 1, 1));
         let loaded = must(LoadedGpr::load(&dir_single, &PersistRegistry::new()));
-        let LoadedGpr::Distance(LoadedDistance::CachedSingle(model)) = loaded else {
+        let LoadedGpr::Single(model) = loaded else {
             panic!("single RBF loads as CachedSingle");
         };
         let got = must(model.predict(&[0.25], 1, 1));
@@ -1678,7 +882,7 @@ mod tests {
         must(online.save_with_factor(&dir_online));
         let want = must(online.predict(&[0.25], 1, 1));
         let loaded = must(LoadedGpr::load(&dir_online, &PersistRegistry::new()));
-        let LoadedGpr::OnlineDistance(LoadedOnlineDistance::CachedSingle(model)) = loaded else {
+        let LoadedGpr::OnlineSingle(model) = loaded else {
             panic!("single online RBF loads as CachedSingle");
         };
         let got = must(model.predict(&[0.25], 1, 1));
@@ -1699,7 +903,7 @@ mod tests {
         assert!(!mixed_json.contains("\"residual\""), "{mixed_json}");
         let want = must(mixed.predict(&[0.25], 1, 1));
         let loaded = must(LoadedGpr::load(&dir_mixed, &PersistRegistry::new()));
-        let LoadedGpr::Distance(LoadedDistance::CachedMixed(model)) = loaded else {
+        let LoadedGpr::Mixed(model) = loaded else {
             panic!("mixed RBF loads as CachedMixed");
         };
         let got = must(model.predict(&[0.25], 1, 1));
@@ -1723,7 +927,7 @@ mod tests {
                 KernelSpec::from(must(RbfKernel::new(1.0))),
                 must(GaussianLikelihood::new(0.1)),
             )
-            .with_math::<crate::FastApprox>()
+            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(Fixed)
             .factor(&x, 3, 1, &y)
             .map_err(|(_, err)| err),
@@ -1737,9 +941,10 @@ mod tests {
         assert!(json.contains("\"math\": \"fast_approx\""), "{json}");
         let want = must(fitted.predict(&[0.25], 1, 1));
         let loaded = must(LoadedGpr::load(&dir, &PersistRegistry::new()));
-        let LoadedGpr::Distance(LoadedDistance::CachedFast(model)) = loaded else {
-            panic!("fast RBF loads as CachedFast");
+        let LoadedGpr::Double(model) = loaded else {
+            panic!("fast RBF loads as Double");
         };
+        assert_eq!(model.math(), crate::KernelExp::FastApprox);
         let got = must(model.predict(&[0.25], 1, 1));
         assert_close(got.mean[0], want.mean[0], TOL);
         assert_close(got.variance[0], want.variance[0], TOL);
@@ -1747,9 +952,10 @@ mod tests {
         let dir_online = temp_dir("math-fast-online");
         must(online.save_with_factor(&dir_online));
         let loaded = must(LoadedGpr::load(&dir_online, &PersistRegistry::new()));
-        let LoadedGpr::OnlineDistance(LoadedOnlineDistance::CachedFast(_)) = loaded else {
-            panic!("fast online RBF loads as CachedFast");
+        let LoadedGpr::OnlineDouble(model) = loaded else {
+            panic!("fast online RBF loads as OnlineDouble");
         };
+        assert_eq!(model.math(), crate::KernelExp::FastApprox);
         let broken = json.replace("\"math\": \"fast_approx\"", "\"math\": \"nope\"");
         if broken == json {
             panic!("math field was not replaced");
@@ -1776,10 +982,10 @@ mod tests {
         };
         assert!(!accurate_json.contains("\"math\""), "{accurate_json}");
         let loaded = must(LoadedGpr::load(&dir_accurate, &PersistRegistry::new()));
-        assert!(matches!(
-            loaded,
-            LoadedGpr::Distance(LoadedDistance::Cached(_))
-        ));
+        let LoadedGpr::Double(model) = loaded else {
+            panic!("accurate RBF loads as Double");
+        };
+        assert_eq!(model.math(), crate::KernelExp::Accurate);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir_online);
         let _ = std::fs::remove_dir_all(&dir_accurate);

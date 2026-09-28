@@ -333,18 +333,7 @@ fn jitter_problem() -> (Vec<f64>, Vec<f64>) {
     (x, y)
 }
 
-fn jitter_fit<R>(
-    x: &[f64],
-    y: &[f64],
-    noise: f64,
-) -> crate::FittedGpr<
-    Fixed,
-    crate::FullRecompute,
-    crate::CachedDistances,
-    crate::RetainCholesky,
-    crate::Accurate,
-    MixedPrecision<R>,
->
+fn jitter_fit<R>(x: &[f64], y: &[f64], noise: f64) -> crate::FittedGpr<Fixed, MixedPrecision<R>>
 where
     MixedPrecision<R>: crate::precision::GpScalar,
     R: ResidualFormula,
@@ -395,19 +384,7 @@ fn factor_exact_noise(x: &[f64], y: &[f64], noise: f64) -> crate::FittedGpr<Fixe
     )
 }
 
-fn factor_exact<P>(
-    x: &[f64],
-    y: &[f64],
-    ell: f64,
-    noise: f64,
-) -> crate::FittedGpr<
-    Fixed,
-    crate::FullRecompute,
-    crate::CachedDistances,
-    crate::RetainCholesky,
-    crate::Accurate,
-    P,
->
+fn factor_exact<P>(x: &[f64], y: &[f64], ell: f64, noise: f64) -> crate::FittedGpr<Fixed, P>
 where
     P: crate::precision::GpScalar,
 {
@@ -686,14 +663,7 @@ fn online_exact_round<P>(
     y: &[f64],
     ell: f64,
     noise: f64,
-) -> crate::OnlineGpr<
-    Fixed,
-    crate::FullRecompute,
-    crate::CachedDistances,
-    crate::RetainCholesky,
-    crate::Accurate,
-    P,
->
+) -> crate::OnlineGpr<Fixed, P>
 where
     P: crate::precision::GpScalar,
 {

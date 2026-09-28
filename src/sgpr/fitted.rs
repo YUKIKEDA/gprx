@@ -384,19 +384,7 @@ where
         self.x_obs == self.z_obs
     }
 
-    fn exact_fitted(
-        &self,
-    ) -> Result<
-        crate::FittedGpr<
-            Fixed,
-            crate::FullRecompute,
-            crate::CachedDistances,
-            crate::RetainCholesky,
-            crate::Accurate,
-            P,
-        >,
-        GprError,
-    >
+    fn exact_fitted(&self) -> Result<crate::FittedGpr<Fixed, P>, GprError>
     where
         P: crate::precision::GpScalar,
     {

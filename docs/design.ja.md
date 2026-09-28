@@ -298,25 +298,26 @@ plan実行時、組み込みリーフは`CompiledKernel`のenumアームを直�
 
 ### 5.4 部分更新(コーディネート型最適化器)対応
 
-**対応方針**: `RecomputeStrategy` はマーカー型（ZST）。既定 `FullRecompute`。`IncrementalRecompute` の本体は P2B-18（[#110](https://github.com/YUKIKEDA/gprx/issues/110)）。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
+**対応方針**: fit が触られた葉だけを作り直すかどうかは型にしない。実行時に `O::USES_CHANGE_INDICES && buffer == CholeskyBuffer::Retain` から決める（R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)）。葉の作り直しの本体は P2B-18（[#110](https://github.com/YUKIKEDA/gprx/issues/110)）。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
 
 ```rust
-trait RecomputeStrategy {}
-struct FullRecompute;
-struct IncrementalRecompute; // ZST。葉 Gram は fit / refit 中の Objective だけ
+trait Optimizer<P> {
+    const USES_CHANGE_INDICES: bool = false; // FSA は true
+    // ...
+}
 
 trait IncrementalObjective: Objective {
     fn value_with_changes(&mut self, params: &[T], indices: &[usize]) -> Result<T, GprError>;
 }
 ```
 
-変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`Objective::value_at_changes` の既定は `value`。`GprObjective<IncrementalRecompute>` だけ `value_with_changes` へ転送する。`FullRecompute` は `IncrementalObjective` を impl しない。
+変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`Objective::value_at_changes` の既定は `value`。`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` が葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。
 
-`Gpr<O = Lbfgs, S = FullRecompute>`。公開切替は `with_prefer_memory` / `with_prefer_speed`。`with_recompute_strategy` は無い。極は `B`：`ReuseCholesky` は常に `FullRecompute`。`RetainCholesky` は `O: UsesChangeIndices` のとき `IncrementalRecompute`。`with_optimizer` も同じ規則。`Gpr<Fixed>` に `S` は無い（`factor` は一発フル）。`FittedGpr<O, S>` は `PhantomData<S>`（`refit` が同じ戦略。predict は `S` を読まない）。L-BFGS / NCG / Nelder–Mead / Newton に Incremental は無い。FSA は `UsesChangeIndices`。初回とリスタートは `value`、座標一歩は `value_at_changes`。
+`with_recompute_strategy` は無い。`CholeskyBuffer::Reuse` は常に全体を作り直す。`CholeskyBuffer::Retain` は最適化器が `USES_CHANGE_INDICES` を立てるとき葉を作り直す。`with_optimizer` / `refit` は新しい最適化器からフラグを決め直す。`Gpr<Fixed>::factor` は一発フル。L-BFGS / NCG / Nelder–Mead / Newton は既定の `false`。FSA は `true`。初回とリスタートは `value`、座標一歩は `value_at_changes`。
 
-`IncrementalRecompute` はコンパイル済み葉だけをキャッシュし、変更 index が触る葉だけ `apply` し直す。木の結合と **Cholesky は毎回フル**。低ランク更新はしない。Workspace に新しい `n×n` は足さない。実行時の NotImplemented は置かない。
+葉の作り直しはコンパイル済み葉だけをキャッシュし、変更 index が触る葉だけ `apply` し直す。木の結合と **Cholesky は毎回フル**。低ランク更新はしない。Workspace に新しい `n×n` は足さない。実行時の NotImplemented は置かない。
 
-#### 5.4.1 IncrementalRecomputeとfaer update APIの関係
+#### 5.4.1 葉の作り直しとfaer update APIの関係
 
 行・列のinsert/deleteはデータ点の追加削除用(§11)であり、ハイパラ変更には使えない。`rank_r_update_clobber`は、ハイパラ変更が`K`にもたらす差分`ΔK`が低ランクな場合(線形カーネル項のamplitude変更、全体スケール変更など)に限り使える。
 
@@ -452,31 +453,38 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。新しい `n×n` は Workspace に足さない。`ReuseCholesky` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。新しい `n×n` は Workspace に足さない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-既定の第4型は `RetainCholesky`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。公開のメモリ極（`with_prefer_memory`）が `ReuseCholesky` を選ぶ。`with_cholesky_buffer` は `pub(crate)`。`ReuseCholesky` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にスロットは書かない。`load` は `RetainCholesky`。
+既定の `CholeskyBuffer` は `Retain`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。公開のメモリ極（`with_prefer_memory`）が `CholeskyBuffer::Reuse` を選ぶ。`with_cholesky_buffer` はこれだけを設定する。`Reuse` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にこの方針は書かない。`load` は `Retain`。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 公開面はトレーナーと学習済みモデルを分ける（P2-8）。
 
-`Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、再計算戦略 `S`（マーカー）、距離キャッシュ枠 `C`、Cholesky バッファ方針 `B` を持つ。`DistanceCachePolicy` はトレイト。`Gpr::new` の既定は速さ極（`CachedDistances` + `RetainCholesky`）。公開の切り替えは `with_prefer_memory` / `with_prefer_speed`。メモリ極は `UncachedDistances` + `ReuseCholesky`。`with_distance_cache_policy` / `with_cholesky_buffer` は `pub(crate)`（クレート内の混合組み合わせ用）。`Gpr::from_points` は Linear / Constant / White 専用で `C = NoDistanceCache`。同じ prefer メソッドがあり、`B` だけが変わる。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, S, C>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`Gpr<Fixed>` に `S` は無い。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, S, C>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
+`Gpr<O = Lbfgs, P = DoublePrecision>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、実行時の方針 3 つ（R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)）を持つ：`DistanceCachePolicy { Cached, Uncached }`、`CholeskyBuffer { Retain, Reuse }`、`KernelExp { Accurate, FastApprox }`。どれも素の enum。不正な組み合わせが無いので型パラメータにしない。`Gpr::new` の既定は速さ極（`Cached` + `Retain`）で `Accurate`。公開の切り替えは `with_prefer_memory` / `with_prefer_speed`。メモリ極は `Uncached` + `Reuse`。`with_distance_cache_policy` / `with_cholesky_buffer` / `with_math` はそれぞれ 1 つを設定する。対距離を読まないカーネル（単独の Linear / Constant / White）は方針によらず距離キャッシュを確保しない。`from_points` は無い。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。3 つの方針は getter で読める。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, P>` を返す。固定ハイパラは `Gpr<Fixed>::factor`（旧 `FitOptions::FIXED`）。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, P>` をエラーと一緒に返す。`fitted: bool` と [`GprError::NotFitted`] は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。公開 `FittedGpr` の `L` / `α` / `X` / compiled は `Option` にしない（P2B-5）。欠けるときに `EmptyInput` を返さない。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-既定の `Gpr` は `Gpr<Lbfgs, FullRecompute>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。`S` は Cholesky 極 `B` から決まる（P2B-18）。`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` と `S` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は `C` を保つ。
+既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。葉の作り直しは §5.4 に従う（P2B-18）。`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
 
 ```rust
-struct Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
+struct Gpr<O = Lbfgs, P = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
-    distance_cache: C,
-    _recompute: PhantomData<S>,
+    policies: Policies,
+    _precision: PhantomData<P>,
+}
+
+struct Policies {
+    distance_cache: DistanceCachePolicy, // Cached（既定）| Uncached
+    cholesky_buffer: CholeskyBuffer,     // Retain（既定）| Reuse
+    math: KernelExp,                     // Accurate（既定）| FastApprox
+    jitter: JitterPolicy,
 }
 
 struct Fixed;
@@ -507,18 +515,18 @@ struct NelderMead {
     n_restarts: u32,
 }
 
-trait DistanceCachePolicy {} // CachedDistances | UncachedDistances。距離モードの経路だけ（P2B-11）
-struct CachedDistances; // 既定。n×n（ARD は n×(n·d)）を Workspace に持つ
-struct UncachedDistances; // dist_cache / ard_sq_diff を置かない。等方は X から距離
+enum DistanceCachePolicy { Cached, Uncached } // 距離モードの経路だけ（P2B-11）
+enum CholeskyBuffer { Retain, Reuse }
+enum KernelExp { Accurate, FastApprox }
 
-struct FittedGpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
+struct FittedGpr<O = Lbfgs, P = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
-    _recompute: PhantomData<S>,
-    workspace: Workspace<DoublePrecision>, // L。W は空でよい
+    policies: Policies,
+    workspace: FitBuffers<P>, // L。dist / W は方針しだい
     query: QueryWorkspace<DoublePrecision>, // predict_into 用
     compiled: CompiledKernel,
     alpha: Vec<f64>,
@@ -530,8 +538,9 @@ struct FittedGpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCh
 
 /// Objective は `Gpr` を fit 中だけ &mut で借り、set_params → MLL/勾配 を中継する。
 /// パラメータの正本は Gpr.kernel / Gpr.likelihood。
-struct GprObjective<'a, O, S, C = CachedDistances> {
-    model: &'a mut FittedGpr<O, S, C>,
+struct GprObjective<'a, O, P = DoublePrecision> {
+    model: &'a mut FittedGpr<O, P>,
+    incremental: bool, // §5.4
 }
 ```
 
@@ -550,7 +559,7 @@ struct GprObjective<'a, O, S, C = CachedDistances> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の `C` は `CachedDistances`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`UncachedDistances` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`UncachedDistances` + `ReuseCholesky`）。速さ極は既定のまま（`with_prefer_speed`）。P2B-21 の libgp 比 RSS 合否は `UncachedDistances` + `RetainCholesky`（crate 内の混合。公開極ではない）。この方針は距離経路の trainer（`Gpr::new`）だけが持つ。`RBF + White` と `Constant * RBF` は距離経路のまま。`from_points` の Linear / Constant / White には距離枠ごと無く、prefer は `B` だけを変える。persist タグは `always` / `never`。`LoadedGpr::Distance` は inner enum。`load` は `RetainCholesky`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。P2B-21 の libgp 比 RSS 合否は `Uncached` + `Retain`（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant。`load` は `Retain`。
 
 ### 6.4 Leave-one-out(P1B-7)
 
@@ -583,15 +592,15 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
 }
 
-struct WithDist<W> {                // CachedDistances。Uncached はこのラッパを付けない
-    inner: W,
-    dist_cache: Mat<f64>,
-    ard_sq_diff: Mat<f64>,           // 等方では 0×0
+struct FitBuffers<P: PrecisionPolicy> {
+    core: WorkspaceCore<P>,
+    dist: Option<DistCache<P::Storage>>, // 距離カーネルで Cached のとき Some
+    w_matrix: Option<Mat<P::Storage>>,   // Retain のとき Some。W = ααᵀ - K⁻¹(§6.2)
 }
 
-struct WithW<W> {                   // RetainCholesky。Reuse はこのラッパを付けない
-    inner: W,
-    w_matrix: Mat<f64>,             // W = ααᵀ - K⁻¹。勾配のトレース項(§6.2)
+struct DistCache<S> {
+    dist_cache: Mat<S>,
+    ard_sq_diff: Mat<S>,             // 等方では 0×0
 }
 
 // FittedGpr が保持。predict_into の warmup で (n, m, d) に合わせる
@@ -655,7 +664,7 @@ trait MathBackend<T: Scalar>: Send + Sync {
 enum MathMode { Accurate, FastApprox }
 ```
 
-デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` は型パラメータで、カーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。精度の型パラメータは最後のまま、数学モードはその直前。公開の切り替えは `with_math`。上の `MathMode` 列挙は置かない。`FittedGpr` と `OnlineGpr` の save はモードを記録し、欄が無いファイルは `Accurate`。
+デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` はカーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。`Gpr` / `FittedGpr` / `OnlineGpr` ではモードは実行時の enum `KernelExp` で、`with_math(KernelExp::FastApprox)` で設定する。カーネル呼び出しごとに sealed な `KernelMath` の印へ 1 回だけ分岐する（R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)）。`Sgpr` / `Svgp` は R5-1 まで印を型パラメータで受け取る。上の `MathMode` 列挙は置かない。`FittedGpr` と `OnlineGpr` の save はモードを記録し、欄が無いファイルは `Accurate`。
 
 ## 9. Optimizer設計
 
@@ -680,7 +689,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。公開面は `Gpr<O: Optimizer, S: RecomputeStrategy>`。既定 `Lbfgs` と `FullRecompute`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。公開 `Newton` は argmin の `Newton`（`H⁻¹` は faer の私有型。logit は L-BFGS と同じで `H_z` は解析連鎖。ノブは共有 3 つ + `with_gamma`）。自作例は `FastSimulatedAnnealing`（Cauchy / Metropolis。P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）。logit は使わず、`minimize` が受け取る log-`θ` を歩く。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`。`GprObjective<IncrementalRecompute>` が impl する（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。`Objective::value_at_changes` の既定は `value`。FSA の座標一歩がそれを呼ぶ。`ChangeSet` 構造体は置かない。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`Gpr`の`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。公開面は `Gpr<O: Optimizer>`。既定は `Lbfgs`。argmin の他ソルバもユーザー実装も `with_optimizer` で同じ型パラメータを差し替える。公開 `Newton` は argmin の `Newton`（`H⁻¹` は faer の私有型。logit は L-BFGS と同じで `H_z` は解析連鎖。ノブは共有 3 つ + `with_gamma`）。自作例は `FastSimulatedAnnealing`（Cauchy / Metropolis。P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)）。logit は使わず、`minimize` が受け取る log-`θ` を歩く。`FitOptions::solver` と custom を並べて片方を無視する設計はしない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。目的関数の能力は `Objective`（value）⊂ `Differentiable` ⊂ `TwiceDifferentiable`。実行時の NotImplemented は置かない。部分更新は `IncrementalObjective::value_with_changes(params, indices: &[usize])`。`GprObjective` が impl する（P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)）。最適化器は `Optimizer::USES_CHANGE_INDICES` で葉の作り直しを選ぶ（§5.4）。`Objective::value_at_changes` の既定は `value`。FSA の座標一歩がそれを呼ぶ。`ChangeSet` 構造体は置かない。
 
 ## 10. エラー型 GprError
 

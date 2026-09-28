@@ -308,25 +308,26 @@ While running the plan, a built-in leaf calls the `CompiledKernel` enum arm dire
 
 ### 5.4 Partial updates (coordinate optimizers)
 
-**Policy**: `RecomputeStrategy` is a marker type (ZST). The default is `FullRecompute`. The body of `IncrementalRecompute` is P2B-18 ([#110](https://github.com/YUKIKEDA/gprx/issues/110)). In Exact GPR, Cholesky is O(n³), so a partial update only helps while building the kernel matrix.
+**Policy**: whether a fit rebuilds only the touched kernel leaves is not a type. It is derived at run time (R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)): `O::USES_CHANGE_INDICES && buffer == CholeskyBuffer::Retain`. The leaf rebuild itself is P2B-18 ([#110](https://github.com/YUKIKEDA/gprx/issues/110)). In Exact GPR, Cholesky is O(n³), so a partial update only helps while building the kernel matrix.
 
 ```rust
-trait RecomputeStrategy {}
-struct FullRecompute;
-struct IncrementalRecompute; // ZST. Leaf Grams live only on the Objective during fit / refit
+trait Optimizer<P> {
+    const USES_CHANGE_INDICES: bool = false; // FSA sets true
+    // ...
+}
 
 trait IncrementalObjective: Objective {
     fn value_with_changes(&mut self, params: &[T], indices: &[usize]) -> Result<T, GprError>;
 }
 ```
 
-Changed indices are the `&[usize]` of `IncrementalObjective::value_with_changes`. The old sketch `ChangeSet { Vec<usize> }`, and guessing changes by a numeric difference of θ, are not shipped. Empty, duplicate, and `i >= n_params` are `GprError` at the boundary. A full recompute is `Objective::value`. The default of `Objective::value_at_changes` is `value`. Only `GprObjective<IncrementalRecompute>` forwards to `value_with_changes`. `FullRecompute` does not implement `IncrementalObjective`.
+Changed indices are the `&[usize]` of `IncrementalObjective::value_with_changes`. The old sketch `ChangeSet { Vec<usize> }`, and guessing changes by a numeric difference of θ, are not shipped. Empty, duplicate, and `i >= n_params` are `GprError` at the boundary. A full recompute is `Objective::value`. The default of `Objective::value_at_changes` is `value`. `GprObjective` implements `IncrementalObjective` for every optimizer and buffer. `value` / `value_at_changes` take the leaf path only when the flag above is set; otherwise they run the full joint evaluation.
 
-`Gpr<O = Lbfgs, S = FullRecompute>`. The public switch is `with_prefer_memory` / `with_prefer_speed`. There is no `with_recompute_strategy`. Pole `B`: `ReuseCholesky` is always `FullRecompute`. `RetainCholesky` is `IncrementalRecompute` when `O: UsesChangeIndices`. `with_optimizer` follows the same rule. `Gpr<Fixed>` has no `S` (`factor` is one full pass). `FittedGpr<O, S>` holds `PhantomData<S>` (`refit` keeps the same strategy. predict does not read `S`). L-BFGS / NCG / Nelder–Mead / Newton have no Incremental. FSA is `UsesChangeIndices`. The first evaluation and a restart use `value`. One coordinate step uses `value_at_changes`.
+There is no `with_recompute_strategy`. `CholeskyBuffer::Reuse` always rebuilds everything. `CholeskyBuffer::Retain` rebuilds leaves when the optimizer sets `USES_CHANGE_INDICES`. `with_optimizer` / `refit` re-derive the flag from the new optimizer. `Gpr<Fixed>::factor` is one full pass. L-BFGS / NCG / Nelder–Mead / Newton keep the default `false`. FSA sets `true`. The first evaluation and a restart use `value`. One coordinate step uses `value_at_changes`.
 
-`IncrementalRecompute` caches only compiled leaves, and reapplies only the leaves a changed index touches. The tree combination and **Cholesky are full every time**. There is no low-rank update. No new `n×n` is added to Workspace. There is no runtime NotImplemented.
+The leaf rebuild caches only compiled leaves, and reapplies only the leaves a changed index touches. The tree combination and **Cholesky are full every time**. There is no low-rank update. No new `n×n` is added to Workspace. There is no runtime NotImplemented.
 
-#### 5.4.1 IncrementalRecompute and the faer update API
+#### 5.4.1 Leaf rebuilds and the faer update API
 
 Row/column insert/delete is for adding and removing data points (§11). It cannot express a hyperparameter change. `rank_r_update_clobber` is usable only when the hyperparameter change makes a low-rank `ΔK` (an amplitude change of a linear kernel term, a global scale change, and similar).
 
@@ -462,31 +463,38 @@ Analytic NLML Hessian (P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/1
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. No new `n×n` is added to Workspace. `ReuseCholesky` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
+`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. No new `n×n` is added to Workspace. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
 
 `value_and_gradient_into` runs this once and shares L, α, and `exp_buf` between the likelihood and the gradient. The default two-step `value` then `gradient_into` does not share them.
 
-The default fourth type parameter is `RetainCholesky`. `K⁻¹` → `W` is written into a dedicated `w_matrix`, and `L` stays in `k_matrix`. Speed does not change. The public memory pole (`with_prefer_memory`) selects `ReuseCholesky`. `with_cholesky_buffer` is `pub(crate)`. `ReuseCholesky` solves `K⁻¹` in `exp_buf` and writes `W` into the Cholesky region. It does not restore `L` in the middle of the optimization loop. It Chols again at the end of `fit` and at the end of a standalone `value_and_gradient_into`. persist does not write a slot for this. `load` is `RetainCholesky`.
+The default `CholeskyBuffer` is `Retain`. `K⁻¹` → `W` is written into a dedicated `w_matrix`, and `L` stays in `k_matrix`. Speed does not change. The public memory pole (`with_prefer_memory`) selects `CholeskyBuffer::Reuse`. `with_cholesky_buffer` sets it alone. `Reuse` solves `K⁻¹` in `exp_buf` and writes `W` into the Cholesky region. It does not restore `L` in the middle of the optimization loop. It Chols again at the end of `fit` and at the end of a standalone `value_and_gradient_into`. persist does not write this policy. `load` is `Retain`.
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 The public surface splits the trainer from the fitted model (P2-8).
 
-`Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky>` holds a `KernelSpec`, a `GaussianLikelihood`, transforms, an optimizer `O`, a recompute strategy `S` (a marker), a distance-cache slot `C`, and a Cholesky-buffer policy `B`. `DistanceCachePolicy` is a trait. The `Gpr::new` default is the speed pole (`CachedDistances` + `RetainCholesky`). The public switch is `with_prefer_memory` / `with_prefer_speed`. The memory pole is `UncachedDistances` + `ReuseCholesky`. `with_distance_cache_policy` / `with_cholesky_buffer` are `pub(crate)` (mixed combinations inside the crate). `Gpr::from_points` is only for Linear / Constant / White, with `C = NoDistanceCache`. It has the same prefer methods, and only `B` changes. `FittedGpr` has no `with_prefer_*` (`into_trainer` → prefer → `refit`). The types stay at the crate root. `Gpr<O: Optimizer>::fit(self, …)` moves hyperparameters with `O` and, on success, returns `FittedGpr<O, S, C>`. Fixed hyperparameters are `Gpr<Fixed>::factor` (the old `FitOptions::FIXED`). `Gpr<Fixed>` has no `S`. There is no `optimize: bool`. On failure the consumed `Gpr<O, S, C>` is returned with the error. There is no `fitted: bool` and no `GprError::NotFitted`. An unfitted `transform` / `apply` cannot happen (`StandardizeTarget::fit(self)` returns `FittedStandardizeTarget`). On the public `FittedGpr`, `L` / `α` / `X` / compiled are not `Option` (P2B-5). A missing piece does not return `EmptyInput`.
+`Gpr<O = Lbfgs, P = DoublePrecision>` holds a `KernelSpec`, a `GaussianLikelihood`, transforms, an optimizer `O`, and three runtime policies (R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)): `DistanceCachePolicy { Cached, Uncached }`, `CholeskyBuffer { Retain, Reuse }`, and `KernelExp { Accurate, FastApprox }`. They are plain enums. No combination is illegal, so none is a type parameter. The `Gpr::new` default is the speed pole (`Cached` + `Retain`) with `Accurate`. The public switch is `with_prefer_memory` / `with_prefer_speed`. The memory pole is `Uncached` + `Reuse`. `with_distance_cache_policy` / `with_cholesky_buffer` / `with_math` set one policy each. A kernel that never reads pairwise distances (standalone Linear / Constant / White) allocates no distance cache whatever the policy says; there is no `from_points`. `FittedGpr` has no `with_prefer_*` (`into_trainer` → prefer → `refit`); it exposes the three policies through getters. The types stay at the crate root. `Gpr<O: Optimizer>::fit(self, …)` moves hyperparameters with `O` and, on success, returns `FittedGpr<O, P>`. Fixed hyperparameters are `Gpr<Fixed>::factor` (the old `FitOptions::FIXED`). There is no `optimize: bool`. On failure the consumed `Gpr<O, P>` is returned with the error. There is no `fitted: bool` and no `GprError::NotFitted`. An unfitted `transform` / `apply` cannot happen (`StandardizeTarget::fit(self)` returns `FittedStandardizeTarget`). On the public `FittedGpr`, `L` / `α` / `X` / compiled are not `Option` (P2B-5). A missing piece does not return `EmptyInput`.
 
 `FittedGpr` holds what inference needs: `L`, `α`, training `X`, the kernel, the likelihood, and the transforms. `W`, `∂K`, and argmin state live only during `fit` and are not kept on the fitted value. Calling `predict` in the same process immediately after `fit` is treated as the minority path. The main path hands over a fitted model, so the inference object is `FittedGpr`.
 
-The default `Gpr` is `Gpr<Lbfgs, FullRecompute>`. `with_optimizer` replaces `O` (P2B-1). argmin `NonlinearCg` / `NelderMead` are P2B-2. argmin `Newton` is P2B-17. `S` is decided by the Cholesky pole `B` (P2B-18). There is no `with_recompute_strategy`. `Gpr<Fixed>::factor` only factors. The default `FittedGpr::predict` is a diagonal variance. Covariance between queries is a separate P2B-6 path (not a flag on diagonal `predict`). `loo_predict` returns per-training-point LOO from `L` and `α` as in GPML 5.4.2. Refactoring the same data at new hyperparameters is `FittedGpr::refit` (the fitted value keeps its `O` and `S`). `with_optimizer` / `factor` / `into_trainer` / `refit` keep `C`.
+The default `Gpr` is `Gpr<Lbfgs>`. `with_optimizer` replaces `O` (P2B-1). argmin `NonlinearCg` / `NelderMead` are P2B-2. argmin `Newton` is P2B-17. Leaf rebuilds follow §5.4 (P2B-18). There is no `with_recompute_strategy`. `Gpr<Fixed>::factor` only factors. The default `FittedGpr::predict` is a diagonal variance. Covariance between queries is a separate P2B-6 path (not a flag on diagonal `predict`). `loo_predict` returns per-training-point LOO from `L` and `α` as in GPML 5.4.2. Refactoring the same data at new hyperparameters is `FittedGpr::refit` (the fitted value keeps its `O`). `with_optimizer` / `factor` / `into_trainer` / `refit` keep the policies.
 
 ```rust
-struct Gpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
+struct Gpr<O = Lbfgs, P = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
-    distance_cache: C,
-    _recompute: PhantomData<S>,
+    policies: Policies,
+    _precision: PhantomData<P>,
+}
+
+struct Policies {
+    distance_cache: DistanceCachePolicy, // Cached (default) | Uncached
+    cholesky_buffer: CholeskyBuffer,     // Retain (default) | Reuse
+    math: KernelExp,                     // Accurate (default) | FastApprox
+    jitter: JitterPolicy,
 }
 
 struct Fixed;
@@ -517,18 +525,18 @@ struct NelderMead {
     n_restarts: u32,
 }
 
-trait DistanceCachePolicy {} // CachedDistances | UncachedDistances. Distance-mode paths only (P2B-11)
-struct CachedDistances; // default. Holds n×n (ARD: n×(n·d)) on the Workspace
-struct UncachedDistances; // no dist_cache / ard_sq_diff. Isotropic distances come from X
+enum DistanceCachePolicy { Cached, Uncached } // distance-mode paths only (P2B-11)
+enum CholeskyBuffer { Retain, Reuse }
+enum KernelExp { Accurate, FastApprox }
 
-struct FittedGpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCholesky> {
+struct FittedGpr<O = Lbfgs, P = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn InputTransform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
-    _recompute: PhantomData<S>,
-    workspace: Workspace<DoublePrecision>, // L. W may be empty
+    policies: Policies,
+    workspace: FitBuffers<P>, // L. dist / W per policy
     query: QueryWorkspace<DoublePrecision>, // for predict_into
     compiled: CompiledKernel,
     alpha: Vec<f64>,
@@ -540,8 +548,9 @@ struct FittedGpr<O = Lbfgs, S = FullRecompute, C = CachedDistances, B = RetainCh
 
 /// Objective borrows `Gpr` as &mut only during fit, and forwards set_params → MLL/gradient.
 /// The parameter source of truth is Gpr.kernel / Gpr.likelihood.
-struct GprObjective<'a, O, S, C = CachedDistances> {
-    model: &'a mut FittedGpr<O, S, C>,
+struct GprObjective<'a, O, P = DoublePrecision> {
+    model: &'a mut FittedGpr<O, P>,
+    incremental: bool, // §5.4
 }
 ```
 
@@ -561,7 +570,7 @@ Preconditions:
 - NaN/Inf in the input is `NonFiniteInput`
 - Cholesky failure is `Err((gpr, err))`. A half-built `FittedGpr` is not returned
 
-The default `C` is `CachedDistances`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)` (P2-7). `UncachedDistances` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`UncachedDistances` + `ReuseCholesky`). The speed pole stays the default (`with_prefer_speed`). The P2B-21 libgp RSS pass/fail is `UncachedDistances` + `RetainCholesky` (a crate-internal mix, not a public pole). This policy belongs only to a distance-path trainer (`Gpr::new`). `RBF + White` and `Constant * RBF` stay on the distance path. Linear / Constant / White from `from_points` have no distance slot, and prefer changes only `B`. persist tags are `always` / `never`. `LoadedGpr::Distance` is an inner enum. `load` is `RetainCholesky`.
+The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)` (P2-7). `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). The P2B-21 libgp RSS pass/fail is `Uncached` + `Retain` (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind. `load` is `Retain`.
 
 ### 6.4 Leave-one-out (P1B-7)
 
@@ -594,15 +603,15 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
 }
 
-struct WithDist<W> {                // CachedDistances. Uncached does not wrap with this
-    inner: W,
-    dist_cache: Mat<f64>,
-    ard_sq_diff: Mat<f64>,           // 0×0 when isotropic
+struct FitBuffers<P: PrecisionPolicy> {
+    core: WorkspaceCore<P>,
+    dist: Option<DistCache<P::Storage>>, // Some for Cached on a distance kernel
+    w_matrix: Option<Mat<P::Storage>>,   // Some for Retain. W = ααᵀ - K⁻¹ (§6.2)
 }
 
-struct WithW<W> {                   // RetainCholesky. Reuse does not wrap with this
-    inner: W,
-    w_matrix: Mat<f64>,             // W = ααᵀ - K⁻¹. Trace term of the gradient (§6.2)
+struct DistCache<S> {
+    dist_cache: Mat<S>,
+    ard_sq_diff: Mat<S>,             // 0×0 when isotropic
 }
 
 // Held by FittedGpr. predict_into warmup sizes it to (n, m, d)
@@ -666,7 +675,7 @@ trait MathBackend<T: Scalar>: Send + Sync {
 enum MathMode { Accurate, FastApprox }
 ```
 
-The default is `Accurate` (`f64::exp` / `f32::exp` / `wide::exp`). `FastApprox` is a type parameter. It replaces `exp` in kernel evaluation, including during `fit` (P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)). `exp(θ)` that maps a lengthscale back, and the `KernelTerm` formulas, stay on the accurate `exp`. The precision type parameter stays last. The math mode is the parameter immediately before it. The public switch is `with_math`. The `MathMode` enum above is not shipped. `FittedGpr` and `OnlineGpr` save records the mode. A file with no field loads as `Accurate`.
+The default is `Accurate` (`f64::exp` / `f32::exp` / `wide::exp`). `FastApprox` replaces `exp` in kernel evaluation, including during `fit` (P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)). `exp(θ)` that maps a lengthscale back, and the `KernelTerm` formulas, stay on the accurate `exp`. On `Gpr` / `FittedGpr` / `OnlineGpr` the mode is the runtime enum `KernelExp`, set by `with_math(KernelExp::FastApprox)`; each kernel call dispatches once to the sealed `KernelMath` marker (R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)). `Sgpr` / `Svgp` still take the marker as a type parameter until R5-1. The `MathMode` enum above is not shipped. `FittedGpr` and `OnlineGpr` save records the mode. A file with no field loads as `Accurate`.
 
 ## 9. Optimizer
 
@@ -691,7 +700,7 @@ trait Optimizer<T: Scalar> {
 }
 ```
 
-`init` is a slice (it does not consume the caller's `Vec`). `Gpr`'s `GprObjective` overrides `value_and_gradient_into` and shares L, α, W, and `exp_buf` by the §6.2 steps. `GprObjective` implements `TwiceDifferentiable`, and `hessian_into` forwards to `FittedGpr`. The public surface is `Gpr<O: Optimizer, S: RecomputeStrategy>`. Defaults are `Lbfgs` and `FullRecompute`. Other argmin solvers and a user implementation replace the same type parameter through `with_optimizer`. The public `Newton` is argmin's `Newton` (`H⁻¹` is a private faer type. The logit matches L-BFGS and `H_z` is the analytic chain. Knobs are the shared three plus `with_gamma`). The homemade example is `FastSimulatedAnnealing` (Cauchy / Metropolis. P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)). It does not use the logit. `minimize` walks the log-`θ` it receives. Do not put `FitOptions::solver` next to a custom optimizer and ignore one of them (`.cursor/rules/types.mdc`). gprx does not implement its own quasi-Newton. Objective capability is `Objective` (value) ⊂ `Differentiable` ⊂ `TwiceDifferentiable`. There is no runtime NotImplemented. A partial update is `IncrementalObjective::value_with_changes(params, indices: &[usize])`. `GprObjective<IncrementalRecompute>` implements it (P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)). The default of `Objective::value_at_changes` is `value`. One FSA coordinate step calls it. There is no `ChangeSet` struct.
+`init` is a slice (it does not consume the caller's `Vec`). `Gpr`'s `GprObjective` overrides `value_and_gradient_into` and shares L, α, W, and `exp_buf` by the §6.2 steps. `GprObjective` implements `TwiceDifferentiable`, and `hessian_into` forwards to `FittedGpr`. The public surface is `Gpr<O: Optimizer>`. The default is `Lbfgs`. Other argmin solvers and a user implementation replace the same type parameter through `with_optimizer`. The public `Newton` is argmin's `Newton` (`H⁻¹` is a private faer type. The logit matches L-BFGS and `H_z` is the analytic chain. Knobs are the shared three plus `with_gamma`). The homemade example is `FastSimulatedAnnealing` (Cauchy / Metropolis. P2B-15 / [#106](https://github.com/YUKIKEDA/gprx/issues/106)). It does not use the logit. `minimize` walks the log-`θ` it receives. Do not put `FitOptions::solver` next to a custom optimizer and ignore one of them (`.cursor/rules/types.mdc`). gprx does not implement its own quasi-Newton. Objective capability is `Objective` (value) ⊂ `Differentiable` ⊂ `TwiceDifferentiable`. There is no runtime NotImplemented. A partial update is `IncrementalObjective::value_with_changes(params, indices: &[usize])`. `GprObjective` implements it (P2B-18 / [#110](https://github.com/YUKIKEDA/gprx/issues/110)); an optimizer opts into leaf rebuilds with `Optimizer::USES_CHANGE_INDICES` (§5.4). The default of `Objective::value_at_changes` is `value`. One FSA coordinate step calls it. There is no `ChangeSet` struct.
 
 ## 10. `GprError`
 
