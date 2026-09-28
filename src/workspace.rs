@@ -32,9 +32,6 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     pub(crate) thread_scratch: Vec<Mat<P::Storage>>,
     /// Right-hand side `y` then `α` for the training Cholesky solve (`n×1`).
     pub(crate) rhs: Mat<P::Storage>,
-    /// Residual buffer for mixed-precision refinement. `None` until P5-2.
-    #[allow(dead_code)]
-    pub(crate) refine_buf: Option<Mat<P::Refine>>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
     /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
@@ -185,7 +182,6 @@ where
             kernel_scratch: Mat::<P::Storage>::zeros(0, 0),
             thread_scratch: empty_thread_scratch::<P::Storage>(),
             rhs: Mat::<P::Storage>::zeros(n, 1),
-            refine_buf: None,
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(n)),
             factor_jitter: 0.0,
         })
@@ -224,7 +220,6 @@ where
             kernel_scratch: self.kernel_scratch.clone(),
             thread_scratch: self.thread_scratch.clone(),
             rhs: self.rhs.clone(),
-            refine_buf: self.refine_buf.clone(),
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(self.n())),
             factor_jitter: self.factor_jitter,
         }
@@ -662,7 +657,6 @@ mod tests {
                 .iter()
                 .all(|m| m.nrows() == 0 && m.ncols() == 0)
         );
-        assert!(ws.refine_buf.is_none());
         assert_eq!(
             ws.faer_scratch.len(),
             faer_scratch_req::<f64>(n).size_bytes()

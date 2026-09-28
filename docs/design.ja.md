@@ -126,6 +126,7 @@ struct DoublePrecision; // Storage=f64, Refine=f64
 3. 残差をf64で計算する。**残差の対象行列 `A_resid` の構築方法は次の2通り**で、メモリ削減と精度がトレードオフになる:
    - **`PromoteStorage`(既定)**: 保存済みf32の`A`をf64へ昇格して `r = y_f64 - A_f32→f64 @ alpha`。これは「f32で保持した線形系」の解を改良する。真のf64カーネル行列に対するIRではない。f64の`A`を別途保持しないため、メモリ削減目的と整合する。
    - **`ReevaluateKernel`**: 残差matvecのたびにカーネルをf64で再評価する。`A_f64`は保持しない。反復1回あたりO(n²)のカーネル評価が乗るが、真のf64系により近い。
+   - 反復改良は、fit（またはオンライン更新）が残した因子の上で行う。`α₀` はその因子で `y` を解いたもの、補正も同じ因子で解く。解く系は `A + (σn² + j) I` で、`j` は因子の再試行で足した jitter（再試行なしなら `0`）。fit が `j` を記録し、オンラインの追加も同じ `j` を足し、保存した因子にも `j` を残す。f32 の分解をやり直さない。収束した `PromoteStorage` の α は f64 の系で1回だけ確かめる（カーネルを列ブロックで評価し、`n×n` の f64 行列は持たない）。`κ(A) u_f32` が大きく満たさないときは、同じ系の f64 Cholesky の解に落とす。f64 へのやり直しはモデルの `JitterPolicy` で再試行し、失敗時は呼び出し元の段を返す（R3-2、[#237](https://github.com/YUKIKEDA/gprx/issues/237)）。
    - f64の`A`を丸ごと保持する方式はメモリ削減と矛盾するため採用しない。
 4. f32の`L`で`delta = solve(L, r)`、`alpha_1 = alpha_0 + delta`
 5. 収束するまで数回繰り返す
@@ -136,23 +137,18 @@ struct DoublePrecision; // Storage=f64, Refine=f64
 
 古典的な反復改良理論(Higham)より、分解精度u_f(f32≈1.19×10⁻⁷)と改良精度u_r(f64≈2.22×10⁻¹⁶)を使う場合、収束速度はκ(A)·u_fに依存する。**ただし実際の収束判定は理論値ではなく実測残差で行う**。
 
-```rust
-struct RefinementConfig {
-    max_iterations: usize,   // デフォルト10
-    relative_tolerance: f64, // デフォルト: 10.0 × n × u_r。判定は実測残差ノルムで行う
-    stagnation_ratio: f64,   // デフォルト0.9
-    fallback: RefinementFallback,
-}
+パラメータは公開の設定ではなく、`src/precision/refine.rs` の crate 内定数に固定する。
 
-enum RefinementFallback {
-    FallbackToDoublePrecision, // 第一選択。IR不収束は精度の問題として扱う
-    ReturnError,
-}
-```
+| パラメータ | 値 |
+| --- | --- |
+| 補正の最大回数 | 10 |
+| 相対許容 | `10 · dim · u_r`（`u_r = f64::EPSILON`）。判定は実測残差 |
+| 停滞 | 残差ノルム比が `0.9` 超えを2回連続 |
+| 不収束 | 同じ系の `f64` の解（エラーにはしない） |
 
-収束判定: `||r_k||∞ / (||A||∞ ||alpha_k||∞ + ||y||∞) < relative_tolerance`。`stagnation_ratio`超過が2回連続で発生したら`RefinementNotConverged`(§10)。
+収束判定: `||r_k||∞ / (||B||∞ ||w_k||∞ + ||b||∞) < 10 · dim · u_r`。1つのループ（`RefineSystem` に対する `refine`）が Exact の `α`、Sgpr の重み、Svgp の三角 solve を扱う。各系は残差、保存済み因子での solve、`f64` へのやり直しを与える（R3-3、[#238](https://github.com/YUKIKEDA/gprx/issues/238)）。反復改良は収束しないエラーを返さない。やり直しは常に `f64` の解。
 
-**IR不収束時にjitterを増やさない**: 分解側のjitterだけを増やすと、前処理`LLᵀ`と目標`A`の乖離が拡大してIRが発散し得る。IR不収束の第一選択は`FallbackToDoublePrecision`。jitter適応は§4.0の通りCholesky失敗時専用とする。
+**IR不収束時にjitterを増やさない**: 分解側のjitterだけを増やすと、前処理`LLᵀ`と目標`A`の乖離が拡大してIRが発散し得る。IR不収束は `f64` の解に落とす。jitter適応は§4.0の通りCholesky失敗時専用とする。
 
 **位置づけ**: 理論的妥当性はあるが、実ワークロードでのパラメータ検証は今後の課題(§14)。
 
@@ -584,7 +580,6 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     kernel_scratch: Mat<P::Storage>, // product `∂K/∂θ`。等方 RBF では空
     thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
     rhs: Mat<P::Storage>,            // n×1、訓練 Cholesky の右辺 y → α
-    refine_buf: Option<Mat<P::Refine>>, // MixedPrecision時のみ。DoublePrecisionではNone
     faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
 }
 
@@ -709,8 +704,6 @@ pub enum GprError {
     CholeskyFailed { jitter: f64, matrix_size: usize, stage: CholeskyStage },
     #[error("行列が半正定値ではありません")]
     NonPositiveDefiniteMatrix,
-    #[error("混合精度反復改良が収束しませんでした({iterations}回反復後、残差ノルム={residual_norm})")]
-    RefinementNotConverged { iterations: usize, residual_norm: f64 },
     #[error("このカーネル項はSparse GPR用の座標微分(grad_wrt_coord_dim)を実装していません")]
     CoordGradientUnsupported,
     #[error("最適化が収束しませんでした({iterations}回反復後)")]

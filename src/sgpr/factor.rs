@@ -17,7 +17,7 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     append_chol_border, cholesky_lower_owned, cholesky_lower_with_retries, copy_mat,
     delete_chol_row, dot, faer_par, frobenius_dot, frobenius2, gemm, gram_aat_plus_noise,
-    gram_aat_plus_noise_in_scalar, inf_norm, mat_add_mul, mat_sub_mul, mat_vec, matvec_columns,
+    gram_aat_plus_noise_in_scalar, mat_add_mul, mat_sub_mul, mat_vec, matvec_columns,
     matvec_promoted, mul_lower_left, promote_mat, quad_form, round_mat, solve_llt, solve_lower,
     symmetrize_lower,
 };
@@ -29,12 +29,8 @@ fn lit<T: KernelScalar>(value: f64) -> T {
     T::from_f64(value)
 }
 
-/// Predictive mean from one storage kernel column and the predict weights.
-pub trait MeanDot: ModelPrecision {
-    fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine;
-}
-
-fn storage_dot<T: KernelScalar>(column: &[T], weights: &[T]) -> T {
+/// Sgpr mean: storage `k_*` column dotted with storage weights.
+pub(crate) fn storage_dot<T: KernelScalar>(column: &[T], weights: &[T]) -> T {
     let mut sum = lit::<T>(0.0);
     for (kernel, weight) in column.iter().zip(weights.iter()) {
         sum += *kernel * *weight;
@@ -42,7 +38,8 @@ fn storage_dot<T: KernelScalar>(column: &[T], weights: &[T]) -> T {
     sum
 }
 
-fn promoted_dot(column: &[f32], weights: &[f64]) -> f64 {
+/// Sgpr mean: `f32` `k_*` column promoted and dotted with `f64` weights.
+pub(crate) fn promoted_dot(column: &[f32], weights: &[f64]) -> f64 {
     let mut sum = 0.0;
     for (kernel, weight) in column.iter().zip(weights.iter()) {
         sum += kernel.to_f64() * *weight;
@@ -50,64 +47,13 @@ fn promoted_dot(column: &[f32], weights: &[f64]) -> f64 {
     sum
 }
 
-impl MeanDot for crate::precision::DoublePrecision {
-    fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine {
-        storage_dot(column, weights)
-    }
-}
-
-impl MeanDot for crate::precision::SinglePrecision {
-    fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine {
-        let mut sum = 0.0f64;
-        for (kernel, weight) in column.iter().zip(weights.iter()) {
-            sum += kernel.to_f64() * weight.to_f64();
-        }
-        Self::Refine::from_f64(sum)
-    }
-}
-
-impl MeanDot for crate::precision::MixedPrecision<crate::precision::PromoteStorage> {
-    fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine {
-        promoted_dot(column, weights)
-    }
-}
-
-impl MeanDot for crate::precision::MixedPrecision<crate::precision::ReevaluateKernel> {
-    fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine {
-        promoted_dot(column, weights)
-    }
-}
-
 use super::InducingLayout;
 use super::fitted::FittedSgpr;
 
-// `K_mm` only. Public default stays Fixed(0). Forrester m=16 / ℓ=1 is not PD in f64.
-/// Predict weights after a factor or an online update.
-pub trait PublishSgprWeights: ModelPrecision {
-    /// Copies storage `w`, or refines the mixed-precision solve `B w = A y`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::CholeskyFailed`] when the `f64` fallback factor
-    /// is not positive definite. Iterative refinement does not add jitter.
-    #[allow(clippy::too_many_arguments)]
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, Self::Storage>,
-        b_l: MatRef<'_, Self::Storage>,
-        w: &[Self::Storage],
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<Vec<Self::Refine>, GprError>;
-}
-
+/// Predict weights after a factor or an online update. See
+/// [`ModelPrecision::publish_weights`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: PublishSgprWeights>(
+pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision>(
     kernel: &KernelSpec,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
@@ -123,151 +69,51 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: PublishSgprWei
     P::publish_weights::<M>(kernel, a, b_l, w, x, y, z, noise, n, m, d)
 }
 
-fn copy_storage_weights<P: ModelPrecision>(w: &[P::Storage]) -> Vec<P::Refine> {
-    w.iter()
-        .map(|value| P::Refine::from_f64(value.to_f64()))
-        .collect()
-}
-
-impl PublishSgprWeights for crate::precision::DoublePrecision {
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, Self::Storage>,
-        b_l: MatRef<'_, Self::Storage>,
-        w: &[Self::Storage],
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<Vec<Self::Refine>, GprError> {
-        let _ = (kernel, a, b_l, x, y, z, noise, n, m, d);
-        Ok(copy_storage_weights::<Self>(w))
-    }
-}
-
-impl PublishSgprWeights for crate::precision::SinglePrecision {
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, Self::Storage>,
-        b_l: MatRef<'_, Self::Storage>,
-        w: &[Self::Storage],
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<Vec<Self::Refine>, GprError> {
-        let _ = (kernel, a, b_l, x, y, z, noise, n, m, d);
-        Ok(copy_storage_weights::<Self>(w))
-    }
-}
-
-impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::PromoteStorage> {
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, Self::Storage>,
-        b_l: MatRef<'_, Self::Storage>,
-        w: &[Self::Storage],
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<Vec<Self::Refine>, GprError> {
-        refine_mixed_weights::<M, crate::precision::PromoteStorage>(
-            kernel, a, b_l, w, x, y, z, noise, n, m, d,
-        )
-    }
-}
-
-impl PublishSgprWeights for crate::precision::MixedPrecision<crate::precision::ReevaluateKernel> {
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, Self::Storage>,
-        b_l: MatRef<'_, Self::Storage>,
-        w: &[Self::Storage],
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<Vec<Self::Refine>, GprError> {
-        refine_mixed_weights::<M, crate::precision::ReevaluateKernel>(
-            kernel, a, b_l, w, x, y, z, noise, n, m, d,
-        )
-    }
-}
-
-trait MixedWeightSystem: crate::precision::ResidualFormula {
-    #[allow(clippy::too_many_arguments)]
-    fn weight_system<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, f32>,
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<WeightSystem, GprError>;
-}
-
-struct WeightSystem {
+/// `B w = A y` with `B = A Aᵀ + σn² I` through the stored `f32` factor of `B`.
+///
+/// [`PromoteStorage`](crate::precision::PromoteStorage) forms `B` from the
+/// stored `f32` `A`; [`ReevaluateKernel`](crate::precision::ReevaluateKernel)
+/// re-assembles `A` in `f64`. The fallback re-assembles the whole VFE state in `f64`.
+struct WeightSystem<'a, M> {
     b32: Option<Mat<f32>>,
     b64: Option<Mat<f64>>,
     rhs: Vec<f64>,
+    b_l: MatRef<'a, f32>,
+    kernel: &'a KernelSpec,
+    x: &'a [f64],
+    y: &'a [f64],
+    z: &'a [f64],
+    noise: f64,
+    shape: (usize, usize, usize),
+    _math: PhantomData<M>,
 }
 
-impl MixedWeightSystem for crate::precision::PromoteStorage {
-    fn weight_system<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, f32>,
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<WeightSystem, GprError> {
-        let _ = (kernel, x, z, n, m, d);
-        Ok(WeightSystem {
-            b32: Some(gram_aat_plus_noise_in_scalar(a, noise)),
-            b64: None,
-            rhs: matvec_promoted(a, y),
-        })
+impl<M: crate::math::KernelMath> crate::precision::RefineSystem for WeightSystem<'_, M> {
+    fn rhs(&self) -> &[f64] {
+        &self.rhs
     }
-}
 
-impl MixedWeightSystem for crate::precision::ReevaluateKernel {
-    fn weight_system<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        a: MatRef<'_, f32>,
-        x: &[f64],
-        y: &[f64],
-        z: &[f64],
-        noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
-    ) -> Result<WeightSystem, GprError> {
-        let _ = a;
-        let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
-        Ok(WeightSystem {
-            b32: None,
-            b64: Some(gram_aat_plus_noise_in_scalar(state.a.as_ref(), noise)),
-            rhs: matvec_promoted(state.a.as_ref(), y),
-        })
+    fn residual(&self, w: &[f64], r: &mut [f64]) -> Result<f64, GprError> {
+        Ok(residual_inf(
+            self.b32.as_ref().map(Mat::as_ref),
+            self.b64.as_ref().map(Mat::as_ref),
+            w,
+            &self.rhs,
+            r,
+        ))
+    }
+
+    fn correct(&self, r: &[f64], w: &mut [f64]) {
+        let mut delta = Mat::<f32>::from_fn(r.len(), 1, |i, _| r[i] as f32);
+        solve_llt(self.b_l, delta.as_mut());
+        for (i, slot) in w.iter_mut().enumerate() {
+            *slot += f64::from(delta[(i, 0)]);
+        }
+    }
+
+    fn fallback(&self) -> Result<Vec<f64>, GprError> {
+        let (n, m, d) = self.shape;
+        f64_assembly_w::<M>(self.kernel, self.x, self.y, self.z, self.noise, n, m, d)
     }
 }
 
@@ -311,7 +157,10 @@ fn residual_inf(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn refine_mixed_weights<M: crate::math::KernelMath, R: MixedWeightSystem>(
+pub(crate) fn refine_mixed_weights<
+    M: crate::math::KernelMath,
+    R: crate::precision::ResidualFormula,
+>(
     kernel: &KernelSpec,
     a: MatRef<'_, f32>,
     b_l: MatRef<'_, f32>,
@@ -327,40 +176,35 @@ fn refine_mixed_weights<M: crate::math::KernelMath, R: MixedWeightSystem>(
     if m == 0 {
         return Ok(Vec::new());
     }
-    let system = R::weight_system::<M>(kernel, a, x, y, z, noise, n, m, d)?;
-    let mut w: Vec<f64> = w_storage.iter().map(|value| f64::from(*value)).collect();
-    let tol = 10.0 * m as f64 * f64::EPSILON;
-    let mut resid = vec![0.0; m];
-    let mut prev: Option<f64> = None;
-    let mut streak = 0usize;
-    let b32 = system.b32.as_ref().map(Mat::as_ref);
-    let b64 = system.b64.as_ref().map(Mat::as_ref);
-    for _ in 0..10 {
-        let b_inf = residual_inf(b32, b64, &w, &system.rhs, &mut resid);
-        let r_inf = inf_norm(&resid);
-        let denom = b_inf * inf_norm(&w) + inf_norm(&system.rhs);
-        if denom > 0.0 && r_inf / denom < tol {
-            return Ok(w);
-        }
-        if let Some(prev_r) = prev {
-            let ratio = if prev_r > 0.0 { r_inf / prev_r } else { 0.0 };
-            if ratio > 0.9 {
-                streak += 1;
-                if streak >= 2 {
-                    return f64_assembly_w::<M>(kernel, x, y, z, noise, n, m, d);
-                }
-            } else {
-                streak = 0;
-            }
-        }
-        prev = Some(r_inf);
-        let mut delta = Mat::<f32>::from_fn(m, 1, |i, _| resid[i] as f32);
-        solve_llt(b_l, delta.as_mut());
-        for i in 0..m {
-            w[i] += f64::from(delta[(i, 0)]);
-        }
-    }
-    f64_assembly_w::<M>(kernel, x, y, z, noise, n, m, d)
+    let (b32, b64, rhs) = if R::READS_STORAGE {
+        (
+            Some(gram_aat_plus_noise_in_scalar(a, noise)),
+            None,
+            matvec_promoted(a, y),
+        )
+    } else {
+        let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
+        (
+            None,
+            Some(gram_aat_plus_noise_in_scalar(state.a.as_ref(), noise)),
+            matvec_promoted(state.a.as_ref(), y),
+        )
+    };
+    let system = WeightSystem::<M> {
+        b32,
+        b64,
+        rhs,
+        b_l,
+        kernel,
+        x,
+        y,
+        z,
+        noise,
+        shape: (n, m, d),
+        _math: PhantomData,
+    };
+    let start = w_storage.iter().map(|value| f64::from(*value)).collect();
+    crate::precision::refine(&system, start)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -404,7 +248,7 @@ pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, 
     n_inducing: usize,
 ) -> Result<FittedSgpr<O, I, M, P>, GprError>
 where
-    P: ModelPrecision + PublishSgprWeights,
+    P: ModelPrecision,
 {
     let state =
         assemble_vfe::<M, P::Storage>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
@@ -1464,7 +1308,7 @@ pub(crate) fn vfe_predict<M: crate::math::KernelMath, P>(
     options: PredictOptions,
 ) -> Result<Prediction<P::Refine>, GprError>
 where
-    P: ModelPrecision + MeanDot,
+    P: ModelPrecision,
 {
     if n_cols != d {
         return Err(GprError::DimensionMismatch {
