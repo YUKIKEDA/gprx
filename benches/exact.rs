@@ -20,7 +20,7 @@ use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
 use gprx::transform::StandardizeTarget;
 use gprx::{
     CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
-    Prediction, RetainCholesky, ReuseCholesky, UncachedDistances,
+    MixedPrecision, Prediction, RetainCholesky, ReuseCholesky, UncachedDistances,
 };
 
 #[path = "../tests/common/problems.rs"]
@@ -297,6 +297,50 @@ fn predict_100(c: &mut Criterion) {
     });
 }
 
+type MixedFitted = FittedGpr<
+    Fixed,
+    FullRecompute,
+    CachedDistances,
+    RetainCholesky,
+    gprx::Accurate,
+    MixedPrecision,
+>;
+
+/// Same problem as [`fitted_model`] at [`MixedPrecision`] (f32 factor, f64 `α`).
+fn fitted_mixed() -> (MixedFitted, Vec<f64>) {
+    let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
+    let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+    let (x, y) = forrester_xy();
+    let gpr = Gpr::new(kernel, likelihood)
+        .with_target_transform(StandardizeTarget::new())
+        .with_optimizer(Fixed)
+        .with_precision::<MixedPrecision>()
+        .factor(&x, N, D_ISO, &y)
+        .map_err(|(_, e)| e)
+        .expect("training Cholesky");
+    (gpr, forrester_query())
+}
+
+/// `predict_100` at [`MixedPrecision`]. Predict reads the `α` published at
+/// factor time; it does not refine again (R3-1).
+fn predict_100_mixed(c: &mut Criterion) {
+    let (mut gpr, xs) = fitted_mixed();
+    let mut pred = Prediction::default();
+    gpr.predict_into(&xs, M, D_ISO, &mut pred).expect("warmup");
+    c.bench_function("predict_100_mixed", |b| {
+        b.iter(|| {
+            gpr.predict_into(
+                std::hint::black_box(&xs),
+                M,
+                D_ISO,
+                std::hint::black_box(&mut pred),
+            )
+            .expect("predict");
+            std::hint::black_box(pred.mean[0] + pred.variance[0])
+        });
+    });
+}
+
 fn fitted_fast() -> FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox> {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
@@ -504,6 +548,7 @@ criterion_group!(
     kernel_exp_ard,
     cholesky_alpha,
     predict_100,
+    predict_100_mixed,
     mll_and_grad,
     fit_lbfgs,
     mll_and_grad_ard,

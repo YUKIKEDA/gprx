@@ -1340,7 +1340,6 @@ where
                 expected_dim: self.d,
             });
         }
-        self.publish_predict_alpha()?;
         validate_query(xs, n_rows, n_cols)?;
         let n = self.n;
         let m = n_rows;
@@ -1375,17 +1374,15 @@ where
         if out.variance.len() != m {
             out.variance.resize(m, zero);
         }
-        for (col, mean) in out.mean.iter_mut().enumerate() {
-            *mean = P::column_mean::<M>(
-                &self.kernel,
-                self.query.query_k_star.as_ref(),
-                self.x.as_ref(),
-                &self.query.query_xs,
-                n_cols,
-                &self.alpha,
-                col,
-            )?;
-        }
+        P::predict_means::<M>(
+            &self.kernel,
+            self.query.query_k_star.as_ref(),
+            self.x.as_ref(),
+            &self.query.query_xs,
+            n_cols,
+            &self.alpha,
+            &mut out.mean,
+        )?;
         let chol = P::view_factor(
             self.mapped_factor.as_ref().map(|mapped| mapped.l_view()),
             self.workspace.core().k_matrix.as_ref(),
@@ -1436,16 +1433,7 @@ where
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        let mut alpha = Vec::new();
-        P::publish_predict_alpha::<M>(
-            &self.kernel,
-            &self.compiled,
-            self.x.as_ref(),
-            &self.y_train,
-            self.likelihood.noise_variance(),
-            &self.factor_alpha,
-            &mut alpha,
-        )?;
+        let alpha = self.alpha.as_slice();
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
@@ -1474,17 +1462,15 @@ where
         if out.variance.len() != m {
             out.variance.resize(m, zero);
         }
-        for (col, mean) in out.mean.iter_mut().enumerate() {
-            *mean = P::column_mean::<M>(
-                &self.kernel,
-                query_k_star.as_ref(),
-                self.x.as_ref(),
-                &query_xs,
-                n_cols,
-                &alpha,
-                col,
-            )?;
-        }
+        P::predict_means::<M>(
+            &self.kernel,
+            query_k_star.as_ref(),
+            self.x.as_ref(),
+            &query_xs,
+            n_cols,
+            alpha,
+            &mut out.mean,
+        )?;
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
@@ -1679,16 +1665,7 @@ where
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        let mut alpha = Vec::new();
-        P::publish_predict_alpha::<M>(
-            &self.kernel,
-            &self.compiled,
-            self.x.as_ref(),
-            &self.y_train,
-            self.likelihood.noise_variance(),
-            &self.factor_alpha,
-            &mut alpha,
-        )?;
+        let alpha = self.alpha.as_slice();
         let n = self.n;
         let m = n_rows;
         let mut query_xs = xs.to_vec();
@@ -1710,17 +1687,15 @@ where
             &mut thread_scratch,
         )?;
         let mut mean = vec![P::Refine::from_f64(0.0); m];
-        for (col, slot) in mean.iter_mut().enumerate() {
-            *slot = P::column_mean::<M>(
-                &self.kernel,
-                query_k_star.as_ref(),
-                self.x.as_ref(),
-                &query_xs,
-                n_cols,
-                &alpha,
-                col,
-            )?;
-        }
+        P::predict_means::<M>(
+            &self.kernel,
+            query_k_star.as_ref(),
+            self.x.as_ref(),
+            &query_xs,
+            n_cols,
+            alpha,
+            &mut mean,
+        )?;
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
@@ -1820,16 +1795,7 @@ where
         if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
             return self.loo_from_rounded_kernel(options);
         }
-        let mut alpha = Vec::new();
-        P::publish_predict_alpha::<M>(
-            &self.kernel,
-            &self.compiled,
-            self.x.as_ref(),
-            &self.y_train,
-            self.likelihood.noise_variance(),
-            &self.factor_alpha,
-            &mut alpha,
-        )?;
+        let alpha = self.alpha.as_slice();
         let mut rows = P::Storage::empty_rows();
         let y = P::Storage::storage_rows(&self.y_train, &mut rows);
         let n = self.n;

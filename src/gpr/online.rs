@@ -857,7 +857,6 @@ where
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        self.publish_predict_alpha()?;
         let n = self.n;
         let m = n_rows;
         self.query.ensure(n, m, n_cols)?;
@@ -929,16 +928,7 @@ where
         validate_query(xs, n_rows, n_cols)?;
         let n = self.n;
         let m = n_rows;
-        let mut alpha = Vec::new();
-        P::publish_predict_alpha::<M>(
-            &self.kernel,
-            &self.compiled,
-            self.x_active(),
-            &self.y_train,
-            self.likelihood.noise_variance(),
-            &self.factor_alpha,
-            &mut alpha,
-        )?;
+        let alpha = self.alpha.as_slice();
         let mut query_xs = xs.to_vec();
         self.x_transform.apply(&mut query_xs, n_rows, n_cols)?;
         let mut x_cast = P::Storage::empty_cols();
@@ -960,7 +950,7 @@ where
         write_ldlt_prediction::<M, P>(
             &self.kernel,
             self.ld_factor(),
-            &alpha,
+            alpha,
             &self.compiled,
             self.x_active(),
             &query_xs,
@@ -1176,17 +1166,15 @@ where
     if out.variance.len() != m {
         out.variance.resize(m, zero);
     }
-    for (col, mean) in out.mean.iter_mut().enumerate() {
-        *mean = P::column_mean::<M>(
-            kernel,
-            query_k_star.as_ref(),
-            x_train,
-            x_query,
-            n_cols,
-            alpha,
-            col,
-        )?;
-    }
+    P::predict_means::<M>(
+        kernel,
+        query_k_star.as_ref(),
+        x_train,
+        x_query,
+        n_cols,
+        alpha,
+        &mut out.mean,
+    )?;
     OnlineWorkspace::apply_inv_l(ld, query_k_star.as_mut(), n);
     compiled.eval_diag(query_x, query_kss)?;
     let noise_s = P::Storage::from_f64(noise);
