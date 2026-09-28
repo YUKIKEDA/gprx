@@ -539,6 +539,7 @@ dependencies = [
  "argmin-math",
  "dyn-stack",
  "faer",
+ "faer-traits",
  "memmap2",
  "rand 0.10.2",
  "rayon",

@@ -11,7 +11,7 @@ use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::precision::{DoublePrecision, GpScalar};
 
-use super::factor::{MeanDot, PublishSgprWeights, assemble_fitted};
+use super::factor::assemble_fitted;
 use super::fitted::FittedSgpr;
 use super::{FixedInducing, FreeInducing, InducingLayout};
 
@@ -100,8 +100,7 @@ impl<O, I, M, P> Sgpr<O, I, M, P> {
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    #[allow(private_bounds)]
-    pub fn with_precision<P2: GpScalar + MeanDot + PublishSgprWeights>(self) -> Sgpr<O, I, M, P2>
+    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, M, P2>
 where {
         Sgpr {
             kernel: self.kernel,
@@ -117,7 +116,6 @@ where {
     ///
     /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
     /// unchanged.
-    #[allow(private_bounds)]
     pub fn with_math<M2>(self) -> Sgpr<O, I, M2, P>
     where
         M2: crate::math::KernelMath,
@@ -218,10 +216,9 @@ where {
     }
 }
 
-#[allow(private_bounds)] // `SgprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
 impl<O, M, P> Sgpr<O, FixedInducing, M, P>
 where
-    P: GpScalar + MeanDot + PublishSgprWeights,
+    P: GpScalar,
     M: crate::math::KernelMath,
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
 {
@@ -288,10 +285,9 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<O, M, P> Sgpr<O, FreeInducing, M, P>
 where
-    P: GpScalar + MeanDot + PublishSgprWeights,
+    P: GpScalar,
     M: crate::math::KernelMath,
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing, M, P>>,
 {
@@ -355,11 +351,10 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<I: InducingLayout, M, P> Sgpr<Fixed, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: GpScalar + MeanDot + PublishSgprWeights,
+    P: GpScalar,
 {
     /// Factors `K_mm = k(Z, Z)` at the current `θ` without a search.
     ///

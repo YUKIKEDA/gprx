@@ -36,7 +36,6 @@ pub struct MaternArdKernel {
     lengthscales: ArdLengthscales,
 }
 
-#[allow(private_bounds)]
 impl MaternArdKernel {
     /// Builds an ARD Matérn kernel from positive finite `ℓ_d` and `ν`.
     ///
@@ -142,7 +141,16 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
-    pub fn apply<M: KernelMath, T: KernelScalar>(
+    pub fn apply<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.apply_math::<crate::math::Accurate, T>(x, out, uplo)
+    }
+
+    pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         out: MatMut<'_, T>,
@@ -162,7 +170,16 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
-    pub fn apply_cross<M: KernelMath, T: KernelScalar>(
+    pub fn apply_cross<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.apply_cross_math::<crate::math::Accurate, T>(x, xs, out)
+    }
+
+    pub(crate) fn apply_cross_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
@@ -190,7 +207,17 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad<M: KernelMath, T: KernelScalar>(
+    pub fn grad<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.grad_math::<crate::math::Accurate, T>(x, d_k, param_idx, uplo)
+    }
+
+    pub(crate) fn grad_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         d_k: MatMut<'_, T>,
@@ -242,7 +269,18 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess<M: KernelMath, T: KernelScalar>(
+    pub fn hess<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.hess_math::<crate::math::Accurate, T>(x, d2_k, i, j, uplo)
+    }
+
+    pub(crate) fn hess_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         d2_k: MatMut<'_, T>,
@@ -337,7 +375,7 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3]]);
         let mut k = fill(3, f64::NAN);
         kernel
-            .apply::<crate::math::Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
+            .apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         assert_close(k[(0, 0)], 1.0, TOL);
         assert_close(k[(1, 1)], 1.0, TOL);
@@ -356,7 +394,7 @@ mod tests {
             let mut k_ard = fill(3, 0.0);
             iso.apply(dist.as_ref(), k_iso.as_mut(), Triangle::Full)
                 .expect("iso");
-            ard.apply::<crate::math::Accurate, _>(x.as_ref(), k_ard.as_mut(), Triangle::Full)
+            ard.apply(x.as_ref(), k_ard.as_mut(), Triangle::Full)
                 .expect("ard");
             for col in 0..3 {
                 for row in 0..3 {
@@ -372,7 +410,7 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.0]]);
         let mut k = fill(2, 0.0);
         kernel
-            .apply::<crate::math::Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
+            .apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         let r = 1.0_f64;
         assert_close(k[(1, 0)], (-r).exp(), TOL);
@@ -384,7 +422,7 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [0.5, 1.0], [1.2, -0.3]]);
         let mut k = fill(3, 0.0);
         kernel
-            .apply::<crate::math::Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
+            .apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         for col in 0..3 {
             for row in 0..3 {
@@ -399,11 +437,11 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.0]]);
         let mut full = fill(3, 0.0);
         kernel
-            .apply::<crate::math::Accurate, _>(x.as_ref(), full.as_mut(), Triangle::Full)
+            .apply(x.as_ref(), full.as_mut(), Triangle::Full)
             .expect("shape");
         let mut lower = fill(3, 42.0);
         kernel
-            .apply::<crate::math::Accurate, _>(x.as_ref(), lower.as_mut(), Triangle::Lower)
+            .apply(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], 42.0, TOL);
@@ -426,13 +464,13 @@ mod tests {
                 let mut k_plus = fill(3, 0.0);
                 let mut k_minus = fill(3, 0.0);
                 let mut dk = fill(3, 0.0);
-                plus.apply::<crate::math::Accurate, _>(x.as_ref(), k_plus.as_mut(), Triangle::Full)
+                plus.apply(x.as_ref(), k_plus.as_mut(), Triangle::Full)
                     .expect("plus");
                 minus
-                    .apply::<crate::math::Accurate, _>(x.as_ref(), k_minus.as_mut(), Triangle::Full)
+                    .apply(x.as_ref(), k_minus.as_mut(), Triangle::Full)
                     .expect("minus");
                 kernel
-                    .grad::<crate::math::Accurate, _>(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
+                    .grad(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
                     .expect("dim");
                 for col in 0..3 {
                     for row in 0..3 {
@@ -451,10 +489,10 @@ mod tests {
         let mut dk0 = fill(2, 0.0);
         let mut dk1 = fill(2, 0.0);
         kernel
-            .grad::<crate::math::Accurate, _>(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
+            .grad(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
             .expect("dim 0");
         kernel
-            .grad::<crate::math::Accurate, _>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
+            .grad(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
             .expect("dim 1");
         assert_close(dk1[(1, 0)], 0.0, TOL);
         assert!(dk0[(1, 0)].abs() > 1e-8);
@@ -467,10 +505,10 @@ mod tests {
         let mut full = fill(3, 0.0);
         let mut lower = fill(3, 99.0);
         kernel
-            .grad::<crate::math::Accurate, _>(x.as_ref(), full.as_mut(), 1, Triangle::Full)
+            .grad(x.as_ref(), full.as_mut(), 1, Triangle::Full)
             .expect("index 1");
         kernel
-            .grad::<crate::math::Accurate, _>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
+            .grad(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("index 1");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], 99.0, TOL);
@@ -496,11 +534,11 @@ mod tests {
         let test = points_2d(&[[0.2, -0.1], [1.0, 0.5]]);
         let mut square = fill(2, 0.0);
         kernel
-            .apply::<crate::math::Accurate, _>(train.as_ref(), square.as_mut(), Triangle::Full)
+            .apply(train.as_ref(), square.as_mut(), Triangle::Full)
             .expect("square");
         let mut cross = fill(2, 0.0);
         kernel
-            .apply_cross::<crate::math::Accurate, _>(train.as_ref(), test.as_ref(), cross.as_mut())
+            .apply_cross(train.as_ref(), test.as_ref(), cross.as_mut())
             .expect("rect");
         assert_close(cross[(0, 1)], square[(0, 1)], TOL);
         assert_close(cross[(1, 1)], square[(1, 1)], TOL);
@@ -516,18 +554,18 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 1.0]]);
         let mut dk = fill(2, 0.0);
         assert!(matches!(
-            kernel.grad::<crate::math::Accurate, _>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
+            kernel.grad(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
             Err(GprError::IndexOutOfRange { .. })
         ));
         let bad_d = Mat::from_fn(2, 3, |_, _| 0.0);
         let mut k = fill(2, 0.0);
         assert!(matches!(
-            kernel.apply::<crate::math::Accurate, _>(bad_d.as_ref(), k.as_mut(), Triangle::Full),
+            kernel.apply(bad_d.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::DimensionMismatch { .. })
         ));
         let nan = points_2d(&[[0.0, 0.0], [f64::NAN, 1.0]]);
         assert!(matches!(
-            kernel.apply::<crate::math::Accurate, _>(nan.as_ref(), k.as_mut(), Triangle::Full),
+            kernel.apply(nan.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::NonFiniteInput)
         ));
     }

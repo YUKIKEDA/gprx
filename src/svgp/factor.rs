@@ -353,7 +353,7 @@ where
 }
 
 /// Mean from the storage triangular solve, or a refined `f64` solve for mixed precision.
-pub(crate) trait SvgpMean: ModelPrecision {
+pub trait SvgpMean: ModelPrecision {
     fn mean_from_factor<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         z_obs: &[f64],
@@ -1330,7 +1330,7 @@ pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P>(
     adam: &Adam,
 ) -> Result<(), GprError>
 where
-    P: crate::precision::GpScalar + SvgpMean,
+    P: crate::precision::GpScalar,
 {
     let n = model.n;
     let m = model.m;

@@ -7,7 +7,9 @@
 
 use faer::{Mat, MatMut, MatRef};
 use gprx::kernel::{KernelScalar, KernelSpec, KernelTerm, RbfKernel, Triangle};
-use gprx::{DoublePrecision, Fixed, GaussianLikelihood, Gpr, GprError, Interval, SinglePrecision};
+use gprx::{
+    DoublePrecision, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, Interval, SinglePrecision,
+};
 
 const ELL: f64 = 0.7;
 const NOISE: f64 = 0.05;
@@ -290,35 +292,33 @@ struct Probe {
     var: Vec<f64>,
 }
 
-/// Fits at `θ` with precision `$p` and reads [`Probe`]. A macro because the
-/// precision bound on `Gpr::with_precision` is crate-private.
-macro_rules! probe {
-    ($p:ty, $kernel:expr) => {{
-        let (x, y, q) = problem();
-        let n = y.len();
-        let mut fitted = Gpr::new($kernel, GaussianLikelihood::new(NOISE).expect("noise"))
-            .with_optimizer(Fixed)
-            .with_precision::<$p>()
-            .factor(&x, n, 1, &y)
-            .map_err(|(_, e)| e)
-            .expect("fit");
-        let mut params = vec![0.0; fitted.num_params()];
-        fitted.get_params(&mut params).expect("params");
-        let mut grad = vec![0.0; params.len()];
-        let nlml = fitted
-            .value_and_gradient_into(&params, &mut grad)
-            .expect("grad");
-        let mut hess = vec![0.0; params.len() * params.len()];
-        fitted.hessian_into(&params, &mut hess).expect("hess");
-        let pred = fitted.predict(&q, q.len(), 1).expect("predict");
-        Probe {
-            nlml,
-            grad,
-            hess,
-            mean: pred.mean.iter().map(|v| v.to_f64()).collect(),
-            var: pred.variance.iter().map(|v| v.to_f64()).collect(),
-        }
-    }};
+/// Fits at `θ` with precision `P` and reads [`Probe`].
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn probe<P: GpScalar>(kernel: KernelSpec) -> Probe {
+    let (x, y, q) = problem();
+    let n = y.len();
+    let mut fitted = Gpr::new(kernel, GaussianLikelihood::new(NOISE).expect("noise"))
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&x, n, 1, &y)
+        .map_err(|(_, e)| e)
+        .expect("fit");
+    let mut params = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut params).expect("params");
+    let mut grad = vec![0.0; params.len()];
+    let nlml = fitted
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("grad");
+    let mut hess = vec![0.0; params.len() * params.len()];
+    fitted.hessian_into(&params, &mut hess).expect("hess");
+    let pred = fitted.predict(&q, q.len(), 1).expect("predict");
+    Probe {
+        nlml,
+        grad,
+        hess,
+        mean: pred.mean.iter().map(|v| v.to_f64()).collect(),
+        var: pred.variance.iter().map(|v| v.to_f64()).collect(),
+    }
 }
 
 fn assert_probe_close(what: &str, got: &Probe, expect: &Probe, tol: f64) {
@@ -359,16 +359,16 @@ fn delegating() -> KernelSpec {
 
 #[test]
 fn generic_leaf_matches_builtin_in_f64() {
-    let expect = probe!(DoublePrecision, builtin());
+    let expect = probe::<DoublePrecision>(builtin());
     assert_probe_close(
         "ExpQuad",
-        &probe!(DoublePrecision, exp_quad()),
+        &probe::<DoublePrecision>(exp_quad()),
         &expect,
         1e-12,
     );
     assert_probe_close(
         "Delegating",
-        &probe!(DoublePrecision, delegating()),
+        &probe::<DoublePrecision>(delegating()),
         &expect,
         0.0,
     );
@@ -376,24 +376,24 @@ fn generic_leaf_matches_builtin_in_f64() {
 
 #[test]
 fn generic_leaf_matches_builtin_in_f32() {
-    let expect32 = probe!(SinglePrecision, builtin());
+    let expect32 = probe::<SinglePrecision>(builtin());
     assert_probe_close(
         "ExpQuad f32",
-        &probe!(SinglePrecision, exp_quad()),
+        &probe::<SinglePrecision>(exp_quad()),
         &expect32,
         1e-5,
     );
     assert_probe_close(
         "Delegating f32",
-        &probe!(SinglePrecision, delegating()),
+        &probe::<SinglePrecision>(delegating()),
         &expect32,
         0.0,
     );
     // The f32 run is the same model as the f64 run, to f32 digits.
-    let expect64 = probe!(DoublePrecision, builtin());
+    let expect64 = probe::<DoublePrecision>(builtin());
     assert_probe_close(
         "ExpQuad f32 vs f64",
-        &probe!(SinglePrecision, exp_quad()),
+        &probe::<SinglePrecision>(exp_quad()),
         &expect64,
         1e-3,
     );

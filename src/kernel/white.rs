@@ -272,7 +272,7 @@ impl WhiteKernel {
     ///
     /// # Errors
     ///
-    /// Same shape errors as [`RbfKernel::grad_wrt_coord_dim`].
+    /// Same shape errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,

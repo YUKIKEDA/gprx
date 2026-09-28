@@ -37,7 +37,6 @@ use super::super::factor::{
 use super::{AllocWorkspace, DistanceCacheSlot, FitBuffers, JitterPolicy, RetainCholesky};
 use super::{FittedGpr, Gpr};
 
-#[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; factorization reads it.
 impl<O, S, C, B, M, P> FittedGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
@@ -1939,7 +1938,6 @@ where
     }
 }
 
-#[allow(private_bounds)] // `GprObjective` is crate-private; `refit` still needs `O: Optimizer` for it.
 impl<O, S, C, B, M, P> FittedGpr<O, S, C, B, M, P>
 where
     C: DistanceCacheSlot,
@@ -1963,7 +1961,6 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<C, M, P> FittedGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
 where
     C: DistanceCacheSlot,

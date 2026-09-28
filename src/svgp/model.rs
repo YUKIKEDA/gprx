@@ -2,7 +2,6 @@
 
 use std::marker::PhantomData;
 
-use super::factor::SvgpMean;
 use crate::error::GprError;
 use crate::param::write_params;
 
@@ -99,8 +98,7 @@ impl<O, M, P> Svgp<O, M, P> {
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    #[allow(private_bounds)]
-    pub fn with_precision<P2: GpScalar + SvgpMean>(self) -> Svgp<O, M, P2>
+    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, M, P2>
 where {
         Svgp {
             kernel: self.kernel,
@@ -115,7 +113,6 @@ where {
     ///
     /// `factor`, `fit`, and predict use the same polynomial. Hyperparameter
     /// `exp(θ)` is unchanged.
-    #[allow(private_bounds)]
     pub fn with_math<M2>(self) -> Svgp<O, M2, P>
     where
         M2: crate::math::KernelMath,
@@ -181,11 +178,10 @@ where {
     }
 }
 
-#[allow(private_bounds)]
 impl<M, P> Svgp<Fixed, M, P>
 where
     M: crate::math::KernelMath,
-    P: GpScalar + SvgpMean,
+    P: GpScalar,
 {
     /// Factors `K_mm` and installs a whitened prior `q(u)` at the current `θ`.
     ///
@@ -245,11 +241,10 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<M, P> Svgp<Adam, M, P>
 where
     M: crate::math::KernelMath,
-    P: GpScalar + SvgpMean,
+    P: GpScalar,
 {
     /// Factors a whitened prior `q` and runs mini-batch Adam on `θ` and `q`.
     ///

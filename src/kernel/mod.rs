@@ -40,9 +40,8 @@ mod white;
 pub use compiled::CompiledKernel;
 pub(crate) use compiled::gram::GramInputs;
 pub use constant::ConstantKernel;
-#[doc(hidden)]
-pub use dist::fill_ard_squared_diff;
-pub(crate) use dist::fill_squared_euclidean;
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) use dist::{fill_ard_squared_diff, fill_squared_euclidean};
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};
@@ -251,15 +250,6 @@ fn write_lower_parallel<T: KernelScalar>(
             }
             Ok::<(), GprError>(())
         })
-}
-
-/// Fills pairwise squared Euclidean distances for criterion's `kernel_rbf`.
-///
-/// Hidden so benches can share the library fill without duplicating the
-/// Rayon partition. Not part of the documented public API.
-#[doc(hidden)]
-pub fn fill_pairwise_sq_euclidean(x: MatRef<'_, f64>, dist: MatMut<'_, f64>) {
-    fill_squared_euclidean(x, dist, &mut []);
 }
 
 /// Returns `value` if it is finite, else [`GprError::NonFiniteKernelValue`].

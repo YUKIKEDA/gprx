@@ -12,6 +12,7 @@ Do not copy the public surface here or into `.cursor/rules/`. The current specif
 src/lib.rs                 public re-exports
 src/data.rs                crate-private boundary checks and column-major packing for caller data
 src/error.rs
+src/internals.rs           bench / compare-perf hooks. Only with the bench-internals or insert-stages feature
 src/likelihood.rs
 src/linalg/                crate-private Cholesky, LDLT, solves, dense helpers, faer worker caps. Models do not define these
 src/math.rs                Accurate / FastApprox

@@ -39,7 +39,6 @@ impl Default for PredictOptions {
 /// [`crate::Gpr::with_prefer_memory`] / [`crate::Gpr::with_prefer_speed`].
 /// Standalone Linear, Constant, and White trainers use
 /// [`crate::Gpr::from_points`] and have no cache slot.
-#[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; the public slot types are the unit structs.
 pub trait DistanceCachePolicy:
     DistanceCacheSlot + Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {
@@ -98,13 +97,13 @@ impl DistanceCachePolicy for UncachedDistances {}
 
 /// Persist tag written as `always` / `never` in `config.json`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DistanceCachePersist {
+pub enum DistanceCachePersist {
     Cached,
     Uncached,
 }
 
 /// Maps a trainer cache slot to workspace wrapping and persist tags.
-pub(crate) trait DistanceCacheSlot:
+pub trait DistanceCacheSlot:
     Copy + Clone + fmt::Debug + Default + Eq + PartialEq + Send + Sync + 'static
 {
     type DistWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>;
@@ -160,7 +159,7 @@ pub(crate) type FitBuffers<C, B, P = crate::precision::DoublePrecision> =
 /// `initial * multiplier` on each later attempt, stopping at `max_retries`
 /// or when `j` would exceed `max_jitter`. A successful retry factors
 /// `A + j I`; this crate does not iteratively refine back to `A`.
-/// Observation noise stays on [`GaussianLikelihood`].
+/// Observation noise stays on [`GaussianLikelihood`](crate::GaussianLikelihood).
 ///
 /// The default is [`Self::fixed`]`(0.0)`: no retry, matching an unregularized
 /// factor. [`GprError::CholeskyFailed::jitter`] is the last `j` that was
@@ -367,7 +366,7 @@ impl Iterator for RetryJitters {
 
 /// Predictive mean and (diagonal) variance at the query points.
 ///
-/// [`FittedGpr::predict_into`] reuses `mean` / `variance` capacity when the
+/// [`FittedGpr::predict_into`](crate::FittedGpr::predict_into) reuses `mean` / `variance` capacity when the
 /// query length matches a previous call. Query–query covariance is
 /// [`PredictiveCovariance`], not a field here.
 #[derive(Clone, Debug, PartialEq)]
@@ -500,7 +499,7 @@ impl CholeskyBuffer for RetainCholesky {}
 impl CholeskyBuffer for ReuseCholesky {}
 
 /// Crate-private workspace allocation for a [`CholeskyBuffer`].
-pub(crate) trait AllocWorkspace: CholeskyBuffer {
+pub trait AllocWorkspace: CholeskyBuffer {
     type CholWrap<W: FitWorkspace>: FitWorkspace<Policy = W::Policy>;
     const OVERWRITES_CHOLESKY: bool;
 }
