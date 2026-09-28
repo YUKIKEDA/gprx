@@ -1,44 +1,44 @@
-# ADR 0005: Sparse 誘導点の増減は bordered insert と trailing delete
+# ADR 0005: Inducing-point growth is a bordered insert and a trailing delete
 
-- 状態: 採用
-- 日付: 2026-09-21
-- Issue: [#192](https://github.com/YUKIKEDA/gprx/issues/192)（P4-9）
+- Status: accepted
+- Date: 2026-09-21
+- Issue: [#192](https://github.com/YUKIKEDA/gprx/issues/192) (P4-9)
 
-## 文脈
+## Context
 
-`OnlineSgpr` は `X` だけを rank-1 で増減する。理由は [ADR 0004](0004-sparse-online-rank1.md)。`n` が増えると、近似品質のために `m` も増やしたくなる。毎回 `assemble_vfe` すると `K_mm` の LLT と `A` の全列を `O(nm²)` でやり直す。公開の `InducingId` / `insert_inducing` はまだ無い。このメモは因子の更新だけを固定する。
+`OnlineSgpr` adds and removes only `X`, by rank-1. The reason is [ADR 0004](0004-sparse-online-rank1.md). As `n` grows, approximation quality wants `m` to grow too. Calling `assemble_vfe` every time redoes the LLT of `K_mm` and every column of `A` at `O(nm²)`. There is no public `InducingId` / `insert_inducing` yet. This note fixes only the factor update.
 
-## 決定
+## Decision
 
-- 対象は誘導点 1 点の末尾 insert と任意位置 delete。`X` と `θ` は動かさない
-- insert は `k(z_new, Z)` を `L_mm` で解き、`K_mm` を bordered LLT する。新しい `A` の行は `(k(z_new, X) − lᵀ A) / ℓ`。`B` も bordered LLT する
-- delete は `L_mm` の該当行を除き、trailing 三角を cholupdate する。`K(Z, X) = L A` を再利用して行を抜き、新しい `L_mm` で `A` を解く。`B` は新しい `A` から作り直す
-- `w = B⁻¹ Ay` は `B` のあと LLT で解き直す
-- `k_diag_sum` は `X` の対角なので据え置く。`‖A‖_F²` は insert で行ノルムを足し、delete では作り直す
-- 照合は再構成した `K_mm = LLᵀ` と `B = LLᵀ` であり、`L` の符号は問わない
-- 公開 `InducingId` / `insert_inducing` / `delete_inducing` は置かない（P4-10）
-- 座標は呼び出し側。k-means はこの行に入れない
+- The target is an append insert of one inducing point and a delete at any index. `X` and `θ` do not move
+- insert solves `k(z_new, Z)` against `L_mm` and bordered-LLTs `K_mm`. The new row of `A` is `(k(z_new, X) − lᵀ A) / ℓ`. `B` is also a bordered LLT
+- delete drops that row of `L_mm` and cholupdates the trailing triangle. It reuses `K(Z, X) = L A` to remove the row, then solves `A` against the new `L_mm`. `B` is rebuilt from the new `A`
+- `w = B⁻¹ Ay` is resolved by LLT after `B`
+- `k_diag_sum` is the diagonal of `X`, so it stays. `‖A‖_F²` adds the row norm on insert and is rebuilt on delete
+- The check reconstructs `K_mm = LLᵀ` and `B = LLᵀ`. The sign of `L` does not matter
+- No public `InducingId` / `insert_inducing` / `delete_inducing` (P4-10)
+- Coordinates come from the caller. k-means is not in this row
 
-RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で、末尾 1 点 insert と先頭 1 点 delete（`m = 2` では末尾以外）のあと、再構成 `K_mm` / `A` / 再構成 `B` / `w` / `k_diag_sum` / `‖A‖_F²` が同じ `θ`・`X`・`Z` の `Sgpr<Fixed>::factor` と相対 `1e-12` で一致した。insert と delete はどちらも増分で通った。
+On RBF / Matern ν=3/2 / RBF ARD (2-D) / RBF+White, each with `n = 4` and `m = 2`, after one append insert and one delete of the first point (not the tail, because `m = 2`), reconstructed `K_mm` / `A` / reconstructed `B` / `w` / `k_diag_sum` / `‖A‖_F²` matched `Sgpr<Fixed>::factor` at the same `θ`, `X`, and `Z` to relative `1e-12`. Both insert and delete passed as incremental updates.
 
-## 根拠
+## Rationale
 
-末尾 insert では新しい行と列が `K_mm` の端に付く。既存の `L_mm` と `A` はそのまま使え、新しい行は `O(nm)`、bordered `B` は `O(m²)` である。フル再 assemble の `O(nm²)` より安い。
+An append insert attaches the new row and column at the edge of `K_mm`. The existing `L_mm` and `A` stay usable. The new row is `O(nm)`. The bordered `B` is `O(m²)`. That is cheaper than a full reassemble at `O(nm²)`.
 
-真ん中の delete は `K_mm` の行と列を抜く。`L` の先頭ブロックは据え置き、trailing を rank-1 update すれば `O(m²)` で足りる。残った `A` の行は `L` が変わるのでそのまま使えない。`K(Z, X) = L A` を再利用すればカーネルの再評価は不要で、三角ソルブは `O(nm²)` のままである。`B` は `A` の全行が動くので作り直す。
+A delete in the middle removes a row and a column of `K_mm`. The leading block of `L` stays, and a rank-1 update of the trailing part is `O(m²)`. The remaining rows of `A` cannot be reused because `L` changed. Reusing `K(Z, X) = L A` avoids reevaluating the kernel. The triangular solve stays `O(nm²)`. `B` is rebuilt because every row of `A` moved.
 
-`w` を増分で直すと `y` の詰めと符号を別に持つ。既存の `B` LLT で `Ay` を解くと同じ作業領域で足りる。
+An incremental fix of `w` would keep the packing of `y` and a sign on the side. Solving `Ay` with the existing LLT of `B` reuses the same workspace.
 
-## 棄却した案
+## Rejected
 
-- **毎回 `assemble_vfe`**: 正しい。`m` を増やすたびに `O(nm²)` と `k(Z, X)` の再評価を払う
-- **delete も bordered の逆だけ**: 末尾以外では先に置換が要る。trailing cholupdate の方が置換を避ける
-- **この行で公開 `insert_inducing`**: 因子の一致と公開面が同じ PR になる。公開は P4-10
-- **この行で k-means**: 座標の選び方は因子の更新とは別である
+- **`assemble_vfe` every time**: correct. Pays `O(nm²)` and a reevaluation of `k(Z, X)` every time `m` grows
+- **Delete as only the inverse of the bordered step**: any index other than the tail needs a permutation first. A trailing cholupdate avoids that permutation
+- **A public `insert_inducing` on this row**: factor agreement and the public surface would be the same PR. The public API is P4-10
+- **k-means on this row**: choosing coordinates is separate from updating the factor
 
-## 帰結
+## Consequences
 
-- P4-10 の公開誘導点 API は、この増分を `m` の増減に使う
-- delete の trailing update や `B` の再 factor が大きな問題で落ちたら、同じ ADR のまま delete だけ再 assemble に落とす。新しい Grill は要らない
-- insert の bordered Schur が非正（1-D で近い `Z`、ℓ が大きいとき）なら、同じ ADR のままその 1 点だけ再 assemble する。新しい Grill は要らない
-- `X` の増減はこの ADR の外である（[ADR 0004](0004-sparse-online-rank1.md)）
+- The public inducing API in P4-10 uses this incremental update to grow and shrink `m`
+- If the trailing update or the refactor of `B` fails on a large problem, the same ADR drops only delete back to a reassemble. A new Grill is not required
+- If the bordered Schur complement of an insert is non-positive (nearby `Z` in 1-D, large ℓ), the same ADR reassembles that one point. A new Grill is not required
+- Adding and removing `X` is outside this ADR ([ADR 0004](0004-sparse-online-rank1.md))

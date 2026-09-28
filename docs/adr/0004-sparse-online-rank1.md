@@ -1,44 +1,44 @@
-# ADR 0004: Sparse オンラインの VFE 因子は rank-1
+# ADR 0004: The online Sparse VFE factor is rank-1
 
-- 状態: 採用
-- 日付: 2026-09-21
-- Issue: [#188](https://github.com/YUKIKEDA/gprx/issues/188)（P4-7）
+- Status: accepted
+- Date: 2026-09-21
+- Issue: [#188](https://github.com/YUKIKEDA/gprx/issues/188) (P4-7)
 
-## 文脈
+## Context
 
-VFE のコストは `O(nm²)` である。`Z` と `m` を固定して訓練点 `X` だけを増減するとき、毎回 `assemble_vfe` すると `K_mm` の LLT と `A` の全列をやり直す。`B = σn²I + AAᵀ` は `m×m` なので、列 1 本の追加・削除は rank-1 の cholupdate / choldown で足りるはずである。公開のオンライン型はまだ無い。このメモは因子の更新だけを固定する。
+VFE costs `O(nm²)`. When `Z` and `m` stay fixed and only training points `X` are added or removed, calling `assemble_vfe` every time redoes the LLT of `K_mm` and every column of `A`. `B = σn²I + AAᵀ` is `m×m`, so adding or removing one column should be a rank-1 cholupdate / choldown. There is no public online type yet. This note fixes only the factor update.
 
-## 決定
+## Decision
 
-- 対象は `X` の 1 点 insert / delete だけ。`Z` と `m` は動かさない
-- `K_mm` と `L_mm` は据え置く
-- insert は `k(Z, x_new)` を `L_mm` で解いて `A` の末尾列にし、`B` を cholupdate する
-- delete は該当列を抜き、`B` を choldown する
-- `w = B⁻¹ Ay` は `B` のあと LLT で解き直す。Sherman–Morrison は使わない
-- `k_diag_sum` と `‖A‖_F²` は対角と列ノルムで増減する
-- 照合は再構成した `B = LLᵀ` であり、`L` の符号は問わない
-- 公開のオンライン型と insert API は置かない（P4-8）
-- `m` の増減はこの行に入れない（P4-9）
+- The target is one-point insert / delete of `X` only. `Z` and `m` do not move
+- `K_mm` and `L_mm` stay
+- insert solves `k(Z, x_new)` against `L_mm`, appends that column to `A`, and cholupdates `B`
+- delete removes that column and choldowns `B`
+- `w = B⁻¹ Ay` is resolved by LLT after `B`. Sherman–Morrison is not used
+- `k_diag_sum` and `‖A‖_F²` grow and shrink by the diagonal and the column norm
+- The check reconstructs `B = LLᵀ`. The sign of `L` does not matter
+- No public online type and no insert API (P4-8)
+- Changing `m` is not in this row (P4-9)
 
-RBF / Matern ν=3/2 / RBF ARD（2-D）/ RBF+White の各 `n = 4`・`m = 2` で、1 点 insert と真ん中 1 点 delete のあと、`A` / 再構成 `B` / `w` / `k_diag_sum` / `‖A‖_F²` が同じ `θ`・`Z` の `Sgpr<Fixed>::factor` と相対 `1e-12` で一致した。insert と delete はどちらも rank-1 で通った。
+On RBF / Matern ν=3/2 / RBF ARD (2-D) / RBF+White, each with `n = 4` and `m = 2`, after one insert and one delete of the middle point, `A` / reconstructed `B` / `w` / `k_diag_sum` / `‖A‖_F²` matched `Sgpr<Fixed>::factor` at the same `θ` and `Z` to relative `1e-12`. Both insert and delete passed as rank-1.
 
-## 根拠
+## Rationale
 
-`Z` が止まっていれば `K_mm` は不変である。新しい列 `a` に対して `B ← B + aaᵀ`、削除では `B ← B − aaᵀ` である。`m` は Sparse では小さく、cholupdate は `O(m²)`、列のカーネルは `O(md)` である。フル再 factor の `O(nm²)` より安い。
+If `Z` is still, `K_mm` is invariant. For a new column `a`, `B ← B + aaᵀ`. For a removal, `B ← B − aaᵀ`. `m` is small for Sparse. cholupdate is `O(m²)`. The column kernel is `O(md)`. That is cheaper than a full refactor at `O(nm²)`.
 
-`w` を増分で直すと `y` の詰めと符号を別に持つ。既存の `B` LLT で `Ay` を解くと同じ作業領域で足りる。
+An incremental fix of `w` would keep the packing of `y` and a sign on the side. Solving `Ay` with the existing LLT of `B` reuses the same workspace.
 
-downdate は `r² ≤ 0` で落ちることがある。この小問題では落ちなかった。落ちた経路は delete を再 factor に戻す（案 C）。今のテストはその分岐を要求しない。
+A downdate can fail when `r² ≤ 0`. It did not fail on this small problem. A path that fails falls back to refactoring the delete (option C). The current tests do not require that branch.
 
-## 棄却した案
+## Rejected
 
-- **毎回 `assemble_vfe`**: 正しい。`n` が増えるたびに `O(nm²)` を払う
-- **`w` の Sherman–Morrison**: `B` の更新と二重に数える。実装と照合が増える
-- **この行で公開 `insert`**: 因子の一致と公開面が同じ PR になる。公開は P4-8
-- **この行で `m` を増やす**: `K_mm` が変わる。X だけの更新ではない
+- **`assemble_vfe` every time**: correct. Pays `O(nm²)` every time `n` grows
+- **Sherman–Morrison for `w`**: counts the `B` update twice. More implementation and more checks
+- **A public `insert` on this row**: factor agreement and the public surface would be the same PR. The public API is P4-8
+- **Growing `m` on this row**: `K_mm` changes. That is not an X-only update
 
-## 帰結
+## Consequences
 
-- P4-8 の公開オンラインは、この rank-1 を `X` の増減に使う
-- delete の downdate が大きな問題で落ちたら、同じ ADR のまま delete だけ再 factor に落とす。新しい Grill は要らない
-- `Z` や `m` を動かす更新はこの ADR の外である
+- The public online path in P4-8 uses this rank-1 update for adding and removing `X`
+- If a downdate fails on a large problem, the same ADR drops only delete back to a refactor. A new Grill is not required
+- Updates that move `Z` or `m` are outside this ADR

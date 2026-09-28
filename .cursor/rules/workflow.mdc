@@ -11,17 +11,17 @@ Human procedure: `CONTRIBUTING.md`. Current row: `docs/roadmap.md`. Do not name 
 
 - Starting implementation without an Issue number and a branch
 - Copying acceptance text into the roadmap. The roadmap keeps ID, title, Issue, and status. Acceptance text stays on the Issue
-- Starting a row whose status is `Grill 後に #n で確定`
+- Starting a row whose status is `Set after Grill on #n`
 - Writing pass/fail numbers, formats, or file layouts into the roadmap before Grill on that row finishes
 - Merging. A human merges
-- Adding or removing a roadmap row, or editing **意図的に今やらない**, without Grill → Issue (`.cursor/rules/consent.mdc`)
+- Adding or removing a roadmap row, or editing **Intentionally out of scope**, without Grill → Issue (`.cursor/rules/consent.mdc`)
 
 「進めなさい」は、Issue があるときの作業である。Issue 作成や範囲決定の代用ではない。履歴改変: `.cursor/rules/git.mdc`。
 
 未 Grill の行を載せるとき（ユーザーが ID と Issue を指名したとき）:
 
 - ID、種別、タイトル、依存（その Issue が既に書いたものだけ）
-- 状態は `Grill 後に #n で確定` だけ。完了条件の本文は置かない
+- 状態は `Set after Grill on #n` だけ。完了条件の本文は置かない
 
 ## 品質ゲート
 
