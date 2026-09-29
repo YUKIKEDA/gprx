@@ -14,8 +14,6 @@ pub use model::Sgpr;
 pub(crate) use objective::SgprObjective;
 pub use online::{InducingId, OnlineSgpr};
 
-pub(crate) use factor::kernel_cross;
-
 /// Keeps inducing coordinates fixed during [`Sgpr::fit`].
 ///
 /// `Z` is an argument of `fit` / `factor` and is not a parameter.

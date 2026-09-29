@@ -10,7 +10,7 @@ use crate::data::{pack_points, validate_inducing, validate_query, validate_train
 use crate::error::{CholeskyStage, GprError};
 use crate::policy::JitterPolicy;
 use crate::policy::KernelExp;
-use crate::sparse::SparseCore;
+use crate::sparse::{SparseCore, k_mm_jitter_policy, kernel_cross};
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
@@ -222,10 +222,6 @@ fn f64_assembly_w<M: crate::math::KernelMath>(
 ) -> Result<Vec<f64>, GprError> {
     let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
     Ok(state.w)
-}
-
-fn k_mm_jitter_policy() -> JitterPolicy {
-    JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
 }
 
 pub(crate) struct VfeState<T: KernelScalar> {
@@ -1247,30 +1243,6 @@ pub(crate) fn dw_from<T: KernelScalar>(
         out[i] = rhs[(i, 0)];
     }
     out
-}
-
-pub(crate) fn kernel_cross<M: crate::math::KernelMath, T>(
-    compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
-    xs: MatRef<'_, T>,
-) -> Result<Mat<T>, GprError>
-where
-    T: KernelScalar,
-{
-    let n = x.nrows();
-    let q = xs.nrows();
-    let mut out = Mat::zeros(n, q);
-    let mut scratch = Mat::zeros(n, q);
-    compiled.eval_cross::<M>(
-        x,
-        xs,
-        None,
-        out.as_mut(),
-        scratch.as_mut(),
-        &mut Vec::new(),
-        &mut [],
-    )?;
-    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
