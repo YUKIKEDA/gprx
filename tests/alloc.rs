@@ -9,7 +9,7 @@
 
 mod common;
 use common::rng::{open_unit, small_rng};
-use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{
     FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, KernelExp, MixedPrecision, Prediction,
     ReevaluateKernel,
@@ -32,10 +32,21 @@ const NOISE: f64 = 0.1;
 const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 
 /// One coordinate step (`value_at_changes`) of an incremental fit on a sum
-/// of two leaves, after a warmup step (R4-5 / #243). The remaining
-/// allocations stage the new `θ` by cloning the kernel trees; #270 takes
-/// them to 0. Do not raise without an Issue.
-const MAX_LEAF_STEP_ALLOCS: usize = 8;
+/// of two leaves, after a warmup step (R4-5 / #243). `θ` is written in place
+/// (#270); the rest is the composite kernel's own scratch, which #272 takes
+/// to 0. Do not raise without an Issue.
+const MAX_LEAF_STEP_ALLOCS: usize = 2;
+
+/// One `value_and_gradient_into` on composite kernels after a warmup call,
+/// by kernel. `θ` is written in place (#270); the rest is the composite
+/// kernel's own scratch (per row in the mixed-mode sum), which #272 takes to
+/// 0. Do not raise without an Issue.
+const MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS: [(&str, usize); 4] = [
+    ("sum_with_ard", 4117),
+    ("product", 7),
+    ("ard", 0),
+    ("sum", 7),
+];
 
 /// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
 const MAX_PREDICT_100_ALLOCS: usize = 0;
@@ -265,4 +276,41 @@ fn incremental_leaf_step_allocs_after_warmup() {
         .expect("fit");
     let count = LEAF_STEP_ALLOCS.lock().expect("lock").expect("probe ran");
     assert_alloc_cap("leaf_step", count, MAX_LEAF_STEP_ALLOCS);
+}
+
+/// `value_and_gradient_into` on composite kernels after a warmup call.
+#[test]
+fn composite_mll_and_grad_allocs_after_workspace() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    let x = fill_column_major(N, D, SEED);
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
+    let kernels = [
+        KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
+            + KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell")),
+        KernelSpec::from(ConstantKernel::new(1.5).expect("constant"))
+            * KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
+        KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell")),
+        KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
+            + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell")),
+    ];
+    for ((label, cap), kernel) in MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS.into_iter().zip(kernels) {
+        let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+        let mut gpr = Gpr::new(kernel, likelihood)
+            .with_optimizer(Fixed)
+            .factor(&x, N, D, &y)
+            .map_err(|(_, e)| e)
+            .expect("spd");
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; params.len()];
+        gpr.value_and_gradient_into(&params, &mut grad)
+            .expect("warmup");
+        let count = allocs_in(|| {
+            gpr.value_and_gradient_into(&params, &mut grad)
+                .expect("counted");
+        });
+        assert_alloc_cap(label, count, cap);
+    }
 }

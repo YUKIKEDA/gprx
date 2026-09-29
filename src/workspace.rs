@@ -33,6 +33,9 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     pub(crate) rhs: Mat<P::Storage>,
     /// Scratch for faer `cholesky_in_place` / `solve_in_place`.
     pub(crate) faer_scratch: MemBuffer,
+    /// `θ` before the current hyperparameter write, to write back when `A`
+    /// does not factor. Scratch: meaningless between writes.
+    pub(crate) theta: Vec<f64>,
     /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
     /// (`0` without a retry). `k_matrix` then holds the factor of `A + (σn² + j) I`.
     pub(crate) factor_jitter: f64,
@@ -192,6 +195,7 @@ where
             thread_scratch: empty_thread_scratch::<P::Storage>(),
             rhs: Mat::<P::Storage>::zeros(n, 1),
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(n)),
+            theta: Vec::new(),
             factor_jitter: 0.0,
         })
     }
@@ -230,6 +234,7 @@ where
             thread_scratch: self.thread_scratch.clone(),
             rhs: self.rhs.clone(),
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(self.n())),
+            theta: self.theta.clone(),
             factor_jitter: self.factor_jitter,
         }
     }
