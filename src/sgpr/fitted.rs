@@ -7,11 +7,10 @@ use faer::Mat;
 use faer::MatRef;
 
 use crate::error::GprError;
-use crate::gpr::{KernelExp, with_kernel_exp};
-use crate::param::write_params;
+use crate::gpr::with_kernel_exp;
+use crate::sparse::{SparseCore, sparse_core_accessors};
 
-use crate::kernel::{KernelScalar, KernelSpec};
-use crate::likelihood::GaussianLikelihood;
+use crate::kernel::KernelScalar;
 use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
 use crate::param::Interval;
@@ -37,87 +36,36 @@ use super::{FixedInducing, InducingLayout};
 /// inducing-point updates.
 #[derive(Clone, Debug)]
 pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePrecision> {
-    pub(crate) kernel: KernelSpec,
-    pub(crate) likelihood: GaussianLikelihood,
-    pub(crate) optimizer: O,
-    pub(crate) inducing: PhantomData<I>,
-    pub(crate) math: KernelExp,
-    pub(crate) x_obs: Vec<f64>,
-    pub(crate) z_obs: Vec<f64>,
-    pub(crate) y: Vec<f64>,
+    pub(super) core: SparseCore,
+    pub(super) optimizer: O,
+    pub(super) inducing: PhantomData<I>,
     /// Lower `L` from `K_mm = L Lᵀ`.
-    pub(crate) k_mm_l: Mat<P::Storage>,
+    pub(super) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
-    pub(crate) a: Mat<P::Storage>,
+    pub(super) a: Mat<P::Storage>,
     /// Lower `L_B` from `B = σn² I + A Aᵀ`.
-    pub(crate) b_l: Mat<P::Storage>,
+    pub(super) b_l: Mat<P::Storage>,
     /// Storage solve `B w = A y`. Marginal likelihood uses this.
-    pub(crate) w: Vec<P::Storage>,
+    pub(super) w: Vec<P::Storage>,
     /// Predict weights. [`DoublePrecision`] and [`SinglePrecision`] promote `w`.
     /// [`MixedPrecision`] stores the refined `f64` weights.
-    pub(crate) predict_w: Vec<P::Refine>,
-    pub(crate) k_diag_sum: P::Storage,
-    pub(crate) a_frobenius2: P::Storage,
-    pub(crate) n: usize,
-    pub(crate) m: usize,
-    pub(crate) d: usize,
+    pub(super) predict_w: Vec<P::Refine>,
+    pub(super) k_diag_sum: P::Storage,
+    pub(super) a_frobenius2: P::Storage,
 }
 
 impl<O, I: InducingLayout, P> FittedSgpr<O, I, P>
 where
     P: crate::precision::GpScalar,
 {
-    /// Returns the number of training points.
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    /// Returns the number of inducing points.
-    pub fn m(&self) -> usize {
-        self.m
-    }
-
-    /// Returns the feature dimension.
-    pub fn d(&self) -> usize {
-        self.d
-    }
-
-    /// Returns the kernel whose hyperparameters this model owns.
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.kernel
-    }
-
-    /// Returns the observation-noise model.
-    pub fn likelihood(&self) -> &GaussianLikelihood {
-        &self.likelihood
-    }
-
-    /// Returns the kernel `exp` mode the trainer set with `with_math`.
-    pub fn math(&self) -> KernelExp {
-        self.math
-    }
-
-    /// Returns the original training features in column-major order.
-    pub fn x(&self) -> &[f64] {
-        &self.x_obs
-    }
-
-    /// Returns the inducing features in column-major order.
-    pub fn z(&self) -> &[f64] {
-        &self.z_obs
-    }
-
-    /// Returns the original training targets.
-    pub fn y(&self) -> &[f64] {
-        &self.y
-    }
+    sparse_core_accessors!();
 
     /// Returns the concatenated parameter count.
     ///
     /// Kernel `θ` then likelihood `θ`. [`FreeInducing`](crate::FreeInducing) also counts
     /// column-major `Z` (`m × d`).
     pub fn num_params(&self) -> usize {
-        self.kernel.num_params() + self.likelihood.num_params() + I::z_params(self.m, self.d)
+        self.core.theta_len() + I::z_params(self.core.m, self.core.d)
     }
 
     /// Writes kernel `θ`, likelihood `θ`, and (when free) column-major `Z`.
@@ -128,10 +76,10 @@ where
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
-        let n_theta = self.kernel.num_params() + self.likelihood.num_params();
-        write_params(&self.kernel, &self.likelihood, &mut out[..n_theta])?;
-        if I::z_params(self.m, self.d) > 0 {
-            out[n_theta..].copy_from_slice(&self.z_obs);
+        let n_theta = self.core.theta_len();
+        self.core.read_theta(&mut out[..n_theta])?;
+        if I::z_params(self.core.m, self.core.d) > 0 {
+            out[n_theta..].copy_from_slice(&self.core.z_obs);
         }
         Ok(())
     }
@@ -179,53 +127,45 @@ where
     /// # }
     /// ```
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        let n_kernel = self.kernel.num_params();
-        let n_theta = n_kernel + self.likelihood.num_params();
+        let n_theta = self.core.theta_len();
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         if self.same_stored_params(params)? {
             return Ok(());
         }
-        let mut kernel = self.kernel.clone();
-        kernel.set_params(&params[..n_kernel])?;
-        let mut likelihood = self.likelihood;
-        likelihood.set_params(&params[n_kernel..n_theta])?;
-        let z_obs = if I::z_params(self.m, self.d) > 0 {
+        let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
+        let z_obs = if I::z_params(self.core.m, self.core.d) > 0 {
             params[n_theta..].to_vec()
         } else {
-            self.z_obs.clone()
+            self.core.z_obs.clone()
         };
-        let state = with_kernel_exp!(self.math, M => assemble_vfe::<M, _>(
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _>(
             &kernel,
             likelihood,
-            &self.x_obs,
-            self.n,
-            self.d,
-            &self.y,
+            &self.core.x_obs,
+            self.core.n,
+            self.core.d,
+            &self.core.y,
             &z_obs,
-            self.m,
+            self.core.m,
         ))?;
-        self.kernel = kernel;
-        self.likelihood = likelihood;
-        self.z_obs = z_obs;
+        self.core.kernel = kernel;
+        self.core.likelihood = likelihood;
+        self.core.z_obs = z_obs;
         self.apply_vfe(state);
         Ok(())
     }
 
     pub(crate) fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-        let n = self.num_params();
-        if out.len() != n {
-            return Err(GprError::LengthMismatch {
-                reason: format!("expected {n} intervals, got {}", out.len()),
-            });
-        }
-        let n_kernel = self.kernel.num_params();
-        let n_theta = n_kernel + self.likelihood.num_params();
-        let mut offset = 0;
-        self.kernel
-            .write_intervals(&mut out[..n_kernel], &mut offset)?;
-        out[n_kernel] = self.likelihood.bounds();
-        if I::z_params(self.m, self.d) > 0 {
-            fill_z_intervals(&self.x_obs, self.n, self.d, &mut out[n_theta..])?;
+        crate::data::require_count(out.len(), self.num_params(), "intervals")?;
+        let n_theta = self.core.theta_len();
+        self.core.theta_intervals(&mut out[..n_theta])?;
+        if I::z_params(self.core.m, self.core.d) > 0 {
+            fill_z_intervals(
+                &self.core.x_obs,
+                self.core.n,
+                self.core.d,
+                &mut out[n_theta..],
+            )?;
         }
         Ok(())
     }
@@ -282,12 +222,12 @@ where
         crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let value = self.neg_log_marginal_likelihood()?;
-        let include_z = I::z_params(self.m, self.d) > 0;
+        let include_z = I::z_params(self.core.m, self.core.d) > 0;
         if !include_z && self.inducing_equals_training() {
             let mut exact = self.exact_fitted()?;
             exact.value_and_gradient_into(params, out)?;
         } else {
-            with_kernel_exp!(self.math, M => analytic_gradient::<M, _, _, _>(self, out, include_z))?;
+            with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(self, out, include_z))?;
         }
         Ok(value)
     }
@@ -332,12 +272,12 @@ where
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         self.set_params(params)?;
-        let include_z = I::z_params(self.m, self.d) > 0;
+        let include_z = I::z_params(self.core.m, self.core.d) > 0;
         if !include_z && self.inducing_equals_training() {
             let mut exact = self.exact_fitted()?;
             exact.hessian_into(params, out)?;
         } else {
-            with_kernel_exp!(self.math, M => analytic_hessian::<M, _, _, _>(self, out, include_z))?;
+            with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(self, out, include_z))?;
         }
         Ok(())
     }
@@ -381,33 +321,33 @@ where
     }
 
     fn inducing_equals_training(&self) -> bool {
-        self.x_obs == self.z_obs
+        self.core.x_obs == self.core.z_obs
     }
 
     fn exact_fitted(&self) -> Result<crate::FittedGpr<Fixed, P>, GprError>
     where
         P: crate::precision::GpScalar,
     {
-        crate::Gpr::new(self.kernel.clone(), self.likelihood)
+        crate::Gpr::new(self.core.kernel.clone(), self.core.likelihood)
             .with_optimizer(Fixed)
             .with_precision::<P>()
-            .factor(&self.x_obs, self.n, self.d, &self.y)
+            .factor(&self.core.x_obs, self.core.n, self.core.d, &self.core.y)
             .map_err(|(_, e)| e)
     }
 
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
-        self.predict_w = with_kernel_exp!(self.math, M => publish_sgpr_weights::<M, P>(
-            &self.kernel,
+        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
+            &self.core.kernel,
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.x_obs,
-            &self.y,
-            &self.z_obs,
-            self.likelihood.noise_variance(),
-            self.n,
-            self.m,
-            self.d,
+            &self.core.x_obs,
+            &self.core.y,
+            &self.core.z_obs,
+            self.core.likelihood.noise_variance(),
+            self.core.n,
+            self.core.m,
+            self.core.d,
         ))?;
         Ok(())
     }
@@ -422,13 +362,17 @@ where
         self.a_frobenius2 = state.a_frobenius2;
     }
 
+    /// `w` and the lower `L_B` of `B`, for the SVGP-at-Titsias checks.
+    #[cfg(test)]
+    pub(crate) fn vfe_w_and_b_l(&self) -> (&[P::Storage], MatRef<'_, P::Storage>) {
+        (&self.w, self.b_l.as_ref())
+    }
+
     pub(crate) fn into_trainer(self) -> Sgpr<O, I, P> {
         Sgpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
+            spec: self.core.spec(),
             optimizer: self.optimizer,
             inducing: PhantomData,
-            math: self.math,
             _precision: PhantomData,
         }
     }
@@ -510,12 +454,12 @@ where
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.y,
+            &self.core.y,
             self.k_diag_sum,
             self.a_frobenius2,
-            self.likelihood.noise_variance(),
-            self.n,
-            self.m,
+            self.core.likelihood.noise_variance(),
+            self.core.n,
+            self.core.m,
         )
     }
 
@@ -599,21 +543,21 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        if n_cols != self.d {
+        if n_cols != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
-                expected_dim: self.d,
+                expected_dim: self.core.d,
             });
         }
-        with_kernel_exp!(self.math, M => vfe_predict::<M, P>(
-            &self.kernel,
-            &self.z_obs,
+        with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
+            &self.core.kernel,
+            &self.core.z_obs,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
             &self.predict_w,
-            self.likelihood.noise_variance(),
-            self.m,
-            self.d,
+            self.core.likelihood.noise_variance(),
+            self.core.m,
+            self.core.d,
             xs,
             n_rows,
             n_cols,
