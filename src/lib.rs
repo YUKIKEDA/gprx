@@ -81,7 +81,7 @@ pub use optimizer::{
     OptResult, Optimizer,
 };
 pub use param::{BoundedParam, Interval, IntervalError};
-pub use persist::{FORMAT_VERSION, LoadedGpr, PersistRegistry};
+pub use persist::{FORMAT_VERSION, LoadedGpr, LoadedSgpr, LoadedSvgp, PersistRegistry};
 pub use points::PointId;
 pub use policy::{
     AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FixedJitter, JitterPolicy, KernelExp,
