@@ -818,14 +818,16 @@ At implementation time, check agreement with a full factorization on a small mat
 
 Batch fit and online differ (fixed n versus n that grows and shrinks). On growth, **reallocate and copy `LD`, `y`, `α`, and `v_buf` by the same steps**. faer scratch for delete grows to the same capacity. predict, NLML, and insert do not read the Gram `K` or the distance cache, so `LdltStore` does not hold them.
 
+The factor is stored transposed, as `Lᵀ` in a column-major `n_capacity × n_capacity` matrix, so each row of `L` is contiguous: an append writes one contiguous column, and its forward solve `L w = k` reads each row contiguously (one dot product per row below 512 rows, faer's blocked solve above). The solves and persist read the lower view `ld()` (a row-major view of `Lᵀ`); the saved packed LDLT is unchanged. With `f32` storage the LDLT solve accumulates in `f64` and rounds once, because the row order of an `f32` solve over that view cancels worse in `k*ᵀ α`.
+
 Crate-private. `from_active(n)` sets `n_active = n_capacity = n`. Training `X` is held by `OnlineGpr` and is not on this struct. Before an append insert, `OnlineGpr` calls `ensure_capacity`. There is no growth-factor field.
 
 ```rust
 struct LdltStore<T: KernelScalar = f64> { // T is the precision's Storage
-    ld_factor: Mat<T>,         // LDLT factor (diagonal = D, strict lower triangle = L)
+    lt: Mat<T>,                // Lᵀ with D on the diagonal: row i of L is the head of column i
     y: Col<T>,
     alpha: Col<T>,
-    v_buf: Col<T>,             // forward-substitution scratch for predictive variance (O(n²) per test point)
+    v_buf: Vec<T>,             // k of an appended point, then its forward solve
     delete_scratch: MemBuffer, // faer delete_rows_and_cols. Grown with capacity
     n_active: usize,
     n_capacity: usize,
@@ -836,7 +838,7 @@ struct LdltStore<T: KernelScalar = f64> { // T is the precision's Storage
 **Growth** (`ensure_capacity(needed)`, when `n_capacity < needed`):
 
 1. `new_cap = max(needed, max(n_capacity, 1) * 2)`
-2. Reallocate `ld_factor`, `alpha`, `y`, and `v_buf` at `new_cap`. Grow the delete scratch for `new_cap` too
+2. Reallocate `lt`, `alpha`, `y`, and `v_buf` at `new_cap`. Grow the delete scratch for `new_cap` too
 3. Copy the existing `n_active × n_active` lower triangle and the length-`n_active` vectors
 4. `PointRegistry` indices stay below `n_active`, so they do not need to be rewritten
 5. Run the insert after growth. Do not reallocate in the middle of the update
