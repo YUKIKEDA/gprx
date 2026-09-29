@@ -7,7 +7,7 @@ use faer::Mat;
 use faer::MatRef;
 
 use crate::error::GprError;
-use crate::gpr::with_kernel_exp;
+use crate::policy::with_kernel_exp;
 use crate::sparse::{SparseCore, sparse_core_accessors};
 
 use crate::kernel::KernelScalar;

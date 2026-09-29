@@ -122,7 +122,7 @@ impl Fresh {
             jitter: 0.0,
             factor: StoredFactor::Llt(self.l.as_ref()),
             factor_alpha: &self.factor_alpha,
-            policy: crate::gpr::JitterPolicy::default(),
+            policy: crate::policy::JitterPolicy::default(),
             stage: CholeskyStage::Fit,
         }
     }

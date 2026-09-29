@@ -1,9 +1,9 @@
 use super::*;
 use crate::error::GprError;
-use crate::gpr::JitterPolicy;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{cholesky_lower_with_retries, faer_par, faer_par_dims};
+use crate::policy::JitterPolicy;
 use crate::{Adam, Fixed, PredictOptions, Sgpr, VarianceKind};
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;

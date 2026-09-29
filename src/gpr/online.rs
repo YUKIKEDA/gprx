@@ -21,10 +21,9 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::{
-    ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, PointId, PointRegistry, Policies,
-    fit_buffers, with_kernel_exp,
-};
+use super::{ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, Policies, fit_buffers};
+use crate::points::{PointId, PointRegistry};
+use crate::policy::with_kernel_exp;
 
 #[cfg(feature = "insert-stages")]
 mod insert_stages {

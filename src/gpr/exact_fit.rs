@@ -21,7 +21,8 @@ use super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
     fill_cached_inputs, neg_mll_from_factor,
 };
-use super::{DistanceCachePolicy, FitBuffers, GprCore, LltStore, Policies, with_kernel_exp};
+use super::{FitBuffers, GprCore, LltStore, Policies};
+use crate::policy::{DistanceCachePolicy, with_kernel_exp};
 
 /// [`Optimizer::USES_CHANGE_INDICES`] of `O` for the objective `obj`.
 fn uses_change_indices<Obj, O: Optimizer<Obj>>(_obj: &Obj) -> bool {

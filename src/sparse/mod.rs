@@ -3,10 +3,10 @@
 //! every fitted model holds, and the kernel + likelihood `θ` over both.
 
 use crate::error::GprError;
-use crate::gpr::KernelExp;
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
+use crate::policy::KernelExp;
 
 /// Kernel, likelihood, and kernel `exp` of an untrained sparse model.
 #[derive(Clone, Debug)]
