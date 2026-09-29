@@ -88,6 +88,20 @@ impl SparseSpec {
     }
 }
 
+/// The saved parts of a fitted sparse model ([`SparseCore::from_persisted`]).
+pub(crate) struct PersistedSparse {
+    pub(crate) spec: SparseSpec,
+    pub(crate) x_transform: Box<dyn Transform>,
+    pub(crate) y_transform: Box<dyn TargetTransform>,
+    pub(crate) x_obs: Vec<f64>,
+    pub(crate) y_obs: Vec<f64>,
+    pub(crate) z_obs: Vec<f64>,
+    pub(crate) z_train: Vec<f64>,
+    pub(crate) n: usize,
+    pub(crate) m: usize,
+    pub(crate) d: usize,
+}
+
 /// Training data and settings of a fitted sparse model.
 ///
 /// `x_obs` / `z_obs` / `y_obs` are what the caller passed (column-major
@@ -200,6 +214,57 @@ impl SparseCore {
             n: n_rows,
             m: n_inducing,
             d: n_cols,
+        })
+    }
+
+    /// A fitted core read back from a persist directory. The fitted
+    /// transforms are the saved ones, not fitted again: an online model's
+    /// were fitted on its first training set. `X` and `y` go through them;
+    /// `z_train` is the saved transformed `Z`, so a moved `Z` is not mapped
+    /// back and forth.
+    ///
+    /// # Errors
+    ///
+    /// Returns the input errors of [`crate::data::validate_training`] and
+    /// [`crate::data::validate_inducing`], or the error of a transform map.
+    pub(crate) fn from_persisted(parts: PersistedSparse) -> Result<Self, GprError> {
+        let PersistedSparse {
+            spec,
+            x_transform,
+            y_transform,
+            x_obs,
+            y_obs,
+            z_obs,
+            z_train,
+            n,
+            m,
+            d,
+        } = parts;
+        validate_training(&x_obs, n, d, &y_obs)?;
+        validate_inducing(&z_obs, m, d)?;
+        validate_inducing(&z_train, m, d)?;
+        let mut x_train = x_obs.clone();
+        x_transform.apply(&mut x_train, n, d)?;
+        let mut y_train = y_obs.clone();
+        y_transform.transform(&mut y_train)?;
+        Ok(Self {
+            kernel: spec.kernel,
+            likelihood: spec.likelihood,
+            math: spec.math,
+            jitter: spec.jitter,
+            x_unfitted: spec.x_transform,
+            y_unfitted: spec.y_transform,
+            x_transform,
+            y_transform,
+            x_obs,
+            z_obs,
+            y_obs,
+            x_train,
+            z_train,
+            y_train,
+            n,
+            m,
+            d,
         })
     }
 

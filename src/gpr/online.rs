@@ -341,7 +341,7 @@ where
     }
 
     pub(crate) fn persist_point_ids(&self) -> Vec<u64> {
-        self.registry.ids().iter().map(|id| id.raw()).collect()
+        self.registry.raw_ids()
     }
 
     pub(crate) fn persist_next_point_id(&self) -> u64 {
@@ -983,6 +983,7 @@ mod tests {
     use super::*;
     use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
     use crate::persist::{LoadedGpr, PersistRegistry};
+    use crate::points::RegistryId;
     use crate::{Fixed, GaussianLikelihood, GprError, PointId};
 
     const TOL: f64 = 1e-12;

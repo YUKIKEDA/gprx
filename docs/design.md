@@ -28,6 +28,7 @@ input X, y
        → persist: one directory (`config.json` + `model.safetensors`). `format_version` 1. `factor_kind` is required (`llt` / `ldlt`). `load` of `llt` is `FittedGpr<Fixed>`. `ldlt` is `OnlineGpr<Fixed>`. mmap when a factor is present. Retrain is `with_optimizer` → `refit`
        → OnlineGpr: `FittedGpr::into_online(self)` converts LLT→LDLT. An append `insert` exists only on `OnlineGpr`
        → Phase 4: Sgpr returns a fitted type the same way
+       → sparse persist (R5-8, [#286](https://github.com/YUKIKEDA/gprx/issues/286)): the same directory with a `model` key (`sgpr` / `online_sgpr` / `svgp`; an Exact file has none). `FittedSgpr` / `OnlineSgpr` / `FittedSvgp::save`, `LoadedSgpr` / `LoadedSvgp::load`. The tensors are the original `X` / `y` / `Z`, the transformed `Z`, and SVGP's `q(u)`; the factors are rebuilt, so a fitted model loads back with the same predictions to the bit. `config.json` floats round-trip exactly (serde_json `float_roundtrip`)
 ```
 
 Principles:

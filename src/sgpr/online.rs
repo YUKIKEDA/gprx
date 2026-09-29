@@ -1,6 +1,5 @@
 //! Online collapsed variational SGPR.
 
-use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use faer::Mat;
@@ -11,7 +10,7 @@ use crate::kernel::ScalarOps;
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::points::PointId;
-use crate::points::PointRegistry;
+use crate::points::{IdRegistry, PointRegistry, RegistryId};
 use crate::policy::with_kernel_exp;
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sgpr::SgprObjective;
@@ -66,63 +65,23 @@ use super::fitted::FittedSgpr;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InducingId(u64);
 
-impl InducingId {
-    pub(crate) fn from_raw(raw: u64) -> Self {
+impl RegistryId for InducingId {
+    const PERSIST_KEY: &'static str = "inducing_ids";
+
+    fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
-}
 
-#[derive(Clone, Debug)]
-struct InducingRegistry {
-    id_to_index: HashMap<InducingId, usize>,
-    index_to_id: Vec<InducingId>,
-    next_id: u64,
-}
-
-impl InducingRegistry {
-    fn from_count(m: usize) -> Self {
-        let index_to_id: Vec<InducingId> = (0..m as u64).map(InducingId::from_raw).collect();
-        let id_to_index = index_to_id
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect();
-        Self {
-            id_to_index,
-            index_to_id,
-            next_id: m as u64,
-        }
+    fn raw(self) -> u64 {
+        self.0
     }
 
-    fn ids(&self) -> &[InducingId] {
-        &self.index_to_id
-    }
-
-    fn index_of(&self, id: InducingId) -> Result<usize, GprError> {
-        self.id_to_index
-            .get(&id)
-            .copied()
-            .ok_or(GprError::InvalidInducingId)
-    }
-
-    fn insert(&mut self) -> InducingId {
-        let id = InducingId::from_raw(self.next_id);
-        let index = self.index_to_id.len();
-        self.next_id = self.next_id.saturating_add(1);
-        self.index_to_id.push(id);
-        self.id_to_index.insert(id, index);
-        id
-    }
-
-    fn remove_at(&mut self, index: usize) {
-        let id = self.index_to_id.remove(index);
-        self.id_to_index.remove(&id);
-        for (shifted, remaining) in self.index_to_id.iter().enumerate().skip(index) {
-            self.id_to_index.insert(*remaining, shifted);
-        }
+    fn unknown() -> GprError {
+        GprError::InvalidInducingId
     }
 }
+
+pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 
 /// Online collapsed variational SGPR after [`FittedSgpr::into_online`].
 ///
@@ -1034,6 +993,86 @@ where
         self.commit_inducing(z_train, z_obs, m - 1)?;
         self.inducing.remove_at(idx);
         Ok(())
+    }
+
+    pub(crate) fn core(&self) -> &SparseCore {
+        &self.core
+    }
+
+    pub(crate) fn point_registry(&self) -> &PointRegistry {
+        &self.registry
+    }
+
+    pub(crate) fn inducing_registry(&self) -> &InducingRegistry {
+        &self.inducing
+    }
+
+    /// The online model of a persist directory: `fitted` with the saved
+    /// point and inducing identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when an identifier list is
+    /// invalid or its length is not `n` / `m`.
+    pub(crate) fn from_persisted<I>(
+        fitted: FittedSgpr<O, I, P>,
+        points: PointRegistry,
+        inducing: InducingRegistry,
+    ) -> Result<Self, GprError> {
+        let mut online = Self::from_fitted(fitted);
+        if points.len() != online.core.n || inducing.len() != online.core.m {
+            return Err(crate::persist::persist_err(format!(
+                "config has {} point ids and {} inducing ids, expected n = {} and m = {}",
+                points.len(),
+                inducing.len(),
+                online.core.n,
+                online.core.m
+            )));
+        }
+        online.registry = points;
+        online.inducing = inducing;
+        Ok(online)
+    }
+
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
+    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
+    /// and `Z`, and `Z` in transformed coordinates, and the point and inducing identifiers. The factors are
+    /// not stored; [`crate::LoadedSgpr::load`] factors the system again at the saved `θ`
+    /// and `Z`. Caller-defined kernels and transforms need their
+    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
+    /// The optimizer and the inducing-point search are not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let mut model = Sgpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    ///     .map_err(|(_, e)| e)?
+    ///     .into_online();
+    /// model.insert(&[3.0], 0.2)?;
+    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-online-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// model.save(&dir)?;
+    /// let loaded = gprx::LoadedSgpr::load(&dir, &gprx::PersistRegistry::new())?;
+    /// assert_eq!(loaded.n(), model.n());
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_online_sgpr(self, dir.as_ref())
     }
 
     /// Converts this model back to a batch sparse GPR with fixed inducing

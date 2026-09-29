@@ -276,6 +276,107 @@ impl DistanceCacheJson {
     }
 }
 
+/// Which model a persist directory holds. Exact files written before the
+/// sparse models have no `model` key and read as [`Self::Exact`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ModelJson {
+    #[default]
+    Exact,
+    Sgpr,
+    OnlineSgpr,
+    Svgp,
+}
+
+impl ModelJson {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Sgpr => "sgpr",
+            Self::OnlineSgpr => "online_sgpr",
+            Self::Svgp => "svgp",
+        }
+    }
+
+    /// The loader of this model, for the error of a wrong one.
+    pub(super) fn loader(self) -> &'static str {
+        match self {
+            Self::Exact => "LoadedGpr::load",
+            Self::Sgpr | Self::OnlineSgpr => "LoadedSgpr::load",
+            Self::Svgp => "LoadedSvgp::load",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelTag {
+    #[serde(default)]
+    model: ModelJson,
+}
+
+/// Reads only the `model` key of `config.json` and checks it is one of
+/// `expected`.
+pub(super) fn parse_model(bytes: &[u8], expected: &[ModelJson]) -> Result<ModelJson, GprError> {
+    let tag: ModelTag = serde_json::from_slice(bytes)
+        .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;
+    if expected.contains(&tag.model) {
+        Ok(tag.model)
+    } else {
+        Err(persist_err(format!(
+            "config.json holds a {} model; load it with {}",
+            tag.model.name(),
+            tag.model.loader()
+        )))
+    }
+}
+
+/// `config.json` of a sparse model ([`ModelJson::Sgpr`],
+/// [`ModelJson::OnlineSgpr`], [`ModelJson::Svgp`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct SparseConfig {
+    pub format_version: u32,
+    pub model: ModelJson,
+    pub n: usize,
+    pub m: usize,
+    pub d: usize,
+    #[serde(default, skip_serializing_if = "PrecisionJson::is_double")]
+    pub precision: PrecisionJson,
+    #[serde(default, skip_serializing_if = "ResidualJson::is_promote_storage")]
+    pub residual: ResidualJson,
+    #[serde(default, skip_serializing_if = "MathJson::is_accurate")]
+    pub math: MathJson,
+    pub kernel: KernelJson,
+    pub likelihood: LikelihoodJson,
+    pub jitter: JitterJson,
+    pub x_unfitted: UnfittedInputJson,
+    pub y_unfitted: UnfittedTargetJson,
+    pub x_transform: FittedInputJson,
+    pub y_transform: FittedTargetJson,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub point_ids: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub next_point_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub inducing_ids: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub next_inducing_id: Option<u64>,
+}
+
+pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError> {
+    let config: SparseConfig = serde_json::from_slice(bytes)
+        .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;
+    if config.format_version != FORMAT_VERSION {
+        return Err(GprError::UnsupportedPersistVersion {
+            found: config.format_version,
+            supported: FORMAT_VERSION,
+        });
+    }
+    if config.n == 0 || config.m == 0 || config.d == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    Ok(config)
+}
+
 pub(super) fn parse_config(bytes: &[u8]) -> Result<ModelConfig, GprError> {
     let config: ModelConfig = serde_json::from_slice(bytes)
         .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;
