@@ -107,6 +107,7 @@ where
         k_mm.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),
+        &mut Vec::new(),
     )?;
     let req = llt::factor::cholesky_in_place_scratch::<T>(
         n_inducing,
@@ -130,6 +131,7 @@ where
             gram.as_mut(),
             Triangle::Lower,
             gram_scratch.as_mut(),
+            &mut Vec::new(),
         )?;
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
@@ -441,6 +443,7 @@ pub(crate) fn refined_mean<M: crate::math::KernelMath, R: crate::precision::Resi
             k_mm.as_mut(),
             Triangle::Lower,
             scratch.as_mut(),
+            &mut Vec::new(),
         )?;
         let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
         let mut chol_scratch = MemBuffer::new(req);
@@ -719,6 +722,7 @@ where
         param_idx,
         Triangle::Full,
         scratch_mm.as_mut(),
+        &mut Vec::new(),
     )?;
     let mut d_kmn = if same_xz {
         let mut gram = Mat::<P::Storage>::zeros(n, n);
@@ -729,6 +733,7 @@ where
             param_idx,
             Triangle::Full,
             scratch.as_mut(),
+            &mut Vec::new(),
         )?;
         gram
     } else {
@@ -1110,6 +1115,7 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
         param_idx,
         Triangle::Full,
         scratch_mm.as_mut(),
+        &mut Vec::new(),
     )?;
     let mut d_kmn = if let Some(pre) = pre_cross {
         pre
@@ -1122,6 +1128,7 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
             param_idx,
             Triangle::Full,
             scratch.as_mut(),
+            &mut Vec::new(),
         )?;
         gram
     } else {

@@ -555,6 +555,7 @@ where
                 query_x,
                 query_dist,
                 query_scratch,
+                query_nested,
                 ..
             } = &mut self.core.query;
             pack_storage(
@@ -569,6 +570,7 @@ where
                 Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
+                query_nested,
                 &mut [],
             ))?;
         }

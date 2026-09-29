@@ -31,7 +31,13 @@ fn combine_sum_from_leaf_grams_overwrites_dirty_dest() {
     let mut dirty = fill(3, 999.0);
     let mut scratch = fill(3, 0.0);
     compiled
-        .combine_from_leaf_grams(&grams, dirty.as_mut(), scratch.as_mut(), Triangle::Lower)
+        .combine_from_leaf_grams(
+            &grams,
+            dirty.as_mut(),
+            scratch.as_mut(),
+            &mut Vec::new(),
+            Triangle::Lower,
+        )
         .expect("combine");
     assert_lower_close(dirty.as_ref(), expected.as_ref(), TOL);
 }
@@ -390,4 +396,124 @@ fn apply_cross_matches_full_block() {
         .expect("rect");
     assert_close(k_cross[(0, 0)], k_nn[(0, 0)], TOL);
     assert_close(k_cross[(0, 1)], k_nn[(0, 1)], TOL);
+}
+
+fn linear(sigma: f64) -> KernelSpec {
+    KernelSpec::from(LinearKernel::new(sigma).expect("valid"))
+}
+
+/// 150 rows span three stack blocks of the diagonal folds.
+fn rows_across_blocks() -> Mat<f64> {
+    Mat::from_fn(150, 1, |i, _| 0.01 * i as f64 - 0.4)
+}
+
+#[test]
+fn composite_fill_diag_points_spans_blocks() {
+    let spec = (linear(1.0) + KernelSpec::from(ConstantKernel::new(0.5).expect("valid")))
+        * linear(0.7)
+        + rbf(1.3);
+    let compiled = spec.compile();
+    let x = rows_across_blocks();
+    let mut diag = vec![0.0; x.nrows()];
+    compiled
+        .fill_diag_points(x.as_ref(), &mut diag)
+        .expect("diag");
+    let full = apply_compiled_points(&compiled, x.as_ref());
+    for (row, value) in diag.iter().enumerate() {
+        assert_close(*value, full[(row, row)], TOL);
+    }
+}
+
+#[test]
+fn product_grad_and_hess_diag_span_blocks() {
+    let compiled = (linear(1.0) * linear(0.7) * linear(1.2)).compile();
+    let x = rows_across_blocks();
+    let n = x.nrows();
+    let mut diag = vec![0.0; n];
+    let mut full = Mat::<f64>::zeros(n, n);
+    let mut scratch = Mat::<f64>::zeros(n, n);
+    compiled
+        .grad_diag_points::<crate::math::Accurate>(x.as_ref(), &mut diag, 1)
+        .expect("grad diag");
+    compiled
+        .grad_points::<crate::math::Accurate>(
+            x.as_ref(),
+            full.as_mut(),
+            1,
+            Triangle::Full,
+            scratch.as_mut(),
+        )
+        .expect("grad");
+    for (row, value) in diag.iter().enumerate() {
+        assert_close(*value, full[(row, row)], TOL);
+    }
+    compiled
+        .hess_diag_points::<crate::math::Accurate>(x.as_ref(), &mut diag, 0, 2)
+        .expect("hess diag");
+    compiled
+        .hess_points::<crate::math::Accurate>(
+            x.as_ref(),
+            full.as_mut(),
+            0,
+            2,
+            Triangle::Full,
+            scratch.as_mut(),
+        )
+        .expect("hess");
+    for (row, value) in diag.iter().enumerate() {
+        assert_close(*value, full[(row, row)], TOL);
+    }
+}
+
+/// One set of nested levels, grown then reused at smaller and larger blocks.
+#[test]
+fn eval_cross_reuses_nested_levels_across_shapes() {
+    let compiled = (rbf(1.0) * (rbf(2.0) + rbf(0.5)) + rbf(3.0)).compile();
+    let x = Mat::from_fn(4, 1, |i, _| 0.3 * i as f64);
+    let mut nested = Vec::new();
+    for m in [5, 3, 7] {
+        let xs = Mat::from_fn(m, 1, |j, _| 0.2 * j as f64 - 0.1);
+        let mut out = Mat::<f64>::zeros(4, m);
+        let mut scratch = Mat::<f64>::zeros(4, m);
+        compiled
+            .eval_cross::<crate::math::Accurate>(
+                x.as_ref(),
+                xs.as_ref(),
+                None,
+                out.as_mut(),
+                scratch.as_mut(),
+                &mut nested,
+                &mut [],
+            )
+            .expect("cross");
+        let dist = Mat::from_fn(4, m, |i, j| (x[(i, 0)] - xs[(j, 0)]).powi(2));
+        let mut expected = Mat::<f64>::zeros(4, m);
+        compiled
+            .apply_cross::<crate::math::Accurate>(
+                dist.as_ref(),
+                expected.as_mut(),
+                scratch.as_mut(),
+            )
+            .expect("reference");
+        for j in 0..m {
+            for i in 0..4 {
+                assert_close(out[(i, j)], expected[(i, j)], TOL);
+            }
+        }
+    }
+    assert_eq!(nested.len(), compiled.nested_depth());
+    for level in &nested {
+        assert_eq!((level.nrows(), level.ncols()), (4, 7));
+    }
+}
+
+#[test]
+fn composite_fill_diag_points_rejects_a_short_x() {
+    let compiled = (rbf(1.0) + rbf(2.0)).compile();
+    let x = Mat::from_fn(2, 1, |i, _| i as f64);
+    let mut diag = [0.0; 3];
+    assert!(matches!(
+        compiled.fill_diag_points(x.as_ref(), &mut diag),
+        Err(crate::error::GprError::LengthMismatch { .. })
+    ));
 }

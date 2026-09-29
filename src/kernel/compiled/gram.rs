@@ -5,7 +5,7 @@ use faer::{Mat, MatMut, MatRef};
 use crate::error::GprError;
 use crate::kernel::{KernelScalar, Triangle};
 
-use super::{CompiledKernel, CoordMode, MixedKernelViews};
+use super::{CompiledKernel, CoordMode, MixedKernelViews, ensure_nested};
 
 /// Views that a square (training) Gram evaluation can read.
 ///
@@ -33,6 +33,10 @@ impl<'a, T> GramInputs<'a, T> {
 /// Fit / predict entry points. Each picks the distance, coordinate,
 /// ARD-cache, or mixed path from [`CompiledKernel::coord_mode`] and the
 /// inputs at hand.
+///
+/// `nested` holds the [`super::Nested`] levels. Each entry point grows it to
+/// this tree's depth and the output's shape, so a caller that keeps it
+/// allocates only on the first call.
 impl<T: KernelScalar> CompiledKernel<T> {
     /// Whether this tree reads a squared-Euclidean distance matrix.
     pub(crate) fn reads_distances(&self) -> Result<bool, GprError> {
@@ -46,22 +50,26 @@ impl<T: KernelScalar> CompiledKernel<T> {
         out: MatMut<'_, T>,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
     ) -> Result<(), GprError> {
+        ensure_nested(nested, self.nested_depth(), out.nrows(), out.ncols());
         let ard = self.ard_view(inputs.ard);
         match (self.coord_mode()?, inputs.dist) {
             (CoordMode::Dist | CoordMode::Either, Some(dist)) => {
-                self.apply::<M>(dist, out, uplo, scratch)
+                self.apply_with::<M>(dist, out, uplo, scratch, nested)
             }
             (CoordMode::Points, _) => match ard {
-                Some(cache) => self.apply_from_ard_cache::<M>(cache, inputs.x, out, uplo, scratch),
-                None => self.apply_points::<M>(inputs.x, out, uplo, scratch),
+                Some(cache) => {
+                    self.apply_from_ard_cache::<M>(cache, inputs.x, out, uplo, scratch, nested)
+                }
+                None => self.apply_points_with::<M>(inputs.x, out, uplo, scratch, nested),
             },
             (CoordMode::Mixed, Some(dist)) => {
                 let mut views = MixedKernelViews::new(dist, inputs.x);
                 views.ard_cache = ard;
-                self.apply_mixed::<M>(views, out, uplo, scratch)
+                self.apply_mixed::<M>(views, out, uplo, scratch, nested)
             }
-            (_, None) => self.apply_points::<M>(inputs.x, out, uplo, scratch),
+            (_, None) => self.apply_points_with::<M>(inputs.x, out, uplo, scratch, nested),
         }
     }
 
@@ -73,10 +81,11 @@ impl<T: KernelScalar> CompiledKernel<T> {
         out: MatMut<'_, T>,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
         thread_scratch: &mut [Mat<T>],
     ) -> Result<(), GprError> {
         if !self.reads_distances()? {
-            return self.eval_gram::<M>(GramInputs::points(x), out, uplo, scratch);
+            return self.eval_gram::<M>(GramInputs::points(x), out, uplo, scratch, nested);
         }
         let m = x.nrows();
         let mut dist = Mat::<T>::zeros(m, m);
@@ -86,7 +95,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             dist: Some(dist.as_ref()),
             ard: None,
         };
-        self.eval_gram::<M>(inputs, out, uplo, scratch)
+        self.eval_gram::<M>(inputs, out, uplo, scratch, nested)
     }
 
     /// Writes `∂K/∂θ_{param_idx}` for `uplo`.
@@ -97,17 +106,19 @@ impl<T: KernelScalar> CompiledKernel<T> {
         param_idx: usize,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
     ) -> Result<(), GprError> {
+        ensure_nested(nested, self.nested_depth(), d_k.nrows(), d_k.ncols());
         let ard = self.ard_view(inputs.ard);
         match (self.coord_mode()?, inputs.dist) {
             (CoordMode::Dist | CoordMode::Either, Some(dist)) => {
-                self.grad::<M>(dist, d_k, param_idx, uplo, scratch)
+                self.grad_with::<M>(dist, d_k, param_idx, uplo, scratch, nested)
             }
             (CoordMode::Points, _) => match ard {
-                Some(cache) => {
-                    self.grad_from_ard_cache::<M>(cache, inputs.x, d_k, param_idx, uplo, scratch)
-                }
-                None => self.grad_points::<M>(inputs.x, d_k, param_idx, uplo, scratch),
+                Some(cache) => self.grad_from_ard_cache::<M>(
+                    cache, inputs.x, d_k, param_idx, uplo, scratch, nested,
+                ),
+                None => self.grad_points_with::<M>(inputs.x, d_k, param_idx, uplo, scratch, nested),
             },
             (CoordMode::Mixed, Some(dist)) => self.grad_mixed::<M>(
                 MixedKernelViews::new(dist, inputs.x),
@@ -115,8 +126,11 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 param_idx,
                 uplo,
                 scratch,
+                nested,
             ),
-            (_, None) => self.grad_points::<M>(inputs.x, d_k, param_idx, uplo, scratch),
+            (_, None) => {
+                self.grad_points_with::<M>(inputs.x, d_k, param_idx, uplo, scratch, nested)
+            }
         }
     }
 
@@ -128,28 +142,28 @@ impl<T: KernelScalar> CompiledKernel<T> {
         pair: (usize, usize),
         uplo: Triangle,
         scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
     ) -> Result<(), GprError> {
-        let (i, j) = pair;
+        ensure_nested(nested, self.nested_depth(), d2_k.nrows(), d2_k.ncols());
         let ard = self.ard_view(inputs.ard);
         match (self.coord_mode()?, inputs.dist) {
             (CoordMode::Dist | CoordMode::Either, Some(dist)) => {
-                self.hess::<M>(dist, d2_k, i, j, uplo, scratch)
+                self.hess_with::<M>(dist, d2_k, pair, uplo, scratch, nested)
             }
             (CoordMode::Points, _) => match ard {
-                Some(cache) => {
-                    self.hess_from_ard_cache::<M>(cache, inputs.x, d2_k, pair, uplo, scratch)
-                }
-                None => self.hess_points::<M>(inputs.x, d2_k, i, j, uplo, scratch),
+                Some(cache) => self
+                    .hess_from_ard_cache::<M>(cache, inputs.x, d2_k, pair, uplo, scratch, nested),
+                None => self.hess_points_with::<M>(inputs.x, d2_k, pair, uplo, scratch, nested),
             },
             (CoordMode::Mixed, Some(dist)) => self.hess_mixed::<M>(
                 MixedKernelViews::new(dist, inputs.x),
                 d2_k,
-                i,
-                j,
+                pair,
                 uplo,
                 scratch,
+                nested,
             ),
-            (_, None) => self.hess_points::<M>(inputs.x, d2_k, i, j, uplo, scratch),
+            (_, None) => self.hess_points_with::<M>(inputs.x, d2_k, pair, uplo, scratch, nested),
         }
     }
 
@@ -157,6 +171,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// `dist` receives the train–query squared distances when the tree reads
     /// them; `None` allocates that buffer for this call.
+    // Both views, the distance and output blocks, and three scratch kinds.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_cross<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
@@ -164,11 +180,13 @@ impl<T: KernelScalar> CompiledKernel<T> {
         dist: Option<MatMut<'_, T>>,
         out: MatMut<'_, T>,
         scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
         thread_scratch: &mut [Mat<T>],
     ) -> Result<(), GprError> {
+        ensure_nested(nested, self.nested_depth(), out.nrows(), out.ncols());
         let mode = self.coord_mode()?;
         if matches!(mode, CoordMode::Points) {
-            return self.apply_cross_points::<M>(x, xs, out, scratch);
+            return self.apply_cross_points_with::<M>(x, xs, out, scratch, nested);
         }
         let mut owned;
         let mut dist = match dist {
@@ -180,8 +198,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
         };
         T::write_cross(x, xs, dist.as_mut(), thread_scratch);
         match mode {
-            CoordMode::Mixed => self.apply_cross_mixed::<M>(dist.as_ref(), x, xs, out, scratch),
-            _ => self.apply_cross::<M>(dist.as_ref(), out, scratch),
+            CoordMode::Mixed => {
+                self.apply_cross_mixed::<M>(dist.as_ref(), x, xs, out, scratch, nested)
+            }
+            _ => self.apply_cross_with::<M>(dist.as_ref(), out, scratch, nested),
         }
     }
 
