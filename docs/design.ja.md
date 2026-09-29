@@ -435,6 +435,8 @@ Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は�
 | LOO | 揃える | 載せない | R5-7（[#285](https://github.com/YUKIKEDA/gprx/issues/285)） |
 | 保存・読み込み | 揃える | 揃える | R5-8（[#286](https://github.com/YUKIKEDA/gprx/issues/286)） |
 
+Sparse の `predict_covariance` / `sample`（R5-6、[#284](https://github.com/YUKIKEDA/gprx/issues/284)）は `predict` の経路を通し、そのバッファから非対角を作る。VFE は `K** − A*ᵀA* + σn² S*ᵀS*`（`A* = L_mm⁻¹ K_m*`、`S* = L_B⁻¹ A*`）、SVGP は `K** − AᵀA + UᵀU`（`U = L_qᵀ A`）。対角は `predict` の分散とビットで一致する。標本は Exact と同じ引き方（`μ + L z`、因子にはモデルの `JitterPolicy`）。
+
 SVGP は LOO を持たない。collapsed VFE の `q(u)` は閉じた形の最適解なので、点 `i` を除くのは `A = K_mm + σ⁻² K_mn K_nm` の rank-1 の downdate になる（θ と `Z` を固定して 1 点 `O(m²)`）。SVGP の `q(u)` は、ミニバッチの Adam が全点に合わせた変分パラメータになっている。点を除くには `q(u)` を合わせ直す必要があり、閉じた形は無い。学習済みの `q(u)` をそのまま使っても LOO の予測にはならないので、その名前では出さない。
 
 ### 6.2 `Gpr` のMLLと勾配(P0追加)

@@ -14,8 +14,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
-    cholesky_lower, cholesky_lower_with_retries, faer_par, faer_par_dims, inv_diag_from_chol_l,
-    log_det_from_l, mul_lower_vec,
+    cholesky_lower, faer_par, faer_par_dims, inv_diag_from_chol_l, log_det_from_l,
 };
 use crate::param::write_params;
 use crate::precision::{GpScalar, InverseBuffers, StoredFactor, TrainSystem};
@@ -463,42 +462,8 @@ impl<P: GpScalar> GprCore<P> {
         n_draws: usize,
         seed: u64,
     ) -> Result<Vec<P::Refine>, GprError> {
-        let cov = self.write_covariance(factor, alpha, xs, n_rows, n_cols, options)?;
-        if n_draws == 0 {
-            return Ok(Vec::new());
-        }
-        let m = cov.mean.len();
-        let mut a = Mat::<P::Refine>::zeros(m, m);
-        for col in 0..m {
-            for row in 0..m {
-                a[(row, col)] = cov.covariance[col * m + row];
-            }
-        }
-        let req =
-            llt::factor::cholesky_in_place_scratch::<P::Refine>(m, faer_par(m), Default::default());
-        let mut scratch = MemBuffer::new(req);
-        cholesky_lower_with_retries(
-            &mut a,
-            &mut scratch,
-            self.policies.jitter.retry_jitters(),
-            CholeskyStage::Predict,
-        )?;
-        let mut rng = crate::rng::small_rng(seed);
-        let zero = P::Refine::from_f64(0.0);
-        let mut out = vec![zero; m * n_draws];
-        let mut z = vec![zero; m];
-        let mut lz = vec![zero; m];
-        for draw in 0..n_draws {
-            for slot in &mut z {
-                *slot = P::Refine::from_f64(crate::rng::unit_normal(&mut rng));
-            }
-            mul_lower_vec(a.as_ref(), &z, &mut lz);
-            let col = &mut out[draw * m..(draw + 1) * m];
-            for i in 0..m {
-                col[i] = cov.mean[i] + lz[i];
-            }
-        }
-        Ok(out)
+        self.write_covariance(factor, alpha, xs, n_rows, n_cols, options)?
+            .draw(n_draws, seed, self.policies.jitter)
     }
 
     /// Leave-one-out mean and variance at every training point (GPML §5.4.2).

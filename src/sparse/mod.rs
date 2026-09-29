@@ -16,7 +16,7 @@ use crate::param::{Interval, write_params};
 use crate::policy::KernelExp;
 use crate::policy::{AdaptiveJitter, JitterPolicy};
 use crate::precision::{InverseBuffers, ModelPrecision};
-use crate::prediction::Prediction;
+use crate::prediction::{Prediction, PredictiveCovariance};
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
 };
@@ -289,6 +289,40 @@ impl SparseCore {
             &mut prediction.variance,
             buffers,
         )
+    }
+
+    /// The public covariance from the latent query covariance `latent`
+    /// (`q × q`, transformed units) and the diagonal prediction `pred` of
+    /// the same queries (transformed units): the off-diagonal from `latent`,
+    /// the diagonal from `pred`, both mapped back through the target
+    /// transform. The diagonal is exactly `pred`'s variance after that map,
+    /// as `predict` returns it.
+    pub(crate) fn finish_covariance<P: ModelPrecision, S: KernelScalar>(
+        &self,
+        latent: MatRef<'_, S>,
+        mut pred: Prediction<P::Refine>,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        let q = pred.mean.len();
+        let mut covariance = vec![P::Refine::from_f64(0.0); q * q];
+        for col in 0..q {
+            for row in 0..q {
+                covariance[col * q + row] = if row == col {
+                    pred.variance[row]
+                } else {
+                    P::Refine::from_f64(latent[(row, col)].to_f64())
+                };
+            }
+        }
+        P::inverse_covariance(self.y_transform.as_ref(), &mut covariance)?;
+        self.inverse_prediction_in_place::<P>(&mut pred, &mut InverseBuffers::default())?;
+        for (i, variance) in pred.variance.iter().enumerate() {
+            covariance[i * q + i] = *variance;
+        }
+        Ok(PredictiveCovariance {
+            mean: pred.mean,
+            covariance,
+            variance_kind: pred.variance_kind,
+        })
     }
 
     /// The trainer settings this model was fitted with.

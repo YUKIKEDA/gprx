@@ -445,6 +445,8 @@ Online can add and remove both X and inducing points. `FittedSgpr::into_online` 
 | Leave-one-out | yes | no | R5-7 ([#285](https://github.com/YUKIKEDA/gprx/issues/285)) |
 | Save and load | yes | yes | R5-8 ([#286](https://github.com/YUKIKEDA/gprx/issues/286)) |
 
+The sparse `predict_covariance` / `sample` (R5-6, [#284](https://github.com/YUKIKEDA/gprx/issues/284)) run the `predict` path and build the off-diagonal from its buffers: VFE `K** − A*ᵀA* + σn² S*ᵀS*` with `A* = L_mm⁻¹ K_m*` and `S* = L_B⁻¹ A*`, SVGP `K** − AᵀA + UᵀU` with `U = L_qᵀ A`. The diagonal is `predict`'s variance, bit for bit. The draws are the Exact draw (`μ + L z`, the model's `JitterPolicy` on the factor).
+
 SVGP has no leave-one-out. The collapsed VFE `q(u)` is the closed-form optimum, so leaving out point `i` is a rank-1 downdate of `A = K_mm + σ⁻² K_mn K_nm` (`O(m²)` per point at fixed `θ` and `Z`). The SVGP `q(u)` is a variational parameter that minibatch Adam fitted to all points. Leaving out a point means fitting `q(u)` again, and there is no closed form. Reusing the fitted `q(u)` is not a leave-one-out prediction, so it is not offered under that name.
 
 ### 6.2 MLL and gradient of `Gpr`
