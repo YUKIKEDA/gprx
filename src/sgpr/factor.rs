@@ -19,34 +19,15 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     append_chol_border, cholesky_lower_owned, cholesky_lower_with_retries, copy_mat,
     delete_chol_row, dot, faer_par, frobenius_dot, frobenius2, gemm, gram_aat_plus_noise,
-    gram_aat_plus_noise_in_scalar, mat_add_mul, mat_sub_mul, mat_vec, matvec_columns,
-    matvec_promoted, mul_lower_left, promote_mat, quad_form, round_mat, solve_llt, solve_lower,
-    symmetrize_lower,
+    mat_add_mul, mat_sub_mul, mat_vec, matvec_columns, mul_lower_left, promote_mat, quad_form,
+    round_mat, solve_llt, solve_lower, symmetrize_lower,
 };
 use crate::param::Interval;
-use crate::precision::ModelPrecision;
+use crate::precision::{F64Vfe, ModelPrecision};
 use crate::{PredictOptions, Prediction, VarianceKind};
 
 fn lit<T: KernelScalar>(value: f64) -> T {
     T::from_f64(value)
-}
-
-/// Sgpr mean: storage `k_*` column dotted with storage weights.
-pub(crate) fn storage_dot<T: KernelScalar>(column: &[T], weights: &[T]) -> T {
-    let mut sum = lit::<T>(0.0);
-    for (kernel, weight) in column.iter().zip(weights.iter()) {
-        sum += *kernel * *weight;
-    }
-    sum
-}
-
-/// Sgpr mean: `f32` `k_*` column promoted and dotted with `f64` weights.
-pub(crate) fn promoted_dot(column: &[f32], weights: &[f64]) -> f64 {
-    let mut sum = 0.0;
-    for (kernel, weight) in column.iter().zip(weights.iter()) {
-        sum += kernel.to_f64() * *weight;
-    }
-    sum
 }
 
 use super::InducingLayout;
@@ -68,55 +49,14 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
     m: usize,
     d: usize,
 ) -> Result<Vec<P::Refine>, GprError> {
-    P::publish_weights::<M>(kernel, a, b_l, w, x, y, z, noise, n, m, d)
-}
-
-/// `B w = A y` with `B = A Aᵀ + σn² I` through the stored `f32` factor of `B`.
-///
-/// [`PromoteStorage`](crate::precision::PromoteStorage) forms `B` from the
-/// stored `f32` `A`; [`ReevaluateKernel`](crate::precision::ReevaluateKernel)
-/// re-assembles `A` in `f64`. The fallback re-assembles the whole VFE state in `f64`.
-struct WeightSystem<'a, M> {
-    b32: Option<Mat<f32>>,
-    b64: Option<Mat<f64>>,
-    rhs: Vec<f64>,
-    b_l: MatRef<'a, f32>,
-    kernel: &'a KernelSpec,
-    x: &'a [f64],
-    y: &'a [f64],
-    z: &'a [f64],
-    noise: f64,
-    shape: (usize, usize, usize),
-    _math: PhantomData<M>,
-}
-
-impl<M: crate::math::KernelMath> crate::precision::RefineSystem for WeightSystem<'_, M> {
-    fn rhs(&self) -> &[f64] {
-        &self.rhs
-    }
-
-    fn residual(&self, w: &[f64], r: &mut [f64]) -> Result<f64, GprError> {
-        Ok(residual_inf(
-            self.b32.as_ref().map(Mat::as_ref),
-            self.b64.as_ref().map(Mat::as_ref),
-            w,
-            &self.rhs,
-            r,
-        ))
-    }
-
-    fn correct(&self, r: &[f64], w: &mut [f64]) {
-        let mut delta = Mat::<f32>::from_fn(r.len(), 1, |i, _| r[i] as f32);
-        solve_llt(self.b_l, delta.as_mut());
-        for (i, slot) in w.iter_mut().enumerate() {
-            *slot += f64::from(delta[(i, 0)]);
-        }
-    }
-
-    fn fallback(&self) -> Result<Vec<f64>, GprError> {
-        let (n, m, d) = self.shape;
-        f64_assembly_w::<M>(self.kernel, self.x, self.y, self.z, self.noise, n, m, d)
-    }
+    let reference = || {
+        let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
+        Ok(F64Vfe {
+            a: state.a,
+            w: state.w,
+        })
+    };
+    P::publish_weights(a, b_l, w, y, noise, &reference)
 }
 
 fn noise_likelihood(noise: f64) -> Result<GaussianLikelihood, GprError> {
@@ -127,101 +67,6 @@ fn noise_likelihood(noise: f64) -> Result<GaussianLikelihood, GprError> {
     let mut likelihood = GaussianLikelihood::new(1.0)?.with_bounds(interval)?;
     likelihood.set_params(&[noise.ln()])?;
     Ok(likelihood)
-}
-
-fn residual_inf(
-    b32: Option<MatRef<'_, f32>>,
-    b64: Option<MatRef<'_, f64>>,
-    w: &[f64],
-    rhs: &[f64],
-    r: &mut [f64],
-) -> f64 {
-    let m = rhs.len();
-    let mut b_inf = 0.0f64;
-    for i in 0..m {
-        let mut row = 0.0;
-        let mut sum = 0.0;
-        for j in 0..m {
-            let bij = if let Some(b) = b32 {
-                f64::from(b[(i, j)])
-            } else if let Some(b) = b64 {
-                b[(i, j)]
-            } else {
-                0.0
-            };
-            row += bij.abs();
-            sum += bij * w[j];
-        }
-        b_inf = b_inf.max(row);
-        r[i] = rhs[i] - sum;
-    }
-    b_inf
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn refine_mixed_weights<
-    M: crate::math::KernelMath,
-    R: crate::precision::ResidualFormula,
->(
-    kernel: &KernelSpec,
-    a: MatRef<'_, f32>,
-    b_l: MatRef<'_, f32>,
-    w_storage: &[f32],
-    x: &[f64],
-    y: &[f64],
-    z: &[f64],
-    noise: f64,
-    n: usize,
-    m: usize,
-    d: usize,
-) -> Result<Vec<f64>, GprError> {
-    if m == 0 {
-        return Ok(Vec::new());
-    }
-    let (b32, b64, rhs) = if R::READS_STORAGE {
-        (
-            Some(gram_aat_plus_noise_in_scalar(a, noise)),
-            None,
-            matvec_promoted(a, y),
-        )
-    } else {
-        let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
-        (
-            None,
-            Some(gram_aat_plus_noise_in_scalar(state.a.as_ref(), noise)),
-            matvec_promoted(state.a.as_ref(), y),
-        )
-    };
-    let system = WeightSystem::<M> {
-        b32,
-        b64,
-        rhs,
-        b_l,
-        kernel,
-        x,
-        y,
-        z,
-        noise,
-        shape: (n, m, d),
-        _math: PhantomData,
-    };
-    let start = w_storage.iter().map(|value| f64::from(*value)).collect();
-    crate::precision::refine(&system, start)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn f64_assembly_w<M: crate::math::KernelMath>(
-    kernel: &KernelSpec,
-    x: &[f64],
-    y: &[f64],
-    z: &[f64],
-    noise: f64,
-    n: usize,
-    m: usize,
-    d: usize,
-) -> Result<Vec<f64>, GprError> {
-    let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
-    Ok(state.w)
 }
 
 pub(crate) struct VfeState<T: KernelScalar> {

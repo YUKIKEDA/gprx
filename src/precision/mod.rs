@@ -88,9 +88,11 @@ impl<R: ResidualFormula> PrecisionPolicy for MixedPrecision<R> {
 }
 
 mod refine;
+mod sparse;
 
 pub(crate) use refine::{COLUMN_BLOCK, RefineSystem, refine};
 pub use refine::{StoredFactor, TrainSystem};
+pub use sparse::F64Vfe;
 
 mod residual_seal {
     pub trait Sealed {
@@ -192,34 +194,32 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
 
     /// Sgpr: predict weights after a factor or an online update.
     ///
+    /// `reference` assembles the VFE system in `f64`; only a refining
+    /// precision calls it (for its residual or its fallback).
+    ///
     /// # Errors
     ///
     /// Returns [`GprError::CholeskyFailed`] when the `f64` fallback factor
     /// is not positive definite. Refinement does not add jitter.
-    #[allow(clippy::too_many_arguments)]
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
+    fn publish_weights(
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
         w: &[Self::Storage],
-        x: &[f64],
         y: &[f64],
-        z: &[f64],
         noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
+        reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError>;
 
     /// Svgp: mean from the storage triangular solve (refined for mixed).
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        z_obs: &[f64],
-        query: &[f64],
+    ///
+    /// `reference` returns the `f64` factor of `K_mm` and `k_*`; only a
+    /// refining precision calls it.
+    fn mean_from_factor(
         k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
         rhs: &[Self::Storage],
         q_mean: &[f64],
+        reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
     ) -> Result<Self::Refine, GprError>;
 }
 
@@ -319,37 +319,30 @@ impl ModelPrecision for DoublePrecision {
     }
 
     fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine {
-        crate::sgpr::factor::storage_dot(column, weights)
+        sparse::storage_dot(column, weights)
     }
 
-    fn publish_weights<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
+    fn publish_weights(
         _a: MatRef<'_, Self::Storage>,
         _b_l: MatRef<'_, Self::Storage>,
         w: &[Self::Storage],
-        _x: &[f64],
         _y: &[f64],
-        _z: &[f64],
         _noise: f64,
-        _n: usize,
-        _m: usize,
-        _d: usize,
+        _reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError> {
         let mut out = Vec::new();
         copy_to_refine::<Self>(w, &mut out);
         Ok(out)
     }
 
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
-        _z_obs: &[f64],
-        _query: &[f64],
+    fn mean_from_factor(
         _k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
         _rhs: &[Self::Storage],
         q_mean: &[f64],
+        _reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
     ) -> Result<Self::Refine, GprError> {
-        Ok(crate::svgp::factor::storage_q_dot(solved, q_mean))
+        Ok(sparse::storage_q_dot(solved, q_mean))
     }
 }
 
@@ -427,34 +420,27 @@ impl ModelPrecision for SinglePrecision {
         Self::Refine::from_f64(sum)
     }
 
-    fn publish_weights<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
+    fn publish_weights(
         _a: MatRef<'_, Self::Storage>,
         _b_l: MatRef<'_, Self::Storage>,
         w: &[Self::Storage],
-        _x: &[f64],
         _y: &[f64],
-        _z: &[f64],
         _noise: f64,
-        _n: usize,
-        _m: usize,
-        _d: usize,
+        _reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError> {
         let mut out = Vec::new();
         copy_to_refine::<Self>(w, &mut out);
         Ok(out)
     }
 
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
-        _z_obs: &[f64],
-        _query: &[f64],
+    fn mean_from_factor(
         _k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
         _rhs: &[Self::Storage],
         q_mean: &[f64],
+        _reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
     ) -> Result<Self::Refine, GprError> {
-        Ok(crate::svgp::factor::storage_q_dot(solved, q_mean))
+        Ok(sparse::storage_q_dot(solved, q_mean))
     }
 }
 
@@ -514,37 +500,28 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
     fn copy_mapped_l(_src: MatRef<'_, f64>, _dest: MatMut<'_, Self::Storage>) {}
 
     fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine {
-        crate::sgpr::factor::promoted_dot(column, weights)
+        sparse::promoted_dot(column, weights)
     }
 
-    fn publish_weights<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
+    fn publish_weights(
         a: MatRef<'_, Self::Storage>,
         b_l: MatRef<'_, Self::Storage>,
         w: &[Self::Storage],
-        x: &[f64],
         y: &[f64],
-        z: &[f64],
         noise: f64,
-        n: usize,
-        m: usize,
-        d: usize,
+        reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError> {
-        crate::sgpr::factor::refine_mixed_weights::<M, R>(
-            kernel, a, b_l, w, x, y, z, noise, n, m, d,
-        )
+        sparse::refine_vfe_weights::<R>(a, b_l, w, y, noise, reference)
     }
 
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        z_obs: &[f64],
-        query: &[f64],
+    fn mean_from_factor(
         k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
         rhs: &[Self::Storage],
         q_mean: &[f64],
+        reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
     ) -> Result<Self::Refine, GprError> {
-        crate::svgp::factor::refined_mean::<M, R>(kernel, z_obs, query, k_mm_l, solved, rhs, q_mean)
+        sparse::refine_svgp_mean::<R>(k_mm_l, solved, rhs, q_mean, reference)
     }
 }
 

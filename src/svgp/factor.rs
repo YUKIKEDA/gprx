@@ -17,8 +17,8 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
-    cholesky_lower_with_retries, dot_f64x4, faer_par, faer_par_dims, forward_substitute,
-    mat_mul_into, norm2_f64x4, symmetrize_lower,
+    cholesky_lower_with_retries, dot_f64x4, faer_par, faer_par_dims, mat_mul_into, norm2_f64x4,
+    symmetrize_lower,
 };
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
@@ -341,8 +341,9 @@ where
         for dim in 0..d {
             query_row[dim] = xs[col + n_rows * dim];
         }
-        out.mean[col] =
-            P::mean_from_factor::<M>(kernel, z_obs, &query_row, k_mm_l, &solved, &rhs_col, q_mean)?;
+        out.mean[col] = P::mean_from_factor(k_mm_l, &solved, &rhs_col, q_mean, &|| {
+            f64_mean_reference::<M>(kernel, z_obs, &query_row, m)
+        })?;
         out.variance[col] = match options.variance_kind {
             VarianceKind::Latent => latent_r,
             VarianceKind::Observation => P::Refine::from_f64(latent.to_f64() + noise),
@@ -350,122 +351,6 @@ where
     }
     let _ = kernel;
     Ok(out)
-}
-
-/// Svgp mean: storage `L⁻¹ k_*` dotted with the variational mean.
-pub(crate) fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
-    let mut sum = T::from_f64(0.0);
-    for (weight, mean) in solved.iter().zip(q_mean.iter()) {
-        sum += *weight * T::from_f64(*mean);
-    }
-    sum
-}
-
-/// `L v = b` with `L` lower-triangular: refined through the stored `f32` `L`
-/// against an `f64` reference `(L₆₄, b₆₄)`, which is also the fallback.
-struct TriangularSystem<'a> {
-    l: MatRef<'a, f32>,
-    l64: MatRef<'a, f64>,
-    rhs64: &'a [f64],
-}
-
-impl crate::precision::RefineSystem for TriangularSystem<'_> {
-    fn rhs(&self) -> &[f64] {
-        self.rhs64
-    }
-
-    fn residual(&self, v: &[f64], r: &mut [f64]) -> Result<f64, GprError> {
-        let mut l_inf = 0.0f64;
-        for (i, (ri, &bi)) in r.iter_mut().zip(self.rhs64).enumerate() {
-            let mut row = 0.0;
-            let mut sum = 0.0;
-            for (j, &vj) in v.iter().enumerate().take(i + 1) {
-                let lij = f64::from(self.l[(i, j)]);
-                row += lij.abs();
-                sum += lij * vj;
-            }
-            l_inf = l_inf.max(row);
-            *ri = bi - sum;
-        }
-        Ok(l_inf)
-    }
-
-    fn correct(&self, r: &[f64], v: &mut [f64]) {
-        let r32: Vec<f32> = r.iter().map(|value| *value as f32).collect();
-        let delta = forward_substitute(self.l, &r32);
-        for (slot, step) in v.iter_mut().zip(delta) {
-            *slot += f64::from(step);
-        }
-    }
-
-    fn fallback(&self) -> Result<Vec<f64>, GprError> {
-        Ok(forward_substitute(self.l64, self.rhs64))
-    }
-}
-
-/// Svgp mixed-precision mean: `v = L⁻¹ k_*` refined in `f64`, dotted with `q_mean`.
-///
-/// [`PromoteStorage`](crate::precision::PromoteStorage) refines against the
-/// stored `f32` `L` and `k_*` promoted to `f64`;
-/// [`ReevaluateKernel`](crate::precision::ReevaluateKernel) against `K_mm` and
-/// `k_*` evaluated and factored in `f64`.
-pub(crate) fn refined_mean<M: crate::math::KernelMath, R: crate::precision::ResidualFormula>(
-    kernel: &KernelSpec,
-    z_obs: &[f64],
-    query: &[f64],
-    k_mm_l: MatRef<'_, f32>,
-    solved: &[f32],
-    rhs: &[f32],
-    q_mean: &[f64],
-) -> Result<f64, GprError> {
-    let m = solved.len();
-    let (l64, rhs64) = if R::READS_STORAGE {
-        let mut l64 = Mat::<f64>::zeros(m, m);
-        let mut rhs64 = vec![0.0; m];
-        for i in 0..m {
-            rhs64[i] = rhs[i].to_f64();
-            for j in 0..=i {
-                l64[(i, j)] = k_mm_l[(i, j)].to_f64();
-            }
-        }
-        (l64, rhs64)
-    } else {
-        let d = query.len();
-        let compiled = kernel.compile();
-        let z64 = pack_points(z_obs, m, d);
-        let q64 = pack_points(query, 1, d);
-        let mut k_mm = Mat::<f64>::zeros(m, m);
-        let mut scratch = Mat::<f64>::zeros(m, m);
-        compiled.eval_gram::<M>(
-            GramInputs::points(z64.as_ref()),
-            k_mm.as_mut(),
-            Triangle::Lower,
-            scratch.as_mut(),
-            &mut Vec::new(),
-        )?;
-        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
-        let mut chol_scratch = MemBuffer::new(req);
-        cholesky_lower_with_retries(
-            &mut k_mm,
-            &mut chol_scratch,
-            k_mm_jitter_policy().retry_jitters(),
-            CholeskyStage::Predict,
-        )?;
-        let k_star = kernel_cross::<M, _>(&compiled, z64.as_ref(), q64.as_ref())?;
-        (k_mm, (0..m).map(|i| k_star[(i, 0)]).collect())
-    };
-    let system = TriangularSystem {
-        l: k_mm_l,
-        l64: l64.as_ref(),
-        rhs64: &rhs64,
-    };
-    let start = solved.iter().map(|value| f64::from(*value)).collect();
-    let v = crate::precision::refine(&system, start)?;
-    let mut sum = 0.0;
-    for (weight, mean) in v.iter().zip(q_mean.iter()) {
-        sum += *weight * *mean;
-    }
-    Ok(sum)
 }
 
 pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
@@ -1297,4 +1182,37 @@ where
     }
     user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
     model.set_params(&user)
+}
+
+/// `K_mm`'s `f64` factor and `k(Z, x_*)` at one query point, the
+/// [`crate::ReevaluateKernel`] reference of the mixed-precision mean.
+fn f64_mean_reference<M: crate::math::KernelMath>(
+    kernel: &KernelSpec,
+    z_obs: &[f64],
+    query: &[f64],
+    m: usize,
+) -> Result<(Mat<f64>, Vec<f64>), GprError> {
+    let d = query.len();
+    let compiled = kernel.compile();
+    let z64 = pack_points(z_obs, m, d);
+    let q64 = pack_points(query, 1, d);
+    let mut k_mm = Mat::<f64>::zeros(m, m);
+    let mut scratch = Mat::<f64>::zeros(m, m);
+    compiled.eval_gram::<M>(
+        GramInputs::points(z64.as_ref()),
+        k_mm.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+        &mut Vec::new(),
+    )?;
+    let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
+    let mut chol_scratch = MemBuffer::new(req);
+    cholesky_lower_with_retries(
+        &mut k_mm,
+        &mut chol_scratch,
+        k_mm_jitter_policy().retry_jitters(),
+        CholeskyStage::Predict,
+    )?;
+    let k_star = kernel_cross::<M, _>(&compiled, z64.as_ref(), q64.as_ref())?;
+    Ok((k_mm, (0..m).map(|i| k_star[(i, 0)]).collect()))
 }
