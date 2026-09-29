@@ -70,10 +70,17 @@ pub(crate) fn cholesky_lower_owned<T: KernelScalar>(
     retries: impl IntoIterator<Item = f64>,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
-    let n = a.nrows();
-    let req = llt::factor::cholesky_in_place_scratch::<T>(n, faer_par(n), Default::default());
-    let mut scratch = MemBuffer::new(req);
+    let mut scratch = llt_scratch::<T>(a.nrows());
     cholesky_lower_with_retries(a, &mut scratch, retries, stage)
+}
+
+/// faer scratch for one `n × n` LLT factor.
+pub(crate) fn llt_scratch<T: KernelScalar>(n: usize) -> MemBuffer {
+    MemBuffer::new(llt::factor::cholesky_in_place_scratch::<T>(
+        n,
+        faer_par(n),
+        Default::default(),
+    ))
 }
 
 /// Factors `A` in place with faer, for any scalar. `jitter` is faer's
