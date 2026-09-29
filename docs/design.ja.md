@@ -561,7 +561,7 @@ struct GprObjective<'a, O, P = DoublePrecision> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。P2B-21 の libgp 比 RSS 合否は `Uncached` + `Retain`（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant。`load` は `Retain`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く（P2-7）。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。P2B-21 の libgp 比 RSS 合否は `Uncached` + `Retain`（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ（R4-6 / [#244](https://github.com/YUKIKEDA/gprx/issues/244)）。`load` は `Retain`。
 
 ### 6.4 Leave-one-out(P1B-7)
 
