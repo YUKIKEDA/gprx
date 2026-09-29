@@ -77,14 +77,18 @@ impl<P: GpScalar> Clone for LltStore<P> {
 
 /// Capacity-backed LDLT, targets, and a one-column solve buffer.
 ///
-/// `ld_factor` is `n_capacity × n_capacity`. Vectors are length
-/// `n_capacity`. The live prefix is `n_active`. Insert and predict read
-/// the factor only; there is no live Gram or distance cache.
+/// The factor is stored transposed: `lt` is `n_capacity × n_capacity`,
+/// column-major, and holds `Lᵀ` with `D` on the diagonal, so row `i` of `L`
+/// is the contiguous head of column `i`. An appended row is one contiguous
+/// write, and the forward solve of an append reads each row contiguously.
+/// [`Self::ld`] is the lower view the solves and the persist format read.
+/// Vectors are length `n_capacity`. The live prefix is `n_active`. Insert
+/// and predict read the factor only; there is no live Gram or distance cache.
 pub(crate) struct LdltStore<T: KernelScalar = f64> {
-    pub(crate) ld_factor: Mat<T>,
+    lt: Mat<T>,
     pub(crate) y: Col<T>,
     pub(crate) alpha: Col<T>,
-    pub(crate) v_buf: Col<T>,
+    pub(crate) v_buf: Vec<T>,
     delete_scratch: MemBuffer,
     pub(crate) n_active: usize,
     pub(crate) n_capacity: usize,
@@ -100,15 +104,24 @@ impl<T: KernelScalar> LdltStore<T> {
             return Err(GprError::EmptyInput);
         }
         Ok(Self {
-            ld_factor: Mat::zeros(n, n),
+            lt: Mat::zeros(n, n),
             y: Col::zeros(n),
             alpha: Col::zeros(n),
-            v_buf: Col::zeros(n),
+            v_buf: vec![T::from_f64(0.0); n],
             delete_scratch: MemBuffer::new(delete_scratch_req::<T>(n)),
             n_active: n,
             n_capacity: n,
             factor_jitter: 0.0,
         })
+    }
+
+    /// The unit-lower `L` with `D` on the diagonal, leading `n_active`
+    /// (a row-major view of the stored `Lᵀ`).
+    pub(crate) fn ld(&self) -> MatRef<'_, T> {
+        self.lt
+            .as_ref()
+            .submatrix(0, 0, self.n_active, self.n_active)
+            .transpose()
     }
 
     /// Grows every buffer to the same capacity when `needed` does not fit.
@@ -124,20 +137,18 @@ impl<T: KernelScalar> LdltStore<T> {
         let new_cap = needed.max(doubled);
         let n = self.n_active;
 
-        let mut ld_factor = Mat::<T>::zeros(new_cap, new_cap);
-        copy_leading_lower(&self.ld_factor, &mut ld_factor, n);
+        let mut lt = Mat::<T>::zeros(new_cap, new_cap);
+        copy_leading_upper(&self.lt, &mut lt, n);
 
         let mut y = Col::<T>::zeros(new_cap);
         let mut alpha = Col::<T>::zeros(new_cap);
-        let mut v_buf = Col::<T>::zeros(new_cap);
         copy_leading_col(&self.y, &mut y, n);
         copy_leading_col(&self.alpha, &mut alpha, n);
-        copy_leading_col(&self.v_buf, &mut v_buf, n);
+        self.v_buf.resize(new_cap, T::from_f64(0.0));
 
-        self.ld_factor = ld_factor;
+        self.lt = lt;
         self.y = y;
         self.alpha = alpha;
-        self.v_buf = v_buf;
         ensure_delete_scratch::<T>(&mut self.delete_scratch, new_cap);
         self.n_capacity = new_cap;
     }
@@ -157,10 +168,10 @@ impl<T: KernelScalar> LdltStore<T> {
                     stage: CholeskyStage::OnlineInsert,
                 });
             }
-            self.ld_factor[(j, j)] = ljj * ljj;
+            self.lt[(j, j)] = ljj * ljj;
             let inv = T::from_f64(1.0) / ljj;
             for i in (j + 1)..n {
-                self.ld_factor[(i, j)] = l[(i, j)] * inv;
+                self.lt[(j, i)] = l[(i, j)] * inv;
             }
         }
         self.n_active = n;
@@ -170,10 +181,10 @@ impl<T: KernelScalar> LdltStore<T> {
     /// Writes the LLT factor `L √D` of the leading `n` into `dest` (lower triangle).
     pub(crate) fn fill_llt_into(&self, mut dest: MatMut<'_, T>, n: usize) {
         for j in 0..n {
-            let root = self.ld_factor[(j, j)].sqrt();
+            let root = self.lt[(j, j)].sqrt();
             dest[(j, j)] = root;
             for i in (j + 1)..n {
-                dest[(i, j)] = self.ld_factor[(i, j)] * root;
+                dest[(i, j)] = self.lt[(j, i)] * root;
             }
         }
     }
@@ -185,7 +196,7 @@ impl<T: KernelScalar> LdltStore<T> {
         }
         for j in 0..n {
             for i in j..n {
-                self.ld_factor[(i, j)] = ld[(i, j)];
+                self.lt[(j, i)] = ld[(i, j)];
             }
         }
         self.n_active = n;
@@ -200,15 +211,14 @@ impl<T: KernelScalar> LdltStore<T> {
         let n = self.n_active;
         self.ensure_capacity(n + 1);
         if n > 0 {
-            let ld = self.ld_factor.as_ref().submatrix(0, 0, n, n);
-            let w = self.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
-            T::solve_unit_lower_in_place(ld, w);
+            let w = &mut self.v_buf[..n];
+            T::solve_unit_lower_rows(&self.lt, w);
         }
         let mut vtdv = 0.0f64;
         for i in 0..n {
-            let d = self.ld_factor[(i, i)].to_f64();
+            let d = self.lt[(i, i)].to_f64();
             let vi = self.v_buf[i].to_f64() / d;
-            self.ld_factor[(n, i)] = T::from_f64(vi);
+            self.lt[(i, n)] = T::from_f64(vi);
             vtdv += vi * vi * d;
         }
         let delta = T::from_f64(k_new.to_f64() - vtdv);
@@ -220,7 +230,7 @@ impl<T: KernelScalar> LdltStore<T> {
                 stage: CholeskyStage::OnlineInsert,
             });
         }
-        self.ld_factor[(n, n)] = delta;
+        self.lt[(n, n)] = delta;
         self.n_active = n + 1;
         Ok(())
     }
@@ -233,12 +243,13 @@ impl<T: KernelScalar> LdltStore<T> {
         }
         compact_leading_col(&mut self.y, n, index);
         compact_leading_col(&mut self.alpha, n, index);
-        compact_leading_col(&mut self.v_buf, n, index);
+        self.v_buf.copy_within(index + 1..n, index);
+        self.v_buf[n - 1] = T::from_f64(0.0);
 
         ensure_delete_scratch::<T>(&mut self.delete_scratch, n);
-        let ld = self.ld_factor.as_mut().submatrix_mut(0, 0, n, n);
+        let ld = self.lt.as_mut().submatrix_mut(0, 0, n, n).transpose_mut();
         T::ldlt_delete_row_col(ld, index, n, &mut self.delete_scratch);
-        zero_trailing_row_col(&mut self.ld_factor, n);
+        zero_trailing_row_col(&mut self.lt, n);
         self.n_active = n - 1;
         Ok(())
     }
@@ -259,7 +270,7 @@ impl<T: KernelScalar> LdltStore<T> {
 impl<T: KernelScalar> Clone for LdltStore<T> {
     fn clone(&self) -> Self {
         Self {
-            ld_factor: self.ld_factor.clone(),
+            lt: self.lt.clone(),
             y: self.y.clone(),
             alpha: self.alpha.clone(),
             v_buf: self.v_buf.clone(),
@@ -291,9 +302,9 @@ fn ensure_delete_scratch<T: KernelScalar>(buf: &mut MemBuffer, n: usize) {
     }
 }
 
-fn copy_leading_lower<T: KernelScalar>(src: &Mat<T>, dest: &mut Mat<T>, n: usize) {
+fn copy_leading_upper<T: KernelScalar>(src: &Mat<T>, dest: &mut Mat<T>, n: usize) {
     for j in 0..n {
-        for i in j..n {
+        for i in 0..=j {
             dest[(i, j)] = src[(i, j)];
         }
     }
@@ -334,7 +345,7 @@ mod tests {
         for j in 0..n {
             for i in j..n {
                 let base = (i * n + j) as f64;
-                ws.ld_factor[(i, j)] = 20.0 + base;
+                ws.lt[(j, i)] = 20.0 + base;
             }
             ws.y[j] = 40.0 + j as f64;
             ws.alpha[j] = 50.0 + j as f64;
@@ -346,7 +357,7 @@ mod tests {
         for j in 0..n {
             for i in j..n {
                 let base = (i * n + j) as f64;
-                assert_close(ws.ld_factor[(i, j)], 20.0 + base, TOL);
+                assert_close(ws.lt[(j, i)], 20.0 + base, TOL);
             }
             assert_close(ws.y[j], 40.0 + j as f64, TOL);
             assert_close(ws.alpha[j], 50.0 + j as f64, TOL);
@@ -358,10 +369,10 @@ mod tests {
         let cap = ws.n_capacity;
         for j in 0..cap {
             for i in 0..cap {
-                if i < n && j < n && i >= j {
+                if i < n && j < n && i <= j {
                     continue;
                 }
-                assert_close(ws.ld_factor[(i, j)], 0.0, TOL);
+                assert_close(ws.lt[(i, j)], 0.0, TOL);
             }
         }
         for i in n..cap {
@@ -373,11 +384,11 @@ mod tests {
 
     fn assert_same_capacity(ws: &LdltStore, cap: usize) {
         assert_eq!(ws.n_capacity, cap);
-        assert_eq!(ws.ld_factor.nrows(), cap);
-        assert_eq!(ws.ld_factor.ncols(), cap);
+        assert_eq!(ws.lt.nrows(), cap);
+        assert_eq!(ws.lt.ncols(), cap);
         assert_eq!(ws.y.nrows(), cap);
         assert_eq!(ws.alpha.nrows(), cap);
-        assert_eq!(ws.v_buf.nrows(), cap);
+        assert_eq!(ws.v_buf.len(), cap);
     }
 
     fn grow_preserves_marks(n: usize) {

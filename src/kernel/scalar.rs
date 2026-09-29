@@ -102,8 +102,13 @@ pub(crate) mod sealed {
         /// Writes `a aᵀ` into `b` (`b` is `m×m`, zero on entry).
         fn gram_aat(a: MatRef<'_, Self>, b: MatMut<'_, Self>);
 
-        /// Solves `L w = v` in place for unit-lower `L` (`ld` is `n×n`).
-        fn solve_unit_lower_in_place(ld: MatRef<'_, Self>, v: MatMut<'_, Self>);
+        /// Solves `L w = v` in place for unit-lower `L` (`n = w.len()`), where
+        /// row `i` of `L` is the head `lt[0..i, i]` of column `i` of `Lᵀ`.
+        fn solve_unit_lower_rows(lt: &faer::Mat<Self>, w: &mut [Self]);
+
+        /// Solves `L D Lᵀ x = b` for the leading `n` of the unit-lower `ld`
+        /// (`D` on its diagonal), in place on every column of `rhs`.
+        fn solve_ldlt_in_place(ld: MatRef<'_, Self>, rhs: MatMut<'_, Self>, n: usize);
 
         /// Deletes row and column `index` from the LDLT factor held in the
         /// leading `n×n` of `ld`.
@@ -349,8 +354,12 @@ impl sealed::ScalarOps for f64 {
         crate::linalg::gram_aat_faer(a, b);
     }
 
-    fn solve_unit_lower_in_place(ld: MatRef<'_, Self>, v: faer::MatMut<'_, Self>) {
-        crate::linalg::solve_unit_lower_faer(ld, v);
+    fn solve_unit_lower_rows(lt: &faer::Mat<Self>, w: &mut [Self]) {
+        crate::linalg::solve_unit_lower_rows_f64(lt, w);
+    }
+
+    fn solve_ldlt_in_place(ld: MatRef<'_, Self>, rhs: faer::MatMut<'_, Self>, n: usize) {
+        crate::linalg::solve_ldlt_faer(ld, rhs, n);
     }
 
     fn ldlt_delete_row_col(
@@ -482,8 +491,12 @@ impl sealed::ScalarOps for f32 {
         crate::linalg::gram_aat_f64_accum(a, b);
     }
 
-    fn solve_unit_lower_in_place(ld: MatRef<'_, Self>, v: faer::MatMut<'_, Self>) {
-        crate::linalg::solve_unit_lower_f64_accum(ld, v);
+    fn solve_unit_lower_rows(lt: &faer::Mat<Self>, w: &mut [Self]) {
+        crate::linalg::solve_unit_lower_rows_f32(lt, w);
+    }
+
+    fn solve_ldlt_in_place(ld: MatRef<'_, Self>, rhs: faer::MatMut<'_, Self>, n: usize) {
+        crate::linalg::solve_ldlt_f64_accum(ld, rhs, n);
     }
 
     fn ldlt_delete_row_col(
