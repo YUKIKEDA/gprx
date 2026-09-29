@@ -103,6 +103,7 @@ enum JitterPolicy {
 **jitterの適用範囲**:
 - `JitterPolicy`は**Cholesky分解そのものが失敗したときだけ**使う。分解に成功した因子は `A + j I` の因子であり、その場合に得ている解は `(A + j I)^{-1} y` である。使用した `j` はログおよび`CholeskyFailed`/`FitResult`に残す。
 - jitterを増やして得た因子で、元の `A` へ反復改良で「戻す」ことはしない。前処理行列 `LLᵀ ≈ A + jI` と目標 `A` の乖離が拡大し、縮小率 `||I - (LLᵀ)^{-1} A||` が1を超えて発散し得るため(§4.2)。
+- Sparse のモデルが分解する `K_mm = k(Z, Z)` には観測ノイズが入らない。`Sgpr` / `Svgp` は `K_mm` 用の `with_jitter_policy` を持ち、既定は Exact の既定（再試行なし）ではなく `adaptive(1e-8, 10, 5, 1e-3)` にする。近い誘導点では、浮動小数点で `K_mm` が特異になるため（R5-4、[#282](https://github.com/YUKIKEDA/gprx/issues/282)）。fit、factor、`set_params`、予測、オンライン更新は、すべてこの方針を使う。
 
 ### 4.1 精度ポリシー: f32/f64/混合精度
 

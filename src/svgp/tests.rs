@@ -476,3 +476,43 @@ fn kernel_exp_is_a_runtime_value() {
         .expect("factor");
     assert_eq!(fitted.math(), crate::KernelExp::FastApprox);
 }
+
+#[test]
+fn k_mm_jitter_policy_applies_to_factor() {
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let z = [0.5, 0.5, 2.0];
+    let trainer = Svgp::new(kernel_rbf(), GaussianLikelihood::new(0.1).expect("noise"));
+    assert_eq!(
+        trainer.jitter_policy(),
+        JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).expect("valid")
+    );
+    let result = trainer
+        .clone()
+        .with_jitter_policy(JitterPolicy::default())
+        .factor(&x, 4, 1, &y, &z, 3)
+        .map_err(|(_, e)| e);
+    assert!(matches!(result, Err(GprError::CholeskyFailed { .. })));
+    let policy = JitterPolicy::fixed(1e-4).expect("valid");
+    let fitted = trainer
+        .with_jitter_policy(policy)
+        .factor(&x, 4, 1, &y, &z, 3)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    assert_eq!(fitted.jitter_policy(), policy);
+    let l = fitted.k_mm_l.as_ref();
+    for i in 0..3 {
+        for j in 0..=i {
+            let mut llt = 0.0;
+            for k in 0..=j {
+                llt += l[(i, k)] * l[(j, k)];
+            }
+            let diff: f64 = z[i] - z[j];
+            let mut expected = (-diff * diff / 2.0).exp();
+            if i == j {
+                expected += 1e-4;
+            }
+            assert_close(llt, expected, 1e-12);
+        }
+    }
+}

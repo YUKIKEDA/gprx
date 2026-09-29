@@ -6,14 +6,16 @@ use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower};
+use crate::policy::JitterPolicy;
 use crate::precision::ModelPrecision;
-use crate::sparse::{KernelScratch, k_mm_jitter_policy};
+use crate::sparse::KernelScratch;
 use crate::{PredictOptions, Prediction, VarianceKind};
 use faer::{Mat, MatRef};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn svgp_predict<M: crate::math::KernelMath, P: ModelPrecision>(
     kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
     z_obs: &[f64],
     k_mm_l: MatRef<'_, P::Storage>,
     q_mean: &[f64],
@@ -80,7 +82,7 @@ where
             query_row[dim] = xs[col + n_rows * dim];
         }
         out.mean[col] = P::mean_from_factor(k_mm_l, &solved, &rhs_col, q_mean, &|| {
-            f64_mean_reference::<M>(kernel, z_obs, &query_row, m)
+            f64_mean_reference::<M>(kernel, k_mm_jitter, z_obs, &query_row, m)
         })?;
         out.variance[col] = match options.variance_kind {
             VarianceKind::Latent => latent_r,
@@ -95,6 +97,7 @@ where
 /// [`crate::ReevaluateKernel`] reference of the mixed-precision mean.
 pub(super) fn f64_mean_reference<M: crate::math::KernelMath>(
     kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
     z_obs: &[f64],
     query: &[f64],
     m: usize,
@@ -115,7 +118,7 @@ pub(super) fn f64_mean_reference<M: crate::math::KernelMath>(
     cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
-        k_mm_jitter_policy().retry_jitters(),
+        k_mm_jitter.retry_jitters(),
         CholeskyStage::Predict,
     )?;
     let k_star = ks.cross::<M>(&compiled, z64.as_ref(), q64.as_ref())?;

@@ -160,6 +160,16 @@ pub struct AdaptiveJitter {
     max_jitter: f64,
 }
 
+impl AdaptiveJitter {
+    /// `adaptive(1e-8, 10, 5, 1e-3)`, the sparse `K_mm` default.
+    pub(crate) const K_MM_DEFAULT: Self = Self {
+        initial: 1e-8,
+        multiplier: 10.0,
+        max_retries: 5,
+        max_jitter: 1e-3,
+    };
+}
+
 impl Default for JitterPolicy {
     fn default() -> Self {
         Self::Fixed(FixedJitter { jitter: 0.0 })
