@@ -10,29 +10,59 @@ use crate::kernel::KernelScalar;
 use faer::{Mat, MatMut, MatRef, Par};
 use wide::f64x4;
 
-/// Below this order the append solve runs one contiguous dot product per
-/// row; from here faer's blocked solve on the transposed view is faster
-/// (measured on the bordered append for `n` = 256 … 4096, #267). At 512 the
-/// lower triangle is 1 MiB of `f64`.
-const ROW_DOT_MAX: usize = 512;
+/// Rows solved together by [`solve_unit_lower_rows_f64`].
+const PANEL: usize = 8;
 
 /// Solves `L w = v` in place for unit-lower `L`, where row `i` of `L` is
 /// the head `lt[0..i, i]` of column `i` of the stored `Lᵀ` (`f64`).
+///
+/// Rows go in panels of [`PANEL`]: the panel's rows are dotted with the
+/// solved head of `w` in one pass (each `w` load is shared by the panel),
+/// then the `PANEL × PANEL` triangle is solved in place. Every entry of `L`
+/// is read once, in one flat loop. faer's recursive solve made thousands of
+/// small matmul calls per append at `n = 4096`, 15–25% slower (#267).
 pub(crate) fn solve_unit_lower_rows_f64(lt: &Mat<f64>, w: &mut [f64]) {
     let n = w.len();
-    if n >= ROW_DOT_MAX {
-        let ld = lt.as_ref().submatrix(0, 0, n, n).transpose();
-        solve_unit_lower_triangular_in_place(
-            ld,
-            MatMut::from_column_major_slice_mut(w, n, 1),
-            Par::Seq,
-        );
-        return;
+    let mut i = 0;
+    while i + PANEL <= n {
+        let rows: [&[f64]; PANEL] = std::array::from_fn(|k| &lt.col_as_slice(i + k)[..i]);
+        let dots = dot_rows(rows, &w[..i]);
+        let mut x: [f64; PANEL] = std::array::from_fn(|k| w[i + k] - dots[k]);
+        for a in 1..PANEL {
+            let row = &lt.col_as_slice(i + a)[i..i + a];
+            for (b, l) in row.iter().enumerate() {
+                x[a] -= l * x[b];
+            }
+        }
+        w[i..i + PANEL].copy_from_slice(&x);
+        i += PANEL;
     }
-    for i in 1..n {
+    for i in i.max(1)..n {
         let (head, rest) = w.split_at_mut(i);
         rest[0] -= dot_f64(&lt.col_as_slice(i)[..i], head);
     }
+}
+
+/// `rowsₖᵀ b` for each of the [`PANEL`] rows, sharing each `f64x4` load of `b`.
+fn dot_rows(rows: [&[f64]; PANEL], b: &[f64]) -> [f64; PANEL] {
+    let len = b.len();
+    let body = len - len % 4;
+    let mut acc = [f64x4::ZERO; PANEL];
+    for at in (0..body).step_by(4) {
+        let vb = f64x4::from([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        for (slot, row) in acc.iter_mut().zip(&rows) {
+            let va = f64x4::from([row[at], row[at + 1], row[at + 2], row[at + 3]]);
+            *slot = va.mul_add(vb, *slot);
+        }
+    }
+    std::array::from_fn(|k| {
+        let tail: f64 = rows[k][body..len]
+            .iter()
+            .zip(&b[body..len])
+            .map(|(x, y)| x * y)
+            .sum();
+        acc[k].reduce_add() + tail
+    })
 }
 
 /// `aᵀ b` with four `f64x4` accumulators.
@@ -178,4 +208,39 @@ pub(crate) fn apply_ldlt_inv_l<T: KernelScalar>(ld: MatRef<'_, T>, rhs: MatMut<'
     }
     let ld_n = ld.submatrix(0, 0, n, n);
     solve_unit_lower_triangular_in_place(ld_n, rhs, Par::Seq);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_solve_matches_faer_across_panel_edges() {
+        for n in [1usize, 2, 7, 8, 9, 16, 17, 100] {
+            let lt = Mat::<f64>::from_fn(n, n, |i, j| {
+                if i < j {
+                    (((i * 131 + j * 17) % 97) as f64 - 48.0) * 1e-3
+                } else if i == j {
+                    2.0
+                } else {
+                    0.0
+                }
+            });
+            let b: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
+            let mut got = b.clone();
+            solve_unit_lower_rows_f64(&lt, &mut got);
+            let mut want = b.clone();
+            solve_unit_lower_triangular_in_place(
+                lt.as_ref().transpose(),
+                MatMut::from_column_major_slice_mut(&mut want, n, 1),
+                Par::Seq,
+            );
+            for (g, w) in got.iter().zip(&want) {
+                assert!(
+                    (g - w).abs() <= 1e-12 * (1.0 + w.abs()),
+                    "n={n}: {g} vs {w}"
+                );
+            }
+        }
+    }
 }
