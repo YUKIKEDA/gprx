@@ -1,4 +1,9 @@
-"""Shared Forrester / ARD-sphere cases for every compare/perf runner."""
+"""Problem data shared by the goldens and the perf cases.
+
+Forrester and the weighted sphere, column-major packing, k-means inducing
+points, and the P2B-16 perf cases (Forrester ``n = 256 / 1024 / 4096``, ARD
+sphere ``16² / 32² / 64²``).
+"""
 
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ ELL_ARD = 4.0
 FORRESTER_SEED = 0
 SPHERE_SEED = 9
 JOINT_EVALS = 10
+KMEANS_SEED = 0
 
 
 def forrester(x: np.ndarray) -> np.ndarray:
@@ -24,10 +30,16 @@ def forrester(x: np.ndarray) -> np.ndarray:
 
 
 def weighted_sphere(coords: np.ndarray) -> np.ndarray:
+    """Anisotropic quadratic: shorter characteristic length in dim 0 than dim 1."""
     return (coords[:, 0] / 0.25) ** 2 + (coords[:, 1] / 1.0) ** 2
 
 
+def as_f64_list(values: np.ndarray) -> list[float]:
+    return np.asarray(values, dtype=np.float64).ravel().tolist()
+
+
 def pack_column_major(coords: np.ndarray) -> list[float]:
+    """Packs an ``n×d`` point matrix into gprx column-major order."""
     n_rows, n_cols = coords.shape
     packed = np.empty(n_rows * n_cols, dtype=np.float64)
     for dim in range(n_cols):
@@ -35,8 +47,30 @@ def pack_column_major(coords: np.ndarray) -> list[float]:
     return packed.tolist()
 
 
-def as_f64_list(values: np.ndarray) -> list[float]:
-    return np.asarray(values, dtype=np.float64).ravel().tolist()
+def column_major_view(values: list[float], n_rows: int, n_cols: int) -> np.ndarray:
+    """The ``n×d`` point matrix of gprx column-major ``values`` as a
+    Fortran-ordered view (no copy)."""
+    packed = np.asarray(values, dtype=np.float64)
+    return packed.reshape((n_cols, n_rows), order="C").T
+
+
+def unpack_column_major(values: list[float], n_rows: int, n_cols: int) -> np.ndarray:
+    """The ``n×d`` point matrix of gprx column-major ``values``, C-ordered.
+
+    The memory order reaches the BLAS calls of sklearn / GPyTorch and can
+    move their results in the last bits; each caller keeps the order its
+    committed goldens were written with.
+    """
+    return column_major_view(values, n_rows, n_cols).copy()
+
+
+def kmeans_z(coords: np.ndarray, m: int) -> np.ndarray:
+    """``m`` inducing points: k-means centres (seed :data:`KMEANS_SEED`)."""
+    from sklearn.cluster import KMeans
+
+    model = KMeans(n_clusters=m, random_state=KMEANS_SEED, n_init=10)
+    model.fit(coords)
+    return np.asarray(model.cluster_centers_, dtype=np.float64)
 
 
 def make_forrester(n: int) -> dict:
@@ -89,16 +123,18 @@ def make_sphere(side: int) -> dict:
 
 
 def all_cases() -> list[dict]:
+    """The P2B-16 perf cases: every Forrester ``n``, then every sphere side."""
     cases = [make_forrester(n) for n in FORRESTER_NS]
     cases.extend(make_sphere(side) for side in SPHERE_SIDES)
     return cases
 
 
-def write_cases(out_dir: Path) -> list[Path]:
+def write_cases(out_dir: Path, cases: list[dict], prefix: str = "") -> list[Path]:
+    """Writes each case to ``out_dir/{prefix}{name}.json``."""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    for case in all_cases():
-        path = out_dir / f"{case['name']}.json"
+    for case in cases:
+        path = out_dir / f"{prefix}{case['name']}.json"
         path.write_text(json.dumps(case), encoding="utf-8")
         paths.append(path)
     return paths

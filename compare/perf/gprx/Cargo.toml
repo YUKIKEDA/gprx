@@ -3,19 +3,11 @@ name = "gprx-perf"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "P2B-16 / P4-12 / P4-14 gprx runner. Not part of the gprx crate."
+description = "gprx runner of the compare/perf harnesses (P2B-16, P3-6, P4-12, P4-14). Not part of the gprx crate."
 
 [[bin]]
 name = "gprx-perf"
 path = "src/main.rs"
-
-[[bin]]
-name = "gprx-sparse-perf"
-path = "src/sparse.rs"
-
-[[bin]]
-name = "gprx-sparse-online-perf"
-path = "src/sparse_online.rs"
 
 [features]
 insert-stages = ["gprx/insert-stages"]

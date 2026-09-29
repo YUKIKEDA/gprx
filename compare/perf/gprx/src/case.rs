@@ -1,4 +1,5 @@
-//! Shared JSON case / result records for the Rust runners.
+//! JSON case / result records of every runner mode. `friedrich-perf`
+//! includes this file by path, so it does not use gprx.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +39,7 @@ pub struct SparseCase {
     pub joint_evals: u64,
 }
 
+/// One factor / joint / predict (or online insert / delete) cell.
 #[derive(Debug, Serialize)]
 pub struct ResultRow {
     pub lib: String,
@@ -71,6 +73,34 @@ pub struct ResultRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rest_s: Option<f64>,
     pub note: Option<String>,
+}
+
+impl ResultRow {
+    /// The row of a cell that could not run.
+    pub fn na(lib: &str, name: &str, note: String) -> Self {
+        Self {
+            lib: lib.to_string(),
+            name: name.to_string(),
+            status: "na".to_string(),
+            factor_s: None,
+            factor_min_s: None,
+            factor_max_s: None,
+            eval_s: None,
+            eval_min_s: None,
+            eval_max_s: None,
+            predict_s: None,
+            predict_min_s: None,
+            predict_max_s: None,
+            joint_evals: None,
+            peak_rss_bytes: None,
+            warmup: None,
+            reps: None,
+            kernel_s: None,
+            border_s: None,
+            rest_s: None,
+            note: Some(note),
+        }
+    }
 }
 
 /// P4-14 Sparse-online cell. `y` is raw. Clock is one 32-op wall.
@@ -118,4 +148,22 @@ pub struct SparseOnlineResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reps: Option<u64>,
     pub note: Option<String>,
+}
+
+impl SparseOnlineResult {
+    /// The row of a cell that could not run.
+    pub fn na(lib: &str, name: &str, note: String) -> Self {
+        Self {
+            lib: lib.to_string(),
+            name: name.to_string(),
+            status: "na".to_string(),
+            ops_s: None,
+            ops_min_s: None,
+            ops_max_s: None,
+            peak_rss_bytes: None,
+            warmup: None,
+            reps: None,
+            note: Some(note),
+        }
+    }
 }

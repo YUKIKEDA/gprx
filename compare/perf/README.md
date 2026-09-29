@@ -3,10 +3,21 @@
 Manual. Not a CI gate. `just test` must not run this.
 
 ```text
-uv run --directory compare/perf python run.py
+uv run --directory compare --group perf python -X utf8 -m perf.run
 ```
 
-or `just perf`.
+or `just perf`. Every harness runs from `compare/` (one Python environment, `compare/pyproject.toml`; the perf-only packages are the `perf` dependency group) and shares `compare/common/`: the problems, the runner process, the verdicts, and the tables. `python -m perf.<harness> --reprint` rebuilds the tables from the saved results without rerunning.
+
+The gprx side is one binary, `gprx/` (`gprx-perf`), with one subcommand per harness:
+
+```text
+gprx-perf exact CASE.json [--memory]
+gprx-perf online CASE.json [--stages | --delete]
+gprx-perf sparse CASE.json
+gprx-perf sparse-online CASE.json incremental|full
+```
+
+`gprx/src/case.rs` (JSON records), `rss.rs`, and `timing.rs` do not use gprx; `friedrich/` includes them by path.
 
 Same JSON cases for gprx, sklearn, libgp, and friedrich:
 
@@ -21,7 +32,7 @@ Same JSON cases for gprx, sklearn, libgp, and friedrich:
 
 gprx uses `Gpr<Fixed>::factor` and `value_and_gradient_into` with `StandardizeTarget`. sklearn uses `optimizer=None` + `normalize_y=True`, then `log_marginal_likelihood(..., eval_gradient=True)`. libgp is the native C++ library (`compare/perf/libgp/`): `add_patterns` then `log_likelihood_gradient`. friedrich / libgp z-score `y` in the runner. friedrich has no ARD and no public MLL+grad: those cells are N/A. Python bindings are not used.
 
-`just perf` prints two tables: the speed pole (default `CachedDistances` + `RetainCholesky`), then the memory pole (`Gpr::with_prefer_memory` = `UncachedDistances` + `ReuseCholesky`). P2B-16 time / RSS gates use the first table. The second table is recorded only; it does not add an RSS gate. The P2B-21 Uncached+Retain table stays in `.dev/bench-log.md` (local, not committed). `python run.py --reprint` rebuilds the tables from `out/results.json` without rerunning.
+`just perf` prints two tables: the speed pole (default `CachedDistances` + `RetainCholesky`), then the memory pole (`Gpr::with_prefer_memory` = `UncachedDistances` + `ReuseCholesky`). P2B-16 time / RSS gates use the first table. The second table is recorded only; it does not add an RSS gate. The P2B-21 Uncached+Retain table stays in `.dev/bench-log.md` (local, not committed). `python -m perf.run --reprint` rebuilds the tables from `out/results.json` without rerunning.
 
 Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench-log.md` (local, not committed). criterion is not used for these gates.
 

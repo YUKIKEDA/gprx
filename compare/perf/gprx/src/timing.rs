@@ -1,4 +1,4 @@
-//! Warmup + timed-rep helpers for the Rust P2B-16 runners.
+//! Warmup + timed-rep helpers (the P2B-16 clock).
 
 use std::env;
 

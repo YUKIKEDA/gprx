@@ -8,11 +8,12 @@ use std::time::Instant;
 use friedrich::gaussian_process::GaussianProcess;
 use friedrich::kernel::SquaredExp;
 
-#[path = "../../case_schema.rs"]
+#[allow(dead_code)]
+#[path = "../../gprx/src/case.rs"]
 mod case_schema;
-#[path = "../../rss_win.rs"]
+#[path = "../../gprx/src/rss.rs"]
 mod peak_rss;
-#[path = "../../timing.rs"]
+#[path = "../../gprx/src/timing.rs"]
 mod timing;
 
 use case_schema::{Case, ResultRow};

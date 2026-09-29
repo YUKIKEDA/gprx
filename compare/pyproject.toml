@@ -1,7 +1,7 @@
 [project]
 name = "gprx-compare"
 version = "0.0.0"
-description = "sklearn / GPyTorch golden generator for gprx. Not a published package."
+description = "Golden generators and cross-library perf harnesses for gprx. Not a published package; cargo test does not run it."
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
@@ -9,6 +9,14 @@ dependencies = [
     "scipy>=1.11",
     "torch>=2.4",
     "gpytorch>=1.13",
+]
+
+[dependency-groups]
+# The perf harnesses only (P2B-16 / P4-12 / P4-14): RSS, the GPy opponent, plots.
+perf = [
+    "psutil>=6.0",
+    "GPy>=1.13",
+    "matplotlib>=3.8",
 ]
 
 [tool.uv]
