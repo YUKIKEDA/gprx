@@ -9,10 +9,10 @@ use faer::{Mat, MatRef};
 
 use crate::data::pack_storage;
 use crate::error::{CholeskyStage, GprError};
+use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::GprObjective;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
 use crate::persist::{self, PersistedModel, persist_err};

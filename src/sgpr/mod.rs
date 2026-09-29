@@ -3,6 +3,7 @@
 pub(crate) mod factor;
 mod fitted;
 mod model;
+mod objective;
 mod online;
 
 #[cfg(test)]
@@ -10,6 +11,7 @@ mod tests;
 
 pub use fitted::FittedSgpr;
 pub use model::Sgpr;
+pub(crate) use objective::SgprObjective;
 pub use online::{InducingId, OnlineSgpr};
 
 pub(crate) use factor::kernel_cross;

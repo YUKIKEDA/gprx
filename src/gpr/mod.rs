@@ -4,6 +4,7 @@ mod exact_fit;
 pub(crate) mod factor;
 mod factor_store;
 mod fitted;
+mod objective;
 pub(crate) mod online;
 mod points;
 mod policy;
@@ -18,6 +19,7 @@ pub(crate) use crate::workspace::FitBuffers;
 pub(crate) use exact_fit::{ExactFit, LeafCache, fit_buffers};
 pub(crate) use factor_store::{LdltStore, LltStore};
 pub use fitted::FittedGpr;
+pub(crate) use objective::GprObjective;
 pub use online::OnlineGpr;
 #[cfg(feature = "insert-stages")]
 pub use online::take_insert_stages;

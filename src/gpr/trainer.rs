@@ -4,9 +4,9 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::error::GprError;
+use crate::gpr::GprObjective;
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::GprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::param::write_params;
 use crate::precision::{DoublePrecision, GpScalar};
