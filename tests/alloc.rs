@@ -32,21 +32,14 @@ const NOISE: f64 = 0.1;
 const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 
 /// One coordinate step (`value_at_changes`) of an incremental fit on a sum
-/// of two leaves, after a warmup step (R4-5 / #243). `θ` is written in place
-/// (#270); the rest is the composite kernel's own scratch, which #272 takes
-/// to 0. Do not raise without an Issue.
-const MAX_LEAF_STEP_ALLOCS: usize = 2;
+/// of two leaves, after a warmup step (R4-5 / #243, #270, #272). Do not
+/// raise without an Issue.
+const MAX_LEAF_STEP_ALLOCS: usize = 0;
 
 /// One `value_and_gradient_into` on composite kernels after a warmup call,
-/// by kernel. `θ` is written in place (#270); the rest is the composite
-/// kernel's own scratch (per row in the mixed-mode sum), which #272 takes to
-/// 0. Do not raise without an Issue.
-const MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS: [(&str, usize); 4] = [
-    ("sum_with_ard", 4117),
-    ("product", 7),
-    ("ard", 0),
-    ("sum", 7),
-];
+/// by kernel (#270, #272). Do not raise without an Issue.
+const MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS: [(&str, usize); 4] =
+    [("sum_with_ard", 0), ("product", 0), ("ard", 0), ("sum", 0)];
 
 /// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
 const MAX_PREDICT_100_ALLOCS: usize = 0;

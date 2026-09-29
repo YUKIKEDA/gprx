@@ -741,7 +741,7 @@ fn accumulate_ard_r2(
         }
         return Ok(());
     }
-    let x = x.ok_or(GprError::UnsupportedKernelOperation {
+    let x = x.ok_or_else(|| GprError::UnsupportedKernelOperation {
         reason: "ARD SIMD needs coordinates or a squared-diff cache".to_owned(),
     })?;
     for (dim, &w) in inv_ell_sq.iter().enumerate() {
@@ -798,7 +798,7 @@ fn map_ard_column<M: KernelMath>(
                     inv_ell_sq[dim],
                 )
             } else {
-                let x = x.ok_or(GprError::UnsupportedKernelOperation {
+                let x = x.ok_or_else(|| GprError::UnsupportedKernelOperation {
                     reason: "ARD SIMD needs coordinates or a squared-diff cache".to_owned(),
                 })?;
                 let Some(xdim) = col_slice(x, dim) else {
