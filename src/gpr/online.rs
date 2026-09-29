@@ -389,6 +389,11 @@ where
         self.core.policies.math
     }
 
+    /// Returns the jitter retries used when `K + σn² I` fails to factor.
+    pub fn jitter_policy(&self) -> crate::JitterPolicy {
+        self.core.policies.jitter
+    }
+
     pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
         self.core.x_unfitted.as_ref()
     }

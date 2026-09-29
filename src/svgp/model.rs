@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use crate::error::GprError;
-use crate::policy::{KernelExp, with_kernel_exp};
+use crate::policy::{JitterPolicy, KernelExp, with_kernel_exp};
 use crate::sparse::{SparseCore, SparseSpec};
 use crate::transform::{UnfittedTarget, UnfittedTransform};
 
@@ -116,6 +116,44 @@ impl<O, P> Svgp<O, P> {
     /// Returns the kernel `exp` mode.
     pub fn math(&self) -> KernelExp {
         self.spec.math
+    }
+
+    /// Replaces the jitter retries for factoring `K_mm = k(Z, Z)`.
+    ///
+    /// The default is `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`, not
+    /// the [`JitterPolicy::default`] (no retry) of [`crate::Gpr`]: the
+    /// Exact system `K + σn² I` carries the observation noise, `K_mm`
+    /// does not, so close inducing points leave it singular in floating
+    /// point. The policy applies wherever `K_mm` is factored: fit, factor,
+    /// `set_params`, predict, and the online updates.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, JitterPolicy, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let policy = JitterPolicy::fixed(1e-6)?;
+    /// let fitted = Svgp::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_jitter_policy(policy)
+    /// .factor(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.jitter_policy(), policy);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_jitter_policy(mut self, policy: JitterPolicy) -> Self {
+        self.spec.jitter = policy;
+        self
+    }
+
+    /// Returns the jitter retries for factoring `K_mm`.
+    pub fn jitter_policy(&self) -> JitterPolicy {
+        self.spec.jitter
     }
 
     /// Replaces the input (`X`) transform. Omitting it leaves identity.

@@ -254,30 +254,11 @@ where
         self.refresh_predict_w()
     }
 
-    /// Rebuilds the stored VFE factors from the current `X` / `Z` / `θ`.
-    ///
-    /// ADR 0005 applies first. This refresh keeps `L` aligned with `k(Z, Z)`
-    /// so a long insert/delete sequence stays within the public 1e-12 check.
-    fn refresh_vfe(&mut self) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
-            &self.core.kernel,
-            self.core.likelihood,
-            &self.core.x_train,
-            self.core.n,
-            self.core.d,
-            &self.core.y_train,
-            &self.core.z_train,
-            self.core.m,
-            &mut self.scratch.storage,
-            &mut self.scratch.f64,
-        ))?;
-        self.apply_vfe(state)
-    }
-
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
             self.predict_w = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, f64>(
                 &self.core.kernel,
+                self.core.jitter,
                 self.core.likelihood,
                 &self.core.x_train,
                 self.core.n,
@@ -296,6 +277,7 @@ where
         }
         self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
             &self.core.kernel,
+            self.core.jitter,
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
@@ -453,6 +435,7 @@ where
         let xs = self.core.map_query(xs, n_rows, n_cols)?;
         let prediction = with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
             &self.core.kernel,
+            self.core.jitter,
             &self.core.z_train,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
@@ -613,6 +596,7 @@ where
         } else {
             let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
                 &self.core.kernel,
+                self.core.jitter,
                 self.core.likelihood,
                 &x_next,
                 self.core.n - 1,
@@ -714,26 +698,48 @@ where
             z_new,
             &mut self.scratch.storage,
         )) {
-            Ok(()) => {
-                self.push_inducing(z_new, z_obs);
-                self.apply_vfe(state)?;
-                self.core.m += 1;
-            }
-            Err(GprError::CholeskyFailed { .. }) => {
-                self.push_inducing(z_new, z_obs);
-                self.core.m += 1;
-            }
+            Ok(()) | Err(GprError::CholeskyFailed { .. }) => {}
             Err(err) => return Err(err),
         }
-        self.refresh_vfe()?;
+        let (m, d) = (self.core.m, self.core.d);
+        let mut z_train = self.core.z_train.clone();
+        append_point(&mut z_train, m, d, z_new);
+        let mut z_obs_next = self.core.z_obs.clone();
+        append_point(&mut z_obs_next, m, d, z_obs);
+        self.commit_inducing(z_train, z_obs_next, m + 1)?;
         Ok(self.inducing.insert())
     }
 
-    /// Appends one inducing point in transformed (`z`) and original
-    /// (`z_obs`) coordinates. `m` is not changed.
-    fn push_inducing(&mut self, z: &[f64], z_obs: &[f64]) {
-        append_point(&mut self.core.z_train, self.core.m, self.core.d, z);
-        append_point(&mut self.core.z_obs, self.core.m, self.core.d, z_obs);
+    /// Factors the VFE system at the inducing set `z_train` (`m × d`) and
+    /// commits it with `z_obs`. A factor failure, such as `K_mm` not
+    /// factoring under the jitter policy, leaves the model unchanged.
+    ///
+    /// ADR 0005 applies first. This full factor keeps `L` aligned with
+    /// `k(Z, Z)` so a long insert/delete sequence stays within the public
+    /// 1e-12 check.
+    fn commit_inducing(
+        &mut self,
+        z_train: Vec<f64>,
+        z_obs: Vec<f64>,
+        m: usize,
+    ) -> Result<(), GprError> {
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+            &self.core.kernel,
+            self.core.jitter,
+            self.core.likelihood,
+            &self.core.x_train,
+            self.core.n,
+            self.core.d,
+            &self.core.y_train,
+            &z_train,
+            m,
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
+        ))?;
+        self.core.z_train = z_train;
+        self.core.z_obs = z_obs;
+        self.core.m = m;
+        self.apply_vfe(state)
     }
 
     /// Removes the inducing point identified by `id` and packs every buffer.
@@ -788,12 +794,11 @@ where
             &self.core.y_train,
             idx,
         )?;
-        self.core.z_train = remove_point(&self.core.z_train, self.core.m, self.core.d, idx);
-        self.core.z_obs = remove_point(&self.core.z_obs, self.core.m, self.core.d, idx);
-        self.apply_vfe(state)?;
-        self.core.m -= 1;
+        let (m, d) = (self.core.m, self.core.d);
+        let z_train = remove_point(&self.core.z_train, m, d, idx);
+        let z_obs = remove_point(&self.core.z_obs, m, d, idx);
+        self.commit_inducing(z_train, z_obs, m - 1)?;
         self.inducing.remove_at(idx);
-        self.refresh_vfe()?;
         Ok(())
     }
 
