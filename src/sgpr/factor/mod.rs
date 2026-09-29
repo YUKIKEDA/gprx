@@ -8,7 +8,7 @@ mod updates;
 mod vfe;
 
 pub(crate) use derivatives::{analytic_gradient, analytic_hessian};
-pub(crate) use predict::{VfeSystem, predict_vfe_into};
+pub(crate) use predict::{VfeSystem, predict_vfe_covariance, predict_vfe_into};
 pub(crate) use updates::{
     append_column, append_point, inducing_delete, inducing_insert, kernel_column, kernel_diag_at,
     point_at, remove_column, remove_point, solve_lmm,

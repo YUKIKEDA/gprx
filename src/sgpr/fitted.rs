@@ -15,11 +15,12 @@ use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
 use crate::param::Interval;
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sgpr::SgprObjective;
-use crate::{PredictOptions, Prediction};
+use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{
     VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
-    predict_vfe_into, publish_sgpr_weights, vfe_neg_log_marginal_likelihood,
+    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights,
+    vfe_neg_log_marginal_likelihood,
 };
 use super::model::Sgpr;
 use super::online::OnlineSgpr;
@@ -588,6 +589,122 @@ where
             &mut out,
         )?;
         Ok(out)
+    }
+
+    /// Returns the predictive mean and query–query covariance at `xs`.
+    ///
+    /// Default [`PredictOptions`] uses [`crate::VarianceKind::Observation`]:
+    /// `σn²` is added on the diagonal in the transformed space. The diagonal
+    /// is exactly the variance of [`Self::predict`] for the same query. This
+    /// path allocates an `m × m` matrix; [`Self::predict`] stays diagonal.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
+    /// assert_eq!(cov.covariance.len(), 4);
+    /// assert_eq!(cov.covariance[0], fitted.predict(&[0.25, 0.75], 2, 1)?.variance[0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn predict_covariance(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        self.predict_covariance_with(xs, n_rows, n_cols, PredictOptions::default())
+    }
+
+    /// Returns query–query covariance with an explicit variance kind.
+    ///
+    /// The VFE posterior covariance is `K** − Q** + K*m Σ Km*` with
+    /// `Q** = K*m K_mm⁻¹ Km*` and `Σ = (K_mm + σn⁻² K_mn K_nm)⁻¹`.
+    /// Latent diagonals are clipped at 0. Observation adds `σn²` on the
+    /// diagonal in the transformed space, then the target transform scales
+    /// the whole matrix.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    pub fn predict_covariance_with(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        predict_vfe_covariance::<P>(
+            &self.core,
+            &VfeSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                self.b_l.as_ref(),
+                &self.predict_w,
+            ),
+            xs,
+            n_rows,
+            n_cols,
+            options,
+        )
+    }
+
+    /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
+    ///
+    /// Each column of the returned column-major `m × n_draws` matrix is
+    /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
+    /// posterior covariance, the same draw as [`crate::FittedGpr::sample`].
+    /// `seed` is the crate [`rand::rngs::SmallRng`] start state. Zero draws
+    /// returns an empty vector after the covariance is formed.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`], plus [`GprError::CholeskyFailed`] with
+    /// [`CholeskyStage::Predict`](crate::CholeskyStage::Predict) if the
+    /// posterior covariance cannot be factored after the retries of
+    /// [`Self::jitter_policy`].
+    pub fn sample(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        n_draws: usize,
+        seed: u64,
+    ) -> Result<Vec<P::Refine>, GprError> {
+        self.sample_with(xs, n_rows, n_cols, PredictOptions::default(), n_draws, seed)
+    }
+
+    /// Draws posterior samples with an explicit variance kind.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::sample`].
+    pub fn sample_with(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        n_draws: usize,
+        seed: u64,
+    ) -> Result<Vec<P::Refine>, GprError> {
+        self.predict_covariance_with(xs, n_rows, n_cols, options)?
+            .draw(n_draws, seed, self.core.jitter)
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] into `out`.

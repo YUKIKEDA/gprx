@@ -2,13 +2,13 @@
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
-use crate::kernel::{KernelScalar, KernelSpec, Triangle};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_backup, solve_lower};
 use crate::policy::JitterPolicy;
 use crate::policy::with_kernel_exp;
 use crate::precision::ModelPrecision;
 use crate::sparse::{PredictBuffers, PredictScratch, SparseCore, pack_into, view};
-use crate::{PredictOptions, Prediction, VarianceKind};
+use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 use faer::{Mat, MatRef};
 
 /// The fitted SVGP a prediction reads, in transformed units.
@@ -197,4 +197,81 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
         });
     }
     Ok(())
+}
+
+/// The SVGP predictive mean and query–query covariance at `xs` (original
+/// coordinates): the diagonal is [`predict_svgp_into`]'s variance, the
+/// off-diagonal the latent `K** − AᵀA + UᵀU` with `A = L_mm⁻¹ K_m*` and
+/// `U = L_qᵀ A`.
+///
+/// # Errors
+///
+/// Same as [`predict_svgp_into`].
+pub(crate) fn predict_svgp_covariance<P: ModelPrecision>(
+    core: &SparseCore,
+    sys: &SvgpSystem<'_, P>,
+    xs: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    options: PredictOptions,
+) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+    let mut scratch = PredictScratch::<P::Storage>::default();
+    let mut mapped = Vec::new();
+    core.map_query_into(xs, n_rows, n_cols, &mut mapped)?;
+    let mut pred = Prediction::default();
+    with_kernel_exp!(core.math, M => {
+        svgp_predict_into::<M, P>(sys, &mapped, n_rows, options, &mut scratch, &mut pred)?;
+        let compiled = scratch.plan.get(sys.kernel);
+        let latent = svgp_latent_covariance::<M, P>(compiled, &mut scratch.storage, sys, n_rows)?;
+        core.finish_covariance::<P, P::Storage>(latent.as_ref(), pred)
+    })
+}
+
+/// `K** − AᵀA + UᵀU` (`q × q`) from the buffers [`svgp_predict_into`] left:
+/// the packed queries and `A`.
+fn svgp_latent_covariance<M: crate::math::KernelMath, P: ModelPrecision>(
+    compiled: &CompiledKernel<P::Storage>,
+    bufs: &mut PredictBuffers<P::Storage>,
+    sys: &SvgpSystem<'_, P>,
+    q: usize,
+) -> Result<Mat<P::Storage>, GprError> {
+    let (m, d) = (sys.m, sys.d);
+    let zero = P::Storage::from_f64(0.0);
+    let PredictBuffers {
+        kernel,
+        query,
+        k_sz,
+        ..
+    } = bufs;
+    let queries = view(query, q, d);
+    let mut cov = Mat::<P::Storage>::zeros(q, q);
+    kernel.gram::<M>(
+        compiled,
+        GramInputs::points(queries.as_ref()),
+        cov.as_mut(),
+        Triangle::Full,
+    )?;
+    let a = k_sz.as_ref().submatrix(0, 0, m, q);
+    let mut u = Mat::<P::Storage>::zeros(m, q);
+    for col in 0..q {
+        for j in 0..m {
+            let mut lt_j = zero;
+            for i in j..m {
+                lt_j += P::Storage::from_f64(sys.q_l[(i, j)]) * a[(i, col)];
+            }
+            u[(j, col)] = lt_j;
+        }
+    }
+    for col in 0..q {
+        for row in 0..q {
+            let mut a_dot = zero;
+            let mut u_dot = zero;
+            for k in 0..m {
+                a_dot += a[(k, row)] * a[(k, col)];
+                u_dot += u[(k, row)] * u[(k, col)];
+            }
+            cov[(row, col)] = cov[(row, col)] - a_dot + u_dot;
+        }
+    }
+    Ok(cov)
 }
