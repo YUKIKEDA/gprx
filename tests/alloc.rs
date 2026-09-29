@@ -12,7 +12,7 @@ use common::rng::{open_unit, small_rng};
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{
     FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, KernelExp, MixedPrecision, Prediction,
-    ReevaluateKernel,
+    ReevaluateKernel, Sgpr, Svgp,
 };
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
@@ -81,6 +81,24 @@ const MAX_PREDICT_100_ALLOCS: usize = 0;
 /// a warmup call: below one `n×n` `f32` matrix, so predict never rebuilds or
 /// refines the training system (R3-1 / #236). Do not raise without an Issue.
 const MAX_MIXED_PREDICT_100_BYTES: usize = N * N * std::mem::size_of::<f32>();
+
+/// Inducing points of the sparse ratchets.
+const M_SPARSE: usize = 32;
+
+/// Allocations of one call on the sparse models after a warmup call, by
+/// path (R5-1d / #246). The sparse models return new matrices for their
+/// factors and results and have no `predict_into` yet (R5-2 / #247), so
+/// these are not zero; the kernel scratch of the `&mut self` paths is kept
+/// on the model between calls. Do not raise without an Issue.
+const MAX_SPARSE_ALLOCS: [(&str, usize); 7] = [
+    ("sgpr_mll_and_grad", 19),
+    ("sgpr_hessian", 111),
+    ("sgpr_predict_100", 109),
+    ("online_sgpr_insert", 11),
+    ("online_sgpr_insert_nested", 19),
+    ("svgp_mll_and_grad", 25),
+    ("svgp_predict_100", 309),
+];
 
 fn ensure_one_rayon_worker() {
     static INIT: OnceLock<()> = OnceLock::new();
@@ -401,5 +419,103 @@ fn composite_predict_100_allocs_after_workspace() {
             gpr.predict_into(&xs, M, D, &mut pred).expect("counted");
         });
         assert_alloc_cap(&format!("predict_100_{label}"), count, cap);
+    }
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
+    ensure_one_rayon_worker();
+    let x = fill_column_major(N, D, SEED);
+    let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
+    let xs = fill_column_major(M, D, SEED.wrapping_add(1));
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
+    let x_new: Vec<f64> = (0..D).map(|dim| 0.1 * dim as f64).collect();
+    let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+    let mut fitted = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(&x, N, D, &y, &z, M_SPARSE)
+        .map_err(|(_, e)| e)
+        .expect("spd");
+    let mut out = Vec::new();
+    if label == "rbf" {
+        let mut params = vec![0.0; fitted.num_params()];
+        fitted.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; params.len()];
+        let mut hess = vec![0.0; params.len() * params.len()];
+        fitted
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("warmup");
+        let count = allocs_in(|| {
+            fitted
+                .value_and_gradient_into(&params, &mut grad)
+                .expect("counted");
+        });
+        out.push(("sgpr_mll_and_grad".to_owned(), count));
+        fitted.hessian_into(&params, &mut hess).expect("warmup");
+        let count = allocs_in(|| {
+            fitted.hessian_into(&params, &mut hess).expect("counted");
+        });
+        out.push(("sgpr_hessian".to_owned(), count));
+        fitted.predict(&xs, M, D).expect("warmup");
+        let count = allocs_in(|| {
+            fitted.predict(&xs, M, D).expect("counted");
+        });
+        out.push(("sgpr_predict_100".to_owned(), count));
+    }
+    let mut online = fitted.into_online();
+    online.insert(&x_new, 0.5).expect("warmup");
+    let count = allocs_in(|| {
+        online.insert(&x_new, 0.25).expect("counted");
+    });
+    let insert_label = if label == "rbf" {
+        "online_sgpr_insert"
+    } else {
+        "online_sgpr_insert_nested"
+    };
+    out.push((insert_label.to_owned(), count));
+    if label == "rbf" {
+        let mut svgp = Svgp::new(kernel, likelihood)
+            .factor(&x, N, D, &y, &z, M_SPARSE)
+            .map_err(|(_, e)| e)
+            .expect("spd");
+        let mut params = vec![0.0; svgp.num_params()];
+        svgp.get_params(&mut params).expect("len");
+        let mut grad = vec![0.0; params.len()];
+        svgp.value_and_gradient_into(&params, &mut grad)
+            .expect("warmup");
+        let count = allocs_in(|| {
+            svgp.value_and_gradient_into(&params, &mut grad)
+                .expect("counted");
+        });
+        out.push(("svgp_mll_and_grad".to_owned(), count));
+        svgp.predict(&xs, M, D).expect("warmup");
+        let count = allocs_in(|| {
+            svgp.predict(&xs, M, D).expect("counted");
+        });
+        out.push(("svgp_predict_100".to_owned(), count));
+    }
+    out
+}
+
+/// One call on each sparse path after a warmup call. The nested kernel (a
+/// product of sums) covers the nested scratch levels on the insert path;
+/// the sparse gradients do not support products.
+#[test]
+fn sparse_allocs_after_warmup() {
+    let _guard = alloc_lock();
+    let rbf = || KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
+    let constant = |v: f64| KernelSpec::from(ConstantKernel::new(v).expect("constant"));
+    let nested = (rbf() + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell")))
+        * (constant(1.5) * rbf() + constant(0.5));
+    let mut counts = sparse_allocs("rbf", rbf());
+    counts.extend(sparse_allocs("nested", nested));
+    for (label, cap) in MAX_SPARSE_ALLOCS {
+        let count = counts
+            .iter()
+            .find(|(name, _)| name == label)
+            .map(|(_, count)| *count)
+            .expect("measured");
+        assert_alloc_cap(label, count, cap);
     }
 }

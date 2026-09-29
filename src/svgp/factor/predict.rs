@@ -7,7 +7,7 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower};
 use crate::precision::ModelPrecision;
-use crate::sparse::{k_mm_jitter_policy, kernel_cross};
+use crate::sparse::{KernelScratch, k_mm_jitter_policy};
 use crate::{PredictOptions, Prediction, VarianceKind};
 use faer::{Mat, MatRef};
 
@@ -28,6 +28,7 @@ pub(crate) fn svgp_predict<M: crate::math::KernelMath, P: ModelPrecision>(
 ) -> Result<Prediction<P::Refine>, GprError>
 where
 {
+    let mut ks = KernelScratch::new();
     if n_cols != d {
         return Err(GprError::DimensionMismatch {
             x_dim: n_cols,
@@ -42,7 +43,7 @@ where
     let mut q_cast = P::Storage::empty_cols();
     let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
-    let mut k_sz = kernel_cross::<M, _>(&compiled, z_mat, query_x)?;
+    let mut k_sz = ks.cross::<M>(&compiled, z_mat, query_x)?;
     let rhs = k_sz.clone();
     solve_lower(k_mm_l, k_sz.as_mut());
     let mut kss = vec![P::Storage::from_f64(0.0); n_rows];
@@ -98,18 +99,17 @@ pub(super) fn f64_mean_reference<M: crate::math::KernelMath>(
     query: &[f64],
     m: usize,
 ) -> Result<(Mat<f64>, Vec<f64>), GprError> {
+    let mut ks = KernelScratch::new();
     let d = query.len();
     let compiled = kernel.compile();
     let z64 = pack_points(z_obs, m, d);
     let q64 = pack_points(query, 1, d);
     let mut k_mm = Mat::<f64>::zeros(m, m);
-    let mut scratch = Mat::<f64>::zeros(m, m);
-    compiled.eval_gram::<M>(
+    ks.gram::<M>(
+        &compiled,
         GramInputs::points(z64.as_ref()),
         k_mm.as_mut(),
         Triangle::Lower,
-        scratch.as_mut(),
-        &mut Vec::new(),
     )?;
     let mut chol_scratch = llt_scratch::<f64>(m);
     cholesky_lower_with_retries(
@@ -118,6 +118,6 @@ pub(super) fn f64_mean_reference<M: crate::math::KernelMath>(
         k_mm_jitter_policy().retry_jitters(),
         CholeskyStage::Predict,
     )?;
-    let k_star = kernel_cross::<M, _>(&compiled, z64.as_ref(), q64.as_ref())?;
+    let k_star = ks.cross::<M>(&compiled, z64.as_ref(), q64.as_ref())?;
     Ok((k_mm, (0..m).map(|i| k_star[(i, 0)]).collect()))
 }

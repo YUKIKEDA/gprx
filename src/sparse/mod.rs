@@ -2,11 +2,11 @@
 //! [`crate::Svgp`]): the settings every trainer holds, the training data
 //! every fitted model holds, and the kernel + likelihood `θ` over both.
 
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
-use crate::kernel::{CompiledKernel, KernelScalar};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::JitterPolicy;
@@ -183,27 +183,132 @@ pub(crate) fn k_mm_jitter_policy() -> JitterPolicy {
     JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
 }
 
-/// `K(x, xs)` (`n × q`) in a new matrix.
-pub(crate) fn kernel_cross<M: crate::math::KernelMath, T>(
-    compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
-    xs: MatRef<'_, T>,
-) -> Result<Mat<T>, GprError>
-where
-    T: KernelScalar,
-{
-    let n = x.nrows();
-    let q = xs.nrows();
-    let mut out = Mat::zeros(n, q);
-    let mut scratch = Mat::zeros(n, q);
-    compiled.eval_cross::<M>(
-        x,
-        xs,
-        None,
-        out.as_mut(),
-        scratch.as_mut(),
-        &mut Vec::new(),
-        &mut [],
-    )?;
-    Ok(out)
+/// Kernel-evaluation buffers of one sparse operation: the output-shaped
+/// scratch, the nested sum / product levels, and the train–query distance
+/// block. Every buffer grows to the largest shape asked for and is viewed at
+/// the shape of each call, so one operation's kernel calls share them.
+/// Scratch: contents mean nothing between calls.
+pub(crate) struct KernelScratch<T> {
+    scratch: Mat<T>,
+    nested: Vec<Mat<T>>,
+    dist: Mat<T>,
+}
+
+impl<T> Clone for KernelScratch<T> {
+    /// Scratch: a clone starts empty.
+    fn clone(&self) -> Self {
+        Self {
+            scratch: Mat::new(),
+            nested: Vec::new(),
+            dist: Mat::new(),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for KernelScratch<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KernelScratch").finish_non_exhaustive()
+    }
+}
+
+impl<T: KernelScalar> Default for KernelScratch<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: KernelScalar> KernelScratch<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            scratch: Mat::new(),
+            nested: Vec::new(),
+            dist: Mat::new(),
+        }
+    }
+
+    /// `K` for `uplo` into `out`.
+    pub(crate) fn gram<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        inputs: GramInputs<'_, T>,
+        out: MatMut<'_, T>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let scratch = view(&mut self.scratch, out.nrows(), out.ncols());
+        compiled.eval_gram::<M>(inputs, out, uplo, scratch, &mut self.nested)
+    }
+
+    /// `∂K/∂θ_{param_idx}` for `uplo` into `d_k`.
+    pub(crate) fn grad<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        inputs: GramInputs<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let scratch = view(&mut self.scratch, d_k.nrows(), d_k.ncols());
+        compiled.grad_gram::<M>(inputs, d_k, param_idx, uplo, scratch, &mut self.nested)
+    }
+
+    /// `∂²K/∂θ_i ∂θ_j` for `uplo` into `d2_k`.
+    pub(crate) fn hess<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        inputs: GramInputs<'_, T>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let scratch = view(&mut self.scratch, d2_k.nrows(), d2_k.ncols());
+        compiled.hess_gram::<M>(inputs, d2_k, pair, uplo, scratch, &mut self.nested)
+    }
+
+    /// `K(x, xs)` (`n × q`) into `out`.
+    pub(crate) fn cross_into<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let (rows, cols) = (out.nrows(), out.ncols());
+        let dist = view(&mut self.dist, rows, cols);
+        let scratch = view(&mut self.scratch, rows, cols);
+        compiled.eval_cross::<M>(x, xs, Some(dist), out, scratch, &mut self.nested, &mut [])
+    }
+
+    /// `K(x, xs)` (`n × q`) in a new matrix.
+    pub(crate) fn cross<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+    ) -> Result<Mat<T>, GprError> {
+        let mut out = Mat::zeros(x.nrows(), xs.nrows());
+        self.cross_into::<M>(compiled, x, xs, out.as_mut())?;
+        Ok(out)
+    }
+
+    /// An output-shaped scratch for a kernel call that takes one directly.
+    pub(crate) fn scratch(&mut self, rows: usize, cols: usize) -> MatMut<'_, T> {
+        view(&mut self.scratch, rows, cols)
+    }
+}
+
+/// `buf` grown to at least `rows × cols`, viewed at that shape.
+fn view<T: KernelScalar>(buf: &mut Mat<T>, rows: usize, cols: usize) -> MatMut<'_, T> {
+    if buf.nrows() < rows || buf.ncols() < cols {
+        *buf = Mat::zeros(rows.max(buf.nrows()), cols.max(buf.ncols()));
+    }
+    buf.as_mut().submatrix_mut(0, 0, rows, cols)
+}
+
+/// Kernel scratch a fitted sparse model keeps between its `&mut self` calls
+/// (`set_params`, gradient, Hessian, online updates): one for the storage
+/// scalar `S`, one for the `f64` assembly a rounding precision starts from.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SparseScratch<S: KernelScalar> {
+    pub(crate) storage: KernelScratch<S>,
+    pub(crate) f64: KernelScratch<f64>,
 }
