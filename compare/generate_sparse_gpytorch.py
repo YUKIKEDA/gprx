@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import gpytorch
@@ -16,24 +15,23 @@ from gpytorch.means import ZeroMean
 from gpytorch.mlls import VariationalELBO
 from gpytorch.models import ApproximateGP
 from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
-from sklearn.cluster import KMeans
 
-ROOT = Path(__file__).resolve().parent
-PERF = ROOT / "perf"
-GOLDENS = ROOT / "goldens"
-
-sys.path.insert(0, str(PERF))
-from problems import (  # noqa: E402
+from common.problems import (
     ELL_ARD,
     ELL_ISO,
+    KMEANS_SEED,
     NOISE_VARIANCE_INIT,
+    kmeans_z,
     make_forrester,
     make_sphere,
     pack_column_major,
+    unpack_column_major,
 )
 
+ROOT = Path(__file__).resolve().parent
+GOLDENS = ROOT / "goldens"
+
 M = 16
-KMEANS_SEED = 0
 WHITE_VARIANCE = 0.05
 FORRESTER_XS = np.array([[0.25], [0.5], [0.75]], dtype=np.float64)
 SPHERE_XS = np.array([[0.25, 0.75], [0.25, 0.25], [0.5, 0.5]], dtype=np.float64)
@@ -78,20 +76,6 @@ class SvgpModel(ApproximateGP):
 
     def forward(self, x: torch.Tensor) -> MultivariateNormal:
         return MultivariateNormal(self.mean_module(x), self.covar_module(x))
-
-
-def unpack_column_major(values: list[float], n: int, d: int) -> np.ndarray:
-    packed = np.asarray(values, dtype=np.float64)
-    coords = np.empty((n, d), dtype=np.float64)
-    for dim in range(d):
-        coords[:, dim] = packed[dim * n : (dim + 1) * n]
-    return coords
-
-
-def kmeans_z(coords: np.ndarray, m: int) -> np.ndarray:
-    model = KMeans(n_clusters=m, random_state=KMEANS_SEED, n_init=10)
-    model.fit(coords)
-    return np.asarray(model.cluster_centers_, dtype=np.float64)
 
 
 def set_lengthscale(kernel: RBFKernel | MaternKernel, lengthscales: list[float]) -> None:

@@ -49,7 +49,11 @@ src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not 
 tests/                     integration tests. Goldens only under compare/goldens/
 tests/common/               check.rs (tolerance asserts) and problems.rs (Forrester / sphere). Unit tests and benches include them with #[path]
 benches/exact.rs           criterion
-compare/                   sklearn and GPyTorch generation. perf/ is manual wall time and RSS
+compare/                   one Python environment (pyproject.toml, uv.lock; group `perf`). Run from here
+  common/                  problems.py ops.py harness.py records.py timing.py rss.py, shared by the generators and perf/
+  generate*.py             sklearn / GPyTorch / libgp goldens into goldens/
+  perf/                    manual wall time and RSS: run*.py (python -m perf.run*), runners.py, the Python runners
+  perf/gprx/               one runner binary gprx-perf (exact / online / sparse / sparse-online)
 examples/fit_predict.rs
 docs/                      design, roadmap, this file, adr/
 ```
