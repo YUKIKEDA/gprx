@@ -8,21 +8,21 @@ mod transform;
 
 use std::path::Path;
 
-use crate::GaussianLikelihood;
 use crate::error::GprError;
 use crate::gpr::{FittedGpr, OnlineGpr, Policies};
 use crate::kernel::KernelSpec;
 use crate::optimizer::Fixed;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
+use crate::{GaussianLikelihood, PredictOptions, Prediction};
 
+use crate::kernel::ScalarOps;
 use config::{
     DistanceCacheJson, FactorKind, JitterJson, LikelihoodJson, MathJson, ModelConfig,
     PrecisionJson, ResidualJson,
 };
 use kernel::KernelJson;
 use tensors::{
-    FactorBytes, pack_lower, read_alpha, read_matrix, read_scalars, read_xy, scalar_bytes,
-    write_tensors,
+    FactorBytes, pack_lower, read_matrix, read_scalars, read_xy, scalar_bytes, write_tensors,
 };
 
 pub(crate) use tensors::MappedTensors;
@@ -49,7 +49,11 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// One variant per precision and factor kind: `llt` loads a [`FittedGpr`],
 /// `ldlt` loads an [`OnlineGpr`]. The distance-cache policy, kernel `exp`,
 /// and jitter policy are read back into the model's runtime policies.
-/// Re-training is [`crate::FittedGpr::with_optimizer`] then
+///
+/// [`Self::predict`], [`Self::predict_with`], [`Self::n`], [`Self::d`], and
+/// [`Self::is_online`] work on any variant, so predicting needs no `match`.
+/// Match a variant for the typed model: `predict_into`, `insert`, or
+/// re-training with [`crate::FittedGpr::with_optimizer`] then
 /// [`crate::FittedGpr::refit`]. The file does not store a solver or a
 /// Cholesky buffer policy; load is always [`crate::CholeskyBuffer::Retain`].
 ///
@@ -74,13 +78,13 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
-/// match loaded {
-///     LoadedGpr::Double(model) => {
-///         let pred = model.predict(&[0.5], 1, 1)?;
-///         assert_eq!(pred.mean.len(), 1);
-///     }
-///     _ => panic!("default save is a double-precision llt model"),
-/// }
+/// let pred = loaded.predict(&[0.5], 1, 1)?;
+/// assert_eq!(pred.mean.len(), 1);
+/// assert!(!loaded.is_online());
+/// let LoadedGpr::Double(model) = loaded else {
+///     panic!("default save is a double-precision llt model");
+/// };
+/// assert_eq!(model.n(), 2);
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -124,6 +128,139 @@ impl LoadedGpr {
     /// [`crate::Gpr<Fixed>::factor`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         load_dir(dir.as_ref(), registry)
+    }
+
+    /// Number of training points.
+    pub fn n(&self) -> usize {
+        self.view().n()
+    }
+
+    /// Number of input features.
+    pub fn d(&self) -> usize {
+        self.view().d()
+    }
+
+    /// `true` for an [`OnlineGpr`] (`ldlt`), `false` for a [`FittedGpr`] (`llt`).
+    pub fn is_online(&self) -> bool {
+        self.view().is_online()
+    }
+
+    /// Predictive mean and variance at `xs` (latent variance), in `f64`
+    /// whatever the stored precision.
+    ///
+    /// Same as the variant's `predict`. [`crate::SinglePrecision`] results are
+    /// widened from `f32`, which does not change their values.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`crate::FittedGpr::predict`].
+    pub fn predict(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
+    }
+
+    /// [`Self::predict`] with [`PredictOptions`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`crate::FittedGpr::predict_with`].
+    pub fn predict_with(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.view().predict_f64(xs, n_rows, n_cols, options)
+    }
+
+    /// The one place that tells the variants apart.
+    fn view(&self) -> &dyn LoadedView {
+        match self {
+            Self::Double(model) => model,
+            Self::Single(model) => model,
+            Self::Mixed(model) => model,
+            Self::Reevaluate(model) => model,
+            Self::OnlineDouble(model) => model,
+            Self::OnlineSingle(model) => model,
+            Self::OnlineMixed(model) => model,
+            Self::OnlineReevaluate(model) => model,
+        }
+    }
+}
+
+/// Reads of a loaded model that do not depend on its precision or factor.
+trait LoadedView {
+    fn n(&self) -> usize;
+    fn d(&self) -> usize;
+    fn is_online(&self) -> bool;
+    fn predict_f64(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError>;
+}
+
+impl<P: crate::precision::GpScalar> LoadedView for FittedGpr<Fixed, P> {
+    fn n(&self) -> usize {
+        FittedGpr::n(self)
+    }
+
+    fn d(&self) -> usize {
+        FittedGpr::d(self)
+    }
+
+    fn is_online(&self) -> bool {
+        false
+    }
+
+    fn predict_f64(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(xs, n_rows, n_cols, options).map(widen)
+    }
+}
+
+impl<P: crate::precision::GpScalar> LoadedView for OnlineGpr<Fixed, P> {
+    fn n(&self) -> usize {
+        OnlineGpr::n(self)
+    }
+
+    fn d(&self) -> usize {
+        OnlineGpr::d(self)
+    }
+
+    fn is_online(&self) -> bool {
+        true
+    }
+
+    fn predict_f64(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(xs, n_rows, n_cols, options).map(widen)
+    }
+}
+
+fn widen<T: crate::kernel::KernelScalar>(pred: Prediction<T>) -> Prediction<f64> {
+    let to_f64 = |values: Vec<T>| values.into_iter().map(T::to_f64).collect();
+    Prediction {
+        mean: to_f64(pred.mean),
+        variance: to_f64(pred.variance),
+        variance_kind: pred.variance_kind,
     }
 }
 
@@ -289,115 +426,39 @@ where
     online.apply_persisted_ids(ids, *next_id)
 }
 
+/// `α` in the precision's refine scalar.
+fn read_alpha<P: crate::precision::GpScalar>(
+    dir: &Path,
+    n: usize,
+) -> Result<Vec<P::Refine>, GprError> {
+    read_scalars::<P::Refine>(
+        dir,
+        tensors::TENSOR_ALPHA,
+        &[n],
+        <P::Refine as ScalarOps>::DTYPE,
+    )
+}
+
+/// `L` in the precision's storage scalar. An `f64` factor stays
+/// memory-mapped; an `f32` factor is copied out.
 #[allow(clippy::type_complexity)]
-trait PersistLoad: crate::precision::GpScalar {
-    fn read_alpha(dir: &Path, n: usize) -> Result<Vec<Self::Refine>, GprError>;
-    fn read_factor(
-        dir: &Path,
-        n: usize,
-    ) -> Result<(Option<faer::Mat<Self::Storage>>, Option<MappedTensors>), GprError>;
-}
-
-impl PersistLoad for crate::precision::DoublePrecision {
-    fn read_alpha(dir: &Path, n: usize) -> Result<Vec<Self::Refine>, GprError> {
-        read_alpha(dir, n)
-    }
-    fn read_factor(
-        dir: &Path,
-        n: usize,
-    ) -> Result<(Option<faer::Mat<Self::Storage>>, Option<MappedTensors>), GprError> {
+fn read_factor<P: crate::precision::GpScalar>(
+    dir: &Path,
+    n: usize,
+) -> Result<(Option<faer::Mat<P::Storage>>, Option<MappedTensors>), GprError> {
+    let dtype = <P::Storage as ScalarOps>::DTYPE;
+    if dtype == safetensors::Dtype::F64 {
         Ok((None, Some(MappedTensors::open(dir, n)?)))
+    } else {
+        Ok((Some(read_matrix::<P::Storage>(dir, n, dtype)?), None))
     }
 }
 
-impl PersistLoad for crate::SinglePrecision {
-    fn read_alpha(dir: &Path, n: usize) -> Result<Vec<Self::Refine>, GprError> {
-        read_scalars::<f32>(
-            dir,
-            tensors::TENSOR_ALPHA,
-            &[n],
-            safetensors::tensor::Dtype::F32,
-        )
-    }
-    fn read_factor(
-        dir: &Path,
-        n: usize,
-    ) -> Result<(Option<faer::Mat<Self::Storage>>, Option<MappedTensors>), GprError> {
-        Ok((
-            Some(read_matrix::<f32>(dir, n, safetensors::tensor::Dtype::F32)?),
-            None,
-        ))
-    }
+/// The [`LoadedGpr`] variants that hold precision `P`.
+struct Variants<P: crate::precision::GpScalar> {
+    fitted: fn(FittedGpr<Fixed, P>) -> LoadedGpr,
+    online: fn(OnlineGpr<Fixed, P>) -> LoadedGpr,
 }
-
-impl PersistLoad for crate::MixedPrecision<crate::precision::PromoteStorage> {
-    fn read_alpha(dir: &Path, n: usize) -> Result<Vec<Self::Refine>, GprError> {
-        read_alpha(dir, n)
-    }
-    fn read_factor(
-        dir: &Path,
-        n: usize,
-    ) -> Result<(Option<faer::Mat<Self::Storage>>, Option<MappedTensors>), GprError> {
-        Ok((
-            Some(read_matrix::<f32>(dir, n, safetensors::tensor::Dtype::F32)?),
-            None,
-        ))
-    }
-}
-
-impl PersistLoad for crate::MixedPrecision<crate::ReevaluateKernel> {
-    fn read_alpha(dir: &Path, n: usize) -> Result<Vec<Self::Refine>, GprError> {
-        read_alpha(dir, n)
-    }
-    fn read_factor(
-        dir: &Path,
-        n: usize,
-    ) -> Result<(Option<faer::Mat<Self::Storage>>, Option<MappedTensors>), GprError> {
-        Ok((
-            Some(read_matrix::<f32>(dir, n, safetensors::tensor::Dtype::F32)?),
-            None,
-        ))
-    }
-}
-
-trait Seal: crate::precision::GpScalar {
-    fn seal(model: FittedGpr<Fixed, Self>) -> LoadedGpr;
-    fn seal_online(model: OnlineGpr<Fixed, Self>) -> LoadedGpr;
-}
-
-macro_rules! impl_seal {
-    ($prec:ty, $fitted:path, $online:path) => {
-        impl Seal for $prec {
-            fn seal(model: FittedGpr<Fixed, Self>) -> LoadedGpr {
-                $fitted(model)
-            }
-            fn seal_online(model: OnlineGpr<Fixed, Self>) -> LoadedGpr {
-                $online(model)
-            }
-        }
-    };
-}
-
-impl_seal!(
-    crate::precision::DoublePrecision,
-    LoadedGpr::Double,
-    LoadedGpr::OnlineDouble
-);
-impl_seal!(
-    crate::SinglePrecision,
-    LoadedGpr::Single,
-    LoadedGpr::OnlineSingle
-);
-impl_seal!(
-    crate::MixedPrecision<crate::precision::PromoteStorage>,
-    LoadedGpr::Mixed,
-    LoadedGpr::OnlineMixed
-);
-impl_seal!(
-    crate::MixedPrecision<crate::ReevaluateKernel>,
-    LoadedGpr::Reevaluate,
-    LoadedGpr::OnlineReevaluate
-);
 
 fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
     let config_path = dir.join(CONFIG_FILE);
@@ -405,18 +466,42 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
         .map_err(|err| persist_err(format!("read {config_path:?}: {err}")))?;
     let config = config::parse_config(&bytes)?;
     match (config.precision, config.residual) {
-        (PrecisionJson::Double, _) => {
-            load_precision::<crate::precision::DoublePrecision>(dir, registry, config)
-        }
-        (PrecisionJson::Single, _) => {
-            load_precision::<crate::SinglePrecision>(dir, registry, config)
-        }
-        (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => load_precision::<
-            crate::MixedPrecision<crate::precision::PromoteStorage>,
-        >(dir, registry, config),
-        (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => {
-            load_precision::<crate::MixedPrecision<crate::ReevaluateKernel>>(dir, registry, config)
-        }
+        (PrecisionJson::Double, _) => load_precision(
+            dir,
+            registry,
+            config,
+            Variants {
+                fitted: LoadedGpr::Double,
+                online: LoadedGpr::OnlineDouble,
+            },
+        ),
+        (PrecisionJson::Single, _) => load_precision(
+            dir,
+            registry,
+            config,
+            Variants {
+                fitted: LoadedGpr::Single,
+                online: LoadedGpr::OnlineSingle,
+            },
+        ),
+        (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => load_precision(
+            dir,
+            registry,
+            config,
+            Variants {
+                fitted: LoadedGpr::Mixed,
+                online: LoadedGpr::OnlineMixed,
+            },
+        ),
+        (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => load_precision(
+            dir,
+            registry,
+            config,
+            Variants {
+                fitted: LoadedGpr::Reevaluate,
+                online: LoadedGpr::OnlineReevaluate,
+            },
+        ),
     }
 }
 
@@ -424,9 +509,10 @@ fn load_precision<P>(
     dir: &Path,
     registry: &PersistRegistry,
     config: ModelConfig,
+    variants: Variants<P>,
 ) -> Result<LoadedGpr, GprError>
 where
-    P: PersistLoad + Seal,
+    P: crate::precision::GpScalar,
 {
     let ldlt_ids = match config.factor_kind {
         FactorKind::Ldlt => {
@@ -452,8 +538,8 @@ where
     let y_transform = config.y_transform.decode(registry)?;
     let (x_obs, y_obs) = read_xy(dir, config.n, config.d)?;
     if config.has_factor {
-        let alpha = P::read_alpha(dir, config.n)?;
-        let (owned_l, mapped) = P::read_factor(dir, config.n)?;
+        let alpha = read_alpha::<P>(dir, config.n)?;
+        let (owned_l, mapped) = read_factor::<P>(dir, config.n)?;
         let parts = PersistedModel {
             kernel,
             likelihood,
@@ -470,11 +556,11 @@ where
             factor_jitter: config.factor_jitter,
         };
         match config.factor_kind {
-            FactorKind::Llt => Ok(P::seal(FittedGpr::from_persisted(parts)?)),
+            FactorKind::Llt => Ok((variants.fitted)(FittedGpr::from_persisted(parts)?)),
             FactorKind::Ldlt => {
                 let mut online = OnlineGpr::from_persisted(parts)?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online(online))
+                Ok((variants.online)(online))
             }
         }
     } else {
@@ -484,11 +570,11 @@ where
         .factor(&x_obs, config.n, config.d, &y_obs)
         .map_err(|(_, err)| err)?;
         match config.factor_kind {
-            FactorKind::Llt => Ok(P::seal(fitted)),
+            FactorKind::Llt => Ok((variants.fitted)(fitted)),
             FactorKind::Ldlt => {
                 let mut online = fitted.into_online()?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok(P::seal_online(online))
+                Ok((variants.online)(online))
             }
         }
     }
@@ -944,6 +1030,107 @@ mod tests {
         assert_close(got.mean[0], want.mean[0], TOL);
         assert_close(got.variance[0], want.variance[0], TOL);
         let _ = std::fs::remove_dir_all(&dir_mixed);
+    }
+
+    /// Saves `fitted` as `llt` and as `ldlt`, each with and without the
+    /// factor, and checks the precision-independent reads of [`LoadedGpr`]
+    /// against the typed model.
+    fn assert_loaded_reads<P: crate::precision::GpScalar>(
+        label: &str,
+        fitted: crate::FittedGpr<Fixed, P>,
+        is_fitted: fn(&LoadedGpr) -> bool,
+        is_online: fn(&LoadedGpr) -> bool,
+    ) {
+        let xs = [0.25, 0.8];
+        let widen = |pred: crate::Prediction<P::Refine>| {
+            let mean: Vec<f64> = pred
+                .mean
+                .iter()
+                .map(|v| crate::kernel::KernelScalar::to_f64(*v))
+                .collect();
+            let variance: Vec<f64> = pred
+                .variance
+                .iter()
+                .map(|v| crate::kernel::KernelScalar::to_f64(*v))
+                .collect();
+            (mean, variance)
+        };
+        let online = fitted.clone().into_online().expect("online");
+        let want_fitted = widen(fitted.predict(&xs, 2, 1).expect("predict"));
+        let want_online = widen(online.predict(&xs, 2, 1).expect("predict"));
+        for with_factor in [true, false] {
+            for ldlt in [false, true] {
+                let dir = temp_dir(&format!("reads-{label}-{with_factor}-{ldlt}"));
+                let saved = match (ldlt, with_factor) {
+                    (false, true) => fitted.save_with_factor(&dir),
+                    (false, false) => fitted.save(&dir),
+                    (true, true) => online.save_with_factor(&dir),
+                    (true, false) => online.save(&dir),
+                };
+                saved.expect("save");
+                let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
+                let (variant, want) = if ldlt {
+                    (is_online(&loaded), &want_online)
+                } else {
+                    (is_fitted(&loaded), &want_fitted)
+                };
+                assert!(variant, "{label}: wrong variant {loaded:?}");
+                assert_eq!(loaded.is_online(), ldlt, "{label}");
+                assert_eq!((loaded.n(), loaded.d()), (3, 1), "{label}");
+                let got = loaded.predict(&xs, 2, 1).expect("loaded predict");
+                for i in 0..xs.len() {
+                    assert_close(got.mean[i], want.0[i], 1e-5);
+                    assert_close(got.variance[i], want.1[i], 1e-5);
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    #[test]
+    fn loaded_reads_match_every_precision_and_factor() {
+        let x = [0.0, 0.5, 1.0];
+        let y = [0.0, 1.0, 0.2];
+        let trainer = || {
+            Gpr::new(
+                KernelSpec::from(RbfKernel::new(1.0).expect("valid")),
+                GaussianLikelihood::new(0.1).expect("valid"),
+            )
+            .with_optimizer(Fixed)
+        };
+        assert_loaded_reads(
+            "double",
+            trainer().factor(&x, 3, 1, &y).expect("spd"),
+            |l| matches!(l, LoadedGpr::Double(_)),
+            |l| matches!(l, LoadedGpr::OnlineDouble(_)),
+        );
+        assert_loaded_reads(
+            "single",
+            trainer()
+                .with_precision::<crate::SinglePrecision>()
+                .factor(&x, 3, 1, &y)
+                .expect("spd"),
+            |l| matches!(l, LoadedGpr::Single(_)),
+            |l| matches!(l, LoadedGpr::OnlineSingle(_)),
+        );
+        assert_loaded_reads(
+            "mixed",
+            trainer()
+                .with_precision::<crate::MixedPrecision>()
+                .factor(&x, 3, 1, &y)
+                .expect("spd"),
+            |l| matches!(l, LoadedGpr::Mixed(_)),
+            |l| matches!(l, LoadedGpr::OnlineMixed(_)),
+        );
+        assert_loaded_reads(
+            "reevaluate",
+            trainer()
+                .with_precision::<crate::MixedPrecision<crate::ReevaluateKernel>>()
+                .factor(&x, 3, 1, &y)
+                .expect("spd"),
+            |l| matches!(l, LoadedGpr::Reevaluate(_)),
+            |l| matches!(l, LoadedGpr::OnlineReevaluate(_)),
+        );
     }
 
     #[test]
