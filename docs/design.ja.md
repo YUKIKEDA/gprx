@@ -335,6 +335,7 @@ Xとyを分ける。GPRでは平均関数を持たない場合、**yを平均0�
 trait Transform {
     fn fit(&mut self, x: MatRef<f64>);
     fn apply(&self, x: MatMut<f64>);
+    fn inverse_apply(&self, x: MatMut<f64>);
 }
 struct Pipeline(Vec<Box<dyn Transform>>);
 
@@ -354,6 +355,8 @@ struct ColumnwiseInput { maps: Vec<Box<dyn Transform>> }
 ```
 
 既定の `Gpr` は Identity。平均関数が零のときは `StandardizeTarget` が数値安定の基本。`MinMaxInput` / `MinMaxTarget` は区間スケール（既定 `[0, 1]`）。未学習の `transform` / `apply` は型で起きない。複数マップの直列は `Pipeline`（`X`）と `TargetPipeline`（`y`）。1 段だけの `with_*` はそのまま残る。入力は列ごとに `ColumnwiseInput`（一様な列は MinMax、正規に近い列は Standardize。長さが `d` でないときはエラー）。`src/transform/` は `input.rs` / `target.rs` / `pipeline.rs` / `columnwise.rs`。葉ファイルに分けるかは P2B-20（[#116](https://github.com/YUKIKEDA/gprx/issues/116)）。行数ではなく、独立したアダプタかどうかで判断する。`predict`は内部で潜在/観測分散を計算したあと、`inverse_transform_mean`/`inverse_transform_variance`を通してから返す。分散の逆変換はアフィン `y' = (y - a)/s` なら `Var(y) = s² Var(y')`。
+
+`Sgpr` / `Svgp` も同じ変換を同じ既定（Identity）で受ける（R5-3、[#281](https://github.com/YUKIKEDA/gprx/issues/281)）。誘導点 `Z` は `X` と同じ座標で渡し、`X` と一緒に学習時の入力の写像を通す。クエリと、`OnlineSgpr` に足す点は、学習時に当てはめた写像を通す。`FreeInducing` は写像後の座標で `Z` を探す。学習後のモデルは、必須メソッドの `Transform::inverse_apply` で `Z` を元の座標に戻して返す。入力の写像はすべて逆を持つ。
 
 ## 6. GPModel抽象化(厳密/疎の差し替え)
 

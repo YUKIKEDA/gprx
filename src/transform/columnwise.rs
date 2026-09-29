@@ -205,6 +205,21 @@ impl Transform for FittedColumnwiseInput {
         Ok(())
     }
 
+    fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+        require_column_count(n_cols, self.maps.len())?;
+        crate::data::require_count(
+            x.len(),
+            crate::data::column_major_len(n_rows, n_cols)?,
+            "values",
+        )?;
+        crate::data::require_finite(x)?;
+        for (col, map) in self.maps.iter().enumerate() {
+            let start = col * n_rows;
+            map.inverse_apply(&mut x[start..start + n_rows], n_rows, 1)?;
+        }
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(self.clone())
     }
@@ -267,6 +282,20 @@ mod tests {
             Ok(())
         }
 
+        fn inverse_apply(
+            &self,
+            x: &mut [f64],
+            n_rows: usize,
+            n_cols: usize,
+        ) -> Result<(), GprError> {
+            require_pack(x, n_rows, n_cols)?;
+            crate::data::require_finite(x)?;
+            for value in x {
+                *value /= 2.0;
+            }
+            Ok(())
+        }
+
         fn clone_box(&self) -> Box<dyn Transform> {
             Box::new(*self)
         }
@@ -300,6 +329,10 @@ mod tests {
         for (actual, want) in got.iter().zip(expected.iter()) {
             assert_close(*actual, *want, TOL);
         }
+        t.inverse_apply(&mut got, 3, 2).expect("ok");
+        for (actual, want) in got.iter().zip(x.iter()) {
+            assert_close(*actual, *want, TOL);
+        }
     }
 
     #[test]
@@ -316,6 +349,10 @@ mod tests {
         assert_close(z[1], 2.0, TOL);
         assert_close(z[2], 6.0, TOL);
         assert_close(z[3], 8.0, TOL);
+        t.inverse_apply(&mut z, 2, 2).expect("ok");
+        for (got, want) in z.iter().zip(x.iter()) {
+            assert_close(*got, *want, TOL);
+        }
     }
 
     #[test]

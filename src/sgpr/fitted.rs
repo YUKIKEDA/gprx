@@ -81,7 +81,7 @@ where
         let n_theta = self.core.theta_len();
         self.core.read_theta(&mut out[..n_theta])?;
         if I::z_params(self.core.m, self.core.d) > 0 {
-            out[n_theta..].copy_from_slice(&self.core.z_obs);
+            out[n_theta..].copy_from_slice(&self.core.z_train);
         }
         Ok(())
     }
@@ -135,25 +135,32 @@ where
             return Ok(());
         }
         let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
-        let z_obs = if I::z_params(self.core.m, self.core.d) > 0 {
+        let free_z = I::z_params(self.core.m, self.core.d) > 0;
+        let z = if free_z {
             params[n_theta..].to_vec()
+        } else {
+            self.core.z_train.clone()
+        };
+        let z_obs = if free_z {
+            self.core.inducing_obs(&z, self.core.m)?
         } else {
             self.core.z_obs.clone()
         };
         let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _>(
             &kernel,
             likelihood,
-            &self.core.x_obs,
+            &self.core.x_train,
             self.core.n,
             self.core.d,
-            &self.core.y,
-            &z_obs,
+            &self.core.y_train,
+            &z,
             self.core.m,
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
         self.core.kernel = kernel;
         self.core.likelihood = likelihood;
+        self.core.z_train = z;
         self.core.z_obs = z_obs;
         self.apply_vfe(state);
         Ok(())
@@ -165,7 +172,7 @@ where
         self.core.theta_intervals(&mut out[..n_theta])?;
         if I::z_params(self.core.m, self.core.d) > 0 {
             fill_z_intervals(
-                &self.core.x_obs,
+                &self.core.x_train,
                 self.core.n,
                 self.core.d,
                 &mut out[n_theta..],
@@ -335,7 +342,7 @@ where
     }
 
     fn inducing_equals_training(&self) -> bool {
-        self.core.x_obs == self.core.z_obs
+        self.core.x_train == self.core.z_train
     }
 
     fn exact_fitted(&self) -> Result<crate::FittedGpr<Fixed, P>, GprError>
@@ -345,7 +352,12 @@ where
         crate::Gpr::new(self.core.kernel.clone(), self.core.likelihood)
             .with_optimizer(Fixed)
             .with_precision::<P>()
-            .factor(&self.core.x_obs, self.core.n, self.core.d, &self.core.y)
+            .factor(
+                &self.core.x_train,
+                self.core.n,
+                self.core.d,
+                &self.core.y_train,
+            )
             .map_err(|(_, e)| e)
     }
 
@@ -355,9 +367,9 @@ where
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.core.x_obs,
-            &self.core.y,
-            &self.core.z_obs,
+            &self.core.x_train,
+            &self.core.y_train,
+            &self.core.z_train,
             self.core.likelihood.noise_variance(),
             self.core.n,
             self.core.m,
@@ -468,7 +480,7 @@ where
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.core.y,
+            &self.core.y_train,
             self.k_diag_sum,
             self.a_frobenius2,
             self.core.likelihood.noise_variance(),
@@ -557,26 +569,22 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        if n_cols != self.core.d {
-            return Err(GprError::DimensionMismatch {
-                x_dim: n_cols,
-                expected_dim: self.core.d,
-            });
-        }
-        with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
+        let xs = self.core.map_query(xs, n_rows, n_cols)?;
+        let prediction = with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
             &self.core.kernel,
-            &self.core.z_obs,
+            &self.core.z_train,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
             &self.predict_w,
             self.core.likelihood.noise_variance(),
             self.core.m,
             self.core.d,
-            xs,
+            &xs,
             n_rows,
             n_cols,
             options,
-        ))
+        ))?;
+        self.core.inverse_prediction::<P>(prediction)
     }
 
     #[cfg(test)]

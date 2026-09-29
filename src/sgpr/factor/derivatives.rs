@@ -230,11 +230,11 @@ where
     P: ModelPrecision,
 {
     let mut y_cast = P::Storage::empty_rows();
-    let y_s = P::Storage::storage_rows(&model.core.y, &mut y_cast);
+    let y_s = P::Storage::storage_rows(&model.core.y_train, &mut y_cast);
     let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
     let compiled = model.core.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
-    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
+    let x64 = pack_points(&model.core.x_train, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_train, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
@@ -270,7 +270,7 @@ where
     P: ModelPrecision,
 {
     let mut y_cast = P::Storage::empty_rows();
-    let y_s = P::Storage::storage_rows(&model.core.y, &mut y_cast);
+    let y_s = P::Storage::storage_rows(&model.core.y_train, &mut y_cast);
     let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
     let vars = collect_first_vars::<M, _, _, _>(model, include_z, ks)?;
     let tangents: Vec<VfeTangent<P::Storage>> =
@@ -298,8 +298,8 @@ where
     P: ModelPrecision,
 {
     let compiled = model.core.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
-    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
+    let x64 = pack_points(&model.core.x_train, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_train, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
@@ -429,8 +429,8 @@ where
     let n_kernel = model.core.kernel.num_params();
     let n_theta = n_kernel + model.core.likelihood.num_params();
     let compiled = model.core.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
-    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
+    let x64 = pack_points(&model.core.x_train, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_train, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);

@@ -2,8 +2,11 @@
 //! [`crate::Svgp`]): the settings every trainer holds, the training data
 //! every fitted model holds, and the kernel + likelihood `θ` over both.
 
+use std::fmt;
+
 use faer::{Mat, MatMut, MatRef};
 
+use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
@@ -11,13 +14,42 @@ use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::JitterPolicy;
 use crate::policy::KernelExp;
+use crate::precision::ModelPrecision;
+use crate::prediction::Prediction;
+use crate::transform::{
+    IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
+};
 
-/// Kernel, likelihood, and kernel `exp` of an untrained sparse model.
-#[derive(Clone, Debug)]
+/// Kernel, likelihood, kernel `exp`, and the unfitted input / target
+/// transforms of an untrained sparse model.
 pub(crate) struct SparseSpec {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) math: KernelExp,
+    pub(crate) x_transform: Box<dyn UnfittedTransform>,
+    pub(crate) y_transform: Box<dyn UnfittedTarget>,
+}
+
+impl Clone for SparseSpec {
+    fn clone(&self) -> Self {
+        Self {
+            kernel: self.kernel.clone(),
+            likelihood: self.likelihood,
+            math: self.math,
+            x_transform: self.x_transform.clone_box(),
+            y_transform: self.y_transform.clone_box(),
+        }
+    }
+}
+
+impl fmt::Debug for SparseSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SparseSpec")
+            .field("kernel", &self.kernel)
+            .field("likelihood", &self.likelihood)
+            .field("math", &self.math)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SparseSpec {
@@ -26,6 +58,8 @@ impl SparseSpec {
             kernel,
             likelihood,
             math: KernelExp::default(),
+            x_transform: Box::new(IdentityInput),
+            y_transform: Box::new(IdentityTarget),
         }
     }
 
@@ -48,23 +82,116 @@ impl SparseSpec {
     }
 }
 
-/// Training data and settings of a fitted sparse model: kernel,
-/// likelihood, kernel `exp`, column-major `X` (`n × d`) and `Z` (`m × d`),
-/// and `y`.
-#[derive(Clone, Debug)]
+/// Training data and settings of a fitted sparse model.
+///
+/// `x_obs` / `z_obs` / `y_obs` are what the caller passed (column-major
+/// `n × d` and `m × d`). `x_train` / `z_train` / `y_train` are the same data through the
+/// fitted transforms; every factor, gradient, and prediction reads those.
 pub(crate) struct SparseCore {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) math: KernelExp,
+    pub(crate) x_unfitted: Box<dyn UnfittedTransform>,
+    pub(crate) y_unfitted: Box<dyn UnfittedTarget>,
+    pub(crate) x_transform: Box<dyn Transform>,
+    pub(crate) y_transform: Box<dyn TargetTransform>,
     pub(crate) x_obs: Vec<f64>,
     pub(crate) z_obs: Vec<f64>,
-    pub(crate) y: Vec<f64>,
+    pub(crate) y_obs: Vec<f64>,
+    pub(crate) x_train: Vec<f64>,
+    pub(crate) z_train: Vec<f64>,
+    pub(crate) y_train: Vec<f64>,
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
 }
 
+impl Clone for SparseCore {
+    fn clone(&self) -> Self {
+        Self {
+            kernel: self.kernel.clone(),
+            likelihood: self.likelihood,
+            math: self.math,
+            x_unfitted: self.x_unfitted.clone_box(),
+            y_unfitted: self.y_unfitted.clone_box(),
+            x_transform: self.x_transform.clone_box(),
+            y_transform: self.y_transform.clone_box(),
+            x_obs: self.x_obs.clone(),
+            z_obs: self.z_obs.clone(),
+            y_obs: self.y_obs.clone(),
+            x_train: self.x_train.clone(),
+            z_train: self.z_train.clone(),
+            y_train: self.y_train.clone(),
+            n: self.n,
+            m: self.m,
+            d: self.d,
+        }
+    }
+}
+
+impl fmt::Debug for SparseCore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SparseCore")
+            .field("kernel", &self.kernel)
+            .field("likelihood", &self.likelihood)
+            .field("math", &self.math)
+            .field("n", &self.n)
+            .field("m", &self.m)
+            .field("d", &self.d)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SparseCore {
+    /// Checks the training data and the inducing points, fits the input
+    /// transform on `X` and the target transform on `y`, and maps `X`, `Z`,
+    /// and `y` through them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the input errors of [`crate::data::validate_training`] and
+    /// [`crate::data::validate_inducing`], or the error of a transform fit
+    /// or map.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare(
+        spec: &SparseSpec,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+        z: &[f64],
+        n_inducing: usize,
+    ) -> Result<Self, GprError> {
+        validate_training(x, n_rows, n_cols, y)?;
+        validate_inducing(z, n_inducing, n_cols)?;
+        let x_transform = spec.x_transform.clone_box().fit(x, n_rows, n_cols)?;
+        let y_transform = spec.y_transform.clone_box().fit(y)?;
+        let mut x_train = x.to_vec();
+        x_transform.apply(&mut x_train, n_rows, n_cols)?;
+        let mut z_train = z.to_vec();
+        x_transform.apply(&mut z_train, n_inducing, n_cols)?;
+        let mut y_train = y.to_vec();
+        y_transform.transform(&mut y_train)?;
+        Ok(Self {
+            kernel: spec.kernel.clone(),
+            likelihood: spec.likelihood,
+            math: spec.math,
+            x_unfitted: spec.x_transform.clone_box(),
+            y_unfitted: spec.y_transform.clone_box(),
+            x_transform,
+            y_transform,
+            x_obs: x.to_vec(),
+            z_obs: z.to_vec(),
+            y_obs: y.to_vec(),
+            x_train,
+            z_train,
+            y_train,
+            n: n_rows,
+            m: n_inducing,
+            d: n_cols,
+        })
+    }
+
     /// Kernel `θ` then likelihood `θ`.
     pub(crate) fn theta_len(&self) -> usize {
         theta_len(&self.kernel, &self.likelihood)
@@ -94,12 +221,71 @@ impl SparseCore {
         Ok(())
     }
 
+    /// The original coordinates of transformed inducing points `z`
+    /// (`rows × d`).
+    pub(crate) fn inducing_obs(&self, z: &[f64], rows: usize) -> Result<Vec<f64>, GprError> {
+        let mut z_obs = z.to_vec();
+        self.x_transform.inverse_apply(&mut z_obs, rows, self.d)?;
+        Ok(z_obs)
+    }
+
+    /// One point (`d` features) through the fitted input transform, into
+    /// `out`.
+    pub(crate) fn map_point(&self, point: &[f64], out: &mut Vec<f64>) -> Result<(), GprError> {
+        out.clear();
+        out.extend_from_slice(point);
+        self.x_transform.apply(out, 1, self.d)
+    }
+
+    /// One target through the fitted target transform.
+    pub(crate) fn map_target(&self, target: f64) -> Result<f64, GprError> {
+        let mut mapped = [target];
+        self.y_transform.transform(&mut mapped)?;
+        Ok(mapped[0])
+    }
+
+    /// Query points (`n_rows × d`, column-major) through the fitted input
+    /// transform. Checks the feature count and the packing first.
+    pub(crate) fn map_query(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<Vec<f64>, GprError> {
+        if n_cols != self.d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: n_cols,
+                expected_dim: self.d,
+            });
+        }
+        validate_query(xs, n_rows, n_cols)?;
+        let mut mapped = xs.to_vec();
+        self.x_transform.apply(&mut mapped, n_rows, n_cols)?;
+        Ok(mapped)
+    }
+
+    /// Maps a prediction in transformed units back through the target
+    /// transform.
+    pub(crate) fn inverse_prediction<P: ModelPrecision>(
+        &self,
+        mut prediction: Prediction<P::Refine>,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        P::inverse_mean_variance(
+            self.y_transform.as_ref(),
+            &mut prediction.mean,
+            &mut prediction.variance,
+        )?;
+        Ok(prediction)
+    }
+
     /// The trainer settings this model was fitted with.
     pub(crate) fn spec(&self) -> SparseSpec {
         SparseSpec {
             kernel: self.kernel.clone(),
             likelihood: self.likelihood,
             math: self.math,
+            x_transform: self.x_unfitted.clone_box(),
+            y_transform: self.y_unfitted.clone_box(),
         }
     }
 }
@@ -163,14 +349,15 @@ macro_rules! sparse_core_accessors {
             &self.core.x_obs
         }
 
-        /// Returns the inducing features in column-major order.
+        /// Returns the inducing features in column-major order, in the
+        /// original coordinates of `X`.
         pub fn z(&self) -> &[f64] {
             &self.core.z_obs
         }
 
         /// Returns the original training targets.
         pub fn y(&self) -> &[f64] {
-            &self.core.y
+            &self.core.y_obs
         }
     };
 }
@@ -311,4 +498,6 @@ fn view<T: KernelScalar>(buf: &mut Mat<T>, rows: usize, cols: usize) -> MatMut<'
 pub(crate) struct SparseScratch<S: KernelScalar> {
     pub(crate) storage: KernelScratch<S>,
     pub(crate) f64: KernelScratch<f64>,
+    /// One point through the input transform (online inserts).
+    pub(crate) point: Vec<f64>,
 }

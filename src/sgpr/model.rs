@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::GprError;
 use crate::policy::{KernelExp, with_kernel_exp};
-use crate::sparse::SparseSpec;
+use crate::sparse::{SparseCore, SparseSpec};
+use crate::transform::{UnfittedTarget, UnfittedTransform};
 
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
@@ -117,6 +118,73 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// Returns the kernel `exp` mode.
     pub fn math(&self) -> KernelExp {
         self.spec.math
+    }
+
+    /// Replaces the input (`X`) transform. Omitting it leaves identity.
+    ///
+    /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
+    /// every later query or inserted point go through it, so `Z` is passed
+    /// in the same coordinates as `X`. [`crate::FreeInducing`] searches `Z`
+    /// in the transformed coordinates; the fitted model reports `Z` in the
+    /// original ones. A single map, a [`crate::transform::Pipeline`], or
+    /// [`crate::transform::ColumnwiseInput`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::transform::StandardizeInput;
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_input_transform(StandardizeInput::new())
+    /// .with_optimizer(Fixed)
+    ///     .factor(&[0.0, 10.0, 20.0, 30.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[5.0, 25.0], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.z(), &[5.0, 25.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
+        self.spec.x_transform = Box::new(transform);
+        self
+    }
+
+    /// Replaces the target (`y`) transform. Omitting it leaves identity.
+    ///
+    /// The map is fitted on training `y`. Predictions are mapped back to the
+    /// original scale. The negative marginal likelihood and its gradient are
+    /// those of the transformed `y`. A single map or a
+    /// [`crate::transform::TargetPipeline`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::transform::StandardizeTarget;
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_target_transform(StandardizeTarget::new())
+    /// .with_optimizer(Fixed)
+    ///     .factor(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[100.0, 101.0, 100.5, 100.25], &[0.5, 2.5], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// let pred = fitted.predict(&[1.0], 1, 1)?;
+    /// assert!(pred.mean[0] > 99.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_target_transform(mut self, transform: impl UnfittedTarget + 'static) -> Self {
+        self.spec.y_transform = Box::new(transform);
+        self
     }
 
     /// Replaces the inducing-point type parameter.
@@ -238,16 +306,13 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSgpr<O, FixedInducing, P>, (Self, GprError)> {
+        let core = match SparseCore::prepare(&self.spec, x, n_rows, n_cols, y, z, n_inducing) {
+            Ok(core) => core,
+            Err(err) => return Err((self, err)),
+        };
         match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
-            self.spec.kernel.clone(),
-            self.spec.likelihood,
+            core,
             self.optimizer.clone(),
-            x,
-            n_rows,
-            n_cols,
-            y,
-            z,
-            n_inducing,
         )) {
             Ok(mut fitted) => match fitted.optimize_hyperparameters() {
                 Ok(()) => Ok(fitted),
@@ -303,16 +368,13 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSgpr<O, FreeInducing, P>, (Self, GprError)> {
+        let core = match SparseCore::prepare(&self.spec, x, n_rows, n_cols, y, z, n_inducing) {
+            Ok(core) => core,
+            Err(err) => return Err((self, err)),
+        };
         match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
-            self.spec.kernel.clone(),
-            self.spec.likelihood,
+            core,
             self.optimizer.clone(),
-            x,
-            n_rows,
-            n_cols,
-            y,
-            z,
-            n_inducing,
         )) {
             Ok(mut fitted) => match fitted.optimize_hyperparameters() {
                 Ok(()) => Ok(fitted),
@@ -371,16 +433,13 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSgpr<Fixed, I, P>, (Self, GprError)> {
+        let core = match SparseCore::prepare(&self.spec, x, n_rows, n_cols, y, z, n_inducing) {
+            Ok(core) => core,
+            Err(err) => return Err((self, err)),
+        };
         match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
-            self.spec.kernel.clone(),
-            self.spec.likelihood,
+            core,
             Fixed,
-            x,
-            n_rows,
-            n_cols,
-            y,
-            z,
-            n_inducing,
         )) {
             Ok(fitted) => Ok(fitted),
             Err(err) => Err((self, err)),
