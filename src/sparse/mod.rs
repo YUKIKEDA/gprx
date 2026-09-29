@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use dyn_stack::MemBuffer;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{validate_inducing, validate_query, validate_training};
@@ -14,7 +15,7 @@ use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::KernelExp;
 use crate::policy::{AdaptiveJitter, JitterPolicy};
-use crate::precision::ModelPrecision;
+use crate::precision::{InverseBuffers, ModelPrecision};
 use crate::prediction::Prediction;
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
@@ -255,13 +256,14 @@ impl SparseCore {
     }
 
     /// Query points (`n_rows × d`, column-major) through the fitted input
-    /// transform. Checks the feature count and the packing first.
-    pub(crate) fn map_query(
+    /// transform, into `out`. Checks the feature count and the packing first.
+    pub(crate) fn map_query_into(
         &self,
         xs: &[f64],
         n_rows: usize,
         n_cols: usize,
-    ) -> Result<Vec<f64>, GprError> {
+        out: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
         if n_cols != self.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
@@ -269,23 +271,24 @@ impl SparseCore {
             });
         }
         validate_query(xs, n_rows, n_cols)?;
-        let mut mapped = xs.to_vec();
-        self.x_transform.apply(&mut mapped, n_rows, n_cols)?;
-        Ok(mapped)
+        out.clear();
+        out.extend_from_slice(xs);
+        self.x_transform.apply(out, n_rows, n_cols)
     }
 
     /// Maps a prediction in transformed units back through the target
-    /// transform.
-    pub(crate) fn inverse_prediction<P: ModelPrecision>(
+    /// transform, in place.
+    pub(crate) fn inverse_prediction_in_place<P: ModelPrecision>(
         &self,
-        mut prediction: Prediction<P::Refine>,
-    ) -> Result<Prediction<P::Refine>, GprError> {
+        prediction: &mut Prediction<P::Refine>,
+        buffers: &mut InverseBuffers,
+    ) -> Result<(), GprError> {
         P::inverse_mean_variance(
             self.y_transform.as_ref(),
             &mut prediction.mean,
             &mut prediction.variance,
-        )?;
-        Ok(prediction)
+            buffers,
+        )
     }
 
     /// The trainer settings this model was fitted with.
@@ -502,11 +505,130 @@ impl<T: KernelScalar> KernelScratch<T> {
 }
 
 /// `buf` grown to at least `rows × cols`, viewed at that shape.
-fn view<T: KernelScalar>(buf: &mut Mat<T>, rows: usize, cols: usize) -> MatMut<'_, T> {
+pub(crate) fn view<T: KernelScalar>(buf: &mut Mat<T>, rows: usize, cols: usize) -> MatMut<'_, T> {
     if buf.nrows() < rows || buf.ncols() < cols {
         *buf = Mat::zeros(rows.max(buf.nrows()), cols.max(buf.ncols()));
     }
     buf.as_mut().submatrix_mut(0, 0, rows, cols)
+}
+
+/// A compiled kernel at `S`, rebuilt only when the kernel changes.
+pub(crate) struct KernelPlan<S: KernelScalar>(Option<(KernelSpec, CompiledKernel<S>)>);
+
+impl<S: KernelScalar> KernelPlan<S> {
+    /// The plan of `kernel`, compiled unless the kept one is already for it.
+    pub(crate) fn get(&mut self, kernel: &KernelSpec) -> &CompiledKernel<S> {
+        if !matches!(&self.0, Some((spec, _)) if spec == kernel) {
+            self.0 = None;
+        }
+        &self
+            .0
+            .get_or_insert_with(|| (kernel.clone(), kernel.compile_as::<S>()))
+            .1
+    }
+}
+
+/// Buffers of one sparse prediction at the storage scalar `S`: the kernel
+/// scratch, the packed `Z` and queries, `K(Z, X*)` and its solves, and
+/// per-query columns.
+pub(crate) struct PredictBuffers<S: KernelScalar> {
+    pub(crate) kernel: KernelScratch<S>,
+    pub(crate) z: Mat<S>,
+    pub(crate) query: Mat<S>,
+    pub(crate) k_sz: Mat<S>,
+    pub(crate) solved: Mat<S>,
+    pub(crate) kss: Vec<S>,
+    pub(crate) column: Vec<S>,
+}
+
+impl<S: KernelScalar> Default for PredictBuffers<S> {
+    fn default() -> Self {
+        Self {
+            kernel: KernelScratch::new(),
+            z: Mat::new(),
+            query: Mat::new(),
+            k_sz: Mat::new(),
+            solved: Mat::new(),
+            kss: Vec::new(),
+            column: Vec::new(),
+        }
+    }
+}
+
+/// Packs `x` (`rows × d`, column-major) into `buf` as `S` and views it.
+pub(crate) fn pack_into<'a, S: KernelScalar>(
+    buf: &'a mut Mat<S>,
+    x: &[f64],
+    rows: usize,
+    d: usize,
+) -> MatMut<'a, S> {
+    let mut out = view(buf, rows, d);
+    crate::data::pack_storage(x, rows, d, out.as_mut());
+    out
+}
+
+/// Buffers of a sparse `predict_into`, kept on the fitted model: the query
+/// through the input transform, the storage-scalar buffers, and the `f64`
+/// ones a rounding storage predicts through (`K_mm` factored in `f64`, `B`
+/// and the weights promoted).
+pub(crate) struct PredictScratch<S: KernelScalar> {
+    pub(crate) xs: Vec<f64>,
+    pub(crate) inverse: InverseBuffers,
+    pub(crate) plan: KernelPlan<S>,
+    pub(crate) storage: PredictBuffers<S>,
+    pub(crate) plan64: KernelPlan<f64>,
+    pub(crate) f64: PredictBuffers<f64>,
+    pub(crate) k_mm64: Mat<f64>,
+    pub(crate) k_mm64_backup: Mat<f64>,
+    pub(crate) llt64: Option<(usize, MemBuffer)>,
+    pub(crate) b_l64: Mat<f64>,
+    pub(crate) w64: Vec<f64>,
+    /// `K(Z, X*)` in `f64`, the reference of a mixed SVGP mean.
+    pub(crate) k_zs64: Mat<f64>,
+}
+
+impl<S: KernelScalar> Default for PredictScratch<S> {
+    fn default() -> Self {
+        Self {
+            xs: Vec::new(),
+            inverse: InverseBuffers::default(),
+            plan: KernelPlan(None),
+            storage: PredictBuffers::default(),
+            plan64: KernelPlan(None),
+            f64: PredictBuffers::default(),
+            k_mm64: Mat::new(),
+            k_mm64_backup: Mat::new(),
+            llt64: None,
+            b_l64: Mat::new(),
+            w64: Vec::new(),
+            k_zs64: Mat::new(),
+        }
+    }
+}
+
+/// A clone starts with empty buffers.
+impl<S: KernelScalar> Clone for PredictScratch<S> {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl<S: KernelScalar> fmt::Debug for PredictScratch<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PredictScratch").finish_non_exhaustive()
+    }
+}
+
+impl<S: KernelScalar> PredictScratch<S> {
+    /// faer scratch for an `m × m` `f64` LLT, reused while `m` is unchanged.
+    pub(crate) fn llt64(llt: &mut Option<(usize, MemBuffer)>, m: usize) -> &mut MemBuffer {
+        if matches!(llt, Some((size, _)) if *size != m) {
+            *llt = None;
+        }
+        &mut llt
+            .get_or_insert_with(|| (m, crate::linalg::llt_scratch::<f64>(m)))
+            .1
+    }
 }
 
 /// Kernel scratch a fitted sparse model keeps between its `&mut self` calls
@@ -518,4 +640,6 @@ pub(crate) struct SparseScratch<S: KernelScalar> {
     pub(crate) f64: KernelScratch<f64>,
     /// One point through the input transform (online inserts).
     pub(crate) point: Vec<f64>,
+    /// Buffers of `predict_into`.
+    pub(crate) predict: PredictScratch<S>,
 }

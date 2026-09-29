@@ -11,8 +11,8 @@ mod common;
 use common::rng::{open_unit, small_rng};
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{
-    FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, KernelExp, MixedPrecision, Prediction,
-    ReevaluateKernel, Sgpr, Svgp,
+    DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, KernelExp,
+    MixedPrecision, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
 };
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
@@ -86,21 +86,28 @@ const MAX_MIXED_PREDICT_100_BYTES: usize = N * N * std::mem::size_of::<f32>();
 const M_SPARSE: usize = 32;
 
 /// Allocations of one call on the sparse models after a warmup call, by
-/// path (R5-1d / #246). The sparse models return new matrices for their
-/// factors and results and have no `predict_into` yet (R5-5 / #283), so
-/// these are not zero; the kernel scratch of the `&mut self` paths is kept
-/// on the model between calls. `predict` also copies the query to map it
-/// through the input transform (R5-3 / #281); R5-5 moves that buffer onto
-/// the model. Do not raise without an Issue.
-const MAX_SPARSE_ALLOCS: [(&str, usize); 7] = [
+/// path (R5-1d / #246). The sparse fits return new matrices for their
+/// factors, so these are not zero; the kernel scratch of the `&mut self`
+/// paths is kept on the model between calls. Do not raise without an Issue.
+const MAX_SPARSE_ALLOCS: [(&str, usize); 5] = [
     ("sgpr_mll_and_grad", 19),
     ("sgpr_hessian", 111),
-    ("sgpr_predict_100", 110),
     ("online_sgpr_insert", 10),
     ("online_sgpr_insert_nested", 18),
     ("svgp_mll_and_grad", 20),
-    ("svgp_predict_100", 310),
 ];
+
+/// One sparse `predict_into` of 100 points after a warmup call, by model,
+/// kernel, and precision (R5-5 / #283). Do not raise without an Issue.
+const MAX_SPARSE_PREDICT_100_ALLOCS: usize = 0;
+
+/// Bytes one [`MixedPrecision`] SVGP `predict_into` of 100 points may
+/// allocate after a warmup call: the mixed mean refines `L_mm⁻¹ k_*` in
+/// `f64` for each query (#39), and the refinement loop keeps three `f64`
+/// vectors of length `m` per query. The `f64` reference (`L_mm`, `K(Z, X*)`)
+/// is built once per call into buffers the model keeps. The other sparse
+/// paths allocate nothing. Do not raise without an Issue.
+const MAX_SVGP_MIXED_PREDICT_100_BYTES: usize = M * 3 * M_SPARSE * std::mem::size_of::<f64>();
 
 fn ensure_one_rayon_worker() {
     static INIT: OnceLock<()> = OnceLock::new();
@@ -429,7 +436,6 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
     ensure_one_rayon_worker();
     let x = fill_column_major(N, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
-    let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let x_new: Vec<f64> = (0..D).map(|dim| 0.1 * dim as f64).collect();
@@ -459,11 +465,6 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
             fitted.hessian_into(&params, &mut hess).expect("counted");
         });
         out.push(("sgpr_hessian".to_owned(), count));
-        fitted.predict(&xs, M, D).expect("warmup");
-        let count = allocs_in(|| {
-            fitted.predict(&xs, M, D).expect("counted");
-        });
-        out.push(("sgpr_predict_100".to_owned(), count));
     }
     let mut online = fitted.into_online();
     online.insert(&x_new, 0.5).expect("warmup");
@@ -491,11 +492,6 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
                 .expect("counted");
         });
         out.push(("svgp_mll_and_grad".to_owned(), count));
-        svgp.predict(&xs, M, D).expect("warmup");
-        let count = allocs_in(|| {
-            svgp.predict(&xs, M, D).expect("counted");
-        });
-        out.push(("svgp_predict_100".to_owned(), count));
     }
     out
 }
@@ -519,5 +515,132 @@ fn sparse_allocs_after_warmup() {
             .map(|(_, count)| *count)
             .expect("measured");
         assert_alloc_cap(label, count, cap);
+    }
+}
+
+/// Allocations (or, with `count = bytes_in`, bytes) of one `predict_into` of
+/// `M` points after a warmup call on a [`gprx::FittedSgpr`], the
+/// [`gprx::OnlineSgpr`] after one insert, and a [`gprx::FittedSvgp`], at
+/// precision `P`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn sparse_predict_counts<P: GpScalar>(
+    kernel: KernelSpec,
+    count: fn(&mut dyn FnMut()) -> usize,
+) -> [(&'static str, usize); 3] {
+    ensure_one_rayon_worker();
+    let x = fill_column_major(N, D, SEED);
+    let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
+    let xs = fill_column_major(M, D, SEED.wrapping_add(1));
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
+    let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+    let mut pred = Prediction::default();
+    let mut fitted = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&x, N, D, &y, &z, M_SPARSE)
+        .map_err(|(_, e)| e)
+        .expect("spd");
+    fitted.predict_into(&xs, M, D, &mut pred).expect("warmup");
+    let sgpr = count(&mut || fitted.predict_into(&xs, M, D, &mut pred).expect("counted"));
+    let mut online = fitted.into_online();
+    let x_new: Vec<f64> = (0..D).map(|dim| 0.1 * dim as f64).collect();
+    online.insert(&x_new, 0.5).expect("insert");
+    online.predict_into(&xs, M, D, &mut pred).expect("warmup");
+    let online = count(&mut || online.predict_into(&xs, M, D, &mut pred).expect("counted"));
+    let mut svgp = Svgp::new(kernel, likelihood)
+        .with_precision::<P>()
+        .factor(&x, N, D, &y, &z, M_SPARSE)
+        .map_err(|(_, e)| e)
+        .expect("spd");
+    svgp.predict_into(&xs, M, D, &mut pred).expect("warmup");
+    let svgp = count(&mut || svgp.predict_into(&xs, M, D, &mut pred).expect("counted"));
+    [("sgpr", sgpr), ("online_sgpr", online), ("svgp", svgp)]
+}
+
+fn allocs_in_dyn(f: &mut dyn FnMut()) -> usize {
+    allocs_in(f)
+}
+
+fn bytes_in_dyn(f: &mut dyn FnMut()) -> usize {
+    bytes_in(f)
+}
+
+/// Sparse `predict_into` after a warmup call: every model, a leaf and a
+/// nested kernel, `f64` and `f32` storage, and mixed precision.
+#[test]
+fn sparse_predict_into_allocs_after_warmup() {
+    let _guard = alloc_lock();
+    let rbf = || KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
+    let constant = |v: f64| KernelSpec::from(ConstantKernel::new(v).expect("constant"));
+    let nested = || {
+        (rbf() + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell")))
+            * (constant(1.5) * rbf() + constant(0.5))
+    };
+    let cases = [
+        (
+            "f64",
+            sparse_predict_counts::<DoublePrecision>(rbf(), allocs_in_dyn),
+        ),
+        (
+            "f64_nested",
+            sparse_predict_counts::<DoublePrecision>(nested(), allocs_in_dyn),
+        ),
+        (
+            "f32",
+            sparse_predict_counts::<SinglePrecision>(rbf(), allocs_in_dyn),
+        ),
+        (
+            "f32_nested",
+            sparse_predict_counts::<SinglePrecision>(nested(), allocs_in_dyn),
+        ),
+    ];
+    for (precision, counts) in cases {
+        for (model, count) in counts {
+            assert_alloc_cap(
+                &format!("{model}_predict_100_{precision}"),
+                count,
+                MAX_SPARSE_PREDICT_100_ALLOCS,
+            );
+        }
+    }
+    for (label, counts) in [
+        (
+            "promote",
+            sparse_predict_counts::<MixedPrecision<gprx::PromoteStorage>>(rbf(), allocs_in_dyn),
+        ),
+        (
+            "reevaluate",
+            sparse_predict_counts::<MixedPrecision<ReevaluateKernel>>(rbf(), allocs_in_dyn),
+        ),
+    ] {
+        for (model, count) in counts {
+            if model != "svgp" {
+                assert_alloc_cap(
+                    &format!("{model}_predict_100_mixed_{label}"),
+                    count,
+                    MAX_SPARSE_PREDICT_100_ALLOCS,
+                );
+            }
+        }
+    }
+    for (label, counts) in [
+        (
+            "promote",
+            sparse_predict_counts::<MixedPrecision<gprx::PromoteStorage>>(rbf(), bytes_in_dyn),
+        ),
+        (
+            "reevaluate",
+            sparse_predict_counts::<MixedPrecision<ReevaluateKernel>>(rbf(), bytes_in_dyn),
+        ),
+    ] {
+        let bytes = counts[2].1;
+        eprintln!(
+            "svgp_predict_100_mixed_{label}: bytes={bytes} cap={MAX_SVGP_MIXED_PREDICT_100_BYTES}"
+        );
+        assert!(
+            bytes <= MAX_SVGP_MIXED_PREDICT_100_BYTES,
+            "svgp_predict_100_mixed_{label}: bytes={bytes}, cap={MAX_SVGP_MIXED_PREDICT_100_BYTES}"
+        );
     }
 }

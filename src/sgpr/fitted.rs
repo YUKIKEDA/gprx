@@ -8,7 +8,7 @@ use faer::MatRef;
 
 use crate::error::GprError;
 use crate::policy::with_kernel_exp;
-use crate::sparse::{SparseCore, SparseScratch, sparse_core_accessors};
+use crate::sparse::{PredictScratch, SparseCore, SparseScratch, sparse_core_accessors};
 
 use crate::kernel::KernelScalar;
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
@@ -18,8 +18,8 @@ use crate::sgpr::SgprObjective;
 use crate::{PredictOptions, Prediction};
 
 use super::factor::{
-    VfeState, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
-    publish_sgpr_weights, vfe_neg_log_marginal_likelihood, vfe_predict,
+    VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
+    predict_vfe_into, publish_sgpr_weights, vfe_neg_log_marginal_likelihood,
 };
 use super::model::Sgpr;
 use super::online::OnlineSgpr;
@@ -571,23 +571,96 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        let xs = self.core.map_query(xs, n_rows, n_cols)?;
-        let prediction = with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
-            &self.core.kernel,
-            self.core.jitter,
-            &self.core.z_train,
-            self.k_mm_l.as_ref(),
-            self.b_l.as_ref(),
-            &self.predict_w,
-            self.core.likelihood.noise_variance(),
-            self.core.m,
-            self.core.d,
-            &xs,
+        let mut out = Prediction::default();
+        predict_vfe_into::<P>(
+            &self.core,
+            &VfeSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                self.b_l.as_ref(),
+                &self.predict_w,
+            ),
+            xs,
             n_rows,
             n_cols,
             options,
-        ))?;
-        self.core.inverse_prediction::<P>(prediction)
+            &mut PredictScratch::default(),
+            &mut out,
+        )?;
+        Ok(out)
+    }
+
+    /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
+    ///
+    /// Same values as [`Self::predict`]. The buffers are kept on the model
+    /// and `out` keeps its capacity, so a call after one with the same
+    /// shapes allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Prediction, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let mut fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0, 1.0], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// let mut pred = Prediction::default();
+    /// fitted.predict_into(&[0.5], 1, 1, &mut pred)?;
+    /// assert_eq!(pred, fitted.predict(&[0.5], 1, 1)?);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn predict_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        self.predict_with_into(xs, n_rows, n_cols, PredictOptions::default(), out)
+    }
+
+    /// Predicts at `xs` with an explicit variance kind into `out`.
+    ///
+    /// Same values as [`Self::predict_with`], with the buffers of
+    /// [`Self::predict_into`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::predict`].
+    pub fn predict_with_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        predict_vfe_into::<P>(
+            &self.core,
+            &VfeSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                self.b_l.as_ref(),
+                &self.predict_w,
+            ),
+            xs,
+            n_rows,
+            n_cols,
+            options,
+            &mut self.scratch.predict,
+            out,
+        )
     }
 
     #[cfg(test)]
