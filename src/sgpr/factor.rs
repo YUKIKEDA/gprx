@@ -2,8 +2,6 @@
 
 use std::marker::PhantomData;
 
-use dyn_stack::MemBuffer;
-use faer::linalg::cholesky::llt;
 use faer::{Accum, Mat, MatMut, MatRef};
 
 use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
@@ -18,7 +16,7 @@ use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     append_chol_border, cholesky_lower_owned, cholesky_lower_with_retries, copy_mat,
-    delete_chol_row, dot, faer_par, frobenius_dot, frobenius2, gemm, gram_aat_plus_noise,
+    delete_chol_row, dot, frobenius_dot, frobenius2, gemm, gram_aat_plus_noise, llt_scratch,
     mat_add_mul, mat_sub_mul, mat_vec, matvec_columns, mul_lower_left, promote_mat, quad_form,
     round_mat, solve_llt, solve_lower, symmetrize_lower,
 };
@@ -205,12 +203,7 @@ where
             &mut Vec::new(),
         )?;
     }
-    let req = llt::factor::cholesky_in_place_scratch::<T>(
-        n_inducing,
-        faer_par(n_inducing),
-        Default::default(),
-    );
-    let mut chol_scratch = MemBuffer::new(req);
+    let mut chol_scratch = llt_scratch::<T>(n_inducing);
     cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
@@ -267,12 +260,7 @@ where
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);
-    let b_req = llt::factor::cholesky_in_place_scratch::<T>(
-        n_inducing,
-        faer_par(n_inducing),
-        Default::default(),
-    );
-    let mut b_scratch = MemBuffer::new(b_req);
+    let mut b_scratch = llt_scratch::<T>(n_inducing);
     cholesky_lower_with_retries(
         &mut b,
         &mut b_scratch,
@@ -1168,8 +1156,7 @@ where
             scratch_k.as_mut(),
             &mut Vec::new(),
         )?;
-        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
-        let mut chol_scratch = MemBuffer::new(req);
+        let mut chol_scratch = llt_scratch::<f64>(m);
         cholesky_lower_with_retries(
             &mut k64,
             &mut chol_scratch,

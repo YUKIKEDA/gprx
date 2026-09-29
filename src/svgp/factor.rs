@@ -1,8 +1,6 @@
 //! Whitened SVGP assembly, ELBO, and diagonal prediction.
 
-use dyn_stack::MemBuffer;
-use faer::linalg::cholesky::llt;
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -17,7 +15,7 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
-    cholesky_lower_with_retries, dot_f64x4, faer_par, faer_par_dims, mat_mul_into, norm2_f64x4,
+    cholesky_lower_with_retries, dot_f64x4, llt_scratch, mat_mul_into, norm2_f64x4, solve_lower,
     symmetrize_lower,
 };
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
@@ -107,12 +105,7 @@ where
         scratch.as_mut(),
         &mut Vec::new(),
     )?;
-    let req = llt::factor::cholesky_in_place_scratch::<T>(
-        n_inducing,
-        faer_par(n_inducing),
-        Default::default(),
-    );
-    let mut chol_scratch = MemBuffer::new(req);
+    let mut chol_scratch = llt_scratch::<T>(n_inducing);
     cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
@@ -136,11 +129,7 @@ where
     } else {
         kernel_cross::<M, _>(&compiled, z_mat, x_mat)?
     };
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        k_mm.as_ref(),
-        a.as_mut(),
-        faer_par_dims(n_inducing, n_rows),
-    );
+    solve_lower(k_mm.as_ref(), a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];
     compiled.fill_diag_points(x_mat, &mut k_diag)?;
     let (q_mean, q_l) = match q {
@@ -303,11 +292,7 @@ where
     let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
     let mut k_sz = kernel_cross::<M, _>(&compiled, z_mat, query_x)?;
     let rhs = k_sz.clone();
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        k_mm_l,
-        k_sz.as_mut(),
-        faer_par_dims(m, n_rows),
-    );
+    solve_lower(k_mm_l, k_sz.as_mut());
     let mut kss = vec![P::Storage::from_f64(0.0); n_rows];
     compiled.fill_diag_points(query_x, &mut kss)?;
     let zero = P::Refine::from_f64(0.0);
@@ -636,18 +621,14 @@ where
     let mut d_l = Mat::<P::Storage>::zeros(m, m);
     storage_cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
     crate::linalg::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        model.k_mm_l.as_ref(),
-        d_kmn.as_mut(),
-        faer_par_dims(m, n),
-    );
+    solve_lower(model.k_mm_l.as_ref(), d_kmn.as_mut());
     Ok((d_kmn, d_kdiag))
 }
 
 fn storage_cholesky_sensitivity<T: KernelScalar>(
     l: MatRef<'_, T>,
     d_k: MatRef<'_, T>,
-    mut d_l: faer::MatMut<'_, T>,
+    mut d_l: MatMut<'_, T>,
     m: usize,
 ) {
     let two = T::from_f64(2.0);
@@ -983,8 +964,8 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
 
 fn kernel_theta_tangents<M: crate::math::KernelMath>(
     compiled: &crate::kernel::CompiledKernel,
-    x: faer::MatRef<'_, f64>,
-    z: faer::MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    z: MatRef<'_, f64>,
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     same_xz: bool,
     param_idx: usize,
@@ -1034,18 +1015,14 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
     // Upper of `d_l` stays zero, so this is the lower-triangular product.
     crate::linalg::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        model.k_mm_l.as_ref(),
-        d_kmn.as_mut(),
-        faer_par_dims(m, n),
-    );
+    solve_lower(model.k_mm_l.as_ref(), d_kmn.as_mut());
     Ok((d_kmn, d_kdiag))
 }
 
 fn cholesky_sensitivity(
-    l: faer::MatRef<'_, f64>,
-    d_k: faer::MatRef<'_, f64>,
-    mut d_l: faer::MatMut<'_, f64>,
+    l: MatRef<'_, f64>,
+    d_k: MatRef<'_, f64>,
+    mut d_l: MatMut<'_, f64>,
     m: usize,
 ) {
     for j in 0..m {
@@ -1205,8 +1182,7 @@ fn f64_mean_reference<M: crate::math::KernelMath>(
         scratch.as_mut(),
         &mut Vec::new(),
     )?;
-    let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
-    let mut chol_scratch = MemBuffer::new(req);
+    let mut chol_scratch = llt_scratch::<f64>(m);
     cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
