@@ -1,11 +1,8 @@
 use super::{FittedGpr, Gpr};
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
+use crate::gpr::FitBuffers;
 use crate::gpr::factor::{FactorPolicy, factor_written_k_with_policy};
-use crate::gpr::{
-    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FitBuffers, FixedJitter, JitterPolicy,
-    KernelExp, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
-};
 use crate::kernel::{
     ConstantKernel, KernelSpec, KernelTerm, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
     PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel,
@@ -18,7 +15,11 @@ use crate::optimizer::{
     FastSimulatedAnnealing, Fixed, Lbfgs, NelderMead, Newton, NonlinearCg, OptResult, Optimizer,
 };
 use crate::param::Interval;
+use crate::policy::{
+    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FixedJitter, JitterPolicy, KernelExp,
+};
 use crate::precision::DoublePrecision;
+use crate::prediction::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 use crate::transform::{
     ColumnwiseInput, MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget,
     TargetPipeline, TargetTransform,

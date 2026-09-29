@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
-use crate::gpr::{DistanceCachePolicy, KernelExp};
 use crate::param::{BoundedParam, Interval};
+use crate::policy::{DistanceCachePolicy, KernelExp};
 use crate::{GaussianLikelihood, JitterPolicy};
 
 use super::kernel::KernelJson;

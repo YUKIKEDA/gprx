@@ -9,8 +9,8 @@ use rand::rngs::SmallRng;
 
 use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
-use crate::gpr::JitterPolicy;
-use crate::gpr::KernelExp;
+use crate::policy::JitterPolicy;
+use crate::policy::KernelExp;
 use crate::sparse::SparseCore;
 
 use crate::kernel::GramInputs;

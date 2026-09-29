@@ -1,5 +1,5 @@
-//! Runtime policies of an Exact GPR: distance cache, Cholesky buffer,
-//! kernel `exp`, and jitter.
+//! Runtime policies: distance cache, Cholesky buffer, kernel `exp`, and
+//! jitter. Every model reads the ones it uses.
 
 use crate::error::GprError;
 
@@ -100,11 +100,11 @@ impl KernelExp {
 macro_rules! with_kernel_exp {
     ($mode:expr, $M:ident => $body:expr) => {
         match $mode {
-            $crate::gpr::KernelExp::Accurate => {
+            $crate::policy::KernelExp::Accurate => {
                 type $M = $crate::math::Accurate;
                 $body
             }
-            $crate::gpr::KernelExp::FastApprox => {
+            $crate::policy::KernelExp::FastApprox => {
                 type $M = $crate::math::FastApprox;
                 $body
             }
@@ -324,13 +324,4 @@ impl Iterator for RetryJitters {
         self.next = if grown.is_finite() { Some(grown) } else { None };
         Some(j)
     }
-}
-
-/// The runtime policies a trainer and its fitted model share.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Policies {
-    pub(crate) distance_cache: DistanceCachePolicy,
-    pub(crate) cholesky_buffer: CholeskyBuffer,
-    pub(crate) math: KernelExp,
-    pub(crate) jitter: JitterPolicy,
 }

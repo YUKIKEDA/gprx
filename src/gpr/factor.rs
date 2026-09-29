@@ -8,7 +8,7 @@ use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
 
-use super::JitterPolicy;
+use crate::policy::JitterPolicy;
 
 /// Writes the training Gram matrix.
 ///
