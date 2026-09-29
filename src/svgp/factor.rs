@@ -1,7 +1,5 @@
 //! Whitened SVGP assembly, ELBO, and diagonal prediction.
 
-use std::marker::PhantomData;
-
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatRef};
@@ -12,6 +10,7 @@ use rand::rngs::SmallRng;
 use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
+use crate::gpr::KernelExp;
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
@@ -54,7 +53,7 @@ pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P>(
     z: &[f64],
     n_inducing: usize,
     q: Option<(Vec<f64>, Mat<f64>)>,
-) -> Result<FittedSvgp<M, P>, GprError>
+) -> Result<FittedSvgp<P>, GprError>
 where
     P: ModelPrecision,
 {
@@ -73,7 +72,7 @@ where
         n: n_rows,
         m: n_inducing,
         d: n_cols,
-        _math: PhantomData,
+        math: KernelExp::of::<M>(),
     })
 }
 
@@ -471,7 +470,7 @@ pub(crate) fn refined_mean<M: crate::math::KernelMath, R: crate::precision::Resi
 }
 
 pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
-    model: &FittedSvgp<M, P>,
+    model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
 ) -> Result<f64, GprError>
@@ -479,14 +478,14 @@ where
     P: ModelPrecision,
 {
     if !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let shadow = promote_svgp_f64(model)?;
-        return svgp_value_and_gradient_f64(&shadow, out, batch);
+        let shadow = promote_svgp_f64::<_>(model)?;
+        return svgp_value_and_gradient_f64::<M>(&shadow, out, batch);
     }
-    svgp_value_and_gradient_storage(model, out, batch)
+    svgp_value_and_gradient_storage::<M, _>(model, out, batch)
 }
 
 fn svgp_value_and_gradient_storage<M: crate::math::KernelMath, P>(
-    model: &FittedSvgp<M, P>,
+    model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
 ) -> Result<f64, GprError>
@@ -505,17 +504,17 @@ where
     let noise = model.likelihood.noise_variance();
     let inv_noise = 1.0 / noise;
     let scale = n as f64 / batch.len() as f64;
-    let kl = storage_kl_grad::<M, P>(model, out, n_theta, m);
-    let cache = storage_point_cache::<M, P>(model, batch, m);
+    let kl = storage_kl_grad::<P>(model, out, n_theta, m);
+    let cache = storage_point_cache::<P>(model, batch, m);
     let (ell, resid2_var) =
-        storage_data_q_grad::<M, P>(model, out, batch, &cache, n_theta, inv_noise, scale);
+        storage_data_q_grad::<P>(model, out, batch, &cache, n_theta, inv_noise, scale);
     out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
     storage_kernel_grad::<M, P>(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
     Ok(kl - scale * ell)
 }
 
-fn storage_kl_grad<M: crate::math::KernelMath, P: ModelPrecision>(
-    model: &FittedSvgp<M, P>,
+fn storage_kl_grad<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
     out: &mut [f64],
     n_theta: usize,
     m: usize,
@@ -555,8 +554,8 @@ struct StoragePointCache<T: KernelScalar> {
     u: Mat<T>,
 }
 
-fn storage_point_cache<M: crate::math::KernelMath, P: ModelPrecision>(
-    model: &FittedSvgp<M, P>,
+fn storage_point_cache<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
     batch: &[usize],
     m: usize,
 ) -> StoragePointCache<P::Storage> {
@@ -601,8 +600,8 @@ fn storage_batch_columns<T: KernelScalar>(full: MatRef<'_, T>, batch: &[usize]) 
     owned
 }
 
-fn storage_data_q_grad<M: crate::math::KernelMath, P: ModelPrecision>(
-    model: &FittedSvgp<M, P>,
+fn storage_data_q_grad<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
     cache: &StoragePointCache<P::Storage>,
@@ -645,7 +644,7 @@ fn storage_data_q_grad<M: crate::math::KernelMath, P: ModelPrecision>(
 }
 
 fn storage_kernel_grad<M: crate::math::KernelMath, P>(
-    model: &FittedSvgp<M, P>,
+    model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
     cache: &StoragePointCache<P::Storage>,
@@ -705,7 +704,7 @@ fn storage_kernel_tangents<M: crate::math::KernelMath, P>(
     compiled: &CompiledKernel<P::Storage>,
     x: MatRef<'_, P::Storage>,
     z: MatRef<'_, P::Storage>,
-    model: &FittedSvgp<M, P>,
+    model: &FittedSvgp<P>,
     same_xz: bool,
     param_idx: usize,
 ) -> Result<(Mat<P::Storage>, Vec<P::Storage>), GprError>
@@ -785,9 +784,9 @@ fn storage_cholesky_sensitivity<T: KernelScalar>(
     }
 }
 
-fn promote_svgp_f64<M: crate::math::KernelMath, P: ModelPrecision>(
-    model: &FittedSvgp<M, P>,
-) -> Result<FittedSvgp<M, crate::precision::DoublePrecision>, GprError>
+fn promote_svgp_f64<P: ModelPrecision>(
+    model: &FittedSvgp<P>,
+) -> Result<FittedSvgp<crate::precision::DoublePrecision>, GprError>
 where
 {
     let mut k_mm_l = Mat::<f64>::zeros(model.m, model.m);
@@ -817,12 +816,12 @@ where
         n: model.n,
         m: model.m,
         d: model.d,
-        _math: PhantomData,
+        math: model.math,
     })
 }
 
 fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
-    model: &FittedSvgp<M, crate::precision::DoublePrecision>,
+    model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
 ) -> Result<f64, GprError> {
@@ -843,12 +842,12 @@ fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     let (ell, resid2_var) =
         accumulate_data_q_grad(model, out, batch, &cache, n_theta, inv_noise, scale);
     out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
-    accumulate_kernel_grad(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
+    accumulate_kernel_grad::<M>(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
     Ok(kl - scale * ell)
 }
 
-fn accumulate_kl_grad<M: crate::math::KernelMath>(
-    model: &FittedSvgp<M, crate::precision::DoublePrecision>,
+fn accumulate_kl_grad(
+    model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     n_theta: usize,
     m: usize,
@@ -910,8 +909,8 @@ struct PointCache {
     u: Mat<f64>,
 }
 
-fn point_cache<M: crate::math::KernelMath>(
-    model: &FittedSvgp<M, crate::precision::DoublePrecision>,
+fn point_cache(
+    model: &FittedSvgp<crate::precision::DoublePrecision>,
     batch: &[usize],
     m: usize,
 ) -> PointCache {
@@ -979,8 +978,8 @@ fn batch_columns<'a>(full: MatRef<'a, f64>, batch: &[usize]) -> BatchCols<'a> {
     BatchCols::Owned(owned)
 }
 
-fn accumulate_data_q_grad<M: crate::math::KernelMath>(
-    model: &FittedSvgp<M, crate::precision::DoublePrecision>,
+fn accumulate_data_q_grad(
+    model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
     cache: &PointCache,
@@ -1022,7 +1021,7 @@ fn accumulate_data_q_grad<M: crate::math::KernelMath>(
 }
 
 fn accumulate_kernel_grad<M: crate::math::KernelMath>(
-    model: &FittedSvgp<M, crate::precision::DoublePrecision>,
+    model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
     cache: &PointCache,
@@ -1045,7 +1044,7 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
         let pre = ard_cross
             .as_mut()
             .map(|mats| std::mem::replace(&mut mats[param_idx], Mat::zeros(0, 0)));
-        let (d_a, d_kdiag) = kernel_theta_tangents(
+        let (d_a, d_kdiag) = kernel_theta_tangents::<M>(
             &compiled,
             x_mat.as_ref(),
             z_mat.as_ref(),
@@ -1100,7 +1099,7 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     compiled: &crate::kernel::CompiledKernel,
     x: faer::MatRef<'_, f64>,
     z: faer::MatRef<'_, f64>,
-    model: &FittedSvgp<M, crate::precision::DoublePrecision>,
+    model: &FittedSvgp<crate::precision::DoublePrecision>,
     same_xz: bool,
     param_idx: usize,
     pre_cross: Option<Mat<f64>>,
@@ -1271,7 +1270,7 @@ fn shuffle_indices(idx: &mut [usize], rng: &mut SmallRng) {
 }
 
 pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P>(
-    model: &mut FittedSvgp<M, P>,
+    model: &mut FittedSvgp<P>,
     adam: &Adam,
 ) -> Result<(), GprError>
 where
@@ -1301,7 +1300,7 @@ where
             let batch = &order[start..end];
             user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
             model.set_params(&user)?;
-            svgp_value_and_gradient(model, &mut g_user, batch)?;
+            svgp_value_and_gradient::<M, _>(model, &mut g_user, batch)?;
             user_grad_to_unconstrained(&user, &z, &intervals, &g_user, &mut g_z, n_theta, m);
             adam.step(&mut z, &g_z, &mut moment1, &mut moment2, &mut timestep);
             start = end;

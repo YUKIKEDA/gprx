@@ -1,10 +1,9 @@
 //! Factored stochastic variational GPR.
 
-use std::marker::PhantomData;
-
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::gpr::{KernelExp, with_kernel_exp};
 use crate::param::write_params;
 
 use crate::kernel::KernelSpec;
@@ -26,7 +25,7 @@ use super::factor::{
 /// likelihood `θ`, the whitened mean vector, then the packed column-major
 /// lower triangle of `L`.
 #[derive(Clone, Debug)]
-pub struct FittedSvgp<M = crate::math::Accurate, P: ModelPrecision = DoublePrecision> {
+pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) x_obs: Vec<f64>,
@@ -43,12 +42,11 @@ pub struct FittedSvgp<M = crate::math::Accurate, P: ModelPrecision = DoublePreci
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
-    pub(crate) _math: PhantomData<M>,
+    pub(crate) math: KernelExp,
 }
 
-impl<M, P> FittedSvgp<M, P>
+impl<P> FittedSvgp<P>
 where
-    M: crate::math::KernelMath,
     P: GpScalar,
 {
     /// Returns the number of training points.
@@ -74,6 +72,11 @@ where
     /// Returns the observation-noise model.
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.likelihood
+    }
+
+    /// Returns the kernel `exp` mode the trainer set with `with_math`.
+    pub fn math(&self) -> KernelExp {
+        self.math
     }
 
     /// Returns the original training features in column-major order.
@@ -169,7 +172,7 @@ where
         let mut likelihood = self.likelihood;
         likelihood.set_params(&params[n_kernel..n_theta])?;
         let q = unpack_q(&params[n_theta..], self.m)?;
-        let state = assemble_svgp::<M, P::Storage>(
+        let state = with_kernel_exp!(self.math, M => assemble_svgp::<M, P::Storage>(
             &kernel,
             &self.x_obs,
             self.n,
@@ -178,7 +181,7 @@ where
             &self.z_obs,
             self.m,
             Some(q),
-        )?;
+        ))?;
         self.kernel = kernel;
         self.likelihood = likelihood;
         self.k_mm_l = state.k_mm_l;
@@ -275,7 +278,7 @@ where
         crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let batch: Vec<usize> = (0..self.n).collect();
-        svgp_value_and_gradient(self, out, &batch)
+        with_kernel_exp!(self.math, M => svgp_value_and_gradient::<M, _>(self, out, &batch))
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
@@ -362,7 +365,7 @@ where
                 expected_dim: self.d,
             });
         }
-        svgp_predict::<M, P>(
+        with_kernel_exp!(self.math, M => svgp_predict::<M, P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),
@@ -375,6 +378,6 @@ where
             n_rows,
             n_cols,
             options,
-        )
+        ))
     }
 }

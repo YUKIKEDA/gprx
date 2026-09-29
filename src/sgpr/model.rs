@@ -3,6 +3,7 @@
 use std::marker::PhantomData;
 
 use crate::error::GprError;
+use crate::gpr::{KernelExp, with_kernel_exp};
 use crate::param::write_params;
 
 use crate::kernel::KernelSpec;
@@ -40,12 +41,12 @@ use super::{FixedInducing, FreeInducing, InducingLayout};
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Sgpr<O = Lbfgs, I = FixedInducing, M = crate::math::Accurate, P = DoublePrecision> {
+pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
     pub(crate) inducing: PhantomData<I>,
-    pub(crate) _math: PhantomData<M>,
+    pub(crate) math: KernelExp,
     pub(crate) _precision: PhantomData<P>,
 }
 impl Sgpr {
@@ -62,13 +63,13 @@ impl Sgpr {
             likelihood,
             optimizer: Lbfgs::new(),
             inducing: PhantomData,
-            _math: PhantomData,
+            math: KernelExp::default(),
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, I, M, P> Sgpr<O, I, M, P> {
+impl<O, I, P> Sgpr<O, I, P> {
     /// Replaces the optimizer type parameter.
     ///
     /// # Examples
@@ -88,46 +89,42 @@ impl<O, I, M, P> Sgpr<O, I, M, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, M, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, P> {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer,
             inducing: PhantomData,
-            _math: PhantomData,
+            math: self.math,
             _precision: PhantomData,
         }
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, M, P2>
+    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, P2>
 where {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
-            _math: PhantomData,
+            math: self.math,
             _precision: PhantomData,
         }
     }
 
-    /// Selects the kernel `exp`. Omitting it leaves [`crate::Accurate`].
+    /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
     ///
     /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
     /// unchanged.
-    pub fn with_math<M2>(self) -> Sgpr<O, I, M2, P>
-    where
-        M2: crate::math::KernelMath,
-    {
-        Sgpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer: self.optimizer,
-            inducing: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
+    pub fn with_math(mut self, math: KernelExp) -> Self {
+        self.math = math;
+        self
+    }
+
+    /// Returns the kernel `exp` mode.
+    pub fn math(&self) -> KernelExp {
+        self.math
     }
 
     /// Replaces the inducing-point type parameter.
@@ -153,13 +150,13 @@ where {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, M, P> {
+    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, P> {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
-            _math: PhantomData,
+            math: self.math,
             _precision: PhantomData,
         }
     }
@@ -216,11 +213,10 @@ where {
     }
 }
 
-impl<O, M, P> Sgpr<O, FixedInducing, M, P>
+impl<O, P> Sgpr<O, FixedInducing, P>
 where
     P: GpScalar,
-    M: crate::math::KernelMath,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P>>,
 {
     /// Factors the VFE system and searches kernel and likelihood `θ`.
     ///
@@ -264,8 +260,8 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSgpr<O, FixedInducing, M, P>, (Self, GprError)> {
-        match assemble_fitted(
+    ) -> Result<FittedSgpr<O, FixedInducing, P>, (Self, GprError)> {
+        match with_kernel_exp!(self.math, M => assemble_fitted::<_, _, M, _>(
             self.kernel.clone(),
             self.likelihood,
             self.optimizer.clone(),
@@ -275,7 +271,7 @@ where
             y,
             z,
             n_inducing,
-        ) {
+        )) {
             Ok(mut fitted) => match fitted.optimize_hyperparameters() {
                 Ok(()) => Ok(fitted),
                 Err(err) => Err((fitted.into_trainer(), err)),
@@ -285,11 +281,10 @@ where
     }
 }
 
-impl<O, M, P> Sgpr<O, FreeInducing, M, P>
+impl<O, P> Sgpr<O, FreeInducing, P>
 where
     P: GpScalar,
-    M: crate::math::KernelMath,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing, M, P>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing, P>>,
 {
     /// Factors the VFE system and searches kernel `θ`, likelihood `θ`, and `Z`.
     ///
@@ -330,8 +325,8 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSgpr<O, FreeInducing, M, P>, (Self, GprError)> {
-        match assemble_fitted(
+    ) -> Result<FittedSgpr<O, FreeInducing, P>, (Self, GprError)> {
+        match with_kernel_exp!(self.math, M => assemble_fitted::<_, _, M, _>(
             self.kernel.clone(),
             self.likelihood,
             self.optimizer.clone(),
@@ -341,7 +336,7 @@ where
             y,
             z,
             n_inducing,
-        ) {
+        )) {
             Ok(mut fitted) => match fitted.optimize_hyperparameters() {
                 Ok(()) => Ok(fitted),
                 Err(err) => Err((fitted.into_trainer(), err)),
@@ -351,9 +346,8 @@ where
     }
 }
 
-impl<I: InducingLayout, M, P> Sgpr<Fixed, I, M, P>
+impl<I: InducingLayout, P> Sgpr<Fixed, I, P>
 where
-    M: crate::math::KernelMath,
     P: GpScalar,
 {
     /// Factors `K_mm = k(Z, Z)` at the current `θ` without a search.
@@ -399,8 +393,8 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSgpr<Fixed, I, M, P>, (Self, GprError)> {
-        match assemble_fitted(
+    ) -> Result<FittedSgpr<Fixed, I, P>, (Self, GprError)> {
+        match with_kernel_exp!(self.math, M => assemble_fitted::<_, _, M, _>(
             self.kernel.clone(),
             self.likelihood,
             Fixed,
@@ -410,7 +404,7 @@ where
             y,
             z,
             n_inducing,
-        ) {
+        )) {
             Ok(fitted) => Ok(fitted),
             Err(err) => Err((self, err)),
         }
