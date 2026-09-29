@@ -597,6 +597,15 @@ Exact GPR の leave-one-out は、学習後の `L` と `α` から閉じた式�
 
 sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_` に同じ GPML 式を適用して JSON に書く。Rust 側は sklearn が選んだ `θ` で `FitOptions::FIXED` して照合する(最適化器差を LOO に混ぜない)。
 
+`FittedSgpr` / `OnlineSgpr::loo_predict`（R5-7、[#285](https://github.com/YUKIKEDA/gprx/issues/285)）は、θ と `Z` を固定した collapsed VFE の事後分布の LOO。点 `i` を除いた最適な `q(u)` で `x_i` を予測する。`A = L_mm⁻¹ K_mn`、`B = σn² I + A Aᵀ`、`w = B⁻¹ A y` とすると、`i` を除くのは `B` から `a_i a_iᵀ` を引くことになる。`h = a_iᵀ B⁻¹ a_i`、`g = a_iᵀ w` として Sherman–Morrison から
+
+```
+μ_i = (g - h y_i) / (1 - h)
+潜在 σ_i² = k(x_i, x_i) - ‖a_i‖² + σn² h / (1 - h)
+```
+
+三角解 `L_B⁻¹ A` を 1 回解けば、全体で `O(n m²)`。`Z = X` では Exact の LOO になる。`f32` の格納は、予測と同じく VFE 系を `f64` で組み直す。SVGP は LOO を持たない（§6.1）。
+
 ## 7. Workspaceとメモリ管理
 
 ### 7.1 個別バッファ構造
