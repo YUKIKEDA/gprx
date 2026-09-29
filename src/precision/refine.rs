@@ -261,6 +261,7 @@ fn storage_system<M: crate::math::KernelMath>(
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),
+        &mut Vec::new(),
     )?;
     let noise32 = sys.noise as f32;
     let jitter32 = sys.jitter as f32;
@@ -311,6 +312,7 @@ fn fresh_residual<M: crate::math::KernelMath>(
     let mut k_block = Mat::<f64>::zeros(n, block);
     let mut scratch = Mat::<f64>::zeros(n, block);
     let mut dist = Mat::<f64>::zeros(n, block);
+    let mut nested = Vec::new();
     let mut row_abs = vec![0.0f64; n];
     let mut sum = vec![0.0f64; n];
     let mut start = 0;
@@ -327,6 +329,7 @@ fn fresh_residual<M: crate::math::KernelMath>(
             Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
             k_block.as_mut().submatrix_mut(0, 0, n, len),
             scratch.as_mut().submatrix_mut(0, 0, n, len),
+            &mut nested,
             &mut [],
         )?;
         for jj in 0..len {
@@ -365,6 +368,7 @@ pub(crate) fn f64_alpha<M: crate::math::KernelMath>(
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),
+        &mut Vec::new(),
     )?;
     for i in 0..n {
         a[(i, i)] += diag;

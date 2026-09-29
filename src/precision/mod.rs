@@ -566,6 +566,7 @@ fn f64_cross_means<M: crate::math::KernelMath>(
     let mut k_block = Mat::<f64>::zeros(n, block);
     let mut scratch = Mat::<f64>::zeros(n, block);
     let mut dist = Mat::<f64>::zeros(n, block);
+    let mut nested = Vec::new();
     let mut start = 0;
     while start < m {
         let len = block.min(m - start);
@@ -580,6 +581,7 @@ fn f64_cross_means<M: crate::math::KernelMath>(
             Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
             k_block.as_mut().submatrix_mut(0, 0, n, len),
             scratch.as_mut().submatrix_mut(0, 0, n, len),
+            &mut nested,
             &mut [],
         )?;
         for j in 0..len {

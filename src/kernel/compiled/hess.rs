@@ -1,18 +1,24 @@
+use super::apply::{combine_diag, mul_assign};
 use super::grad::{
-    broadcast_self_diag, require_diag_len, scale_by_other_diags, write_product_grad,
+    ProductBuffers, broadcast_self_diag, eval_cell, product_with_owner, require_diag_len,
+    scale_by_other_diags, term_index_for_param,
 };
 use super::{
-    CompiledKernel, MixedKernelViews, ard_needs_coords, mul_triangle, require_scratch_shape,
+    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
+    require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::kernel::{Triangle, visit_triangle};
-use faer::{Mat, MatMut, MatRef};
+use faer::{MatMut, MatRef};
 
 impl<T: KernelScalar> CompiledKernel<T> {
     /// Writes `∂²K/∂θ_i ∂θ_j` from squared distances into `d2_k`.
     ///
     /// Product trees need `scratch` the same shape as `d2_k`. Leaves ignore it.
+    ///
+    /// A sum / product nested in another allocates one output-shaped buffer
+    /// per nesting level for the call.
     ///
     /// # Errors
     ///
@@ -22,12 +28,27 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub fn hess<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, T>,
-        mut d2_k: MatMut<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d2_k.nrows(), d2_k.ncols());
+        self.hess_with::<M>(dist, d2_k, (i, j), uplo, scratch, &mut nested)
+    }
+
+    /// [`Self::hess`] with caller-owned [`Nested`] levels.
+    pub(crate) fn hess_with<M: crate::math::KernelMath>(
+        &self,
+        dist: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        let (i, j) = pair;
         match self {
             Self::Rbf(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
             Self::RbfArd(_)
@@ -45,7 +66,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     term,
                     local_i,
                     local_j,
-                } => term.hess::<M>(dist, d2_k, local_i, local_j, uplo, scratch),
+                } => term.hess_with::<M>(dist, d2_k, (local_i, local_j), uplo, scratch, nested),
                 PairOwners::Distinct { .. } => {
                     zero_triangle(d2_k.as_mut(), uplo);
                     Ok(())
@@ -53,26 +74,57 @@ impl<T: KernelScalar> CompiledKernel<T> {
             },
             Self::Product(terms) => {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
-                product_hess::<M, _>(terms, dist, d2_k.as_mut(), i, j, uplo, scratch.as_mut())
+                let buffers = ProductBuffers::new(d2_k, scratch, nested, uplo);
+                product_hess(
+                    terms,
+                    (i, j),
+                    buffers,
+                    |term, out, scratch, nested| {
+                        term.apply_with::<M>(dist, out, uplo, scratch, nested)
+                    },
+                    |term, out, pair, scratch, nested| {
+                        term.hess_with::<M>(dist, out, pair, uplo, scratch, nested)
+                    },
+                    |term, out, param, scratch, nested| {
+                        term.grad_with::<M>(dist, out, param, uplo, scratch, nested)
+                    },
+                )
             }
         }
     }
 
     /// Writes `∂²K/∂θ_i ∂θ_j` from point coordinates.
     ///
+    /// A sum / product nested in another allocates one output-shaped buffer
+    /// per nesting level for the call.
+    ///
     /// # Errors
     ///
     /// Same as [`Self::hess`], with coordinates in place of distances.
-    #[allow(clippy::only_used_in_recursion)]
     pub fn hess_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
-        mut d2_k: MatMut<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d2_k.nrows(), d2_k.ncols());
+        self.hess_points_with::<M>(x, d2_k, (i, j), uplo, scratch, &mut nested)
+    }
+
+    /// [`Self::hess_points`] with caller-owned [`Nested`] levels.
+    pub(crate) fn hess_points_with<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        let (i, j) = pair;
         match self {
             Self::Rbf(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
             Self::Matern(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
@@ -90,7 +142,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     term,
                     local_i,
                     local_j,
-                } => term.hess_points::<M>(x, d2_k, local_i, local_j, uplo, scratch),
+                } => term.hess_points_with::<M>(x, d2_k, (local_i, local_j), uplo, scratch, nested),
                 PairOwners::Distinct { .. } => {
                     zero_triangle(d2_k.as_mut(), uplo);
                     Ok(())
@@ -98,7 +150,21 @@ impl<T: KernelScalar> CompiledKernel<T> {
             },
             Self::Product(terms) => {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
-                product_hess_points::<M, _>(terms, x, d2_k.as_mut(), i, j, uplo, scratch.as_mut())
+                let buffers = ProductBuffers::new(d2_k, scratch, nested, uplo);
+                product_hess(
+                    terms,
+                    (i, j),
+                    buffers,
+                    |term, out, scratch, nested| {
+                        term.apply_points_with::<M>(x, out, uplo, scratch, nested)
+                    },
+                    |term, out, pair, scratch, nested| {
+                        term.hess_points_with::<M>(x, out, pair, uplo, scratch, nested)
+                    },
+                    |term, out, param, scratch, nested| {
+                        term.grad_points_with::<M>(x, out, param, uplo, scratch, nested)
+                    },
+                )
             }
         }
     }
@@ -123,8 +189,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => {
                 require_diag_len(x, out)?;
                 let one = x.submatrix(0, 0, 1, x.ncols());
-                let mut cell = Mat::zeros(1, 1);
-                leaf.hess(one.as_ref(), cell.as_mut(), i, j, Triangle::Lower)?;
+                eval_cell(|cell| leaf.hess(one, cell, i, j, Triangle::Lower))?;
                 leaf.fill_diag_points(x, out)
             }
             Self::Rbf(leaf) => broadcast_self_diag(x, out, |one, cell| {
@@ -171,6 +236,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    // The cache and `x` views, output, pair, triangle, scratch, and levels.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn hess_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, T>,
@@ -179,6 +246,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         pair: (usize, usize),
         uplo: Triangle,
         scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         let (i, j) = pair;
         match self {
@@ -192,15 +260,21 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     term,
                     local_i,
                     local_j,
-                } => {
-                    term.hess_from_ard_cache::<M>(cache, x, d2_k, (local_i, local_j), uplo, scratch)
-                }
+                } => term.hess_from_ard_cache::<M>(
+                    cache,
+                    x,
+                    d2_k,
+                    (local_i, local_j),
+                    uplo,
+                    scratch,
+                    nested,
+                ),
                 PairOwners::Distinct { .. } => {
                     zero_triangle(d2_k, uplo);
                     Ok(())
                 }
             },
-            _ => self.hess_points::<M>(x, d2_k, i, j, uplo, scratch),
+            _ => self.hess_points_with::<M>(x, d2_k, pair, uplo, scratch, nested),
         }
     }
 
@@ -208,11 +282,12 @@ impl<T: KernelScalar> CompiledKernel<T> {
         &self,
         views: MixedKernelViews<'_, T>,
         mut d2_k: MatMut<'_, T>,
-        i: usize,
-        j: usize,
+        pair: (usize, usize),
         uplo: Triangle,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
+        let (i, j) = pair;
         match self {
             Self::Rbf(_)
             | Self::Matern(_)
@@ -220,15 +295,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.hess::<M>(views.dist, d2_k, i, j, uplo, scratch),
+            | Self::White(_) => self.hess_with::<M>(views.dist, d2_k, pair, uplo, scratch, nested),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => {
                 if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
-                    self.hess_from_ard_cache::<M>(cache, views.x, d2_k, (i, j), uplo, scratch)
+                    self.hess_from_ard_cache::<M>(cache, views.x, d2_k, pair, uplo, scratch, nested)
                 } else {
-                    self.hess_points::<M>(views.x, d2_k, i, j, uplo, scratch)
+                    self.hess_points_with::<M>(views.x, d2_k, pair, uplo, scratch, nested)
                 }
             }
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
@@ -236,7 +311,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     term,
                     local_i,
                     local_j,
-                } => term.hess_mixed::<M>(views, d2_k, local_i, local_j, uplo, scratch),
+                } => term.hess_mixed::<M>(views, d2_k, (local_i, local_j), uplo, scratch, nested),
                 PairOwners::Distinct { .. } => {
                     zero_triangle(d2_k.as_mut(), uplo);
                     Ok(())
@@ -244,14 +319,20 @@ impl<T: KernelScalar> CompiledKernel<T> {
             },
             Self::Product(terms) => {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
-                product_hess_mixed::<M, _>(
+                let buffers = ProductBuffers::new(d2_k, scratch, nested, uplo);
+                product_hess(
                     terms,
-                    views,
-                    d2_k.as_mut(),
-                    i,
-                    j,
-                    uplo,
-                    scratch.as_mut(),
+                    pair,
+                    buffers,
+                    |term, out, scratch, nested| {
+                        term.apply_mixed::<M>(views, out, uplo, scratch, nested)
+                    },
+                    |term, out, pair, scratch, nested| {
+                        term.hess_mixed::<M>(views, out, pair, uplo, scratch, nested)
+                    },
+                    |term, out, param, scratch, nested| {
+                        term.grad_mixed::<M>(views, out, param, uplo, scratch, nested)
+                    },
                 )
             }
         }
@@ -295,72 +376,10 @@ fn owners_for_pair<T: KernelScalar>(
     }
 }
 
-fn term_index_for_param<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    param_idx: usize,
-) -> Result<(usize, usize), GprError> {
-    let mut offset = 0;
-    for (idx, term) in terms.iter().enumerate() {
-        let n = term.num_params();
-        if param_idx < offset + n {
-            return Ok((idx, param_idx - offset));
-        }
-        offset += n;
-    }
-    Err(GprError::IndexOutOfRange {
-        reason: format!("kernel parameter index {param_idx} is out of range"),
-    })
-}
-
 fn zero_triangle<T: KernelScalar>(mut out: MatMut<'_, T>, uplo: Triangle) {
     visit_triangle(out.nrows(), uplo, |row, col| {
         out[(row, col)] = T::from_f64(0.0);
     });
-}
-
-fn product_hess<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    dist: MatRef<'_, T>,
-    d2_k: MatMut<'_, T>,
-    i: usize,
-    j: usize,
-    uplo: Triangle,
-    scratch: MatMut<'_, T>,
-) -> Result<(), GprError> {
-    match owners_for_pair(terms, i, j)? {
-        PairOwners::Same {
-            term: _,
-            local_i,
-            local_j,
-        } => {
-            let (owner, _) = term_index_for_param(terms, i)?;
-            product_same_leaf(
-                terms,
-                owner,
-                d2_k,
-                scratch,
-                uplo,
-                |term, dest, scratch| term.apply::<M>(dist, dest, uplo, scratch),
-                |term, dest, scratch| term.hess::<M>(dist, dest, local_i, local_j, uplo, scratch),
-            )
-        }
-        PairOwners::Distinct {
-            owner_i,
-            local_i,
-            owner_j,
-            local_j,
-        } => product_cross_leaf(
-            terms,
-            owner_i,
-            owner_j,
-            d2_k,
-            scratch,
-            uplo,
-            |term, dest, scratch| term.apply::<M>(dist, dest, uplo, scratch),
-            |term, dest, scratch| term.grad::<M>(dist, dest, local_i, uplo, scratch),
-            |term, dest, scratch| term.grad::<M>(dist, dest, local_j, uplo, scratch),
-        ),
-    }
 }
 
 fn custom_hess_diag<T: KernelScalar>(
@@ -371,12 +390,10 @@ fn custom_hess_diag<T: KernelScalar>(
     j: usize,
 ) -> Result<(), GprError> {
     require_diag_len(x, out)?;
-    let mut cell = Mat::zeros(1, 1);
     let width = x.ncols();
     for (row, slot) in out.iter_mut().enumerate() {
         let one = x.submatrix(row, 0, 1, width);
-        leaf.hess_points(one.as_ref(), cell.as_mut(), i, j, Triangle::Lower)?;
-        *slot = cell[(0, 0)];
+        *slot = eval_cell(|cell| leaf.hess_points(one, cell, i, j, Triangle::Lower))?;
     }
     Ok(())
 }
@@ -403,40 +420,54 @@ fn product_hess_diag<M: crate::math::KernelMath, T: KernelScalar>(
             local_j,
         } => {
             terms[owner_i].grad_diag_points::<M>(x, out, local_i)?;
-            let mut tmp = vec![T::from_f64(0.0); out.len()];
-            terms[owner_j].grad_diag_points::<M>(x, &mut tmp, local_j)?;
-            for (dst, src) in out.iter_mut().zip(tmp.iter()) {
-                *dst *= *src;
-            }
+            combine_diag(out, mul_assign, |start, block| {
+                let rows = x.subrows(start, block.len());
+                terms[owner_j].grad_diag_points::<M>(rows, block, local_j)
+            })?;
             scale_by_other_diags(terms, owner_i, Some(owner_j), x, out)
         }
     }
 }
 
-fn product_hess_points<M: crate::math::KernelMath, T: KernelScalar>(
+/// `∂²/∂θ_i ∂θ_j` of a product: one term's Hessian, or two terms' gradients,
+/// times the other terms. The writers get `(term, out, …, scratch, nested)`.
+fn product_hess<T: KernelScalar>(
     terms: &[CompiledKernel<T>],
-    x: MatRef<'_, T>,
-    d2_k: MatMut<'_, T>,
-    i: usize,
-    j: usize,
-    uplo: Triangle,
-    scratch: MatMut<'_, T>,
+    pair: (usize, usize),
+    buffers: ProductBuffers<'_, '_, T>,
+    apply: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
+    mut hess: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        (usize, usize),
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
+    grad: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        usize,
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
 ) -> Result<(), GprError> {
+    let (i, j) = pair;
     match owners_for_pair(terms, i, j)? {
         PairOwners::Same {
             local_i, local_j, ..
         } => {
             let (owner, _) = term_index_for_param(terms, i)?;
-            product_same_leaf(
+            product_with_owner(
                 terms,
                 owner,
-                d2_k,
-                scratch,
-                uplo,
-                |term, dest, scratch| term.apply_points::<M>(x, dest, uplo, scratch),
-                |term, dest, scratch| {
-                    term.hess_points::<M>(x, dest, local_i, local_j, uplo, scratch)
-                },
+                buffers,
+                apply,
+                |term, out, scratch, nested| hess(term, out, (local_i, local_j), scratch, nested),
             )
         }
         PairOwners::Distinct {
@@ -446,174 +477,73 @@ fn product_hess_points<M: crate::math::KernelMath, T: KernelScalar>(
             local_j,
         } => product_cross_leaf(
             terms,
-            owner_i,
-            owner_j,
-            d2_k,
-            scratch,
-            uplo,
-            |term, dest, scratch| term.apply_points::<M>(x, dest, uplo, scratch),
-            |term, dest, scratch| term.grad_points::<M>(x, dest, local_i, uplo, scratch),
-            |term, dest, scratch| term.grad_points::<M>(x, dest, local_j, uplo, scratch),
+            (owner_i, local_i),
+            (owner_j, local_j),
+            buffers,
+            apply,
+            grad,
         ),
     }
 }
 
-fn product_hess_mixed<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    views: MixedKernelViews<'_, T>,
-    d2_k: MatMut<'_, T>,
-    i: usize,
-    j: usize,
-    uplo: Triangle,
-    scratch: MatMut<'_, T>,
-) -> Result<(), GprError> {
-    match owners_for_pair(terms, i, j)? {
-        PairOwners::Same {
-            local_i, local_j, ..
-        } => {
-            let (owner, _) = term_index_for_param(terms, i)?;
-            product_same_leaf(
-                terms,
-                owner,
-                d2_k,
-                scratch,
-                uplo,
-                |term, dest, scratch| term.apply_mixed::<M>(views, dest, uplo, scratch),
-                |term, dest, scratch| {
-                    term.hess_mixed::<M>(views, dest, local_i, local_j, uplo, scratch)
-                },
-            )
-        }
-        PairOwners::Distinct {
-            owner_i,
-            local_i,
-            owner_j,
-            local_j,
-        } => product_cross_leaf(
-            terms,
-            owner_i,
-            owner_j,
-            d2_k,
-            scratch,
-            uplo,
-            |term, dest, scratch| term.apply_mixed::<M>(views, dest, uplo, scratch),
-            |term, dest, scratch| term.grad_mixed::<M>(views, dest, local_i, uplo, scratch),
-            |term, dest, scratch| term.grad_mixed::<M>(views, dest, local_j, uplo, scratch),
-        ),
-    }
-}
-
-fn product_same_leaf<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    owner: usize,
-    mut d2_k: MatMut<'_, T>,
-    mut scratch: MatMut<'_, T>,
-    uplo: Triangle,
-    mut apply: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
-    mut hess: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
-) -> Result<(), GprError> {
-    let n = d2_k.nrows();
-    let mut extra = None;
-    let mut started = false;
-    for (k, term) in terms.iter().enumerate() {
-        if k == owner {
-            continue;
-        }
-        if !started {
-            apply(term, d2_k.as_mut(), scratch.as_mut())?;
-            started = true;
-        } else if term.needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            apply(term, scratch.as_mut(), buf.as_mut())?;
-            mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
-        } else {
-            apply(term, scratch.as_mut(), d2_k.as_mut())?;
-            mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
-        }
-    }
-    if started {
-        if terms[owner].needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            hess(&terms[owner], scratch.as_mut(), buf.as_mut())?;
-        } else {
-            hess(&terms[owner], scratch.as_mut(), d2_k.as_mut())?;
-        }
-        mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
-    } else {
-        hess(&terms[owner], d2_k.as_mut(), scratch.as_mut())?;
-    }
-    Ok(())
-}
-
-// Owners, dest/scratch, apply, and both leaf grads do not fold without a new type.
-#[allow(clippy::too_many_arguments)]
+/// `∂K_a/∂θ_i · ∂K_b/∂θ_j · ∏_{k ∉ {a, b}} K_k` for owners `(a, i)` and `(b, j)`.
 fn product_cross_leaf<T: KernelScalar>(
     terms: &[CompiledKernel<T>],
-    owner_i: usize,
-    owner_j: usize,
-    mut d2_k: MatMut<'_, T>,
-    mut scratch: MatMut<'_, T>,
-    uplo: Triangle,
-    mut apply: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
-    mut grad_i: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
-    mut grad_j: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
+    (owner_i, local_i): (usize, usize),
+    (owner_j, local_j): (usize, usize),
+    buffers: ProductBuffers<'_, '_, T>,
+    mut apply: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
+    mut grad: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        usize,
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
 ) -> Result<(), GprError> {
-    let n = d2_k.nrows();
-    let mut extra = None;
+    let ProductBuffers {
+        mut out,
+        mut scratch,
+        nested,
+        uplo,
+    } = buffers;
+    let (rows, cols) = (out.nrows(), out.ncols());
     let mut started = false;
     for (k, term) in terms.iter().enumerate() {
         if k == owner_i || k == owner_j {
             continue;
         }
-        if !started {
-            apply(term, d2_k.as_mut(), scratch.as_mut())?;
-            started = true;
-        } else if term.needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            apply(term, scratch.as_mut(), buf.as_mut())?;
-            mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
+        if started {
+            let (own, deeper) = term_scratch(term, rows, cols, out.as_mut(), &mut *nested)?;
+            apply(term, scratch.as_mut(), own, deeper)?;
+            mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
         } else {
-            apply(term, scratch.as_mut(), d2_k.as_mut())?;
-            mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
+            apply(term, out.as_mut(), scratch.as_mut(), &mut *nested)?;
+            started = true;
         }
     }
+    let term_i = &terms[owner_i];
     if started {
-        write_product_grad(
-            &terms[owner_i],
-            scratch.as_mut(),
-            d2_k.as_mut(),
-            &mut extra,
-            n,
-            &mut grad_i,
-        )?;
-        mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
-        write_product_grad(
-            &terms[owner_j],
-            scratch.as_mut(),
-            d2_k.as_mut(),
-            &mut extra,
-            n,
-            &mut grad_j,
-        )?;
-        mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
+        let (own, deeper) = term_scratch(term_i, rows, cols, out.as_mut(), &mut *nested)?;
+        grad(term_i, scratch.as_mut(), local_i, own, deeper)?;
+        mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
     } else {
-        write_product_grad(
-            &terms[owner_i],
-            d2_k.as_mut(),
+        grad(
+            term_i,
+            out.as_mut(),
+            local_i,
             scratch.as_mut(),
-            &mut extra,
-            n,
-            &mut grad_i,
+            &mut *nested,
         )?;
-        write_product_grad(
-            &terms[owner_j],
-            scratch.as_mut(),
-            d2_k.as_mut(),
-            &mut extra,
-            n,
-            &mut grad_j,
-        )?;
-        mul_triangle(d2_k.as_mut(), scratch.as_ref(), uplo);
     }
+    let term_j = &terms[owner_j];
+    let (own, deeper) = term_scratch(term_j, rows, cols, out.as_mut(), nested)?;
+    grad(term_j, scratch.as_mut(), local_j, own, deeper)?;
+    mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
     Ok(())
 }
