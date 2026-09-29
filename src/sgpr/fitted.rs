@@ -8,7 +8,7 @@ use faer::MatRef;
 
 use crate::error::GprError;
 use crate::policy::with_kernel_exp;
-use crate::sparse::{SparseCore, sparse_core_accessors};
+use crate::sparse::{SparseCore, SparseScratch, sparse_core_accessors};
 
 use crate::kernel::KernelScalar;
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
@@ -37,6 +37,8 @@ use super::{FixedInducing, InducingLayout};
 #[derive(Clone, Debug)]
 pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePrecision> {
     pub(super) core: SparseCore,
+    /// Kernel scratch kept between `&mut self` calls.
+    pub(super) scratch: SparseScratch<P::Storage>,
     pub(super) optimizer: O,
     pub(super) inducing: PhantomData<I>,
     /// Lower `L` from `K_mm = L Lᵀ`.
@@ -147,6 +149,8 @@ where
             &self.core.y,
             &z_obs,
             self.core.m,
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
         ))?;
         self.core.kernel = kernel;
         self.core.likelihood = likelihood;
@@ -227,7 +231,12 @@ where
             let mut exact = self.exact_fitted()?;
             exact.value_and_gradient_into(params, out)?;
         } else {
-            with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(self, out, include_z))?;
+            let mut ks = std::mem::take(&mut self.scratch.storage);
+            let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(
+                self, out, include_z, &mut ks
+            ));
+            self.scratch.storage = ks;
+            result?;
         }
         Ok(value)
     }
@@ -277,7 +286,12 @@ where
             let mut exact = self.exact_fitted()?;
             exact.hessian_into(params, out)?;
         } else {
-            with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(self, out, include_z))?;
+            let mut ks = std::mem::take(&mut self.scratch.storage);
+            let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(
+                self, out, include_z, &mut ks
+            ));
+            self.scratch.storage = ks;
+            result?;
         }
         Ok(())
     }

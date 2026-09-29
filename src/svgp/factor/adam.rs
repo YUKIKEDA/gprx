@@ -118,7 +118,10 @@ where
             let batch = &order[start..end];
             user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
             model.set_params(&user)?;
-            svgp_value_and_gradient::<M, _>(model, &mut g_user, batch)?;
+            let mut scratch = std::mem::take(&mut model.scratch);
+            let result = svgp_value_and_gradient::<M, _>(model, &mut g_user, batch, &mut scratch);
+            model.scratch = scratch;
+            result?;
             user_grad_to_unconstrained(&user, &z, &intervals, &g_user, &mut g_z, n_theta, m);
             adam.step(&mut z, &g_z, &mut moment1, &mut moment2, &mut timestep);
             start = end;

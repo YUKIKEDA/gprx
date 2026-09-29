@@ -9,7 +9,7 @@ use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower, symme
 use crate::policy::KernelExp;
 use crate::precision::ModelPrecision;
 use crate::sparse::SparseCore;
-use crate::sparse::{k_mm_jitter_policy, kernel_cross};
+use crate::sparse::{KernelScratch, SparseScratch, k_mm_jitter_policy};
 use crate::svgp::FittedSvgp;
 use faer::{Mat, MatRef};
 
@@ -37,7 +37,18 @@ pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P>(
 where
     P: ModelPrecision,
 {
-    let state = assemble_svgp::<M, P::Storage>(&kernel, x, n_rows, n_cols, y, z, n_inducing, q)?;
+    let mut scratch = SparseScratch::<P::Storage>::default();
+    let state = assemble_svgp::<M, P::Storage>(
+        &kernel,
+        x,
+        n_rows,
+        n_cols,
+        y,
+        z,
+        n_inducing,
+        q,
+        &mut scratch.storage,
+    )?;
     Ok(FittedSvgp {
         core: SparseCore {
             kernel,
@@ -50,6 +61,7 @@ where
             d: n_cols,
             math: KernelExp::of::<M>(),
         },
+        scratch,
         k_mm_l: state.k_mm_l,
         a: state.a,
         q_mean: state.q_mean,
@@ -68,6 +80,7 @@ pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
     z: &[f64],
     n_inducing: usize,
     q: Option<(Vec<f64>, Mat<f64>)>,
+    ks: &mut KernelScratch<T>,
 ) -> Result<SvgpState<T>, GprError>
 where
     T: KernelScalar,
@@ -82,13 +95,11 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
-    let mut scratch = Mat::zeros(n_inducing, n_inducing);
-    compiled.eval_gram::<M>(
+    ks.gram::<M>(
+        &compiled,
         GramInputs::points(z_mat),
         k_mm.as_mut(),
         Triangle::Lower,
-        scratch.as_mut(),
-        &mut Vec::new(),
     )?;
     let mut chol_scratch = llt_scratch::<T>(n_inducing);
     cholesky_lower_with_retries(
@@ -101,18 +112,16 @@ where
     // `apply_cross` leaves White at zero.
     let mut a = if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
-        let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.eval_gram::<M>(
+        ks.gram::<M>(
+            &compiled,
             GramInputs::points(x_mat),
             gram.as_mut(),
             Triangle::Lower,
-            gram_scratch.as_mut(),
-            &mut Vec::new(),
         )?;
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
     } else {
-        kernel_cross::<M, _>(&compiled, z_mat, x_mat)?
+        ks.cross::<M>(&compiled, z_mat, x_mat)?
     };
     solve_lower(k_mm.as_ref(), a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];

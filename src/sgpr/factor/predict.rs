@@ -10,7 +10,7 @@ use crate::linalg::{
     cholesky_lower_with_retries, llt_scratch, promote_mat, solve_llt, solve_lower,
 };
 use crate::precision::ModelPrecision;
-use crate::sparse::{k_mm_jitter_policy, kernel_cross};
+use crate::sparse::{KernelScratch, k_mm_jitter_policy};
 use crate::{PredictOptions, Prediction, VarianceKind};
 use faer::{Mat, MatRef};
 
@@ -32,6 +32,8 @@ pub(crate) fn vfe_predict<M: crate::math::KernelMath, P>(
 where
     P: ModelPrecision,
 {
+    let mut ks = KernelScratch::new();
+    let mut ks64 = KernelScratch::new();
     if n_cols != d {
         return Err(GprError::DimensionMismatch {
             x_dim: n_cols,
@@ -43,13 +45,11 @@ where
         let compiled64 = kernel.compile();
         let z64 = pack_points(z_obs, m, d);
         let mut k64 = Mat::<f64>::zeros(m, m);
-        let mut scratch_k = Mat::<f64>::zeros(m, m);
-        compiled64.eval_gram::<M>(
+        ks64.gram::<M>(
+            &compiled64,
             GramInputs::points(z64.as_ref()),
             k64.as_mut(),
             Triangle::Lower,
-            scratch_k.as_mut(),
-            &mut Vec::new(),
         )?;
         let mut chol_scratch = llt_scratch::<f64>(m);
         cholesky_lower_with_retries(
@@ -93,7 +93,7 @@ where
     let query64 = pack_points(xs, n_rows, n_cols);
     let mut k_sz = if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let compiled64 = kernel.compile();
-        let cross = kernel_cross::<M, f64>(&compiled64, z64.as_ref(), query64.as_ref())?;
+        let cross = ks64.cross::<M>(&compiled64, z64.as_ref(), query64.as_ref())?;
         let mut stored = Mat::<P::Storage>::zeros(m, n_rows);
         for col in 0..cross.ncols() {
             for row in 0..cross.nrows() {
@@ -106,7 +106,7 @@ where
         let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
         let mut q_cast = P::Storage::empty_cols();
         let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
-        kernel_cross::<M, _>(&compiled, z_mat, query_x)?
+        ks.cross::<M>(&compiled, z_mat, query_x)?
     };
     solve_lower(k_mm_l, k_sz.as_mut());
     let mut kss = vec![lit::<P::Storage>(0.0); n_rows];
