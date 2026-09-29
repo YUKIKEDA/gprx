@@ -7,7 +7,7 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::gpr::PointId;
-use crate::gpr::online::PointRegistry;
+use crate::gpr::PointRegistry;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;

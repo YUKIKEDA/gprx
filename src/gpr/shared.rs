@@ -17,7 +17,6 @@ use crate::linalg::{
     cholesky_lower, cholesky_lower_with_retries, faer_par, faer_par_dims, inv_diag_from_chol_l,
     log_det_from_l, mul_lower_vec,
 };
-use crate::online::OnlineWorkspace;
 use crate::param::write_params;
 use crate::precision::{GpScalar, StoredFactor, TrainSystem};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
@@ -720,7 +719,7 @@ impl<T: KernelScalar> StoredFactor<'_, T> {
                 rhs,
                 faer_par_dims(n, m),
             ),
-            Self::Ldlt(ld) => OnlineWorkspace::<T>::apply_inv_l(ld, rhs, n),
+            Self::Ldlt(ld) => crate::linalg::apply_ldlt_inv_l(ld, rhs, n),
         }
     }
 
@@ -755,7 +754,7 @@ impl<T: KernelScalar> StoredFactor<'_, T> {
                 let mut inv_l = Mat::<T>::from_fn(n, n, |row, col| {
                     T::from_f64(if row == col { 1.0 } else { 0.0 })
                 });
-                OnlineWorkspace::<T>::apply_inv_l(ld, inv_l.as_mut(), n);
+                crate::linalg::apply_ldlt_inv_l(ld, inv_l.as_mut(), n);
                 for (i, slot) in out.iter_mut().enumerate() {
                     let mut q = 0.0f64;
                     for k in i..n {

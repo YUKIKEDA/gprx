@@ -9,4 +9,4 @@ Single crate `gprx`. Not a Cargo workspace. Do not create empty files ahead of t
 
 The directory tree lives in `docs/conventions.md`. The public surface lives in `docs/design.md`. Do not copy either into this rule.
 
-`Workspace`, `QueryWorkspace`, `OnlineWorkspace`, and faer types stay crate-private. Combinations that would be ignored or rejected at runtime must not be representable (`.cursor/rules/types.mdc`).
+`Workspace`, `QueryWorkspace`, `LltStore`, `LdltStore`, and faer types stay crate-private. Combinations that would be ignored or rejected at runtime must not be representable (`.cursor/rules/types.mdc`).

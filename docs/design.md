@@ -477,7 +477,7 @@ The public surface splits the trainer from the fitted model (P2-8).
 
 `FittedGpr` holds what inference needs: `L`, `α`, training `X`, the kernel, the likelihood, and the transforms. `W`, `∂K`, and argmin state live only during `fit` and are not kept on the fitted value. Calling `predict` in the same process immediately after `fit` is treated as the minority path. The main path hands over a fitted model, so the inference object is `FittedGpr`.
 
-`FittedGpr` and `OnlineGpr` share one crate-private `GprCore` (kernel spec, compiled kernel, likelihood, transforms, policies, training data, `α`, query buffers) and differ only in the factor (R4-2 / [#240](https://github.com/YUKIKEDA/gprx/issues/240)): `FittedGpr` holds the LLT buffers (`FitBuffers`, or a memory-mapped `L`), `OnlineGpr` holds the LDLT `OnlineWorkspace` and the `PointId` table. `StoredFactor { Llt, Ldlt }` is the factor view: `solve`, `L⁻¹` on columns, the per-pivot weight (`1` or `1/Dᵢ`), `log|A|`, and `diag(A⁻¹)`. Predict, covariance, sampling, LOO, NLML, and the predict `α` are written once on `GprCore` against that view. Every hyperparameter write (`set_params`, gradient, Hessian, `fit`, `refit`) runs on one borrowed `ExactFit` view (core + LLT buffers). `OnlineGpr` lends it temporary LLT buffers filled with `L √D` in O(n²) and writes the new factor back; the training data is not copied, and the only O(n³) work is the refactor the new `θ` needs.
+`FittedGpr` and `OnlineGpr` share one crate-private `GprCore` (kernel spec, compiled kernel, likelihood, transforms, policies, training data, `α`, query buffers) and differ only in the factor (R4-2 / [#240](https://github.com/YUKIKEDA/gprx/issues/240)): `FittedGpr` holds the LLT buffers (`FitBuffers`, or a memory-mapped `L`), `OnlineGpr` holds the LDLT `LdltStore` and the `PointId` table. `StoredFactor { Llt, Ldlt }` is the factor view: `solve`, `L⁻¹` on columns, the per-pivot weight (`1` or `1/Dᵢ`), `log|A|`, and `diag(A⁻¹)`. Predict, covariance, sampling, LOO, NLML, and the predict `α` are written once on `GprCore` against that view. Every hyperparameter write (`set_params`, gradient, Hessian, `fit`, `refit`) runs on one borrowed `ExactFit` view (core + LLT buffers). `OnlineGpr` lends it temporary LLT buffers filled with `L √D` in O(n²) and writes the new factor back; the training data is not copied, and the only O(n³) work is the refactor the new `θ` needs.
 
 The default `Gpr` is `Gpr<Lbfgs>`. `with_optimizer` replaces `O` (P2B-1). argmin `NonlinearCg` / `NelderMead` are P2B-2. argmin `Newton` is P2B-17. Leaf rebuilds follow §5.4 (P2B-18). There is no `with_recompute_strategy`. `Gpr<Fixed>::factor` only factors. The default `FittedGpr::predict` is a diagonal variance. Covariance between queries is a separate P2B-6 path (not a flag on diagonal `predict`). `loo_predict` returns per-training-point LOO from `L` and `α` as in GPML 5.4.2. Refactoring the same data at new hyperparameters is `FittedGpr::refit` (the fitted value keeps its `O`). `with_optimizer` / `factor` / `into_trainer` / `refit` keep the policies.
 
@@ -665,7 +665,7 @@ fit() ends → FittedGpr keeps L, α, X (Reuse Chols again here). W / ∂K / L-B
   → predict_into(&mut self): overwrite query_*, reuse Prediction capacity
 ```
 
-A batch-fit Workspace has fixed n. Capacity growth for online learning belongs to `OnlineWorkspace` (§11), and its memory policy is separate from the batch Workspace. `Workspace`, `QueryWorkspace`, `OnlineWorkspace`, and faer types are crate-private.
+A batch-fit Workspace has fixed n. Capacity growth for online learning belongs to `LdltStore` (§11), and its memory policy is separate from the batch Workspace. `Workspace`, `QueryWorkspace`, `LdltStore`, and faer types are crate-private.
 
 ## 8. Parallelism, SIMD, and the math backend
 
@@ -766,7 +766,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 ## 11. Online learning (adding and removing points)
 
-GPR cost grows as O(n³) with n, so adding and removing points one at a time is in scope. Beside the batch-fit Workspace (fixed n), there is a crate-private `OnlineWorkspace` and a public `OnlineGpr`. `FittedGpr::into_online(self)` converts. `insert` exists only on `OnlineGpr`.
+GPR cost grows as O(n³) with n, so adding and removing points one at a time is in scope. Beside the batch-fit Workspace (fixed n), there is a crate-private `LdltStore` and a public `OnlineGpr`. `FittedGpr::into_online(self)` converts. `insert` exists only on `OnlineGpr`.
 
 ### Cost
 
@@ -780,7 +780,7 @@ GPR cost grows as O(n³) with n, so adding and removing points one at a time is 
 As in §3, **LLT has no insert/delete API**. The online path is:
 
 1. **Append**: a hand-rolled bordered update. O(n²)
-2. **Delete at any index**: `OnlineWorkspace` holds an **LDLT factor** and uses `ldlt::update::delete_rows_and_cols_clobber`. On handwritten SPD matrices of size `2×2` / `5×5`, the reconstructed `A = L D Lᵀ` after delete matches a full LDLT (P3-1 / [#30](https://github.com/YUKIKEDA/gprx/issues/30)). There is no Givens downdate
+2. **Delete at any index**: `LdltStore` holds an **LDLT factor** and uses `ldlt::update::delete_rows_and_cols_clobber`. On handwritten SPD matrices of size `2×2` / `5×5`, the reconstructed `A = L D Lᵀ` after delete matches a full LDLT (P3-1 / [#30](https://github.com/YUKIKEDA/gprx/issues/30)). There is no Givens downdate
 
 Batch fit stays LLT. `FittedGpr::into_online` converts LLT→LDLT in O(n²):
 
@@ -805,12 +805,12 @@ At implementation time, check agreement with a full factorization on a small mat
 
 ### Capacity
 
-Batch fit and online differ (fixed n versus n that grows and shrinks). On growth, **reallocate and copy `LD`, `y`, `α`, and `v_buf` by the same steps**. faer scratch for delete grows to the same capacity. predict, NLML, and insert do not read the Gram `K` or the distance cache, so `OnlineWorkspace` does not hold them.
+Batch fit and online differ (fixed n versus n that grows and shrinks). On growth, **reallocate and copy `LD`, `y`, `α`, and `v_buf` by the same steps**. faer scratch for delete grows to the same capacity. predict, NLML, and insert do not read the Gram `K` or the distance cache, so `LdltStore` does not hold them.
 
 Crate-private. `from_active(n)` sets `n_active = n_capacity = n`. Training `X` is held by `OnlineGpr` and is not on this struct. Before an append insert, `OnlineGpr` calls `ensure_capacity`. There is no growth-factor field.
 
 ```rust
-struct OnlineWorkspace {
+struct LdltStore {
     ld_factor: Mat<f64>,    // LDLT factor (diagonal = D, strict lower triangle = L)
     alpha: Col<f64>,
     y: Col<f64>,
@@ -833,9 +833,9 @@ struct OnlineWorkspace {
 
 ### Steps and the invariant
 
-**Append**: (1) if capacity is short, `OnlineWorkspace::ensure_capacity` (factor 2). Training `X` / `y` on `OnlineGpr` grow by the same factor. Query buffers use `ensure_at_least`. (2) Distances from the new point to the existing n points (O(n). One column is sequential, and `k` is written directly into `v_buf`). (3) Add only the kernel diagonal `k_new` (insert does not write a new row or column of `K`. predict and NLML read only LD). (4) Bordered LDLT update (O(n²). The triangular solve reuses `v_buf`). (5) `α` is not solved on insert (libgp `alpha_needs_update`); insert only marks it stale in O(1). The first read resolves the LDLT again: a `&mut self` read (`predict_into`, a hyperparameter write) stores `α` on the model, and a `&self` read (`predict`, covariance, sample, LOO, NLML, `alpha()`, `save_with_factor`) fills a `OnceLock` cache that the next insert / delete clears. A failed solve (a `MixedPrecision` `f64` fallback that does not factor) is that read's `Err`, so `OnlineGpr::alpha()` returns `Result` (R4-2b / [#265](https://github.com/YUKIKEDA/gprx/issues/265)). (6) `PointRegistry` issues a new `PointId`.
+**Append**: (1) if capacity is short, `LdltStore::ensure_capacity` (factor 2). Training `X` / `y` on `OnlineGpr` grow by the same factor. Query buffers use `ensure_at_least`. (2) Distances from the new point to the existing n points (O(n). One column is sequential, and `k` is written directly into `v_buf`). (3) Add only the kernel diagonal `k_new` (insert does not write a new row or column of `K`. predict and NLML read only LD). (4) Bordered LDLT update (O(n²). The triangular solve reuses `v_buf`). (5) `α` is not solved on insert (libgp `alpha_needs_update`); insert only marks it stale in O(1). The first read resolves the LDLT again: a `&mut self` read (`predict_into`, a hyperparameter write) stores `α` on the model, and a `&self` read (`predict`, covariance, sample, LOO, NLML, `alpha()`, `save_with_factor`) fills a `OnceLock` cache that the next insert / delete clears. A failed solve (a `MixedPrecision` `f64` fallback that does not factor) is that read's `Err`, so `OnlineGpr::alpha()` returns `Result` (R4-2b / [#265](https://github.com/YUKIKEDA/gprx/issues/265)). (6) `PointRegistry` issues a new `PointId`.
 
-**Delete**: (1) update LD with `ldlt::update::delete_rows_and_cols_clobber` (O(n²). Scratch lives on `OnlineWorkspace` and is reused). (2) Remove the matching entries from `y` and `X` on `OnlineGpr` and pack the later rows/columns (O(n)). (3) Shift `PointRegistry` indices in the same order. (4) `α` is not solved on delete either. The first `predict` / NLML / `alpha()` resolves the LDLT again. `n_capacity` stays. The last point is not deleted (`InsufficientData`, `min = 2`). An unknown or already-deleted `PointId` is `InvalidPointId`.
+**Delete**: (1) update LD with `ldlt::update::delete_rows_and_cols_clobber` (O(n²). Scratch lives on `LdltStore` and is reused). (2) Remove the matching entries from `y` and `X` on `OnlineGpr` and pack the later rows/columns (O(n)). (3) Shift `PointRegistry` indices in the same order. (4) `α` is not solved on delete either. The first `predict` / NLML / `alpha()` resolves the LDLT again. `n_capacity` stays. The last point is not deleted (`InsufficientData`, `min = 2`). An unknown or already-deleted `PointId` is `InvalidPointId`.
 
 **Invariant**: when a delete shifts internal indices, `LD` / `y` / `alpha` on the workspace, `X` on `OnlineGpr`, and `PointRegistry` **must stay in the same order**. One of them drifting produces the wrong solution. Tests (§12) check this invariant explicitly.
 
