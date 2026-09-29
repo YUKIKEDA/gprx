@@ -242,7 +242,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn leaf_at(&self, leaf: usize) -> Result<&Self, GprError> {
         let mut remaining = leaf;
         self.find_leaf_at(&mut remaining)
-            .ok_or(GprError::IndexOutOfRange {
+            .ok_or_else(|| GprError::IndexOutOfRange {
                 reason: format!("leaf index {leaf} is out of range"),
             })
     }
@@ -584,7 +584,7 @@ fn split_terms<T: KernelScalar>(
 ) -> Result<(&CompiledKernel<T>, &[CompiledKernel<T>]), GprError> {
     terms
         .split_first()
-        .ok_or(GprError::UnsupportedKernelOperation {
+        .ok_or_else(|| GprError::UnsupportedKernelOperation {
             reason: "sum/product has no terms".to_owned(),
         })
 }

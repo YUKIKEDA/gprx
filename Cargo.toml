@@ -26,6 +26,7 @@ expect_used = "deny"
 panic = "deny"
 dbg_macro = "deny"
 float_cmp = "deny"
+or_fun_call = "deny"
 
 [dependencies]
 argmin = { version = "0.11.0", default-features = false }
