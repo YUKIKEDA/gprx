@@ -587,7 +587,7 @@ impl<O, P> From<(Gpr<O, P>, GprError)> for GprError {
 #[path = "fitted.rs"]
 mod fitted;
 
-pub(crate) use fitted::{ExactFit, LltStore, fit_buffers};
+pub(crate) use fitted::{ExactFit, LeafCache, LltStore, fit_buffers};
 
 #[cfg(test)]
 #[path = "tests.rs"]

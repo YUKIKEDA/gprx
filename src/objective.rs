@@ -9,10 +9,9 @@
 //! [`TwiceDifferentiable`].
 
 use crate::error::GprError;
-use crate::gpr::ExactFit;
+use crate::gpr::{ExactFit, LeafCache};
 use crate::param::Interval;
 use crate::sgpr::{FittedSgpr, InducingLayout};
-use faer::Mat;
 
 /// Optimizer-facing scalar objective (`value` only).
 ///
@@ -33,6 +32,11 @@ pub trait Objective {
 
     /// Returns the objective after the coordinates in `indices` changed.
     ///
+    /// `indices` lists **every** coordinate of `params` that differs from
+    /// the `params` of the previous evaluation on this objective, not from
+    /// the optimizer's accepted point. After a rejected proposal, the next
+    /// step lists the coordinate it reverted as well.
+    ///
     /// The default rebuilds everything through [`Self::value`]. The GPR fit
     /// objective rebuilds only the touched kernel leaves when the optimizer
     /// sets [`crate::Optimizer::USES_CHANGE_INDICES`] and the fit keeps a
@@ -41,7 +45,8 @@ pub trait Objective {
     /// # Errors
     ///
     /// Same as [`Self::value`]. An incremental implementation also rejects
-    /// an empty, duplicate, or out-of-range `indices`.
+    /// an empty, duplicate, or out-of-range `indices`, and a step that
+    /// changed a coordinate `indices` does not list.
     fn value_at_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
         let _ = indices;
         self.value(params)
@@ -94,9 +99,12 @@ pub trait TwiceDifferentiable: Differentiable {
 
 /// Partial kernel rebuild from changed parameter indices.
 ///
-/// `indices` is the list of flat `θ` positions that changed. Empty, duplicate,
-/// or out-of-range indices are a [`GprError`] at this boundary. Full rebuilds
-/// use [`Objective::value`]. The GPR fit objective implements this for every
+/// `indices` is every flat `θ` position that changed since the previous
+/// evaluation on this objective (see [`Objective::value_at_changes`]). Only
+/// those positions decide which leaves are rebuilt; changes are never
+/// inferred from the numbers. Empty, duplicate, or out-of-range indices, and
+/// an unlisted change, are a [`GprError`] at this boundary. Full rebuilds use
+/// [`Objective::value`]. The GPR fit objective implements this for every
 /// optimizer and buffer policy.
 pub trait IncrementalObjective: Objective {
     /// Returns the objective after rebuilding only the leaves that `indices`
@@ -105,8 +113,8 @@ pub trait IncrementalObjective: Objective {
     /// # Errors
     ///
     /// Returns [`GprError`] when `params` is the wrong length, `indices` is
-    /// empty, contains a duplicate, or contains `i >= n_params`, or when the
-    /// model cannot evaluate.
+    /// empty, contains a duplicate, contains `i >= n_params`, or leaves out a
+    /// coordinate that changed, or when the model cannot evaluate.
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError>;
 }
 
@@ -122,8 +130,7 @@ pub(crate) trait HasBounds {
 pub struct GprObjective<'a, P: crate::precision::GpScalar = crate::precision::DoublePrecision> {
     model: ExactFit<'a, P>,
     scratch: Vec<f64>,
-    leaf_grams: Vec<Mat<P::Storage>>,
-    leaves_primed: bool,
+    leaves: LeafCache<P::Storage>,
     /// Rebuild only dirty leaves in [`Objective::value`] /
     /// [`Objective::value_at_changes`]. Set when the optimizer reports changed
     /// coordinates and the fit keeps a dedicated `W`.
@@ -139,8 +146,7 @@ where
         Self {
             model,
             scratch,
-            leaf_grams: Vec::new(),
-            leaves_primed: false,
+            leaves: LeafCache::new(),
             incremental: false,
         }
     }
@@ -168,12 +174,8 @@ where
     }
 
     fn leaf_value(&mut self, params: &[f64], indices: Option<&[usize]>) -> Result<f64, GprError> {
-        self.model.value_from_leaf_grams(
-            params,
-            indices,
-            &mut self.leaf_grams,
-            &mut self.leaves_primed,
-        )
+        self.model
+            .value_from_leaf_grams(params, indices, &mut self.leaves)
     }
 }
 

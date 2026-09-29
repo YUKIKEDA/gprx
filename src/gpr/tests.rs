@@ -2685,7 +2685,7 @@ fn incremental_cached_leaves_match_full_after_later_steps() {
         let mut obj = incr.objective().with_change_indices(true);
         obj.value(&start).expect("prime");
         IncrementalObjective::value_with_changes(&mut obj, &after_first, &[0]).expect("rejected");
-        IncrementalObjective::value_with_changes(&mut obj, &rejected_then_other, &[1])
+        IncrementalObjective::value_with_changes(&mut obj, &rejected_then_other, &[0, 1])
             .expect("other coord from start")
     };
     let v_full = full
@@ -2693,6 +2693,27 @@ fn incremental_cached_leaves_match_full_after_later_steps() {
         .value(&rejected_then_other)
         .expect("full reject");
     assert_close(v_incr, v_full, TOL);
+}
+
+#[test]
+fn incremental_rejects_an_unlisted_change() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+        + KernelSpec::from(RbfKernel::new(0.8).expect("valid"));
+    let mut incr = incremental_at_init(kernel, 0.16);
+    let n = incr.num_params();
+    let mut start = vec![0.0; n];
+    incr.get_params(&mut start).expect("len");
+    let mut first = start.clone();
+    first[0] += 0.15;
+    let mut both_moved = start.clone();
+    both_moved[1] += 0.2;
+    let mut obj = incr.objective().with_change_indices(true);
+    obj.value(&start).expect("prime");
+    IncrementalObjective::value_with_changes(&mut obj, &first, &[0]).expect("leaf 0");
+    assert!(matches!(
+        IncrementalObjective::value_with_changes(&mut obj, &both_moved, &[1]),
+        Err(GprError::IndexOutOfRange { .. })
+    ));
 }
 
 #[test]
