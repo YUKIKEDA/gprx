@@ -694,6 +694,40 @@ mod tests {
     }
 
     #[test]
+    fn mapped_factor_survives_failed_set_params() {
+        let fitted = Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1)
+                .expect("noise")
+                .with_bounds(Interval::new(1e-30, 1e5).expect("open"))
+                .expect("inside"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 0.0], 2, 1, &[0.5, -0.25])
+        .map_err(|(_, e)| e)
+        .expect("factor");
+        let want = fitted.predict(&[0.25], 1, 1).expect("predict");
+        let dir = temp_dir("mapped-failed-set");
+        fitted.save_with_factor(&dir).expect("save");
+        let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
+        let LoadedGpr::Double(mut model) = loaded else {
+            panic!("default save is double precision");
+        };
+        let mut bad = [0.0; 2];
+        model.get_params(&mut bad).expect("len 2");
+        bad[0] = 0.5;
+        bad[1] = (1e-20_f64).ln();
+        assert!(matches!(
+            model.set_params(&bad),
+            Err(GprError::CholeskyFailed { .. })
+        ));
+        let got = model.predict(&[0.25], 1, 1).expect("usable after failure");
+        assert_close(got.mean[0], want.mean[0], TOL);
+        assert_close(got.variance[0], want.variance[0], TOL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn linear_round_trips_without_distance_cache() {
         let fitted = Gpr::new(
             KernelSpec::from(LinearKernel::new(1.0).expect("σ²")),

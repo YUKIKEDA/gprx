@@ -23,7 +23,7 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::model::fit_buffers;
+use super::model::{LltStore, fit_buffers};
 use super::{ExactFit, FittedGpr, Gpr, GprCore, PointId, Policies, with_kernel_exp};
 
 #[derive(Clone, Debug)]
@@ -980,21 +980,19 @@ where
     P: GpScalar,
 {
     let n = core.n;
-    let mut ws = fit_buffers::<P>(n, core.d, core.policies, &core.compiled)?;
-    online.fill_llt_into(ws.core_mut().k_matrix.as_mut(), n);
-    ws.core_mut().factor_jitter = online.factor_jitter;
+    let mut store = LltStore::new(fit_buffers::<P>(n, core.policies, &core.compiled)?);
+    online.fill_llt_into(store.buffers.core_mut().k_matrix.as_mut(), n);
+    store.buffers.core_mut().factor_jitter = online.factor_jitter;
     let factor_alpha = core.factor_alpha.clone();
     let alpha = core.alpha.clone();
-    let mut mapped = None;
     let result = f(&mut ExactFit {
         core: &mut *core,
-        ws: &mut ws,
-        mapped: &mut mapped,
+        store: &mut store,
     });
     match result {
         Ok(value) => {
-            online.fill_ld_from_llt(ws.core().k_matrix.as_ref(), n)?;
-            online.factor_jitter = ws.core().factor_jitter;
+            online.fill_ld_from_llt(store.l(), n)?;
+            online.factor_jitter = store.buffers.core().factor_jitter;
             OnlineWorkspace::set_f64_prefix(&mut online.y, &core.y_train);
             OnlineWorkspace::set_vector_prefix(&mut online.alpha, &core.factor_alpha);
             Ok(value)

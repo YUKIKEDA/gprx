@@ -9,10 +9,8 @@ use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::param::write_params;
-use crate::persist::MappedTensors;
 use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{IdentityInput, IdentityTarget, UnfittedTarget, UnfittedTransform};
-use crate::workspace::FitWorkspace;
 
 use super::{
     CholeskyBuffer, DistanceCachePolicy, FitBuffers, GprCore, JitterPolicy, KernelExp,
@@ -150,8 +148,7 @@ impl<O: Clone, P> Clone for Gpr<O, P> {
 pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
     core: GprCore<P>,
     optimizer: O,
-    workspace: FitBuffers<P>,
-    mapped_factor: Option<MappedTensors>,
+    store: LltStore<P>,
 }
 
 impl<O, P> Clone for FittedGpr<O, P>
@@ -160,15 +157,10 @@ where
     P: GpScalar,
 {
     fn clone(&self) -> Self {
-        let mut workspace = self.workspace.clone();
-        if let Some(mapped) = &self.mapped_factor {
-            P::copy_mapped_l(mapped.l_view(), workspace.core_mut().k_matrix.as_mut());
-        }
         Self {
             core: self.core.clone(),
             optimizer: self.optimizer.clone(),
-            workspace,
-            mapped_factor: None,
+            store: self.store.clone(),
         }
     }
 }
@@ -532,8 +524,7 @@ where
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
         let mut view = ExactFit {
             core: &mut model.core,
-            ws: &mut model.workspace,
-            mapped: &mut model.mapped_factor,
+            store: &mut model.store,
         };
         match view.optimize(&model.optimizer) {
             Ok(()) => Ok(model),
@@ -596,7 +587,7 @@ impl<O, P> From<(Gpr<O, P>, GprError)> for GprError {
 #[path = "fitted.rs"]
 mod fitted;
 
-pub(crate) use fitted::{ExactFit, fit_buffers};
+pub(crate) use fitted::{ExactFit, LltStore, fit_buffers};
 
 #[cfg(test)]
 #[path = "tests.rs"]

@@ -45,7 +45,6 @@ fn uses_change_indices<Obj, O: Optimizer<Obj>>(_obj: &Obj) -> bool {
 /// tensor gets no distance cache, whatever the policy says.
 pub(crate) fn fit_buffers<P: GpScalar>(
     n: usize,
-    d: usize,
     policies: Policies,
     compiled: &CompiledKernel<P::Storage>,
 ) -> Result<FitBuffers<P>, GprError> {
@@ -54,11 +53,7 @@ pub(crate) fn fit_buffers<P: GpScalar>(
     } else {
         DistanceCachePolicy::Uncached
     };
-    let mut workspace = FitBuffers::<P>::new(n, cache, policies.cholesky_buffer)?;
-    if workspace.has_distance_cache() && compiled.needs_ard_sq_diff() {
-        workspace.ensure_ard_if_cached(n, d)?;
-    }
-    Ok(workspace)
+    FitBuffers::<P>::new(n, cache, policies.cholesky_buffer)
 }
 
 /// Borrowed fit state: the shared core plus the LLT buffers.
@@ -68,16 +63,80 @@ pub(crate) fn fit_buffers<P: GpScalar>(
 /// [`OnlineGpr`] lends temporary ones filled from its LDLT.
 pub(crate) struct ExactFit<'a, P: GpScalar> {
     pub(crate) core: &'a mut GprCore<P>,
-    pub(crate) ws: &'a mut FitBuffers<P>,
-    pub(crate) mapped: &'a mut Option<MappedTensors>,
+    pub(crate) store: &'a mut LltStore<P>,
+}
+
+/// Kernel, compiled kernel, and likelihood at one `θ`, before it is committed.
+struct Theta<S: KernelScalar> {
+    kernel: KernelSpec,
+    compiled: CompiledKernel<S>,
+    likelihood: GaussianLikelihood,
+}
+
+/// The LLT factor of a batch fit: the fit buffers, plus a memory-mapped
+/// `f64` `L` while a loaded model has not been written to.
+pub(crate) struct LltStore<P: GpScalar> {
+    pub(crate) buffers: FitBuffers<P>,
+    /// Loaded `L`. Every factor write drops it first and lands in `buffers`.
+    mapped: Option<MappedTensors>,
+}
+
+impl<P: GpScalar> LltStore<P> {
+    pub(crate) fn new(buffers: FitBuffers<P>) -> Self {
+        Self {
+            buffers,
+            mapped: None,
+        }
+    }
+
+    pub(crate) fn with_mapped(buffers: FitBuffers<P>, mapped: Option<MappedTensors>) -> Self {
+        Self { buffers, mapped }
+    }
+
+    /// `L` of the current training system.
+    pub(crate) fn l(&self) -> MatRef<'_, P::Storage> {
+        let mapped = self.mapped.as_ref().map(|mapped| mapped.l_view());
+        P::view_factor(mapped, self.buffers.core().k_matrix.as_ref())
+    }
+
+    /// `L`, and the per-thread kernel scratch, borrowed together.
+    pub(crate) fn l_and_thread_scratch(
+        &mut self,
+    ) -> (MatRef<'_, P::Storage>, &mut Vec<Mat<P::Storage>>) {
+        let mapped = self.mapped.as_ref().map(|mapped| mapped.l_view());
+        let WorkspaceCore {
+            k_matrix,
+            thread_scratch,
+            ..
+        } = self.buffers.core_mut();
+        (P::view_factor(mapped, k_matrix.as_ref()), thread_scratch)
+    }
+
+    /// Drops the mapped `L` before the buffers are written.
+    fn release_mapped(&mut self) {
+        self.mapped = None;
+    }
+}
+
+impl<P: GpScalar> Clone for LltStore<P> {
+    /// Copies a mapped `L` into the clone's own buffers.
+    fn clone(&self) -> Self {
+        let mut buffers = self.buffers.clone();
+        if let Some(mapped) = &self.mapped {
+            P::copy_mapped_l(mapped.l_view(), buffers.core_mut().k_matrix.as_mut());
+        }
+        Self {
+            buffers,
+            mapped: None,
+        }
+    }
 }
 
 impl<P: GpScalar> ExactFit<'_, P> {
     pub(crate) fn reborrow(&mut self) -> ExactFit<'_, P> {
         ExactFit {
             core: &mut *self.core,
-            ws: &mut *self.ws,
-            mapped: &mut *self.mapped,
+            store: &mut *self.store,
         }
     }
 
@@ -105,70 +164,40 @@ impl<P: GpScalar> ExactFit<'_, P> {
             optimizer.minimize(&mut obj, &init)
         };
         self.commit_or_revert_optimize(kernel_before, likelihood_before, result)?;
+        self.finish()
+    }
+
+    /// Rebuilds `L` at the current `θ` and publishes the predict `α`.
+    pub(crate) fn refactor(&mut self) -> Result<(), GprError> {
+        self.factorize_current()?;
+        self.finish()
+    }
+
+    /// Ends every public write: `L` back in place of a reuse `W`, then the
+    /// predict `α` for that `L`. Between public calls the predict `α`
+    /// always matches the stored factor.
+    fn finish(&mut self) -> Result<(), GprError> {
         self.restore_cholesky_if_overwritten()?;
         self.publish_predict_alpha()
     }
 
-    /// Rebuilds `L` / `α` at the current `θ` and publishes the predict `α`.
-    pub(crate) fn refactor(&mut self) -> Result<(), GprError> {
-        self.factorize_current()?;
-        self.publish_predict_alpha()
-    }
-
     pub(crate) fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
-        let mapped = self.mapped.as_ref().map(|mapped| mapped.l_view());
-        let core = self.ws.core();
-        let factor = StoredFactor::Llt(P::view_factor(mapped, core.k_matrix.as_ref()));
-        self.core
-            .publish_predict_alpha(factor, core.factor_jitter, CholeskyStage::Fit)
+        let jitter = self.store.buffers.core().factor_jitter;
+        self.core.publish_predict_alpha(
+            StoredFactor::Llt(self.store.l()),
+            jitter,
+            CholeskyStage::Fit,
+        )
     }
 
     pub(crate) fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        let n_kernel = self.core.kernel.num_params();
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
-        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
-        let workspace = self.ws.clone();
-        let alpha = self.core.alpha.clone();
-        let factor_alpha = self.core.factor_alpha.clone();
         let kernel_before = self.core.kernel.clone();
         let likelihood_before = self.core.likelihood;
-        let mapped_before = self.mapped.take();
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
-            &mut self.core.x_cast,
-        );
-        if let Err(err) = with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
-            &compiled,
-            x,
-            &mut *self.ws,
-            &self.core.y_train,
-            likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-        )) {
-            *self.ws = workspace;
-            self.core.alpha = alpha;
-            self.core.factor_alpha = factor_alpha;
-            *self.mapped = mapped_before;
-            return Err(err);
-        }
-        self.copy_factor_alpha();
-        self.core.kernel = kernel;
-        self.core.compiled = compiled;
-        self.core.likelihood = likelihood;
-        if let Err(err) = self.publish_predict_alpha() {
-            *self.ws = workspace;
-            self.core.alpha = alpha;
-            self.core.factor_alpha = factor_alpha;
-            self.core.kernel = kernel_before;
-            self.core.likelihood = likelihood_before;
-            self.core.compiled = self.core.kernel.compile_as::<P::Storage>();
-            *self.mapped = mapped_before;
+        self.factor_at(params)?;
+        if let Err(err) = self.finish() {
+            self.revert_theta(kernel_before, likelihood_before);
+            let _ = self.publish_predict_alpha();
             return Err(err);
         }
         Ok(())
@@ -180,9 +209,59 @@ impl<P: GpScalar> ExactFit<'_, P> {
         out: &mut [f64],
     ) -> Result<f64, GprError> {
         let nlml = self.value_and_gradient_into_fit(params, out)?;
-        self.restore_cholesky_if_overwritten()?;
-        self.publish_predict_alpha()?;
+        self.finish()?;
         Ok(nlml)
+    }
+
+    /// Factors `A` at `params` and commits `θ`.
+    ///
+    /// The one rollback rule for hyperparameter writes: `θ` is committed only
+    /// after `A` factors. On failure `θ` is unchanged and `L` / `α` are
+    /// rebuilt at it, so nothing is copied up front.
+    fn factor_at(&mut self, params: &[f64]) -> Result<(), GprError> {
+        let n_kernel = self.core.kernel.num_params();
+        let next = self.prepared_params(params, n_kernel)?;
+        if let Err(err) = self.factor(Some(&next)) {
+            let _ = self.factorize_current();
+            return Err(err);
+        }
+        self.commit_theta(next);
+        Ok(())
+    }
+
+    /// Factors `A` at `theta` (the stored `θ` when `None`) into the buffers.
+    fn factor(&mut self, theta: Option<&Theta<P::Storage>>) -> Result<(), GprError> {
+        self.store.release_mapped();
+        let (compiled, noise) = match theta {
+            Some(next) => (&next.compiled, next.likelihood.noise_variance()),
+            None => (&self.core.compiled, self.core.likelihood.noise_variance()),
+        };
+        let x = P::Storage::storage_cols(
+            self.core
+                .x
+                .as_ref()
+                .submatrix(0, 0, self.core.n, self.core.d),
+            &mut self.core.x_cast,
+        );
+        with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
+            compiled,
+            x,
+            &mut self.store.buffers,
+            &self.core.y_train,
+            noise,
+            FactorPolicy {
+                jitter: self.core.policies.jitter,
+                stage: CholeskyStage::Fit,
+            },
+        ))?;
+        self.commit_factor();
+        Ok(())
+    }
+
+    fn commit_theta(&mut self, next: Theta<P::Storage>) {
+        self.core.kernel = next.kernel;
+        self.core.compiled = next.compiled;
+        self.core.likelihood = next.likelihood;
     }
 
     /// Joint MLL+grad used during `fit`. Does not restore `L` when the buffer
@@ -196,38 +275,12 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let n_params = self.num_params();
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params, "parameters")?;
-        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        self.factor_at(params)?;
         let n = self.core.n;
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
-            &mut self.core.x_cast,
-        );
-        if let Err(err) = with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
-            &compiled,
-            x,
-            &mut *self.ws,
-            &self.core.y_train,
-            likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-        )) {
-            let _ = self.factorize_current();
-            return Err(err);
-        }
-        self.copy_factor_alpha();
-        self.core.kernel = kernel;
-        self.core.likelihood = likelihood;
-        self.core.compiled = compiled;
-        *self.mapped = None;
         let mut rows = P::Storage::empty_rows();
         let y = P::Storage::storage_rows(&self.core.y_train, &mut rows);
         let nlml = neg_mll_from_factor(
-            self.ws.core().k_matrix.as_ref(),
+            self.store.buffers.core().k_matrix.as_ref(),
             y,
             &self.core.factor_alpha,
             n,
@@ -251,9 +304,9 @@ impl<P: GpScalar> ExactFit<'_, P> {
         if let Some(changed) = indices {
             require_change_indices(changed, n_params)?;
         }
-        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        let next = self.prepared_params(params, n_kernel)?;
         let n = self.core.n;
-        let n_leaves = compiled.leaf_count();
+        let n_leaves = next.compiled.leaf_count();
         if leaf_grams.len() != n_leaves || leaf_grams.first().is_none_or(|m| m.nrows() != n) {
             *leaf_grams = (0..n_leaves)
                 .map(|_| Mat::<P::Storage>::zeros(n, n))
@@ -265,9 +318,9 @@ impl<P: GpScalar> ExactFit<'_, P> {
             dirty.fill(false);
             let mut last = vec![0.0; n_params];
             write_params(&self.core.kernel, &self.core.likelihood, &mut last)?;
-            for (j, (&prev, &next)) in last.iter().zip(params.iter()).enumerate() {
-                if prev.to_bits() != next.to_bits() && j < n_kernel {
-                    dirty[compiled.leaf_index_for_param(j)?] = true;
+            for (j, (&prev, &param)) in last.iter().zip(params.iter()).enumerate() {
+                if prev.to_bits() != param.to_bits() && j < n_kernel {
+                    dirty[next.compiled.leaf_index_for_param(j)?] = true;
                 }
             }
         }
@@ -281,24 +334,25 @@ impl<P: GpScalar> ExactFit<'_, P> {
                     &mut self.core.x_cast,
                 );
                 with_kernel_exp!(self.core.policies.math, M => apply_compiled_to::<_, _, M>(
-                    compiled.leaf_at(i)?,
+                    next.compiled.leaf_at(i)?,
                     x,
-                    &mut *self.ws,
+                    &mut self.store.buffers,
                     slot.as_mut(),
                 ))?;
             }
         }
+        self.store.release_mapped();
         if let Err(err) = factor_written_k_with_policy(
-            &mut *self.ws,
+            &mut self.store.buffers,
             &self.core.y_train,
-            likelihood.noise_variance(),
+            next.likelihood.noise_variance(),
             FactorPolicy {
                 jitter: self.core.policies.jitter,
                 stage: CholeskyStage::Fit,
             },
             |ws| {
                 let core = ws.core_mut();
-                compiled.combine_from_leaf_grams(
+                next.compiled.combine_from_leaf_grams(
                     leaf_grams,
                     core.k_matrix.as_mut(),
                     core.exp_buf.as_mut(),
@@ -311,15 +365,12 @@ impl<P: GpScalar> ExactFit<'_, P> {
             return Err(err);
         }
         *primed = true;
-        self.copy_factor_alpha();
-        self.core.kernel = kernel;
-        self.core.likelihood = likelihood;
-        self.core.compiled = compiled;
-        *self.mapped = None;
+        self.commit_factor();
+        self.commit_theta(next);
         let mut rows = P::Storage::empty_rows();
         let y = P::Storage::storage_rows(&self.core.y_train, &mut rows);
         Ok(neg_mll_from_factor(
-            self.ws.core().k_matrix.as_ref(),
+            self.store.buffers.core().k_matrix.as_ref(),
             y,
             &self.core.factor_alpha,
             n,
@@ -329,9 +380,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     pub(crate) fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.hessian_into_fit(params, out)?;
-        self.restore_cholesky_if_overwritten()?;
-        self.publish_predict_alpha()?;
-        Ok(())
+        self.finish()
     }
 
     pub(crate) fn hessian_into_fit(
@@ -343,34 +392,8 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let n_params = self.num_params();
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
-        let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
+        self.factor_at(params)?;
         let n = self.core.n;
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
-            &mut self.core.x_cast,
-        );
-        if let Err(err) = with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
-            &compiled,
-            x,
-            &mut *self.ws,
-            &self.core.y_train,
-            likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-        )) {
-            let _ = self.factorize_current();
-            return Err(err);
-        }
-        self.copy_factor_alpha();
-        self.core.kernel = kernel;
-        self.core.likelihood = likelihood;
-        self.core.compiled = compiled;
-        *self.mapped = None;
         self.fill_hessian_from_factor(n_kernel, n, out)
     }
 
@@ -380,21 +403,26 @@ impl<P: GpScalar> ExactFit<'_, P> {
         n: usize,
         out: &mut [f64],
     ) -> Result<(), GprError> {
-        self.ws.core_mut().ensure_kernel_scratch(n)?;
+        self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         if self.core.compiled.needs_product_grad_scratch() {
-            self.ws.core_mut().ensure_kernel_scratch(n)?;
+            self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         }
-        self.ws.form_gradient_w(&self.core.factor_alpha, n);
+        self.store
+            .buffers
+            .form_gradient_w(&self.core.factor_alpha, n);
         out.fill(0.0);
         let n_params = n_kernel + 1;
         let noise = self.core.likelihood.noise_variance();
-        let thread_scratch = std::mem::take(&mut self.ws.core_mut().thread_scratch);
+        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
         let second = (|| {
             for i in 0..n_params {
                 for j in i..n_params {
                     self.write_second_deriv(n_kernel, i, j, n)?;
-                    let inner =
-                        frobenius_lower(self.ws.gradient_w(), self.ws.core().exp_buf.as_ref(), n);
+                    let inner = frobenius_lower(
+                        self.store.buffers.gradient_w(),
+                        self.store.buffers.core().exp_buf.as_ref(),
+                        n,
+                    );
                     let hij = -0.5 * inner.to_f64();
                     out[i * n_params + j] = hij;
                     out[j * n_params + i] = hij;
@@ -402,10 +430,10 @@ impl<P: GpScalar> ExactFit<'_, P> {
             }
             Ok::<(), GprError>(())
         })();
-        self.ws.core_mut().thread_scratch = thread_scratch;
+        self.store.buffers.core_mut().thread_scratch = thread_scratch;
         second?;
         self.add_noise_first_order(n_kernel, n, noise, out)?;
-        if !self.ws.has_dedicated_w() {
+        if !self.store.buffers.has_dedicated_w() {
             self.factorize_current()?;
         }
         self.add_kernel_first_order(n_kernel, n, out)
@@ -420,7 +448,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
     ) -> Result<(), GprError> {
         if i >= n_kernel || j >= n_kernel {
             zero_and_maybe_noise(
-                self.ws.core_mut().exp_buf.as_mut(),
+                self.store.buffers.core_mut().exp_buf.as_mut(),
                 n,
                 i == n_kernel && j == n_kernel,
                 self.core.likelihood.noise_variance(),
@@ -434,7 +462,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 .submatrix(0, 0, self.core.n, self.core.d),
             &mut self.core.x_cast,
         );
-        let (core, dist) = self.ws.split_fit();
+        let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
             exp_buf,
             kernel_scratch,
@@ -459,7 +487,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 .submatrix(0, 0, self.core.n, self.core.d),
             &mut self.core.x_cast,
         );
-        let (core, dist) = self.ws.split_fit();
+        let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
             exp_buf,
             kernel_scratch,
@@ -488,7 +516,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let two = P::Storage::from_f64(2.0);
         let noise_s = P::Storage::from_f64(noise);
         let (kinv_alpha, tr_kinv2) = {
-            let w = self.ws.gradient_w();
+            let w = self.store.buffers.gradient_w();
             let mut w_alpha = vec![zero; n];
             gemv_sym_lower(w, &self.core.factor_alpha, &mut w_alpha, n);
             let mut alpha_dot = zero;
@@ -526,20 +554,20 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let nn = n_kernel;
         out[nn * n_params + nn] += -0.5 * noise * noise * tr_kinv2.to_f64() + un_wn.to_f64();
 
-        self.ws.core_mut().ensure_kernel_scratch(n)?;
-        let thread_scratch = std::mem::take(&mut self.ws.core_mut().thread_scratch);
+        self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
+        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
         let cross = (|| {
             for i in 0..n_kernel {
                 self.write_first_deriv(i)?;
                 let tr = trace_ki_kinv2(
-                    self.ws.core().exp_buf.as_ref(),
-                    self.ws.gradient_w(),
+                    self.store.buffers.core().exp_buf.as_ref(),
+                    self.store.buffers.gradient_w(),
                     &self.core.factor_alpha,
                     n,
                 );
                 let mut u_i = vec![P::Storage::from_f64(0.0); n];
                 gemv_sym_lower(
-                    self.ws.core().exp_buf.as_ref(),
+                    self.store.buffers.core().exp_buf.as_ref(),
                     &self.core.factor_alpha,
                     &mut u_i,
                     n,
@@ -554,7 +582,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
             }
             Ok::<(), GprError>(())
         })();
-        self.ws.core_mut().thread_scratch = thread_scratch;
+        self.store.buffers.core_mut().thread_scratch = thread_scratch;
         cross
     }
 
@@ -567,25 +595,25 @@ impl<P: GpScalar> ExactFit<'_, P> {
         if n_kernel == 0 {
             return Ok(());
         }
-        self.ws.core_mut().ensure_kernel_scratch(n)?;
+        self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         let n_params = n_kernel + 1;
-        let thread_scratch = std::mem::take(&mut self.ws.core_mut().thread_scratch);
+        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
         let result = (|| {
             for j in 0..n_kernel {
                 self.write_first_deriv(j)?;
                 let mut u_j = vec![P::Storage::from_f64(0.0); n];
                 gemv_sym_lower(
-                    self.ws.core().exp_buf.as_ref(),
+                    self.store.buffers.core().exp_buf.as_ref(),
                     &self.core.factor_alpha,
                     &mut u_j,
                     n,
                 );
-                symmetrize_lower(self.ws.core_mut().exp_buf.as_mut(), n);
+                symmetrize_lower(self.store.buffers.core_mut().exp_buf.as_mut(), n);
                 self.solve_exp_against_l(n);
                 // `write_first_deriv` for a product reuses `kernel_scratch`.
                 let mut q_j = Mat::<P::Storage>::zeros(n, n);
                 {
-                    let core = self.ws.core();
+                    let core = self.store.buffers.core();
                     for col in 0..n {
                         for row in 0..n {
                             q_j[(row, col)] = core.exp_buf[(row, col)];
@@ -606,14 +634,18 @@ impl<P: GpScalar> ExactFit<'_, P> {
                         self.write_first_deriv(i)?;
                         let mut u_i = vec![P::Storage::from_f64(0.0); n];
                         gemv_sym_lower(
-                            self.ws.core().exp_buf.as_ref(),
+                            self.store.buffers.core().exp_buf.as_ref(),
                             &self.core.factor_alpha,
                             &mut u_i,
                             n,
                         );
-                        symmetrize_lower(self.ws.core_mut().exp_buf.as_mut(), n);
+                        symmetrize_lower(self.store.buffers.core_mut().exp_buf.as_mut(), n);
                         self.solve_exp_against_l(n);
-                        tr = trace_product(self.ws.core().exp_buf.as_ref(), q_j.as_ref(), n);
+                        tr = trace_product(
+                            self.store.buffers.core().exp_buf.as_ref(),
+                            q_j.as_ref(),
+                            n,
+                        );
                         for k in 0..n {
                             ui_wj += u_i[k] * w_j[k];
                         }
@@ -627,12 +659,12 @@ impl<P: GpScalar> ExactFit<'_, P> {
             }
             Ok::<(), GprError>(())
         })();
-        self.ws.core_mut().thread_scratch = thread_scratch;
+        self.store.buffers.core_mut().thread_scratch = thread_scratch;
         result
     }
 
     fn solve_exp_against_l(&mut self, n: usize) {
-        let core = self.ws.core_mut();
+        let core = self.store.buffers.core_mut();
         let stack = MemStack::new(&mut core.faer_scratch);
         llt::solve::solve_in_place(
             core.k_matrix.as_ref(),
@@ -649,24 +681,29 @@ impl<P: GpScalar> ExactFit<'_, P> {
         out: &mut [f64],
     ) -> Result<(), GprError> {
         if self.core.compiled.needs_product_grad_scratch() {
-            self.ws.core_mut().ensure_kernel_scratch(n)?;
+            self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         }
-        self.ws.form_gradient_w(&self.core.factor_alpha, n);
-        let thread_scratch = std::mem::take(&mut self.ws.core_mut().thread_scratch);
+        self.store
+            .buffers
+            .form_gradient_w(&self.core.factor_alpha, n);
+        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
         let result = (|| {
             for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
                 self.write_first_deriv(i)?;
-                let inner =
-                    frobenius_lower(self.ws.gradient_w(), self.ws.core().exp_buf.as_ref(), n);
+                let inner = frobenius_lower(
+                    self.store.buffers.gradient_w(),
+                    self.store.buffers.core().exp_buf.as_ref(),
+                    n,
+                );
                 *slot = -0.5 * inner.to_f64();
             }
             Ok::<(), GprError>(())
         })();
-        self.ws.core_mut().thread_scratch = thread_scratch;
+        self.store.buffers.core_mut().thread_scratch = thread_scratch;
         result?;
         let mut noise_inner = 0.0;
         let d_noise = self.core.likelihood.noise_variance();
-        let w = self.ws.gradient_w();
+        let w = self.store.buffers.gradient_w();
         for i in 0..n {
             noise_inner += w[(i, i)].to_f64() * d_noise;
         }
@@ -676,7 +713,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     /// Whether a gradient writes `W` over `L` ([`crate::CholeskyBuffer::Reuse`]).
     pub(crate) fn overwrites_cholesky(&self) -> bool {
-        self.ws.overwrites_cholesky()
+        self.store.buffers.overwrites_cholesky()
     }
 
     pub(crate) fn restore_cholesky_if_overwritten(&mut self) -> Result<(), GprError> {
@@ -695,14 +732,18 @@ impl<P: GpScalar> ExactFit<'_, P> {
         &self,
         params: &[f64],
         n_kernel: usize,
-    ) -> Result<(KernelSpec, CompiledKernel<P::Storage>, GaussianLikelihood), GprError> {
+    ) -> Result<Theta<P::Storage>, GprError> {
         let mut likelihood = self.core.likelihood;
         likelihood.set_params(&params[n_kernel..])?;
         let mut kernel = self.core.kernel.clone();
         kernel.set_params(&params[..n_kernel])?;
         let mut compiled = self.core.compiled.clone();
         compiled.set_params(&params[..n_kernel])?;
-        Ok((kernel, compiled, likelihood))
+        Ok(Theta {
+            kernel,
+            compiled,
+            likelihood,
+        })
     }
 
     pub(crate) fn commit_or_revert_optimize(
@@ -736,36 +777,17 @@ impl<P: GpScalar> ExactFit<'_, P> {
     }
 
     pub(crate) fn factorize_current(&mut self) -> Result<(), GprError> {
-        *self.mapped = None;
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
-            &mut self.core.x_cast,
-        );
-        with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
-            &self.core.compiled,
-            x,
-            &mut *self.ws,
-            &self.core.y_train,
-            self.core.likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-        ))?;
-        self.copy_factor_alpha();
-        Ok(())
+        self.factor(None)
     }
 
-    fn copy_factor_alpha(&mut self) {
+    /// The one writer of the factor `α`: `A⁻¹ y` from the solve that just ran.
+    fn commit_factor(&mut self) {
         let n = self.core.n;
         if self.core.factor_alpha.len() != n {
             self.core.factor_alpha.resize(n, P::Storage::from_f64(0.0));
         }
         for (i, slot) in self.core.factor_alpha.iter_mut().enumerate() {
-            *slot = self.ws.core().rhs[(i, 0)];
+            *slot = self.store.buffers.core().rhs[(i, 0)];
         }
     }
 
@@ -819,7 +841,7 @@ where
             return Err((gpr, err));
         }
         let compiled = gpr.kernel.compile_as::<P::Storage>();
-        let workspace = match fit_buffers::<P>(n_rows, n_cols, gpr.policies, &compiled) {
+        let workspace = match fit_buffers::<P>(n_rows, gpr.policies, &compiled) {
             Ok(ws) => ws,
             Err(err) => return Err((gpr, err)),
         };
@@ -846,8 +868,7 @@ where
                 d: n_cols,
             },
             optimizer: gpr.optimizer,
-            workspace,
-            mapped_factor: None,
+            store: LltStore::new(workspace),
         })
     }
 
@@ -889,17 +910,11 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(mut self) -> Result<OnlineGpr<O, P>, GprError> {
-        self.publish_predict_alpha()?;
-        self.into_online_from_llt()
-    }
-
-    /// Moves the core into an [`OnlineGpr`] with `D` / `L` from the stored LLT.
-    fn into_online_from_llt(self) -> Result<OnlineGpr<O, P>, GprError> {
+    pub fn into_online(self) -> Result<OnlineGpr<O, P>, GprError> {
         let n = self.core.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
         workspace.fill_ld_from_llt(self.chol_l(), n)?;
-        workspace.factor_jitter = self.workspace.core().factor_jitter;
+        workspace.factor_jitter = self.store.buffers.core().factor_jitter;
         OnlineWorkspace::set_f64_prefix(&mut workspace.y, &self.core.y_train);
         OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.core.factor_alpha);
         Ok(OnlineGpr::from_core(self.core, self.optimizer, workspace))
@@ -1039,14 +1054,13 @@ where
         FittedGpr {
             core: self.core,
             optimizer,
-            workspace: self.workspace,
-            mapped_factor: self.mapped_factor,
+            store: self.store,
         }
     }
 
     /// Diagonal jitter the current factor was built with.
     pub(crate) fn factor_jitter(&self) -> f64 {
-        self.workspace.core().factor_jitter
+        self.store.buffers.core().factor_jitter
     }
 
     pub(crate) fn policies(&self) -> Policies {
@@ -1085,8 +1099,7 @@ where
     }
 
     pub(crate) fn chol_l(&self) -> MatRef<'_, P::Storage> {
-        let mapped = self.mapped_factor.as_ref().map(|mapped| mapped.l_view());
-        P::view_factor(mapped, self.workspace.core().k_matrix.as_ref())
+        self.store.l()
     }
 
     pub(crate) fn factor(&self) -> StoredFactor<'_, P::Storage> {
@@ -1097,13 +1110,8 @@ where
     pub(crate) fn fit_view(&mut self) -> ExactFit<'_, P> {
         ExactFit {
             core: &mut self.core,
-            ws: &mut self.workspace,
-            mapped: &mut self.mapped_factor,
+            store: &mut self.store,
         }
-    }
-
-    pub(crate) fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
-        self.fit_view().publish_predict_alpha()
     }
 
     /// Returns the negative log marginal likelihood of the last successful fit.
@@ -1394,13 +1402,8 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        let mapped = self.mapped_factor.as_ref().map(|mapped| mapped.l_view());
-        let WorkspaceCore {
-            k_matrix,
-            thread_scratch,
-            ..
-        } = self.workspace.core_mut();
-        let factor = StoredFactor::Llt(P::view_factor(mapped, k_matrix.as_ref()));
+        let (l, thread_scratch) = self.store.l_and_thread_scratch();
+        let factor = StoredFactor::Llt(l);
         self.core
             .predict_with_into(factor, thread_scratch, xs, n_rows, n_cols, options, out)
     }
@@ -1597,8 +1600,7 @@ where
     pub fn refit(&mut self) -> Result<(), GprError> {
         let mut view = ExactFit {
             core: &mut self.core,
-            ws: &mut self.workspace,
-            mapped: &mut self.mapped_factor,
+            store: &mut self.store,
         };
         view.optimize(&self.optimizer)
     }
@@ -1612,7 +1614,7 @@ where
         let n = self.core.n;
         let mut workspace = OnlineWorkspace::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
-        workspace.factor_jitter = self.workspace.core().factor_jitter;
+        workspace.factor_jitter = self.store.buffers.core().factor_jitter;
         OnlineWorkspace::set_f64_prefix(&mut workspace.y, &self.core.y_train);
         OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.core.factor_alpha);
         Ok(OnlineGpr::from_core(self.core, self.optimizer, workspace))
@@ -1638,7 +1640,7 @@ where
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
-        let mut workspace = fit_buffers::<P>(n, d, parts.policies, &compiled)?;
+        let mut workspace = fit_buffers::<P>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
         if let Some(l) = parts.owned_l.take() {
             let mut dest = workspace.core_mut().k_matrix.as_mut();
@@ -1676,8 +1678,7 @@ where
                 d,
             },
             optimizer: Fixed,
-            workspace,
-            mapped_factor: parts.mapped,
+            store: LltStore::with_mapped(workspace, parts.mapped),
         })
     }
 

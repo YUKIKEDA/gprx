@@ -39,36 +39,18 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
 }
 
 /// Training-distance tensors ([`crate::DistanceCachePolicy::Cached`]).
-#[derive(Clone)]
+///
+/// Buffers here are caches: their contents stay valid across calls, so a
+/// slot is `None` until it is filled from the training `X` (which never
+/// changes for one set of fit buffers). Scratch buffers on
+/// [`WorkspaceCore`] are the opposite: empty `Mat`s grown on demand whose
+/// contents mean nothing between calls.
+#[derive(Clone, Default)]
 pub struct DistCache<S> {
-    /// Pairwise squared distances for isotropic (distance-mode) leaves.
-    pub(crate) dist_cache: Mat<S>,
-    /// Whether `dist_cache` matches the current training `X`.
-    pub(crate) dist_ready: bool,
-    /// Raw `(Δx_d)²` for ARD leaves: `n × (n·d)`. Empty for isotropic.
-    pub(crate) ard_sq_diff: Mat<S>,
-    /// Whether `ard_sq_diff` matches the current training `X`.
-    pub(crate) ard_sq_diff_ready: bool,
-}
-
-impl<S: KernelScalar> DistCache<S> {
-    fn new(n: usize) -> Self {
-        Self {
-            dist_cache: Mat::<S>::zeros(n, n),
-            dist_ready: false,
-            ard_sq_diff: Mat::<S>::zeros(0, 0),
-            ard_sq_diff_ready: false,
-        }
-    }
-
-    fn bufs(&mut self) -> DistBufs<'_, S> {
-        DistBufs {
-            dist_cache: &mut self.dist_cache,
-            dist_ready: &mut self.dist_ready,
-            ard_sq_diff: &mut self.ard_sq_diff,
-            ard_sq_diff_ready: &mut self.ard_sq_diff_ready,
-        }
-    }
+    /// Pairwise squared distances for isotropic (distance-mode) leaves (`n × n`).
+    pub(crate) dist: Option<Mat<S>>,
+    /// Raw `(Δx_d)²` for ARD leaves (`n × (n·d)`).
+    pub(crate) ard_sq_diff: Option<Mat<S>>,
 }
 
 /// Fit buffers for one training size: the shared core, plus the distance
@@ -105,7 +87,7 @@ impl<P: PrecisionPolicy> FitBuffers<P> {
     ) -> Result<Self, GprError> {
         let core = WorkspaceCore::new(n)?;
         let dist = match cache {
-            crate::gpr::DistanceCachePolicy::Cached => Some(DistCache::new(n)),
+            crate::gpr::DistanceCachePolicy::Cached => Some(DistCache::default()),
             crate::gpr::DistanceCachePolicy::Uncached => None,
         };
         let w_matrix = match buffer {
@@ -125,29 +107,6 @@ impl<P: PrecisionPolicy> FitBuffers<P> {
     }
 }
 
-/// Mutable view of the distance tensors on [`FitBuffers`].
-pub struct DistBufs<'a, S = f64> {
-    pub dist_cache: &'a mut Mat<S>,
-    pub dist_ready: &'a mut bool,
-    pub ard_sq_diff: &'a mut Mat<S>,
-    pub ard_sq_diff_ready: &'a mut bool,
-}
-
-impl<S: KernelScalar> DistBufs<'_, S> {
-    pub(crate) fn ensure_ard_sq_diff(&mut self, n: usize, d: usize) -> Result<(), GprError> {
-        if n == 0 || d == 0 {
-            return Err(GprError::EmptyInput);
-        }
-        let cols = n.checked_mul(d).ok_or(GprError::SizeOverflow)?;
-        if self.ard_sq_diff.nrows() == n && self.ard_sq_diff.ncols() == cols {
-            return Ok(());
-        }
-        *self.ard_sq_diff = Mat::<S>::zeros(n, cols);
-        *self.ard_sq_diff_ready = false;
-        Ok(())
-    }
-}
-
 /// Construction and core access for composed fit buffers.
 pub trait FitWorkspace: Clone + Send + Sync + 'static {
     type Policy: PrecisionPolicy;
@@ -162,7 +121,7 @@ pub trait FitWorkspace: Clone + Send + Sync + 'static {
         &mut self,
     ) -> (
         &mut WorkspaceCore<Self::Policy>,
-        Option<DistBufs<'_, <Self::Policy as PrecisionPolicy>::Storage>>,
+        Option<&mut DistCache<<Self::Policy as PrecisionPolicy>::Storage>>,
     );
 
     /// Forms `W = ααᵀ - K⁻¹` after `k_matrix` holds `L`.
@@ -170,11 +129,6 @@ pub trait FitWorkspace: Clone + Send + Sync + 'static {
 
     /// `W` after [`Self::form_gradient_w`].
     fn gradient_w(&self) -> MatRef<'_, <Self::Policy as PrecisionPolicy>::Storage>;
-
-    /// Sizes ARD `(Δx_d)²` when this workspace has a distance cache.
-    fn ensure_ard_if_cached(&mut self, _n: usize, _d: usize) -> Result<(), GprError> {
-        Ok(())
-    }
 
     /// Whether this workspace stores `dist_cache` / `ard_sq_diff`.
     #[allow(dead_code)] // used by unit tests on `FittedGpr::workspace`
@@ -321,8 +275,8 @@ where
         &mut self.core
     }
 
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<P>, Option<DistBufs<'_, P::Storage>>) {
-        (&mut self.core, self.dist.as_mut().map(DistCache::bufs))
+    fn split_fit(&mut self) -> (&mut WorkspaceCore<P>, Option<&mut DistCache<P::Storage>>) {
+        (&mut self.core, self.dist.as_mut())
     }
 
     fn form_gradient_w(&mut self, alpha: &[P::Storage], n: usize) {
@@ -361,13 +315,6 @@ where
         match &self.w_matrix {
             Some(w_matrix) => w_matrix.as_ref(),
             None => self.core.k_matrix.as_ref(),
-        }
-    }
-
-    fn ensure_ard_if_cached(&mut self, n: usize, d: usize) -> Result<(), GprError> {
-        match &mut self.dist {
-            Some(dist) => dist.bufs().ensure_ard_sq_diff(n, d),
-            None => Ok(()),
         }
     }
 
@@ -491,22 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_ard_sq_diff_allocates_n_by_n_d() {
-        let mut ws = speed(4).expect("n > 0");
-        ws.ensure_ard_if_cached(4, 3).expect("n,d > 0");
-        let dist = ws.dist.as_mut().expect("cached");
-        assert_eq!(dist.ard_sq_diff.nrows(), 4);
-        assert_eq!(dist.ard_sq_diff.ncols(), 12);
-        ws.ensure_ard_if_cached(4, 3).expect("same");
-        ws.ensure_ard_if_cached(4, 2).expect("retile d");
-        assert_eq!(ws.dist.as_ref().expect("cached").ard_sq_diff.ncols(), 8);
-        assert_eq!(
-            ws.ensure_ard_if_cached(0, 2).err(),
-            Some(GprError::EmptyInput)
-        );
-    }
-
-    #[test]
     fn reuse_workspace_has_no_second_n_by_n_w() {
         let n = 8;
         let ws = FitBuffers::<DoublePrecision>::new(
@@ -517,7 +448,7 @@ mod tests {
         .expect("n > 0");
         assert_eq!(ws.core().n(), n);
         assert_square(&ws.core().k_matrix, n);
-        assert_square(&ws.dist.as_ref().expect("cached").dist_cache, n);
+        assert!(ws.dist.as_ref().expect("cached").dist.is_none());
         assert_square(&ws.core().exp_buf, n);
         assert!(ws.w_matrix.is_none());
         assert!(ws.overwrites_cholesky());
@@ -538,14 +469,12 @@ mod tests {
         let core = ws.core();
         assert_eq!(core.n(), n);
         let dist = ws.dist.as_ref().expect("cached");
-        assert!(!dist.dist_ready);
+        assert!(dist.dist.is_none());
         assert_square(&core.k_matrix, n);
         assert_square(ws.w_matrix.as_ref().expect("retain"), n);
-        assert_square(&dist.dist_cache, n);
         assert_square(&core.exp_buf, n);
         assert_eq!(core.kernel_scratch.nrows(), 0);
-        assert_eq!(dist.ard_sq_diff.nrows(), 0);
-        assert!(!dist.ard_sq_diff_ready);
+        assert!(dist.ard_sq_diff.is_none());
         assert_eq!(core.rhs.nrows(), n);
         assert_eq!(core.rhs.ncols(), 1);
         assert_eq!(
