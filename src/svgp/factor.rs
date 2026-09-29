@@ -9,7 +9,6 @@ use rand::rngs::SmallRng;
 
 use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
-use crate::policy::JitterPolicy;
 use crate::policy::KernelExp;
 use crate::sparse::SparseCore;
 
@@ -25,15 +24,12 @@ use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
 use crate::precision::ModelPrecision;
 use crate::rng::small_rng;
-use crate::sgpr::kernel_cross;
+use crate::sparse::{k_mm_jitter_policy, kernel_cross};
 use crate::{PredictOptions, Prediction, VarianceKind};
 
 use super::fitted::FittedSvgp;
 
 // `K_mm` only. Public default stays Fixed(0). Forrester m=16 / ℓ=1 is not PD in f64.
-fn k_mm_jitter_policy() -> JitterPolicy {
-    JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
-}
 
 pub(crate) struct SvgpState<T: KernelScalar> {
     pub(crate) k_mm_l: Mat<T>,
