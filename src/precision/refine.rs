@@ -103,7 +103,7 @@ impl<T: KernelScalar> StoredFactor<'_, T> {
             Self::Llt(l) => T::solve_llt_owned_scratch(l, rhs),
             Self::Ldlt(ld) => {
                 let n = rhs.nrows();
-                crate::online::OnlineWorkspace::<T>::solve_ldlt_in_place(ld, rhs, n);
+                crate::linalg::solve_ldlt_in_place(ld, rhs, n);
             }
         }
     }

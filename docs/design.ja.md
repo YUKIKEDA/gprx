@@ -467,7 +467,7 @@ H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
-`FittedGpr` と `OnlineGpr` は crate 内部の `GprCore`（kernel spec・コンパイル済みカーネル・尤度・変換・方針・訓練データ・`α`・クエリ用バッファ）を共有し、違うのは因子だけ（R4-2 / [#240](https://github.com/YUKIKEDA/gprx/issues/240)）。`FittedGpr` は LLT の置き場（`FitBuffers` か mmap の `L`）、`OnlineGpr` は LDLT の `OnlineWorkspace` と `PointId` の表を持つ。`StoredFactor { Llt, Ldlt }` が因子の見方で、`solve`、列への `L⁻¹`、ピボットごとの重み（`1` か `1/Dᵢ`）、`log|A|`、`diag(A⁻¹)` を持つ。predict・共分散・sample・LOO・NLML・予測用 `α` はこの見方について `GprCore` に1回だけ書く。ハイパラの書き込み（`set_params`・勾配・Hessian・`fit`・`refit`）はすべて借用の `ExactFit`（core + LLT の置き場）1つで動く。`OnlineGpr` は `L √D` を O(n²) で詰めた一時的な LLT の置き場を貸し、新しい因子を書き戻す。訓練データは複製せず、O(n³) は新しい `θ` が要る分解だけ。
+`FittedGpr` と `OnlineGpr` は crate 内部の `GprCore`（kernel spec・コンパイル済みカーネル・尤度・変換・方針・訓練データ・`α`・クエリ用バッファ）を共有し、違うのは因子だけ（R4-2 / [#240](https://github.com/YUKIKEDA/gprx/issues/240)）。`FittedGpr` は LLT の置き場（`FitBuffers` か mmap の `L`）、`OnlineGpr` は LDLT の `LdltStore` と `PointId` の表を持つ。`StoredFactor { Llt, Ldlt }` が因子の見方で、`solve`、列への `L⁻¹`、ピボットごとの重み（`1` か `1/Dᵢ`）、`log|A|`、`diag(A⁻¹)` を持つ。predict・共分散・sample・LOO・NLML・予測用 `α` はこの見方について `GprCore` に1回だけ書く。ハイパラの書き込み（`set_params`・勾配・Hessian・`fit`・`refit`）はすべて借用の `ExactFit`（core + LLT の置き場）1つで動く。`OnlineGpr` は `L √D` を O(n²) で詰めた一時的な LLT の置き場を貸し、新しい因子を書き戻す。訓練データは複製せず、O(n³) は新しい `θ` が要る分解だけ。
 
 既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。葉の作り直しは §5.4 に従う（P2B-18）。`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
 
@@ -654,7 +654,7 @@ fit()終了 → FittedGpr が L, α, X を保持（Reuse はここで Chol し�
   → predict_into(&mut self): query_* に上書き、`Prediction` の容量を再利用
 ```
 
-バッチfitのWorkspaceはn固定。オンライン学習の容量成長は`OnlineWorkspace`(§11)が担当し、バッチ用Workspaceとはメモリ管理方針を分ける。`Workspace`、`QueryWorkspace`、`OnlineWorkspace`、faer の型はクレート私有。
+バッチfitのWorkspaceはn固定。オンライン学習の容量成長は`LdltStore`(§11)が担当し、バッチ用Workspaceとはメモリ管理方針を分ける。`Workspace`、`QueryWorkspace`、`LdltStore`、faer の型はクレート私有。
 
 ## 8. 並列化・SIMD、数学関数バックエンド
 
@@ -756,7 +756,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 ## 11. オンライン学習(データ点の追加削除)
 
-GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、crate-private の `OnlineWorkspace` と公開の `OnlineGpr` を置く。`FittedGpr::into_online(self)` が変換する。`insert` は `OnlineGpr` だけにある。
+GPRはn増加に伴いO(n³)でコストが増大するため、データの逐次追加削除を正式にスコープへ含める。バッチfit用Workspace(n固定)とは別に、crate-private の `LdltStore` と公開の `OnlineGpr` を置く。`FittedGpr::into_online(self)` が変換する。`insert` は `OnlineGpr` だけにある。
 
 ### コスト比較
 
@@ -770,7 +770,7 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 §3の通り、**LLTにinsert/delete APIは無い**。オンライン経路は次で進める。
 
 1. **追加(末尾append)**: 自前で bordered update を実装する。O(n²)
-2. **削除(任意インデックス)**: `OnlineWorkspace`は**LDLT因子**を保持し、`ldlt::update::delete_rows_and_cols_clobber`を使う。`2×2` / `5×5` の手書き SPD で、削除後の再構成 `A = L D Lᵀ` がフル LDLT と一致する（P3-1 / [#30](https://github.com/YUKIKEDA/gprx/issues/30)）。Givens downdate は置かない
+2. **削除(任意インデックス)**: `LdltStore`は**LDLT因子**を保持し、`ldlt::update::delete_rows_and_cols_clobber`を使う。`2×2` / `5×5` の手書き SPD で、削除後の再構成 `A = L D Lᵀ` がフル LDLT と一致する（P3-1 / [#30](https://github.com/YUKIKEDA/gprx/issues/30)）。Givens downdate は置かない
 
 バッチfitはLLTのままにする。`FittedGpr::into_online` で LLT→LDLT へ O(n²) 変換する:
 
@@ -795,12 +795,12 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 
 ### Workspaceの容量方式
 
-バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は **LD・`y`・`α`・`v_buf` を同じ手順で**再確保・コピーする。delete の faer スクラッチも同じ容量に伸ばす。予測・NLML・insert は Gram `K` と距離キャッシュを読まないので、`OnlineWorkspace` には置かない。
+バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は **LD・`y`・`α`・`v_buf` を同じ手順で**再確保・コピーする。delete の faer スクラッチも同じ容量に伸ばす。予測・NLML・insert は Gram `K` と距離キャッシュを読まないので、`LdltStore` には置かない。
 
 crate-private。`from_active(n)` で `n_active = n_capacity = n`。訓練 `X` は `OnlineGpr` が持ち、この struct には置かない。末尾 insert の前に `OnlineGpr` が `ensure_capacity` する。倍率フィールドは置かない。
 
 ```rust
-struct OnlineWorkspace {
+struct LdltStore {
     ld_factor: Mat<f64>,    // LDLT因子(対角=D、厳密下三角=L)
     alpha: Col<f64>,
     y: Col<f64>,
@@ -823,9 +823,9 @@ struct OnlineWorkspace {
 
 ### 増分更新の手順と不変条件
 
-**追加（末尾）**: ①容量が足りなければ `OnlineWorkspace::ensure_capacity`（倍率 2）。`OnlineGpr` の訓練 `X` / `y` も同じ倍率で伸ばす。クエリバッファは `ensure_at_least` → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル対角 `k_new` だけ足す（insert は `K` の新行/列を書かない。予測・NLML は LD だけ読む） → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。O(1) で古い印を付けるだけ。最初に読む操作が LDLT で解き直す。`&mut self` の読み（`predict_into`・ハイパラの書き込み）はモデルに `α` を置き、`&self` の読み（`predict`・共分散・sample・LOO・NLML・`alpha()`・`save_with_factor`）は次の insert / delete が空にする `OnceLock` のキャッシュを埋める。解くのに失敗したら（`MixedPrecision` の f64 へのやり直しが分解できないなど）その読みの `Err` になるので、`OnlineGpr::alpha()` は `Result` を返す（R4-2b / [#265](https://github.com/YUKIKEDA/gprx/issues/265)） → ⑥`PointRegistry` に新しい `PointId` を発行。
+**追加（末尾）**: ①容量が足りなければ `LdltStore::ensure_capacity`（倍率 2）。`OnlineGpr` の訓練 `X` / `y` も同じ倍率で伸ばす。クエリバッファは `ensure_at_least` → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル対角 `k_new` だけ足す（insert は `K` の新行/列を書かない。予測・NLML は LD だけ読む） → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。O(1) で古い印を付けるだけ。最初に読む操作が LDLT で解き直す。`&mut self` の読み（`predict_into`・ハイパラの書き込み）はモデルに `α` を置き、`&self` の読み（`predict`・共分散・sample・LOO・NLML・`alpha()`・`save_with_factor`）は次の insert / delete が空にする `OnceLock` のキャッシュを埋める。解くのに失敗したら（`MixedPrecision` の f64 へのやり直しが分解できないなど）その読みの `Err` になるので、`OnlineGpr::alpha()` は `Result` を返す（R4-2b / [#265](https://github.com/YUKIKEDA/gprx/issues/265)） → ⑥`PointRegistry` に新しい `PointId` を発行。
 
-**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)。スクラッチは `OnlineWorkspace` に置き再利用) → ②`OnlineGpr` の y・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④`α` は delete でも解かない。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
+**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)。スクラッチは `LdltStore` に置き再利用) → ②`OnlineGpr` の y・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④`α` は delete でも解かない。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
 
 **不変条件**: 削除により内部インデックスがシフトする際、workspace の `LD` / `y` / `alpha` と `OnlineGpr` の `X` と `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
 

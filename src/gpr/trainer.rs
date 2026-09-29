@@ -1,4 +1,4 @@
-//! [`Gpr`] trainer and [`FittedGpr`] factorization.
+//! Unfitted [`Gpr`] trainer.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -13,8 +13,7 @@ use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{IdentityInput, IdentityTarget, UnfittedTarget, UnfittedTransform};
 
 use super::{
-    CholeskyBuffer, DistanceCachePolicy, FitBuffers, GprCore, JitterPolicy, KernelExp,
-    with_kernel_exp,
+    CholeskyBuffer, DistanceCachePolicy, ExactFit, FittedGpr, JitterPolicy, KernelExp, Policies,
 };
 
 /// Unfitted Exact GPR trainer: kernel, likelihood, transforms, optimizer, and
@@ -60,22 +59,13 @@ use super::{
 /// # }
 /// ```
 pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
-    kernel: KernelSpec,
-    likelihood: GaussianLikelihood,
-    x_transform: Box<dyn UnfittedTransform>,
-    y_transform: Box<dyn UnfittedTarget>,
-    optimizer: O,
-    policies: Policies,
-    _precision: PhantomData<P>,
-}
-
-/// The runtime policies a trainer and its fitted model share.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Policies {
-    pub(crate) distance_cache: DistanceCachePolicy,
-    pub(crate) cholesky_buffer: CholeskyBuffer,
-    pub(crate) math: KernelExp,
-    pub(crate) jitter: JitterPolicy,
+    pub(super) kernel: KernelSpec,
+    pub(super) likelihood: GaussianLikelihood,
+    pub(super) x_transform: Box<dyn UnfittedTransform>,
+    pub(super) y_transform: Box<dyn UnfittedTarget>,
+    pub(super) optimizer: O,
+    pub(super) policies: Policies,
+    pub(super) _precision: PhantomData<P>,
 }
 
 impl<O, P> fmt::Debug for Gpr<O, P>
@@ -106,82 +96,6 @@ impl<O: Clone, P> Clone for Gpr<O, P> {
             policies: self.policies,
             _precision: PhantomData,
         }
-    }
-}
-
-/// Fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
-///
-/// [`Self::neg_log_marginal_likelihood`] is
-/// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
-/// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
-/// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
-/// a diagonal variance; [`Self::predict_into`] writes into a reused
-/// [`Prediction`](crate::Prediction) and crate-private query buffers (not the fit workspace).
-/// [`Self::predict_covariance`] returns the query–query matrix as
-/// [`PredictiveCovariance`](crate::PredictiveCovariance). [`Self::sample`] draws from that posterior.
-/// [`Self::loo_predict`] is the GPML leave-one-out at every
-/// training point, from `L` and `α`. [`Self::refit`] re-runs the trainer's
-/// optimizer (`Gpr<O>`) or re-factors (`Gpr<Fixed>`) on the same training
-/// data.
-///
-/// [`Clone`] copies the factorization, training observations, transforms, and
-/// optimizer. [`Self::kernel`] is a shared reference; writes go through
-/// [`Self::set_params`].
-///
-/// # Examples
-///
-/// ```rust
-/// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Gpr, GaussianLikelihood};
-///
-/// # fn main() -> Result<(), gprx::GprError> {
-/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let fitted = Gpr::new(kernel, likelihood)
-///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
-///     .map_err(|(_, e)| e)?;
-/// let pred = fitted.predict(&[0.5], 1, 1)?;
-/// assert_eq!(pred.mean.len(), 1);
-/// # Ok(())
-/// # }
-/// ```
-pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
-    core: GprCore<P>,
-    optimizer: O,
-    store: LltStore<P>,
-}
-
-impl<O, P> Clone for FittedGpr<O, P>
-where
-    O: Clone,
-    P: GpScalar,
-{
-    fn clone(&self) -> Self {
-        Self {
-            core: self.core.clone(),
-            optimizer: self.optimizer.clone(),
-            store: self.store.clone(),
-        }
-    }
-}
-
-impl<O, P> fmt::Debug for FittedGpr<O, P>
-where
-    O: fmt::Debug,
-    P: GpScalar,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FittedGpr")
-            .field("n", &self.core.n)
-            .field("d", &self.core.d)
-            .field("kernel", &self.core.kernel)
-            .field("likelihood", &self.core.likelihood)
-            .field("optimizer", &self.optimizer)
-            .field("distance_cache", &self.core.policies.distance_cache)
-            .field("cholesky_buffer", &self.core.policies.cholesky_buffer)
-            .field("math", &self.core.policies.math)
-            .field("jitter_policy", &self.core.policies.jitter)
-            .finish_non_exhaustive()
     }
 }
 
@@ -583,12 +497,3 @@ impl<O, P> From<(Gpr<O, P>, GprError)> for GprError {
         err
     }
 }
-
-#[path = "fitted.rs"]
-mod fitted;
-
-pub(crate) use fitted::{ExactFit, LeafCache, LltStore, fit_buffers};
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests;

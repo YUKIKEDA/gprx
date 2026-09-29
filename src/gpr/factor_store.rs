@@ -1,26 +1,86 @@
-//! Growable buffers for online insert and delete on a fitted GPR.
+//! Factor stores of an Exact GPR: [`LltStore`] for [`crate::FittedGpr`]
+//! and the growable [`LdltStore`] for [`crate::OnlineGpr`].
 //!
 //! Crate-private. [`crate::OnlineGpr`] owns training `X` and calls
-//! [`OnlineWorkspace::ensure_capacity`] before a tail insert.
+//! [`LdltStore::ensure_capacity`] before a tail insert.
 
 use std::fmt;
 
 use dyn_stack::{MemBuffer, StackReq};
 use faer::linalg::cholesky::ldlt;
-use faer::linalg::triangular_solve::{
-    solve_unit_lower_triangular_in_place, solve_unit_upper_triangular_in_place,
-};
-use faer::{Col, Mat, MatMut, MatRef, Par};
+use faer::{Col, Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::KernelScalar;
+use crate::persist::MappedTensors;
+use crate::precision::GpScalar;
+use crate::workspace::{FitBuffers, FitWorkspace, WorkspaceCore};
+
+/// The LLT factor of a batch fit: the fit buffers, plus a memory-mapped
+/// `f64` `L` while a loaded model has not been written to.
+pub(crate) struct LltStore<P: GpScalar> {
+    pub(crate) buffers: FitBuffers<P>,
+    /// Loaded `L`. Every factor write drops it first and lands in `buffers`.
+    mapped: Option<MappedTensors>,
+}
+
+impl<P: GpScalar> LltStore<P> {
+    pub(crate) fn new(buffers: FitBuffers<P>) -> Self {
+        Self {
+            buffers,
+            mapped: None,
+        }
+    }
+
+    pub(crate) fn with_mapped(buffers: FitBuffers<P>, mapped: Option<MappedTensors>) -> Self {
+        Self { buffers, mapped }
+    }
+
+    /// `L` of the current training system.
+    pub(crate) fn l(&self) -> MatRef<'_, P::Storage> {
+        let mapped = self.mapped.as_ref().map(|mapped| mapped.l_view());
+        P::view_factor(mapped, self.buffers.core().k_matrix.as_ref())
+    }
+
+    /// `L`, and the per-thread kernel scratch, borrowed together.
+    pub(crate) fn l_and_thread_scratch(
+        &mut self,
+    ) -> (MatRef<'_, P::Storage>, &mut Vec<Mat<P::Storage>>) {
+        let mapped = self.mapped.as_ref().map(|mapped| mapped.l_view());
+        let WorkspaceCore {
+            k_matrix,
+            thread_scratch,
+            ..
+        } = self.buffers.core_mut();
+        (P::view_factor(mapped, k_matrix.as_ref()), thread_scratch)
+    }
+
+    /// Drops the mapped `L` before the buffers are written.
+    pub(super) fn release_mapped(&mut self) {
+        self.mapped = None;
+    }
+}
+
+impl<P: GpScalar> Clone for LltStore<P> {
+    /// Copies a mapped `L` into the clone's own buffers.
+    fn clone(&self) -> Self {
+        let mut buffers = self.buffers.clone();
+        if let Some(mapped) = &self.mapped {
+            P::copy_mapped_l(mapped.l_view(), buffers.core_mut().k_matrix.as_mut());
+        }
+        Self {
+            buffers,
+            mapped: None,
+        }
+    }
+}
 
 /// Capacity-backed LDLT, targets, and a one-column solve buffer.
 ///
 /// `ld_factor` is `n_capacity × n_capacity`. Vectors are length
 /// `n_capacity`. The live prefix is `n_active`. Insert and predict read
 /// the factor only; there is no live Gram or distance cache.
-pub(crate) struct OnlineWorkspace<T: KernelScalar = f64> {
+pub(crate) struct LdltStore<T: KernelScalar = f64> {
     pub(crate) ld_factor: Mat<T>,
     pub(crate) y: Col<T>,
     pub(crate) alpha: Col<T>,
@@ -33,7 +93,7 @@ pub(crate) struct OnlineWorkspace<T: KernelScalar = f64> {
     pub(crate) factor_jitter: f64,
 }
 
-impl<T: KernelScalar> OnlineWorkspace<T> {
+impl<T: KernelScalar> LdltStore<T> {
     /// Allocates a full workspace of order `n` (`n_active == n_capacity`).
     pub(crate) fn from_active(n: usize) -> Result<Self, GprError> {
         if n == 0 {
@@ -194,31 +254,9 @@ impl<T: KernelScalar> OnlineWorkspace<T> {
             col[i] = T::from_f64(v);
         }
     }
-
-    /// Solves `L D Lᵀ x = b` for the leading `n` (overwrites the first column of `rhs`).
-    pub(crate) fn solve_ldlt_in_place(ld: MatRef<'_, T>, mut rhs: MatMut<'_, T>, n: usize) {
-        if n == 0 {
-            return;
-        }
-        let ld_n = ld.submatrix(0, 0, n, n);
-        solve_unit_lower_triangular_in_place(ld_n, rhs.as_mut(), Par::Seq);
-        for i in 0..n {
-            rhs[(i, 0)] /= ld[(i, i)];
-        }
-        solve_unit_upper_triangular_in_place(ld_n.transpose(), rhs, Par::Seq);
-    }
-
-    /// Overwrites each column of `rhs` (`n×m`) with `L⁻¹` of that column.
-    pub(crate) fn apply_inv_l(ld: MatRef<'_, T>, rhs: MatMut<'_, T>, n: usize) {
-        if n == 0 {
-            return;
-        }
-        let ld_n = ld.submatrix(0, 0, n, n);
-        solve_unit_lower_triangular_in_place(ld_n, rhs, Par::Seq);
-    }
 }
 
-impl<T: KernelScalar> Clone for OnlineWorkspace<T> {
+impl<T: KernelScalar> Clone for LdltStore<T> {
     fn clone(&self) -> Self {
         Self {
             ld_factor: self.ld_factor.clone(),
@@ -233,9 +271,9 @@ impl<T: KernelScalar> Clone for OnlineWorkspace<T> {
     }
 }
 
-impl<T: KernelScalar> fmt::Debug for OnlineWorkspace<T> {
+impl<T: KernelScalar> fmt::Debug for LdltStore<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OnlineWorkspace")
+        f.debug_struct("LdltStore")
             .field("n_active", &self.n_active)
             .field("n_capacity", &self.n_capacity)
             .finish_non_exhaustive()
@@ -291,7 +329,7 @@ mod tests {
 
     use crate::test_check::assert_close;
 
-    fn mark(ws: &mut OnlineWorkspace) {
+    fn mark(ws: &mut LdltStore) {
         let n = ws.n_active;
         for j in 0..n {
             for i in j..n {
@@ -304,7 +342,7 @@ mod tests {
         }
     }
 
-    fn assert_leading_marks(ws: &OnlineWorkspace, n: usize) {
+    fn assert_leading_marks(ws: &LdltStore, n: usize) {
         for j in 0..n {
             for i in j..n {
                 let base = (i * n + j) as f64;
@@ -316,7 +354,7 @@ mod tests {
         }
     }
 
-    fn assert_tail_zero(ws: &OnlineWorkspace, n: usize) {
+    fn assert_tail_zero(ws: &LdltStore, n: usize) {
         let cap = ws.n_capacity;
         for j in 0..cap {
             for i in 0..cap {
@@ -333,7 +371,7 @@ mod tests {
         }
     }
 
-    fn assert_same_capacity(ws: &OnlineWorkspace, cap: usize) {
+    fn assert_same_capacity(ws: &LdltStore, cap: usize) {
         assert_eq!(ws.n_capacity, cap);
         assert_eq!(ws.ld_factor.nrows(), cap);
         assert_eq!(ws.ld_factor.ncols(), cap);
@@ -343,7 +381,7 @@ mod tests {
     }
 
     fn grow_preserves_marks(n: usize) {
-        let mut ws = OnlineWorkspace::from_active(n).unwrap();
+        let mut ws = LdltStore::from_active(n).unwrap();
         mark(&mut ws);
         ws.ensure_capacity(n);
         assert_eq!(ws.n_active, n);
@@ -361,7 +399,7 @@ mod tests {
     #[test]
     fn from_active_rejects_empty() {
         assert_eq!(
-            OnlineWorkspace::<f64>::from_active(0).unwrap_err(),
+            LdltStore::<f64>::from_active(0).unwrap_err(),
             GprError::EmptyInput
         );
     }
