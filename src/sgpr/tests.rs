@@ -5,7 +5,7 @@ use crate::error::GprError;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, frobenius2, solve_llt};
-use crate::objective::SgprObjective;
+use crate::sgpr::SgprObjective;
 use crate::{
     FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Newton, NonlinearCg,
     Optimizer, PredictOptions, VarianceKind,

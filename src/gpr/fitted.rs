@@ -8,11 +8,11 @@ use faer::{Mat, MatRef};
 
 use crate::data::{pack_points, validate_training};
 use crate::error::GprError;
+use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
-use crate::objective::GprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::persist::{self, PersistedModel};
 use crate::precision::{DoublePrecision, GpScalar, StoredFactor};

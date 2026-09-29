@@ -12,9 +12,9 @@ use crate::gpr::with_kernel_exp;
 use crate::kernel::KernelScalar;
 use crate::kernel::ScalarOps;
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
-use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::precision::{DoublePrecision, ModelPrecision};
+use crate::sgpr::SgprObjective;
 use crate::sparse::{SparseCore, sparse_core_accessors};
 use crate::{PredictOptions, Prediction};
 

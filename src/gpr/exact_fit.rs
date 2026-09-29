@@ -5,13 +5,13 @@ use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
+use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     faer_par, frobenius_lower, gemv_full, gemv_sym_lower, symmetrize_lower, trace_product,
 };
-use crate::objective::GprObjective;
 use crate::optimizer::{OptResult, Optimizer};
 use crate::param::Interval;
 use crate::precision::{GpScalar, StoredFactor};
