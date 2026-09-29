@@ -60,7 +60,7 @@ where
 fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,
-    dist: Option<crate::workspace::DistBufs<'_, T>>,
+    dist: Option<&mut crate::workspace::DistCache<T>>,
     dest: MatMut<'_, T>,
     scratch: MatMut<'_, T>,
     thread_scratch: &mut Vec<Mat<T>>,
@@ -74,30 +74,44 @@ fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
 pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'a, T>,
-    dist: Option<crate::workspace::DistBufs<'a, T>>,
+    dist: Option<&'a mut crate::workspace::DistCache<T>>,
     thread_scratch: &mut Vec<Mat<T>>,
 ) -> Result<GramInputs<'a, T>, GprError> {
     let Some(d) = dist else {
         return Ok(GramInputs::points(x));
     };
     let reads_dist = compiled.reads_distances()?;
-    if reads_dist && !*d.dist_ready {
+    if reads_dist && d.dist.is_none() {
+        let n = x.nrows();
+        let mut dist = Mat::<T>::zeros(n, n);
         let mut pool = std::mem::take(thread_scratch);
-        T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
+        T::write_squared(x, dist.as_mut(), &mut pool);
         *thread_scratch = pool;
-        *d.dist_ready = true;
+        d.dist = Some(dist);
     }
-    let reads_ard = T::READS_ARD_CACHE && compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0;
-    if reads_ard && !*d.ard_sq_diff_ready {
+    let reads_ard = T::READS_ARD_CACHE && compiled.needs_ard_sq_diff();
+    if reads_ard && d.ard_sq_diff.is_none() {
+        let n = x.nrows();
+        let cols = n.checked_mul(x.ncols()).ok_or(GprError::SizeOverflow)?;
+        let mut ard = Mat::<T>::zeros(n, cols);
         let mut pool = std::mem::take(thread_scratch);
-        T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
+        T::write_ard(x, ard.as_mut(), &mut pool);
         *thread_scratch = pool;
-        *d.ard_sq_diff_ready = true;
+        d.ard_sq_diff = Some(ard);
     }
+    let d: &'a crate::workspace::DistCache<T> = d;
     Ok(GramInputs {
         x,
-        dist: reads_dist.then_some(d.dist_cache.as_ref()),
-        ard: reads_ard.then_some(d.ard_sq_diff.as_ref()),
+        dist: if reads_dist {
+            d.dist.as_ref().map(Mat::as_ref)
+        } else {
+            None
+        },
+        ard: if reads_ard {
+            d.ard_sq_diff.as_ref().map(Mat::as_ref)
+        } else {
+            None
+        },
     })
 }
 
