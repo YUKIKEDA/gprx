@@ -183,6 +183,16 @@ impl Transform for FittedPipeline {
         Ok(())
     }
 
+    fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+        if self.steps.is_empty() {
+            return IdentityInput.inverse_apply(x, n_rows, n_cols);
+        }
+        for step in self.steps.iter().rev() {
+            step.inverse_apply(x, n_rows, n_cols)?;
+        }
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn Transform> {
         Box::new(self.clone())
     }
@@ -444,6 +454,10 @@ mod tests {
         let mut got = x;
         t.apply(&mut got, 3, 2).expect("ok");
         for (actual, want) in got.iter().zip(expected.iter()) {
+            assert_close(*actual, *want, TOL);
+        }
+        t.inverse_apply(&mut got, 3, 2).expect("ok");
+        for (actual, want) in got.iter().zip(x.iter()) {
             assert_close(*actual, *want, TOL);
         }
     }

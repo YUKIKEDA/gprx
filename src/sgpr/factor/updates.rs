@@ -44,15 +44,15 @@ pub(crate) fn remove_column<T: KernelScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
     out
 }
 
-pub(crate) fn append_point(x: &[f64], n: usize, d: usize, x_new: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; (n + 1) * d];
-    for dim in 0..d {
-        for i in 0..n {
-            out[i + (n + 1) * dim] = x[i + n * dim];
-        }
-        out[n + (n + 1) * dim] = x_new[dim];
+/// Appends one point to column-major `x` (`n × d`) in place. Growth is
+/// amortized by the `Vec`.
+pub(crate) fn append_point(x: &mut Vec<f64>, n: usize, d: usize, x_new: &[f64]) {
+    x.resize((n + 1) * d, 0.0);
+    // Last column first, so no column is overwritten before it moves.
+    for dim in (0..d).rev() {
+        x.copy_within(dim * n..(dim + 1) * n, dim * (n + 1));
+        x[dim * (n + 1) + n] = x_new[dim];
     }
-    out
 }
 
 pub(crate) fn remove_point(x: &[f64], n: usize, d: usize, idx: usize) -> Vec<f64> {

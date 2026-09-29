@@ -119,11 +119,11 @@ where
         let q = unpack_q(&params[n_theta..], self.core.m)?;
         let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage>(
             &kernel,
-            &self.core.x_obs,
+            &self.core.x_train,
             self.core.n,
             self.core.d,
-            &self.core.y,
-            &self.core.z_obs,
+            &self.core.y_train,
+            &self.core.z_train,
             self.core.m,
             Some(q),
             &mut self.scratch.storage,
@@ -170,7 +170,7 @@ where
             self.a.as_ref(),
             &self.q_mean,
             self.q_l.as_ref(),
-            &self.core.y,
+            &self.core.y_train,
             &self.k_diag,
             self.core.likelihood.noise_variance(),
             self.core.n,
@@ -311,25 +311,21 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        if n_cols != self.core.d {
-            return Err(GprError::DimensionMismatch {
-                x_dim: n_cols,
-                expected_dim: self.core.d,
-            });
-        }
-        with_kernel_exp!(self.core.math, M => svgp_predict::<M, P>(
+        let xs = self.core.map_query(xs, n_rows, n_cols)?;
+        let prediction = with_kernel_exp!(self.core.math, M => svgp_predict::<M, P>(
             &self.core.kernel,
-            &self.core.z_obs,
+            &self.core.z_train,
             self.k_mm_l.as_ref(),
             &self.q_mean,
             self.q_l.as_ref(),
             self.core.likelihood.noise_variance(),
             self.core.m,
             self.core.d,
-            xs,
+            &xs,
             n_rows,
             n_cols,
             options,
-        ))
+        ))?;
+        self.core.inverse_prediction::<P>(prediction)
     }
 }
