@@ -420,6 +420,19 @@ Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は�
 
 オンラインは X と誘導点を増減できる。`FittedSgpr::into_online` が `OnlineSgpr<O>` を返す（誘導 typestate は無い）。`insert` / `delete` は ADR 0004 の rank-1 で VFE 因子を更新する。`insert_inducing` / `delete_inducing` は [ADR 0005](adr/0005-sparse-inducing-update.md)（insert は bordered LLT、delete は trailing cholupdate）。識別子は `InducingId`。座標は呼び出し側。`Z` は params に入らない。`set_params` と `refit` はフル再 assemble。
 
+**Exact との機能差**（R5-2 / [#247](https://github.com/YUKIKEDA/gprx/issues/247)）。Sparse のモデルは、次の機能で `Gpr` に揃える。まだ入っていない行は、それぞれ行と Issue を持つ。
+
+| 機能 | `FittedSgpr` / `OnlineSgpr` | `FittedSvgp` | 行 |
+| --- | --- | --- | --- |
+| 入力 / 目的変数の変換 | 揃える | 揃える | R5-3（[#281](https://github.com/YUKIKEDA/gprx/issues/281)） |
+| `K_mm` の `JitterPolicy`（既定は `adaptive(1e-8, 10, 5, 1e-3)` のまま。`K_mm` にはノイズが入らないため、§4.0） | 揃える | 揃える | R5-4（[#282](https://github.com/YUKIKEDA/gprx/issues/282)） |
+| warmup 後に確保しない `predict_into` | 揃える | 揃える | R5-5（[#283](https://github.com/YUKIKEDA/gprx/issues/283)） |
+| 予測共分散と posterior sample | 揃える | 揃える | R5-6（[#284](https://github.com/YUKIKEDA/gprx/issues/284)） |
+| LOO | 揃える | 載せない | R5-7（[#285](https://github.com/YUKIKEDA/gprx/issues/285)） |
+| 保存・読み込み | 揃える | 揃える | R5-8（[#286](https://github.com/YUKIKEDA/gprx/issues/286)） |
+
+SVGP は LOO を持たない。collapsed VFE の `q(u)` は閉じた形の最適解なので、点 `i` を除くのは `A = K_mm + σ⁻² K_mn K_nm` の rank-1 の downdate になる（θ と `Z` を固定して 1 点 `O(m²)`）。SVGP の `q(u)` は、ミニバッチの Adam が全点に合わせた変分パラメータになっている。点を除くには `q(u)` を合わせ直す必要があり、閉じた形は無い。学習済みの `q(u)` をそのまま使っても LOO の予測にはならないので、その名前では出さない。
+
 ### 6.2 `Gpr` のMLLと勾配(P0追加)
 
 ハイパーパラメータ勾配のアルゴリズムと必要なメモリが無いと、勾配ループで一時行列を確保してアロケーション方針に違反するか、パラメータごとに線形ソルブを繰り返してO(p n³)になる。
@@ -619,7 +632,7 @@ struct QueryWorkspace<P: PrecisionPolicy> {
 }
 ```
 
-和・積の項がさらに複数項の和・積のときは、入れ子 1 段ごとに出力と同じ形のバッファがもう 1 枚要る（`CompiledKernel::nested_depth`）。crate 内の fit / predict の入口は、その段を `nested` / `query_nested` から借りる。最初の呼び出しで伸ばし、以後は使い回す（R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)）。公開の `CompiledKernel::apply` / `grad` / `hess` などはシグネチャを変えず、その呼び出しのぶんだけ段を用意する。対角の畳み込み（`fill_diag`、`fill_diag_points` と、その勾配・Hessian）は固定長のスタック上の行ブロックで項を合わせ、確保しない。Sparse のモデル（`FittedSgpr`、`OnlineSgpr`、`FittedSvgp`）は、カーネルのスクラッチ（出力と同じ形のスクラッチ、入れ子の段、訓練–クエリの距離）を crate 内の `SparseScratch` に持ち、`&mut self` の呼び出し（`set_params`、勾配、Hessian、オンライン更新）のあいだ使い回す。`&self` の呼び出し（`predict`、NLML）は呼び出しごとに 1 回作る。因子と結果は今も新しい行列で返すので、`tests/alloc.rs` はゼロではなく測った数をラチェットにする（R5-1d / [#246](https://github.com/YUKIKEDA/gprx/issues/246)）。Sparse の `predict_into` は R5-2（[#247](https://github.com/YUKIKEDA/gprx/issues/247)）。
+和・積の項がさらに複数項の和・積のときは、入れ子 1 段ごとに出力と同じ形のバッファがもう 1 枚要る（`CompiledKernel::nested_depth`）。crate 内の fit / predict の入口は、その段を `nested` / `query_nested` から借りる。最初の呼び出しで伸ばし、以後は使い回す（R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)）。公開の `CompiledKernel::apply` / `grad` / `hess` などはシグネチャを変えず、その呼び出しのぶんだけ段を用意する。対角の畳み込み（`fill_diag`、`fill_diag_points` と、その勾配・Hessian）は固定長のスタック上の行ブロックで項を合わせ、確保しない。Sparse のモデル（`FittedSgpr`、`OnlineSgpr`、`FittedSvgp`）は、カーネルのスクラッチ（出力と同じ形のスクラッチ、入れ子の段、訓練–クエリの距離）を crate 内の `SparseScratch` に持ち、`&mut self` の呼び出し（`set_params`、勾配、Hessian、オンライン更新）のあいだ使い回す。`&self` の呼び出し（`predict`、NLML）は呼び出しごとに 1 回作る。因子と結果は今も新しい行列で返すので、`tests/alloc.rs` はゼロではなく測った数をラチェットにする（R5-1d / [#246](https://github.com/YUKIKEDA/gprx/issues/246)）。Sparse の `predict_into` は R5-5（[#283](https://github.com/YUKIKEDA/gprx/issues/283)）。
 
 fit 用バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは `FittedGpr` の `QueryWorkspace` が持ち、最初の `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。`predict(&self)` は出力 `Vec` を毎回確保してよい。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 

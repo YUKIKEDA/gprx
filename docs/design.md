@@ -430,6 +430,19 @@ The gradient of inducing coordinates is `grad_wrt_coord_dim` (§5.1). An unsuppo
 
 Online can add and remove both X and inducing points. `FittedSgpr::into_online` returns `OnlineSgpr<O>` (no inducing typestate). `insert` / `delete` update the VFE factor by the rank-1 of ADR 0004. `insert_inducing` / `delete_inducing` are [ADR 0005](adr/0005-sparse-inducing-update.md) (insert is a bordered LLT, delete is a trailing cholupdate). The identifier is `InducingId`. Coordinates come from the caller. `Z` is not in params. `set_params` and `refit` fully reassemble.
 
+**Parity with Exact** (R5-2 / [#247](https://github.com/YUKIKEDA/gprx/issues/247)). The sparse models follow `Gpr` for the features below. Each row that is not shipped yet has its own row and Issue.
+
+| Feature | `FittedSgpr` / `OnlineSgpr` | `FittedSvgp` | Row |
+| --- | --- | --- | --- |
+| Input / target transforms | yes | yes | R5-3 ([#281](https://github.com/YUKIKEDA/gprx/issues/281)) |
+| `JitterPolicy` of `K_mm` (default stays `adaptive(1e-8, 10, 5, 1e-3)`, because `K_mm` has no noise, §4.0) | yes | yes | R5-4 ([#282](https://github.com/YUKIKEDA/gprx/issues/282)) |
+| `predict_into` with no allocation after warmup | yes | yes | R5-5 ([#283](https://github.com/YUKIKEDA/gprx/issues/283)) |
+| Predictive covariance and posterior sample | yes | yes | R5-6 ([#284](https://github.com/YUKIKEDA/gprx/issues/284)) |
+| Leave-one-out | yes | no | R5-7 ([#285](https://github.com/YUKIKEDA/gprx/issues/285)) |
+| Save and load | yes | yes | R5-8 ([#286](https://github.com/YUKIKEDA/gprx/issues/286)) |
+
+SVGP has no leave-one-out. The collapsed VFE `q(u)` is the closed-form optimum, so leaving out point `i` is a rank-1 downdate of `A = K_mm + σ⁻² K_mn K_nm` (`O(m²)` per point at fixed `θ` and `Z`). The SVGP `q(u)` is a variational parameter that minibatch Adam fitted to all points. Leaving out a point means fitting `q(u)` again, and there is no closed form. Reusing the fitted `q(u)` is not a leave-one-out prediction, so it is not offered under that name.
+
 ### 6.2 MLL and gradient of `Gpr`
 
 Without an algorithm and a memory plan for the hyperparameter gradient, the gradient loop either allocates temporary matrices (breaking the allocation policy) or repeats a linear solve per parameter (O(p n³)).
@@ -630,7 +643,7 @@ struct QueryWorkspace<P: PrecisionPolicy> {
 }
 ```
 
-A sum or product whose term is itself a multi-term sum or product needs one more output-shaped buffer per nesting level (`CompiledKernel::nested_depth`). The crate-internal fit / predict entry points take those levels from `nested` / `query_nested`, which grow on the first call and are reused after (R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)). The public `CompiledKernel::apply` / `grad` / `hess` family keeps its signature and builds the levels for that one call. The diagonal folds (`fill_diag`, `fill_diag_points`, and their gradients and Hessians) combine terms in fixed-size stack blocks of rows and allocate nothing. The sparse models (`FittedSgpr`, `OnlineSgpr`, `FittedSvgp`) keep their kernel scratch (output-shaped scratch, nested levels, train–query distances) in a crate-private `SparseScratch` between `&mut self` calls (`set_params`, gradient, Hessian, online updates); `&self` calls (`predict`, NLML) build it once per call. They still return new matrices for their factors and results, so `tests/alloc.rs` records their counts as a ratchet rather than zero (R5-1d / [#246](https://github.com/YUKIKEDA/gprx/issues/246)); a sparse `predict_into` is R5-2 ([#247](https://github.com/YUKIKEDA/gprx/issues/247)).
+A sum or product whose term is itself a multi-term sum or product needs one more output-shaped buffer per nesting level (`CompiledKernel::nested_depth`). The crate-internal fit / predict entry points take those levels from `nested` / `query_nested`, which grow on the first call and are reused after (R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)). The public `CompiledKernel::apply` / `grad` / `hess` family keeps its signature and builds the levels for that one call. The diagonal folds (`fill_diag`, `fill_diag_points`, and their gradients and Hessians) combine terms in fixed-size stack blocks of rows and allocate nothing. The sparse models (`FittedSgpr`, `OnlineSgpr`, `FittedSvgp`) keep their kernel scratch (output-shaped scratch, nested levels, train–query distances) in a crate-private `SparseScratch` between `&mut self` calls (`set_params`, gradient, Hessian, online updates); `&self` calls (`predict`, NLML) build it once per call. They still return new matrices for their factors and results, so `tests/alloc.rs` records their counts as a ratchet rather than zero (R5-1d / [#246](https://github.com/YUKIKEDA/gprx/issues/246)); a sparse `predict_into` is R5-5 ([#283](https://github.com/YUKIKEDA/gprx/issues/283)).
 
 Fit buffers have a known size at the start of `fit`, so they are allocated once with `reserve_exact` (or built once with `Mat::zeros`) and overwritten on later iterations. Query buffers live on `FittedGpr`'s `QueryWorkspace`. The first `predict_into` sizes them to `(n, m, d)`, and the same query length reuses them. `predict(&self)` may allocate the output `Vec` every call. faer's `PodStack` / `MemStack` is the scratch manager. A hand-rolled scratch arena is not used.
 
