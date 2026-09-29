@@ -170,12 +170,20 @@ impl ArdLengthscales {
             self.num_params(),
             "ARD lengthscale parameters",
         )?;
-        let mut next = Vec::with_capacity(self.params.len());
-        for (i, param) in self.params.iter().enumerate() {
-            let log = validate_log_lengthscale(params[i])?;
-            next.push(BoundedParam::new(log.exp(), param.interval())?);
+        // Check every `θ_d` before writing so a rejected slice changes nothing
+        // and the write does not allocate.
+        for (param, &theta) in self.params.iter().zip(params) {
+            let log = validate_log_lengthscale(theta)?;
+            let next = BoundedParam::new(log.exp(), param.interval())?;
+            inv_ell_sq_of(next.ln())?;
         }
-        *self = Self::from_params(next)?;
+        for (i, &theta) in params.iter().enumerate() {
+            let log = validate_log_lengthscale(theta)?;
+            let next = BoundedParam::new(log.exp(), self.params[i].interval())?;
+            self.params[i] = next;
+            self.log_lengthscales[i] = next.ln();
+            self.inv_ell_sq[i] = inv_ell_sq_of(self.log_lengthscales[i])?;
+        }
         Ok(())
     }
 }
@@ -207,18 +215,21 @@ pub(crate) fn validate_log_lengthscale(theta: f64) -> Result<f64, GprError> {
 }
 
 fn inv_ell_sq_from_log(log_lengthscales: &[f64]) -> Result<Vec<f64>, GprError> {
-    let mut inv_ell_sq = Vec::with_capacity(log_lengthscales.len());
-    for &theta in log_lengthscales {
-        let ell = theta.exp();
-        let ell_sq = ell * ell;
-        if !ell_sq.is_finite() || ell_sq <= 0.0 {
-            return Err(invalid_length(
-                "lengthscale overflowed to a non-finite value",
-            ));
-        }
-        inv_ell_sq.push(1.0 / ell_sq);
+    log_lengthscales
+        .iter()
+        .map(|&theta| inv_ell_sq_of(theta))
+        .collect()
+}
+
+fn inv_ell_sq_of(theta: f64) -> Result<f64, GprError> {
+    let ell = theta.exp();
+    let ell_sq = ell * ell;
+    if !ell_sq.is_finite() || ell_sq <= 0.0 {
+        return Err(invalid_length(
+            "lengthscale overflowed to a non-finite value",
+        ));
     }
-    Ok(inv_ell_sq)
+    Ok(1.0 / ell_sq)
 }
 
 fn invalid_length(reason: &'static str) -> GprError {

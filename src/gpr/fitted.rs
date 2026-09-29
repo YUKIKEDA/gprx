@@ -65,13 +65,6 @@ pub(crate) struct ExactFit<'a, P: GpScalar> {
     pub(crate) store: &'a mut LltStore<P>,
 }
 
-/// Kernel, compiled kernel, and likelihood at one `θ`, before it is committed.
-struct Theta<S: KernelScalar> {
-    kernel: KernelSpec,
-    compiled: CompiledKernel<S>,
-    likelihood: GaussianLikelihood,
-}
-
 /// Per-leaf Gram matrices an incremental objective keeps during `fit` /
 /// `refit` (`L · n²`, outside the fit buffers), plus the reused bookkeeping
 /// for one coordinate step.
@@ -243,11 +236,10 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     pub(crate) fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
-        let kernel_before = self.core.kernel.clone();
-        let likelihood_before = self.core.likelihood;
         self.factor_at(params)?;
         if let Err(err) = self.finish() {
-            self.revert_theta(kernel_before, likelihood_before);
+            self.restore_theta();
+            let _ = self.factorize_current();
             let _ = self.publish_predict_alpha();
             return Err(err);
         }
@@ -264,29 +256,71 @@ impl<P: GpScalar> ExactFit<'_, P> {
         Ok(nlml)
     }
 
-    /// Factors `A` at `params` and commits `θ`.
+    /// Writes `θ = params` and factors `A` at it.
     ///
-    /// The one rollback rule for hyperparameter writes: `θ` is committed only
-    /// after `A` factors. On failure `θ` is unchanged and `L` / `α` are
-    /// rebuilt at it, so nothing is copied up front.
+    /// The one rollback rule for hyperparameter writes: `θ` is written in
+    /// place (no clone of the kernel trees), with the previous `θ` kept in a
+    /// reused buffer. When `A` does not factor, that `θ` is written back and
+    /// `L` / `α` are rebuilt at it, so nothing is copied up front.
     fn factor_at(&mut self, params: &[f64]) -> Result<(), GprError> {
-        let n_kernel = self.core.kernel.num_params();
-        let next = self.prepared_params(params, n_kernel)?;
-        if let Err(err) = self.factor(Some(&next)) {
+        self.write_theta(params)?;
+        if let Err(err) = self.factor() {
+            self.restore_theta();
             let _ = self.factorize_current();
             return Err(err);
         }
-        self.commit_theta(next);
         Ok(())
     }
 
-    /// Factors `A` at `theta` (the stored `θ` when `None`) into the buffers.
-    fn factor(&mut self, theta: Option<&Theta<P::Storage>>) -> Result<(), GprError> {
+    /// Writes `params` into the stored kernel, compiled kernel, and likelihood.
+    ///
+    /// The previous `θ` goes to the fit buffers' `θ` scratch for
+    /// [`Self::restore_theta`]. A rejected slice changes nothing.
+    fn write_theta(&mut self, params: &[f64]) -> Result<(), GprError> {
+        let n_kernel = self.core.kernel.num_params();
+        let mut likelihood = self.core.likelihood;
+        likelihood.set_params(&params[n_kernel..])?;
+        let prev = &mut self.store.buffers.core_mut().theta;
+        prev.resize(params.len(), 0.0);
+        self.core.get_params(prev)?;
+        let (kernel_prev, _) = prev.split_at(n_kernel);
+        self.core
+            .kernel
+            .set_params_in_place(&params[..n_kernel], kernel_prev)?;
+        if let Err(err) = self
+            .core
+            .compiled
+            .set_params_in_place(&params[..n_kernel], kernel_prev)
+        {
+            let _ = self
+                .core
+                .kernel
+                .set_params_in_place(kernel_prev, kernel_prev);
+            return Err(err);
+        }
+        self.core.likelihood = likelihood;
+        Ok(())
+    }
+
+    /// Writes back the `θ` the last [`Self::write_theta`] replaced.
+    fn restore_theta(&mut self) {
+        let n_kernel = self.core.kernel.num_params();
+        let prev = &self.store.buffers.core().theta;
+        let (kernel_prev, likelihood_prev) = prev.split_at(n_kernel);
+        let _ = self
+            .core
+            .kernel
+            .set_params_in_place(kernel_prev, kernel_prev);
+        let _ = self
+            .core
+            .compiled
+            .set_params_in_place(kernel_prev, kernel_prev);
+        let _ = self.core.likelihood.set_params(likelihood_prev);
+    }
+
+    /// Factors `A` at the stored `θ` into the buffers.
+    fn factor(&mut self) -> Result<(), GprError> {
         self.store.release_mapped();
-        let (compiled, noise) = match theta {
-            Some(next) => (&next.compiled, next.likelihood.noise_variance()),
-            None => (&self.core.compiled, self.core.likelihood.noise_variance()),
-        };
         let x = P::Storage::storage_cols(
             self.core
                 .x
@@ -295,11 +329,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
             &mut self.core.x_cast,
         );
         with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
-            compiled,
+            &self.core.compiled,
             x,
             &mut self.store.buffers,
             &self.core.y_train,
-            noise,
+            self.core.likelihood.noise_variance(),
             FactorPolicy {
                 jitter: self.core.policies.jitter,
                 stage: CholeskyStage::Fit,
@@ -307,12 +341,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
         ))?;
         self.commit_factor();
         Ok(())
-    }
-
-    fn commit_theta(&mut self, next: Theta<P::Storage>) {
-        self.core.kernel = next.kernel;
-        self.core.compiled = next.compiled;
-        self.core.likelihood = next.likelihood;
     }
 
     /// Joint MLL+grad used during `fit`. Does not restore `L` when the buffer
@@ -358,9 +386,8 @@ impl<P: GpScalar> ExactFit<'_, P> {
         if let Some(changed) = indices {
             require_change_indices(changed, n_params)?;
         }
-        let next = self.prepared_params(params, n_kernel)?;
         let n = self.core.n;
-        let n_leaves = next.compiled.leaf_count();
+        let n_leaves = self.core.compiled.leaf_count();
         cache.fit(n_leaves, n);
         match (cache.primed, indices) {
             (true, Some(changed)) => {
@@ -368,15 +395,60 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 cache.dirty.fill(false);
                 for &j in changed {
                     if j < n_kernel {
-                        cache.dirty[next.compiled.leaf_index_for_param(j)?] = true;
+                        cache.dirty[self.core.compiled.leaf_index_for_param(j)?] = true;
                     }
                 }
             }
             _ => cache.dirty.fill(true),
         }
+        self.write_theta(params)?;
         // Grams are only trusted again once this evaluation factors.
         cache.primed = false;
-        let LeafCache { grams, dirty, .. } = &mut *cache;
+        if let Err(err) = self.rebuild_dirty_leaves(cache) {
+            self.restore_theta();
+            return Err(err);
+        }
+        self.store.release_mapped();
+        let compiled = &self.core.compiled;
+        let grams = &cache.grams;
+        if let Err(err) = factor_written_k_with_policy(
+            &mut self.store.buffers,
+            &self.core.y_train,
+            self.core.likelihood.noise_variance(),
+            FactorPolicy {
+                jitter: self.core.policies.jitter,
+                stage: CholeskyStage::Fit,
+            },
+            |ws| {
+                let core = ws.core_mut();
+                compiled.combine_from_leaf_grams(
+                    grams,
+                    core.k_matrix.as_mut(),
+                    core.exp_buf.as_mut(),
+                    Triangle::Lower,
+                )
+            },
+        ) {
+            self.restore_theta();
+            let _ = self.factorize_current();
+            return Err(err);
+        }
+        cache.record(params);
+        self.commit_factor();
+        let mut rows = P::Storage::empty_rows();
+        let y = P::Storage::storage_rows(&self.core.y_train, &mut rows);
+        Ok(neg_mll_from_factor(
+            self.store.buffers.core().k_matrix.as_ref(),
+            y,
+            &self.core.factor_alpha,
+            n,
+        )
+        .to_f64())
+    }
+
+    /// Re-evaluates the leaves `cache.dirty` marks at the stored `θ`.
+    fn rebuild_dirty_leaves(&mut self, cache: &mut LeafCache<P::Storage>) -> Result<(), GprError> {
+        let LeafCache { grams, dirty, .. } = cache;
         for (i, slot) in grams.iter_mut().enumerate() {
             if dirty[i] {
                 let x = P::Storage::storage_cols(
@@ -387,47 +459,14 @@ impl<P: GpScalar> ExactFit<'_, P> {
                     &mut self.core.x_cast,
                 );
                 with_kernel_exp!(self.core.policies.math, M => apply_compiled_to::<_, _, M>(
-                    next.compiled.leaf_at(i)?,
+                    self.core.compiled.leaf_at(i)?,
                     x,
                     &mut self.store.buffers,
                     slot.as_mut(),
                 ))?;
             }
         }
-        self.store.release_mapped();
-        if let Err(err) = factor_written_k_with_policy(
-            &mut self.store.buffers,
-            &self.core.y_train,
-            next.likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-            |ws| {
-                let core = ws.core_mut();
-                next.compiled.combine_from_leaf_grams(
-                    grams,
-                    core.k_matrix.as_mut(),
-                    core.exp_buf.as_mut(),
-                    Triangle::Lower,
-                )
-            },
-        ) {
-            let _ = self.factorize_current();
-            return Err(err);
-        }
-        cache.record(params);
-        self.commit_factor();
-        self.commit_theta(next);
-        let mut rows = P::Storage::empty_rows();
-        let y = P::Storage::storage_rows(&self.core.y_train, &mut rows);
-        Ok(neg_mll_from_factor(
-            self.store.buffers.core().k_matrix.as_ref(),
-            y,
-            &self.core.factor_alpha,
-            n,
-        )
-        .to_f64())
+        Ok(())
     }
 
     pub(crate) fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
@@ -775,29 +814,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
         Ok(())
     }
 
-    /// Builds kernel, compiled kernel, and likelihood `θ` without storing them.
-    ///
-    /// Each `set_params` is atomic on its own type. The caller commits the
-    /// triple only after `A` factors, so a later Cholesky failure cannot
-    /// leave stored kernel and likelihood `θ` mixed or half-applied.
-    fn prepared_params(
-        &self,
-        params: &[f64],
-        n_kernel: usize,
-    ) -> Result<Theta<P::Storage>, GprError> {
-        let mut likelihood = self.core.likelihood;
-        likelihood.set_params(&params[n_kernel..])?;
-        let mut kernel = self.core.kernel.clone();
-        kernel.set_params(&params[..n_kernel])?;
-        let mut compiled = self.core.compiled.clone();
-        compiled.set_params(&params[..n_kernel])?;
-        Ok(Theta {
-            kernel,
-            compiled,
-            likelihood,
-        })
-    }
-
     pub(crate) fn commit_or_revert_optimize(
         &mut self,
         kernel_before: KernelSpec,
@@ -829,7 +845,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
     }
 
     pub(crate) fn factorize_current(&mut self) -> Result<(), GprError> {
-        self.factor(None)
+        self.factor()
     }
 
     /// The one writer of the factor `α`: `A⁻¹ y` from the solve that just ran.
