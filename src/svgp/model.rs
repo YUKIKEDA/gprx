@@ -3,6 +3,7 @@
 use std::marker::PhantomData;
 
 use crate::error::GprError;
+use crate::gpr::{KernelExp, with_kernel_exp};
 use crate::param::write_params;
 
 use crate::kernel::KernelSpec;
@@ -39,11 +40,11 @@ use super::fitted::FittedSvgp;
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Svgp<O = Fixed, M = crate::math::Accurate, P = DoublePrecision> {
+pub struct Svgp<O = Fixed, P = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
-    pub(crate) _math: PhantomData<M>,
+    pub(crate) math: KernelExp,
     pub(crate) _precision: PhantomData<P>,
 }
 
@@ -58,13 +59,13 @@ impl Svgp {
             kernel,
             likelihood,
             optimizer: Fixed,
-            _math: PhantomData,
+            math: KernelExp::default(),
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, M, P> Svgp<O, M, P> {
+impl<O, P> Svgp<O, P> {
     /// Replaces the optimizer type parameter.
     ///
     /// [`Fixed`] keeps [`Svgp<Fixed>::factor`]. [`Adam`] enables
@@ -87,43 +88,40 @@ impl<O, M, P> Svgp<O, M, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, M, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, P> {
         Svgp {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer,
-            _math: PhantomData,
+            math: self.math,
             _precision: PhantomData,
         }
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, M, P2>
+    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, P2>
 where {
         Svgp {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
-            _math: PhantomData,
+            math: self.math,
             _precision: PhantomData,
         }
     }
 
-    /// Selects the kernel `exp`. Omitting it leaves [`crate::Accurate`].
+    /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
     ///
     /// `factor`, `fit`, and predict use the same polynomial. Hyperparameter
     /// `exp(θ)` is unchanged.
-    pub fn with_math<M2>(self) -> Svgp<O, M2, P>
-    where
-        M2: crate::math::KernelMath,
-    {
-        Svgp {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer: self.optimizer,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
+    pub fn with_math(mut self, math: KernelExp) -> Self {
+        self.math = math;
+        self
+    }
+
+    /// Returns the kernel `exp` mode.
+    pub fn math(&self) -> KernelExp {
+        self.math
     }
 
     /// Returns the kernel whose hyperparameters this trainer owns.
@@ -178,9 +176,8 @@ where {
     }
 }
 
-impl<M, P> Svgp<Fixed, M, P>
+impl<P> Svgp<Fixed, P>
 where
-    M: crate::math::KernelMath,
     P: GpScalar,
 {
     /// Factors `K_mm` and installs a whitened prior `q(u)` at the current `θ`.
@@ -223,8 +220,8 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSvgp<M, P>, (Self, GprError)> {
-        match assemble_fitted(
+    ) -> Result<FittedSvgp<P>, (Self, GprError)> {
+        match with_kernel_exp!(self.math, M => assemble_fitted::<M, _>(
             self.kernel.clone(),
             self.likelihood,
             x,
@@ -234,16 +231,15 @@ where
             z,
             n_inducing,
             None,
-        ) {
+        )) {
             Ok(fitted) => Ok(fitted),
             Err(err) => Err((self, err)),
         }
     }
 }
 
-impl<M, P> Svgp<Adam, M, P>
+impl<P> Svgp<Adam, P>
 where
-    M: crate::math::KernelMath,
     P: GpScalar,
 {
     /// Factors a whitened prior `q` and runs mini-batch Adam on `θ` and `q`.
@@ -290,8 +286,8 @@ where
         y: &[f64],
         z: &[f64],
         n_inducing: usize,
-    ) -> Result<FittedSvgp<M, P>, (Self, GprError)> {
-        match assemble_fitted(
+    ) -> Result<FittedSvgp<P>, (Self, GprError)> {
+        match with_kernel_exp!(self.math, M => assemble_fitted::<M, _>(
             self.kernel.clone(),
             self.likelihood,
             x,
@@ -301,8 +297,11 @@ where
             z,
             n_inducing,
             None,
-        ) {
-            Ok(mut fitted) => match run_adam_fit(&mut fitted, &self.optimizer) {
+        )) {
+            Ok(mut fitted) => match with_kernel_exp!(
+                self.math,
+                M => run_adam_fit::<M, _>(&mut fitted, &self.optimizer)
+            ) {
                 Ok(()) => Ok(fitted),
                 Err(err) => Err((self, err)),
             },

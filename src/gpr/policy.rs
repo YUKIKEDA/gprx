@@ -83,6 +83,17 @@ pub enum KernelExp {
     FastApprox,
 }
 
+impl KernelExp {
+    /// The mode of the [`crate::KernelMath`] type `M`.
+    pub(crate) fn of<M: crate::math::KernelMath>() -> Self {
+        if <M as crate::math::MathOps>::ACCURATE {
+            Self::Accurate
+        } else {
+            Self::FastApprox
+        }
+    }
+}
+
 /// Runs `$body` with the type alias `$M` bound to the [`crate::KernelMath`]
 /// type of `$mode`. The body is monomorphized once per mode, as a generic
 /// `M` parameter was before.
