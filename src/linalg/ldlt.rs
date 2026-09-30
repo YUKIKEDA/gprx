@@ -1,8 +1,12 @@
-//! Unit-lower LDLT: forward solve and row / column delete.
+//! Unit-lower LDLT: solves and row / column delete.
 
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt;
-use faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place;
+use faer::linalg::triangular_solve::{
+    solve_unit_lower_triangular_in_place, solve_unit_upper_triangular_in_place,
+};
+
+use crate::kernel::KernelScalar;
 use faer::{Mat, MatMut, MatRef, Par};
 
 /// Solves `L w = v` in place for unit-lower `L` (`f64`, faer).
@@ -61,4 +65,30 @@ pub(crate) fn ldlt_delete_via_f64(mut ld: MatMut<'_, f32>, index: usize, n: usiz
             ld[(row, col)] = ld64[(row, col)] as f32;
         }
     }
+}
+
+/// Solves `L D Lᵀ x = b` for the leading `n` (overwrites the first column of `rhs`).
+pub(crate) fn solve_ldlt_in_place<T: KernelScalar>(
+    ld: MatRef<'_, T>,
+    mut rhs: MatMut<'_, T>,
+    n: usize,
+) {
+    if n == 0 {
+        return;
+    }
+    let ld_n = ld.submatrix(0, 0, n, n);
+    solve_unit_lower_triangular_in_place(ld_n, rhs.as_mut(), Par::Seq);
+    for i in 0..n {
+        rhs[(i, 0)] /= ld[(i, i)];
+    }
+    solve_unit_upper_triangular_in_place(ld_n.transpose(), rhs, Par::Seq);
+}
+
+/// Overwrites each column of `rhs` (`n×m`) with `L⁻¹` of that column.
+pub(crate) fn apply_ldlt_inv_l<T: KernelScalar>(ld: MatRef<'_, T>, rhs: MatMut<'_, T>, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let ld_n = ld.submatrix(0, 0, n, n);
+    solve_unit_lower_triangular_in_place(ld_n, rhs, Par::Seq);
 }

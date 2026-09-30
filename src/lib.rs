@@ -49,7 +49,6 @@ mod likelihood;
 mod linalg;
 mod math;
 mod objective;
-mod online;
 mod optimizer;
 mod param;
 pub mod persist;

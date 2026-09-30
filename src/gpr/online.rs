@@ -1,6 +1,5 @@
 //! Incremental tail insert and delete on a converted [`crate::FittedGpr`].
 
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::OnceLock;
 #[cfg(feature = "insert-stages")]
@@ -14,7 +13,6 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
-use crate::online::OnlineWorkspace;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
 use crate::persist::{self, PersistedModel, persist_err};
@@ -23,86 +21,10 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::model::{LltStore, fit_buffers};
-use super::{ExactFit, FittedGpr, Gpr, GprCore, PointId, Policies, with_kernel_exp};
-
-#[derive(Clone, Debug)]
-pub(crate) struct PointRegistry {
-    id_to_index: HashMap<PointId, usize>,
-    index_to_id: Vec<PointId>,
-    next_id: u64,
-}
-
-impl PointRegistry {
-    pub(crate) fn from_count(n: usize) -> Self {
-        let index_to_id: Vec<PointId> = (0..n as u64).map(PointId::from_raw).collect();
-        let id_to_index = index_to_id
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect();
-        Self {
-            id_to_index,
-            index_to_id,
-            next_id: n as u64,
-        }
-    }
-
-    fn from_persisted(ids: &[u64], next_id: u64) -> Result<Self, GprError> {
-        let mut id_to_index = HashMap::with_capacity(ids.len());
-        let mut index_to_id = Vec::with_capacity(ids.len());
-        let mut max_id = None;
-        for (index, &raw) in ids.iter().enumerate() {
-            let id = PointId::from_raw(raw);
-            if id_to_index.insert(id, index).is_some() {
-                return Err(persist_err("ldlt config has duplicate point_ids"));
-            }
-            index_to_id.push(id);
-            max_id = Some(max_id.map_or(raw, |seen: u64| seen.max(raw)));
-        }
-        if let Some(max_id) = max_id {
-            if next_id <= max_id {
-                return Err(persist_err(
-                    "ldlt config next_point_id must exceed every stored PointId",
-                ));
-            }
-        }
-        Ok(Self {
-            id_to_index,
-            index_to_id,
-            next_id,
-        })
-    }
-
-    pub(crate) fn ids(&self) -> &[PointId] {
-        &self.index_to_id
-    }
-
-    fn next_id(&self) -> u64 {
-        self.next_id
-    }
-
-    fn len(&self) -> usize {
-        self.index_to_id.len()
-    }
-
-    pub(crate) fn index_of(&self, id: PointId) -> Result<usize, GprError> {
-        self.id_to_index
-            .get(&id)
-            .copied()
-            .ok_or(GprError::InvalidPointId)
-    }
-
-    pub(crate) fn insert(&mut self) -> PointId {
-        let id = PointId::from_raw(self.next_id);
-        let index = self.index_to_id.len();
-        self.next_id = self.next_id.saturating_add(1);
-        self.index_to_id.push(id);
-        self.id_to_index.insert(id, index);
-        id
-    }
-}
+use super::{
+    ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, PointId, PointRegistry, Policies,
+    fit_buffers, with_kernel_exp,
+};
 
 #[cfg(feature = "insert-stages")]
 mod insert_stages {
@@ -143,16 +65,6 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
     insert_stages::take()
 }
 
-impl PointRegistry {
-    pub(crate) fn remove_at(&mut self, index: usize) {
-        let id = self.index_to_id.remove(index);
-        self.id_to_index.remove(&id);
-        for (shifted, remaining) in self.index_to_id.iter().enumerate().skip(index) {
-            self.id_to_index.insert(*remaining, shifted);
-        }
-    }
-}
-
 /// Online Exact GPR after [`FittedGpr::into_online`]: LDLT factor, tail insert, and delete.
 ///
 /// [`Self::insert`] appends one training point with a bordered LDLT update
@@ -189,7 +101,7 @@ impl PointRegistry {
 pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
     pub(crate) core: GprCore<P>,
     pub(crate) optimizer: O,
-    pub(crate) workspace: OnlineWorkspace<P::Storage>,
+    pub(crate) workspace: LdltStore<P::Storage>,
     pub(crate) registry: PointRegistry,
     pub(crate) alpha: AlphaState<P>,
 }
@@ -299,7 +211,7 @@ where
     pub(crate) fn from_core(
         core: GprCore<P>,
         optimizer: O,
-        workspace: OnlineWorkspace<P::Storage>,
+        workspace: LdltStore<P::Storage>,
     ) -> Self {
         let registry = PointRegistry::from_count(core.n);
         Self {
@@ -596,7 +508,7 @@ where
         append_point_mat_inplace(&mut self.core.x, n, &self.core.query.query_xs[..xs_len]);
         self.core.y_train.push(y_trans[0]);
         self.core.n += 1;
-        OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
+        LdltStore::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
         self.alpha.mark_stale(CholeskyStage::OnlineInsert);
         let id = self.registry.insert();
         #[cfg(feature = "insert-stages")]
@@ -652,7 +564,7 @@ where
         self.core.y_train.remove(index);
         self.registry.remove_at(index);
         self.core.n -= 1;
-        OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
+        LdltStore::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
         self.alpha.mark_stale(CholeskyStage::OnlineDelete);
         Ok(())
     }
@@ -973,7 +885,7 @@ where
 /// fit code restores `θ`, and the `α` it may have rebuilt is put back here.
 fn with_llt_view<P, R>(
     core: &mut GprCore<P>,
-    online: &mut OnlineWorkspace<P::Storage>,
+    online: &mut LdltStore<P::Storage>,
     f: impl FnOnce(&mut ExactFit<'_, P>) -> Result<R, GprError>,
 ) -> Result<R, GprError>
 where
@@ -993,8 +905,8 @@ where
         Ok(value) => {
             online.fill_ld_from_llt(store.l(), n)?;
             online.factor_jitter = store.buffers.core().factor_jitter;
-            OnlineWorkspace::set_f64_prefix(&mut online.y, &core.y_train);
-            OnlineWorkspace::set_vector_prefix(&mut online.alpha, &core.factor_alpha);
+            LdltStore::set_f64_prefix(&mut online.y, &core.y_train);
+            LdltStore::set_vector_prefix(&mut online.alpha, &core.factor_alpha);
             Ok(value)
         }
         Err(err) => {

@@ -17,12 +17,17 @@ src/likelihood.rs
 src/linalg/                crate-private Cholesky, LDLT, solves, dense helpers, faer worker caps. Models do not define these
 src/math.rs                Accurate / FastApprox
 src/objective.rs
-src/online.rs              crate-private OnlineWorkspace
 src/param.rs
 src/precision.rs
 src/rng.rs                 crate-private SmallRng
 src/workspace.rs           Workspace and QueryWorkspace. Do not pack them into one struct
-src/gpr/                   Gpr and FittedGpr in model.rs. fitted.rs, factor.rs, online.rs, types.rs, tests.rs
+src/gpr/                   one responsibility per file, no #[path]
+  trainer.rs fitted.rs online.rs    Gpr, FittedGpr, OnlineGpr
+  exact_fit.rs             ExactFit: every hyperparameter write, gradient, and Hessian
+  factor_store.rs          LltStore (FittedGpr) and LdltStore (OnlineGpr)
+  shared.rs factor.rs      GprCore and the shared predict body; Gram assembly and Cholesky
+  points.rs prediction.rs policy.rs   PointId, prediction types, runtime policies
+  tests.rs
 src/kernel/                leaves live here, not in src/*.rs
   compiled/                mod.rs, apply.rs, grad.rs, hess.rs, gram.rs. One dispatch over T: KernelScalar
     tests/                 one file per concern (compose, coord_mode, custom, fast_math, params, scalar)
@@ -45,6 +50,6 @@ docs/                      design, roadmap, this file, adr/
 
 `.dev/` is local scratch (measurement logs, reviews, drafts). It is not committed. Decisions do not stay there.
 
-`Workspace`, `QueryWorkspace`, `OnlineWorkspace`, and faer types are crate-private.
+`Workspace`, `QueryWorkspace`, `LltStore`, `LdltStore`, and faer types are crate-private.
 
 Unit tests are `#[cfg(test)]` in the module. Integration tests are `tests/`.
