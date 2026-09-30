@@ -27,8 +27,7 @@ use gprx::{
 };
 
 /// Labels of the combinations that fail today (#306).
-const KNOWN_FAILURES: [&str; 16] = [
-    "periodic · newton · SinglePrecision · FastApprox · free",
+const KNOWN_FAILURES: [&str; 15] = [
     "constant * rbf ard · ncg · SinglePrecision · Accurate · free",
     "linear * rbf · newton · SinglePrecision · FastApprox · free",
     "(rbf + rq) * (periodic + constant) · newton · DoublePrecision · Accurate · free",
