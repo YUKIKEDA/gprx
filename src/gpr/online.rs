@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 #[cfg(feature = "insert-stages")]
 use std::time::Instant;
 
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
 
 use crate::data::pack_storage;
 use crate::error::{CholeskyStage, GprError};
@@ -411,10 +411,7 @@ where
     }
 
     pub(crate) fn ld_factor(&self) -> MatRef<'_, P::Storage> {
-        self.workspace
-            .ld_factor
-            .as_ref()
-            .submatrix(0, 0, self.core.n, self.core.n)
+        self.workspace.ld()
     }
 
     /// Appends one training point at the current `θ` with a bordered LDLT update.
@@ -464,7 +461,7 @@ where
                 self.core.x.as_ref().submatrix(0, 0, n, d),
                 &mut self.core.x_cast,
             );
-            let dest = self.workspace.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
+            let dest = MatMut::from_column_major_slice_mut(&mut self.workspace.v_buf[..n], n, 1);
             let QueryWorkspace {
                 query_xs,
                 query_x,
@@ -734,8 +731,7 @@ where
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         self.refresh_alpha()?;
-        let n = self.core.n;
-        let ld = self.workspace.ld_factor.as_ref().submatrix(0, 0, n, n);
+        let ld = self.workspace.ld();
         self.core.predict_with_into(
             StoredFactor::Ldlt(ld),
             &mut [],

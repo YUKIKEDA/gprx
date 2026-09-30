@@ -8,29 +8,102 @@ use faer::linalg::triangular_solve::{
 
 use crate::kernel::KernelScalar;
 use faer::{Mat, MatMut, MatRef, Par};
+use wide::f64x4;
 
-/// Solves `L w = v` in place for unit-lower `L` (`f64`, faer).
-pub(crate) fn solve_unit_lower_faer(ld: MatRef<'_, f64>, v: MatMut<'_, f64>) {
-    solve_unit_lower_triangular_in_place(ld, v, Par::Seq);
+/// Rows solved together by [`solve_unit_lower_rows_f64`].
+const PANEL: usize = 8;
+
+/// Solves `L w = v` in place for unit-lower `L`, where row `i` of `L` is
+/// the head `lt[0..i, i]` of column `i` of the stored `Lᵀ` (`f64`).
+///
+/// Rows go in panels of [`PANEL`]: the panel's rows are dotted with the
+/// solved head of `w` in one pass (each `w` load is shared by the panel),
+/// then the `PANEL × PANEL` triangle is solved in place. Every entry of `L`
+/// is read once, in one flat loop. faer's recursive solve made thousands of
+/// small matmul calls per append at `n = 4096`, 15–25% slower (#267).
+pub(crate) fn solve_unit_lower_rows_f64(lt: &Mat<f64>, w: &mut [f64]) {
+    let n = w.len();
+    let mut i = 0;
+    while i + PANEL <= n {
+        let rows: [&[f64]; PANEL] = std::array::from_fn(|k| &lt.col_as_slice(i + k)[..i]);
+        let dots = dot_rows(rows, &w[..i]);
+        let mut x: [f64; PANEL] = std::array::from_fn(|k| w[i + k] - dots[k]);
+        for a in 1..PANEL {
+            let row = &lt.col_as_slice(i + a)[i..i + a];
+            for (b, l) in row.iter().enumerate() {
+                x[a] -= l * x[b];
+            }
+        }
+        w[i..i + PANEL].copy_from_slice(&x);
+        i += PANEL;
+    }
+    for i in i.max(1)..n {
+        let (head, rest) = w.split_at_mut(i);
+        rest[0] -= dot_f64(&lt.col_as_slice(i)[..i], head);
+    }
 }
 
-/// Solves `L w = v` in place for unit-lower `L`, accumulating in `f64`.
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn solve_unit_lower_f64_accum(ld: MatRef<'_, f32>, mut v: MatMut<'_, f32>) {
-    let n = ld.nrows();
-    let mut solved = vec![0.0f64; n];
-    for i in 0..n {
-        solved[i] = f64::from(v[(i, 0)]);
-    }
-    for i in 0..n {
-        let mut sum = solved[i];
-        for j in 0..i {
-            sum -= f64::from(ld[(i, j)]) * solved[j];
+/// `rowsₖᵀ b` for each of the [`PANEL`] rows, sharing each `f64x4` load of `b`.
+fn dot_rows(rows: [&[f64]; PANEL], b: &[f64]) -> [f64; PANEL] {
+    let len = b.len();
+    let body = len - len % 4;
+    let mut acc = [f64x4::ZERO; PANEL];
+    for at in (0..body).step_by(4) {
+        let vb = f64x4::from([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        for (slot, row) in acc.iter_mut().zip(&rows) {
+            let va = f64x4::from([row[at], row[at + 1], row[at + 2], row[at + 3]]);
+            *slot = va.mul_add(vb, *slot);
         }
-        solved[i] = sum;
     }
-    for i in 0..n {
-        v[(i, 0)] = solved[i] as f32;
+    std::array::from_fn(|k| {
+        let tail: f64 = rows[k][body..len]
+            .iter()
+            .zip(&b[body..len])
+            .map(|(x, y)| x * y)
+            .sum();
+        acc[k].reduce_add() + tail
+    })
+}
+
+/// `aᵀ b` with four `f64x4` accumulators.
+fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
+    const LANES: usize = 4;
+    const STEP: usize = 4 * LANES;
+    let mut acc = [f64x4::ZERO; 4];
+    let body = a.len() - a.len() % STEP;
+    for (ca, cb) in a[..body]
+        .chunks_exact(STEP)
+        .zip(b[..body].chunks_exact(STEP))
+    {
+        for (k, slot) in acc.iter_mut().enumerate() {
+            let at = k * LANES;
+            let va = f64x4::from([ca[at], ca[at + 1], ca[at + 2], ca[at + 3]]);
+            let vb = f64x4::from([cb[at], cb[at + 1], cb[at + 2], cb[at + 3]]);
+            *slot = va.mul_add(vb, *slot);
+        }
+    }
+    let total = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    let mut sum = total.reduce_add();
+    for (x, y) in a[body..].iter().zip(&b[body..]) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// [`solve_unit_lower_rows_f64`] for `f32` storage. The solution stays in
+/// `f64` until every row is solved, then rounds once.
+pub(crate) fn solve_unit_lower_rows_f32(lt: &Mat<f32>, w: &mut [f32]) {
+    let mut solved: Vec<f64> = w.iter().map(|&v| f64::from(v)).collect();
+    for i in 1..solved.len() {
+        let (head, rest) = solved.split_at_mut(i);
+        let mut sum = rest[0];
+        for (l, x) in lt.col_as_slice(i)[..i].iter().zip(head.iter()) {
+            sum -= f64::from(*l) * *x;
+        }
+        rest[0] = sum;
+    }
+    for (out, v) in w.iter_mut().zip(&solved) {
+        *out = *v as f32;
     }
 }
 
@@ -70,6 +143,50 @@ pub(crate) fn ldlt_delete_via_f64(mut ld: MatMut<'_, f32>, index: usize, n: usiz
 /// Solves `L D Lᵀ x = b` for the leading `n` (overwrites the first column of `rhs`).
 pub(crate) fn solve_ldlt_in_place<T: KernelScalar>(
     ld: MatRef<'_, T>,
+    rhs: MatMut<'_, T>,
+    n: usize,
+) {
+    T::solve_ldlt_in_place(ld, rhs, n);
+}
+
+/// [`solve_ldlt_in_place`] for `f32` storage: each column is solved in
+/// `f64` from the `f32` entries and rounded once at the end.
+///
+/// The stored `Lᵀ` makes `ld` a row-major view; an `f32` solve over it rounds
+/// in row (dot-product) order, whose error cancels worse in `k*ᵀ α` than the
+/// column order did. Accumulating in `f64` removes that dependence.
+pub(crate) fn solve_ldlt_f64_accum(ld: MatRef<'_, f32>, mut rhs: MatMut<'_, f32>, n: usize) {
+    let mut x = vec![0.0f64; n];
+    for col in 0..rhs.ncols() {
+        for (i, v) in x.iter_mut().enumerate() {
+            *v = f64::from(rhs[(i, col)]);
+        }
+        for i in 1..n {
+            let mut sum = x[i];
+            for j in 0..i {
+                sum -= f64::from(ld[(i, j)]) * x[j];
+            }
+            x[i] = sum;
+        }
+        for (i, v) in x.iter_mut().enumerate() {
+            *v /= f64::from(ld[(i, i)]);
+        }
+        for i in (0..n).rev() {
+            let mut sum = x[i];
+            for j in (i + 1)..n {
+                sum -= f64::from(ld[(j, i)]) * x[j];
+            }
+            x[i] = sum;
+        }
+        for (i, v) in x.iter().enumerate() {
+            rhs[(i, col)] = *v as f32;
+        }
+    }
+}
+
+/// [`solve_ldlt_in_place`] with faer (`f64`).
+pub(crate) fn solve_ldlt_faer<T: KernelScalar>(
+    ld: MatRef<'_, T>,
     mut rhs: MatMut<'_, T>,
     n: usize,
 ) {
@@ -91,4 +208,39 @@ pub(crate) fn apply_ldlt_inv_l<T: KernelScalar>(ld: MatRef<'_, T>, rhs: MatMut<'
     }
     let ld_n = ld.submatrix(0, 0, n, n);
     solve_unit_lower_triangular_in_place(ld_n, rhs, Par::Seq);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_solve_matches_faer_across_panel_edges() {
+        for n in [1usize, 2, 7, 8, 9, 16, 17, 100] {
+            let lt = Mat::<f64>::from_fn(n, n, |i, j| {
+                if i < j {
+                    (((i * 131 + j * 17) % 97) as f64 - 48.0) * 1e-3
+                } else if i == j {
+                    2.0
+                } else {
+                    0.0
+                }
+            });
+            let b: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
+            let mut got = b.clone();
+            solve_unit_lower_rows_f64(&lt, &mut got);
+            let mut want = b.clone();
+            solve_unit_lower_triangular_in_place(
+                lt.as_ref().transpose(),
+                MatMut::from_column_major_slice_mut(&mut want, n, 1),
+                Par::Seq,
+            );
+            for (g, w) in got.iter().zip(&want) {
+                assert!(
+                    (g - w).abs() <= 1e-12 * (1.0 + w.abs()),
+                    "n={n}: {g} vs {w}"
+                );
+            }
+        }
+    }
 }
