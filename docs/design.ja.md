@@ -466,6 +466,8 @@ H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
+`FittedGpr` と `OnlineGpr` は crate 内部の `GprCore`（kernel spec・コンパイル済みカーネル・尤度・変換・方針・訓練データ・`α`・クエリ用バッファ）を共有し、違うのは因子だけ（R4-2 / [#240](https://github.com/YUKIKEDA/gprx/issues/240)）。`FittedGpr` は LLT の置き場（`FitBuffers` か mmap の `L`）、`OnlineGpr` は LDLT の `OnlineWorkspace` と `PointId` の表を持つ。`StoredFactor { Llt, Ldlt }` が因子の見方で、`solve`、列への `L⁻¹`、ピボットごとの重み（`1` か `1/Dᵢ`）、`log|A|`、`diag(A⁻¹)` を持つ。predict・共分散・sample・LOO・NLML・予測用 `α` はこの見方について `GprCore` に1回だけ書く。ハイパラの書き込み（`set_params`・勾配・Hessian・`fit`・`refit`）はすべて借用の `ExactFit`（core + LLT の置き場）1つで動く。`OnlineGpr` は `L √D` を O(n²) で詰めた一時的な LLT の置き場を貸し、新しい因子を書き戻す。訓練データは複製せず、O(n³) は新しい `θ` が要る分解だけ。
+
 既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を差し替える（P2B-1）。argmin の `NonlinearCg` / `NelderMead` は P2B-2。argmin の `Newton` は P2B-17。葉の作り直しは §5.4 に従う（P2B-18）。`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` の既定は対角分散。クエリ間共分散は P2B-6 の別経路（対角 `predict` のフラグでは切り替えない）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
 
 ```rust
@@ -836,18 +838,18 @@ struct PointRegistry {
 未学習の `Gpr` には点を足さない。バッチの `FittedGpr` に `insert` は無い。
 
 ```rust
-impl FittedGpr<O, S, C, B> {
-    fn into_online(self) -> Result<OnlineGpr<O, S, C, B>, GprError>;
+impl FittedGpr<O, P> {
+    fn into_online(self) -> Result<OnlineGpr<O, P>, GprError>;
 }
 
-impl OnlineGpr<O, S, C, B> {
+impl OnlineGpr<O, P> {
     fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError>;
     fn delete(&mut self, id: PointId) -> Result<(), GprError>;
     fn point_ids(&self) -> &[PointId];
 }
 ```
 
-`insert` / `delete` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private で `OnlineGpr` が持つ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse のオンラインは `OnlineSgpr`（§6）。
+`insert` / `delete` は現在のカーネル・ハイパラのまま LD・alpha を更新する。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。これらは一時的な LLT の置き場でバッチの fit を動かし（§6.3）、`PointId` とワークスペースの容量を保つ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private で `OnlineGpr` が持つ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse のオンラインは `OnlineSgpr`（§6）。
 
 ## 12. テスト計画
 

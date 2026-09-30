@@ -50,6 +50,8 @@ def run_gprx(case_path: Path, memory: bool = False) -> dict[str, Any]:
         "--quiet",
         "--manifest-path",
         str(ROOT / "gprx" / "Cargo.toml"),
+        "--bin",
+        "gprx-perf",
         "--",
         str(case_path),
     ]
