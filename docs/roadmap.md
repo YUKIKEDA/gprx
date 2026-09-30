@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-The R rows are done (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)). P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
+B1-3 ([#301](https://github.com/YUKIKEDA/gprx/issues/301), `Sgpr` / `Svgp` fit with every built-in kernel). Acceptance is on #301. B1-2 is done. B1-1 stays acceptance on #298 (the measured tables are not in yet). P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
 
 ## Dependencies
 
@@ -186,6 +186,9 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
 | B1-1 | Task | Real-dataset benchmark and library comparison in the README | [#298](https://github.com/YUKIKEDA/gprx/issues/298) | acceptance on #298 |
+| B1-2 | Bug | `Svgp` Adam step costs O(n·m²), not O(batch·m²) | [#300](https://github.com/YUKIKEDA/gprx/issues/300) | done |
+| B1-3 | Feat | `Sgpr` / `Svgp` fit with every built-in kernel (rectangular `∂K(Z,X)/∂θ` and its Hessian) | [#301](https://github.com/YUKIKEDA/gprx/issues/301) | in progress |
+| B1-4 | Feat | `FreeInducing` coordinate derivatives and `Custom` cross derivatives for every kernel | [#302](https://github.com/YUKIKEDA/gprx/issues/302) | Set after Grill on #302 |
 
 ## Intentionally out of scope
 
