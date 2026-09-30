@@ -462,122 +462,130 @@ where
     }
 }
 
-/// Predictive mean from storage `k_*`, or a fresh `f64` column for [`ReevaluateKernel`].
+/// Predictive mean from storage `k_*`, or fresh `f64` columns for [`MixedPrecision`].
 pub trait PredictMean: ModelPrecision {
-    /// Dot of query column `col` with predict `α`, as [`PrecisionPolicy::Refine`].
-    fn column_mean<M: crate::math::KernelMath>(
+    /// Writes `k_*ᵀ α` for every query column into `out` (`out.len()` = queries).
+    ///
+    /// `x_query` is the transformed query, column-major `out.len() × n_cols`.
+    fn predict_means<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
         x_query: &[f64],
         n_cols: usize,
         alpha: &[Self::Refine],
-        col: usize,
-    ) -> Result<Self::Refine, GprError>;
+        out: &mut [Self::Refine],
+    ) -> Result<(), GprError>;
 }
 
-fn storage_column_mean<P: ModelPrecision>(
+fn storage_means<P: ModelPrecision>(
     k_storage: MatRef<'_, P::Storage>,
     alpha: &[P::Refine],
-    col: usize,
-) -> P::Refine {
-    let mut sum = 0.0f64;
-    for (row, &weight) in alpha.iter().enumerate() {
-        sum += k_storage[(row, col)].to_f64() * weight.to_f64();
+    out: &mut [P::Refine],
+) {
+    for (col, slot) in out.iter_mut().enumerate() {
+        let mut sum = 0.0f64;
+        for (row, &weight) in alpha.iter().enumerate() {
+            sum += k_storage[(row, col)].to_f64() * weight.to_f64();
+        }
+        *slot = P::Refine::from_f64(sum);
     }
-    P::Refine::from_f64(sum)
 }
 
 impl PredictMean for DoublePrecision {
-    fn column_mean<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
+    fn predict_means<M: crate::math::KernelMath>(
+        _kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
-        x_train: MatRef<'_, f64>,
-        x_query: &[f64],
-        n_cols: usize,
+        _x_train: MatRef<'_, f64>,
+        _x_query: &[f64],
+        _n_cols: usize,
         alpha: &[Self::Refine],
-        col: usize,
-    ) -> Result<Self::Refine, GprError> {
-        let _ = (kernel, x_train, x_query, n_cols);
-        Ok(storage_column_mean::<Self>(k_storage, alpha, col))
+        out: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        storage_means::<Self>(k_storage, alpha, out);
+        Ok(())
     }
 }
 
 impl PredictMean for SinglePrecision {
-    fn column_mean<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
+    fn predict_means<M: crate::math::KernelMath>(
+        _kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,
+        _x_train: MatRef<'_, f64>,
+        _x_query: &[f64],
+        _n_cols: usize,
+        alpha: &[Self::Refine],
+        out: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        storage_means::<Self>(k_storage, alpha, out);
+        Ok(())
+    }
+}
+
+impl<R> PredictMean for MixedPrecision<R>
+where
+    R: ResidualTag + Copy + Send + Sync + 'static,
+{
+    fn predict_means<M: crate::math::KernelMath>(
+        kernel: &KernelSpec,
+        _k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
         x_query: &[f64],
         n_cols: usize,
         alpha: &[Self::Refine],
-        col: usize,
-    ) -> Result<Self::Refine, GprError> {
-        let _ = (kernel, x_train, x_query, n_cols);
-        Ok(storage_column_mean::<Self>(k_storage, alpha, col))
+        out: &mut [Self::Refine],
+    ) -> Result<(), GprError> {
+        f64_cross_means::<M>(kernel, x_train, x_query, n_cols, alpha, out)
     }
 }
 
-impl PredictMean for MixedPrecision<PromoteStorage> {
-    fn column_mean<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        k_storage: MatRef<'_, Self::Storage>,
-        x_train: MatRef<'_, f64>,
-        x_query: &[f64],
-        n_cols: usize,
-        alpha: &[Self::Refine],
-        col: usize,
-    ) -> Result<Self::Refine, GprError> {
-        let _ = k_storage;
-        f64_cross_dot::<M>(kernel, x_train, x_query, n_cols, alpha, col)
-    }
-}
+/// Query columns per `f64` cross block. Bounds the scratch at `3 · n · 32` `f64`.
+const MEAN_BLOCK: usize = 32;
 
-impl PredictMean for MixedPrecision<ReevaluateKernel> {
-    fn column_mean<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        k_storage: MatRef<'_, Self::Storage>,
-        x_train: MatRef<'_, f64>,
-        x_query: &[f64],
-        n_cols: usize,
-        alpha: &[Self::Refine],
-        col: usize,
-    ) -> Result<Self::Refine, GprError> {
-        let _ = k_storage;
-        f64_cross_dot::<M>(kernel, x_train, x_query, n_cols, alpha, col)
-    }
-}
-
-fn f64_cross_dot<M: crate::math::KernelMath>(
+/// `k_*ᵀ α` with `k_*` evaluated in `f64`: one compile, then blocks of
+/// [`MEAN_BLOCK`] query columns.
+fn f64_cross_means<M: crate::math::KernelMath>(
     kernel: &KernelSpec,
     x_train: MatRef<'_, f64>,
     x_query: &[f64],
     n_cols: usize,
     alpha: &[f64],
-    col: usize,
-) -> Result<f64, GprError> {
+    out: &mut [f64],
+) -> Result<(), GprError> {
     let kernel_f64 = kernel.compile();
     let n = x_train.nrows();
-    let n_rows = x_query.len() / n_cols;
-    let mut row = Mat::<f64>::zeros(1, n_cols);
-    for dim in 0..n_cols {
-        row[(0, dim)] = x_query[dim * n_rows + col];
+    let m = out.len();
+    let block = MEAN_BLOCK.min(m.max(1));
+    let mut rows = Mat::<f64>::zeros(block, n_cols);
+    let mut k_block = Mat::<f64>::zeros(n, block);
+    let mut scratch = Mat::<f64>::zeros(n, block);
+    let mut dist = Mat::<f64>::zeros(n, block);
+    let mut start = 0;
+    while start < m {
+        let len = block.min(m - start);
+        for dim in 0..n_cols {
+            for j in 0..len {
+                rows[(j, dim)] = x_query[dim * m + start + j];
+            }
+        }
+        kernel_f64.eval_cross::<M>(
+            x_train,
+            rows.as_ref().submatrix(0, 0, len, n_cols),
+            Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
+            k_block.as_mut().submatrix_mut(0, 0, n, len),
+            scratch.as_mut().submatrix_mut(0, 0, n, len),
+            &mut [],
+        )?;
+        for j in 0..len {
+            let mut sum = 0.0;
+            for i in 0..n {
+                sum += k_block[(i, j)] * alpha[i];
+            }
+            out[start + j] = sum;
+        }
+        start += len;
     }
-    let mut k_col = Mat::<f64>::zeros(n, 1);
-    let mut scratch = Mat::<f64>::zeros(n, 1);
-    kernel_f64.eval_cross::<M>(
-        x_train,
-        row.as_ref(),
-        None,
-        k_col.as_mut(),
-        scratch.as_mut(),
-        &mut [],
-    )?;
-    let mut sum = 0.0;
-    for i in 0..n {
-        sum += k_col[(i, 0)] * alpha[i];
-    }
-    Ok(sum)
+    Ok(())
 }
 
 /// Inverse target map. `f32` predictions pass through an `f64` buffer.
