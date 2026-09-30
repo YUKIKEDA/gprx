@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R4-4 ([#242](https://github.com/YUKIKEDA/gprx/issues/242), uniform model state, rollback, and optional buffers). Acceptance is on #242. R4-3 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+R4-5 ([#243](https://github.com/YUKIKEDA/gprx/issues/243), `IncrementalRecompute` infers changed leaves from bit differences and allocates per call). Acceptance is on #243. R4-4 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
 
 ## Dependencies
 
@@ -172,8 +172,8 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R4-1 | Task | Distance cache, Cholesky buffer, exp mode, and recompute strategy as runtime values | [#239](https://github.com/YUKIKEDA/gprx/issues/239) | done |
 | R4-2 | Task | Factor abstraction (LLT / LDLT) and a shared model core for `FittedGpr` and `OnlineGpr` | [#240](https://github.com/YUKIKEDA/gprx/issues/240) | done |
 | R4-3 | Task | One predict path | [#241](https://github.com/YUKIKEDA/gprx/issues/241) | done |
-| R4-4 | Task | Uniform model state, rollback, and optional buffers | [#242](https://github.com/YUKIKEDA/gprx/issues/242) | in progress |
-| R4-5 | Bug | `IncrementalRecompute` infers changed leaves from bit differences and allocates per call | [#243](https://github.com/YUKIKEDA/gprx/issues/243) | acceptance on #243 |
+| R4-4 | Task | Uniform model state, rollback, and optional buffers | [#242](https://github.com/YUKIKEDA/gprx/issues/242) | done |
+| R4-5 | Bug | `IncrementalRecompute` infers changed leaves from bit differences and allocates per call | [#243](https://github.com/YUKIKEDA/gprx/issues/243) | in progress |
 | R4-6 | Task | Shrink the 48 `Loaded*` persist types | [#244](https://github.com/YUKIKEDA/gprx/issues/244) | acceptance on #244 |
 | R4-7 | Task | Reorganize `src/gpr` files | [#245](https://github.com/YUKIKEDA/gprx/issues/245) | acceptance on #245 |
 | R5-1 | Task | Put `Sgpr` / `Svgp` on the shared core, linalg, and precision; fix module dependencies | [#246](https://github.com/YUKIKEDA/gprx/issues/246) | acceptance on #246 |
