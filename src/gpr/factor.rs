@@ -3,9 +3,7 @@
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{
-    CoordMode, FillDistances, GramKernel, KernelScalar, MixedKernelViews, Triangle,
-};
+use crate::kernel::{FillDistances, GramInputs, GramKernel, KernelScalar, Triangle};
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
@@ -68,72 +66,43 @@ fn apply_compiled_views<K: GramKernel, M: crate::math::KernelMath>(
     dest: MatMut<'_, K::T>,
     scratch: MatMut<'_, K::T>,
     thread_scratch: &mut Vec<Mat<K::T>>,
-) -> Result<(), GprError>
-where
-    K::T: FillDistances,
-{
-    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            if let Some(d) = dist {
-                if !*d.dist_ready {
-                    let mut pool = std::mem::take(thread_scratch);
-                    K::T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
-                    *thread_scratch = pool;
-                    *d.dist_ready = true;
-                }
-                compiled.apply::<M>(d.dist_cache.as_ref(), dest, Triangle::Lower, scratch)
-            } else {
-                compiled.apply_points::<M>(x, dest, Triangle::Lower, scratch)
-            }
-        }
-        CoordMode::Points => {
-            if reads_ard
-                && compiled.needs_ard_sq_diff()
-                && let Some(d) = dist
-                && d.ard_sq_diff.ncols() > 0
-            {
-                if !*d.ard_sq_diff_ready {
-                    let mut pool = std::mem::take(thread_scratch);
-                    K::T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
-                    *thread_scratch = pool;
-                    *d.ard_sq_diff_ready = true;
-                }
-                compiled.apply_from_ard_cache::<M>(
-                    d.ard_sq_diff.as_ref(),
-                    x,
-                    dest,
-                    Triangle::Lower,
-                    scratch,
-                )
-            } else {
-                compiled.apply_points::<M>(x, dest, Triangle::Lower, scratch)
-            }
-        }
-        CoordMode::Mixed => {
-            if let Some(d) = dist {
-                if !*d.dist_ready {
-                    let mut pool = std::mem::take(thread_scratch);
-                    K::T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
-                    *thread_scratch = pool;
-                    *d.dist_ready = true;
-                }
-                let mut views = MixedKernelViews::new(d.dist_cache.as_ref(), x);
-                if reads_ard && compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0 {
-                    if !*d.ard_sq_diff_ready {
-                        let mut pool = std::mem::take(thread_scratch);
-                        K::T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
-                        *thread_scratch = pool;
-                        *d.ard_sq_diff_ready = true;
-                    }
-                    views.ard_cache = Some(d.ard_sq_diff.as_ref());
-                }
-                compiled.apply_mixed::<M>(views, dest, Triangle::Lower, scratch)
-            } else {
-                compiled.apply_points::<M>(x, dest, Triangle::Lower, scratch)
-            }
-        }
+) -> Result<(), GprError> {
+    let inputs = fill_cached_inputs(compiled, x, dist, thread_scratch)?;
+    compiled.eval_gram::<M>(inputs, dest, Triangle::Lower, scratch)
+}
+
+/// Fills the training distance caches the tree reads (once per `X`) and
+/// returns the views for a Gram evaluation. Without caches, only `x`.
+pub(crate) fn fill_cached_inputs<'a, K: GramKernel>(
+    compiled: &K,
+    x: MatRef<'a, K::T>,
+    dist: Option<crate::workspace::DistBufs<'a, K::T>>,
+    thread_scratch: &mut Vec<Mat<K::T>>,
+) -> Result<GramInputs<'a, K::T>, GprError> {
+    let Some(d) = dist else {
+        return Ok(GramInputs::points(x));
+    };
+    let reads_dist = compiled.reads_distances()?;
+    if reads_dist && !*d.dist_ready {
+        let mut pool = std::mem::take(thread_scratch);
+        K::T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
+        *thread_scratch = pool;
+        *d.dist_ready = true;
     }
+    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE
+        && compiled.needs_ard_sq_diff()
+        && d.ard_sq_diff.ncols() > 0;
+    if reads_ard && !*d.ard_sq_diff_ready {
+        let mut pool = std::mem::take(thread_scratch);
+        K::T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
+        *thread_scratch = pool;
+        *d.ard_sq_diff_ready = true;
+    }
+    Ok(GramInputs {
+        x,
+        dist: reads_dist.then_some(d.dist_cache.as_ref()),
+        ard: reads_ard.then_some(d.ard_sq_diff.as_ref()),
+    })
 }
 
 pub(crate) fn finish_train_system<W>(ws: &mut W, y: &[f64], noise: f64, extra_diag: f64)
@@ -227,102 +196,4 @@ pub(crate) fn neg_mll_from_factor<T: KernelScalar>(
     let log_det = log_det_from_l(l, n);
     let log_two_pi = T::from_f64((2.0 * std::f64::consts::PI).ln());
     T::from_f64(0.5) * (quad + log_det + T::from_f64(n as f64) * log_two_pi)
-}
-
-pub(crate) fn write_kernel_grad<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    dist: MatRef<'_, K::T>,
-    x: MatRef<'_, K::T>,
-    ard_cache: Option<MatRef<'_, K::T>>,
-    d_k: MatMut<'_, K::T>,
-    scratch: MatMut<'_, K::T>,
-    param_idx: usize,
-) -> Result<(), GprError>
-where
-    K::T: FillDistances,
-{
-    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            compiled.grad::<M>(dist, d_k, param_idx, Triangle::Lower, scratch)
-        }
-        CoordMode::Points => {
-            if reads_ard && let Some(cache) = ard_cache {
-                compiled.grad_from_ard_cache::<M>(
-                    cache,
-                    x,
-                    d_k,
-                    param_idx,
-                    Triangle::Lower,
-                    scratch,
-                )
-            } else {
-                compiled.grad_points::<M>(x, d_k, param_idx, Triangle::Lower, scratch)
-            }
-        }
-        CoordMode::Mixed => compiled.grad_mixed::<M>(
-            MixedKernelViews::new(dist, x),
-            d_k,
-            param_idx,
-            Triangle::Lower,
-            scratch,
-        ),
-    }
-}
-
-pub(crate) fn write_kernel_grad_from_coords<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    x: MatRef<'_, K::T>,
-    d_k: MatMut<'_, K::T>,
-    scratch: MatMut<'_, K::T>,
-    param_idx: usize,
-) -> Result<(), GprError> {
-    compiled.grad_points::<M>(x, d_k, param_idx, Triangle::Lower, scratch)
-}
-
-pub(crate) fn write_kernel_hess<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    dist: MatRef<'_, K::T>,
-    x: MatRef<'_, K::T>,
-    ard_cache: Option<MatRef<'_, K::T>>,
-    d2_k: MatMut<'_, K::T>,
-    scratch: MatMut<'_, K::T>,
-    pair: (usize, usize),
-) -> Result<(), GprError>
-where
-    K::T: FillDistances,
-{
-    let (i, j) = pair;
-    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE;
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            compiled.hess::<M>(dist, d2_k, i, j, Triangle::Lower, scratch)
-        }
-        CoordMode::Points => {
-            if reads_ard && let Some(cache) = ard_cache {
-                compiled.hess_from_ard_cache::<M>(cache, x, d2_k, pair, Triangle::Lower, scratch)
-            } else {
-                compiled.hess_points::<M>(x, d2_k, i, j, Triangle::Lower, scratch)
-            }
-        }
-        CoordMode::Mixed => compiled.hess_mixed::<M>(
-            MixedKernelViews::new(dist, x),
-            d2_k,
-            i,
-            j,
-            Triangle::Lower,
-            scratch,
-        ),
-    }
-}
-
-pub(crate) fn write_kernel_hess_from_coords<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    x: MatRef<'_, K::T>,
-    d2_k: MatMut<'_, K::T>,
-    scratch: MatMut<'_, K::T>,
-    i: usize,
-    j: usize,
-) -> Result<(), GprError> {
-    compiled.hess_points::<M>(x, d2_k, i, j, Triangle::Lower, scratch)
 }

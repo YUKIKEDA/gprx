@@ -11,9 +11,7 @@ use faer::{Mat, MatMut, MatRef};
 use crate::data::{pack_storage, validate_query};
 use crate::error::GprError;
 use crate::kernel::ScalarOps;
-use crate::kernel::{
-    CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec,
-};
+use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
@@ -593,22 +591,18 @@ where
                 d,
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
-            fill_train_query_kernel::<_, M>(
-                &self.compiled,
+            self.compiled.eval_cross::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
-                query_dist.as_mut().submatrix_mut(0, 0, n, 1),
+                Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
+                &mut [],
             )?;
         }
         let mut kss = [P::Storage::from_f64(0.0)];
-        match self.compiled.coord_mode()? {
-            CoordMode::Dist | CoordMode::Either => self.compiled.fill_diag(&mut kss)?,
-            CoordMode::Points | CoordMode::Mixed => self
-                .compiled
-                .fill_diag_points(self.query.query_x.as_ref().submatrix(0, 0, 1, d), &mut kss)?,
-        }
+        self.compiled
+            .eval_diag(self.query.query_x.as_ref().submatrix(0, 0, 1, d), &mut kss)?;
         let k_new = kss[0] + P::Storage::from_f64(self.likelihood.noise_variance());
         #[cfg(feature = "insert-stages")]
         insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
@@ -888,13 +882,13 @@ where
                 ..
             } = &mut self.query;
             pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
-            fill_train_query_kernel::<_, M>(
-                &self.compiled,
+            self.compiled.eval_cross::<M>(
                 x_train,
                 query_x.as_ref(),
-                query_dist.as_mut(),
+                Some(query_dist.as_mut()),
                 query_k_star.as_mut(),
                 query_scratch.as_mut(),
+                &mut [],
             )?;
         }
         let ld = self
@@ -959,13 +953,13 @@ where
         let mut query_k_star = Mat::<P::Storage>::zeros(n, m);
         let mut query_scratch = Mat::<P::Storage>::zeros(n, m);
         let mut query_kss = vec![P::Storage::from_f64(0.0); m];
-        fill_train_query_kernel::<_, M>(
-            &self.compiled,
+        self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
-            query_dist.as_mut(),
+            Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
+            &mut [],
         )?;
         write_ldlt_prediction::<M, P>(
             &self.kernel,
@@ -1163,38 +1157,6 @@ where
     }
 }
 
-fn fill_train_query_kernel<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    x_train: MatRef<'_, K::T>,
-    query_x: MatRef<'_, K::T>,
-    mut query_dist: MatMut<'_, K::T>,
-    query_k_star: MatMut<'_, K::T>,
-    query_scratch: MatMut<'_, K::T>,
-) -> Result<(), GprError>
-where
-    K::T: FillDistances,
-{
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            K::T::write_cross(x_train, query_x, query_dist.as_mut(), &mut []);
-            compiled.apply_cross::<M>(query_dist.as_ref(), query_k_star, query_scratch)
-        }
-        CoordMode::Points => {
-            compiled.apply_cross_points::<M>(x_train, query_x, query_k_star, query_scratch)
-        }
-        CoordMode::Mixed => {
-            K::T::write_cross(x_train, query_x, query_dist.as_mut(), &mut []);
-            compiled.apply_cross_mixed::<M>(
-                query_dist.as_ref(),
-                x_train,
-                query_x,
-                query_k_star,
-                query_scratch,
-            )
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn write_ldlt_prediction<M: crate::math::KernelMath, P>(
     kernel: &KernelSpec,
@@ -1237,10 +1199,7 @@ where
         )?;
     }
     OnlineWorkspace::apply_inv_l(ld, query_k_star.as_mut(), n);
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => compiled.fill_diag(query_kss)?,
-        CoordMode::Points | CoordMode::Mixed => compiled.fill_diag_points(query_x, query_kss)?,
-    }
+    compiled.eval_diag(query_x, query_kss)?;
     let noise_s = P::Storage::from_f64(noise);
     let zero_s = P::Storage::from_f64(0.0);
     for col in 0..m {
