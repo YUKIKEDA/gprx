@@ -16,12 +16,17 @@ use crate::objective::{Differentiable, HasBounds};
 use crate::param::Interval;
 
 use super::logit::{
-    CachedProblem, EvalCache, consider_value_run, log_theta_to_z, map_argmin_error,
+    BestPoint, CachedProblem, EvalCache, consider_value_run, log_theta_to_z, map_argmin_error,
     sample_log_uniform_z,
 };
 use super::{OptResult, Optimizer, Restarts};
 
 /// Nonlinear conjugate gradient via argmin.
+///
+/// When the line search finds no descent direction, the run restarts from the
+/// best point evaluated, from the steepest descent (at most ten times, and only
+/// while the value still improves); otherwise it returns
+/// [`GprError::OptimizationNotConverged`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NonlinearCg {
     max_iterations: u64,
@@ -129,6 +134,10 @@ impl<P: Differentiable + HasBounds> Optimizer<P> for NonlinearCg {
     }
 }
 
+/// Restarts from the steepest descent after a line search without a descent
+/// direction, at most this many times in one run.
+const MAX_DIRECTION_RESTARTS: u32 = 10;
+
 fn run_ncg<P: Differentiable>(
     ncg: &NonlinearCg,
     objective: &mut P,
@@ -140,31 +149,63 @@ fn run_ncg<P: Differentiable>(
             reason: format!("expected {n} parameters, got {}", init.len()),
         });
     }
-    let problem = CachedProblem {
-        inner: RefCell::new(EvalCache::new(objective, n)),
-    };
-    let linesearch = MoreThuenteLineSearch::<Vec<f64>, Vec<f64>, f64>::new();
-    let inner = NonlinearConjugateGradient::new(linesearch, PolakRibierePlus::new())
-        .restart_orthogonality(0.1);
-    let solver = GradNormStop {
-        inner,
-        tol_grad: ncg.tolerance,
-    };
-    let (params, iterations) =
-        {
-            let result = Executor::new(problem, solver)
-                .configure(|state| state.param(init.to_vec()).max_iters(ncg.max_iterations))
-                .ctrlc(false)
-                .run()
-                .map_err(map_argmin_error)?;
-            let state = result.state();
-            let params = state.get_best_param().cloned().ok_or_else(|| {
-                GprError::OptimizationNotConverged {
-                    iterations: state.get_iter() as usize,
-                }
-            })?;
-            (params, state.get_iter())
+    let best: BestPoint = RefCell::new(None);
+    let mut start = init.to_vec();
+    let mut restarts_left = MAX_DIRECTION_RESTARTS;
+    let mut total_iterations = 0_u64;
+    let params = loop {
+        let problem = CachedProblem {
+            inner: RefCell::new(EvalCache::new(&mut *objective, n).track_best(&best)),
         };
+        let before = best.borrow().as_ref().map(|(_, v)| *v);
+        let linesearch = MoreThuenteLineSearch::<Vec<f64>, Vec<f64>, f64>::new();
+        let inner = NonlinearConjugateGradient::new(linesearch, PolakRibierePlus::new())
+            .restart_orthogonality(0.1);
+        let solver = GradNormStop {
+            inner,
+            tol_grad: ncg.tolerance,
+        };
+        let remaining = ncg.max_iterations.saturating_sub(total_iterations);
+        let run = Executor::new(problem, solver)
+            .configure(|state| state.param(start.clone()).max_iters(remaining))
+            .ctrlc(false)
+            .run();
+        match run {
+            Ok(result) => {
+                let state = result.state();
+                total_iterations += state.get_iter();
+                break state.get_best_param().cloned().ok_or(
+                    GprError::OptimizationNotConverged {
+                        iterations: total_iterations as usize,
+                    },
+                )?;
+            }
+            // The line search found no descent direction; its error is not
+            // the objective's. Restart from the best point, which starts the
+            // conjugate direction over from the steepest descent.
+            Err(err) if err.downcast_ref::<GprError>().is_none() => {
+                let now = best.borrow().clone();
+                let improved = match (&now, before) {
+                    (Some((_, v)), Some(b)) => *v < b,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                match now {
+                    Some((point, _)) if improved && restarts_left > 0 => {
+                        restarts_left -= 1;
+                        start = point;
+                    }
+                    _ => {
+                        return Err(GprError::OptimizationNotConverged {
+                            iterations: total_iterations as usize,
+                        });
+                    }
+                }
+            }
+            Err(err) => return Err(map_argmin_error(err)),
+        }
+    };
+    let iterations = total_iterations;
     let mut grad = vec![0.0; n];
     let value = objective.value_and_gradient_into(&params, &mut grad)?;
     Ok(OptResult {

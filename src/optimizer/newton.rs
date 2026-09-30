@@ -1,14 +1,7 @@
-//! Newton's method via argmin, with a private faer inverse.
+//! Newton's method with a backtracking line search and a private faer inverse.
 
-use std::cell::RefCell;
 use std::num::NonZeroU32;
 
-use argmin::core::{
-    CostFunction, Error as ArgminError, Executor, Gradient, Hessian, IterState, KV, Problem,
-    Solver, State, TerminationReason, TerminationStatus,
-};
-use argmin::solver::newton::Newton as ArgminNewton;
-use argmin_math::{ArgminDot, ArgminInv};
 use faer::Mat;
 use faer::linalg::solvers::DenseSolveCore;
 
@@ -17,16 +10,19 @@ use crate::objective::{HasBounds, TwiceDifferentiable};
 use crate::param::Interval;
 
 use super::logit::{
-    LogitMapped, keep_better, log_theta_to_z, map_argmin_error, sample_log_uniform_z,
-    z_to_log_theta,
+    LogitMapped, keep_better, log_theta_to_z, sample_log_uniform_z, z_to_log_theta,
 };
 use super::{OptResult, Optimizer, Restarts};
 
-/// Newton's method via argmin.
+/// Newton's method with a backtracking line search.
 ///
-/// The Hessian lives in unconstrained logit coordinates. `H⁻¹` is a private
-/// faer factorization of the `p×p` matrix. A singular Hessian is
-/// [`GprError::OptimizationNotConverged`].
+/// The Hessian lives in unconstrained logit coordinates. The direction is
+/// `−H⁻¹ g` from a private faer LU, or the steepest descent `−g` when `H` is
+/// singular or the step does not descend. The step starts at `gamma` and is
+/// halved until the Armijo decrease holds; a candidate that cannot be
+/// evaluated (out of the bounds, not finite, not positive definite) counts as
+/// no decrease. When no step decreases the objective away from a minimum,
+/// [`GprError::OptimizationNotConverged`] carries the iteration count.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Newton {
     max_iterations: u64,
@@ -174,6 +170,11 @@ fn consider_newton<P: TwiceDifferentiable>(
     Ok(())
 }
 
+/// Backtracking halvings of one step before the search gives up.
+const MAX_BACKTRACKS: usize = 30;
+/// Armijo constant of the sufficient decrease `f(x + t d) ≤ f(x) + c t g·d`.
+const ARMIJO: f64 = 1e-4;
+
 fn run_newton<P: TwiceDifferentiable>(
     newton: &Newton,
     objective: &mut P,
@@ -185,103 +186,96 @@ fn run_newton<P: TwiceDifferentiable>(
             reason: format!("expected {n} parameters, got {}", init.len()),
         });
     }
-    let problem = NewtonProblem {
-        inner: RefCell::new(HessCache::new(objective, n)),
-    };
-    let inner = ArgminNewton::new()
-        .with_gamma(newton.gamma)
-        .map_err(map_argmin_error)?;
-    let solver = NewtonTol {
-        inner,
-        tolerance: newton.tolerance,
-    };
-    let (params, iterations) =
-        {
-            let result = Executor::new(problem, solver)
-                .configure(|state| state.param(init.to_vec()).max_iters(newton.max_iterations))
-                .ctrlc(false)
-                .run()
-                .map_err(map_newton_error)?;
-            let state = result.state();
-            let params = state.get_best_param().cloned().ok_or_else(|| {
-                GprError::OptimizationNotConverged {
-                    iterations: state.get_iter() as usize,
+    let mut cache = HessCache::new(objective, n);
+    let mut x = init.to_vec();
+    let mut value = cache.ensure(&x)?;
+    let mut iterations = 0_u64;
+    let mut candidate = vec![0.0; n];
+    while iterations < newton.max_iterations {
+        let grad = cache.grad.clone();
+        let grad_norm = norm(&grad);
+        if grad_norm <= newton.tolerance {
+            break;
+        }
+        iterations += 1;
+        cache.fill_hessian(&x)?;
+        let direction = descent_direction(&cache.hess, &grad, n);
+        let slope: f64 = grad.iter().zip(&direction).map(|(g, d)| g * d).sum();
+        let mut step = newton.gamma;
+        let mut accepted = false;
+        for _ in 0..MAX_BACKTRACKS {
+            for ((c, xi), d) in candidate.iter_mut().zip(&x).zip(&direction) {
+                *c = xi + step * d;
+            }
+            // A candidate that cannot be evaluated (out of the bounds, not
+            // finite, not positive definite) is rejected like one that does
+            // not decrease enough.
+            if let Ok(v) = cache.ensure(&candidate) {
+                if v <= value + ARMIJO * step * slope {
+                    x.copy_from_slice(&candidate);
+                    value = v;
+                    accepted = true;
+                    break;
                 }
-            })?;
-            (params, state.get_iter())
-        };
-    let mut grad = vec![0.0; n];
-    let value = objective.value_and_gradient_into(&params, &mut grad)?;
+            }
+            step *= 0.5;
+        }
+        if !accepted {
+            // At a minimum to rounding the line search finds no decrease.
+            if grad_norm <= 1e-4 * value.abs().max(1.0) {
+                break;
+            }
+            return Err(GprError::OptimizationNotConverged {
+                iterations: iterations as usize,
+            });
+        }
+    }
     Ok(OptResult {
-        params,
+        params: x,
         value,
         iterations,
     })
 }
 
-fn map_newton_error(err: ArgminError) -> GprError {
-    if let Some(gpr) = err.downcast_ref::<GprError>() {
-        return gpr.clone();
-    }
-    let text = err.to_string();
-    if text.contains("singular") || text.contains("invert") || text.contains("inv") {
-        GprError::OptimizationNotConverged { iterations: 0 }
-    } else {
-        map_argmin_error(err)
-    }
+fn norm(v: &[f64]) -> f64 {
+    v.iter().map(|a| a * a).sum::<f64>().sqrt()
 }
 
-struct NewtonTol {
-    inner: ArgminNewton<f64>,
-    tolerance: f64,
-}
-
-impl<O> Solver<O, IterState<Vec<f64>, Vec<f64>, (), NewtonHess, (), f64>> for NewtonTol
-where
-    O: Gradient<Param = Vec<f64>, Gradient = Vec<f64>>
-        + Hessian<Param = Vec<f64>, Hessian = NewtonHess>,
-{
-    fn name(&self) -> &str {
-        "Newton method"
-    }
-
-    fn next_iter(
-        &mut self,
-        problem: &mut Problem<O>,
-        state: IterState<Vec<f64>, Vec<f64>, (), NewtonHess, (), f64>,
-    ) -> Result<
-        (
-            IterState<Vec<f64>, Vec<f64>, (), NewtonHess, (), f64>,
-            Option<KV>,
-        ),
-        ArgminError,
-    > {
-        let (state, kv) = self.inner.next_iter(problem, state)?;
-        let Some(param) = state.get_param().cloned() else {
-            return Ok((state, kv));
-        };
-        let grad = problem.gradient(&param)?;
-        Ok((state.gradient(grad), kv))
-    }
-
-    fn terminate(
-        &mut self,
-        state: &IterState<Vec<f64>, Vec<f64>, (), NewtonHess, (), f64>,
-    ) -> TerminationStatus {
-        if let Some(grad) = state.get_gradient() {
-            let norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
-            if norm <= self.tolerance {
-                return TerminationStatus::Terminated(TerminationReason::SolverConverged);
-            }
+/// `−H⁻¹ g`, or `−g` when `H` is singular, not finite, or the step does not
+/// descend (`H` not positive definite).
+fn descent_direction(hess: &[f64], grad: &[f64], n: usize) -> Vec<f64> {
+    if let Some(step) = newton_step(hess, grad, n) {
+        let slope: f64 = grad.iter().zip(&step).map(|(g, d)| g * d).sum();
+        if slope < 0.0 {
+            return step;
         }
-        TerminationStatus::NotTerminated
     }
+    grad.iter().map(|g| -g).collect()
 }
 
+fn newton_step(hess: &[f64], grad: &[f64], n: usize) -> Option<Vec<f64>> {
+    if hess.len() != n * n || grad.len() != n {
+        return None;
+    }
+    let a = Mat::<f64>::from_fn(n, n, |row, col| hess[row * n + col]);
+    let lu = a.partial_piv_lu();
+    let u = lu.U();
+    let scale = (0..n).fold(0.0_f64, |m, i| m.max(u[(i, i)].abs()));
+    let tol = f64::EPSILON * scale.max(1.0) * n as f64;
+    if (0..n).any(|i| !u[(i, i)].is_finite() || u[(i, i)].abs() <= tol) {
+        return None;
+    }
+    let inv = lu.inverse();
+    let step: Vec<f64> = (0..n)
+        .map(|row| -(0..n).map(|col| inv[(row, col)] * grad[col]).sum::<f64>())
+        .collect();
+    step.iter().all(|v| v.is_finite()).then_some(step)
+}
+
+/// The objective with the buffers of the last evaluation. The Hessian is
+/// filled only for a point that was accepted, not for every candidate.
 struct HessCache<'a, P: ?Sized> {
     objective: &'a mut P,
-    params: Vec<f64>,
-    value: Option<f64>,
     grad: Vec<f64>,
     hess: Vec<f64>,
 }
@@ -290,145 +284,29 @@ impl<'a, P: TwiceDifferentiable + ?Sized> HessCache<'a, P> {
     fn new(objective: &'a mut P, n: usize) -> Self {
         Self {
             objective,
-            params: Vec::new(),
-            value: None,
             grad: vec![0.0; n],
             hess: vec![0.0; n * n],
         }
     }
 
+    /// Value and gradient at `param`, into `self.grad`.
     fn ensure(&mut self, param: &[f64]) -> Result<f64, GprError> {
-        if let Some(value) = self.value {
-            if same_params(&self.params, param) {
-                return Ok(value);
-            }
-        }
-        let n = param.len();
-        if self.grad.len() != n {
-            self.grad.resize(n, 0.0);
-        }
-        if self.hess.len() != n * n {
-            self.hess.resize(n * n, 0.0);
-        }
         let value = self
             .objective
             .value_and_gradient_into(param, &mut self.grad)?;
-        self.objective.hessian_into(param, &mut self.hess)?;
-        if !value.is_finite()
-            || self.grad.iter().any(|g| !g.is_finite())
-            || self.hess.iter().any(|h| !h.is_finite())
-        {
+        if !value.is_finite() || self.grad.iter().any(|g| !g.is_finite()) {
             return Err(GprError::OptimizationNotConverged { iterations: 0 });
         }
-        self.params.clear();
-        self.params.extend_from_slice(param);
-        self.value = Some(value);
         Ok(value)
     }
-}
 
-fn same_params(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
-struct NewtonProblem<'a, P: ?Sized> {
-    inner: RefCell<HessCache<'a, P>>,
-}
-
-impl<P: TwiceDifferentiable + ?Sized> CostFunction for NewtonProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Output = f64;
-
-    fn cost(&self, param: &Self::Param) -> Result<Self::Output, ArgminError> {
-        self.inner
-            .borrow_mut()
-            .ensure(param)
-            .map_err(ArgminError::from)
-    }
-}
-
-impl<P: TwiceDifferentiable + ?Sized> Gradient for NewtonProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Gradient = Vec<f64>;
-
-    fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, ArgminError> {
-        let mut inner = self.inner.borrow_mut();
-        inner.ensure(param).map_err(ArgminError::from)?;
-        Ok(inner.grad.clone())
-    }
-}
-
-impl<P: TwiceDifferentiable + ?Sized> Hessian for NewtonProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Hessian = NewtonHess;
-
-    fn hessian(&self, param: &Self::Param) -> Result<Self::Hessian, ArgminError> {
-        let mut inner = self.inner.borrow_mut();
-        inner.ensure(param).map_err(ArgminError::from)?;
-        Ok(NewtonHess {
-            data: inner.hess.clone(),
-            n: inner.grad.len(),
-        })
-    }
-}
-
-/// Row-major `p×p` Hessian. Inverse uses faer LU.
-#[derive(Clone, Debug)]
-struct NewtonHess {
-    data: Vec<f64>,
-    n: usize,
-}
-
-impl ArgminInv<NewtonHess> for NewtonHess {
-    fn inv(&self) -> Result<NewtonHess, ArgminError> {
-        let n = self.n;
-        if self.data.len() != n * n {
-            return Err(ArgminError::from(GprError::OptimizationNotConverged {
-                iterations: 0,
-            }));
+    /// The Hessian at `param`, into `self.hess`.
+    fn fill_hessian(&mut self, param: &[f64]) -> Result<(), GprError> {
+        self.objective.hessian_into(param, &mut self.hess)?;
+        if self.hess.iter().any(|h| !h.is_finite()) {
+            return Err(GprError::OptimizationNotConverged { iterations: 0 });
         }
-        let a = Mat::<f64>::from_fn(n, n, |row, col| self.data[row * n + col]);
-        let lu = a.partial_piv_lu();
-        let u = lu.U();
-        let mut scale = 0.0_f64;
-        for i in 0..n {
-            scale = scale.max(u[(i, i)].abs());
-        }
-        let tol = f64::EPSILON * scale.max(1.0) * n as f64;
-        for i in 0..n {
-            if !u[(i, i)].is_finite() || u[(i, i)].abs() <= tol {
-                return Err(ArgminError::from(GprError::OptimizationNotConverged {
-                    iterations: 0,
-                }));
-            }
-        }
-        let inv = lu.inverse();
-        let mut data = vec![0.0; n * n];
-        for row in 0..n {
-            for col in 0..n {
-                data[row * n + col] = inv[(row, col)];
-            }
-        }
-        Ok(NewtonHess { data, n })
-    }
-}
-
-impl ArgminDot<Vec<f64>, Vec<f64>> for NewtonHess {
-    fn dot(&self, other: &Vec<f64>) -> Vec<f64> {
-        let n = self.n;
-        let mut out = vec![0.0; n];
-        if other.len() != n || self.data.len() != n * n {
-            return out;
-        }
-        for (row, slot) in out.iter_mut().enumerate() {
-            let start = row * n;
-            *slot = self.data[start..start + n]
-                .iter()
-                .zip(other.iter())
-                .map(|(a, b)| a * b)
-                .sum();
-        }
-        out
+        Ok(())
     }
 }
 
@@ -542,6 +420,108 @@ mod tests {
         .fit(&x, 3, 1, &y)
         .unwrap_or_else(|(_, e)| panic!("{e}"));
         assert!(fitted.neg_log_marginal_likelihood().expect("fitted") < start);
+    }
+
+    /// `√(1 + x²)`: plain Newton from `|x| > 1` jumps away (`x → −x³`); values
+    /// beyond `|x| = 50` cannot be evaluated.
+    struct Sqrt1PlusSquare;
+
+    impl Objective for Sqrt1PlusSquare {
+        fn num_params(&self) -> usize {
+            1
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            let mut dummy = [0.0; 1];
+            self.value_and_gradient_into(params, &mut dummy)
+        }
+    }
+
+    impl Differentiable for Sqrt1PlusSquare {
+        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.value_and_gradient_into(params, out).map(|_| ())
+        }
+
+        fn value_and_gradient_into(
+            &mut self,
+            params: &[f64],
+            out: &mut [f64],
+        ) -> Result<f64, GprError> {
+            let x = params[0];
+            if x.abs() > 50.0 {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+            let root = (1.0 + x * x).sqrt();
+            out[0] = x / root;
+            Ok(root)
+        }
+    }
+
+    impl TwiceDifferentiable for Sqrt1PlusSquare {
+        fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            let x = params[0];
+            out[0] = (1.0 + x * x).powf(-1.5);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn newton_backtracks_where_the_plain_step_diverges() {
+        for start in [1.5, 2.0, 4.0, -3.0] {
+            let mut obj = Sqrt1PlusSquare;
+            let result = Newton::new()
+                .with_max_iterations(200)
+                .minimize_unconstrained(&mut obj, &[start])
+                .expect("safeguarded newton");
+            assert_close(result.params[0], 0.0, 1e-6);
+        }
+    }
+
+    /// The Hessian of `−cos(x)` at `x = 2` is negative: the Newton step
+    /// ascends, and the search falls back to the steepest descent.
+    struct NegativeCurvature;
+
+    impl Objective for NegativeCurvature {
+        fn num_params(&self) -> usize {
+            1
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            Ok(-params[0].cos())
+        }
+    }
+
+    impl Differentiable for NegativeCurvature {
+        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            out[0] = params[0].sin();
+            Ok(())
+        }
+
+        fn value_and_gradient_into(
+            &mut self,
+            params: &[f64],
+            out: &mut [f64],
+        ) -> Result<f64, GprError> {
+            out[0] = params[0].sin();
+            Ok(-params[0].cos())
+        }
+    }
+
+    impl TwiceDifferentiable for NegativeCurvature {
+        fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            out[0] = params[0].cos();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn newton_descends_when_the_hessian_is_not_positive_definite() {
+        let mut obj = NegativeCurvature;
+        let result = Newton::new()
+            .with_max_iterations(200)
+            .minimize_unconstrained(&mut obj, &[2.0])
+            .expect("falls back to steepest descent");
+        assert!(result.value < -0.999, "value {}", result.value);
     }
 
     #[test]

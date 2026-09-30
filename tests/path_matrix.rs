@@ -2,10 +2,8 @@
 //! listed, documented exceptions. A combination that fails for another reason
 //! fails this test.
 //!
-//! Known failures are listed in `KNOWN_FAILURES` and belong to
-//! [#306](https://github.com/YUKIKEDA/gprx/issues/306) (Newton and
-//! NonlinearCg robustness). The test fails when one of them starts to pass, so
-//! the list shrinks to empty with that Issue.
+//! A combination that fails today would be listed in `KNOWN_FAILURES`; the
+//! test fails when a listed one starts to pass, so the list only shrinks.
 //!
 //! Exceptions:
 //! - Matérn `ν = 1/2` with `FreeInducing`: `CoordGradientUnsupported` (its
@@ -26,17 +24,8 @@ use gprx::{
     Lbfgs, NelderMead, Newton, NonlinearCg, Sgpr, SinglePrecision,
 };
 
-/// Labels of the combinations that fail today (#306).
-const KNOWN_FAILURES: [&str; 8] = [
-    "periodic · newton · SinglePrecision · FastApprox · free",
-    "constant * rbf ard · ncg · SinglePrecision · Accurate · free",
-    "linear * rbf · newton · SinglePrecision · FastApprox · free",
-    "(rbf + rq) * (periodic + constant) · newton · DoublePrecision · Accurate · free",
-    "(rbf + rq) * (periodic + constant) · newton · SinglePrecision · Accurate · free",
-    "(rbf + rq) * (periodic + constant) · newton · DoublePrecision · FastApprox · free",
-    "(rbf + rq) * (periodic + constant) · newton · SinglePrecision · FastApprox · free",
-    "constant * matern ard 5/2 · newton · SinglePrecision · FastApprox · fixed",
-];
+/// Labels of the combinations that fail today. Empty: none.
+const KNOWN_FAILURES: [&str; 0] = [];
 
 const N: usize = 12;
 const D: usize = 2;
