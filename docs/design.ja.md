@@ -262,17 +262,16 @@ Periodicは二乗ユークリッド距離ではない。ARDは次元ごとの差
 
 ```rust
 enum DistanceCachePolicy {
-    Never,
-    Always,
-    Auto { memory_budget_bytes: usize }, // n,d,メモリ予算から実装時にベンチマークして調整
+    Cached,   // 既定。fit で 1 回埋めて使い回す
+    Uncached, // カーネルを組むたびに X から計算し直す
 }
 ```
 
-理論的な参考値(目安であり決定基準ではない): `(n,n,d)`テンソルは`n²×d×sizeof(T)`バイト。基本のK行列自体もn²×sizeof(T)であり(例: n=5000,f64で約200MB)、ARDキャッシュはこれのd倍になる点に注意。d≪nの典型的GPRではキャッシュの投資対効果は薄いことが多い。`Auto`の具体的な閾値は実装後のベンチマークで決定する(§14)。
+理論的な参考値(目安であり決定基準ではない): `(n,n,d)`テンソルは`n²×d×sizeof(T)`バイト。基本のK行列自体もn²×sizeof(T)であり(例: n=5000,f64で約200MB)、ARDキャッシュはこれのd倍になる点に注意。d≪nの典型的GPRではキャッシュの投資対効果は薄いことが多い。`Auto`の具体的な閾値は実装後のベンチマークで決定する(§14)。`Auto` はまだ variant ではない。
 
-P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Never` / `Always` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Always`。`Auto` は P5-5。
+P2-2（[#26](https://github.com/YUKIKEDA/gprx/issues/26)）: `Cached` / `Uncached` は既存の `Workspace.dist_cache`（等方 Dist/Either の n×n）に載せた。デフォルトは `Cached`。P5-5 で `Auto` を足す。
 
-P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always の ARD fit で 1 回確保し、等方 / `Never` では空（`kernel_scratch` と同じ）。レイアウトは列優先 `n × (n·d)`、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。埋めと RBF ARD `apply`/`grad` は Rayon + `wide::f64x4`（単位行ストライド）。Matérn / RQ ARD は同じキャッシュをスカラーで読む。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。`Auto` は P5-5。train×test / LOO のキャッシュは P2-7 の対象外。Dist 葉と Points 葉の合成の評価は P2B-13（P2-7 ではキャッシュ経路を混ぜない）。
+P2-7（[#88](https://github.com/YUKIKEDA/gprx/issues/88)）: 同じ `DistanceCachePolicy` を ARD 葉の生の `(Δx_d)²` に載せる。ℓ 込みの `r²` は置かない。公開 Policy は増やさない。`Workspace` は `n` と `d` を見る。Always（`Cached`）の ARD fit で 1 回確保し、等方 / Never（`Uncached`）では空（`kernel_scratch` と同じ）。レイアウトは列優先 `n × (n·d)`、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。埋めと RBF ARD `apply`/`grad` は Rayon + `wide::f64x4`（単位行ストライド）。Matérn / RQ ARD は同じキャッシュをスカラーで読む。必須の数値は同じ固定問題の ARD RBF（`mll_and_grad_ard` / `fit_lbfgs_ard`、Always vs Never）。`Auto` は P5-5。train×test / LOO のキャッシュは P2-7 の対象外。Dist 葉と Points 葉の合成の評価は P2B-13（P2-7 ではキャッシュ経路を混ぜない）。
 
 ### 5.3 CompiledKernelのplan構築アルゴリズム
 
@@ -844,7 +843,7 @@ struct LdltStore {
 
 **追加（末尾）**: ①容量が足りなければ `LdltStore::ensure_capacity`（倍率 2）。`OnlineGpr` の訓練 `X` / `y` も同じ倍率で伸ばす。クエリバッファは `ensure_at_least` → ②新規点と既存n点との距離計算(O(n)。1 列は逐次、`v_buf` に `k` を直接書く) → ③カーネル対角 `k_new` だけ足す（insert は `K` の新行/列を書かない。予測・NLML は LD だけ読む） → ④bordered LDLT update(O(n²)。三角ソルブは `v_buf` を再利用) → ⑤`α` は insert では解かない（libgp `alpha_needs_update`）。O(1) で古い印を付けるだけ。最初に読む操作が LDLT で解き直す。`&mut self` の読み（`predict_into`・ハイパラの書き込み）はモデルに `α` を置き、`&self` の読み（`predict`・共分散・sample・LOO・NLML・`alpha()`・`save_with_factor`）は次の insert / delete が空にする `OnceLock` のキャッシュを埋める。解くのに失敗したら（`MixedPrecision` の f64 へのやり直しが分解できないなど）その読みの `Err` になるので、`OnlineGpr::alpha()` は `Result` を返す（R4-2b / [#265](https://github.com/YUKIKEDA/gprx/issues/265)） → ⑥`PointRegistry` に新しい `PointId` を発行。
 
-**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)。スクラッチは `LdltStore` に置き再利用) → ②`OnlineGpr` の y・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④`α` は delete でも解かない。最初の `predict` / NLML / `alpha()` で LDLT 再ソルブ。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
+**削除**: ①`ldlt::update::delete_rows_and_cols_clobber`でLD更新(O(n²)。スクラッチは `LdltStore` に置き再利用) → ②`OnlineGpr` の y・`X` から該当要素を除去し、後ろの行/列を詰める(O(n)) → ③`PointRegistry`のインデックスを同じ順序でシフト → ④`α` は delete でも解かない。古い印と最初の読みでの解き直しは追加の⑤と同じ。`n_capacity` は据え置く。最後の 1 点は消さない（`InsufficientData`、`min = 2`）。未知・削除済みの `PointId` は `InvalidPointId`。
 
 **不変条件**: 削除により内部インデックスがシフトする際、workspace の `LD` / `y` / `alpha` と `OnlineGpr` の `X` と `PointRegistry`は**必ず同じ順序で同期**しなければならない。いずれか一つでも順序がずれると誤った解になる。この不変条件をテスト(§12)で明示的に検証する。
 
