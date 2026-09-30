@@ -1,0 +1,200 @@
+"""SVG figures for the README from ``out/real/results.json`` and the RSS
+timelines (``--timeline``).
+
+```text
+python -m perf.real.plot [--out DIR] [--protocol native|matched] [--timeline-case NAME]
+```
+
+Palette: the validated categorical order (blue, orange, aqua, yellow,
+magenta) on the light chart surface. Three of those fall under 3:1 contrast
+there, so every mark also has its own marker shape, the legend is always
+present, and the README carries the numbers as tables.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import statistics
+import sys
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+from .data import OUT  # noqa: E402
+
+SURFACE = "#fcfcfb"
+INK = "#0b0b0b"
+INK_2 = "#52514e"
+GRID = "#e6e5e1"
+#: Fixed slot per library: the entity keeps its color in every figure.
+STYLE = {
+    "gprx": ("#2a78d6", "o"),
+    "sklearn": ("#eb6834", "s"),
+    "gpytorch": ("#1baf7a", "^"),
+    "gpy": ("#eda100", "D"),
+    "libgp": ("#e87ba4", "v"),
+}
+LABEL = {"gprx": "gprx", "sklearn": "scikit-learn", "gpytorch": "GPyTorch", "gpy": "GPy", "libgp": "libgp"}
+
+plt.rcParams.update(
+    {
+        "svg.fonttype": "none",
+        "font.family": "sans-serif",
+        "font.size": 9,
+        "axes.edgecolor": GRID,
+        "axes.labelcolor": INK_2,
+        "xtick.color": INK_2,
+        "ytick.color": INK_2,
+        "text.color": INK,
+        "figure.facecolor": SURFACE,
+        "axes.facecolor": SURFACE,
+        "savefig.facecolor": SURFACE,
+    }
+)
+
+
+def _style_axes(ax) -> None:
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(length=0)
+
+
+def _legend(fig, libs: list[str]) -> None:
+    handles = [
+        plt.Line2D([], [], marker=STYLE[l][1], color=STYLE[l][0], linestyle="", markersize=6,
+                   markeredgecolor=SURFACE, label=LABEL[l])
+        for l in libs
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=len(libs), frameon=False,
+               labelcolor=INK_2, bbox_to_anchor=(0.5, 1.0))
+
+
+def _mean_se(values: list[float]) -> tuple[float, float]:
+    mean = statistics.fmean(values)
+    if len(values) < 2:
+        return mean, 0.0
+    return mean, statistics.stdev(values) / math.sqrt(len(values))
+
+
+def _table(rows: list[dict], protocol: str) -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
+    """dataset -> lib -> metric -> (mean, se) over the ok splits."""
+    cells: dict[str, dict[str, list[dict]]] = {}
+    for row in rows:
+        if row.get("status") != "ok" or row["protocol"] != protocol:
+            continue
+        dataset = row["name"].rsplit("_s", 1)[0]
+        cells.setdefault(dataset, {}).setdefault(row["lib"], []).append(row)
+    out: dict = {}
+    for dataset, libs in cells.items():
+        for lib, group in libs.items():
+            out.setdefault(dataset, {})[lib] = {
+                key: _mean_se([r[key] for r in group if r.get(key) is not None])
+                for key in ("rmse", "nlpd", "fit_s", "joint_evals")
+                if any(r.get(key) is not None for r in group)
+            }
+    return out
+
+
+def _dots(axes, table, datasets, libs, metric, ylabel, log=False) -> None:
+    for ax, dataset in zip(axes, datasets):
+        _style_axes(ax)
+        for i, lib in enumerate(libs):
+            cell = table.get(dataset, {}).get(lib, {}).get(metric)
+            if cell is None:
+                continue
+            color, marker = STYLE[lib]
+            ax.errorbar(i, cell[0], yerr=cell[1], color=color, marker=marker, markersize=6,
+                        markeredgecolor=SURFACE, markeredgewidth=1.2, linewidth=1.6, capsize=0)
+        if log:
+            ax.set_yscale("log")
+        ax.set_xlim(-0.6, len(libs) - 0.4)
+        ax.set_xticks([])
+        ax.set_title(dataset, fontsize=9, color=INK)
+    axes[0].set_ylabel(ylabel)
+
+
+def accuracy(rows: list[dict], protocol: str, out: Path) -> Path | None:
+    table = _table(rows, protocol)
+    datasets = sorted(table)
+    if not datasets:
+        return None
+    libs = [l for l in STYLE if any(l in table[d] for d in datasets)]
+    fig, axes = plt.subplots(2, len(datasets), figsize=(max(1.9 * len(datasets) + 0.6, 6.6), 4.6), squeeze=False)
+    _dots(axes[0], table, datasets, libs, "rmse", "RMSE (lower is better)")
+    _dots(axes[1], table, datasets, libs, "nlpd", "NLPD (lower is better)")
+    _legend(fig, libs)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    path = out / f"accuracy_{protocol}.svg"
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def fit_time(rows: list[dict], protocol: str, out: Path) -> Path | None:
+    table = _table(rows, protocol)
+    datasets = sorted(table)
+    if not datasets:
+        return None
+    libs = [l for l in STYLE if any(l in table[d] for d in datasets)]
+    fig, axes = plt.subplots(2, len(datasets), figsize=(max(1.9 * len(datasets) + 0.6, 6.6), 4.6), squeeze=False)
+    _dots(axes[0], table, datasets, libs, "fit_s", "fit wall time [s], log", log=True)
+    _dots(axes[1], table, datasets, libs, "joint_evals", "joint MLL+grad evaluations", log=True)
+    _legend(fig, libs)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    path = out / f"fit_time_{protocol}.svg"
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def rss_timeline(case: str, protocol: str, out: Path, directory: Path) -> Path | None:
+    files = {l: directory / f"{case}_{protocol}_{l}.json" for l in STYLE}
+    files = {l: f for l, f in files.items() if f.is_file()}
+    if not files:
+        return None
+    fig, ax = plt.subplots(figsize=(7.2, 3.6))
+    _style_axes(ax)
+    for lib, file in files.items():
+        data = json.loads(file.read_text(encoding="utf-8"))
+        color, _ = STYLE[lib]
+        live = [(t, r) for t, r in data["samples"] if r > 0]  # after exit the tree reads 0
+        times = [t for t, _ in live]
+        mib = [r / 2**20 for _, r in live]
+        ax.plot(times, mib, color=color, linewidth=1.6, label=LABEL[lib])
+        for t, name in data["phases"]:
+            if name in ("fit", "predict"):
+                ax.axvline(t, color=color, linewidth=0.8, linestyle=":", alpha=0.8)
+    ax.set_xlabel("time since process start [s]  (dotted: start of fit / predict)")
+    ax.set_ylabel("RSS of the process tree [MiB]")
+    ax.legend(frameon=False, labelcolor=INK_2, loc="upper left")
+    fig.tight_layout()
+    path = out / f"rss_timeline_{case}_{protocol}.svg"
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def main(argv: list[str]) -> int:
+    def option(flag: str, default: str) -> str:
+        return argv[argv.index(flag) + 1] if flag in argv else default
+
+    out = Path(option("--out", str(OUT / "plots")))
+    out.mkdir(parents=True, exist_ok=True)
+    protocol = option("--protocol", "native")
+    rows = json.loads((OUT / "results.json").read_text(encoding="utf-8"))
+    made = [accuracy(rows, protocol, out), fit_time(rows, protocol, out)]
+    if "--timeline-case" in argv:
+        made.append(rss_timeline(option("--timeline-case", ""), protocol, out, OUT / "timeline"))
+    for path in made:
+        print(path if path else "nothing to plot")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

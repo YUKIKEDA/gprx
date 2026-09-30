@@ -18,6 +18,7 @@ from scipy.optimize import minimize
 
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
+from common.timeline import phase
 
 from .metrics import score
 from .timing import warmup_fits
@@ -94,6 +95,7 @@ def counter_joint(counter: Counter, model, x):  # noqa: ANN001
 
 
 def run(case: dict) -> dict:
+    phase("load")
     n, d = int(case["n_rows"]), int(case["n_cols"])
     m = int(case["xs_n_rows"])
     x = np.asarray(case["x"], dtype=np.float64).reshape(d, n).T.copy()
@@ -101,11 +103,14 @@ def run(case: dict) -> dict:
     xs = np.asarray(case["xs"], dtype=np.float64).reshape(d, m).T.copy()
 
     for _ in range(warmup_fits(n)):
+        phase("warmup")
         train(case, build(case, x, y))
+    phase("fit")
     model = build(case, x, y)
     t0 = time.perf_counter()
     info = train(case, model)
     fit_s = time.perf_counter() - t0
+    phase("predict")
     t0 = time.perf_counter()
     mean, var = model.predict(xs)
     predict_s = time.perf_counter() - t0

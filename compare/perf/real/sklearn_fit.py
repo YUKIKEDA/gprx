@@ -18,6 +18,7 @@ from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
 
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
+from common.timeline import phase
 
 from .metrics import score
 from .timing import warmup_fits
@@ -74,6 +75,7 @@ def make_model(case: dict) -> CountingGpr:
 
 
 def run(case: dict) -> dict:
+    phase("load")
     n, d = int(case["n_rows"]), int(case["n_cols"])
     x = np.asarray(case["x"], dtype=np.float64).reshape(d, n).T
     y = np.asarray(case["y"], dtype=np.float64)
@@ -82,11 +84,14 @@ def run(case: dict) -> dict:
     ys = np.asarray(case["ys"], dtype=np.float64)
 
     for _ in range(warmup_fits(n)):
+        phase("warmup")
         make_model(case).fit(x, y)
+    phase("fit")
     model = make_model(case)
     t0 = time.perf_counter()
     model.fit(x, y)
     fit_s = time.perf_counter() - t0
+    phase("predict")
     t0 = time.perf_counter()
     mean, std = model.predict(xs, return_std=True)
     predict_s = time.perf_counter() - t0

@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -73,27 +74,22 @@ json na_row(const json& c, const std::string& note) {
             {"coverage95", nullptr},  {"peak_rss_bytes", nullptr}, {"note", note}};
 }
 
-json run(const json& c) {
-    const std::string protocol = c.at("protocol").get<std::string>();
-    if (protocol == "matched") {
-        return na_row(c, "libgp has no swappable optimizer (Rprop only)");
-    }
-    const int n = c.at("n_rows").get<int>();
-    const int d = c.at("n_cols").get<int>();
-    const int m = c.at("xs_n_rows").get<int>();
-    const auto x = unpack_rows(c.at("x").get<std::vector<double>>(), n, d);
-    const auto xs = unpack_rows(c.at("xs").get<std::vector<double>>(), m, d);
-    const auto y_raw = c.at("y").get<std::vector<double>>();
-    const auto ys = c.at("ys").get<std::vector<double>>();
-    const double y_mean = c.at("y_mean").get<double>();
-    const double y_std = c.at("y_std").get<double>();
-    Eigen::VectorXd y =
-        Eigen::Map<const Eigen::VectorXd>(y_raw.data(), static_cast<Eigen::Index>(y_raw.size()));
+struct Fitted {
+    std::unique_ptr<libgp::GaussianProcess> gp;
+    uint64_t evals = 0;
+    double fit_s = 0.0;
+};
 
-    libgp::GaussianProcess gp(static_cast<size_t>(d), "CovSum ( CovSEard, CovNoise)");
+// One timed fit: build, add the points, and (for `native`) run Rprop.
+Fitted fit_gp(const json& c, const std::string& protocol, const Eigen::MatrixXd& x,
+              const Eigen::VectorXd& y, int n, int d) {
+    Fitted out;
+    out.gp = std::make_unique<libgp::GaussianProcess>(static_cast<size_t>(d),
+                                                     "CovSum ( CovSEard, CovNoise)");
+    libgp::GaussianProcess& gp = *out.gp;
     Eigen::VectorXd loghyper(static_cast<Eigen::Index>(gp.covf().get_param_dim()));
     if (loghyper.size() != d + 2) {
-        return na_row(c, "unexpected CovSEard+Noise parameter dimension");
+        throw std::runtime_error("unexpected CovSEard+Noise parameter dimension");
     }
     // libgp keeps log ell, log sf (an amplitude), log sn (a noise std).
     for (int j = 0; j < d; ++j) {
@@ -113,21 +109,59 @@ json run(const json& c) {
         }
         gp.add_pattern(point.data(), y(i));
     }
-    uint64_t evals = 0;
     if (protocol == "native") {
         libgp::RProp rprop;
         rprop.init();
         rprop.maximize(&gp, kRpropIterations, false);
-        evals = kRpropIterations;  // eps_stop = 0: one gradient and one value per iteration
-    } else if (protocol == "fixed") {
-        (void)gp.log_likelihood();
+        out.evals = kRpropIterations;  // eps_stop = 0: one gradient and one value per iteration
     } else {
+        (void)gp.log_likelihood();
+    }
+    out.fit_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    return out;
+}
+
+std::size_t warmup_fits(int n_rows) {
+    const char* raw = std::getenv("PERF_WARMUP");
+    if (raw != nullptr && raw[0] != '\0') {
+        return static_cast<std::size_t>(std::strtoul(raw, nullptr, 10));
+    }
+    return n_rows <= 5000 ? 1 : 0;
+}
+
+json run(const json& c) {
+    const std::string protocol = c.at("protocol").get<std::string>();
+    if (protocol == "matched") {
+        return na_row(c, "libgp has no swappable optimizer (Rprop only)");
+    }
+    const int n = c.at("n_rows").get<int>();
+    const int d = c.at("n_cols").get<int>();
+    const int m = c.at("xs_n_rows").get<int>();
+    const auto x = unpack_rows(c.at("x").get<std::vector<double>>(), n, d);
+    const auto xs = unpack_rows(c.at("xs").get<std::vector<double>>(), m, d);
+    const auto y_raw = c.at("y").get<std::vector<double>>();
+    const auto ys = c.at("ys").get<std::vector<double>>();
+    const double y_mean = c.at("y_mean").get<double>();
+    const double y_std = c.at("y_std").get<double>();
+    Eigen::VectorXd y =
+        Eigen::Map<const Eigen::VectorXd>(y_raw.data(), static_cast<Eigen::Index>(y_raw.size()));
+
+    std::cerr << "PHASE fit" << std::endl;
+    if (protocol != "native" && protocol != "fixed") {
         return na_row(c, "unknown protocol " + protocol);
     }
-    const double fit_s =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    for (std::size_t i = 0; i < warmup_fits(n); ++i) {
+        std::cerr << "PHASE warmup" << std::endl;
+        (void)fit_gp(c, protocol, x, y, n, d);
+    }
+    std::cerr << "PHASE fit" << std::endl;
+    Fitted fitted = fit_gp(c, protocol, x, y, n, d);
+    libgp::GaussianProcess& gp = *fitted.gp;
+    const double fit_s = fitted.fit_s;
+    const uint64_t evals = fitted.evals;
     const double nlml = -gp.log_likelihood();
 
+    std::cerr << "PHASE predict" << std::endl;
     const auto pstart = std::chrono::steady_clock::now();
     const Eigen::MatrixXd pred = gp.predict(xs, true);
     const double predict_s =
