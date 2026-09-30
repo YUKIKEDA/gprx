@@ -9,11 +9,12 @@ use crate::error::GprError;
 use crate::gpr::PointId;
 use crate::gpr::factor::write_params;
 use crate::gpr::online::PointRegistry;
+use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
-use crate::precision::{DoublePrecision, ModelPrecision, StorageScalar};
+use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
@@ -301,9 +302,7 @@ where
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
-        if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f32>()
-            && std::mem::size_of::<P::Refine>() == std::mem::size_of::<f64>()
-        {
+        if P::REFINES_IN_F64 {
             self.predict_w = assemble_vfe::<M, f64>(
                 &self.kernel,
                 self.likelihood,

@@ -16,13 +16,14 @@ use crate::gpr::factor::{
     cholesky_lower_with_policy, pack_points, require_param_len, symmetrize_lower, validate_query,
     validate_training,
 };
+use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
-use crate::precision::{ModelPrecision, StorageScalar};
+use crate::precision::ModelPrecision;
 use crate::rng::small_rng;
 use crate::sgpr::{kernel_cross, mat_mul_into, validate_inducing};
 use crate::workspace::{faer_par, faer_par_dims};
@@ -35,7 +36,7 @@ fn k_mm_jitter_policy() -> JitterPolicy {
     JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
 }
 
-pub(crate) struct SvgpState<T: StorageScalar> {
+pub(crate) struct SvgpState<T: KernelScalar> {
     pub(crate) k_mm_l: Mat<T>,
     pub(crate) a: Mat<T>,
     pub(crate) q_mean: Vec<f64>,
@@ -91,7 +92,7 @@ pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
     q: Option<(Vec<f64>, Mat<f64>)>,
 ) -> Result<SvgpState<T>, GprError>
 where
-    T: StorageScalar + FillDistances,
+    T: KernelScalar + FillDistances,
     CompiledKernel<T>: GramKernel<T = T>,
 {
     validate_training(x, n_rows, n_cols, y)?;
@@ -210,7 +211,7 @@ pub(crate) fn unpack_q(params: &[f64], m: usize) -> Result<(Vec<f64>, Mat<f64>),
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn svgp_neg_elbo<T: StorageScalar>(
+pub(crate) fn svgp_neg_elbo<T: KernelScalar>(
     a: MatRef<'_, T>,
     q_mean: &[f64],
     q_l: MatRef<'_, f64>,
@@ -224,7 +225,7 @@ pub(crate) fn svgp_neg_elbo<T: StorageScalar>(
     let mut tr_s = T::from_f64(0.0);
     let mut log_det_s = T::from_f64(0.0);
     for j in 0..m {
-        log_det_s += StorageScalar::ln(T::from_f64(q_l[(j, j)]));
+        log_det_s += KernelScalar::ln(T::from_f64(q_l[(j, j)]));
         for i in j..m {
             let v = T::from_f64(q_l[(i, j)]);
             tr_s += v * v;
@@ -360,7 +361,7 @@ pub(crate) trait SvgpMean: ModelPrecision {
     ) -> Result<Self::Refine, GprError>;
 }
 
-fn storage_q_dot<T: StorageScalar>(solved: &[T], q_mean: &[f64]) -> T {
+fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
     let mut sum = T::from_f64(0.0);
     for (weight, mean) in solved.iter().zip(q_mean.iter()) {
         sum += *weight * T::from_f64(*mean);
@@ -566,7 +567,7 @@ where
     P::Storage: FillDistances,
     CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
-    if std::mem::size_of::<P::Storage>() == std::mem::size_of::<f64>() {
+    if !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let shadow = promote_svgp_f64(model)?;
         return svgp_value_and_gradient_f64(&shadow, out, batch);
     }
@@ -615,7 +616,7 @@ fn storage_kl_grad<M: crate::math::KernelMath, P: ModelPrecision>(
     let mut packed = 0;
     for j in 0..m {
         let diag = P::Storage::from_f64(model.q_l[(j, j)]);
-        log_det_s += StorageScalar::ln(diag);
+        log_det_s += KernelScalar::ln(diag);
         for i in j..m {
             let v = P::Storage::from_f64(model.q_l[(i, j)]);
             tr_s += v * v;
@@ -639,7 +640,7 @@ fn storage_kl_grad<M: crate::math::KernelMath, P: ModelPrecision>(
         .to_f64()
 }
 
-struct StoragePointCache<T: StorageScalar> {
+struct StoragePointCache<T: KernelScalar> {
     resid: Vec<T>,
     var: Vec<T>,
     u: Mat<T>,
@@ -680,7 +681,7 @@ fn storage_point_cache<M: crate::math::KernelMath, P: ModelPrecision>(
     StoragePointCache { resid, var, u }
 }
 
-fn storage_batch_columns<T: StorageScalar>(full: MatRef<'_, T>, batch: &[usize]) -> Mat<T> {
+fn storage_batch_columns<T: KernelScalar>(full: MatRef<'_, T>, batch: &[usize]) -> Mat<T> {
     let m = full.nrows();
     let mut owned = Mat::zeros(m, batch.len());
     for (b_idx, &col) in batch.iter().enumerate() {
@@ -853,7 +854,7 @@ where
     Ok((d_kmn, d_kdiag))
 }
 
-fn storage_cholesky_sensitivity<T: StorageScalar>(
+fn storage_cholesky_sensitivity<T: KernelScalar>(
     l: MatRef<'_, T>,
     d_k: MatRef<'_, T>,
     mut d_l: faer::MatMut<'_, T>,

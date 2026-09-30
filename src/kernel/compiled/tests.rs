@@ -1163,7 +1163,7 @@ fn rational_quadratic_ard_plus_constant_is_points_mode() {
 }
 
 fn fast_exp(x: f64) -> f64 {
-    <crate::math::FastApprox as crate::math::KernelMath>::exp_f64(x)
+    <crate::math::FastApprox as crate::math::KernelMath>::exp(x)
 }
 
 fn apply_fast(spec: &KernelSpec, x: MatRef<'_, f64>, out: &mut Mat<f64>) {

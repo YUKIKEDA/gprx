@@ -6,8 +6,6 @@
 //! The residual type parameter exists only on [`MixedPrecision`]. There is no
 //! flag and no alias that picks a residual formula.
 
-use std::ops::{Add, Div, Mul, Sub};
-
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::{LltError, LltRegularization};
@@ -18,99 +16,12 @@ use crate::kernel::{CompiledKernel, FillDistances, KernelScalar, KernelSpec, Tri
 use crate::transform::TargetTransform;
 use crate::workspace::{faer_par, faer_par_dims};
 
-/// Scalar stored in a Gram factor. Only `f32` and `f64`.
-pub(crate) trait StorageScalar:
-    KernelScalar
-    + faer_traits::ComplexField<Real = Self>
-    + Add<Output = Self>
-    + Sub<Output = Self>
-    + Mul<Output = Self>
-    + Div<Output = Self>
-{
-    /// Scratch that holds `y` cast to this scalar. `f64` uses no buffer.
-    type RowCast: Clone + Send + Sync + 'static;
-    /// Scratch that holds `X` cast to this scalar. `f64` uses no buffer.
-    type ColCast: Clone + Send + Sync + 'static;
-
-    fn ln(self) -> Self;
-
-    fn empty_rows() -> Self::RowCast;
-
-    fn empty_cols() -> Self::ColCast;
-
-    /// Views `y` as this scalar. `f64` returns `y`. `f32` fills `cast`.
-    fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self];
-
-    /// Views `x` as this scalar. `f64` returns `x`. `f32` fills `cast`.
-    fn storage_cols<'a>(x: MatRef<'a, f64>, cast: &'a mut Self::ColCast) -> MatRef<'a, Self>;
-}
-
-impl StorageScalar for f32 {
-    type RowCast = Vec<f32>;
-    type ColCast = Mat<f32>;
-
-    fn ln(self) -> Self {
-        f32::ln(self)
-    }
-
-    fn empty_rows() -> Self::RowCast {
-        Vec::new()
-    }
-
-    fn empty_cols() -> Self::ColCast {
-        Mat::zeros(0, 0)
-    }
-
-    fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self] {
-        if cast.len() != y.len() {
-            cast.resize(y.len(), 0.0);
-        }
-        for (slot, &value) in cast.iter_mut().zip(y.iter()) {
-            *slot = value as f32;
-        }
-        cast.as_slice()
-    }
-
-    fn storage_cols<'a>(x: MatRef<'a, f64>, cast: &'a mut Self::ColCast) -> MatRef<'a, Self> {
-        if cast.nrows() != x.nrows() || cast.ncols() != x.ncols() {
-            *cast = Mat::zeros(x.nrows(), x.ncols());
-        }
-        for col in 0..x.ncols() {
-            for row in 0..x.nrows() {
-                cast[(row, col)] = x[(row, col)] as f32;
-            }
-        }
-        cast.as_ref()
-    }
-}
-
-impl StorageScalar for f64 {
-    type RowCast = ();
-    type ColCast = ();
-
-    fn ln(self) -> Self {
-        f64::ln(self)
-    }
-
-    fn empty_rows() -> Self::RowCast {}
-
-    fn empty_cols() -> Self::ColCast {}
-
-    fn storage_rows<'a>(y: &'a [f64], _cast: &'a mut Self::RowCast) -> &'a [Self] {
-        y
-    }
-
-    fn storage_cols<'a>(x: MatRef<'a, f64>, _cast: &'a mut Self::ColCast) -> MatRef<'a, Self> {
-        x
-    }
-}
-
 /// Selects storage and residual-refinement scalar types for GP computations.
 pub trait PrecisionPolicy {
     /// Scalar used for `K`, `L`, and other stored buffers.
-    type Storage;
+    type Storage: KernelScalar;
     /// Scalar used when refining a solve against a higher-precision residual.
-    type Refine;
+    type Refine: KernelScalar;
 }
 
 /// Uses `f64` for stored factors and for refinement.
@@ -510,21 +421,24 @@ impl ResidualTag for ReevaluateKernel {
 
 /// Bounds a model precision so distance fills and both scalars are known.
 pub(crate) trait ModelPrecision:
-    PrecisionPolicy<Storage: StorageScalar + FillDistances, Refine: StorageScalar>
-    + Copy
-    + Send
-    + Sync
-    + 'static
+    PrecisionPolicy<Storage: FillDistances> + Copy + Send + Sync + 'static
 {
+    /// `true` when predict weights are refined in `f64` from an `f32` factor.
+    const REFINES_IN_F64: bool;
+
     fn persist_kind() -> PersistKind;
 }
 
 impl ModelPrecision for DoublePrecision {
+    const REFINES_IN_F64: bool = false;
+
     fn persist_kind() -> PersistKind {
         PersistKind::Double
     }
 }
 impl ModelPrecision for SinglePrecision {
+    const REFINES_IN_F64: bool = false;
+
     fn persist_kind() -> PersistKind {
         PersistKind::Single
     }
@@ -533,6 +447,8 @@ impl<R> ModelPrecision for MixedPrecision<R>
 where
     R: ResidualTag + Copy + Send + Sync + 'static,
 {
+    const REFINES_IN_F64: bool = true;
+
     fn persist_kind() -> PersistKind {
         if R::REEVALUATES {
             PersistKind::MixedReevaluate
