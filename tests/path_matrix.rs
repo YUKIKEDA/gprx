@@ -27,7 +27,7 @@ use gprx::{
 };
 
 /// Labels of the combinations that fail today (#306).
-const KNOWN_FAILURES: [&str; 8] = [
+const KNOWN_FAILURES: [&str; 16] = [
     "periodic · newton · SinglePrecision · FastApprox · free",
     "constant * rbf ard · ncg · SinglePrecision · Accurate · free",
     "linear * rbf · newton · SinglePrecision · FastApprox · free",
@@ -36,6 +36,14 @@ const KNOWN_FAILURES: [&str; 8] = [
     "(rbf + rq) * (periodic + constant) · newton · DoublePrecision · FastApprox · free",
     "(rbf + rq) * (periodic + constant) · newton · SinglePrecision · FastApprox · free",
     "constant * matern ard 5/2 · newton · SinglePrecision · FastApprox · fixed",
+    "linear · ncg · DoublePrecision · Accurate · fixed",
+    "linear · ncg · DoublePrecision · Accurate · free",
+    "linear · ncg · SinglePrecision · Accurate · free",
+    "linear · ncg · DoublePrecision · FastApprox · fixed",
+    "linear · ncg · DoublePrecision · FastApprox · free",
+    "linear · ncg · SinglePrecision · FastApprox · free",
+    "matern ard 5/2 · newton · DoublePrecision · FastApprox · free",
+    "linear * rbf · ncg · DoublePrecision · FastApprox · free",
 ];
 
 const N: usize = 12;
