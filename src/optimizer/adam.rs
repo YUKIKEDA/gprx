@@ -69,11 +69,11 @@ impl Adam {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `learning_rate` is not
+    /// Returns [`GprError::InvalidConfig`] if `learning_rate` is not
     /// finite or is not strictly positive.
     pub fn with_learning_rate(mut self, learning_rate: f64) -> Result<Self, GprError> {
         if !learning_rate.is_finite() || learning_rate <= 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "Adam learning rate must be finite and > 0".to_owned(),
             });
         }
@@ -85,10 +85,10 @@ impl Adam {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `beta1` is not in `[0, 1)`.
+    /// Returns [`GprError::InvalidConfig`] if `beta1` is not in `[0, 1)`.
     pub fn with_beta1(mut self, beta1: f64) -> Result<Self, GprError> {
         if !beta1.is_finite() || !(0.0..1.0).contains(&beta1) {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "Adam β1 must be finite and in [0, 1)".to_owned(),
             });
         }
@@ -100,10 +100,10 @@ impl Adam {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `beta2` is not in `[0, 1)`.
+    /// Returns [`GprError::InvalidConfig`] if `beta2` is not in `[0, 1)`.
     pub fn with_beta2(mut self, beta2: f64) -> Result<Self, GprError> {
         if !beta2.is_finite() || !(0.0..1.0).contains(&beta2) {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "Adam β2 must be finite and in [0, 1)".to_owned(),
             });
         }
@@ -115,11 +115,11 @@ impl Adam {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `epsilon` is not finite
+    /// Returns [`GprError::InvalidConfig`] if `epsilon` is not finite
     /// or is not strictly positive.
     pub fn with_epsilon(mut self, epsilon: f64) -> Result<Self, GprError> {
         if !epsilon.is_finite() || epsilon <= 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "Adam ε must be finite and > 0".to_owned(),
             });
         }

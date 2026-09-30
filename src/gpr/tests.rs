@@ -386,7 +386,7 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
         if out.is_empty() {
             Ok(())
         } else {
-            Err(GprError::InvalidHyperparameter {
+            Err(GprError::IndexOutOfRange {
                 reason: "indefinite leaf has no parameters".to_owned(),
             })
         }
@@ -400,7 +400,7 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
         if out.is_empty() {
             Ok(())
         } else {
-            Err(GprError::InvalidHyperparameter {
+            Err(GprError::IndexOutOfRange {
                 reason: "indefinite leaf has no parameters".to_owned(),
             })
         }
@@ -414,7 +414,7 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
     ) -> Result<(), GprError> {
         let n = dist.nrows();
         if n == 0 || dist.ncols() != n || out.nrows() != n || out.ncols() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::ShapeMismatch {
                 reason: "indefinite leaf needs matching square matrices".to_owned(),
             });
         }
@@ -464,7 +464,7 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
         param_idx: usize,
         _uplo: Triangle,
     ) -> Result<(), GprError> {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("indefinite leaf has no parameter {param_idx}"),
         })
     }
@@ -477,7 +477,7 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
         j: usize,
         _uplo: Triangle,
     ) -> Result<(), GprError> {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("indefinite leaf has no parameter pair ({i}, {j})"),
         })
     }
@@ -490,7 +490,7 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
         j: usize,
         _uplo: Triangle,
     ) -> Result<(), GprError> {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("indefinite leaf has no parameter pair ({i}, {j})"),
         })
     }
@@ -876,11 +876,11 @@ fn columnwise_input_rejects_length_mismatch() {
 fn fit_rejects_bad_shapes_and_non_finite() {
     assert!(matches!(
         rbf_gpr(1.0, 0.1).fit(&[0.0], 2, 1, &[0.0, 1.0]),
-        Err((_, GprError::InvalidHyperparameter { .. }))
+        Err((_, GprError::LengthMismatch { .. }))
     ));
     assert!(matches!(
         rbf_gpr(1.0, 0.1).fit(&[0.0, 1.0], 2, 1, &[0.0]),
-        Err((_, GprError::InvalidHyperparameter { .. }))
+        Err((_, GprError::LengthMismatch { .. }))
     ));
     assert!(matches!(
         rbf_gpr(1.0, 0.1).fit(&[0.0, f64::NAN], 2, 1, &[0.0, 1.0]),
@@ -976,11 +976,11 @@ fn value_and_gradient_rejects_bad_len() {
     let mut grad = [0.0, 0.0];
     assert!(matches!(
         gpr.value_and_gradient_into(&[0.0], &mut grad),
-        Err(GprError::InvalidHyperparameter { .. })
+        Err(GprError::LengthMismatch { .. })
     ));
     assert!(matches!(
         gpr.get_params(&mut [0.0]),
-        Err(GprError::InvalidHyperparameter { .. })
+        Err(GprError::LengthMismatch { .. })
     ));
 }
 
@@ -2712,15 +2712,15 @@ fn incremental_rejects_empty_duplicate_and_oob_indices() {
     obj.value(&params).expect("prime");
     assert!(matches!(
         obj.value_at_changes(&params, &[]),
-        Err(GprError::InvalidHyperparameter { .. })
+        Err(GprError::IndexOutOfRange { .. })
     ));
     assert!(matches!(
         obj.value_at_changes(&params, &[0, 0]),
-        Err(GprError::InvalidHyperparameter { .. })
+        Err(GprError::IndexOutOfRange { .. })
     ));
     assert!(matches!(
         obj.value_at_changes(&params, &[n]),
-        Err(GprError::InvalidHyperparameter { .. })
+        Err(GprError::IndexOutOfRange { .. })
     ));
 }
 

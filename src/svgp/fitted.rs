@@ -111,7 +111,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
@@ -135,7 +135,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length or an `L` diagonal entry is not positive,
     /// [`GprError::NonFiniteInput`] if a variational value is not finite,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid, or
@@ -243,7 +243,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if a slice length is wrong
+    /// Returns [`GprError::LengthMismatch`] if a slice length is wrong
     /// or an `L` diagonal entry is not positive,
     /// [`GprError::NonFiniteInput`] if a variational value is not finite,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
@@ -292,7 +292,7 @@ where
     ///
     /// Returns [`GprError::DimensionMismatch`] if `n_cols` differs from the
     /// training features, [`GprError::EmptyInput`] if a dimension is zero, or
-    /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`] for a
+    /// [`GprError::LengthMismatch`] / [`GprError::NonFiniteInput`] for a
     /// badly packed or non-finite `xs`.
     ///
     /// # Examples

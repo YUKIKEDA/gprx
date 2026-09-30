@@ -35,7 +35,7 @@ impl KernelTerm for RbfAsTerm {
 
     fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
         if out.len() != 1 {
-            return Err(crate::GprError::InvalidHyperparameter {
+            return Err(crate::GprError::LengthMismatch {
                 reason: format!("expected 1 bound, got {}", out.len()),
             });
         }
@@ -118,7 +118,7 @@ impl crate::kernel::KernelTerm<f32> for RbfAsTerm {
 
     fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
         if out.len() != 1 {
-            return Err(crate::GprError::InvalidHyperparameter {
+            return Err(crate::GprError::LengthMismatch {
                 reason: format!("expected 1 bound, got {}", out.len()),
             });
         }
@@ -165,7 +165,7 @@ impl crate::kernel::KernelTerm<f32> for RbfAsTerm {
         uplo: Triangle,
     ) -> Result<(), crate::GprError> {
         if param_idx != 0 {
-            return Err(crate::GprError::InvalidHyperparameter {
+            return Err(crate::GprError::IndexOutOfRange {
                 reason: "RBF term has a single parameter at index 0".to_owned(),
             });
         }
@@ -187,7 +187,7 @@ impl crate::kernel::KernelTerm<f32> for RbfAsTerm {
         uplo: Triangle,
     ) -> Result<(), crate::GprError> {
         if i != 0 || j != 0 {
-            return Err(crate::GprError::InvalidHyperparameter {
+            return Err(crate::GprError::IndexOutOfRange {
                 reason: format!("RBF term has a single parameter; got pair ({i}, {j})"),
             });
         }
@@ -721,7 +721,7 @@ fn rejects_bad_index_and_scratch_shape() {
             Triangle::Lower,
             scratch.as_mut()
         ),
-        Err(crate::error::GprError::InvalidHyperparameter { .. })
+        Err(crate::error::GprError::IndexOutOfRange { .. })
     ));
     let mut small = fill(1, 0.0);
     assert!(matches!(

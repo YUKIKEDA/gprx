@@ -12,12 +12,12 @@ use crate::kernel::KernelScalar;
 ///
 /// # Errors
 ///
-/// Returns [`GprError::EmptyInput`] if either side is zero or the product
-/// overflows `usize`.
+/// Returns [`GprError::EmptyInput`] if either side is zero, or
+/// [`GprError::SizeOverflow`] if the product overflows `usize`.
 pub(crate) fn column_major_len(n_rows: usize, n_cols: usize) -> Result<usize, GprError> {
     require_nonempty(n_rows)?;
     require_nonempty(n_cols)?;
-    n_rows.checked_mul(n_cols).ok_or(GprError::EmptyInput)
+    n_rows.checked_mul(n_cols).ok_or(GprError::SizeOverflow)
 }
 
 /// Rejects a zero count with [`GprError::EmptyInput`].
@@ -55,7 +55,7 @@ pub(crate) fn require_count(actual: usize, expected: usize, what: &str) -> Resul
     if actual == expected {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::LengthMismatch {
             reason: format!("expected {expected} {what}, got {actual}"),
         })
     }
@@ -69,12 +69,12 @@ pub(crate) fn validate_training(
 ) -> Result<(), GprError> {
     let expected_x = column_major_len(n_rows, n_cols)?;
     if x.len() != expected_x {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {expected_x} feature values, got {}", x.len()),
         });
     }
     if y.len() != n_rows {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {n_rows} targets, got {}", y.len()),
         });
     }
@@ -87,7 +87,7 @@ pub(crate) fn validate_training(
 pub(crate) fn validate_query(xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
     let expected = column_major_len(n_rows, n_cols)?;
     if xs.len() != expected {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {expected} feature values, got {}", xs.len()),
         });
     }
@@ -141,9 +141,9 @@ pub(crate) fn validate_inducing(z: &[f64], m: usize, d: usize) -> Result<(), Gpr
             });
         }
     }
-    let expected = m.checked_mul(d).ok_or(GprError::EmptyInput)?;
+    let expected = m.checked_mul(d).ok_or(GprError::SizeOverflow)?;
     if z.len() != expected {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!(
                 "expected {expected} inducing feature values, got {}",
                 z.len()
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(column_major_len(3, 2), Ok(6));
         assert_eq!(column_major_len(0, 2), Err(GprError::EmptyInput));
         assert_eq!(column_major_len(3, 0), Err(GprError::EmptyInput));
-        assert_eq!(column_major_len(usize::MAX, 2), Err(GprError::EmptyInput));
+        assert_eq!(column_major_len(usize::MAX, 2), Err(GprError::SizeOverflow));
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
         let err = require_count(2, 3, "kernel parameters").err();
         assert_eq!(
             err,
-            Some(GprError::InvalidHyperparameter {
+            Some(GprError::LengthMismatch {
                 reason: "expected 3 kernel parameters, got 2".to_owned(),
             })
         );
@@ -189,11 +189,11 @@ mod tests {
         let mut buf = x;
         assert_eq!(
             standardize.apply(&mut buf, usize::MAX, 2),
-            Err(GprError::EmptyInput)
+            Err(GprError::SizeOverflow)
         );
         assert_eq!(
             min_max.apply(&mut buf, usize::MAX, 2),
-            Err(GprError::EmptyInput)
+            Err(GprError::SizeOverflow)
         );
     }
 }

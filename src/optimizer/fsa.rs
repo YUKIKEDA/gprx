@@ -118,11 +118,11 @@ impl FastSimulatedAnnealing {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `temperature` is not
+    /// Returns [`GprError::InvalidConfig`] if `temperature` is not
     /// finite or is not strictly positive.
     pub fn with_initial_temperature(mut self, temperature: f64) -> Result<Self, GprError> {
         if !temperature.is_finite() || temperature <= 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "FSA initial temperature must be finite and > 0".to_owned(),
             });
         }
@@ -134,11 +134,11 @@ impl FastSimulatedAnnealing {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `cooling_rate` is not
+    /// Returns [`GprError::InvalidConfig`] if `cooling_rate` is not
     /// finite or is not strictly positive.
     pub fn with_cooling_rate(mut self, cooling_rate: f64) -> Result<Self, GprError> {
         if !cooling_rate.is_finite() || cooling_rate <= 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "FSA cooling rate must be finite and > 0".to_owned(),
             });
         }
@@ -165,12 +165,12 @@ impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {n} parameters, got {}", init.len()),
             });
         }
         if n == 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: "FSA requires at least one parameter".to_owned(),
             });
         }
@@ -204,7 +204,7 @@ fn anneal<P: Objective>(
     }
     let mut current_energy = objective.value(&current)?;
     if !current_energy.is_finite() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::InvalidConfig {
             reason: "FSA initial objective value must be finite".to_owned(),
         });
     }
@@ -326,7 +326,7 @@ mod tests {
 
         fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
             if params.len() != 2 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "Rosenbrock is 2-D".to_owned(),
                 });
             }
@@ -339,7 +339,7 @@ mod tests {
     impl HasBounds for Rosenbrock {
         fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
             if out.len() != 2 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "Rosenbrock is 2-D".to_owned(),
                 });
             }
@@ -361,7 +361,7 @@ mod tests {
 
         fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
             if params.len() != 1 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "bowl is 1-D".to_owned(),
                 });
             }
@@ -373,7 +373,7 @@ mod tests {
     impl HasBounds for Bowl1d {
         fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
             if out.len() != 1 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "bowl is 1-D".to_owned(),
                 });
             }

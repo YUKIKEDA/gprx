@@ -16,7 +16,7 @@ impl CompiledKernel<f64> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is
     /// the wrong size, or the same shape errors as [`Self::apply`].
     pub fn hess<M: crate::math::KernelMath>(
@@ -110,7 +110,7 @@ impl CompiledKernel<f64> {
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `x` is empty,
-    /// [`GprError::InvalidHyperparameter`] if `i` or `j` is out of range or
+    /// [`GprError::IndexOutOfRange`] if `i` or `j` is out of range or
     /// `out.len()` is not `x.nrows()`, or the leaf error for that diagonal entry.
     pub(crate) fn hess_diag_points<M: crate::math::KernelMath>(
         &self,
@@ -299,7 +299,7 @@ fn term_index_for_param(
         }
         offset += n;
     }
-    Err(GprError::InvalidHyperparameter {
+    Err(GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })
 }

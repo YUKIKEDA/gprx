@@ -100,7 +100,7 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "likelihood parameter")?;
         out[0] = self.noise_variance.ln();
@@ -111,7 +111,7 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1,
+    /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidNoiseVariance`] if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "likelihood parameter")?;
@@ -133,10 +133,10 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is not 0.
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0.
     pub fn noise_grad_diag(&self, dk_diag: &mut [f64], param_idx: usize) -> Result<(), GprError> {
         if param_idx != 0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: "likelihood has a single parameter at index 0".to_owned(),
             });
         }
@@ -269,7 +269,7 @@ mod tests {
         let mut diag = [0.0];
         assert!(matches!(
             lik.noise_grad_diag(&mut diag, 1),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
     }
 }

@@ -79,11 +79,11 @@ impl Newton {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `tolerance` is not finite
+    /// Returns [`GprError::InvalidConfig`] if `tolerance` is not finite
     /// or is negative.
     pub fn with_tolerance(mut self, tolerance: f64) -> Result<Self, GprError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "Newton gradient tolerance must be finite and >= 0".to_owned(),
             });
         }
@@ -95,11 +95,11 @@ impl Newton {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `gamma` is outside
+    /// Returns [`GprError::InvalidConfig`] if `gamma` is outside
     /// `(0, 1]`.
     pub fn with_gamma(mut self, gamma: f64) -> Result<Self, GprError> {
         if !gamma.is_finite() || gamma <= 0.0 || gamma > 1.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "Newton gamma must be in (0, 1]".to_owned(),
             });
         }
@@ -127,7 +127,7 @@ impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for Newton {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {n} parameters, got {}", init.len()),
             });
         }
@@ -181,7 +181,7 @@ fn run_newton<P: TwiceDifferentiable>(
 ) -> Result<OptResult, GprError> {
     let n = objective.num_params();
     if init.len() != n {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {n} parameters, got {}", init.len()),
         });
     }
@@ -470,7 +470,7 @@ mod tests {
             out: &mut [f64],
         ) -> Result<f64, GprError> {
             if params.len() != 2 || out.len() != 2 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "quadratic is 2-D".to_owned(),
                 });
             }
@@ -483,7 +483,7 @@ mod tests {
     impl TwiceDifferentiable for Quadratic {
         fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
             if params.len() != 2 || out.len() != 4 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::ShapeMismatch {
                     reason: "quadratic Hessian is 2x2".to_owned(),
                 });
             }

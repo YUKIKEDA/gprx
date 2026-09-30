@@ -168,7 +168,7 @@ pub(crate) type FitBuffers<C, B, P = crate::precision::DoublePrecision> =
 ///
 /// # Errors
 ///
-/// Constructors return [`GprError::InvalidHyperparameter`] if a value is
+/// Constructors return [`GprError::InvalidConfig`] if a value is
 /// non-finite or outside the domain below.
 ///
 /// # Examples
@@ -221,11 +221,11 @@ impl JitterPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `jitter` is not finite
+    /// Returns [`GprError::InvalidConfig`] if `jitter` is not finite
     /// or is negative.
     pub fn fixed(jitter: f64) -> Result<Self, GprError> {
         if !jitter.is_finite() || jitter < 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: format!("jitter must be finite and non-negative, got {jitter}"),
             });
         }
@@ -240,7 +240,7 @@ impl JitterPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if a value is non-finite
+    /// Returns [`GprError::InvalidConfig`] if a value is non-finite
     /// or outside that domain.
     pub fn adaptive(
         initial: f64,
@@ -249,26 +249,26 @@ impl JitterPolicy {
         max_jitter: f64,
     ) -> Result<Self, GprError> {
         if !initial.is_finite() || initial <= 0.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: format!(
                     "adaptive initial jitter must be finite and positive, got {initial}"
                 ),
             });
         }
         if !multiplier.is_finite() || multiplier <= 1.0 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: format!(
                     "adaptive jitter multiplier must be finite and greater than 1, got {multiplier}"
                 ),
             });
         }
         if max_retries < 1 {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: "adaptive jitter max_retries must be at least 1".to_owned(),
             });
         }
         if !max_jitter.is_finite() || max_jitter < initial {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::InvalidConfig {
                 reason: format!(
                     "adaptive max_jitter must be finite and at least initial ({initial}), got {max_jitter}"
                 ),

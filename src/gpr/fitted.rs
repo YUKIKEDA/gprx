@@ -470,7 +470,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
@@ -490,7 +490,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is
     /// invalid, or [`GprError::CholeskyFailed`] if `A` cannot be factored.
     /// Kernel and likelihood `θ` are committed together only after `A`
@@ -578,7 +578,7 @@ where
     pub(crate) fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         let n = self.num_params();
         if out.len() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {n} intervals, got {}", out.len()),
             });
         }
@@ -606,7 +606,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if a slice length is wrong,
+    /// Returns [`GprError::LengthMismatch`] if a slice length is wrong,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
     /// [`GprError::CholeskyFailed`] if `A` cannot be factored, or
     /// [`GprError::UnsupportedKernelOperation`] if the compiled tree cannot
@@ -1280,7 +1280,7 @@ where
     ///
     /// Returns [`GprError::DimensionMismatch`] if `n_cols` differs from the
     /// training features, [`GprError::EmptyInput`] if a dimension is zero, or
-    /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`] for a
+    /// [`GprError::LengthMismatch`] / [`GprError::NonFiniteInput`] for a
     /// badly packed or non-finite `xs`.
     pub fn predict(
         &self,
@@ -2216,19 +2216,19 @@ where
 
 fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprError> {
     if indices.is_empty() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: "change indices must not be empty".to_owned(),
         });
     }
     let mut seen = vec![false; n_params];
     for &i in indices {
         if i >= n_params {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("change index {i} is out of range (n_params={n_params})"),
             });
         }
         if seen[i] {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::IndexOutOfRange {
                 reason: format!("change index {i} is duplicated"),
             });
         }

@@ -577,7 +577,7 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         write_params(&self.kernel, &self.likelihood, out)
@@ -748,7 +748,7 @@ where
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] if `n_rows` or `n_cols` is zero,
-    /// [`GprError::InvalidHyperparameter`] if `x` or `y` has the wrong length,
+    /// [`GprError::LengthMismatch`] if `x` or `y` has the wrong length,
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
     /// [`GprError::CholeskyFailed`] if `A` cannot be factored, or
     /// [`GprError::OptimizationNotConverged`] if the optimizer does not
