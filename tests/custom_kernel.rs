@@ -9,6 +9,9 @@ use faer::{Mat, MatMut, MatRef};
 use gprx::kernel::{KernelScalar, KernelSpec, KernelTerm, RbfKernel, Triangle};
 use gprx::{DoublePrecision, Fixed, GaussianLikelihood, Gpr, GprError, Interval, SinglePrecision};
 
+mod common;
+use common::{assert_close_named, assert_slice_close_named};
+
 const ELL: f64 = 0.7;
 const NOISE: f64 = 0.05;
 
@@ -322,24 +325,14 @@ macro_rules! probe {
 }
 
 fn assert_probe_close(what: &str, got: &Probe, expect: &Probe, tol: f64) {
-    let close = |name: &str, a: f64, b: f64| {
-        let scale = b.abs().max(1.0);
-        assert!(
-            (a - b).abs() <= tol * scale,
-            "{what} {name}: got {a}, expected {b} (tol {tol})"
-        );
-    };
-    close("nlml", got.nlml, expect.nlml);
-    for (name, a, b) in [
+    assert_close_named(&format!("{what} nlml"), got.nlml, expect.nlml, tol);
+    for (name, actual, expected) in [
         ("grad", &got.grad, &expect.grad),
         ("hess", &got.hess, &expect.hess),
         ("mean", &got.mean, &expect.mean),
         ("variance", &got.var, &expect.var),
     ] {
-        assert_eq!(a.len(), b.len(), "{what} {name} length");
-        for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
-            close(&format!("{name}[{i}]"), x, y);
-        }
+        assert_slice_close_named(&format!("{what} {name}"), actual, expected, tol);
     }
 }
 
