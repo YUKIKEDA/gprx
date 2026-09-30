@@ -9,6 +9,7 @@
 
 mod common;
 use common::rng::{open_unit, small_rng};
+use gprx::Adam;
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, KernelExp,
@@ -16,6 +17,7 @@ use gprx::{
 };
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Mutex, OnceLock};
 
 #[global_allocator]
@@ -643,4 +645,57 @@ fn sparse_predict_into_allocs_after_warmup() {
             "svgp_predict_100_mixed_{label}: bytes={bytes}, cap={MAX_SVGP_MIXED_PREDICT_100_BYTES}"
         );
     }
+}
+
+/// Bytes one Adam step of `Svgp::fit` may allocate at `n = 4096`, relative to
+/// `n = 512` at the same batch size: a step costs `O(batch · m²)`, so its
+/// allocations do not grow with `n` (#300). It grew with `n` (8×) while a step
+/// rebuilt `A` and the tangents of every point.
+const MAX_SVGP_STEP_BYTES_GROWTH: f64 = 1.25;
+
+/// Bytes of one `Svgp::fit` with `epochs` epochs of mini-batches of 32.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
+    ensure_one_rayon_worker();
+    let x = fill_column_major(n, D, SEED);
+    let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
+    let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
+    let adam = Adam::new()
+        .with_batch_size(NonZeroUsize::new(32).expect("batch"))
+        .with_epochs(NonZeroU64::new(epochs).expect("epochs"));
+    let trainer =
+        Svgp::new(kernel, GaussianLikelihood::new(NOISE).expect("noise")).with_optimizer(adam);
+    let mut fitted = None;
+    let bytes = bytes_in(|| {
+        fitted = Some(
+            trainer
+                .fit(&x, n, D, &y, &z, M_SPARSE)
+                .map_err(|(_, e)| e)
+                .expect("fit"),
+        );
+    });
+    drop(fitted);
+    bytes
+}
+
+/// The bytes of one step: one more epoch is `n / 32` more steps, and the
+/// setup and the final rebuild of `A` cancel in the difference.
+fn svgp_step_bytes(n: usize) -> f64 {
+    let extra = svgp_fit_bytes(n, 2) as f64 - svgp_fit_bytes(n, 1) as f64;
+    extra / (n / 32) as f64
+}
+
+#[test]
+fn svgp_adam_step_bytes_do_not_grow_with_n() {
+    let _guard = alloc_lock();
+    let _ = svgp_fit_bytes(64, 1); // one-time allocations (thread pool, statics)
+    let small = svgp_step_bytes(512);
+    let large = svgp_step_bytes(4096);
+    eprintln!("svgp step bytes: n=512 {small:.0}, n=4096 {large:.0}");
+    assert!(
+        large <= MAX_SVGP_STEP_BYTES_GROWTH * small,
+        "an Adam step allocates {large:.0} bytes at n=4096 and {small:.0} at n=512: it scales with n"
+    );
 }

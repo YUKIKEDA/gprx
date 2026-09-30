@@ -10,8 +10,8 @@ use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{
-    SvgpSystem, assemble_svgp, pack_q, predict_svgp_covariance, predict_svgp_into, q_param_len,
-    svgp_neg_elbo, svgp_value_and_gradient, unpack_q,
+    SvgpSystem, assemble_data_terms, assemble_kmm, assemble_svgp, pack_q, predict_svgp_covariance,
+    predict_svgp_into, q_param_len, svgp_neg_elbo, svgp_value_and_gradient, unpack_q,
 };
 
 /// Factored stochastic variational GPR at the `θ` used by [`crate::Svgp<Fixed>::factor`]
@@ -201,6 +201,51 @@ where
         self.q_mean = state.q_mean;
         self.q_l = state.q_l;
         self.k_diag = state.k_diag;
+        Ok(())
+    }
+
+    /// One mini-batch step's update: `θ`, the factor of `K_mm`, and `q`.
+    ///
+    /// Leaves `A` and `k_diag`, which cost `O(n)`, stale until
+    /// [`Self::rebuild_data_terms`]: a mini-batch gradient forms the terms of
+    /// its own points and never reads them. Committed together only after
+    /// `K_mm` factors, like [`Self::set_params`].
+    pub(crate) fn set_params_light(&mut self, params: &[f64]) -> Result<(), GprError> {
+        let n_theta = self.core.theta_len();
+        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
+        let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
+        let (q_mean, q_l) = unpack_q(&params[n_theta..], self.core.m)?;
+        let k_mm_l = with_kernel_exp!(self.core.math, M => assemble_kmm::<M, P::Storage>(
+            &kernel,
+            self.core.jitter,
+            &self.core.z_train,
+            self.core.m,
+            self.core.d,
+            &mut self.scratch.storage,
+        ))?;
+        self.core.kernel = kernel;
+        self.core.likelihood = likelihood;
+        self.k_mm_l = k_mm_l;
+        self.q_mean = q_mean;
+        self.q_l = q_l;
+        Ok(())
+    }
+
+    /// `A` and `k_diag` for every training point at the stored `θ`, `Z`, and
+    /// `K_mm` factor (after [`Self::set_params_light`] steps).
+    pub(crate) fn rebuild_data_terms(&mut self) -> Result<(), GprError> {
+        let (a, k_diag) = with_kernel_exp!(self.core.math, M => assemble_data_terms::<M, P::Storage>(
+            &self.core.kernel,
+            &self.core.x_train,
+            self.core.n,
+            self.core.d,
+            &self.core.z_train,
+            self.core.m,
+            self.k_mm_l.as_ref(),
+            &mut self.scratch.storage,
+        ))?;
+        self.a = a;
+        self.k_diag = k_diag;
         Ok(())
     }
 
