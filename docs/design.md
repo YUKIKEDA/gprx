@@ -271,17 +271,16 @@ Periodic is not squared Euclidean. ARD needs a per-dimension difference. The cac
 
 ```rust
 enum DistanceCachePolicy {
-    Never,
-    Always,
-    Auto { memory_budget_bytes: usize }, // tuned from n, d, and a memory budget by a benchmark at implementation time
+    Cached,   // default: fill once per fit and reuse
+    Uncached, // recompute from X on every kernel build
 }
 ```
 
-A theoretical reference, not a decision: an `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes. `K` itself is also n²×sizeof(T) (about 200MB at n=5000, f64), and an ARD cache is `d` times that. In a typical GPR with d≪n the cache often does not pay for itself. The concrete `Auto` threshold is decided by a benchmark after implementation (§14).
+A theoretical reference, not a decision: an `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes. `K` itself is also n²×sizeof(T) (about 200MB at n=5000, f64), and an ARD cache is `d` times that. In a typical GPR with d≪n the cache often does not pay for itself. The concrete `Auto` threshold is decided by a benchmark after implementation (§14). `Auto` is not a variant yet.
 
-P2-2 ([#26](https://github.com/YUKIKEDA/gprx/issues/26)): `Never` / `Always` sit on the existing `Workspace.dist_cache` (isotropic Dist/Either, n×n). The default is `Always`. `Auto` is P5-5.
+P2-2 ([#26](https://github.com/YUKIKEDA/gprx/issues/26)): `Cached` / `Uncached` sit on the existing `Workspace.dist_cache` (isotropic Dist/Either, n×n). The default is `Cached`. P5-5 adds `Auto`.
 
-P2-7 ([#88](https://github.com/YUKIKEDA/gprx/issues/88)): the same `DistanceCachePolicy` covers the raw `(Δx_d)²` of ARD leaves. An `r²` that already includes ℓ is not stored. The public policy is not extended. `Workspace` looks at `n` and `d`. An ARD fit with Always allocates once. Isotropic / `Never` stays empty (same as `kernel_scratch`). Layout is column-major `n × (n·d)`. Dimension `k` is columns `[k n, (k+1) n)`. Each block is lower triangular. The fill and RBF ARD `apply` / `grad` are Rayon + `wide::f64x4` (unit row stride). Matérn / RQ ARD read the same cache in scalar code. The required numbers are ARD RBF on the same fixed problem (`mll_and_grad_ard` / `fit_lbfgs_ard`, Always versus Never). `Auto` is P5-5. A train×test / LOO cache is outside P2-7. Evaluating a composite of Dist leaves and Points leaves is P2B-13 (P2-7 does not mix that into the cache path).
+P2-7 ([#88](https://github.com/YUKIKEDA/gprx/issues/88)): the same `DistanceCachePolicy` covers the raw `(Δx_d)²` of ARD leaves. An `r²` that already includes ℓ is not stored. The public policy is not extended. `Workspace` looks at `n` and `d`. An ARD fit with Always (`Cached`) allocates once. Isotropic / Never (`Uncached`) stays empty (same as `kernel_scratch`). Layout is column-major `n × (n·d)`. Dimension `k` is columns `[k n, (k+1) n)`. Each block is lower triangular. The fill and RBF ARD `apply` / `grad` are Rayon + `wide::f64x4` (unit row stride). Matérn / RQ ARD read the same cache in scalar code. The required numbers are ARD RBF on the same fixed problem (`mll_and_grad_ard` / `fit_lbfgs_ard`, Always versus Never). `Auto` is P5-5. A train×test / LOO cache is outside P2-7. Evaluating a composite of Dist leaves and Points leaves is P2B-13 (P2-7 does not mix that into the cache path).
 
 ### 5.3 Building a CompiledKernel plan
 
