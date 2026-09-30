@@ -87,7 +87,7 @@ const M_SPARSE: usize = 32;
 
 /// Allocations of one call on the sparse models after a warmup call, by
 /// path (R5-1d / #246). The sparse models return new matrices for their
-/// factors and results and have no `predict_into` yet (R5-2 / #247), so
+/// factors and results and have no `predict_into` yet (R5-5 / #283), so
 /// these are not zero; the kernel scratch of the `&mut self` paths is kept
 /// on the model between calls. Do not raise without an Issue.
 const MAX_SPARSE_ALLOCS: [(&str, usize); 7] = [
