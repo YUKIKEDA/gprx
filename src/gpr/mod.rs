@@ -7,7 +7,7 @@ mod shared;
 mod types;
 
 pub(crate) use crate::workspace::FitBuffers;
-pub(crate) use model::{ExactFit, Policies};
+pub(crate) use model::{ExactFit, LeafCache, Policies};
 pub use model::{FittedGpr, Gpr};
 pub use online::OnlineGpr;
 #[cfg(feature = "insert-stages")]

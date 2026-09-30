@@ -31,6 +31,12 @@ const NOISE: f64 = 0.1;
 /// One `value_and_gradient_into` after a warmup call. Do not raise without an Issue.
 const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 
+/// One coordinate step (`value_at_changes`) of an incremental fit on a sum
+/// of two leaves, after a warmup step (R4-5 / #243). The remaining
+/// allocations stage the new `θ` by cloning the kernel trees; #270 takes
+/// them to 0. Do not raise without an Issue.
+const MAX_LEAF_STEP_ALLOCS: usize = 8;
+
 /// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
 const MAX_PREDICT_100_ALLOCS: usize = 0;
 
@@ -209,4 +215,54 @@ fn mixed_promote_predict_100_bytes_after_workspace() {
 #[test]
 fn mixed_reevaluate_predict_100_bytes_after_workspace() {
     assert_mixed_predict_bytes::<ReevaluateKernel>("mixed_reevaluate_predict_100");
+}
+
+/// Optimizer that measures one incremental coordinate step inside `minimize`.
+#[derive(Clone, Copy, Debug)]
+struct LeafStepProbe;
+
+static LEAF_STEP_ALLOCS: Mutex<Option<usize>> = Mutex::new(None);
+
+impl<P: gprx::Objective> gprx::Optimizer<P> for LeafStepProbe {
+    const USES_CHANGE_INDICES: bool = true;
+
+    fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<gprx::OptResult, GprError> {
+        let mut step = init.to_vec();
+        let value = objective.value(&step)?;
+        step[0] += 0.01;
+        objective.value_at_changes(&step, &[0])?;
+        step[0] += 0.01;
+        let mut result = Ok(0.0);
+        let count = allocs_in(|| {
+            result = objective.value_at_changes(&step, &[0]);
+        });
+        result?;
+        if let Ok(mut slot) = LEAF_STEP_ALLOCS.lock() {
+            *slot = Some(count);
+        }
+        Ok(gprx::OptResult {
+            params: init.to_vec(),
+            value,
+            iterations: 0,
+        })
+    }
+}
+
+#[test]
+fn incremental_leaf_step_allocs_after_warmup() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
+        + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell"));
+    let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+    let x = fill_column_major(N, D, SEED);
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
+    Gpr::new(kernel, likelihood)
+        .with_optimizer(LeafStepProbe)
+        .fit(&x, N, D, &y)
+        .map_err(|(_, e)| e)
+        .expect("fit");
+    let count = LEAF_STEP_ALLOCS.lock().expect("lock").expect("probe ran");
+    assert_alloc_cap("leaf_step", count, MAX_LEAF_STEP_ALLOCS);
 }

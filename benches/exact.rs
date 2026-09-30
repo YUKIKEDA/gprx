@@ -18,7 +18,10 @@ use gprx::internals::{
 };
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
 use gprx::transform::StandardizeTarget;
-use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, KernelExp, MixedPrecision, Prediction};
+use gprx::{
+    FastSimulatedAnnealing, FittedGpr, Fixed, GaussianLikelihood, Gpr, KernelExp, MixedPrecision,
+    Prediction,
+};
 
 #[path = "../tests/common/problems.rs"]
 mod problems;
@@ -396,6 +399,42 @@ fn fit_lbfgs(c: &mut Criterion) {
     group.finish();
 }
 
+/// FSA on a sum of two RBF leaves: every coordinate step rebuilds only the
+/// leaf it touches (`Optimizer::USES_CHANGE_INDICES`, R4-5 / #243).
+fn fit_fsa(c: &mut Criterion) {
+    let (x, y) = forrester_xy();
+    let mut group = c.benchmark_group("fit_fsa");
+    group.sample_size(10);
+    group.bench_function("sum_of_two", |b| {
+        b.iter_batched(
+            || {
+                let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("valid lengthscale"))
+                    + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("valid lengthscale"));
+                let likelihood = GaussianLikelihood::new(NOISE).expect("valid noise");
+                (
+                    Gpr::new(kernel, likelihood)
+                        .with_target_transform(StandardizeTarget::new())
+                        .with_optimizer(
+                            FastSimulatedAnnealing::new()
+                                .with_max_iterations(10)
+                                .with_seed(7),
+                        ),
+                    x.clone(),
+                    y.clone(),
+                )
+            },
+            |(gpr, x, y)| {
+                let fitted = gpr
+                    .fit(std::hint::black_box(&x), N, D_ISO, std::hint::black_box(&y))
+                    .expect("fsa");
+                std::hint::black_box(fitted)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
 fn fitted_ard_fast() -> FittedGpr<Fixed> {
     let ells = [ELL_ARD; D_ARD];
     let kernel = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale"));
@@ -540,6 +579,7 @@ criterion_group!(
     predict_100_mixed,
     mll_and_grad,
     fit_lbfgs,
+    fit_fsa,
     mll_and_grad_ard,
     fit_lbfgs_ard
 );
