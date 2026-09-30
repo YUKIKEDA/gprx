@@ -206,7 +206,7 @@ impl sealed::ScalarOps for f64 {
         jitter: f64,
         stage: crate::error::CholeskyStage,
     ) -> Result<(), crate::error::GprError> {
-        crate::gpr::factor::cholesky_lower_faer(a, scratch, jitter, stage)
+        crate::linalg::cholesky_lower_faer(a, scratch, jitter, stage)
     }
 
     fn solve_llt_in_place(
@@ -214,27 +214,27 @@ impl sealed::ScalarOps for f64 {
         rhs: faer::MatMut<'_, Self>,
         scratch: &mut dyn_stack::MemBuffer,
     ) {
-        crate::gpr::factor::solve_llt_faer(l, rhs, scratch);
+        crate::linalg::solve_llt_faer(l, rhs, scratch);
     }
 
     fn solve_llt_owned_scratch(l: MatRef<'_, Self>, rhs: faer::MatMut<'_, Self>) {
-        crate::sgpr::factor::solve_llt_faer_owned(l, rhs);
+        crate::linalg::solve_llt_faer_owned(l, rhs);
     }
 
     fn inv_diag_from_chol_l(l: MatRef<'_, Self>, q_diag: &mut [Self]) {
-        crate::gpr::factor::inv_diag_from_chol_l_faer(l, q_diag);
+        crate::linalg::inv_diag_from_chol_l_faer(l, q_diag);
     }
 
     fn matvec_columns(a: MatRef<'_, Self>, y: &[Self], ay: faer::MatMut<'_, Self>) {
-        crate::sgpr::factor::matvec_columns_native(a, y, ay);
+        crate::linalg::matvec_columns_native(a, y, ay);
     }
 
     fn gram_aat(a: MatRef<'_, Self>, b: faer::MatMut<'_, Self>) {
-        crate::sgpr::factor::gram_aat_faer(a, b);
+        crate::linalg::gram_aat_faer(a, b);
     }
 
     fn solve_unit_lower_in_place(ld: MatRef<'_, Self>, v: faer::MatMut<'_, Self>) {
-        crate::online::solve_unit_lower_faer(ld, v);
+        crate::linalg::solve_unit_lower_faer(ld, v);
     }
 
     fn ldlt_delete_row_col(
@@ -243,7 +243,7 @@ impl sealed::ScalarOps for f64 {
         n: usize,
         scratch: &mut dyn_stack::MemBuffer,
     ) {
-        crate::online::ldlt_delete_faer(ld, index, n, scratch);
+        crate::linalg::ldlt_delete_faer(ld, index, n, scratch);
     }
 }
 
@@ -300,7 +300,7 @@ impl sealed::ScalarOps for f32 {
         jitter: f64,
         stage: crate::error::CholeskyStage,
     ) -> Result<(), crate::error::GprError> {
-        crate::gpr::factor::cholesky_lower_f64_accum(a, jitter, stage)
+        crate::linalg::cholesky_lower_f64_accum(a, jitter, stage)
     }
 
     fn solve_llt_in_place(
@@ -308,27 +308,27 @@ impl sealed::ScalarOps for f32 {
         rhs: faer::MatMut<'_, Self>,
         _scratch: &mut dyn_stack::MemBuffer,
     ) {
-        crate::gpr::factor::solve_llt_f64_accum(l, rhs);
+        crate::linalg::solve_llt_f64_accum(l, rhs);
     }
 
     fn solve_llt_owned_scratch(l: MatRef<'_, Self>, rhs: faer::MatMut<'_, Self>) {
-        crate::gpr::factor::solve_llt_f64_accum(l, rhs);
+        crate::linalg::solve_llt_f64_accum(l, rhs);
     }
 
     fn inv_diag_from_chol_l(l: MatRef<'_, Self>, q_diag: &mut [Self]) {
-        crate::gpr::factor::inv_diag_from_chol_l_f64_accum(l, q_diag);
+        crate::linalg::inv_diag_from_chol_l_f64_accum(l, q_diag);
     }
 
     fn matvec_columns(a: MatRef<'_, Self>, y: &[Self], ay: faer::MatMut<'_, Self>) {
-        crate::sgpr::factor::matvec_columns_f64_accum(a, y, ay);
+        crate::linalg::matvec_columns_f64_accum(a, y, ay);
     }
 
     fn gram_aat(a: MatRef<'_, Self>, b: faer::MatMut<'_, Self>) {
-        crate::sgpr::factor::gram_aat_f64_accum(a, b);
+        crate::linalg::gram_aat_f64_accum(a, b);
     }
 
     fn solve_unit_lower_in_place(ld: MatRef<'_, Self>, v: faer::MatMut<'_, Self>) {
-        crate::online::solve_unit_lower_f64_accum(ld, v);
+        crate::linalg::solve_unit_lower_f64_accum(ld, v);
     }
 
     fn ldlt_delete_row_col(
@@ -337,6 +337,6 @@ impl sealed::ScalarOps for f32 {
         n: usize,
         _scratch: &mut dyn_stack::MemBuffer,
     ) {
-        crate::online::ldlt_delete_via_f64(ld, index, n);
+        crate::linalg::ldlt_delete_via_f64(ld, index, n);
     }
 }

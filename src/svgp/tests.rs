@@ -1,10 +1,9 @@
 use super::*;
 use crate::error::GprError;
 use crate::gpr::JitterPolicy;
-use crate::gpr::factor::cholesky_lower_with_policy;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
-use crate::workspace::{faer_par, faer_par_dims};
+use crate::linalg::{cholesky_lower_with_retries, faer_par, faer_par_dims};
 use crate::{Adam, Fixed, PredictOptions, Sgpr, VarianceKind};
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
@@ -109,10 +108,10 @@ fn cholesky_lower(mat: &mut Mat<f64>) {
     let n = mat.nrows();
     let req = llt::factor::cholesky_in_place_scratch::<f64>(n, faer_par(n), Default::default());
     let mut scratch = MemBuffer::new(req);
-    cholesky_lower_with_policy(
+    cholesky_lower_with_retries(
         mat,
         &mut scratch,
-        JitterPolicy::default(),
+        JitterPolicy::default().retry_jitters(),
         crate::error::CholeskyStage::Fit,
     )
     .expect("chol");

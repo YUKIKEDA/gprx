@@ -12,6 +12,7 @@ use crate::gpr::online::PointRegistry;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
 use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::precision::{DoublePrecision, ModelPrecision};
@@ -19,10 +20,9 @@ use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
 use super::factor::{
-    PublishSgprWeights, VfeState, append_column, append_point, assemble_vfe, chol_rank1_downdate,
-    chol_rank1_update, frobenius2, inducing_delete, inducing_insert, kernel_column, kernel_diag_at,
-    point_at, publish_sgpr_weights, refresh_w, remove_column, remove_point, solve_lmm,
-    vfe_neg_log_marginal_likelihood, vfe_predict,
+    PublishSgprWeights, VfeState, append_column, append_point, assemble_vfe, inducing_delete,
+    inducing_insert, kernel_column, kernel_diag_at, point_at, publish_sgpr_weights, refresh_w,
+    remove_column, remove_point, solve_lmm, vfe_neg_log_marginal_likelihood, vfe_predict,
 };
 use super::fitted::FittedSgpr;
 

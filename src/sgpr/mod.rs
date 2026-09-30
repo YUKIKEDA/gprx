@@ -12,7 +12,7 @@ pub use fitted::FittedSgpr;
 pub use model::Sgpr;
 pub use online::{InducingId, OnlineSgpr};
 
-pub(crate) use factor::{kernel_cross, mat_mul_into, mat_sub_mul, validate_inducing};
+pub(crate) use factor::{kernel_cross, validate_inducing};
 
 /// Keeps inducing coordinates fixed during [`Sgpr::fit`].
 ///
