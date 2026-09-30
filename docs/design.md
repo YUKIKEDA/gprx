@@ -205,7 +205,7 @@ pub enum CompiledKernel<T: KernelScalar = f64> {
 pub enum Triangle { Lower, Upper, Full }
 
 /// A user leaf. It reads squared Euclidean distances (or coordinates for
-/// `hess_points` / `grad_wrt_coord_dim`) and writes the triangle `uplo` asks for.
+/// `hess_points`) and writes the triangle `uplo` asks for.
 pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     fn num_params(&self) -> usize;
     fn get_params(&self, out: &mut [f64]) -> Result<(), GprError>;
@@ -220,9 +220,20 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         -> Result<(), GprError>;
     fn hess_points(&self, x: MatRef<'_, T>, d2_k: MatMut<'_, T>, i: usize, j: usize, uplo: Triangle)
         -> Result<(), GprError>;
-    /// ∂K(X1, X2)/∂X2[*, dim] for one whole dimension. A per-point vtable call
-    /// (m×d times) would block SIMD, so the unit is a dimension.
-    fn grad_wrt_coord_dim(&self, x1: MatRef<'_, T>, x2: MatRef<'_, T>, d_k: MatMut<'_, T>, dim: usize)
+    /// Rectangular ∂K/∂θ and ∂²K/∂θ∂θ from squared distances (train × test).
+    /// Default: `CoordGradientUnsupported`.
+    fn grad_cross(&self, dist: MatRef<'_, T>, d_k: MatMut<'_, T>, param_idx: usize)
+        -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
+    fn hess_cross(&self, dist: MatRef<'_, T>, d2_k: MatMut<'_, T>, i: usize, j: usize)
+        -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
+    /// ∂k/∂(d²), ∂²k/∂(d²)², ∂²k/∂θ∂(d²): with these the coordinate derivatives of
+    /// `FreeInducing` follow (k is a function of the squared distance). Default:
+    /// `CoordGradientUnsupported`.
+    fn grad_wrt_sq_dist(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError>
+        { Err(GprError::CoordGradientUnsupported) }
+    fn hess_wrt_sq_dist(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError>
+        { Err(GprError::CoordGradientUnsupported) }
+    fn grad_wrt_sq_dist_theta(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>, param_idx: usize)
         -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
     fn clone_box(&self) -> Box<dyn KernelTerm<T>>;
     fn persist_id(&self) -> &'static str { "" }                          // registry key for save / load
@@ -230,7 +241,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
 }
 ```
 
-`uplo` defaults to `Lower`: faer `cholesky_in_place` reads only the lower triangle, so filling `Full` would about double the kernel evaluation. `CompiledKernel` exposes the same operations (`apply`, `apply_cross`, `apply_points`, `apply_cross_points`, `fill_diag`, `fill_diag_points`, `grad`, `grad_points`, `grad_wrt_coord_dim`, `hess`, `hess_points`), each generic over the `KernelMath` of §8.
+`uplo` defaults to `Lower`: faer `cholesky_in_place` reads only the lower triangle, so filling `Full` would about double the kernel evaluation. `CompiledKernel` exposes the same operations (`apply`, `apply_cross`, `apply_points`, `apply_cross_points`, `fill_diag`, `fill_diag_points`, `grad`, `grad_points`, `grad_wrt_coord_dim`, `hess_wrt_coord_dims`, `hess_wrt_coord_mixed`, `hess_theta_coord_dim`, `hess`, `hess_points`), each generic over the `KernelMath` of §8.
 
 Leaf parameters stay f64. `compile()` is f64; `compile_as::<T>()` gives the same apply, gradient, and Hessian in f32. Every built-in leaf is one implementation over `T: KernelScalar`, and `CompiledKernel<T>` has one dispatch. f64 SIMD paths are reached through a scalar hook that returns an f64 view only when `T = f64`; f32 is the same formula, scalar. A user leaf is one `impl<T: KernelScalar> KernelTerm<T>`: `KernelScalar` carries the arithmetic and `exp` / `ln` / `sqrt` / `powf` / `sin` / `cos` a formula needs, and the generic built-in leaves can be called from it. `CustomKernel::new` requires `KernelTerm<f64> + KernelTerm<f32>`, which one generic impl satisfies.
 
@@ -420,7 +431,7 @@ The Sparse approximation is VFE. The reason is [ADR 0002](adr/0002-sparse-vfe.md
 
 The diagonal of `K(X,X)` is invariant, so it is computed once and reused. `K(X,Z)` and `K(Z,Z)` must be recomputed whenever Z moves, but `m` (the number of inducing points) is small, so that cost is negligible next to the O(nm²) Cholesky and is not cached. The joint gradient and Hessian of `K(X,X)` sum the diagonal `∂k(x_i, x_i)/∂θ` in `O(n)`. Gradients of `K(Z,Z)` and `K(Z,X)` stay dense.
 
-The gradient of inducing coordinates is `grad_wrt_coord_dim` (§5.1). An unsupported kernel returns `GprError::CoordGradientUnsupported`, not a panic. The default `FixedInducing` `fit` does not call this API: it needs the rectangular `∂K(Z, X)/∂θ` and `∂²K(Z, X)/∂θ∂θ` (`grad_cross_points` / `hess_cross_points`), which every built-in leaf and every Sum / Product tree of them provides, so a `Constant × RBF` signal variance fits in `Sgpr` and `Svgp` as in Exact. A `Custom` leaf has no rectangular derivative and returns `CoordGradientUnsupported`. `FreeInducing` calls the coordinate API once per dimension during joint optimization. The reason is [ADR 0003](adr/0003-sparse-z-joint.md).
+The gradient of inducing coordinates is `grad_wrt_coord_dim` and the Hessian is `hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim` (§5.1). Every built-in leaf has them, Sum and Product trees compose them (the radial leaves from `g'(q)`, `g''(q)` of `k = g(q)`, `q = Σ w_d Δ_d²`, one implementation; a Product by the product rule over each term's value and first and second derivative). Matérn with `ν = 1/2` returns `GprError::CoordGradientUnsupported`, not a panic: its coordinate derivative is undefined where two points coincide, and `Z ⊂ X` starts there. A `Custom` leaf provides them through `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, and `grad_wrt_sq_dist_theta`, and the rectangular `∂K/∂θ` through `grad_cross` / `hess_cross`; a leaf that leaves the defaults returns `CoordGradientUnsupported`. The default `FixedInducing` `fit` does not call this API: it needs the rectangular `∂K(Z, X)/∂θ` and `∂²K(Z, X)/∂θ∂θ` (`grad_cross_points` / `hess_cross_points`), which every built-in leaf and every Sum / Product tree of them provides, so a `Constant × RBF` signal variance fits in `Sgpr` and `Svgp` as in Exact. A `Custom` leaf needs `KernelTerm::grad_cross` / `hess_cross` (see above). `FreeInducing` calls the coordinate API once per dimension during joint optimization. The reason is [ADR 0003](adr/0003-sparse-z-joint.md).
 
 **The default is: the caller passes Z, and the optimization targets are kernel hyperparameters and noise only.** Free Z switches with `FixedInducing` / `FreeInducing`. The same `Optimizer` moves kernel `θ`, likelihood `θ`, and column-major `Z` together. The interval is the raw coordinates of the training-`X` box, opened a little. L-BFGS history length is `p = p_θ + m×d`, and the extra storage is `history_size × m × d` values of `f64` (small next to the VFE `O(nm²)`, because `m` is small). Alternating is not shipped.
 

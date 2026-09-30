@@ -4,17 +4,17 @@
 use super::*;
 use crate::math::Accurate;
 
-const M: usize = 3;
-const N: usize = 4;
+pub(super) const M: usize = 3;
+pub(super) const N: usize = 4;
 
 /// `M` points, then `N` points, in `d` dimensions; deterministic, no two equal.
-fn stacked(d: usize) -> Mat<f64> {
+pub(super) fn stacked(d: usize) -> Mat<f64> {
     Mat::from_fn(M + N, d, |row, col| {
         0.3 + 0.41 * row as f64 - 0.17 * ((row * (col + 2)) % 5) as f64 + 0.08 * col as f64
     })
 }
 
-fn rows(x: MatRef<'_, f64>, start: usize, count: usize) -> Mat<f64> {
+pub(super) fn rows(x: MatRef<'_, f64>, start: usize, count: usize) -> Mat<f64> {
     Mat::from_fn(count, x.ncols(), |r, c| x[(start + r, c)])
 }
 
@@ -59,7 +59,7 @@ fn white() -> KernelSpec {
 
 /// Every built-in leaf, and the trees that need a product: with one factor per
 /// leaf kind, with nested sums, and with three factors.
-fn kernels(d: usize) -> Vec<(&'static str, KernelSpec)> {
+pub(super) fn kernels(d: usize) -> Vec<(&'static str, KernelSpec)> {
     vec![
         ("rbf", rbf(1.3)),
         ("matern_1_2", matern(MaternNu::Half)),
@@ -245,10 +245,11 @@ fn rectangular_values_from_coordinates_match_the_block_of_the_square_values() {
     }
 }
 
-/// A custom leaf has a rectangular value but no rectangular derivative.
+/// A custom leaf that leaves the trait defaults has a rectangular value but no
+/// rectangular or coordinate derivative.
 #[test]
 fn custom_leaf_has_no_rectangular_derivative() {
-    let compiled = (constant(1.0) * custom_rbf(1.0)).compile();
+    let compiled = (constant(1.0) * custom_rbf_without_derivatives(1.0)).compile();
     let all = stacked(1);
     let z = rows(all.as_ref(), 0, M);
     let x = rows(all.as_ref(), M, N);

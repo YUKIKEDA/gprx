@@ -1158,6 +1158,18 @@ fn assert_free_derivs(
     z: &[f64],
     m: usize,
 ) {
+    assert_free_derivs_tol(kernel, (x, n, d), y, (z, m), 2e-4);
+}
+
+/// `hess_tol` is the absolute tolerance of the Hessian against a difference of
+/// gradients, whose own error grows with the curvature.
+fn assert_free_derivs_tol(
+    kernel: KernelSpec,
+    (x, n, d): (&[f64], usize, usize),
+    y: &[f64],
+    (z, m): (&[f64], usize),
+    hess_tol: f64,
+) {
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
     let mut fitted = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -1177,7 +1189,7 @@ fn assert_free_derivs(
     let mut hess = vec![0.0; p * p];
     fitted.hessian_into(&params, &mut hess).expect("hess");
     let fd_h = fd_hess_from_grad(&mut fitted, &params);
-    assert_slice_close(&hess, &fd_h, 2e-4);
+    assert_slice_close(&hess, &fd_h, hess_tol);
 }
 
 #[test]
@@ -1223,6 +1235,121 @@ fn rbf_plus_white_n8_m2_free_grad_hess_match_fd() {
         &z,
         2,
     );
+}
+
+const FREE_X_2D: [f64; 16] = [
+    0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0, 0.0, 0.2, 0.1, 0.8, 0.4, 0.6, 0.3, 0.9,
+];
+const FREE_Y_8: [f64; 8] = [0.0, 0.35, 0.1, -0.4, 0.2, 0.55, -0.15, 0.3];
+
+/// Kernels whose coordinate derivatives came with #302: every leaf that had
+/// none, Matérn 5/2, and products.
+fn free_kernels_1d() -> Vec<(&'static str, KernelSpec)> {
+    let rbf = || KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let matern = |nu| KernelSpec::from(MaternKernel::new(1.0, nu).expect("ℓ"));
+    let rq = || KernelSpec::from(RationalQuadraticKernel::new(1.1, 0.8).expect("rq"));
+    let periodic = || KernelSpec::from(PeriodicKernel::new(0.9, 1.7).expect("periodic"));
+    let linear = || KernelSpec::from(LinearKernel::new(0.6).expect("linear"));
+    vec![
+        ("matern 5/2", matern(MaternNu::FiveHalves)),
+        ("rq", rq()),
+        ("periodic", periodic()),
+        ("linear + rbf", linear() + rbf()),
+        ("constant * rbf", constant(1.7) * rbf()),
+        (
+            "constant * matern 5/2",
+            constant(0.8) * matern(MaternNu::FiveHalves),
+        ),
+        ("constant * rq", constant(0.6) * rq()),
+        ("rbf * periodic", rbf() * periodic()),
+        ("linear * rbf", linear() * rbf()),
+        (
+            "constant * (rbf + matern 3/2)",
+            constant(1.4) * (rbf() + matern(MaternNu::ThreeHalves)),
+        ),
+        (
+            "(rbf + rq) * (periodic + constant)",
+            (rbf() + rq()) * (periodic() + constant(0.5)),
+        ),
+    ]
+}
+
+fn free_kernels_2d() -> Vec<(&'static str, KernelSpec)> {
+    let matern = |nu| KernelSpec::from(MaternArdKernel::new(&[1.0, 1.4], nu).expect("ℓ"));
+    let rq = || KernelSpec::from(RationalQuadraticArdKernel::new(&[1.1, 0.9], 0.7).expect("ℓ"));
+    vec![
+        ("matern ard 3/2", matern(MaternNu::ThreeHalves)),
+        ("matern ard 5/2", matern(MaternNu::FiveHalves)),
+        ("rq ard", rq()),
+        ("constant * rbf ard", constant(1.7) * kernel_ard()),
+        (
+            "constant * matern ard",
+            constant(0.8) * matern(MaternNu::FiveHalves),
+        ),
+        ("constant * rq ard", constant(2.1) * rq()),
+    ]
+}
+
+#[test]
+fn free_inducing_grad_hess_match_fd_for_every_kernel() {
+    let (_, x, y, z) = free_rbf_n8();
+    for (name, kernel) in free_kernels_1d() {
+        eprintln!("{name}");
+        assert_free_derivs(kernel, &x, 8, 1, &y, &z, 2);
+    }
+    let z2 = [0.05, 0.12, 0.08, 0.18];
+    for (name, kernel) in free_kernels_2d() {
+        eprintln!("{name}");
+        assert_free_derivs_tol(kernel, (&FREE_X_2D, 8, 2), &FREE_Y_8, (&z2, 2), 2e-3);
+    }
+}
+
+#[test]
+fn free_inducing_fits_with_every_kernel() {
+    let (_, x, y, z) = free_rbf_n8();
+    for (name, kernel) in free_kernels_1d() {
+        eprintln!("{name}");
+        free_fit_ok(kernel, &x, 8, 1, &y, &z, 2);
+    }
+    let z2 = [0.05, 0.12, 0.08, 0.18];
+    for (name, kernel) in free_kernels_2d() {
+        eprintln!("{name}");
+        free_fit_ok(kernel, &FREE_X_2D, 8, 2, &FREE_Y_8, &z2, 2);
+    }
+}
+
+#[test]
+fn free_inducing_lbfgs_learns_a_product_kernel() {
+    let (_, x, y, z) = free_rbf_n8();
+    let kernel = constant(0.6) * KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let fixed = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(&x, 8, 1, &y, &z, 2)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .neg_log_marginal_likelihood()
+        .expect("fixed nlml");
+    let free = Sgpr::new(kernel, likelihood)
+        .with_inducing(FreeInducing)
+        .fit(&x, 8, 1, &y, &z, 2)
+        .map_err(|(_, e)| e)
+        .expect("free fit")
+        .neg_log_marginal_likelihood()
+        .expect("free nlml");
+    assert!(free < fixed, "free={free} fixed={fixed}");
+}
+
+#[test]
+fn matern_half_free_inducing_is_unsupported() {
+    let (_, x, y, z) = free_rbf_n8();
+    let kernel = KernelSpec::from(MaternKernel::new(1.0, MaternNu::Half).expect("ℓ"));
+    let err = Sgpr::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .with_inducing(FreeInducing)
+        .fit(&x, 8, 1, &y, &z, 2)
+        .map(|_| ())
+        .map_err(|(_, e)| e);
+    assert_eq!(err, Err(GprError::CoordGradientUnsupported));
 }
 
 fn assert_rank1_matches_factor(got: &Rank1Vfe, want: &FittedSgpr<Fixed>) {
