@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R3-2 ([#237](https://github.com/YUKIKEDA/gprx/issues/237), refinement ignores the stored factor and `JitterPolicy`). Acceptance is on #237. R3-1 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+R3-3 ([#238](https://github.com/YUKIKEDA/gprx/issues/238), one precision-policy trait; refinement as a `Refiner`). Acceptance is on #238. R3-2 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
 
 ## Dependencies
 
@@ -167,8 +167,8 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R2-3 | Feat | Custom kernels written once for f32 and f64 | [#234](https://github.com/YUKIKEDA/gprx/issues/234) | done |
 | R2-4 | Task | Fix inconsistencies and leaks in the kernel and crate public surface | [#235](https://github.com/YUKIKEDA/gprx/issues/235) | done |
 | R3-1 | Bug | `MixedPrecision` predict re-runs refinement and recompiles the kernel on every call | [#236](https://github.com/YUKIKEDA/gprx/issues/236) | done |
-| R3-2 | Bug | Refinement ignores the stored factor and `JitterPolicy` | [#237](https://github.com/YUKIKEDA/gprx/issues/237) | in progress |
-| R3-3 | Task | One precision-policy trait; refinement as a `Refiner` | [#238](https://github.com/YUKIKEDA/gprx/issues/238) | acceptance on #238 |
+| R3-2 | Bug | Refinement ignores the stored factor and `JitterPolicy` | [#237](https://github.com/YUKIKEDA/gprx/issues/237) | done |
+| R3-3 | Task | One precision-policy trait; refinement as a `Refiner` | [#238](https://github.com/YUKIKEDA/gprx/issues/238) | in progress |
 | R4-1 | Task | Distance cache, Cholesky buffer, exp mode, and recompute strategy as runtime values | [#239](https://github.com/YUKIKEDA/gprx/issues/239) | acceptance on #239 |
 | R4-2 | Task | Factor abstraction (LLT / LDLT) and a shared model core for `FittedGpr` and `OnlineGpr` | [#240](https://github.com/YUKIKEDA/gprx/issues/240) | acceptance on #240 |
 | R4-3 | Task | One predict path | [#241](https://github.com/YUKIKEDA/gprx/issues/241) | acceptance on #241 |

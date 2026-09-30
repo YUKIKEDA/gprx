@@ -9,7 +9,7 @@ use std::time::Instant;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{pack_storage, validate_query};
-use crate::error::GprError;
+use crate::error::{CholeskyStage, GprError};
 use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
@@ -18,7 +18,7 @@ use crate::online::OnlineWorkspace;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, FullRecompute, Optimizer, PoleRecompute};
 use crate::persist::{self, PersistedModel, persist_err};
-use crate::precision::{DoublePrecision, GpScalar};
+use crate::precision::{DoublePrecision, GpScalar, StoredFactor, TrainSystem};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::QueryWorkspace;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -432,17 +432,21 @@ where
         }
     }
 
-    fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
-        let x = self.x.as_ref().submatrix(0, 0, self.n, self.d);
-        P::publish_predict_alpha::<M>(
-            &self.kernel,
-            &self.compiled,
-            x,
-            &self.y_train,
-            self.likelihood.noise_variance(),
-            &self.factor_alpha,
-            &mut self.alpha,
-        )
+    fn publish_predict_alpha(&mut self, stage: CholeskyStage) -> Result<(), GprError> {
+        let n = self.n;
+        let sys = TrainSystem {
+            kernel: &self.kernel,
+            compiled: &self.compiled,
+            x: self.x.as_ref().submatrix(0, 0, n, self.d),
+            y: &self.y_train,
+            noise: self.likelihood.noise_variance(),
+            jitter: self.workspace.factor_jitter,
+            factor: StoredFactor::Ldlt(self.workspace.ld_factor.as_ref().submatrix(0, 0, n, n)),
+            factor_alpha: &self.factor_alpha,
+            policy: self.jitter_policy,
+            stage,
+        };
+        P::publish_predict_alpha::<M>(&sys, &mut self.alpha)
     }
 
     /// Returns the original training features in column-major order.
@@ -491,6 +495,11 @@ where
         debug_assert_eq!(self.n, registry.len());
         self.registry = registry;
         Ok(())
+    }
+
+    /// Diagonal jitter every row of the current factor carries.
+    pub(crate) fn factor_jitter(&self) -> f64 {
+        self.workspace.factor_jitter
     }
 
     pub(crate) fn jitter_policy(&self) -> JitterPolicy {
@@ -598,7 +607,8 @@ where
         let mut kss = [P::Storage::from_f64(0.0)];
         self.compiled
             .eval_diag(self.query.query_x.as_ref().submatrix(0, 0, 1, d), &mut kss)?;
-        let k_new = kss[0] + P::Storage::from_f64(self.likelihood.noise_variance());
+        let k_new = kss[0]
+            + P::Storage::from_f64(self.likelihood.noise_variance() + self.workspace.factor_jitter);
         #[cfg(feature = "insert-stages")]
         insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -615,7 +625,7 @@ where
         self.n += 1;
         OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.y_train);
         self.refresh_factor_alpha();
-        self.publish_predict_alpha()?;
+        self.publish_predict_alpha(CholeskyStage::OnlineInsert)?;
         let id = self.registry.insert();
         #[cfg(feature = "insert-stages")]
         insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
@@ -669,7 +679,7 @@ where
         self.n -= 1;
         OnlineWorkspace::set_f64_prefix(&mut self.workspace.y, &self.y_train);
         self.refresh_factor_alpha();
-        self.publish_predict_alpha()?;
+        self.publish_predict_alpha(CholeskyStage::OnlineDelete)?;
         Ok(())
     }
 

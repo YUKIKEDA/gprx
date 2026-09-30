@@ -596,6 +596,8 @@ pub(crate) struct PersistedModel<
     pub alpha: Vec<P::Refine>,
     pub owned_l: Option<faer::Mat<P::Storage>>,
     pub mapped: Option<MappedTensors>,
+    /// Diagonal jitter the saved factor was built with.
+    pub factor_jitter: f64,
 }
 
 pub(crate) fn persist_err(reason: impl Into<String>) -> GprError {
@@ -654,6 +656,7 @@ where
         kernel: KernelJson::encode(model.kernel())?,
         likelihood: LikelihoodJson::encode(model.likelihood()),
         jitter: JitterJson::encode(model.jitter_policy()),
+        factor_jitter: model.factor_jitter(),
         distance_cache: model
             .distance_cache_slot()
             .persist()
@@ -709,6 +712,7 @@ where
         kernel: KernelJson::encode(model.kernel())?,
         likelihood: LikelihoodJson::encode(model.likelihood()),
         jitter: JitterJson::encode(model.jitter_policy()),
+        factor_jitter: model.factor_jitter(),
         distance_cache: model
             .distance_cache_slot()
             .persist()
@@ -1088,6 +1092,7 @@ where
                     alpha,
                     owned_l,
                     mapped,
+                    factor_jitter: config.factor_jitter,
                 })?;
                 Ok(P::seal_cached(model))
             }
@@ -1106,6 +1111,7 @@ where
                     alpha,
                     owned_l,
                     mapped,
+                    factor_jitter: config.factor_jitter,
                 })?;
                 Ok(P::seal_uncached(model))
             }
@@ -1124,6 +1130,7 @@ where
                     alpha,
                     owned_l,
                     mapped,
+                    factor_jitter: config.factor_jitter,
                 })?;
                 Ok(P::seal_points(model))
             }
@@ -1142,6 +1149,7 @@ where
                     alpha,
                     owned_l,
                     mapped,
+                    factor_jitter: config.factor_jitter,
                 })?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(P::seal_online_cached(online))
@@ -1161,6 +1169,7 @@ where
                     alpha,
                     owned_l,
                     mapped,
+                    factor_jitter: config.factor_jitter,
                 })?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(P::seal_online_uncached(online))
@@ -1180,6 +1189,7 @@ where
                     alpha,
                     owned_l,
                     mapped,
+                    factor_jitter: config.factor_jitter,
                 })?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
                 Ok(P::seal_online_points(online))

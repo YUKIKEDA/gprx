@@ -32,6 +32,9 @@ pub(super) struct ModelConfig {
     pub kernel: KernelJson,
     pub likelihood: LikelihoodJson,
     pub jitter: JitterJson,
+    /// Diagonal jitter the saved factor was built with. Omitted on disk means `0`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub factor_jitter: f64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub distance_cache: Option<DistanceCacheJson>,
     pub x_unfitted: UnfittedInputJson,
@@ -275,4 +278,8 @@ pub(super) fn parse_config(bytes: &[u8]) -> Result<ModelConfig, GprError> {
         return Err(GprError::EmptyInput);
     }
     Ok(config)
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
