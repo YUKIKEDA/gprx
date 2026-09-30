@@ -205,6 +205,8 @@ impl KernelSpec {
 
 What P5-1 shipped: leaf parameters stay f64. The public compute scalar is `CompiledKernel<T = f64>`. `compile()` with the type omitted is f64. `compile_as::<T>()` makes apply, gradient, Hessian, built-in leaves, sum, product, and user leaves the same operation in f32 and f64. The f64 distance cache and SIMD stay on the f64 side. f32 is the same formula, scalar. There is no conversion that swaps an f32 value with an f64 value.
 
+Since R2-2 / R2-3 every built-in leaf is one implementation over `T: KernelScalar`, and `CompiledKernel<T>` has one dispatch. f64 SIMD paths are reached through a scalar hook that returns an f64 view only when `T = f64`. A user leaf is one `impl<T: KernelScalar> KernelTerm<T>`: `KernelScalar` carries the arithmetic and `exp` / `ln` / `sqrt` / `powf` / `sin` / `cos` a formula needs, and the generic built-in leaves can be called from it. `CustomKernel::new` keeps the bound `KernelTerm<f64> + KernelTerm<f32>`, which one generic impl satisfies.
+
 ```rust
 /// Evaluator. Built-ins are an enum (static dispatch). Only a user term is dyn.
 enum CompiledKernel<T: Scalar> {

@@ -155,7 +155,8 @@ impl KernelSpec {
     /// Sum and product with other distance leaves work. Mixing with
     /// points-mode leaves (Linear, ARD) evaluates each leaf in its own mode.
     ///
-    /// See [`super::KernelTerm`] for a Sum example.
+    /// One generic `impl<T: KernelScalar> KernelTerm<T>` serves both
+    /// precisions. See [`super::KernelTerm`] for a Sum example.
     pub fn custom<K>(term: K) -> Self
     where
         K: super::KernelTerm<f64>

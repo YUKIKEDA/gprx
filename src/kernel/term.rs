@@ -18,6 +18,12 @@ use super::Triangle;
 /// Coordinate (points) kernels are not this trait. Sum/Product with
 /// points-mode leaves evaluates each leaf in its own mode.
 ///
+/// Write one generic `impl<T: KernelScalar> KernelTerm<T>`. [`KernelScalar`]
+/// carries the arithmetic and `exp` / `ln` / `sqrt` / … a formula needs, and
+/// built-in leaves such as [`super::RbfKernel`] are generic too, so the same
+/// code serves `f64` and `f32` ([`crate::SinglePrecision`]). Parameters stay
+/// `f64` at both scalars.
+///
 /// `get_params` / `set_params` / [`Self::bounds_into`] use the same log-`θ`
 /// convention as built-in leaves. [`Self::apply`] writes `uplo`; entries
 /// outside that triangle stay untouched.
@@ -367,6 +373,8 @@ pub struct CustomKernel<T: KernelScalar = f64> {
 
 impl CustomKernel<f64> {
     /// Boxes a user leaf that implements the same operations at `f32` and `f64`.
+    ///
+    /// One generic `impl<T: KernelScalar> KernelTerm<T>` meets this bound.
     pub fn new<K>(term: K) -> Self
     where
         K: KernelTerm<f64> + KernelTerm<f32> + Clone + Debug + Send + Sync + 'static,
