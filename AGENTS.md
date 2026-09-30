@@ -5,6 +5,8 @@ Entry point for agents. Procedure: [CONTRIBUTING.md](CONTRIBUTING.md). Enforceme
 | Source | Path |
 | --- | --- |
 | Design | [docs/design.md](docs/design.md) |
+| Modules, responsibilities, dependency direction | [docs/architecture.md](docs/architecture.md) |
+| Saved directory (`config.json` and `model.safetensors`) | [docs/persist-format.md](docs/persist-format.md) |
 | Order and status | [docs/roadmap.md](docs/roadmap.md) |
 | Directories | [docs/conventions.md](docs/conventions.md) |
 | Why a decision was made | [docs/adr/](docs/adr/) |

@@ -8,7 +8,7 @@ Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::
 
 Local **0.1.0** quality: `Gpr` / `FittedGpr`, kernels, `fit` / `predict` / `predict_into` / leave-one-out, English rustdoc, and `examples/`. Depend on git or a path, not crates.io.
 
-Design: [`docs/design.md`](docs/design.md). Tasks: [`docs/roadmap.md`](docs/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`compare/perf/`](compare/perf/) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; not criterion).
+Design: [`docs/design.md`](docs/design.md). Architecture: [`docs/architecture.md`](docs/architecture.md). Saved format: [`docs/persist-format.md`](docs/persist-format.md). Tasks: [`docs/roadmap.md`](docs/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`compare/perf/`](compare/perf/) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; not criterion).
 
 ## Example
 
@@ -36,6 +36,47 @@ Default `predict` variance is observation (`latent + σn²`). Use `predict_with`
 Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Features can use `MinMaxInput` (default `[0, 1]`). Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in composition; using both at large values double-counts noise.
 
 `Gpr<Fixed>::factor` (after `with_optimizer(Fixed)`) factors at the kernel and likelihood `θ` already on the trainer. L-BFGS knobs live on `Lbfgs` (`with_max_iterations`, `with_tolerance`, `with_history_size`, `with_restarts`). Nelder–Mead has `with_max_iterations`, `with_tolerance`, and `with_restarts` (`NelderMead`). The Hessian solver is `TrustRegion` (`with_max_iterations`, `with_tolerance`, `with_restarts`, `with_radii`). Homemade Fast Simulated Annealing is `FastSimulatedAnnealing` (`with_max_iterations`, `with_restarts`, `with_initial_temperature`, `with_cooling_rate`, `with_seed`, `with_boundary`).
+
+## Architecture and the saved format
+
+Three model families (`Gpr`, `Sgpr`, `Svgp`) are built from the same blocks and never import one another. The map below is the whole crate; each box is a module under `src/`.
+
+```mermaid
+flowchart TB
+    api["<b>Public API</b><br/>lib.rs re-exports; pub mods kernel, transform, persist"]
+    subgraph models["Models — one directory per family"]
+        direction LR
+        gpr["<b>gpr</b><br/>Exact GPR"]
+        sgpr["<b>sgpr</b><br/>Sparse GPR (VFE)"]
+        svgp["<b>svgp</b><br/>SVGP (minibatch)"]
+    end
+    sparse["<b>sparse</b><br/>crate-private core shared by sgpr and svgp"]
+    persist["<b>persist</b><br/>save / load directories"]
+    subgraph services["Building blocks the models compose"]
+        direction LR
+        kernel["<b>kernel</b><br/>spec, compiled, leaves"]
+        likelihood["<b>likelihood</b>"]
+        transform["<b>transform</b><br/>input / target maps"]
+        precision["<b>precision</b><br/>f32 / f64 / mixed"]
+        optimizer["<b>optimizer</b><br/>+ objective traits"]
+        workspace["<b>workspace</b><br/>+ prediction"]
+    end
+    subgraph foundation["Foundation — scalars, numerics, checks"]
+        direction LR
+        f1["linalg · math · policy"]
+        f2["param · data · error · rng · points"]
+    end
+    api --> models
+    gpr --> services
+    sgpr --> sparse --> services
+    svgp --> sparse
+    services --> foundation
+    persist -.->|"reads and rebuilds"| models
+    models -.->|"save, persist_err"| persist
+```
+
+- [`docs/architecture.md`](docs/architecture.md): every module, what it is responsible for, which way its imports point, the public types by family, and where to change what.
+- [`docs/persist-format.md`](docs/persist-format.md): what `save` writes. The keys of `config.json`, the tensors of `model.safetensors` (names, shapes, dtypes, column-major layout), the JSON form of kernels and transforms, `Custom` restore, versions, and errors.
 
 ## Comparison with other libraries
 
