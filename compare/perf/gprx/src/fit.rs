@@ -216,5 +216,19 @@ pub fn run(case: &RealCase) -> Result<FitRow, String> {
         coverage95: Some(inside / m),
         peak_rss_bytes: Some(peak_rss_bytes()?),
         note: None,
+        pred_mean: case.return_predictions.then(|| {
+            fitted
+                .mean
+                .iter()
+                .map(|v| v * case.y_std + case.y_mean)
+                .collect()
+        }),
+        pred_var: case.return_predictions.then(|| {
+            fitted
+                .variance
+                .iter()
+                .map(|v| v * case.y_std * case.y_std)
+                .collect()
+        }),
     })
 }

@@ -93,3 +93,45 @@ def write_case(
 
 def splits_of(dataset: str) -> range:
     return range(n_splits(DATASETS[dataset]))
+
+
+def write_curve_case(name: str, protocol: str) -> Path:
+    """A T0 case: the curve's training points and a dense grid, standardized
+    with the training statistics; every runner returns its predictions on
+    the grid (``return_predictions``). The grid has no targets, so the scores
+    of such a row mean nothing."""
+    from .curves import CURVES
+
+    curve = CURVES[name]()
+    x_mean, x_std = curve.x_train.mean(axis=0), curve.x_train.std(axis=0)
+    y_mean, y_std = float(curve.y_train.mean()), float(curve.y_train.std())
+    xs = (curve.x_grid - x_mean) / x_std
+    path = CASES / f"{name}_s0_{protocol}.json"
+    write_json(
+        path,
+        {
+            "model": "exact",
+            "name": f"{name}_s0",
+            "dataset": name,
+            "split": 0,
+            "protocol": protocol,
+            "return_predictions": True,
+            "n_rows": int(curve.x_train.shape[0]),
+            "n_cols": 1,
+            "x": ((curve.x_train - x_mean) / x_std).T.ravel().tolist(),
+            "y": ((curve.y_train - y_mean) / y_std).tolist(),
+            "xs_n_rows": int(xs.shape[0]),
+            "xs": xs.T.ravel().tolist(),
+            "ys": [y_mean] * int(xs.shape[0]),
+            "y_mean": y_mean,
+            "y_std": y_std,
+            "x_mean": float(x_mean[0]),
+            "x_std": float(x_std[0]),
+            "lengthscale_init": LENGTHSCALE_INIT,
+            "signal_variance_init": SIGNAL_VARIANCE_INIT,
+            "noise_variance_init": NOISE_VARIANCE_INIT,
+            "max_iterations": MATCHED_MAX_ITERATIONS,
+            "gtol": MATCHED_GTOL,
+        },
+    )
+    return path

@@ -202,6 +202,8 @@ pub struct RealCase {
     pub adam_batch_size: usize,
     #[serde(default)]
     pub adam_epochs: u64,
+    #[serde(default)]
+    pub return_predictions: bool,
 }
 
 fn default_model() -> String {
@@ -226,6 +228,10 @@ pub struct FitRow {
     pub coverage95: Option<f64>,
     pub peak_rss_bytes: Option<u64>,
     pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pred_mean: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pred_var: Option<Vec<f64>>,
 }
 
 impl FitRow {
@@ -247,6 +253,8 @@ impl FitRow {
             coverage95: None,
             peak_rss_bytes: None,
             note: Some(note),
+            pred_mean: None,
+            pred_var: None,
         }
     }
 }

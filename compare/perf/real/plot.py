@@ -180,6 +180,40 @@ def rss_timeline(case: str, protocol: str, out: Path, directory: Path) -> Path |
     return path
 
 
+def curve(name: str, protocol: str, out: Path) -> Path | None:
+    """T0: every library's predictive mean and 95% band on the grid, over the
+    training points."""
+    import numpy as np
+
+    from .curves import CURVES
+
+    rows = [
+        r
+        for r in json.loads((OUT / "results.json").read_text(encoding="utf-8"))
+        if r.get("status") == "ok" and r["name"] == f"{name}_s0" and r["protocol"] == protocol
+        and r.get("pred_mean") is not None
+    ]
+    if not rows:
+        return None
+    data = CURVES[name]()
+    grid = data.x_grid.ravel()
+    fig, axes = plt.subplots(1, len(rows), figsize=(max(2.6 * len(rows), 6.6), 3.0), squeeze=False, sharey=True)
+    for ax, row in zip(axes[0], rows):
+        _style_axes(ax)
+        color, _ = STYLE[row["lib"]]
+        mean = np.asarray(row["pred_mean"])
+        sd = np.sqrt(np.asarray(row["pred_var"]))
+        ax.fill_between(grid, mean - 1.96 * sd, mean + 1.96 * sd, color=color, alpha=0.18, linewidth=0)
+        ax.plot(grid, mean, color=color, linewidth=1.6)
+        ax.scatter(data.x_train.ravel(), data.y_train, s=6, color=INK_2, alpha=0.7, linewidths=0)
+        ax.set_title(LABEL[row["lib"]], fontsize=9, color=INK)
+    fig.tight_layout()
+    path = out / f"curve_{name}_{protocol}.svg"
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
 def main(argv: list[str]) -> int:
     def option(flag: str, default: str) -> str:
         return argv[argv.index(flag) + 1] if flag in argv else default
@@ -189,6 +223,8 @@ def main(argv: list[str]) -> int:
     protocol = option("--protocol", "native")
     rows = json.loads((OUT / "results.json").read_text(encoding="utf-8"))
     made = [accuracy(rows, protocol, out), fit_time(rows, protocol, out)]
+    if "--curve" in argv:
+        made.append(curve(option("--curve", ""), protocol, out))
     if "--timeline-case" in argv:
         made.append(rss_timeline(option("--timeline-case", ""), protocol, out, OUT / "timeline"))
     for path in made:

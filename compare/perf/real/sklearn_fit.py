@@ -110,6 +110,9 @@ def run(case: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(),
         "note": model.message,
     }
+    if case.get("return_predictions"):
+        row["pred_mean"] = (np.asarray(mean).ravel() * case["y_std"] + case["y_mean"]).tolist()
+        row["pred_var"] = (np.asarray(std**2).ravel() * case["y_std"] ** 2).tolist()
     row.update(score(mean, std**2, ys, case["y_mean"], case["y_std"]))
     return row
 

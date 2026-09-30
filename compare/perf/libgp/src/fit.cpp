@@ -182,7 +182,7 @@ json run(const json& c) {
             inside += 1.0;
         }
     }
-    return {{"lib", "libgp"},
+    json out_row = {{"lib", "libgp"},
             {"name", c.at("name")},
             {"status", "ok"},
             {"protocol", protocol},
@@ -197,6 +197,16 @@ json run(const json& c) {
             {"coverage95", inside / m},
             {"peak_rss_bytes", peak_rss_bytes()},
             {"note", protocol == "native" ? "Rprop 100 iterations" : "fixed"}};
+    if (c.value("return_predictions", false)) {
+        std::vector<double> mean, var;
+        for (int i = 0; i < m; ++i) {
+            mean.push_back(pred(i, 0) * y_std + y_mean);
+            var.push_back((pred(i, 1) + noise_variance) * y_std * y_std);
+        }
+        out_row["pred_mean"] = mean;
+        out_row["pred_var"] = var;
+    }
+    return out_row;
 }
 
 }  // namespace
