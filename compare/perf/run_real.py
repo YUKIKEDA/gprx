@@ -19,26 +19,9 @@ from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start
 
 from .real.cases import splits_of, write_case
 from .real.data import DATASETS, OUT
-from .runners import run_gprx, run_python
+from .real.libs import RUNNERS
 
 RESULTS = OUT / "results.json"
-FIT_FIELDS = (
-    "fit_s",
-    "predict_s",
-    "joint_evals",
-    "value_evals",
-    "iterations",
-    "nlml",
-    "rmse",
-    "nlpd",
-    "coverage95",
-    "peak_rss_bytes",
-)
-
-RUNNERS = {
-    "gprx": lambda path: run_gprx("fit", path, features="fit-counts"),
-    "sklearn": lambda path: run_python("real.sklearn_fit", path, FIT_FIELDS),
-}
 
 BANNER = (
     "one fit per cell (untimed warm-up fit first when n <= 5000); "
