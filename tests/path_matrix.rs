@@ -2,15 +2,13 @@
 //! listed, documented exceptions. A combination that fails for another reason
 //! fails this test.
 //!
-//! A combination that fails today would be listed in `KNOWN_FAILURES`; the
-//! test fails when a listed one starts to pass, so the list only shrinks.
+//! The default test runs an all-pairs cover of the options (every pair of
+//! values of any two options appears in some combination); the exhaustive
+//! matrix is `#[ignore]`d.
 //!
 //! Exceptions:
 //! - Matérn `ν = 1/2` with `FreeInducing`: `CoordGradientUnsupported` (its
 //!   coordinate derivative is undefined where two points coincide).
-//! - `Newton` with an unlucky start: `OptimizationNotConverged`. Newton is the
-//!   plain method (no line search), documented on [`gprx::Newton`]; it is
-//!   allowed to fail on every model, and must not fail with anything else.
 
 #![allow(clippy::unwrap_used)] // fixtures outside the `#[test]` body
 
@@ -21,11 +19,8 @@ use gprx::kernel::{
 };
 use gprx::{
     DoublePrecision, FastSimulatedAnnealing, FreeInducing, GaussianLikelihood, GprError, KernelExp,
-    Lbfgs, NelderMead, Newton, NonlinearCg, Sgpr, SinglePrecision,
+    Lbfgs, NelderMead, NonlinearCg, Sgpr, SinglePrecision, TrustRegion,
 };
-
-/// Labels of the combinations that fail today. Empty: none.
-const KNOWN_FAILURES: [&str; 0] = [];
 
 const N: usize = 12;
 const D: usize = 2;
@@ -96,17 +91,19 @@ fn kernels() -> Vec<(&'static str, KernelSpec, bool)> {
     ]
 }
 
-fn allowed(err: &GprError, free: bool, unsupported: bool, newton: bool) -> bool {
-    match err {
-        GprError::CoordGradientUnsupported => free && unsupported,
-        GprError::OptimizationNotConverged { .. } => newton,
-        _ => false,
-    }
+fn allowed(err: &GprError, free: bool, unsupported: bool) -> bool {
+    matches!(err, GprError::CoordGradientUnsupported) && free && unsupported
 }
 
-macro_rules! run {
-    ($failures:ident, $name:expr, $kernel:expr, $unsupported:expr, $opt_name:expr, $newton:expr,
-     $opt:expr, $precision:ty, $math:expr, $free:expr) => {{
+const OPTIMIZERS: [&str; 5] = ["lbfgs", "ncg", "nelder-mead", "trust-region", "fsa"];
+const PRECISIONS: [&str; 2] = ["f64", "f32"];
+const MATHS: [KernelExp; 2] = [KernelExp::Accurate, KernelExp::FastApprox];
+
+/// One combination: the failure message, or `None` when it fits (or is a
+/// listed exception).
+macro_rules! fit_case {
+    ($name:expr, $kernel:expr, $unsupported:expr, $opt:expr, $opt_name:expr,
+     $precision:ty, $precision_name:expr, $math:expr, $free:expr) => {{
         let (x, y, z) = data();
         let likelihood = GaussianLikelihood::new(0.1).unwrap();
         let base = Sgpr::new($kernel.clone(), likelihood)
@@ -127,133 +124,209 @@ macro_rules! run {
             "{} · {} · {} · {:?} · {}",
             $name,
             $opt_name,
-            stringify!($precision),
+            $precision_name,
             $math,
             if $free { "free" } else { "fixed" }
         );
         match result {
-            Ok(value) if value.is_finite() => {}
-            Ok(value) => $failures.push(format!("{label}: non-finite NLML {value}")),
-            Err(err) if allowed(&err, $free, $unsupported, $newton) => {}
-            Err(err) => $failures.push(format!("{label}: {err}")),
+            Ok(value) if value.is_finite() => None,
+            Ok(value) => Some(format!("{label}: non-finite NLML {value}")),
+            Err(err) if allowed(&err, $free, $unsupported) => None,
+            Err(err) => Some(format!("{label}: {err}")),
         }
     }};
 }
 
-macro_rules! all_optimizers {
-    ($failures:ident, $name:expr, $kernel:expr, $unsupported:expr, $precision:ty, $math:expr, $free:expr) => {
-        run!(
-            $failures,
-            $name,
-            $kernel,
-            $unsupported,
-            "lbfgs",
-            false,
-            Lbfgs::new(),
-            $precision,
-            $math,
-            $free
-        );
-        run!(
-            $failures,
-            $name,
-            $kernel,
-            $unsupported,
-            "ncg",
-            false,
-            NonlinearCg::new(),
-            $precision,
-            $math,
-            $free
-        );
-        run!(
-            $failures,
-            $name,
-            $kernel,
-            $unsupported,
-            "nelder-mead",
-            false,
-            NelderMead::new(),
-            $precision,
-            $math,
-            $free
-        );
-        run!(
-            $failures,
-            $name,
-            $kernel,
-            $unsupported,
-            "newton",
-            true,
-            Newton::new(),
-            $precision,
-            $math,
-            $free
-        );
-        run!(
-            $failures,
-            $name,
-            $kernel,
-            $unsupported,
-            "fsa",
-            false,
-            FastSimulatedAnnealing::new().with_seed(7),
-            $precision,
-            $math,
-            $free
-        );
+macro_rules! by_precision {
+    ($name:expr, $kernel:expr, $unsupported:expr, $opt:expr, $opt_name:expr,
+     $precision:expr, $math:expr, $free:expr) => {
+        match $precision {
+            0 => fit_case!(
+                $name,
+                $kernel,
+                $unsupported,
+                $opt,
+                $opt_name,
+                DoublePrecision,
+                "f64",
+                $math,
+                $free
+            ),
+            _ => fit_case!(
+                $name,
+                $kernel,
+                $unsupported,
+                $opt,
+                $opt_name,
+                SinglePrecision,
+                "f32",
+                $math,
+                $free
+            ),
+        }
     };
 }
 
-#[test]
-fn every_sparse_option_combination_fits_or_is_a_listed_exception() {
-    let mut failures = Vec::new();
-    for (name, kernel, unsupported) in kernels() {
-        for math in [KernelExp::Accurate, KernelExp::FastApprox] {
-            for free in [false, true] {
-                all_optimizers!(
-                    failures,
-                    name,
-                    kernel,
-                    unsupported,
-                    DoublePrecision,
-                    math,
-                    free
-                );
-                all_optimizers!(
-                    failures,
-                    name,
-                    kernel,
-                    unsupported,
-                    SinglePrecision,
-                    math,
-                    free
-                );
+/// Indices: kernel, optimizer, precision, exp math, free inducing points.
+type Case = [usize; 5];
+
+fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
+    let (name, kernel, unsupported) = kernels().swap_remove(k_i);
+    let math = MATHS[math];
+    let free = free == 1;
+    match opt {
+        0 => by_precision!(
+            name,
+            kernel,
+            unsupported,
+            Lbfgs::new(),
+            OPTIMIZERS[0],
+            precision,
+            math,
+            free
+        ),
+        1 => by_precision!(
+            name,
+            kernel,
+            unsupported,
+            NonlinearCg::new(),
+            OPTIMIZERS[1],
+            precision,
+            math,
+            free
+        ),
+        2 => by_precision!(
+            name,
+            kernel,
+            unsupported,
+            NelderMead::new(),
+            OPTIMIZERS[2],
+            precision,
+            math,
+            free
+        ),
+        3 => by_precision!(
+            name,
+            kernel,
+            unsupported,
+            TrustRegion::new(),
+            OPTIMIZERS[3],
+            precision,
+            math,
+            free
+        ),
+        _ => by_precision!(
+            name,
+            kernel,
+            unsupported,
+            FastSimulatedAnnealing::new().with_seed(7),
+            OPTIMIZERS[4],
+            precision,
+            math,
+            free
+        ),
+    }
+}
+
+/// A deterministic all-pairs cover: every pair of values of any two options
+/// (kernel, optimizer, precision, exp math, inducing points) is in at least one
+/// chosen combination. About a hundred combinations instead of all 800.
+fn pairwise_cover(sizes: [usize; 5]) -> Vec<Case> {
+    let mut all: Vec<Case> = vec![[0; 5]];
+    for (dim, &size) in sizes.iter().enumerate() {
+        all = all
+            .into_iter()
+            .flat_map(|case| {
+                (0..size).map(move |v| {
+                    let mut next = case;
+                    next[dim] = v;
+                    next
+                })
+            })
+            .collect();
+    }
+    let pairs = |case: &Case| -> Vec<(usize, usize, usize, usize)> {
+        let mut out = Vec::new();
+        for i in 0..5 {
+            for j in i + 1..5 {
+                out.push((i, case[i], j, case[j]));
             }
         }
-    }
-    let is_known = |failure: &String| {
-        KNOWN_FAILURES
-            .iter()
-            .any(|known| failure.starts_with(&format!("{known}:")))
+        out
     };
-    let unexpected: Vec<&String> = failures.iter().filter(|f| !is_known(f)).collect();
-    let fixed: Vec<&&str> = KNOWN_FAILURES
-        .iter()
-        .filter(|known| !failures.iter().any(|f| f.starts_with(&format!("{known}:"))))
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "{} unexpected failures:\n{}",
-        unexpected.len(),
-        unexpected
+    let mut uncovered: std::collections::HashSet<_> = all.iter().flat_map(pairs).collect();
+    let mut chosen = Vec::new();
+    while !uncovered.is_empty() {
+        let best = all
             .iter()
-            .map(|f| f.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+            .max_by_key(|case| {
+                (
+                    pairs(case)
+                        .iter()
+                        .filter(|p| uncovered.contains(*p))
+                        .count(),
+                    std::cmp::Reverse(case.to_vec()),
+                )
+            })
+            .copied()
+            .unwrap();
+        for pair in pairs(&best) {
+            uncovered.remove(&pair);
+        }
+        chosen.push(best);
+    }
+    chosen
+}
+
+fn assert_no_failures(cases: &[Case]) {
+    let failures: Vec<String> = cases.iter().filter_map(|c| run_case(*c)).collect();
     assert!(
-        fixed.is_empty(),
-        "now passing, remove from KNOWN_FAILURES: {fixed:?}"
+        failures.is_empty(),
+        "{} of {} combinations failed:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
     );
+}
+
+/// The default run: an all-pairs cover of the options.
+#[test]
+fn sparse_option_pairs_fit_or_are_a_listed_exception() {
+    let sizes = [
+        kernels().len(),
+        OPTIMIZERS.len(),
+        PRECISIONS.len(),
+        MATHS.len(),
+        2,
+    ];
+    let cases = pairwise_cover(sizes);
+    assert!(cases.len() < 200, "cover has {} cases", cases.len());
+    assert_no_failures(&cases);
+}
+
+/// Every combination (about 800 fits): `cargo test --test path_matrix -- --ignored`.
+#[test]
+#[ignore = "exhaustive; minutes in a debug build"]
+fn every_sparse_option_combination_fits_or_is_a_listed_exception() {
+    let sizes = [
+        kernels().len(),
+        OPTIMIZERS.len(),
+        PRECISIONS.len(),
+        MATHS.len(),
+        2,
+    ];
+    let mut cases: Vec<Case> = vec![[0; 5]];
+    for (dim, &size) in sizes.iter().enumerate() {
+        cases = cases
+            .into_iter()
+            .flat_map(|case| {
+                (0..size).map(move |v| {
+                    let mut next = case;
+                    next[dim] = v;
+                    next
+                })
+            })
+            .collect();
+    }
+    assert_no_failures(&cases);
 }

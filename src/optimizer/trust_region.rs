@@ -1,9 +1,14 @@
-//! Newton's method with a backtracking line search and a private faer inverse.
+//! Trust-region optimizer (argmin `TrustRegion` with the Steihaug subproblem):
+//! the solver that uses the analytic Hessian.
 
+use std::cell::RefCell;
 use std::num::NonZeroU32;
 
-use faer::Mat;
-use faer::linalg::solvers::DenseSolveCore;
+use argmin::core::{
+    CostFunction, Error as ArgminError, Executor, Gradient, Hessian, IterState, KV, Problem,
+    Solver, State, TerminationReason, TerminationStatus,
+};
+use argmin::solver::trustregion::{Steihaug, TrustRegion as ArgminTrustRegion};
 
 use crate::error::GprError;
 use crate::objective::{HasBounds, TwiceDifferentiable};
@@ -14,49 +19,57 @@ use super::logit::{
 };
 use super::{OptResult, Optimizer, Restarts};
 
-/// Newton's method with a backtracking line search.
+/// Cost of a point that cannot be evaluated (out of the bounds, not finite,
+/// not positive definite): the ratio of actual to predicted reduction turns
+/// negative and the region shrinks. The same barrier the L-BFGS and
+/// nonlinear-CG adapters use.
+const BARRIER_COST: f64 = 1.0e300;
+
+/// Trust-region method with the Steihaug conjugate-gradient subproblem, via
+/// argmin. It uses the analytic Hessian ([`crate::TwiceDifferentiable`]).
 ///
-/// The Hessian lives in unconstrained logit coordinates. The direction is
-/// `−H⁻¹ g` from a private faer LU, or the steepest descent `−g` when `H` is
-/// singular or the step does not descend. The step starts at `gamma` and is
-/// halved until the Armijo decrease holds; a candidate that cannot be
-/// evaluated (out of the bounds, not finite, not positive definite) counts as
-/// no decrease. When no step decreases the objective away from a minimum,
-/// [`GprError::OptimizationNotConverged`] carries the iteration count.
+/// The step is the minimizer of the quadratic model inside a ball whose
+/// radius grows and shrinks with how well the model predicted the decrease, so
+/// an indefinite or singular Hessian and a step that leaves the bounds are
+/// handled by the method: the region shrinks. The Hessian lives in
+/// unconstrained logit coordinates. A run that hits the iteration cap returns
+/// its best point.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Newton {
+pub struct TrustRegion {
     max_iterations: u64,
     tolerance: f64,
-    gamma: f64,
+    initial_radius: f64,
+    max_radius: f64,
     restarts: Option<Restarts>,
 }
 
-impl Default for Newton {
+impl Default for TrustRegion {
     fn default() -> Self {
         Self {
             max_iterations: 100,
             tolerance: f64::EPSILON.sqrt(),
-            gamma: 1.0,
+            initial_radius: 1.0,
+            max_radius: 100.0,
             restarts: None,
         }
     }
 }
 
-impl Newton {
-    /// Builds Newton with 100 iterations, gradient tolerance `sqrt(ε)`, and
-    /// step size `gamma = 1`.
+impl TrustRegion {
+    /// Builds a trust-region optimizer with 100 iterations, gradient tolerance
+    /// `sqrt(ε)`, initial radius 1, and maximum radius 100 (logit coordinates).
     ///
     /// # Examples
     ///
     /// ```rust
     /// use std::num::NonZeroU32;
-    /// use gprx::Newton;
+    /// use gprx::TrustRegion;
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let _newton = Newton::new()
+    /// let _optimizer = TrustRegion::new()
     ///     .with_max_iterations(50)
     ///     .with_tolerance(1e-8)?
-    ///     .with_gamma(1.0)?
+    ///     .with_radii(1.0, 100.0)?
     ///     .with_restarts(NonZeroU32::MIN, 0);
     /// # Ok(())
     /// # }
@@ -80,26 +93,31 @@ impl Newton {
     pub fn with_tolerance(mut self, tolerance: f64) -> Result<Self, GprError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
             return Err(GprError::InvalidConfig {
-                reason: "Newton gradient tolerance must be finite and >= 0".to_owned(),
+                reason: "trust-region gradient tolerance must be finite and >= 0".to_owned(),
             });
         }
         self.tolerance = tolerance;
         Ok(self)
     }
 
-    /// Sets the Newton step size `gamma ∈ (0, 1]` (default 1).
+    /// Sets the initial and the maximum trust radius (defaults 1 and 100).
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidConfig`] if `gamma` is outside
-    /// `(0, 1]`.
-    pub fn with_gamma(mut self, gamma: f64) -> Result<Self, GprError> {
-        if !gamma.is_finite() || gamma <= 0.0 || gamma > 1.0 {
+    /// Returns [`GprError::InvalidConfig`] unless
+    /// `0 < initial_radius <= max_radius` and both are finite.
+    pub fn with_radii(mut self, initial_radius: f64, max_radius: f64) -> Result<Self, GprError> {
+        let ok = initial_radius.is_finite()
+            && max_radius.is_finite()
+            && initial_radius > 0.0
+            && initial_radius <= max_radius;
+        if !ok {
             return Err(GprError::InvalidConfig {
-                reason: "Newton gamma must be in (0, 1]".to_owned(),
+                reason: "trust radii must satisfy 0 < initial <= max, both finite".to_owned(),
             });
         }
-        self.gamma = gamma;
+        self.initial_radius = initial_radius;
+        self.max_radius = max_radius;
         Ok(self)
     }
 
@@ -115,11 +133,11 @@ impl Newton {
         objective: &mut P,
         init: &[f64],
     ) -> Result<OptResult, GprError> {
-        run_newton(self, objective, init)
+        run_trust_region(self, objective, init)
     }
 }
 
-impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for Newton {
+impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for TrustRegion {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
@@ -131,20 +149,20 @@ impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for Newton {
         objective.fill_intervals(&mut intervals)?;
         let mut best: Option<OptResult> = None;
         let first_z = log_theta_to_z(init, &intervals)?;
-        consider_newton(self, objective, &intervals, &first_z, &mut best)?;
+        consider(self, objective, &intervals, &first_z, &mut best)?;
         if let Some(restarts) = self.restarts {
             let mut rng = crate::rng::small_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
-                let _ = consider_newton(self, objective, &intervals, &z, &mut best);
+                let _ = consider(self, objective, &intervals, &z, &mut best);
             }
         }
         best.ok_or(GprError::OptimizationNotConverged { iterations: 0 })
     }
 }
 
-fn consider_newton<P: TwiceDifferentiable>(
-    newton: &Newton,
+fn consider<P: TwiceDifferentiable>(
+    optimizer: &TrustRegion,
     objective: &mut P,
     intervals: &[Interval],
     init_z: &[f64],
@@ -155,7 +173,7 @@ fn consider_newton<P: TwiceDifferentiable>(
         intervals,
         log_scratch: vec![0.0; init_z.len()],
     };
-    let run = run_newton(newton, &mut mapped, init_z)?;
+    let run = run_trust_region(optimizer, &mut mapped, init_z)?;
     let log_theta = z_to_log_theta(&run.params, intervals)?;
     let mut grad = vec![0.0; log_theta.len()];
     let value = objective.value_and_gradient_into(&log_theta, &mut grad)?;
@@ -170,13 +188,8 @@ fn consider_newton<P: TwiceDifferentiable>(
     Ok(())
 }
 
-/// Backtracking halvings of one step before the search gives up.
-const MAX_BACKTRACKS: usize = 30;
-/// Armijo constant of the sufficient decrease `f(x + t d) ≤ f(x) + c t g·d`.
-const ARMIJO: f64 = 1e-4;
-
-fn run_newton<P: TwiceDifferentiable>(
-    newton: &Newton,
+fn run_trust_region<P: TwiceDifferentiable>(
+    optimizer: &TrustRegion,
     objective: &mut P,
     init: &[f64],
 ) -> Result<OptResult, GprError> {
@@ -187,95 +200,113 @@ fn run_newton<P: TwiceDifferentiable>(
         });
     }
     let mut cache = HessCache::new(objective, n);
-    let mut x = init.to_vec();
-    let mut value = cache.ensure(&x)?;
-    let mut iterations = 0_u64;
-    let mut candidate = vec![0.0; n];
-    while iterations < newton.max_iterations {
-        let grad = cache.grad.clone();
-        let grad_norm = norm(&grad);
-        if grad_norm <= newton.tolerance {
-            break;
-        }
-        iterations += 1;
-        cache.fill_hessian(&x)?;
-        let direction = descent_direction(&cache.hess, &grad, n);
-        let slope: f64 = grad.iter().zip(&direction).map(|(g, d)| g * d).sum();
-        let mut step = newton.gamma;
-        let mut accepted = false;
-        for _ in 0..MAX_BACKTRACKS {
-            for ((c, xi), d) in candidate.iter_mut().zip(&x).zip(&direction) {
-                *c = xi + step * d;
-            }
-            // A candidate that cannot be evaluated (out of the bounds, not
-            // finite, not positive definite) is rejected like one that does
-            // not decrease enough.
-            if let Ok(v) = cache.ensure(&candidate) {
-                if v <= value + ARMIJO * step * slope {
-                    x.copy_from_slice(&candidate);
-                    value = v;
-                    accepted = true;
-                    break;
-                }
-            }
-            step *= 0.5;
-        }
-        if !accepted {
-            // At a minimum to rounding the line search finds no decrease.
-            if grad_norm <= 1e-4 * value.abs().max(1.0) {
-                break;
-            }
-            return Err(GprError::OptimizationNotConverged {
-                iterations: iterations as usize,
-            });
-        }
+    // The start must be evaluable; an error there is the caller's, not a
+    // failure to make progress.
+    cache.ensure(init)?;
+    let problem = TrustRegionProblem {
+        inner: RefCell::new(cache),
+    };
+    let subproblem = Steihaug::<Vec<f64>, f64>::new().with_max_iters(4 * n as u64 + 10);
+    let inner = ArgminTrustRegion::new(subproblem)
+        .with_radius(optimizer.initial_radius)
+        .and_then(|tr| tr.with_max_radius(optimizer.max_radius))
+        .map_err(|e| GprError::InvalidConfig {
+            reason: e.to_string(),
+        })?;
+    let solver = GradNormStop {
+        inner,
+        tolerance: optimizer.tolerance,
+    };
+    let result = Executor::new(problem, solver)
+        .configure(|state| {
+            state
+                .param(init.to_vec())
+                .max_iters(optimizer.max_iterations)
+        })
+        .ctrlc(false)
+        .run()
+        .map_err(map_error)?;
+    let state = result.state();
+    let iterations = state.get_iter();
+    let params = state
+        .get_best_param()
+        .cloned()
+        .ok_or(GprError::OptimizationNotConverged {
+            iterations: iterations as usize,
+        })?;
+    let value = state.get_best_cost();
+    if !value.is_finite() {
+        return Err(GprError::OptimizationNotConverged {
+            iterations: iterations as usize,
+        });
     }
     Ok(OptResult {
-        params: x,
+        params,
         value,
         iterations,
     })
 }
 
-fn norm(v: &[f64]) -> f64 {
-    v.iter().map(|a| a * a).sum::<f64>().sqrt()
+/// Failures of the solver (a subproblem or a numerical condition of argmin)
+/// are a failure to make progress; the objective's own errors keep their type.
+fn map_error(err: ArgminError) -> GprError {
+    match err.downcast_ref::<GprError>() {
+        Some(gpr) => gpr.clone(),
+        None => GprError::OptimizationNotConverged { iterations: 0 },
+    }
 }
 
-/// `−H⁻¹ g`, or `−g` when `H` is singular, not finite, or the step does not
-/// descend (`H` not positive definite).
-fn descent_direction(hess: &[f64], grad: &[f64], n: usize) -> Vec<f64> {
-    if let Some(step) = newton_step(hess, grad, n) {
-        let slope: f64 = grad.iter().zip(&step).map(|(g, d)| g * d).sum();
-        if slope < 0.0 {
-            return step;
+/// Stops on the gradient norm.
+struct GradNormStop<S> {
+    inner: S,
+    tolerance: f64,
+}
+
+type TrState = IterState<Vec<f64>, Vec<f64>, (), Vec<Vec<f64>>, (), f64>;
+
+impl<O, S> Solver<O, TrState> for GradNormStop<S>
+where
+    S: Solver<O, TrState>,
+{
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn init(
+        &mut self,
+        problem: &mut Problem<O>,
+        state: TrState,
+    ) -> Result<(TrState, Option<KV>), ArgminError> {
+        self.inner.init(problem, state)
+    }
+
+    fn next_iter(
+        &mut self,
+        problem: &mut Problem<O>,
+        state: TrState,
+    ) -> Result<(TrState, Option<KV>), ArgminError> {
+        self.inner.next_iter(problem, state)
+    }
+
+    fn terminate(&mut self, state: &TrState) -> TerminationStatus {
+        if let Some(grad) = state.get_gradient() {
+            let norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+            if norm <= self.tolerance {
+                return TerminationStatus::Terminated(TerminationReason::SolverConverged);
+            }
         }
+        self.inner.terminate(state)
     }
-    grad.iter().map(|g| -g).collect()
 }
 
-fn newton_step(hess: &[f64], grad: &[f64], n: usize) -> Option<Vec<f64>> {
-    if hess.len() != n * n || grad.len() != n {
-        return None;
-    }
-    let a = Mat::<f64>::from_fn(n, n, |row, col| hess[row * n + col]);
-    let lu = a.partial_piv_lu();
-    let u = lu.U();
-    let scale = (0..n).fold(0.0_f64, |m, i| m.max(u[(i, i)].abs()));
-    let tol = f64::EPSILON * scale.max(1.0) * n as f64;
-    if (0..n).any(|i| !u[(i, i)].is_finite() || u[(i, i)].abs() <= tol) {
-        return None;
-    }
-    let inv = lu.inverse();
-    let step: Vec<f64> = (0..n)
-        .map(|row| -(0..n).map(|col| inv[(row, col)] * grad[col]).sum::<f64>())
-        .collect();
-    step.iter().all(|v| v.is_finite()).then_some(step)
-}
-
-/// The objective with the buffers of the last evaluation. The Hessian is
-/// filled only for a point that was accepted, not for every candidate.
+/// The objective with the buffers of the last evaluation: value, gradient, and
+/// Hessian. A trust-region iteration evaluates one candidate, so the Hessian
+/// computed there is the one argmin asks for when it accepts the step, and a
+/// candidate whose Hessian cannot be computed is a bad step.
 struct HessCache<'a, P: ?Sized> {
     objective: &'a mut P,
+    params: Vec<f64>,
+    value: Option<f64>,
     grad: Vec<f64>,
     hess: Vec<f64>,
 }
@@ -284,35 +315,89 @@ impl<'a, P: TwiceDifferentiable + ?Sized> HessCache<'a, P> {
     fn new(objective: &'a mut P, n: usize) -> Self {
         Self {
             objective,
+            params: Vec::new(),
+            value: None,
             grad: vec![0.0; n],
             hess: vec![0.0; n * n],
         }
     }
 
-    /// Value and gradient at `param`, into `self.grad`.
+    /// Value, gradient, and Hessian at `param`, into `self.grad` / `self.hess`.
     fn ensure(&mut self, param: &[f64]) -> Result<f64, GprError> {
+        if let Some(value) = self.value {
+            if self.params.len() == param.len()
+                && self
+                    .params
+                    .iter()
+                    .zip(param)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            {
+                return Ok(value);
+            }
+        }
         let value = self
             .objective
             .value_and_gradient_into(param, &mut self.grad)?;
-        if !value.is_finite() || self.grad.iter().any(|g| !g.is_finite()) {
+        let hessian = self.objective.hessian_into(param, &mut self.hess);
+        if hessian.is_err()
+            || !value.is_finite()
+            || self.grad.iter().any(|g| !g.is_finite())
+            || self.hess.iter().any(|h| !h.is_finite())
+        {
+            self.value = None;
             return Err(GprError::OptimizationNotConverged { iterations: 0 });
         }
+        self.params.clear();
+        self.params.extend_from_slice(param);
+        self.value = Some(value);
         Ok(value)
     }
+}
 
-    /// The Hessian at `param`, into `self.hess`.
-    fn fill_hessian(&mut self, param: &[f64]) -> Result<(), GprError> {
-        self.objective.hessian_into(param, &mut self.hess)?;
-        if self.hess.iter().any(|h| !h.is_finite()) {
-            return Err(GprError::OptimizationNotConverged { iterations: 0 });
-        }
-        Ok(())
+struct TrustRegionProblem<'a, P: ?Sized> {
+    inner: RefCell<HessCache<'a, P>>,
+}
+
+impl<P: TwiceDifferentiable + ?Sized> CostFunction for TrustRegionProblem<'_, P> {
+    type Param = Vec<f64>;
+    type Output = f64;
+
+    fn cost(&self, param: &Self::Param) -> Result<Self::Output, ArgminError> {
+        // A point that cannot be evaluated is a bad step, not an error.
+        Ok(self
+            .inner
+            .borrow_mut()
+            .ensure(param)
+            .unwrap_or(BARRIER_COST))
+    }
+}
+
+impl<P: TwiceDifferentiable + ?Sized> Gradient for TrustRegionProblem<'_, P> {
+    type Param = Vec<f64>;
+    type Gradient = Vec<f64>;
+
+    fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, ArgminError> {
+        let mut inner = self.inner.borrow_mut();
+        inner.ensure(param).map_err(ArgminError::from)?;
+        Ok(inner.grad.clone())
+    }
+}
+
+impl<P: TwiceDifferentiable + ?Sized> Hessian for TrustRegionProblem<'_, P> {
+    type Param = Vec<f64>;
+    type Hessian = Vec<Vec<f64>>;
+
+    fn hessian(&self, param: &Self::Param) -> Result<Self::Hessian, ArgminError> {
+        let mut inner = self.inner.borrow_mut();
+        inner.ensure(param).map_err(ArgminError::from)?;
+        let n = param.len();
+        Ok(inner.hess.chunks(n).map(<[f64]>::to_vec).collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Newton;
+    use super::TrustRegion;
     use crate::error::GprError;
     use crate::gpr::Gpr;
     use crate::kernel::{KernelSpec, RbfKernel};
@@ -374,10 +459,10 @@ mod tests {
     }
 
     #[test]
-    fn newton_minimizes_quadratic_bowl() {
+    fn trust_region_minimizes_quadratic_bowl() {
         let mut obj = Quadratic;
-        let result = Newton::new()
-            .with_max_iterations(5)
+        let result = TrustRegion::new()
+            .with_max_iterations(50)
             .minimize_unconstrained(&mut obj, &[1.0, -0.5])
             .expect("bowl");
         assert_close(result.params[0], 0.0, TOL);
@@ -386,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn newton_lowers_gpr_nlml() {
+    fn trust_region_lowers_gpr_nlml() {
         let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"));
         let likelihood = GaussianLikelihood::new(0.16).expect("valid");
         let x = [0.0, 0.8, 1.7];
@@ -402,7 +487,7 @@ mod tests {
         {
             let mut obj = gpr.objective();
             start = obj.value(&init).expect("spd");
-            result = Newton::new()
+            result = TrustRegion::new()
                 .with_max_iterations(30)
                 .minimize(&mut obj, &init)
                 .expect("newton");
@@ -416,13 +501,13 @@ mod tests {
             KernelSpec::from(RbfKernel::new(1.25).expect("valid")),
             GaussianLikelihood::new(0.16).expect("valid"),
         )
-        .with_optimizer(Newton::new().with_max_iterations(30))
+        .with_optimizer(TrustRegion::new().with_max_iterations(30))
         .fit(&x, 3, 1, &y)
         .unwrap_or_else(|(_, e)| panic!("{e}"));
         assert!(fitted.neg_log_marginal_likelihood().expect("fitted") < start);
     }
 
-    /// `√(1 + x²)`: plain Newton from `|x| > 1` jumps away (`x → −x³`); values
+    /// `√(1 + x²)`: a plain Newton step from `|x| > 1` jumps away (`x → −x³`); values
     /// beyond `|x| = 50` cannot be evaluated.
     struct Sqrt1PlusSquare;
 
@@ -466,10 +551,10 @@ mod tests {
     }
 
     #[test]
-    fn newton_backtracks_where_the_plain_step_diverges() {
+    fn trust_region_converges_where_the_plain_newton_step_diverges() {
         for start in [1.5, 2.0, 4.0, -3.0] {
             let mut obj = Sqrt1PlusSquare;
-            let result = Newton::new()
+            let result = TrustRegion::new()
                 .with_max_iterations(200)
                 .minimize_unconstrained(&mut obj, &[start])
                 .expect("safeguarded newton");
@@ -478,7 +563,7 @@ mod tests {
     }
 
     /// The Hessian of `−cos(x)` at `x = 2` is negative: the Newton step
-    /// ascends, and the search falls back to the steepest descent.
+    /// ascends; the trust-region step still descends.
     struct NegativeCurvature;
 
     impl Objective for NegativeCurvature {
@@ -515,9 +600,9 @@ mod tests {
     }
 
     #[test]
-    fn newton_descends_when_the_hessian_is_not_positive_definite() {
+    fn trust_region_descends_when_the_hessian_is_not_positive_definite() {
         let mut obj = NegativeCurvature;
-        let result = Newton::new()
+        let result = TrustRegion::new()
             .with_max_iterations(200)
             .minimize_unconstrained(&mut obj, &[2.0])
             .expect("falls back to steepest descent");
@@ -525,8 +610,9 @@ mod tests {
     }
 
     #[test]
-    fn newton_rejects_bad_gamma() {
-        assert!(Newton::new().with_gamma(0.0).is_err());
-        assert!(Newton::new().with_gamma(1.1).is_err());
+    fn trust_region_rejects_bad_radii() {
+        assert!(TrustRegion::new().with_radii(0.0, 1.0).is_err());
+        assert!(TrustRegion::new().with_radii(2.0, 1.0).is_err());
+        assert!(TrustRegion::new().with_radii(1.0, f64::INFINITY).is_err());
     }
 }
