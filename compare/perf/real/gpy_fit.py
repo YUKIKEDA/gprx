@@ -20,11 +20,16 @@ from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
 
-from .metrics import score
+from . import maunaloa_kernels
+from .metrics import case_metrics
 from .timing import warmup_fits
 
 
 def build(case: dict, x: np.ndarray, y: np.ndarray):
+    if case.get("kernel") == "mauna_loa":
+        model = GPy.models.GPRegression(x, y, kernel=maunaloa_kernels.gpy_kernel(case["theta_init"]))
+        model.Gaussian_noise.variance = case["theta_init"][-1]
+        return model
     kernel = GPy.kern.RBF(
         input_dim=x.shape[1],
         variance=case["signal_variance_init"],
@@ -129,10 +134,7 @@ def run(case: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(),
         "note": info["message"],
     }
-    if case.get("return_predictions"):
-        row["pred_mean"] = (np.asarray(mean.ravel()).ravel() * case["y_std"] + case["y_mean"]).tolist()
-        row["pred_var"] = (np.asarray(var.ravel()).ravel() * case["y_std"] ** 2).tolist()
-    row.update(score(mean.ravel(), var.ravel(), np.asarray(case["ys"]), case["y_mean"], case["y_std"]))
+    row.update(case_metrics(case, mean, var))
     return row
 
 

@@ -25,7 +25,7 @@ from common.rss import peak_rss_bytes
 from common.timeline import phase
 
 from .gpytorch_fit import ADAM_LR, ADAM_STEPS, optimize_lbfgsb_or_adam
-from .metrics import score
+from .metrics import case_metrics
 from .timing import warmup_fits
 
 torch.set_default_dtype(torch.float64)
@@ -154,10 +154,7 @@ def run(case: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(),
         "note": info["message"],
     }
-    if case.get("return_predictions"):
-        row["pred_mean"] = (np.asarray(mean).ravel() * case["y_std"] + case["y_mean"]).tolist()
-        row["pred_var"] = (np.asarray(var).ravel() * case["y_std"] ** 2).tolist()
-    row.update(score(mean, var, np.asarray(case["ys"]), case["y_mean"], case["y_std"]))
+    row.update(case_metrics(case, mean, var))
     return row
 
 

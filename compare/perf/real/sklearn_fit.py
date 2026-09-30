@@ -20,7 +20,8 @@ from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
 
-from .metrics import score
+from . import maunaloa_kernels
+from .metrics import case_metrics
 from .timing import warmup_fits
 
 
@@ -62,9 +63,12 @@ class CountingGpr(GaussianProcessRegressor):
 
 
 def make_model(case: dict) -> CountingGpr:
-    kernel = ConstantKernel(case["signal_variance_init"]) * RBF(
-        length_scale=[case["lengthscale_init"]] * case["n_cols"]
-    ) + WhiteKernel(case["noise_variance_init"])
+    if case.get("kernel") == "mauna_loa":
+        kernel = maunaloa_kernels.sklearn_kernel(case["theta_init"])
+    else:
+        kernel = ConstantKernel(case["signal_variance_init"]) * RBF(
+            length_scale=[case["lengthscale_init"]] * case["n_cols"]
+        ) + WhiteKernel(case["noise_variance_init"])
     model = CountingGpr(kernel=kernel, alpha=1e-10, n_restarts_optimizer=0, random_state=0)
     if case["protocol"] == "fixed":
         model.optimizer = None
@@ -110,10 +114,7 @@ def run(case: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(),
         "note": model.message,
     }
-    if case.get("return_predictions"):
-        row["pred_mean"] = (np.asarray(mean).ravel() * case["y_std"] + case["y_mean"]).tolist()
-        row["pred_var"] = (np.asarray(std**2).ravel() * case["y_std"] ** 2).tolist()
-    row.update(score(mean, std**2, ys, case["y_mean"], case["y_std"]))
+    row.update(case_metrics(case, mean, std**2))
     return row
 
 

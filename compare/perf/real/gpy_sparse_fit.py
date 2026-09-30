@@ -19,7 +19,7 @@ from common.rss import peak_rss_bytes
 from common.timeline import phase
 
 from .gpy_fit import train
-from .metrics import score
+from .metrics import case_metrics
 from .timing import warmup_fits
 
 
@@ -80,10 +80,7 @@ def run(case: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(),
         "note": info["message"],
     }
-    if case.get("return_predictions"):
-        row["pred_mean"] = (np.asarray(mean.ravel()).ravel() * case["y_std"] + case["y_mean"]).tolist()
-        row["pred_var"] = (np.asarray(var.ravel()).ravel() * case["y_std"] ** 2).tolist()
-    row.update(score(mean.ravel(), var.ravel(), np.asarray(case["ys"]), case["y_mean"], case["y_std"]))
+    row.update(case_metrics(case, mean, var))
     return row
 
 

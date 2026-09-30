@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import sys
 
-from .cases import write_case
+from .cases import write_case, write_curve_case
+from .curves import CURVES
 from .libs import RUNNERS
 
 #: A start that is not the default, so a wrong parameter order would show.
@@ -24,15 +25,22 @@ TOLERANCE = 1e-6
 def main(argv: list[str]) -> int:
     dataset = argv[0] if argv else "yacht"
     split = int(argv[1]) if len(argv) > 1 else 0
-    path = write_case(dataset, split, "fixed")
-    case = json.loads(path.read_text(encoding="utf-8"))
-    case.update(THETA)
-    path.write_text(json.dumps(case), encoding="utf-8")
+    if dataset in CURVES:
+        path = write_curve_case(dataset, "fixed")  # keeps its own start (θ_init)
+    else:
+        path = write_case(dataset, split, "fixed")
+        case = json.loads(path.read_text(encoding="utf-8"))
+        case.update(THETA)
+        path.write_text(json.dumps(case), encoding="utf-8")
     rows = {lib: run(path) for lib, run in RUNNERS.items()}
+    if rows["gprx"].get("status") != "ok":
+        print(f"gprx: {rows['gprx'].get('note')}", file=sys.stderr)
+        return 1
+    for lib in list(rows):
+        if rows[lib].get("status") != "ok":
+            print(f"{lib}: N/A ({rows[lib].get('note')})")
+            del rows[lib]
     for lib, row in rows.items():
-        if row.get("status") != "ok":
-            print(f"{lib}: {row.get('note')}", file=sys.stderr)
-            return 1
         print(lib, {f: row[f] for f in FIELDS})
     reference = rows["gprx"]
     ok = True

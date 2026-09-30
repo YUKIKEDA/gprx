@@ -8,7 +8,9 @@ fn main() -> Result<(), gprx::GprError> {
     let (n, m, d) = (200, 50, 3);
     let mut state = 12345_u64;
     let mut next = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((state >> 33) as f64 / (1u64 << 31) as f64) * 2.0 - 1.0
     };
     let x: Vec<f64> = (0..n * d).map(|_| next()).collect();
@@ -32,6 +34,10 @@ fn main() -> Result<(), gprx::GprError> {
         .sum::<f64>()
         / m as f64;
     // snippet:end
-    println!("gprx     mean[0]={:.4} std[0]={:.4} nlpd={nlpd:.4}", pred.mean[0], pred.variance[0].sqrt());
+    println!(
+        "gprx     mean[0]={:.4} std[0]={:.4} nlpd={nlpd:.4}",
+        pred.mean[0],
+        pred.variance[0].sqrt()
+    );
     Ok(())
 }

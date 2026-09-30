@@ -131,6 +131,9 @@ std::size_t warmup_fits(int n_rows) {
 
 json run(const json& c) {
     const std::string protocol = c.at("protocol").get<std::string>();
+    if (c.contains("kernel")) {
+        return na_row(c, "the composite Mauna Loa kernel is not wired in this runner");
+    }
     if (protocol == "matched") {
         return na_row(c, "libgp has no swappable optimizer (Rprop only)");
     }
