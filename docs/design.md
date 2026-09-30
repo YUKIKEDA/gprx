@@ -271,17 +271,16 @@ Periodic is not squared Euclidean. ARD needs a per-dimension difference. The cac
 
 ```rust
 enum DistanceCachePolicy {
-    Never,
-    Always,
-    Auto { memory_budget_bytes: usize }, // tuned from n, d, and a memory budget by a benchmark at implementation time
+    Cached,   // default: fill once per fit and reuse
+    Uncached, // recompute from X on every kernel build
 }
 ```
 
-A theoretical reference, not a decision: an `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes. `K` itself is also n²×sizeof(T) (about 200MB at n=5000, f64), and an ARD cache is `d` times that. In a typical GPR with d≪n the cache often does not pay for itself. The concrete `Auto` threshold is decided by a benchmark after implementation (§14).
+A theoretical reference, not a decision: an `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes. `K` itself is also n²×sizeof(T) (about 200MB at n=5000, f64), and an ARD cache is `d` times that. In a typical GPR with d≪n the cache often does not pay for itself. The concrete `Auto` threshold is decided by a benchmark after implementation (§14). `Auto` is not a variant yet.
 
-P2-2 ([#26](https://github.com/YUKIKEDA/gprx/issues/26)): `Never` / `Always` sit on the existing `Workspace.dist_cache` (isotropic Dist/Either, n×n). The default is `Always`. `Auto` is P5-5.
+P2-2 ([#26](https://github.com/YUKIKEDA/gprx/issues/26)): `Cached` / `Uncached` sit on the existing `Workspace.dist_cache` (isotropic Dist/Either, n×n). The default is `Cached`. P5-5 adds `Auto`.
 
-P2-7 ([#88](https://github.com/YUKIKEDA/gprx/issues/88)): the same `DistanceCachePolicy` covers the raw `(Δx_d)²` of ARD leaves. An `r²` that already includes ℓ is not stored. The public policy is not extended. `Workspace` looks at `n` and `d`. An ARD fit with Always allocates once. Isotropic / `Never` stays empty (same as `kernel_scratch`). Layout is column-major `n × (n·d)`. Dimension `k` is columns `[k n, (k+1) n)`. Each block is lower triangular. The fill and RBF ARD `apply` / `grad` are Rayon + `wide::f64x4` (unit row stride). Matérn / RQ ARD read the same cache in scalar code. The required numbers are ARD RBF on the same fixed problem (`mll_and_grad_ard` / `fit_lbfgs_ard`, Always versus Never). `Auto` is P5-5. A train×test / LOO cache is outside P2-7. Evaluating a composite of Dist leaves and Points leaves is P2B-13 (P2-7 does not mix that into the cache path).
+P2-7 ([#88](https://github.com/YUKIKEDA/gprx/issues/88)): the same `DistanceCachePolicy` covers the raw `(Δx_d)²` of ARD leaves. An `r²` that already includes ℓ is not stored. The public policy is not extended. `Workspace` looks at `n` and `d`. An ARD fit with Always (`Cached`) allocates once. Isotropic / Never (`Uncached`) stays empty (same as `kernel_scratch`). Layout is column-major `n × (n·d)`. Dimension `k` is columns `[k n, (k+1) n)`. Each block is lower triangular. The fill and RBF ARD `apply` / `grad` are Rayon + `wide::f64x4` (unit row stride). Matérn / RQ ARD read the same cache in scalar code. The required numbers are ARD RBF on the same fixed problem (`mll_and_grad_ard` / `fit_lbfgs_ard`, Always versus Never). `Auto` is P5-5. A train×test / LOO cache is outside P2-7. Evaluating a composite of Dist leaves and Points leaves is P2B-13 (P2-7 does not mix that into the cache path).
 
 ### 5.3 Building a CompiledKernel plan
 
@@ -835,7 +834,7 @@ struct LdltStore {
 
 **Append**: (1) if capacity is short, `LdltStore::ensure_capacity` (factor 2). Training `X` / `y` on `OnlineGpr` grow by the same factor. Query buffers use `ensure_at_least`. (2) Distances from the new point to the existing n points (O(n). One column is sequential, and `k` is written directly into `v_buf`). (3) Add only the kernel diagonal `k_new` (insert does not write a new row or column of `K`. predict and NLML read only LD). (4) Bordered LDLT update (O(n²). The triangular solve reuses `v_buf`). (5) `α` is not solved on insert (libgp `alpha_needs_update`); insert only marks it stale in O(1). The first read resolves the LDLT again: a `&mut self` read (`predict_into`, a hyperparameter write) stores `α` on the model, and a `&self` read (`predict`, covariance, sample, LOO, NLML, `alpha()`, `save_with_factor`) fills a `OnceLock` cache that the next insert / delete clears. A failed solve (a `MixedPrecision` `f64` fallback that does not factor) is that read's `Err`, so `OnlineGpr::alpha()` returns `Result` (R4-2b / [#265](https://github.com/YUKIKEDA/gprx/issues/265)). (6) `PointRegistry` issues a new `PointId`.
 
-**Delete**: (1) update LD with `ldlt::update::delete_rows_and_cols_clobber` (O(n²). Scratch lives on `LdltStore` and is reused). (2) Remove the matching entries from `y` and `X` on `OnlineGpr` and pack the later rows/columns (O(n)). (3) Shift `PointRegistry` indices in the same order. (4) `α` is not solved on delete either. The first `predict` / NLML / `alpha()` resolves the LDLT again. `n_capacity` stays. The last point is not deleted (`InsufficientData`, `min = 2`). An unknown or already-deleted `PointId` is `InvalidPointId`.
+**Delete**: (1) update LD with `ldlt::update::delete_rows_and_cols_clobber` (O(n²). Scratch lives on `LdltStore` and is reused). (2) Remove the matching entries from `y` and `X` on `OnlineGpr` and pack the later rows/columns (O(n)). (3) Shift `PointRegistry` indices in the same order. (4) `α` is not solved on delete either; the stale mark and the first-read solve are the same as append step (5). `n_capacity` stays. The last point is not deleted (`InsufficientData`, `min = 2`). An unknown or already-deleted `PointId` is `InvalidPointId`.
 
 **Invariant**: when a delete shifts internal indices, `LD` / `y` / `alpha` on the workspace, `X` on `OnlineGpr`, and `PointRegistry` **must stay in the same order**. One of them drifting produces the wrong solution. Tests (§12) check this invariant explicitly.
 
