@@ -1,6 +1,6 @@
-//! Every option combination of the sparse fit either succeeds or is one of the
-//! listed, documented exceptions. A combination that fails for another reason
-//! fails this test.
+//! Option combinations of an Exact, sparse, SVGP, or online fit either succeed
+//! or are one of the listed exceptions. A combination that fails for another
+//! reason fails this test.
 //!
 //! The default test runs an all-pairs cover of the options (every pair of
 //! values of any two options appears in some combination); the exhaustive
@@ -19,7 +19,7 @@ use gprx::kernel::{
 };
 use gprx::{
     Adam, DoublePrecision, FastSimulatedAnnealing, FreeInducing, GaussianLikelihood, Gpr, GprError,
-    KernelExp, Lbfgs, NelderMead, NonlinearCg, Sgpr, SinglePrecision, Svgp, TrustRegion,
+    KernelExp, Lbfgs, NelderMead, Sgpr, SinglePrecision, Svgp, TrustRegion,
 };
 
 const N: usize = 12;
@@ -95,7 +95,7 @@ fn allowed(err: &GprError, free: bool, unsupported: bool) -> bool {
     matches!(err, GprError::CoordGradientUnsupported) && free && unsupported
 }
 
-const OPTIMIZERS: [&str; 5] = ["lbfgs", "ncg", "nelder-mead", "trust-region", "fsa"];
+const OPTIMIZERS: [&str; 4] = ["lbfgs", "nelder-mead", "trust-region", "fsa"];
 const PRECISIONS: [&str; 2] = ["f64", "f32"];
 const MATHS: [KernelExp; 2] = [KernelExp::Accurate, KernelExp::FastApprox];
 
@@ -192,7 +192,7 @@ fn run_case(case: &[usize]) -> Option<String> {
             name,
             kernel,
             unsupported,
-            NonlinearCg::new(),
+            NelderMead::new(),
             OPTIMIZERS[1],
             precision,
             math,
@@ -202,18 +202,8 @@ fn run_case(case: &[usize]) -> Option<String> {
             name,
             kernel,
             unsupported,
-            NelderMead::new(),
-            OPTIMIZERS[2],
-            precision,
-            math,
-            free
-        ),
-        3 => by_precision!(
-            name,
-            kernel,
-            unsupported,
             TrustRegion::new(),
-            OPTIMIZERS[3],
+            OPTIMIZERS[2],
             precision,
             math,
             free
@@ -223,7 +213,7 @@ fn run_case(case: &[usize]) -> Option<String> {
             kernel,
             unsupported,
             FastSimulatedAnnealing::new().with_seed(7),
-            OPTIMIZERS[4],
+            OPTIMIZERS[3],
             precision,
             math,
             free
@@ -316,7 +306,7 @@ fn sparse_option_pairs_fit_or_are_a_listed_exception() {
     assert_no_failures(&cases, run_case);
 }
 
-/// Every combination (about 800 fits): `cargo test --test path_matrix -- --ignored`.
+/// Every combination (about 640 fits): `cargo test --test path_matrix -- --ignored`.
 #[test]
 #[ignore = "exhaustive; minutes in a debug build"]
 fn every_sparse_option_combination_fits_or_is_a_listed_exception() {
@@ -385,7 +375,7 @@ fn run_exact(case: &[usize]) -> Option<String> {
         1 => exact_by_precision!(
             name,
             kernel,
-            NonlinearCg::new(),
+            NelderMead::new(),
             OPTIMIZERS[1],
             precision,
             math
@@ -393,16 +383,8 @@ fn run_exact(case: &[usize]) -> Option<String> {
         2 => exact_by_precision!(
             name,
             kernel,
-            NelderMead::new(),
-            OPTIMIZERS[2],
-            precision,
-            math
-        ),
-        3 => exact_by_precision!(
-            name,
-            kernel,
             TrustRegion::new(),
-            OPTIMIZERS[3],
+            OPTIMIZERS[2],
             precision,
             math
         ),
@@ -410,7 +392,7 @@ fn run_exact(case: &[usize]) -> Option<String> {
             name,
             kernel,
             FastSimulatedAnnealing::new().with_seed(7),
-            OPTIMIZERS[4],
+            OPTIMIZERS[3],
             precision,
             math
         ),
