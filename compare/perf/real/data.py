@@ -71,10 +71,38 @@ def _pins() -> dict[str, str]:
     return {}
 
 
-def _download(url: str, dest: Path) -> None:
+def _download(url: str, dest: Path, attempts: int = 8) -> None:
+    """``url`` into ``dest``, resuming with a Range request after a cut
+    connection (a proxy may drop a long transfer half way); written as
+    ``.part`` and renamed once the size matches ``Content-Length``."""
+    import http.client
+    import urllib.error
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url, timeout=120) as response:
-        dest.write_bytes(response.read())
+    part = dest.with_name(dest.name + ".part")
+    part.unlink(missing_ok=True)
+    total: int | None = None
+    for attempt in range(attempts):
+        have = part.stat().st_size if part.exists() else 0
+        request = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                if have and response.status != 206:  # the server ignored Range: start over
+                    have = 0
+                    part.unlink(missing_ok=True)
+                length = response.headers.get("Content-Length")
+                if total is None and length is not None:
+                    total = have + int(length)
+                with part.open("ab" if have else "wb") as handle:
+                    while chunk := response.read(1 << 20):
+                        handle.write(chunk)
+        except (http.client.IncompleteRead, urllib.error.URLError, ConnectionError, TimeoutError) as err:
+            print(f"download of {url} cut ({type(err).__name__}); attempt {attempt + 1}/{attempts}", file=sys.stderr)
+            continue
+        if total is None or part.stat().st_size == total:
+            part.rename(dest)
+            return
+    raise RuntimeError(f"could not download {url} completely")
 
 
 def fetch_file(dataset: Dataset, filename: str) -> Path:
@@ -155,7 +183,7 @@ def load_split(dataset: Dataset, split: int) -> Split:
 
 def pin_all() -> None:
     """Downloads every file of every dataset and writes ``checksums.json``."""
-    pins: dict[str, str] = {}
+    pins = _pins()  # keep the pins of the curves (Mauna Loa, Snelson)
     for dataset in DATASETS.values():
         if dataset.source == "trevans":
             files = list(dataset.files)

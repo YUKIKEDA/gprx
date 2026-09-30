@@ -37,7 +37,15 @@ def build(case: dict, x, y, z):
     return model
 
 
+def _na(case: dict, note: str) -> dict:
+    return {"lib": "gpy", "name": case["name"], "status": "na", "protocol": case["protocol"], "note": note}
+
+
 def run(case: dict) -> dict:
+    if case["protocol"] == "fixed" and case["model"] == "svgp":
+        return _na(case, "SVGP has no fixed protocol")
+    if case["model"] == "svgp" and case["protocol"] == "native":
+        return _na(case, "SVGP has no native protocol: Adam has no default that suits a large n, so it runs one shared setting (matched)")
     if case["model"] != "sgpr":
         return {
             "lib": "gpy",

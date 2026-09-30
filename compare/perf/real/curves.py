@@ -38,6 +38,8 @@ def fetch_pinned(rel: str, url: str, override: Path | None = None) -> Path:
     """``url`` saved as ``out/real/data/<rel>`` (or ``override``, a local copy),
     checked against ``checksums.json``; the first fetch pins what it got."""
     path = override or DATA / rel
+    if override is not None and os.environ.get("PERF_SMOKE"):
+        return path  # a stand-in archive in a smoke run: neither verified nor pinned
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(url, timeout=120) as response:

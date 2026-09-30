@@ -48,7 +48,7 @@ gprx against scikit-learn, GPyTorch, GPy, libgp and friedrich on the regression 
 | T2 | Kin40k, Protein (5 splits) | mid-size scale | `Gpr` where `K` fits in memory, `Sgpr` / `Svgp` |
 | T3 | 3DRoad, Song, Buzz, HouseElectric (`treforevans/uci_datasets`, 10 splits of 90 / 10) | large scale | `Sgpr` / `Svgp` |
 
-Every model is an ARD RBF kernel with a Gaussian likelihood, inputs and targets standardized with the training statistics, and the same start (ℓ = 1, signal variance 1, noise variance 0.1). Metrics are RMSE, NLPD and the 95% interval coverage, in the original units of `y`, as mean ± standard error over the splits. Before any comparison, `just perf-real-check` fits nothing and evaluates every library at one fixed θ: NLML, RMSE and NLPD agree to 1e-6, so a difference in a fitted result is a difference in the optimizer, not in the objective.
+Every model is an ARD RBF kernel with a Gaussian likelihood, inputs and targets standardized with the training statistics, and the same start (ℓ = 1, signal variance 1, noise variance 0.1). Metrics are RMSE, NLPD and the 95% interval coverage, in the original units of `y`, as mean ± standard error over the splits. Before any comparison, `just perf-real-check` fits nothing and evaluates every library at one fixed θ: NLML, RMSE and NLPD agree to 1e-6, so a difference in a fitted result is a difference in the optimizer, not in the objective. The same check for the sparse model (`just perf-real-check yacht 0 sgpr`) finds the collapsed bound equal in gprx, GPyTorch and GPy; GPyTorch predicts with its own low-rank test covariance, so its RMSE and NLPD differ by a fraction of a percent from the other two at the same θ and Z.
 
 ### Optimizers matter
 

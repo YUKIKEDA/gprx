@@ -113,7 +113,15 @@ def fit_svgp(case, x, y, z):
     }
 
 
+def _na(case: dict, note: str) -> dict:
+    return {"lib": "gpytorch", "name": case["name"], "status": "na", "protocol": case["protocol"], "note": note}
+
+
 def run(case: dict) -> dict:
+    if case["protocol"] == "fixed" and case["model"] == "svgp":
+        return _na(case, "SVGP has no fixed protocol")
+    if case["model"] == "svgp" and case["protocol"] == "native":
+        return _na(case, "SVGP has no native protocol: Adam has no default that suits a large n, so it runs one shared setting (matched)")
     phase("load")
     n, d = int(case["n_rows"]), int(case["n_cols"])
     m = int(case["xs_n_rows"])
@@ -132,6 +140,11 @@ def run(case: dict) -> dict:
     fit_s = time.perf_counter() - t0
 
     nlml = None
+    if case["model"] == "sgpr":  # the exact marginal likelihood the optimizer saw, times n
+        model.train()
+        likelihood.train()
+        with torch.no_grad():
+            nlml = float(-gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)(model(x), y).item() * n)
     model.eval()
     likelihood.eval()
     phase("predict")

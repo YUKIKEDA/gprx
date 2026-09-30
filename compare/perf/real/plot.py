@@ -121,9 +121,14 @@ def _dots(axes, table, datasets, libs, metric, ylabel, log=False) -> None:
     axes[0].set_ylabel(ylabel)
 
 
-def accuracy(rows: list[dict], protocol: str, out: Path) -> Path | None:
-    table = _table(rows, protocol)
-    datasets = sorted(table)
+def _suffix(model: str) -> str:
+    return "" if model == "exact" else f"_{model}"
+
+
+def accuracy(rows: list[dict], protocol: str, out: Path, model: str = "exact") -> Path | None:
+    table = _table(rows, protocol, model)
+    # A curve without held-out points (Snelson) has nothing to score.
+    datasets = sorted(d for d in table if any("rmse" in cell for cell in table[d].values()))
     if not datasets:
         return None
     libs = [l for l in STYLE if any(l in table[d] for d in datasets)]
@@ -132,14 +137,14 @@ def accuracy(rows: list[dict], protocol: str, out: Path) -> Path | None:
     _dots(axes[1], table, datasets, libs, "nlpd", "NLPD (lower is better)")
     _legend(fig, libs)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
-    path = out / f"accuracy_{protocol}.svg"
+    path = out / f"accuracy{_suffix(model)}_{protocol}.svg"
     fig.savefig(path)
     plt.close(fig)
     return path
 
 
-def fit_time(rows: list[dict], protocol: str, out: Path) -> Path | None:
-    table = _table(rows, protocol)
+def fit_time(rows: list[dict], protocol: str, out: Path, model: str = "exact") -> Path | None:
+    table = _table(rows, protocol, model)
     datasets = sorted(table)
     if not datasets:
         return None
@@ -149,7 +154,7 @@ def fit_time(rows: list[dict], protocol: str, out: Path) -> Path | None:
     _dots(axes[1], table, datasets, libs, "joint_evals", "joint MLL+grad evaluations", log=True)
     _legend(fig, libs)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
-    path = out / f"fit_time_{protocol}.svg"
+    path = out / f"fit_time{_suffix(model)}_{protocol}.svg"
     fig.savefig(path)
     plt.close(fig)
     return path

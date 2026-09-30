@@ -48,7 +48,7 @@ GPR の論文で使われる回帰ベンチマークで、gprx を scikit-learn�
 | T2 | Kin40k、Protein（5 split） | 中規模のスケール | `K` がメモリに入る範囲は `Gpr`、それ以外と比較用に `Sgpr` / `Svgp` |
 | T3 | 3DRoad、Song、Buzz、HouseElectric（`treforevans/uci_datasets`。90 / 10 の 10 split） | 大規模のスケール | `Sgpr` / `Svgp` |
 
-どのモデルも、ARD RBF カーネルと Gaussian 尤度で、入力と目的変数は学習データの統計で標準化し、初期値も同じ（ℓ = 1、信号分散 1、ノイズ分散 0.1）。指標は RMSE、NLPD、95% 区間のカバレッジ。`y` の元の単位で、split にわたる平均 ± 標準誤差。比較の前に `just perf-real-check` が、学習せずに固定した 1 つの θ で全ライブラリを評価する。NLML、RMSE、NLPD が 1e-6 で一致するので、学習後の結果の差は、目的関数ではなく最適化器の差になる。
+どのモデルも、ARD RBF カーネルと Gaussian 尤度で、入力と目的変数は学習データの統計で標準化し、初期値も同じ（ℓ = 1、信号分散 1、ノイズ分散 0.1）。指標は RMSE、NLPD、95% 区間のカバレッジ。`y` の元の単位で、split にわたる平均 ± 標準誤差。比較の前に `just perf-real-check` が、学習せずに固定した 1 つの θ で全ライブラリを評価する。NLML、RMSE、NLPD が 1e-6 で一致するので、学習後の結果の差は、目的関数ではなく最適化器の差になる。疎なモデルの同じ確認（`just perf-real-check yacht 0 sgpr`）では、周辺尤度の下界は gprx、GPyTorch、GPy で一致する。GPyTorch は自前の低ランクのテスト共分散で予測するので、同じ θ と Z でも RMSE と NLPD が他の 2 つと 1% 未満ずれる。
 
 ### 最適化器が効く
 

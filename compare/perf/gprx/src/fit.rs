@@ -162,6 +162,21 @@ fn fit_once(case: &RealCase) -> Result<(Fitted, f64), String> {
                 fit_s,
             ))
         }
+        ("sgpr", "fixed") => {
+            let fitted = Sgpr::new(kernel, likelihood)
+                .with_optimizer(Fixed)
+                .factor(x, n, d, y, &case.z, case.n_inducing)
+                .map_err(|(_, e)| e.to_string())?;
+            let fit_s = start.elapsed().as_secs_f64();
+            let nlml = fitted.neg_log_marginal_likelihood().map_err(|e| e.to_string())?;
+            let (mean, variance, predict_s) = predict_timed(|| fitted.predict(xs, m, d))?;
+            Ok((Fitted { mean, variance, predict_s, nlml: Some(nlml) }, fit_s))
+        }
+        ("svgp", "fixed") => Err("SVGP has no fixed protocol".to_string()),
+        ("svgp", "native") => Err(
+            "SVGP has no native protocol: Adam has no default that suits a large n, so it runs one shared setting (matched)"
+                .to_string(),
+        ),
         ("sgpr", _) => {
             let fitted = Sgpr::new(kernel, likelihood)
                 .with_optimizer(lbfgs(case)?)

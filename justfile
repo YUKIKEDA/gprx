@@ -62,6 +62,11 @@ perf-real *args:
 perf-real-check *args:
     uv run --directory compare --group perf python -X utf8 -m perf.real.check {{args}}
 
+# B1-1 every path (dataset kind × model × protocol × library) on tiny problems; a path that cannot
+# run must say why. Add --data to load two splits of every dataset (downloads them once).
+perf-real-smoke *args:
+    uv run --directory compare --group perf python -X utf8 -m perf.real.smoke {{args}}
+
 # B1-1 download the datasets and pin their checksums (compare/perf/real/checksums.json).
 perf-real-data:
     uv run --directory compare --group perf python -X utf8 -m perf.real.data --pin
@@ -74,6 +79,7 @@ perf-real-report *args:
 # T1: every split. T2: 5 splits. T3: 1 split. A timeline run writes RSS files only, not results.
 perf-real-full:
     just perf-real-data
+    just perf-real-smoke --data
     just perf-real-check yacht
     just perf-real-check maunaloa
     just perf-real --datasets snelson,maunaloa --protocol native
