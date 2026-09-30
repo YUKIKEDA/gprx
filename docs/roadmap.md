@@ -151,6 +151,12 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | P5-4 | Feat | Opt-in `FastApprox` | [#42](https://github.com/YUKIKEDA/gprx/issues/42) | done |
 | P5-5 | Task | Threshold for `DistanceCachePolicy::Auto` | [#43](https://github.com/YUKIKEDA/gprx/issues/43) | Set after Grill on #43 |
 
+## B (real-dataset comparison)
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| B1-1 | Task | Real-dataset benchmark and library comparison in the README | [#298](https://github.com/YUKIKEDA/gprx/issues/298) | acceptance on #298 |
+
 ## Intentionally out of scope
 
 Adding or removing a bullet here is Grill → Issue (`.cursor/rules/workflow.mdc`). An agent does not add a row without that agreement.
