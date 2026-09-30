@@ -13,6 +13,7 @@ use crate::data::{pack_points, validate_inducing, validate_query, validate_train
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
 
+use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
@@ -106,7 +107,12 @@ where
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     let mut scratch = Mat::zeros(n_inducing, n_inducing);
-    compiled.apply_points::<M>(z_mat, k_mm.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    compiled.eval_gram::<M>(
+        GramInputs::points(z_mat),
+        k_mm.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+    )?;
     let req = llt::factor::cholesky_in_place_scratch::<T>(
         n_inducing,
         faer_par(n_inducing),
@@ -124,7 +130,12 @@ where
     let mut a = if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
         let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.apply_points::<M>(x_mat, gram.as_mut(), Triangle::Lower, gram_scratch.as_mut())?;
+        compiled.eval_gram::<M>(
+            GramInputs::points(x_mat),
+            gram.as_mut(),
+            Triangle::Lower,
+            gram_scratch.as_mut(),
+        )?;
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
     } else {
@@ -499,8 +510,8 @@ impl SvgpMean for crate::precision::MixedPrecision<crate::precision::ReevaluateK
         let q64 = pack_points(query, 1, d);
         let mut k_mm = Mat::<f64>::zeros(m, m);
         let mut scratch = Mat::<f64>::zeros(m, m);
-        compiled.apply_points::<M>(
-            z64.as_ref(),
+        compiled.eval_gram::<M>(
+            GramInputs::points(z64.as_ref()),
             k_mm.as_mut(),
             Triangle::Lower,
             scratch.as_mut(),
@@ -779,8 +790,8 @@ where
     let n = model.n;
     let mut d_kmm = Mat::<P::Storage>::zeros(m, m);
     let mut scratch_mm = Mat::<P::Storage>::zeros(m, m);
-    compiled.grad_points::<M>(
-        z,
+    compiled.grad_gram::<M>(
+        GramInputs::points(z),
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
@@ -789,8 +800,8 @@ where
     let mut d_kmn = if same_xz {
         let mut gram = Mat::<P::Storage>::zeros(n, n);
         let mut scratch = Mat::<P::Storage>::zeros(n, n);
-        compiled.grad_points::<M>(
-            x,
+        compiled.grad_gram::<M>(
+            GramInputs::points(x),
             gram.as_mut(),
             param_idx,
             Triangle::Full,
@@ -1171,8 +1182,8 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     let n = model.n;
     let mut d_kmm = Mat::zeros(m, m);
     let mut scratch_mm = Mat::zeros(m, m);
-    compiled.grad_points::<M>(
-        z,
+    compiled.grad_gram::<M>(
+        GramInputs::points(z),
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
@@ -1183,8 +1194,8 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     } else if same_xz {
         let mut gram = Mat::zeros(n, n);
         let mut scratch = Mat::zeros(n, n);
-        compiled.grad_points::<M>(
-            x,
+        compiled.grad_gram::<M>(
+            GramInputs::points(x),
             gram.as_mut(),
             param_idx,
             Triangle::Full,

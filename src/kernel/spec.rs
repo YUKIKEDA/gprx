@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(compiled.num_params(), 3);
         assert_eq!(
             compiled.coord_mode().expect("compat"),
-            crate::kernel::CoordMode::Dist
+            crate::kernel::compiled::CoordMode::Dist
         );
     }
 
@@ -709,7 +709,7 @@ mod tests {
         }
         assert_eq!(
             spec.compile().coord_mode().expect("compat"),
-            crate::kernel::CoordMode::Dist
+            crate::kernel::compiled::CoordMode::Dist
         );
     }
 
@@ -731,7 +731,7 @@ mod tests {
         }
         assert_eq!(
             iso.compile().coord_mode().expect("compat"),
-            crate::kernel::CoordMode::Dist
+            crate::kernel::compiled::CoordMode::Dist
         );
         let mut ard =
             KernelSpec::from(RationalQuadraticArdKernel::new(&[1.0, 2.0], 0.5).expect("valid"));
@@ -750,7 +750,7 @@ mod tests {
         }
         assert_eq!(
             ard.compile().coord_mode().expect("compat"),
-            crate::kernel::CoordMode::Points
+            crate::kernel::compiled::CoordMode::Points
         );
     }
 }

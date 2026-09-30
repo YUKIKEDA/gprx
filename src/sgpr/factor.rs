@@ -10,9 +10,10 @@ use crate::data::{pack_points, validate_inducing, validate_query, validate_train
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
 
+use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
-    CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
+    CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
@@ -498,8 +499,8 @@ where
         let compiled64 = kernel.compile();
         let mut k64 = Mat::<f64>::zeros(n_inducing, n_inducing);
         let mut scratch64 = Mat::<f64>::zeros(n_inducing, n_inducing);
-        compiled64.apply_points::<M>(
-            z64.as_ref(),
+        compiled64.eval_gram::<M>(
+            GramInputs::points(z64.as_ref()),
             k64.as_mut(),
             Triangle::Lower,
             scratch64.as_mut(),
@@ -511,8 +512,8 @@ where
         }
     } else {
         let mut scratch = Mat::zeros(n_inducing, n_inducing);
-        compiled.apply_points::<M>(
-            z_mat.as_ref(),
+        compiled.eval_gram::<M>(
+            GramInputs::points(z_mat.as_ref()),
             k_mm.as_mut(),
             Triangle::Lower,
             scratch.as_mut(),
@@ -537,8 +538,8 @@ where
         if x == z {
             let mut gram64 = Mat::<f64>::zeros(n_rows, n_rows);
             let mut gram_scratch = Mat::<f64>::zeros(n_rows, n_rows);
-            compiled64.apply_points::<M>(
-                x64.as_ref(),
+            compiled64.eval_gram::<M>(
+                GramInputs::points(x64.as_ref()),
                 gram64.as_mut(),
                 Triangle::Lower,
                 gram_scratch.as_mut(),
@@ -564,8 +565,8 @@ where
     } else if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
         let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.apply_points::<M>(
-            x_mat.as_ref(),
+        compiled.eval_gram::<M>(
+            GramInputs::points(x_mat.as_ref()),
             gram.as_mut(),
             Triangle::Lower,
             gram_scratch.as_mut(),
@@ -995,8 +996,8 @@ where
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
     let mut scratch_mm = Mat::zeros(m, m);
-    compiled.grad_points::<M>(
-        z,
+    compiled.grad_gram::<M>(
+        GramInputs::points(z),
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
@@ -1148,7 +1149,13 @@ where
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
     let mut scratch_mm = Mat::zeros(m, m);
-    compiled.hess_points::<M>(z, d_kmm.as_mut(), i, j, Triangle::Full, scratch_mm.as_mut())?;
+    compiled.hess_gram::<M>(
+        GramInputs::points(z),
+        d_kmm.as_mut(),
+        (i, j),
+        Triangle::Full,
+        scratch_mm.as_mut(),
+    )?;
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
     compiled.hess_cross_points::<M>(z, x, d_kmn.as_mut(), i, j, scratch_mn.as_mut())?;
@@ -1415,29 +1422,7 @@ where
     let q = xs.nrows();
     let mut out = Mat::zeros(n, q);
     let mut scratch = Mat::zeros(n, q);
-    match compiled.coord_mode()? {
-        CoordMode::Dist | CoordMode::Either => {
-            let mut dist = Mat::zeros(n, q);
-            let mut thread_scratch = Vec::new();
-            T::write_cross(x, xs, dist.as_mut(), &mut thread_scratch);
-            compiled.apply_cross::<M>(dist.as_ref(), out.as_mut(), scratch.as_mut())?;
-        }
-        CoordMode::Points => {
-            compiled.apply_cross_points::<M>(x, xs, out.as_mut(), scratch.as_mut())?;
-        }
-        CoordMode::Mixed => {
-            let mut dist = Mat::zeros(n, q);
-            let mut thread_scratch = Vec::new();
-            T::write_cross(x, xs, dist.as_mut(), &mut thread_scratch);
-            compiled.apply_cross_mixed::<M>(
-                dist.as_ref(),
-                x,
-                xs,
-                out.as_mut(),
-                scratch.as_mut(),
-            )?;
-        }
-    }
+    compiled.eval_cross::<M>(x, xs, None, out.as_mut(), scratch.as_mut(), &mut [])?;
     Ok(out)
 }
 
@@ -1514,8 +1499,8 @@ where
         let z64 = pack_points(z_obs, m, d);
         let mut k64 = Mat::<f64>::zeros(m, m);
         let mut scratch_k = Mat::<f64>::zeros(m, m);
-        compiled64.apply_points::<M>(
-            z64.as_ref(),
+        compiled64.eval_gram::<M>(
+            GramInputs::points(z64.as_ref()),
             k64.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),

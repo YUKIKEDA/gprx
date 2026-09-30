@@ -9,7 +9,10 @@
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, FillDistances, KernelScalar, KernelSpec, Triangle};
+use crate::kernel::GramInputs;
+use crate::kernel::{
+    CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
+};
 use crate::linalg::{cholesky_lower_faer_owned, inf_norm, solve_llt_faer_owned, symmetrize_lower};
 use crate::transform::TargetTransform;
 
@@ -192,7 +195,12 @@ pub(crate) fn refine<M: crate::math::KernelMath, R: ResidualFormula>(
     }
     let mut a = Mat::<f32>::zeros(n, n);
     let mut scratch = Mat::<f32>::zeros(n, n);
-    kernel_f32.apply_points::<M>(x32.as_ref(), a.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    kernel_f32.eval_gram::<M>(
+        GramInputs::points(x32.as_ref()),
+        a.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+    )?;
     let noise32 = noise as f32;
     for i in 0..n {
         a[(i, i)] += noise32;
@@ -271,7 +279,12 @@ fn fresh_residual<M: crate::math::KernelMath>(
     let n = y.len();
     let mut k = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
-    kernel.apply_points::<M>(x, k.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    kernel.eval_gram::<M>(
+        GramInputs::points(x),
+        k.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+    )?;
     for i in 0..n {
         k[(i, i)] += noise;
     }
@@ -300,7 +313,12 @@ fn f64_alpha<M: crate::math::KernelMath>(
     let n = y.len();
     let mut a = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
-    kernel.apply_points::<M>(x, a.as_mut(), Triangle::Lower, scratch.as_mut())?;
+    kernel.eval_gram::<M>(
+        GramInputs::points(x),
+        a.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+    )?;
     for i in 0..n {
         a[(i, i)] += noise;
     }
@@ -554,32 +572,14 @@ fn f64_cross_dot<M: crate::math::KernelMath>(
     }
     let mut k_col = Mat::<f64>::zeros(n, 1);
     let mut scratch = Mat::<f64>::zeros(n, 1);
-    match kernel_f64.coord_mode()? {
-        crate::kernel::CoordMode::Points => {
-            kernel_f64.apply_cross_points::<M>(
-                x_train,
-                row.as_ref(),
-                k_col.as_mut(),
-                scratch.as_mut(),
-            )?;
-        }
-        crate::kernel::CoordMode::Dist | crate::kernel::CoordMode::Either => {
-            let mut dist = Mat::<f64>::zeros(n, 1);
-            f64::write_cross(x_train, row.as_ref(), dist.as_mut(), &mut []);
-            kernel_f64.apply_cross::<M>(dist.as_ref(), k_col.as_mut(), scratch.as_mut())?;
-        }
-        crate::kernel::CoordMode::Mixed => {
-            let mut dist = Mat::<f64>::zeros(n, 1);
-            f64::write_cross(x_train, row.as_ref(), dist.as_mut(), &mut []);
-            kernel_f64.apply_cross_mixed::<M>(
-                dist.as_ref(),
-                x_train,
-                row.as_ref(),
-                k_col.as_mut(),
-                scratch.as_mut(),
-            )?;
-        }
-    }
+    kernel_f64.eval_cross::<M>(
+        x_train,
+        row.as_ref(),
+        None,
+        k_col.as_mut(),
+        scratch.as_mut(),
+        &mut [],
+    )?;
     let mut sum = 0.0;
     for i in 0..n {
         sum += k_col[(i, 0)] * alpha[i];
