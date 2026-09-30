@@ -173,6 +173,27 @@ impl<T: KernelScalar> CompiledKernel<T> {
         Ok(())
     }
 
+    /// Writes flattened `θ` in place without cloning the tree.
+    ///
+    /// `prev` is the current `θ`. When a leaf rejects its slice, the leaves
+    /// already written are put back from `prev`, so the tree is unchanged on
+    /// error. Built-in leaves validate before they write; a custom leaf that
+    /// rejects `prev` on the way back leaves its own value as it chose.
+    pub(crate) fn set_params_in_place(
+        &mut self,
+        params: &[f64],
+        prev: &[f64],
+    ) -> Result<(), GprError> {
+        crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;
+        let mut offset = 0;
+        if let Err(err) = self.apply_params(params, &mut offset) {
+            let mut offset = 0;
+            let _ = self.apply_params(prev, &mut offset);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// Returns the number of compiled leaves in this tree.
     pub(crate) fn leaf_count(&self) -> usize {
         match self {

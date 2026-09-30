@@ -173,11 +173,10 @@ impl RationalQuadraticArdKernel {
                 ),
             });
         }
-        let mut lengthscales = self.lengthscales.clone();
-        lengthscales.set_params(&params[..d])?;
         let log_alpha = validate_log_positive(params[d], "alpha")?;
         let alpha = BoundedParam::new(log_alpha.exp(), self.alpha.interval())?;
-        self.lengthscales = lengthscales;
+        // All-or-nothing on its own, so `alpha` is written only after it lands.
+        self.lengthscales.set_params(&params[..d])?;
         self.alpha = alpha;
         Ok(())
     }
