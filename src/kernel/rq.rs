@@ -400,40 +400,11 @@ mod tests {
     use super::RationalQuadraticKernel;
     use crate::error::GprError;
     use crate::kernel::Triangle;
-    use faer::{Mat, MatRef, mat};
+    use faer::{Mat, mat};
 
     const TOL: f64 = 1e-8;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    fn fill(n: usize, value: f64) -> Mat<f64> {
-        Mat::from_fn(n, n, |_, _| value)
-    }
-
-    fn sq_dist_1d(x: &[f64]) -> Mat<f64> {
-        let n = x.len();
-        Mat::from_fn(n, n, |i, j| {
-            let d = x[i] - x[j];
-            d * d
-        })
-    }
-
-    fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-        let n = actual.nrows();
-        for col in 0..n {
-            for row in col..n {
-                assert_close(actual[(row, col)], expected[(row, col)]);
-            }
-        }
-    }
+    use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, sq_dist_1d};
 
     #[test]
     fn is_send_sync() {
@@ -448,9 +419,9 @@ mod tests {
         kernel
             .apply(dist.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
-        assert_close(k[(0, 0)], 1.0);
-        assert_close(k[(1, 1)], 1.0);
-        assert_close(k[(2, 2)], 1.0);
+        assert_close(k[(0, 0)], 1.0, TOL);
+        assert_close(k[(1, 1)], 1.0, TOL);
+        assert_close(k[(2, 2)], 1.0, TOL);
     }
 
     #[test]
@@ -464,7 +435,7 @@ mod tests {
         kernel
             .apply(dist.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
-        assert_close(k[(0, 1)], 2.0_f64.powf(-alpha));
+        assert_close(k[(0, 1)], 2.0_f64.powf(-alpha), TOL);
     }
 
     #[test]
@@ -477,7 +448,7 @@ mod tests {
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
-                assert_close(k[(row, col)], k[(col, row)]);
+                assert_close(k[(row, col)], k[(col, row)], TOL);
             }
         }
     }
@@ -495,8 +466,8 @@ mod tests {
         kernel
             .apply(dist.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], sentinel);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], sentinel, TOL);
     }
 
     #[test]
@@ -513,10 +484,10 @@ mod tests {
             .expect("shape");
         for col in 0..3 {
             for row in 0..=col {
-                assert_close(upper[(row, col)], full[(row, col)]);
+                assert_close(upper[(row, col)], full[(row, col)], TOL);
             }
         }
-        assert_close(upper[(1, 0)], -1.0);
+        assert_close(upper[(1, 0)], -1.0, TOL);
     }
 
     #[test]
@@ -550,7 +521,7 @@ mod tests {
                 for col in 0..3 {
                     for row in 0..3 {
                         let fd = (g_plus[(row, col)] - g_minus[(row, col)]) / (2.0 * h);
-                        assert_close(d2[(row, col)], fd);
+                        assert_close(d2[(row, col)], fd, TOL);
                     }
                 }
             }
@@ -585,7 +556,7 @@ mod tests {
             for col in 0..3 {
                 for row in 0..3 {
                     let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
-                    assert_close(dk[(row, col)], fd);
+                    assert_close(dk[(row, col)], fd, TOL);
                 }
             }
         }
@@ -603,8 +574,8 @@ mod tests {
         kernel
             .grad(dist.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("alpha");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 99.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 99.0, TOL);
     }
 
     #[test]
@@ -612,11 +583,11 @@ mod tests {
         let mut kernel = RationalQuadraticKernel::new(2.0, 3.0).expect("valid");
         let mut params = [0.0; 2];
         kernel.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 2.0_f64.ln());
-        assert_close(params[1], 3.0_f64.ln());
+        assert_close(params[0], 2.0_f64.ln(), TOL);
+        assert_close(params[1], 3.0_f64.ln(), TOL);
         params[0] = 0.5_f64.ln();
         kernel.set_params(&params).expect("len 2");
-        assert_close(kernel.lengthscale(), 0.5);
+        assert_close(kernel.lengthscale(), 0.5, TOL);
         let before = kernel;
         assert!(kernel.set_params(&[0.0, f64::INFINITY]).is_err());
         assert_eq!(kernel, before);
@@ -634,10 +605,10 @@ mod tests {
         kernel
             .apply(dist.as_ref(), square.as_mut(), Triangle::Full)
             .expect("square");
-        assert_close(out[(0, 1)], square[(0, 1)]);
+        assert_close(out[(0, 1)], square[(0, 1)], TOL);
         let mut diag = [0.0, 0.0];
         kernel.fill_diag(&mut diag);
-        assert_close(diag[0], 1.0);
+        assert_close(diag[0], 1.0, TOL);
     }
 
     #[test]

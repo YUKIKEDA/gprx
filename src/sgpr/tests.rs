@@ -16,13 +16,7 @@ const TOL: f64 = 1e-12;
 const GRAD_FD: f64 = 1e-5;
 const HESS_FD: f64 = 1e-4;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
+use crate::test_check::{assert_close, assert_send_sync, assert_slice_close};
 
 struct Rank1Vfe {
     a: Mat<f64>,
@@ -315,6 +309,7 @@ fn assert_matches_exact(
     assert_close(
         sparse.neg_log_marginal_likelihood().expect("sparse nlml"),
         exact.neg_log_marginal_likelihood().expect("exact nlml"),
+        TOL,
     );
     assert_pred_close(&sparse, &exact, x, n, d);
     assert_pred_close(&sparse, &exact, xs_extra, n_extra, d);
@@ -341,8 +336,8 @@ fn assert_pred_close(
         assert_eq!(got.variance_kind, kind);
         assert_eq!(got.mean.len(), n_rows);
         for i in 0..n_rows {
-            assert_close(got.mean[i], want.mean[i]);
-            assert_close(got.variance[i], want.variance[i]);
+            assert_close(got.mean[i], want.mean[i], TOL);
+            assert_close(got.variance[i], want.variance[i], TOL);
         }
     }
 }
@@ -423,9 +418,9 @@ fn rbf_n2_z_eq_x_matches_analytic_gram() {
         sum
     };
     let off = (-0.5_f64).exp();
-    assert_close(reconstructed(0, 0), 1.0);
-    assert_close(reconstructed(1, 1), 1.0);
-    assert_close(reconstructed(1, 0), off);
+    assert_close(reconstructed(0, 0), 1.0, TOL);
+    assert_close(reconstructed(1, 1), 1.0, TOL);
+    assert_close(reconstructed(1, 0), off, TOL);
 }
 
 #[test]
@@ -597,17 +592,6 @@ fn kernel_ard() -> KernelSpec {
     KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ"))
 }
 
-fn assert_slice_close(actual: &[f64], expected: &[f64], tol: f64) {
-    assert_eq!(actual.len(), expected.len());
-    for (a, e) in actual.iter().zip(expected) {
-        let scale = e.abs().max(1.0);
-        assert!(
-            (a - e).abs() <= tol * scale,
-            "actual={a}, expected={e}, tol={tol}"
-        );
-    }
-}
-
 fn fd_grad_from_value<I: InducingLayout>(
     model: &mut FittedSgpr<Fixed, I>,
     params: &[f64],
@@ -688,7 +672,7 @@ fn assert_z_eq_x_matches_exact_derivs(
     let ve = exact
         .value_and_gradient_into(&params, &mut g_e)
         .expect("exact vg");
-    assert_close(vs, ve);
+    assert_close(vs, ve, TOL);
     assert_slice_close(&g_s, &g_e, TOL);
     let mut h_s = vec![0.0; p * p];
     let mut h_e = vec![0.0; p * p];
@@ -888,7 +872,6 @@ fn rbf_n4_m2_fit_fsa_drops_nlml() {
 
 #[test]
 fn is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Sgpr>();
     assert_send_sync::<FittedSgpr>();
     assert_send_sync::<Sgpr<Lbfgs, FreeInducing>>();
@@ -1113,7 +1096,7 @@ fn assert_rank1_matches_factor(got: &Rank1Vfe, want: &FittedSgpr<Fixed>) {
     assert_eq!(got.a.ncols(), want.a.ncols());
     for j in 0..got.a.ncols() {
         for i in 0..got.a.nrows() {
-            assert_close(got.a[(i, j)], want.a[(i, j)]);
+            assert_close(got.a[(i, j)], want.a[(i, j)], TOL);
         }
     }
     let m = got.b_l.nrows();
@@ -1123,15 +1106,16 @@ fn assert_rank1_matches_factor(got: &Rank1Vfe, want: &FittedSgpr<Fixed>) {
             assert_close(
                 reconstruct_llt(&got.b_l, i, j),
                 reconstruct_llt(&want.b_l, i, j),
+                TOL,
             );
         }
     }
     assert_eq!(got.w.len(), want.w.len());
     for i in 0..got.w.len() {
-        assert_close(got.w[i], want.w[i]);
+        assert_close(got.w[i], want.w[i], TOL);
     }
-    assert_close(got.k_diag_sum, want.k_diag_sum);
-    assert_close(got.a_frobenius2, want.a_frobenius2);
+    assert_close(got.k_diag_sum, want.k_diag_sum, TOL);
+    assert_close(got.a_frobenius2, want.a_frobenius2, TOL);
 }
 
 struct Rank1Case<'a> {
@@ -1184,14 +1168,14 @@ fn chol_rank1_update_and_downdate_2x2() {
     l[(1, 1)] = 1.0;
     let mut v = [1.0, 0.0];
     chol_rank1_update(&mut l, &mut v);
-    assert_close(reconstruct_llt(&l, 0, 0), 5.0);
-    assert_close(reconstruct_llt(&l, 1, 0), 2.0);
-    assert_close(reconstruct_llt(&l, 1, 1), 2.0);
+    assert_close(reconstruct_llt(&l, 0, 0), 5.0, TOL);
+    assert_close(reconstruct_llt(&l, 1, 0), 2.0, TOL);
+    assert_close(reconstruct_llt(&l, 1, 1), 2.0, TOL);
     let mut back = [1.0, 0.0];
     chol_rank1_downdate(&mut l, &mut back).expect("downdate");
-    assert_close(reconstruct_llt(&l, 0, 0), 4.0);
-    assert_close(reconstruct_llt(&l, 1, 0), 2.0);
-    assert_close(reconstruct_llt(&l, 1, 1), 2.0);
+    assert_close(reconstruct_llt(&l, 0, 0), 4.0, TOL);
+    assert_close(reconstruct_llt(&l, 1, 0), 2.0, TOL);
+    assert_close(reconstruct_llt(&l, 1, 1), 2.0, TOL);
 }
 
 #[test]
@@ -1275,7 +1259,7 @@ fn assert_inducing_matches_factor(got: &VfeState<f64>, want: &FittedSgpr<Fixed>)
     assert_eq!(got.a.ncols(), want.a.ncols());
     for j in 0..got.a.ncols() {
         for i in 0..got.a.nrows() {
-            assert_close(got.a[(i, j)], want.a[(i, j)]);
+            assert_close(got.a[(i, j)], want.a[(i, j)], TOL);
         }
     }
     let m = got.k_mm_l.nrows();
@@ -1287,19 +1271,21 @@ fn assert_inducing_matches_factor(got: &VfeState<f64>, want: &FittedSgpr<Fixed>)
             assert_close(
                 reconstruct_llt(&got.k_mm_l, i, j),
                 reconstruct_llt(&want.k_mm_l, i, j),
+                TOL,
             );
             assert_close(
                 reconstruct_llt(&got.b_l, i, j),
                 reconstruct_llt(&want.b_l, i, j),
+                TOL,
             );
         }
     }
     assert_eq!(got.w.len(), want.w.len());
     for i in 0..got.w.len() {
-        assert_close(got.w[i], want.w[i]);
+        assert_close(got.w[i], want.w[i], TOL);
     }
-    assert_close(got.k_diag_sum, want.k_diag_sum);
-    assert_close(got.a_frobenius2, want.a_frobenius2);
+    assert_close(got.k_diag_sum, want.k_diag_sum, TOL);
+    assert_close(got.a_frobenius2, want.a_frobenius2, TOL);
 }
 
 struct InducingCase<'a> {

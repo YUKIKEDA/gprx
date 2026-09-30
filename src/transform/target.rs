@@ -528,15 +528,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::{assert_close, assert_send_sync};
 
     #[test]
     fn is_send_sync() {
@@ -552,26 +544,26 @@ mod tests {
         let t = IdentityTarget.fit(&[1.0, 2.0]).expect("finite");
         let mut y = [1.0, 2.0];
         t.transform(&mut y).expect("finite");
-        assert_close(y[0], 1.0);
-        assert_close(y[1], 2.0);
+        assert_close(y[0], 1.0, TOL);
+        assert_close(y[1], 2.0, TOL);
         t.inverse_transform_mean(&mut y).expect("finite");
         t.inverse_transform_variance(&mut y).expect("finite");
-        assert_close(y[0], 1.0);
-        assert_close(y[1], 2.0);
+        assert_close(y[0], 1.0, TOL);
+        assert_close(y[1], 2.0, TOL);
     }
 
     #[test]
     fn standardize_centers_and_unit_scales() {
         let y = [1.0, 3.0, 5.0];
         let t = StandardizeTarget::new().fit(&y).expect("valid");
-        assert_close(t.mean(), 3.0);
-        assert_close(t.std(), (8.0 / 3.0_f64).sqrt());
+        assert_close(t.mean(), 3.0, TOL);
+        assert_close(t.std(), (8.0 / 3.0_f64).sqrt(), TOL);
         let mut z = y;
         t.transform(&mut z).expect("finite");
         let z_mean = z.iter().sum::<f64>() / 3.0;
-        assert_close(z_mean, 0.0);
+        assert_close(z_mean, 0.0, TOL);
         let z_var = z.iter().map(|v| v * v).sum::<f64>() / 3.0;
-        assert_close(z_var, 1.0);
+        assert_close(z_var, 1.0, TOL);
     }
 
     #[test]
@@ -581,9 +573,9 @@ mod tests {
         let mut z = y;
         t.transform(&mut z).expect("finite");
         t.inverse_transform_mean(&mut z).expect("finite");
-        assert_close(z[0], y[0]);
-        assert_close(z[1], y[1]);
-        assert_close(z[2], y[2]);
+        assert_close(z[0], y[0], TOL);
+        assert_close(z[1], y[1], TOL);
+        assert_close(z[2], y[2], TOL);
     }
 
     #[test]
@@ -593,9 +585,9 @@ mod tests {
         let s = t.std();
         let mut var = [0.25, 1.0, 4.0];
         t.inverse_transform_variance(&mut var).expect("finite");
-        assert_close(var[0], 0.25 * s * s);
-        assert_close(var[1], 1.0 * s * s);
-        assert_close(var[2], 4.0 * s * s);
+        assert_close(var[0], 0.25 * s * s, TOL);
+        assert_close(var[1], 1.0 * s * s, TOL);
+        assert_close(var[2], 4.0 * s * s, TOL);
     }
 
     #[test]
@@ -606,10 +598,10 @@ mod tests {
         let mut cov = [1.0, 0.5, 0.5, 4.0];
         t.inverse_transform_covariance(&mut cov).expect("finite");
         let s2 = s * s;
-        assert_close(cov[0], 1.0 * s2);
-        assert_close(cov[1], 0.5 * s2);
-        assert_close(cov[2], 0.5 * s2);
-        assert_close(cov[3], 4.0 * s2);
+        assert_close(cov[0], 1.0 * s2, TOL);
+        assert_close(cov[1], 0.5 * s2, TOL);
+        assert_close(cov[2], 0.5 * s2, TOL);
+        assert_close(cov[3], 4.0 * s2, TOL);
     }
 
     #[test]
@@ -623,12 +615,12 @@ mod tests {
         let mut var = [1.0, 0.25, 4.0];
         t.inverse_transform_mean(&mut mean).expect("finite");
         t.inverse_transform_variance(&mut var).expect("finite");
-        assert_close(mean[0], mu);
-        assert_close(mean[1], mu + s);
-        assert_close(mean[2], mu - 0.5 * s);
-        assert_close(var[0], s * s);
-        assert_close(var[1], 0.25 * s * s);
-        assert_close(var[2], 4.0 * s * s);
+        assert_close(mean[0], mu, TOL);
+        assert_close(mean[1], mu + s, TOL);
+        assert_close(mean[2], mu - 0.5 * s, TOL);
+        assert_close(var[0], s * s, TOL);
+        assert_close(var[1], 0.25 * s * s, TOL);
+        assert_close(var[2], 4.0 * s * s, TOL);
     }
 
     #[test]
@@ -636,13 +628,13 @@ mod tests {
         let t = StandardizeTarget::new()
             .fit(&[4.0, 4.0, 4.0])
             .expect("valid");
-        assert_close(t.mean(), 4.0);
-        assert_close(t.std(), 1.0);
+        assert_close(t.mean(), 4.0, TOL);
+        assert_close(t.std(), 1.0, TOL);
         let mut y = [4.0, 4.0];
         t.transform(&mut y).expect("finite");
-        assert_close(y[0], 0.0);
+        assert_close(y[0], 0.0, TOL);
         t.inverse_transform_mean(&mut y).expect("finite");
-        assert_close(y[0], 4.0);
+        assert_close(y[0], 4.0, TOL);
     }
 
     #[test]
@@ -667,21 +659,21 @@ mod tests {
     fn minmax_scales_and_inverts() {
         let y = [1.0, 3.0, 5.0];
         let t = MinMaxTarget::new().fit(&y).expect("valid");
-        assert_close(t.min(), 1.0);
-        assert_close(t.max(), 5.0);
+        assert_close(t.min(), 1.0, TOL);
+        assert_close(t.max(), 5.0, TOL);
         let mut z = y;
         t.transform(&mut z).expect("finite");
-        assert_close(z[0], 0.0);
-        assert_close(z[1], 0.5);
-        assert_close(z[2], 1.0);
+        assert_close(z[0], 0.0, TOL);
+        assert_close(z[1], 0.5, TOL);
+        assert_close(z[2], 1.0, TOL);
         t.inverse_transform_mean(&mut z).expect("finite");
-        assert_close(z[0], y[0]);
-        assert_close(z[1], y[1]);
-        assert_close(z[2], y[2]);
+        assert_close(z[0], y[0], TOL);
+        assert_close(z[1], y[1], TOL);
+        assert_close(z[2], y[2], TOL);
         let mut var = [1.0, 0.25];
         t.inverse_transform_variance(&mut var).expect("finite");
-        assert_close(var[0], 16.0);
-        assert_close(var[1], 4.0);
+        assert_close(var[0], 16.0, TOL);
+        assert_close(var[1], 4.0, TOL);
     }
 
     #[test]
@@ -689,9 +681,9 @@ mod tests {
         let t = MinMaxTarget::new().fit(&[4.0, 4.0, 4.0]).expect("valid");
         let mut y = [4.0, 4.0];
         t.transform(&mut y).expect("finite");
-        assert_close(y[0], 0.0);
+        assert_close(y[0], 0.0, TOL);
         t.inverse_transform_mean(&mut y).expect("finite");
-        assert_close(y[0], 4.0);
+        assert_close(y[0], 4.0, TOL);
     }
 
     #[test]

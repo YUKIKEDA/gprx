@@ -536,13 +536,7 @@ mod tests {
 
     const TOL: f64 = 1e-12;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     fn rbf(ell: f64) -> KernelSpec {
         KernelSpec::from(RbfKernel::new(ell).expect("valid"))
@@ -554,13 +548,13 @@ mod tests {
         assert_eq!(spec.num_params(), 3);
         let mut params = [0.0; 3];
         spec.get_params(&mut params).expect("len 3");
-        assert_close(params[0], 1.0_f64.ln());
-        assert_close(params[1], 2.0_f64.ln());
-        assert_close(params[2], 3.0_f64.ln());
+        assert_close(params[0], 1.0_f64.ln(), TOL);
+        assert_close(params[1], 2.0_f64.ln(), TOL);
+        assert_close(params[2], 3.0_f64.ln(), TOL);
         params[1] = 4.0_f64.ln();
         spec.set_params(&params).expect("len 3");
         spec.get_params(&mut params).expect("len 3");
-        assert_close(params[1], 4.0_f64.ln());
+        assert_close(params[1], 4.0_f64.ln(), TOL);
         match spec.compile() {
             crate::kernel::CompiledKernel::Sum(terms) => assert_eq!(terms.len(), 3),
             other => panic!("expected flattened sum, got {other:?}"),
@@ -594,9 +588,9 @@ mod tests {
         assert_eq!(spec.num_params(), 3);
         let mut params = [0.0; 3];
         spec.get_params(&mut params).expect("len 3");
-        assert_close(params[0], 1.5_f64.ln());
-        assert_close(params[1], 1.0_f64.ln());
-        assert_close(params[2], 2.0_f64.ln());
+        assert_close(params[0], 1.5_f64.ln(), TOL);
+        assert_close(params[1], 1.0_f64.ln(), TOL);
+        assert_close(params[2], 2.0_f64.ln(), TOL);
         match spec.compile() {
             crate::kernel::CompiledKernel::Sum(terms) => {
                 assert_eq!(terms.len(), 2);
@@ -634,12 +628,12 @@ mod tests {
         assert_eq!(spec.num_params(), 2);
         let mut params = [0.0; 2];
         spec.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 1.0_f64.ln());
-        assert_close(params[1], 2.0_f64.ln());
+        assert_close(params[0], 1.0_f64.ln(), TOL);
+        assert_close(params[1], 2.0_f64.ln(), TOL);
         params[1] = 3.0_f64.ln();
         spec.set_params(&params).expect("len 2");
         spec.get_params(&mut params).expect("len 2");
-        assert_close(params[1], 3.0_f64.ln());
+        assert_close(params[1], 3.0_f64.ln(), TOL);
         let b = spec.parameter_bindings();
         assert_eq!(b.len(), 2);
         assert_eq!(b[0].leaf_id, 0);
@@ -659,8 +653,8 @@ mod tests {
         assert_eq!(spec.num_params(), 3);
         let mut params = [0.0; 3];
         spec.get_params(&mut params).expect("len 3");
-        assert_close(params[1], 2.0_f64.ln());
-        assert_close(params[2], 0.1_f64.ln());
+        assert_close(params[1], 2.0_f64.ln(), TOL);
+        assert_close(params[2], 0.1_f64.ln(), TOL);
         let compiled = spec.compile();
         assert_eq!(compiled.num_params(), 3);
         assert_eq!(
@@ -675,13 +669,13 @@ mod tests {
         assert_eq!(iso.num_params(), 1);
         let mut params = [0.0];
         iso.get_params(&mut params).expect("len 1");
-        assert_close(params[0], 1.5_f64.ln());
+        assert_close(params[0], 1.5_f64.ln(), TOL);
         let mut ard =
             KernelSpec::from(MaternArdKernel::new(&[1.0, 2.0], MaternNu::Half).expect("valid"));
         assert_eq!(ard.num_params(), 2);
         let mut ard_params = [0.0; 2];
         ard.get_params(&mut ard_params).expect("len 2");
-        assert_close(ard_params[1], 2.0_f64.ln());
+        assert_close(ard_params[1], 2.0_f64.ln(), TOL);
         ard_params[1] = 3.0_f64.ln();
         ard.set_params(&ard_params).expect("len 2");
         match ard.compile() {
@@ -699,8 +693,8 @@ mod tests {
         assert_eq!(spec.num_params(), 2);
         let mut params = [0.0; 2];
         spec.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 1.5_f64.ln());
-        assert_close(params[1], 4.0_f64.ln());
+        assert_close(params[0], 1.5_f64.ln(), TOL);
+        assert_close(params[1], 4.0_f64.ln(), TOL);
         params[1] = 2.0_f64.ln();
         spec.set_params(&params).expect("len 2");
         let b = spec.parameter_bindings();
@@ -709,7 +703,7 @@ mod tests {
         assert_eq!(b[1].local_index, 1);
         match spec.compile() {
             crate::kernel::CompiledKernel::Periodic(leaf) => {
-                assert_close(leaf.period(), 2.0);
+                assert_close(leaf.period(), 2.0, TOL);
             }
             other => panic!("expected Periodic, got {other:?}"),
         }
@@ -725,13 +719,13 @@ mod tests {
         assert_eq!(iso.num_params(), 2);
         let mut params = [0.0; 2];
         iso.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 1.5_f64.ln());
-        assert_close(params[1], 0.8_f64.ln());
+        assert_close(params[0], 1.5_f64.ln(), TOL);
+        assert_close(params[1], 0.8_f64.ln(), TOL);
         params[1] = 2.0_f64.ln();
         iso.set_params(&params).expect("len 2");
         match iso.compile() {
             crate::kernel::CompiledKernel::RationalQuadratic(leaf) => {
-                assert_close(leaf.alpha(), 2.0);
+                assert_close(leaf.alpha(), 2.0, TOL);
             }
             other => panic!("expected RQ, got {other:?}"),
         }
@@ -744,13 +738,13 @@ mod tests {
         assert_eq!(ard.num_params(), 3);
         let mut ard_params = [0.0; 3];
         ard.get_params(&mut ard_params).expect("len 3");
-        assert_close(ard_params[2], 0.5_f64.ln());
+        assert_close(ard_params[2], 0.5_f64.ln(), TOL);
         ard_params[2] = 1.25_f64.ln();
         ard.set_params(&ard_params).expect("len 3");
         match ard.compile() {
             crate::kernel::CompiledKernel::RationalQuadraticArd(leaf) => {
                 assert_eq!(leaf.num_params(), 3);
-                assert_close(leaf.alpha(), 1.25);
+                assert_close(leaf.alpha(), 1.25, TOL);
             }
             other => panic!("expected ARD RQ, got {other:?}"),
         }

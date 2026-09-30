@@ -216,13 +216,7 @@ mod tests {
 
     const TOL: f64 = 1e-6;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     struct Quadratic {
         joint_evals: usize,
@@ -278,8 +272,8 @@ mod tests {
             .with_max_iterations(50)
             .minimize_unconstrained(&mut obj, &[1.0, -0.5])
             .expect("bowl");
-        assert_close(result.params[0], 0.0);
-        assert_close(result.params[1], 0.0);
+        assert_close(result.params[0], 0.0, TOL);
+        assert_close(result.params[1], 0.0, TOL);
         assert!(result.value < 1e-10);
         assert!(obj.joint_evals > 0);
     }
@@ -312,8 +306,8 @@ mod tests {
         );
         let mut got = [0.0; 2];
         gpr.get_params(&mut got).expect("len 2");
-        assert_close(got[0], result.params[0]);
-        assert_close(got[1], result.params[1]);
+        assert_close(got[0], result.params[0], TOL);
+        assert_close(got[1], result.params[1], TOL);
     }
 
     struct CountingObj<'a, O, S, C: crate::gpr::DistanceCacheSlot = crate::CachedDistances> {
@@ -362,17 +356,7 @@ mod tests {
     }
 
     fn forrester_bench_xy() -> (Vec<f64>, Vec<f64>) {
-        const N: usize = 256;
-        let x: Vec<f64> = (0..N).map(|i| i as f64 / (N - 1) as f64).collect();
-        let mut rng = crate::rng::small_rng(0);
-        let y: Vec<f64> = x
-            .iter()
-            .map(|&xi| {
-                let t = 6.0 * xi - 2.0;
-                t * t * (12.0 * xi - 4.0).sin() + crate::rng::unit_normal(&mut rng)
-            })
-            .collect();
-        (x, y)
+        crate::test_problems::forrester_xy(256, 0, 1.0)
     }
 
     /// The `fit_lbfgs` bench problem must stay a peaked landscape. Independent
@@ -430,24 +414,7 @@ mod tests {
     }
 
     fn sphere_bench_xy_with_seed(seed: u64) -> (Vec<f64>, Vec<f64>) {
-        const N: usize = 256;
-        const SIDE: usize = 16;
-        let mut x = vec![0.0; N * 2];
-        let denom = (SIDE - 1) as f64;
-        for row in 0..N {
-            let i = row % SIDE;
-            let j = row / SIDE;
-            x[row] = i as f64 / denom;
-            x[N + row] = j as f64 / denom;
-        }
-        let mut rng = crate::rng::small_rng(seed);
-        let y: Vec<f64> = (0..N)
-            .map(|row| {
-                let a = x[row] / 0.25;
-                a * a + x[N + row] * x[N + row] + crate::rng::unit_normal(&mut rng)
-            })
-            .collect();
-        (x, y)
+        crate::test_problems::sphere_xy(16, seed, 1.0)
     }
 
     fn sphere_lbfgs_evals<C: crate::DistanceCachePolicy>(policy: C) -> (u64, usize, f64, f64)
@@ -505,8 +472,8 @@ mod tests {
         );
         assert!((4..=40).contains(&iters_a), "iters={iters_a}");
         assert!((4..=40).contains(&iters_n), "iters={iters_n}");
-        assert_close(start_a, start_n);
-        assert_close(value_a, value_n);
+        assert_close(start_a, start_n, TOL);
+        assert_close(value_a, value_n, TOL);
         assert!(value_a < start_a - 1.0, "start={start_a}, best={value_a}");
     }
 }

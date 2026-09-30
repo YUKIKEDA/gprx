@@ -288,34 +288,10 @@ mod tests {
     use super::LinearKernel;
     use crate::error::GprError;
     use crate::kernel::Triangle;
-    use faer::{Mat, MatRef};
 
     const TOL: f64 = 1e-8;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn fill(n: usize, value: f64) -> Mat<f64> {
-        Mat::from_fn(n, n, |_, _| value)
-    }
-
-    fn points_2d(rows: &[[f64; 2]]) -> Mat<f64> {
-        Mat::from_fn(rows.len(), 2, |i, j| rows[i][j])
-    }
-
-    fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-        let n = actual.nrows();
-        for col in 0..n {
-            for row in col..n {
-                assert_close(actual[(row, col)], expected[(row, col)]);
-            }
-        }
-    }
+    use crate::test_check::{assert_close, assert_lower_close, fill, points_2d};
 
     #[test]
     fn known_inner_products() {
@@ -325,14 +301,14 @@ mod tests {
         kernel
             .apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
-        assert_close(k[(0, 0)], 2.0);
-        assert_close(k[(1, 0)], 0.0);
-        assert_close(k[(2, 0)], 2.0);
-        assert_close(k[(2, 1)], 2.0);
-        assert_close(k[(2, 2)], 4.0);
+        assert_close(k[(0, 0)], 2.0, TOL);
+        assert_close(k[(1, 0)], 0.0, TOL);
+        assert_close(k[(2, 0)], 2.0, TOL);
+        assert_close(k[(2, 1)], 2.0, TOL);
+        assert_close(k[(2, 2)], 4.0, TOL);
         for col in 0..3 {
             for row in 0..3 {
-                assert_close(k[(row, col)], k[(col, row)]);
+                assert_close(k[(row, col)], k[(col, row)], TOL);
             }
         }
     }
@@ -349,8 +325,8 @@ mod tests {
         kernel
             .apply(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 42.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 42.0, TOL);
     }
 
     #[test]
@@ -375,7 +351,7 @@ mod tests {
         for col in 0..3 {
             for row in 0..3 {
                 let fd = (kp[(row, col)] - km[(row, col)]) / (2.0 * h);
-                assert_close(dk[(row, col)], fd);
+                assert_close(dk[(row, col)], fd, TOL);
             }
         }
     }
@@ -392,8 +368,8 @@ mod tests {
         kernel
             .fill_diag_points(x.as_ref(), &mut diag)
             .expect("diag");
-        assert_close(diag[0], k[(0, 0)]);
-        assert_close(diag[1], k[(1, 1)]);
+        assert_close(diag[0], k[(0, 0)], TOL);
+        assert_close(diag[1], k[(1, 1)], TOL);
     }
 
     #[test]
@@ -401,10 +377,10 @@ mod tests {
         let mut kernel = LinearKernel::new(2.0).expect("valid");
         let mut params = [0.0];
         kernel.get_params(&mut params).expect("len 1");
-        assert_close(params[0], 2.0_f64.ln());
+        assert_close(params[0], 2.0_f64.ln(), TOL);
         params[0] = 0.25_f64.ln();
         kernel.set_params(&params).expect("len 1");
-        assert_close(kernel.variance(), 0.25);
+        assert_close(kernel.variance(), 0.25, TOL);
     }
 
     #[test]

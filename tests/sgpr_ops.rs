@@ -9,8 +9,7 @@ use std::collections::HashSet;
 
 use gprx::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use gprx::{
-    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSgpr, PointId, Prediction,
-    Sgpr,
+    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSgpr, PointId, Sgpr,
 };
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -26,35 +25,8 @@ const Z1: [f64; 2] = [0.5, 2.5];
 const X2: [f64; 8] = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0];
 const Z2: [f64; 4] = [0.25, 0.75, 0.25, 0.75];
 
-fn assert_close(actual: f64, expected: f64) {
-    assert_close_named(actual, expected, "");
-}
-
-fn assert_close_named(actual: f64, expected: f64, label: &str) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "{label} actual={actual}, expected={expected}, diff={}",
-        (actual - expected).abs()
-    );
-}
-
-fn assert_pred_close(got: &Prediction, want: &Prediction) {
-    assert_eq!(got.mean.len(), want.mean.len());
-    for (a, b) in got.mean.iter().zip(want.mean.iter()) {
-        assert_close(*a, *b);
-    }
-    for (a, b) in got.variance.iter().zip(want.variance.iter()) {
-        assert_close(*a, *b);
-    }
-}
-
-fn assert_slice_close(got: &[f64], want: &[f64]) {
-    assert_eq!(got.len(), want.len());
-    for (a, b) in got.iter().zip(want.iter()) {
-        assert_close(*a, *b);
-    }
-}
+mod common;
+use common::{assert_close, assert_close_named, assert_mean_var_close, assert_slice_close};
 
 fn sample_coord(rng: &mut SmallRng) -> f64 {
     4.0 * rng.random::<f64>()
@@ -131,20 +103,20 @@ fn assert_matches_factor(
 
     let full = factor_oracle(kernel, likelihood, x, n, d, y, z, m);
     assert_eq!(full.n(), n);
-    assert_slice_close(online.x(), full.x());
-    assert_slice_close(online.y(), full.y());
-    assert_slice_close(online.z(), full.z());
-    assert_slice_close(online.x(), x);
-    assert_slice_close(online.y(), y);
+    assert_slice_close(online.x(), full.x(), TOL);
+    assert_slice_close(online.y(), full.y(), TOL);
+    assert_slice_close(online.z(), full.z(), TOL);
+    assert_slice_close(online.x(), x, TOL);
+    assert_slice_close(online.y(), y, TOL);
 
     let n_query = xs.len() / d;
     let got = online.predict(xs, n_query, d).expect("online predict");
     let want = full.predict(xs, n_query, d).expect("factor predict");
-    assert_pred_close(&got, &want);
+    assert_mean_var_close(&got.mean, &got.variance, &want.mean, &want.variance, TOL);
 
     let nlml_online = online.neg_log_marginal_likelihood().expect("online nlml");
     let nlml_full = full.neg_log_marginal_likelihood().expect("factor nlml");
-    assert_close(nlml_online, nlml_full);
+    assert_close(nlml_online, nlml_full, TOL);
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
@@ -311,9 +283,9 @@ fn into_online_value_grad_hess_match_fitted() {
     online
         .hessian_into(&params, &mut hess_on)
         .expect("online hess");
-    assert_close(value_on, value_fit);
-    assert_slice_close(&grad_on, &grad_fit);
-    assert_slice_close(&hess_on, &hess_fit);
+    assert_close(value_on, value_fit, TOL);
+    assert_slice_close(&grad_on, &grad_fit, TOL);
+    assert_slice_close(&hess_on, &hess_fit, TOL);
 }
 
 #[test]
@@ -407,25 +379,25 @@ fn assert_matches_factor_inducing(
     let full = factor_oracle(kernel, likelihood, x, n, d, y, z, m);
     assert_eq!(full.n(), n);
     assert_eq!(full.m(), m);
-    assert_slice_close(online.x(), full.x());
-    assert_slice_close(online.y(), full.y());
-    assert_slice_close(online.z(), full.z());
-    assert_slice_close(online.z(), z);
+    assert_slice_close(online.x(), full.x(), TOL);
+    assert_slice_close(online.y(), full.y(), TOL);
+    assert_slice_close(online.z(), full.z(), TOL);
+    assert_slice_close(online.z(), z, TOL);
 
     let n_query = xs.len() / d;
     let got = online.predict(xs, n_query, d).expect("online predict");
     let want = full.predict(xs, n_query, d).expect("factor predict");
     assert_eq!(got.mean.len(), want.mean.len());
     for (i, (a, b)) in got.mean.iter().zip(want.mean.iter()).enumerate() {
-        assert_close_named(*a, *b, &format!("{ctx} mean[{i}] m={m}"));
+        assert_close_named(&format!("{ctx} mean[{i}] m={m}"), *a, *b, TOL);
     }
     for (i, (a, b)) in got.variance.iter().zip(want.variance.iter()).enumerate() {
-        assert_close_named(*a, *b, &format!("{ctx} var[{i}] m={m}"));
+        assert_close_named(&format!("{ctx} var[{i}] m={m}"), *a, *b, TOL);
     }
 
     let nlml_online = online.neg_log_marginal_likelihood().expect("online nlml");
     let nlml_full = full.neg_log_marginal_likelihood().expect("factor nlml");
-    assert_close_named(nlml_online, nlml_full, &format!("{ctx} nlml m={m}"));
+    assert_close_named(&format!("{ctx} nlml m={m}"), nlml_online, nlml_full, TOL);
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body

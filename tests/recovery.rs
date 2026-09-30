@@ -7,8 +7,6 @@
 
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, NonlinearCg};
-use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
 
 const N: usize = 40;
 const D: usize = 1;
@@ -20,28 +18,6 @@ const X_MAX: f64 = 8.0;
 const SEED: u64 = 0;
 /// Recovered `ℓ` and `σn²` must lie within this relative band of the truth.
 const REL_TOL: f64 = 0.5;
-
-fn small_rng(seed: u64) -> SmallRng {
-    SmallRng::seed_from_u64(seed)
-}
-
-fn open_unit(rng: &mut SmallRng) -> f64 {
-    let u: f64 = rng.random();
-    let eps = 1.0 / ((1u64 << 53) as f64);
-    if u <= eps {
-        eps
-    } else if u >= 1.0 - eps {
-        1.0 - eps
-    } else {
-        u
-    }
-}
-
-fn standard_normal(rng: &mut SmallRng) -> f64 {
-    let u1 = open_unit(rng).max(f64::MIN_POSITIVE);
-    let u2 = open_unit(rng);
-    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-}
 
 fn grid_x(n: usize) -> Vec<f64> {
     (0..n)
@@ -89,7 +65,7 @@ fn sample_gp(x: &[f64], ell: f64, noise: f64, seed: u64) -> Vec<f64> {
     let mut a = rbf_cov(x, ell, noise);
     cholesky_lower(&mut a, n);
     let mut rng = small_rng(seed);
-    let z: Vec<f64> = (0..n).map(|_| standard_normal(&mut rng)).collect();
+    let z: Vec<f64> = (0..n).map(|_| unit_normal(&mut rng)).collect();
     let mut y = vec![0.0; n];
     for i in 0..n {
         let mut s = 0.0;
@@ -108,17 +84,9 @@ fn rbf_gpr(ell: f64, noise: f64) -> Result<Gpr, GprError> {
     ))
 }
 
-fn rel_err(actual: f64, expected: f64) -> f64 {
-    (actual - expected).abs() / expected.abs()
-}
-
-fn assert_near(label: &str, actual: f64, expected: f64) {
-    let err = rel_err(actual, expected);
-    assert!(
-        err <= REL_TOL,
-        "{label}: actual={actual}, expected={expected}, rel_err={err}, tol={REL_TOL}"
-    );
-}
+mod common;
+use common::rng::{small_rng, unit_normal};
+use common::{assert_close_named, rel_err};
 
 #[test]
 fn fit_recovers_rbf_lengthscale_and_noise() {
@@ -147,8 +115,8 @@ fn fit_recovers_rbf_lengthscale_and_noise() {
     gpr.get_params(&mut params).expect("len 2");
     let ell = params[0].exp();
     let noise = params[1].exp();
-    assert_near("lengthscale", ell, ELL_TRUE);
-    assert_near("noise", noise, NOISE_TRUE);
+    assert_close_named("lengthscale", ell, ELL_TRUE, REL_TOL);
+    assert_close_named("noise", noise, NOISE_TRUE, REL_TOL);
     assert!(
         rel_err(ell, ELL_TRUE) < rel_err(ELL_INIT, ELL_TRUE),
         "lengthscale should move toward the truth: fitted={ell}, init={ELL_INIT}, true={ELL_TRUE}"
@@ -187,8 +155,8 @@ fn fit_nonlinear_cg_recovers_rbf_lengthscale_and_noise() {
     gpr.get_params(&mut params).expect("len 2");
     let ell = params[0].exp();
     let noise = params[1].exp();
-    assert_near("lengthscale", ell, ELL_TRUE);
-    assert_near("noise", noise, NOISE_TRUE);
+    assert_close_named("lengthscale", ell, ELL_TRUE, REL_TOL);
+    assert_close_named("noise", noise, NOISE_TRUE, REL_TOL);
     assert!(
         rel_err(ell, ELL_TRUE) < rel_err(ELL_INIT, ELL_TRUE),
         "lengthscale should move toward the truth: fitted={ell}, init={ELL_INIT}, true={ELL_TRUE}"

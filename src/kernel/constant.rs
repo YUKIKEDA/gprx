@@ -333,33 +333,14 @@ mod tests {
     use super::ConstantKernel;
     use crate::error::GprError;
     use crate::kernel::Triangle;
-    use faer::{Mat, MatRef, mat};
+    use faer::{Mat, mat};
 
     const TOL: f64 = 1e-8;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn fill(n: usize, value: f64) -> Mat<f64> {
-        Mat::from_fn(n, n, |_, _| value)
-    }
+    use crate::test_check::{assert_close, assert_lower_close, fill};
 
     fn dummy_dist(n: usize) -> Mat<f64> {
         Mat::from_fn(n, n, |i, j| ((i + j) as f64) * 0.1)
-    }
-
-    fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-        let n = actual.nrows();
-        for col in 0..n {
-            for row in col..n {
-                assert_close(actual[(row, col)], expected[(row, col)]);
-            }
-        }
     }
 
     #[test]
@@ -372,8 +353,8 @@ mod tests {
             .expect("shape");
         for col in 0..3 {
             for row in 0..3 {
-                assert_close(k[(row, col)], 2.5);
-                assert_close(k[(row, col)], k[(col, row)]);
+                assert_close(k[(row, col)], 2.5, TOL);
+                assert_close(k[(row, col)], k[(col, row)], TOL);
             }
         }
     }
@@ -390,8 +371,8 @@ mod tests {
         kernel
             .apply(dist.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 42.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 42.0, TOL);
     }
 
     #[test]
@@ -414,8 +395,8 @@ mod tests {
             .grad(dist.as_ref(), dk.as_mut(), 0, Triangle::Full)
             .expect("idx 0");
         let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);
-        assert_close(dk[(0, 1)], fd);
-        assert_close(dk[(0, 1)], kernel.constant());
+        assert_close(dk[(0, 1)], fd, TOL);
+        assert_close(dk[(0, 1)], kernel.constant(), TOL);
     }
 
     #[test]
@@ -423,10 +404,10 @@ mod tests {
         let mut kernel = ConstantKernel::new(2.0).expect("valid");
         let mut params = [0.0];
         kernel.get_params(&mut params).expect("len 1");
-        assert_close(params[0], 2.0_f64.ln());
+        assert_close(params[0], 2.0_f64.ln(), TOL);
         params[0] = 0.5_f64.ln();
         kernel.set_params(&params).expect("len 1");
-        assert_close(kernel.constant(), 0.5);
+        assert_close(kernel.constant(), 0.5, TOL);
     }
 
     #[test]
@@ -437,10 +418,10 @@ mod tests {
         kernel
             .apply_cross(dist.as_ref(), out.as_mut())
             .expect("rect");
-        assert_close(out[(0, 1)], 3.0);
+        assert_close(out[(0, 1)], 3.0, TOL);
         let mut diag = [0.0, 0.0];
         kernel.fill_diag(&mut diag);
-        assert_close(diag[0], 3.0);
+        assert_close(diag[0], 3.0, TOL);
     }
 
     #[test]

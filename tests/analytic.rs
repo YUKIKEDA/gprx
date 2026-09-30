@@ -9,13 +9,8 @@ use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, VarianceKin
 
 const TOL: f64 = 1e-9;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
+mod common;
+use common::assert_close;
 
 fn rbf(dist2: f64, ell: f64) -> f64 {
     (-0.5 * dist2 / (ell * ell)).exp()
@@ -166,7 +161,7 @@ fn check_rbf_case(ell: f64, noise: f64, x: &[f64], y: &[f64], xs: &[f64]) -> Res
     let (a_inv, det) = if n == 2 { invert2(&a) } else { invert3(&a) };
     let restored = matvec(&a, &matvec(&a_inv, y, n), n);
     for i in 0..n {
-        assert_close(restored[i], y[i]);
+        assert_close(restored[i], y[i], TOL);
     }
     let alpha = matvec(&a_inv, y, n);
     let expected_nlml = nlml(y, &alpha, det);
@@ -199,24 +194,24 @@ fn check_rbf_case(ell: f64, noise: f64, x: &[f64], y: &[f64], xs: &[f64]) -> Res
     let pred_obs = gpr.predict(xs, xs.len(), 1)?;
     assert_eq!(pred_obs.variance_kind, VarianceKind::Observation);
     for i in 0..xs.len() {
-        assert_close(pred_lat.mean[i], mean[i]);
-        assert_close(pred_obs.mean[i], mean[i]);
-        assert_close(pred_lat.variance[i], latent[i]);
-        assert_close(pred_obs.variance[i], obs[i]);
-        assert_close(pred_obs.variance[i], pred_lat.variance[i] + noise);
+        assert_close(pred_lat.mean[i], mean[i], TOL);
+        assert_close(pred_obs.mean[i], mean[i], TOL);
+        assert_close(pred_lat.variance[i], latent[i], TOL);
+        assert_close(pred_obs.variance[i], obs[i], TOL);
+        assert_close(pred_obs.variance[i], pred_lat.variance[i] + noise, TOL);
     }
 
-    assert_close(gpr.neg_log_marginal_likelihood()?, expected_nlml);
+    assert_close(gpr.neg_log_marginal_likelihood()?, expected_nlml, TOL);
 
     let mut params = [0.0; 2];
     gpr.get_params(&mut params)?;
-    assert_close(params[0], ell.ln());
-    assert_close(params[1], noise.ln());
+    assert_close(params[0], ell.ln(), TOL);
+    assert_close(params[1], noise.ln(), TOL);
     let mut grad = [0.0; 2];
     let value = gpr.value_and_gradient_into(&params, &mut grad)?;
-    assert_close(value, expected_nlml);
-    assert_close(grad[0], expected_grad[0]);
-    assert_close(grad[1], expected_grad[1]);
+    assert_close(value, expected_nlml, TOL);
+    assert_close(grad[0], expected_grad[0], TOL);
+    assert_close(grad[1], expected_grad[1], TOL);
     Ok(())
 }
 

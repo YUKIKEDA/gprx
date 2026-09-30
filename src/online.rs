@@ -273,13 +273,7 @@ mod tests {
 
     const TOL: f64 = 1e-12;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     fn mark(ws: &mut OnlineWorkspace) {
         let n = ws.n_active;
@@ -298,11 +292,11 @@ mod tests {
         for j in 0..n {
             for i in j..n {
                 let base = (i * n + j) as f64;
-                assert_close(ws.ld_factor[(i, j)], 20.0 + base);
+                assert_close(ws.ld_factor[(i, j)], 20.0 + base, TOL);
             }
-            assert_close(ws.y[j], 40.0 + j as f64);
-            assert_close(ws.alpha[j], 50.0 + j as f64);
-            assert_close(ws.v_buf[j], 60.0 + j as f64);
+            assert_close(ws.y[j], 40.0 + j as f64, TOL);
+            assert_close(ws.alpha[j], 50.0 + j as f64, TOL);
+            assert_close(ws.v_buf[j], 60.0 + j as f64, TOL);
         }
     }
 
@@ -313,13 +307,13 @@ mod tests {
                 if i < n && j < n && i >= j {
                     continue;
                 }
-                assert_close(ws.ld_factor[(i, j)], 0.0);
+                assert_close(ws.ld_factor[(i, j)], 0.0, TOL);
             }
         }
         for i in n..cap {
-            assert_close(ws.y[i], 0.0);
-            assert_close(ws.alpha[i], 0.0);
-            assert_close(ws.v_buf[i], 0.0);
+            assert_close(ws.y[i], 0.0, TOL);
+            assert_close(ws.alpha[i], 0.0, TOL);
+            assert_close(ws.v_buf[i], 0.0, TOL);
         }
     }
 
