@@ -11,17 +11,12 @@ from __future__ import annotations
 import json
 import sys
 
-from perf.runners import run_gprx, run_python
-
 from .cases import write_case
+from .libs import RUNNERS
 
 #: A start that is not the default, so a wrong parameter order would show.
 THETA = {"lengthscale_init": 0.8, "signal_variance_init": 1.7, "noise_variance_init": 0.05}
 FIELDS = ("nlml", "rmse", "nlpd", "coverage95")
-RUNNERS = {
-    "gprx": lambda path: run_gprx("fit", path, features="fit-counts"),
-    "sklearn": lambda path: run_python("real.sklearn_fit", path),
-}
 #: Relative difference each metric may show between libraries.
 TOLERANCE = 1e-6
 
