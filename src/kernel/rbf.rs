@@ -215,7 +215,7 @@ impl RbfKernel {
         }
         write_triangle(dist, d_k, uplo, |d| {
             let d = finite_dist(d)?;
-            let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+            let dk = M::jet(-d * inv_two_ell_sq).d1;
             Ok(dk * d * inv_ell_sq)
         })
     }
@@ -283,7 +283,7 @@ impl RbfKernel {
         let inv_ell_sq = 1.0 / ell_sq;
         write_square_from_coords(x, d_k, uplo, |d| {
             let d = finite_dist(d)?;
-            let dk = M::jet_f64(-d * inv_two_ell_sq).d1;
+            let dk = M::jet(-d * inv_two_ell_sq).d1;
             Ok(dk * d * inv_ell_sq)
         })
     }
@@ -512,7 +512,7 @@ fn try_grad_rbf_cross<M: KernelMath>(
             i += 4;
         }
         while i < n {
-            let d1 = M::jet_f64(-s[i] * inv_two_ell_sq).d1;
+            let d1 = M::jet(-s[i] * inv_two_ell_sq).d1;
             let value = d1 * s[i] * inv_ell_sq;
             if !value.is_finite() {
                 return Err(GprError::NonFiniteKernelValue);
@@ -612,7 +612,7 @@ fn rbf_pair_two_dims<M: KernelMath>(
         let delta = a - b;
         s += delta * delta;
     }
-    let jet = M::jet_f64(-s * inv_two_ell_sq);
+    let jet = M::jet(-s * inv_two_ell_sq);
     if !jet.v.is_finite() {
         return Err(GprError::NonFiniteKernelValue);
     }
@@ -641,7 +641,7 @@ fn rbf_pair_with_s<M: KernelMath>(
         let delta = a - b;
         s += delta * delta;
     }
-    let jet = M::jet_f64(-s * inv_two_ell_sq);
+    let jet = M::jet(-s * inv_two_ell_sq);
     if !jet.v.is_finite() {
         return Err(GprError::NonFiniteKernelValue);
     }
@@ -650,7 +650,7 @@ fn rbf_pair_with_s<M: KernelMath>(
 
 fn rbf_from_sq_dist<M: KernelMath>(d: f64, inv_two_ell_sq: f64) -> Result<f64, GprError> {
     let d = finite_dist(d)?;
-    Ok(M::exp_f64(-d * inv_two_ell_sq))
+    Ok(M::exp(-d * inv_two_ell_sq))
 }
 
 fn rbf_hess_from_sq_dist<M: KernelMath>(
@@ -659,7 +659,7 @@ fn rbf_hess_from_sq_dist<M: KernelMath>(
     inv_ell_sq: f64,
 ) -> Result<f64, GprError> {
     let d = finite_dist(d)?;
-    let jet = M::jet_f64(-d * inv_two_ell_sq);
+    let jet = M::jet(-d * inv_two_ell_sq);
     let u = d * inv_ell_sq;
     let h = u * (jet.d2 * u - 2.0 * jet.d1);
     if h.is_finite() {

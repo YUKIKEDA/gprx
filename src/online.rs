@@ -13,14 +13,14 @@ use faer::linalg::triangular_solve::{
 use faer::{Col, Mat, MatMut, MatRef, Par};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::precision::StorageScalar;
+use crate::kernel::KernelScalar;
 
 /// Capacity-backed LDLT, targets, and a one-column solve buffer.
 ///
 /// `ld_factor` is `n_capacity × n_capacity`. Vectors are length
 /// `n_capacity`. The live prefix is `n_active`. Insert and predict read
 /// the factor only; there is no live Gram or distance cache.
-pub(crate) struct OnlineWorkspace<T: StorageScalar = f64> {
+pub(crate) struct OnlineWorkspace<T: KernelScalar = f64> {
     pub(crate) ld_factor: Mat<T>,
     pub(crate) y: Col<T>,
     pub(crate) alpha: Col<T>,
@@ -30,7 +30,7 @@ pub(crate) struct OnlineWorkspace<T: StorageScalar = f64> {
     pub(crate) n_capacity: usize,
 }
 
-impl<T: StorageScalar> OnlineWorkspace<T> {
+impl<T: KernelScalar> OnlineWorkspace<T> {
     /// Allocates a full workspace of order `n` (`n_active == n_capacity`).
     pub(crate) fn from_active(n: usize) -> Result<Self, GprError> {
         if n == 0 {
@@ -125,26 +125,9 @@ impl<T: StorageScalar> OnlineWorkspace<T> {
         let n = self.n_active;
         self.ensure_capacity(n + 1);
         if n > 0 {
-            if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-                let mut solved = vec![0.0f64; n];
-                for i in 0..n {
-                    solved[i] = self.v_buf[i].to_f64();
-                }
-                for i in 0..n {
-                    let mut sum = solved[i];
-                    for j in 0..i {
-                        sum -= self.ld_factor[(i, j)].to_f64() * solved[j];
-                    }
-                    solved[i] = sum;
-                }
-                for i in 0..n {
-                    self.v_buf[i] = T::from_f64(solved[i]);
-                }
-            } else {
-                let ld = self.ld_factor.as_ref().submatrix(0, 0, n, n);
-                let w = self.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
-                solve_unit_lower_triangular_in_place(ld, w, Par::Seq);
-            }
+            let ld = self.ld_factor.as_ref().submatrix(0, 0, n, n);
+            let w = self.v_buf.as_mat_mut().submatrix_mut(0, 0, n, 1);
+            T::solve_unit_lower_in_place(ld, w);
         }
         let mut vtdv = 0.0f64;
         for i in 0..n {
@@ -178,34 +161,8 @@ impl<T: StorageScalar> OnlineWorkspace<T> {
         compact_leading_col(&mut self.v_buf, n, index);
 
         ensure_delete_scratch::<T>(&mut self.delete_scratch, n);
-        let mut indices = [index];
-        if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-            let mut ld64 = Mat::<f64>::zeros(n, n);
-            for col in 0..n {
-                for row in col..n {
-                    ld64[(row, col)] = self.ld_factor[(row, col)].to_f64();
-                }
-            }
-            let scratch_req =
-                ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n.max(1), 1);
-            let mut scratch = MemBuffer::new(scratch_req);
-            let stack = MemStack::new(&mut scratch);
-            ldlt::update::delete_rows_and_cols_clobber(
-                ld64.as_mut(),
-                &mut indices,
-                Par::Seq,
-                stack,
-            );
-            for col in 0..n {
-                for row in col..n {
-                    self.ld_factor[(row, col)] = T::from_f64(ld64[(row, col)]);
-                }
-            }
-        } else {
-            let stack = MemStack::new(&mut self.delete_scratch);
-            let ld = self.ld_factor.as_mut().submatrix_mut(0, 0, n, n);
-            ldlt::update::delete_rows_and_cols_clobber(ld, &mut indices, Par::Seq, stack);
-        }
+        let ld = self.ld_factor.as_mut().submatrix_mut(0, 0, n, n);
+        T::ldlt_delete_row_col(ld, index, n, &mut self.delete_scratch);
         zero_trailing_row_col(&mut self.ld_factor, n);
         self.n_active = n - 1;
         Ok(())
@@ -246,7 +203,7 @@ impl<T: StorageScalar> OnlineWorkspace<T> {
     }
 }
 
-impl<T: StorageScalar> Clone for OnlineWorkspace<T> {
+impl<T: KernelScalar> Clone for OnlineWorkspace<T> {
     fn clone(&self) -> Self {
         Self {
             ld_factor: self.ld_factor.clone(),
@@ -260,7 +217,7 @@ impl<T: StorageScalar> Clone for OnlineWorkspace<T> {
     }
 }
 
-impl<T: StorageScalar> fmt::Debug for OnlineWorkspace<T> {
+impl<T: KernelScalar> fmt::Debug for OnlineWorkspace<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnlineWorkspace")
             .field("n_active", &self.n_active)
@@ -269,18 +226,18 @@ impl<T: StorageScalar> fmt::Debug for OnlineWorkspace<T> {
     }
 }
 
-fn delete_scratch_req<T: StorageScalar>(n: usize) -> StackReq {
+fn delete_scratch_req<T: KernelScalar>(n: usize) -> StackReq {
     ldlt::update::delete_rows_and_cols_clobber_scratch::<T>(n.max(1), 1)
 }
 
-fn ensure_delete_scratch<T: StorageScalar>(buf: &mut MemBuffer, n: usize) {
+fn ensure_delete_scratch<T: KernelScalar>(buf: &mut MemBuffer, n: usize) {
     let req = delete_scratch_req::<T>(n);
     if buf.len() < req.size_bytes() {
         *buf = MemBuffer::new(req);
     }
 }
 
-fn copy_leading_lower<T: StorageScalar>(src: &Mat<T>, dest: &mut Mat<T>, n: usize) {
+fn copy_leading_lower<T: KernelScalar>(src: &Mat<T>, dest: &mut Mat<T>, n: usize) {
     for j in 0..n {
         for i in j..n {
             dest[(i, j)] = src[(i, j)];
@@ -288,25 +245,83 @@ fn copy_leading_lower<T: StorageScalar>(src: &Mat<T>, dest: &mut Mat<T>, n: usiz
     }
 }
 
-fn copy_leading_col<T: StorageScalar>(src: &Col<T>, dest: &mut Col<T>, n: usize) {
+fn copy_leading_col<T: KernelScalar>(src: &Col<T>, dest: &mut Col<T>, n: usize) {
     for i in 0..n {
         dest[i] = src[i];
     }
 }
 
-fn compact_leading_col<T: StorageScalar>(col: &mut Col<T>, n: usize, index: usize) {
+fn compact_leading_col<T: KernelScalar>(col: &mut Col<T>, n: usize, index: usize) {
     for i in index..(n - 1) {
         col[i] = col[i + 1];
     }
     col[n - 1] = T::from_f64(0.0);
 }
 
-fn zero_trailing_row_col<T: StorageScalar>(mat: &mut Mat<T>, n: usize) {
+fn zero_trailing_row_col<T: KernelScalar>(mat: &mut Mat<T>, n: usize) {
     let last = n - 1;
     let zero = T::from_f64(0.0);
     for i in 0..n {
         mat[(i, last)] = zero;
         mat[(last, i)] = zero;
+    }
+}
+
+/// Solves `L w = v` in place for unit-lower `L` (`f64`, faer).
+pub(crate) fn solve_unit_lower_faer(ld: MatRef<'_, f64>, v: MatMut<'_, f64>) {
+    solve_unit_lower_triangular_in_place(ld, v, Par::Seq);
+}
+
+/// Solves `L w = v` in place for unit-lower `L`, accumulating in `f64`.
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn solve_unit_lower_f64_accum(ld: MatRef<'_, f32>, mut v: MatMut<'_, f32>) {
+    let n = ld.nrows();
+    let mut solved = vec![0.0f64; n];
+    for i in 0..n {
+        solved[i] = f64::from(v[(i, 0)]);
+    }
+    for i in 0..n {
+        let mut sum = solved[i];
+        for j in 0..i {
+            sum -= f64::from(ld[(i, j)]) * solved[j];
+        }
+        solved[i] = sum;
+    }
+    for i in 0..n {
+        v[(i, 0)] = solved[i] as f32;
+    }
+}
+
+/// Deletes row and column `index` from the `n×n` LDLT in `ld` (`f64`, faer).
+pub(crate) fn ldlt_delete_faer(
+    ld: MatMut<'_, f64>,
+    index: usize,
+    _n: usize,
+    scratch: &mut MemBuffer,
+) {
+    let mut indices = [index];
+    let stack = MemStack::new(scratch);
+    ldlt::update::delete_rows_and_cols_clobber(ld, &mut indices, Par::Seq, stack);
+}
+
+/// Deletes row and column `index` from the `n×n` LDLT in `ld` through an
+/// `f64` copy, then rounds back to `f32`.
+pub(crate) fn ldlt_delete_via_f64(mut ld: MatMut<'_, f32>, index: usize, n: usize) {
+    let mut ld64 = Mat::<f64>::zeros(n, n);
+    for col in 0..n {
+        for row in col..n {
+            ld64[(row, col)] = f64::from(ld[(row, col)]);
+        }
+    }
+    let scratch_req = ldlt::update::delete_rows_and_cols_clobber_scratch::<f64>(n.max(1), 1);
+    let mut scratch = MemBuffer::new(scratch_req);
+    let stack = MemStack::new(&mut scratch);
+    let mut indices = [index];
+    ldlt::update::delete_rows_and_cols_clobber(ld64.as_mut(), &mut indices, Par::Seq, stack);
+    for col in 0..n {
+        for row in col..n {
+            ld[(row, col)] = ld64[(row, col)] as f32;
+        }
     }
 }
 

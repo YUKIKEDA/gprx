@@ -362,7 +362,7 @@ impl MaternKernel {
                     0.0
                 } else {
                     let rho = scale * r;
-                    let jet = M::jet_f64(-rho);
+                    let jet = M::jet(-rho);
                     let psi = (1.0 + rho) * jet.d1 - jet.v;
                     psi * scale * delta / r
                 };
@@ -477,7 +477,7 @@ impl MaternKernel {
                     0.0
                 } else {
                     let rho = scale * r;
-                    let jet = M::jet_f64(-rho);
+                    let jet = M::jet(-rho);
                     let psi = (1.0 + rho) * jet.d1 - jet.v;
                     let dpsi = 2.0 * jet.d1 - (1.0 + rho) * jet.d2;
                     -scale * delta / r * (rho * dpsi + psi)
@@ -537,7 +537,7 @@ impl MaternKernel {
 ///
 /// `from_x1` differentiates the `x2` gradient with respect to `x1`.
 fn matern_fast_coord_hess(scale: f64, r: f64, da: f64, db: f64, same: bool, from_x1: bool) -> f64 {
-    let jet0 = <crate::math::FastApprox as crate::math::KernelMath>::jet_f64(0.0);
+    let jet0 = <crate::math::FastApprox as crate::math::KernelMath>::jet(0.0);
     let dpsi0 = 2.0 * jet0.d1 - jet0.d2;
     if r == 0.0 {
         return if same {
@@ -548,7 +548,7 @@ fn matern_fast_coord_hess(scale: f64, r: f64, da: f64, db: f64, same: bool, from
         };
     }
     let rho = scale * r;
-    let jet = <crate::math::FastApprox as crate::math::KernelMath>::jet_f64(-rho);
+    let jet = <crate::math::FastApprox as crate::math::KernelMath>::jet(-rho);
     let psi = (1.0 + rho) * jet.d1 - jet.v;
     let dpsi = 2.0 * jet.d1 - (1.0 + rho) * jet.d2;
     let sign = if from_x1 { 1.0 } else { -1.0 };
@@ -601,14 +601,14 @@ fn euclid_pair_two(
 
 pub(crate) fn matern_from_r<M: crate::math::KernelMath>(nu: MaternNu, r: f64) -> f64 {
     match nu {
-        MaternNu::Half => M::exp_f64(-r),
+        MaternNu::Half => M::exp(-r),
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            (1.0 + rho) * M::exp_f64(-rho)
+            (1.0 + rho) * M::exp(-rho)
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            (1.0 + rho + rho * rho / 3.0) * M::exp_f64(-rho)
+            (1.0 + rho + rho * rho / 3.0) * M::exp(-rho)
         }
     }
 }
@@ -629,15 +629,15 @@ pub(crate) fn matern_dk_dtheta_iso<M: crate::math::KernelMath>(nu: MaternNu, r: 
         };
     }
     match nu {
-        MaternNu::Half => r * M::jet_f64(-r).d1,
+        MaternNu::Half => r * M::jet(-r).d1,
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             rho * ((1.0 + rho) * jet.d1 - jet.v)
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             rho * (a * jet.d1 - (1.0 + 2.0 * rho / 3.0) * jet.v)
         }
@@ -664,18 +664,18 @@ pub(crate) fn matern_d2k_dtheta2_iso<M: crate::math::KernelMath>(nu: MaternNu, r
     }
     match nu {
         MaternNu::Half => {
-            let jet = M::jet_f64(-r);
+            let jet = M::jet(-r);
             r * r * jet.d2 - r * jet.d1
         }
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             let u = (1.0 + rho) * jet.d1 - jet.v;
             rho * (-u + rho * ((1.0 + rho) * jet.d2 - 2.0 * jet.d1))
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             let ap = 1.0 + 2.0 * rho / 3.0;
             let app = 2.0 / 3.0;
@@ -712,15 +712,15 @@ pub(crate) fn matern_dk_dtheta_ard<M: crate::math::KernelMath>(
         return 0.0;
     }
     match nu {
-        MaternNu::Half => M::jet_f64(-r).d1 * dim_term / r,
+        MaternNu::Half => M::jet(-r).d1 * dim_term / r,
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             ((1.0 + rho) * jet.d1 - jet.v) * 3.0_f64.sqrt() * dim_term / r
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             let ap = 1.0 + 2.0 * rho / 3.0;
             (a * jet.d1 - ap * jet.v) * 5.0_f64.sqrt() * dim_term / r
@@ -773,7 +773,7 @@ pub(crate) fn matern_d2k_dtheta_ard<M: crate::math::KernelMath>(
     }
     match nu {
         MaternNu::Half => {
-            let jet = M::jet_f64(-r);
+            let jet = M::jet(-r);
             let rr = r * r;
             if same {
                 jet.d2 * dim_i * dim_i / rr + jet.d1 * (-2.0 * dim_i / r + dim_i * dim_i / (rr * r))
@@ -783,14 +783,14 @@ pub(crate) fn matern_d2k_dtheta_ard<M: crate::math::KernelMath>(
         }
         MaternNu::ThreeHalves => {
             let rho = 3.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             let phi_p = jet.v - (1.0 + rho) * jet.d1;
             let phi_pp = (1.0 + rho) * jet.d2 - 2.0 * jet.d1;
             matern_ard_hess_from_phi(phi_p, phi_pp, r, dim_i, dim_j, same, 3.0_f64.sqrt())
         }
         MaternNu::FiveHalves => {
             let rho = 5.0_f64.sqrt() * r;
-            let jet = M::jet_f64(-rho);
+            let jet = M::jet(-rho);
             let a = 1.0 + rho + rho * rho / 3.0;
             let ap = 1.0 + 2.0 * rho / 3.0;
             let app = 2.0 / 3.0;

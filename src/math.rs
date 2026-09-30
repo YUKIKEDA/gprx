@@ -8,7 +8,7 @@ use wide::{CmpEq, CmpGt, CmpLe, CmpLt, f64x4, i64x4};
 
 /// Value and the first two derivatives of the kernel `exp` approximation.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ExpJet<T> {
+pub struct ExpJet<T> {
     pub v: T,
     pub d1: T,
     pub d2: T,
@@ -48,17 +48,11 @@ pub(crate) trait KernelMath: Copy + Send + Sync + 'static {
     /// `true` keeps the libm `exp` algebra. `false` differentiates the polynomial.
     const ACCURATE: bool;
 
-    /// `exp(x)` in `f64`.
-    fn exp_f64(x: f64) -> f64;
+    /// `exp(x)` in the compute scalar.
+    fn exp<T: crate::kernel::KernelScalar>(x: T) -> T;
 
-    /// `exp(x)`, `d/dx`, and `d²/dx²` in `f64`.
-    fn jet_f64(x: f64) -> ExpJet<f64>;
-
-    /// `exp(x)` in `f32`.
-    fn exp_f32(x: f32) -> f32;
-
-    /// `exp(x)`, `d/dx`, and `d²/dx²` in `f32`.
-    fn jet_f32(x: f32) -> ExpJet<f32>;
+    /// `exp(x)`, `d/dx`, and `d²/dx²` in the compute scalar.
+    fn jet<T: crate::kernel::KernelScalar>(x: T) -> ExpJet<T>;
 
     /// Four `f64` exponents. Value only.
     fn exp_f64x4(x: f64x4) -> f64x4;
@@ -71,23 +65,12 @@ impl KernelMath for Accurate {
     const ACCURATE: bool = true;
 
     #[inline(always)]
-    fn exp_f64(x: f64) -> f64 {
+    fn exp<T: crate::kernel::KernelScalar>(x: T) -> T {
         x.exp()
     }
 
     #[inline(always)]
-    fn jet_f64(x: f64) -> ExpJet<f64> {
-        let e = x.exp();
-        ExpJet { v: e, d1: e, d2: e }
-    }
-
-    #[inline(always)]
-    fn exp_f32(x: f32) -> f32 {
-        x.exp()
-    }
-
-    #[inline(always)]
-    fn jet_f32(x: f32) -> ExpJet<f32> {
+    fn jet<T: crate::kernel::KernelScalar>(x: T) -> ExpJet<T> {
         let e = x.exp();
         ExpJet { v: e, d1: e, d2: e }
     }
@@ -107,23 +90,13 @@ impl KernelMath for FastApprox {
     const ACCURATE: bool = false;
 
     #[inline(always)]
-    fn exp_f64(x: f64) -> f64 {
-        fast_exp_f64(x)
+    fn exp<T: crate::kernel::KernelScalar>(x: T) -> T {
+        x.fast_exp()
     }
 
     #[inline(always)]
-    fn jet_f64(x: f64) -> ExpJet<f64> {
-        fast_jet_f64(x)
-    }
-
-    #[inline(always)]
-    fn exp_f32(x: f32) -> f32 {
-        fast_exp_f32(x)
-    }
-
-    #[inline(always)]
-    fn jet_f32(x: f32) -> ExpJet<f32> {
-        fast_jet_f32(x)
+    fn jet<T: crate::kernel::KernelScalar>(x: T) -> ExpJet<T> {
+        x.fast_jet()
     }
 
     #[inline(always)]
@@ -236,7 +209,7 @@ fn reduce_f32(x: f32) -> (f32, f32) {
 }
 
 #[inline(always)]
-fn fast_exp_f64(x: f64) -> f64 {
+pub(crate) fn fast_exp_f64(x: f64) -> f64 {
     if !x.is_finite() {
         return x.exp();
     }
@@ -245,7 +218,7 @@ fn fast_exp_f64(x: f64) -> f64 {
 }
 
 #[inline(always)]
-fn fast_jet_f64(x: f64) -> ExpJet<f64> {
+pub(crate) fn fast_jet_f64(x: f64) -> ExpJet<f64> {
     if !x.is_finite() {
         let e = x.exp();
         return ExpJet { v: e, d1: e, d2: e };
@@ -259,7 +232,7 @@ fn fast_jet_f64(x: f64) -> ExpJet<f64> {
 }
 
 #[inline(always)]
-fn fast_exp_f32(x: f32) -> f32 {
+pub(crate) fn fast_exp_f32(x: f32) -> f32 {
     if !x.is_finite() {
         return x.exp();
     }
@@ -268,7 +241,7 @@ fn fast_exp_f32(x: f32) -> f32 {
 }
 
 #[inline(always)]
-fn fast_jet_f32(x: f32) -> ExpJet<f32> {
+pub(crate) fn fast_jet_f32(x: f32) -> ExpJet<f32> {
     if !x.is_finite() {
         let e = x.exp();
         return ExpJet { v: e, d1: e, d2: e };
@@ -361,7 +334,7 @@ mod tests {
     use wide::f64x4;
 
     fn assert_exp_f64(x: f64) {
-        let value = FastApprox::exp_f64(x);
+        let value = FastApprox::exp(x);
         let truth = x.exp();
         let tol = 2.0_f64.powi(-23);
         if truth.abs() < tol {
@@ -376,7 +349,7 @@ mod tests {
     }
 
     fn assert_exp_f32(x: f32) {
-        let value = FastApprox::exp_f32(x);
+        let value = FastApprox::exp(x);
         let truth = x.exp();
         let bound = 8.0 * f32::EPSILON;
         if truth.abs() < bound {
@@ -416,11 +389,11 @@ mod tests {
 
     #[test]
     fn f64_derivative_matches_finite_difference_of_the_polynomial() {
-        let h = 1.0e-4;
-        for x in [-2.0, -0.5, -1.0e-3, 0.0, 0.3] {
-            let mid = FastApprox::jet_f64(x);
-            let hi = FastApprox::exp_f64(x + h);
-            let lo = FastApprox::exp_f64(x - h);
+        let h = 1.0e-4_f64;
+        for x in [-2.0_f64, -0.5, -1.0e-3, 0.0, 0.3] {
+            let mid = FastApprox::jet(x);
+            let hi = FastApprox::exp(x + h);
+            let lo = FastApprox::exp(x - h);
             let fd = (hi - lo) / (2.0 * h);
             let scale = mid.d1.abs().max(1.0);
             assert!(
@@ -428,8 +401,8 @@ mod tests {
                 "x={x} fd={fd} d1={}",
                 mid.d1
             );
-            let hi2 = FastApprox::jet_f64(x + h).d1;
-            let lo2 = FastApprox::jet_f64(x - h).d1;
+            let hi2 = FastApprox::jet(x + h).d1;
+            let lo2 = FastApprox::jet(x - h).d1;
             let fd2 = (hi2 - lo2) / (2.0 * h);
             let scale2 = mid.d2.abs().max(1.0);
             assert!(
@@ -452,7 +425,7 @@ mod tests {
         }
         let d1 = FastApprox::d1_f64x4(x).to_array();
         for (lane, value) in d1.iter().enumerate() {
-            let scalar = FastApprox::jet_f64(lanes[lane]).d1;
+            let scalar = FastApprox::jet(lanes[lane]).d1;
             let scale = scalar.abs().max(1.0);
             assert!(
                 (value - scalar).abs() <= 1.0e-12 * scale,
@@ -462,7 +435,7 @@ mod tests {
         let extreme = [-40.0, -713.9, -800.0, 800.0];
         let got = FastApprox::exp_f64x4(f64x4::new(extreme)).to_array();
         for (lane, &x) in extreme.iter().enumerate() {
-            let scalar = FastApprox::exp_f64(x);
+            let scalar = FastApprox::exp(x);
             if scalar.is_infinite() {
                 assert!(got[lane].is_infinite(), "lane={lane} x={x}");
             } else if scalar.abs() < 2.0_f64.powi(-23) {

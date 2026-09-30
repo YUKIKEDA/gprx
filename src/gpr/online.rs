@@ -9,6 +9,7 @@ use std::time::Instant;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
+use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, CoordMode, FillDistances, GramKernel, KernelScalar, KernelSpec,
 };
@@ -18,7 +19,7 @@ use crate::online::OnlineWorkspace;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, FullRecompute, Optimizer, PoleRecompute};
 use crate::persist::{self, PersistedModel, persist_err};
-use crate::precision::{DoublePrecision, GpScalar, StorageScalar};
+use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::QueryWorkspace;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -214,8 +215,8 @@ pub struct OnlineGpr<
     pub(crate) y_train: Vec<f64>,
     pub(crate) factor_alpha: Vec<P::Storage>,
     pub(crate) alpha: Vec<P::Refine>,
-    pub(crate) x_cast: <P::Storage as StorageScalar>::ColCast,
-    pub(crate) y_cast: <P::Storage as StorageScalar>::RowCast,
+    pub(crate) x_cast: <P::Storage as crate::kernel::ScalarOps>::ColCast,
+    pub(crate) y_cast: <P::Storage as crate::kernel::ScalarOps>::RowCast,
     pub(crate) n: usize,
     pub(crate) d: usize,
     pub(crate) registry: PointRegistry,
@@ -1263,7 +1264,7 @@ where
     Ok(())
 }
 
-fn neg_mll_from_ldlt<T: StorageScalar>(ld: MatRef<'_, T>, y: &[T], alpha: &[T], n: usize) -> f64 {
+fn neg_mll_from_ldlt<T: KernelScalar>(ld: MatRef<'_, T>, y: &[T], alpha: &[T], n: usize) -> f64 {
     let mut quad = T::from_f64(0.0);
     let mut log_det = T::from_f64(0.0);
     for i in 0..n {

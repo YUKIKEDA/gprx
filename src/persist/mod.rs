@@ -619,24 +619,14 @@ where
     let n = l.nrows();
     let mut packed_l = vec![T::from_f64(0.0); n * n];
     pack_lower(l, &mut packed_l);
-    let l_dtype = scalar_dtype::<T>()?;
-    let alpha_dtype = scalar_dtype::<A>()?;
+    let l_dtype = <T as crate::kernel::ScalarOps>::DTYPE;
+    let alpha_dtype = <A as crate::kernel::ScalarOps>::DTYPE;
     Ok(PackedFactor {
         l_dtype,
         l: scalar_bytes(&packed_l).to_vec(),
         alpha_dtype,
         alpha: scalar_bytes(alpha).to_vec(),
     })
-}
-
-fn scalar_dtype<T>() -> Result<safetensors::Dtype, GprError> {
-    if std::mem::size_of::<T>() == std::mem::size_of::<f32>() {
-        Ok(safetensors::Dtype::F32)
-    } else if std::mem::size_of::<T>() == std::mem::size_of::<f64>() {
-        Ok(safetensors::Dtype::F64)
-    } else {
-        Err(persist_err("persist scalar is not f32 or f64"))
-    }
 }
 
 pub(crate) fn save_fitted<O, S, C, B, M, P>(
