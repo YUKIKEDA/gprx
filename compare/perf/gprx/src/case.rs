@@ -189,6 +189,23 @@ pub struct RealCase {
     pub protocol: String,
     pub max_iterations: u64,
     pub gtol: f64,
+    /// `exact`, `sgpr` or `svgp` (absent in exact cases).
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default)]
+    pub z: Vec<f64>,
+    #[serde(default)]
+    pub n_inducing: usize,
+    #[serde(default)]
+    pub adam_lr: f64,
+    #[serde(default)]
+    pub adam_batch_size: usize,
+    #[serde(default)]
+    pub adam_epochs: u64,
+}
+
+fn default_model() -> String {
+    "exact".to_string()
 }
 
 /// One real-dataset fit row (also written by the Python runners).

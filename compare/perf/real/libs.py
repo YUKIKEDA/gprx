@@ -35,3 +35,18 @@ RUNNERS: dict[str, "callable[[Path], Row]"] = {
     # friedrich has only isotropic kernels; the cells stay in the table as N/A.
     "friedrich": lambda path: na_row("friedrich has no ARD kernel", FIT_FIELDS),
 }
+
+
+#: Sparse models: only gprx, GPyTorch and GPy have one.
+SPARSE_RUNNERS: dict[str, "callable[[Path], Row]"] = {
+    "gprx": RUNNERS["gprx"],
+    "gpytorch": _python("gpytorch_sparse_fit"),
+    "gpy": _python("gpy_sparse_fit"),
+    "sklearn": lambda path: na_row("scikit-learn has no sparse GP", FIT_FIELDS),
+    "libgp": lambda path: na_row("libgp has no sparse GP", FIT_FIELDS),
+    "friedrich": lambda path: na_row("friedrich has no sparse GP", FIT_FIELDS),
+}
+
+
+def runners_for(model: str) -> dict[str, "callable[[Path], Row]"]:
+    return RUNNERS if model == "exact" else SPARSE_RUNNERS

@@ -21,16 +21,53 @@ MATCHED_MAX_ITERATIONS = 100
 MATCHED_GTOL = float(np.sqrt(np.finfo(np.float64).eps))
 
 
-def case_path(dataset: str, split: int, protocol: str) -> Path:
-    return CASES / f"{dataset}_s{split}_{protocol}.json"
+#: Inducing points and the SVGP Adam setting (Adam has no library default that
+#: suits n in the hundreds of thousands, so SVGP runs one shared setting).
+N_INDUCING = 512
+ADAM_LR = 0.01
+ADAM_BATCH_SIZE = 1024
+ADAM_EPOCHS = 3
+KMEANS_SEED = 0
+KMEANS_SUBSAMPLE = 100_000
 
 
-def write_case(dataset: str, split: int, protocol: str) -> Path:
+def case_path(dataset: str, split: int, protocol: str, model: str = "exact") -> Path:
+    tag = "" if model == "exact" else f"_{model}"
+    return CASES / f"{dataset}{tag}_s{split}_{protocol}.json"
+
+
+def inducing_points(x: np.ndarray, m: int) -> np.ndarray:
+    """k-means centres (seed fixed) of the standardized training inputs; a
+    subsample of at most ``KMEANS_SUBSAMPLE`` rows when n is larger."""
+    from sklearn.cluster import MiniBatchKMeans
+
+    rng = np.random.default_rng(KMEANS_SEED)
+    if x.shape[0] > KMEANS_SUBSAMPLE:
+        x = x[rng.choice(x.shape[0], KMEANS_SUBSAMPLE, replace=False)]
+    model = MiniBatchKMeans(n_clusters=m, random_state=KMEANS_SEED, n_init=1, batch_size=4096)
+    return model.fit(x).cluster_centers_
+
+
+def write_case(
+    dataset: str, split: int, protocol: str, model: str = "exact", n_inducing: int = N_INDUCING
+) -> Path:
     data = load_split(DATASETS[dataset], split)
-    path = case_path(dataset, split, protocol)
+    path = case_path(dataset, split, protocol, model)
+    extra: dict = {}
+    if model != "exact":
+        z = inducing_points(data.x_train, n_inducing)
+        extra = {
+            "z": z.T.ravel().tolist(),
+            "n_inducing": int(z.shape[0]),
+            "adam_lr": ADAM_LR,
+            "adam_batch_size": ADAM_BATCH_SIZE,
+            "adam_epochs": ADAM_EPOCHS,
+        }
     write_json(
         path,
         {
+            **extra,
+            "model": model,
             "name": f"{dataset}_s{split}",
             "dataset": dataset,
             "split": split,
