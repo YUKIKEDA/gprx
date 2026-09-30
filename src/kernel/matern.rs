@@ -345,7 +345,7 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is not `3/2`,
+    /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is `1/2`,
     /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
@@ -354,152 +354,7 @@ impl MaternKernel {
         d_k: MatMut<'_, T>,
         dim: usize,
     ) -> Result<(), GprError> {
-        self.grad_wrt_coord_dim_math::<crate::math::Accurate, _>(x1, x2, d_k, dim)
-    }
-
-    pub(crate) fn grad_wrt_coord_dim_math<M: crate::math::KernelMath, T: KernelScalar>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d_k: MatMut<'_, T>,
-        dim: usize,
-    ) -> Result<(), GprError> {
-        if self.nu != MaternNu::ThreeHalves {
-            return Err(GprError::CoordGradientUnsupported);
-        }
-        super::require_coord_grad(x1, x2, d_k.as_ref(), dim)?;
-        let inv_ell_sq = T::from_f64(1.0 / (self.lengthscale() * self.lengthscale()));
-        let scale = T::from_f64(3.0_f64.sqrt() / self.lengthscale());
-        super::write_rect(d_k, |row, col| {
-            let (r, delta) = euclid_pair(x1, row, x2, col, dim)?;
-            Ok(if M::ACCURATE {
-                let psi = (-scale * r).exp();
-                T::from_f64(3.0) * inv_ell_sq * psi * delta
-            } else if r == T::from_f64(0.0) {
-                T::from_f64(0.0)
-            } else {
-                let rho = scale * r;
-                let jet = M::jet(-rho);
-                let psi = (T::from_f64(1.0) + rho) * jet.d1 - jet.v;
-                psi * scale * delta / r
-            })
-        })
-    }
-
-    pub(crate) fn hess_wrt_coord_dims<M: crate::math::KernelMath, T: KernelScalar>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        dim_a: usize,
-        dim_b: usize,
-    ) -> Result<(), GprError> {
-        if self.nu != MaternNu::ThreeHalves {
-            return Err(GprError::CoordGradientUnsupported);
-        }
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_a)?;
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_b)?;
-        let ell = T::from_f64(self.lengthscale());
-        let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
-        let scale = T::from_f64(3.0_f64.sqrt()) / ell;
-        super::write_rect(d2_k, |row, col| {
-            let (r, da, db) = euclid_pair_two(x1, row, x2, col, dim_a, dim_b)?;
-            let same = dim_a == dim_b;
-            let three = T::from_f64(3.0);
-            let zero = T::from_f64(0.0);
-            Ok(if M::ACCURATE {
-                let psi = (-scale * r).exp();
-                let mut value = if same {
-                    -three * inv_ell_sq * psi
-                } else {
-                    zero
-                };
-                if r > zero {
-                    value = three * inv_ell_sq * psi * (scale * da * db / r);
-                    if same {
-                        value -= three * inv_ell_sq * psi;
-                    }
-                }
-                value
-            } else {
-                matern_fast_coord_hess(scale, r, da, db, same, false)
-            })
-        })
-    }
-
-    pub(crate) fn hess_wrt_coord_mixed<M: crate::math::KernelMath, T: KernelScalar>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        dim_x1: usize,
-        dim_x2: usize,
-    ) -> Result<(), GprError> {
-        if self.nu != MaternNu::ThreeHalves {
-            return Err(GprError::CoordGradientUnsupported);
-        }
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x1)?;
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim_x2)?;
-        let ell = T::from_f64(self.lengthscale());
-        let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
-        let scale = T::from_f64(3.0_f64.sqrt()) / ell;
-        super::write_rect(d2_k, |row, col| {
-            let (r, d1, d2) = euclid_pair_two(x1, row, x2, col, dim_x1, dim_x2)?;
-            let same = dim_x1 == dim_x2;
-            let three = T::from_f64(3.0);
-            let zero = T::from_f64(0.0);
-            Ok(if M::ACCURATE {
-                let psi = (-scale * r).exp();
-                let mut value = if same { three * inv_ell_sq * psi } else { zero };
-                if r > zero {
-                    value = three * inv_ell_sq * psi * (-scale * d1 * d2 / r);
-                    if same {
-                        value += three * inv_ell_sq * psi;
-                    }
-                }
-                value
-            } else {
-                matern_fast_coord_hess(scale, r, d1, d2, same, true)
-            })
-        })
-    }
-
-    pub(crate) fn hess_theta_coord_dim<M: crate::math::KernelMath, T: KernelScalar>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        param_idx: usize,
-        dim: usize,
-    ) -> Result<(), GprError> {
-        if param_idx != 0 {
-            return Err(GprError::IndexOutOfRange {
-                reason: "Matern has a single parameter at index 0".to_owned(),
-            });
-        }
-        if self.nu != MaternNu::ThreeHalves {
-            return Err(GprError::CoordGradientUnsupported);
-        }
-        super::require_coord_grad(x1, x2, d2_k.as_ref(), dim)?;
-        let ell = T::from_f64(self.lengthscale());
-        let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
-        let scale = T::from_f64(3.0_f64.sqrt()) / ell;
-        super::write_rect(d2_k, |row, col| {
-            let (r, delta) = euclid_pair(x1, row, x2, col, dim)?;
-            Ok(if M::ACCURATE {
-                let psi = (-scale * r).exp();
-                T::from_f64(3.0) * inv_ell_sq * psi * delta * (scale * r - T::from_f64(2.0))
-            } else if r == T::from_f64(0.0) {
-                T::from_f64(0.0)
-            } else {
-                let rho = scale * r;
-                let jet = M::jet(-rho);
-                let one = T::from_f64(1.0);
-                let psi = (one + rho) * jet.d1 - jet.v;
-                let dpsi = T::from_f64(2.0) * jet.d1 - (one + rho) * jet.d2;
-                -scale * delta / r * (rho * dpsi + psi)
-            })
-        })
+        super::radial::grad_wrt_coord_dim::<crate::math::Accurate, _>(self, x1, x2, d_k, dim)
     }
 
     pub(crate) fn grad_cross_from_coords<M: crate::math::KernelMath, T: KernelScalar>(
@@ -540,51 +395,6 @@ impl MaternKernel {
             finite_kernel(matern_d2k_dtheta2_iso::<M, _>(nu, r / ell))
         })
     }
-}
-
-/// Second derivative of Matérn 3/2 w.r.t. coordinates, for [`crate::FastApprox`].
-///
-/// `from_x1` differentiates the `x2` gradient with respect to `x1`.
-fn matern_fast_coord_hess<T: KernelScalar>(
-    scale: T,
-    r: T,
-    da: T,
-    db: T,
-    same: bool,
-    from_x1: bool,
-) -> T {
-    let jet0 = <crate::math::FastApprox as crate::math::MathOps>::jet(T::from_f64(0.0));
-    let dpsi0 = T::from_f64(2.0) * jet0.d1 - jet0.d2;
-    if r == T::from_f64(0.0) {
-        return if same {
-            let sign = if from_x1 {
-                T::from_f64(1.0)
-            } else {
-                -T::from_f64(1.0)
-            };
-            sign * scale * scale * dpsi0
-        } else {
-            T::from_f64(0.0)
-        };
-    }
-    let rho = scale * r;
-    let jet = <crate::math::FastApprox as crate::math::MathOps>::jet(-rho);
-    let psi = (T::from_f64(1.0) + rho) * jet.d1 - jet.v;
-    let dpsi = T::from_f64(2.0) * jet.d1 - (T::from_f64(1.0) + rho) * jet.d2;
-    let sign = if from_x1 {
-        T::from_f64(1.0)
-    } else {
-        -T::from_f64(1.0)
-    };
-    let same_term = if same {
-        if from_x1 { psi / r } else { -psi / r }
-    } else {
-        T::from_f64(0.0)
-    };
-    scale
-        * (dpsi * (sign * scale * da / r) * db / r
-            + same_term
-            + psi * (-sign * da * db) / (r * r * r))
 }
 
 fn euclid_pair<T: KernelScalar>(

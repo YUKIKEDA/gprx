@@ -1,10 +1,12 @@
 use super::apply::{combine_diag, mul_assign};
+use super::coord::{self, Dir};
 use super::{
     CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
     require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
+use crate::kernel::radial;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
 
@@ -322,15 +324,27 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match self {
-            Self::Rbf(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
-            Self::Matern(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
-            Self::RbfArd(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
+            Self::Rbf(leaf) => radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim),
+            Self::Matern(leaf) => radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim),
+            Self::RbfArd(leaf) => radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim),
+            Self::MaternArd(leaf) => radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim),
+            Self::Periodic(leaf) => radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim),
+            Self::RationalQuadratic(leaf) => {
+                radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim)
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                radial::grad_wrt_coord_dim::<M, _>(leaf, x1, x2, d_k, dim)
+            }
             Self::White(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
-            Self::Custom(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
+            Self::Constant(_) => coord::zero_block(x1, x2, d_k, &[dim]),
+            Self::Linear(leaf) => coord::linear_grad_dim(leaf, x1, x2, d_k, dim),
+            Self::Custom(leaf) => coord::custom_grad_dim(leaf, x1, x2, d_k, dim),
             Self::Sum(terms) => fold_coord_sum(terms, d_k.as_mut(), scratch, |term, dest| {
                 term.grad_wrt_coord_dim_with::<M>(x1, x2, dest, dim, Mat::new().as_mut())
             }),
-            _ => Err(GprError::CoordGradientUnsupported),
+            Self::Product(terms) => {
+                Self::product_coord::<M>(terms, x1, x2, d_k, (Dir::X2(dim), None))
+            }
         }
     }
 
@@ -345,14 +359,43 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match self {
-            Self::Rbf(leaf) => leaf.hess_wrt_coord_dims::<M, _>(x1, x2, d2_k, dim_a, dim_b),
-            Self::Matern(leaf) => leaf.hess_wrt_coord_dims::<M, _>(x1, x2, d2_k, dim_a, dim_b),
-            Self::RbfArd(leaf) => leaf.hess_wrt_coord_dims::<M, _>(x1, x2, d2_k, dim_a, dim_b),
+            Self::Rbf(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
+            Self::Matern(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
+            Self::RbfArd(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
+            Self::MaternArd(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
+            Self::Periodic(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
+            Self::RationalQuadratic(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
             Self::White(leaf) => leaf.hess_wrt_coord_dims(x1, x2, d2_k, dim_a, dim_b),
+            Self::Constant(_) => coord::zero_block(x1, x2, d2_k, &[dim_a, dim_b]),
+            Self::Linear(_) => coord::zero_block(x1, x2, d2_k, &[dim_a, dim_b]),
+            Self::Custom(leaf) => {
+                coord::custom_hess_dims(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
+            }
             Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
                 term.hess_wrt_coord_dims::<M>(x1, x2, dest, dim_a, dim_b, Mat::new().as_mut())
             }),
-            _ => Err(GprError::CoordGradientUnsupported),
+            Self::Product(terms) => Self::product_coord::<M>(
+                terms,
+                x1,
+                x2,
+                d2_k,
+                (Dir::X2(dim_a), Some(Dir::X2(dim_b))),
+            ),
         }
     }
 
@@ -367,14 +410,43 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match self {
-            Self::Rbf(leaf) => leaf.hess_wrt_coord_mixed::<M, _>(x1, x2, d2_k, dim_x1, dim_x2),
-            Self::Matern(leaf) => leaf.hess_wrt_coord_mixed::<M, _>(x1, x2, d2_k, dim_x1, dim_x2),
-            Self::RbfArd(leaf) => leaf.hess_wrt_coord_mixed::<M, _>(x1, x2, d2_k, dim_x1, dim_x2),
+            Self::Rbf(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
+            Self::Matern(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
+            Self::RbfArd(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
+            Self::MaternArd(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
+            Self::Periodic(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
+            Self::RationalQuadratic(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                radial::hess_wrt_coord::<M, _>(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
             Self::White(leaf) => leaf.hess_wrt_coord_mixed(x1, x2, d2_k, dim_x1, dim_x2),
+            Self::Constant(_) => coord::zero_block(x1, x2, d2_k, &[dim_x1, dim_x2]),
+            Self::Linear(leaf) => coord::linear_mixed(leaf, x1, x2, d2_k, (dim_x1, dim_x2)),
+            Self::Custom(leaf) => {
+                coord::custom_hess_dims(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
+            }
             Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
                 term.hess_wrt_coord_mixed::<M>(x1, x2, dest, dim_x1, dim_x2, Mat::new().as_mut())
             }),
-            _ => Err(GprError::CoordGradientUnsupported),
+            Self::Product(terms) => Self::product_coord::<M>(
+                terms,
+                x1,
+                x2,
+                d2_k,
+                (Dir::X1(dim_x1), Some(Dir::X2(dim_x2))),
+            ),
         }
     }
 
@@ -387,15 +459,48 @@ impl<T: KernelScalar> CompiledKernel<T> {
         dim: usize,
     ) -> Result<(), GprError> {
         match self {
-            Self::Rbf(leaf) => leaf.hess_theta_coord_dim::<M, _>(x1, x2, d2_k, param_idx, dim),
-            Self::Matern(leaf) => leaf.hess_theta_coord_dim::<M, _>(x1, x2, d2_k, param_idx, dim),
-            Self::RbfArd(leaf) => leaf.hess_theta_coord_dim::<M, _>(x1, x2, d2_k, param_idx, dim),
+            Self::Rbf(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
+            Self::Matern(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
+            Self::RbfArd(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
+            Self::MaternArd(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
+            Self::Periodic(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
+            Self::RationalQuadratic(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
+            Self::RationalQuadraticArd(leaf) => {
+                radial::hess_theta_coord_dim::<M, _>(leaf, x1, x2, d2_k, param_idx, dim)
+            }
             Self::White(leaf) => leaf.hess_theta_coord_dim(x1, x2, d2_k, param_idx, dim),
+            Self::Constant(leaf) => {
+                coord::constant_param(leaf, param_idx)?;
+                coord::zero_block(x1, x2, d2_k, &[dim])
+            }
+            Self::Linear(leaf) => {
+                coord::linear_param(param_idx)?;
+                coord::linear_grad_dim(leaf, x1, x2, d2_k, dim)
+            }
+            Self::Custom(leaf) => coord::custom_theta_dim(leaf, x1, x2, d2_k, param_idx, dim),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.hess_theta_coord_dim::<M>(x1, x2, d2_k, local, dim)
             }
-            _ => Err(GprError::CoordGradientUnsupported),
+            Self::Product(terms) => Self::product_coord::<M>(
+                terms,
+                x1,
+                x2,
+                d2_k,
+                (Dir::Theta(param_idx), Some(Dir::X2(dim))),
+            ),
         }
     }
 
@@ -445,7 +550,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 }
                 leaf.grad_wrt_coord_dim(x1, x2, d_k, 0)
             }
-            Self::Custom(_) => Err(GprError::CoordGradientUnsupported),
+            Self::Custom(leaf) => coord::custom_cross_grad(leaf, x1, x2, d_k, param_idx),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_cross_points_with::<M>(x1, x2, d_k, local, scratch, nested)

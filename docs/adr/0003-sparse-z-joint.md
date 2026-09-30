@@ -17,7 +17,7 @@ Joint optimization adds `m×d` parameters. L-BFGS history holds `history_size` v
 - `factor` moves neither `θ` nor `Z`
 - Params for free `Z` are kernel `θ`, likelihood `θ`, then column-major `Z` (`m×d`)
 - `Z` is raw coordinates. The interval is the open box of per-dimension min/max of training `X`, widened a little
-- The `Z` gradient is `grad_wrt_coord_dim`. One call per dimension, not per point. An unsupported kernel returns `GprError::CoordGradientUnsupported`
+- The `Z` gradient is `grad_wrt_coord_dim`, and its Hessian is `hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim`. One call per dimension, not per point. Every built-in kernel and Sum / Product tree has them. Matérn `ν = 1/2` returns `GprError::CoordGradientUnsupported`: its coordinate derivative is undefined at coincident points, and `Z ⊂ X` starts there (a type-level exclusion would need a separate kernel type for `FreeInducing`, which the row rejected). A `Custom` leaf provides them through the squared-distance derivatives of `KernelTerm`
 
 ## Rationale
 
