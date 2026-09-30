@@ -27,6 +27,7 @@ mod linear;
 mod matern;
 mod matern_ard;
 mod periodic;
+mod radial;
 mod rbf;
 mod rbf_ard;
 mod rq;

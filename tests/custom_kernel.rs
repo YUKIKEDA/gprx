@@ -187,6 +187,90 @@ impl<T: KernelScalar> KernelTerm<T> for ExpQuad {
         KernelTerm::<T>::hess(self, sq_dist(x).as_ref(), d2_k, i, j, uplo)
     }
 
+    fn grad_cross(
+        &self,
+        dist: MatRef<'_, T>,
+        mut d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        require_one(param_idx)?;
+        let (half, full) = self.scales::<T>();
+        for col in 0..dist.ncols() {
+            for row in 0..dist.nrows() {
+                let s = dist[(row, col)];
+                d_k[(row, col)] = (-s * half).exp() * s * full;
+            }
+        }
+        Ok(())
+    }
+
+    fn hess_cross(
+        &self,
+        dist: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_one(i)?;
+        require_one(j)?;
+        let (half, full) = self.scales::<T>();
+        let two = T::from_f64(2.0);
+        for col in 0..dist.ncols() {
+            for row in 0..dist.nrows() {
+                let s = dist[(row, col)];
+                let u = s * full;
+                d2_k[(row, col)] = (-s * half).exp() * u * (u - two);
+            }
+        }
+        Ok(())
+    }
+
+    fn grad_wrt_sq_dist(
+        &self,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let (half, full) = self.scales::<T>();
+        for col in 0..dist.ncols() {
+            for row in 0..dist.nrows() {
+                out[(row, col)] = -(-dist[(row, col)] * half).exp() * half;
+            }
+        }
+        let _ = full;
+        Ok(())
+    }
+
+    fn hess_wrt_sq_dist(
+        &self,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let (half, _) = self.scales::<T>();
+        for col in 0..dist.ncols() {
+            for row in 0..dist.nrows() {
+                out[(row, col)] = (-dist[(row, col)] * half).exp() * half * half;
+            }
+        }
+        Ok(())
+    }
+
+    fn grad_wrt_sq_dist_theta(
+        &self,
+        dist: MatRef<'_, T>,
+        mut out: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        require_one(param_idx)?;
+        let (half, full) = self.scales::<T>();
+        for col in 0..dist.ncols() {
+            for row in 0..dist.nrows() {
+                let s = dist[(row, col)];
+                out[(row, col)] = (-s * half).exp() * full * (T::from_f64(1.0) - s * half);
+            }
+        }
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
         Box::new(self.clone())
     }
@@ -397,4 +481,45 @@ fn generic_leaf_matches_builtin_in_f32() {
         &expect64,
         1e-3,
     );
+}
+
+/// A `Custom` leaf that implements the rectangular and coordinate
+/// derivatives fits `Sgpr` with fixed and free inducing points, and the fit
+/// equals the built-in RBF's.
+#[test]
+fn custom_leaf_fits_sgpr_like_the_builtin() {
+    use gprx::{FreeInducing, Lbfgs, Sgpr};
+    let (x, y, _) = problem();
+    let n = y.len();
+    let z: Vec<f64> = x.iter().step_by(3).copied().collect();
+    let m = z.len();
+    let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+    let nlml = |kernel: KernelSpec, free: bool| -> f64 {
+        if free {
+            Sgpr::new(kernel, likelihood)
+                .with_optimizer(Lbfgs::new())
+                .with_inducing(FreeInducing)
+                .fit(&x, n, 1, &y, &z, m)
+                .map_err(|(_, e)| e)
+                .expect("free fit")
+                .neg_log_marginal_likelihood()
+                .expect("nlml")
+        } else {
+            Sgpr::new(kernel, likelihood)
+                .with_optimizer(Lbfgs::new())
+                .fit(&x, n, 1, &y, &z, m)
+                .map_err(|(_, e)| e)
+                .expect("fit")
+                .neg_log_marginal_likelihood()
+                .expect("nlml")
+        }
+    };
+    for free in [false, true] {
+        let custom = nlml(exp_quad(), free);
+        let built_in = nlml(builtin(), free);
+        assert!(
+            (custom - built_in).abs() < 1e-6 * built_in.abs().max(1.0),
+            "free={free}: custom {custom} vs built-in {built_in}"
+        );
+    }
 }

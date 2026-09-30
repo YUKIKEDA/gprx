@@ -285,21 +285,80 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         uplo: Triangle,
     ) -> Result<(), GprError>;
 
-    /// Writes `∂K(X1, X2)/∂X2[*, dim]` into `d_k`.
+    /// Writes `∂K/∂θ_{param_idx}` of a rectangular block from squared
+    /// distances (train × test) into `d_k`.
     ///
-    /// The default is [`GprError::CoordGradientUnsupported`]. Built-in
-    /// stationary leaves used by free inducing points override this.
+    /// `Sgpr` and `Svgp` read `∂K(Z, X)/∂θ`. The default is
+    /// [`GprError::CoordGradientUnsupported`].
     ///
     /// # Errors
     ///
     /// Returns [`GprError::CoordGradientUnsupported`] when this leaf has no
-    /// coordinate derivative, or the same shape errors as [`Self::apply_cross`].
-    fn grad_wrt_coord_dim(
+    /// rectangular derivative, [`GprError::IndexOutOfRange`] if `param_idx` is
+    /// out of range, or the same shape errors as [`Self::apply_cross`].
+    fn grad_cross(
         &self,
-        _x1: MatRef<'_, T>,
-        _x2: MatRef<'_, T>,
+        _dist: MatRef<'_, T>,
         _d_k: MatMut<'_, T>,
-        _dim: usize,
+        _param_idx: usize,
+    ) -> Result<(), GprError> {
+        Err(GprError::CoordGradientUnsupported)
+    }
+
+    /// Writes `∂²K/∂θ_i ∂θ_j` of a rectangular block from squared distances
+    /// into `d2_k`. The default is [`GprError::CoordGradientUnsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::grad_cross`], with the pair `(i, j)`.
+    fn hess_cross(
+        &self,
+        _dist: MatRef<'_, T>,
+        _d2_k: MatMut<'_, T>,
+        _i: usize,
+        _j: usize,
+    ) -> Result<(), GprError> {
+        Err(GprError::CoordGradientUnsupported)
+    }
+
+    /// Writes `∂k/∂(d²)`, the derivative of the kernel with respect to the
+    /// squared distance, into `out` (same shape as `dist`).
+    ///
+    /// With this and [`Self::grad_wrt_sq_dist_theta`] and
+    /// [`Self::hess_wrt_sq_dist`], `Sgpr<FreeInducing>` differentiates the
+    /// kernel by the coordinates of the inducing points. The default is
+    /// [`GprError::CoordGradientUnsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::CoordGradientUnsupported`] when this leaf has no
+    /// such derivative, or the same shape errors as [`Self::apply_cross`].
+    fn grad_wrt_sq_dist(&self, _dist: MatRef<'_, T>, _out: MatMut<'_, T>) -> Result<(), GprError> {
+        Err(GprError::CoordGradientUnsupported)
+    }
+
+    /// Writes `∂²k/∂(d²)²` into `out`. The default is
+    /// [`GprError::CoordGradientUnsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::grad_wrt_sq_dist`].
+    fn hess_wrt_sq_dist(&self, _dist: MatRef<'_, T>, _out: MatMut<'_, T>) -> Result<(), GprError> {
+        Err(GprError::CoordGradientUnsupported)
+    }
+
+    /// Writes `∂²k/∂θ_{param_idx} ∂(d²)` into `out`. The default is
+    /// [`GprError::CoordGradientUnsupported`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::grad_wrt_sq_dist`], plus [`GprError::IndexOutOfRange`]
+    /// if `param_idx` is out of range.
+    fn grad_wrt_sq_dist_theta(
+        &self,
+        _dist: MatRef<'_, T>,
+        _out: MatMut<'_, T>,
+        _param_idx: usize,
     ) -> Result<(), GprError> {
         Err(GprError::CoordGradientUnsupported)
     }
@@ -500,14 +559,48 @@ impl<T: KernelScalar> CustomKernel<T> {
         self.term().hess_points(x, d2_k, i, j, uplo)
     }
 
-    pub(super) fn grad_wrt_coord_dim(
+    pub(super) fn grad_cross(
         &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
+        dist: MatRef<'_, T>,
         d_k: MatMut<'_, T>,
-        dim: usize,
+        param_idx: usize,
     ) -> Result<(), GprError> {
-        self.term().grad_wrt_coord_dim(x1, x2, d_k, dim)
+        self.term().grad_cross(dist, d_k, param_idx)
+    }
+
+    pub(super) fn hess_cross(
+        &self,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        self.term().hess_cross(dist, d2_k, i, j)
+    }
+
+    pub(super) fn grad_wrt_sq_dist(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.term().grad_wrt_sq_dist(dist, out)
+    }
+
+    pub(super) fn hess_wrt_sq_dist(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.term().hess_wrt_sq_dist(dist, out)
+    }
+
+    pub(super) fn grad_wrt_sq_dist_theta(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        self.term().grad_wrt_sq_dist_theta(dist, out, param_idx)
     }
 }
 

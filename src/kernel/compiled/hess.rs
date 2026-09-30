@@ -1,4 +1,5 @@
 use super::apply::{combine_diag, mul_assign};
+use super::coord;
 use super::grad::{
     ProductBuffers, broadcast_self_diag, eval_cell, mul_fold, product_with_owner, require_diag_len,
     scale_by_other_diags, term_index_for_param,
@@ -385,7 +386,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 }
                 leaf.grad_wrt_coord_dim(x1, x2, d2_k, 0)
             }
-            Self::Custom(_) => Err(GprError::CoordGradientUnsupported),
+            Self::Custom(leaf) => coord::custom_cross_hess(leaf, x1, x2, d2_k, (i, j)),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,

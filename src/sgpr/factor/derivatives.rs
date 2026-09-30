@@ -542,6 +542,10 @@ where
     let mut h22 = Mat::zeros(m, m);
     compiled.hess_wrt_coord_dims::<M>(z, z, h22.as_mut(), e, f, ks.scratch(m, m))?;
     let mut d_kmm = Mat::zeros(m, m);
+    let mut h12 = Mat::zeros(m, m);
+    compiled.hess_wrt_coord_mixed::<M>(z, z, h12.as_mut(), e, f, ks.scratch(m, m))?;
+    let mut h21 = Mat::zeros(m, m);
+    compiled.hess_wrt_coord_mixed::<M>(z, z, h21.as_mut(), f, e, ks.scratch(m, m))?;
     if p == q {
         for i in 0..m {
             if i != p {
@@ -549,11 +553,11 @@ where
                 d_kmm[(p, i)] += h22[(i, p)];
             }
         }
+        // k(z_p, z_p) moves through both arguments: the two second
+        // derivatives in one argument and the two mixed ones. They cancel for
+        // a stationary kernel and not for `Linear`.
+        d_kmm[(p, p)] = h22[(p, p)] + h22[(p, p)] + h12[(p, p)] + h21[(p, p)];
     } else {
-        let mut h12 = Mat::zeros(m, m);
-        compiled.hess_wrt_coord_mixed::<M>(z, z, h12.as_mut(), e, f, ks.scratch(m, m))?;
-        let mut h21 = Mat::zeros(m, m);
-        compiled.hess_wrt_coord_mixed::<M>(z, z, h21.as_mut(), f, e, ks.scratch(m, m))?;
         d_kmm[(p, q)] = h12[(p, q)];
         d_kmm[(q, p)] = h21[(q, p)];
     }
