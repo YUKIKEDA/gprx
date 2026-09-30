@@ -5,14 +5,14 @@ mod model;
 pub(crate) mod online;
 mod types;
 
+pub(crate) use crate::workspace::FitBuffers;
+pub(crate) use model::Policies;
 pub use model::{FittedGpr, Gpr};
 pub use online::OnlineGpr;
 #[cfg(feature = "insert-stages")]
 pub use online::take_insert_stages;
-pub(crate) use types::AllocWorkspace;
+pub(crate) use types::with_kernel_exp;
 pub use types::{
-    AdaptiveJitter, CachedDistances, CholeskyBuffer, DistanceCachePolicy, FixedJitter,
-    JitterPolicy, NoDistanceCache, PointId, PredictOptions, Prediction, PredictiveCovariance,
-    RetainCholesky, ReuseCholesky, UncachedDistances, VarianceKind,
+    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FixedJitter, JitterPolicy, KernelExp,
+    PointId, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
 };
-pub(crate) use types::{DistanceCachePersist, DistanceCacheSlot, FitBuffers};

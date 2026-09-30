@@ -186,9 +186,9 @@ struct PredGolden<'a> {
     xs_n_cols: usize,
 }
 
-fn check_predictions<O, S>(
+fn check_predictions<O>(
     name: &str,
-    gpr: &mut FittedGpr<O, S>,
+    gpr: &mut FittedGpr<O>,
     golden: PredGolden<'_>,
 ) -> Result<(), GprError> {
     let pred_lat = gpr.predict_with(

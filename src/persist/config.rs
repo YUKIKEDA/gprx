@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
-use crate::gpr::DistanceCachePersist;
+use crate::gpr::{DistanceCachePolicy, KernelExp};
 use crate::param::{BoundedParam, Interval};
 use crate::{GaussianLikelihood, JitterPolicy};
 
@@ -125,11 +125,17 @@ impl MathJson {
         matches!(kind, Self::Accurate)
     }
 
-    pub(super) fn from_math<M: crate::math::KernelMath>() -> Self {
-        if M::ACCURATE {
-            Self::Accurate
-        } else {
-            Self::FastApprox
+    pub(super) fn encode(math: KernelExp) -> Self {
+        match math {
+            KernelExp::Accurate => Self::Accurate,
+            KernelExp::FastApprox => Self::FastApprox,
+        }
+    }
+
+    pub(super) fn decode(self) -> KernelExp {
+        match self {
+            Self::Accurate => KernelExp::Accurate,
+            Self::FastApprox => KernelExp::FastApprox,
         }
     }
 }
@@ -255,17 +261,17 @@ pub(super) enum DistanceCacheJson {
 }
 
 impl DistanceCacheJson {
-    pub(super) fn encode(policy: DistanceCachePersist) -> Self {
+    pub(super) fn encode(policy: DistanceCachePolicy) -> Self {
         match policy {
-            DistanceCachePersist::Cached => Self::Always,
-            DistanceCachePersist::Uncached => Self::Never,
+            DistanceCachePolicy::Cached => Self::Always,
+            DistanceCachePolicy::Uncached => Self::Never,
         }
     }
 
-    pub(super) fn decode(self) -> DistanceCachePersist {
+    pub(super) fn decode(self) -> DistanceCachePolicy {
         match self {
-            Self::Always => DistanceCachePersist::Cached,
-            Self::Never => DistanceCachePersist::Uncached,
+            Self::Always => DistanceCachePolicy::Cached,
+            Self::Never => DistanceCachePolicy::Uncached,
         }
     }
 }

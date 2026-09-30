@@ -12,9 +12,9 @@ use super::JitterPolicy;
 
 /// Writes the training Gram matrix.
 ///
-/// [`crate::CachedDistances`] fills `dist_cache` (and ARD `ard_sq_diff`) once
-/// and reuses them. [`crate::UncachedDistances`] has no those tensors;
-/// isotropic and mixed trees compute distances from `X`.
+/// [`crate::DistanceCachePolicy::Cached`] fills `dist_cache` (and ARD
+/// `ard_sq_diff`) once and reuses them. [`crate::DistanceCachePolicy::Uncached`]
+/// has no such tensors; isotropic and mixed trees compute distances from `X`.
 fn apply_train_kernel<T, W, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
     x: MatRef<'_, T>,

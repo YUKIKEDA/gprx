@@ -1,7 +1,5 @@
 //! [`FittedGpr`] factorization, prediction, and refit.
 
-use std::marker::PhantomData;
-
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
@@ -19,7 +17,7 @@ use crate::linalg::{
 };
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
-use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute};
+use crate::optimizer::{Fixed, OptResult, Optimizer};
 use crate::param::Interval;
 use crate::param::write_params;
 use crate::persist::{self, PersistedModel};
@@ -34,24 +32,48 @@ use super::super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
     fill_cached_inputs, neg_mll_from_factor,
 };
-use super::{AllocWorkspace, DistanceCacheSlot, FitBuffers, JitterPolicy, RetainCholesky};
-use super::{FittedGpr, Gpr};
+use super::{DistanceCachePolicy, FitBuffers, with_kernel_exp};
+use super::{FittedGpr, Gpr, Policies};
 
-impl<O, S, C, B, M, P> FittedGpr<O, S, C, B, M, P>
+/// [`Optimizer::USES_CHANGE_INDICES`] of `O` for the objective `obj`.
+fn uses_change_indices<Obj, O: Optimizer<Obj>>(_obj: &Obj) -> bool {
+    O::USES_CHANGE_INDICES
+}
+
+/// Allocates fit buffers for `n` points under `policies`.
+///
+/// A kernel that reads neither pairwise distances nor the ARD `(Δx_d)²`
+/// tensor gets no distance cache, whatever the policy says.
+pub(crate) fn fit_buffers<P: GpScalar>(
+    n: usize,
+    d: usize,
+    policies: Policies,
+    compiled: &CompiledKernel<P::Storage>,
+) -> Result<FitBuffers<P>, GprError> {
+    let cache = if compiled.reads_distances()? || compiled.needs_ard_sq_diff() {
+        policies.distance_cache
+    } else {
+        DistanceCachePolicy::Uncached
+    };
+    let mut workspace = FitBuffers::<P>::new(n, cache, policies.cholesky_buffer)?;
+    if workspace.has_distance_cache() && compiled.needs_ard_sq_diff() {
+        workspace.ensure_ard_if_cached(n, d)?;
+    }
+    Ok(workspace)
+}
+
+impl<O, P> FittedGpr<O, P>
 where
-    C: DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
-    M: crate::math::KernelMath,
 {
     #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
     pub(crate) fn prepare(
-        gpr: Gpr<O, S, C, B, M, P>,
+        gpr: Gpr<O, P>,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<Self, (Gpr<O, S, C, B, M, P>, GprError)> {
+    ) -> Result<Self, (Gpr<O, P>, GprError)> {
         if let Err(err) = validate_training(x, n_rows, n_cols, y) {
             return Err((gpr, err));
         }
@@ -71,16 +93,11 @@ where
         if let Err(err) = y_fitted.transform(&mut y_buf) {
             return Err((gpr, err));
         }
-        let mut workspace = match FitBuffers::<C, B, P>::new(n_rows) {
+        let compiled = gpr.kernel.compile_as::<P::Storage>();
+        let workspace = match fit_buffers::<P>(n_rows, n_cols, gpr.policies, &compiled) {
             Ok(ws) => ws,
             Err(err) => return Err((gpr, err)),
         };
-        let compiled = gpr.kernel.compile_as::<P::Storage>();
-        if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
-            if let Err(err) = workspace.ensure_ard_if_cached(n_rows, n_cols) {
-                return Err((gpr, err));
-            }
-        }
         Ok(Self {
             kernel: gpr.kernel,
             compiled,
@@ -90,8 +107,7 @@ where
             x_transform: x_fitted,
             y_transform: y_fitted,
             optimizer: gpr.optimizer,
-            distance_cache: gpr.distance_cache,
-            jitter_policy: gpr.jitter_policy,
+            policies: gpr.policies,
             workspace,
             query: QueryWorkspace::new(),
             x_obs: x.to_vec(),
@@ -105,23 +121,19 @@ where
             n: n_rows,
             d: n_cols,
             mapped_factor: None,
-            _recompute: PhantomData,
-            _math: PhantomData,
         })
     }
 
     /// Drops `L` / `α` / training data and returns a trainer with the current
-    /// kernel, likelihood, transforms, optimizer, distance-cache slot, and
-    /// jitter policy.
-    pub fn into_trainer(self) -> Gpr<O, S, C, B, M, P> {
+    /// kernel, likelihood, transforms, optimizer, and policies.
+    pub fn into_trainer(self) -> Gpr<O, P> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
             self.x_unfitted,
             self.y_unfitted,
             self.optimizer,
-            self.distance_cache,
-            self.jitter_policy,
+            self.policies,
         )
     }
 
@@ -157,7 +169,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(mut self) -> Result<OnlineGpr<O, S, C, B, M, P>, GprError> {
+    pub fn into_online(mut self) -> Result<OnlineGpr<O, P>, GprError> {
         self.publish_predict_alpha()?;
         let n = self.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
@@ -174,8 +186,7 @@ where
             self.x_transform,
             self.y_transform,
             self.optimizer,
-            self.distance_cache,
-            self.jitter_policy,
+            self.policies,
             workspace,
             self.query,
             self.x_obs,
@@ -189,20 +200,14 @@ where
         ))
     }
 
-    pub(crate) fn from_online_snapshot(
-        online: &OnlineGpr<O, S, C, B, M, P>,
-    ) -> Result<Self, GprError>
+    pub(crate) fn from_online_snapshot(online: &OnlineGpr<O, P>) -> Result<Self, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         let n = online.n;
         let d = online.d;
-        let mut workspace = FitBuffers::<C, B, P>::new(n)?;
         let compiled = online.compiled.clone();
-        if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
-            workspace.ensure_ard_if_cached(n, d)?;
-        }
+        let workspace = fit_buffers::<P>(n, d, online.policies, &compiled)?;
         let mut fitted = Self {
             kernel: online.kernel.clone(),
             compiled,
@@ -212,8 +217,7 @@ where
             x_transform: online.x_transform.clone_box(),
             y_transform: online.y_transform.clone_box(),
             optimizer: online.optimizer.clone(),
-            distance_cache: online.distance_cache,
-            jitter_policy: online.jitter_policy,
+            policies: online.policies,
             workspace,
             query: online.query.clone(),
             x_obs: online.x_obs.clone(),
@@ -227,8 +231,6 @@ where
             n,
             d,
             mapped_factor: None,
-            _recompute: PhantomData,
-            _math: PhantomData,
         };
         fitted.factorize_current()?;
         Ok(fitted)
@@ -279,7 +281,7 @@ where
     ///
     /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
     /// by factorizing. The Cholesky buffer policy is not written; load
-    /// reconstructs [`RetainCholesky`].
+    /// reconstructs [`crate::CholeskyBuffer::Retain`].
     ///
     /// # Errors
     ///
@@ -332,14 +334,14 @@ where
     ///
     /// Does not write a solver into a persist directory. A model loaded as
     /// [`crate::persist::LoadedGpr`] is [`Fixed`]; call this before `refit`
-    /// to search again. `S` follows the same Cholesky-pole rule as
+    /// to search again. Incremental rebuilds follow the same rule as
     /// [`Gpr::with_optimizer`].
     ///
     /// # Examples
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::persist::{LoadedDistance, LoadedGpr, PersistRegistry};
+    /// use gprx::persist::{LoadedGpr, PersistRegistry};
     /// use gprx::{GaussianLikelihood, Gpr, Lbfgs};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
@@ -355,9 +357,7 @@ where
     /// ));
     /// let _ = std::fs::remove_dir_all(&dir);
     /// fitted.save(&dir)?;
-    /// let LoadedGpr::Distance(LoadedDistance::Cached(model)) =
-    ///     LoadedGpr::load(&dir, &PersistRegistry::new())?
-    /// else {
+    /// let LoadedGpr::Double(model) = LoadedGpr::load(&dir, &PersistRegistry::new())? else {
     ///     return Ok(());
     /// };
     /// let mut model = model.with_optimizer(Lbfgs::new());
@@ -366,10 +366,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2: PoleRecompute<B>>(
-        self,
-        optimizer: O2,
-    ) -> FittedGpr<O2, O2::Strategy, C, B, M, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> FittedGpr<O2, P> {
         FittedGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -379,8 +376,7 @@ where
             x_transform: self.x_transform,
             y_transform: self.y_transform,
             optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
+            policies: self.policies,
             workspace: self.workspace,
             query: self.query,
             x_obs: self.x_obs,
@@ -394,8 +390,6 @@ where
             n: self.n,
             d: self.d,
             mapped_factor: self.mapped_factor,
-            _recompute: PhantomData,
-            _math: PhantomData,
         }
     }
 
@@ -404,12 +398,23 @@ where
         self.workspace.core().factor_jitter
     }
 
-    pub(crate) fn jitter_policy(&self) -> JitterPolicy {
-        self.jitter_policy
+    pub(crate) fn policies(&self) -> Policies {
+        self.policies
     }
 
-    pub(crate) fn distance_cache_slot(&self) -> C {
-        self.distance_cache
+    /// Returns the distance-cache policy carried from the trainer.
+    pub fn distance_cache_policy(&self) -> crate::DistanceCachePolicy {
+        self.policies.distance_cache
+    }
+
+    /// Returns the Cholesky buffer policy carried from the trainer.
+    pub fn cholesky_buffer(&self) -> crate::CholeskyBuffer {
+        self.policies.cholesky_buffer
+    }
+
+    /// Returns the kernel `exp` used by fit and predict.
+    pub fn math(&self) -> crate::KernelExp {
+        self.policies.math
     }
 
     pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
@@ -538,17 +543,17 @@ where
         let likelihood_before = self.likelihood;
         let mapped_before = self.mapped_factor.take();
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        if let Err(err) = factor_train_with_policy::<_, _, M>(
+        if let Err(err) = with_kernel_exp!(self.policies.math, M => factor_train_with_policy::<_, _, M>(
             &compiled,
             x,
             &mut self.workspace,
             &self.y_train,
             likelihood.noise_variance(),
             FactorPolicy {
-                jitter: self.jitter_policy,
+                jitter: self.policies.jitter,
                 stage: CholeskyStage::Fit,
             },
-        ) {
+        )) {
             self.workspace = workspace;
             self.alpha = alpha;
             self.factor_alpha = factor_alpha;
@@ -572,7 +577,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn objective(&mut self) -> GprObjective<'_, O, S, C, B, M, P> {
+    pub(crate) fn objective(&mut self) -> GprObjective<'_, O, P> {
         GprObjective::new(self)
     }
 
@@ -595,8 +600,8 @@ where
     ///
     /// `params` and `out` are kernel parameters followed by the likelihood
     /// parameter. One Cholesky produces `L` and `α`; `W = ααᵀ - A⁻¹` is
-    /// formed from that factor. [`RetainCholesky`] keeps `W` in a dedicated
-    /// buffer. [`crate::ReuseCholesky`] writes `W` over `L` and this method
+    /// formed from that factor. [`crate::CholeskyBuffer::Retain`] keeps `W` in a dedicated
+    /// buffer. [`crate::CholeskyBuffer::Reuse`] writes `W` over `L` and this method
     /// refactors afterwards so [`Self::predict`] still sees `L`. Kernel
     /// `∂A/∂θ` goes through `exp_buf`. Product trees also use
     /// `kernel_scratch`. The returned value is the same as
@@ -648,7 +653,7 @@ where
         Ok(nlml)
     }
 
-    /// Joint MLL+grad used during `fit`. Does not restore `L` when `B`
+    /// Joint MLL+grad used during `fit`. Does not restore `L` when the buffer
     /// overwrites the factor; the optimizer's next step rebuilds `A`.
     pub(crate) fn value_and_gradient_into_fit(
         &mut self,
@@ -662,17 +667,17 @@ where
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        if let Err(err) = factor_train_with_policy::<_, _, M>(
+        if let Err(err) = with_kernel_exp!(self.policies.math, M => factor_train_with_policy::<_, _, M>(
             &compiled,
             x,
             &mut self.workspace,
             &self.y_train,
             likelihood.noise_variance(),
             FactorPolicy {
-                jitter: self.jitter_policy,
+                jitter: self.policies.jitter,
                 stage: CholeskyStage::Fit,
             },
-        ) {
+        )) {
             let _ = self.factorize_current();
             return Err(err);
         }
@@ -731,12 +736,12 @@ where
         for (i, slot) in leaf_grams.iter_mut().enumerate() {
             if dirty[i] {
                 let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-                apply_compiled_to::<_, _, M>(
+                with_kernel_exp!(self.policies.math, M => apply_compiled_to::<_, _, M>(
                     compiled.leaf_at(i)?,
                     x,
                     &mut self.workspace,
                     slot.as_mut(),
-                )?;
+                ))?;
             }
         }
         if let Err(err) = factor_written_k_with_policy(
@@ -744,7 +749,7 @@ where
             &self.y_train,
             likelihood.noise_variance(),
             FactorPolicy {
-                jitter: self.jitter_policy,
+                jitter: self.policies.jitter,
                 stage: CholeskyStage::Fit,
             },
             |ws| {
@@ -781,7 +786,7 @@ where
     /// Writes the analytic NLML Hessian (row-major `p×p`) at `params`.
     ///
     /// `params` is kernel `θ` followed by likelihood `θ`. After a successful
-    /// call the stored kernel and likelihood match `params`. `ReuseCholesky`
+    /// call the stored kernel and likelihood match `params`. [`crate::CholeskyBuffer::Reuse`]
     /// rebuilds `L` before return, matching [`Self::value_and_gradient_into`].
     ///
     /// # Errors
@@ -828,17 +833,17 @@ where
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        if let Err(err) = factor_train_with_policy::<_, _, M>(
+        if let Err(err) = with_kernel_exp!(self.policies.math, M => factor_train_with_policy::<_, _, M>(
             &compiled,
             x,
             &mut self.workspace,
             &self.y_train,
             likelihood.noise_variance(),
             FactorPolicy {
-                jitter: self.jitter_policy,
+                jitter: self.policies.jitter,
                 stage: CholeskyStage::Fit,
             },
-        ) {
+        )) {
             let _ = self.factorize_current();
             return Err(err);
         }
@@ -915,13 +920,13 @@ where
             ..
         } = core;
         let inputs = fill_cached_inputs(&self.compiled, x, dist, thread_scratch)?;
-        self.compiled.hess_gram::<M>(
+        with_kernel_exp!(self.policies.math, M => self.compiled.hess_gram::<M>(
             inputs,
             exp_buf.as_mut(),
             (i, j),
             Triangle::Lower,
             kernel_scratch.as_mut(),
-        )
+        ))
     }
 
     fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
@@ -934,13 +939,13 @@ where
             ..
         } = core;
         let inputs = fill_cached_inputs(&self.compiled, x, dist, thread_scratch)?;
-        self.compiled.grad_gram::<M>(
+        with_kernel_exp!(self.policies.math, M => self.compiled.grad_gram::<M>(
             inputs,
             exp_buf.as_mut(),
             idx,
             Triangle::Lower,
             kernel_scratch.as_mut(),
-        )
+        ))
     }
 
     fn add_noise_first_order(
@@ -1137,8 +1142,13 @@ where
         Ok(())
     }
 
+    /// Whether a gradient writes `W` over `L` ([`crate::CholeskyBuffer::Reuse`]).
+    pub(crate) fn overwrites_cholesky(&self) -> bool {
+        self.workspace.overwrites_cholesky()
+    }
+
     pub(super) fn restore_cholesky_if_overwritten(&mut self) -> Result<(), GprError> {
-        if B::OVERWRITES_CHOLESKY {
+        if self.overwrites_cholesky() {
             self.factorize_current()?;
         }
         Ok(())
@@ -1165,7 +1175,7 @@ where
 
     pub(super) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
+        O: Clone + for<'a> Optimizer<GprObjective<'a, O, P>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -1173,7 +1183,9 @@ where
         let likelihood_before = self.likelihood;
         let optimizer = self.optimizer.clone();
         let result = {
-            let mut obj = self.objective();
+            let obj = self.objective();
+            let uses_change_indices = uses_change_indices::<_, O>(&obj);
+            let mut obj = obj.with_change_indices(uses_change_indices);
             optimizer.minimize(&mut obj, &init)
         };
         self.commit_or_revert_optimize(kernel_before, likelihood_before, result)
@@ -1212,17 +1224,17 @@ where
     pub(crate) fn factorize_current(&mut self) -> Result<(), GprError> {
         self.mapped_factor = None;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
-        factor_train_with_policy::<_, _, M>(
+        with_kernel_exp!(self.policies.math, M => factor_train_with_policy::<_, _, M>(
             &self.compiled,
             x,
             &mut self.workspace,
             &self.y_train,
             self.likelihood.noise_variance(),
             FactorPolicy {
-                jitter: self.jitter_policy,
+                jitter: self.policies.jitter,
                 stage: CholeskyStage::Fit,
             },
-        )?;
+        ))?;
         self.copy_factor_alpha();
         Ok(())
     }
@@ -1241,10 +1253,10 @@ where
                 core.k_matrix.as_ref(),
             )),
             factor_alpha: &self.factor_alpha,
-            policy: self.jitter_policy,
+            policy: self.policies.jitter,
             stage: CholeskyStage::Fit,
         };
-        P::publish_predict_alpha::<M>(&sys, &mut self.alpha)
+        with_kernel_exp!(self.policies.math, M => P::publish_predict_alpha::<M>(&sys, &mut self.alpha))
     }
 
     fn copy_factor_alpha(&mut self) {
@@ -1370,14 +1382,14 @@ where
         {
             let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
             let mut thread_scratch = std::mem::take(&mut self.workspace.core_mut().thread_scratch);
-            let applied = self.compiled.eval_cross::<M>(
+            let applied = with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
                 x_train,
                 self.query.query_x.as_ref(),
                 Some(self.query.query_dist.as_mut()),
                 self.query.query_k_star.as_mut(),
                 self.query.query_scratch.as_mut(),
                 &mut thread_scratch,
-            );
+            ));
             self.workspace.core_mut().thread_scratch = thread_scratch;
             applied?;
         }
@@ -1388,7 +1400,7 @@ where
         if out.variance.len() != m {
             out.variance.resize(m, zero);
         }
-        P::predict_means::<M>(
+        with_kernel_exp!(self.policies.math, M => P::predict_means::<M>(
             &self.kernel,
             self.query.query_k_star.as_ref(),
             self.x.as_ref(),
@@ -1396,7 +1408,7 @@ where
             n_cols,
             &self.alpha,
             &mut out.mean,
-        )?;
+        ))?;
         let chol = P::view_factor(
             self.mapped_factor.as_ref().map(|mapped| mapped.l_view()),
             self.workspace.core().k_matrix.as_ref(),
@@ -1461,14 +1473,14 @@ where
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         let mut x_cast = P::Storage::empty_cols();
         let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
-        self.compiled.eval_cross::<M>(
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
             Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
             &mut thread_scratch,
-        )?;
+        ))?;
         let zero = P::Refine::from_f64(0.0);
         if out.mean.len() != m {
             out.mean.resize(m, zero);
@@ -1476,7 +1488,7 @@ where
         if out.variance.len() != m {
             out.variance.resize(m, zero);
         }
-        P::predict_means::<M>(
+        with_kernel_exp!(self.policies.math, M => P::predict_means::<M>(
             &self.kernel,
             query_k_star.as_ref(),
             self.x.as_ref(),
@@ -1484,7 +1496,7 @@ where
             n_cols,
             alpha,
             &mut out.mean,
-        )?;
+        ))?;
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
@@ -1584,7 +1596,7 @@ where
     ///
     /// Same as [`Self::predict`], plus [`GprError::CholeskyFailed`] with
     /// [`CholeskyStage::Predict`] if the posterior covariance cannot be
-    /// factored after [`JitterPolicy`] retries.
+    /// factored after [`crate::JitterPolicy`] retries.
     ///
     /// # Examples
     ///
@@ -1644,7 +1656,7 @@ where
         cholesky_lower_with_retries(
             &mut a,
             &mut scratch,
-            self.jitter_policy.retry_jitters(),
+            self.policies.jitter.retry_jitters(),
             CholeskyStage::Predict,
         )?;
         let mut rng = crate::rng::small_rng(seed);
@@ -1692,16 +1704,16 @@ where
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
         let mut x_cast = P::Storage::empty_cols();
         let x_train = P::Storage::storage_cols(self.x.as_ref(), &mut x_cast);
-        self.compiled.eval_cross::<M>(
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
             Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
             &mut thread_scratch,
-        )?;
+        ))?;
         let mut mean = vec![P::Refine::from_f64(0.0); m];
-        P::predict_means::<M>(
+        with_kernel_exp!(self.policies.math, M => P::predict_means::<M>(
             &self.kernel,
             query_k_star.as_ref(),
             self.x.as_ref(),
@@ -1709,7 +1721,7 @@ where
             n_cols,
             alpha,
             &mut mean,
-        )?;
+        ))?;
         faer::linalg::triangular_solve::solve_lower_triangular_in_place(
             self.chol_l(),
             query_k_star.as_mut(),
@@ -1717,13 +1729,13 @@ where
         );
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        self.compiled.eval_gram_from_points::<M>(
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
             query_x.as_ref(),
             kss.as_mut(),
             Triangle::Full,
             kss_scratch.as_mut(),
             &mut thread_scratch,
-        )?;
+        ))?;
         let zero_s = P::Storage::from_f64(0.0);
         for col in 0..m {
             for row in 0..m {
@@ -1851,12 +1863,12 @@ where
         let kernel = self.kernel.compile();
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch_k = Mat::<f64>::zeros(n, n);
-        kernel.eval_gram::<M>(
+        with_kernel_exp!(self.policies.math, M => kernel.eval_gram::<M>(
             GramInputs::points(self.x.as_ref()),
             a.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),
-        )?;
+        ))?;
         let noise = self.likelihood.noise_variance();
         for i in 0..n {
             a[(i, i)] += noise;
@@ -1918,13 +1930,10 @@ where
     }
 }
 
-impl<O, S, C, B, M, P> FittedGpr<O, S, C, B, M, P>
+impl<O, P> FittedGpr<O, P>
 where
-    C: DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
-    M: crate::math::KernelMath,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
     ///
@@ -1941,15 +1950,11 @@ where
     }
 }
 
-impl<C, M, P> FittedGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
+impl<P> FittedGpr<Fixed, P>
 where
-    C: DistanceCacheSlot,
     P: GpScalar,
-    M: crate::math::KernelMath,
 {
-    pub(crate) fn into_online_preserving_factor(
-        self,
-    ) -> Result<OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>, GprError> {
+    pub(crate) fn into_online_preserving_factor(self) -> Result<OnlineGpr<Fixed, P>, GprError> {
         let n = self.n;
         let mut workspace = OnlineWorkspace::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
@@ -1965,8 +1970,7 @@ where
             self.x_transform,
             self.y_transform,
             self.optimizer,
-            self.distance_cache,
-            self.jitter_policy,
+            self.policies,
             workspace,
             self.query,
             self.x_obs,
@@ -1980,7 +1984,7 @@ where
         ))
     }
 
-    pub(crate) fn from_persisted(mut parts: PersistedModel<C, P>) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(mut parts: PersistedModel<P>) -> Result<Self, GprError> {
         let n = parts.y_obs.len();
         if n == 0 {
             return Err(GprError::EmptyInput);
@@ -1999,12 +2003,9 @@ where
         parts.x_transform.apply(&mut x_buf, n, d)?;
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let mut workspace = FitBuffers::<C, RetainCholesky, P>::new(n)?;
-        workspace.core_mut().factor_jitter = parts.factor_jitter;
         let compiled = parts.kernel.compile_as::<P::Storage>();
-        if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
-            workspace.ensure_ard_if_cached(n, d)?;
-        }
+        let mut workspace = fit_buffers::<P>(n, d, parts.policies, &compiled)?;
+        workspace.core_mut().factor_jitter = parts.factor_jitter;
         if let Some(l) = parts.owned_l.take() {
             let mut dest = workspace.core_mut().k_matrix.as_mut();
             for col in 0..n {
@@ -2027,8 +2028,7 @@ where
             x_transform: parts.x_transform,
             y_transform: parts.y_transform,
             optimizer: Fixed,
-            distance_cache: parts.distance_cache,
-            jitter_policy: parts.jitter_policy,
+            policies: parts.policies,
             workspace,
             query: QueryWorkspace::new(),
             x: pack_points(&x_buf, n, d),
@@ -2042,8 +2042,6 @@ where
             n,
             d,
             mapped_factor: parts.mapped,
-            _recompute: PhantomData,
-            _math: PhantomData,
         })
     }
 

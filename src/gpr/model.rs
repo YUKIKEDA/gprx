@@ -9,7 +9,7 @@ use crate::error::GprError;
 use crate::kernel::{CompiledKernel, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
-use crate::optimizer::{AcceptsRecompute, Fixed, FullRecompute, Lbfgs, Optimizer, PoleRecompute};
+use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::param::write_params;
 use crate::persist::MappedTensors;
 use crate::precision::{DoublePrecision, GpScalar};
@@ -19,8 +19,7 @@ use crate::transform::{
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 
 use super::{
-    AllocWorkspace, CachedDistances, DistanceCachePolicy, DistanceCacheSlot, FitBuffers,
-    JitterPolicy, NoDistanceCache, RetainCholesky, ReuseCholesky, UncachedDistances,
+    CholeskyBuffer, DistanceCachePolicy, FitBuffers, JitterPolicy, KernelExp, with_kernel_exp,
 };
 
 /// Unfitted Exact GPR trainer: kernel, likelihood, transforms, optimizer, and
@@ -30,16 +29,16 @@ use super::{
 /// hyperparameters. [`Gpr<Fixed>::factor`] factors at the current `θ` with no
 /// search. Success returns [`FittedGpr`]. Failure returns the trainer with
 /// [`GprError`] so the caller can change `θ` or data and try again.
-/// Input and target transforms default to identity. Trainers from
-/// [`Gpr::new`] store [`CachedDistances`] and [`RetainCholesky`] by default
-/// (the speed pole). [`Gpr::with_prefer_memory`] switches to
-/// [`UncachedDistances`] and [`ReuseCholesky`]. Standalone Linear, Constant,
-/// and White kernels use [`Gpr::from_points`], which has no distance-cache
-/// slot; the same prefer methods change only the Cholesky buffer.
-/// The default type is
-/// [`Gpr<Lbfgs, FullRecompute, CachedDistances, RetainCholesky>`].
-/// [`Clone`] copies kernel, likelihood,
-/// transforms, optimizer, and policies.
+/// Input and target transforms default to identity. The trainer stores three
+/// runtime policies: [`DistanceCachePolicy`] (default
+/// [`DistanceCachePolicy::Cached`]), [`CholeskyBuffer`] (default
+/// [`CholeskyBuffer::Retain`]), and [`KernelExp`] (default
+/// [`KernelExp::Accurate`]). [`Gpr::with_prefer_memory`] /
+/// [`Gpr::with_prefer_speed`] set the memory / speed pole at once. The type
+/// parameters are the optimizer `O` (default [`Lbfgs`]; [`Fixed`] for
+/// [`Gpr<Fixed>::factor`]) and the precision `P` (default
+/// [`DoublePrecision`]). [`Clone`] copies kernel, likelihood, transforms,
+/// optimizer, and policies.
 ///
 /// Isotropic distance fills and lower-triangle kernel writes use Rayon.
 /// There is no parallel on/off flag. Thread count is the process-wide
@@ -65,44 +64,43 @@ use super::{
 /// # Ok(())
 /// # }
 /// ```
-pub struct Gpr<
-    O = Lbfgs,
-    S = FullRecompute,
-    C = CachedDistances,
-    B = RetainCholesky,
-    M = crate::math::Accurate,
-    P = DoublePrecision,
-> {
+pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     x_transform: Box<dyn UnfittedTransform>,
     y_transform: Box<dyn UnfittedTarget>,
     optimizer: O,
-    distance_cache: C,
-    jitter_policy: JitterPolicy,
-    _recompute: PhantomData<S>,
-    _cholesky: PhantomData<B>,
-    _math: PhantomData<M>,
+    policies: Policies,
     _precision: PhantomData<P>,
 }
 
-impl<O, S, C, B, M, P> fmt::Debug for Gpr<O, S, C, B, M, P>
+/// The runtime policies a trainer and its fitted model share.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Policies {
+    pub(crate) distance_cache: DistanceCachePolicy,
+    pub(crate) cholesky_buffer: CholeskyBuffer,
+    pub(crate) math: KernelExp,
+    pub(crate) jitter: JitterPolicy,
+}
+
+impl<O, P> fmt::Debug for Gpr<O, P>
 where
     O: fmt::Debug,
-    C: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Gpr")
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
             .field("optimizer", &self.optimizer)
-            .field("distance_cache", &self.distance_cache)
-            .field("jitter_policy", &self.jitter_policy)
+            .field("distance_cache", &self.policies.distance_cache)
+            .field("cholesky_buffer", &self.policies.cholesky_buffer)
+            .field("math", &self.policies.math)
+            .field("jitter_policy", &self.policies.jitter)
             .finish_non_exhaustive()
     }
 }
 
-impl<O: Clone, S, C: Copy, B, M, P> Clone for Gpr<O, S, C, B, M, P> {
+impl<O: Clone, P> Clone for Gpr<O, P> {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -110,11 +108,7 @@ impl<O: Clone, S, C: Copy, B, M, P> Clone for Gpr<O, S, C, B, M, P> {
             x_transform: self.x_transform.clone_box(),
             y_transform: self.y_transform.clone_box(),
             optimizer: self.optimizer.clone(),
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
+            policies: self.policies,
             _precision: PhantomData,
         }
     }
@@ -156,14 +150,7 @@ impl<O: Clone, S, C: Copy, B, M, P> Clone for Gpr<O, S, C, B, M, P> {
 /// # Ok(())
 /// # }
 /// ```
-pub struct FittedGpr<
-    O = Lbfgs,
-    S = FullRecompute,
-    C: DistanceCacheSlot = CachedDistances,
-    B: AllocWorkspace = RetainCholesky,
-    M = crate::math::Accurate,
-    P: GpScalar = DoublePrecision,
-> {
+pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
     kernel: KernelSpec,
     compiled: CompiledKernel<P::Storage>,
     likelihood: GaussianLikelihood,
@@ -172,9 +159,8 @@ pub struct FittedGpr<
     x_transform: Box<dyn Transform>,
     y_transform: Box<dyn TargetTransform>,
     optimizer: O,
-    distance_cache: C,
-    jitter_policy: JitterPolicy,
-    workspace: FitBuffers<C, B, P>,
+    policies: Policies,
+    workspace: FitBuffers<P>,
     query: QueryWorkspace<P>,
     x_obs: Vec<f64>,
     y_obs: Vec<f64>,
@@ -190,15 +176,11 @@ pub struct FittedGpr<
     n: usize,
     d: usize,
     mapped_factor: Option<MappedTensors>,
-    _recompute: PhantomData<S>,
-    _math: PhantomData<M>,
 }
 
-impl<O, S, C, B, M, P> Clone for FittedGpr<O, S, C, B, M, P>
+impl<O, P> Clone for FittedGpr<O, P>
 where
     O: Clone,
-    C: Copy + DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
 {
     fn clone(&self) -> Self {
@@ -215,8 +197,7 @@ where
             x_transform: self.x_transform.clone_box(),
             y_transform: self.y_transform.clone_box(),
             optimizer: self.optimizer.clone(),
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
+            policies: self.policies,
             workspace,
             query: self.query.clone(),
             x_obs: self.x_obs.clone(),
@@ -230,17 +211,13 @@ where
             n: self.n,
             d: self.d,
             mapped_factor: None,
-            _recompute: PhantomData,
-            _math: PhantomData,
         }
     }
 }
 
-impl<O, S, C, B, M, P> fmt::Debug for FittedGpr<O, S, C, B, M, P>
+impl<O, P> fmt::Debug for FittedGpr<O, P>
 where
     O: fmt::Debug,
-    C: fmt::Debug + DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -249,8 +226,10 @@ where
             .field("d", &self.d)
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
-            .field("distance_cache", &self.distance_cache)
-            .field("jitter_policy", &self.jitter_policy)
+            .field("distance_cache", &self.policies.distance_cache)
+            .field("cholesky_buffer", &self.policies.cholesky_buffer)
+            .field("math", &self.policies.math)
+            .field("jitter_policy", &self.policies.jitter)
             .finish_non_exhaustive()
     }
 }
@@ -262,12 +241,11 @@ impl Gpr {
     /// Call [`Self::with_input_transform`] / [`Self::with_target_transform`]
     /// before [`Self::fit`] to standardize. Those methods take an unfitted
     /// map; `fit` / `factor` produce the fitted map stored on [`FittedGpr`].
-    /// Call [`Self::with_optimizer`] to
-    /// switch to [`Fixed`] or another [`Optimizer`]. Distance kernels use this
-    /// constructor; the cache slot is [`CachedDistances`] and the Cholesky
-    /// buffer is [`RetainCholesky`]. [`Self::with_prefer_memory`] / [`Self::with_prefer_speed`]
-    /// switch those poles. Standalone Linear, Constant, and White kernels
-    /// use [`Self::from_points`].
+    /// Call [`Self::with_optimizer`] to switch to [`Fixed`] or another
+    /// [`Optimizer`]. Policies start at [`DistanceCachePolicy::Cached`],
+    /// [`CholeskyBuffer::Retain`], and [`KernelExp::Accurate`]. A kernel that
+    /// does not read pairwise distances (standalone Linear, Constant, White)
+    /// never allocates the distance cache.
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
             kernel,
@@ -275,62 +253,29 @@ impl Gpr {
             x_transform: Box::new(IdentityInput),
             y_transform: Box::new(IdentityTarget),
             optimizer: Lbfgs::new(),
-            distance_cache: CachedDistances,
-            jitter_policy: JitterPolicy::default(),
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
-    }
-
-    /// Builds a trainer for a kernel that evaluates from coordinates, not
-    /// pairwise distances.
-    ///
-    /// Use this for a standalone Linear, Constant, or White kernel. The
-    /// trainer has no [`DistanceCachePolicy`]. [`Self::with_prefer_memory`]
-    /// / [`Self::with_prefer_speed`] still exist and change only the
-    /// Cholesky buffer. Compositions that still fill distances
-    /// (`RBF + White`, `Constant * RBF`) use [`Self::new`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, LinearKernel};
-    /// use gprx::{GaussianLikelihood, Gpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let kernel = KernelSpec::from(LinearKernel::new(1.0)?);
-    /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = Gpr::from_points(kernel, likelihood)
-    ///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
-    ///     .map_err(|(_, e)| e)?;
-    /// let pred = fitted.predict(&[0.5], 1, 1)?;
-    /// assert_eq!(pred.mean.len(), 1);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn from_points(
-        kernel: KernelSpec,
-        likelihood: GaussianLikelihood,
-    ) -> Gpr<Lbfgs, FullRecompute, NoDistanceCache> {
-        Gpr {
-            kernel,
-            likelihood,
-            x_transform: Box::new(IdentityInput),
-            y_transform: Box::new(IdentityTarget),
-            optimizer: Lbfgs::new(),
-            distance_cache: NoDistanceCache,
-            jitter_policy: JitterPolicy::default(),
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
+            policies: Policies::default(),
             _precision: PhantomData,
         }
     }
 }
 
-impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
+impl<O, P> Gpr<O, P> {
+    /// The one place a trainer changes its type parameters.
+    fn retype<O2, P2>(self, optimizer: O2) -> (Gpr<O2, P2>, O) {
+        (
+            Gpr {
+                kernel: self.kernel,
+                likelihood: self.likelihood,
+                x_transform: self.x_transform,
+                y_transform: self.y_transform,
+                optimizer,
+                policies: self.policies,
+                _precision: PhantomData,
+            },
+            self.optimizer,
+        )
+    }
+
     /// Replaces the input (`X`) transform. Intended to be called before fit.
     ///
     /// A single map, a [`crate::transform::Pipeline`], or
@@ -342,65 +287,37 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    pub fn with_precision<P2>(self) -> Gpr<O, S, C, B, M, P2>
-    where
-        P2: GpScalar,
-    {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
-            optimizer: self.optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
+    pub fn with_precision<P2: GpScalar>(self) -> Gpr<O, P2> {
+        let (trainer, optimizer) = self.retype::<(), P2>(());
+        trainer.retype(optimizer).0
     }
 
-    /// Selects the kernel `exp`. Omitting it leaves [`crate::Accurate`].
+    /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
     ///
-    /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
+    /// `fit` and predict use the same `exp`. Hyperparameter `exp(θ)` is
     /// unchanged.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{FastApprox, GaussianLikelihood, Gpr};
+    /// use gprx::{GaussianLikelihood, Gpr, KernelExp};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let gpr = Gpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
-    /// .with_math::<FastApprox>();
+    /// .with_math(KernelExp::FastApprox);
     /// let _fitted = gpr
     ///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
     ///     .map_err(|(_, e)| e)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_math<M2>(self) -> Gpr<O, S, C, B, M2, P>
-    where
-        M2: crate::math::KernelMath,
-    {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
-            optimizer: self.optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
+    pub fn with_math(mut self, math: KernelExp) -> Self {
+        self.policies.math = math;
+        self
     }
 
     /// Replaces the target (`y`) transform. Intended to be called before fit.
@@ -412,22 +329,13 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
         self
     }
 
-    pub(crate) fn with_boxed_input_transform(
-        mut self,
-        transform: Box<dyn UnfittedTransform>,
-    ) -> Self {
-        self.x_transform = transform;
-        self
-    }
-
     pub(crate) fn from_owned(
         kernel: KernelSpec,
         likelihood: GaussianLikelihood,
         x_transform: Box<dyn UnfittedTransform>,
         y_transform: Box<dyn UnfittedTarget>,
         optimizer: O,
-        distance_cache: C,
-        jitter_policy: JitterPolicy,
+        policies: Policies,
     ) -> Self {
         Self {
             kernel,
@@ -435,21 +343,9 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
             x_transform,
             y_transform,
             optimizer,
-            distance_cache,
-            jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
+            policies,
             _precision: PhantomData,
         }
-    }
-
-    pub(crate) fn with_boxed_target_transform(
-        mut self,
-        transform: Box<dyn UnfittedTarget>,
-    ) -> Self {
-        self.y_transform = transform;
-        self
     }
 
     /// Sets the Cholesky jitter policy. Does not change observation noise.
@@ -477,20 +373,16 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     /// # }
     /// ```
     pub fn with_jitter_policy(mut self, policy: JitterPolicy) -> Self {
-        self.jitter_policy = policy;
+        self.policies.jitter = policy;
         self
     }
 
     /// Replaces the optimizer, changing the type parameter `O`.
     ///
-    /// The recompute strategy follows the Cholesky pole `B`:
-    /// [`crate::ReuseCholesky`] is always [`FullRecompute`].
-    /// [`crate::RetainCholesky`] is [`crate::IncrementalRecompute`] when
-    /// `O2: `[`crate::UsesChangeIndices`], otherwise [`FullRecompute`].
-    /// L-BFGS cannot be incremental. A custom optimizer that does not
-    /// implement [`crate::UsesChangeIndices`] implements
-    /// [`crate::PoleRecompute`]`<`[`crate::RetainCholesky`]`>` with
-    /// [`FullRecompute`].
+    /// A fit rebuilds only the kernel leaves a step touches when the
+    /// optimizer reports changed coordinates
+    /// ([`Optimizer::USES_CHANGE_INDICES`]) and the buffer is
+    /// [`CholeskyBuffer::Retain`]; otherwise it rebuilds the whole kernel.
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after
     /// this switch. argmin solvers are [`crate::Lbfgs`], [`crate::NonlinearCg`],
@@ -513,46 +405,93 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2: PoleRecompute<B>>(
-        self,
-        optimizer: O2,
-    ) -> Gpr<O2, O2::Strategy, C, B, M, P> {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
-            optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Gpr<O2, P> {
+        self.retype(optimizer).0
     }
 
-    /// Selects whether the Cholesky factor keeps a dedicated `W` buffer.
+    /// Sets whether training distances are cached across kernel builds.
     ///
-    /// Public callers use [`Gpr::with_prefer_memory`] / [`Gpr::with_prefer_speed`].
-    pub(crate) fn with_cholesky_buffer<B2>(self, _: B2) -> Gpr<O, O::Strategy, C, B2, M, P>
-    where
-        B2: crate::CholeskyBuffer,
-        O: PoleRecompute<B2>,
-    {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
-            optimizer: self.optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
+    /// See [`DistanceCachePolicy`]. [`Self::with_prefer_memory`] /
+    /// [`Self::with_prefer_speed`] set this together with the Cholesky buffer.
+    pub fn with_distance_cache_policy(mut self, policy: DistanceCachePolicy) -> Self {
+        self.policies.distance_cache = policy;
+        self
+    }
+
+    /// Sets where the gradient matrix `W` lives. See [`CholeskyBuffer`].
+    pub fn with_cholesky_buffer(mut self, buffer: CholeskyBuffer) -> Self {
+        self.policies.cholesky_buffer = buffer;
+        self
+    }
+
+    /// Selects the memory pole: [`DistanceCachePolicy::Uncached`] and
+    /// [`CholeskyBuffer::Reuse`].
+    ///
+    /// Training distances are computed from `X` each kernel build, and `W`
+    /// overwrites `L` during a gradient. [`Self::with_prefer_speed`] restores
+    /// the default.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{CholeskyBuffer, DistanceCachePolicy, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_prefer_memory();
+    /// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Uncached);
+    /// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Reuse);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_prefer_memory(self) -> Self {
+        self.with_distance_cache_policy(DistanceCachePolicy::Uncached)
+            .with_cholesky_buffer(CholeskyBuffer::Reuse)
+    }
+
+    /// Selects the speed pole: [`DistanceCachePolicy::Cached`] and
+    /// [`CholeskyBuffer::Retain`] (the default).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{CholeskyBuffer, DistanceCachePolicy, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let gpr = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_prefer_memory()
+    /// .with_prefer_speed();
+    /// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Cached);
+    /// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Retain);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_prefer_speed(self) -> Self {
+        self.with_distance_cache_policy(DistanceCachePolicy::Cached)
+            .with_cholesky_buffer(CholeskyBuffer::Retain)
+    }
+
+    /// Returns the distance-cache policy.
+    pub fn distance_cache_policy(&self) -> DistanceCachePolicy {
+        self.policies.distance_cache
+    }
+
+    /// Returns the Cholesky buffer policy.
+    pub fn cholesky_buffer(&self) -> CholeskyBuffer {
+        self.policies.cholesky_buffer
+    }
+
+    /// Returns the kernel `exp`.
+    pub fn math(&self) -> KernelExp {
+        self.policies.math
     }
 
     /// Returns the kernel whose hyperparameters this trainer owns.
@@ -581,155 +520,10 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     }
 }
 
-impl<O, S, C: DistanceCachePolicy, B, M, P> Gpr<O, S, C, B, M, P> {
-    /// Selects the memory pole: no distance cache and a reused Cholesky buffer.
-    ///
-    /// The returned trainer is [`UncachedDistances`] + [`ReuseCholesky`].
-    /// Training distances are computed from `X` each kernel build. `W`
-    /// overwrites `L` during a gradient. Call before [`Gpr::fit`] /
-    /// [`Gpr<Fixed>::factor`]. [`Self::with_prefer_speed`] restores the
-    /// default. This method exists only on trainers from [`Gpr::new`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Gpr, ReuseCholesky, UncachedDistances};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let gpr = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_prefer_memory();
-    /// let _: gprx::Gpr<_, _, UncachedDistances, ReuseCholesky> = gpr;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, UncachedDistances, ReuseCholesky, M, P>
-    where
-        O: PoleRecompute<ReuseCholesky, Strategy = FullRecompute>,
-    {
-        self.with_distance_cache_policy(UncachedDistances)
-            .with_cholesky_buffer(ReuseCholesky)
-    }
-
-    /// Selects the speed pole: cached distances and a dedicated `W` buffer.
-    ///
-    /// This is the default [`Gpr::new`] layout ([`CachedDistances`] +
-    /// [`RetainCholesky`]). Use it to undo [`Self::with_prefer_memory`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{CachedDistances, GaussianLikelihood, Gpr, RetainCholesky};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let gpr = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_prefer_memory()
-    /// .with_prefer_speed();
-    /// let _: gprx::Gpr<_, _, CachedDistances, RetainCholesky> = gpr;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, CachedDistances, RetainCholesky, M, P>
-    where
-        O: PoleRecompute<RetainCholesky>,
-    {
-        self.with_distance_cache_policy(CachedDistances)
-            .with_cholesky_buffer(RetainCholesky)
-    }
-
-    /// Sets whether training distances are cached across kernel builds.
-    ///
-    /// Public callers use [`Self::with_prefer_memory`] / [`Self::with_prefer_speed`].
-    pub(crate) fn with_distance_cache_policy<C2: DistanceCachePolicy>(
-        self,
-        _: C2,
-    ) -> Gpr<O, S, C2, B, M, P> {
-        Gpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            x_transform: self.x_transform,
-            y_transform: self.y_transform,
-            optimizer: self.optimizer,
-            distance_cache: C2::default(),
-            jitter_policy: self.jitter_policy,
-            _recompute: PhantomData,
-            _cholesky: PhantomData,
-            _math: PhantomData,
-            _precision: PhantomData,
-        }
-    }
-}
-
-impl<O, S, B, M, P> Gpr<O, S, NoDistanceCache, B, M, P> {
-    /// Selects the memory-pole Cholesky layout. The cache slot stays
-    /// [`NoDistanceCache`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, LinearKernel};
-    /// use gprx::{GaussianLikelihood, Gpr, NoDistanceCache, ReuseCholesky};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let gpr = Gpr::from_points(
-    ///     KernelSpec::from(LinearKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_prefer_memory();
-    /// let _: gprx::Gpr<_, _, NoDistanceCache, ReuseCholesky> = gpr;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_prefer_memory(self) -> Gpr<O, FullRecompute, NoDistanceCache, ReuseCholesky, M, P>
-    where
-        O: PoleRecompute<ReuseCholesky, Strategy = FullRecompute>,
-    {
-        self.with_cholesky_buffer(ReuseCholesky)
-    }
-
-    /// Selects the speed-pole Cholesky layout. The cache slot stays
-    /// [`NoDistanceCache`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, LinearKernel};
-    /// use gprx::{GaussianLikelihood, Gpr, NoDistanceCache, RetainCholesky};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let gpr = Gpr::from_points(
-    ///     KernelSpec::from(LinearKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_prefer_memory()
-    /// .with_prefer_speed();
-    /// let _: gprx::Gpr<_, _, NoDistanceCache, RetainCholesky> = gpr;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_prefer_speed(self) -> Gpr<O, O::Strategy, NoDistanceCache, RetainCholesky, M, P>
-    where
-        O: PoleRecompute<RetainCholesky>,
-    {
-        self.with_cholesky_buffer(RetainCholesky)
-    }
-}
-
-impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P>
+impl<O, P> Gpr<O, P>
 where
-    S: AcceptsRecompute<O>,
-    C: DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
-    M: crate::math::KernelMath,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, P>>,
 {
     /// Factors `A = K + σn² I`, solves `A α = y`, and updates `θ` with `O`.
     ///
@@ -768,14 +562,14 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
     pub fn fit(
         self,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<FittedGpr<O, S, C, B, M, P>, (Self, GprError)> {
+    ) -> Result<FittedGpr<O, P>, (Self, GprError)> {
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
         match model.optimize_hyperparameters() {
             Ok(()) => {
@@ -792,13 +586,7 @@ where
     }
 }
 
-impl<C, B, M, P> Gpr<Fixed, FullRecompute, C, B, M, P>
-where
-    C: DistanceCacheSlot,
-    B: AllocWorkspace,
-    P: GpScalar,
-    M: crate::math::KernelMath,
-{
+impl<P: GpScalar> Gpr<Fixed, P> {
     /// Factors at the current kernel and likelihood `θ` without a search.
     ///
     /// Same data contract as [`Gpr::fit`]. There are no optimizer knobs.
@@ -826,14 +614,14 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
     pub fn factor(
         self,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
         y: &[f64],
-    ) -> Result<FittedGpr<Fixed, FullRecompute, C, B, M, P>, (Self, GprError)> {
+    ) -> Result<FittedGpr<Fixed, P>, (Self, GprError)> {
         let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
         if let Err(err) = model.factorize_current() {
             return Err((model.into_trainer(), err));
@@ -846,8 +634,8 @@ where
 }
 
 /// Drops the trainer and keeps the error so `?` works in `Result<_, GprError>`.
-impl<O, S, C, B, M, P> From<(Gpr<O, S, C, B, M, P>, GprError)> for GprError {
-    fn from((_, err): (Gpr<O, S, C, B, M, P>, GprError)) -> Self {
+impl<O, P> From<(Gpr<O, P>, GprError)> for GprError {
+    fn from((_, err): (Gpr<O, P>, GprError)) -> Self {
         err
     }
 }

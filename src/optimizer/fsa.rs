@@ -159,9 +159,9 @@ impl FastSimulatedAnnealing {
     }
 }
 
-impl crate::UsesChangeIndices for FastSimulatedAnnealing {}
-
 impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
+    const USES_CHANGE_INDICES: bool = true;
+
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
