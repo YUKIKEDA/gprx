@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`). Acceptance is set after Grill on #43. Through P5-4 is done. The comparison baseline is `phase-2`.
+B1-3 ([#301](https://github.com/YUKIKEDA/gprx/issues/301), `Sgpr` / `Svgp` fit with every built-in kernel). Acceptance is on #301. B1-2 is done. B1-1 stays acceptance on #298 (the measured tables are not in yet). P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
 
 ## Dependencies
 
@@ -14,9 +14,11 @@ P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `Distance
 M0 → 1a → 1b → 2 → 2b → 3
                      → 4
                 after the phase-2 measurement → 5
+R1 → R2 → R3 → R4 → R5 → R6
+R4-1 → P5-5
 ```
 
-Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`.
+Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue.
 
 ## M0
 
@@ -151,13 +153,41 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | P5-4 | Feat | Opt-in `FastApprox` | [#42](https://github.com/YUKIKEDA/gprx/issues/42) | done |
 | P5-5 | Task | Threshold for `DistanceCachePolicy::Auto` | [#43](https://github.com/YUKIKEDA/gprx/issues/43) | Set after Grill on #43 |
 
+## R (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226))
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| R1-1 | Task | Shared numeric scalar trait for f32 / f64; remove `size_of` type checks | [#227](https://github.com/YUKIKEDA/gprx/issues/227) | done |
+| R1-2 | Task | Collect linear algebra into a `linalg` module | [#228](https://github.com/YUKIKEDA/gprx/issues/228) | done |
+| R1-3 | Task | Collect input validation and column-major packing into a `data` module | [#229](https://github.com/YUKIKEDA/gprx/issues/229) | done |
+| R1-4 | Task | One place for shared test helpers and problem generators | [#230](https://github.com/YUKIKEDA/gprx/issues/230) | done |
+| R1-5 | Task | Reclassify `GprError` (shape, length, overflow, unused variants) | [#231](https://github.com/YUKIKEDA/gprx/issues/231) | done |
+| R2-1 | Task | One input struct for kernel evaluation entry points | [#232](https://github.com/YUKIKEDA/gprx/issues/232) | done |
+| R2-2 | Task | Split stationary kernels into profile and driver; remove `f32_eval.rs` | [#233](https://github.com/YUKIKEDA/gprx/issues/233) | done |
+| R2-3 | Feat | Custom kernels written once for f32 and f64 | [#234](https://github.com/YUKIKEDA/gprx/issues/234) | done |
+| R2-4 | Task | Fix inconsistencies and leaks in the kernel and crate public surface | [#235](https://github.com/YUKIKEDA/gprx/issues/235) | done |
+| R3-1 | Bug | `MixedPrecision` predict re-runs refinement and recompiles the kernel on every call | [#236](https://github.com/YUKIKEDA/gprx/issues/236) | done |
+| R3-2 | Bug | Refinement ignores the stored factor and `JitterPolicy` | [#237](https://github.com/YUKIKEDA/gprx/issues/237) | done |
+| R3-3 | Task | One precision-policy trait; refinement as a `Refiner` | [#238](https://github.com/YUKIKEDA/gprx/issues/238) | done |
+| R4-1 | Task | Distance cache, Cholesky buffer, exp mode, and recompute strategy as runtime values | [#239](https://github.com/YUKIKEDA/gprx/issues/239) | done |
+| R4-2 | Task | Factor abstraction (LLT / LDLT) and a shared model core for `FittedGpr` and `OnlineGpr` | [#240](https://github.com/YUKIKEDA/gprx/issues/240) | done |
+| R4-3 | Task | One predict path | [#241](https://github.com/YUKIKEDA/gprx/issues/241) | done |
+| R4-4 | Task | Uniform model state, rollback, and optional buffers | [#242](https://github.com/YUKIKEDA/gprx/issues/242) | done |
+| R4-5 | Bug | `IncrementalRecompute` infers changed leaves from bit differences and allocates per call | [#243](https://github.com/YUKIKEDA/gprx/issues/243) | done |
+| R4-6 | Task | Shrink the 48 `Loaded*` persist types | [#244](https://github.com/YUKIKEDA/gprx/issues/244) | done |
+| R4-7 | Task | Reorganize `src/gpr` files | [#245](https://github.com/YUKIKEDA/gprx/issues/245) | done |
+| R5-1 | Task | Put `Sgpr` / `Svgp` on the shared core, linalg, and precision; fix module dependencies | [#246](https://github.com/YUKIKEDA/gprx/issues/246) | done |
+| R5-2 | Spike | Decide which Exact features `Sgpr` / `Svgp` should match | [#247](https://github.com/YUKIKEDA/gprx/issues/247) | done |
+| R6-1 | Task | Deduplicate the `compare/` Python harness and problem definitions | [#248](https://github.com/YUKIKEDA/gprx/issues/248) | done |
+| R6-2 | Task | Align `design.md` pseudo-code with the implementation | [#249](https://github.com/YUKIKEDA/gprx/issues/249) | done |
+
 ## B (real-dataset comparison)
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
 | B1-1 | Task | Real-dataset benchmark and library comparison in the README | [#298](https://github.com/YUKIKEDA/gprx/issues/298) | acceptance on #298 |
-| B1-2 | Bug | `Svgp` Adam step costs O(n·m²), not O(batch·m²) | [#300](https://github.com/YUKIKEDA/gprx/issues/300) | acceptance on #300 |
-| B1-3 | Feat | `Sgpr` / `Svgp` fit with every built-in kernel (rectangular `∂K(Z,X)/∂θ` and its Hessian) | [#301](https://github.com/YUKIKEDA/gprx/issues/301) | acceptance on #301 |
+| B1-2 | Bug | `Svgp` Adam step costs O(n·m²), not O(batch·m²) | [#300](https://github.com/YUKIKEDA/gprx/issues/300) | done |
+| B1-3 | Feat | `Sgpr` / `Svgp` fit with every built-in kernel (rectangular `∂K(Z,X)/∂θ` and its Hessian) | [#301](https://github.com/YUKIKEDA/gprx/issues/301) | in progress |
 | B1-4 | Feat | `FreeInducing` coordinate derivatives and `Custom` cross derivatives for every kernel | [#302](https://github.com/YUKIKEDA/gprx/issues/302) | Set after Grill on #302 |
 
 ## Intentionally out of scope
