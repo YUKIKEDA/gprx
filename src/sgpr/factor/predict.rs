@@ -9,7 +9,7 @@ use crate::linalg::{cholesky_lower_with_backup, solve_lower};
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sparse::{PredictBuffers, PredictScratch, SparseCore, pack_into, view};
-use crate::{PredictOptions, Prediction, VarianceKind};
+use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 use faer::{Mat, MatRef};
 
 /// The fitted VFE system a prediction reads, in transformed units.
@@ -249,4 +249,84 @@ fn vfe_latent<M: crate::math::KernelMath, S: KernelScalar>(
         write(col, column, latent);
     }
     Ok(())
+}
+
+/// The VFE predictive mean and query–query covariance at `xs` (original
+/// coordinates): the diagonal is [`predict_vfe_into`]'s variance, the
+/// off-diagonal the latent `K** − A*ᵀ A* + σn² S*ᵀ S*` with
+/// `A* = L_mm⁻¹ K_m*` and `S* = L_B⁻¹ A*`.
+///
+/// # Errors
+///
+/// Same as [`predict_vfe_into`].
+pub(crate) fn predict_vfe_covariance<P: ModelPrecision>(
+    core: &SparseCore,
+    sys: &VfeSystem<'_, P>,
+    xs: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    options: PredictOptions,
+) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+    let mut scratch = PredictScratch::<P::Storage>::default();
+    let mut mapped = Vec::new();
+    core.map_query_into(xs, n_rows, n_cols, &mut mapped)?;
+    let mut pred = Prediction::default();
+    with_kernel_exp!(core.math, M => {
+        vfe_predict_into::<M, P>(sys, &mapped, n_rows, options, &mut scratch, &mut pred)?;
+        if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
+            let compiled = scratch.plan64.get(sys.kernel);
+            let latent = vfe_latent_covariance::<M, f64>(
+                compiled, &mut scratch.f64, sys.m, sys.d, n_rows, sys.noise,
+            )?;
+            core.finish_covariance::<P, f64>(latent.as_ref(), pred)
+        } else {
+            let compiled = scratch.plan.get(sys.kernel);
+            let latent = vfe_latent_covariance::<M, P::Storage>(
+                compiled, &mut scratch.storage, sys.m, sys.d, n_rows, sys.noise,
+            )?;
+            core.finish_covariance::<P, P::Storage>(latent.as_ref(), pred)
+        }
+    })
+}
+
+/// `K** − A*ᵀ A* + σn² S*ᵀ S*` (`q × q`) from the buffers [`vfe_latent`]
+/// left: the packed queries, `A*`, and `S*`.
+fn vfe_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
+    compiled: &CompiledKernel<S>,
+    bufs: &mut PredictBuffers<S>,
+    m: usize,
+    d: usize,
+    q: usize,
+    noise: f64,
+) -> Result<Mat<S>, GprError> {
+    let PredictBuffers {
+        kernel,
+        query,
+        k_sz,
+        solved,
+        ..
+    } = bufs;
+    let queries = view(query, q, d);
+    let mut cov = Mat::<S>::zeros(q, q);
+    kernel.gram::<M>(
+        compiled,
+        GramInputs::points(queries.as_ref()),
+        cov.as_mut(),
+        Triangle::Full,
+    )?;
+    let a_star = k_sz.as_ref().submatrix(0, 0, m, q);
+    let s_star = solved.as_ref().submatrix(0, 0, m, q);
+    let noise_s = lit::<S>(noise);
+    for col in 0..q {
+        for row in 0..q {
+            let mut a_dot = lit::<S>(0.0);
+            let mut s_dot = lit::<S>(0.0);
+            for k in 0..m {
+                a_dot += a_star[(k, row)] * a_star[(k, col)];
+                s_dot += s_star[(k, row)] * s_star[(k, col)];
+            }
+            cov[(row, col)] = cov[(row, col)] - a_dot + noise_s * s_dot;
+        }
+    }
+    Ok(cov)
 }

@@ -516,3 +516,31 @@ fn k_mm_jitter_policy_applies_to_factor() {
         }
     }
 }
+
+#[test]
+fn titsias_q_covariance_matches_vfe() {
+    for case in cases() {
+        let vfe = factor_vfe(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let mut svgp = factor_svgp(case.kernel.clone(), case.x, case.n, case.d, case.z);
+        let (mean, l) = titsias_whitened_q(&vfe);
+        let params = write_q_params(&svgp, &mean, l.as_ref());
+        svgp.set_params(&params).expect("set q");
+        for kind in [VarianceKind::Latent, VarianceKind::Observation] {
+            let options = PredictOptions {
+                variance_kind: kind,
+            };
+            let cov_s = svgp
+                .predict_covariance_with(case.x, case.n, case.d, options)
+                .expect("svgp covariance");
+            let cov_v = vfe
+                .predict_covariance_with(case.x, case.n, case.d, options)
+                .expect("vfe covariance");
+            for (s, v) in cov_s.covariance.iter().zip(cov_v.covariance.iter()) {
+                assert_close(*s, *v, TOL);
+            }
+            for (s, v) in cov_s.mean.iter().zip(cov_v.mean.iter()) {
+                assert_close(*s, *v, TOL);
+            }
+        }
+    }
+}

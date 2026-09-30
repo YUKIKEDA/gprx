@@ -1,5 +1,12 @@
 //! Prediction results and options of an Exact GPR.
 
+use faer::Mat;
+
+use crate::error::{CholeskyStage, GprError};
+use crate::kernel::KernelScalar;
+use crate::linalg::{cholesky_lower_with_retries, llt_scratch, mul_lower_vec};
+use crate::policy::JitterPolicy;
+
 /// Which predictive variance [`Prediction`] reports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum VarianceKind {
@@ -93,5 +100,52 @@ impl<T> Default for PredictiveCovariance<T> {
             covariance: Vec::new(),
             variance_kind: VarianceKind::default(),
         }
+    }
+}
+
+impl<T: KernelScalar> PredictiveCovariance<T> {
+    /// `n_draws` posterior draws, column-major `m × n_draws`: each column is
+    /// `μ + L z` with `z ∼ N(0, I)` from the crate `SmallRng` at `seed`, and
+    /// `L` the Cholesky factor of [`Self::covariance`], retried with `jitter`.
+    /// Zero draws return an empty vector without factoring.
+    pub(crate) fn draw(
+        &self,
+        n_draws: usize,
+        seed: u64,
+        jitter: JitterPolicy,
+    ) -> Result<Vec<T>, GprError> {
+        if n_draws == 0 {
+            return Ok(Vec::new());
+        }
+        let m = self.mean.len();
+        let mut a = Mat::<T>::zeros(m, m);
+        for col in 0..m {
+            for row in 0..m {
+                a[(row, col)] = self.covariance[col * m + row];
+            }
+        }
+        let mut scratch = llt_scratch::<T>(m);
+        cholesky_lower_with_retries(
+            &mut a,
+            &mut scratch,
+            jitter.retry_jitters(),
+            CholeskyStage::Predict,
+        )?;
+        let mut rng = crate::rng::small_rng(seed);
+        let zero = T::from_f64(0.0);
+        let mut out = vec![zero; m * n_draws];
+        let mut z = vec![zero; m];
+        let mut lz = vec![zero; m];
+        for draw in 0..n_draws {
+            for slot in &mut z {
+                *slot = T::from_f64(crate::rng::unit_normal(&mut rng));
+            }
+            mul_lower_vec(a.as_ref(), &z, &mut lz);
+            let col = &mut out[draw * m..(draw + 1) * m];
+            for i in 0..m {
+                col[i] = self.mean[i] + lz[i];
+            }
+        }
+        Ok(out)
     }
 }
