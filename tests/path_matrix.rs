@@ -10,7 +10,7 @@
 //! - Matérn `ν = 1/2` with `FreeInducing`: `CoordGradientUnsupported` (its
 //!   coordinate derivative is undefined where two points coincide).
 
-#![allow(clippy::unwrap_used)] // fixtures outside the `#[test]` body
+#![allow(clippy::unwrap_used, clippy::panic)] // fixtures outside the `#[test]` body
 
 use gprx::kernel::{
     ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
@@ -18,8 +18,8 @@ use gprx::kernel::{
     WhiteKernel,
 };
 use gprx::{
-    DoublePrecision, FastSimulatedAnnealing, FreeInducing, GaussianLikelihood, GprError, KernelExp,
-    Lbfgs, NelderMead, NonlinearCg, Sgpr, SinglePrecision, TrustRegion,
+    Adam, DoublePrecision, FastSimulatedAnnealing, FreeInducing, GaussianLikelihood, Gpr, GprError,
+    KernelExp, Lbfgs, NelderMead, NonlinearCg, Sgpr, SinglePrecision, Svgp, TrustRegion,
 };
 
 const N: usize = 12;
@@ -168,9 +168,12 @@ macro_rules! by_precision {
 }
 
 /// Indices: kernel, optimizer, precision, exp math, free inducing points.
-type Case = [usize; 5];
+type Case = Vec<usize>;
 
-fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
+fn run_case(case: &[usize]) -> Option<String> {
+    let [k_i, opt, precision, math, free] = case[..] else {
+        panic!("a sparse case has five options");
+    };
     let (name, kernel, unsupported) = kernels().swap_remove(k_i);
     let math = MATHS[math];
     let free = free == 1;
@@ -228,33 +231,39 @@ fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
     }
 }
 
-/// A deterministic all-pairs cover: every pair of values of any two options
-/// (kernel, optimizer, precision, exp math, inducing points) is in at least one
-/// chosen combination. About a hundred combinations instead of all 800.
-fn pairwise_cover(sizes: [usize; 5]) -> Vec<Case> {
-    let mut all: Vec<Case> = vec![[0; 5]];
-    for (dim, &size) in sizes.iter().enumerate() {
+/// Every combination of options with the given number of values each.
+fn all_cases(sizes: &[usize]) -> Vec<Case> {
+    let mut all: Vec<Case> = vec![Vec::new()];
+    for &size in sizes {
         all = all
             .into_iter()
             .flat_map(|case| {
                 (0..size).map(move |v| {
-                    let mut next = case;
-                    next[dim] = v;
+                    let mut next = case.clone();
+                    next.push(v);
                     next
                 })
             })
             .collect();
     }
-    let pairs = |case: &Case| -> Vec<(usize, usize, usize, usize)> {
+    all
+}
+
+/// A deterministic all-pairs cover: every pair of values of any two options is
+/// in at least one chosen combination.
+fn pairwise_cover(sizes: &[usize]) -> Vec<Case> {
+    type Pair = (usize, usize, usize, usize);
+    let all = all_cases(sizes);
+    let pairs = |case: &Case| -> Vec<Pair> {
         let mut out = Vec::new();
-        for i in 0..5 {
-            for j in i + 1..5 {
+        for i in 0..case.len() {
+            for j in i + 1..case.len() {
                 out.push((i, case[i], j, case[j]));
             }
         }
         out
     };
-    let mut uncovered: std::collections::HashSet<_> = all.iter().flat_map(pairs).collect();
+    let mut uncovered: std::collections::HashSet<Pair> = all.iter().flat_map(pairs).collect();
     let mut chosen = Vec::new();
     while !uncovered.is_empty() {
         let best = all
@@ -265,11 +274,11 @@ fn pairwise_cover(sizes: [usize; 5]) -> Vec<Case> {
                         .iter()
                         .filter(|p| uncovered.contains(*p))
                         .count(),
-                    std::cmp::Reverse(case.to_vec()),
+                    std::cmp::Reverse((*case).clone()),
                 )
             })
-            .copied()
-            .unwrap();
+            .unwrap()
+            .clone();
         for pair in pairs(&best) {
             uncovered.remove(&pair);
         }
@@ -278,8 +287,8 @@ fn pairwise_cover(sizes: [usize; 5]) -> Vec<Case> {
     chosen
 }
 
-fn assert_no_failures(cases: &[Case]) {
-    let failures: Vec<String> = cases.iter().filter_map(|c| run_case(*c)).collect();
+fn assert_no_failures(cases: &[Case], run: impl Fn(&[usize]) -> Option<String>) {
+    let failures: Vec<String> = cases.iter().filter_map(|c| run(c)).collect();
     assert!(
         failures.is_empty(),
         "{} of {} combinations failed:\n{}",
@@ -289,44 +298,324 @@ fn assert_no_failures(cases: &[Case]) {
     );
 }
 
-/// The default run: an all-pairs cover of the options.
-#[test]
-fn sparse_option_pairs_fit_or_are_a_listed_exception() {
-    let sizes = [
+fn sparse_sizes() -> Vec<usize> {
+    vec![
         kernels().len(),
         OPTIMIZERS.len(),
         PRECISIONS.len(),
         MATHS.len(),
         2,
-    ];
-    let cases = pairwise_cover(sizes);
+    ]
+}
+
+/// The default run: an all-pairs cover of the options.
+#[test]
+fn sparse_option_pairs_fit_or_are_a_listed_exception() {
+    let cases = pairwise_cover(&sparse_sizes());
     assert!(cases.len() < 200, "cover has {} cases", cases.len());
-    assert_no_failures(&cases);
+    assert_no_failures(&cases, run_case);
 }
 
 /// Every combination (about 800 fits): `cargo test --test path_matrix -- --ignored`.
 #[test]
 #[ignore = "exhaustive; minutes in a debug build"]
 fn every_sparse_option_combination_fits_or_is_a_listed_exception() {
-    let sizes = [
+    assert_no_failures(&all_cases(&sparse_sizes()), run_case);
+}
+
+// ---- Exact ---------------------------------------------------------------
+
+macro_rules! exact_case {
+    ($name:expr, $kernel:expr, $opt:expr, $opt_name:expr, $precision:ty, $precision_name:expr,
+     $math:expr) => {{
+        let (x, y, _) = data();
+        let likelihood = GaussianLikelihood::new(0.1).unwrap();
+        let result = Gpr::new($kernel.clone(), likelihood)
+            .with_optimizer($opt)
+            .with_precision::<$precision>()
+            .with_math($math)
+            .fit(&x, N, D, &y)
+            .map(|f| f.neg_log_marginal_likelihood().unwrap_or(f64::NAN))
+            .map_err(|(_, e)| e);
+        let label = format!(
+            "exact · {} · {} · {} · {:?}",
+            $name, $opt_name, $precision_name, $math
+        );
+        match result {
+            Ok(value) if value.is_finite() => None,
+            Ok(value) => Some(format!("{label}: non-finite NLML {value}")),
+            Err(err) => Some(format!("{label}: {err}")),
+        }
+    }};
+}
+
+macro_rules! exact_by_precision {
+    ($name:expr, $kernel:expr, $opt:expr, $opt_name:expr, $precision:expr, $math:expr) => {
+        match $precision {
+            0 => exact_case!(
+                $name,
+                $kernel,
+                $opt,
+                $opt_name,
+                DoublePrecision,
+                "f64",
+                $math
+            ),
+            _ => exact_case!(
+                $name,
+                $kernel,
+                $opt,
+                $opt_name,
+                SinglePrecision,
+                "f32",
+                $math
+            ),
+        }
+    };
+}
+
+fn run_exact(case: &[usize]) -> Option<String> {
+    let [k_i, opt, precision, math] = case[..] else {
+        panic!("an exact case has four options");
+    };
+    let (name, kernel, _) = kernels().swap_remove(k_i);
+    let math = MATHS[math];
+    match opt {
+        0 => exact_by_precision!(name, kernel, Lbfgs::new(), OPTIMIZERS[0], precision, math),
+        1 => exact_by_precision!(
+            name,
+            kernel,
+            NonlinearCg::new(),
+            OPTIMIZERS[1],
+            precision,
+            math
+        ),
+        2 => exact_by_precision!(
+            name,
+            kernel,
+            NelderMead::new(),
+            OPTIMIZERS[2],
+            precision,
+            math
+        ),
+        3 => exact_by_precision!(
+            name,
+            kernel,
+            TrustRegion::new(),
+            OPTIMIZERS[3],
+            precision,
+            math
+        ),
+        _ => exact_by_precision!(
+            name,
+            kernel,
+            FastSimulatedAnnealing::new().with_seed(7),
+            OPTIMIZERS[4],
+            precision,
+            math
+        ),
+    }
+}
+
+fn exact_sizes() -> Vec<usize> {
+    vec![
         kernels().len(),
         OPTIMIZERS.len(),
         PRECISIONS.len(),
         MATHS.len(),
-        2,
-    ];
-    let mut cases: Vec<Case> = vec![[0; 5]];
-    for (dim, &size) in sizes.iter().enumerate() {
-        cases = cases
-            .into_iter()
-            .flat_map(|case| {
-                (0..size).map(move |v| {
-                    let mut next = case;
-                    next[dim] = v;
-                    next
-                })
-            })
-            .collect();
+    ]
+}
+
+#[test]
+fn exact_option_pairs_fit() {
+    assert_no_failures(&pairwise_cover(&exact_sizes()), run_exact);
+}
+
+#[test]
+#[ignore = "exhaustive"]
+fn every_exact_option_combination_fits() {
+    assert_no_failures(&all_cases(&exact_sizes()), run_exact);
+}
+
+// ---- Svgp ----------------------------------------------------------------
+
+macro_rules! svgp_case {
+    ($name:expr, $kernel:expr, $precision:ty, $precision_name:expr, $math:expr) => {{
+        let (x, y, z) = data();
+        let likelihood = GaussianLikelihood::new(0.1).unwrap();
+        let result = Svgp::new($kernel.clone(), likelihood)
+            .with_optimizer(Adam::new())
+            .with_precision::<$precision>()
+            .with_math($math)
+            .fit(&x, N, D, &y, &z, M)
+            .map_err(|(_, e)| e)
+            .and_then(|f| f.predict(&x, N, D))
+            .map(|p| p.mean.iter().all(|v| v.is_finite()));
+        let label = format!("svgp · {} · {} · {:?}", $name, $precision_name, $math);
+        match result {
+            Ok(true) => None,
+            Ok(false) => Some(format!("{label}: non-finite prediction")),
+            Err(err) => Some(format!("{label}: {err}")),
+        }
+    }};
+}
+
+fn run_svgp(case: &[usize]) -> Option<String> {
+    let [k_i, precision, math] = case[..] else {
+        panic!("an svgp case has three options");
+    };
+    let (name, kernel, _) = kernels().swap_remove(k_i);
+    let math = MATHS[math];
+    match precision {
+        0 => svgp_case!(name, kernel, DoublePrecision, "f64", math),
+        _ => svgp_case!(name, kernel, SinglePrecision, "f32", math),
     }
-    assert_no_failures(&cases);
+}
+
+fn svgp_sizes() -> Vec<usize> {
+    vec![kernels().len(), PRECISIONS.len(), MATHS.len()]
+}
+
+/// Three options: every combination is only 80 fits.
+#[test]
+fn every_svgp_option_combination_fits() {
+    assert_no_failures(&all_cases(&svgp_sizes()), run_svgp);
+}
+
+// ---- Online ----------------------------------------------------------------
+
+/// Fit with L-BFGS, go online, insert and delete a point, predict, change the
+/// parameters back through `refit`, and (sparse) insert and delete an inducing
+/// point. The message names the step that failed.
+macro_rules! online_case {
+    ($name:expr, $kernel:expr, $sparse:expr, $precision:ty, $precision_name:expr, $math:expr) => {{
+        let label = format!(
+            "online {} · {} · {} · {:?}",
+            if $sparse { "sgpr" } else { "exact" },
+            $name,
+            $precision_name,
+            $math
+        );
+        let (x, y, z) = data();
+        let likelihood = GaussianLikelihood::new(0.1).unwrap();
+        let new_x = [0.45, 0.55];
+        let query = [0.2, 0.3, 0.7, 0.6];
+        let outcome: Result<(), String> = if $sparse {
+            (|| {
+                let fitted = Sgpr::new($kernel.clone(), likelihood)
+                    .with_optimizer(Lbfgs::new())
+                    .with_precision::<$precision>()
+                    .with_math($math)
+                    .fit(&x, N, D, &y, &z, M)
+                    .map_err(|(_, e)| format!("fit: {e}"))?;
+                let mut online = fitted.into_online();
+                let id = match online.insert(&new_x, 0.1) {
+                    Ok(id) => id,
+                    // A point close to the others can make the single-precision
+                    // factor indefinite. The error is typed and the model must
+                    // stay usable.
+                    Err(GprError::CholeskyFailed { .. }) if $precision_name == "f32" => {
+                        let p = online
+                            .predict(&query, 2, D)
+                            .map_err(|e| format!("predict after a failed insert: {e}"))?;
+                        return if p.mean.iter().all(|v| v.is_finite()) {
+                            Ok(())
+                        } else {
+                            Err("predict after a failed insert: non-finite mean".to_owned())
+                        };
+                    }
+                    Err(e) => return Err(format!("insert: {e}")),
+                };
+                let p = online
+                    .predict(&query, 2, D)
+                    .map_err(|e| format!("predict: {e}"))?;
+                if !p.mean.iter().all(|v| v.is_finite()) {
+                    return Err("predict: non-finite mean".to_owned());
+                }
+                online.delete(id).map_err(|e| format!("delete: {e}"))?;
+                let zid = online
+                    .insert_inducing(&[0.4, 0.6])
+                    .map_err(|e| format!("insert_inducing: {e}"))?;
+                online
+                    .delete_inducing(zid)
+                    .map_err(|e| format!("delete_inducing: {e}"))?;
+                online.refit().map_err(|e| format!("refit: {e}"))?;
+                let p = online
+                    .predict(&query, 2, D)
+                    .map_err(|e| format!("predict after refit: {e}"))?;
+                if !p.mean.iter().all(|v| v.is_finite()) {
+                    return Err("predict after refit: non-finite mean".to_owned());
+                }
+                Ok(())
+            })()
+        } else {
+            (|| {
+                let fitted = Gpr::new($kernel.clone(), likelihood)
+                    .with_optimizer(Lbfgs::new())
+                    .with_precision::<$precision>()
+                    .with_math($math)
+                    .fit(&x, N, D, &y)
+                    .map_err(|(_, e)| format!("fit: {e}"))?;
+                let mut online = fitted
+                    .into_online()
+                    .map_err(|e| format!("into_online: {e}"))?;
+                let id = match online.insert(&new_x, 0.1) {
+                    Ok(id) => id,
+                    // A point close to the others can make the single-precision
+                    // factor indefinite. The error is typed and the model must
+                    // stay usable.
+                    Err(GprError::CholeskyFailed { .. }) if $precision_name == "f32" => {
+                        let p = online
+                            .predict(&query, 2, D)
+                            .map_err(|e| format!("predict after a failed insert: {e}"))?;
+                        return if p.mean.iter().all(|v| v.is_finite()) {
+                            Ok(())
+                        } else {
+                            Err("predict after a failed insert: non-finite mean".to_owned())
+                        };
+                    }
+                    Err(e) => return Err(format!("insert: {e}")),
+                };
+                let p = online
+                    .predict(&query, 2, D)
+                    .map_err(|e| format!("predict: {e}"))?;
+                if !p.mean.iter().all(|v| v.is_finite()) {
+                    return Err("predict: non-finite mean".to_owned());
+                }
+                online.delete(id).map_err(|e| format!("delete: {e}"))?;
+                online.refit().map_err(|e| format!("refit: {e}"))?;
+                let p = online
+                    .predict(&query, 2, D)
+                    .map_err(|e| format!("predict after refit: {e}"))?;
+                if !p.mean.iter().all(|v| v.is_finite()) {
+                    return Err("predict after refit: non-finite mean".to_owned());
+                }
+                Ok(())
+            })()
+        };
+        outcome.err().map(|e| format!("{label}: {e}"))
+    }};
+}
+
+fn run_online(case: &[usize]) -> Option<String> {
+    let [k_i, sparse, precision, math] = case[..] else {
+        panic!("an online case has four options");
+    };
+    let (name, kernel, _) = kernels().swap_remove(k_i);
+    let math = MATHS[math];
+    let sparse = sparse == 1;
+    match precision {
+        0 => online_case!(name, kernel, sparse, DoublePrecision, "f64", math),
+        _ => online_case!(name, kernel, sparse, SinglePrecision, "f32", math),
+    }
+}
+
+fn online_sizes() -> Vec<usize> {
+    vec![kernels().len(), 2, PRECISIONS.len(), MATHS.len()]
+}
+
+/// Four options: every combination is 160 sessions.
+#[test]
+fn every_online_option_combination_works() {
+    assert_no_failures(&all_cases(&online_sizes()), run_online);
 }
