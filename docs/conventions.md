@@ -39,10 +39,10 @@ src/kernel/                leaves live here, not in src/*.rs
   ard.rs                   shared checks and r² sums of the ARD leaves
   spec.rs term.rs dist.rs simd.rs lengthscale.rs scalar.rs
 src/optimizer/             mod.rs, logit.rs. lbfgs.rs ncg.rs neldermead.rs fsa.rs newton.rs. adam.rs does not implement Optimizer
-src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs
+src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs sparse.rs (save / load of Sgpr, OnlineSgpr, Svgp)
 src/sparse/                crate-private: SparseSpec / SparseCore and the inducing-point helpers Sgpr and Svgp share. Sgpr and Svgp do not import each other
 src/sgpr/                  model.rs fitted.rs online.rs objective.rs tests.rs
-  factor/                  vfe.rs (assembly, weights, bound) derivatives.rs predict.rs updates.rs (rank-1, inducing)
+  factor/                  vfe.rs (assembly, weights, bound) derivatives.rs predict.rs loo.rs updates.rs (rank-1, inducing)
 src/svgp/                  model.rs fitted.rs tests.rs
   factor/                  assemble.rs (K_mm, A, q, ELBO) gradient.rs predict.rs adam.rs
 src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not split into leaves

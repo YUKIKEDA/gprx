@@ -12,6 +12,7 @@ mod tests;
 pub use fitted::FittedSgpr;
 pub use model::Sgpr;
 pub(crate) use objective::SgprObjective;
+pub(crate) use online::InducingRegistry;
 pub use online::{InducingId, OnlineSgpr};
 
 /// Keeps inducing coordinates fixed during [`Sgpr::fit`].
