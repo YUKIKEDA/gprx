@@ -170,7 +170,11 @@ def main(argv: list[str]) -> int:
             figures.append(path.name)
     for curve_name in sorted({c["dataset"] for c in summary if c["dataset"] in CURVES}):
         for protocol in sorted({c["protocol"] for c in summary if c["dataset"] == curve_name}):
-            path = plot.curve(curve_name, protocol, BENCH)
+            try:
+                path = plot.curve(curve_name, protocol, BENCH)
+            except OSError as err:  # the data cannot be fetched here (urllib errors are OSErrors)
+                print(f"curve {curve_name}: no figure ({err})", file=sys.stderr)
+                path = None
             if path:
                 figures.append(path.name)
     body = "\n".join(
