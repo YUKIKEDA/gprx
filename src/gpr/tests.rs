@@ -12,7 +12,8 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l};
 use crate::objective::{IncrementalObjective, Objective};
 use crate::optimizer::{
-    FastSimulatedAnnealing, Fixed, Lbfgs, NelderMead, Newton, NonlinearCg, OptResult, Optimizer,
+    FastSimulatedAnnealing, Fixed, Lbfgs, NelderMead, NonlinearCg, OptResult, Optimizer,
+    TrustRegion,
 };
 use crate::param::Interval;
 use crate::policy::{
@@ -2934,7 +2935,7 @@ fn fast_approx_fit_nlml_does_not_rise() {
     check(
         Gpr::new(kernel(), noise())
             .with_math(KernelExp::FastApprox)
-            .with_optimizer(Newton::new())
+            .with_optimizer(TrustRegion::new())
             .fit(&x, 3, 1, &y)
             .map_err(|(_, err)| err)
             .expect("newton")

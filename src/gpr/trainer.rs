@@ -250,7 +250,7 @@ impl<O, P> Gpr<O, P> {
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after
     /// this switch. argmin solvers are [`crate::Lbfgs`], [`crate::NonlinearCg`],
-    /// [`crate::NelderMead`], and [`crate::Newton`]. A user type that implements [`Optimizer`]
+    /// [`crate::NelderMead`], and [`crate::TrustRegion`]. A user type that implements [`Optimizer`]
     /// uses this same method; there is no second solver slot.
     ///
     /// # Examples
