@@ -72,3 +72,18 @@ just perf-real-report
 - `--timeline`: the RSS of the whole process tree every 10 ms, with the start of load / warm-up / fit / predict marked (`out/real/timeline/`).
 - Do not run two cells at once: they share the CPU and the timings mix.
 - friedrich has no ARD kernel, so its cells are N/A. libgp's fit is Rprop only, so its `matched` cells are N/A.
+
+### Real datasets: every path, and what is known not to work
+
+`just perf-real-smoke` runs the whole matrix (dataset kind × model × protocol × library, with and without `--timeline`) on tiny problems, and with `--data` loads two splits of every dataset and checks the shapes against the sources' tables. A cell either runs or is N/A with a reason the script knows (`EXPECTED_NA`); anything else is a FAIL. Run it after touching a runner. `just perf-real-full` starts with it.
+
+N/A on purpose: friedrich (no ARD kernel, no sparse model), libgp (Rprop only, so no `matched`; no sparse model; the composite Mauna Loa kernel is not wired), scikit-learn (no sparse model), GPy's SVGP (no minibatch fit in its API), SVGP `native` (no library default suits a large n) and SVGP `fixed`. An exact fit whose `K` and factor (2 n² f64) do not fit in the available memory is N/A with the sizes (`--force-exact` tries anyway).
+
+Known limits of what is measured:
+
+- gprx's `Svgp` recomputes the cached `A = L⁻¹ K_mn` for **all** n points at every Adam step (`set_params`), and promotes a copy of it for f64 (`promote_svgp_f64`), so a step costs O(n·m²) instead of O(batch·m²). Measured on HouseElectric rows with m = 16, batch 1024: 90 ms per step at n = 20 000 and 335 ms at n = 80 000. At n ≈ 1.8 M a fit is hours; a T3 time for gprx's `Svgp` measures this, not the model.
+- gprx's `Sgpr` / `Svgp` cannot fit a signal variance (no coordinate derivative for a `Constant × RBF` product), so the sparse cells fix it at 1 in every library.
+- gprx's argmin L-BFGS uses several function evaluations per iteration (Sgpr, n = 1000, m = 128, d = 8: about 720 for 100 iterations); scipy's L-BFGS-B uses about one. Compare times only with the evaluation counts beside them.
+- At the same θ and Z, GPyTorch's sparse model has the same marginal likelihood as gprx and GPy but predicts with its own low-rank test covariance (RMSE / NLPD differ by a fraction of a percent).
+- The case of a large dataset is one JSON file (HouseElectric: 600 MB) that each runner parses whole: allow a few GiB of memory and a minute of start-up per cell.
+- The cloud VM this was developed on (4 vCPUs, 15 GiB) is too small for a final run: exact Kin40k / Protein do not fit, and an `Sgpr` fit at m = 512 takes hours.

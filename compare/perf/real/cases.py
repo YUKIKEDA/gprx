@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
 import numpy as np
 
 from common.harness import write_json
@@ -34,6 +36,16 @@ KMEANS_SUBSAMPLE = 100_000
 def case_path(dataset: str, split: int, protocol: str, model: str = "exact") -> Path:
     tag = "" if model == "exact" else f"_{model}"
     return CASES / f"{dataset}{tag}_s{split}_{protocol}.json"
+
+
+def case_n_rows(path: Path) -> int:
+    """Training rows of a written case, from its small sidecar (the case
+    itself is hundreds of MB for the large datasets)."""
+    return int(json.loads(path.with_suffix(".size.json").read_text(encoding="utf-8"))["n_rows"])
+
+
+def _write_size(path: Path, n_rows: int) -> None:
+    path.with_suffix(".size.json").write_text(json.dumps({"n_rows": n_rows}), encoding="utf-8")
 
 
 def inducing_points(x: np.ndarray, m: int) -> np.ndarray:
@@ -88,6 +100,7 @@ def write_case(
             "gtol": MATCHED_GTOL,
         },
     )
+    _write_size(path, int(data.x_train.shape[0]))
     return path
 
 
@@ -154,4 +167,5 @@ def write_curve_case(name: str, protocol: str) -> Path:
             "gtol": MATCHED_GTOL,
         },
     )
+    _write_size(path, int(curve.x_train.shape[0]))
     return path

@@ -159,11 +159,10 @@ def main(argv: list[str]) -> int:
     )
     figures = []
     for model, protocol in sorted({(c["model"], c["protocol"]) for c in summary}):
-        if model == "exact":
-            for maker in (plot.accuracy, plot.fit_time):
-                path = maker(rows, protocol, BENCH)
-                if path:
-                    figures.append(path.name)
+        for maker in (plot.accuracy, plot.fit_time):
+            path = maker(rows, protocol, BENCH, model)
+            if path:
+                figures.append(path.name)
     for prefix in plot.timeline_groups(OUT / "timeline"):
         path = plot.rss_timeline(prefix, BENCH, OUT / "timeline")
         if path:

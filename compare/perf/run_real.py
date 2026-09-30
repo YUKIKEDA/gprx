@@ -19,7 +19,7 @@ import sys
 from common import harness
 from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start, write_json
 
-from .real.cases import N_INDUCING, splits_of, write_case, write_curve_case
+from .real.cases import N_INDUCING, case_n_rows, splits_of, write_case, write_curve_case
 from .real.curves import CURVES
 from .real.data import DATASETS, OUT
 from .real.libs import FIT_FIELDS, RUNNERS, runners_for
@@ -156,7 +156,7 @@ def main(argv: list[str]) -> int:
             print(f"# {path.name}", flush=True)
             for lib in libs:
                 reason = (
-                    exact_skip_reason(json.loads(path.read_text(encoding="utf-8"))["n_rows"], "--force-exact" in argv)
+                    exact_skip_reason(case_n_rows(path), "--force-exact" in argv)
                     if model == "exact" and protocol != "fixed" and DATASETS.get(dataset) and DATASETS[dataset].tier in ("T2", "T3")
                     else None
                 )
