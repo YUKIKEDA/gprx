@@ -23,7 +23,7 @@ use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute
 use crate::param::Interval;
 use crate::param::write_params;
 use crate::persist::{self, PersistedModel};
-use crate::precision::GpScalar;
+use crate::precision::{GpScalar, StoredFactor, TrainSystem};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{FitWorkspace, QueryWorkspace, WorkspaceCore, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
@@ -162,6 +162,7 @@ where
         let n = self.n;
         let mut workspace = OnlineWorkspace::from_active(n)?;
         workspace.fill_ld_from_llt(self.chol_l(), n)?;
+        workspace.factor_jitter = self.workspace.core().factor_jitter;
         OnlineWorkspace::set_f64_prefix(&mut workspace.y, &self.y_train);
         OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.factor_alpha);
         Ok(OnlineGpr::from_parts(
@@ -396,6 +397,11 @@ where
             _recompute: PhantomData,
             _math: PhantomData,
         }
+    }
+
+    /// Diagonal jitter the current factor was built with.
+    pub(crate) fn factor_jitter(&self) -> f64 {
+        self.workspace.core().factor_jitter
     }
 
     pub(crate) fn jitter_policy(&self) -> JitterPolicy {
@@ -1222,15 +1228,23 @@ where
     }
 
     pub(crate) fn publish_predict_alpha(&mut self) -> Result<(), GprError> {
-        P::publish_predict_alpha::<M>(
-            &self.kernel,
-            &self.compiled,
-            self.x.as_ref(),
-            &self.y_train,
-            self.likelihood.noise_variance(),
-            &self.factor_alpha,
-            &mut self.alpha,
-        )
+        let core = self.workspace.core();
+        let sys = TrainSystem {
+            kernel: &self.kernel,
+            compiled: &self.compiled,
+            x: self.x.as_ref(),
+            y: &self.y_train,
+            noise: self.likelihood.noise_variance(),
+            jitter: core.factor_jitter,
+            factor: StoredFactor::Llt(P::view_factor(
+                self.mapped_factor.as_ref().map(|mapped| mapped.l_view()),
+                core.k_matrix.as_ref(),
+            )),
+            factor_alpha: &self.factor_alpha,
+            policy: self.jitter_policy,
+            stage: CholeskyStage::Fit,
+        };
+        P::publish_predict_alpha::<M>(&sys, &mut self.alpha)
     }
 
     fn copy_factor_alpha(&mut self) {
@@ -1939,6 +1953,7 @@ where
         let n = self.n;
         let mut workspace = OnlineWorkspace::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
+        workspace.factor_jitter = self.workspace.core().factor_jitter;
         OnlineWorkspace::set_f64_prefix(&mut workspace.y, &self.y_train);
         OnlineWorkspace::set_vector_prefix(&mut workspace.alpha, &self.factor_alpha);
         Ok(OnlineGpr::from_parts(
@@ -1985,6 +2000,7 @@ where
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
         let mut workspace = FitBuffers::<C, RetainCholesky, P>::new(n)?;
+        workspace.core_mut().factor_jitter = parts.factor_jitter;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         if C::CACHES_DISTANCES && compiled.needs_ard_sq_diff() {
             workspace.ensure_ard_if_cached(n, d)?;

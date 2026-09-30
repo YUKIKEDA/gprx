@@ -155,7 +155,7 @@ where
     F: FnMut(&mut W) -> Result<(), GprError>,
 {
     let n = ws.core().k_matrix.nrows();
-    retry_with_jitter(policy.jitter.retry_jitters(), n, policy.stage, |j| {
+    let jitter = retry_with_jitter(policy.jitter.retry_jitters(), n, policy.stage, |j| {
         clear_train_gram(ws);
         write_k(ws)?;
         finish_train_system(ws, y, noise, j);
@@ -167,7 +167,9 @@ where
             0.0,
             policy.stage,
         )
-    })
+    })?;
+    ws.core_mut().factor_jitter = jitter;
+    Ok(())
 }
 
 fn clear_train_gram<W>(ws: &mut W)
