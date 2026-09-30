@@ -54,13 +54,13 @@ def build(case: dict, x: torch.Tensor, y: torch.Tensor):
     return model.double(), likelihood.double()
 
 
-def train(case: dict, model, likelihood, x, y) -> dict:
+def optimize_lbfgsb_or_adam(case: dict, model, likelihood, x, y) -> dict:
     """Runs the case's optimizer; returns the call count and stop reason."""
     mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
     n = x.shape[0]
     model.train()
     likelihood.train()
-    params = list(model.parameters())
+    params = [p for p in model.parameters() if p.requires_grad]
     calls = 0
     protocol = case["protocol"]
     if protocol == "fixed":
@@ -90,8 +90,13 @@ def train(case: dict, model, likelihood, x, y) -> dict:
         assign(flat)
         for p in params:
             p.grad = None
-        loss = -mll(model(x), y) * n
-        loss.backward()
+        try:
+            loss = -mll(model(x), y) * n
+            loss.backward()
+        except (gpytorch.utils.errors.NotPSDError, torch.linalg.LinAlgError):
+            # a trial θ whose K is not positive definite: a huge value and no
+            # slope, as gprx does (SgprObjective returns 1e300)
+            return 1.0e300, np.zeros_like(flat)
         grad = np.concatenate([p.grad.reshape(-1).numpy() for p in params])
         return float(loss.item()), grad
 
@@ -123,11 +128,11 @@ def run(case: dict) -> dict:
     for _ in range(warmup_fits(n)):
         phase("warmup")
         model, likelihood = build(case, x, y)
-        train(case, model, likelihood, x, y)
+        optimize_lbfgsb_or_adam(case, model, likelihood, x, y)
     phase("fit")
     model, likelihood = build(case, x, y)
     t0 = time.perf_counter()
-    info = train(case, model, likelihood, x, y)
+    info = optimize_lbfgsb_or_adam(case, model, likelihood, x, y)
     fit_s = time.perf_counter() - t0
 
     model.train()

@@ -125,7 +125,7 @@ def run(case: dict) -> dict:
         "joint_evals": info["joint"],
         "value_evals": info["value"],
         "iterations": info["iterations"],
-        "nlml": float(-model.log_likelihood()),
+        "nlml": float(np.asarray(-model.log_likelihood()).reshape(-1)[0]),
         "peak_rss_bytes": peak_rss_bytes(),
         "note": info["message"],
     }

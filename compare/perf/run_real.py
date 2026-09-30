@@ -1,7 +1,7 @@
 """B1-1: fit every library on the real datasets and print the tables.
 
 ```text
-python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline]
+python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline] [--model exact|sgpr|svgp] [--m 512]
 python -m perf.run_real --reprint
 ```
 
@@ -18,9 +18,9 @@ import sys
 from common import harness
 from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start, write_json
 
-from .real.cases import splits_of, write_case
+from .real.cases import N_INDUCING, splits_of, write_case
 from .real.data import DATASETS, OUT
-from .real.libs import RUNNERS
+from .real.libs import RUNNERS, runners_for
 from .real.optimizers import OPTIMIZERS, meta
 
 RESULTS = OUT / "results.json"
@@ -51,7 +51,7 @@ def print_tables(rows: list[dict]) -> None:
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
         dataset = row["name"].rsplit("_s", 1)[0]
-        groups.setdefault((row["protocol"], dataset, row["lib"]), []).append(row)
+        groups.setdefault((f'{row["protocol"]} / {row.get("model", "exact")}', dataset, row["lib"]), []).append(row)
     for protocol in sorted({key[0] for key in groups}):
         lines = []
         for (proto, dataset, lib), cells in groups.items():
@@ -97,9 +97,12 @@ def main(argv: list[str]) -> int:
         return 0
     datasets = option(argv, "--datasets", "yacht").split(",")
     protocol = option(argv, "--protocol", "native")
+    model = option(argv, "--model", "exact")
+    n_inducing = int(option(argv, "--m", str(N_INDUCING)))
+    runners = runners_for(model)
     libs = option(argv, "--libs", ",".join(RUNNERS)).split(",")
     limit = int(option(argv, "--splits", "0"))
-    unknown = [d for d in datasets if d not in DATASETS] + [l for l in libs if l not in RUNNERS]
+    unknown = [d for d in datasets if d not in DATASETS] + [l for l in libs if l not in runners]
     if unknown:
         print(f"unknown: {unknown}", file=sys.stderr)
         return 2
@@ -110,12 +113,13 @@ def main(argv: list[str]) -> int:
         if limit:
             splits = splits[:limit]
         for split in splits:
-            path = write_case(dataset, split, protocol)
+            path = write_case(dataset, split, protocol, model, n_inducing)
             print(f"# {path.name}", flush=True)
             for lib in libs:
                 if "--timeline" in argv:
-                    harness.TIMELINE = (OUT / "timeline", f"{dataset}_s{split}_{protocol}_{lib}")
-                row = RUNNERS[lib](path)
+                    harness.TIMELINE = (OUT / "timeline", f"{dataset}_{model}_s{split}_{protocol}_{lib}")
+                row = runners[lib](path)
+                row["model"] = model
                 row.setdefault("lib", lib)
                 row.setdefault("name", f"{dataset}_s{split}")
                 row.setdefault("protocol", protocol)
