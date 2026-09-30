@@ -311,7 +311,7 @@ mod tests {
     }
 
     struct CountingObj<'a> {
-        inner: crate::objective::GprObjective<'a>,
+        inner: crate::gpr::GprObjective<'a>,
         joint_evals: usize,
     }
 

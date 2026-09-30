@@ -4,17 +4,16 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::error::GprError;
+use crate::gpr::GprObjective;
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::GprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::param::write_params;
 use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{IdentityInput, IdentityTarget, UnfittedTarget, UnfittedTransform};
 
-use super::{
-    CholeskyBuffer, DistanceCachePolicy, ExactFit, FittedGpr, JitterPolicy, KernelExp, Policies,
-};
+use super::{ExactFit, FittedGpr, Policies};
+use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp};
 
 /// Unfitted Exact GPR trainer: kernel, likelihood, transforms, optimizer, and
 /// recompute strategy.

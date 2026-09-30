@@ -16,17 +16,20 @@ src/internals.rs           bench / compare-perf hooks. Only with the bench-inter
 src/likelihood.rs
 src/linalg/                crate-private Cholesky, LDLT, solves, dense helpers, faer worker caps. Models do not define these
 src/math.rs                Accurate / FastApprox
-src/objective.rs
+src/objective.rs           optimizer-facing traits only. Each model keeps its own adapter (gpr/objective.rs, sgpr/objective.rs)
 src/param.rs
-src/precision.rs
+src/points.rs              PointId and the crate-private PointRegistry
+src/policy.rs              runtime policies (distance cache, Cholesky buffer, KernelExp, jitter)
+src/precision/             precision policies and refinement. Does not import a model: models pass their f64 reference as a closure
+src/prediction.rs          Prediction, PredictiveCovariance, PredictOptions, VarianceKind
 src/rng.rs                 crate-private SmallRng
 src/workspace.rs           Workspace and QueryWorkspace. Do not pack them into one struct
-src/gpr/                   one responsibility per file, no #[path]
+src/gpr/                   one responsibility per file, no #[path]. Models import the shared layers above, never each other
   trainer.rs fitted.rs online.rs    Gpr, FittedGpr, OnlineGpr
   exact_fit.rs             ExactFit: every hyperparameter write, gradient, and Hessian
+  objective.rs             GprObjective
   factor_store.rs          LltStore (FittedGpr) and LdltStore (OnlineGpr)
-  shared.rs factor.rs      GprCore and the shared predict body; Gram assembly and Cholesky
-  points.rs prediction.rs policy.rs   PointId, prediction types, runtime policies
+  shared.rs factor.rs      GprCore, Policies, and the shared predict body; Gram assembly and Cholesky
   tests.rs
 src/kernel/                leaves live here, not in src/*.rs
   compiled/                mod.rs, apply.rs, grad.rs, hess.rs, gram.rs. One dispatch over T: KernelScalar
@@ -37,9 +40,11 @@ src/kernel/                leaves live here, not in src/*.rs
   spec.rs term.rs dist.rs simd.rs lengthscale.rs scalar.rs
 src/optimizer/             mod.rs, logit.rs. lbfgs.rs ncg.rs neldermead.rs fsa.rs newton.rs. adam.rs does not implement Optimizer
 src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs
-src/sparse/                crate-private: SparseSpec (trainer settings) and SparseCore (fitted data) shared by Sgpr and Svgp
-src/sgpr/                  model.rs, fitted.rs, factor.rs, online.rs, tests.rs
-src/svgp/                  model.rs, fitted.rs, factor.rs, tests.rs
+src/sparse/                crate-private: SparseSpec / SparseCore and the inducing-point helpers Sgpr and Svgp share. Sgpr and Svgp do not import each other
+src/sgpr/                  model.rs fitted.rs online.rs objective.rs tests.rs
+  factor/                  vfe.rs (assembly, weights, bound) derivatives.rs predict.rs updates.rs (rank-1, inducing)
+src/svgp/                  model.rs fitted.rs tests.rs
+  factor/                  assemble.rs (K_mm, A, q, ELBO) gradient.rs predict.rs adam.rs
 src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not split into leaves
 tests/                     integration tests. Goldens only under compare/goldens/
 tests/common/               check.rs (tolerance asserts) and problems.rs (Forrester / sphere). Unit tests and benches include them with #[path]
