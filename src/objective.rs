@@ -259,25 +259,22 @@ pub struct SgprObjective<
     'a,
     O,
     I = crate::FixedInducing,
-    M = crate::math::Accurate,
     P: crate::precision::GpScalar = crate::precision::DoublePrecision,
 > {
-    model: &'a mut FittedSgpr<O, I, M, P>,
+    model: &'a mut FittedSgpr<O, I, P>,
 }
 
-impl<'a, O, I, M, P> SgprObjective<'a, O, I, M, P>
+impl<'a, O, I, P> SgprObjective<'a, O, I, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
-    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, M, P>) -> Self {
+    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, P>) -> Self {
         Self { model }
     }
 }
 
-impl<O, I: InducingLayout, M, P> Objective for SgprObjective<'_, O, I, M, P>
+impl<O, I: InducingLayout, P> Objective for SgprObjective<'_, O, I, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     fn num_params(&self) -> usize {
@@ -293,9 +290,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, M, P> Differentiable for SgprObjective<'_, O, I, M, P>
+impl<O, I: InducingLayout, P> Differentiable for SgprObjective<'_, O, I, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
@@ -311,9 +307,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, M, P> TwiceDifferentiable for SgprObjective<'_, O, I, M, P>
+impl<O, I: InducingLayout, P> TwiceDifferentiable for SgprObjective<'_, O, I, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
@@ -321,9 +316,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, M, P> HasBounds for SgprObjective<'_, O, I, M, P>
+impl<O, I: InducingLayout, P> HasBounds for SgprObjective<'_, O, I, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
