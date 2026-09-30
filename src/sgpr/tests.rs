@@ -788,7 +788,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     let kernel = || KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = || GaussianLikelihood::new(0.1).expect("noise");
     let start = Sgpr::new(kernel(), likelihood())
-        .with_math::<crate::FastApprox>()
+        .with_math(crate::KernelExp::FastApprox)
         .with_optimizer(Fixed)
         .factor(&x, 4, 1, &y, &z, 2)
         .map_err(|(_, err)| err)
@@ -801,7 +801,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     };
     check(
         Sgpr::new(kernel(), likelihood())
-            .with_math::<crate::FastApprox>()
+            .with_math(crate::KernelExp::FastApprox)
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
             .expect("lbfgs")
@@ -810,7 +810,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     );
     check(
         Sgpr::new(kernel(), likelihood())
-            .with_math::<crate::FastApprox>()
+            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(NonlinearCg::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
@@ -820,7 +820,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     );
     check(
         Sgpr::new(kernel(), likelihood())
-            .with_math::<crate::FastApprox>()
+            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(NelderMead::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
@@ -830,7 +830,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     );
     check(
         Sgpr::new(kernel(), likelihood())
-            .with_math::<crate::FastApprox>()
+            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(Newton::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
@@ -840,7 +840,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     );
     check(
         Sgpr::new(kernel(), likelihood())
-            .with_math::<crate::FastApprox>()
+            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(FastSimulatedAnnealing::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
@@ -1398,4 +1398,38 @@ fn inducing_rbf_plus_white_n4_m2_matches_factor() {
         z_new: &[1.5],
         delete_idx: 0,
     });
+}
+
+/// The runtime `exp` mode reaches the kernel and survives `fit`,
+/// `into_online`, and `into_fitted`.
+#[test]
+fn kernel_exp_is_a_runtime_value() {
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let z = [0.5, 2.5];
+    let fitted = |math| {
+        Sgpr::new(
+            KernelSpec::from(RbfKernel::new(0.7).expect("ell")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_math(math)
+        .with_optimizer(Fixed)
+        .factor(&x, 4, 1, &y, &z, 2)
+        .map_err(|(_, err)| err)
+        .expect("factor")
+    };
+    let accurate = fitted(crate::KernelExp::Accurate);
+    let fast = fitted(crate::KernelExp::FastApprox);
+    assert_eq!(accurate.math(), crate::KernelExp::Accurate);
+    assert_eq!(fast.math(), crate::KernelExp::FastApprox);
+    let a = accurate.neg_log_marginal_likelihood().expect("nlml");
+    let f = fast.neg_log_marginal_likelihood().expect("nlml");
+    assert!((a - f).abs() < 1e-4, "accurate={a} fast={f}");
+    assert!(
+        a.to_bits() != f.to_bits(),
+        "FastApprox must change the kernel"
+    );
+    let online = fast.into_online();
+    assert_eq!(online.math(), crate::KernelExp::FastApprox);
+    assert_eq!(online.into_fitted().math(), crate::KernelExp::FastApprox);
 }

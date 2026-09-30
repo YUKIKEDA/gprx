@@ -681,7 +681,7 @@ trait MathBackend<T: Scalar>: Send + Sync {
 enum MathMode { Accurate, FastApprox }
 ```
 
-The default is `Accurate` (`f64::exp` / `f32::exp` / `wide::exp`). `FastApprox` replaces `exp` in kernel evaluation, including during `fit` (P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)). `exp(θ)` that maps a lengthscale back, and the `KernelTerm` formulas, stay on the accurate `exp`. On `Gpr` / `FittedGpr` / `OnlineGpr` the mode is the runtime enum `KernelExp`, set by `with_math(KernelExp::FastApprox)`; each kernel call dispatches once to the sealed `KernelMath` marker (R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)). `Sgpr` / `Svgp` still take the marker as a type parameter until R5-1. The `MathMode` enum above is not shipped. `FittedGpr` and `OnlineGpr` save records the mode. A file with no field loads as `Accurate`.
+The default is `Accurate` (`f64::exp` / `f32::exp` / `wide::exp`). `FastApprox` replaces `exp` in kernel evaluation, including during `fit` (P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)). `exp(θ)` that maps a lengthscale back, and the `KernelTerm` formulas, stay on the accurate `exp`. On every model (`Gpr` / `FittedGpr` / `OnlineGpr`, `Sgpr` / `FittedSgpr` / `OnlineSgpr`, `Svgp` / `FittedSvgp`) the mode is the runtime enum `KernelExp`, set by `with_math(KernelExp::FastApprox)`; each kernel call dispatches once to the sealed `KernelMath` marker (R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239), R5-1a / [#246](https://github.com/YUKIKEDA/gprx/issues/246)). The `MathMode` enum above is not shipped. `FittedGpr` and `OnlineGpr` save records the mode. A file with no field loads as `Accurate`.
 
 ## 9. Optimizer
 

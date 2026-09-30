@@ -7,6 +7,7 @@ use faer::Mat;
 use faer::MatRef;
 
 use crate::error::GprError;
+use crate::gpr::{KernelExp, with_kernel_exp};
 use crate::param::write_params;
 
 use crate::kernel::{KernelScalar, KernelSpec};
@@ -35,17 +36,12 @@ use super::{FixedInducing, InducingLayout};
 /// [`Self::into_online`] yields [`OnlineSgpr`] for training-point and
 /// inducing-point updates.
 #[derive(Clone, Debug)]
-pub struct FittedSgpr<
-    O = Lbfgs,
-    I = FixedInducing,
-    M = crate::math::Accurate,
-    P: ModelPrecision = DoublePrecision,
-> {
+pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) optimizer: O,
     pub(crate) inducing: PhantomData<I>,
-    pub(crate) _math: PhantomData<M>,
+    pub(crate) math: KernelExp,
     pub(crate) x_obs: Vec<f64>,
     pub(crate) z_obs: Vec<f64>,
     pub(crate) y: Vec<f64>,
@@ -67,9 +63,8 @@ pub struct FittedSgpr<
     pub(crate) d: usize,
 }
 
-impl<O, I: InducingLayout, M, P> FittedSgpr<O, I, M, P>
+impl<O, I: InducingLayout, P> FittedSgpr<O, I, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
     /// Returns the number of training points.
@@ -95,6 +90,11 @@ where
     /// Returns the observation-noise model.
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.likelihood
+    }
+
+    /// Returns the kernel `exp` mode the trainer set with `with_math`.
+    pub fn math(&self) -> KernelExp {
+        self.math
     }
 
     /// Returns the original training features in column-major order.
@@ -194,7 +194,7 @@ where
         } else {
             self.z_obs.clone()
         };
-        let state = assemble_vfe::<M, _>(
+        let state = with_kernel_exp!(self.math, M => assemble_vfe::<M, _>(
             &kernel,
             likelihood,
             &self.x_obs,
@@ -203,7 +203,7 @@ where
             &self.y,
             &z_obs,
             self.m,
-        )?;
+        ))?;
         self.kernel = kernel;
         self.likelihood = likelihood;
         self.z_obs = z_obs;
@@ -287,7 +287,7 @@ where
             let mut exact = self.exact_fitted()?;
             exact.value_and_gradient_into(params, out)?;
         } else {
-            analytic_gradient(self, out, include_z)?;
+            with_kernel_exp!(self.math, M => analytic_gradient::<M, _, _, _>(self, out, include_z))?;
         }
         Ok(value)
     }
@@ -337,7 +337,7 @@ where
             let mut exact = self.exact_fitted()?;
             exact.hessian_into(params, out)?;
         } else {
-            analytic_hessian(self, out, include_z)?;
+            with_kernel_exp!(self.math, M => analytic_hessian::<M, _, _, _>(self, out, include_z))?;
         }
         Ok(())
     }
@@ -376,7 +376,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(self) -> OnlineSgpr<O, M, P> {
+    pub fn into_online(self) -> OnlineSgpr<O, P> {
         OnlineSgpr::from_fitted(self)
     }
 
@@ -396,7 +396,7 @@ where
     }
 
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
-        self.predict_w = publish_sgpr_weights::<M, P>(
+        self.predict_w = with_kernel_exp!(self.math, M => publish_sgpr_weights::<M, P>(
             &self.kernel,
             self.a.as_ref(),
             self.b_l.as_ref(),
@@ -408,7 +408,7 @@ where
             self.n,
             self.m,
             self.d,
-        )?;
+        ))?;
         Ok(())
     }
 
@@ -422,20 +422,20 @@ where
         self.a_frobenius2 = state.a_frobenius2;
     }
 
-    pub(crate) fn into_trainer(self) -> Sgpr<O, I, M, P> {
+    pub(crate) fn into_trainer(self) -> Sgpr<O, I, P> {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
-            _math: PhantomData,
+            math: self.math,
             _precision: PhantomData,
         }
     }
 
     pub(crate) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I, M, P>>,
+        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I, P>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -605,7 +605,7 @@ where
                 expected_dim: self.d,
             });
         }
-        vfe_predict::<M, P>(
+        with_kernel_exp!(self.math, M => vfe_predict::<M, P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),
@@ -618,7 +618,7 @@ where
             n_rows,
             n_cols,
             options,
-        )
+        ))
     }
 
     #[cfg(test)]

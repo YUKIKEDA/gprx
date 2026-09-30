@@ -45,8 +45,9 @@ pub struct FastApprox;
 
 /// Kernel `exp` mode: [`Accurate`] or [`FastApprox`].
 ///
-/// This is the `M` parameter of [`crate::Gpr::with_math`] and of the
-/// [`crate::kernel::CompiledKernel`] evaluators. It is sealed: only those two
+/// This is the `M` parameter of the [`crate::kernel::CompiledKernel`]
+/// evaluators. Models take the runtime [`crate::KernelExp`] instead
+/// (`with_math`) and dispatch to one of these once per kernel call. It is sealed: only those two
 /// types implement it, and its operations are crate-private.
 ///
 /// # Examples

@@ -375,14 +375,14 @@ fn shifted_q_grad_matches_fd() {
 fn fast_approx_adam_elbo_does_not_rise() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ell"));
     let start = Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1).expect("noise"))
-        .with_math::<crate::FastApprox>()
+        .with_math(crate::KernelExp::FastApprox)
         .factor(&X_1D, 4, 1, &Y, &Z_1D, 2)
         .map_err(|(_, err)| err)
         .expect("factor")
         .neg_elbo()
         .expect("start");
     let end = Svgp::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
-        .with_math::<crate::FastApprox>()
+        .with_math(crate::KernelExp::FastApprox)
         .with_optimizer(Adam::new())
         .fit(&X_1D, 4, 1, &Y, &Z_1D, 2)
         .map_err(|(_, err)| err)
@@ -461,4 +461,17 @@ fn mini_batch_fit_reproduces() {
     for (x, y) in pa.iter().zip(&pb) {
         assert_close(*x, *y, TOL);
     }
+}
+
+#[test]
+fn kernel_exp_is_a_runtime_value() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ell"));
+    let trainer = Svgp::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .with_math(crate::KernelExp::FastApprox);
+    assert_eq!(trainer.math(), crate::KernelExp::FastApprox);
+    let fitted = trainer
+        .factor(&X_1D, 4, 1, &Y, &Z_1D, 2)
+        .map_err(|(_, err)| err)
+        .expect("factor");
+    assert_eq!(fitted.math(), crate::KernelExp::FastApprox);
 }

@@ -9,6 +9,7 @@ use faer::{Accum, Mat, MatMut, MatRef};
 use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
+use crate::gpr::KernelExp;
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
@@ -246,7 +247,7 @@ pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, 
     y: &[f64],
     z: &[f64],
     n_inducing: usize,
-) -> Result<FittedSgpr<O, I, M, P>, GprError>
+) -> Result<FittedSgpr<O, I, P>, GprError>
 where
     P: ModelPrecision,
 {
@@ -278,7 +279,7 @@ where
         likelihood,
         optimizer,
         inducing: PhantomData,
-        _math: PhantomData,
+        math: KernelExp::of::<M>(),
         x_obs: x.to_vec(),
         z_obs: z.to_vec(),
         y: y.to_vec(),
@@ -530,10 +531,7 @@ pub(crate) struct VfeEngine<'a, T: KernelScalar> {
 }
 
 impl<'a, T: KernelScalar> VfeEngine<'a, T> {
-    fn from_model<O, I, M: crate::math::KernelMath, P>(
-        model: &'a FittedSgpr<O, I, M, P>,
-        y: &'a [T],
-    ) -> Self
+    fn from_model<O, I, P>(model: &'a FittedSgpr<O, I, P>, y: &'a [T]) -> Self
     where
         P: ModelPrecision<Storage = T>,
     {
@@ -718,7 +716,7 @@ pub(crate) struct VfeTangent<T: KernelScalar> {
 }
 
 pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, M, P>,
+    model: &FittedSgpr<O, I, P>,
     out: &mut [f64],
     include_z: bool,
 ) -> Result<(), GprError>
@@ -727,7 +725,7 @@ where
 {
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.y, &mut y_cast);
-    let engine = VfeEngine::<P::Storage>::from_model(model, y_s);
+    let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
     let compiled = model.kernel.compile_as::<P::Storage>();
     let x64 = pack_points(&model.x_obs, model.n, model.d);
     let z64 = pack_points(&model.z_obs, model.m, model.d);
@@ -757,7 +755,7 @@ where
 }
 
 pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, M, P>,
+    model: &FittedSgpr<O, I, P>,
     out: &mut [f64],
     include_z: bool,
 ) -> Result<(), GprError>
@@ -766,14 +764,14 @@ where
 {
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.y, &mut y_cast);
-    let engine = VfeEngine::<P::Storage>::from_model(model, y_s);
-    let vars = collect_first_vars(model, include_z)?;
+    let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
+    let vars = collect_first_vars::<M, _, _, _>(model, include_z)?;
     let tangents: Vec<VfeTangent<P::Storage>> =
         vars.iter().map(|v| engine.first_tangent(v)).collect();
     let p = vars.len();
     for j in 0..p {
         for i in j..p {
-            let dd = second_var(model, i, j, include_z)?;
+            let dd = second_var::<M, _, _, _>(model, i, j, include_z)?;
             let hij = engine
                 .second_directional(&tangents[i], &tangents[j], &dd)
                 .to_f64();
@@ -785,7 +783,7 @@ where
 }
 
 pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, M, P>,
+    model: &FittedSgpr<O, I, P>,
     include_z: bool,
 ) -> Result<Vec<KernelVar<P::Storage>>, GprError>
 where
@@ -898,7 +896,7 @@ where
 }
 
 pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, M, P>,
+    model: &FittedSgpr<O, I, P>,
     i: usize,
     j: usize,
     include_z: bool,

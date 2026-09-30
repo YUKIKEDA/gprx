@@ -8,6 +8,7 @@ use faer::Mat;
 use crate::error::GprError;
 use crate::gpr::PointId;
 use crate::gpr::PointRegistry;
+use crate::gpr::{KernelExp, with_kernel_exp};
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
@@ -161,7 +162,7 @@ impl InducingRegistry {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct OnlineSgpr<O = Lbfgs, M = crate::math::Accurate, P: ModelPrecision = DoublePrecision> {
+pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
     optimizer: O,
@@ -180,15 +181,14 @@ pub struct OnlineSgpr<O = Lbfgs, M = crate::math::Accurate, P: ModelPrecision = 
     d: usize,
     registry: PointRegistry,
     inducing: InducingRegistry,
-    _math: PhantomData<M>,
+    math: KernelExp,
 }
 
-impl<O, M, P> OnlineSgpr<O, M, P>
+impl<O, P> OnlineSgpr<O, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
 {
-    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, M, P>) -> Self {
+    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
         let inducing = InducingRegistry::from_count(fitted.m);
         Self {
@@ -210,11 +210,11 @@ where
             d: fitted.d,
             registry,
             inducing,
-            _math: PhantomData,
+            math: fitted.math,
         }
     }
 
-    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing, M, P>
+    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing, P>
     where
         O: Clone,
     {
@@ -223,7 +223,7 @@ where
             likelihood: self.likelihood,
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
-            _math: PhantomData,
+            math: self.math,
             x_obs: self.x_obs.clone(),
             z_obs: self.z_obs.clone(),
             y: self.y.clone(),
@@ -240,7 +240,7 @@ where
         }
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, M, P>) {
+    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
         self.kernel = fitted.kernel;
         self.likelihood = fitted.likelihood;
         self.optimizer = fitted.optimizer;
@@ -285,7 +285,7 @@ where
     /// ADR 0005 applies first. This refresh keeps `L` aligned with `k(Z, Z)`
     /// so a long insert/delete sequence stays within the public 1e-12 check.
     fn refresh_vfe(&mut self) -> Result<(), GprError> {
-        let state = assemble_vfe::<M, P::Storage>(
+        let state = with_kernel_exp!(self.math, M => assemble_vfe::<M, P::Storage>(
             &self.kernel,
             self.likelihood,
             &self.x_obs,
@@ -294,13 +294,13 @@ where
             &self.y,
             &self.z_obs,
             self.m,
-        )?;
+        ))?;
         self.apply_vfe(state)
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
-            self.predict_w = assemble_vfe::<M, f64>(
+            self.predict_w = with_kernel_exp!(self.math, M => assemble_vfe::<M, f64>(
                 &self.kernel,
                 self.likelihood,
                 &self.x_obs,
@@ -309,14 +309,14 @@ where
                 &self.y,
                 &self.z_obs,
                 self.m,
-            )?
+            ))?
             .w
             .into_iter()
             .map(P::Refine::from_f64)
             .collect();
             return Ok(());
         }
-        self.predict_w = publish_sgpr_weights::<M, P>(
+        self.predict_w = with_kernel_exp!(self.math, M => publish_sgpr_weights::<M, P>(
             &self.kernel,
             self.a.as_ref(),
             self.b_l.as_ref(),
@@ -328,7 +328,7 @@ where
             self.n,
             self.m,
             self.d,
-        )?;
+        ))?;
         Ok(())
     }
 
@@ -365,6 +365,11 @@ where
     /// Returns the observation-noise model.
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.likelihood
+    }
+
+    /// Returns the kernel `exp` mode the trainer set with `with_math`.
+    pub fn math(&self) -> KernelExp {
+        self.math
     }
 
     /// Returns the original training features in column-major order.
@@ -510,7 +515,7 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_predict::<M, P>(
+        with_kernel_exp!(self.math, M => vfe_predict::<M, P>(
             &self.kernel,
             &self.z_obs,
             self.k_mm_l.as_ref(),
@@ -523,7 +528,7 @@ where
             n_rows,
             n_cols,
             options,
-        )
+        ))
     }
 
     /// Appends one training point at the current `θ` with a rank-1 VFE update.
@@ -550,8 +555,7 @@ where
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        let mut a_col =
-            kernel_column::<M, P::Storage>(&self.kernel, &self.z_obs, self.m, x_new, self.d)?;
+        let mut a_col = with_kernel_exp!(self.math, M => kernel_column::<M, P::Storage>(&self.kernel, &self.z_obs, self.m, x_new, self.d))?;
         solve_lmm(self.k_mm_l.as_ref(), a_col.as_mut());
         let mut v = vec![P::Storage::from_f64(0.0); self.m];
         for (i, slot) in v.iter_mut().enumerate() {
@@ -637,7 +641,7 @@ where
             self.n -= 1;
             self.recompute_w()?;
         } else {
-            let state = assemble_vfe::<M, P::Storage>(
+            let state = with_kernel_exp!(self.math, M => assemble_vfe::<M, P::Storage>(
                 &self.kernel,
                 self.likelihood,
                 &x_next,
@@ -646,7 +650,7 @@ where
                 &y_next,
                 &self.z_obs,
                 self.m,
-            )?;
+            ))?;
             self.x_obs = x_next;
             self.y = y_next;
             self.n -= 1;
@@ -717,7 +721,7 @@ where
             return Err(GprError::NonFiniteInput);
         }
         let mut state = self.vfe_state();
-        match inducing_insert::<M, _>(
+        match with_kernel_exp!(self.math, M => inducing_insert::<M, _>(
             &mut state,
             &self.kernel,
             self.likelihood.noise_variance(),
@@ -728,7 +732,7 @@ where
             &self.z_obs,
             self.m,
             z_new,
-        ) {
+        )) {
             Ok(()) => {
                 self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
                 self.apply_vfe(state)?;
@@ -833,13 +837,13 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, M, P> {
+    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
         FittedSgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
             optimizer: self.optimizer,
             inducing: PhantomData,
-            _math: PhantomData,
+            math: self.math,
             x_obs: self.x_obs,
             z_obs: self.z_obs,
             y: self.y,
@@ -857,11 +861,10 @@ where
     }
 }
 
-impl<O, M, P> OnlineSgpr<O, M, P>
+impl<O, P> OnlineSgpr<O, P>
 where
-    M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///

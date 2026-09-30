@@ -546,7 +546,7 @@ fn factor_sgpr<P>(
     y: &[f64],
     ell: f64,
     noise: f64,
-) -> crate::FittedSgpr<Fixed, crate::FixedInducing, crate::Accurate, P>
+) -> crate::FittedSgpr<Fixed, crate::FixedInducing, P>
 where
     P: crate::precision::GpScalar,
 {
@@ -606,12 +606,7 @@ fn sgpr_precisions_match_f64_predict_n1024() {
     sgpr_case(1024, 1.0, 0.1, true, true);
 }
 
-fn factor_svgp<P>(
-    x: &[f64],
-    y: &[f64],
-    ell: f64,
-    noise: f64,
-) -> crate::FittedSvgp<crate::Accurate, P>
+fn factor_svgp<P>(x: &[f64], y: &[f64], ell: f64, noise: f64) -> crate::FittedSvgp<P>
 where
     P: crate::precision::GpScalar,
 {
@@ -722,7 +717,7 @@ fn online_sgpr_round<P>(
     y: &[f64],
     ell: f64,
     noise: f64,
-) -> crate::OnlineSgpr<Fixed, crate::Accurate, P>
+) -> crate::OnlineSgpr<Fixed, P>
 where
     P: crate::precision::GpScalar,
 {

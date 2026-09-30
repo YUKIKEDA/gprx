@@ -670,7 +670,7 @@ trait MathBackend<T: Scalar>: Send + Sync {
 enum MathMode { Accurate, FastApprox }
 ```
 
-デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` はカーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。`Gpr` / `FittedGpr` / `OnlineGpr` ではモードは実行時の enum `KernelExp` で、`with_math(KernelExp::FastApprox)` で設定する。カーネル呼び出しごとに sealed な `KernelMath` の印へ 1 回だけ分岐する（R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)）。`Sgpr` / `Svgp` は R5-1 まで印を型パラメータで受け取る。上の `MathMode` 列挙は置かない。`FittedGpr` と `OnlineGpr` の save はモードを記録し、欄が無いファイルは `Accurate`。
+デフォルトは `Accurate`（`f64::exp` / `f32::exp` / `wide::exp`）。`FastApprox` はカーネル評価の `exp` を `fit` も含めて置き換える（P5-4 / [#42](https://github.com/YUKIKEDA/gprx/issues/42)）。長さスケールへ戻す `exp(θ)` と `KernelTerm` の式は正確な `exp` のまま。すべてのモデル（`Gpr` / `FittedGpr` / `OnlineGpr`、`Sgpr` / `FittedSgpr` / `OnlineSgpr`、`Svgp` / `FittedSvgp`）で、モードは実行時の enum `KernelExp` で、`with_math(KernelExp::FastApprox)` で設定する。カーネル呼び出しごとに sealed な `KernelMath` の印へ 1 回だけ分岐する（R4-1 / [#239](https://github.com/YUKIKEDA/gprx/issues/239)、R5-1a / [#246](https://github.com/YUKIKEDA/gprx/issues/246)）。上の `MathMode` 列挙は置かない。`FittedGpr` と `OnlineGpr` の save はモードを記録し、欄が無いファイルは `Accurate`。
 
 ## 9. Optimizer設計
 
