@@ -104,7 +104,7 @@ fn fit_restores_thread_scratch() {
     let gpr = rbf_gpr(1.0, 0.1)
         .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
         .expect("spd");
-    let ws = &gpr.workspace.core;
+    let ws = &gpr.store.buffers.core;
     assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
     assert!(
         ws.thread_scratch
@@ -124,7 +124,7 @@ fn predict_restores_thread_scratch_when_apply_cross_fails() {
         gpr.predict_into(&[0.5], 1, 1, &mut Prediction::default()),
         Err(GprError::WorkspaceTooSmall)
     ));
-    let ws = &gpr.workspace.core;
+    let ws = &gpr.store.buffers.core;
     assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
     assert!(
         ws.thread_scratch
@@ -144,7 +144,7 @@ fn predict_into_matches_predict() {
     assert_eq!(into.mean, owned.mean);
     assert_eq!(into.variance, owned.variance);
     assert_eq!(into.variance_kind, owned.variance_kind);
-    let ws = &gpr.workspace.core;
+    let ws = &gpr.store.buffers.core;
     assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
     assert!(
         ws.thread_scratch
@@ -282,7 +282,7 @@ fn fit_solves_a_alpha_equals_y() {
     for i in 0..3 {
         assert_close(restored[i], y[i], TOL);
     }
-    let ws = &gpr.workspace.core;
+    let ws = &gpr.store.buffers.core;
     let l = copy_lower(ws.k_matrix.as_ref());
     let a_from_l = &l * l.transpose();
     for col in 0..3 {
@@ -899,7 +899,7 @@ fn neg_mll_n_one_matches_closed_form() {
         .expect("spd");
     let a = 1.0 + noise;
     let log_det = a.ln();
-    let ws = &gpr.workspace.core;
+    let ws = &gpr.store.buffers.core;
     assert_close(log_det_from_l(ws.k_matrix.as_ref(), 1), log_det, TOL);
     let quad = y * y / a;
     let expected = 0.5 * (quad + log_det + (2.0 * std::f64::consts::PI).ln());
@@ -924,7 +924,7 @@ fn neg_mll_n_two_matches_analytic_det_and_quad() {
     let diag = 1.0 + noise;
     let det = diag * diag - k01 * k01;
     let log_det = det.ln();
-    let ws = &gpr.workspace.core;
+    let ws = &gpr.store.buffers.core;
     assert_close(log_det_from_l(ws.k_matrix.as_ref(), 2), log_det, TOL);
     let inv_scale = 1.0 / det;
     let quad = inv_scale * (y[0] * (diag * y[0] - k01 * y[1]) + y[1] * (-k01 * y[0] + diag * y[1]));
@@ -1060,13 +1060,13 @@ fn uncached_workspace_has_no_distance_cache() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
         .expect("spd");
-    assert!(!iso.workspace.has_distance_cache());
+    assert!(!iso.store.buffers.has_distance_cache());
     let ard = rbf_ard_gpr(&[1.25, 0.8], 0.16)
         .with_distance_cache_policy(DistanceCachePolicy::Uncached)
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7, 0.2, -0.4, 0.9], 3, 2, &[0.4, -0.2, 0.9])
         .expect("spd");
-    assert!(!ard.workspace.has_distance_cache());
+    assert!(!ard.store.buffers.has_distance_cache());
 }
 
 #[test]
@@ -1085,10 +1085,9 @@ fn always_reuses_poisoned_dist_cache() {
         .value_and_gradient_into(&params, &mut grad)
         .expect("spd");
     {
-        let ws = gpr.workspace.dist.as_mut().expect("distance cache");
-        let n = ws.dist_cache.nrows();
-        ws.dist_cache = Mat::from_fn(n, n, |_, _| 999.0);
-        ws.dist_ready = true;
+        let ws = gpr.store.buffers.dist.as_mut().expect("distance cache");
+        let n = ws.dist.as_ref().expect("filled at fit").nrows();
+        ws.dist = Some(Mat::from_fn(n, n, |_, _| 999.0));
     }
     let poisoned = gpr
         .value_and_gradient_into(&params, &mut grad)
@@ -1147,15 +1146,18 @@ fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
         .with_optimizer(Fixed)
         .factor(&x, 3, 2, &y)
         .expect("spd");
-    assert!(!never.workspace.has_distance_cache());
-    assert!(always.workspace.has_distance_cache());
+    assert!(!never.store.buffers.has_distance_cache());
+    assert!(always.store.buffers.has_distance_cache());
     assert_eq!(
         always
-            .workspace
+            .store
+            .buffers
             .dist
             .as_ref()
             .expect("distance cache")
             .ard_sq_diff
+            .as_ref()
+            .expect("filled at fit")
             .ncols(),
         6
     );
@@ -1194,9 +1196,9 @@ fn rbf_ard_fit_optimizes_with_always_cache() {
         before.iter().zip(&after).any(|(a, b)| (a - b).abs() > 1e-9),
         "L-BFGS should move ARD θ: before={before:?}, after={after:?}"
     );
-    let dist = gpr.workspace.dist.as_ref().expect("distance cache");
-    assert_eq!(dist.ard_sq_diff.ncols(), 6);
-    assert!(dist.ard_sq_diff_ready);
+    let dist = gpr.store.buffers.dist.as_ref().expect("distance cache");
+    let ard = dist.ard_sq_diff.as_ref().expect("filled at fit");
+    assert_eq!(ard.ncols(), 6);
 }
 
 #[test]
@@ -1258,16 +1260,16 @@ fn always_reuses_poisoned_ard_cache() {
         .value_and_gradient_into(&params, &mut grad)
         .expect("spd");
     {
-        let ws = gpr.workspace.dist.as_mut().expect("distance cache");
+        let ws = gpr.store.buffers.dist.as_mut().expect("distance cache");
+        let ard = ws.ard_sq_diff.as_mut().expect("filled at fit");
         let n = 3;
         for dim in 0..2 {
             for col in 0..n {
                 for row in col..n {
-                    ws.ard_sq_diff[(row, dim * n + col)] = 999.0;
+                    ard[(row, dim * n + col)] = 999.0;
                 }
             }
         }
-        ws.ard_sq_diff_ready = true;
     }
     let poisoned = gpr
         .value_and_gradient_into(&params, &mut grad)
@@ -1286,9 +1288,10 @@ fn always_ard_cache_retiling_follows_n() {
         .factor(&[0.0, 0.8, 1.7, 0.2, -0.4, 0.9], 3, 2, &[0.4, -0.2, 0.9])
         .expect("spd n=3");
     {
-        let ws = gpr.workspace.dist.as_ref().expect("distance cache");
-        assert_eq!(ws.ard_sq_diff.nrows(), 3);
-        assert_eq!(ws.ard_sq_diff.ncols(), 6);
+        let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
+        let ard = ws.ard_sq_diff.as_ref().expect("filled at fit");
+        assert_eq!(ard.nrows(), 3);
+        assert_eq!(ard.ncols(), 6);
     }
     let gpr = gpr
         .into_trainer()
@@ -1300,10 +1303,10 @@ fn always_ard_cache_retiling_follows_n() {
             &[0.4, -0.2, 0.9, 0.1],
         )
         .expect("spd n=4");
-    let ws = gpr.workspace.dist.as_ref().expect("distance cache");
-    assert_eq!(ws.ard_sq_diff.nrows(), 4);
-    assert_eq!(ws.ard_sq_diff.ncols(), 8);
-    assert!(ws.ard_sq_diff_ready);
+    let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
+    let ard = ws.ard_sq_diff.as_ref().expect("filled at fit");
+    assert_eq!(ard.nrows(), 4);
+    assert_eq!(ard.ncols(), 8);
 }
 
 #[test]
@@ -1313,10 +1316,9 @@ fn isotropic_always_leaves_ard_cache_empty() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
         .expect("spd");
-    let ws = gpr.workspace.dist.as_ref().expect("distance cache");
-    assert_eq!(ws.ard_sq_diff.nrows(), 0);
-    assert_eq!(ws.ard_sq_diff.ncols(), 0);
-    assert!(!ws.ard_sq_diff_ready);
+    let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
+    assert!(ws.ard_sq_diff.is_none());
+    assert!(ws.dist.is_some());
 }
 
 #[test]
@@ -1984,8 +1986,8 @@ fn points_kernel_allocates_no_distance_cache() {
     .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
     .expect("spd");
     assert_eq!(fitted.distance_cache_policy(), DistanceCachePolicy::Cached);
-    assert!(!fitted.workspace.has_distance_cache());
-    assert!(fitted.workspace.has_dedicated_w());
+    assert!(!fitted.store.buffers.has_distance_cache());
+    assert!(fitted.store.buffers.has_dedicated_w());
 }
 
 #[test]
@@ -2040,15 +2042,15 @@ fn prefer_memory_workspace_has_no_dist_or_dedicated_w() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
         .expect("spd");
-    assert!(!mem.workspace.has_distance_cache());
-    assert!(!mem.workspace.has_dedicated_w());
+    assert!(!mem.store.buffers.has_distance_cache());
+    assert!(!mem.store.buffers.has_dedicated_w());
     let speed = rbf_gpr(1.25, 0.16)
         .with_prefer_speed()
         .with_optimizer(Fixed)
         .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
         .expect("spd");
-    assert!(speed.workspace.has_distance_cache());
-    assert!(speed.workspace.has_dedicated_w());
+    assert!(speed.store.buffers.has_distance_cache());
+    assert!(speed.store.buffers.has_dedicated_w());
 }
 
 #[test]
@@ -2277,7 +2279,7 @@ fn fit_optimizes_and_keeps_l_and_alpha() {
     assert_eq!(alpha.len(), 2);
     assert!(alpha.iter().all(|a| a.is_finite()));
     {
-        let ws = &gpr.workspace.core;
+        let ws = &gpr.store.buffers.core;
         assert_eq!(ws.k_matrix.nrows(), 2);
     }
     let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
