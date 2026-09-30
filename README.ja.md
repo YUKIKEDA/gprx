@@ -35,7 +35,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 変換の既定は恒等。平均関数が零のときは `fit` の前に `with_target_transform(StandardizeTarget::new())`。特徴は `MinMaxInput`（既定 `[0, 1]`）。観測ノイズは `GaussianLikelihood`。`WhiteKernel` はオプトインの合成。両方を大きい値で足すとノイズを二重に数える。
 
-`Gpr<Fixed>::factor`（`with_optimizer(Fixed)` のあと）は、トレーナーに既にあるカーネルと尤度の `θ` で因子を作る。L-BFGS のノブは `Lbfgs`（`with_max_iterations`、`with_tolerance`、`with_history_size`、`with_restarts`）。Nonlinear CG と Nelder–Mead は `history_size` 以外の最初の 3 つを共有する（`NonlinearCg`、`NelderMead`）。Newton は `Newton`（`with_max_iterations`、`with_tolerance`、`with_restarts`、`with_gamma`）。自作の Fast Simulated Annealing は `FastSimulatedAnnealing`（`with_max_iterations`、`with_restarts`、`with_initial_temperature`、`with_cooling_rate`、`with_seed`、`with_boundary`）。
+`Gpr<Fixed>::factor`（`with_optimizer(Fixed)` のあと）は、トレーナーに既にあるカーネルと尤度の `θ` で因子を作る。L-BFGS のノブは `Lbfgs`（`with_max_iterations`、`with_tolerance`、`with_history_size`、`with_restarts`）。Nelder–Mead は `with_max_iterations`、`with_tolerance`、`with_restarts` を持つ（`NelderMead`）。Hessian を使うソルバは `TrustRegion`（`with_max_iterations`、`with_tolerance`、`with_restarts`、`with_radii`）。自作の Fast Simulated Annealing は `FastSimulatedAnnealing`（`with_max_iterations`、`with_restarts`、`with_initial_temperature`、`with_cooling_rate`、`with_seed`、`with_boundary`）。
 
 ## 他ライブラリとの比較
 

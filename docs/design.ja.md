@@ -310,7 +310,7 @@ pub trait IncrementalObjective: Objective {
 
 `indices` には、最適化器の受理済みの点からではなく、その目的関数で直前に評価した `params` から変わった座標をすべて並べる。棄却のあと FSA は戻した座標と新しい座標の両方を渡す。作り直す葉は index だけで決める。`GprObjective` はあわせて直前と新しい `θ` をビットで比べ（`f64::to_bits`）、`indices` に無い座標が変わっていたら、誤った値を黙って返さず `IndexOutOfRange` にする。空・重複・`i >= n_params` の index は境界で `GprError`。`ChangeSet` 型は無い。
 
-`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` が葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。`CholeskyBuffer::Reuse` は常に全体を作り直す。`with_optimizer` / `refit` は新しい最適化器からフラグを決め直す。`Gpr<Fixed>::factor` は一発フル。`Lbfgs` / `NonlinearCg` / `NelderMead` / `Newton` は既定の `false`。FSA の初回とリスタートは `value`、座標一歩は `value_at_changes`。
+`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` が葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。`CholeskyBuffer::Reuse` は常に全体を作り直す。`with_optimizer` / `refit` は新しい最適化器からフラグを決め直す。`Gpr<Fixed>::factor` は一発フル。`Lbfgs` / `NelderMead` / `TrustRegion` は既定の `false`。FSA の初回とリスタートは `value`、座標一歩は `value_at_changes`。
 
 葉の作り直しはコンパイル済みの葉をキャッシュし、変更 index が触る葉だけ `apply` し直す。葉ごとの Gram（葉 `L` 個で `L · n²`）、dirty の印、直前の `θ` は、1 回の `fit` / `refit` のあいだ `GprObjective`（crate 内の `LeafCache`）が持ち、Workspace には置かない。木の結合と **Cholesky は毎回フル**。ハイパラの変更は `K` の低ランク更新ではなく、faer の `rank_r_update_clobber` もそのためには使わない。
 
@@ -494,7 +494,7 @@ H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ
 
 `FittedGpr` と `OnlineGpr` は crate 内部の `GprCore`（kernel spec・コンパイル済みカーネル・尤度・変換・方針・訓練データ・`α`・クエリ用バッファ）を共有し、違うのは因子だけ。`FittedGpr` は LLT の置き場（crate 内の `LltStore`。`FitBuffers` か mmap の `L`）、`OnlineGpr` は LDLT の `LdltStore` と `PointId` の表を持つ。`StoredFactor { Llt, Ldlt }` が因子の見方で、`solve`、列への `L⁻¹`、ピボットごとの重み（`1` か `1/Dᵢ`）、`log|A|`、`diag(A⁻¹)` を持つ。predict・共分散・sample・LOO・NLML・予測用 `α` はこの見方について `GprCore` に1回だけ書く。ハイパラの書き込み（`set_params`・勾配・Hessian・`fit`・`refit`）はすべて借用の `ExactFit`（core + LLT の置き場）1つで動く。`OnlineGpr` は `L √D` を O(n²) で詰めた一時的な LLT の置き場を貸し、新しい因子を書き戻す。訓練データは複製せず、O(n³) は新しい `θ` が要る分解だけ。
 
-既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を argmin の別のソルバ（`NonlinearCg`、`NelderMead`、`Newton`）、`FastSimulatedAnnealing`、または自作の最適化器に差し替える。葉の作り直しは §5.4 に従い、`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` は対角分散で、クエリ間共分散は `predict_covariance`（§6）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
+既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を argmin の別のソルバ（`NelderMead`、`TrustRegion`）、`FastSimulatedAnnealing`、または自作の最適化器に差し替える。葉の作り直しは §5.4 に従い、`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` は対角分散で、クエリ間共分散は `predict_covariance`（§6）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
 
 ```rust
 pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
@@ -519,8 +519,7 @@ pub struct Fixed; // Gpr<Fixed>::factor only; not an Optimizer
 
 // Optimizers. Fields are private; each has `Default` and `with_*` setters.
 pub struct Lbfgs       { max_iterations: u64, tolerance: f64, history_size: NonZeroUsize, restarts: Option<Restarts> }
-pub struct Newton      { max_iterations: u64, tolerance: f64, gamma: f64, restarts: Option<Restarts> }
-pub struct NonlinearCg { max_iterations: u64, tolerance: f64, restarts: Option<Restarts> }
+pub struct TrustRegion { max_iterations: u64, tolerance: f64, initial_radius: f64, max_radius: f64, restarts: Option<Restarts> }
 pub struct NelderMead  { max_iterations: u64, tolerance: f64, restarts: Option<Restarts> }
 pub struct FastSimulatedAnnealing {
     max_iterations: u64, restarts: Option<Restarts>,
@@ -735,7 +734,7 @@ pub struct OptResult {
 
 `init`はスライスにする(呼び出し側のVecを消費しない)。`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。`SgprObjective` は `Sgpr` 用の同じ crate 内アダプタ。区間は各パラメータの `Interval` から取る（crate 内の `HasBounds`）。
 
-トレーナーの境界は `O: for<'a> Optimizer<GprObjective<'a, P>>`。既定は `Lbfgs`。`Lbfgs` / `NonlinearCg` は `Differentiable`、`Newton` は `TwiceDifferentiable`、`NelderMead` / `FastSimulatedAnnealing` は `Objective` だけを要る。argmin のアダプタは、ユーザー単位の区間を logit で写して argmin を制約なしのまま動かす（正の区間は対数一様、中点でヤコビアンが 1 になるよう縮尺）。`Newton` は解析ヘッセも写す。`FastSimulatedAnnealing` は gprx 自前の値だけのソルバ（Cauchy / Metropolis）で、logit は使わず受け取った log-`θ` を歩く。自作最適化器の例でもある。目的関数の型は crate 内なので、自作の最適化器は要る能力について `Optimizer<P>` をジェネリックに impl し（`impl<P: Objective> Optimizer<P> for Mine`）、`with_optimizer` で同じ型パラメータを差し替える。その隣に無視される別のソルバ設定は置かない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。`Adam` は `Svgp` のミニバッチのループで、`Optimizer` ではない。実行時の NotImplemented は置かない。
+トレーナーの境界は `O: for<'a> Optimizer<GprObjective<'a, P>>`。既定は `Lbfgs`。`Lbfgs` は `Differentiable`、`TrustRegion` は `TwiceDifferentiable`、`NelderMead` / `FastSimulatedAnnealing` は `Objective` だけを要る。argmin のアダプタは、ユーザー単位の区間を logit で写して argmin を制約なしのまま動かす（正の区間は対数一様、中点でヤコビアンが 1 になるよう縮尺）。`TrustRegion` は解析ヘッセも写す。`TrustRegion` は argmin の信頼領域法（部分問題は Steihaug）で、Hessian を使うソルバ。Hessian が非正定・特異でも、ステップが区間の外へ出ても、領域が縮むことで扱う（評価できない候補は、Hessian も含めてバリア値の費用にする）。ソルバの失敗は `OptimizationNotConverged`。`FastSimulatedAnnealing` は gprx 自前の値だけのソルバ（Cauchy / Metropolis）で、logit は使わず受け取った log-`θ` を歩く。自作最適化器の例でもある。目的関数の型は crate 内なので、自作の最適化器は要る能力について `Optimizer<P>` をジェネリックに impl し（`impl<P: Objective> Optimizer<P> for Mine`）、`with_optimizer` で同じ型パラメータを差し替える。その隣に無視される別のソルバ設定は置かない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。`Adam` は `Svgp` のミニバッチのループで、`Optimizer` ではない。実行時の NotImplemented は置かない。
 
 ## 10. エラー型 GprError
 
