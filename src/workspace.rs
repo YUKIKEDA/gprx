@@ -583,8 +583,7 @@ mod tests {
     };
     use crate::error::GprError;
     use crate::precision::DoublePrecision;
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::assert_send_sync;
 
     fn assert_square(mat: &faer::Mat<f64>, n: usize) {
         assert_eq!(mat.nrows(), n);

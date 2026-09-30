@@ -242,15 +242,7 @@ mod tests {
 
     const TOL: f64 = 1e-12;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::{assert_close, assert_send_sync};
 
     #[test]
     fn is_send_sync() {
@@ -261,8 +253,8 @@ mod tests {
     fn new_and_log_roundtrip() {
         let scales = ArdLengthscales::new(&[1.5, 0.25]).expect("valid");
         assert_eq!(scales.num_params(), 2);
-        assert_close(scales.lengthscale(0).expect("dim 0"), 1.5);
-        assert_close(scales.lengthscale(1).expect("dim 1"), 0.25);
+        assert_close(scales.lengthscale(0).expect("dim 0"), 1.5, TOL);
+        assert_close(scales.lengthscale(1).expect("dim 1"), 0.25, TOL);
         let from_log =
             ArdLengthscales::from_log_lengthscales(&[1.5_f64.ln(), 0.25_f64.ln()]).expect("valid");
         assert_eq!(scales, from_log);
@@ -273,11 +265,11 @@ mod tests {
         let mut scales = ArdLengthscales::new(&[1.0, 2.0]).expect("valid");
         let mut params = [0.0; 2];
         scales.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 1.0_f64.ln());
-        assert_close(params[1], 2.0_f64.ln());
+        assert_close(params[0], 1.0_f64.ln(), TOL);
+        assert_close(params[1], 2.0_f64.ln(), TOL);
         params[1] = 4.0_f64.ln();
         scales.set_params(&params).expect("valid");
-        assert_close(scales.lengthscale(1).expect("dim 1"), 4.0);
+        assert_close(scales.lengthscale(1).expect("dim 1"), 4.0, TOL);
         let before = scales.clone();
         assert!(scales.set_params(&[0.0, f64::INFINITY]).is_err());
         assert_eq!(scales, before);

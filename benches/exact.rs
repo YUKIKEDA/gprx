@@ -22,8 +22,28 @@ use gprx::{
     CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
     Prediction, RetainCholesky, ReuseCholesky, UncachedDistances,
 };
-use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
+
+#[path = "../tests/common/problems.rs"]
+mod problems;
+#[path = "../src/rng.rs"]
+#[allow(dead_code)]
+mod rng;
+
+/// Forrester `n = N`, seed 0.
+fn forrester_xy() -> (Vec<f64>, Vec<f64>) {
+    problems::forrester_xy(N, SEED, NOISE_STD)
+}
+
+fn forrester_query() -> Vec<f64> {
+    problems::linspace(0.05, 0.95, M)
+}
+
+/// Weighted sphere on a `SPHERE_SIDE²` grid. Same seed as `sphere_bench_xy`
+/// in `src/optimizer/lbfgs.rs`. Seed 0 walks a ridge on the memory pole
+/// (`UncachedDistances`).
+fn sphere_xy() -> (Vec<f64>, Vec<f64>) {
+    problems::sphere_xy(SPHERE_SIDE, 9, NOISE_STD)
+}
 
 const N: usize = 256;
 const D_ISO: usize = 1;
@@ -35,81 +55,6 @@ const ELL: f64 = 1.0;
 const ELL_ARD: f64 = 4.0;
 const NOISE: f64 = 0.1;
 const NOISE_STD: f64 = 1.0;
-
-fn small_rng(seed: u64) -> SmallRng {
-    SmallRng::seed_from_u64(seed)
-}
-
-fn open_unit(rng: &mut SmallRng) -> f64 {
-    let u: f64 = rng.random();
-    let eps = 1.0 / ((1u64 << 53) as f64);
-    if u <= eps {
-        eps
-    } else if u >= 1.0 - eps {
-        1.0 - eps
-    } else {
-        u
-    }
-}
-
-fn standard_normal(rng: &mut SmallRng) -> f64 {
-    let u1 = open_unit(rng).max(f64::MIN_POSITIVE);
-    let u2 = open_unit(rng);
-    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-}
-
-fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
-    if n == 1 {
-        return vec![lo];
-    }
-    let denom = (n - 1) as f64;
-    (0..n)
-        .map(|i| lo + (hi - lo) * (i as f64) / denom)
-        .collect()
-}
-
-fn forrester(x: f64) -> f64 {
-    let t = 6.0 * x - 2.0;
-    t * t * (12.0 * x - 4.0).sin()
-}
-
-fn weighted_sphere(x0: f64, x1: f64) -> f64 {
-    let a = x0 / 0.25;
-    a * a + x1 * x1
-}
-
-fn forrester_xy() -> (Vec<f64>, Vec<f64>) {
-    let x = linspace(0.0, 1.0, N);
-    let mut rng = small_rng(SEED);
-    let y: Vec<f64> = x
-        .iter()
-        .map(|&xi| forrester(xi) + NOISE_STD * standard_normal(&mut rng))
-        .collect();
-    (x, y)
-}
-
-fn forrester_query() -> Vec<f64> {
-    linspace(0.05, 0.95, M)
-}
-
-fn sphere_xy() -> (Vec<f64>, Vec<f64>) {
-    debug_assert_eq!(SPHERE_SIDE * SPHERE_SIDE, N);
-    let mut x = vec![0.0; N * D_ARD];
-    let denom = (SPHERE_SIDE - 1) as f64;
-    for row in 0..N {
-        let i = row % SPHERE_SIDE;
-        let j = row / SPHERE_SIDE;
-        x[row] = i as f64 / denom;
-        x[N + row] = j as f64 / denom;
-    }
-    // Same seed as `sphere_bench_xy` in `src/optimizer/lbfgs.rs`. Seed 0
-    // walks a ridge on the memory pole (`UncachedDistances`).
-    let mut rng = small_rng(9);
-    let y: Vec<f64> = (0..N)
-        .map(|row| weighted_sphere(x[row], x[N + row]) + NOISE_STD * standard_normal(&mut rng))
-        .collect();
-    (x, y)
-}
 
 fn pack_points(x: &[f64], n_rows: usize, n_cols: usize) -> Mat<f64> {
     Mat::from_fn(n_rows, n_cols, |row, col| x[col * n_rows + row])

@@ -409,33 +409,14 @@ mod tests {
     use super::WhiteKernel;
     use crate::error::GprError;
     use crate::kernel::Triangle;
-    use faer::{Mat, MatRef, mat};
+    use faer::{Mat, mat};
 
     const TOL: f64 = 1e-8;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn fill(n: usize, value: f64) -> Mat<f64> {
-        Mat::from_fn(n, n, |_, _| value)
-    }
+    use crate::test_check::{assert_close, assert_lower_close, fill};
 
     fn dummy_dist(n: usize) -> Mat<f64> {
         Mat::zeros(n, n)
-    }
-
-    fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-        let n = actual.nrows();
-        for col in 0..n {
-            for row in col..n {
-                assert_close(actual[(row, col)], expected[(row, col)]);
-            }
-        }
     }
 
     #[test]
@@ -449,8 +430,8 @@ mod tests {
         for col in 0..3 {
             for row in 0..3 {
                 let expected = if row == col { 0.4 } else { 0.0 };
-                assert_close(k[(row, col)], expected);
-                assert_close(k[(row, col)], k[(col, row)]);
+                assert_close(k[(row, col)], expected, TOL);
+                assert_close(k[(row, col)], k[(col, row)], TOL);
             }
         }
     }
@@ -467,8 +448,8 @@ mod tests {
         kernel
             .apply(dist.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 42.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 42.0, TOL);
     }
 
     #[test]
@@ -479,8 +460,8 @@ mod tests {
         kernel
             .apply_cross(dist.as_ref(), out.as_mut())
             .expect("rect");
-        assert_close(out[(0, 0)], 0.0);
-        assert_close(out[(0, 1)], 0.0);
+        assert_close(out[(0, 0)], 0.0, TOL);
+        assert_close(out[(0, 1)], 0.0, TOL);
     }
 
     #[test]
@@ -503,8 +484,8 @@ mod tests {
             .grad(dist.as_ref(), dk.as_mut(), 0, Triangle::Full)
             .expect("idx 0");
         let fd = (kp[(0, 0)] - km[(0, 0)]) / (2.0 * h);
-        assert_close(dk[(0, 0)], fd);
-        assert_close(dk[(0, 1)], 0.0);
+        assert_close(dk[(0, 0)], fd, TOL);
+        assert_close(dk[(0, 1)], 0.0, TOL);
     }
 
     #[test]
@@ -512,10 +493,10 @@ mod tests {
         let mut kernel = WhiteKernel::new(0.3).expect("valid");
         let mut params = [0.0];
         kernel.get_params(&mut params).expect("len 1");
-        assert_close(params[0], 0.3_f64.ln());
+        assert_close(params[0], 0.3_f64.ln(), TOL);
         params[0] = 0.1_f64.ln();
         kernel.set_params(&params).expect("len 1");
-        assert_close(kernel.variance(), 0.1);
+        assert_close(kernel.variance(), 0.1, TOL);
     }
 
     #[test]

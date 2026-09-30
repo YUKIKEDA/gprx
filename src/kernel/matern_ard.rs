@@ -617,23 +617,7 @@ mod tests {
 
     const TOL: f64 = 1e-8;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    fn fill(n: usize, value: f64) -> Mat<f64> {
-        Mat::from_fn(n, n, |_, _| value)
-    }
-
-    fn points_2d(rows: &[[f64; 2]]) -> Mat<f64> {
-        Mat::from_fn(rows.len(), 2, |i, j| rows[i][j])
-    }
+    use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, points_2d};
 
     fn sq_dist(x: MatRef<'_, f64>) -> Mat<f64> {
         let n = x.nrows();
@@ -646,15 +630,6 @@ mod tests {
             }
             sum
         })
-    }
-
-    fn lower_matches(actual: MatRef<'_, f64>, expected: MatRef<'_, f64>) {
-        let n = actual.nrows();
-        for col in 0..n {
-            for row in col..n {
-                assert_close(actual[(row, col)], expected[(row, col)]);
-            }
-        }
     }
 
     fn all_nu() -> [MaternNu; 3] {
@@ -674,9 +649,9 @@ mod tests {
         kernel
             .apply::<crate::math::Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
-        assert_close(k[(0, 0)], 1.0);
-        assert_close(k[(1, 1)], 1.0);
-        assert_close(k[(2, 2)], 1.0);
+        assert_close(k[(0, 0)], 1.0, TOL);
+        assert_close(k[(1, 1)], 1.0, TOL);
+        assert_close(k[(2, 2)], 1.0, TOL);
     }
 
     #[test]
@@ -695,7 +670,7 @@ mod tests {
                 .expect("ard");
             for col in 0..3 {
                 for row in 0..3 {
-                    assert_close(k_ard[(row, col)], k_iso[(row, col)]);
+                    assert_close(k_ard[(row, col)], k_iso[(row, col)], TOL);
                 }
             }
         }
@@ -710,7 +685,7 @@ mod tests {
             .apply::<crate::math::Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         let r = 1.0_f64;
-        assert_close(k[(1, 0)], (-r).exp());
+        assert_close(k[(1, 0)], (-r).exp(), TOL);
     }
 
     #[test]
@@ -723,7 +698,7 @@ mod tests {
             .expect("shape");
         for col in 0..3 {
             for row in 0..3 {
-                assert_close(k[(row, col)], k[(col, row)]);
+                assert_close(k[(row, col)], k[(col, row)], TOL);
             }
         }
     }
@@ -740,8 +715,8 @@ mod tests {
         kernel
             .apply::<crate::math::Accurate>(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 42.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 42.0, TOL);
     }
 
     #[test]
@@ -772,7 +747,7 @@ mod tests {
                 for col in 0..3 {
                     for row in 0..3 {
                         let fd = (k_plus[(row, col)] - k_minus[(row, col)]) / (2.0 * h);
-                        assert_close(dk[(row, col)], fd);
+                        assert_close(dk[(row, col)], fd, TOL);
                     }
                 }
             }
@@ -791,7 +766,7 @@ mod tests {
         kernel
             .grad::<crate::math::Accurate>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
             .expect("dim 1");
-        assert_close(dk1[(1, 0)], 0.0);
+        assert_close(dk1[(1, 0)], 0.0, TOL);
         assert!(dk0[(1, 0)].abs() > 1e-8);
     }
 
@@ -807,8 +782,8 @@ mod tests {
         kernel
             .grad::<crate::math::Accurate>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("index 1");
-        lower_matches(lower.as_ref(), full.as_ref());
-        assert_close(lower[(0, 1)], 99.0);
+        assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
+        assert_close(lower[(0, 1)], 99.0, TOL);
     }
 
     #[test]
@@ -816,11 +791,11 @@ mod tests {
         let mut kernel = MaternArdKernel::new(&[2.0, 0.5], MaternNu::ThreeHalves).expect("valid");
         let mut params = [0.0; 2];
         kernel.get_params(&mut params).expect("len 2");
-        assert_close(params[0], 2.0_f64.ln());
-        assert_close(params[1], 0.5_f64.ln());
+        assert_close(params[0], 2.0_f64.ln(), TOL);
+        assert_close(params[1], 0.5_f64.ln(), TOL);
         params[0] = 0.5_f64.ln();
         kernel.set_params(&params).expect("len 2");
-        assert_close(kernel.lengthscale(0).expect("dim 0"), 0.5);
+        assert_close(kernel.lengthscale(0).expect("dim 0"), 0.5, TOL);
         assert_eq!(kernel.nu(), MaternNu::ThreeHalves);
     }
 
@@ -837,8 +812,8 @@ mod tests {
         kernel
             .apply_cross::<crate::math::Accurate>(train.as_ref(), test.as_ref(), cross.as_mut())
             .expect("rect");
-        assert_close(cross[(0, 1)], square[(0, 1)]);
-        assert_close(cross[(1, 1)], square[(1, 1)]);
+        assert_close(cross[(0, 1)], square[(0, 1)], TOL);
+        assert_close(cross[(1, 1)], square[(1, 1)], TOL);
     }
 
     #[test]

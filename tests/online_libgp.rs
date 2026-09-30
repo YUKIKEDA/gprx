@@ -5,7 +5,7 @@
 //! C++ or Python.
 
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
-use gprx::{Fixed, GaussianLikelihood, Gpr, OnlineGpr, Prediction};
+use gprx::{Fixed, GaussianLikelihood, Gpr, OnlineGpr};
 use serde::Deserialize;
 
 const TOL: f64 = 1e-8;
@@ -34,24 +34,8 @@ struct OnlineLibgpStep {
     neg_log_marginal_likelihood: f64,
 }
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
-
-fn assert_pred_close(got: &Prediction, mean: &[f64], variance: &[f64]) {
-    assert_eq!(got.mean.len(), mean.len());
-    assert_eq!(got.variance.len(), variance.len());
-    for (a, b) in got.mean.iter().zip(mean.iter()) {
-        assert_close(*a, *b);
-    }
-    for (a, b) in got.variance.iter().zip(variance.iter()) {
-        assert_close(*a, *b);
-    }
-}
+mod common;
+use common::{assert_close, assert_mean_var_close};
 
 fn point_at(x: &[f64], n: usize, d: usize, index: usize) -> Vec<f64> {
     (0..d).map(|feature| x[feature * n + index]).collect()
@@ -112,9 +96,15 @@ fn check_step(
 ) {
     assert_eq!(online.n(), step.n);
     let got = online.predict(xs, n_query, d).expect("predict");
-    assert_pred_close(&got, &step.mean, &step.observation_variance);
+    assert_mean_var_close(
+        &got.mean,
+        &got.variance,
+        &step.mean,
+        &step.observation_variance,
+        TOL,
+    );
     let nlml = online.neg_log_marginal_likelihood().expect("nlml");
-    assert_close(nlml, step.neg_log_marginal_likelihood);
+    assert_close(nlml, step.neg_log_marginal_likelihood, TOL);
 }
 
 #[test]

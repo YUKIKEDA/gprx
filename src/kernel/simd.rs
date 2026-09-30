@@ -1055,13 +1055,7 @@ mod tests {
 
     const TOL: f64 = 1e-12;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     #[test]
     fn add_squared_diff_matches_scalar() {
@@ -1073,7 +1067,7 @@ mod tests {
         for i in 0..11 {
             let d = x[i] - x0;
             expected[i] += d * d;
-            assert_close(acc[i], expected[i]);
+            assert_close(acc[i], expected[i], TOL);
         }
     }
 
@@ -1088,7 +1082,7 @@ mod tests {
         for i in 0..11 {
             let d = x[i] - x0;
             expected[i] += w * d * d;
-            assert_close(acc[i], expected[i]);
+            assert_close(acc[i], expected[i], TOL);
         }
     }
 
@@ -1100,7 +1094,7 @@ mod tests {
         rbf_exp_slice::<Accurate>(&dist, &mut out, inv).expect("finite");
         for i in 0..10 {
             let expected = (-dist[i] * inv).exp();
-            assert_close(out[i], expected);
+            assert_close(out[i], expected, TOL);
         }
     }
 
@@ -1113,7 +1107,7 @@ mod tests {
         rbf_grad_slice::<Accurate>(&dist, &mut out, inv_two, inv_ell).expect("finite");
         for i in 0..9 {
             let k = (-dist[i] * inv_two).exp();
-            assert_close(out[i], k * dist[i] * inv_ell);
+            assert_close(out[i], k * dist[i] * inv_ell, TOL);
         }
     }
 

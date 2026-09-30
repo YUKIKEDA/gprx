@@ -224,15 +224,7 @@ mod tests {
 
     const TOL: f64 = 1e-10;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
-
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::{assert_close, assert_send_sync};
 
     /// Caller-supplied column map used to cover a custom [`UnfittedTransform`].
     #[derive(Clone, Copy, Debug)]
@@ -306,7 +298,7 @@ mod tests {
         let mut got = x;
         t.apply(&mut got, 3, 2).expect("ok");
         for (actual, want) in got.iter().zip(expected.iter()) {
-            assert_close(*actual, *want);
+            assert_close(*actual, *want, TOL);
         }
     }
 
@@ -320,10 +312,10 @@ mod tests {
             .expect("valid");
         let mut z = x;
         t.apply(&mut z, 2, 2).expect("ok");
-        assert_close(z[0], 1.0);
-        assert_close(z[1], 2.0);
-        assert_close(z[2], 6.0);
-        assert_close(z[3], 8.0);
+        assert_close(z[0], 1.0, TOL);
+        assert_close(z[1], 2.0, TOL);
+        assert_close(z[2], 6.0, TOL);
+        assert_close(z[3], 8.0, TOL);
     }
 
     #[test]

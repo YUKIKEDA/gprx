@@ -194,7 +194,7 @@ pub(crate) fn write_params(
 mod tests {
     use super::{BoundedParam, Interval, IntervalError};
 
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::assert_send_sync;
 
     #[test]
     fn is_send_sync() {

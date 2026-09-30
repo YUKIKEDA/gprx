@@ -772,7 +772,7 @@ impl GpScalar for MixedPrecision<ReevaluateKernel> {}
 mod tests {
     use super::{DoublePrecision, PrecisionPolicy};
 
-    fn assert_send_sync<T: Send + Sync>() {}
+    use crate::test_check::assert_send_sync;
 
     #[test]
     fn double_precision_is_f64() {
@@ -811,15 +811,7 @@ mod tests {
     const ILL_NOISE: f64 = 1.0e-5;
 
     fn forrester(n: usize) -> (Mat<f64>, Vec<f64>) {
-        let x: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
-        let mut rng = crate::rng::small_rng(0);
-        let y: Vec<f64> = x
-            .iter()
-            .map(|&xi| {
-                let t = 6.0 * xi - 2.0;
-                t * t * (12.0 * xi - 4.0).sin() + crate::rng::unit_normal(&mut rng)
-            })
-            .collect();
+        let (x, y) = crate::test_problems::forrester_xy(n, 0, 1.0);
         (Mat::from_fn(n, 1, |i, _| x[i]), y)
     }
 

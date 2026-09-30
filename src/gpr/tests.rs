@@ -31,15 +31,7 @@ use faer::{Mat, MatMut, MatRef};
 
 const TOL: f64 = 1e-9;
 
-fn assert_close(actual: f64, expected: f64) {
-    let scale = expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= TOL * scale,
-        "actual={actual}, expected={expected}"
-    );
-}
-
-fn assert_send_sync<T: Send + Sync>() {}
+use crate::test_check::{assert_close, assert_send_sync};
 
 fn rbf_gpr(ell: f64, noise: f64) -> Gpr {
     Gpr::new(
@@ -182,9 +174,9 @@ fn predict_covariance_diagonal_matches_predict() {
     assert_eq!(cov.variance_kind, pred.variance_kind);
     let diag = cov_diag(&cov);
     for (d, v) in diag.iter().zip(pred.variance.iter()) {
-        assert_close(*d, *v);
+        assert_close(*d, *v, TOL);
     }
-    assert_close(cov.covariance[1], cov.covariance[2]);
+    assert_close(cov.covariance[1], cov.covariance[2], TOL);
     let lat = gpr
         .predict_covariance_with(
             &xs,
@@ -206,11 +198,11 @@ fn predict_covariance_diagonal_matches_predict() {
         )
         .expect("fitted");
     for (d, v) in cov_diag(&lat).iter().zip(lat_pred.variance.iter()) {
-        assert_close(*d, *v);
+        assert_close(*d, *v, TOL);
     }
-    assert_close(cov.covariance[0], lat.covariance[0] + 0.1);
-    assert_close(cov.covariance[3], lat.covariance[3] + 0.1);
-    assert_close(cov.covariance[1], lat.covariance[1]);
+    assert_close(cov.covariance[0], lat.covariance[0] + 0.1, TOL);
+    assert_close(cov.covariance[3], lat.covariance[3] + 0.1, TOL);
+    assert_close(cov.covariance[1], lat.covariance[1], TOL);
 }
 
 #[test]
@@ -223,7 +215,7 @@ fn predict_covariance_n1_matches_predict() {
     let cov = gpr.predict_covariance(&[0.5], 1, 1).expect("fitted");
     assert_eq!(cov.mean, pred.mean);
     assert_eq!(cov.covariance.len(), 1);
-    assert_close(cov.covariance[0], pred.variance[0]);
+    assert_close(cov.covariance[0], pred.variance[0], TOL);
 }
 
 #[test]
@@ -239,7 +231,7 @@ fn predict_covariance_standardize_diagonal_matches_predict() {
     let cov = gpr.predict_covariance(&xs, 2, 1).expect("fitted");
     assert_eq!(cov.mean, pred.mean);
     for (d, v) in cov_diag(&cov).iter().zip(pred.variance.iter()) {
-        assert_close(*d, *v);
+        assert_close(*d, *v, TOL);
     }
 }
 
@@ -256,7 +248,7 @@ fn predict_covariance_ard_diagonal_matches_predict() {
     let cov = gpr.predict_covariance(&xs, 2, 2).expect("fitted");
     assert_eq!(cov.mean, pred.mean);
     for (d, v) in cov_diag(&cov).iter().zip(pred.variance.iter()) {
-        assert_close(*d, *v);
+        assert_close(*d, *v, TOL);
     }
 }
 
@@ -291,14 +283,14 @@ fn fit_solves_a_alpha_equals_y() {
     let alpha = gpr.alpha();
     let restored = matvec_sym(&a, alpha);
     for i in 0..3 {
-        assert_close(restored[i], y[i]);
+        assert_close(restored[i], y[i], TOL);
     }
     let ws = &gpr.workspace;
     let l = copy_lower(ws.k_matrix.as_ref());
     let a_from_l = &l * l.transpose();
     for col in 0..3 {
         for row in col..3 {
-            assert_close(a_from_l[(row, col)], a[(row, col)]);
+            assert_close(a_from_l[(row, col)], a[(row, col)], TOL);
         }
     }
 }
@@ -325,8 +317,8 @@ fn refit_replaces_size_and_still_solves() {
     );
     let alpha = gpr.alpha();
     let restored = matvec_sym(&a, alpha);
-    assert_close(restored[0], 0.5);
-    assert_close(restored[1], -0.25);
+    assert_close(restored[0], 0.5, TOL);
+    assert_close(restored[1], -0.25, TOL);
 }
 
 #[test]
@@ -337,7 +329,7 @@ fn fit_n_one_matches_scalar_solve() {
         .factor(&[0.0], 1, 1, &[2.0])
         .expect("spd");
     let a = 1.0 + noise;
-    assert_close(gpr.alpha()[0], 2.0 / a);
+    assert_close(gpr.alpha()[0], 2.0 / a, TOL);
 }
 
 #[test]
@@ -355,8 +347,8 @@ fn validation_error_does_not_yield_fitted_model() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[1.0, 2.0])
         .expect("spd");
-    assert_close(gpr.alpha()[0], alpha[0]);
-    assert_close(gpr.alpha()[1], alpha[1]);
+    assert_close(gpr.alpha()[0], alpha[0], TOL);
+    assert_close(gpr.alpha()[1], alpha[1], TOL);
 }
 
 #[test]
@@ -550,7 +542,7 @@ fn fixed_jitter_recovers_without_changing_noise() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
         .expect("A + j I is spd");
-    assert_close(fitted.likelihood().noise_variance(), noise);
+    assert_close(fitted.likelihood().noise_variance(), noise, TOL);
     assert_eq!(fitted.alpha().len(), 2);
     assert!(fitted.alpha().iter().all(|a| a.is_finite()));
 }
@@ -562,7 +554,7 @@ fn adaptive_jitter_recovers_after_growth() {
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
         .expect("j grows past the negative eigenvalue");
-    assert_close(fitted.likelihood().noise_variance(), 0.1);
+    assert_close(fitted.likelihood().noise_variance(), 0.1, TOL);
 }
 
 #[test]
@@ -598,7 +590,7 @@ fn factor_retry_does_not_accumulate_into_failed_cholesky() {
             for k in 0..=row.min(col) {
                 a += l[(row, k)] * l[(col, k)];
             }
-            assert_close(a, expected[row][col]);
+            assert_close(a, expected[row][col], TOL);
         }
     }
 }
@@ -637,8 +629,8 @@ fn set_params_refactors_and_training_xy_roundtrip_through_factor() {
     fitted.set_params(&params).expect("spd at new theta");
     let mut got = [0.0; 2];
     fitted.get_params(&mut got).expect("len 2");
-    assert_close(got[0], params[0]);
-    assert_close(got[1], params[1]);
+    assert_close(got[0], params[0], TOL);
+    assert_close(got[1], params[1], TOL);
     let pred = fitted.predict(&[0.5], 1, 1).expect("fitted");
     assert!(pred.mean[0].is_finite());
 
@@ -654,7 +646,7 @@ fn set_params_refactors_and_training_xy_roundtrip_through_factor() {
         .expect("same observations");
     assert_eq!(rebuilt.alpha().len(), alpha.len());
     for (a, b) in rebuilt.alpha().iter().zip(alpha.iter()) {
-        assert_close(*a, *b);
+        assert_close(*a, *b, TOL);
     }
 }
 
@@ -669,8 +661,8 @@ fn set_params_rejects_wrong_length_without_changing_theta() {
     assert!(fitted.set_params(&[0.0]).is_err());
     let mut after = [0.0; 2];
     fitted.get_params(&mut after).expect("len 2");
-    assert_close(before[0], after[0]);
-    assert_close(before[1], after[1]);
+    assert_close(before[0], after[0], TOL);
+    assert_close(before[1], after[1], TOL);
 }
 
 #[test]
@@ -698,23 +690,24 @@ fn set_params_cholesky_failure_leaves_theta_and_factorization() {
     fitted.get_params(&mut after).expect("len 2");
     let mut before = [0.0; 2];
     snapshot.get_params(&mut before).expect("len 2");
-    assert_close(after[0], before[0]);
-    assert_close(after[1], before[1]);
+    assert_close(after[0], before[0], TOL);
+    assert_close(after[1], before[1], TOL);
     let pred = fitted
         .predict(&[0.0], 1, 1)
         .expect("usable after failed set_params");
     let pred0 = snapshot.predict(&[0.0], 1, 1).expect("snapshot predict");
-    assert_close(pred.mean[0], pred0.mean[0]);
-    assert_close(pred.variance[0], pred0.variance[0]);
+    assert_close(pred.mean[0], pred0.mean[0], TOL);
+    assert_close(pred.variance[0], pred0.variance[0], TOL);
     assert_close(
         fitted.neg_log_marginal_likelihood().expect("nlml"),
         snapshot
             .neg_log_marginal_likelihood()
             .expect("snapshot nlml"),
+        TOL,
     );
     assert_eq!(fitted.alpha().len(), snapshot.alpha().len());
     for (a, b) in fitted.alpha().iter().zip(snapshot.alpha()) {
-        assert_close(*a, *b);
+        assert_close(*a, *b, TOL);
     }
 }
 
@@ -729,14 +722,14 @@ fn clone_preserves_trainer_and_fitted_predict() {
     let fitted_clone = fitted.clone();
     let p1 = fitted.predict(&[0.25], 1, 1).expect("fitted");
     let p2 = fitted_clone.predict(&[0.25], 1, 1).expect("clone");
-    assert_close(p1.mean[0], p2.mean[0]);
-    assert_close(p1.variance[0], p2.variance[0]);
+    assert_close(p1.mean[0], p2.mean[0], TOL);
+    assert_close(p1.variance[0], p2.variance[0], TOL);
     let other = trainer_clone
         .with_optimizer(Fixed)
         .factor(&[0.0, 1.0], 2, 1, &[0.5, -0.25])
         .expect("spd");
     let p3 = other.predict(&[0.25], 1, 1).expect("cloned trainer");
-    assert_close(p1.mean[0], p3.mean[0]);
+    assert_close(p1.mean[0], p3.mean[0], TOL);
 }
 
 #[test]
@@ -759,8 +752,8 @@ fn training_y_is_original_scale_with_standardize_target() {
         .factor(&x_obs, n, d, &y_obs)
         .expect("roundtrip");
     let pred2 = rebuilt.predict(&[0.5], 1, 1).expect("rebuilt");
-    assert_close(pred.mean[0], pred2.mean[0]);
-    assert_close(pred.variance[0], pred2.variance[0]);
+    assert_close(pred.mean[0], pred2.mean[0], TOL);
+    assert_close(pred.variance[0], pred2.variance[0], TOL);
 }
 
 #[test]
@@ -791,8 +784,8 @@ fn one_step_target_pipeline_matches_direct_map() {
         .expect("spd");
     let p1 = direct.predict(&[0.5], 1, 1).expect("fitted");
     let p2 = via.predict(&[0.5], 1, 1).expect("fitted");
-    assert_close(p1.mean[0], p2.mean[0]);
-    assert_close(p1.variance[0], p2.variance[0]);
+    assert_close(p1.mean[0], p2.mean[0], TOL);
+    assert_close(p1.variance[0], p2.variance[0], TOL);
 }
 
 #[test]
@@ -827,8 +820,8 @@ fn stacked_transforms_fit_predict_and_roundtrip() {
         .factor(&x_obs, n, d, &y_obs)
         .expect("roundtrip");
     let pred2 = rebuilt.predict(&[5.0], 1, 1).expect("rebuilt");
-    assert_close(pred.mean[0], pred2.mean[0]);
-    assert_close(pred.variance[0], pred2.variance[0]);
+    assert_close(pred.mean[0], pred2.mean[0], TOL);
+    assert_close(pred.variance[0], pred2.variance[0], TOL);
 }
 
 #[test]
@@ -858,8 +851,8 @@ fn columnwise_input_minmax_and_standardize() {
         .factor(&x_obs, n, d, &y_obs)
         .expect("roundtrip");
     let pred2 = rebuilt.predict(&[1.5, 1.75], 1, 2).expect("rebuilt");
-    assert_close(pred.mean[0], pred2.mean[0]);
-    assert_close(pred.variance[0], pred2.variance[0]);
+    assert_close(pred.mean[0], pred2.mean[0], TOL);
+    assert_close(pred.variance[0], pred2.variance[0], TOL);
 }
 
 #[test]
@@ -906,10 +899,14 @@ fn neg_mll_n_one_matches_closed_form() {
     let a = 1.0 + noise;
     let log_det = a.ln();
     let ws = &gpr.workspace;
-    assert_close(log_det_from_l(ws.k_matrix.as_ref(), 1), log_det);
+    assert_close(log_det_from_l(ws.k_matrix.as_ref(), 1), log_det, TOL);
     let quad = y * y / a;
     let expected = 0.5 * (quad + log_det + (2.0 * std::f64::consts::PI).ln());
-    assert_close(gpr.neg_log_marginal_likelihood().expect("fitted"), expected);
+    assert_close(
+        gpr.neg_log_marginal_likelihood().expect("fitted"),
+        expected,
+        TOL,
+    );
 }
 
 #[test]
@@ -927,11 +924,15 @@ fn neg_mll_n_two_matches_analytic_det_and_quad() {
     let det = diag * diag - k01 * k01;
     let log_det = det.ln();
     let ws = &gpr.workspace;
-    assert_close(log_det_from_l(ws.k_matrix.as_ref(), 2), log_det);
+    assert_close(log_det_from_l(ws.k_matrix.as_ref(), 2), log_det, TOL);
     let inv_scale = 1.0 / det;
     let quad = inv_scale * (y[0] * (diag * y[0] - k01 * y[1]) + y[1] * (-k01 * y[0] + diag * y[1]));
     let expected = 0.5 * (quad + log_det + 2.0 * (2.0 * std::f64::consts::PI).ln());
-    assert_close(gpr.neg_log_marginal_likelihood().expect("fitted"), expected);
+    assert_close(
+        gpr.neg_log_marginal_likelihood().expect("fitted"),
+        expected,
+        TOL,
+    );
 }
 
 #[test]
@@ -954,7 +955,11 @@ fn neg_mll_uses_transformed_targets() {
     let quad = inv_scale
         * (y_t[0] * (diag * y_t[0] - k01 * y_t[1]) + y_t[1] * (-k01 * y_t[0] + diag * y_t[1]));
     let expected = 0.5 * (quad + log_det + 2.0 * (2.0 * std::f64::consts::PI).ln());
-    assert_close(gpr.neg_log_marginal_likelihood().expect("fitted"), expected);
+    assert_close(
+        gpr.neg_log_marginal_likelihood().expect("fitted"),
+        expected,
+        TOL,
+    );
     let raw = 0.5
         * (inv_scale * (y[0] * (diag * y[0] - k01 * y[1]) + y[1] * (-k01 * y[0] + diag * y[1]))
             + log_det
@@ -997,8 +1002,8 @@ fn value_and_gradient_set_params_is_atomic() {
     ));
     let mut after = [0.0; 2];
     gpr.get_params(&mut after).expect("len 2");
-    assert_close(after[0], before[0]);
-    assert_close(after[1], before[1]);
+    assert_close(after[0], before[0], TOL);
+    assert_close(after[1], before[1], TOL);
 }
 
 #[test]
@@ -1026,21 +1031,22 @@ fn value_and_gradient_cholesky_failure_keeps_params() {
     ));
     let mut after = [0.0; 2];
     gpr.get_params(&mut after).expect("len 2");
-    assert_close(after[0], before[0]);
-    assert_close(after[1], before[1]);
+    assert_close(after[0], before[0], TOL);
+    assert_close(after[1], before[1], TOL);
     let pred = gpr.predict(&[0.0], 1, 1).expect("usable after failed grad");
     let pred0 = snapshot.predict(&[0.0], 1, 1).expect("snapshot predict");
-    assert_close(pred.mean[0], pred0.mean[0]);
-    assert_close(pred.variance[0], pred0.variance[0]);
+    assert_close(pred.mean[0], pred0.mean[0], TOL);
+    assert_close(pred.variance[0], pred0.variance[0], TOL);
     assert_close(
         gpr.neg_log_marginal_likelihood().expect("nlml"),
         snapshot
             .neg_log_marginal_likelihood()
             .expect("snapshot nlml"),
+        TOL,
     );
     assert_eq!(gpr.alpha().len(), snapshot.alpha().len());
     for (a, b) in gpr.alpha().iter().zip(snapshot.alpha()) {
-        assert_close(*a, *b);
+        assert_close(*a, *b, TOL);
     }
     gpr.value_and_gradient_into(&before, &mut grad)
         .expect("restore");
@@ -1116,13 +1122,13 @@ fn never_and_always_match_rbf_nlml_grad_and_predict() {
     let va = always
         .value_and_gradient_into(&params, &mut grad_a)
         .expect("spd");
-    assert_close(vn, va);
-    assert_close(grad_n[0], grad_a[0]);
-    assert_close(grad_n[1], grad_a[1]);
+    assert_close(vn, va, TOL);
+    assert_close(grad_n[0], grad_a[0], TOL);
+    assert_close(grad_n[1], grad_a[1], TOL);
     let pn = never.predict(&[0.5], 1, 1).expect("fitted");
     let pa = always.predict(&[0.5], 1, 1).expect("fitted");
-    assert_close(pn.mean[0], pa.mean[0]);
-    assert_close(pn.variance[0], pa.variance[0]);
+    assert_close(pn.mean[0], pa.mean[0], TOL);
+    assert_close(pn.variance[0], pa.variance[0], TOL);
 }
 
 #[test]
@@ -1153,14 +1159,14 @@ fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
     let va = always
         .value_and_gradient_into(&params, &mut grad_a)
         .expect("spd");
-    assert_close(vn, va);
-    assert_close(grad_n[0], grad_a[0]);
-    assert_close(grad_n[1], grad_a[1]);
-    assert_close(grad_n[2], grad_a[2]);
+    assert_close(vn, va, TOL);
+    assert_close(grad_n[0], grad_a[0], TOL);
+    assert_close(grad_n[1], grad_a[1], TOL);
+    assert_close(grad_n[2], grad_a[2], TOL);
     let pn = never.predict(&xs, 1, 2).expect("fitted");
     let pa = always.predict(&xs, 1, 2).expect("fitted");
-    assert_close(pn.mean[0], pa.mean[0]);
-    assert_close(pn.variance[0], pa.variance[0]);
+    assert_close(pn.mean[0], pa.mean[0], TOL);
+    assert_close(pn.variance[0], pa.variance[0], TOL);
 }
 
 #[test]
@@ -1205,13 +1211,13 @@ fn retain_and_reuse_match_nlml_grad_and_predict() {
     let vu = reuse
         .value_and_gradient_into(&params, &mut grad_u)
         .expect("spd");
-    assert_close(vr, vu);
-    assert_close(grad_r[0], grad_u[0]);
-    assert_close(grad_r[1], grad_u[1]);
+    assert_close(vr, vu, TOL);
+    assert_close(grad_r[0], grad_u[0], TOL);
+    assert_close(grad_r[1], grad_u[1], TOL);
     let pr = retain.predict(&xs, 1, 1).expect("fitted");
     let pu = reuse.predict(&xs, 1, 1).expect("fitted");
-    assert_close(pr.mean[0], pu.mean[0]);
-    assert_close(pr.variance[0], pu.variance[0]);
+    assert_close(pr.mean[0], pu.mean[0], TOL);
+    assert_close(pr.variance[0], pu.variance[0], TOL);
 
     let fitted_r = rbf_gpr(1.0, 0.1).fit(&x, 3, 1, &y).expect("optimize");
     let fitted_u = rbf_gpr(1.0, 0.1)
@@ -1220,8 +1226,8 @@ fn retain_and_reuse_match_nlml_grad_and_predict() {
         .expect("optimize");
     let fr = fitted_r.predict(&xs, 1, 1).expect("fitted");
     let fu = fitted_u.predict(&xs, 1, 1).expect("fitted");
-    assert_close(fr.mean[0], fu.mean[0]);
-    assert_close(fr.variance[0], fu.variance[0]);
+    assert_close(fr.mean[0], fu.mean[0], TOL);
+    assert_close(fr.variance[0], fu.variance[0], TOL);
 }
 
 #[test]
@@ -1332,10 +1338,10 @@ fn never_and_always_match_matern_ard_nlml() {
     let va = always
         .value_and_gradient_into(&params, &mut grad_a)
         .expect("spd");
-    assert_close(vn, va);
-    assert_close(grad_n[0], grad_a[0]);
-    assert_close(grad_n[1], grad_a[1]);
-    assert_close(grad_n[2], grad_a[2]);
+    assert_close(vn, va, TOL);
+    assert_close(grad_n[0], grad_a[0], TOL);
+    assert_close(grad_n[1], grad_a[1], TOL);
+    assert_close(grad_n[2], grad_a[2], TOL);
 }
 
 #[test]
@@ -1350,7 +1356,11 @@ fn value_and_gradient_matches_nlml_and_finite_difference() {
     let value = gpr
         .value_and_gradient_into(&params, &mut grad)
         .expect("spd");
-    assert_close(value, gpr.neg_log_marginal_likelihood().expect("fitted"));
+    assert_close(
+        value,
+        gpr.neg_log_marginal_likelihood().expect("fitted"),
+        TOL,
+    );
     let h = 1e-5;
     let mut dummy = [0.0; 2];
     for i in 0..2 {
@@ -1663,8 +1673,8 @@ fn value_and_gradient_n_one_noise_matches_closed_form() {
         .expect("spd");
     let a = 1.0 + noise;
     let w = (y / a) * (y / a) - 1.0 / a;
-    assert_close(grad[0], 0.0);
-    assert_close(grad[1], -0.5 * w * noise);
+    assert_close(grad[0], 0.0, TOL);
+    assert_close(grad[1], -0.5 * w * noise, TOL);
 }
 
 #[test]
@@ -1691,15 +1701,15 @@ fn loo_n_one_is_prior() {
         .expect("spd");
     let loo = gpr.loo_predict().expect("fitted");
     assert_eq!(loo.variance_kind, VarianceKind::Observation);
-    assert_close(loo.mean[0], 0.0);
-    assert_close(loo.variance[0], 1.0 + noise);
+    assert_close(loo.mean[0], 0.0, TOL);
+    assert_close(loo.variance[0], 1.0 + noise, TOL);
     let lat = gpr
         .loo_predict_with(PredictOptions {
             variance_kind: VarianceKind::Latent,
         })
         .expect("fitted");
-    assert_close(lat.mean[0], 0.0);
-    assert_close(lat.variance[0], 1.0);
+    assert_close(lat.mean[0], 0.0, TOL);
+    assert_close(lat.variance[0], 1.0, TOL);
 }
 
 #[test]
@@ -1722,17 +1732,17 @@ fn loo_n_two_matches_closed_form() {
     let loo = gpr.loo_predict().expect("fitted");
     assert_eq!(loo.mean.len(), 2);
     assert_eq!(loo.variance_kind, VarianceKind::Observation);
-    assert_close(loo.mean[0], y[0] - alpha0 / qii);
-    assert_close(loo.mean[1], y[1] - alpha1 / qii);
-    assert_close(loo.variance[0], 1.0 / qii);
-    assert_close(loo.variance[1], 1.0 / qii);
+    assert_close(loo.mean[0], y[0] - alpha0 / qii, TOL);
+    assert_close(loo.mean[1], y[1] - alpha1 / qii, TOL);
+    assert_close(loo.variance[0], 1.0 / qii, TOL);
+    assert_close(loo.variance[1], 1.0 / qii, TOL);
     let lat = gpr
         .loo_predict_with(PredictOptions {
             variance_kind: VarianceKind::Latent,
         })
         .expect("fitted");
-    assert_close(lat.variance[0], (1.0 / qii - noise).max(0.0));
-    assert_close(lat.variance[1], (1.0 / qii - noise).max(0.0));
+    assert_close(lat.variance[0], (1.0 / qii - noise).max(0.0), TOL);
+    assert_close(lat.variance[1], (1.0 / qii - noise).max(0.0), TOL);
 }
 
 fn omit_training_row(
@@ -1798,10 +1808,10 @@ fn loo_n_three_matches_refit_predict() {
                 },
             )
             .expect("fitted");
-        assert_close(loo_obs.mean[skip], pred_obs.mean[0]);
-        assert_close(loo_obs.variance[skip], pred_obs.variance[0]);
-        assert_close(loo_lat.mean[skip], pred_lat.mean[0]);
-        assert_close(loo_lat.variance[skip], pred_lat.variance[0]);
+        assert_close(loo_obs.mean[skip], pred_obs.mean[0], TOL);
+        assert_close(loo_obs.variance[skip], pred_obs.variance[0], TOL);
+        assert_close(loo_lat.mean[skip], pred_lat.mean[0], TOL);
+        assert_close(loo_lat.variance[skip], pred_lat.variance[0], TOL);
     }
 }
 
@@ -1823,8 +1833,8 @@ fn loo_observation_is_latent_plus_noise_after_inverse() {
         })
         .expect("fitted");
     let obs = gpr.loo_predict().expect("fitted");
-    assert_close(obs.variance[0], lat.variance[0] + scale_sq * noise);
-    assert_close(obs.variance[1], lat.variance[1] + scale_sq * noise);
+    assert_close(obs.variance[0], lat.variance[0] + scale_sq * noise, TOL);
+    assert_close(obs.variance[1], lat.variance[1] + scale_sq * noise, TOL);
 }
 
 #[test]
@@ -1845,11 +1855,11 @@ fn predict_n_one_matches_closed_form() {
         )
         .expect("fitted");
     let a = 1.0 + noise;
-    assert_close(pred.mean[0], 2.0 / a);
-    assert_close(pred.variance[0], 1.0 - 1.0 / a);
+    assert_close(pred.mean[0], 2.0 / a, TOL);
+    assert_close(pred.variance[0], 1.0 - 1.0 / a, TOL);
     let obs = gpr.predict(&[0.0], 1, 1).expect("fitted");
     assert_eq!(obs.variance_kind, VarianceKind::Observation);
-    assert_close(obs.variance[0], pred.variance[0] + noise);
+    assert_close(obs.variance[0], pred.variance[0] + noise, TOL);
 }
 
 #[test]
@@ -1875,12 +1885,12 @@ fn observation_variance_is_latent_plus_noise_after_inverse() {
         )
         .expect("fitted");
     let obs = gpr.predict(&[0.5], 1, 1).expect("fitted");
-    assert_close(obs.variance[0], lat.variance[0] + scale_sq * noise);
+    assert_close(obs.variance[0], lat.variance[0] + scale_sq * noise, TOL);
     let mut recovered = y;
     t.transform(&mut recovered).expect("fitted");
     t.inverse_transform_mean(&mut recovered).expect("fitted");
-    assert_close(recovered[0], y[0]);
-    assert_close(recovered[1], y[1]);
+    assert_close(recovered[0], y[0], TOL);
+    assert_close(recovered[1], y[1], TOL);
 }
 
 #[test]
@@ -1903,8 +1913,8 @@ fn ard_equal_lengthscales_match_isotropic_predict() {
     .expect("spd");
     let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
     let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
-    assert_close(p_ard.mean[0], p_iso.mean[0]);
-    assert_close(p_ard.variance[0], p_iso.variance[0]);
+    assert_close(p_ard.mean[0], p_iso.mean[0], TOL);
+    assert_close(p_ard.variance[0], p_iso.variance[0], TOL);
     let mut params = vec![0.0; ard.num_params()];
     ard.get_params(&mut params).expect("len");
     let mut grad = vec![0.0; params.len()];
@@ -2033,13 +2043,13 @@ fn prefer_memory_matches_default_nlml_grad_and_predict() {
     let vs = speed
         .value_and_gradient_into(&params, &mut grad_s)
         .expect("spd");
-    assert_close(vm, vs);
-    assert_close(grad_m[0], grad_s[0]);
-    assert_close(grad_m[1], grad_s[1]);
+    assert_close(vm, vs, TOL);
+    assert_close(grad_m[0], grad_s[0], TOL);
+    assert_close(grad_m[1], grad_s[1], TOL);
     let pm = memory.predict(&[0.5], 1, 1).expect("fitted");
     let ps = speed.predict(&[0.5], 1, 1).expect("fitted");
-    assert_close(pm.mean[0], ps.mean[0]);
-    assert_close(pm.variance[0], ps.variance[0]);
+    assert_close(pm.mean[0], ps.mean[0], TOL);
+    assert_close(pm.variance[0], ps.variance[0], TOL);
 }
 
 #[test]
@@ -2130,8 +2140,8 @@ fn matern_ard_equal_lengthscales_match_isotropic() {
     .expect("spd");
     let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
     let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
-    assert_close(p_ard.mean[0], p_iso.mean[0]);
-    assert_close(p_ard.variance[0], p_iso.variance[0]);
+    assert_close(p_ard.mean[0], p_iso.mean[0], TOL);
+    assert_close(p_ard.variance[0], p_iso.variance[0], TOL);
     let mut params = vec![0.0; ard.num_params()];
     ard.get_params(&mut params).expect("len");
     let mut grad = vec![0.0; params.len()];
@@ -2213,8 +2223,8 @@ fn rational_quadratic_ard_equal_lengthscales_match_isotropic() {
     .expect("spd");
     let p_iso = iso.predict(&xs, 1, 2).expect("fitted");
     let p_ard = ard.predict(&xs, 1, 2).expect("fitted");
-    assert_close(p_ard.mean[0], p_iso.mean[0]);
-    assert_close(p_ard.variance[0], p_iso.variance[0]);
+    assert_close(p_ard.mean[0], p_iso.mean[0], TOL);
+    assert_close(p_ard.variance[0], p_iso.variance[0], TOL);
     let mut params = vec![0.0; ard.num_params()];
     ard.get_params(&mut params).expect("len");
     let mut grad = vec![0.0; params.len()];
@@ -2254,8 +2264,8 @@ fn fit_optimizes_and_keeps_l_and_alpha() {
         1,
     );
     let restored = matvec_sym(&a, &alpha);
-    assert_close(restored[0], 0.5);
-    assert_close(restored[1], -0.25);
+    assert_close(restored[0], 0.5, TOL);
+    assert_close(restored[1], -0.25, TOL);
 }
 
 #[test]
@@ -2266,8 +2276,8 @@ fn fit_fixed_keeps_construction_params() {
         .expect("spd");
     let mut params = [0.0; 2];
     gpr.get_params(&mut params).expect("len 2");
-    assert_close(params[0], 1.25_f64.ln());
-    assert_close(params[1], 0.16_f64.ln());
+    assert_close(params[0], 1.25_f64.ln(), TOL);
+    assert_close(params[1], 0.16_f64.ln(), TOL);
     let pred = gpr.predict(&[0.5], 1, 1).expect("fitted");
     assert_eq!(pred.mean.len(), 1);
 }
@@ -2306,8 +2316,8 @@ fn non_finite_optimize_result_restores_theta() {
     ));
     let mut after = [0.0; 2];
     gpr.get_params(&mut after).expect("len 2");
-    assert_close(after[0], before[0]);
-    assert_close(after[1], before[1]);
+    assert_close(after[0], before[0], TOL);
+    assert_close(after[1], before[1], TOL);
     assert_eq!(gpr.alpha().len(), 2);
     assert!(gpr.alpha().iter().all(|a| a.is_finite()));
 }
@@ -2338,8 +2348,8 @@ fn failed_optimize_err_restores_theta() {
     .expect_err("chol");
     let mut after = [0.0; 2];
     gpr.get_params(&mut after).expect("len 2");
-    assert_close(after[0], before[0]);
-    assert_close(after[1], before[1]);
+    assert_close(after[0], before[0], TOL);
+    assert_close(after[1], before[1], TOL);
 }
 
 #[test]
@@ -2353,8 +2363,8 @@ fn factor_refit_keeps_construction_theta() {
     gpr.refit().expect("refit");
     let mut after = [0.0; 2];
     gpr.get_params(&mut after).expect("len 2");
-    assert_close(after[0], before[0]);
-    assert_close(after[1], before[1]);
+    assert_close(after[0], before[0], TOL);
+    assert_close(after[1], before[1], TOL);
 }
 
 #[test]
@@ -2367,8 +2377,8 @@ fn lbfgs_knobs_affect_fit_and_refit() {
         .expect("zero iters");
     let mut frozen_params = [0.0; 2];
     frozen.get_params(&mut frozen_params).expect("len 2");
-    assert_close(frozen_params[0], 2.0_f64.ln());
-    assert_close(frozen_params[1], 0.2_f64.ln());
+    assert_close(frozen_params[0], 2.0_f64.ln(), TOL);
+    assert_close(frozen_params[1], 0.2_f64.ln(), TOL);
 
     let searched = rbf_gpr(2.0, 0.2)
         .with_optimizer(
@@ -2413,8 +2423,8 @@ fn ncg_knobs_affect_fit_and_refit() {
         .expect("zero iters");
     let mut frozen_params = [0.0; 2];
     frozen.get_params(&mut frozen_params).expect("len 2");
-    assert_close(frozen_params[0], 2.0_f64.ln());
-    assert_close(frozen_params[1], 0.2_f64.ln());
+    assert_close(frozen_params[0], 2.0_f64.ln(), TOL);
+    assert_close(frozen_params[1], 0.2_f64.ln(), TOL);
 
     let searched = rbf_gpr(2.0, 0.2)
         .with_optimizer(
@@ -2587,7 +2597,7 @@ fn assert_incremental_matches_full(kernel: KernelSpec, noise: f64, change: usize
         assert!(primed.is_finite());
         IncrementalObjective::value_with_changes(&mut obj, &params, &[change]).expect("incr")
     };
-    assert_close(v_incr, v_full);
+    assert_close(v_incr, v_full, TOL);
 }
 
 #[test]
@@ -2631,7 +2641,7 @@ fn incremental_cached_leaves_match_full_after_later_steps() {
         let sequential = IncrementalObjective::value_with_changes(&mut obj, &after_second, &[1])
             .expect("leaf 1 after accept");
         let v_full = full.objective().value(&after_second).expect("full seq");
-        assert_close(sequential, v_full);
+        assert_close(sequential, v_full, TOL);
     }
     let mut incr = incremental_at_init(
         KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
@@ -2649,7 +2659,7 @@ fn incremental_cached_leaves_match_full_after_later_steps() {
         .objective()
         .value(&rejected_then_other)
         .expect("full reject");
-    assert_close(v_incr, v_full);
+    assert_close(v_incr, v_full, TOL);
 }
 
 #[test]
@@ -2674,7 +2684,7 @@ fn incremental_sum_jitter_retry_matches_full() {
     full.get_params(&mut params).expect("len");
     let v_full = full.objective().value(&params).expect("full");
     let v_incr = incr.objective().value(&params).expect("incr");
-    assert_close(v_incr, v_full);
+    assert_close(v_incr, v_full, TOL);
 }
 
 #[test]
@@ -2742,13 +2752,13 @@ fn fsa_speed_and_memory_poles_fit_and_match() {
     let memory_nlml = memory.neg_log_marginal_likelihood().expect("memory nlml");
     assert!(speed_nlml < start, "speed={speed_nlml}, start={start}");
     assert!(memory_nlml < start, "memory={memory_nlml}, start={start}");
-    assert_close(speed_nlml, memory_nlml);
+    assert_close(speed_nlml, memory_nlml, TOL);
     let mut speed_theta = vec![0.0; speed.num_params()];
     let mut memory_theta = vec![0.0; memory.num_params()];
     speed.get_params(&mut speed_theta).expect("speed θ");
     memory.get_params(&mut memory_theta).expect("memory θ");
     for (a, b) in speed_theta.iter().zip(memory_theta.iter()) {
-        assert_close(*a, *b);
+        assert_close(*a, *b, TOL);
     }
 }
 

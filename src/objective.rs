@@ -443,13 +443,7 @@ mod tests {
 
     const TOL: f64 = 1e-12;
 
-    fn assert_close(actual: f64, expected: f64) {
-        let scale = expected.abs().max(1.0);
-        assert!(
-            (actual - expected).abs() <= TOL * scale,
-            "actual={actual}, expected={expected}"
-        );
-    }
+    use crate::test_check::assert_close;
 
     fn fitted_rbf() -> FittedGpr<Fixed> {
         let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
@@ -501,12 +495,12 @@ mod tests {
         let value = obj
             .value_and_gradient_into(&params, &mut grad)
             .expect("dummy");
-        assert_close(value, 1.5);
+        assert_close(value, 1.5, TOL);
         assert_eq!(obj.values, 1);
         assert_eq!(obj.grads, 1);
         assert_eq!(obj.last_params, params);
-        assert_close(grad[0], 0.25);
-        assert_close(grad[1], 0.25);
+        assert_close(grad[0], 0.25, TOL);
+        assert_close(grad[1], 0.25, TOL);
     }
 
     #[test]
@@ -530,15 +524,19 @@ mod tests {
         }
         let mut got = [0.0; 2];
         gpr.get_params(&mut got).expect("len 2");
-        assert_close(got[0], params[0]);
-        assert_close(got[1], params[1]);
+        assert_close(got[0], params[0], TOL);
+        assert_close(got[1], params[1], TOL);
         let mut kernel_theta = [0.0; 1];
         gpr.kernel().get_params(&mut kernel_theta).expect("len 1");
-        assert_close(kernel_theta[0], params[0]);
+        assert_close(kernel_theta[0], params[0], TOL);
         let mut lik_theta = [0.0; 1];
         gpr.likelihood().get_params(&mut lik_theta).expect("len 1");
-        assert_close(lik_theta[0], params[1]);
-        assert_close(nlml, gpr.neg_log_marginal_likelihood().expect("fitted"));
+        assert_close(lik_theta[0], params[1], TOL);
+        assert_close(
+            nlml,
+            gpr.neg_log_marginal_likelihood().expect("fitted"),
+            TOL,
+        );
     }
 
     #[test]
@@ -557,7 +555,7 @@ mod tests {
                 .value_and_gradient_into(&params, &mut grad)
                 .expect("spd");
         }
-        assert_close(via_value, via_joint);
+        assert_close(via_value, via_joint, TOL);
     }
 
     #[test]
@@ -576,7 +574,7 @@ mod tests {
         }
         let mut after = [0.0; 2];
         gpr.get_params(&mut after).expect("len 2");
-        assert_close(after[0], before[0]);
-        assert_close(after[1], before[1]);
+        assert_close(after[0], before[0], TOL);
+        assert_close(after[1], before[1], TOL);
     }
 }
