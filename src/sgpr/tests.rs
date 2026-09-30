@@ -1438,3 +1438,112 @@ fn kernel_exp_is_a_runtime_value() {
     assert_eq!(online.math(), crate::KernelExp::FastApprox);
     assert_eq!(online.into_fitted().math(), crate::KernelExp::FastApprox);
 }
+
+/// `Z` with a repeated point: `K_mm` is singular without jitter.
+const DUP_Z: [f64; 3] = [0.5, 0.5, 2.0];
+const JITTER_X: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
+const JITTER_Y: [f64; 4] = [0.0, 1.0, 0.5, 0.25];
+
+fn jitter_trainer() -> Sgpr<Fixed> {
+    Sgpr::new(
+        KernelSpec::from(RbfKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_optimizer(Fixed)
+}
+
+/// Checks `L Lᵀ = k(Z, Z) + j I` for the 1-D RBF kernel of length scale `ell`.
+fn assert_k_mm_with_jitter(l: MatRef<'_, f64>, z: &[f64], ell: f64, jitter: f64) {
+    let l = l.to_owned();
+    for i in 0..z.len() {
+        for j in 0..=i {
+            let diff = z[i] - z[j];
+            let mut expected = (-diff * diff / (2.0 * ell * ell)).exp();
+            if i == j {
+                expected += jitter;
+            }
+            assert_close(reconstruct_llt(&l, i, j), expected, TOL);
+        }
+    }
+}
+
+#[test]
+fn k_mm_jitter_default_is_adaptive() {
+    let expected = crate::JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).expect("valid");
+    let trainer = jitter_trainer();
+    assert_eq!(trainer.jitter_policy(), expected);
+    let fitted = trainer
+        .factor(&JITTER_X, 4, 1, &JITTER_Y, &DUP_Z, 3)
+        .map_err(|(_, e)| e)
+        .expect("the default retries a singular K_mm");
+    assert_eq!(fitted.jitter_policy(), expected);
+    assert_eq!(fitted.clone().into_online().jitter_policy(), expected);
+}
+
+#[test]
+fn k_mm_without_retry_rejects_singular_inducing_set() {
+    let result = jitter_trainer()
+        .with_jitter_policy(crate::JitterPolicy::default())
+        .factor(&JITTER_X, 4, 1, &JITTER_Y, &DUP_Z, 3)
+        .map_err(|(_, e)| e);
+    assert!(matches!(result, Err(GprError::CholeskyFailed { .. })));
+}
+
+#[test]
+fn k_mm_uses_the_policy_jitter_in_factor_and_set_params() {
+    let cases = [
+        (crate::JitterPolicy::fixed(1e-4).expect("valid"), 1e-4),
+        (
+            crate::JitterPolicy::adaptive(1e-6, 10.0, 5, 1e-3).expect("valid"),
+            1e-6,
+        ),
+    ];
+    for (policy, jitter) in cases {
+        let mut fitted = jitter_trainer()
+            .with_jitter_policy(policy)
+            .factor(&JITTER_X, 4, 1, &JITTER_Y, &DUP_Z, 3)
+            .map_err(|(_, e)| e)
+            .expect("factor");
+        assert_eq!(fitted.jitter_policy(), policy);
+        assert_k_mm_with_jitter(fitted.k_mm_l(), &DUP_Z, 1.0, jitter);
+        let mut params = [0.0; 2];
+        fitted.get_params(&mut params).expect("params");
+        params[0] = 2.0_f64.ln();
+        fitted.set_params(&params).expect("set params");
+        assert_k_mm_with_jitter(fitted.k_mm_l(), &DUP_Z, 2.0, jitter);
+    }
+}
+
+#[test]
+fn online_inducing_insert_failing_k_mm_leaves_model_unchanged() {
+    let z = [0.5, 2.0];
+    let xs = [0.25, 1.75];
+    let mut online = jitter_trainer()
+        .with_jitter_policy(crate::JitterPolicy::default())
+        .factor(&JITTER_X, 4, 1, &JITTER_Y, &z, 2)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    let before = online.predict(&xs, 2, 1).expect("predict");
+    let ids = online.inducing_ids().to_vec();
+    assert!(matches!(
+        online.insert_inducing(&[0.5]),
+        Err(GprError::CholeskyFailed { .. })
+    ));
+    assert_eq!(online.m(), 2);
+    assert_eq!(online.z(), &z);
+    assert_eq!(online.inducing_ids(), ids.as_slice());
+    let after = online.predict(&xs, 2, 1).expect("predict");
+    assert_eq!(after.mean, before.mean);
+    assert_eq!(after.variance, before.variance);
+
+    let mut retrying = jitter_trainer()
+        .factor(&JITTER_X, 4, 1, &JITTER_Y, &z, 2)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    retrying
+        .insert_inducing(&[0.5])
+        .expect("the default retries");
+    assert_eq!(retrying.m(), 3);
+}

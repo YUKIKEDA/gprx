@@ -15,7 +15,7 @@ use crate::policy::JitterPolicy;
 use crate::precision::{F64Vfe, ModelPrecision};
 use crate::sgpr::FittedSgpr;
 use crate::sgpr::InducingLayout;
-use crate::sparse::{KernelScratch, SparseCore, SparseScratch, k_mm_jitter_policy};
+use crate::sparse::{KernelScratch, SparseCore, SparseScratch};
 use faer::{Mat, MatRef};
 use std::marker::PhantomData;
 
@@ -24,6 +24,7 @@ use std::marker::PhantomData;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision>(
     kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
     w: &[P::Storage],
@@ -38,6 +39,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
     let reference = || {
         let state = assemble_vfe::<M, f64>(
             kernel,
+            k_mm_jitter,
             noise_likelihood(noise)?,
             x,
             n,
@@ -86,6 +88,7 @@ where
     let mut scratch = SparseScratch::<P::Storage>::default();
     let state = assemble_vfe::<M, P::Storage>(
         &core.kernel,
+        core.jitter,
         core.likelihood,
         &core.x_train,
         core.n,
@@ -99,6 +102,7 @@ where
     let predict_w = if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64>(
             &core.kernel,
+            core.jitter,
             core.likelihood,
             &core.x_train,
             core.n,
@@ -116,6 +120,7 @@ where
     } else {
         publish_sgpr_weights::<M, P>(
             &core.kernel,
+            core.jitter,
             state.a.as_ref(),
             state.b_l.as_ref(),
             &state.w,
@@ -146,6 +151,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
     kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
     x: &[f64],
     n_rows: usize,
@@ -164,6 +170,7 @@ where
     if T::ROUNDS_FROM_F64 {
         let state = assemble_vfe::<M, f64>(
             kernel,
+            k_mm_jitter,
             likelihood,
             x,
             n_rows,
@@ -220,7 +227,7 @@ where
     cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
-        k_mm_jitter_policy().retry_jitters(),
+        k_mm_jitter.retry_jitters(),
         CholeskyStage::Fit,
     )?;
     // Same packed `X` and `Z` share a training White diagonal. Rectangular

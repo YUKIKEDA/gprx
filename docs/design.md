@@ -109,6 +109,7 @@ enum JitterPolicy {
 
 - `JitterPolicy` is used **only when Cholesky itself fails**. A factor that succeeded is the factor of `A + j I`, and the solution in hand is `(A + j I)^{-1} y`. The `j` that was used is logged and kept on `CholeskyFailed` / `FitResult`.
 - Do not iteratively refine that factor back onto the original `A`. The gap between the preconditioner `LLᵀ ≈ A + jI` and the target `A` grows, and the contraction `||I - (LLᵀ)^{-1} A||` can exceed 1 and diverge (§4.2).
+- The sparse models factor `K_mm = k(Z, Z)`, which carries no observation noise. `Sgpr` / `Svgp` take their own `with_jitter_policy` for `K_mm`, and its default is `adaptive(1e-8, 10, 5, 1e-3)` rather than the Exact default (no retry): close inducing points leave `K_mm` singular in floating point (R5-4, [#282](https://github.com/YUKIKEDA/gprx/issues/282)). Fit, factor, `set_params`, predict, and the online updates all use that policy.
 
 ### 4.1 Precision: f32 / f64 / mixed
 

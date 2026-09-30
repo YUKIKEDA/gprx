@@ -358,6 +358,11 @@ impl<O, P> Gpr<O, P> {
         self.policies.math
     }
 
+    /// Returns the jitter retries used when `K + σn² I` fails to factor.
+    pub fn jitter_policy(&self) -> JitterPolicy {
+        self.policies.jitter
+    }
+
     /// Returns the kernel whose hyperparameters this trainer owns.
     pub fn kernel(&self) -> &KernelSpec {
         &self.kernel
