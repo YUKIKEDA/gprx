@@ -185,7 +185,7 @@ fn kernel_column(
     let compiled = kernel.compile();
     let z_mat = pack_points(z, m, d);
     let x_mat = pack_points(x_pt, 1, d);
-    crate::sparse::kernel_cross::<crate::math::Accurate, _>(
+    crate::sparse::KernelScratch::new().cross::<crate::math::Accurate>(
         &compiled,
         z_mat.as_ref(),
         x_mat.as_ref(),
@@ -1330,6 +1330,7 @@ fn assert_inducing_insert_delete(case: InducingCase<'_>) {
         z,
         m,
         z_new,
+        &mut crate::sparse::KernelScratch::new(),
     )
     .expect("insert inducing");
     let z_ins = append_point(z, m, d, z_new);

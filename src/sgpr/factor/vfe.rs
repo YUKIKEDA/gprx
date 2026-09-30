@@ -16,7 +16,7 @@ use crate::policy::KernelExp;
 use crate::precision::{F64Vfe, ModelPrecision};
 use crate::sgpr::FittedSgpr;
 use crate::sgpr::InducingLayout;
-use crate::sparse::{SparseCore, k_mm_jitter_policy, kernel_cross};
+use crate::sparse::{KernelScratch, SparseCore, SparseScratch, k_mm_jitter_policy};
 use faer::{Mat, MatRef};
 use std::marker::PhantomData;
 
@@ -37,7 +37,18 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
     d: usize,
 ) -> Result<Vec<P::Refine>, GprError> {
     let reference = || {
-        let state = assemble_vfe::<M, f64>(kernel, noise_likelihood(noise)?, x, n, d, y, z, m)?;
+        let state = assemble_vfe::<M, f64>(
+            kernel,
+            noise_likelihood(noise)?,
+            x,
+            n,
+            d,
+            y,
+            z,
+            m,
+            &mut KernelScratch::new(),
+            &mut KernelScratch::new(),
+        )?;
         Ok(F64Vfe {
             a: state.a,
             w: state.w,
@@ -80,14 +91,36 @@ pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, 
 where
     P: ModelPrecision,
 {
-    let state =
-        assemble_vfe::<M, P::Storage>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
+    let mut scratch = SparseScratch::<P::Storage>::default();
+    let state = assemble_vfe::<M, P::Storage>(
+        &kernel,
+        likelihood,
+        x,
+        n_rows,
+        n_cols,
+        y,
+        z,
+        n_inducing,
+        &mut scratch.storage,
+        &mut scratch.f64,
+    )?;
     let predict_w = if P::REFINES_IN_F64 {
-        assemble_vfe::<M, f64>(&kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?
-            .w
-            .into_iter()
-            .map(P::Refine::from_f64)
-            .collect()
+        assemble_vfe::<M, f64>(
+            &kernel,
+            likelihood,
+            x,
+            n_rows,
+            n_cols,
+            y,
+            z,
+            n_inducing,
+            &mut scratch.f64,
+            &mut KernelScratch::new(),
+        )?
+        .w
+        .into_iter()
+        .map(P::Refine::from_f64)
+        .collect()
     } else {
         publish_sgpr_weights::<M, P>(
             &kernel,
@@ -115,6 +148,7 @@ where
             m: n_inducing,
             d: n_cols,
         },
+        scratch,
         optimizer,
         inducing: PhantomData,
         k_mm_l: state.k_mm_l,
@@ -137,6 +171,8 @@ pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
     y: &[f64],
     z: &[f64],
     n_inducing: usize,
+    ks: &mut KernelScratch<T>,
+    ks64: &mut KernelScratch<f64>,
 ) -> Result<VfeState<T>, GprError>
 where
     T: KernelScalar,
@@ -144,8 +180,18 @@ where
     validate_training(x, n_rows, n_cols, y)?;
     validate_inducing(z, n_inducing, n_cols)?;
     if T::ROUNDS_FROM_F64 {
-        let state =
-            assemble_vfe::<M, f64>(kernel, likelihood, x, n_rows, n_cols, y, z, n_inducing)?;
+        let state = assemble_vfe::<M, f64>(
+            kernel,
+            likelihood,
+            x,
+            n_rows,
+            n_cols,
+            y,
+            z,
+            n_inducing,
+            ks64,
+            &mut KernelScratch::new(),
+        )?;
         return Ok(VfeState {
             k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
             a: round_mat::<T>(state.a.as_ref()),
@@ -169,13 +215,11 @@ where
     if round_kernel {
         let compiled64 = kernel.compile();
         let mut k64 = Mat::<f64>::zeros(n_inducing, n_inducing);
-        let mut scratch64 = Mat::<f64>::zeros(n_inducing, n_inducing);
-        compiled64.eval_gram::<M>(
+        ks64.gram::<M>(
+            &compiled64,
             GramInputs::points(z64.as_ref()),
             k64.as_mut(),
             Triangle::Lower,
-            scratch64.as_mut(),
-            &mut Vec::new(),
         )?;
         for col in 0..n_inducing {
             for row in col..n_inducing {
@@ -183,13 +227,11 @@ where
             }
         }
     } else {
-        let mut scratch = Mat::zeros(n_inducing, n_inducing);
-        compiled.eval_gram::<M>(
+        ks.gram::<M>(
+            &compiled,
             GramInputs::points(z_mat.as_ref()),
             k_mm.as_mut(),
             Triangle::Lower,
-            scratch.as_mut(),
-            &mut Vec::new(),
         )?;
     }
     let mut chol_scratch = llt_scratch::<T>(n_inducing);
@@ -205,13 +247,11 @@ where
         let compiled64 = kernel.compile();
         if x == z {
             let mut gram64 = Mat::<f64>::zeros(n_rows, n_rows);
-            let mut gram_scratch = Mat::<f64>::zeros(n_rows, n_rows);
-            compiled64.eval_gram::<M>(
+            ks64.gram::<M>(
+                &compiled64,
                 GramInputs::points(x64.as_ref()),
                 gram64.as_mut(),
                 Triangle::Lower,
-                gram_scratch.as_mut(),
-                &mut Vec::new(),
             )?;
             let mut gram = Mat::<T>::zeros(n_rows, n_rows);
             for col in 0..n_rows {
@@ -222,7 +262,7 @@ where
             symmetrize_lower(gram.as_mut(), n_rows);
             gram
         } else {
-            let cross = kernel_cross::<M, f64>(&compiled64, z64.as_ref(), x64.as_ref())?;
+            let cross = ks64.cross::<M>(&compiled64, z64.as_ref(), x64.as_ref())?;
             let mut stored = Mat::<T>::zeros(n_inducing, n_rows);
             for col in 0..n_rows {
                 for row in 0..n_inducing {
@@ -233,18 +273,16 @@ where
         }
     } else if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
-        let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.eval_gram::<M>(
+        ks.gram::<M>(
+            &compiled,
             GramInputs::points(x_mat.as_ref()),
             gram.as_mut(),
             Triangle::Lower,
-            gram_scratch.as_mut(),
-            &mut Vec::new(),
         )?;
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
     } else {
-        kernel_cross::<M, _>(&compiled, z_mat.as_ref(), x_mat.as_ref())?
+        ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref())?
     };
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();

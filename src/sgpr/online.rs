@@ -15,7 +15,7 @@ use crate::points::PointRegistry;
 use crate::policy::with_kernel_exp;
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sgpr::SgprObjective;
-use crate::sparse::{SparseCore, sparse_core_accessors};
+use crate::sparse::{KernelScratch, SparseCore, SparseScratch, sparse_core_accessors};
 use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
@@ -163,6 +163,8 @@ impl InducingRegistry {
 #[derive(Clone, Debug)]
 pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     pub(super) core: SparseCore,
+    /// Kernel scratch kept between `&mut self` calls.
+    pub(super) scratch: SparseScratch<P::Storage>,
     optimizer: O,
     k_mm_l: Mat<P::Storage>,
     a: Mat<P::Storage>,
@@ -184,6 +186,7 @@ where
         let inducing = InducingRegistry::from_count(fitted.core.m);
         Self {
             core: fitted.core,
+            scratch: fitted.scratch,
             optimizer: fitted.optimizer,
             k_mm_l: fitted.k_mm_l,
             a: fitted.a,
@@ -197,12 +200,14 @@ where
         }
     }
 
-    fn snapshot_fitted(&self) -> FittedSgpr<O, FixedInducing, P>
+    fn snapshot_fitted(&mut self) -> FittedSgpr<O, FixedInducing, P>
     where
         O: Clone,
     {
         FittedSgpr {
             core: self.core.clone(),
+            // Lent for the call; `adopt_fitted` takes it back.
+            scratch: std::mem::take(&mut self.scratch),
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
             k_mm_l: self.k_mm_l.clone(),
@@ -217,6 +222,7 @@ where
 
     fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
         self.core = fitted.core;
+        self.scratch = fitted.scratch;
         self.optimizer = fitted.optimizer;
         self.k_mm_l = fitted.k_mm_l;
         self.a = fitted.a;
@@ -262,6 +268,8 @@ where
             &self.core.y,
             &self.core.z_obs,
             self.core.m,
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
         ))?;
         self.apply_vfe(state)
     }
@@ -277,6 +285,8 @@ where
                 &self.core.y,
                 &self.core.z_obs,
                 self.core.m,
+                &mut self.scratch.f64,
+                &mut KernelScratch::new(),
             ))?
             .w
             .into_iter()
@@ -480,7 +490,14 @@ where
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        let mut a_col = with_kernel_exp!(self.core.math, M => kernel_column::<M, P::Storage>(&self.core.kernel, &self.core.z_obs, self.core.m, x_new, self.core.d))?;
+        let mut a_col = with_kernel_exp!(self.core.math, M => kernel_column::<M, P::Storage>(
+            &self.core.kernel,
+            &self.core.z_obs,
+            self.core.m,
+            x_new,
+            self.core.d,
+            &mut self.scratch.storage,
+        ))?;
         solve_lmm(self.k_mm_l.as_ref(), a_col.as_mut());
         let mut v = vec![P::Storage::from_f64(0.0); self.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
@@ -575,6 +592,8 @@ where
                 &y_next,
                 &self.core.z_obs,
                 self.core.m,
+                &mut self.scratch.storage,
+                &mut self.scratch.f64,
             ))?;
             self.core.x_obs = x_next;
             self.core.y = y_next;
@@ -657,6 +676,7 @@ where
             &self.core.z_obs,
             self.core.m,
             z_new,
+            &mut self.scratch.storage,
         )) {
             Ok(()) => {
                 self.core.z_obs = append_point(&self.core.z_obs, self.core.m, self.core.d, z_new);
@@ -770,6 +790,7 @@ where
     pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
         FittedSgpr {
             core: self.core,
+            scratch: self.scratch,
             optimizer: self.optimizer,
             inducing: PhantomData,
             k_mm_l: self.k_mm_l,

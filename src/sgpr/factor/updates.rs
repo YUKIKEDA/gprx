@@ -9,7 +9,7 @@ use crate::linalg::{
     append_chol_border, cholesky_lower_owned, delete_chol_row, frobenius2, gram_aat_plus_noise,
     mul_lower_left, solve_lower,
 };
-use crate::sparse::kernel_cross;
+use crate::sparse::KernelScratch;
 use faer::{Mat, MatMut, MatRef};
 
 pub(crate) fn append_column<T: KernelScalar>(a: &Mat<T>, col: MatRef<'_, T>) -> Mat<T> {
@@ -84,6 +84,7 @@ pub(crate) fn kernel_column<M: crate::math::KernelMath, T>(
     m: usize,
     x_pt: &[f64],
     d: usize,
+    ks: &mut KernelScratch<T>,
 ) -> Result<Mat<T>, GprError>
 where
     T: KernelScalar,
@@ -95,7 +96,7 @@ where
     let mut x_cast = T::empty_cols();
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
-    kernel_cross::<M, _>(&compiled, z_mat, x_mat)
+    ks.cross::<M>(&compiled, z_mat, x_mat)
 }
 
 pub(crate) fn kernel_diag_at<T>(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<T, GprError>
@@ -130,6 +131,7 @@ pub(crate) fn inducing_insert<M: crate::math::KernelMath, T>(
     z: &[f64],
     m: usize,
     z_new: &[f64],
+    ks: &mut KernelScratch<T>,
 ) -> Result<(), GprError>
 where
     T: KernelScalar,
@@ -151,9 +153,9 @@ where
     let z_new_mat = T::storage_cols(z_new64.as_ref(), &mut zn_cast);
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
-    let mut k_zz = kernel_cross::<M, _>(&compiled, z_mat, z_new_mat)?;
+    let mut k_zz = ks.cross::<M>(&compiled, z_mat, z_new_mat)?;
     let k_nn = kernel_diag_at::<T>(kernel, z_new, d)?;
-    let k_zx = kernel_cross::<M, _>(&compiled, z_new_mat, x_mat)?;
+    let k_zx = ks.cross::<M>(&compiled, z_new_mat, x_mat)?;
     solve_lmm(state.k_mm_l.as_ref(), k_zz.as_mut());
     let mut ell2 = k_nn;
     for i in 0..m {

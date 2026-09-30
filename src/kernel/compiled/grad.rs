@@ -304,8 +304,22 @@ impl<T: KernelScalar> CompiledKernel<T> {
         &self,
         x1: MatRef<'_, T>,
         x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        let mut scratch = Mat::zeros(d_k.nrows(), d_k.ncols());
+        self.grad_wrt_coord_dim_with::<M>(x1, x2, d_k, dim, scratch.as_mut())
+    }
+
+    /// [`Self::grad_wrt_coord_dim`] with a caller-owned `scratch` (the shape
+    /// of `d_k`, distinct from it) for the terms of a sum.
+    pub(crate) fn grad_wrt_coord_dim_with<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
         mut d_k: MatMut<'_, T>,
         dim: usize,
+        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
@@ -313,25 +327,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RbfArd(leaf) => leaf.grad_wrt_coord_dim_math::<M, _>(x1, x2, d_k, dim),
             Self::White(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
             Self::Custom(leaf) => leaf.grad_wrt_coord_dim(x1, x2, d_k, dim),
-            Self::Sum(terms) => {
-                let (first, rest) = terms
-                    .split_first()
-                    .ok_or(GprError::CoordGradientUnsupported)?;
-                first.grad_wrt_coord_dim::<M>(x1, x2, d_k.as_mut(), dim)?;
-                if rest.is_empty() {
-                    return Ok(());
-                }
-                let mut scratch = Mat::zeros(d_k.nrows(), d_k.ncols());
-                for term in rest {
-                    term.grad_wrt_coord_dim::<M>(x1, x2, scratch.as_mut(), dim)?;
-                    super::apply::add_rect(d_k.as_mut(), scratch.as_ref());
-                }
-                Ok(())
-            }
+            Self::Sum(terms) => fold_coord_sum(terms, d_k.as_mut(), scratch, |term, dest| {
+                term.grad_wrt_coord_dim_with::<M>(x1, x2, dest, dim, Mat::new().as_mut())
+            }),
             _ => Err(GprError::CoordGradientUnsupported),
         }
     }
 
+    /// `scratch` (the shape of `d2_k`, distinct from it) holds each term of a sum.
     pub(crate) fn hess_wrt_coord_dims<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, T>,
@@ -339,19 +342,21 @@ impl<T: KernelScalar> CompiledKernel<T> {
         mut d2_k: MatMut<'_, T>,
         dim_a: usize,
         dim_b: usize,
+        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => leaf.hess_wrt_coord_dims::<M, _>(x1, x2, d2_k, dim_a, dim_b),
             Self::Matern(leaf) => leaf.hess_wrt_coord_dims::<M, _>(x1, x2, d2_k, dim_a, dim_b),
             Self::RbfArd(leaf) => leaf.hess_wrt_coord_dims::<M, _>(x1, x2, d2_k, dim_a, dim_b),
             Self::White(leaf) => leaf.hess_wrt_coord_dims(x1, x2, d2_k, dim_a, dim_b),
-            Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), |term, dest| {
-                term.hess_wrt_coord_dims::<M>(x1, x2, dest, dim_a, dim_b)
+            Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
+                term.hess_wrt_coord_dims::<M>(x1, x2, dest, dim_a, dim_b, Mat::new().as_mut())
             }),
             _ => Err(GprError::CoordGradientUnsupported),
         }
     }
 
+    /// `scratch` (the shape of `d2_k`, distinct from it) holds each term of a sum.
     pub(crate) fn hess_wrt_coord_mixed<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, T>,
@@ -359,14 +364,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
         mut d2_k: MatMut<'_, T>,
         dim_x1: usize,
         dim_x2: usize,
+        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => leaf.hess_wrt_coord_mixed::<M, _>(x1, x2, d2_k, dim_x1, dim_x2),
             Self::Matern(leaf) => leaf.hess_wrt_coord_mixed::<M, _>(x1, x2, d2_k, dim_x1, dim_x2),
             Self::RbfArd(leaf) => leaf.hess_wrt_coord_mixed::<M, _>(x1, x2, d2_k, dim_x1, dim_x2),
             Self::White(leaf) => leaf.hess_wrt_coord_mixed(x1, x2, d2_k, dim_x1, dim_x2),
-            Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), |term, dest| {
-                term.hess_wrt_coord_mixed::<M>(x1, x2, dest, dim_x1, dim_x2)
+            Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
+                term.hess_wrt_coord_mixed::<M>(x1, x2, dest, dim_x1, dim_x2, Mat::new().as_mut())
             }),
             _ => Err(GprError::CoordGradientUnsupported),
         }
@@ -459,19 +465,24 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 }
 
+/// Folds `eval` over the terms of a sum into `out`, each later term through
+/// `scratch` (the shape of `out`).
+///
+/// A sum's terms are never sums (the tree flattens them), so `eval` hands
+/// each term an empty scratch, which a leaf does not read.
 fn fold_coord_sum<T: KernelScalar>(
     terms: &[CompiledKernel<T>],
     mut out: MatMut<'_, T>,
+    mut scratch: MatMut<'_, T>,
     mut eval: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>) -> Result<(), GprError>,
 ) -> Result<(), GprError> {
     let (first, rest) = terms
         .split_first()
         .ok_or(GprError::CoordGradientUnsupported)?;
     eval(first, out.as_mut())?;
-    if rest.is_empty() {
-        return Ok(());
+    if !rest.is_empty() {
+        super::require_scratch_shape(out.as_ref(), scratch.as_ref())?;
     }
-    let mut scratch = Mat::zeros(out.nrows(), out.ncols());
     for term in rest {
         eval(term, scratch.as_mut())?;
         super::apply::add_rect(out.as_mut(), scratch.as_ref());
