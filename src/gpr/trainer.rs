@@ -249,22 +249,22 @@ impl<O, P> Gpr<O, P> {
     /// [`CholeskyBuffer::Retain`]; otherwise it rebuilds the whole kernel.
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after
-    /// this switch. argmin solvers are [`crate::Lbfgs`], [`crate::NonlinearCg`],
-    /// [`crate::NelderMead`], and [`crate::Newton`]. A user type that implements [`Optimizer`]
+    /// this switch. argmin solvers are [`crate::Lbfgs`],
+    /// [`crate::NelderMead`], and [`crate::TrustRegion`]. A user type that implements [`Optimizer`]
     /// uses this same method; there is no second solver slot.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Gpr, NonlinearCg};
+    /// use gprx::{GaussianLikelihood, Gpr, NelderMead};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
     /// let gpr = Gpr::new(
     ///     KernelSpec::from(RbfKernel::new(1.0)?),
     ///     GaussianLikelihood::new(0.1)?,
     /// )
-    /// .with_optimizer(NonlinearCg::new());
+    /// .with_optimizer(NelderMead::new());
     /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
     /// # Ok(())
     /// # }

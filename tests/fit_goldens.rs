@@ -1,4 +1,4 @@
-//! sklearn golden checks for Exact GPR **with** L-BFGS (P1B-6), Newton
+//! sklearn golden checks for Exact GPR **with** L-BFGS (P1B-6), trust-region
 //! recovery (P2B-17), and leave-one-out at sklearn's `θ` (P1B-7).
 //!
 //! JSON under `compare/goldens/` is produced by `just gen-goldens`. This
@@ -9,7 +9,7 @@
 
 use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, Newton, PredictOptions, VarianceKind};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, TrustRegion, VarianceKind};
 use serde::Deserialize;
 
 /// Relative band for NLML and predictive mean / variance after `Gpr::fit`.
@@ -210,14 +210,14 @@ fn fit_matches_committed_sklearn_json() {
 }
 
 fn check_newton_forrester(golden: &FitGolden) -> Result<(), GprError> {
-    // Undamped Newton from the L-BFGS start (`ℓ = 1`) goes to another
+    // The trust region from the L-BFGS start (`ℓ = 1`) may go to another
     // critical point. This start is in the basin of the committed θ.
     let gpr = Gpr::new(
         KernelSpec::from(RbfKernel::new(0.2)?),
         GaussianLikelihood::new(0.03)?,
     )
     .with_target_transform(StandardizeTarget::new())
-    .with_optimizer(Newton::new())
+    .with_optimizer(TrustRegion::new())
     .fit(&golden.x, golden.n_rows, golden.n_cols, &golden.y)?;
 
     let nlml = gpr.neg_log_marginal_likelihood()?;

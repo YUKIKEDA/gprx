@@ -5,7 +5,7 @@
 //! model during `fit` / `refit` and forwards concatenated kernel-then-
 //! likelihood `θ` to it. Capability is split so a derivative-free solver
 //! can require only [`Objective`], L-BFGS can require [`Differentiable`],
-//! and a Newton solver can require [`TwiceDifferentiable`].
+//! and a Hessian-based solver ([`crate::TrustRegion`]) can require [`TwiceDifferentiable`].
 
 use crate::error::GprError;
 use crate::param::Interval;

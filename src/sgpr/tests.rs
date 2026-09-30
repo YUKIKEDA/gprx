@@ -11,8 +11,8 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, frobenius2, solve_llt};
 use crate::sgpr::SgprObjective;
 use crate::{
-    FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Newton, NonlinearCg,
-    Optimizer, PredictOptions, VarianceKind,
+    FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Optimizer, PredictOptions,
+    TrustRegion, VarianceKind,
 };
 use faer::{Mat, MatMut, MatRef};
 
@@ -816,7 +816,7 @@ fn constant_times_rq_plus_linear_z_eq_x_matches_exact_value_grad_hess() {
 }
 
 /// A `fit` on `Constant × RBF` learns the signal variance and does not
-/// raise the negative bound, with the gradient (L-BFGS) and with the Hessian (Newton).
+/// raise the negative bound, with the gradient (L-BFGS) and with the Hessian (trust region).
 fn assert_constant_times_rbf_fit_learns_the_variance<O>(optimizer: O)
 where
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,
@@ -859,7 +859,7 @@ fn constant_times_rbf_lbfgs_fit_learns_the_variance() {
 
 #[test]
 fn constant_times_rbf_newton_fit_learns_the_variance() {
-    assert_constant_times_rbf_fit_learns_the_variance(Newton::new());
+    assert_constant_times_rbf_fit_learns_the_variance(TrustRegion::new());
 }
 
 /// `Z ≠ X`: the gradient of the collapsed bound is the finite difference of
@@ -945,16 +945,6 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     check(
         Sgpr::new(kernel(), likelihood())
             .with_math(crate::KernelExp::FastApprox)
-            .with_optimizer(NonlinearCg::new())
-            .fit(&x, 4, 1, &y, &z, 2)
-            .map_err(|(_, err)| err)
-            .expect("ncg")
-            .neg_log_marginal_likelihood()
-            .expect("end"),
-    );
-    check(
-        Sgpr::new(kernel(), likelihood())
-            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(NelderMead::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
@@ -965,7 +955,7 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     check(
         Sgpr::new(kernel(), likelihood())
             .with_math(crate::KernelExp::FastApprox)
-            .with_optimizer(Newton::new())
+            .with_optimizer(TrustRegion::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
             .expect("newton")
@@ -985,18 +975,13 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
 }
 
 #[test]
-fn rbf_n4_m2_fit_ncg_drops_nlml() {
-    assert_fit_finishes_and_nlml_drops(NonlinearCg::new());
-}
-
-#[test]
 fn rbf_n4_m2_fit_nelder_mead_drops_nlml() {
     assert_fit_finishes_and_nlml_drops(NelderMead::new());
 }
 
 #[test]
 fn rbf_n4_m2_fit_newton_drops_nlml() {
-    assert_fit_finishes_and_nlml_drops(Newton::new());
+    assert_fit_finishes_and_nlml_drops(TrustRegion::new());
 }
 
 #[test]
@@ -1130,18 +1115,13 @@ fn rbf_n8_m2_free_lbfgs_drops_nlml() {
 }
 
 #[test]
-fn rbf_n8_m2_free_ncg_drops_nlml() {
-    assert_free_solver_nlml_drops(NonlinearCg::new());
-}
-
-#[test]
 fn rbf_n8_m2_free_nelder_mead_drops_nlml() {
     assert_free_solver_nlml_drops(NelderMead::new());
 }
 
 #[test]
 fn rbf_n8_m2_free_newton_drops_nlml() {
-    assert_free_solver_nlml_drops(Newton::new());
+    assert_free_solver_nlml_drops(TrustRegion::new());
 }
 
 #[test]

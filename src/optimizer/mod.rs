@@ -1,13 +1,13 @@
 //! argmin optimizer adapters and the [`Optimizer`] type slot.
 //!
-//! Does not implement L-BFGS, nonlinear CG, Nelder–Mead, or Newton. [`Lbfgs`],
-//! [`NonlinearCg`], [`NelderMead`], and [`Newton`] map user-unit [`crate::Interval`]
+//! Does not implement L-BFGS, Nelder–Mead, or a trust-region method. [`Lbfgs`],
+//! [`NelderMead`], and [`TrustRegion`] map user-unit [`crate::Interval`]
 //! through a logit so argmin stays unconstrained. Positive intervals
 //! (`lo > 0`) use a log-uniform logit, matching restart sampling. The
 //! unconstrained coordinate is scaled so the Jacobian is 1 at the interval
 //! midpoint. When a gradient solver asks for cost and gradient at the same
 //! point, one [`crate::Differentiable::value_and_gradient_into`] call fills
-//! both. [`Newton`] also maps the analytic Hessian to logit coordinates.
+//! both. [`TrustRegion`] also maps the analytic Hessian to logit coordinates.
 //! [`NelderMead`] evaluates [`crate::Objective::value`] only.
 //! [`Adam`] is a mini-batch loop for [`crate::Svgp`] and does not implement
 //! [`Optimizer`].
@@ -20,9 +20,8 @@ mod adam;
 mod fsa;
 mod lbfgs;
 mod logit;
-mod ncg;
 mod neldermead;
-mod newton;
+mod trust_region;
 
 use std::num::NonZeroU32;
 
@@ -30,9 +29,8 @@ pub use adam::Adam;
 pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
 pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta};
-pub use ncg::NonlinearCg;
 pub use neldermead::NelderMead;
-pub use newton::Newton;
+pub use trust_region::TrustRegion;
 
 use crate::error::GprError;
 
@@ -49,8 +47,8 @@ pub struct OptResult {
 
 /// Hyperparameter optimizer.
 ///
-/// `P` is the objective this algorithm can minimize. [`Lbfgs`] and
-/// [`NonlinearCg`] require [`crate::Differentiable`] plus bounds. [`Newton`]
+/// `P` is the objective this algorithm can minimize. [`Lbfgs`]
+/// requires [`crate::Differentiable`] plus bounds. [`TrustRegion`]
 /// requires [`crate::TwiceDifferentiable`] plus bounds. [`NelderMead`]
 /// and [`FastSimulatedAnnealing`] require only [`crate::Objective`] plus bounds.
 pub trait Optimizer<P: ?Sized> {
