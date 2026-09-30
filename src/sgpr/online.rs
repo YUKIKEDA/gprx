@@ -8,15 +8,14 @@ use faer::Mat;
 use crate::error::GprError;
 use crate::gpr::PointId;
 use crate::gpr::PointRegistry;
-use crate::gpr::{KernelExp, with_kernel_exp};
+use crate::gpr::with_kernel_exp;
+use crate::kernel::KernelScalar;
 use crate::kernel::ScalarOps;
-use crate::kernel::{KernelScalar, KernelSpec};
-use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
 use crate::objective::SgprObjective;
 use crate::optimizer::{Lbfgs, Optimizer};
-use crate::param::write_params;
 use crate::precision::{DoublePrecision, ModelPrecision};
+use crate::sparse::{SparseCore, sparse_core_accessors};
 use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
@@ -163,12 +162,8 @@ impl InducingRegistry {
 /// ```
 #[derive(Clone, Debug)]
 pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
-    kernel: KernelSpec,
-    likelihood: GaussianLikelihood,
+    pub(super) core: SparseCore,
     optimizer: O,
-    x_obs: Vec<f64>,
-    z_obs: Vec<f64>,
-    y: Vec<f64>,
     k_mm_l: Mat<P::Storage>,
     a: Mat<P::Storage>,
     b_l: Mat<P::Storage>,
@@ -176,12 +171,8 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     predict_w: Vec<P::Refine>,
     k_diag_sum: P::Storage,
     a_frobenius2: P::Storage,
-    n: usize,
-    m: usize,
-    d: usize,
     registry: PointRegistry,
     inducing: InducingRegistry,
-    math: KernelExp,
 }
 
 impl<O, P> OnlineSgpr<O, P>
@@ -189,15 +180,11 @@ where
     P: crate::precision::GpScalar,
 {
     pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P>) -> Self {
-        let registry = PointRegistry::from_count(fitted.n);
-        let inducing = InducingRegistry::from_count(fitted.m);
+        let registry = PointRegistry::from_count(fitted.core.n);
+        let inducing = InducingRegistry::from_count(fitted.core.m);
         Self {
-            kernel: fitted.kernel,
-            likelihood: fitted.likelihood,
+            core: fitted.core,
             optimizer: fitted.optimizer,
-            x_obs: fitted.x_obs,
-            z_obs: fitted.z_obs,
-            y: fitted.y,
             k_mm_l: fitted.k_mm_l,
             a: fitted.a,
             b_l: fitted.b_l,
@@ -205,12 +192,8 @@ where
             predict_w: fitted.predict_w,
             k_diag_sum: fitted.k_diag_sum,
             a_frobenius2: fitted.a_frobenius2,
-            n: fitted.n,
-            m: fitted.m,
-            d: fitted.d,
             registry,
             inducing,
-            math: fitted.math,
         }
     }
 
@@ -219,14 +202,9 @@ where
         O: Clone,
     {
         FittedSgpr {
-            kernel: self.kernel.clone(),
-            likelihood: self.likelihood,
+            core: self.core.clone(),
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
-            math: self.math,
-            x_obs: self.x_obs.clone(),
-            z_obs: self.z_obs.clone(),
-            y: self.y.clone(),
             k_mm_l: self.k_mm_l.clone(),
             a: self.a.clone(),
             b_l: self.b_l.clone(),
@@ -234,19 +212,12 @@ where
             predict_w: self.predict_w.clone(),
             k_diag_sum: self.k_diag_sum,
             a_frobenius2: self.a_frobenius2,
-            n: self.n,
-            m: self.m,
-            d: self.d,
         }
     }
 
     fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
-        self.kernel = fitted.kernel;
-        self.likelihood = fitted.likelihood;
+        self.core = fitted.core;
         self.optimizer = fitted.optimizer;
-        self.x_obs = fitted.x_obs;
-        self.z_obs = fitted.z_obs;
-        self.y = fitted.y;
         self.k_mm_l = fitted.k_mm_l;
         self.a = fitted.a;
         self.b_l = fitted.b_l;
@@ -254,9 +225,6 @@ where
         self.predict_w = fitted.predict_w;
         self.k_diag_sum = fitted.k_diag_sum;
         self.a_frobenius2 = fitted.a_frobenius2;
-        self.n = fitted.n;
-        self.m = fitted.m;
-        self.d = fitted.d;
     }
 
     fn vfe_state(&self) -> VfeState<P::Storage> {
@@ -285,30 +253,30 @@ where
     /// ADR 0005 applies first. This refresh keeps `L` aligned with `k(Z, Z)`
     /// so a long insert/delete sequence stays within the public 1e-12 check.
     fn refresh_vfe(&mut self) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.math, M => assemble_vfe::<M, P::Storage>(
-            &self.kernel,
-            self.likelihood,
-            &self.x_obs,
-            self.n,
-            self.d,
-            &self.y,
-            &self.z_obs,
-            self.m,
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+            &self.core.kernel,
+            self.core.likelihood,
+            &self.core.x_obs,
+            self.core.n,
+            self.core.d,
+            &self.core.y,
+            &self.core.z_obs,
+            self.core.m,
         ))?;
         self.apply_vfe(state)
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
-            self.predict_w = with_kernel_exp!(self.math, M => assemble_vfe::<M, f64>(
-                &self.kernel,
-                self.likelihood,
-                &self.x_obs,
-                self.n,
-                self.d,
-                &self.y,
-                &self.z_obs,
-                self.m,
+            self.predict_w = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, f64>(
+                &self.core.kernel,
+                self.core.likelihood,
+                &self.core.x_obs,
+                self.core.n,
+                self.core.d,
+                &self.core.y,
+                &self.core.z_obs,
+                self.core.m,
             ))?
             .w
             .into_iter()
@@ -316,18 +284,18 @@ where
             .collect();
             return Ok(());
         }
-        self.predict_w = with_kernel_exp!(self.math, M => publish_sgpr_weights::<M, P>(
-            &self.kernel,
+        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
+            &self.core.kernel,
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.x_obs,
-            &self.y,
-            &self.z_obs,
-            self.likelihood.noise_variance(),
-            self.n,
-            self.m,
-            self.d,
+            &self.core.x_obs,
+            &self.core.y,
+            &self.core.z_obs,
+            self.core.likelihood.noise_variance(),
+            self.core.n,
+            self.core.m,
+            self.core.d,
         ))?;
         Ok(())
     }
@@ -335,57 +303,14 @@ where
     fn recompute_w(&mut self) -> Result<(), GprError> {
         let w = {
             let mut y_cast = P::Storage::empty_rows();
-            let y_s = P::Storage::storage_rows(&self.y, &mut y_cast);
+            let y_s = P::Storage::storage_rows(&self.core.y, &mut y_cast);
             refresh_w(self.a.as_ref(), self.b_l.as_ref(), y_s)
         };
         self.w = w;
         self.refresh_predict_w()
     }
 
-    /// Returns the number of training points.
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    /// Returns the number of inducing points.
-    pub fn m(&self) -> usize {
-        self.m
-    }
-
-    /// Returns the feature dimension.
-    pub fn d(&self) -> usize {
-        self.d
-    }
-
-    /// Returns the kernel whose hyperparameters this model owns.
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.kernel
-    }
-
-    /// Returns the observation-noise model.
-    pub fn likelihood(&self) -> &GaussianLikelihood {
-        &self.likelihood
-    }
-
-    /// Returns the kernel `exp` mode the trainer set with `with_math`.
-    pub fn math(&self) -> KernelExp {
-        self.math
-    }
-
-    /// Returns the original training features in column-major order.
-    pub fn x(&self) -> &[f64] {
-        &self.x_obs
-    }
-
-    /// Returns the inducing features in column-major order.
-    pub fn z(&self) -> &[f64] {
-        &self.z_obs
-    }
-
-    /// Returns the original training targets.
-    pub fn y(&self) -> &[f64] {
-        &self.y
-    }
+    sparse_core_accessors!();
 
     /// Returns training-point identifiers in buffer order.
     pub fn point_ids(&self) -> &[PointId] {
@@ -401,7 +326,7 @@ where
     ///
     /// Inducing coordinates are not counted.
     pub fn num_params(&self) -> usize {
-        self.kernel.num_params() + self.likelihood.num_params()
+        self.core.theta_len()
     }
 
     /// Writes kernel `θ` then likelihood `θ` into `out`.
@@ -411,7 +336,7 @@ where
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        write_params(&self.kernel, &self.likelihood, out)
+        self.core.read_theta(out)
     }
 
     /// Sets kernel then likelihood `θ` and rebuilds the VFE factors.
@@ -480,12 +405,12 @@ where
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.y,
+            &self.core.y,
             self.k_diag_sum,
             self.a_frobenius2,
-            self.likelihood.noise_variance(),
-            self.n,
-            self.m,
+            self.core.likelihood.noise_variance(),
+            self.core.n,
+            self.core.m,
         )
     }
 
@@ -515,15 +440,15 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        with_kernel_exp!(self.math, M => vfe_predict::<M, P>(
-            &self.kernel,
-            &self.z_obs,
+        with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
+            &self.core.kernel,
+            &self.core.z_obs,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
             &self.predict_w,
-            self.likelihood.noise_variance(),
-            self.m,
-            self.d,
+            self.core.likelihood.noise_variance(),
+            self.core.m,
+            self.core.d,
             xs,
             n_rows,
             n_cols,
@@ -543,31 +468,31 @@ where
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`, or
     /// [`GprError::EmptyInput`] if `d` is zero.
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
-        if x_new.len() != self.d {
+        if x_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
-                expected_dim: self.d,
+                expected_dim: self.core.d,
             });
         }
-        if self.d == 0 {
+        if self.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        let mut a_col = with_kernel_exp!(self.math, M => kernel_column::<M, P::Storage>(&self.kernel, &self.z_obs, self.m, x_new, self.d))?;
+        let mut a_col = with_kernel_exp!(self.core.math, M => kernel_column::<M, P::Storage>(&self.core.kernel, &self.core.z_obs, self.core.m, x_new, self.core.d))?;
         solve_lmm(self.k_mm_l.as_ref(), a_col.as_mut());
-        let mut v = vec![P::Storage::from_f64(0.0); self.m];
+        let mut v = vec![P::Storage::from_f64(0.0); self.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = a_col[(i, 0)];
         }
         self.a_frobenius2 += frobenius2(a_col.as_ref());
-        self.k_diag_sum += kernel_diag_at::<P::Storage>(&self.kernel, x_new, self.d)?;
+        self.k_diag_sum += kernel_diag_at::<P::Storage>(&self.core.kernel, x_new, self.core.d)?;
         self.a = append_column(&self.a, a_col.as_ref());
         chol_rank1_update(&mut self.b_l, &mut v);
-        self.x_obs = append_point(&self.x_obs, self.n, self.d, x_new);
-        self.y.push(y_new);
-        self.n += 1;
+        self.core.x_obs = append_point(&self.core.x_obs, self.core.n, self.core.d, x_new);
+        self.core.y.push(y_new);
+        self.core.n += 1;
         self.recompute_w()?;
         Ok(self.registry.insert())
     }
@@ -612,22 +537,22 @@ where
     /// # }
     /// ```
     pub fn delete(&mut self, id: PointId) -> Result<(), GprError> {
-        if self.n <= 1 {
+        if self.core.n <= 1 {
             return Err(GprError::EmptyInput);
         }
         let idx = self.registry.index_of(id)?;
-        let mut v = vec![P::Storage::from_f64(0.0); self.m];
+        let mut v = vec![P::Storage::from_f64(0.0); self.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = self.a[(i, idx)];
         }
-        let x_pt = point_at(&self.x_obs, self.n, self.d, idx);
-        let diag = kernel_diag_at::<P::Storage>(&self.kernel, &x_pt, self.d)?;
+        let x_pt = point_at(&self.core.x_obs, self.core.n, self.core.d, idx);
+        let diag = kernel_diag_at::<P::Storage>(&self.core.kernel, &x_pt, self.core.d)?;
         let mut col_norm = P::Storage::from_f64(0.0);
         for value in &v {
             col_norm += *value * *value;
         }
-        let x_next = remove_point(&self.x_obs, self.n, self.d, idx);
-        let mut y_next = self.y.clone();
+        let x_next = remove_point(&self.core.x_obs, self.core.n, self.core.d, idx);
+        let mut y_next = self.core.y.clone();
         y_next.remove(idx);
         let mut b_trial = self.b_l.clone();
         let mut v_trial = v;
@@ -636,24 +561,24 @@ where
             self.a_frobenius2 -= col_norm;
             self.a = remove_column(&self.a, idx);
             self.b_l = b_trial;
-            self.x_obs = x_next;
-            self.y = y_next;
-            self.n -= 1;
+            self.core.x_obs = x_next;
+            self.core.y = y_next;
+            self.core.n -= 1;
             self.recompute_w()?;
         } else {
-            let state = with_kernel_exp!(self.math, M => assemble_vfe::<M, P::Storage>(
-                &self.kernel,
-                self.likelihood,
+            let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+                &self.core.kernel,
+                self.core.likelihood,
                 &x_next,
-                self.n - 1,
-                self.d,
+                self.core.n - 1,
+                self.core.d,
                 &y_next,
-                &self.z_obs,
-                self.m,
+                &self.core.z_obs,
+                self.core.m,
             ))?;
-            self.x_obs = x_next;
-            self.y = y_next;
-            self.n -= 1;
+            self.core.x_obs = x_next;
+            self.core.y = y_next;
+            self.core.n -= 1;
             self.k_mm_l = state.k_mm_l;
             self.a = state.a;
             self.b_l = state.b_l;
@@ -708,39 +633,39 @@ where
     /// # }
     /// ```
     pub fn insert_inducing(&mut self, z_new: &[f64]) -> Result<InducingId, GprError> {
-        if z_new.len() != self.d {
+        if z_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: z_new.len(),
-                expected_dim: self.d,
+                expected_dim: self.core.d,
             });
         }
-        if self.d == 0 {
+        if self.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
         if z_new.iter().any(|v| !v.is_finite()) {
             return Err(GprError::NonFiniteInput);
         }
         let mut state = self.vfe_state();
-        match with_kernel_exp!(self.math, M => inducing_insert::<M, _>(
+        match with_kernel_exp!(self.core.math, M => inducing_insert::<M, _>(
             &mut state,
-            &self.kernel,
-            self.likelihood.noise_variance(),
-            &self.x_obs,
-            self.n,
-            self.d,
-            &self.y,
-            &self.z_obs,
-            self.m,
+            &self.core.kernel,
+            self.core.likelihood.noise_variance(),
+            &self.core.x_obs,
+            self.core.n,
+            self.core.d,
+            &self.core.y,
+            &self.core.z_obs,
+            self.core.m,
             z_new,
         )) {
             Ok(()) => {
-                self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
+                self.core.z_obs = append_point(&self.core.z_obs, self.core.m, self.core.d, z_new);
                 self.apply_vfe(state)?;
-                self.m += 1;
+                self.core.m += 1;
             }
             Err(GprError::CholeskyFailed { .. }) => {
-                self.z_obs = append_point(&self.z_obs, self.m, self.d, z_new);
-                self.m += 1;
+                self.core.z_obs = append_point(&self.core.z_obs, self.core.m, self.core.d, z_new);
+                self.core.m += 1;
             }
             Err(err) => return Err(err),
         }
@@ -789,15 +714,20 @@ where
     /// # }
     /// ```
     pub fn delete_inducing(&mut self, id: InducingId) -> Result<(), GprError> {
-        if self.m <= 1 {
+        if self.core.m <= 1 {
             return Err(GprError::EmptyInput);
         }
         let idx = self.inducing.index_of(id)?;
         let mut state = self.vfe_state();
-        inducing_delete(&mut state, self.likelihood.noise_variance(), &self.y, idx)?;
-        self.z_obs = remove_point(&self.z_obs, self.m, self.d, idx);
+        inducing_delete(
+            &mut state,
+            self.core.likelihood.noise_variance(),
+            &self.core.y,
+            idx,
+        )?;
+        self.core.z_obs = remove_point(&self.core.z_obs, self.core.m, self.core.d, idx);
         self.apply_vfe(state)?;
-        self.m -= 1;
+        self.core.m -= 1;
         self.inducing.remove_at(idx);
         self.refresh_vfe()?;
         Ok(())
@@ -839,14 +769,9 @@ where
     /// ```
     pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
         FittedSgpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
+            core: self.core,
             optimizer: self.optimizer,
             inducing: PhantomData,
-            math: self.math,
-            x_obs: self.x_obs,
-            z_obs: self.z_obs,
-            y: self.y,
             k_mm_l: self.k_mm_l,
             a: self.a,
             b_l: self.b_l,
@@ -854,9 +779,6 @@ where
             predict_w: self.predict_w,
             k_diag_sum: self.k_diag_sum,
             a_frobenius2: self.a_frobenius2,
-            n: self.n,
-            m: self.m,
-            d: self.d,
         }
     }
 }

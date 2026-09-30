@@ -1313,7 +1313,7 @@ fn assert_inducing_insert_delete(case: InducingCase<'_>) {
         delete_idx,
     } = case;
     let fitted = factor_sparse(kernel.clone(), x, n, d, y, z, m);
-    let noise = fitted.likelihood.noise_variance();
+    let noise = fitted.likelihood().noise_variance();
     let mut inserted = vfe_from_fitted(&fitted);
     inducing_insert::<crate::math::Accurate, _>(
         &mut inserted,

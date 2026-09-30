@@ -55,6 +55,7 @@ pub mod persist;
 mod precision;
 mod rng;
 mod sgpr;
+mod sparse;
 mod svgp;
 #[cfg(test)]
 #[path = "../tests/common/check.rs"]

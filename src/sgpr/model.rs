@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use crate::error::GprError;
 use crate::gpr::{KernelExp, with_kernel_exp};
-use crate::param::write_params;
+use crate::sparse::SparseSpec;
 
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
@@ -42,12 +42,10 @@ use super::{FixedInducing, FreeInducing, InducingLayout};
 /// ```
 #[derive(Clone, Debug)]
 pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision> {
-    pub(crate) kernel: KernelSpec,
-    pub(crate) likelihood: GaussianLikelihood,
-    pub(crate) optimizer: O,
-    pub(crate) inducing: PhantomData<I>,
-    pub(crate) math: KernelExp,
-    pub(crate) _precision: PhantomData<P>,
+    pub(super) spec: SparseSpec,
+    pub(super) optimizer: O,
+    pub(super) inducing: PhantomData<I>,
+    pub(super) _precision: PhantomData<P>,
 }
 impl Sgpr {
     /// Builds a trainer with identity transforms, the current kernel `θ`, and
@@ -59,17 +57,26 @@ impl Sgpr {
     /// [`Optimizer`].
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
-            kernel,
-            likelihood,
+            spec: SparseSpec::new(kernel, likelihood),
             optimizer: Lbfgs::new(),
             inducing: PhantomData,
-            math: KernelExp::default(),
             _precision: PhantomData,
         }
     }
 }
 
 impl<O, I, P> Sgpr<O, I, P> {
+    /// The same settings under new type parameters, with `map` applied to
+    /// the optimizer.
+    fn retype<O2, I2, P2>(self, map: impl FnOnce(O) -> O2) -> Sgpr<O2, I2, P2> {
+        Sgpr {
+            spec: self.spec,
+            optimizer: map(self.optimizer),
+            inducing: PhantomData,
+            _precision: PhantomData,
+        }
+    }
+
     /// Replaces the optimizer type parameter.
     ///
     /// # Examples
@@ -90,27 +97,12 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// # }
     /// ```
     pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, P> {
-        Sgpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer,
-            inducing: PhantomData,
-            math: self.math,
-            _precision: PhantomData,
-        }
+        self.retype(|_| optimizer)
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, P2>
-where {
-        Sgpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer: self.optimizer,
-            inducing: PhantomData,
-            math: self.math,
-            _precision: PhantomData,
-        }
+    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, P2> {
+        self.retype(|optimizer| optimizer)
     }
 
     /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
@@ -118,13 +110,13 @@ where {
     /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
     /// unchanged.
     pub fn with_math(mut self, math: KernelExp) -> Self {
-        self.math = math;
+        self.spec.math = math;
         self
     }
 
     /// Returns the kernel `exp` mode.
     pub fn math(&self) -> KernelExp {
-        self.math
+        self.spec.math
     }
 
     /// Replaces the inducing-point type parameter.
@@ -151,31 +143,24 @@ where {
     /// # }
     /// ```
     pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, P> {
-        Sgpr {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer: self.optimizer,
-            inducing: PhantomData,
-            math: self.math,
-            _precision: PhantomData,
-        }
+        self.retype(|optimizer| optimizer)
     }
 
     /// Returns the kernel whose hyperparameters this trainer owns.
     pub fn kernel(&self) -> &KernelSpec {
-        &self.kernel
+        &self.spec.kernel
     }
 
     /// Returns the observation-noise model.
     pub fn likelihood(&self) -> &GaussianLikelihood {
-        &self.likelihood
+        &self.spec.likelihood
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
     ///
     /// Inducing coordinates are not counted.
     pub fn num_params(&self) -> usize {
-        self.kernel.num_params() + self.likelihood.num_params()
+        self.spec.theta_len()
     }
 
     /// Writes kernel `θ` then likelihood `θ` into `out`.
@@ -185,7 +170,7 @@ where {
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        write_params(&self.kernel, &self.likelihood, out)
+        self.spec.read_theta(out)
     }
 
     /// Sets kernel then likelihood `θ` without forming the VFE system.
@@ -201,15 +186,7 @@ where {
     /// is invalid. Kernel and likelihood `θ` are committed together only
     /// after both writes succeed.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        let n_kernel = self.kernel.num_params();
-        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
-        let mut kernel = self.kernel.clone();
-        kernel.set_params(&params[..n_kernel])?;
-        let mut likelihood = self.likelihood;
-        likelihood.set_params(&params[n_kernel..])?;
-        self.kernel = kernel;
-        self.likelihood = likelihood;
-        Ok(())
+        self.spec.write_theta(params)
     }
 }
 
@@ -261,9 +238,9 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSgpr<O, FixedInducing, P>, (Self, GprError)> {
-        match with_kernel_exp!(self.math, M => assemble_fitted::<_, _, M, _>(
-            self.kernel.clone(),
-            self.likelihood,
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
+            self.spec.kernel.clone(),
+            self.spec.likelihood,
             self.optimizer.clone(),
             x,
             n_rows,
@@ -326,9 +303,9 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSgpr<O, FreeInducing, P>, (Self, GprError)> {
-        match with_kernel_exp!(self.math, M => assemble_fitted::<_, _, M, _>(
-            self.kernel.clone(),
-            self.likelihood,
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
+            self.spec.kernel.clone(),
+            self.spec.likelihood,
             self.optimizer.clone(),
             x,
             n_rows,
@@ -394,9 +371,9 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSgpr<Fixed, I, P>, (Self, GprError)> {
-        match with_kernel_exp!(self.math, M => assemble_fitted::<_, _, M, _>(
-            self.kernel.clone(),
-            self.likelihood,
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
+            self.spec.kernel.clone(),
+            self.spec.likelihood,
             Fixed,
             x,
             n_rows,

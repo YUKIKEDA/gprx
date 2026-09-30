@@ -114,13 +114,14 @@ fn cholesky_lower(mat: &mut Mat<f64>) {
 fn titsias_whitened_q(vfe: &crate::FittedSgpr<Fixed>) -> (Vec<f64>, Mat<f64>) {
     let m = vfe.m();
     let noise = vfe.likelihood().noise_variance();
-    let mean = vfe.w.clone();
+    let (w, b_l) = vfe.vfe_w_and_b_l();
+    let mean = w.to_vec();
     let mut inv = Mat::zeros(m, m);
     for i in 0..m {
         inv[(i, i)] = 1.0;
     }
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        vfe.b_l.as_ref(),
+        b_l,
         inv.as_mut(),
         faer_par_dims(m, m),
     );
