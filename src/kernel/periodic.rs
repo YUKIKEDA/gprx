@@ -3,7 +3,7 @@
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{
     Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
-    write_square_from_coords, write_triangle,
+    write_rect_from_coords, write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
@@ -328,6 +328,57 @@ impl PeriodicKernel {
         let ell = T::from_f64(self.lengthscale());
         let period = T::from_f64(self.period());
         write_square_from_coords(x, d2_k, uplo, |d| {
+            periodic_hess_from_sq_dist::<M, _>(d, ell, period, i, j)
+        })
+    }
+
+    /// Rectangular `K(x1, x2)` from coordinates.
+    pub(crate) fn apply_cross_from_coords<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_rect_from_coords(x1, x2, out, |d| {
+            periodic_from_sq_dist::<M, _>(d, ell, period)
+        })
+    }
+
+    /// `∂K(x1, x2)/∂θ` of a rectangular block, from coordinates.
+    pub(crate) fn grad_cross_from_coords<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx > 1 {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("periodic kernel parameter index {param_idx} is out of range"),
+            });
+        }
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_rect_from_coords(x1, x2, d_k, |d| {
+            periodic_grad_from_sq_dist::<M, _>(d, ell, period, param_idx)
+        })
+    }
+
+    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block, from coordinates.
+    pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_periodic_hess_idx(i, j)?;
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_rect_from_coords(x1, x2, d2_k, |d| {
             periodic_hess_from_sq_dist::<M, _>(d, ell, period, i, j)
         })
     }

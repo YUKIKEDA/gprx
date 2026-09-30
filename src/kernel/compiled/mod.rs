@@ -643,12 +643,6 @@ fn ard_needs_coords() -> GprError {
     }
 }
 
-fn iso_needs_dist() -> GprError {
-    GprError::UnsupportedKernelOperation {
-        reason: "isotropic RBF evaluates from a squared-distance matrix".to_owned(),
-    }
-}
-
 fn merge_coord_mode(a: CoordMode, b: CoordMode) -> CoordMode {
     use CoordMode::{Dist, Either, Mixed, Points};
     match (a, b) {

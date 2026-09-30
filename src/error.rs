@@ -83,9 +83,14 @@ pub enum GprError {
     /// A matrix that must be positive definite (or semidefinite) is not.
     #[error("matrix is not positive semidefinite")]
     NonPositiveDefiniteMatrix,
-    /// The kernel does not implement `grad_wrt_coord_dim`.
+    /// The kernel has no derivative a sparse model needs: the coordinate
+    /// derivative of inducing points (`FreeInducing`) for a Product tree or a
+    /// leaf other than RBF, Matérn, and White, or the rectangular derivative
+    /// of a `Custom` leaf.
     #[error(
-        "this kernel term does not implement Sparse GPR coordinate derivatives (grad_wrt_coord_dim)"
+        "this kernel term does not implement the derivative a sparse model needs \
+         (a coordinate derivative, grad_wrt_coord_dim, of FreeInducing points, \
+         or the rectangular derivative of a Custom leaf)"
     )]
     CoordGradientUnsupported,
     /// The hyperparameter optimizer stopped without meeting its convergence test.

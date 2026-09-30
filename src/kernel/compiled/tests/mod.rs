@@ -1,5 +1,6 @@
 mod compose;
 mod coord_mode;
+mod cross;
 mod custom;
 mod fast_math;
 mod params;

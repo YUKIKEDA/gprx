@@ -399,18 +399,45 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    /// `∂K(x1, x2)/∂θ_{param_idx}` of a rectangular block
+    /// (`x1.nrows() × x2.nrows()`) from coordinates: every built-in leaf, and
+    /// Sum / Product trees of them. A `Custom` leaf has no rectangular
+    /// derivative and returns [`GprError::CoordGradientUnsupported`].
+    ///
+    /// Product trees need `scratch` the same shape as `d_k` and distinct from
+    /// it; leaves ignore it.
     pub(crate) fn grad_cross_points<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, T>,
         x2: MatRef<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
+        self.grad_cross_points_with::<M>(x1, x2, d_k, param_idx, scratch, &mut nested)
+    }
+
+    /// [`Self::grad_cross_points`] with caller-owned [`Nested`] levels.
+    pub(crate) fn grad_cross_points_with<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
             Self::Matern(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
             Self::RbfArd(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
+            Self::MaternArd(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
+            Self::Periodic(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
+            Self::RationalQuadratic(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
+            Self::RationalQuadraticArd(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
+            Self::Linear(leaf) => leaf.grad_cross(x1, x2, d_k, param_idx),
+            Self::Constant(leaf) => leaf.grad_cross_points(x1, x2, d_k, param_idx),
             Self::White(leaf) => {
                 let _ = param_idx;
                 if x1.ncols() == 0 {
@@ -418,49 +445,26 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 }
                 leaf.grad_wrt_coord_dim(x1, x2, d_k, 0)
             }
+            Self::Custom(_) => Err(GprError::CoordGradientUnsupported),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_cross_points::<M>(x1, x2, d_k, local, scratch.as_mut())
+                term.grad_cross_points_with::<M>(x1, x2, d_k, local, scratch, nested)
             }
-            _ => Err(GprError::CoordGradientUnsupported),
-        }
-    }
-
-    pub(crate) fn hess_cross_points<M: crate::math::KernelMath>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        mut d2_k: MatMut<'_, T>,
-        i: usize,
-        j: usize,
-        mut scratch: MatMut<'_, T>,
-    ) -> Result<(), GprError> {
-        match self {
-            Self::Rbf(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
-            Self::Matern(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
-            Self::RbfArd(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
-            Self::White(leaf) => {
-                let _ = (i, j);
-                if x1.ncols() == 0 {
-                    return Err(GprError::EmptyInput);
-                }
-                leaf.grad_wrt_coord_dim(x1, x2, d2_k, 0)
+            Self::Product(terms) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
+                let (owner, local) = term_index_for_param(terms, param_idx)?;
+                product_with_owner(
+                    terms,
+                    owner,
+                    ProductBuffers::rect(d_k, scratch, nested),
+                    |term, out, scratch, nested| {
+                        term.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
+                    },
+                    |term, out, scratch, nested| {
+                        term.grad_cross_points_with::<M>(x1, x2, out, local, scratch, nested)
+                    },
+                )
             }
-            Self::Sum(terms) => {
-                let (term_i, li) = term_for_param(terms, i)?;
-                let (term_j, lj) = term_for_param(terms, j)?;
-                if std::ptr::eq(term_i, term_j) {
-                    term_i.hess_cross_points::<M>(x1, x2, d2_k, li, lj, scratch.as_mut())
-                } else {
-                    for col in 0..d2_k.ncols() {
-                        for row in 0..d2_k.nrows() {
-                            d2_k[(row, col)] = T::from_f64(0.0);
-                        }
-                    }
-                    Ok(())
-                }
-            }
-            _ => Err(GprError::CoordGradientUnsupported),
         }
     }
 }
@@ -530,15 +534,32 @@ pub(super) fn term_index_for_param<T: KernelScalar>(
     })
 }
 
-/// Output, scratch, nested levels, and triangle of one product fold.
+/// How a product multiplies the running block by the next factor: the
+/// triangle of a square block, or every entry of a rectangular one.
+#[derive(Clone, Copy)]
+pub(super) enum Fold {
+    Triangle(Triangle),
+    Rect,
+}
+
+/// `acc *= src` over the part of the block `fold` names.
+pub(super) fn mul_fold<T: KernelScalar>(acc: MatMut<'_, T>, src: MatRef<'_, T>, fold: Fold) {
+    match fold {
+        Fold::Triangle(uplo) => mul_triangle(acc, src, uplo),
+        Fold::Rect => super::apply::mul_rect(acc, src),
+    }
+}
+
+/// Output, scratch, nested levels, and fold of one product.
 pub(super) struct ProductBuffers<'a, 'n, T> {
     pub(super) out: MatMut<'a, T>,
     pub(super) scratch: MatMut<'a, T>,
     pub(super) nested: &'n mut Nested<T>,
-    pub(super) uplo: Triangle,
+    pub(super) fold: Fold,
 }
 
 impl<'a, 'n, T> ProductBuffers<'a, 'n, T> {
+    /// A square block, folded over `uplo`.
     pub(super) fn new(
         out: MatMut<'a, T>,
         scratch: MatMut<'a, T>,
@@ -549,7 +570,21 @@ impl<'a, 'n, T> ProductBuffers<'a, 'n, T> {
             out,
             scratch,
             nested,
-            uplo,
+            fold: Fold::Triangle(uplo),
+        }
+    }
+
+    /// A rectangular block, folded over every entry.
+    pub(super) fn rect(
+        out: MatMut<'a, T>,
+        scratch: MatMut<'a, T>,
+        nested: &'n mut Nested<T>,
+    ) -> Self {
+        Self {
+            out,
+            scratch,
+            nested,
+            fold: Fold::Rect,
         }
     }
 }
@@ -578,7 +613,7 @@ pub(super) fn product_with_owner<T: KernelScalar>(
         mut out,
         mut scratch,
         nested,
-        uplo,
+        fold,
     } = buffers;
     let (rows, cols) = (out.nrows(), out.ncols());
     let mut started = false;
@@ -589,7 +624,7 @@ pub(super) fn product_with_owner<T: KernelScalar>(
         if started {
             let (own, deeper) = term_scratch(term, rows, cols, out.as_mut(), &mut *nested)?;
             apply(term, scratch.as_mut(), own, deeper)?;
-            mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
+            mul_fold(out.as_mut(), scratch.as_ref(), fold);
         } else {
             apply(term, out.as_mut(), scratch.as_mut(), &mut *nested)?;
             started = true;
@@ -599,7 +634,7 @@ pub(super) fn product_with_owner<T: KernelScalar>(
     if started {
         let (own, deeper) = term_scratch(owner, rows, cols, out.as_mut(), &mut *nested)?;
         deriv(owner, scratch.as_mut(), own, deeper)?;
-        mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
+        mul_fold(out.as_mut(), scratch.as_ref(), fold);
     } else {
         deriv(owner, out, scratch, nested)?;
     }

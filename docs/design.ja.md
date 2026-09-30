@@ -415,7 +415,7 @@ Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は�
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。joint の `K(X,X)` 勾配とヘッセは対角 `∂k(x_i, x_i)/∂θ` を `O(n)` で足す。`K(Z,Z)` と `K(Z,X)` の勾配は密行列のまま。
 
-誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。既定の `FixedInducing` の `fit` はこの API を使わない。`FreeInducing` は同時最適化で次元一括で呼ぶ。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。
+誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。既定の `FixedInducing` の `fit` はこの API を使わない。使うのは長方形の `∂K(Z, X)/∂θ` と `∂²K(Z, X)/∂θ∂θ`（`grad_cross_points` / `hess_cross_points`）で、組み込みのすべての葉と、その Sum / Product の木が持つ。そのため `Constant × RBF` の信号分散を、Exact と同じく `Sgpr` と `Svgp` で学習できる。`Custom` の葉は長方形の微分を持たず、`CoordGradientUnsupported` を返す。`FreeInducing` は同時最適化で次元一括で座標 API を呼ぶ。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。
 
 **既定は呼び出し側が Z を渡し、最適化対象はカーネルハイパラとノイズのみとする。** 自由 Z は `FixedInducing` / `FreeInducing` で切り替え、カーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。区間は訓練 `X` の箱を少し開いて広げた生座標。L-BFGS 履歴の長さは `p = p_θ + m×d` で、増分は `history_size × m × d` 個の `f64`（`m` が小さいので VFE の `O(nm²)` に対して小さい）。交互は載らない。
 

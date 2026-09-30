@@ -1,6 +1,9 @@
 use super::*;
 use crate::error::GprError;
-use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
+use crate::kernel::{
+    ConstantKernel, KernelSpec, MaternKernel, MaternNu, PeriodicKernel, RbfArdKernel, RbfKernel,
+    WhiteKernel,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{cholesky_lower_with_retries, faer_par, faer_par_dims};
 use crate::policy::JitterPolicy;
@@ -351,6 +354,33 @@ fn rbf_ard_prior_grad_matches_fd() {
 #[test]
 fn rbf_white_prior_grad_matches_fd() {
     check_full_grad(kernel_rbf_white(), &X_1D, 4, 1, &Z_1D);
+}
+
+fn constant(v: f64) -> KernelSpec {
+    KernelSpec::from(ConstantKernel::new(v).expect("constant"))
+}
+
+/// A signal variance and a product of leaves: the gradient is the finite
+/// difference of the full-data ELBO (#301).
+#[test]
+fn constant_times_rbf_prior_grad_matches_fd() {
+    check_full_grad(constant(1.7) * kernel_rbf(), &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn constant_times_ard_prior_grad_matches_fd() {
+    check_full_grad(constant(1.7) * kernel_ard(), &X_ARD, 4, 2, &Z_ARD);
+}
+
+#[test]
+fn rbf_times_periodic_prior_grad_matches_fd() {
+    let periodic = KernelSpec::from(PeriodicKernel::new(0.9, 1.7).expect("periodic"));
+    check_full_grad(kernel_rbf() * periodic, &X_1D, 4, 1, &Z_1D);
+}
+
+#[test]
+fn constant_times_rbf_fit_reproduces_and_does_not_worsen() {
+    check_fit_seed_and_elbo(constant(1.7) * kernel_rbf(), &X_1D, 4, 1, &Z_1D);
 }
 
 #[test]
