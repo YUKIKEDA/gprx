@@ -377,8 +377,9 @@ where
     /// # Errors
     ///
     /// Same input errors as [`Sgpr<O, FixedInducing>::fit`], plus
-    /// [`GprError::CoordGradientUnsupported`] when the kernel has no
-    /// coordinate derivative.
+    /// [`GprError::CoordGradientUnsupported`] for Matérn with `ν = 1/2` or a
+    /// `Custom` leaf that does not implement the squared-distance derivatives
+    /// of [`KernelTerm`](crate::kernel::KernelTerm).
     ///
     /// # Examples
     ///

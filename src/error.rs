@@ -83,14 +83,17 @@ pub enum GprError {
     /// A matrix that must be positive definite (or semidefinite) is not.
     #[error("matrix is not positive semidefinite")]
     NonPositiveDefiniteMatrix,
-    /// The kernel has no derivative a sparse model needs: the coordinate
-    /// derivative of inducing points (`FreeInducing`) for a Product tree or a
-    /// leaf other than RBF, Matérn, and White, or the rectangular derivative
-    /// of a `Custom` leaf.
+    /// The kernel has no derivative a sparse model needs. Every built-in
+    /// kernel and every Sum / Product tree of them has all of them, except
+    /// Matérn with `ν = 1/2`, whose coordinate derivative (`FreeInducing`) is
+    /// undefined where two points coincide, as `Z ⊂ X` starts. A `Custom`
+    /// leaf has them only when it implements the corresponding `KernelTerm`
+    /// methods (`grad_cross` / `hess_cross` for `Sgpr` and `Svgp`,
+    /// `grad_wrt_sq_dist*` and `hess_wrt_sq_dist` for `FreeInducing`).
     #[error(
-        "this kernel term does not implement the derivative a sparse model needs \
-         (a coordinate derivative, grad_wrt_coord_dim, of FreeInducing points, \
-         or the rectangular derivative of a Custom leaf)"
+        "this kernel does not implement the derivative a sparse model needs \
+         (Matern nu = 1/2 has no coordinate derivative for FreeInducing points; \
+         a Custom leaf must implement the KernelTerm cross / squared-distance derivatives)"
     )]
     CoordGradientUnsupported,
     /// The hyperparameter optimizer stopped without meeting its convergence test.

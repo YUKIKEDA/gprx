@@ -200,7 +200,7 @@ pub enum CompiledKernel<T: KernelScalar = f64> {
 pub enum Triangle { Lower, Upper, Full }
 
 /// A user leaf. It reads squared Euclidean distances (or coordinates for
-/// `hess_points` / `grad_wrt_coord_dim`) and writes the triangle `uplo` asks for.
+/// `hess_points`) and writes the triangle `uplo` asks for.
 pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     fn num_params(&self) -> usize;
     fn get_params(&self, out: &mut [f64]) -> Result<(), GprError>;
@@ -215,9 +215,18 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         -> Result<(), GprError>;
     fn hess_points(&self, x: MatRef<'_, T>, d2_k: MatMut<'_, T>, i: usize, j: usize, uplo: Triangle)
         -> Result<(), GprError>;
-    /// ∂K(X1, X2)/∂X2[*, dim] for one whole dimension. A per-point vtable call
-    /// (m×d times) would block SIMD, so the unit is a dimension.
-    fn grad_wrt_coord_dim(&self, x1: MatRef<'_, T>, x2: MatRef<'_, T>, d_k: MatMut<'_, T>, dim: usize)
+    /// 長方形の ∂K/∂θ、∂²K/∂θ∂θ（二乗距離から、train × test）。既定は `CoordGradientUnsupported`。
+    fn grad_cross(&self, dist: MatRef<'_, T>, d_k: MatMut<'_, T>, param_idx: usize)
+        -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
+    fn hess_cross(&self, dist: MatRef<'_, T>, d2_k: MatMut<'_, T>, i: usize, j: usize)
+        -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
+    /// ∂k/∂(d²)、∂²k/∂(d²)²、∂²k/∂θ∂(d²)。k は二乗距離の関数なので、これで
+    /// `FreeInducing` の座標微分が決まる。既定は `CoordGradientUnsupported`。
+    fn grad_wrt_sq_dist(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError>
+        { Err(GprError::CoordGradientUnsupported) }
+    fn hess_wrt_sq_dist(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError>
+        { Err(GprError::CoordGradientUnsupported) }
+    fn grad_wrt_sq_dist_theta(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>, param_idx: usize)
         -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
     fn clone_box(&self) -> Box<dyn KernelTerm<T>>;
     fn persist_id(&self) -> &'static str { "" }                          // registry key for save / load
@@ -225,7 +234,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
 }
 ```
 
-`uplo` の既定は `Lower`。faer の `cholesky_in_place` は下三角しか読まないので、`Full` で埋めるとカーネル評価が約 2 倍になる。`CompiledKernel` も同じ操作（`apply`、`apply_cross`、`apply_points`、`apply_cross_points`、`fill_diag`、`fill_diag_points`、`grad`、`grad_points`、`grad_wrt_coord_dim`、`hess`、`hess_points`）を持ち、どれも §8 の `KernelMath` についてジェネリック。
+`uplo` の既定は `Lower`。faer の `cholesky_in_place` は下三角しか読まないので、`Full` で埋めるとカーネル評価が約 2 倍になる。`CompiledKernel` も同じ操作（`apply`、`apply_cross`、`apply_points`、`apply_cross_points`、`fill_diag`、`fill_diag_points`、`grad`、`grad_points`、`grad_wrt_coord_dim`、`hess_wrt_coord_dims`、`hess_wrt_coord_mixed`、`hess_theta_coord_dim`、`hess`、`hess_points`）を持ち、どれも §8 の `KernelMath` についてジェネリック。
 
 葉のパラメータは f64 のまま。`compile()` は f64、`compile_as::<T>()` は同じ apply・勾配・ヘッセを f32 で与える。組み込みの葉はどれも `T: KernelScalar` についての実装 1 つで、`CompiledKernel<T>` のディスパッチも 1 つ。f64 の SIMD 経路へは、`T = f64` のときだけ f64 のビューを返すスカラーのフックから入る。f32 は同じ式のスカラー。ユーザー定義の葉は `impl<T: KernelScalar> KernelTerm<T>` 1 つ。`KernelScalar` は式に要る四則と `exp` / `ln` / `sqrt` / `powf` / `sin` / `cos` を持ち、ジェネリックな組み込みの葉をそこから呼べる。`CustomKernel::new` は `KernelTerm<f64> + KernelTerm<f32>` を要求し、ジェネリックな impl 1 つでそれを満たす。
 
@@ -415,7 +424,7 @@ Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は�
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。joint の `K(X,X)` 勾配とヘッセは対角 `∂k(x_i, x_i)/∂θ` を `O(n)` で足す。`K(Z,Z)` と `K(Z,X)` の勾配は密行列のまま。
 
-誘導点座標の勾配は`grad_wrt_coord_dim`(§5.1)で扱い、未対応カーネルはpanicではなく`GprError::CoordGradientUnsupported`を返す。既定の `FixedInducing` の `fit` はこの API を使わない。使うのは長方形の `∂K(Z, X)/∂θ` と `∂²K(Z, X)/∂θ∂θ`（`grad_cross_points` / `hess_cross_points`）で、組み込みのすべての葉と、その Sum / Product の木が持つ。そのため `Constant × RBF` の信号分散を、Exact と同じく `Sgpr` と `Svgp` で学習できる。`Custom` の葉は長方形の微分を持たず、`CoordGradientUnsupported` を返す。`FreeInducing` は同時最適化で次元一括で座標 API を呼ぶ。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。
+誘導点座標の勾配は`grad_wrt_coord_dim`、Hessian は`hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim`(§5.1)で扱う。組み込みのすべての葉が持ち、Sum と Product の木が合成する（放射状の葉は `k = g(q)`、`q = Σ w_d Δ_d²` の `g'(q)`、`g''(q)` から 1 つの実装で、Product は各項の値・1 階・2 階への積の規則で）。`ν = 1/2` の Matérn は panic ではなく`GprError::CoordGradientUnsupported`を返す。2 点が一致するところで座標微分が定義できず、`Z ⊂ X` の初期化がそこから始まるため。`Custom` の葉は `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` で座標微分を、`grad_cross` / `hess_cross` で長方形の `∂K/∂θ` を与える。既定のまま残した葉は`CoordGradientUnsupported`を返す。既定の `FixedInducing` の `fit` はこの API を使わない。使うのは長方形の `∂K(Z, X)/∂θ` と `∂²K(Z, X)/∂θ∂θ`（`grad_cross_points` / `hess_cross_points`）で、組み込みのすべての葉と、その Sum / Product の木が持つ。そのため `Constant × RBF` の信号分散を、Exact と同じく `Sgpr` と `Svgp` で学習できる。`Custom` の葉は `KernelTerm::grad_cross` / `hess_cross` が要る（上記）。`FreeInducing` は同時最適化で次元一括で座標 API を呼ぶ。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。
 
 **既定は呼び出し側が Z を渡し、最適化対象はカーネルハイパラとノイズのみとする。** 自由 Z は `FixedInducing` / `FreeInducing` で切り替え、カーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。区間は訓練 `X` の箱を少し開いて広げた生座標。L-BFGS 履歴の長さは `p = p_θ + m×d` で、増分は `history_size × m × d` 個の `f64`（`m` が小さいので VFE の `O(nm²)` に対して小さい）。交互は載らない。
 
