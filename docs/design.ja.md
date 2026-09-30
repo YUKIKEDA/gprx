@@ -812,14 +812,16 @@ GPRはn増加に伴いO(n³)でコストが増大するため、データの逐�
 
 バッチfitとオンラインは性質が異なる(n固定 vs n増減)。容量拡張時は **LD・`y`・`α`・`v_buf` を同じ手順で**再確保・コピーする。delete の faer スクラッチも同じ容量に伸ばす。予測・NLML・insert は Gram `K` と距離キャッシュを読まないので、`LdltStore` には置かない。
 
+因子は転置して、列優先の `n_capacity × n_capacity` 行列に `Lᵀ` として持つ。`L` の各行が連続するので、追加は連続した 1 列を書き、その前進代入 `L w = k` は各行を連続に読む（8 行ずつのパネルで、パネルの行と解き終えた `w` の頭の内積を 1 回の走査で取り、8×8 の三角を解く。faer の再帰の solve と違い、平らなループ 1 本）。solve と persist は下三角のビュー `ld()`（`Lᵀ` の行優先ビュー）を読み、保存する詰めた LDLT は変わらない。`f32` の格納では LDLT の solve を `f64` で積算して最後に 1 回だけ丸める。そのビューに対する `f32` の solve は行の順に丸まり、`k*ᵀ α` で打ち消しが悪くなるため。
+
 crate-private。`from_active(n)` で `n_active = n_capacity = n`。訓練 `X` は `OnlineGpr` が持ち、この struct には置かない。末尾 insert の前に `OnlineGpr` が `ensure_capacity` する。倍率フィールドは置かない。
 
 ```rust
 struct LdltStore<T: KernelScalar = f64> { // T is the precision's Storage
-    ld_factor: Mat<T>,         // LDLT factor (diagonal = D, strict lower triangle = L)
+    lt: Mat<T>,                // Lᵀ with D on the diagonal: row i of L is the head of column i
     y: Col<T>,
     alpha: Col<T>,
-    v_buf: Col<T>,             // forward-substitution scratch for predictive variance (O(n²) per test point)
+    v_buf: Vec<T>,             // k of an appended point, then its forward solve
     delete_scratch: MemBuffer, // faer delete_rows_and_cols. Grown with capacity
     n_active: usize,
     n_capacity: usize,
@@ -830,7 +832,7 @@ struct LdltStore<T: KernelScalar = f64> { // T is the precision's Storage
 **容量拡張** (`ensure_capacity(needed)`。`n_capacity < needed` のとき):
 
 1. `new_cap = max(needed, max(n_capacity, 1) * 2)`
-2. `ld_factor`, `alpha`, `y`, `v_buf`を`new_cap`で再確保。delete スクラッチも `new_cap` 用に伸ばす
+2. `lt`, `alpha`, `y`, `v_buf`を`new_cap`で再確保。delete スクラッチも `new_cap` 用に伸ばす
 3. 既存の`n_active × n_active`下三角と長さ`n_active`のベクトルをコピー
 4. `PointRegistry`のインデックスは`n_active`未満のままなので付け替え不要
 5. 拡張後にinsertを実行する。更新アルゴリズムの最中には再確保しない
