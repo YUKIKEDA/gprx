@@ -51,3 +51,24 @@ Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench
 ## Sparse online (P4-14)
 
 `just perf-sparse-online` times `OnlineSgpr` `insert` / `delete` / `insert_inducing` / `delete_inducing` against self `Sgpr<Fixed>::factor` and GPyTorch Titsias assemble (no query). Same Forrester / sphere `n` as P2B-16, `m_max = 16` (k-means seed `0` at generation time), prefix `start_n = 32/128/512` and `start_m = 8`, raw `y`, CPU, no `fit`. The harness draws 32 ops (`ops_seed = 0`, RBF probe PD filter) and does not read P4-13 goldens. Prefix is untimed. Clock is one 32-op wall (discard 1 + median; reps follow P2B-16). Gate: incremental median smaller than self full and GPyTorch full (5% inconclusive). RSS is recorded only. Results: `compare/perf/out/sparse_online_results.json`. Pass / fail is recorded in `.dev/bench-log.md` (local, not committed). `just perf` / `just perf-online` / `just perf-sparse` stay Exact / online / batch Sparse. `cargo test` must not run this.
+
+## Real datasets (B1-1)
+
+`just perf-real` fits every library on the benchmark data of Gaussian-process papers, scores it (RMSE, NLPD, 95% coverage in the original units of `y`), and reports fit time, joint evaluation counts and peak RSS. `just perf-real-report` turns the raw output into `docs/bench/summary.json`, the SVG figures and the README tables. Manual. Not a CI gate. `just test` must not run this and needs no network.
+
+```text
+just perf-real-data                       # fetch every dataset once, pin the SHA-256 in real/checksums.json
+just perf-real-check                      # fixed-θ agreement of all libraries (NLML, RMSE, NLPD to 1e-6)
+just perf-real --datasets yacht,energy --splits 2 --protocol native --timeline
+just perf-real --datasets kin40k --model sgpr --m 512 --protocol matched
+just perf-real-report
+```
+
+- Data: `yaringal/DropoutUncertaintyExps` (T1 and Protein, the Hernández-Lobato & Adams splits), `treforevans/uci_datasets` (Kin40k and T3, 10 splits of 90 / 10), the NOAA Mauna Loa monthly means through `datasets/co2-ppm`, and Snelson's archive (`SNELSON_ZIP` may point at a local copy when the author's page is not reachable). Files land in `out/real/data/`; a checksum mismatch stops the run.
+- Cases: one JSON per (dataset, split, protocol, model) in `out/real/cases/`. `x`, `y` are standardized with the training statistics; metrics are converted back. One cell is one process: one split, one library.
+- Protocols: `native` (each library's own optimizer), `matched` (scipy L-BFGS-B, 100 iterations, gradient tolerance √ε, history 10), `fixed` (no optimizer, for `perf-real-check`). `real/optimizers.py` records every optimizer with the source it was read from; `out/real/meta.json` records the machine and library versions.
+- Sparse models: `--model sgpr` (fixed inducing points, k-means with a fixed seed on at most 100 000 training rows) or `--model svgp` (Adam, one shared setting). gprx's `Sgpr` / `Svgp` have no coordinate derivative for a `Constant × RBF` product, so the sparse cells leave the signal variance at 1 in every library.
+- Timing: one timed fit per cell after an untimed warm-up fit when n ≤ 5000 (`PERF_WARMUP` overrides); the split-to-split spread is the standard error. Joint evaluations are counted through `gprx::internals` (feature `bench-internals`, off by default) for gprx and through wrappers for the Python libraries; libgp's RProp counts its 100 iterations. A time difference between cells with different counts is not a speed difference.
+- `--timeline`: the RSS of the whole process tree every 10 ms, with the start of load / warm-up / fit / predict marked (`out/real/timeline/`).
+- Do not run two cells at once: they share the CPU and the timings mix.
+- friedrich has no ARD kernel, so its cells are N/A. libgp's fit is Rprop only, so its `matched` cells are N/A.

@@ -86,3 +86,6 @@ target_link_libraries(libgp-fit PRIVATE gp nlohmann_json::nlohmann_json)
 if(WIN32)
     target_link_libraries(libgp-fit PRIVATE psapi)
 endif()
+
+add_executable(libgp-snippet ../real/snippets/libgp_ard.cpp)
+target_link_libraries(libgp-snippet PRIVATE gp)

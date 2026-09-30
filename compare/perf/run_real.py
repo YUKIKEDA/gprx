@@ -84,6 +84,16 @@ def print_tables(rows: list[dict]) -> None:
         )
 
 
+def merge_rows(path, fresh: list[dict]) -> list[dict]:
+    """Earlier results, with the cells this run measured replaced."""
+    def key(row: dict) -> tuple:
+        return (row.get("model", "exact"), row["protocol"], row["name"], row["lib"])
+
+    kept = {key(row): row for row in (read_rows(path) if path.is_file() else [])}
+    kept.update({key(row): row for row in fresh})
+    return list(kept.values())
+
+
 def print_optimizers() -> None:
     print_table(
         "optimizers",
@@ -135,7 +145,7 @@ def main(argv: list[str]) -> int:
                     + (f" [{row.get('note')}]" if row.get("status") != "ok" else ""),
                     flush=True,
                 )
-    write_json(RESULTS, rows)
+    write_json(RESULTS, merge_rows(RESULTS, rows))
     write_json(OUT / "meta.json", meta())
     print_tables(rows)
     print_optimizers()

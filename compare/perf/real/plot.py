@@ -82,11 +82,13 @@ def _mean_se(values: list[float]) -> tuple[float, float]:
     return mean, statistics.stdev(values) / math.sqrt(len(values))
 
 
-def _table(rows: list[dict], protocol: str) -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
+def _table(rows: list[dict], protocol: str, model: str = "exact") -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
     """dataset -> lib -> metric -> (mean, se) over the ok splits."""
     cells: dict[str, dict[str, list[dict]]] = {}
     for row in rows:
         if row.get("status") != "ok" or row["protocol"] != protocol:
+            continue
+        if row.get("model", "exact") != model:
             continue
         dataset = row["name"].rsplit("_s", 1)[0]
         cells.setdefault(dataset, {}).setdefault(row["lib"], []).append(row)
