@@ -9,14 +9,16 @@ use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{
     cholesky_lower_with_retries, llt_scratch, promote_mat, solve_llt, solve_lower,
 };
+use crate::policy::JitterPolicy;
 use crate::precision::ModelPrecision;
-use crate::sparse::{KernelScratch, k_mm_jitter_policy};
+use crate::sparse::KernelScratch;
 use crate::{PredictOptions, Prediction, VarianceKind};
 use faer::{Mat, MatRef};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vfe_predict<M: crate::math::KernelMath, P>(
     kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
     z_obs: &[f64],
     k_mm_l: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
@@ -55,13 +57,14 @@ where
         cholesky_lower_with_retries(
             &mut k64,
             &mut chol_scratch,
-            k_mm_jitter_policy().retry_jitters(),
+            k_mm_jitter.retry_jitters(),
             CholeskyStage::Predict,
         )?;
         let b64 = promote_mat(b_l);
         let w64: Vec<f64> = predict_w.iter().map(|value| value.to_f64()).collect();
         let pred = vfe_predict::<M, crate::precision::DoublePrecision>(
             kernel,
+            k_mm_jitter,
             z_obs,
             k64.as_ref(),
             b64.as_ref(),

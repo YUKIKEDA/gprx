@@ -12,8 +12,8 @@ use crate::kernel::KernelSpec;
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
-use crate::policy::JitterPolicy;
 use crate::policy::KernelExp;
+use crate::policy::{AdaptiveJitter, JitterPolicy};
 use crate::precision::ModelPrecision;
 use crate::prediction::Prediction;
 use crate::transform::{
@@ -26,6 +26,8 @@ pub(crate) struct SparseSpec {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) math: KernelExp,
+    /// Retries for factoring `K_mm`.
+    pub(crate) jitter: JitterPolicy,
     pub(crate) x_transform: Box<dyn UnfittedTransform>,
     pub(crate) y_transform: Box<dyn UnfittedTarget>,
 }
@@ -36,6 +38,7 @@ impl Clone for SparseSpec {
             kernel: self.kernel.clone(),
             likelihood: self.likelihood,
             math: self.math,
+            jitter: self.jitter,
             x_transform: self.x_transform.clone_box(),
             y_transform: self.y_transform.clone_box(),
         }
@@ -48,6 +51,7 @@ impl fmt::Debug for SparseSpec {
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
             .field("math", &self.math)
+            .field("jitter", &self.jitter)
             .finish_non_exhaustive()
     }
 }
@@ -58,6 +62,7 @@ impl SparseSpec {
             kernel,
             likelihood,
             math: KernelExp::default(),
+            jitter: default_k_mm_jitter(),
             x_transform: Box::new(IdentityInput),
             y_transform: Box::new(IdentityTarget),
         }
@@ -91,6 +96,8 @@ pub(crate) struct SparseCore {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) math: KernelExp,
+    /// Retries for factoring `K_mm`.
+    pub(crate) jitter: JitterPolicy,
     pub(crate) x_unfitted: Box<dyn UnfittedTransform>,
     pub(crate) y_unfitted: Box<dyn UnfittedTarget>,
     pub(crate) x_transform: Box<dyn Transform>,
@@ -112,6 +119,7 @@ impl Clone for SparseCore {
             kernel: self.kernel.clone(),
             likelihood: self.likelihood,
             math: self.math,
+            jitter: self.jitter,
             x_unfitted: self.x_unfitted.clone_box(),
             y_unfitted: self.y_unfitted.clone_box(),
             x_transform: self.x_transform.clone_box(),
@@ -135,6 +143,7 @@ impl fmt::Debug for SparseCore {
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
             .field("math", &self.math)
+            .field("jitter", &self.jitter)
             .field("n", &self.n)
             .field("m", &self.m)
             .field("d", &self.d)
@@ -176,6 +185,7 @@ impl SparseCore {
             kernel: spec.kernel.clone(),
             likelihood: spec.likelihood,
             math: spec.math,
+            jitter: spec.jitter,
             x_unfitted: spec.x_transform.clone_box(),
             y_unfitted: spec.y_transform.clone_box(),
             x_transform,
@@ -284,6 +294,7 @@ impl SparseCore {
             kernel: self.kernel.clone(),
             likelihood: self.likelihood,
             math: self.math,
+            jitter: self.jitter,
             x_transform: self.x_unfitted.clone_box(),
             y_transform: self.y_unfitted.clone_box(),
         }
@@ -339,6 +350,11 @@ macro_rules! sparse_core_accessors {
             &self.core.likelihood
         }
 
+        /// Returns the jitter retries used when `K_mm` fails to factor.
+        pub fn jitter_policy(&self) -> $crate::JitterPolicy {
+            self.core.jitter
+        }
+
         /// Returns the kernel `exp` mode the trainer set with `with_math`.
         pub fn math(&self) -> $crate::KernelExp {
             self.core.math
@@ -364,10 +380,12 @@ macro_rules! sparse_core_accessors {
 
 pub(crate) use sparse_core_accessors;
 
-/// Jitter retries for factoring `K_mm = k(Z, Z)`. Observation noise is not
-/// on `K_mm`, so close inducing points need a small diagonal offset.
-pub(crate) fn k_mm_jitter_policy() -> JitterPolicy {
-    JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
+/// Default retries for factoring `K_mm = k(Z, Z)`:
+/// `adaptive(1e-8, 10, 5, 1e-3)`. Observation noise is not on `K_mm`
+/// (design §4.0), so close inducing points need a small diagonal offset;
+/// the Exact default (no retry) would fail there.
+pub(crate) fn default_k_mm_jitter() -> JitterPolicy {
+    JitterPolicy::Adaptive(AdaptiveJitter::K_MM_DEFAULT)
 }
 
 /// Kernel-evaluation buffers of one sparse operation: the output-shaped

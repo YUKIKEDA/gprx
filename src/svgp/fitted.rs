@@ -119,6 +119,7 @@ where
         let q = unpack_q(&params[n_theta..], self.core.m)?;
         let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage>(
             &kernel,
+            self.core.jitter,
             &self.core.x_train,
             self.core.n,
             self.core.d,
@@ -314,6 +315,7 @@ where
         let xs = self.core.map_query(xs, n_rows, n_cols)?;
         let prediction = with_kernel_exp!(self.core.math, M => svgp_predict::<M, P>(
             &self.core.kernel,
+            self.core.jitter,
             &self.core.z_train,
             self.k_mm_l.as_ref(),
             &self.q_mean,

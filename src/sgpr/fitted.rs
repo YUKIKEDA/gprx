@@ -148,6 +148,7 @@ where
         };
         let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _>(
             &kernel,
+            self.core.jitter,
             likelihood,
             &self.core.x_train,
             self.core.n,
@@ -364,6 +365,7 @@ where
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
             &self.core.kernel,
+            self.core.jitter,
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
@@ -572,6 +574,7 @@ where
         let xs = self.core.map_query(xs, n_rows, n_cols)?;
         let prediction = with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
             &self.core.kernel,
+            self.core.jitter,
             &self.core.z_train,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),

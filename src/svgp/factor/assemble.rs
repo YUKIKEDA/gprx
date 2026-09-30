@@ -5,9 +5,10 @@ use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower, symmetrize_lower};
+use crate::policy::JitterPolicy;
 use crate::precision::ModelPrecision;
 use crate::sparse::SparseCore;
-use crate::sparse::{KernelScratch, SparseScratch, k_mm_jitter_policy};
+use crate::sparse::{KernelScratch, SparseScratch};
 use crate::svgp::FittedSvgp;
 use faer::{Mat, MatRef};
 
@@ -30,6 +31,7 @@ where
     let mut scratch = SparseScratch::<P::Storage>::default();
     let state = assemble_svgp::<M, P::Storage>(
         &core.kernel,
+        core.jitter,
         &core.x_train,
         core.n,
         core.d,
@@ -53,6 +55,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
     kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
     x: &[f64],
     n_rows: usize,
     n_cols: usize,
@@ -85,7 +88,7 @@ where
     cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
-        k_mm_jitter_policy().retry_jitters(),
+        k_mm_jitter.retry_jitters(),
         CholeskyStage::Fit,
     )?;
     // Same packed `X` and `Z` share a training White diagonal. Rectangular
