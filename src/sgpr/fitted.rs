@@ -19,7 +19,7 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{
     VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
-    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights,
+    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, vfe_loo,
     vfe_neg_log_marginal_likelihood,
 };
 use super::model::Sgpr;
@@ -705,6 +705,65 @@ where
     ) -> Result<Vec<P::Refine>, GprError> {
         self.predict_covariance_with(xs, n_rows, n_cols, options)?
             .draw(n_draws, seed, self.core.jitter)
+    }
+
+    /// Returns the leave-one-out mean and observation variance at every
+    /// training point.
+    ///
+    /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
+    /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
+    /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
+    /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
+    /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
+    /// inverse-transformed like [`Self::predict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a downdated `B` is
+    /// not positive definite, or [`GprError::CholeskyFailed`] if an `f32` storage cannot factor `K_mm` again in `f64`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// let loo = fitted.loo_predict()?;
+    /// assert_eq!(loo.mean.len(), fitted.n());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
+        self.loo_predict_with(PredictOptions::default())
+    }
+
+    /// Returns leave-one-out mean and variance with an explicit variance kind.
+    ///
+    /// Latent variance is the VFE variance of `f(x_i)` without point `i`;
+    /// observation variance adds `σn²`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::loo_predict`].
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        vfe_loo::<P>(
+            &self.core,
+            self.a.as_ref(),
+            self.b_l.as_ref(),
+            &self.w,
+            options,
+        )
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
