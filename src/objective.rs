@@ -1,6 +1,6 @@
 //! Negative log marginal likelihood as an optimizer objective.
 //!
-//! [`GprObjective`] borrows [`FittedGpr`] during `fit` / `refit` and forwards
+//! The GPR fit objective borrows [`FittedGpr`] during `fit` / `refit` and forwards
 //! concatenated kernel-then-likelihood `θ` to the model, which owns the
 //! source of truth. [`SgprObjective`] does the same for
 //! [`crate::FittedSgpr`] and the VFE evidence lower bound. Capability
@@ -50,7 +50,7 @@ pub trait Objective {
 
 /// First-order objective. Supertrait of [`Objective`].
 ///
-/// [`GprObjective`] overrides [`Self::value_and_gradient_into`] so one
+/// The GPR fit objective overrides [`Self::value_and_gradient_into`] so one
 /// Cholesky produces `L`, `α`, and `W`.
 pub trait Differentiable: Objective {
     /// Writes `∂L/∂θ` into `out`.
@@ -80,7 +80,7 @@ pub trait Differentiable: Objective {
 
 /// Second-order objective. Supertrait of [`Differentiable`].
 ///
-/// [`GprObjective`] implements this by forwarding to
+/// The GPR fit objective implements this by forwarding to
 /// [`crate::FittedGpr::hessian_into`]. There is no runtime `NotImplemented`.
 pub trait TwiceDifferentiable: Differentiable {
     /// Writes the Hessian (row-major `n×n`) into `out`.
@@ -97,7 +97,7 @@ pub trait TwiceDifferentiable: Differentiable {
 /// `indices` is the list of flat `θ` positions that changed. Empty, duplicate,
 /// or out-of-range indices are a [`GprError`] at this boundary. Full rebuilds
 /// use [`Objective::value`]. [`crate::FullRecompute`] does not implement this
-/// trait. [`GprObjective`]`<`[`crate::IncrementalRecompute`]`>` does.
+/// trait. The GPR fit objective with [`crate::IncrementalRecompute`] does.
 pub trait IncrementalObjective: Objective {
     /// Returns the objective after rebuilding only the leaves that `indices`
     /// touch.
@@ -119,7 +119,7 @@ pub(crate) trait HasBounds {
 ///
 /// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
 /// kernel and likelihood match `params`.
-pub(crate) struct GprObjective<
+pub struct GprObjective<
     'a,
     O,
     S,
@@ -325,25 +325,20 @@ where
 /// Does not own hyperparameters. After a successful evaluation,
 /// [`FittedSgpr`]'s kernel and likelihood match `params`. [`FreeInducing`]
 /// also treats column-major `Z` as parameters.
-#[allow(private_bounds)]
-pub(crate) struct SgprObjective<
+pub struct SgprObjective<
     'a,
     O,
     I = crate::FixedInducing,
     M = crate::math::Accurate,
-    P: crate::precision::GpScalar + crate::sgpr::factor::MeanDot + crate::sgpr::factor::PublishSgprWeights = crate::precision::DoublePrecision,
->
-where
-{
+    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+> {
     model: &'a mut FittedSgpr<O, I, M, P>,
 }
 
 impl<'a, O, I, M, P> SgprObjective<'a, O, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar
-        + crate::sgpr::factor::MeanDot
-        + crate::sgpr::factor::PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     pub(crate) fn new(model: &'a mut FittedSgpr<O, I, M, P>) -> Self {
         Self { model }
@@ -353,9 +348,7 @@ where
 impl<O, I: InducingLayout, M, P> Objective for SgprObjective<'_, O, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar
-        + crate::sgpr::factor::MeanDot
-        + crate::sgpr::factor::PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
@@ -373,9 +366,7 @@ where
 impl<O, I: InducingLayout, M, P> Differentiable for SgprObjective<'_, O, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar
-        + crate::sgpr::factor::MeanDot
-        + crate::sgpr::factor::PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.value_and_gradient_into(params, out).map(|_| ())
@@ -393,9 +384,7 @@ where
 impl<O, I: InducingLayout, M, P> TwiceDifferentiable for SgprObjective<'_, O, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar
-        + crate::sgpr::factor::MeanDot
-        + crate::sgpr::factor::PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into(params, out)
@@ -405,9 +394,7 @@ where
 impl<O, I: InducingLayout, M, P> HasBounds for SgprObjective<'_, O, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar
-        + crate::sgpr::factor::MeanDot
-        + crate::sgpr::factor::PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)

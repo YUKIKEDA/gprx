@@ -333,7 +333,7 @@ impl MaternKernel {
     /// # Errors
     ///
     /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is not `3/2`,
-    /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`].
+    /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,
@@ -540,7 +540,7 @@ fn matern_fast_coord_hess<T: KernelScalar>(
     same: bool,
     from_x1: bool,
 ) -> T {
-    let jet0 = <crate::math::FastApprox as crate::math::KernelMath>::jet(T::from_f64(0.0));
+    let jet0 = <crate::math::FastApprox as crate::math::MathOps>::jet(T::from_f64(0.0));
     let dpsi0 = T::from_f64(2.0) * jet0.d1 - jet0.d2;
     if r == T::from_f64(0.0) {
         return if same {
@@ -555,7 +555,7 @@ fn matern_fast_coord_hess<T: KernelScalar>(
         };
     }
     let rho = scale * r;
-    let jet = <crate::math::FastApprox as crate::math::KernelMath>::jet(-rho);
+    let jet = <crate::math::FastApprox as crate::math::MathOps>::jet(-rho);
     let psi = (T::from_f64(1.0) + rho) * jet.d1 - jet.v;
     let dpsi = T::from_f64(2.0) * jet.d1 - (T::from_f64(1.0) + rho) * jet.d2;
     let sign = if from_x1 {

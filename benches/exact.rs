@@ -13,10 +13,10 @@ use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::{Mat, MatMut, Par};
-use gprx::kernel::{
-    KernelSpec, RbfArdKernel, RbfKernel, Triangle, fill_ard_squared_diff,
-    fill_pairwise_sq_euclidean,
+use gprx::internals::{
+    apply_from_ard_cache, fill_ard_squared_diff, fill_pairwise_sq_euclidean, grad_from_ard_cache,
 };
+use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
 use gprx::transform::StandardizeTarget;
 use gprx::{
     CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood, Gpr,
@@ -195,52 +195,52 @@ fn kernel_exp_ard(c: &mut Criterion) {
     let mut group = c.benchmark_group("kernel_exp_ard");
     group.bench_function("accurate", |b| {
         b.iter(|| {
-            compiled
-                .apply_from_ard_cache::<gprx::Accurate>(
-                    std::hint::black_box(cache.as_ref()),
+            apply_from_ard_cache::<gprx::Accurate>(
+                &compiled,
+                std::hint::black_box(cache.as_ref()),
+                x_mat.as_ref(),
+                k.as_mut(),
+                Triangle::Lower,
+                scratch.as_mut(),
+            )
+            .expect("apply");
+            for idx in 0..n_theta {
+                grad_from_ard_cache::<gprx::Accurate>(
+                    &compiled,
+                    cache.as_ref(),
                     x_mat.as_ref(),
-                    k.as_mut(),
+                    dk.as_mut(),
+                    idx,
                     Triangle::Lower,
                     scratch.as_mut(),
                 )
-                .expect("apply");
-            for idx in 0..n_theta {
-                compiled
-                    .grad_from_ard_cache::<gprx::Accurate>(
-                        cache.as_ref(),
-                        x_mat.as_ref(),
-                        dk.as_mut(),
-                        idx,
-                        Triangle::Lower,
-                        scratch.as_mut(),
-                    )
-                    .expect("grad");
+                .expect("grad");
             }
             std::hint::black_box(k[(0, 0)] + dk[(1, 0)])
         });
     });
     group.bench_function("fast_approx", |b| {
         b.iter(|| {
-            compiled
-                .apply_from_ard_cache::<gprx::FastApprox>(
-                    std::hint::black_box(cache.as_ref()),
+            apply_from_ard_cache::<gprx::FastApprox>(
+                &compiled,
+                std::hint::black_box(cache.as_ref()),
+                x_mat.as_ref(),
+                k.as_mut(),
+                Triangle::Lower,
+                scratch.as_mut(),
+            )
+            .expect("apply");
+            for idx in 0..n_theta {
+                grad_from_ard_cache::<gprx::FastApprox>(
+                    &compiled,
+                    cache.as_ref(),
                     x_mat.as_ref(),
-                    k.as_mut(),
+                    dk.as_mut(),
+                    idx,
                     Triangle::Lower,
                     scratch.as_mut(),
                 )
-                .expect("apply");
-            for idx in 0..n_theta {
-                compiled
-                    .grad_from_ard_cache::<gprx::FastApprox>(
-                        cache.as_ref(),
-                        x_mat.as_ref(),
-                        dk.as_mut(),
-                        idx,
-                        Triangle::Lower,
-                        scratch.as_mut(),
-                    )
-                    .expect("grad");
+                .expect("grad");
             }
             std::hint::black_box(k[(0, 0)] + dk[(1, 0)])
         });

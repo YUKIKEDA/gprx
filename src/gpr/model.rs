@@ -127,9 +127,9 @@ impl<O: Clone, S, C: Copy, B, M, P> Clone for Gpr<O, S, C, B, M, P> {
 /// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
 /// a diagonal variance; [`Self::predict_into`] writes into a reused
-/// [`Prediction`] and crate-private query buffers (not the fit workspace).
+/// [`Prediction`](crate::Prediction) and crate-private query buffers (not the fit workspace).
 /// [`Self::predict_covariance`] returns the query–query matrix as
-/// [`PredictiveCovariance`]. [`Self::sample`] draws from that posterior.
+/// [`PredictiveCovariance`](crate::PredictiveCovariance). [`Self::sample`] draws from that posterior.
 /// [`Self::loo_predict`] is the GPML leave-one-out at every
 /// training point, from `L` and `α`. [`Self::refit`] re-runs the trainer's
 /// optimizer (`Gpr<O>`) or re-factors (`Gpr<Fixed>`) on the same training
@@ -156,7 +156,6 @@ impl<O: Clone, S, C: Copy, B, M, P> Clone for Gpr<O, S, C, B, M, P> {
 /// # Ok(())
 /// # }
 /// ```
-#[allow(private_bounds)] // `AllocWorkspace` is crate-private; the public slot is `CholeskyBuffer`.
 pub struct FittedGpr<
     O = Lbfgs,
     S = FullRecompute,
@@ -343,7 +342,6 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    #[allow(private_bounds)]
     pub fn with_precision<P2>(self) -> Gpr<O, S, C, B, M, P2>
     where
         P2: GpScalar,
@@ -386,7 +384,6 @@ impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P> {
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(private_bounds)]
     pub fn with_math<M2>(self) -> Gpr<O, S, C, B, M2, P>
     where
         M2: crate::math::KernelMath,
@@ -725,7 +722,6 @@ impl<O, S, B, M, P> Gpr<O, S, NoDistanceCache, B, M, P> {
     }
 }
 
-#[allow(private_bounds)] // `GprObjective` is crate-private; `fit` still needs `O: Optimizer` for it.
 impl<O, S, C, B, M, P> Gpr<O, S, C, B, M, P>
 where
     S: AcceptsRecompute<O>,
@@ -796,7 +792,6 @@ where
     }
 }
 
-#[allow(private_bounds)] // `DistanceCacheSlot` is crate-private; `factor` still needs it.
 impl<C, B, M, P> Gpr<Fixed, FullRecompute, C, B, M, P>
 where
     C: DistanceCacheSlot,

@@ -370,7 +370,7 @@ fn run_online_delete(case: &Case) -> Result<ResultRow, String> {
 fn take_insert_stages_or_zero() -> (f64, f64, f64) {
     #[cfg(feature = "insert-stages")]
     {
-        gprx::take_insert_stages()
+        gprx::internals::take_insert_stages()
     }
     #[cfg(not(feature = "insert-stages"))]
     {

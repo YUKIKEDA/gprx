@@ -18,8 +18,8 @@ use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::{PredictOptions, Prediction};
 
 use super::factor::{
-    MeanDot, PublishSgprWeights, VfeState, analytic_gradient, analytic_hessian, assemble_vfe,
-    fill_z_intervals, publish_sgpr_weights, vfe_neg_log_marginal_likelihood, vfe_predict,
+    VfeState, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
+    publish_sgpr_weights, vfe_neg_log_marginal_likelihood, vfe_predict,
 };
 use super::model::Sgpr;
 use super::online::OnlineSgpr;
@@ -31,10 +31,9 @@ use super::{FixedInducing, InducingLayout};
 /// Stores the LLT of `K_mm = k(Z, Z)` and the VFE factors used by
 /// [`Self::predict`] and [`Self::neg_log_marginal_likelihood`]. Observation
 /// noise is not added to `K_mm`. Hyperparameters are kernel `θ` then
-/// likelihood `θ`. [`FreeInducing`] then appends column-major `Z`.
+/// likelihood `θ`. [`FreeInducing`](crate::FreeInducing) then appends column-major `Z`.
 /// [`Self::into_online`] yields [`OnlineSgpr`] for training-point and
 /// inducing-point updates.
-#[allow(private_bounds)]
 #[derive(Clone, Debug)]
 pub struct FittedSgpr<
     O = Lbfgs,
@@ -68,11 +67,10 @@ pub struct FittedSgpr<
     pub(crate) d: usize,
 }
 
-#[allow(private_bounds)]
 impl<O, I: InducingLayout, M, P> FittedSgpr<O, I, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar + MeanDot + PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     /// Returns the number of training points.
     pub fn n(&self) -> usize {
@@ -116,7 +114,7 @@ where
 
     /// Returns the concatenated parameter count.
     ///
-    /// Kernel `θ` then likelihood `θ`. [`FreeInducing`] also counts
+    /// Kernel `θ` then likelihood `θ`. [`FreeInducing`](crate::FreeInducing) also counts
     /// column-major `Z` (`m × d`).
     pub fn num_params(&self) -> usize {
         self.kernel.num_params() + self.likelihood.num_params() + I::z_params(self.m, self.d)
@@ -146,7 +144,7 @@ where
 
     /// Sets kernel then likelihood `θ` and rebuilds the VFE factors.
     ///
-    /// `params` matches [`Self::get_params`]. [`FreeInducing`] also writes
+    /// `params` matches [`Self::get_params`]. [`FreeInducing`](crate::FreeInducing) also writes
     /// column-major `Z` from the tail of the slice. Training `X` / `y` are
     /// not changed. Values are committed together only after the VFE system
     /// factors.
@@ -347,7 +345,7 @@ where
     /// Converts this model into an online sparse GPR.
     ///
     /// [`OnlineSgpr`] can append or drop training points and inducing
-    /// points. [`FixedInducing`] and [`FreeInducing`] both produce
+    /// points. [`FixedInducing`] and [`FreeInducing`](crate::FreeInducing) both produce
     /// [`OnlineSgpr<O>`] whose parameters are kernel then likelihood
     /// `θ`. The stored VFE factors are reused.
     ///

@@ -27,7 +27,7 @@ gen-sparse-online-goldens:
     $env:PYTHONUTF8 = "1"; uv run --directory compare python generate_sparse_online_gpytorch.py
 
 bench:
-    cargo bench --bench exact
+    cargo bench --features bench-internals --bench exact
 
 # Manual P2B-16 harness. cargo test must not run this.
 perf:

@@ -8,7 +8,7 @@
 use super::dist::{col_chunk, worker_count};
 use super::{Triangle, finite_dist, require_same_shape, require_square_pair};
 use crate::error::GprError;
-use crate::math::{FastApprox, KernelMath, f64x4_all_finite};
+use crate::math::{FastApprox, KernelMath, MathOps, f64x4_all_finite};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 use rayon::prelude::*;
@@ -1051,7 +1051,7 @@ pub(crate) fn try_grad_rbf_ard_points<M: KernelMath>(
 mod tests {
     use super::{add_squared_diff, add_squared_diff_scaled, rbf_exp_slice, rbf_grad_slice};
     use crate::error::GprError;
-    use crate::math::{Accurate, FastApprox, KernelMath};
+    use crate::math::{Accurate, FastApprox, MathOps};
 
     const TOL: f64 = 1e-12;
 

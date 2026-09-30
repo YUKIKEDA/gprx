@@ -3,7 +3,7 @@
 use super::*;
 
 fn fast_exp(x: f64) -> f64 {
-    <crate::math::FastApprox as crate::math::KernelMath>::exp(x)
+    <crate::math::FastApprox as crate::math::MathOps>::exp(x)
 }
 
 fn apply_fast(spec: &KernelSpec, x: MatRef<'_, f64>, out: &mut Mat<f64>) {

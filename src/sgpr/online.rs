@@ -20,9 +20,9 @@ use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
 use super::factor::{
-    PublishSgprWeights, VfeState, append_column, append_point, assemble_vfe, inducing_delete,
-    inducing_insert, kernel_column, kernel_diag_at, point_at, publish_sgpr_weights, refresh_w,
-    remove_column, remove_point, solve_lmm, vfe_neg_log_marginal_likelihood, vfe_predict,
+    VfeState, append_column, append_point, assemble_vfe, inducing_delete, inducing_insert,
+    kernel_column, kernel_diag_at, point_at, publish_sgpr_weights, refresh_w, remove_column,
+    remove_point, solve_lmm, vfe_neg_log_marginal_likelihood, vfe_predict,
 };
 use super::fitted::FittedSgpr;
 
@@ -161,7 +161,6 @@ impl InducingRegistry {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-#[allow(private_bounds)]
 pub struct OnlineSgpr<O = Lbfgs, M = crate::math::Accurate, P: ModelPrecision = DoublePrecision> {
     kernel: KernelSpec,
     likelihood: GaussianLikelihood,
@@ -184,11 +183,10 @@ pub struct OnlineSgpr<O = Lbfgs, M = crate::math::Accurate, P: ModelPrecision = 
     _math: PhantomData<M>,
 }
 
-#[allow(private_bounds)]
 impl<O, M, P> OnlineSgpr<O, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
+    P: crate::precision::GpScalar,
 {
     pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, M, P>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
@@ -859,11 +857,10 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<O, M, P> OnlineSgpr<O, M, P>
 where
     M: crate::math::KernelMath,
-    P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
+    P: crate::precision::GpScalar,
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
@@ -873,7 +870,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Sgpr<O, FixedInducing>::fit`].
+    /// Same as [`Sgpr::fit`](crate::Sgpr::fit).
     ///
     /// # Examples
     ///

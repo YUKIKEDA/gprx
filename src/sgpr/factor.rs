@@ -30,7 +30,7 @@ fn lit<T: KernelScalar>(value: f64) -> T {
 }
 
 /// Predictive mean from one storage kernel column and the predict weights.
-pub(crate) trait MeanDot: ModelPrecision {
+pub trait MeanDot: ModelPrecision {
     fn mean_dot(column: &[Self::Storage], weights: &[Self::Refine]) -> Self::Refine;
 }
 
@@ -83,7 +83,7 @@ use super::fitted::FittedSgpr;
 
 // `K_mm` only. Public default stays Fixed(0). Forrester m=16 / ℓ=1 is not PD in f64.
 /// Predict weights after a factor or an online update.
-pub(crate) trait PublishSgprWeights: ModelPrecision {
+pub trait PublishSgprWeights: ModelPrecision {
     /// Copies storage `w`, or refines the mixed-precision solve `B w = A y`.
     ///
     /// # Errors
