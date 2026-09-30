@@ -26,14 +26,13 @@ from .timing import warmup_fits
 def build(case: dict, x, y, z):
     kernel = GPy.kern.RBF(
         input_dim=x.shape[1],
-        variance=1.0,
+        variance=case["signal_variance_init"],
         lengthscale=[case["lengthscale_init"]] * x.shape[1],
         ARD=True,
     )
     model = GPy.models.SparseGPRegression(x, y, kernel=kernel, Z=z.copy())
     model.Gaussian_noise.variance = case["noise_variance_init"]
     model.inducing_inputs.fix(warning=False)
-    kernel.variance.fix(warning=False)  # gprx's sparse models have no signal variance
     return model
 
 

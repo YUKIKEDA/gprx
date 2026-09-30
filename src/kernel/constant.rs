@@ -226,6 +226,42 @@ impl ConstantKernel {
         self.write_square(d_k, uplo)
     }
 
+    /// Writes the rectangular `∂K(x, xs)/∂θ` (`∂k/∂θ = c`) for train × test
+    /// coordinates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or the
+    /// same shape errors as [`Self::apply_cross_points`].
+    pub(crate) fn grad_cross_points<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        require_param_idx(param_idx)?;
+        self.apply_cross_points(x, xs, d_k)
+    }
+
+    /// Writes the rectangular `∂²K(x, xs)/∂θ²` (`∂²k/∂θ² = c`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or the
+    /// same shape errors as [`Self::apply_cross_points`].
+    pub(crate) fn hess_cross_points<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_hess_idx(i, j)?;
+        self.apply_cross_points(x, xs, d2_k)
+    }
+
     /// Writes `∂²K/∂θ²` for `θ = log(c)` into `d2_k` (`∂²k/∂θ² = c`).
     ///
     /// # Errors

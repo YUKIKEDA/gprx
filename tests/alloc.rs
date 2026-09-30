@@ -499,8 +499,7 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
 }
 
 /// One call on each sparse path after a warmup call. The nested kernel (a
-/// product of sums) covers the nested scratch levels on the insert path;
-/// the sparse gradients do not support products.
+/// product of sums) covers the nested scratch levels on the insert path.
 #[test]
 fn sparse_allocs_after_warmup() {
     let _guard = alloc_lock();

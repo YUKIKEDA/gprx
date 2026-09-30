@@ -1,10 +1,10 @@
 use super::{
-    CompiledKernel, MixedKernelViews, Nested, add_triangle, ard_needs_coords, iso_needs_dist,
-    mul_triangle, require_scratch_shape, split_terms, term_scratch,
+    CompiledKernel, MixedKernelViews, Nested, add_triangle, ard_needs_coords, mul_triangle,
+    require_scratch_shape, split_terms, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
-use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
+use crate::kernel::{CustomKernel, Triangle, write_rect_from_coords, write_square_from_coords};
 use faer::{MatMut, MatRef};
 
 impl<T: KernelScalar> CompiledKernel<T> {
@@ -340,11 +340,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self {
-            Self::Rbf(_)
-            | Self::Matern(_)
-            | Self::Periodic(_)
-            | Self::RationalQuadratic(_)
-            | Self::Custom(_) => Err(iso_needs_dist()),
+            Self::Rbf(leaf) => leaf.apply_cross_from_coords::<M, _>(x, xs, out),
+            Self::Matern(leaf) => leaf.apply_cross_from_coords::<M, _>(x, xs, out),
+            Self::Periodic(leaf) => leaf.apply_cross_from_coords::<M, _>(x, xs, out),
+            Self::RationalQuadratic(leaf) => leaf.apply_cross_from_coords(x, xs, out),
+            Self::Custom(leaf) => {
+                write_rect_from_coords(x, xs, scratch.as_mut(), Ok)?;
+                leaf.apply_cross(scratch.as_ref(), out)
+            }
             Self::RbfArd(leaf) => leaf.apply_cross_math::<M, _>(x, xs, out),
             Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
             Self::MaternArd(leaf) => leaf.apply_cross_math::<M, _>(x, xs, out),
@@ -663,7 +666,7 @@ pub(super) fn add_rect<T: KernelScalar>(mut acc: MatMut<'_, T>, src: MatRef<'_, 
     }
 }
 
-fn mul_rect<T: KernelScalar>(mut acc: MatMut<'_, T>, src: MatRef<'_, T>) {
+pub(super) fn mul_rect<T: KernelScalar>(mut acc: MatMut<'_, T>, src: MatRef<'_, T>) {
     for col in 0..acc.ncols() {
         for row in 0..acc.nrows() {
             acc[(row, col)] *= src[(row, col)];

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import gpytorch
+import linear_operator
 import numpy as np
 import torch
 from gpytorch.constraints import GreaterThan
@@ -102,7 +103,11 @@ def optimize_lbfgsb_or_adam(case: dict, model, likelihood, x, y) -> dict:
         try:
             loss = -mll(model(x), y) * n
             loss.backward()
-        except (gpytorch.utils.errors.NotPSDError, torch.linalg.LinAlgError):
+        except (
+            gpytorch.utils.errors.NotPSDError,
+            linear_operator.utils.errors.NanError,
+            torch.linalg.LinAlgError,
+        ):
             # a trial θ whose K is not positive definite: a huge value and no
             # slope, as gprx does (SgprObjective returns 1e300)
             return 1.0e300, np.zeros_like(flat)

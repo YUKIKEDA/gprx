@@ -5,6 +5,7 @@ use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::{
     ArdLengthscales, KernelScalar, Triangle, validate_log_positive, validate_positive_finite,
+    write_rect,
 };
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
@@ -330,6 +331,45 @@ impl RationalQuadraticArdKernel {
         let alpha = T::from_f64(self.alpha());
         ard::write_from_cache(cache, d2_k, d, uplo, |n, row, col| {
             let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+            rq_hess(t, alpha, (i, j), d)
+        })
+    }
+
+    /// `∂K(x1, x2)/∂θ` of a rectangular block, from coordinates.
+    pub(crate) fn grad_cross_from_coords<T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        ard::require_param(NAME, param_idx, d + 1)?;
+        ard::require_cross(x1, x2, d_k.as_ref(), d)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        write_rect(d_k, |row, col| {
+            let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::one(param_idx))?;
+            rq_grad(t, alpha, param_idx == d)
+        })
+    }
+
+    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block, from coordinates.
+    pub(crate) fn hess_cross_from_coords<T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        ard::require_param_pair(NAME, i, j, d + 1)?;
+        ard::require_cross(x1, x2, d2_k.as_ref(), d)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        write_rect(d2_k, |row, col| {
+            let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::pair(i, j))?;
             rq_hess(t, alpha, (i, j), d)
         })
     }

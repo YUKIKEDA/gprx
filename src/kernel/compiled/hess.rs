@@ -1,11 +1,10 @@
 use super::apply::{combine_diag, mul_assign};
 use super::grad::{
-    ProductBuffers, broadcast_self_diag, eval_cell, product_with_owner, require_diag_len,
+    ProductBuffers, broadcast_self_diag, eval_cell, mul_fold, product_with_owner, require_diag_len,
     scale_by_other_diags, term_index_for_param,
 };
 use super::{
-    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
-    require_scratch_shape, term_scratch,
+    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
@@ -337,6 +336,98 @@ impl<T: KernelScalar> CompiledKernel<T> {
             }
         }
     }
+
+    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block
+    /// (`x1.nrows() × x2.nrows()`) from coordinates: every built-in leaf, and
+    /// Sum / Product trees of them. A `Custom` leaf has no rectangular
+    /// derivative and returns [`GprError::CoordGradientUnsupported`].
+    ///
+    /// Product trees need `scratch` the same shape as `d2_k` and distinct
+    /// from it; leaves ignore it.
+    pub(crate) fn hess_cross_points<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d2_k.nrows(), d2_k.ncols());
+        self.hess_cross_points_with::<M>(x1, x2, d2_k, (i, j), scratch, &mut nested)
+    }
+
+    /// [`Self::hess_cross_points`] with caller-owned [`Nested`] levels.
+    pub(crate) fn hess_cross_points_with<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        mut d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        let (i, j) = pair;
+        match self {
+            Self::Rbf(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
+            Self::Matern(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
+            Self::RbfArd(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
+            Self::MaternArd(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
+            Self::Periodic(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
+            Self::RationalQuadratic(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
+            Self::RationalQuadraticArd(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
+            Self::Linear(leaf) => leaf.hess_cross(x1, x2, d2_k, i, j),
+            Self::Constant(leaf) => leaf.hess_cross_points(x1, x2, d2_k, i, j),
+            Self::White(leaf) => {
+                let _ = (i, j);
+                if x1.ncols() == 0 {
+                    return Err(GprError::EmptyInput);
+                }
+                leaf.grad_wrt_coord_dim(x1, x2, d2_k, 0)
+            }
+            Self::Custom(_) => Err(GprError::CoordGradientUnsupported),
+            Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
+                PairOwners::Same {
+                    term,
+                    local_i,
+                    local_j,
+                } => term.hess_cross_points_with::<M>(
+                    x1,
+                    x2,
+                    d2_k,
+                    (local_i, local_j),
+                    scratch,
+                    nested,
+                ),
+                PairOwners::Distinct { .. } => {
+                    for col in 0..d2_k.ncols() {
+                        for row in 0..d2_k.nrows() {
+                            d2_k[(row, col)] = T::from_f64(0.0);
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            Self::Product(terms) => {
+                require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
+                let buffers = ProductBuffers::rect(d2_k, scratch, nested);
+                product_hess(
+                    terms,
+                    (i, j),
+                    buffers,
+                    |term, out, scratch, nested| {
+                        term.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
+                    },
+                    |term, out, pair, scratch, nested| {
+                        term.hess_cross_points_with::<M>(x1, x2, out, pair, scratch, nested)
+                    },
+                    |term, out, param, scratch, nested| {
+                        term.grad_cross_points_with::<M>(x1, x2, out, param, scratch, nested)
+                    },
+                )
+            }
+        }
+    }
 }
 
 enum PairOwners<'a, T: KernelScalar> {
@@ -510,7 +601,7 @@ fn product_cross_leaf<T: KernelScalar>(
         mut out,
         mut scratch,
         nested,
-        uplo,
+        fold,
     } = buffers;
     let (rows, cols) = (out.nrows(), out.ncols());
     let mut started = false;
@@ -521,7 +612,7 @@ fn product_cross_leaf<T: KernelScalar>(
         if started {
             let (own, deeper) = term_scratch(term, rows, cols, out.as_mut(), &mut *nested)?;
             apply(term, scratch.as_mut(), own, deeper)?;
-            mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
+            mul_fold(out.as_mut(), scratch.as_ref(), fold);
         } else {
             apply(term, out.as_mut(), scratch.as_mut(), &mut *nested)?;
             started = true;
@@ -531,7 +622,7 @@ fn product_cross_leaf<T: KernelScalar>(
     if started {
         let (own, deeper) = term_scratch(term_i, rows, cols, out.as_mut(), &mut *nested)?;
         grad(term_i, scratch.as_mut(), local_i, own, deeper)?;
-        mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
+        mul_fold(out.as_mut(), scratch.as_ref(), fold);
     } else {
         grad(
             term_i,
@@ -544,6 +635,6 @@ fn product_cross_leaf<T: KernelScalar>(
     let term_j = &terms[owner_j];
     let (own, deeper) = term_scratch(term_j, rows, cols, out.as_mut(), nested)?;
     grad(term_j, scratch.as_mut(), local_j, own, deeper)?;
-    mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
+    mul_fold(out.as_mut(), scratch.as_ref(), fold);
     Ok(())
 }

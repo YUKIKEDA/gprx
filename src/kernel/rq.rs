@@ -3,7 +3,7 @@
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{
     Triangle, finite_dist, finite_kernel, validate_log_positive, validate_positive_finite,
-    write_dense, write_square_from_coords, write_triangle,
+    write_dense, write_rect_from_coords, write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
@@ -290,6 +290,61 @@ impl RationalQuadraticKernel {
         let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
         let alpha = T::from_f64(self.alpha());
         write_square_from_coords(x, d2_k, uplo, |d| {
+            let r2 = scaled_r2(d, ell_sq)?;
+            finite_kernel(rq_d2k(r2, alpha, i, j))
+        })
+    }
+
+    /// Rectangular `K(x1, x2)` from coordinates.
+    pub(crate) fn apply_cross_from_coords<T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
+        write_rect_from_coords(x1, x2, out, |d| rq_from_sq_dist(d, ell_sq, alpha))
+    }
+
+    /// `∂K(x1, x2)/∂θ` of a rectangular block, from coordinates.
+    pub(crate) fn grad_cross_from_coords<T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx > 1 {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("rational quadratic parameter index {param_idx} is out of range"),
+            });
+        }
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
+        write_rect_from_coords(x1, x2, d_k, |d| {
+            let r2 = scaled_r2(d, ell_sq)?;
+            finite_kernel(if param_idx == 0 {
+                rq_dk_dtheta_lengthscale(r2, alpha)
+            } else {
+                rq_dk_dtheta_alpha(r2, alpha)
+            })
+        })
+    }
+
+    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block, from coordinates.
+    pub(crate) fn hess_cross_from_coords<T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_rq_hess_idx(i, j)?;
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
+        write_rect_from_coords(x1, x2, d2_k, |d| {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(rq_d2k(r2, alpha, i, j))
         })

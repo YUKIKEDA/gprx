@@ -67,7 +67,7 @@ just perf-real-report
 - Data: `yaringal/DropoutUncertaintyExps` (T1 and Protein, the Hernández-Lobato & Adams splits), `treforevans/uci_datasets` (Kin40k and T3, 10 splits of 90 / 10), the NOAA Mauna Loa monthly means through `datasets/co2-ppm`, and Snelson's archive (`SNELSON_ZIP` may point at a local copy when the author's page is not reachable). Files land in `out/real/data/`; a checksum mismatch stops the run.
 - Cases: one JSON per (dataset, split, protocol, model) in `out/real/cases/`. `x`, `y` are standardized with the training statistics; metrics are converted back. One cell is one process: one split, one library.
 - Protocols: `native` (each library's own optimizer), `matched` (scipy L-BFGS-B, 100 iterations, gradient tolerance √ε, history 10), `fixed` (no optimizer, for `perf-real-check`). `real/optimizers.py` records every optimizer with the source it was read from; `out/real/meta.json` records the machine and library versions.
-- Sparse models: `--model sgpr` (fixed inducing points, k-means with a fixed seed on at most 100 000 training rows) or `--model svgp` (Adam, one shared setting). gprx's `Sgpr` / `Svgp` have no coordinate derivative for a `Constant × RBF` product, so the sparse cells leave the signal variance at 1 in every library.
+- Sparse models: `--model sgpr` (fixed inducing points, k-means with a fixed seed on at most 100 000 training rows) or `--model svgp` (Adam, one shared setting).
 - Timing: one timed fit per cell after an untimed warm-up fit when n ≤ 5000 (`PERF_WARMUP` overrides); the split-to-split spread is the standard error. Joint evaluations are counted through `gprx::internals` (feature `bench-internals`, off by default) for gprx and through wrappers for the Python libraries; libgp's RProp counts its 100 iterations. A time difference between cells with different counts is not a speed difference.
 - `--timeline`: the RSS of the whole process tree every 10 ms, with the start of load / warm-up / fit / predict marked (`out/real/timeline/`).
 - Do not run two cells at once: they share the CPU and the timings mix.
@@ -81,7 +81,6 @@ N/A on purpose: friedrich (no ARD kernel, no sparse model), libgp (Rprop only, s
 
 Known limits of what is measured:
 
-- gprx's `Sgpr` / `Svgp` cannot fit a signal variance (no coordinate derivative for a `Constant × RBF` product), so the sparse cells fix it at 1 in every library.
 - gprx's argmin L-BFGS uses several function evaluations per iteration (Sgpr, n = 1000, m = 128, d = 8: about 720 for 100 iterations); scipy's L-BFGS-B uses about one. Compare times only with the evaluation counts beside them.
 - At the same θ and Z, GPyTorch's sparse model has the same marginal likelihood as gprx and GPy but predicts with its own low-rank test covariance (RMSE / NLPD differ by a fraction of a percent).
 - The case of a large dataset is one JSON file (HouseElectric: 600 MB) that each runner parses whole: allow a few GiB of memory and a minute of start-up per cell.

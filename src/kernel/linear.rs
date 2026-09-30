@@ -211,6 +211,49 @@ impl LinearKernel {
         self.apply(x, d_k, uplo)
     }
 
+    /// Writes the rectangular `∂K(x, xs)/∂θ` (`∂k/∂θ = k`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or the
+    /// same shape / non-finite errors as [`Self::apply_cross`].
+    pub(crate) fn grad_cross<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::IndexOutOfRange {
+                reason: "linear kernel has a single parameter at index 0".to_owned(),
+            });
+        }
+        self.apply_cross(x, xs, d_k)
+    }
+
+    /// Writes the rectangular `∂²K(x, xs)/∂θ²` (`∂²k/∂θ² = k`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or the
+    /// same shape / non-finite errors as [`Self::apply_cross`].
+    pub(crate) fn hess_cross<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        if i != 0 || j != 0 {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("linear kernel has a single parameter; got pair ({i}, {j})"),
+            });
+        }
+        self.apply_cross(x, xs, d2_k)
+    }
+
     /// Writes `∂²K/∂θ²` for `θ = log(σ²)` (`∂²k/∂θ² = k`).
     ///
     /// # Errors
