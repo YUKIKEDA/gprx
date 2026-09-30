@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R6-2 ([#249](https://github.com/YUKIKEDA/gprx/issues/249), align `design.md` pseudo-code with the implementation). Acceptance is on #249. R6-1 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+The R rows are done (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)). P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
 
 ## Dependencies
 
@@ -179,7 +179,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R5-1 | Task | Put `Sgpr` / `Svgp` on the shared core, linalg, and precision; fix module dependencies | [#246](https://github.com/YUKIKEDA/gprx/issues/246) | done |
 | R5-2 | Spike | Decide which Exact features `Sgpr` / `Svgp` should match | [#247](https://github.com/YUKIKEDA/gprx/issues/247) | done |
 | R6-1 | Task | Deduplicate the `compare/` Python harness and problem definitions | [#248](https://github.com/YUKIKEDA/gprx/issues/248) | done |
-| R6-2 | Task | Align `design.md` pseudo-code with the implementation | [#249](https://github.com/YUKIKEDA/gprx/issues/249) | in progress |
+| R6-2 | Task | Align `design.md` pseudo-code with the implementation | [#249](https://github.com/YUKIKEDA/gprx/issues/249) | done |
 
 ## Intentionally out of scope
 
