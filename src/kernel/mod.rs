@@ -390,13 +390,3 @@ fn validate_log_positive(theta: f64, what: &str) -> Result<f64, GprError> {
     }
     Ok(theta)
 }
-
-fn expect_one_param(len: usize, what: &str) -> Result<(), GprError> {
-    if len == 1 {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected 1 {what} parameter, got {len}"),
-        })
-    }
-}

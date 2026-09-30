@@ -153,7 +153,7 @@ impl ArdLengthscales {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        require_param_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "ARD lengthscale parameters")?;
         out.copy_from_slice(&self.log_lengthscales);
         Ok(())
     }
@@ -165,7 +165,11 @@ impl ArdLengthscales {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
     /// length or a `θ_d` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        require_param_len(params.len(), self.num_params())?;
+        crate::data::require_count(
+            params.len(),
+            self.num_params(),
+            "ARD lengthscale parameters",
+        )?;
         let mut next = Vec::with_capacity(self.params.len());
         for (i, param) in self.params.iter().enumerate() {
             let log = validate_log_lengthscale(params[i])?;
@@ -228,16 +232,6 @@ fn require_non_empty(len: usize) -> Result<(), GprError> {
         Err(invalid_length("ARD lengthscales must be non-empty"))
     } else {
         Ok(())
-    }
-}
-
-fn require_param_len(actual: usize, expected: usize) -> Result<(), GprError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {expected} ARD lengthscale parameters, got {actual}"),
-        })
     }
 }
 

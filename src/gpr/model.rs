@@ -10,6 +10,7 @@ use crate::kernel::{CompiledKernel, GramKernel, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::optimizer::{AcceptsRecompute, Fixed, FullRecompute, Lbfgs, Optimizer, PoleRecompute};
+use crate::param::write_params;
 use crate::persist::MappedTensors;
 use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{
@@ -17,7 +18,6 @@ use crate::transform::{
 };
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 
-use super::factor::write_params;
 use super::{
     AllocWorkspace, CachedDistances, DistanceCachePolicy, DistanceCacheSlot, FitBuffers,
     JitterPolicy, NoDistanceCache, RetainCholesky, ReuseCholesky, UncachedDistances,

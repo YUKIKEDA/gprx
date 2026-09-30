@@ -196,7 +196,7 @@ impl KernelSpec {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        require_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "kernel parameters")?;
         let mut offset = 0;
         self.write_params(out, &mut offset)
     }
@@ -208,7 +208,7 @@ impl KernelSpec {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
     /// length or a leaf rejects its slice.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        require_len(params.len(), self.num_params())?;
+        crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;
         let mut next = self.clone();
         let mut offset = 0;
         next.apply_params(params, &mut offset)?;
@@ -523,16 +523,6 @@ fn push_leaf_bindings(
             local_index,
         });
         *index += 1;
-    }
-}
-
-fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {expected} kernel parameters, got {actual}"),
-        })
     }
 }
 

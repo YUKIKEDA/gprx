@@ -1,7 +1,7 @@
 use super::factor::*;
 use super::*;
+use crate::data::pack_points;
 use crate::error::GprError;
-use crate::gpr::factor::pack_points;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, frobenius2, solve_llt};

@@ -1,8 +1,6 @@
 //! Linear kernel `k(x, x') = σ² xᵀ x'`.
 
-use super::{
-    Triangle, expect_one_param, validate_log_positive, validate_positive_finite, write_square,
-};
+use super::{Triangle, validate_log_positive, validate_positive_finite, write_square};
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
@@ -94,7 +92,7 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        expect_one_param(out.len(), "linear")?;
+        crate::data::require_count(out.len(), 1, "linear parameter")?;
         out[0] = self.variance.ln();
         Ok(())
     }
@@ -106,7 +104,7 @@ impl LinearKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        expect_one_param(params.len(), "linear")?;
+        crate::data::require_count(params.len(), 1, "linear parameter")?;
         let log_variance = validate_log_positive(params[0], "linear variance")?;
         self.variance = BoundedParam::new(log_variance.exp(), self.variance.interval())?;
         Ok(())
@@ -125,7 +123,7 @@ impl LinearKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_square_points(x, out.as_ref())?;
-        require_finite_points(x)?;
+        crate::data::require_finite_points(x)?;
         let var = self.variance();
         let d = x.ncols();
         write_square(out, uplo, |row, col| Ok(var * dot_at(x, row, x, col, d)?))
@@ -155,8 +153,8 @@ impl LinearKernel {
                 ),
             });
         }
-        require_finite_points(x)?;
-        require_finite_points(xs)?;
+        crate::data::require_finite_points(x)?;
+        crate::data::require_finite_points(xs)?;
         let var = self.variance();
         let d = x.ncols();
         for col in 0..xs.nrows() {
@@ -183,7 +181,7 @@ impl LinearKernel {
                 reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
             });
         }
-        require_finite_points(x)?;
+        crate::data::require_finite_points(x)?;
         let var = self.variance();
         let d = x.ncols();
         for (i, slot) in out.iter_mut().enumerate() {
@@ -283,17 +281,6 @@ fn require_square_points(x: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usi
         });
     }
     Ok(x.nrows())
-}
-
-fn require_finite_points(x: MatRef<'_, f64>) -> Result<(), GprError> {
-    for col in 0..x.ncols() {
-        for row in 0..x.nrows() {
-            if !x[(row, col)].is_finite() {
-                return Err(GprError::NonFiniteInput);
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
