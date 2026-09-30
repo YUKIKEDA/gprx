@@ -26,7 +26,7 @@ input X, y
   → persist: one directory (`config.json` + `model.safetensors`) per model (§6.3, §11)
 ```
 
-Persist writes one directory. `format_version` is 1. Exact models require `factor_kind` (`llt` loads as `FittedGpr`, `ldlt` as `OnlineGpr`), and a stored factor is memory-mapped. Sparse models add a `model` key (`sgpr` / `online_sgpr` / `svgp`; an Exact file has none) and load through `LoadedSgpr` / `LoadedSvgp`. Their tensors are the original `X` / `y` / `Z`, the transformed `Z`, and SVGP's `q(u)`; the factors are rebuilt, so a loaded model predicts the same values to the bit. `config.json` floats round-trip exactly (serde_json `float_roundtrip`). Retraining a loaded model is `with_optimizer` → `refit`.
+Persist writes one directory. `format_version` is 1. Exact models require `factor_kind` (`llt` loads as `FittedGpr`, `ldlt` as `OnlineGpr`), and a stored factor is memory-mapped. Sparse models add a `model` key (`sgpr` / `online_sgpr` / `svgp`; an Exact file has none) and load through `LoadedSgpr` / `LoadedSvgp`. Their tensors are the original `X` / `y` / `Z`, the transformed `Z`, and SVGP's `q(u)`; the factors are rebuilt, so a loaded model predicts the same values to the bit. `config.json` floats round-trip exactly (serde_json `float_roundtrip`). Retraining a loaded model is `with_optimizer` → `refit`. Every key and tensor: [persist-format.md](persist-format.md). Modules and how they depend on each other: [architecture.md](architecture.md).
 
 Principles:
 

@@ -24,7 +24,7 @@
   → persist: モデルごとに 1 ディレクトリ（`config.json` + `model.safetensors`）（§6.3、§11）
 ```
 
-persist は 1 ディレクトリに書く。`format_version` は 1。Exact のモデルは `factor_kind` が必須で（`llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む）、保存した因子は mmap する。Sparse のモデルは `model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を足し、`LoadedSgpr` / `LoadedSvgp` で読む。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、読み込んだモデルは同じ値をビットで予測する。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）。読み込んだモデルの再学習は `with_optimizer` → `refit`。
+persist は 1 ディレクトリに書く。`format_version` は 1。Exact のモデルは `factor_kind` が必須で（`llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む）、保存した因子は mmap する。Sparse のモデルは `model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を足し、`LoadedSgpr` / `LoadedSvgp` で読む。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、読み込んだモデルは同じ値をビットで予測する。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）。読み込んだモデルの再学習は `with_optimizer` → `refit`。すべてのキーとテンソルは [persist-format.ja.md](persist-format.ja.md)。モジュールと依存の向きは [architecture.ja.md](architecture.ja.md)。
 
 主要な設計原則:
 - **識別子は gprx / GPR の概念を名付ける**（カーネル、尤度、θ、分解、正パラメータの区間、…）。他製品・テストハーネス・無関係なドメインの名前は置かない

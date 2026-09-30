@@ -8,7 +8,7 @@ Rust の Exact ガウス過程回帰。`Gpr` は未学習のトレーナー。`G
 
 手元の **0.1.0** 品質: `Gpr` / `FittedGpr`、カーネル、`fit` / `predict` / `predict_into` / leave-one-out、英語の rustdoc、`examples/`。依存は git か path。crates.io ではない。
 
-設計: [`docs/design.ja.md`](docs/design.ja.md)。タスク: [`docs/roadmap.md`](docs/roadmap.md)。エージェント向け: [`AGENTS.md`](AGENTS.md)。他ライブラリとの壁時計とピーク RSS: [`compare/perf/`](compare/perf/)（P2B-16 Exact は `just perf`。P4-12 Sparse は `just perf-sparse`。P4-14 Sparse オンラインは `just perf-sparse-online`。criterion ではない）。
+設計: [`docs/design.ja.md`](docs/design.ja.md)。アーキテクチャ: [`docs/architecture.ja.md`](docs/architecture.ja.md)。保存フォーマット: [`docs/persist-format.ja.md`](docs/persist-format.ja.md)。タスク: [`docs/roadmap.md`](docs/roadmap.md)。エージェント向け: [`AGENTS.md`](AGENTS.md)。他ライブラリとの壁時計とピーク RSS: [`compare/perf/`](compare/perf/)（P2B-16 Exact は `just perf`。P4-12 Sparse は `just perf-sparse`。P4-14 Sparse オンラインは `just perf-sparse-online`。criterion ではない）。
 
 ## 例
 
@@ -36,6 +36,47 @@ fn main() -> Result<(), gprx::GprError> {
 変換の既定は恒等。平均関数が零のときは `fit` の前に `with_target_transform(StandardizeTarget::new())`。特徴は `MinMaxInput`（既定 `[0, 1]`）。観測ノイズは `GaussianLikelihood`。`WhiteKernel` はオプトインの合成。両方を大きい値で足すとノイズを二重に数える。
 
 `Gpr<Fixed>::factor`（`with_optimizer(Fixed)` のあと）は、トレーナーに既にあるカーネルと尤度の `θ` で因子を作る。L-BFGS のノブは `Lbfgs`（`with_max_iterations`、`with_tolerance`、`with_history_size`、`with_restarts`）。Nelder–Mead は `with_max_iterations`、`with_tolerance`、`with_restarts` を持つ（`NelderMead`）。Hessian を使うソルバは `TrustRegion`（`with_max_iterations`、`with_tolerance`、`with_restarts`、`with_radii`）。自作の Fast Simulated Annealing は `FastSimulatedAnnealing`（`with_max_iterations`、`with_restarts`、`with_initial_temperature`、`with_cooling_rate`、`with_seed`、`with_boundary`）。
+
+## アーキテクチャと保存フォーマット
+
+3 つのモデル族（`Gpr`、`Sgpr`、`Svgp`）は、同じ部品から作られ、互いを import しない。下の図がクレート全体の地図で、各箱は `src/` のモジュール。
+
+```mermaid
+flowchart TB
+    api["<b>公開 API</b><br/>lib.rs の再エクスポート。pub mod は kernel, transform, persist"]
+    subgraph models["モデル — 族ごとに 1 ディレクトリ"]
+        direction LR
+        gpr["<b>gpr</b><br/>Exact GPR"]
+        sgpr["<b>sgpr</b><br/>Sparse GPR (VFE)"]
+        svgp["<b>svgp</b><br/>SVGP (ミニバッチ)"]
+    end
+    sparse["<b>sparse</b><br/>sgpr と svgp が共有する crate 内の核"]
+    persist["<b>persist</b><br/>ディレクトリへの保存と読み込み"]
+    subgraph services["モデルが組み合わせる部品"]
+        direction LR
+        kernel["<b>kernel</b><br/>spec, compiled, 葉"]
+        likelihood["<b>likelihood</b>"]
+        transform["<b>transform</b><br/>入力 / 目的変数の変換"]
+        precision["<b>precision</b><br/>f32 / f64 / 混合"]
+        optimizer["<b>optimizer</b><br/>+ objective の trait"]
+        workspace["<b>workspace</b><br/>+ prediction"]
+    end
+    subgraph foundation["基盤 — スカラー、数値計算、検査"]
+        direction LR
+        f1["linalg · math · policy"]
+        f2["param · data · error · rng · points"]
+    end
+    api --> models
+    gpr --> services
+    sgpr --> sparse --> services
+    svgp --> sparse
+    services --> foundation
+    persist -.->|"読んで組み直す"| models
+    models -.->|"save, persist_err"| persist
+```
+
+- [`docs/architecture.ja.md`](docs/architecture.ja.md): 全モジュールの責務、import の向き、族ごとの公開型、何を変えるときどこを見るか。
+- [`docs/persist-format.ja.md`](docs/persist-format.ja.md): `save` が書くもの。`config.json` のキー、`model.safetensors` のテンソル（名前、形、dtype、列優先の並び）、カーネルと変換の JSON の形、`Custom` の復元、版、エラー。
 
 ## 他ライブラリとの比較
 

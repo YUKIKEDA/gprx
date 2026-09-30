@@ -6,6 +6,8 @@ Where things live, for humans. Procedure: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Single crate `gprx`. Not a Cargo workspace. Do not create an empty file before the Issue that needs it.
 
+Which module owns what, and which way imports point: [architecture.md](architecture.md). The saved directory: [persist-format.md](persist-format.md).
+
 Do not copy the public surface here or into `.cursor/rules/`. The current specification is [design.md](design.md).
 
 ```text
@@ -55,7 +57,7 @@ compare/                   one Python environment (pyproject.toml, uv.lock; grou
   perf/                    manual wall time and RSS: run*.py (python -m perf.run*), runners.py, the Python runners
   perf/gprx/               one runner binary gprx-perf (exact / online / sparse / sparse-online)
 examples/fit_predict.rs
-docs/                      design, roadmap, this file, adr/
+docs/                      design, architecture, persist-format (each with a .ja.md), roadmap, this file, adr/
 ```
 
 `.dev/` is local scratch (measurement logs, reviews, drafts). It is not committed. Decisions do not stay there.
