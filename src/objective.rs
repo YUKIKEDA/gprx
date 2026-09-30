@@ -1,6 +1,6 @@
 //! Negative log marginal likelihood as an optimizer objective.
 //!
-//! The GPR fit objective borrows [`FittedGpr`] during `fit` / `refit` and forwards
+//! The GPR fit objective borrows [`crate::FittedGpr`] during `fit` / `refit` and forwards
 //! concatenated kernel-then-likelihood `θ` to the model, which owns the
 //! source of truth. [`SgprObjective`] does the same for
 //! [`crate::FittedSgpr`] and the VFE evidence lower bound. Capability
@@ -9,7 +9,7 @@
 //! [`TwiceDifferentiable`].
 
 use crate::error::GprError;
-use crate::gpr::FittedGpr;
+use crate::gpr::ExactFit;
 use crate::param::Interval;
 use crate::sgpr::{FittedSgpr, InducingLayout};
 use faer::Mat;
@@ -117,10 +117,10 @@ pub(crate) trait HasBounds {
 
 /// Exact GPR objective. Parameters are kernel `θ` followed by likelihood `θ`.
 ///
-/// Does not own hyperparameters. After a successful evaluation, [`FittedGpr`]'s
-/// kernel and likelihood match `params`.
-pub struct GprObjective<'a, O, P: crate::precision::GpScalar = crate::precision::DoublePrecision> {
-    model: &'a mut FittedGpr<O, P>,
+/// Does not own hyperparameters. After a successful evaluation, the fitted
+/// model's kernel and likelihood match `params`.
+pub struct GprObjective<'a, P: crate::precision::GpScalar = crate::precision::DoublePrecision> {
+    model: ExactFit<'a, P>,
     scratch: Vec<f64>,
     leaf_grams: Vec<Mat<P::Storage>>,
     leaves_primed: bool,
@@ -130,11 +130,11 @@ pub struct GprObjective<'a, O, P: crate::precision::GpScalar = crate::precision:
     incremental: bool,
 }
 
-impl<'a, O, P> GprObjective<'a, O, P>
+impl<'a, P> GprObjective<'a, P>
 where
     P: crate::precision::GpScalar,
 {
-    pub(crate) fn new(model: &'a mut FittedGpr<O, P>) -> Self {
+    pub(crate) fn new(model: ExactFit<'a, P>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self {
             model,
@@ -177,7 +177,7 @@ where
     }
 }
 
-impl<O, P> Objective for GprObjective<'_, O, P>
+impl<P> Objective for GprObjective<'_, P>
 where
     P: crate::precision::GpScalar,
 {
@@ -202,7 +202,7 @@ where
     }
 }
 
-impl<O, P> IncrementalObjective for GprObjective<'_, O, P>
+impl<P> IncrementalObjective for GprObjective<'_, P>
 where
     P: crate::precision::GpScalar,
 {
@@ -211,7 +211,7 @@ where
     }
 }
 
-impl<O, P> Differentiable for GprObjective<'_, O, P>
+impl<P> Differentiable for GprObjective<'_, P>
 where
     P: crate::precision::GpScalar,
 {
@@ -230,7 +230,7 @@ where
     }
 }
 
-impl<O, P> TwiceDifferentiable for GprObjective<'_, O, P>
+impl<P> TwiceDifferentiable for GprObjective<'_, P>
 where
     P: crate::precision::GpScalar,
 {
@@ -239,7 +239,7 @@ where
     }
 }
 
-impl<O, P> HasBounds for GprObjective<'_, O, P>
+impl<P> HasBounds for GprObjective<'_, P>
 where
     P: crate::precision::GpScalar,
 {

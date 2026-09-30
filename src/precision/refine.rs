@@ -98,7 +98,7 @@ pub enum StoredFactor<'a, T> {
 
 impl<T: KernelScalar> StoredFactor<'_, T> {
     /// Overwrites `rhs` with `(A + (σn² + j) I)⁻¹ rhs` through the stored factor.
-    fn solve_in_place(&self, rhs: MatMut<'_, T>) {
+    pub(crate) fn solve_in_place(&self, rhs: MatMut<'_, T>) {
         match *self {
             Self::Llt(l) => T::solve_llt_owned_scratch(l, rhs),
             Self::Ldlt(ld) => {
