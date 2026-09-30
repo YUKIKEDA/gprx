@@ -23,8 +23,9 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     pub(crate) k_matrix: Mat<P::Storage>,
     /// Kernel values and `∂K/∂θ` output. Reuse n-RHS solve also uses this.
     pub(crate) exp_buf: Mat<P::Storage>,
-    /// Distinct `n×n` scratch for product `∂K/∂θ`. Empty until a product tree
-    /// needs a gradient, so isotropic RBF does not carry an extra matrix.
+    /// Distinct `n×n` scratch for `∂K/∂θ` of a product or custom leaf. Empty
+    /// until such a tree needs a gradient, so isotropic RBF does not carry an
+    /// extra matrix.
     pub(crate) kernel_scratch: Mat<P::Storage>,
     /// One empty `0×0` matrix per Rayon worker. Detached with `mem::take`
     /// before a parallel kernel fill so closures never borrow `&mut Workspace`.
@@ -36,6 +37,11 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     /// `θ` before the current hyperparameter write, to write back when `A`
     /// does not factor. Scratch: meaningless between writes.
     pub(crate) theta: Vec<f64>,
+    /// Buffers for sum / product terms nested in another sum / product, one
+    /// per nesting level. Empty until such a tree is evaluated. Scratch.
+    pub(crate) nested: Vec<Mat<P::Storage>>,
+    /// Buffers of the exact Hessian. Empty until the first Hessian. Scratch.
+    pub(crate) hessian: HessianScratch<P::Storage>,
     /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
     /// (`0` without a retry). `k_matrix` then holds the factor of `A + (σn² + j) I`.
     pub(crate) factor_jitter: f64,
@@ -161,6 +167,8 @@ pub(crate) struct QueryWorkspace<P: PrecisionPolicy> {
     pub(crate) query_k_star: Mat<P::Storage>,
     /// Scratch for `apply_cross` (`n×m`).
     pub(crate) query_scratch: Mat<P::Storage>,
+    /// Nested sum / product buffers for the train–query block. Scratch.
+    pub(crate) query_nested: Vec<Mat<P::Storage>>,
     /// Train–test squared distances (`n×m`).
     pub(crate) query_dist: Mat<P::Storage>,
     /// `k(x*_j, x*_j)` for each query column.
@@ -196,6 +204,8 @@ where
             rhs: Mat::<P::Storage>::zeros(n, 1),
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(n)),
             theta: Vec::new(),
+            nested: Vec::new(),
+            hessian: HessianScratch::default(),
             factor_jitter: 0.0,
         })
     }
@@ -205,7 +215,7 @@ where
         self.k_matrix.nrows()
     }
 
-    /// Ensures product `∂K/∂θ` scratch is `n×n`. No-op when already sized.
+    /// Ensures the `∂K/∂θ` scratch is `n×n`. No-op when already sized.
     ///
     /// # Errors
     ///
@@ -222,6 +232,51 @@ where
     }
 }
 
+/// Buffers of the exact Hessian (`hessian_into`): `Q_j = K⁻¹ ∂K/∂θ_j` and
+/// the length-`n` vectors of one parameter pair. Scratch.
+pub(crate) struct HessianScratch<S> {
+    /// `Q_j` (`n×n`).
+    pub(crate) q: Mat<S>,
+    /// `σn² K⁻¹ α`.
+    pub(crate) w_noise: Vec<S>,
+    /// `∂K/∂θ_i α`.
+    pub(crate) u_i: Vec<S>,
+    /// `∂K/∂θ_j α`.
+    pub(crate) u_j: Vec<S>,
+    /// `Q_j α`.
+    pub(crate) w_j: Vec<S>,
+}
+
+impl<S> Default for HessianScratch<S> {
+    fn default() -> Self {
+        Self {
+            q: Mat::new(),
+            w_noise: Vec::new(),
+            u_i: Vec::new(),
+            u_j: Vec::new(),
+            w_j: Vec::new(),
+        }
+    }
+}
+
+impl<S: KernelScalar> HessianScratch<S> {
+    /// Sizes every buffer for `n` training points. No-op when already sized.
+    pub(crate) fn ensure(&mut self, n: usize) {
+        if self.q.nrows() != n || self.q.ncols() != n {
+            self.q = Mat::zeros(n, n);
+        }
+        let zero = S::from_f64(0.0);
+        for v in [
+            &mut self.w_noise,
+            &mut self.u_i,
+            &mut self.u_j,
+            &mut self.w_j,
+        ] {
+            v.resize(n, zero);
+        }
+    }
+}
+
 impl<P> Clone for WorkspaceCore<P>
 where
     P: PrecisionPolicy,
@@ -235,6 +290,8 @@ where
             rhs: self.rhs.clone(),
             faer_scratch: MemBuffer::new(faer_scratch_req::<P::Storage>(self.n())),
             theta: self.theta.clone(),
+            nested: Vec::new(),
+            hessian: HessianScratch::default(),
             factor_jitter: self.factor_jitter,
         }
     }
@@ -343,6 +400,7 @@ where
             query_x: Mat::<P::Storage>::zeros(0, 0),
             query_k_star: Mat::<P::Storage>::zeros(0, 0),
             query_scratch: Mat::<P::Storage>::zeros(0, 0),
+            query_nested: Vec::new(),
             query_dist: Mat::<P::Storage>::zeros(0, 0),
             query_kss: Vec::new(),
         }

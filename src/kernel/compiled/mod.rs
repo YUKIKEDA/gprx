@@ -242,7 +242,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn leaf_at(&self, leaf: usize) -> Result<&Self, GprError> {
         let mut remaining = leaf;
         self.find_leaf_at(&mut remaining)
-            .ok_or(GprError::IndexOutOfRange {
+            .ok_or_else(|| GprError::IndexOutOfRange {
                 reason: format!("leaf index {leaf} is out of range"),
             })
     }
@@ -268,23 +268,26 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
-    /// Combines cached leaf Grams into `out` (sum / product tree).
-    ///
-    /// `scratch` must match `out`. Nested products may allocate one extra
-    /// `n×n` buffer.
-    pub(crate) fn needs_product_grad_scratch(&self) -> bool {
+    /// Whether `∂K/∂θ` reads an output-shaped `scratch`: a product, or a
+    /// custom leaf that may hold its distances there.
+    pub(crate) fn needs_grad_scratch(&self) -> bool {
         match self {
-            Self::Product(_) => true,
-            Self::Sum(terms) => terms.iter().any(Self::needs_product_grad_scratch),
+            Self::Product(_) | Self::Custom(_) => true,
+            Self::Sum(terms) => terms.iter().any(Self::needs_grad_scratch),
             _ => false,
         }
     }
 
+    /// Combines cached leaf Grams into `out` (sum / product tree).
+    ///
+    /// `scratch` must match `out`. `nested` grows to the levels a nested
+    /// sum / product reads ([`Self::nested_depth`]).
     pub(crate) fn combine_from_leaf_grams(
         &self,
         grams: &[Mat<T>],
         mut out: MatMut<'_, T>,
         mut scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         if grams.len() != self.leaf_count() {
@@ -300,8 +303,16 @@ impl<T: KernelScalar> CompiledKernel<T> {
         visit_triangle(out.nrows(), uplo, |row, col| {
             out[(row, col)] = T::from_f64(0.0);
         });
+        ensure_nested(nested, self.nested_depth(), out.nrows(), out.ncols());
         let mut index = 0;
-        self.write_from_leaf_grams(grams, &mut index, out.as_mut(), scratch.as_mut(), uplo)?;
+        self.write_from_leaf_grams(
+            grams,
+            &mut index,
+            out.as_mut(),
+            scratch.as_mut(),
+            nested,
+            uplo,
+        )?;
         if index != grams.len() {
             return Err(GprError::LengthMismatch {
                 reason: "leaf Gram walk did not consume every leaf".to_owned(),
@@ -316,15 +327,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
         index: &mut usize,
         dest: MatMut<'_, T>,
         scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        let fold = CachedFold {
+            grams,
+            index,
+            nested,
+            uplo,
+        };
         match self {
-            Self::Sum(terms) => {
-                fold_cached_leaves(terms, grams, index, dest, scratch, uplo, add_triangle)
-            }
-            Self::Product(terms) => {
-                fold_cached_leaves(terms, grams, index, dest, scratch, uplo, mul_triangle)
-            }
+            Self::Sum(terms) => fold.run(terms, dest, scratch, add_triangle),
+            Self::Product(terms) => fold.run(terms, dest, scratch, mul_triangle),
             _ => {
                 if *index >= grams.len() {
                     return Err(GprError::LengthMismatch {
@@ -509,6 +523,26 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    /// Levels of [`Nested`] buffers this tree reads: one for each nesting
+    /// level whose sum / product term needs a buffer of its own.
+    pub(crate) fn nested_depth(&self) -> usize {
+        match self {
+            Self::Sum(terms) | Self::Product(terms) => {
+                let deepest = terms.iter().map(Self::nested_depth).max().unwrap_or(0);
+                deepest + usize::from(terms.iter().any(Self::needs_internal_scratch))
+            }
+            _ => 0,
+        }
+    }
+
+    /// Fresh [`Nested`] buffers for one `rows × cols` call. Empty (no
+    /// allocation) unless a sum / product nests another multi-term one.
+    pub(crate) fn nested_buffers(&self, rows: usize, cols: usize) -> Vec<Mat<T>> {
+        (0..self.nested_depth())
+            .map(|_| Mat::zeros(rows, cols))
+            .collect()
+    }
+
     fn needs_internal_scratch(&self) -> bool {
         match self {
             Self::Rbf(_)
@@ -549,6 +583,52 @@ fn flatten_product<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKer
     }
 }
 
+/// Buffers for sum / product terms nested inside another sum / product, one
+/// per level (see [`CompiledKernel::nested_depth`]), each at least the
+/// output's shape. Scratch: contents mean nothing between calls.
+pub(crate) type Nested<T> = [Mat<T>];
+
+/// Grows `levels` to `depth` buffers of at least `rows × cols`. Allocates
+/// only when a level is missing or too small.
+pub(crate) fn ensure_nested<T: KernelScalar>(
+    levels: &mut Vec<Mat<T>>,
+    depth: usize,
+    rows: usize,
+    cols: usize,
+) {
+    if levels.len() < depth {
+        levels.resize_with(depth, || Mat::zeros(0, 0));
+    }
+    for level in levels.iter_mut().take(depth) {
+        if level.nrows() < rows || level.ncols() < cols {
+            *level = Mat::zeros(rows.max(level.nrows()), cols.max(level.ncols()));
+        }
+    }
+}
+
+/// The scratch and deeper levels for `term` writing a `rows × cols` block.
+///
+/// A multi-term sum / product takes the first [`Nested`] level as its
+/// scratch; any other term reads `fallback` (distinct from its output).
+fn term_scratch<'a, T: KernelScalar>(
+    term: &CompiledKernel<T>,
+    rows: usize,
+    cols: usize,
+    fallback: MatMut<'a, T>,
+    nested: &'a mut Nested<T>,
+) -> Result<(MatMut<'a, T>, &'a mut Nested<T>), GprError> {
+    if !term.needs_internal_scratch() {
+        return Ok((fallback, nested));
+    }
+    let (level, deeper) = nested
+        .split_first_mut()
+        .ok_or(GprError::WorkspaceTooSmall)?;
+    if level.nrows() < rows || level.ncols() < cols {
+        return Err(GprError::WorkspaceTooSmall);
+    }
+    Ok((level.as_mut().submatrix_mut(0, 0, rows, cols), deeper))
+}
+
 fn require_scratch_shape<T>(out: MatRef<'_, T>, scratch: MatRef<'_, T>) -> Result<(), GprError> {
     if scratch.nrows() == out.nrows() && scratch.ncols() == out.ncols() {
         Ok(())
@@ -584,34 +664,43 @@ fn split_terms<T: KernelScalar>(
 ) -> Result<(&CompiledKernel<T>, &[CompiledKernel<T>]), GprError> {
     terms
         .split_first()
-        .ok_or(GprError::UnsupportedKernelOperation {
+        .ok_or_else(|| GprError::UnsupportedKernelOperation {
             reason: "sum/product has no terms".to_owned(),
         })
 }
 
-fn fold_cached_leaves<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    grams: &[Mat<T>],
-    index: &mut usize,
-    mut dest: MatMut<'_, T>,
-    mut scratch: MatMut<'_, T>,
+/// One fold over cached leaf Grams: the walk position and the nested levels.
+struct CachedFold<'g, 'n, T> {
+    grams: &'g [Mat<T>],
+    index: &'g mut usize,
+    nested: &'n mut Nested<T>,
     uplo: Triangle,
-    combine: fn(MatMut<'_, T>, MatRef<'_, T>, Triangle),
-) -> Result<(), GprError> {
-    let (first, rest) = split_terms(terms)?;
-    first.write_from_leaf_grams(grams, index, dest.as_mut(), scratch.as_mut(), uplo)?;
-    let n = dest.nrows();
-    let mut extra = None;
-    for term in rest {
-        if term.needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            term.write_from_leaf_grams(grams, index, scratch.as_mut(), buf.as_mut(), uplo)?;
-        } else {
-            term.write_from_leaf_grams(grams, index, scratch.as_mut(), dest.as_mut(), uplo)?;
+}
+
+impl<T: KernelScalar> CachedFold<'_, '_, T> {
+    fn run(
+        self,
+        terms: &[CompiledKernel<T>],
+        mut dest: MatMut<'_, T>,
+        mut scratch: MatMut<'_, T>,
+        combine: fn(MatMut<'_, T>, MatRef<'_, T>, Triangle),
+    ) -> Result<(), GprError> {
+        let Self {
+            grams,
+            index,
+            nested,
+            uplo,
+        } = self;
+        let (first, rest) = split_terms(terms)?;
+        first.write_from_leaf_grams(grams, index, dest.as_mut(), scratch.as_mut(), nested, uplo)?;
+        let (rows, cols) = (dest.nrows(), dest.ncols());
+        for term in rest {
+            let (own, deeper) = term_scratch(term, rows, cols, dest.as_mut(), &mut *nested)?;
+            term.write_from_leaf_grams(grams, index, scratch.as_mut(), own, deeper, uplo)?;
+            combine(dest.as_mut(), scratch.as_ref(), uplo);
         }
-        combine(dest.as_mut(), scratch.as_ref(), uplo);
+        Ok(())
     }
-    Ok(())
 }
 
 fn copy_triangle<T: Copy>(mut dest: MatMut<'_, T>, src: MatRef<'_, T>, uplo: Triangle) {

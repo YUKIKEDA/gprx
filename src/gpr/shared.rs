@@ -326,6 +326,7 @@ impl<P: GpScalar> GprCore<P> {
             query_dist,
             query_k_star,
             query_scratch,
+            query_nested,
             ..
         } = &mut *query;
         pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
@@ -335,6 +336,7 @@ impl<P: GpScalar> GprCore<P> {
             Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
+            query_nested,
             thread_scratch,
         ))?;
         Ok(query)
@@ -389,6 +391,7 @@ impl<P: GpScalar> GprCore<P> {
             kss.as_mut(),
             Triangle::Full,
             kss_scratch.as_mut(),
+            &mut Vec::new(),
             &mut thread_scratch,
         ))?;
         let zero_s = P::Storage::from_f64(0.0);
@@ -538,6 +541,7 @@ impl<P: GpScalar> GprCore<P> {
             a.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),
+            &mut Vec::new(),
         ))?;
         let noise = self.likelihood.noise_variance();
         for i in 0..n {

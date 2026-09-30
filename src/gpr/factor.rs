@@ -31,6 +31,7 @@ where
         dist,
         core.k_matrix.as_mut(),
         core.exp_buf.as_mut(),
+        &mut core.nested,
         &mut core.thread_scratch,
     )
 }
@@ -53,6 +54,7 @@ where
         dist,
         dest,
         core.exp_buf.as_mut(),
+        &mut core.nested,
         &mut core.thread_scratch,
     )
 }
@@ -63,10 +65,11 @@ fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
     dist: Option<&mut crate::workspace::DistCache<T>>,
     dest: MatMut<'_, T>,
     scratch: MatMut<'_, T>,
+    nested: &mut Vec<Mat<T>>,
     thread_scratch: &mut Vec<Mat<T>>,
 ) -> Result<(), GprError> {
     let inputs = fill_cached_inputs(compiled, x, dist, thread_scratch)?;
-    compiled.eval_gram::<M>(inputs, dest, Triangle::Lower, scratch)
+    compiled.eval_gram::<M>(inputs, dest, Triangle::Lower, scratch, nested)
 }
 
 /// Fills the training distance caches the tree reads (once per `X`) and

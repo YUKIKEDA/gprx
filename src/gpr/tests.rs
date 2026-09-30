@@ -1436,19 +1436,21 @@ fn hessian_matches_finite_difference_of_gradient() {
     }
 }
 
-#[test]
-fn hessian_product_matches_finite_difference_of_gradient() {
-    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
-        * KernelSpec::from(crate::kernel::ConstantKernel::new(1.4).expect("valid"));
+/// `hessian_into` against central differences of `value_and_gradient_into`,
+/// twice on the same model so reused Hessian and nested buffers start dirty.
+fn assert_hessian_matches_fd(kernel: KernelSpec, x: &[f64], d: usize, y: &[f64]) {
     let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"))
         .with_optimizer(Fixed)
-        .factor(&[0.0, 0.8, 1.7], 3, 1, &[0.4, -0.2, 0.9])
+        .factor(x, y.len(), d, y)
         .expect("spd");
     let n = gpr.num_params();
     let mut params = vec![0.0; n];
     gpr.get_params(&mut params).expect("len");
     let mut hess = vec![0.0; n * n];
     gpr.hessian_into(&params, &mut hess).expect("spd");
+    let mut again = vec![0.0; n * n];
+    gpr.hessian_into(&params, &mut again).expect("spd");
+    assert_eq!(hess, again, "a second Hessian must not read stale scratch");
     let h = 1e-5;
     let mut g_plus = vec![0.0; n];
     let mut g_minus = vec![0.0; n];
@@ -1472,6 +1474,34 @@ fn hessian_product_matches_finite_difference_of_gradient() {
             );
         }
     }
+}
+
+#[test]
+fn hessian_product_matches_finite_difference_of_gradient() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.25).expect("valid"))
+        * KernelSpec::from(crate::kernel::ConstantKernel::new(1.4).expect("valid"));
+    assert_hessian_matches_fd(kernel, &[0.0, 0.8, 1.7], 1, &[0.4, -0.2, 0.9]);
+}
+
+/// A product of sums, nested in a sum: two levels of nested buffers.
+#[test]
+fn hessian_nested_composite_matches_finite_difference_of_gradient() {
+    let rbf = |ell| KernelSpec::from(RbfKernel::new(ell).expect("valid"));
+    let constant = |v| KernelSpec::from(crate::kernel::ConstantKernel::new(v).expect("valid"));
+    let kernel = rbf(1.25) * (rbf(0.7) * constant(1.3) + constant(0.4)) + rbf(2.0);
+    assert_hessian_matches_fd(kernel, &[0.0, 0.8, 1.7, 2.1], 1, &[0.4, -0.2, 0.9, 0.1]);
+}
+
+/// Distance and ARD leaves in one nested tree (mixed coordinate mode).
+#[test]
+fn hessian_nested_mixed_matches_finite_difference_of_gradient() {
+    let rbf = KernelSpec::from(RbfKernel::new(1.1).expect("valid"));
+    let ard = KernelSpec::from(crate::kernel::RbfArdKernel::new(&[0.9, 1.4]).expect("valid"));
+    let constant = |v| KernelSpec::from(crate::kernel::ConstantKernel::new(v).expect("valid"));
+    let kernel = (rbf + ard)
+        * (constant(1.5) * KernelSpec::from(RbfKernel::new(2.0).expect("valid")) + constant(0.5));
+    let x = [0.0, 0.8, 1.7, 2.1, 0.3, -0.4, 0.9, 1.2];
+    assert_hessian_matches_fd(kernel, &x, 2, &[0.4, -0.2, 0.9, 0.1]);
 }
 
 #[test]
