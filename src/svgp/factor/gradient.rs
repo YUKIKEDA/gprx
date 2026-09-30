@@ -9,6 +9,7 @@ use crate::kernel::{CompiledKernel, KernelScalar, Triangle};
 use crate::linalg::{dot_f64x4, mat_mul_into, norm2_f64x4, solve_lower};
 use crate::precision::ModelPrecision;
 use crate::sparse::SparseCore;
+use crate::sparse::{KernelScratch, SparseScratch};
 use crate::svgp::FittedSvgp;
 use faer::{Mat, MatMut, MatRef};
 
@@ -16,21 +17,23 @@ pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
+    scratch: &mut SparseScratch<P::Storage>,
 ) -> Result<f64, GprError>
 where
     P: ModelPrecision,
 {
     if !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let shadow = promote_svgp_f64::<_>(model)?;
-        return svgp_value_and_gradient_f64::<M>(&shadow, out, batch);
+        return svgp_value_and_gradient_f64::<M>(&shadow, out, batch, &mut scratch.f64);
     }
-    svgp_value_and_gradient_storage::<M, _>(model, out, batch)
+    svgp_value_and_gradient_storage::<M, _>(model, out, batch, &mut scratch.storage)
 }
 
 pub(super) fn svgp_value_and_gradient_storage<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
+    ks: &mut KernelScratch<P::Storage>,
 ) -> Result<f64, GprError>
 where
     P: ModelPrecision,
@@ -52,7 +55,7 @@ where
     let (ell, resid2_var) =
         storage_data_q_grad::<P>(model, out, batch, &cache, n_theta, inv_noise, scale);
     out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
-    storage_kernel_grad::<M, P>(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
+    storage_kernel_grad::<M, P>(model, out, batch, &cache, n_kernel, inv_noise, scale, ks)?;
     Ok(kl - scale * ell)
 }
 
@@ -189,6 +192,8 @@ pub(super) fn storage_data_q_grad<P: ModelPrecision>(
     (ell.to_f64(), resid2_var.to_f64())
 }
 
+// The model, output, batch, point cache, its sizes and scales, and scratch.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn storage_kernel_grad<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
@@ -197,6 +202,7 @@ pub(super) fn storage_kernel_grad<M: crate::math::KernelMath, P>(
     n_kernel: usize,
     inv_noise: f64,
     scale: f64,
+    ks: &mut KernelScratch<P::Storage>,
 ) -> Result<(), GprError>
 where
     P: ModelPrecision,
@@ -217,8 +223,9 @@ where
         }
     }
     for (param_idx, slot) in out.iter_mut().take(n_kernel).enumerate() {
-        let (d_a, d_kdiag) =
-            storage_kernel_tangents::<M, P>(&compiled, x_mat, z_mat, model, same_xz, param_idx)?;
+        let (d_a, d_kdiag) = storage_kernel_tangents::<M, P>(
+            &compiled, x_mat, z_mat, ks, model, same_xz, param_idx,
+        )?;
         let da_b = storage_batch_columns(d_a.as_ref(), batch);
         let mut lt = Mat::<P::Storage>::zeros(m, batch.len());
         crate::linalg::mat_mul_into(&mut lt, q_l.transpose(), da_b.as_ref());
@@ -250,6 +257,7 @@ pub(super) fn storage_kernel_tangents<M: crate::math::KernelMath, P>(
     compiled: &CompiledKernel<P::Storage>,
     x: MatRef<'_, P::Storage>,
     z: MatRef<'_, P::Storage>,
+    ks: &mut KernelScratch<P::Storage>,
     model: &FittedSvgp<P>,
     same_xz: bool,
     param_idx: usize,
@@ -260,31 +268,26 @@ where
     let m = model.core.m;
     let n = model.core.n;
     let mut d_kmm = Mat::<P::Storage>::zeros(m, m);
-    let mut scratch_mm = Mat::<P::Storage>::zeros(m, m);
-    compiled.grad_gram::<M>(
+    ks.grad::<M>(
+        compiled,
         GramInputs::points(z),
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
-        scratch_mm.as_mut(),
-        &mut Vec::new(),
     )?;
     let mut d_kmn = if same_xz {
         let mut gram = Mat::<P::Storage>::zeros(n, n);
-        let mut scratch = Mat::<P::Storage>::zeros(n, n);
-        compiled.grad_gram::<M>(
+        ks.grad::<M>(
+            compiled,
             GramInputs::points(x),
             gram.as_mut(),
             param_idx,
             Triangle::Full,
-            scratch.as_mut(),
-            &mut Vec::new(),
         )?;
         gram
     } else {
         let mut cross = Mat::<P::Storage>::zeros(m, n);
-        let mut scratch = Mat::<P::Storage>::zeros(m, n);
-        compiled.grad_cross_points::<M>(z, x, cross.as_mut(), param_idx, scratch.as_mut())?;
+        compiled.grad_cross_points::<M>(z, x, cross.as_mut(), param_idx, ks.scratch(m, n))?;
         cross
     };
     let mut d_kdiag = vec![P::Storage::from_f64(0.0); n];
@@ -356,6 +359,7 @@ where
             d: model.core.d,
             math: model.core.math,
         },
+        scratch: SparseScratch::default(),
         k_mm_l,
         a,
         q_mean: model.q_mean.clone(),
@@ -368,6 +372,7 @@ pub(super) fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
+    ks: &mut KernelScratch<f64>,
 ) -> Result<f64, GprError> {
     let n = model.core.n;
     let m = model.core.m;
@@ -386,7 +391,7 @@ pub(super) fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     let (ell, resid2_var) =
         accumulate_data_q_grad(model, out, batch, &cache, n_theta, inv_noise, scale);
     out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
-    accumulate_kernel_grad::<M>(model, out, batch, &cache, n_kernel, inv_noise, scale)?;
+    accumulate_kernel_grad::<M>(model, out, batch, &cache, n_kernel, inv_noise, scale, ks)?;
     Ok(kl - scale * ell)
 }
 
@@ -564,6 +569,8 @@ pub(super) fn accumulate_data_q_grad(
     (ell, resid2_var)
 }
 
+// The model, output, batch, point cache, its sizes and scales, and scratch.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
@@ -572,6 +579,7 @@ pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     n_kernel: usize,
     inv_noise: f64,
     scale: f64,
+    ks: &mut KernelScratch<f64>,
 ) -> Result<(), GprError> {
     let m = model.core.m;
     let compiled = model.core.kernel.compile();
@@ -592,6 +600,7 @@ pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
             &compiled,
             x_mat.as_ref(),
             z_mat.as_ref(),
+            ks,
             model,
             same_xz,
             param_idx,
@@ -639,10 +648,13 @@ pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     Ok(())
 }
 
+// The kernel, both views, its scratch, the model, and the parameter.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn kernel_theta_tangents<M: crate::math::KernelMath>(
     compiled: &crate::kernel::CompiledKernel,
     x: MatRef<'_, f64>,
     z: MatRef<'_, f64>,
+    ks: &mut KernelScratch<f64>,
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     same_xz: bool,
     param_idx: usize,
@@ -651,33 +663,28 @@ pub(super) fn kernel_theta_tangents<M: crate::math::KernelMath>(
     let m = model.core.m;
     let n = model.core.n;
     let mut d_kmm = Mat::zeros(m, m);
-    let mut scratch_mm = Mat::zeros(m, m);
-    compiled.grad_gram::<M>(
+    ks.grad::<M>(
+        compiled,
         GramInputs::points(z),
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
-        scratch_mm.as_mut(),
-        &mut Vec::new(),
     )?;
     let mut d_kmn = if let Some(pre) = pre_cross {
         pre
     } else if same_xz {
         let mut gram = Mat::zeros(n, n);
-        let mut scratch = Mat::zeros(n, n);
-        compiled.grad_gram::<M>(
+        ks.grad::<M>(
+            compiled,
             GramInputs::points(x),
             gram.as_mut(),
             param_idx,
             Triangle::Full,
-            scratch.as_mut(),
-            &mut Vec::new(),
         )?;
         gram
     } else {
         let mut cross = Mat::zeros(m, n);
-        let mut scratch = Mat::zeros(m, n);
-        compiled.grad_cross_points::<M>(z, x, cross.as_mut(), param_idx, scratch.as_mut())?;
+        compiled.grad_cross_points::<M>(z, x, cross.as_mut(), param_idx, ks.scratch(m, n))?;
         cross
     };
     let mut d_kdiag = vec![0.0; n];

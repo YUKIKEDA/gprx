@@ -4,7 +4,7 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::policy::with_kernel_exp;
-use crate::sparse::{SparseCore, sparse_core_accessors};
+use crate::sparse::{SparseCore, SparseScratch, sparse_core_accessors};
 
 use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
 use crate::{PredictOptions, Prediction};
@@ -25,6 +25,8 @@ use super::factor::{
 #[derive(Clone, Debug)]
 pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
     pub(super) core: SparseCore,
+    /// Kernel scratch kept between `&mut self` calls.
+    pub(super) scratch: SparseScratch<P::Storage>,
     /// Lower `L_mm` from `K_mm = L_mm L_mmᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
@@ -124,6 +126,7 @@ where
             &self.core.z_obs,
             self.core.m,
             Some(q),
+            &mut self.scratch.storage,
         ))?;
         self.core.kernel = kernel;
         self.core.likelihood = likelihood;
@@ -221,7 +224,13 @@ where
         crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let batch: Vec<usize> = (0..self.core.n).collect();
-        with_kernel_exp!(self.core.math, M => svgp_value_and_gradient::<M, _>(self, out, &batch))
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let result = with_kernel_exp!(
+            self.core.math,
+            M => svgp_value_and_gradient::<M, _>(self, out, &batch, &mut scratch)
+        );
+        self.scratch = scratch;
+        result
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).

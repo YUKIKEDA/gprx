@@ -12,6 +12,7 @@ use crate::linalg::{
 };
 use crate::precision::ModelPrecision;
 use crate::sgpr::FittedSgpr;
+use crate::sparse::KernelScratch;
 use faer::{Accum, Mat, MatRef};
 
 pub(crate) struct KernelVar<T: KernelScalar> {
@@ -223,6 +224,7 @@ pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P>(
     model: &FittedSgpr<O, I, P>,
     out: &mut [f64],
     include_z: bool,
+    ks: &mut KernelScratch<P::Storage>,
 ) -> Result<(), GprError>
 where
     P: ModelPrecision,
@@ -239,7 +241,7 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let n_kernel = model.core.kernel.num_params();
     for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-        let var = kernel_theta_var::<M, _>(&compiled, x, z, model.core.n, i)?;
+        let var = kernel_theta_var::<M, _>(&compiled, ks, x, z, model.core.n, i)?;
         *slot = engine.directional_owned(var).to_f64();
     }
     out[n_kernel] = engine
@@ -249,7 +251,7 @@ where
         let mut idx = n_kernel + 1;
         for dim in 0..model.core.d {
             for p in 0..model.core.m {
-                let var = z_coord_var::<M, _>(&compiled, x, z, p, dim)?;
+                let var = z_coord_var::<M, _>(&compiled, ks, x, z, p, dim)?;
                 out[idx] = engine.directional_owned(var).to_f64();
                 idx += 1;
             }
@@ -262,6 +264,7 @@ pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P>(
     model: &FittedSgpr<O, I, P>,
     out: &mut [f64],
     include_z: bool,
+    ks: &mut KernelScratch<P::Storage>,
 ) -> Result<(), GprError>
 where
     P: ModelPrecision,
@@ -269,13 +272,13 @@ where
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.core.y, &mut y_cast);
     let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
-    let vars = collect_first_vars::<M, _, _, _>(model, include_z)?;
+    let vars = collect_first_vars::<M, _, _, _>(model, include_z, ks)?;
     let tangents: Vec<VfeTangent<P::Storage>> =
         vars.iter().map(|v| engine.first_tangent(v)).collect();
     let p = vars.len();
     for j in 0..p {
         for i in j..p {
-            let dd = second_var::<M, _, _, _>(model, i, j, include_z)?;
+            let dd = second_var::<M, _, _, _>(model, i, j, include_z, ks)?;
             let hij = engine
                 .second_directional(&tangents[i], &tangents[j], &dd)
                 .to_f64();
@@ -289,6 +292,7 @@ where
 pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P>(
     model: &FittedSgpr<O, I, P>,
     include_z: bool,
+    ks: &mut KernelScratch<P::Storage>,
 ) -> Result<Vec<KernelVar<P::Storage>>, GprError>
 where
     P: ModelPrecision,
@@ -311,7 +315,14 @@ where
             },
     );
     for i in 0..n_kernel {
-        vars.push(kernel_theta_var::<M, _>(&compiled, x, z, model.core.n, i)?);
+        vars.push(kernel_theta_var::<M, _>(
+            &compiled,
+            ks,
+            x,
+            z,
+            model.core.n,
+            i,
+        )?);
     }
     vars.push(likelihood_var(
         model.core.m,
@@ -321,7 +332,7 @@ where
     if include_z {
         for dim in 0..model.core.d {
             for p in 0..model.core.m {
-                vars.push(z_coord_var::<M, _>(&compiled, x, z, p, dim)?);
+                vars.push(z_coord_var::<M, _>(&compiled, ks, x, z, p, dim)?);
             }
         }
     }
@@ -330,6 +341,7 @@ where
 
 pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
+    ks: &mut KernelScratch<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
     n: usize,
@@ -340,18 +352,15 @@ where
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
-    let mut scratch_mm = Mat::zeros(m, m);
-    compiled.grad_gram::<M>(
+    ks.grad::<M>(
+        compiled,
         GramInputs::points(z),
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
-        scratch_mm.as_mut(),
-        &mut Vec::new(),
     )?;
     let mut d_kmn = Mat::zeros(m, n);
-    let mut scratch_mn = Mat::zeros(m, n);
-    compiled.grad_cross_points::<M>(z, x, d_kmn.as_mut(), param_idx, scratch_mn.as_mut())?;
+    compiled.grad_cross_points::<M>(z, x, d_kmn.as_mut(), param_idx, ks.scratch(m, n))?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.grad_diag_points::<M>(x, &mut diag, param_idx)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
@@ -375,6 +384,7 @@ pub(crate) fn likelihood_var<T: KernelScalar>(m: usize, n: usize, noise: f64) ->
 
 pub(crate) fn z_coord_var<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
+    ks: &mut KernelScratch<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
     point: usize,
@@ -386,9 +396,9 @@ where
     let m = z.nrows();
     let n = x.nrows();
     let mut g2 = Mat::zeros(m, m);
-    compiled.grad_wrt_coord_dim::<M>(z, z, g2.as_mut(), dim)?;
+    compiled.grad_wrt_coord_dim_with::<M>(z, z, g2.as_mut(), dim, ks.scratch(m, m))?;
     let mut g_xz = Mat::zeros(n, m);
-    compiled.grad_wrt_coord_dim::<M>(x, z, g_xz.as_mut(), dim)?;
+    compiled.grad_wrt_coord_dim_with::<M>(x, z, g_xz.as_mut(), dim, ks.scratch(n, m))?;
     let mut d_kmm = Mat::zeros(m, m);
     for i in 0..m {
         d_kmm[(i, point)] += g2[(i, point)];
@@ -411,6 +421,7 @@ pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P>(
     i: usize,
     j: usize,
     include_z: bool,
+    ks: &mut KernelScratch<P::Storage>,
 ) -> Result<KernelVar<P::Storage>, GprError>
 where
     P: ModelPrecision,
@@ -435,7 +446,7 @@ where
         }
     };
     if i < n_kernel && j < n_kernel {
-        return kernel_theta_second::<M, _>(&compiled, x, z, n, i, j);
+        return kernel_theta_second::<M, _>(&compiled, ks, x, z, n, i, j);
     }
     if i == n_kernel && j == n_kernel {
         return Ok(likelihood_var(m, n, model.core.likelihood.noise_variance()));
@@ -449,7 +460,7 @@ where
         });
     }
     if let (Some((pi, ei)), Some((pj, ej))) = (z_index(i), z_index(j)) {
-        return z_z_second::<M, _>(&compiled, x, z, pi, ei, pj, ej);
+        return z_z_second::<M, _>(&compiled, ks, x, z, pi, ei, pj, ej);
     }
     let (theta, (p, e)) = if i < n_theta {
         (
@@ -479,6 +490,7 @@ where
 
 pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
+    ks: &mut KernelScratch<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
     n: usize,
@@ -490,18 +502,15 @@ where
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
-    let mut scratch_mm = Mat::zeros(m, m);
-    compiled.hess_gram::<M>(
+    ks.hess::<M>(
+        compiled,
         GramInputs::points(z),
         d_kmm.as_mut(),
         (i, j),
         Triangle::Full,
-        scratch_mm.as_mut(),
-        &mut Vec::new(),
     )?;
     let mut d_kmn = Mat::zeros(m, n);
-    let mut scratch_mn = Mat::zeros(m, n);
-    compiled.hess_cross_points::<M>(z, x, d_kmn.as_mut(), i, j, scratch_mn.as_mut())?;
+    compiled.hess_cross_points::<M>(z, x, d_kmn.as_mut(), i, j, ks.scratch(m, n))?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.hess_diag_points::<M>(x, &mut diag, i, j)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
@@ -513,8 +522,11 @@ where
     })
 }
 
+// The kernel, both views, its scratch, and the two (point, dimension) pairs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn z_z_second<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
+    ks: &mut KernelScratch<T>,
     x: MatRef<'_, T>,
     z: MatRef<'_, T>,
     p: usize,
@@ -528,7 +540,7 @@ where
     let m = z.nrows();
     let n = x.nrows();
     let mut h22 = Mat::zeros(m, m);
-    compiled.hess_wrt_coord_dims::<M>(z, z, h22.as_mut(), e, f)?;
+    compiled.hess_wrt_coord_dims::<M>(z, z, h22.as_mut(), e, f, ks.scratch(m, m))?;
     let mut d_kmm = Mat::zeros(m, m);
     if p == q {
         for i in 0..m {
@@ -539,16 +551,16 @@ where
         }
     } else {
         let mut h12 = Mat::zeros(m, m);
-        compiled.hess_wrt_coord_mixed::<M>(z, z, h12.as_mut(), e, f)?;
+        compiled.hess_wrt_coord_mixed::<M>(z, z, h12.as_mut(), e, f, ks.scratch(m, m))?;
         let mut h21 = Mat::zeros(m, m);
-        compiled.hess_wrt_coord_mixed::<M>(z, z, h21.as_mut(), f, e)?;
+        compiled.hess_wrt_coord_mixed::<M>(z, z, h21.as_mut(), f, e, ks.scratch(m, m))?;
         d_kmm[(p, q)] = h12[(p, q)];
         d_kmm[(q, p)] = h21[(q, p)];
     }
     let mut d_kmn = Mat::zeros(m, n);
     if p == q {
         let mut h_xz = Mat::zeros(n, m);
-        compiled.hess_wrt_coord_dims::<M>(x, z, h_xz.as_mut(), e, f)?;
+        compiled.hess_wrt_coord_dims::<M>(x, z, h_xz.as_mut(), e, f, ks.scratch(n, m))?;
         for col in 0..n {
             d_kmn[(p, col)] = h_xz[(col, p)];
         }
