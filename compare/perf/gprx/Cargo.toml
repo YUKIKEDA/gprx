@@ -9,8 +9,14 @@ description = "gprx runner of the compare/perf harnesses (P2B-16, P3-6, P4-12, P
 name = "gprx-perf"
 path = "src/main.rs"
 
+[[example]]
+name = "gprx_ard"
+path = "../real/snippets/gprx_ard.rs"
+
 [features]
 insert-stages = ["gprx/insert-stages"]
+# `fit` mode (B1-1): counts the objective calls of one fit.
+fit-counts = ["gprx/bench-internals"]
 
 [dependencies]
 gprx = { path = "../../.." }

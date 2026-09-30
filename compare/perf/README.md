@@ -51,3 +51,39 @@ Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench
 ## Sparse online (P4-14)
 
 `just perf-sparse-online` times `OnlineSgpr` `insert` / `delete` / `insert_inducing` / `delete_inducing` against self `Sgpr<Fixed>::factor` and GPyTorch Titsias assemble (no query). Same Forrester / sphere `n` as P2B-16, `m_max = 16` (k-means seed `0` at generation time), prefix `start_n = 32/128/512` and `start_m = 8`, raw `y`, CPU, no `fit`. The harness draws 32 ops (`ops_seed = 0`, RBF probe PD filter) and does not read P4-13 goldens. Prefix is untimed. Clock is one 32-op wall (discard 1 + median; reps follow P2B-16). Gate: incremental median smaller than self full and GPyTorch full (5% inconclusive). RSS is recorded only. Results: `compare/perf/out/sparse_online_results.json`. Pass / fail is recorded in `.dev/bench-log.md` (local, not committed). `just perf` / `just perf-online` / `just perf-sparse` stay Exact / online / batch Sparse. `cargo test` must not run this.
+
+## Real datasets (B1-1)
+
+`just perf-real` fits every library on the benchmark data of Gaussian-process papers, scores it (RMSE, NLPD, 95% coverage in the original units of `y`), and reports fit time, joint evaluation counts and peak RSS. `just perf-real-report` turns the raw output into `docs/bench/summary.json`, the SVG figures and the README tables. Manual. Not a CI gate. `just test` must not run this and needs no network.
+
+```text
+just perf-real-data                       # fetch every dataset once, pin the SHA-256 in real/checksums.json
+just perf-real-check                      # fixed-θ agreement of all libraries (NLML, RMSE, NLPD to 1e-6)
+just perf-real --datasets yacht,energy --splits 2 --protocol native --timeline
+just perf-real --datasets kin40k --model sgpr --m 512 --protocol matched
+just perf-real-report
+```
+
+- Data: `yaringal/DropoutUncertaintyExps` (T1 and Protein, the Hernández-Lobato & Adams splits), `treforevans/uci_datasets` (Kin40k and T3, 10 splits of 90 / 10), the NOAA Mauna Loa monthly means through `datasets/co2-ppm`, and Snelson's archive (`SNELSON_ZIP` may point at a local copy when the author's page is not reachable). Files land in `out/real/data/`; a checksum mismatch stops the run.
+- Cases: one JSON per (dataset, split, protocol, model) in `out/real/cases/`. `x`, `y` are standardized with the training statistics; metrics are converted back. One cell is one process: one split, one library.
+- Protocols: `native` (each library's own optimizer), `matched` (scipy L-BFGS-B, 100 iterations, gradient tolerance √ε, history 10), `fixed` (no optimizer, for `perf-real-check`). `real/optimizers.py` records every optimizer with the source it was read from; `out/real/meta.json` records the machine and library versions.
+- Sparse models: `--model sgpr` (fixed inducing points, k-means with a fixed seed on at most 100 000 training rows) or `--model svgp` (Adam, one shared setting). gprx's `Sgpr` / `Svgp` have no coordinate derivative for a `Constant × RBF` product, so the sparse cells leave the signal variance at 1 in every library.
+- Timing: one timed fit per cell after an untimed warm-up fit when n ≤ 5000 (`PERF_WARMUP` overrides); the split-to-split spread is the standard error. Joint evaluations are counted through `gprx::internals` (feature `bench-internals`, off by default) for gprx and through wrappers for the Python libraries; libgp's RProp counts its 100 iterations. A time difference between cells with different counts is not a speed difference.
+- `--timeline`: the RSS of the whole process tree every 10 ms, with the start of load / warm-up / fit / predict marked (`out/real/timeline/`).
+- Do not run two cells at once: they share the CPU and the timings mix.
+- friedrich has no ARD kernel, so its cells are N/A. libgp's fit is Rprop only, so its `matched` cells are N/A.
+
+### Real datasets: every path, and what is known not to work
+
+`just perf-real-smoke` runs the whole matrix (dataset kind × model × protocol × library, with and without `--timeline`) on tiny problems, and with `--data` loads two splits of every dataset and checks the shapes against the sources' tables. A cell either runs or is N/A with a reason the script knows (`EXPECTED_NA`); anything else is a FAIL. Run it after touching a runner. `just perf-real-full` starts with it.
+
+N/A on purpose: friedrich (no ARD kernel, no sparse model), libgp (Rprop only, so no `matched`; no sparse model; the composite Mauna Loa kernel is not wired), scikit-learn (no sparse model), GPy's SVGP (no minibatch fit in its API), SVGP `native` (no library default suits a large n) and SVGP `fixed`. An exact fit whose `K` and factor (2 n² f64) do not fit in the available memory is N/A with the sizes (`--force-exact` tries anyway).
+
+Known limits of what is measured:
+
+- gprx's `Svgp` recomputes the cached `A = L⁻¹ K_mn` for **all** n points at every Adam step (`set_params`), and promotes a copy of it for f64 (`promote_svgp_f64`), so a step costs O(n·m²) instead of O(batch·m²). Measured on HouseElectric rows with m = 16, batch 1024: 90 ms per step at n = 20 000 and 335 ms at n = 80 000. At n ≈ 1.8 M a fit is hours; a T3 time for gprx's `Svgp` measures this, not the model.
+- gprx's `Sgpr` / `Svgp` cannot fit a signal variance (no coordinate derivative for a `Constant × RBF` product), so the sparse cells fix it at 1 in every library.
+- gprx's argmin L-BFGS uses several function evaluations per iteration (Sgpr, n = 1000, m = 128, d = 8: about 720 for 100 iterations); scipy's L-BFGS-B uses about one. Compare times only with the evaluation counts beside them.
+- At the same θ and Z, GPyTorch's sparse model has the same marginal likelihood as gprx and GPy but predicts with its own low-rank test covariance (RMSE / NLPD differ by a fraction of a percent).
+- The case of a large dataset is one JSON file (HouseElectric: 600 MB) that each runner parses whole: allow a few GiB of memory and a minute of start-up per cell.
+- The cloud VM this was developed on (4 vCPUs, 15 GiB) is too small for a final run: exact Kin40k / Protein do not fit, and an `Sgpr` fit at m = 512 takes hours.
