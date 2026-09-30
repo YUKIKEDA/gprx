@@ -8,8 +8,7 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, Triangle};
 use crate::linalg::{dot_f64x4, mat_mul_into, norm2_f64x4, solve_lower};
 use crate::precision::ModelPrecision;
-use crate::sparse::SparseCore;
-use crate::sparse::{KernelScratch, SparseScratch};
+use crate::sparse::{KernelScratch, SparseCore, SparseScratch};
 use crate::svgp::FittedSvgp;
 use faer::{Mat, MatMut, MatRef};
 
@@ -23,7 +22,7 @@ where
     P: ModelPrecision,
 {
     if !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let shadow = promote_svgp_f64::<_>(model)?;
+        let shadow = promote_svgp_f64(model);
         return svgp_value_and_gradient_f64::<M>(&shadow, out, batch, &mut scratch.f64);
     }
     svgp_value_and_gradient_storage::<M, _>(model, out, batch, &mut scratch.storage)
@@ -130,7 +129,7 @@ pub(super) fn storage_point_cache<P: ModelPrecision>(
             lt_norm += u_j * u_j;
         }
         var[b_idx] = model.k_diag[col] - a_norm + lt_norm;
-        resid[b_idx] = P::Storage::from_f64(model.core.y[col]) - mu;
+        resid[b_idx] = P::Storage::from_f64(model.core.y_train[col]) - mu;
     }
     StoragePointCache { resid, var, u }
 }
@@ -209,13 +208,13 @@ where
 {
     let m = model.core.m;
     let compiled = model.core.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
-    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
+    let x64 = pack_points(&model.core.x_train, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_train, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x_mat = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let same_xz = model.core.x_obs == model.core.z_obs;
+    let same_xz = model.core.x_train == model.core.z_train;
     let mut q_l = Mat::<P::Storage>::zeros(m, m);
     for j in 0..m {
         for i in 0..m {
@@ -329,11 +328,18 @@ pub(super) fn storage_cholesky_sensitivity<T: KernelScalar>(
     }
 }
 
-pub(super) fn promote_svgp_f64<P: ModelPrecision>(
-    model: &FittedSvgp<P>,
-) -> Result<FittedSvgp<crate::precision::DoublePrecision>, GprError>
-where
-{
+/// A [`FittedSvgp`] seen in `f64`: the storage factors converted, the data
+/// and `q` borrowed.
+pub(super) struct SvgpF64<'a> {
+    pub(super) core: &'a SparseCore,
+    pub(super) k_mm_l: Mat<f64>,
+    pub(super) a: Mat<f64>,
+    pub(super) q_mean: &'a Vec<f64>,
+    pub(super) q_l: &'a Mat<f64>,
+    pub(super) k_diag: Vec<f64>,
+}
+
+pub(super) fn promote_svgp_f64<P: ModelPrecision>(model: &FittedSvgp<P>) -> SvgpF64<'_> {
     let mut k_mm_l = Mat::<f64>::zeros(model.core.m, model.core.m);
     let mut a = Mat::<f64>::zeros(model.core.m, model.core.n);
     for j in 0..model.core.m {
@@ -346,30 +352,18 @@ where
             a[(row, col)] = model.a[(row, col)].to_f64();
         }
     }
-    let k_diag: Vec<f64> = model.k_diag.iter().map(|value| value.to_f64()).collect();
-    Ok(FittedSvgp {
-        core: SparseCore {
-            kernel: model.core.kernel.clone(),
-            likelihood: model.core.likelihood,
-            x_obs: model.core.x_obs.clone(),
-            z_obs: model.core.z_obs.clone(),
-            y: model.core.y.clone(),
-            n: model.core.n,
-            m: model.core.m,
-            d: model.core.d,
-            math: model.core.math,
-        },
-        scratch: SparseScratch::default(),
+    SvgpF64 {
+        core: &model.core,
         k_mm_l,
         a,
-        q_mean: model.q_mean.clone(),
-        q_l: model.q_l.clone(),
-        k_diag,
-    })
+        q_mean: &model.q_mean,
+        q_l: &model.q_l,
+        k_diag: model.k_diag.iter().map(|value| value.to_f64()).collect(),
+    }
 }
 
 pub(super) fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
-    model: &FittedSvgp<crate::precision::DoublePrecision>,
+    model: &SvgpF64<'_>,
     out: &mut [f64],
     batch: &[usize],
     ks: &mut KernelScratch<f64>,
@@ -396,7 +390,7 @@ pub(super) fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
 }
 
 pub(super) fn accumulate_kl_grad(
-    model: &FittedSvgp<crate::precision::DoublePrecision>,
+    model: &SvgpF64<'_>,
     out: &mut [f64],
     n_theta: usize,
     m: usize,
@@ -458,11 +452,7 @@ pub(super) struct PointCache {
     u: Mat<f64>,
 }
 
-pub(super) fn point_cache(
-    model: &FittedSvgp<crate::precision::DoublePrecision>,
-    batch: &[usize],
-    m: usize,
-) -> PointCache {
+pub(super) fn point_cache(model: &SvgpF64<'_>, batch: &[usize], m: usize) -> PointCache {
     let b = batch.len();
     let a = batch_columns(model.a.as_ref(), batch);
     let mut u = Mat::zeros(m, b);
@@ -477,7 +467,7 @@ pub(super) fn point_cache(
             let u_col = u_cm.col(b_idx);
             let mu = dot_f64x4(a_col, mean);
             var[b_idx] = model.k_diag[col] - norm2_f64x4(a_col) + norm2_f64x4(u_col);
-            resid[b_idx] = model.core.y[col] - mu;
+            resid[b_idx] = model.core.y_train[col] - mu;
         }
     } else {
         for (b_idx, &col) in batch.iter().enumerate() {
@@ -492,7 +482,7 @@ pub(super) fn point_cache(
                 lt_norm += u_j * u_j;
             }
             var[b_idx] = model.k_diag[col] - a_norm + lt_norm;
-            resid[b_idx] = model.core.y[col] - mu;
+            resid[b_idx] = model.core.y_train[col] - mu;
         }
     }
     PointCache { resid, var, u }
@@ -528,7 +518,7 @@ pub(super) fn batch_columns<'a>(full: MatRef<'a, f64>, batch: &[usize]) -> Batch
 }
 
 pub(super) fn accumulate_data_q_grad(
-    model: &FittedSvgp<crate::precision::DoublePrecision>,
+    model: &SvgpF64<'_>,
     out: &mut [f64],
     batch: &[usize],
     cache: &PointCache,
@@ -572,7 +562,7 @@ pub(super) fn accumulate_data_q_grad(
 // The model, output, batch, point cache, its sizes and scales, and scratch.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
-    model: &FittedSvgp<crate::precision::DoublePrecision>,
+    model: &SvgpF64<'_>,
     out: &mut [f64],
     batch: &[usize],
     cache: &PointCache,
@@ -583,9 +573,9 @@ pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
 ) -> Result<(), GprError> {
     let m = model.core.m;
     let compiled = model.core.kernel.compile();
-    let x_mat = pack_points(&model.core.x_obs, model.core.n, model.core.d);
-    let z_mat = pack_points(&model.core.z_obs, model.core.m, model.core.d);
-    let same_xz = model.core.x_obs == model.core.z_obs;
+    let x_mat = pack_points(&model.core.x_train, model.core.n, model.core.d);
+    let z_mat = pack_points(&model.core.z_train, model.core.m, model.core.d);
+    let same_xz = model.core.x_train == model.core.z_train;
     let mut ard_cross = match &compiled {
         crate::kernel::CompiledKernel::RbfArd(leaf) if !same_xz => {
             Some(leaf.grad_cross_all_from_coords::<M, _>(z_mat.as_ref(), x_mat.as_ref())?)
@@ -655,7 +645,7 @@ pub(super) fn kernel_theta_tangents<M: crate::math::KernelMath>(
     x: MatRef<'_, f64>,
     z: MatRef<'_, f64>,
     ks: &mut KernelScratch<f64>,
-    model: &FittedSvgp<crate::precision::DoublePrecision>,
+    model: &SvgpF64<'_>,
     same_xz: bool,
     param_idx: usize,
     pre_cross: Option<Mat<f64>>,

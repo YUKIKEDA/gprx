@@ -89,15 +89,17 @@ const M_SPARSE: usize = 32;
 /// path (R5-1d / #246). The sparse models return new matrices for their
 /// factors and results and have no `predict_into` yet (R5-5 / #283), so
 /// these are not zero; the kernel scratch of the `&mut self` paths is kept
-/// on the model between calls. Do not raise without an Issue.
+/// on the model between calls. `predict` also copies the query to map it
+/// through the input transform (R5-3 / #281); R5-5 moves that buffer onto
+/// the model. Do not raise without an Issue.
 const MAX_SPARSE_ALLOCS: [(&str, usize); 7] = [
     ("sgpr_mll_and_grad", 19),
     ("sgpr_hessian", 111),
-    ("sgpr_predict_100", 109),
-    ("online_sgpr_insert", 11),
-    ("online_sgpr_insert_nested", 19),
-    ("svgp_mll_and_grad", 25),
-    ("svgp_predict_100", 309),
+    ("sgpr_predict_100", 110),
+    ("online_sgpr_insert", 10),
+    ("online_sgpr_insert_nested", 18),
+    ("svgp_mll_and_grad", 20),
+    ("svgp_predict_100", 310),
 ];
 
 fn ensure_one_rayon_worker() {

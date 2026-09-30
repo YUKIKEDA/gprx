@@ -262,11 +262,11 @@ where
         let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
             &self.core.kernel,
             self.core.likelihood,
-            &self.core.x_obs,
+            &self.core.x_train,
             self.core.n,
             self.core.d,
-            &self.core.y,
-            &self.core.z_obs,
+            &self.core.y_train,
+            &self.core.z_train,
             self.core.m,
             &mut self.scratch.storage,
             &mut self.scratch.f64,
@@ -279,11 +279,11 @@ where
             self.predict_w = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, f64>(
                 &self.core.kernel,
                 self.core.likelihood,
-                &self.core.x_obs,
+                &self.core.x_train,
                 self.core.n,
                 self.core.d,
-                &self.core.y,
-                &self.core.z_obs,
+                &self.core.y_train,
+                &self.core.z_train,
                 self.core.m,
                 &mut self.scratch.f64,
                 &mut KernelScratch::new(),
@@ -299,9 +299,9 @@ where
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.core.x_obs,
-            &self.core.y,
-            &self.core.z_obs,
+            &self.core.x_train,
+            &self.core.y_train,
+            &self.core.z_train,
             self.core.likelihood.noise_variance(),
             self.core.n,
             self.core.m,
@@ -313,7 +313,7 @@ where
     fn recompute_w(&mut self) -> Result<(), GprError> {
         let w = {
             let mut y_cast = P::Storage::empty_rows();
-            let y_s = P::Storage::storage_rows(&self.core.y, &mut y_cast);
+            let y_s = P::Storage::storage_rows(&self.core.y_train, &mut y_cast);
             refresh_w(self.a.as_ref(), self.b_l.as_ref(), y_s)
         };
         self.w = w;
@@ -415,7 +415,7 @@ where
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.core.y,
+            &self.core.y_train,
             self.k_diag_sum,
             self.a_frobenius2,
             self.core.likelihood.noise_variance(),
@@ -450,25 +450,29 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
+        let xs = self.core.map_query(xs, n_rows, n_cols)?;
+        let prediction = with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
             &self.core.kernel,
-            &self.core.z_obs,
+            &self.core.z_train,
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
             &self.predict_w,
             self.core.likelihood.noise_variance(),
             self.core.m,
             self.core.d,
-            xs,
+            &xs,
             n_rows,
             n_cols,
             options,
-        ))
+        ))?;
+        self.core.inverse_prediction::<P>(prediction)
     }
 
     /// Appends one training point at the current `θ` with a rank-1 VFE update.
     ///
-    /// `x_new` has length [`Self::d`]. Inducing coordinates are not moved.
+    /// `x_new` has length [`Self::d`]. `x_new` and `y_new` are in the
+    /// original units and go through the transforms fitted at training.
+    /// Inducing coordinates are not moved.
     /// The returned [`PointId`] is new and is never reused after a later
     /// [`Self::delete`].
     ///
@@ -490,9 +494,26 @@ where
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
+        let mut mapped = std::mem::take(&mut self.scratch.point);
+        let result = self.insert_mapped(x_new, y_new, &mut mapped);
+        self.scratch.point = mapped;
+        result
+    }
+
+    /// [`Self::insert`] after the checks. `mapped` receives `x_obs` through
+    /// the input transform.
+    fn insert_mapped(
+        &mut self,
+        x_obs: &[f64],
+        y_obs: f64,
+        mapped: &mut Vec<f64>,
+    ) -> Result<PointId, GprError> {
+        self.core.map_point(x_obs, mapped)?;
+        let x_new = mapped.as_slice();
+        let y_new = self.core.map_target(y_obs)?;
         let mut a_col = with_kernel_exp!(self.core.math, M => kernel_column::<M, P::Storage>(
             &self.core.kernel,
-            &self.core.z_obs,
+            &self.core.z_train,
             self.core.m,
             x_new,
             self.core.d,
@@ -507,8 +528,10 @@ where
         self.k_diag_sum += kernel_diag_at::<P::Storage>(&self.core.kernel, x_new, self.core.d)?;
         self.a = append_column(&self.a, a_col.as_ref());
         chol_rank1_update(&mut self.b_l, &mut v);
-        self.core.x_obs = append_point(&self.core.x_obs, self.core.n, self.core.d, x_new);
-        self.core.y.push(y_new);
+        append_point(&mut self.core.x_train, self.core.n, self.core.d, x_new);
+        append_point(&mut self.core.x_obs, self.core.n, self.core.d, x_obs);
+        self.core.y_train.push(y_new);
+        self.core.y_obs.push(y_obs);
         self.core.n += 1;
         self.recompute_w()?;
         Ok(self.registry.insert())
@@ -562,15 +585,18 @@ where
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = self.a[(i, idx)];
         }
-        let x_pt = point_at(&self.core.x_obs, self.core.n, self.core.d, idx);
+        let x_pt = point_at(&self.core.x_train, self.core.n, self.core.d, idx);
         let diag = kernel_diag_at::<P::Storage>(&self.core.kernel, &x_pt, self.core.d)?;
         let mut col_norm = P::Storage::from_f64(0.0);
         for value in &v {
             col_norm += *value * *value;
         }
-        let x_next = remove_point(&self.core.x_obs, self.core.n, self.core.d, idx);
-        let mut y_next = self.core.y.clone();
+        let x_next = remove_point(&self.core.x_train, self.core.n, self.core.d, idx);
+        let mut y_next = self.core.y_train.clone();
         y_next.remove(idx);
+        let x_obs_next = remove_point(&self.core.x_obs, self.core.n, self.core.d, idx);
+        let mut y_obs_next = self.core.y_obs.clone();
+        y_obs_next.remove(idx);
         let mut b_trial = self.b_l.clone();
         let mut v_trial = v;
         if chol_rank1_downdate(&mut b_trial, &mut v_trial) {
@@ -578,8 +604,10 @@ where
             self.a_frobenius2 -= col_norm;
             self.a = remove_column(&self.a, idx);
             self.b_l = b_trial;
-            self.core.x_obs = x_next;
-            self.core.y = y_next;
+            self.core.x_train = x_next;
+            self.core.y_train = y_next;
+            self.core.x_obs = x_obs_next;
+            self.core.y_obs = y_obs_next;
             self.core.n -= 1;
             self.recompute_w()?;
         } else {
@@ -590,13 +618,15 @@ where
                 self.core.n - 1,
                 self.core.d,
                 &y_next,
-                &self.core.z_obs,
+                &self.core.z_train,
                 self.core.m,
                 &mut self.scratch.storage,
                 &mut self.scratch.f64,
             ))?;
-            self.core.x_obs = x_next;
-            self.core.y = y_next;
+            self.core.x_train = x_next;
+            self.core.y_train = y_next;
+            self.core.x_obs = x_obs_next;
+            self.core.y_obs = y_obs_next;
             self.core.n -= 1;
             self.k_mm_l = state.k_mm_l;
             self.a = state.a;
@@ -611,7 +641,9 @@ where
 
     /// Appends one inducing point at the current `θ` with a bordered VFE update.
     ///
-    /// `z_new` has length [`Self::d`]. Training `X` / `y` are not moved.
+    /// `z_new` has length [`Self::d`], in the original coordinates of `X`;
+    /// it goes through the input transform fitted at training. Training
+    /// `X` / `y` are not moved.
     /// The returned [`InducingId`] is new and is never reused after a later
     /// [`Self::delete_inducing`]. If the bordered Schur complement is
     /// non-positive, the enlarged inducing set is assembled again.
@@ -664,33 +696,44 @@ where
         if z_new.iter().any(|v| !v.is_finite()) {
             return Err(GprError::NonFiniteInput);
         }
+        let z_obs = z_new;
+        let mut z_new = Vec::with_capacity(z_obs.len());
+        self.core.map_point(z_obs, &mut z_new)?;
+        let z_new = z_new.as_slice();
         let mut state = self.vfe_state();
         match with_kernel_exp!(self.core.math, M => inducing_insert::<M, _>(
             &mut state,
             &self.core.kernel,
             self.core.likelihood.noise_variance(),
-            &self.core.x_obs,
+            &self.core.x_train,
             self.core.n,
             self.core.d,
-            &self.core.y,
-            &self.core.z_obs,
+            &self.core.y_train,
+            &self.core.z_train,
             self.core.m,
             z_new,
             &mut self.scratch.storage,
         )) {
             Ok(()) => {
-                self.core.z_obs = append_point(&self.core.z_obs, self.core.m, self.core.d, z_new);
+                self.push_inducing(z_new, z_obs);
                 self.apply_vfe(state)?;
                 self.core.m += 1;
             }
             Err(GprError::CholeskyFailed { .. }) => {
-                self.core.z_obs = append_point(&self.core.z_obs, self.core.m, self.core.d, z_new);
+                self.push_inducing(z_new, z_obs);
                 self.core.m += 1;
             }
             Err(err) => return Err(err),
         }
         self.refresh_vfe()?;
         Ok(self.inducing.insert())
+    }
+
+    /// Appends one inducing point in transformed (`z`) and original
+    /// (`z_obs`) coordinates. `m` is not changed.
+    fn push_inducing(&mut self, z: &[f64], z_obs: &[f64]) {
+        append_point(&mut self.core.z_train, self.core.m, self.core.d, z);
+        append_point(&mut self.core.z_obs, self.core.m, self.core.d, z_obs);
     }
 
     /// Removes the inducing point identified by `id` and packs every buffer.
@@ -742,9 +785,10 @@ where
         inducing_delete(
             &mut state,
             self.core.likelihood.noise_variance(),
-            &self.core.y,
+            &self.core.y_train,
             idx,
         )?;
+        self.core.z_train = remove_point(&self.core.z_train, self.core.m, self.core.d, idx);
         self.core.z_obs = remove_point(&self.core.z_obs, self.core.m, self.core.d, idx);
         self.apply_vfe(state)?;
         self.core.m -= 1;

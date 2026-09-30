@@ -344,6 +344,7 @@ Split X and y. When a GPR has no mean function, **standardizing y to mean 0 and 
 trait Transform {
     fn fit(&mut self, x: MatRef<f64>);
     fn apply(&self, x: MatMut<f64>);
+    fn inverse_apply(&self, x: MatMut<f64>);
 }
 struct Pipeline(Vec<Box<dyn Transform>>);
 
@@ -363,6 +364,8 @@ struct ColumnwiseInput { maps: Vec<Box<dyn Transform>> }
 ```
 
 The default `Gpr` is Identity. When the mean function is zero, `StandardizeTarget` is the basic numerical step. `MinMaxInput` / `MinMaxTarget` scale to an interval (default `[0, 1]`). An unfitted `transform` / `apply` cannot happen: the types do not allow it. A series of maps is `Pipeline` (`X`) and `TargetPipeline` (`y`). A one-step `with_*` stays as it is. Inputs can be per column with `ColumnwiseInput` (a uniform column is MinMax, a near-normal column is Standardize. A length other than `d` is an error). `src/transform/` is `input.rs` / `target.rs` / `pipeline.rs` / `columnwise.rs`. Whether to split into leaf files is P2B-20 ([#116](https://github.com/YUKIKEDA/gprx/issues/116)). Judge by whether the adapter is independent, not by line count. `predict` computes latent or observation variance internally, then returns through `inverse_transform_mean` / `inverse_transform_variance`. For an affine `y' = (y - a)/s`, the inverse variance is `Var(y) = s² Var(y')`.
+
+`Sgpr` / `Svgp` take the same transforms with the same identity default (R5-3, [#281](https://github.com/YUKIKEDA/gprx/issues/281)). The inducing points `Z` are passed in the coordinates of `X` and go through the fitted input map with `X`. Queries and points inserted into `OnlineSgpr` go through the maps fitted at training. `FreeInducing` searches `Z` in the mapped coordinates. The fitted model reports `Z` in the original coordinates through `Transform::inverse_apply`, a required method: every input map is invertible.
 
 ## 6. GP model: swapping exact and sparse
 
