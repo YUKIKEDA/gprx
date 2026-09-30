@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
-from sklearn.cluster import KMeans
 
-from io_util import unpack_rows
-from problems import all_cases, as_f64_list, pack_column_major
-from sparse_online_ops import (
+from common.ops import (
     M_MAX,
     OPS_SEED,
     START_M,
@@ -18,14 +14,15 @@ from sparse_online_ops import (
     rbf_probe,
     start_n_for,
 )
-
-KMEANS_SEED = 0
-
-
-def kmeans_z(coords: np.ndarray, m: int = M_MAX) -> np.ndarray:
-    model = KMeans(n_clusters=m, random_state=KMEANS_SEED, n_init=10)
-    model.fit(coords)
-    return np.asarray(model.cluster_centers_, dtype=np.float64)
+from common.problems import (
+    KMEANS_SEED,
+    all_cases,
+    as_f64_list,
+    kmeans_z,
+    pack_column_major,
+    unpack_column_major,
+    write_cases,
+)
 
 
 def all_sparse_online_cases() -> list[dict]:
@@ -34,8 +31,8 @@ def all_sparse_online_cases() -> list[dict]:
     for base in all_cases():
         n_max = int(base["n_rows"])
         start_n = start_n_for(n_max)
-        coords = unpack_rows(base["x"], n_max, int(base["n_cols"]))
-        z = kmeans_z(coords)
+        coords = unpack_column_major(base["x"], n_max, int(base["n_cols"]))
+        z = kmeans_z(coords, M_MAX)
         ops = generate_ops(probe, z, start_n=start_n, n_max=n_max)
         case = dict(base)
         case["y"] = as_f64_list(np.asarray(base["y"], dtype=np.float64))
@@ -53,10 +50,4 @@ def all_sparse_online_cases() -> list[dict]:
 
 
 def write_sparse_online_cases(out_dir: Path) -> list[Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    for case in all_sparse_online_cases():
-        path = out_dir / f"{case['name']}.json"
-        path.write_text(json.dumps(case), encoding="utf-8")
-        paths.append(path)
-    return paths
+    return write_cases(out_dir, all_sparse_online_cases())

@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-PERF = ROOT / "perf"
-GOLDENS = ROOT / "goldens"
+from common.problems import make_forrester, make_sphere
+from perf.runners import PERF, ensure_libgp
 
-sys.path.insert(0, str(PERF))
-from problems import make_forrester, make_sphere  # noqa: E402
-from run import ensure_libgp_online  # noqa: E402
+ROOT = Path(__file__).resolve().parent
+GOLDENS = ROOT / "goldens"
 
 
 def prefix_colmajor(values: list[float], n: int, d: int, keep: int) -> list[float]:
@@ -69,7 +66,7 @@ def write_golden(case: dict, dest: Path, exe: Path) -> None:
 
 
 def main() -> int:
-    exe = ensure_libgp_online()
+    exe = ensure_libgp("libgp-online")
     if isinstance(exe, dict):
         raise RuntimeError(exe.get("note", "libgp-online build failed"))
     cases = [

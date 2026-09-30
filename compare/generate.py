@@ -45,6 +45,9 @@ from sklearn.gaussian_process.kernels import (
     WhiteKernel,
 )
 
+from common.problems import as_f64_list, forrester, pack_column_major, weighted_sphere
+from common.problems import column_major_view as unpack_column_major
+
 ROOT = Path(__file__).resolve().parent
 GOLDENS = ROOT / "goldens"
 
@@ -137,33 +140,6 @@ COMPOSITE_CASES = [
         "eval_gradient": True,
     },
 ]
-
-
-def unpack_column_major(values: list[float], n_rows: int, n_cols: int) -> np.ndarray:
-    packed = np.asarray(values, dtype=np.float64)
-    return packed.reshape((n_cols, n_rows), order="C").T
-
-
-def as_f64_list(values: np.ndarray) -> list[float]:
-    return [float(v) for v in np.asarray(values, dtype=np.float64).ravel()]
-
-
-def pack_column_major(coords: np.ndarray) -> list[float]:
-    """Packs an ``n×d`` point matrix into gprx column-major order."""
-    n_rows, n_cols = coords.shape
-    packed = np.empty(n_rows * n_cols, dtype=np.float64)
-    for dim in range(n_cols):
-        packed[dim * n_rows : (dim + 1) * n_rows] = coords[:, dim]
-    return as_f64_list(packed)
-
-
-def forrester(x: np.ndarray) -> np.ndarray:
-    return (6.0 * x - 2.0) ** 2 * np.sin(12.0 * x - 4.0)
-
-
-def weighted_sphere(coords: np.ndarray) -> np.ndarray:
-    """Anisotropic quadratic: shorter characteristic length in dim 0 than dim 1."""
-    return (coords[:, 0] / 0.25) ** 2 + (coords[:, 1] / 1.0) ** 2
 
 
 FIT_JITTER = 1e-10
