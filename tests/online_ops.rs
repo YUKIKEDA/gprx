@@ -103,7 +103,7 @@ fn assert_matches_factor(
     let nlml_online = online.neg_log_marginal_likelihood().expect("online nlml");
     let nlml_full = full.neg_log_marginal_likelihood().expect("factor nlml");
     assert_close(nlml_online, nlml_full, TOL);
-    assert_slice_close(online.alpha(), full.alpha(), TOL);
+    assert_slice_close(online.alpha().expect("online alpha"), full.alpha(), TOL);
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
