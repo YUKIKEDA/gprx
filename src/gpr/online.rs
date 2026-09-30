@@ -418,9 +418,8 @@ where
     ///
     /// `x_new` has length [`Self::d`]. Transforms already stored on this model
     /// are applied; they are not re-fit. Grows the online workspace when the
-    /// next row does not fit. `α` is not solved here; the next
-    /// [`Self::predict`], [`Self::neg_log_marginal_likelihood`], or
-    /// [`Self::alpha`] fills it. The returned [`PointId`] is new and is never
+    /// next row does not fit. `α` is not solved here. The first later read
+    /// solves it, and [`Self::alpha`] returns [`Result`]. The returned [`PointId`] is new and is never
     /// reused after a later [`Self::delete`].
     ///
     /// # Errors
@@ -522,9 +521,8 @@ where
     ///
     /// Updates the stored LDLT with
     /// `ldlt::update::delete_rows_and_cols_clobber`. Workspace capacity is
-    /// unchanged. `α` is not solved here; the next
-    /// [`Self::predict`], [`Self::neg_log_marginal_likelihood`], or
-    /// [`Self::alpha`] fills it. The last remaining point cannot be deleted.
+    /// unchanged. `α` is not solved here. The first later read solves it.
+    /// The last remaining point cannot be deleted.
     ///
     /// # Errors
     ///
