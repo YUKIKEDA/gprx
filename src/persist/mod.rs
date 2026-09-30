@@ -826,7 +826,6 @@ impl PersistLoad for crate::MixedPrecision<crate::ReevaluateKernel> {
     }
 }
 
-#[allow(private_bounds)]
 trait Seal<M: crate::math::KernelMath>: crate::precision::GpScalar {
     fn seal_cached(
         model: FittedGpr<Fixed, FullRecompute, CachedDistances, crate::RetainCholesky, M, Self>,

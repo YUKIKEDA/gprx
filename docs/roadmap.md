@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R2-4 ([#235](https://github.com/YUKIKEDA/gprx/issues/235), fix inconsistencies and leaks in the kernel and crate public surface). Acceptance is on #235. R2-3 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+R3-1 ([#236](https://github.com/YUKIKEDA/gprx/issues/236), `MixedPrecision` predict re-runs refinement and recompiles the kernel on every call). Acceptance is on #236. R2-4 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
 
 ## Dependencies
 
@@ -165,8 +165,8 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R2-1 | Task | One input struct for kernel evaluation entry points | [#232](https://github.com/YUKIKEDA/gprx/issues/232) | done |
 | R2-2 | Task | Split stationary kernels into profile and driver; remove `f32_eval.rs` | [#233](https://github.com/YUKIKEDA/gprx/issues/233) | done |
 | R2-3 | Feat | Custom kernels written once for f32 and f64 | [#234](https://github.com/YUKIKEDA/gprx/issues/234) | done |
-| R2-4 | Task | Fix inconsistencies and leaks in the kernel and crate public surface | [#235](https://github.com/YUKIKEDA/gprx/issues/235) | in progress |
-| R3-1 | Bug | `MixedPrecision` predict re-runs refinement and recompiles the kernel on every call | [#236](https://github.com/YUKIKEDA/gprx/issues/236) | acceptance on #236 |
+| R2-4 | Task | Fix inconsistencies and leaks in the kernel and crate public surface | [#235](https://github.com/YUKIKEDA/gprx/issues/235) | done |
+| R3-1 | Bug | `MixedPrecision` predict re-runs refinement and recompiles the kernel on every call | [#236](https://github.com/YUKIKEDA/gprx/issues/236) | in progress |
 | R3-2 | Bug | Refinement ignores the stored factor and `JitterPolicy` | [#237](https://github.com/YUKIKEDA/gprx/issues/237) | acceptance on #237 |
 | R3-3 | Task | One precision-policy trait; refinement as a `Refiner` | [#238](https://github.com/YUKIKEDA/gprx/issues/238) | acceptance on #238 |
 | R4-1 | Task | Distance cache, Cholesky buffer, exp mode, and recompute strategy as runtime values | [#239](https://github.com/YUKIKEDA/gprx/issues/239) | acceptance on #239 |

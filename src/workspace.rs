@@ -19,7 +19,7 @@ use crate::precision::{DoublePrecision, PrecisionPolicy};
 
 /// Shared fit buffers: `L` (or `W` while a reuse gradient is in progress)
 /// and Cholesky scratch. No distance cache.
-pub(crate) struct WorkspaceCore<P: PrecisionPolicy> {
+pub struct WorkspaceCore<P: PrecisionPolicy> {
     /// `A = K + σn² I`, then the LLT factor `L` after Cholesky.
     pub(crate) k_matrix: Mat<P::Storage>,
     /// Kernel values and `∂K/∂θ` output. Reuse n-RHS solve also uses this.
@@ -40,7 +40,7 @@ pub(crate) struct WorkspaceCore<P: PrecisionPolicy> {
 }
 
 /// Training-distance cache wrapping an inner workspace ([`crate::CachedDistances`]).
-pub(crate) struct WithDist<W, S = f64> {
+pub struct WithDist<W, S = f64> {
     pub(crate) inner: W,
     /// Pairwise squared distances for isotropic (distance-mode) leaves.
     pub(crate) dist_cache: Mat<S>,
@@ -53,13 +53,13 @@ pub(crate) struct WithDist<W, S = f64> {
 }
 
 /// Dedicated `W = ααᵀ - K⁻¹` wrapping an inner workspace ([`crate::RetainCholesky`]).
-pub(crate) struct WithW<W, S = f64> {
+pub struct WithW<W, S = f64> {
     pub(crate) inner: W,
     pub(crate) w_matrix: Mat<S>,
 }
 
 /// Mutable view of the distance tensors on [`WithDist`].
-pub(crate) struct DistBufs<'a, S = f64> {
+pub struct DistBufs<'a, S = f64> {
     pub dist_cache: &'a mut Mat<S>,
     pub dist_ready: &'a mut bool,
     pub ard_sq_diff: &'a mut Mat<S>,
@@ -82,7 +82,7 @@ impl<S: KernelScalar> DistBufs<'_, S> {
 }
 
 /// Construction and core access for composed fit buffers.
-pub(crate) trait FitWorkspace: Clone + Send + Sync + 'static {
+pub trait FitWorkspace: Clone + Send + Sync + 'static {
     type Policy: PrecisionPolicy;
 
     fn new(n: usize) -> Result<Self, GprError>

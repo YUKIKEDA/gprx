@@ -44,7 +44,6 @@ pub struct RbfArdKernel {
     lengthscales: ArdLengthscales,
 }
 
-#[allow(private_bounds)]
 impl RbfArdKernel {
     /// Builds an ARD RBF kernel from positive finite `ℓ_d`.
     ///
@@ -143,7 +142,16 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
-    pub fn apply<M: KernelMath, T: KernelScalar>(
+    pub fn apply<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.apply_math::<crate::math::Accurate, T>(x, out, uplo)
+    }
+
+    pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         mut out: MatMut<'_, T>,
@@ -167,7 +175,16 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
-    pub fn apply_cross<M: KernelMath, T: KernelScalar>(
+    pub fn apply_cross<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.apply_cross_math::<crate::math::Accurate, T>(x, xs, out)
+    }
+
+    pub(crate) fn apply_cross_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
@@ -198,7 +215,17 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad<M: KernelMath, T: KernelScalar>(
+    pub fn grad<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.grad_math::<crate::math::Accurate, T>(x, d_k, param_idx, uplo)
+    }
+
+    pub(crate) fn grad_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         mut d_k: MatMut<'_, T>,
@@ -278,7 +305,18 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess<M: KernelMath, T: KernelScalar>(
+    pub fn hess<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.hess_math::<crate::math::Accurate, T>(x, d2_k, i, j, uplo)
+    }
+
+    pub(crate) fn hess_math<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         d2_k: MatMut<'_, T>,
@@ -320,9 +358,19 @@ impl RbfArdKernel {
     ///
     /// # Errors
     ///
-    /// Same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`], or
+    /// Same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim), or
     /// [`GprError::IndexOutOfRange`] when `dim` does not match `ℓ_d`.
-    pub fn grad_wrt_coord_dim<M: KernelMath, T: KernelScalar>(
+    pub fn grad_wrt_coord_dim<T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        dim: usize,
+    ) -> Result<(), GprError> {
+        self.grad_wrt_coord_dim_math::<crate::math::Accurate, T>(x1, x2, d_k, dim)
+    }
+
+    pub(crate) fn grad_wrt_coord_dim_math<M: KernelMath, T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,
         x2: MatRef<'_, T>,
@@ -936,7 +984,6 @@ mod tests {
     use super::RbfArdKernel;
     use crate::error::GprError;
     use crate::kernel::{RbfKernel, Triangle};
-    use crate::math::Accurate;
     use faer::{Mat, MatRef};
 
     const TOL: f64 = 1e-10;
@@ -966,7 +1013,7 @@ mod tests {
         let rbf = RbfArdKernel::new(&[1.0, 2.0]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3]]);
         let mut k = fill(3, f64::NAN);
-        rbf.apply::<Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
+        rbf.apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         assert_close(k[(0, 0)], 1.0, TOL);
         assert_close(k[(1, 1)], 1.0, TOL);
@@ -980,7 +1027,7 @@ mod tests {
         // (0,2) differs only in dim 1 by 2 ⇒ k = exp(-4/(2ℓ₁²)) = exp(-1/2)
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.0], [0.0, 2.0]]);
         let mut k = fill(3, 0.0);
-        rbf.apply::<Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
+        rbf.apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         assert_close(k[(1, 0)], (-0.5_f64).exp(), TOL);
         assert_close(k[(2, 0)], (-0.5_f64).exp(), TOL);
@@ -998,7 +1045,7 @@ mod tests {
         let mut k_ard = fill(4, 0.0);
         iso.apply(dist.as_ref(), k_iso.as_mut(), Triangle::Full)
             .expect("shape");
-        ard.apply::<Accurate, _>(x.as_ref(), k_ard.as_mut(), Triangle::Full)
+        ard.apply(x.as_ref(), k_ard.as_mut(), Triangle::Full)
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
@@ -1017,7 +1064,7 @@ mod tests {
         crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
         let mut from_points = fill(n, 0.0);
         let mut from_cache = fill(n, f64::NAN);
-        rbf.apply::<Accurate, _>(x.as_ref(), from_points.as_mut(), Triangle::Lower)
+        rbf.apply(x.as_ref(), from_points.as_mut(), Triangle::Lower)
             .expect("points");
         rbf.apply_from_sq_diff::<crate::math::Accurate, _>(
             cache.as_ref(),
@@ -1039,7 +1086,7 @@ mod tests {
         for param_idx in 0..d {
             let mut from_points = fill(n, 0.0);
             let mut from_cache = fill(n, f64::NAN);
-            rbf.grad::<Accurate, _>(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
+            rbf.grad(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
                 .expect("points");
             rbf.grad_from_sq_diff::<crate::math::Accurate, _>(
                 cache.as_ref(),
@@ -1057,7 +1104,7 @@ mod tests {
         let rbf = RbfArdKernel::new(&[0.8, 1.7]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [0.5, 1.0], [2.0, -0.3], [2.5, 0.4]]);
         let mut k = fill(4, 0.0);
-        rbf.apply::<Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
+        rbf.apply(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         for col in 0..4 {
             for row in 0..4 {
@@ -1071,11 +1118,11 @@ mod tests {
         let rbf = RbfArdKernel::new(&[0.75, 1.25]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.2], [2.0, -0.5]]);
         let mut full = fill(3, 0.0);
-        rbf.apply::<Accurate, _>(x.as_ref(), full.as_mut(), Triangle::Full)
+        rbf.apply(x.as_ref(), full.as_mut(), Triangle::Full)
             .expect("shape");
         let sentinel = 42.0;
         let mut lower = fill(3, sentinel);
-        rbf.apply::<Accurate, _>(x.as_ref(), lower.as_mut(), Triangle::Lower)
+        rbf.apply(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], sentinel, TOL);
@@ -1089,9 +1136,9 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 1.0], [2.0, 0.5]]);
         let mut full = fill(3, 0.0);
         let mut upper = fill(3, -1.0);
-        rbf.apply::<Accurate, _>(x.as_ref(), full.as_mut(), Triangle::Full)
+        rbf.apply(x.as_ref(), full.as_mut(), Triangle::Full)
             .expect("shape");
-        rbf.apply::<Accurate, _>(x.as_ref(), upper.as_mut(), Triangle::Upper)
+        rbf.apply(x.as_ref(), upper.as_mut(), Triangle::Upper)
             .expect("shape");
         for col in 0..3 {
             for row in 0..=col {
@@ -1121,12 +1168,12 @@ mod tests {
                 let mut g_plus = fill(3, 0.0);
                 let mut g_minus = fill(3, 0.0);
                 let mut d2 = fill(3, 0.0);
-                plus.grad::<Accurate, _>(x.as_ref(), g_plus.as_mut(), i, Triangle::Full)
+                plus.grad(x.as_ref(), g_plus.as_mut(), i, Triangle::Full)
                     .expect("plus");
                 minus
-                    .grad::<Accurate, _>(x.as_ref(), g_minus.as_mut(), i, Triangle::Full)
+                    .grad(x.as_ref(), g_minus.as_mut(), i, Triangle::Full)
                     .expect("minus");
-                rbf.hess::<Accurate, _>(x.as_ref(), d2.as_mut(), i, j, Triangle::Full)
+                rbf.hess(x.as_ref(), d2.as_mut(), i, j, Triangle::Full)
                     .expect("pair");
                 for col in 0..3 {
                     for row in 0..3 {
@@ -1153,12 +1200,12 @@ mod tests {
             let mut k_plus = fill(3, 0.0);
             let mut k_minus = fill(3, 0.0);
             let mut dk = fill(3, 0.0);
-            plus.apply::<Accurate, _>(x.as_ref(), k_plus.as_mut(), Triangle::Full)
+            plus.apply(x.as_ref(), k_plus.as_mut(), Triangle::Full)
                 .expect("shape");
             minus
-                .apply::<Accurate, _>(x.as_ref(), k_minus.as_mut(), Triangle::Full)
+                .apply(x.as_ref(), k_minus.as_mut(), Triangle::Full)
                 .expect("shape");
-            rbf.grad::<Accurate, _>(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
+            rbf.grad(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
                 .expect("index");
             for col in 0..3 {
                 for row in 0..3 {
@@ -1175,9 +1222,9 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.0]]);
         let mut dk0 = fill(2, 0.0);
         let mut dk1 = fill(2, 0.0);
-        rbf.grad::<Accurate, _>(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
+        rbf.grad(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
             .expect("dim 0");
-        rbf.grad::<Accurate, _>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
+        rbf.grad(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
             .expect("dim 1");
         assert_close(dk1[(1, 0)], 0.0, TOL);
         assert!(dk0[(1, 0)].abs() > 1e-8);
@@ -1189,9 +1236,9 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [0.8, 0.3], [1.6, -0.2]]);
         let mut full = fill(3, 0.0);
         let mut lower = fill(3, 99.0);
-        rbf.grad::<Accurate, _>(x.as_ref(), full.as_mut(), 1, Triangle::Full)
+        rbf.grad(x.as_ref(), full.as_mut(), 1, Triangle::Full)
             .expect("index 1");
-        rbf.grad::<Accurate, _>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
+        rbf.grad(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("index 1");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], 99.0, TOL);
@@ -1215,10 +1262,10 @@ mod tests {
         let train = points_2d(&[[0.0, 0.0], [1.0, 0.5]]);
         let test = points_2d(&[[0.2, -0.1], [1.0, 0.5]]);
         let mut square = fill(2, 0.0);
-        rbf.apply::<Accurate, _>(train.as_ref(), square.as_mut(), Triangle::Full)
+        rbf.apply(train.as_ref(), square.as_mut(), Triangle::Full)
             .expect("square");
         let mut cross = fill(2, 0.0);
-        rbf.apply_cross::<crate::math::Accurate, _>(train.as_ref(), test.as_ref(), cross.as_mut())
+        rbf.apply_cross(train.as_ref(), test.as_ref(), cross.as_mut())
             .expect("rect");
         // test[:, 1] == train[:, 1]
         assert_close(cross[(0, 1)], square[(0, 1)], TOL);
@@ -1235,18 +1282,18 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 1.0]]);
         let mut dk = fill(2, 0.0);
         assert!(matches!(
-            rbf.grad::<Accurate, _>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
+            rbf.grad(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
             Err(GprError::IndexOutOfRange { .. })
         ));
         let bad_d = Mat::from_fn(2, 3, |_, _| 0.0);
         let mut k = fill(2, 0.0);
         assert!(matches!(
-            rbf.apply::<Accurate, _>(bad_d.as_ref(), k.as_mut(), Triangle::Full),
+            rbf.apply(bad_d.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::DimensionMismatch { .. })
         ));
         let nan = points_2d(&[[0.0, 0.0], [f64::NAN, 1.0]]);
         assert!(matches!(
-            rbf.apply::<Accurate, _>(nan.as_ref(), k.as_mut(), Triangle::Full),
+            rbf.apply(nan.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::NonFiniteInput)
         ));
     }

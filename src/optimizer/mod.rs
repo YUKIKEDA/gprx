@@ -85,7 +85,7 @@ pub trait AcceptsRecompute<O>: RecomputeStrategy {}
 
 /// Selects [`FullRecompute`] or [`IncrementalRecompute`] from the Cholesky pole.
 ///
-/// [`ReuseCholesky`] (memory pole) is always [`FullRecompute`].
+/// [`ReuseCholesky`](crate::ReuseCholesky) (memory pole) is always [`FullRecompute`].
 /// [`crate::RetainCholesky`] is [`IncrementalRecompute`] when `O`
 /// implements [`UsesChangeIndices`], and [`FullRecompute`] for the
 /// built-in solvers that do not. A custom [`Optimizer`] that does not

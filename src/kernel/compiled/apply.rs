@@ -7,7 +7,6 @@ use crate::kernel::KernelScalar;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
 
-#[allow(private_bounds)]
 impl<T: KernelScalar> CompiledKernel<T> {
     /// Writes `k` into `out` for `uplo`. `scratch` must match `out`.
     ///
@@ -94,10 +93,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
 
     /// Writes the diagonal `k(x, x)` into `out`.
     ///
+    /// Leaf `fill_diag` methods cannot fail and return `()`. This one returns
+    /// a `Result` because a tree may hold a leaf whose diagonal needs the
+    /// coordinates ([`super::super::LinearKernel`]); use
+    /// [`Self::fill_diag_points`] for such trees.
+    ///
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
-    /// terms.
+    /// terms or a leaf needs coordinates.
     pub fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
@@ -263,9 +267,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Periodic(leaf) => leaf.apply_from_coords::<M, _>(x, out, uplo),
             Self::RationalQuadratic(leaf) => leaf.apply_from_coords(x, out, uplo),
             Self::Custom(leaf) => apply_custom_from_coords(leaf, x, out, uplo),
-            Self::RbfArd(leaf) => leaf.apply::<M, _>(x, out, uplo),
+            Self::RbfArd(leaf) => leaf.apply_math::<M, _>(x, out, uplo),
             Self::Linear(leaf) => leaf.apply(x, out, uplo),
-            Self::MaternArd(leaf) => leaf.apply::<M, _>(x, out, uplo),
+            Self::MaternArd(leaf) => leaf.apply_math::<M, _>(x, out, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.apply(x, out, uplo),
             Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
             Self::White(leaf) => leaf.apply_points(x, out, uplo),
@@ -307,9 +311,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::Periodic(_)
             | Self::RationalQuadratic(_)
             | Self::Custom(_) => Err(iso_needs_dist()),
-            Self::RbfArd(leaf) => leaf.apply_cross::<M, _>(x, xs, out),
+            Self::RbfArd(leaf) => leaf.apply_cross_math::<M, _>(x, xs, out),
             Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
-            Self::MaternArd(leaf) => leaf.apply_cross::<M, _>(x, xs, out),
+            Self::MaternArd(leaf) => leaf.apply_cross_math::<M, _>(x, xs, out),
             Self::RationalQuadraticArd(leaf) => leaf.apply_cross(x, xs, out),
             Self::Constant(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::White(leaf) => leaf.apply_cross_points(x, xs, out),
@@ -322,8 +326,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
-    #[doc(hidden)]
-    pub fn apply_from_ard_cache<M: crate::math::KernelMath>(
+    pub(crate) fn apply_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, T>,
         x: MatRef<'_, T>,

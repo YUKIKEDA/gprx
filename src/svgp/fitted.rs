@@ -4,7 +4,6 @@ use std::marker::PhantomData;
 
 use faer::Mat;
 
-use super::factor::SvgpMean;
 use crate::error::GprError;
 use crate::param::write_params;
 
@@ -27,7 +26,6 @@ use super::factor::{
 /// likelihood `θ`, the whitened mean vector, then the packed column-major
 /// lower triangle of `L`.
 #[derive(Clone, Debug)]
-#[allow(private_bounds)]
 pub struct FittedSvgp<M = crate::math::Accurate, P: ModelPrecision = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) likelihood: GaussianLikelihood,
@@ -48,11 +46,10 @@ pub struct FittedSvgp<M = crate::math::Accurate, P: ModelPrecision = DoublePreci
     pub(crate) _math: PhantomData<M>,
 }
 
-#[allow(private_bounds)]
 impl<M, P> FittedSvgp<M, P>
 where
     M: crate::math::KernelMath,
-    P: GpScalar + SvgpMean,
+    P: GpScalar,
 {
     /// Returns the number of training points.
     pub fn n(&self) -> usize {

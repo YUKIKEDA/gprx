@@ -27,7 +27,7 @@ pub struct FixedInducing;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FreeInducing;
 
-pub(crate) trait InducingLayout: Clone {
+pub trait InducingLayout: Clone {
     fn z_params(m: usize, d: usize) -> usize;
 }
 
