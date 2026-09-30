@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R1-1 ([#227](https://github.com/YUKIKEDA/gprx/issues/227), numeric scalar trait shared by f32 and f64). Acceptance is on #227. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+R1-2 ([#228](https://github.com/YUKIKEDA/gprx/issues/228), collect linear algebra into a `linalg` module). Acceptance is on #228. R1-1 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
 
 ## Dependencies
 
@@ -157,8 +157,8 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| R1-1 | Task | Shared numeric scalar trait for f32 / f64; remove `size_of` type checks | [#227](https://github.com/YUKIKEDA/gprx/issues/227) | in progress |
-| R1-2 | Task | Collect linear algebra into a `linalg` module | [#228](https://github.com/YUKIKEDA/gprx/issues/228) | acceptance on #228 |
+| R1-1 | Task | Shared numeric scalar trait for f32 / f64; remove `size_of` type checks | [#227](https://github.com/YUKIKEDA/gprx/issues/227) | done |
+| R1-2 | Task | Collect linear algebra into a `linalg` module | [#228](https://github.com/YUKIKEDA/gprx/issues/228) | in progress |
 | R1-3 | Task | Collect input validation and column-major packing into a `data` module | [#229](https://github.com/YUKIKEDA/gprx/issues/229) | acceptance on #229 |
 | R1-4 | Task | One place for shared test helpers and problem generators | [#230](https://github.com/YUKIKEDA/gprx/issues/230) | acceptance on #230 |
 | R1-5 | Task | Reclassify `GprError` (shape, length, overflow, unused variants) | [#231](https://github.com/YUKIKEDA/gprx/issues/231) | acceptance on #231 |
