@@ -281,11 +281,15 @@ fn log_uniform_open(rng: &mut SmallRng, interval: Interval) -> f64 {
 /// instead of aborting the whole solve.
 const BARRIER_COST: f64 = 1.0e300;
 
+/// The lowest value an [`EvalCache`] evaluated, and where.
+pub(super) type BestPoint = RefCell<Option<(Vec<f64>, f64)>>;
+
 pub(super) struct EvalCache<'a, P: ?Sized> {
     objective: &'a mut P,
     params: Vec<f64>,
     value: Option<f64>,
     grad: Vec<f64>,
+    best: Option<&'a BestPoint>,
 }
 
 impl<'a, P: Differentiable + ?Sized> EvalCache<'a, P> {
@@ -295,7 +299,15 @@ impl<'a, P: Differentiable + ?Sized> EvalCache<'a, P> {
             params: Vec::new(),
             value: None,
             grad: vec![0.0; n],
+            best: None,
         }
+    }
+
+    /// Records the lowest finite value evaluated into `best`, which outlives
+    /// the solver that owns this cache.
+    pub(super) fn track_best(mut self, best: &'a BestPoint) -> Self {
+        self.best = Some(best);
+        self
     }
 
     fn eval(&mut self, param: &[f64]) -> Result<f64, GprError> {
@@ -315,6 +327,12 @@ impl<'a, P: Differentiable + ?Sized> EvalCache<'a, P> {
                 self.params.clear();
                 self.params.extend_from_slice(param);
                 self.value = Some(value);
+                if let Some(best) = self.best {
+                    let mut best = best.borrow_mut();
+                    if best.as_ref().is_none_or(|(_, v)| value < *v) {
+                        *best = Some((param.to_vec(), value));
+                    }
+                }
                 Ok(value)
             }
             Ok(_) | Err(_) => {
