@@ -12,7 +12,6 @@ use crate::linalg::{
 };
 use crate::param::Interval;
 use crate::policy::JitterPolicy;
-use crate::policy::KernelExp;
 use crate::precision::{F64Vfe, ModelPrecision};
 use crate::sgpr::FittedSgpr;
 use crate::sgpr::InducingLayout;
@@ -78,42 +77,35 @@ pub(crate) struct VfeState<T: KernelScalar> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P>(
-    kernel: KernelSpec,
-    likelihood: GaussianLikelihood,
+    core: SparseCore,
     optimizer: O,
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-    z: &[f64],
-    n_inducing: usize,
 ) -> Result<FittedSgpr<O, I, P>, GprError>
 where
     P: ModelPrecision,
 {
     let mut scratch = SparseScratch::<P::Storage>::default();
     let state = assemble_vfe::<M, P::Storage>(
-        &kernel,
-        likelihood,
-        x,
-        n_rows,
-        n_cols,
-        y,
-        z,
-        n_inducing,
+        &core.kernel,
+        core.likelihood,
+        &core.x_train,
+        core.n,
+        core.d,
+        &core.y_train,
+        &core.z_train,
+        core.m,
         &mut scratch.storage,
         &mut scratch.f64,
     )?;
     let predict_w = if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64>(
-            &kernel,
-            likelihood,
-            x,
-            n_rows,
-            n_cols,
-            y,
-            z,
-            n_inducing,
+            &core.kernel,
+            core.likelihood,
+            &core.x_train,
+            core.n,
+            core.d,
+            &core.y_train,
+            &core.z_train,
+            core.m,
             &mut scratch.f64,
             &mut KernelScratch::new(),
         )?
@@ -123,31 +115,21 @@ where
         .collect()
     } else {
         publish_sgpr_weights::<M, P>(
-            &kernel,
+            &core.kernel,
             state.a.as_ref(),
             state.b_l.as_ref(),
             &state.w,
-            x,
-            y,
-            z,
-            likelihood.noise_variance(),
-            n_rows,
-            n_inducing,
-            n_cols,
+            &core.x_train,
+            &core.y_train,
+            &core.z_train,
+            core.likelihood.noise_variance(),
+            core.n,
+            core.m,
+            core.d,
         )?
     };
     Ok(FittedSgpr {
-        core: SparseCore {
-            kernel,
-            likelihood,
-            math: KernelExp::of::<M>(),
-            x_obs: x.to_vec(),
-            z_obs: z.to_vec(),
-            y: y.to_vec(),
-            n: n_rows,
-            m: n_inducing,
-            d: n_cols,
-        },
+        core,
         scratch,
         optimizer,
         inducing: PhantomData,

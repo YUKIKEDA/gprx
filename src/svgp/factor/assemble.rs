@@ -4,9 +4,7 @@ use crate::data::{pack_points, validate_inducing, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
-use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower, symmetrize_lower};
-use crate::policy::KernelExp;
 use crate::precision::ModelPrecision;
 use crate::sparse::SparseCore;
 use crate::sparse::{KernelScratch, SparseScratch, k_mm_jitter_policy};
@@ -22,16 +20,8 @@ pub(crate) struct SvgpState<T: KernelScalar> {
     pub(crate) k_diag: Vec<T>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P>(
-    kernel: KernelSpec,
-    likelihood: GaussianLikelihood,
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-    z: &[f64],
-    n_inducing: usize,
+    core: SparseCore,
     q: Option<(Vec<f64>, Mat<f64>)>,
 ) -> Result<FittedSvgp<P>, GprError>
 where
@@ -39,28 +29,18 @@ where
 {
     let mut scratch = SparseScratch::<P::Storage>::default();
     let state = assemble_svgp::<M, P::Storage>(
-        &kernel,
-        x,
-        n_rows,
-        n_cols,
-        y,
-        z,
-        n_inducing,
+        &core.kernel,
+        &core.x_train,
+        core.n,
+        core.d,
+        &core.y_train,
+        &core.z_train,
+        core.m,
         q,
         &mut scratch.storage,
     )?;
     Ok(FittedSvgp {
-        core: SparseCore {
-            kernel,
-            likelihood,
-            x_obs: x.to_vec(),
-            z_obs: z.to_vec(),
-            y: y.to_vec(),
-            n: n_rows,
-            m: n_inducing,
-            d: n_cols,
-            math: KernelExp::of::<M>(),
-        },
+        core,
         scratch,
         k_mm_l: state.k_mm_l,
         a: state.a,

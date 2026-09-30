@@ -57,6 +57,18 @@ pub trait Transform: Send + Sync {
     /// fit, or [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`.
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 
+    /// Maps transformed features back to the original coordinates in place,
+    /// so that `inverse_apply` after [`Self::apply`] returns the input up to
+    /// rounding.
+    ///
+    /// The sparse models report inducing points that the optimizer moved in
+    /// transformed coordinates ([`crate::FreeInducing`]) through this map.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::apply`].
+    fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
+
     /// Clones this map into a new box. Used by [`crate::FittedGpr`] clone.
     fn clone_box(&self) -> Box<dyn Transform>;
 
@@ -139,10 +151,35 @@ impl UnfittedTransform for IdentityInput {
     }
 }
 
+/// Checks the column count against the fit, the packing, and finiteness.
+fn require_columns(
+    x: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    expected_cols: usize,
+) -> Result<(), GprError> {
+    if n_cols != expected_cols {
+        return Err(GprError::DimensionMismatch {
+            x_dim: n_cols,
+            expected_dim: expected_cols,
+        });
+    }
+    crate::data::require_count(
+        x.len(),
+        crate::data::column_major_len(n_rows, n_cols)?,
+        "values",
+    )?;
+    crate::data::require_finite(x)
+}
+
 impl Transform for IdentityInput {
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_pack(x, n_rows, n_cols)?;
         crate::data::require_finite(x)
+    }
+
+    fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+        self.apply(x, n_rows, n_cols)
     }
 
     fn clone_box(&self) -> Box<dyn Transform> {
@@ -263,25 +300,26 @@ impl FittedStandardizeInput {
 
 impl Transform for FittedStandardizeInput {
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
-        let expected_cols = self.mean.len();
-        if n_cols != expected_cols {
-            return Err(GprError::DimensionMismatch {
-                x_dim: n_cols,
-                expected_dim: expected_cols,
-            });
-        }
-        crate::data::require_count(
-            x.len(),
-            crate::data::column_major_len(n_rows, n_cols)?,
-            "values",
-        )?;
-        crate::data::require_finite(x)?;
+        require_columns(x, n_rows, n_cols, self.mean.len())?;
         for col in 0..n_cols {
             let mean = self.mean[col];
             let std = self.std[col];
             let start = col * n_rows;
             for value in &mut x[start..start + n_rows] {
                 *value = (*value - mean) / std;
+            }
+        }
+        Ok(())
+    }
+
+    fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+        require_columns(x, n_rows, n_cols, self.mean.len())?;
+        for col in 0..n_cols {
+            let mean = self.mean[col];
+            let std = self.std[col];
+            let start = col * n_rows;
+            for value in &mut x[start..start + n_rows] {
+                *value = *value * std + mean;
             }
         }
         Ok(())
@@ -466,19 +504,7 @@ impl FittedMinMaxInput {
 
 impl Transform for FittedMinMaxInput {
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
-        let expected_cols = self.data_min.len();
-        if n_cols != expected_cols {
-            return Err(GprError::DimensionMismatch {
-                x_dim: n_cols,
-                expected_dim: expected_cols,
-            });
-        }
-        crate::data::require_count(
-            x.len(),
-            crate::data::column_major_len(n_rows, n_cols)?,
-            "values",
-        )?;
-        crate::data::require_finite(x)?;
+        require_columns(x, n_rows, n_cols, self.data_min.len())?;
         let out_span = self.range_hi - self.range_lo;
         for col in 0..n_cols {
             let min = self.data_min[col];
@@ -486,6 +512,20 @@ impl Transform for FittedMinMaxInput {
             let start = col * n_rows;
             for value in &mut x[start..start + n_rows] {
                 *value = self.range_lo + out_span * (*value - min) / span;
+            }
+        }
+        Ok(())
+    }
+
+    fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+        require_columns(x, n_rows, n_cols, self.data_min.len())?;
+        let out_span = self.range_hi - self.range_lo;
+        for col in 0..n_cols {
+            let min = self.data_min[col];
+            let span = column_span(self.data_max[col], min);
+            let start = col * n_rows;
+            for value in &mut x[start..start + n_rows] {
+                *value = min + span * (*value - self.range_lo) / out_span;
             }
         }
         Ok(())
@@ -567,6 +607,40 @@ mod tests {
         assert_close(z[3], 0.0, TOL);
         assert_close(z[4], 0.0, TOL);
         assert_close(z[5], 0.0, TOL);
+    }
+
+    #[test]
+    fn inverse_apply_round_trips_each_builtin() {
+        let x = [0.0, 2.0, 4.0, 1.0, 1.0, 1.0];
+        let maps: [Box<dyn Transform>; 4] = [
+            Box::new(IdentityInput),
+            Box::new(StandardizeInput::new().fit(&x, 3, 2).expect("valid")),
+            Box::new(MinMaxInput::new().fit(&x, 3, 2).expect("valid")),
+            Box::new(
+                MinMaxInput::with_feature_range(-1.0, 3.0)
+                    .expect("valid range")
+                    .fit(&x, 3, 2)
+                    .expect("valid"),
+            ),
+        ];
+        let query = [-1.0, 0.5, 7.0, 1.0, 2.0, -3.0];
+        for (idx, map) in maps.iter().enumerate() {
+            let mut z = query;
+            map.apply(&mut z, 3, 2).expect("fitted");
+            map.inverse_apply(&mut z, 3, 2).expect("fitted");
+            for (got, want) in z.iter().zip(&query) {
+                assert_close(*got, *want, TOL);
+            }
+            let mut wrong = [0.0; 3];
+            // Identity is fitted to no column count.
+            assert!(
+                idx == 0
+                    || matches!(
+                        map.inverse_apply(&mut wrong, 3, 1),
+                        Err(GprError::DimensionMismatch { .. })
+                    )
+            );
+        }
     }
 
     #[test]
