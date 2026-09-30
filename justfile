@@ -52,3 +52,20 @@ perf-sparse:
 # Manual P4-14 Sparse-online harness. cargo test must not run this.
 perf-sparse-online:
     uv run --directory compare --group perf python -X utf8 -m perf.run_sparse_online
+
+# B1-1 real-dataset comparison. Manual: needs the network for the data. cargo test must not run this.
+# Example: just perf-real --datasets yacht,energy --splits 2 --protocol native
+perf-real *args:
+    uv run --directory compare --group perf python -X utf8 -m perf.run_real {{args}}
+
+# B1-1 fixed-θ agreement of every library (run before trusting a comparison).
+perf-real-check *args:
+    uv run --directory compare --group perf python -X utf8 -m perf.real.check {{args}}
+
+# B1-1 download the datasets and pin their checksums (compare/perf/real/checksums.json).
+perf-real-data:
+    uv run --directory compare --group perf python -X utf8 -m perf.real.data --pin
+
+# B1-1 figures, aggregated results, and the README tables from compare/perf/out/real.
+perf-real-report *args:
+    uv run --directory compare --group perf python -X utf8 -m perf.real.report {{args}}
