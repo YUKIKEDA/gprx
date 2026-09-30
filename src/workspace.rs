@@ -2,11 +2,10 @@
 //! for [`crate::FittedGpr::predict_into`].
 //!
 //! Fit buffers are allocated once when fit starts. Later optimizer iterations
-//! overwrite the same storage. Distance caches sit on [`WithDist`]; the
-//! dedicated `W` matrix sits on [`WithW`]. Query buffers live on
-//! [`QueryWorkspace`]. Crate-private; faer types are not re-exported.
-
-use std::ops::{Deref, DerefMut};
+//! overwrite the same storage. [`FitBuffers`] holds the shared core, the
+//! distance cache when [`crate::DistanceCachePolicy::Cached`], and the
+//! dedicated `W` matrix when [`crate::CholeskyBuffer::Retain`]. Query buffers
+//! live on [`QueryWorkspace`]. Crate-private; faer types are not re-exported.
 
 use dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::llt;
@@ -15,7 +14,7 @@ use faer::{Mat, MatRef};
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::linalg::{faer_par, fill_identity};
-use crate::precision::{DoublePrecision, PrecisionPolicy};
+use crate::precision::PrecisionPolicy;
 
 /// Shared fit buffers: `L` (or `W` while a reuse gradient is in progress)
 /// and Cholesky scratch. No distance cache.
@@ -39,9 +38,9 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     pub(crate) factor_jitter: f64,
 }
 
-/// Training-distance cache wrapping an inner workspace ([`crate::CachedDistances`]).
-pub struct WithDist<W, S = f64> {
-    pub(crate) inner: W,
+/// Training-distance tensors ([`crate::DistanceCachePolicy::Cached`]).
+#[derive(Clone)]
+pub struct DistCache<S> {
     /// Pairwise squared distances for isotropic (distance-mode) leaves.
     pub(crate) dist_cache: Mat<S>,
     /// Whether `dist_cache` matches the current training `X`.
@@ -52,13 +51,81 @@ pub struct WithDist<W, S = f64> {
     pub(crate) ard_sq_diff_ready: bool,
 }
 
-/// Dedicated `W = ααᵀ - K⁻¹` wrapping an inner workspace ([`crate::RetainCholesky`]).
-pub struct WithW<W, S = f64> {
-    pub(crate) inner: W,
-    pub(crate) w_matrix: Mat<S>,
+impl<S: KernelScalar> DistCache<S> {
+    fn new(n: usize) -> Self {
+        Self {
+            dist_cache: Mat::<S>::zeros(n, n),
+            dist_ready: false,
+            ard_sq_diff: Mat::<S>::zeros(0, 0),
+            ard_sq_diff_ready: false,
+        }
+    }
+
+    fn bufs(&mut self) -> DistBufs<'_, S> {
+        DistBufs {
+            dist_cache: &mut self.dist_cache,
+            dist_ready: &mut self.dist_ready,
+            ard_sq_diff: &mut self.ard_sq_diff,
+            ard_sq_diff_ready: &mut self.ard_sq_diff_ready,
+        }
+    }
 }
 
-/// Mutable view of the distance tensors on [`WithDist`].
+/// Fit buffers for one training size: the shared core, plus the distance
+/// cache and the dedicated `W` when the trainer's policies ask for them.
+pub struct FitBuffers<P: PrecisionPolicy> {
+    pub(crate) core: WorkspaceCore<P>,
+    /// `Some` for [`crate::DistanceCachePolicy::Cached`].
+    pub(crate) dist: Option<DistCache<P::Storage>>,
+    /// Dedicated `W = ααᵀ - K⁻¹` for [`crate::CholeskyBuffer::Retain`].
+    /// `None` reuses `k_matrix` as `W` and refactors afterwards.
+    pub(crate) w_matrix: Option<Mat<P::Storage>>,
+}
+
+impl<P: PrecisionPolicy> Clone for FitBuffers<P> {
+    fn clone(&self) -> Self {
+        Self {
+            core: self.core.clone(),
+            dist: self.dist.clone(),
+            w_matrix: self.w_matrix.clone(),
+        }
+    }
+}
+
+impl<P: PrecisionPolicy> FitBuffers<P> {
+    /// Allocates the core, the cache for `cache`, and `W` for `buffer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n` is zero.
+    pub(crate) fn new(
+        n: usize,
+        cache: crate::gpr::DistanceCachePolicy,
+        buffer: crate::gpr::CholeskyBuffer,
+    ) -> Result<Self, GprError> {
+        let core = WorkspaceCore::new(n)?;
+        let dist = match cache {
+            crate::gpr::DistanceCachePolicy::Cached => Some(DistCache::new(n)),
+            crate::gpr::DistanceCachePolicy::Uncached => None,
+        };
+        let w_matrix = match buffer {
+            crate::gpr::CholeskyBuffer::Retain => Some(Mat::<P::Storage>::zeros(n, n)),
+            crate::gpr::CholeskyBuffer::Reuse => None,
+        };
+        Ok(Self {
+            core,
+            dist,
+            w_matrix,
+        })
+    }
+
+    /// Whether a gradient overwrites `L` with `W` (no dedicated `W`).
+    pub(crate) fn overwrites_cholesky(&self) -> bool {
+        self.w_matrix.is_none()
+    }
+}
+
+/// Mutable view of the distance tensors on [`FitBuffers`].
 pub struct DistBufs<'a, S = f64> {
     pub dist_cache: &'a mut Mat<S>,
     pub dist_ready: &'a mut bool,
@@ -84,10 +151,6 @@ impl<S: KernelScalar> DistBufs<'_, S> {
 /// Construction and core access for composed fit buffers.
 pub trait FitWorkspace: Clone + Send + Sync + 'static {
     type Policy: PrecisionPolicy;
-
-    fn new(n: usize) -> Result<Self, GprError>
-    where
-        Self: Sized;
 
     fn core(&self) -> &WorkspaceCore<Self::Policy>;
 
@@ -125,14 +188,6 @@ pub trait FitWorkspace: Clone + Send + Sync + 'static {
         false
     }
 }
-
-/// Default cached + retain layout used by unit tests that still name `Workspace`.
-#[cfg(test)]
-pub(crate) type Workspace<P> = WithDist<WithW<WorkspaceCore<P>>>;
-
-/// Cached + reuse layout (distance tensors, no dedicated `W`).
-#[cfg(test)]
-pub(crate) type ReuseWorkspace<P> = WithDist<WorkspaceCore<P>>;
 
 /// Predict-into buffers owned by [`crate::FittedGpr`].
 ///
@@ -226,86 +281,6 @@ where
     }
 }
 
-impl<W: FitWorkspace<Policy = DoublePrecision>> WithDist<W> {
-    #[cfg(test)]
-    pub(crate) fn ensure_ard_sq_diff(&mut self, n: usize, d: usize) -> Result<(), GprError> {
-        let mut bufs = DistBufs {
-            dist_cache: &mut self.dist_cache,
-            dist_ready: &mut self.dist_ready,
-            ard_sq_diff: &mut self.ard_sq_diff,
-            ard_sq_diff_ready: &mut self.ard_sq_diff_ready,
-        };
-        bufs.ensure_ard_sq_diff(n, d)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn clear_ard_sq_diff(&mut self) {
-        if self.ard_sq_diff.nrows() != 0 || self.ard_sq_diff.ncols() != 0 {
-            self.ard_sq_diff = Mat::<f64>::zeros(0, 0);
-        }
-        self.ard_sq_diff_ready = false;
-    }
-
-    /// Reuses the existing allocation when `n` matches, otherwise reallocates.
-    #[cfg(test)]
-    pub(crate) fn ensure(&mut self, n: usize) -> Result<(), GprError> {
-        if n == self.core().n() {
-            return Ok(());
-        }
-        *self = Self::new(n)?;
-        Ok(())
-    }
-}
-
-impl<W, S> Deref for WithDist<W, S> {
-    type Target = W;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<W, S> DerefMut for WithDist<W, S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl<W: Clone, S: KernelScalar> Clone for WithDist<W, S> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            dist_cache: self.dist_cache.clone(),
-            dist_ready: self.dist_ready,
-            ard_sq_diff: self.ard_sq_diff.clone(),
-            ard_sq_diff_ready: self.ard_sq_diff_ready,
-        }
-    }
-}
-
-impl<W, S> Deref for WithW<W, S> {
-    type Target = W;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<W, S> DerefMut for WithW<W, S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl<W: Clone, S: KernelScalar> Clone for WithW<W, S> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            w_matrix: self.w_matrix.clone(),
-        }
-    }
-}
-
 fn form_w_lower<T>(mut w: faer::MatMut<'_, T>, alpha: &[T], n: usize)
 where
     T: KernelScalar,
@@ -332,159 +307,76 @@ fn form_w_from_inverse<T>(
     }
 }
 
-impl<P> FitWorkspace for WorkspaceCore<P>
+impl<P> FitWorkspace for FitBuffers<P>
 where
     P: PrecisionPolicy + 'static,
 {
     type Policy = P;
 
-    fn new(n: usize) -> Result<Self, GprError> {
-        Self::new(n)
-    }
-
     fn core(&self) -> &WorkspaceCore<P> {
-        self
+        &self.core
     }
 
     fn core_mut(&mut self) -> &mut WorkspaceCore<P> {
-        self
+        &mut self.core
     }
 
     fn split_fit(&mut self) -> (&mut WorkspaceCore<P>, Option<DistBufs<'_, P::Storage>>) {
-        (self, None)
+        (&mut self.core, self.dist.as_mut().map(DistCache::bufs))
     }
 
     fn form_gradient_w(&mut self, alpha: &[P::Storage], n: usize) {
-        fill_identity(self.exp_buf.as_mut());
-        {
-            let stack = MemStack::new(&mut self.faer_scratch);
-            llt::solve::solve_in_place(
-                self.k_matrix.as_ref(),
-                self.exp_buf.as_mut(),
-                faer_par(n),
-                stack,
-            );
+        let core = &mut self.core;
+        match &mut self.w_matrix {
+            Some(w_matrix) => {
+                fill_identity(w_matrix.as_mut());
+                {
+                    let stack = MemStack::new(&mut core.faer_scratch);
+                    llt::solve::solve_in_place(
+                        core.k_matrix.as_ref(),
+                        w_matrix.as_mut(),
+                        faer_par(n),
+                        stack,
+                    );
+                }
+                form_w_lower(w_matrix.as_mut(), alpha, n);
+            }
+            None => {
+                fill_identity(core.exp_buf.as_mut());
+                {
+                    let stack = MemStack::new(&mut core.faer_scratch);
+                    llt::solve::solve_in_place(
+                        core.k_matrix.as_ref(),
+                        core.exp_buf.as_mut(),
+                        faer_par(n),
+                        stack,
+                    );
+                }
+                form_w_from_inverse(core.k_matrix.as_mut(), core.exp_buf.as_ref(), alpha, n);
+            }
         }
-        form_w_from_inverse(self.k_matrix.as_mut(), self.exp_buf.as_ref(), alpha, n);
     }
 
     fn gradient_w(&self) -> MatRef<'_, P::Storage> {
-        self.k_matrix.as_ref()
-    }
-}
-
-impl<W, S> FitWorkspace for WithW<W, S>
-where
-    W: FitWorkspace<Policy: PrecisionPolicy<Storage = S>> + 'static,
-    S: KernelScalar,
-{
-    type Policy = W::Policy;
-
-    fn new(n: usize) -> Result<Self, GprError> {
-        Ok(Self {
-            inner: W::new(n)?,
-            w_matrix: Mat::<S>::zeros(n, n),
-        })
-    }
-
-    fn core(&self) -> &WorkspaceCore<W::Policy> {
-        self.inner.core()
-    }
-
-    fn core_mut(&mut self) -> &mut WorkspaceCore<W::Policy> {
-        self.inner.core_mut()
-    }
-
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<W::Policy>, Option<DistBufs<'_, S>>) {
-        self.inner.split_fit()
-    }
-
-    fn form_gradient_w(&mut self, alpha: &[S], n: usize) {
-        fill_identity(self.w_matrix.as_mut());
-        {
-            let WithW { inner, w_matrix } = self;
-            let core = inner.core_mut();
-            let stack = MemStack::new(&mut core.faer_scratch);
-            llt::solve::solve_in_place(
-                core.k_matrix.as_ref(),
-                w_matrix.as_mut(),
-                faer_par(n),
-                stack,
-            );
+        match &self.w_matrix {
+            Some(w_matrix) => w_matrix.as_ref(),
+            None => self.core.k_matrix.as_ref(),
         }
-        form_w_lower(self.w_matrix.as_mut(), alpha, n);
-    }
-
-    fn gradient_w(&self) -> MatRef<'_, S> {
-        self.w_matrix.as_ref()
-    }
-
-    fn has_dedicated_w(&self) -> bool {
-        true
-    }
-}
-
-impl<W, S> FitWorkspace for WithDist<W, S>
-where
-    W: FitWorkspace<Policy: PrecisionPolicy<Storage = S>> + 'static,
-    S: KernelScalar,
-{
-    type Policy = W::Policy;
-
-    fn new(n: usize) -> Result<Self, GprError> {
-        Ok(Self {
-            inner: W::new(n)?,
-            dist_cache: Mat::<S>::zeros(n, n),
-            dist_ready: false,
-            ard_sq_diff: Mat::<S>::zeros(0, 0),
-            ard_sq_diff_ready: false,
-        })
-    }
-
-    fn core(&self) -> &WorkspaceCore<W::Policy> {
-        self.inner.core()
-    }
-
-    fn core_mut(&mut self) -> &mut WorkspaceCore<W::Policy> {
-        self.inner.core_mut()
-    }
-
-    fn split_fit(&mut self) -> (&mut WorkspaceCore<W::Policy>, Option<DistBufs<'_, S>>) {
-        (
-            self.inner.core_mut(),
-            Some(DistBufs {
-                dist_cache: &mut self.dist_cache,
-                dist_ready: &mut self.dist_ready,
-                ard_sq_diff: &mut self.ard_sq_diff,
-                ard_sq_diff_ready: &mut self.ard_sq_diff_ready,
-            }),
-        )
-    }
-
-    fn form_gradient_w(&mut self, alpha: &[S], n: usize) {
-        self.inner.form_gradient_w(alpha, n);
-    }
-
-    fn gradient_w(&self) -> MatRef<'_, S> {
-        self.inner.gradient_w()
     }
 
     fn ensure_ard_if_cached(&mut self, n: usize, d: usize) -> Result<(), GprError> {
-        let mut bufs = DistBufs {
-            dist_cache: &mut self.dist_cache,
-            dist_ready: &mut self.dist_ready,
-            ard_sq_diff: &mut self.ard_sq_diff,
-            ard_sq_diff_ready: &mut self.ard_sq_diff_ready,
-        };
-        bufs.ensure_ard_sq_diff(n, d)
+        match &mut self.dist {
+            Some(dist) => dist.bufs().ensure_ard_sq_diff(n, d),
+            None => Ok(()),
+        }
     }
 
     fn has_distance_cache(&self) -> bool {
-        true
+        self.dist.is_some()
     }
 
     fn has_dedicated_w(&self) -> bool {
-        self.inner.has_dedicated_w()
+        self.w_matrix.is_some()
     }
 }
 
@@ -578,10 +470,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FitWorkspace, QueryWorkspace, ReuseWorkspace, Workspace, WorkspaceCore, faer_scratch_req,
-    };
+    use super::{FitBuffers, FitWorkspace, QueryWorkspace, WorkspaceCore, faer_scratch_req};
     use crate::error::GprError;
+    use crate::gpr::{CholeskyBuffer, DistanceCachePolicy};
     use crate::precision::DoublePrecision;
     use crate::test_check::assert_send_sync;
 
@@ -590,28 +481,27 @@ mod tests {
         assert_eq!(mat.ncols(), n);
     }
 
+    fn speed(n: usize) -> Result<FitBuffers<DoublePrecision>, GprError> {
+        FitBuffers::new(n, DistanceCachePolicy::Cached, CholeskyBuffer::Retain)
+    }
+
     #[test]
     fn new_rejects_empty() {
-        assert_eq!(
-            Workspace::<DoublePrecision>::new(0).err(),
-            Some(GprError::EmptyInput)
-        );
+        assert_eq!(speed(0).err(), Some(GprError::EmptyInput));
     }
 
     #[test]
     fn ensure_ard_sq_diff_allocates_n_by_n_d() {
-        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
-        ws.ensure_ard_sq_diff(4, 3).expect("n,d > 0");
-        assert_eq!(ws.ard_sq_diff.nrows(), 4);
-        assert_eq!(ws.ard_sq_diff.ncols(), 12);
-        ws.ensure_ard_sq_diff(4, 3).expect("same");
-        assert_eq!(ws.ard_sq_diff.ncols(), 12);
-        ws.ensure_ard_sq_diff(4, 2).expect("retile d");
-        assert_eq!(ws.ard_sq_diff.ncols(), 8);
-        ws.clear_ard_sq_diff();
-        assert_eq!(ws.ard_sq_diff.nrows(), 0);
+        let mut ws = speed(4).expect("n > 0");
+        ws.ensure_ard_if_cached(4, 3).expect("n,d > 0");
+        let dist = ws.dist.as_mut().expect("cached");
+        assert_eq!(dist.ard_sq_diff.nrows(), 4);
+        assert_eq!(dist.ard_sq_diff.ncols(), 12);
+        ws.ensure_ard_if_cached(4, 3).expect("same");
+        ws.ensure_ard_if_cached(4, 2).expect("retile d");
+        assert_eq!(ws.dist.as_ref().expect("cached").ard_sq_diff.ncols(), 8);
         assert_eq!(
-            ws.ensure_ard_sq_diff(0, 2).err(),
+            ws.ensure_ard_if_cached(0, 2).err(),
             Some(GprError::EmptyInput)
         );
     }
@@ -619,73 +509,74 @@ mod tests {
     #[test]
     fn reuse_workspace_has_no_second_n_by_n_w() {
         let n = 8;
-        let ws = ReuseWorkspace::<DoublePrecision>::new(n).expect("n > 0");
+        let ws = FitBuffers::<DoublePrecision>::new(
+            n,
+            DistanceCachePolicy::Cached,
+            CholeskyBuffer::Reuse,
+        )
+        .expect("n > 0");
         assert_eq!(ws.core().n(), n);
         assert_square(&ws.core().k_matrix, n);
-        assert_square(&ws.dist_cache, n);
+        assert_square(&ws.dist.as_ref().expect("cached").dist_cache, n);
         assert_square(&ws.core().exp_buf, n);
-        assert_eq!(ws.core().kernel_scratch.nrows(), 0);
-        assert_eq!(ws.core().kernel_scratch.ncols(), 0);
-        let uncached_reuse = WorkspaceCore::<DoublePrecision>::new(n).expect("n > 0");
-        assert_eq!(
-            std::mem::size_of_val(&uncached_reuse),
-            std::mem::size_of::<WorkspaceCore<DoublePrecision>>()
-        );
-        let _no_w: &WorkspaceCore<DoublePrecision> = &ws.inner;
+        assert!(ws.w_matrix.is_none());
+        assert!(ws.overwrites_cholesky());
+        let uncached = FitBuffers::<DoublePrecision>::new(
+            n,
+            DistanceCachePolicy::Uncached,
+            CholeskyBuffer::Reuse,
+        )
+        .expect("n > 0");
+        assert!(uncached.dist.is_none());
+        assert!(!uncached.has_distance_cache());
     }
 
     #[test]
     fn new_allocates_n_by_n_buffers_and_scratch() {
         let n = 8;
-        let ws = Workspace::<DoublePrecision>::new(n).expect("n > 0");
-        assert_eq!(ws.n(), n);
-        assert!(!ws.dist_ready);
-        assert_square(&ws.k_matrix, n);
-        assert_square(&ws.w_matrix, n);
-        assert_square(&ws.dist_cache, n);
-        assert_square(&ws.exp_buf, n);
-        assert_eq!(ws.kernel_scratch.nrows(), 0);
-        assert_eq!(ws.kernel_scratch.ncols(), 0);
-        assert_eq!(ws.ard_sq_diff.nrows(), 0);
-        assert_eq!(ws.ard_sq_diff.ncols(), 0);
-        assert!(!ws.ard_sq_diff_ready);
-        assert_eq!(ws.rhs.nrows(), n);
-        assert_eq!(ws.rhs.ncols(), 1);
-        assert_eq!(ws.thread_scratch.len(), rayon::current_num_threads().max(1));
+        let ws = speed(n).expect("n > 0");
+        let core = ws.core();
+        assert_eq!(core.n(), n);
+        let dist = ws.dist.as_ref().expect("cached");
+        assert!(!dist.dist_ready);
+        assert_square(&core.k_matrix, n);
+        assert_square(ws.w_matrix.as_ref().expect("retain"), n);
+        assert_square(&dist.dist_cache, n);
+        assert_square(&core.exp_buf, n);
+        assert_eq!(core.kernel_scratch.nrows(), 0);
+        assert_eq!(dist.ard_sq_diff.nrows(), 0);
+        assert!(!dist.ard_sq_diff_ready);
+        assert_eq!(core.rhs.nrows(), n);
+        assert_eq!(core.rhs.ncols(), 1);
+        assert_eq!(
+            core.thread_scratch.len(),
+            rayon::current_num_threads().max(1)
+        );
         assert!(
-            ws.thread_scratch
+            core.thread_scratch
                 .iter()
                 .all(|m| m.nrows() == 0 && m.ncols() == 0)
         );
         assert_eq!(
-            ws.faer_scratch.len(),
+            core.faer_scratch.len(),
             faer_scratch_req::<f64>(n).size_bytes()
         );
-        assert_send_sync::<Workspace<DoublePrecision>>();
+        assert_send_sync::<FitBuffers<DoublePrecision>>();
         assert_send_sync::<QueryWorkspace<DoublePrecision>>();
-    }
-
-    #[test]
-    fn ensure_keeps_size_then_grows() {
-        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
-        ws.ensure(4).expect("same n");
-        assert_eq!(ws.n(), 4);
-        ws.ensure(6).expect("grow");
-        assert_eq!(ws.n(), 6);
-        assert_square(&ws.k_matrix, 6);
-        assert_eq!(ws.ensure(0).err(), Some(GprError::EmptyInput));
+        let _core: &WorkspaceCore<DoublePrecision> = core;
     }
 
     #[test]
     fn ensure_kernel_scratch_allocates_when_needed() {
-        let mut ws = Workspace::<DoublePrecision>::new(4).expect("n > 0");
-        assert_eq!(ws.kernel_scratch.nrows(), 0);
-        ws.ensure_kernel_scratch(4).expect("n > 0");
-        assert_square(&ws.kernel_scratch, 4);
-        ws.ensure_kernel_scratch(4).expect("same n");
-        assert_square(&ws.kernel_scratch, 4);
+        let mut ws = speed(4).expect("n > 0");
+        let core = ws.core_mut();
+        assert_eq!(core.kernel_scratch.nrows(), 0);
+        core.ensure_kernel_scratch(4).expect("n > 0");
+        assert_square(&core.kernel_scratch, 4);
+        core.ensure_kernel_scratch(4).expect("same n");
+        assert_square(&core.kernel_scratch, 4);
         assert_eq!(
-            ws.ensure_kernel_scratch(0).err(),
+            core.ensure_kernel_scratch(0).err(),
             Some(GprError::EmptyInput)
         );
     }

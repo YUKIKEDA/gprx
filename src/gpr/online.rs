@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::marker::PhantomData;
 #[cfg(feature = "insert-stages")]
 use std::time::Instant;
 
@@ -16,16 +15,14 @@ use crate::likelihood::GaussianLikelihood;
 use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
 use crate::optimizer::Lbfgs;
-use crate::optimizer::{Fixed, FullRecompute, Optimizer, PoleRecompute};
+use crate::optimizer::{Fixed, Optimizer};
 use crate::persist::{self, PersistedModel, persist_err};
 use crate::precision::{DoublePrecision, GpScalar, StoredFactor, TrainSystem};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::QueryWorkspace;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::{
-    AllocWorkspace, DistanceCacheSlot, FittedGpr, Gpr, JitterPolicy, PointId, RetainCholesky,
-};
+use super::{FittedGpr, Gpr, PointId, Policies, with_kernel_exp};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PointRegistry {
@@ -185,14 +182,7 @@ impl PointRegistry {
 /// # Ok(())
 /// # }
 /// ```
-pub struct OnlineGpr<
-    O = Lbfgs,
-    S = FullRecompute,
-    C: DistanceCacheSlot = crate::CachedDistances,
-    B: AllocWorkspace = RetainCholesky,
-    M = crate::math::Accurate,
-    P: GpScalar = DoublePrecision,
-> {
+pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
     pub(crate) kernel: KernelSpec,
     pub(crate) compiled: CompiledKernel<P::Storage>,
     pub(crate) likelihood: GaussianLikelihood,
@@ -201,8 +191,7 @@ pub struct OnlineGpr<
     pub(crate) x_transform: Box<dyn Transform>,
     pub(crate) y_transform: Box<dyn TargetTransform>,
     pub(crate) optimizer: O,
-    pub(crate) distance_cache: C,
-    pub(crate) jitter_policy: JitterPolicy,
+    pub(crate) policies: Policies,
     pub(crate) workspace: OnlineWorkspace<P::Storage>,
     pub(crate) query: QueryWorkspace<P>,
     pub(crate) x_obs: Vec<f64>,
@@ -216,16 +205,11 @@ pub struct OnlineGpr<
     pub(crate) n: usize,
     pub(crate) d: usize,
     pub(crate) registry: PointRegistry,
-    pub(crate) _recompute: PhantomData<S>,
-    pub(crate) _math: PhantomData<M>,
-    pub(crate) _cholesky: PhantomData<B>,
 }
 
-impl<O, S, C, B, M, P> Clone for OnlineGpr<O, S, C, B, M, P>
+impl<O, P> Clone for OnlineGpr<O, P>
 where
     O: Clone,
-    C: Copy + DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
 {
     fn clone(&self) -> Self {
@@ -238,8 +222,7 @@ where
             x_transform: self.x_transform.clone_box(),
             y_transform: self.y_transform.clone_box(),
             optimizer: self.optimizer.clone(),
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
+            policies: self.policies,
             workspace: self.workspace.clone(),
             query: self.query.clone(),
             x_obs: self.x_obs.clone(),
@@ -253,18 +236,13 @@ where
             n: self.n,
             d: self.d,
             registry: self.registry.clone(),
-            _recompute: PhantomData,
-            _math: PhantomData,
-            _cholesky: PhantomData,
         }
     }
 }
 
-impl<O, S, C, B, M, P> fmt::Debug for OnlineGpr<O, S, C, B, M, P>
+impl<O, P> fmt::Debug for OnlineGpr<O, P>
 where
     O: fmt::Debug,
-    C: fmt::Debug + DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -273,18 +251,17 @@ where
             .field("d", &self.d)
             .field("kernel", &self.kernel)
             .field("likelihood", &self.likelihood)
-            .field("distance_cache", &self.distance_cache)
-            .field("jitter_policy", &self.jitter_policy)
+            .field("distance_cache", &self.policies.distance_cache)
+            .field("cholesky_buffer", &self.policies.cholesky_buffer)
+            .field("math", &self.policies.math)
+            .field("jitter_policy", &self.policies.jitter)
             .finish_non_exhaustive()
     }
 }
 
-impl<O, S, C, B, M, P> OnlineGpr<O, S, C, B, M, P>
+impl<O, P> OnlineGpr<O, P>
 where
-    C: DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
-    M: crate::math::KernelMath,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
@@ -296,8 +273,7 @@ where
         x_transform: Box<dyn Transform>,
         y_transform: Box<dyn TargetTransform>,
         optimizer: O,
-        distance_cache: C,
-        jitter_policy: JitterPolicy,
+        policies: Policies,
         workspace: OnlineWorkspace<P::Storage>,
         query: QueryWorkspace<P>,
         x_obs: Vec<f64>,
@@ -318,8 +294,7 @@ where
             x_transform,
             y_transform,
             optimizer,
-            distance_cache,
-            jitter_policy,
+            policies,
             workspace,
             query,
             x_obs,
@@ -333,33 +308,26 @@ where
             n,
             d,
             registry: PointRegistry::from_count(n),
-            _recompute: PhantomData,
-            _math: PhantomData,
-            _cholesky: PhantomData,
         }
     }
 
     /// Drops the LDLT factor and returns a trainer with the current kernel,
     /// likelihood, transforms, optimizer, and policies.
-    pub fn into_trainer(self) -> Gpr<O, S, C, B, M, P> {
+    pub fn into_trainer(self) -> Gpr<O, P> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
             self.x_unfitted,
             self.y_unfitted,
             self.optimizer,
-            self.distance_cache,
-            self.jitter_policy,
+            self.policies,
         )
     }
 
     /// Replaces the optimizer used by a later [`Self::refit`].
     ///
-    /// Same Cholesky-pole rule as [`FittedGpr::with_optimizer`].
-    pub fn with_optimizer<O2: PoleRecompute<B>>(
-        self,
-        optimizer: O2,
-    ) -> OnlineGpr<O2, O2::Strategy, C, B, M, P> {
+    /// Same incremental-rebuild rule as [`FittedGpr::with_optimizer`].
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> OnlineGpr<O2, P> {
         OnlineGpr {
             kernel: self.kernel,
             compiled: self.compiled,
@@ -369,8 +337,7 @@ where
             x_transform: self.x_transform,
             y_transform: self.y_transform,
             optimizer,
-            distance_cache: self.distance_cache,
-            jitter_policy: self.jitter_policy,
+            policies: self.policies,
             workspace: self.workspace,
             query: self.query,
             x_obs: self.x_obs,
@@ -384,9 +351,6 @@ where
             n: self.n,
             d: self.d,
             registry: self.registry,
-            _recompute: PhantomData,
-            _math: PhantomData,
-            _cholesky: PhantomData,
         }
     }
 
@@ -443,10 +407,10 @@ where
             jitter: self.workspace.factor_jitter,
             factor: StoredFactor::Ldlt(self.workspace.ld_factor.as_ref().submatrix(0, 0, n, n)),
             factor_alpha: &self.factor_alpha,
-            policy: self.jitter_policy,
+            policy: self.policies.jitter,
             stage,
         };
-        P::publish_predict_alpha::<M>(&sys, &mut self.alpha)
+        with_kernel_exp!(self.policies.math, M => P::publish_predict_alpha::<M>(&sys, &mut self.alpha))
     }
 
     /// Returns the original training features in column-major order.
@@ -489,7 +453,7 @@ where
         Ok(())
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedGpr<O, S, C, B, M, P>) -> Result<(), GprError> {
+    fn adopt_fitted(&mut self, fitted: FittedGpr<O, P>) -> Result<(), GprError> {
         let registry = self.registry.clone();
         *self = fitted.into_online()?;
         debug_assert_eq!(self.n, registry.len());
@@ -502,12 +466,23 @@ where
         self.workspace.factor_jitter
     }
 
-    pub(crate) fn jitter_policy(&self) -> JitterPolicy {
-        self.jitter_policy
+    pub(crate) fn policies(&self) -> Policies {
+        self.policies
     }
 
-    pub(crate) fn distance_cache_slot(&self) -> C {
-        self.distance_cache
+    /// Returns the distance-cache policy carried from the trainer.
+    pub fn distance_cache_policy(&self) -> crate::DistanceCachePolicy {
+        self.policies.distance_cache
+    }
+
+    /// Returns the Cholesky buffer policy carried from the trainer.
+    pub fn cholesky_buffer(&self) -> crate::CholeskyBuffer {
+        self.policies.cholesky_buffer
+    }
+
+    /// Returns the kernel `exp` used by fit and predict.
+    pub fn math(&self) -> crate::KernelExp {
+        self.policies.math
     }
 
     pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
@@ -595,14 +570,14 @@ where
                 d,
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
-            self.compiled.eval_cross::<M>(
+            with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
                 Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
                 &mut [],
-            )?;
+            ))?;
         }
         let mut kss = [P::Storage::from_f64(0.0)];
         self.compiled
@@ -754,7 +729,6 @@ where
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError>
     where
         O: Clone,
-        C: Copy,
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.set_params(params)?;
@@ -773,7 +747,6 @@ where
     ) -> Result<f64, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         let nlml = fitted.value_and_gradient_into(params, out)?;
@@ -789,7 +762,6 @@ where
     pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>
     where
         O: Clone,
-        C: Copy,
     {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.hessian_into(params, out)?;
@@ -885,21 +857,21 @@ where
                 ..
             } = &mut self.query;
             pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
-            self.compiled.eval_cross::<M>(
+            with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
                 x_train,
                 query_x.as_ref(),
                 Some(query_dist.as_mut()),
                 query_k_star.as_mut(),
                 query_scratch.as_mut(),
                 &mut [],
-            )?;
+            ))?;
         }
         let ld = self
             .workspace
             .ld_factor
             .as_ref()
             .submatrix(0, 0, self.n, self.n);
-        write_ldlt_prediction::<M, P>(
+        with_kernel_exp!(self.policies.math, M => write_ldlt_prediction::<M, P>(
             &self.kernel,
             ld,
             &self.alpha,
@@ -916,7 +888,7 @@ where
             options,
             self.y_transform.as_ref(),
             out,
-        )
+        ))
     }
 
     fn write_prediction(
@@ -947,15 +919,15 @@ where
         let mut query_k_star = Mat::<P::Storage>::zeros(n, m);
         let mut query_scratch = Mat::<P::Storage>::zeros(n, m);
         let mut query_kss = vec![P::Storage::from_f64(0.0); m];
-        self.compiled.eval_cross::<M>(
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
             x_train,
             query_x.as_ref(),
             Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
             &mut [],
-        )?;
-        write_ldlt_prediction::<M, P>(
+        ))?;
+        with_kernel_exp!(self.policies.math, M => write_ldlt_prediction::<M, P>(
             &self.kernel,
             self.ld_factor(),
             alpha,
@@ -972,7 +944,7 @@ where
             options,
             self.y_transform.as_ref(),
             out,
-        )
+        ))
     }
 
     /// Returns the predictive mean and query–query covariance at `xs`.
@@ -988,7 +960,6 @@ where
     ) -> Result<PredictiveCovariance<P::Refine>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         self.to_fitted()?.predict_covariance(xs, n_rows, n_cols)
     }
@@ -1007,7 +978,6 @@ where
     ) -> Result<PredictiveCovariance<P::Refine>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         self.to_fitted()?
             .predict_covariance_with(xs, n_rows, n_cols, options)
@@ -1028,7 +998,6 @@ where
     ) -> Result<Vec<P::Refine>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         self.to_fitted()?.sample(xs, n_rows, n_cols, n_draws, seed)
     }
@@ -1049,7 +1018,6 @@ where
     ) -> Result<Vec<P::Refine>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         self.to_fitted()?
             .sample_with(xs, n_rows, n_cols, options, n_draws, seed)
@@ -1063,7 +1031,6 @@ where
     pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         self.to_fitted()?.loo_predict()
     }
@@ -1079,48 +1046,38 @@ where
     ) -> Result<Prediction<P::Refine>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         self.to_fitted()?.loo_predict_with(options)
     }
 
-    fn to_fitted(&self) -> Result<FittedGpr<O, S, C, B, M, P>, GprError>
+    fn to_fitted(&self) -> Result<FittedGpr<O, P>, GprError>
     where
         O: Clone,
-        C: Copy,
     {
         FittedGpr::from_online_snapshot(self)
     }
 }
 
-impl<O, S, C, B, M, P> OnlineGpr<O, S, C, B, M, P>
+impl<O, P> OnlineGpr<O, P>
 where
-    C: DistanceCacheSlot,
-    B: AllocWorkspace,
     P: GpScalar,
-    M: crate::math::KernelMath,
-    O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
+    O: Clone + for<'a> Optimizer<GprObjective<'a, O, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///
     /// # Errors
     ///
     /// Same as [`FittedGpr::refit`].
-    pub fn refit(&mut self) -> Result<(), GprError>
-    where
-        C: Copy,
-    {
+    pub fn refit(&mut self) -> Result<(), GprError> {
         let mut fitted = FittedGpr::from_online_snapshot(self)?;
         fitted.refit()?;
         self.adopt_fitted(fitted)
     }
 }
 
-impl<C, M, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
+impl<P> OnlineGpr<Fixed, P>
 where
-    C: DistanceCacheSlot,
     P: GpScalar,
-    M: crate::math::KernelMath,
 {
     /// Rebuilds the LDLT factor at the current `θ` without a search.
     ///
@@ -1134,13 +1091,11 @@ where
     }
 }
 
-impl<C, M, P> OnlineGpr<Fixed, FullRecompute, C, RetainCholesky, M, P>
+impl<P> OnlineGpr<Fixed, P>
 where
-    C: DistanceCacheSlot,
-    P: crate::precision::GpScalar,
-    M: crate::math::KernelMath,
+    P: GpScalar,
 {
-    pub(crate) fn from_persisted(parts: PersistedModel<C, P>) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(parts: PersistedModel<P>) -> Result<Self, GprError> {
         FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
     }
 }
@@ -1405,9 +1360,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         online.save_with_factor(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::OnlineDistance(crate::persist::LoadedOnlineDistance::Cached(model)) = loaded
-        else {
-            panic!("online RBF should load as OnlineDistance::Cached");
+        let LoadedGpr::OnlineDouble(model) = loaded else {
+            panic!("online RBF should load as OnlineDouble");
         };
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");
         assert_mean_var_close(&got.mean, &got.variance, &want.mean, &want.variance, TOL);
@@ -1585,9 +1539,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         online.save_with_factor(&dir).expect("save");
         let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
-        let LoadedGpr::OnlineDistance(crate::persist::LoadedOnlineDistance::Cached(model)) = loaded
-        else {
-            panic!("online RBF should load as OnlineDistance::Cached");
+        let LoadedGpr::OnlineDouble(model) = loaded else {
+            panic!("online RBF should load as OnlineDouble");
         };
         assert_eq!(model.point_ids(), want_ids.as_slice());
         let got = model.predict(&[0.5], 1, 1).expect("loaded predict");

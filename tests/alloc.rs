@@ -11,8 +11,8 @@ mod common;
 use common::rng::{open_unit, small_rng};
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::{
-    Accurate, CachedDistances, FastApprox, FittedGpr, Fixed, FullRecompute, GaussianLikelihood,
-    Gpr, GprError, MixedPrecision, Prediction, ReevaluateKernel, RetainCholesky,
+    FittedGpr, Fixed, GaussianLikelihood, Gpr, GprError, KernelExp, MixedPrecision, Prediction,
+    ReevaluateKernel,
 };
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
@@ -123,7 +123,7 @@ fn fast_approx_mll_and_grad_allocs_after_workspace() {
     let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let mut gpr = Gpr::new(kernel, likelihood)
-        .with_math::<FastApprox>()
+        .with_math(KernelExp::FastApprox)
         .with_optimizer(Fixed)
         .factor(&x, N, D, &y)
         .expect("spd");
@@ -137,7 +137,7 @@ fn fast_approx_mll_and_grad_allocs_after_workspace() {
             .expect("counted");
     });
     assert_alloc_cap("fast_mll_and_grad", count, MAX_MLL_AND_GRAD_ALLOCS);
-    let _typed: FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, FastApprox> = gpr;
+    let _typed: FittedGpr<Fixed> = gpr;
 }
 
 #[test]
@@ -152,8 +152,7 @@ fn predict_100_allocs_after_workspace() {
     assert_alloc_cap("predict_100", count, MAX_PREDICT_100_ALLOCS);
 }
 
-type MixedFitted<R> =
-    FittedGpr<Fixed, FullRecompute, CachedDistances, RetainCholesky, Accurate, MixedPrecision<R>>;
+type MixedFitted<R> = FittedGpr<Fixed, MixedPrecision<R>>;
 
 fn fitted_mixed<R>() -> Result<(MixedFitted<R>, Vec<f64>), GprError>
 where
