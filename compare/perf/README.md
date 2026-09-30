@@ -81,7 +81,6 @@ N/A on purpose: friedrich (no ARD kernel, no sparse model), libgp (Rprop only, s
 
 Known limits of what is measured:
 
-- gprx's `Svgp` recomputes the cached `A = L⁻¹ K_mn` for **all** n points at every Adam step (`set_params`), and promotes a copy of it for f64 (`promote_svgp_f64`), so a step costs O(n·m²) instead of O(batch·m²). Measured on HouseElectric rows with m = 16, batch 1024: 90 ms per step at n = 20 000 and 335 ms at n = 80 000. At n ≈ 1.8 M a fit is hours; a T3 time for gprx's `Svgp` measures this, not the model.
 - gprx's `Sgpr` / `Svgp` cannot fit a signal variance (no coordinate derivative for a `Constant × RBF` product), so the sparse cells fix it at 1 in every library.
 - gprx's argmin L-BFGS uses several function evaluations per iteration (Sgpr, n = 1000, m = 128, d = 8: about 720 for 100 iterations); scipy's L-BFGS-B uses about one. Compare times only with the evaluation counts beside them.
 - At the same θ and Z, GPyTorch's sparse model has the same marginal likelihood as gprx and GPy but predicts with its own low-rank test covariance (RMSE / NLPD differ by a fraction of a percent).
