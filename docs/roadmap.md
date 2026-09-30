@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R4-7 ([#245](https://github.com/YUKIKEDA/gprx/issues/245), reorganize `src/gpr` files). Acceptance is on #245. R4-6 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+R5-1 ([#246](https://github.com/YUKIKEDA/gprx/issues/246), put `Sgpr` / `Svgp` on the shared core, linalg, and precision; fix module dependencies). Acceptance is on #246. R4-7 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
 
 ## Dependencies
 
@@ -175,8 +175,8 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R4-4 | Task | Uniform model state, rollback, and optional buffers | [#242](https://github.com/YUKIKEDA/gprx/issues/242) | done |
 | R4-5 | Bug | `IncrementalRecompute` infers changed leaves from bit differences and allocates per call | [#243](https://github.com/YUKIKEDA/gprx/issues/243) | done |
 | R4-6 | Task | Shrink the 48 `Loaded*` persist types | [#244](https://github.com/YUKIKEDA/gprx/issues/244) | done |
-| R4-7 | Task | Reorganize `src/gpr` files | [#245](https://github.com/YUKIKEDA/gprx/issues/245) | in progress |
-| R5-1 | Task | Put `Sgpr` / `Svgp` on the shared core, linalg, and precision; fix module dependencies | [#246](https://github.com/YUKIKEDA/gprx/issues/246) | acceptance on #246 |
+| R4-7 | Task | Reorganize `src/gpr` files | [#245](https://github.com/YUKIKEDA/gprx/issues/245) | done |
+| R5-1 | Task | Put `Sgpr` / `Svgp` on the shared core, linalg, and precision; fix module dependencies | [#246](https://github.com/YUKIKEDA/gprx/issues/246) | in progress |
 | R5-2 | Spike | Decide which Exact features `Sgpr` / `Svgp` should match | [#247](https://github.com/YUKIKEDA/gprx/issues/247) | acceptance on #247 |
 | R6-1 | Task | Deduplicate the `compare/` Python harness and problem definitions | [#248](https://github.com/YUKIKEDA/gprx/issues/248) | acceptance on #248 |
 | R6-2 | Task | Align `design.md` pseudo-code with the implementation | [#249](https://github.com/YUKIKEDA/gprx/issues/249) | acceptance on #249 |
