@@ -74,7 +74,7 @@ flowchart TB
 | `workspace` | 使い回すバッファ: Gram、`W`、距離キャッシュ、`exp` のバッファ、faer の scratch。クエリごとのバッファ | crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
 | `prediction` | 予測が返すものと、共分散からの事後標本の生成 | 公開: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
 | `objective` | モデルの学習の目的関数が実装する trait。ソルバーがモデルを知らなくて済む | 公開: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective`。crate: `HasBounds` | `error`, `param` |
-| `optimizer` | その trait の上のソルバー: argmin のアダプタ、自前の焼きなまし、`Fixed` の印。SVGP 用の Adam（`Optimizer` ではない） | 公開: `Optimizer`, `Lbfgs`, `NonlinearCg`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
+| `optimizer` | その trait の上のソルバー: argmin のアダプタ、自前の焼きなまし、`Fixed` の印。SVGP 用の Adam（`Optimizer` ではない） | 公開: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
 ### モデル
 
@@ -162,7 +162,7 @@ flowchart TB
 
 | パラメータ | 意味 | 値 |
 | --- | --- | --- |
-| `O` | 最適化器の枠 | `Lbfgs`（Exact と Sparse の既定）, `NonlinearCg`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, 利用者の `Optimizer`。`factor` だけなら `Fixed`。`Svgp::fit` は `Adam`（`Svgp` の既定は `Fixed`） |
+| `O` | 最適化器の枠 | `Lbfgs`（Exact と Sparse の既定）, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, 利用者の `Optimizer`。`factor` だけなら `Fixed`。`Svgp::fit` は `Adam`（`Svgp` の既定は `Fixed`） |
 | `P` | 精度。コンパイル時の選択 | `DoublePrecision`（既定）, `SinglePrecision`, `MixedPrecision`（残差は `PromoteStorage` か `ReevaluateKernel`） |
 | `I` | 誘導点 `Z` の置き場 | `FixedInducing`（既定。`Z` はパラメータに入らない）, `FreeInducing`（`Z` を `θ` と一緒に最適化する） |
 

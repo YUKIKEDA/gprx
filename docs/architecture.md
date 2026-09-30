@@ -74,7 +74,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `workspace` | Reusable buffers: Gram, `W`, distance cache, `exp` buffer, faer scratch; the per-query buffers | Crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
 | `prediction` | What a predict call returns, and drawing posterior samples from a covariance | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
 | `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective`. Crate: `HasBounds` | `error`, `param` |
-| `optimizer` | Solvers over those traits: argmin adapters, the homemade annealing, and the `Fixed` marker; Adam for SVGP (not an `Optimizer`) | Public: `Optimizer`, `Lbfgs`, `NonlinearCg`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
+| `optimizer` | Solvers over those traits: argmin adapters, the homemade annealing, and the `Fixed` marker; Adam for SVGP (not an `Optimizer`) | Public: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
 ### Models
 
@@ -162,7 +162,7 @@ The type parameters:
 
 | Parameter | Meaning | Values |
 | --- | --- | --- |
-| `O` | The optimizer slot | `Lbfgs` (default for Exact and Sparse), `NonlinearCg`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, a user `Optimizer`; `Fixed` for `factor` only; `Adam` for `Svgp::fit` (`Svgp` defaults to `Fixed`) |
+| `O` | The optimizer slot | `Lbfgs` (default for Exact and Sparse), `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, a user `Optimizer`; `Fixed` for `factor` only; `Adam` for `Svgp::fit` (`Svgp` defaults to `Fixed`) |
 | `P` | Precision, a compile-time choice | `DoublePrecision` (default), `SinglePrecision`, `MixedPrecision` (residual `PromoteStorage` or `ReevaluateKernel`) |
 | `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`) |
 
