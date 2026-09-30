@@ -1,62 +1,14 @@
 //! One Sparse cell: `Sgpr<Fixed>::factor` or `Svgp<Fixed>::factor`, then
 //! N joint value+grad evals, then predict 100.
 
-use std::env;
-use std::fs;
-use std::process::ExitCode;
 use std::time::Instant;
 
-use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{FittedSgpr, FittedSvgp, Fixed, GaussianLikelihood, Sgpr, Svgp};
 
-#[allow(dead_code)]
-#[path = "../../case_schema.rs"]
-mod case_schema;
-#[path = "../../rss_win.rs"]
-mod peak_rss;
-#[path = "../../timing.rs"]
-mod timing;
-
-use case_schema::{ResultRow, SparseCase};
-
-fn na_row(lib: &str, name: &str, note: String) -> ResultRow {
-    ResultRow {
-        lib: lib.to_string(),
-        name: name.to_string(),
-        status: "na".to_string(),
-        factor_s: None,
-        factor_min_s: None,
-        factor_max_s: None,
-        eval_s: None,
-        eval_min_s: None,
-        eval_max_s: None,
-        predict_s: None,
-        predict_min_s: None,
-        predict_max_s: None,
-        joint_evals: None,
-        peak_rss_bytes: None,
-        warmup: None,
-        reps: None,
-        kernel_s: None,
-        border_s: None,
-        rest_s: None,
-        note: Some(note),
-    }
-}
-
-fn make_kernel(case: &SparseCase) -> Result<KernelSpec, String> {
-    if case.ard {
-        let spec = RbfArdKernel::new(&case.lengthscales_init).map_err(|e| e.to_string())?;
-        Ok(KernelSpec::from(spec))
-    } else {
-        let ell = case
-            .lengthscales_init
-            .first()
-            .copied()
-            .ok_or_else(|| "missing lengthscale".to_string())?;
-        Ok(KernelSpec::from(RbfKernel::new(ell).map_err(|e| e.to_string())?))
-    }
-}
+use crate::case::{ResultRow, SparseCase};
+use crate::rss::peak_rss_bytes;
+use crate::shared::rbf_kernel;
+use crate::timing;
 
 fn finish_row(
     case: &SparseCase,
@@ -83,7 +35,7 @@ fn finish_row(
         predict_min_s: Some(predict_min),
         predict_max_s: Some(predict_max),
         joint_evals: Some(case.joint_evals),
-        peak_rss_bytes: Some(peak_rss::peak_rss_bytes()?),
+        peak_rss_bytes: Some(peak_rss_bytes()?),
         warmup: Some(warmup as u64),
         reps: Some(reps as u64),
         kernel_s: None,
@@ -190,7 +142,8 @@ fn run_sgpr(case: &SparseCase) -> Result<ResultRow, String> {
         drop(fitted.take());
         let likelihood =
             GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
-        let trainer = Sgpr::new(make_kernel(case)?, likelihood).with_optimizer(Fixed);
+        let trainer = Sgpr::new(rbf_kernel(case.ard, &case.lengthscales_init)?, likelihood)
+            .with_optimizer(Fixed);
         let start = Instant::now();
         let next = trainer
             .factor(
@@ -208,7 +161,7 @@ fn run_sgpr(case: &SparseCase) -> Result<ResultRow, String> {
         }
         fitted = Some(next);
     }
-    let mut fitted = fitted.expect("timed_reps is at least 1");
+    let mut fitted = fitted.ok_or_else(|| "timed_reps is at least 1".to_string())?;
     let (eval_scale, predict_samples) = time_eval_predict(case, &mut fitted, warmup, reps)?;
     finish_row(
         case,
@@ -229,7 +182,7 @@ fn run_svgp(case: &SparseCase) -> Result<ResultRow, String> {
         drop(fitted.take());
         let likelihood =
             GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
-        let trainer = Svgp::new(make_kernel(case)?, likelihood);
+        let trainer = Svgp::new(rbf_kernel(case.ard, &case.lengthscales_init)?, likelihood);
         let start = Instant::now();
         let next = trainer
             .factor(
@@ -247,7 +200,7 @@ fn run_svgp(case: &SparseCase) -> Result<ResultRow, String> {
         }
         fitted = Some(next);
     }
-    let mut fitted = fitted.expect("timed_reps is at least 1");
+    let mut fitted = fitted.ok_or_else(|| "timed_reps is at least 1".to_string())?;
     let (eval_scale, predict_samples) = time_eval_predict(case, &mut fitted, warmup, reps)?;
     finish_row(
         case,
@@ -259,42 +212,12 @@ fn run_svgp(case: &SparseCase) -> Result<ResultRow, String> {
     )
 }
 
-fn main() -> ExitCode {
-    let Some(path) = env::args().nth(1) else {
-        eprintln!("usage: gprx-sparse-perf CASE.json");
-        return ExitCode::from(2);
-    };
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-    let case: SparseCase = match serde_json::from_str(&text) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
-    };
-    let row = match case.model.as_str() {
-        "sgpr" => run_sgpr(&case),
-        "svgp" => run_svgp(&case),
+/// The case's model (`sgpr` or `svgp`): factor, N joint value+grad evals,
+/// predict 100.
+pub fn run(case: &SparseCase) -> Result<ResultRow, String> {
+    match case.model.as_str() {
+        "sgpr" => run_sgpr(case),
+        "svgp" => run_svgp(case),
         other => Err(format!("unknown sparse model {other}")),
-    };
-    let row = match row {
-        Ok(row) => row,
-        Err(e) => na_row("gprx", &case.name, e),
-    };
-    match serde_json::to_string(&row) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::from(1)
-        }
     }
 }

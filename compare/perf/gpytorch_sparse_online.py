@@ -16,10 +16,11 @@ from gpytorch.kernels import RBFKernel
 torch.set_default_dtype(torch.float64)
 torch.set_num_threads(max(1, os.cpu_count() or 1))
 
-from io_util import load_case, unpack_rows, write_result
-from rss import peak_rss_bytes
-from sparse_online_ops import apply_op
-from timing import median, min_max, timed_reps, warmup_count
+from common.problems import unpack_column_major as unpack_rows
+from common.records import load_case, write_result
+from common.ops import apply_op
+from common.rss import peak_rss_bytes
+from common.timing import median, min_max, timed_reps, warmup_count
 
 DEVICE = torch.device("cpu")
 

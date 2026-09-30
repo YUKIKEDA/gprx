@@ -1,4 +1,4 @@
-"""Generate and apply P4-14 OnlineSgpr ops. Does not read P4-13 goldens."""
+"""Generate the P4-14 OnlineSgpr ops shared by the P4-13 goldens and the P4-14 cases."""
 
 from __future__ import annotations
 

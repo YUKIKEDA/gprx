@@ -1,4 +1,4 @@
-"""Warmup + timed-rep helpers for the Python P2B-16 runners."""
+"""Warmup + timed-rep helpers for the Python runners (P2B-16 clock)."""
 
 from __future__ import annotations
 
