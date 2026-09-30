@@ -38,6 +38,7 @@ where
     }
 
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        crate::objective::count_value_call!();
         match self.model.set_params(params) {
             Ok(()) => self.model.neg_log_marginal_likelihood(),
             Err(GprError::CholeskyFailed { .. }) => Ok(1.0e300),
@@ -51,6 +52,7 @@ where
     P: crate::precision::GpScalar,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        crate::objective::count_joint_call!();
         self.model.value_and_gradient_into(params, out).map(|_| ())
     }
 
@@ -59,6 +61,7 @@ where
         params: &[f64],
         out: &mut [f64],
     ) -> Result<f64, GprError> {
+        crate::objective::count_joint_call!();
         self.model.value_and_gradient_into(params, out)
     }
 }

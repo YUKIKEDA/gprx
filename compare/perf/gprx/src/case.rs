@@ -167,3 +167,69 @@ impl SparseOnlineResult {
         }
     }
 }
+
+/// B1-1 real-dataset cell. `x` / `xs` are column-major and standardized, `y`
+/// is standardized with the training statistics, `ys` is in original units.
+#[derive(Debug, Deserialize)]
+pub struct RealCase {
+    pub name: String,
+    pub n_rows: usize,
+    pub n_cols: usize,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub xs_n_rows: usize,
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+    pub y_mean: f64,
+    pub y_std: f64,
+    pub lengthscale_init: f64,
+    pub signal_variance_init: f64,
+    pub noise_variance_init: f64,
+    /// `native` (the library default) or `matched` (`max_iterations` / `gtol`).
+    pub protocol: String,
+    pub max_iterations: u64,
+    pub gtol: f64,
+}
+
+/// One real-dataset fit row (also written by the Python runners).
+#[derive(Debug, Serialize)]
+pub struct FitRow {
+    pub lib: String,
+    pub name: String,
+    pub status: String,
+    pub protocol: String,
+    pub fit_s: Option<f64>,
+    pub predict_s: Option<f64>,
+    pub joint_evals: Option<u64>,
+    pub value_evals: Option<u64>,
+    pub iterations: Option<u64>,
+    pub nlml: Option<f64>,
+    pub rmse: Option<f64>,
+    pub nlpd: Option<f64>,
+    pub coverage95: Option<f64>,
+    pub peak_rss_bytes: Option<u64>,
+    pub note: Option<String>,
+}
+
+impl FitRow {
+    /// The row of a cell that could not run.
+    pub fn na(lib: &str, name: &str, protocol: &str, note: String) -> Self {
+        Self {
+            lib: lib.to_string(),
+            name: name.to_string(),
+            status: "na".to_string(),
+            protocol: protocol.to_string(),
+            fit_s: None,
+            predict_s: None,
+            joint_evals: None,
+            value_evals: None,
+            iterations: None,
+            nlml: None,
+            rmse: None,
+            nlpd: None,
+            coverage95: None,
+            peak_rss_bytes: None,
+            note: Some(note),
+        }
+    }
+}

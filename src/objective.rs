@@ -10,6 +10,60 @@
 use crate::error::GprError;
 use crate::param::Interval;
 
+/// Calls the model adapters make, for the `compare/perf` optimizer tables.
+///
+/// Present only with the non-default feature `bench-internals`. One global
+/// pair of counters: fits must not run concurrently while it is read.
+#[cfg(feature = "bench-internals")]
+pub(crate) mod call_counts {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static VALUE_CALLS: AtomicU64 = AtomicU64::new(0);
+    static JOINT_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn count_value() {
+        VALUE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_joint() {
+        JOINT_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reset() {
+        VALUE_CALLS.store(0, Ordering::Relaxed);
+        JOINT_CALLS.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn read() -> (u64, u64) {
+        (
+            VALUE_CALLS.load(Ordering::Relaxed),
+            JOINT_CALLS.load(Ordering::Relaxed),
+        )
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+macro_rules! count_value_call {
+    () => {
+        $crate::objective::call_counts::count_value()
+    };
+}
+#[cfg(not(feature = "bench-internals"))]
+macro_rules! count_value_call {
+    () => {};
+}
+#[cfg(feature = "bench-internals")]
+macro_rules! count_joint_call {
+    () => {
+        $crate::objective::call_counts::count_joint()
+    };
+}
+#[cfg(not(feature = "bench-internals"))]
+macro_rules! count_joint_call {
+    () => {};
+}
+pub(crate) use {count_joint_call, count_value_call};
+
 /// Optimizer-facing scalar objective (`value` only).
 ///
 /// Default [`Differentiable::value_and_gradient_into`] is not on this trait.
