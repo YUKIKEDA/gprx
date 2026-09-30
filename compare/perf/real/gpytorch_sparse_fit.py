@@ -34,9 +34,7 @@ torch.set_default_dtype(torch.float64)
 def _base_kernel(case: dict, d: int):
     kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=d))
     kernel.base_kernel.lengthscale = case["lengthscale_init"]
-    kernel.outputscale = 1.0
-    # gprx's sparse models cannot fit a signal variance (see gprx fit.rs): fixed at 1 here too.
-    kernel.raw_outputscale.requires_grad_(False)
+    kernel.outputscale = case["signal_variance_init"]
     return kernel
 
 

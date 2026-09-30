@@ -4,7 +4,8 @@ use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::scalar::f64_pair;
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
 use super::{
-    KernelScalar, Triangle, finite_dist, write_dense, write_square_from_coords, write_triangle,
+    KernelScalar, Triangle, finite_dist, write_dense, write_rect_from_coords,
+    write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
 use crate::math::{Accurate, ExpJet, KernelMath};
@@ -272,6 +273,17 @@ impl RbfKernel {
         write_square_from_coords(x, out, uplo, |d| {
             rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq)
         })
+    }
+
+    /// Rectangular `K(x1, x2)` from coordinates.
+    pub(crate) fn apply_cross_from_coords<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let (inv_two_ell_sq, _) = self.inv_scales_t::<T>();
+        write_rect_from_coords(x1, x2, out, |d| rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq))
     }
 
     pub(crate) fn grad_from_coords<M: KernelMath, T: KernelScalar>(

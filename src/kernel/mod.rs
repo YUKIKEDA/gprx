@@ -280,6 +280,35 @@ pub(crate) fn pair_squared_euclidean<T: KernelScalar>(x: MatRef<'_, T>, i: usize
     sum
 }
 
+/// `‖x1_row − x2_col‖²` of two point sets.
+pub(crate) fn cross_squared_euclidean<T: KernelScalar>(
+    x1: MatRef<'_, T>,
+    row: usize,
+    x2: MatRef<'_, T>,
+    col: usize,
+) -> T {
+    let mut sum = T::from_f64(0.0);
+    for dim in 0..x1.ncols() {
+        let diff = x1[(row, dim)] - x2[(col, dim)];
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// Writes a rectangular kernel block (`x1.nrows() × x2.nrows()`) from
+/// coordinates: `kernel(‖x1_i − x2_j‖²)` per entry, without a distance matrix.
+pub(crate) fn write_rect_from_coords<T: KernelScalar>(
+    x1: MatRef<'_, T>,
+    x2: MatRef<'_, T>,
+    out: MatMut<'_, T>,
+    kernel: impl Fn(T) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    require_coord_grad(x1, x2, out.as_ref(), 0)?;
+    write_rect(out, |row, col| {
+        kernel(finite_dist(cross_squared_euclidean(x1, row, x2, col))?)
+    })
+}
+
 /// Writes a kernel triangle from coordinates. Each pair computes `‖x_i-x_j‖²`
 /// without a distance matrix.
 pub(crate) fn write_square_from_coords<T: KernelScalar>(

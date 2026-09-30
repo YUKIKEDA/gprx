@@ -3,7 +3,7 @@
 use super::ard::{self, ArdR2, Pick};
 use super::finite_kernel;
 use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
-use super::{ArdLengthscales, KernelScalar, Triangle};
+use super::{ArdLengthscales, KernelScalar, Triangle, write_rect};
 use crate::error::GprError;
 use crate::math::KernelMath;
 use faer::{MatMut, MatRef};
@@ -310,6 +310,43 @@ impl MaternArdKernel {
         let nu = self.nu;
         ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
             let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+            matern_hess::<M, T>(nu, t, i == j)
+        })
+    }
+
+    /// `∂K(x1, x2)/∂θ` of a rectangular block, from coordinates.
+    pub(crate) fn grad_cross_from_coords<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        ard::require_cross(x1, x2, d_k.as_ref(), self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        let nu = self.nu;
+        write_rect(d_k, |row, col| {
+            let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::one(param_idx))?;
+            matern_grad::<M, T>(nu, t)
+        })
+    }
+
+    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block, from coordinates.
+    pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        ard::require_cross(x1, x2, d2_k.as_ref(), self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        let nu = self.nu;
+        write_rect(d2_k, |row, col| {
+            let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::pair(i, j))?;
             matern_hess::<M, T>(nu, t, i == j)
         })
     }
