@@ -544,3 +544,165 @@ fn titsias_q_covariance_matches_vfe() {
         }
     }
 }
+
+/// The mini-batch objective and gradient at `params`, through the light
+/// update: the model's cached `A` and `k_diag` are stale afterwards, and the
+/// gradient must not read them.
+fn batch_value_and_grad(
+    model: &mut FittedSvgp,
+    params: &[f64],
+    batch: &[usize],
+) -> (f64, Vec<f64>) {
+    model.set_params_light(params).expect("light update");
+    let mut scratch = std::mem::take(&mut model.scratch);
+    let mut out = vec![0.0; params.len()];
+    let value = crate::policy::with_kernel_exp!(
+        model.core.math,
+        M => super::factor::svgp_value_and_gradient::<M, _>(model, &mut out, batch, &mut scratch)
+    )
+    .expect("gradient");
+    model.scratch = scratch;
+    (value, out)
+}
+
+/// A model of `n` points and `m` inducing points, and `params` whose `q` is
+/// away from the prior so every term of the gradient is non-zero.
+fn shifted_model(
+    kernel: KernelSpec,
+    x: &[f64],
+    n: usize,
+    d: usize,
+    z: &[f64],
+) -> (FittedSvgp, Vec<f64>) {
+    let m = z.len() / d;
+    let y: Vec<f64> = (0..n)
+        .map(|i| 0.3 + 0.2 * i as f64 - 0.05 * (i * i) as f64)
+        .collect();
+    let model = Svgp::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .factor(x, n, d, &y, z, m)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let mut params = vec![0.0; model.num_params()];
+    model.get_params(&mut params).expect("get");
+    let n_theta = model.kernel().num_params() + model.likelihood().num_params();
+    params[n_theta] += 0.15; // whitened mean
+    params[n_theta + m] *= 1.1; // L[0, 0]
+    params[n_theta + m + 1] += 0.05; // L[1, 0]
+    (model, params)
+}
+
+/// The mini-batch value is `KL − (n / b) Σ_{i ∈ batch} ell_i`, written out
+/// from the full model's `A`, and its gradient is the finite difference of that value.
+fn check_batch(kernel: KernelSpec, x: &[f64], n: usize, d: usize, z: &[f64], batch: &[usize]) {
+    let (mut model, params) = shifted_model(kernel, x, n, d, z);
+    let m = z.len() / d;
+    let (value, analytic) = batch_value_and_grad(&mut model, &params, batch);
+
+    let mut full = model.clone();
+    full.set_params(&params).expect("full");
+    let a_sub = Mat::from_fn(m, batch.len(), |r, c| full.a[(r, batch[c])]);
+    let k_diag: Vec<f64> = batch.iter().map(|&i| full.k_diag[i]).collect();
+    let y: Vec<f64> = batch.iter().map(|&i| full.core.y_train[i]).collect();
+    let noise = full.core.likelihood.noise_variance();
+    let q_l = full.q_l.as_ref();
+    let empty = Mat::<f64>::zeros(m, 0);
+    let kl = independent_neg_elbo(empty.as_ref(), &full.q_mean, q_l, &[], &[], noise);
+    let minus_data = independent_neg_elbo(a_sub.as_ref(), &full.q_mean, q_l, &y, &k_diag, noise);
+    let scale = n as f64 / batch.len() as f64;
+    assert_close(value, kl - scale * (kl - minus_data), 1e-10);
+
+    let mut fd = vec![0.0; params.len()];
+    for i in 0..params.len() {
+        let mut plus = params.clone();
+        let mut minus = params.clone();
+        plus[i] += GRAD_FD;
+        minus[i] -= GRAD_FD;
+        fd[i] = (batch_value_and_grad(&mut model, &plus, batch).0
+            - batch_value_and_grad(&mut model, &minus, batch).0)
+            / (2.0 * GRAD_FD);
+    }
+    assert_grad_close(&analytic, &fd);
+}
+
+#[test]
+fn mini_batch_value_and_gradient_match_the_batch_formula_and_fd() {
+    let x_1d: Vec<f64> = (0..6).map(|i| 0.4 * i as f64).collect();
+    let x_2d: Vec<f64> = (0..12).map(|i| 0.3 * ((i * 7) % 12) as f64 / 3.0).collect();
+    let z_1d = [0.5, 1.5];
+    let z_2d = [0.2, 0.9, 0.3, 1.0];
+    check_batch(kernel_rbf(), &x_1d, 6, 1, &z_1d, &[1, 4]);
+    check_batch(kernel_matern(), &x_1d, 6, 1, &z_1d, &[0, 2, 5]);
+    check_batch(kernel_ard(), &x_2d, 6, 2, &z_2d, &[3, 1, 5]);
+    check_batch(kernel_rbf_white(), &x_1d, 6, 1, &z_1d, &[2, 3]);
+    // The batch is every point: the full-data objective.
+    check_batch(kernel_rbf(), &x_1d, 6, 1, &z_1d, &[0, 1, 2, 3, 4, 5]);
+}
+
+/// `X == Z` (the Gram of `X` carries the White diagonal): a batch reads the
+/// columns of that Gram.
+#[test]
+fn mini_batch_gradient_with_z_equal_to_x_keeps_the_white_diagonal() {
+    let x: Vec<f64> = (0..4).map(|i| 0.5 * i as f64).collect();
+    check_batch(kernel_rbf_white(), &x, 4, 1, &x, &[3, 0]);
+}
+
+#[test]
+fn single_precision_mini_batch_gradient_tracks_double() {
+    use crate::SinglePrecision;
+    let x: Vec<f64> = (0..6).map(|i| 0.4 * i as f64).collect();
+    let z = [0.5, 1.5];
+    let y: Vec<f64> = (0..6)
+        .map(|i| 0.3 + 0.2 * i as f64 - 0.05 * (i * i) as f64)
+        .collect();
+    let build = || Svgp::new(kernel_rbf(), GaussianLikelihood::new(0.1).expect("noise"));
+    let mut wide = build()
+        .factor(&x, 6, 1, &y, &z, 2)
+        .map_err(|(_, e)| e)
+        .expect("f64");
+    let mut narrow = build()
+        .with_precision::<SinglePrecision>()
+        .factor(&x, 6, 1, &y, &z, 2)
+        .map_err(|(_, e)| e)
+        .expect("f32");
+    let mut params = vec![0.0; wide.num_params()];
+    wide.get_params(&mut params).expect("params");
+    let mut g64 = vec![0.0; params.len()];
+    let mut g32 = vec![0.0; params.len()];
+    let v64 = wide
+        .value_and_gradient_into(&params, &mut g64)
+        .expect("f64 grad");
+    let v32 = narrow
+        .value_and_gradient_into(&params, &mut g32)
+        .expect("f32 grad");
+    assert_close(v32, v64, 1e-5);
+    for (a, b) in g32.iter().zip(&g64) {
+        assert!(
+            (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+            "f32 {a} vs f64 {b}"
+        );
+    }
+}
+
+/// After a mini-batch fit, `A` and `k_diag` are the ones of a full
+/// assembly at the fitted parameters (the steps leave them stale).
+#[test]
+fn mini_batch_fit_rebuilds_a_and_k_diag_at_the_end() {
+    use std::num::NonZeroUsize;
+    let adam = Adam::new().with_batch_size(NonZeroUsize::new(2).expect("batch"));
+    let fitted = fit_svgp(kernel_rbf(), &X_1D, 4, 1, &Z_1D, adam);
+    let mut params = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut params).expect("params");
+    let mut fresh = factor_svgp(kernel_rbf(), &X_1D, 4, 1, &Z_1D);
+    fresh.set_params(&params).expect("set");
+    assert_close(
+        fitted.neg_elbo().expect("fit"),
+        fresh.neg_elbo().expect("fresh"),
+        TOL,
+    );
+    for col in 0..4 {
+        assert_close(fitted.k_diag[col], fresh.k_diag[col], TOL);
+        for row in 0..2 {
+            assert_close(fitted.a[(row, col)], fresh.a[(row, col)], TOL);
+        }
+    }
+}

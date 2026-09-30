@@ -117,7 +117,7 @@ where
             let end = start.saturating_add(batch_size).min(n);
             let batch = &order[start..end];
             user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
-            model.set_params(&user)?;
+            model.set_params_light(&user)?;
             let mut scratch = std::mem::take(&mut model.scratch);
             let result = svgp_value_and_gradient::<M, _>(model, &mut g_user, batch, &mut scratch);
             model.scratch = scratch;
@@ -128,5 +128,7 @@ where
         }
     }
     user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
-    model.set_params(&user)
+    model.set_params_light(&user)?;
+    // The steps left `A` and `k_diag` stale: one pass over all n rebuilds them.
+    model.rebuild_data_terms()
 }

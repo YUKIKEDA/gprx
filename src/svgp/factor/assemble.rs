@@ -69,13 +69,39 @@ where
     T: KernelScalar,
 {
     validate_training(x, n_rows, n_cols, y)?;
+    let k_mm = assemble_kmm::<M, T>(kernel, k_mm_jitter, z, n_inducing, n_cols, ks)?;
+    let (a, k_diag) =
+        assemble_data_terms::<M, T>(kernel, x, n_rows, n_cols, z, n_inducing, k_mm.as_ref(), ks)?;
+    let (q_mean, q_l) = match q {
+        Some((mean, l)) => (mean, l),
+        None => prior_q(n_inducing),
+    };
+    Ok(SvgpState::<T> {
+        k_mm_l: k_mm,
+        a,
+        q_mean,
+        q_l,
+        k_diag,
+    })
+}
+
+/// The lower factor `L_mm` of `K_mm = k(Z, Z)`, retried by `k_mm_jitter`. It
+/// does not depend on the training data.
+pub(crate) fn assemble_kmm<M: crate::math::KernelMath, T>(
+    kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
+    z: &[f64],
+    n_inducing: usize,
+    n_cols: usize,
+    ks: &mut KernelScratch<T>,
+) -> Result<Mat<T>, GprError>
+where
+    T: KernelScalar,
+{
     validate_inducing(z, n_inducing, n_cols)?;
     let compiled = kernel.compile_as::<T>();
-    let x64 = pack_points(x, n_rows, n_cols);
     let z64 = pack_points(z, n_inducing, n_cols);
-    let mut x_cast = T::empty_cols();
     let mut z_cast = T::empty_cols();
-    let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M>(
@@ -91,6 +117,32 @@ where
         k_mm_jitter.retry_jitters(),
         CholeskyStage::Fit,
     )?;
+    Ok(k_mm)
+}
+
+/// `A = L_mm⁻¹ K(Z, X)` (`m × n`) and `k(x_i, x_i)` for every training
+/// point: the part of the assembly that costs `O(n)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_data_terms<M: crate::math::KernelMath, T>(
+    kernel: &KernelSpec,
+    x: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    z: &[f64],
+    n_inducing: usize,
+    k_mm_l: MatRef<'_, T>,
+    ks: &mut KernelScratch<T>,
+) -> Result<(Mat<T>, Vec<T>), GprError>
+where
+    T: KernelScalar,
+{
+    let compiled = kernel.compile_as::<T>();
+    let x64 = pack_points(x, n_rows, n_cols);
+    let z64 = pack_points(z, n_inducing, n_cols);
+    let mut x_cast = T::empty_cols();
+    let mut z_cast = T::empty_cols();
+    let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
+    let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     // Same packed `X` and `Z` share a training White diagonal. Rectangular
     // `apply_cross` leaves White at zero.
     let mut a = if x == z {
@@ -106,20 +158,10 @@ where
     } else {
         ks.cross::<M>(&compiled, z_mat, x_mat)?
     };
-    solve_lower(k_mm.as_ref(), a.as_mut());
+    solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];
     compiled.fill_diag_points(x_mat, &mut k_diag)?;
-    let (q_mean, q_l) = match q {
-        Some((mean, l)) => (mean, l),
-        None => prior_q(n_inducing),
-    };
-    Ok(SvgpState::<T> {
-        k_mm_l: k_mm,
-        a,
-        q_mean,
-        q_l,
-        k_diag,
-    })
+    Ok((a, k_diag))
 }
 
 pub(crate) fn prior_q(m: usize) -> (Vec<f64>, Mat<f64>) {
