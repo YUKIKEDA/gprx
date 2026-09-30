@@ -10,7 +10,7 @@ use crate::data::{pack_points, pack_storage, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec, Triangle};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower, cholesky_lower_with_retries, faer_par, faer_par_dims, frobenius_lower,
@@ -44,7 +44,6 @@ where
     B: AllocWorkspace,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
     pub(crate) fn prepare(
@@ -1947,7 +1946,6 @@ where
     B: AllocWorkspace,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
     O: Clone + for<'a> Optimizer<GprObjective<'a, O, S, C, B, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
@@ -1971,7 +1969,6 @@ where
     C: DistanceCacheSlot,
     P: GpScalar,
     M: crate::math::KernelMath,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     pub(crate) fn into_online_preserving_factor(
         self,

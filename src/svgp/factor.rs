@@ -15,9 +15,7 @@ use crate::gpr::JitterPolicy;
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{
-    CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
-};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower_with_retries, dot_f64x4, faer_par, faer_par_dims, forward_substitute,
@@ -59,8 +57,6 @@ pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P>(
 ) -> Result<FittedSvgp<M, P>, GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let state = assemble_svgp::<M, P::Storage>(&kernel, x, n_rows, n_cols, y, z, n_inducing, q)?;
     Ok(FittedSvgp {
@@ -93,8 +89,7 @@ pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
     q: Option<(Vec<f64>, Mat<f64>)>,
 ) -> Result<SvgpState<T>, GprError>
 where
-    T: KernelScalar + FillDistances,
-    CompiledKernel<T>: GramKernel<T = T>,
+    T: KernelScalar,
 {
     validate_training(x, n_rows, n_cols, y)?;
     validate_inducing(z, n_inducing, n_cols)?;
@@ -291,8 +286,6 @@ pub(crate) fn svgp_predict<M: crate::math::KernelMath, P: ModelPrecision + SvgpM
     options: PredictOptions,
 ) -> Result<Prediction<P::Refine>, GprError>
 where
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     if n_cols != d {
         return Err(GprError::DimensionMismatch {
@@ -543,8 +536,6 @@ pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
 ) -> Result<f64, GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     if !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
         let shadow = promote_svgp_f64(model)?;
@@ -560,8 +551,6 @@ fn svgp_value_and_gradient_storage<M: crate::math::KernelMath, P>(
 ) -> Result<f64, GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let n = model.n;
     let m = model.m;
@@ -725,8 +714,6 @@ fn storage_kernel_grad<M: crate::math::KernelMath, P>(
 ) -> Result<(), GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let m = model.m;
     let compiled = model.kernel.compile_as::<P::Storage>();
@@ -783,8 +770,6 @@ fn storage_kernel_tangents<M: crate::math::KernelMath, P>(
 ) -> Result<(Mat<P::Storage>, Vec<P::Storage>), GprError>
 where
     P: ModelPrecision,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let m = model.m;
     let n = model.n;
@@ -861,7 +846,6 @@ fn promote_svgp_f64<M: crate::math::KernelMath, P: ModelPrecision>(
     model: &FittedSvgp<M, P>,
 ) -> Result<FittedSvgp<M, crate::precision::DoublePrecision>, GprError>
 where
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let mut k_mm_l = Mat::<f64>::zeros(model.m, model.m);
     let mut a = Mat::<f64>::zeros(model.m, model.n);
@@ -1110,7 +1094,7 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     let same_xz = model.x_obs == model.z_obs;
     let mut ard_cross = match &compiled {
         crate::kernel::CompiledKernel::RbfArd(leaf) if !same_xz => {
-            Some(leaf.grad_cross_all_from_coords::<M>(z_mat.as_ref(), x_mat.as_ref())?)
+            Some(leaf.grad_cross_all_from_coords::<M, _>(z_mat.as_ref(), x_mat.as_ref())?)
         }
         _ => None,
     };
@@ -1347,8 +1331,6 @@ pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P>(
 ) -> Result<(), GprError>
 where
     P: crate::precision::GpScalar + SvgpMean,
-    P::Storage: FillDistances,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     let n = model.n;
     let m = model.m;

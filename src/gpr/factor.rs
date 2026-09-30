@@ -3,7 +3,7 @@
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{FillDistances, GramInputs, GramKernel, KernelScalar, Triangle};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
@@ -15,18 +15,17 @@ use super::JitterPolicy;
 /// [`crate::CachedDistances`] fills `dist_cache` (and ARD `ard_sq_diff`) once
 /// and reuses them. [`crate::UncachedDistances`] has no those tensors;
 /// isotropic and mixed trees compute distances from `X`.
-fn apply_train_kernel<K, W, M: crate::math::KernelMath>(
-    compiled: &K,
-    x: MatRef<'_, K::T>,
+fn apply_train_kernel<T, W, M: crate::math::KernelMath>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'_, T>,
     ws: &mut W,
 ) -> Result<(), GprError>
 where
-    K: GramKernel,
-    K::T: FillDistances + KernelScalar,
-    W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
+    T: KernelScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
     let (core, dist) = ws.split_fit();
-    apply_compiled_views::<K, M>(
+    apply_compiled_views::<T, M>(
         compiled,
         x,
         dist,
@@ -37,19 +36,18 @@ where
 }
 
 /// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
-pub(crate) fn apply_compiled_to<K, W, M: crate::math::KernelMath>(
-    compiled: &K,
-    x: MatRef<'_, K::T>,
+pub(crate) fn apply_compiled_to<T, W, M: crate::math::KernelMath>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'_, T>,
     ws: &mut W,
-    dest: MatMut<'_, K::T>,
+    dest: MatMut<'_, T>,
 ) -> Result<(), GprError>
 where
-    K: GramKernel,
-    K::T: FillDistances + KernelScalar,
-    W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
+    T: KernelScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
     let (core, dist) = ws.split_fit();
-    apply_compiled_views::<K, M>(
+    apply_compiled_views::<T, M>(
         compiled,
         x,
         dist,
@@ -59,13 +57,13 @@ where
     )
 }
 
-fn apply_compiled_views<K: GramKernel, M: crate::math::KernelMath>(
-    compiled: &K,
-    x: MatRef<'_, K::T>,
-    dist: Option<crate::workspace::DistBufs<'_, K::T>>,
-    dest: MatMut<'_, K::T>,
-    scratch: MatMut<'_, K::T>,
-    thread_scratch: &mut Vec<Mat<K::T>>,
+fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'_, T>,
+    dist: Option<crate::workspace::DistBufs<'_, T>>,
+    dest: MatMut<'_, T>,
+    scratch: MatMut<'_, T>,
+    thread_scratch: &mut Vec<Mat<T>>,
 ) -> Result<(), GprError> {
     let inputs = fill_cached_inputs(compiled, x, dist, thread_scratch)?;
     compiled.eval_gram::<M>(inputs, dest, Triangle::Lower, scratch)
@@ -73,28 +71,26 @@ fn apply_compiled_views<K: GramKernel, M: crate::math::KernelMath>(
 
 /// Fills the training distance caches the tree reads (once per `X`) and
 /// returns the views for a Gram evaluation. Without caches, only `x`.
-pub(crate) fn fill_cached_inputs<'a, K: GramKernel>(
-    compiled: &K,
-    x: MatRef<'a, K::T>,
-    dist: Option<crate::workspace::DistBufs<'a, K::T>>,
-    thread_scratch: &mut Vec<Mat<K::T>>,
-) -> Result<GramInputs<'a, K::T>, GprError> {
+pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'a, T>,
+    dist: Option<crate::workspace::DistBufs<'a, T>>,
+    thread_scratch: &mut Vec<Mat<T>>,
+) -> Result<GramInputs<'a, T>, GprError> {
     let Some(d) = dist else {
         return Ok(GramInputs::points(x));
     };
     let reads_dist = compiled.reads_distances()?;
     if reads_dist && !*d.dist_ready {
         let mut pool = std::mem::take(thread_scratch);
-        K::T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
+        T::write_squared(x, d.dist_cache.as_mut(), &mut pool);
         *thread_scratch = pool;
         *d.dist_ready = true;
     }
-    let reads_ard = <K::T as FillDistances>::READS_ARD_CACHE
-        && compiled.needs_ard_sq_diff()
-        && d.ard_sq_diff.ncols() > 0;
+    let reads_ard = T::READS_ARD_CACHE && compiled.needs_ard_sq_diff() && d.ard_sq_diff.ncols() > 0;
     if reads_ard && !*d.ard_sq_diff_ready {
         let mut pool = std::mem::take(thread_scratch);
-        K::T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
+        T::write_ard(x, d.ard_sq_diff.as_mut(), &mut pool);
         *thread_scratch = pool;
         *d.ard_sq_diff_ready = true;
     }
@@ -124,21 +120,20 @@ pub(crate) struct FactorPolicy {
     pub(crate) stage: CholeskyStage,
 }
 
-pub(crate) fn factor_train_with_policy<K, W, M: crate::math::KernelMath>(
-    compiled: &K,
-    x: MatRef<'_, K::T>,
+pub(crate) fn factor_train_with_policy<T, W, M: crate::math::KernelMath>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'_, T>,
     ws: &mut W,
     y: &[f64],
     noise: f64,
     policy: FactorPolicy,
 ) -> Result<(), GprError>
 where
-    K: GramKernel,
-    K::T: FillDistances + KernelScalar,
-    W: FitWorkspace<Policy: PrecisionPolicy<Storage = K::T>>,
+    T: KernelScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
     factor_written_k_with_policy(ws, y, noise, policy, |ws| {
-        apply_train_kernel::<K, W, M>(compiled, x, ws)
+        apply_train_kernel::<T, W, M>(compiled, x, ws)
     })
 }
 

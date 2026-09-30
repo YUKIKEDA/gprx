@@ -140,7 +140,6 @@ where
     B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     pub(crate) fn new(model: &'a mut FittedGpr<O, S, C, B, M, P>) -> Self {
         let scratch = vec![0.0; model.num_params()];
@@ -162,8 +161,7 @@ pub(crate) trait EvalObjective: Sized {
         C: DistanceCacheSlot,
         B: crate::gpr::AllocWorkspace,
         P: crate::precision::GpScalar,
-        M: crate::math::KernelMath,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>;
+        M: crate::math::KernelMath;
 
     fn eval_at_changes<O, C, B, M, P>(
         obj: &mut GprObjective<'_, O, Self, C, B, M, P>,
@@ -175,7 +173,6 @@ pub(crate) trait EvalObjective: Sized {
         B: crate::gpr::AllocWorkspace,
         P: crate::precision::GpScalar,
         M: crate::math::KernelMath,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let _ = indices;
         Self::eval_value(obj, params)
@@ -192,7 +189,6 @@ impl EvalObjective for FullRecompute {
         B: crate::gpr::AllocWorkspace,
         P: crate::precision::GpScalar,
         M: crate::math::KernelMath,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let n = obj.model.num_params();
         if obj.scratch.len() != n {
@@ -213,7 +209,6 @@ impl EvalObjective for IncrementalRecompute {
         B: crate::gpr::AllocWorkspace,
         P: crate::precision::GpScalar,
         M: crate::math::KernelMath,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         obj.model
             .value_from_leaf_grams(params, None, &mut obj.leaf_grams, &mut obj.leaves_primed)
@@ -229,7 +224,6 @@ impl EvalObjective for IncrementalRecompute {
         B: crate::gpr::AllocWorkspace,
         P: crate::precision::GpScalar,
         M: crate::math::KernelMath,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         obj.model.value_from_leaf_grams(
             params,
@@ -247,7 +241,6 @@ where
     B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
@@ -268,7 +261,6 @@ where
     B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
         self.model.value_from_leaf_grams(
@@ -287,7 +279,6 @@ where
     B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model
@@ -311,7 +302,6 @@ where
     B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into_fit(params, out)
@@ -324,7 +314,6 @@ where
     B: crate::gpr::AllocWorkspace,
     P: crate::precision::GpScalar,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)
@@ -345,8 +334,6 @@ pub(crate) struct SgprObjective<
     P: crate::precision::GpScalar + crate::sgpr::factor::MeanDot + crate::sgpr::factor::PublishSgprWeights = crate::precision::DoublePrecision,
 >
 where
-    crate::kernel::CompiledKernel<P::Storage>:
-        crate::kernel::GramKernel<T = P::Storage>,
 {
     model: &'a mut FittedSgpr<O, I, M, P>,
 }
@@ -357,7 +344,6 @@ where
     P: crate::precision::GpScalar
         + crate::sgpr::factor::MeanDot
         + crate::sgpr::factor::PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     pub(crate) fn new(model: &'a mut FittedSgpr<O, I, M, P>) -> Self {
         Self { model }
@@ -370,7 +356,6 @@ where
     P: crate::precision::GpScalar
         + crate::sgpr::factor::MeanDot
         + crate::sgpr::factor::PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
@@ -391,7 +376,6 @@ where
     P: crate::precision::GpScalar
         + crate::sgpr::factor::MeanDot
         + crate::sgpr::factor::PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.value_and_gradient_into(params, out).map(|_| ())
@@ -412,7 +396,6 @@ where
     P: crate::precision::GpScalar
         + crate::sgpr::factor::MeanDot
         + crate::sgpr::factor::PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into(params, out)
@@ -425,7 +408,6 @@ where
     P: crate::precision::GpScalar
         + crate::sgpr::factor::MeanDot
         + crate::sgpr::factor::PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         self.model.fill_intervals(out)

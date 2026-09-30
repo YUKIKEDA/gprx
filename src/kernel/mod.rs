@@ -18,6 +18,7 @@
 //! other points-mode leaves stay sequential. See the [crate-level parallelism
 //! notes](crate).
 
+mod ard;
 mod compiled;
 mod constant;
 mod dist;
@@ -37,11 +38,11 @@ mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
-pub(crate) use compiled::gram::{GramInputs, GramKernel};
+pub(crate) use compiled::gram::GramInputs;
 pub use constant::ConstantKernel;
 #[doc(hidden)]
 pub use dist::fill_ard_squared_diff;
-pub(crate) use dist::{FillDistances, fill_squared_euclidean};
+pub(crate) use dist::fill_squared_euclidean;
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};
@@ -99,7 +100,7 @@ pub(crate) fn visit_triangle(n: usize, uplo: Triangle, mut visit: impl FnMut(usi
     }
 }
 
-fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<usize, GprError> {
+fn require_square_pair<T>(dist: MatRef<'_, T>, out: MatRef<'_, T>) -> Result<usize, GprError> {
     if dist.nrows() != dist.ncols() {
         return Err(GprError::ShapeMismatch {
             reason: format!(
@@ -126,10 +127,10 @@ fn require_square_pair(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<us
     Ok(dist.nrows())
 }
 
-pub(crate) fn require_coord_grad(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    d_k: MatRef<'_, f64>,
+pub(crate) fn require_coord_grad<T>(
+    x1: MatRef<'_, T>,
+    x2: MatRef<'_, T>,
+    d_k: MatRef<'_, T>,
     dim: usize,
 ) -> Result<(), GprError> {
     if x1.nrows() == 0 || x2.nrows() == 0 || x1.ncols() == 0 {
@@ -163,7 +164,7 @@ pub(crate) fn require_coord_grad(
     Ok(())
 }
 
-fn require_same_shape(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(), GprError> {
+fn require_same_shape<T>(dist: MatRef<'_, T>, out: MatRef<'_, T>) -> Result<(), GprError> {
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
         return Err(GprError::ShapeMismatch {
             reason: format!(
@@ -181,10 +182,10 @@ fn require_same_shape(dist: MatRef<'_, f64>, out: MatRef<'_, f64>) -> Result<(),
     Ok(())
 }
 
-fn write_dense(
-    dist: MatRef<'_, f64>,
-    mut out: MatMut<'_, f64>,
-    mut kernel: impl FnMut(f64) -> Result<f64, GprError>,
+fn write_dense<T: KernelScalar>(
+    dist: MatRef<'_, T>,
+    mut out: MatMut<'_, T>,
+    mut kernel: impl FnMut(T) -> Result<T, GprError>,
 ) -> Result<(), GprError> {
     require_same_shape(dist, out.as_ref())?;
     let mut err = None;
@@ -205,11 +206,11 @@ fn write_dense(
     }
 }
 
-fn write_triangle(
-    dist: MatRef<'_, f64>,
-    mut out: MatMut<'_, f64>,
+fn write_triangle<T: KernelScalar>(
+    dist: MatRef<'_, T>,
+    mut out: MatMut<'_, T>,
     uplo: Triangle,
-    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+    kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = require_square_pair(dist, out.as_ref())?;
     if n > 0 && matches!(uplo, Triangle::Lower) {
@@ -231,10 +232,10 @@ fn write_triangle(
     }
 }
 
-fn write_lower_parallel(
-    dist: MatRef<'_, f64>,
-    out: MatMut<'_, f64>,
-    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+fn write_lower_parallel<T: KernelScalar>(
+    dist: MatRef<'_, T>,
+    out: MatMut<'_, T>,
+    kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = dist.nrows();
     let n_parts = worker_count();
@@ -261,7 +262,17 @@ pub fn fill_pairwise_sq_euclidean(x: MatRef<'_, f64>, dist: MatMut<'_, f64>) {
     fill_squared_euclidean(x, dist, &mut []);
 }
 
-fn finite_dist(d: f64) -> Result<f64, GprError> {
+/// Returns `value` if it is finite, else [`GprError::NonFiniteKernelValue`].
+#[inline(always)]
+pub(crate) fn finite_kernel<T: KernelScalar>(value: T) -> Result<T, GprError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(GprError::NonFiniteKernelValue)
+    }
+}
+
+fn finite_dist<T: KernelScalar>(d: T) -> Result<T, GprError> {
     if d.is_finite() {
         Ok(d)
     } else {
@@ -269,9 +280,9 @@ fn finite_dist(d: f64) -> Result<f64, GprError> {
     }
 }
 
-pub(crate) fn pair_squared_euclidean(x: MatRef<'_, f64>, i: usize, j: usize) -> f64 {
+pub(crate) fn pair_squared_euclidean<T: KernelScalar>(x: MatRef<'_, T>, i: usize, j: usize) -> T {
     let d = x.ncols();
-    let mut sum = 0.0;
+    let mut sum = T::from_f64(0.0);
     for dim in 0..d {
         let diff = x[(i, dim)] - x[(j, dim)];
         sum += diff * diff;
@@ -281,11 +292,11 @@ pub(crate) fn pair_squared_euclidean(x: MatRef<'_, f64>, i: usize, j: usize) -> 
 
 /// Writes a kernel triangle from coordinates. Each pair computes `‖x_i-x_j‖²`
 /// without a distance matrix.
-pub(crate) fn write_square_from_coords(
-    x: MatRef<'_, f64>,
-    out: MatMut<'_, f64>,
+pub(crate) fn write_square_from_coords<T: KernelScalar>(
+    x: MatRef<'_, T>,
+    out: MatMut<'_, T>,
     uplo: Triangle,
-    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+    kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = out.nrows();
     if out.ncols() != n {
@@ -304,10 +315,10 @@ pub(crate) fn write_square_from_coords(
     })
 }
 
-fn write_lower_from_coords_parallel(
-    x: MatRef<'_, f64>,
-    out: MatMut<'_, f64>,
-    kernel: impl Fn(f64) -> Result<f64, GprError> + Sync,
+fn write_lower_from_coords_parallel<T: KernelScalar>(
+    x: MatRef<'_, T>,
+    out: MatMut<'_, T>,
+    kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = x.nrows();
     let n_parts = worker_count();
@@ -326,10 +337,23 @@ fn write_lower_from_coords_parallel(
         })
 }
 
-fn write_square(
-    mut out: MatMut<'_, f64>,
+/// Writes every entry of a rectangular `out`. `pair(row, col)` is the value.
+pub(crate) fn write_rect<T: KernelScalar>(
+    mut out: MatMut<'_, T>,
+    mut pair: impl FnMut(usize, usize) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    for col in 0..out.ncols() {
+        for row in 0..out.nrows() {
+            out[(row, col)] = pair(row, col)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_square<T: KernelScalar>(
+    mut out: MatMut<'_, T>,
     uplo: Triangle,
-    mut kernel: impl FnMut(usize, usize) -> Result<f64, GprError>,
+    mut kernel: impl FnMut(usize, usize) -> Result<T, GprError>,
 ) -> Result<(), GprError> {
     if out.nrows() != out.ncols() {
         return Err(GprError::ShapeMismatch {

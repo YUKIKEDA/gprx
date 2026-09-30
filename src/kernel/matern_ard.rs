@@ -1,10 +1,11 @@
 //! ARD Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
-use super::matern::{
-    MaternNu, finite_kernel, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r,
-};
-use super::{ArdLengthscales, Triangle, visit_triangle};
+use super::ard::{self, ArdR2, Pick};
+use super::finite_kernel;
+use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
+use super::{ArdLengthscales, KernelScalar, Triangle};
 use crate::error::GprError;
+use crate::math::KernelMath;
 use faer::{MatMut, MatRef};
 
 /// ARD Matérn: `k` is a function of `r = √(Σ_d (x_d-x'_d)² / ℓ_d²)`.
@@ -141,29 +142,18 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
-    pub fn apply<M: crate::math::KernelMath>(
+    pub fn apply<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let n = require_square_points(x, out.as_ref(), self.num_params())?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel::<M>(x, row, col, inv_ell_sq, nu) {
-                Ok(value) => out[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::write_from_points(x, out, self.num_params(), uplo, |row, col| {
+            let t = ard::r2_from_coords(x, row, x, col, w, Pick::NONE)?;
+            matern_value::<M, T>(nu, t)
+        })
     }
 
     /// Writes rectangular `k(x, xs)` (train × test) into `out`.
@@ -172,41 +162,24 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
-    pub fn apply_cross<M: crate::math::KernelMath>(
+    pub fn apply_cross<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        xs: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        require_feature_dim(x, d)?;
-        require_feature_dim(xs, d)?;
-        if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-            return Err(GprError::ShapeMismatch {
-                reason: format!(
-                    "output is {}x{}, expected {}x{}",
-                    out.nrows(),
-                    out.ncols(),
-                    x.nrows(),
-                    xs.nrows()
-                ),
-            });
-        }
-        crate::data::require_finite_points(x)?;
-        crate::data::require_finite_points(xs)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        ard::require_cross(x, xs, out.as_ref(), self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        for col in 0..xs.nrows() {
-            for row in 0..x.nrows() {
-                out[(row, col)] = ard_kernel_pair::<M>(x, row, xs, col, inv_ell_sq, nu)?;
-            }
-        }
-        Ok(())
+        super::write_rect(out, |row, col| {
+            let t = ard::r2_from_coords(x, row, xs, col, w, Pick::NONE)?;
+            matern_value::<M, T>(nu, t)
+        })
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(1.0);
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(1.0));
     }
 
     /// Writes `∂K/∂θ_d` for `θ_d = log(ℓ_d)` into `d_k`.
@@ -217,126 +190,50 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad<M: crate::math::KernelMath>(
+    pub fn grad<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        if param_idx >= self.num_params() {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD Matern parameter index {param_idx} is out of range (d={})",
-                    self.num_params()
-                ),
-            });
-        }
-        let n = require_square_points(x, d_k.as_ref(), self.num_params())?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_grad::<M>(x, row, col, inv_ell_sq, param_idx, nu) {
-                Ok(value) => d_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::write_from_points(x, d_k, self.num_params(), uplo, |row, col| {
+            let t = ard::r2_from_coords(x, row, x, col, w, Pick::one(param_idx))?;
+            matern_grad::<M, T>(nu, t)
+        })
     }
 
-    pub(crate) fn apply_from_sq_diff<M: crate::math::KernelMath>(
+    pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut out: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let n = out.nrows();
-        if out.ncols() != n {
-            return Err(GprError::ShapeMismatch {
-                reason: format!("output is {}x{}, expected square", out.nrows(), out.ncols()),
-            });
-        }
-        let d = self.num_params();
-        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match super::dist::weighted_r2_from_cache(cache, n, row, col, inv_ell_sq, None)
-                .and_then(|(r2, _)| finite_kernel(matern_from_r::<M>(nu, r2.max(0.0).sqrt())))
-            {
-                Ok(value) => out[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::write_from_cache(cache, out, self.num_params(), uplo, |n, row, col| {
+            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?;
+            matern_value::<M, T>(nu, t)
+        })
     }
 
-    pub(crate) fn grad_from_sq_diff<M: crate::math::KernelMath>(
+    pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut d_k: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        if param_idx >= self.num_params() {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!(
-                    "ARD Matern parameter index {param_idx} is out of range (d={})",
-                    self.num_params()
-                ),
-            });
-        }
-        let n = d_k.nrows();
-        if d_k.ncols() != n {
-            return Err(GprError::ShapeMismatch {
-                reason: format!("output is {}x{}, expected square", d_k.nrows(), d_k.ncols()),
-            });
-        }
-        let d = self.num_params();
-        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match super::dist::weighted_r2_from_cache(
-                cache,
-                n,
-                row,
-                col,
-                inv_ell_sq,
-                Some(param_idx),
-            )
-            .and_then(|(r2, dim_term)| {
-                if !r2.is_finite() {
-                    return Err(GprError::NonFiniteKernelValue);
-                }
-                finite_kernel(matern_dk_dtheta_ard::<M>(nu, r2.max(0.0).sqrt(), dim_term))
-            }) {
-                Ok(value) => d_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::write_from_cache(cache, d_k, self.num_params(), uplo, |n, row, col| {
+            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::one(param_idx))?;
+            matern_grad::<M, T>(nu, t)
+        })
     }
 
     /// Writes `∂²K/∂θ_i ∂θ_j` for ARD `θ_d = log(ℓ_d)`.
@@ -345,267 +242,60 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess<M: crate::math::KernelMath>(
+    pub fn hess<M: KernelMath, T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        if i >= d || j >= d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("ARD Matern parameter pair ({i}, {j}) is out of range (d={d})"),
-            });
-        }
-        let n = require_square_points(x, d2_k.as_ref(), d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_kernel_hess::<M>(x, row, col, inv_ell_sq, i, j, nu) {
-                Ok(value) => d2_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::write_from_points(x, d2_k, self.num_params(), uplo, |row, col| {
+            let t = ard::r2_from_coords(x, row, x, col, w, Pick::pair(i, j))?;
+            matern_hess::<M, T>(nu, t, i == j)
+        })
     }
 
-    pub(crate) fn hess_from_sq_diff<M: crate::math::KernelMath>(
+    pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, f64>,
-        mut d2_k: MatMut<'_, f64>,
+        cache: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let d = self.num_params();
-        if i >= d || j >= d {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("ARD Matern parameter pair ({i}, {j}) is out of range (d={d})"),
-            });
-        }
-        let n = d2_k.nrows();
-        if d2_k.ncols() != n {
-            return Err(GprError::ShapeMismatch {
-                reason: format!(
-                    "output is {}x{}, expected square",
-                    d2_k.nrows(),
-                    d2_k.ncols()
-                ),
-            });
-        }
-        super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-        let inv_ell_sq = self.lengthscales.inv_ell_sq();
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        let mut err = None;
-        visit_triangle(n, uplo, |row, col| {
-            if err.is_some() {
-                return;
-            }
-            match ard_hess_from_cache::<M>(cache, n, row, col, inv_ell_sq, (i, j), nu) {
-                Ok(value) => d2_k[(row, col)] = value,
-                Err(e) => err = Some(e),
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
+            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+            matern_hess::<M, T>(nu, t, i == j)
+        })
     }
 }
 
-fn require_feature_dim(x: MatRef<'_, f64>, expected_d: usize) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
-        return Err(GprError::EmptyInput);
-    }
-    if x.ncols() != expected_d {
-        return Err(GprError::DimensionMismatch {
-            x_dim: x.ncols(),
-            expected_dim: expected_d,
-        });
-    }
-    Ok(())
+const NAME: &str = "Matern";
+
+fn matern_value<M: KernelMath, T: KernelScalar>(nu: MaternNu, t: ArdR2<T>) -> Result<T, GprError> {
+    let r = t.r2.max(T::from_f64(0.0)).sqrt();
+    finite_kernel(matern_from_r::<M, T>(nu, r))
 }
 
-fn require_square_points(
-    x: MatRef<'_, f64>,
-    out: MatRef<'_, f64>,
-    expected_d: usize,
-) -> Result<usize, GprError> {
-    require_feature_dim(x, expected_d)?;
-    if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
-        return Err(GprError::ShapeMismatch {
-            reason: format!(
-                "output is {}x{}, expected {}x{}",
-                out.nrows(),
-                out.ncols(),
-                x.nrows(),
-                x.nrows()
-            ),
-        });
-    }
-    crate::data::require_finite_points(x)?;
-    Ok(x.nrows())
+fn matern_grad<M: KernelMath, T: KernelScalar>(nu: MaternNu, t: ArdR2<T>) -> Result<T, GprError> {
+    let r = t.r2.max(T::from_f64(0.0)).sqrt();
+    finite_kernel(matern_dk_dtheta_ard::<M, T>(nu, r, t.dim_i))
 }
 
-fn ard_r2_pair(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        r2 += diff * diff * w;
-    }
-    if r2.is_finite() {
-        Ok(r2)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_pair<M: crate::math::KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    xs: MatRef<'_, f64>,
-    col: usize,
-    inv_ell_sq: &[f64],
+fn matern_hess<M: KernelMath, T: KernelScalar>(
     nu: MaternNu,
-) -> Result<f64, GprError> {
-    let r2 = ard_r2_pair(x, row, xs, col, inv_ell_sq)?;
-    finite_kernel(matern_from_r::<M>(nu, r2.max(0.0).sqrt()))
-}
-
-fn ard_kernel<M: crate::math::KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    nu: MaternNu,
-) -> Result<f64, GprError> {
-    ard_kernel_pair::<M>(x, row, x, col, inv_ell_sq, nu)
-}
-
-fn ard_kernel_grad<M: crate::math::KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    param_idx: usize,
-    nu: MaternNu,
-) -> Result<f64, GprError> {
-    let mut r2 = 0.0;
-    let mut dim_term = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - x[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == param_idx {
-            dim_term = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let r = r2.max(0.0).sqrt();
-    finite_kernel(matern_dk_dtheta_ard::<M>(nu, r, dim_term))
-}
-
-fn ard_dim_pair(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    i: usize,
-    j: usize,
-) -> Result<(f64, f64, f64), GprError> {
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - x[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if r2.is_finite() {
-        Ok((r2, dim_i, dim_j))
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
-fn ard_kernel_hess<M: crate::math::KernelMath>(
-    x: MatRef<'_, f64>,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    i: usize,
-    j: usize,
-    nu: MaternNu,
-) -> Result<f64, GprError> {
-    let (r2, dim_i, dim_j) = ard_dim_pair(x, row, col, inv_ell_sq, i, j)?;
-    let r = r2.max(0.0).sqrt();
-    finite_kernel(matern_d2k_dtheta_ard::<M>(nu, r, dim_i, dim_j, i == j))
-}
-
-fn ard_hess_from_cache<M: crate::math::KernelMath>(
-    cache: MatRef<'_, f64>,
-    n: usize,
-    row: usize,
-    col: usize,
-    inv_ell_sq: &[f64],
-    pair: (usize, usize),
-    nu: MaternNu,
-) -> Result<f64, GprError> {
-    let (i, j) = pair;
-    let mut r2 = 0.0;
-    let mut dim_i = 0.0;
-    let mut dim_j = 0.0;
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let v = cache[(row, dim * n + col)];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = v * w;
-        r2 += term;
-        if dim == i {
-            dim_i = term;
-        }
-        if dim == j {
-            dim_j = term;
-        }
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    let r = r2.max(0.0).sqrt();
-    finite_kernel(matern_d2k_dtheta_ard::<M>(nu, r, dim_i, dim_j, i == j))
+    t: ArdR2<T>,
+    same: bool,
+) -> Result<T, GprError> {
+    let r = t.r2.max(T::from_f64(0.0)).sqrt();
+    finite_kernel(matern_d2k_dtheta_ard::<M, T>(nu, r, t.dim_i, t.dim_j, same))
 }
 
 #[cfg(test)]
@@ -647,7 +337,7 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3]]);
         let mut k = fill(3, f64::NAN);
         kernel
-            .apply::<crate::math::Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
+            .apply::<crate::math::Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         assert_close(k[(0, 0)], 1.0, TOL);
         assert_close(k[(1, 1)], 1.0, TOL);
@@ -666,7 +356,7 @@ mod tests {
             let mut k_ard = fill(3, 0.0);
             iso.apply(dist.as_ref(), k_iso.as_mut(), Triangle::Full)
                 .expect("iso");
-            ard.apply::<crate::math::Accurate>(x.as_ref(), k_ard.as_mut(), Triangle::Full)
+            ard.apply::<crate::math::Accurate, _>(x.as_ref(), k_ard.as_mut(), Triangle::Full)
                 .expect("ard");
             for col in 0..3 {
                 for row in 0..3 {
@@ -682,7 +372,7 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.0]]);
         let mut k = fill(2, 0.0);
         kernel
-            .apply::<crate::math::Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
+            .apply::<crate::math::Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         let r = 1.0_f64;
         assert_close(k[(1, 0)], (-r).exp(), TOL);
@@ -694,7 +384,7 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [0.5, 1.0], [1.2, -0.3]]);
         let mut k = fill(3, 0.0);
         kernel
-            .apply::<crate::math::Accurate>(x.as_ref(), k.as_mut(), Triangle::Full)
+            .apply::<crate::math::Accurate, _>(x.as_ref(), k.as_mut(), Triangle::Full)
             .expect("shape");
         for col in 0..3 {
             for row in 0..3 {
@@ -709,11 +399,11 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.0]]);
         let mut full = fill(3, 0.0);
         kernel
-            .apply::<crate::math::Accurate>(x.as_ref(), full.as_mut(), Triangle::Full)
+            .apply::<crate::math::Accurate, _>(x.as_ref(), full.as_mut(), Triangle::Full)
             .expect("shape");
         let mut lower = fill(3, 42.0);
         kernel
-            .apply::<crate::math::Accurate>(x.as_ref(), lower.as_mut(), Triangle::Lower)
+            .apply::<crate::math::Accurate, _>(x.as_ref(), lower.as_mut(), Triangle::Lower)
             .expect("shape");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], 42.0, TOL);
@@ -736,13 +426,13 @@ mod tests {
                 let mut k_plus = fill(3, 0.0);
                 let mut k_minus = fill(3, 0.0);
                 let mut dk = fill(3, 0.0);
-                plus.apply::<crate::math::Accurate>(x.as_ref(), k_plus.as_mut(), Triangle::Full)
+                plus.apply::<crate::math::Accurate, _>(x.as_ref(), k_plus.as_mut(), Triangle::Full)
                     .expect("plus");
                 minus
-                    .apply::<crate::math::Accurate>(x.as_ref(), k_minus.as_mut(), Triangle::Full)
+                    .apply::<crate::math::Accurate, _>(x.as_ref(), k_minus.as_mut(), Triangle::Full)
                     .expect("minus");
                 kernel
-                    .grad::<crate::math::Accurate>(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
+                    .grad::<crate::math::Accurate, _>(x.as_ref(), dk.as_mut(), dim, Triangle::Full)
                     .expect("dim");
                 for col in 0..3 {
                     for row in 0..3 {
@@ -761,10 +451,10 @@ mod tests {
         let mut dk0 = fill(2, 0.0);
         let mut dk1 = fill(2, 0.0);
         kernel
-            .grad::<crate::math::Accurate>(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
+            .grad::<crate::math::Accurate, _>(x.as_ref(), dk0.as_mut(), 0, Triangle::Full)
             .expect("dim 0");
         kernel
-            .grad::<crate::math::Accurate>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
+            .grad::<crate::math::Accurate, _>(x.as_ref(), dk1.as_mut(), 1, Triangle::Full)
             .expect("dim 1");
         assert_close(dk1[(1, 0)], 0.0, TOL);
         assert!(dk0[(1, 0)].abs() > 1e-8);
@@ -777,10 +467,10 @@ mod tests {
         let mut full = fill(3, 0.0);
         let mut lower = fill(3, 99.0);
         kernel
-            .grad::<crate::math::Accurate>(x.as_ref(), full.as_mut(), 1, Triangle::Full)
+            .grad::<crate::math::Accurate, _>(x.as_ref(), full.as_mut(), 1, Triangle::Full)
             .expect("index 1");
         kernel
-            .grad::<crate::math::Accurate>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
+            .grad::<crate::math::Accurate, _>(x.as_ref(), lower.as_mut(), 1, Triangle::Lower)
             .expect("index 1");
         assert_lower_close(lower.as_ref(), full.as_ref(), TOL);
         assert_close(lower[(0, 1)], 99.0, TOL);
@@ -806,11 +496,11 @@ mod tests {
         let test = points_2d(&[[0.2, -0.1], [1.0, 0.5]]);
         let mut square = fill(2, 0.0);
         kernel
-            .apply::<crate::math::Accurate>(train.as_ref(), square.as_mut(), Triangle::Full)
+            .apply::<crate::math::Accurate, _>(train.as_ref(), square.as_mut(), Triangle::Full)
             .expect("square");
         let mut cross = fill(2, 0.0);
         kernel
-            .apply_cross::<crate::math::Accurate>(train.as_ref(), test.as_ref(), cross.as_mut())
+            .apply_cross::<crate::math::Accurate, _>(train.as_ref(), test.as_ref(), cross.as_mut())
             .expect("rect");
         assert_close(cross[(0, 1)], square[(0, 1)], TOL);
         assert_close(cross[(1, 1)], square[(1, 1)], TOL);
@@ -826,18 +516,18 @@ mod tests {
         let x = points_2d(&[[0.0, 0.0], [1.0, 1.0]]);
         let mut dk = fill(2, 0.0);
         assert!(matches!(
-            kernel.grad::<crate::math::Accurate>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
+            kernel.grad::<crate::math::Accurate, _>(x.as_ref(), dk.as_mut(), 2, Triangle::Lower),
             Err(GprError::IndexOutOfRange { .. })
         ));
         let bad_d = Mat::from_fn(2, 3, |_, _| 0.0);
         let mut k = fill(2, 0.0);
         assert!(matches!(
-            kernel.apply::<crate::math::Accurate>(bad_d.as_ref(), k.as_mut(), Triangle::Full),
+            kernel.apply::<crate::math::Accurate, _>(bad_d.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::DimensionMismatch { .. })
         ));
         let nan = points_2d(&[[0.0, 0.0], [f64::NAN, 1.0]]);
         assert!(matches!(
-            kernel.apply::<crate::math::Accurate>(nan.as_ref(), k.as_mut(), Triangle::Full),
+            kernel.apply::<crate::math::Accurate, _>(nan.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::NonFiniteInput)
         ));
     }

@@ -11,6 +11,7 @@ pub(crate) mod sealed {
     use faer::{Mat, MatMut, MatRef};
 
     use crate::error::{CholeskyStage, GprError};
+    use crate::kernel::KernelTerm;
     use crate::math::ExpJet;
 
     /// Crate-private operations whose algorithm differs between `f32` and `f64`.
@@ -31,6 +32,23 @@ pub(crate) mod sealed {
         /// safetensors dtype of this scalar.
         const DTYPE: safetensors::Dtype;
 
+        /// Whether fit fills and reads the ARD `(Δx_d)²` cache at this scalar.
+        const READS_ARD_CACHE: bool;
+
+        /// Writes pairwise squared Euclidean distances of the rows of `x`.
+        fn write_squared(x: MatRef<'_, Self>, dist: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
+
+        /// Writes train × test squared Euclidean distances.
+        fn write_cross(
+            x_train: MatRef<'_, Self>,
+            x_test: MatRef<'_, Self>,
+            dist: MatMut<'_, Self>,
+            scratch: &mut [Mat<Self>],
+        );
+
+        /// Writes the `n × (n·d)` raw `(Δx_d)²` cache.
+        fn write_ard(x: MatRef<'_, Self>, cache: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
+
         fn empty_rows() -> Self::RowCast;
 
         fn empty_cols() -> Self::ColCast;
@@ -40,6 +58,20 @@ pub(crate) mod sealed {
 
         /// Views `x` as this scalar. `f64` returns `x`. `f32` fills `cast`.
         fn storage_cols<'a>(x: MatRef<'a, f64>, cast: &'a mut Self::ColCast) -> MatRef<'a, Self>;
+
+        /// This view as `f64` when the scalar is `f64`, for the SIMD paths.
+        fn as_f64_ref(m: MatRef<'_, Self>) -> Option<MatRef<'_, f64>>;
+
+        /// This view as `f64` when the scalar is `f64`, for the SIMD paths.
+        fn as_f64_mut(m: MatMut<'_, Self>) -> Option<MatMut<'_, f64>>;
+
+        /// Picks a [`crate::kernel::CustomKernel`] leaf's implementation at this scalar.
+        fn pick_term<'a>(
+            f64_term: &'a dyn KernelTerm<f64>,
+            f32_term: &'a dyn KernelTerm<f32>,
+        ) -> &'a dyn KernelTerm<Self>
+        where
+            Self: crate::kernel::KernelScalar;
 
         /// Degree-7 polynomial `exp` ([`crate::FastApprox`]).
         fn fast_exp(self) -> Self;
@@ -125,6 +157,30 @@ pub trait KernelScalar:
 
     /// Whether the value is neither infinite nor `NaN`.
     fn is_finite(self) -> bool;
+
+    /// `selfᵉ` for a real exponent.
+    fn powf(self, e: Self) -> Self;
+
+    /// Sine (radians).
+    fn sin(self) -> Self;
+
+    /// Cosine (radians).
+    fn cos(self) -> Self;
+
+    /// The larger of two values (`NaN` loses).
+    fn max(self, other: Self) -> Self;
+
+    /// The smaller of two values (`NaN` loses).
+    fn min(self, other: Self) -> Self;
+}
+
+/// `(src, dest)` as `f64` views when `T` is `f64`, for the SIMD paths.
+#[inline(always)]
+pub(crate) fn f64_pair<'a, T: KernelScalar>(
+    src: MatRef<'a, T>,
+    dest: faer::MatMut<'a, T>,
+) -> Option<(MatRef<'a, f64>, faer::MatMut<'a, f64>)> {
+    Some((T::as_f64_ref(src)?, T::as_f64_mut(dest)?))
 }
 
 macro_rules! impl_kernel_scalar {
@@ -164,6 +220,31 @@ macro_rules! impl_kernel_scalar {
             fn is_finite(self) -> bool {
                 <$t>::is_finite(self)
             }
+
+            #[inline(always)]
+            fn powf(self, e: Self) -> Self {
+                <$t>::powf(self, e)
+            }
+
+            #[inline(always)]
+            fn sin(self) -> Self {
+                <$t>::sin(self)
+            }
+
+            #[inline(always)]
+            fn cos(self) -> Self {
+                <$t>::cos(self)
+            }
+
+            #[inline(always)]
+            fn max(self, other: Self) -> Self {
+                <$t>::max(self, other)
+            }
+
+            #[inline(always)]
+            fn min(self, other: Self) -> Self {
+                <$t>::min(self, other)
+            }
         }
     };
 }
@@ -177,6 +258,24 @@ impl sealed::ScalarOps for f64 {
 
     const ROUNDS_FROM_F64: bool = false;
     const DTYPE: safetensors::Dtype = safetensors::Dtype::F64;
+    const READS_ARD_CACHE: bool = true;
+
+    fn write_squared(x: MatRef<'_, Self>, dist: faer::MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
+        super::dist::fill_squared_euclidean(x, dist, scratch);
+    }
+
+    fn write_cross(
+        x_train: MatRef<'_, Self>,
+        x_test: MatRef<'_, Self>,
+        dist: faer::MatMut<'_, Self>,
+        scratch: &mut [Mat<Self>],
+    ) {
+        super::dist::fill_squared_euclidean_cross(x_train, x_test, dist, scratch);
+    }
+
+    fn write_ard(x: MatRef<'_, Self>, cache: faer::MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
+        super::dist::fill_ard_squared_diff(x, cache, scratch);
+    }
 
     fn empty_rows() -> Self::RowCast {}
 
@@ -188,6 +287,23 @@ impl sealed::ScalarOps for f64 {
 
     fn storage_cols<'a>(x: MatRef<'a, f64>, _cast: &'a mut Self::ColCast) -> MatRef<'a, Self> {
         x
+    }
+
+    fn pick_term<'a>(
+        f64_term: &'a dyn crate::kernel::KernelTerm<f64>,
+        _f32_term: &'a dyn crate::kernel::KernelTerm<f32>,
+    ) -> &'a dyn crate::kernel::KernelTerm<Self> {
+        f64_term
+    }
+
+    #[inline(always)]
+    fn as_f64_ref(m: MatRef<'_, Self>) -> Option<MatRef<'_, f64>> {
+        Some(m)
+    }
+
+    #[inline(always)]
+    fn as_f64_mut(m: faer::MatMut<'_, Self>) -> Option<faer::MatMut<'_, f64>> {
+        Some(m)
     }
 
     #[inline(always)]
@@ -253,6 +369,28 @@ impl sealed::ScalarOps for f32 {
 
     const ROUNDS_FROM_F64: bool = true;
     const DTYPE: safetensors::Dtype = safetensors::Dtype::F32;
+    const READS_ARD_CACHE: bool = false;
+
+    fn write_squared(
+        x: MatRef<'_, Self>,
+        dist: faer::MatMut<'_, Self>,
+        _scratch: &mut [Mat<Self>],
+    ) {
+        super::dist::fill_squared_scalar(x, dist);
+    }
+
+    fn write_cross(
+        x_train: MatRef<'_, Self>,
+        x_test: MatRef<'_, Self>,
+        dist: faer::MatMut<'_, Self>,
+        _scratch: &mut [Mat<Self>],
+    ) {
+        super::dist::fill_cross_scalar(x_train, x_test, dist);
+    }
+
+    fn write_ard(x: MatRef<'_, Self>, cache: faer::MatMut<'_, Self>, _scratch: &mut [Mat<Self>]) {
+        super::dist::fill_ard_scalar(x, cache);
+    }
 
     fn empty_rows() -> Self::RowCast {
         Vec::new()
@@ -282,6 +420,23 @@ impl sealed::ScalarOps for f32 {
             }
         }
         cast.as_ref()
+    }
+
+    fn pick_term<'a>(
+        _f64_term: &'a dyn crate::kernel::KernelTerm<f64>,
+        f32_term: &'a dyn crate::kernel::KernelTerm<f32>,
+    ) -> &'a dyn crate::kernel::KernelTerm<Self> {
+        f32_term
+    }
+
+    #[inline(always)]
+    fn as_f64_ref(_m: MatRef<'_, Self>) -> Option<MatRef<'_, f64>> {
+        None
+    }
+
+    #[inline(always)]
+    fn as_f64_mut(_m: faer::MatMut<'_, Self>) -> Option<faer::MatMut<'_, f64>> {
+        None
     }
 
     #[inline(always)]

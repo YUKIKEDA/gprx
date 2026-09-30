@@ -189,7 +189,6 @@ impl<O, M, P> OnlineSgpr<O, M, P>
 where
     M: crate::math::KernelMath,
     P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, M, P>) -> Self {
         let registry = PointRegistry::from_count(fitted.n);
@@ -865,7 +864,6 @@ impl<O, M, P> OnlineSgpr<O, M, P>
 where
     M: crate::math::KernelMath,
     P: crate::precision::GpScalar + super::factor::MeanDot + PublishSgprWeights,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
