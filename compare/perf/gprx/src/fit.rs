@@ -6,20 +6,25 @@ use std::time::Instant;
 
 use gprx::internals as hooks;
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel};
-use gprx::{GaussianLikelihood, Gpr, Lbfgs};
+use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, Lbfgs};
 
 use crate::case::{FitRow, RealCase};
 use crate::rss::peak_rss_bytes;
 
 const HISTORY: usize = 10;
 
-fn make_gpr(case: &RealCase) -> Result<Gpr<Lbfgs>, String> {
+fn model_parts(case: &RealCase) -> Result<(KernelSpec, GaussianLikelihood), String> {
     let ard =
         RbfArdKernel::new(&vec![case.lengthscale_init; case.n_cols]).map_err(|e| e.to_string())?;
     let constant = ConstantKernel::new(case.signal_variance_init).map_err(|e| e.to_string())?;
     let kernel = KernelSpec::from(constant) * KernelSpec::from(ard);
     let likelihood =
         GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
+    Ok((kernel, likelihood))
+}
+
+fn make_gpr(case: &RealCase) -> Result<Gpr<Lbfgs>, String> {
+    let (kernel, likelihood) = model_parts(case)?;
     let lbfgs = match case.protocol.as_str() {
         "native" => Lbfgs::new(),
         "matched" => Lbfgs::new()
@@ -33,6 +38,16 @@ fn make_gpr(case: &RealCase) -> Result<Gpr<Lbfgs>, String> {
 }
 
 pub fn run(case: &RealCase) -> Result<FitRow, String> {
+    if case.protocol == "fixed" {
+        let (kernel, likelihood) = model_parts(case)?;
+        let gpr = Gpr::new(kernel, likelihood).with_optimizer(Fixed);
+        let start = Instant::now();
+        let fitted = gpr
+            .factor(&case.x, case.n_rows, case.n_cols, &case.y)
+            .map_err(|(_, e)| e.to_string())?;
+        let fit_s = start.elapsed().as_secs_f64();
+        return score_row(case, &fitted, fit_s, (0, 0));
+    }
     let gpr = make_gpr(case)?;
     hooks::reset_objective_call_counts();
     let start = Instant::now();
@@ -40,7 +55,15 @@ pub fn run(case: &RealCase) -> Result<FitRow, String> {
         .fit(&case.x, case.n_rows, case.n_cols, &case.y)
         .map_err(|(_, e)| e.to_string())?;
     let fit_s = start.elapsed().as_secs_f64();
-    let (value_evals, joint_evals) = hooks::objective_call_counts();
+    score_row(case, &fitted, fit_s, hooks::objective_call_counts())
+}
+
+fn score_row<O>(
+    case: &RealCase,
+    fitted: &FittedGpr<O>,
+    fit_s: f64,
+    (value_evals, joint_evals): (u64, u64),
+) -> Result<FitRow, String> {
     let nlml = fitted
         .neg_log_marginal_likelihood()
         .map_err(|e| e.to_string())?;

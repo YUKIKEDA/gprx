@@ -65,6 +65,8 @@ def make_model(case: dict) -> CountingGpr:
         length_scale=[case["lengthscale_init"]] * case["n_cols"]
     ) + WhiteKernel(case["noise_variance_init"])
     model = CountingGpr(kernel=kernel, alpha=1e-10, n_restarts_optimizer=0, random_state=0)
+    if case["protocol"] == "fixed":
+        model.optimizer = None
     model.protocol = case["protocol"]
     model.max_iterations = int(case["max_iterations"])
     model.gtol = float(case["gtol"])
