@@ -3,14 +3,14 @@
 use std::marker::PhantomData;
 
 use crate::error::GprError;
-use crate::gpr::{KernelExp, with_kernel_exp};
+use crate::policy::{KernelExp, with_kernel_exp};
 use crate::sparse::SparseSpec;
 
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::precision::{DoublePrecision, GpScalar};
+use crate::sgpr::SgprObjective;
 
 use super::factor::assemble_fitted;
 use super::fitted::FittedSgpr;

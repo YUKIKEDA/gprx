@@ -23,7 +23,19 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{QueryWorkspace, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 
-use super::{Gpr, Policies, with_kernel_exp};
+use super::Gpr;
+use crate::policy::{
+    CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp, with_kernel_exp,
+};
+
+/// The runtime policies a trainer and its fitted model share.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Policies {
+    pub(crate) distance_cache: DistanceCachePolicy,
+    pub(crate) cholesky_buffer: CholeskyBuffer,
+    pub(crate) math: KernelExp,
+    pub(crate) jitter: JitterPolicy,
+}
 
 /// Everything a fitted Exact GPR holds except its training factor.
 pub(crate) struct GprCore<P: GpScalar> {
@@ -619,7 +631,7 @@ struct CoreRefs<'a, P: GpScalar> {
     x_train: MatRef<'a, f64>,
     noise: f64,
     y_transform: &'a dyn TargetTransform,
-    math: super::KernelExp,
+    math: crate::policy::KernelExp,
 }
 
 struct MomentInputs<'a, P: GpScalar> {

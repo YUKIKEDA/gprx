@@ -2,11 +2,15 @@
 //! [`crate::Svgp`]): the settings every trainer holds, the training data
 //! every fitted model holds, and the kernel + likelihood `θ` over both.
 
+use faer::{Mat, MatRef};
+
 use crate::error::GprError;
-use crate::gpr::KernelExp;
 use crate::kernel::KernelSpec;
+use crate::kernel::{CompiledKernel, KernelScalar};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
+use crate::policy::JitterPolicy;
+use crate::policy::KernelExp;
 
 /// Kernel, likelihood, and kernel `exp` of an untrained sparse model.
 #[derive(Clone, Debug)]
@@ -172,3 +176,34 @@ macro_rules! sparse_core_accessors {
 }
 
 pub(crate) use sparse_core_accessors;
+
+/// Jitter retries for factoring `K_mm = k(Z, Z)`. Observation noise is not
+/// on `K_mm`, so close inducing points need a small diagonal offset.
+pub(crate) fn k_mm_jitter_policy() -> JitterPolicy {
+    JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
+}
+
+/// `K(x, xs)` (`n × q`) in a new matrix.
+pub(crate) fn kernel_cross<M: crate::math::KernelMath, T>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'_, T>,
+    xs: MatRef<'_, T>,
+) -> Result<Mat<T>, GprError>
+where
+    T: KernelScalar,
+{
+    let n = x.nrows();
+    let q = xs.nrows();
+    let mut out = Mat::zeros(n, q);
+    let mut scratch = Mat::zeros(n, q);
+    compiled.eval_cross::<M>(
+        x,
+        xs,
+        None,
+        out.as_mut(),
+        scratch.as_mut(),
+        &mut Vec::new(),
+        &mut [],
+    )?;
+    Ok(out)
+}

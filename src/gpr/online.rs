@@ -9,10 +9,10 @@ use faer::{Mat, MatRef};
 
 use crate::data::pack_storage;
 use crate::error::{CholeskyStage, GprError};
+use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
-use crate::objective::GprObjective;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
 use crate::persist::{self, PersistedModel, persist_err};
@@ -21,10 +21,9 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::{
-    ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, PointId, PointRegistry, Policies,
-    fit_buffers, with_kernel_exp,
-};
+use super::{ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, Policies, fit_buffers};
+use crate::points::{PointId, PointRegistry};
+use crate::policy::with_kernel_exp;
 
 #[cfg(feature = "insert-stages")]
 mod insert_stages {

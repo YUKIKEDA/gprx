@@ -5,7 +5,7 @@ use crate::error::GprError;
 use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, frobenius2, solve_llt};
-use crate::objective::SgprObjective;
+use crate::sgpr::SgprObjective;
 use crate::{
     FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Newton, NonlinearCg,
     Optimizer, PredictOptions, VarianceKind,
@@ -185,7 +185,11 @@ fn kernel_column(
     let compiled = kernel.compile();
     let z_mat = pack_points(z, m, d);
     let x_mat = pack_points(x_pt, 1, d);
-    kernel_cross::<crate::math::Accurate, _>(&compiled, z_mat.as_ref(), x_mat.as_ref())
+    crate::sparse::kernel_cross::<crate::math::Accurate, _>(
+        &compiled,
+        z_mat.as_ref(),
+        x_mat.as_ref(),
+    )
 }
 
 fn kernel_diag_at(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<f64, GprError> {

@@ -91,17 +91,17 @@ impl<P: PrecisionPolicy> FitBuffers<P> {
     /// Returns [`GprError::EmptyInput`] if `n` is zero.
     pub(crate) fn new(
         n: usize,
-        cache: crate::gpr::DistanceCachePolicy,
-        buffer: crate::gpr::CholeskyBuffer,
+        cache: crate::policy::DistanceCachePolicy,
+        buffer: crate::policy::CholeskyBuffer,
     ) -> Result<Self, GprError> {
         let core = WorkspaceCore::new(n)?;
         let dist = match cache {
-            crate::gpr::DistanceCachePolicy::Cached => Some(DistCache::default()),
-            crate::gpr::DistanceCachePolicy::Uncached => None,
+            crate::policy::DistanceCachePolicy::Cached => Some(DistCache::default()),
+            crate::policy::DistanceCachePolicy::Uncached => None,
         };
         let w_matrix = match buffer {
-            crate::gpr::CholeskyBuffer::Retain => Some(Mat::<P::Storage>::zeros(n, n)),
-            crate::gpr::CholeskyBuffer::Reuse => None,
+            crate::policy::CholeskyBuffer::Retain => Some(Mat::<P::Storage>::zeros(n, n)),
+            crate::policy::CholeskyBuffer::Reuse => None,
         };
         Ok(Self {
             core,
@@ -482,7 +482,7 @@ where
 mod tests {
     use super::{FitBuffers, FitWorkspace, QueryWorkspace, WorkspaceCore, faer_scratch_req};
     use crate::error::GprError;
-    use crate::gpr::{CholeskyBuffer, DistanceCachePolicy};
+    use crate::policy::{CholeskyBuffer, DistanceCachePolicy};
     use crate::precision::DoublePrecision;
     use crate::test_check::assert_send_sync;
 

@@ -125,7 +125,7 @@ pub struct TrainSystem<'a, T: KernelScalar> {
     /// `factor⁻¹ y` in the storage scalar.
     pub factor_alpha: &'a [T],
     /// Retries for the `f64` fallback factor.
-    pub policy: crate::gpr::JitterPolicy,
+    pub policy: crate::policy::JitterPolicy,
     /// Reported on a failed fallback factor.
     pub stage: CholeskyStage,
 }

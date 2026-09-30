@@ -52,7 +52,10 @@ mod objective;
 mod optimizer;
 mod param;
 pub mod persist;
+mod points;
+mod policy;
 mod precision;
+mod prediction;
 mod rng;
 mod sgpr;
 mod sparse;
@@ -69,10 +72,7 @@ pub mod transform;
 mod workspace;
 
 pub use error::{CholeskyStage, GprError};
-pub use gpr::{
-    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FittedGpr, FixedJitter, Gpr, JitterPolicy,
-    KernelExp, OnlineGpr, PointId, PredictOptions, Prediction, PredictiveCovariance, VarianceKind,
-};
+pub use gpr::{FittedGpr, Gpr, OnlineGpr};
 pub use likelihood::GaussianLikelihood;
 pub use math::{Accurate, FastApprox, KernelMath};
 pub use objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
@@ -82,10 +82,15 @@ pub use optimizer::{
 };
 pub use param::{BoundedParam, Interval, IntervalError};
 pub use persist::{FORMAT_VERSION, LoadedGpr, PersistRegistry};
+pub use points::PointId;
+pub use policy::{
+    AdaptiveJitter, CholeskyBuffer, DistanceCachePolicy, FixedJitter, JitterPolicy, KernelExp,
+};
 pub use precision::{
     DoublePrecision, GpScalar, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
     ResidualFormula, SinglePrecision,
 };
+pub use prediction::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 pub use sgpr::{FittedSgpr, FixedInducing, FreeInducing, InducingId, OnlineSgpr, Sgpr};
 pub use svgp::{FittedSvgp, Svgp};
 

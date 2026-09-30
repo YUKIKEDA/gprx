@@ -1,476 +1,16 @@
-//! Whitened SVGP assembly, ELBO, and diagonal prediction.
+//! Full-data and mini-batch gradients of the negative ELBO.
 
-use dyn_stack::MemBuffer;
-use faer::linalg::cholesky::llt;
-use faer::{Mat, MatRef};
-
-use rand::RngExt;
-use rand::rngs::SmallRng;
-
-use crate::data::{pack_points, validate_inducing, validate_query, validate_training};
-use crate::error::{CholeskyStage, GprError};
-use crate::gpr::JitterPolicy;
-use crate::gpr::KernelExp;
-use crate::sparse::SparseCore;
-
+use super::assemble::q_param_len;
+use crate::data::pack_points;
+use crate::error::GprError;
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
-use crate::likelihood::GaussianLikelihood;
-use crate::linalg::{
-    cholesky_lower_with_retries, dot_f64x4, faer_par, faer_par_dims, forward_substitute,
-    mat_mul_into, norm2_f64x4, symmetrize_lower,
-};
-use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
-use crate::param::Interval;
+use crate::kernel::{CompiledKernel, KernelScalar, Triangle};
+use crate::linalg::{dot_f64x4, mat_mul_into, norm2_f64x4, solve_lower};
 use crate::precision::ModelPrecision;
-use crate::rng::small_rng;
-use crate::sgpr::kernel_cross;
-use crate::{PredictOptions, Prediction, VarianceKind};
-
-use super::fitted::FittedSvgp;
-
-// `K_mm` only. Public default stays Fixed(0). Forrester m=16 / ℓ=1 is not PD in f64.
-fn k_mm_jitter_policy() -> JitterPolicy {
-    JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3).unwrap_or_default()
-}
-
-pub(crate) struct SvgpState<T: KernelScalar> {
-    pub(crate) k_mm_l: Mat<T>,
-    pub(crate) a: Mat<T>,
-    pub(crate) q_mean: Vec<f64>,
-    pub(crate) q_l: Mat<f64>,
-    pub(crate) k_diag: Vec<T>,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P>(
-    kernel: KernelSpec,
-    likelihood: GaussianLikelihood,
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-    z: &[f64],
-    n_inducing: usize,
-    q: Option<(Vec<f64>, Mat<f64>)>,
-) -> Result<FittedSvgp<P>, GprError>
-where
-    P: ModelPrecision,
-{
-    let state = assemble_svgp::<M, P::Storage>(&kernel, x, n_rows, n_cols, y, z, n_inducing, q)?;
-    Ok(FittedSvgp {
-        core: SparseCore {
-            kernel,
-            likelihood,
-            x_obs: x.to_vec(),
-            z_obs: z.to_vec(),
-            y: y.to_vec(),
-            n: n_rows,
-            m: n_inducing,
-            d: n_cols,
-            math: KernelExp::of::<M>(),
-        },
-        k_mm_l: state.k_mm_l,
-        a: state.a,
-        q_mean: state.q_mean,
-        q_l: state.q_l,
-        k_diag: state.k_diag,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
-    kernel: &KernelSpec,
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-    z: &[f64],
-    n_inducing: usize,
-    q: Option<(Vec<f64>, Mat<f64>)>,
-) -> Result<SvgpState<T>, GprError>
-where
-    T: KernelScalar,
-{
-    validate_training(x, n_rows, n_cols, y)?;
-    validate_inducing(z, n_inducing, n_cols)?;
-    let compiled = kernel.compile_as::<T>();
-    let x64 = pack_points(x, n_rows, n_cols);
-    let z64 = pack_points(z, n_inducing, n_cols);
-    let mut x_cast = T::empty_cols();
-    let mut z_cast = T::empty_cols();
-    let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
-    let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
-    let mut k_mm = Mat::zeros(n_inducing, n_inducing);
-    let mut scratch = Mat::zeros(n_inducing, n_inducing);
-    compiled.eval_gram::<M>(
-        GramInputs::points(z_mat),
-        k_mm.as_mut(),
-        Triangle::Lower,
-        scratch.as_mut(),
-        &mut Vec::new(),
-    )?;
-    let req = llt::factor::cholesky_in_place_scratch::<T>(
-        n_inducing,
-        faer_par(n_inducing),
-        Default::default(),
-    );
-    let mut chol_scratch = MemBuffer::new(req);
-    cholesky_lower_with_retries(
-        &mut k_mm,
-        &mut chol_scratch,
-        k_mm_jitter_policy().retry_jitters(),
-        CholeskyStage::Fit,
-    )?;
-    // Same packed `X` and `Z` share a training White diagonal. Rectangular
-    // `apply_cross` leaves White at zero.
-    let mut a = if x == z {
-        let mut gram = Mat::zeros(n_rows, n_rows);
-        let mut gram_scratch = Mat::zeros(n_rows, n_rows);
-        compiled.eval_gram::<M>(
-            GramInputs::points(x_mat),
-            gram.as_mut(),
-            Triangle::Lower,
-            gram_scratch.as_mut(),
-            &mut Vec::new(),
-        )?;
-        symmetrize_lower(gram.as_mut(), n_rows);
-        gram
-    } else {
-        kernel_cross::<M, _>(&compiled, z_mat, x_mat)?
-    };
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        k_mm.as_ref(),
-        a.as_mut(),
-        faer_par_dims(n_inducing, n_rows),
-    );
-    let mut k_diag = vec![T::from_f64(0.0); n_rows];
-    compiled.fill_diag_points(x_mat, &mut k_diag)?;
-    let (q_mean, q_l) = match q {
-        Some((mean, l)) => (mean, l),
-        None => prior_q(n_inducing),
-    };
-    Ok(SvgpState::<T> {
-        k_mm_l: k_mm,
-        a,
-        q_mean,
-        q_l,
-        k_diag,
-    })
-}
-
-pub(crate) fn prior_q(m: usize) -> (Vec<f64>, Mat<f64>) {
-    let mean = vec![0.0; m];
-    let mut l = Mat::zeros(m, m);
-    for i in 0..m {
-        l[(i, i)] = 1.0;
-    }
-    (mean, l)
-}
-
-pub(crate) fn q_chol_len(m: usize) -> usize {
-    m.saturating_mul(m.saturating_add(1)) / 2
-}
-
-pub(crate) fn q_param_len(m: usize) -> usize {
-    m + q_chol_len(m)
-}
-
-pub(crate) fn pack_q(mean: &[f64], l: MatRef<'_, f64>, out: &mut [f64]) {
-    let m = mean.len();
-    debug_assert_eq!(out.len(), q_param_len(m));
-    out[..m].copy_from_slice(mean);
-    let mut k = 0;
-    for j in 0..m {
-        for i in j..m {
-            out[m + k] = l[(i, j)];
-            k += 1;
-        }
-    }
-}
-
-pub(crate) fn unpack_q(params: &[f64], m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
-    crate::data::require_count(params.len(), q_param_len(m), "parameters")?;
-    let mut mean = vec![0.0; m];
-    for (i, slot) in mean.iter_mut().enumerate() {
-        let v = params[i];
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        *slot = v;
-    }
-    let mut l = Mat::zeros(m, m);
-    let mut k = 0;
-    for j in 0..m {
-        for i in j..m {
-            let v = params[m + k];
-            if !v.is_finite() {
-                return Err(GprError::NonFiniteInput);
-            }
-            if i == j && v <= 0.0 {
-                return Err(GprError::InvalidHyperparameter {
-                    reason: "variational Cholesky diagonal must be positive".to_owned(),
-                });
-            }
-            l[(i, j)] = v;
-            k += 1;
-        }
-    }
-    Ok((mean, l))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn svgp_neg_elbo<T: KernelScalar>(
-    a: MatRef<'_, T>,
-    q_mean: &[f64],
-    q_l: MatRef<'_, f64>,
-    y: &[f64],
-    k_diag: &[T],
-    noise: f64,
-    n: usize,
-    m: usize,
-) -> f64 {
-    let noise_s = T::from_f64(noise);
-    let mut tr_s = T::from_f64(0.0);
-    let mut log_det_s = T::from_f64(0.0);
-    for j in 0..m {
-        log_det_s += KernelScalar::ln(T::from_f64(q_l[(j, j)]));
-        for i in j..m {
-            let v = T::from_f64(q_l[(i, j)]);
-            tr_s += v * v;
-        }
-    }
-    log_det_s *= T::from_f64(2.0);
-    let mut mean_norm2 = T::from_f64(0.0);
-    for &v in q_mean {
-        let v_s = T::from_f64(v);
-        mean_norm2 += v_s * v_s;
-    }
-    let kl = T::from_f64(0.5) * (tr_s + mean_norm2 - T::from_f64(m as f64) - log_det_s);
-    let log_2pi_noise = T::from_f64((2.0 * std::f64::consts::PI * noise).ln());
-    let inv_noise = T::from_f64(1.0) / noise_s;
-    let mut expected_ll = T::from_f64(0.0);
-    let half = T::from_f64(0.5);
-    for col in 0..n {
-        let mut mu = T::from_f64(0.0);
-        let mut a_norm = T::from_f64(0.0);
-        let mut lt_norm = T::from_f64(0.0);
-        for j in 0..m {
-            let a_j = a[(j, col)];
-            mu += a_j * T::from_f64(q_mean[j]);
-            a_norm += a_j * a_j;
-            let mut lt_j = T::from_f64(0.0);
-            for i in j..m {
-                lt_j += T::from_f64(q_l[(i, j)]) * a[(i, col)];
-            }
-            lt_norm += lt_j * lt_j;
-        }
-        let var = k_diag[col] - a_norm + lt_norm;
-        let resid = T::from_f64(y[col]) - mu;
-        expected_ll =
-            expected_ll + -half * log_2pi_noise + -half * inv_noise * (resid * resid + var);
-    }
-    (-(expected_ll - kl)).to_f64()
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn svgp_predict<M: crate::math::KernelMath, P: ModelPrecision>(
-    kernel: &KernelSpec,
-    z_obs: &[f64],
-    k_mm_l: MatRef<'_, P::Storage>,
-    q_mean: &[f64],
-    q_l: MatRef<'_, f64>,
-    noise: f64,
-    m: usize,
-    d: usize,
-    xs: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    options: PredictOptions,
-) -> Result<Prediction<P::Refine>, GprError>
-where
-{
-    if n_cols != d {
-        return Err(GprError::DimensionMismatch {
-            x_dim: n_cols,
-            expected_dim: d,
-        });
-    }
-    validate_query(xs, n_rows, n_cols)?;
-    let compiled = kernel.compile_as::<P::Storage>();
-    let z64 = pack_points(z_obs, m, d);
-    let query64 = pack_points(xs, n_rows, n_cols);
-    let mut z_cast = P::Storage::empty_cols();
-    let mut q_cast = P::Storage::empty_cols();
-    let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
-    let mut k_sz = kernel_cross::<M, _>(&compiled, z_mat, query_x)?;
-    let rhs = k_sz.clone();
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        k_mm_l,
-        k_sz.as_mut(),
-        faer_par_dims(m, n_rows),
-    );
-    let mut kss = vec![P::Storage::from_f64(0.0); n_rows];
-    compiled.fill_diag_points(query_x, &mut kss)?;
-    let zero = P::Refine::from_f64(0.0);
-    let mut out = Prediction {
-        mean: vec![zero; n_rows],
-        variance: vec![zero; n_rows],
-        variance_kind: options.variance_kind,
-    };
-    for col in 0..n_rows {
-        let mut solved = vec![P::Storage::from_f64(0.0); m];
-        let mut rhs_col = vec![P::Storage::from_f64(0.0); m];
-        let mut a_norm = P::Storage::from_f64(0.0);
-        let mut lt_norm = P::Storage::from_f64(0.0);
-        for j in 0..m {
-            let a_star = k_sz[(j, col)];
-            solved[j] = a_star;
-            rhs_col[j] = rhs[(j, col)];
-            a_norm += a_star * a_star;
-            let mut lt_j = P::Storage::from_f64(0.0);
-            for i in j..m {
-                lt_j += P::Storage::from_f64(q_l[(i, j)]) * k_sz[(i, col)];
-            }
-            lt_norm += lt_j * lt_j;
-        }
-        let mut latent = kss[col] - a_norm + lt_norm;
-        if latent.to_f64() < 0.0 {
-            latent = P::Storage::from_f64(0.0);
-        }
-        let latent_r = P::Refine::from_f64(latent.to_f64());
-        let mut query_row = vec![0.0; d];
-        for dim in 0..d {
-            query_row[dim] = xs[col + n_rows * dim];
-        }
-        out.mean[col] =
-            P::mean_from_factor::<M>(kernel, z_obs, &query_row, k_mm_l, &solved, &rhs_col, q_mean)?;
-        out.variance[col] = match options.variance_kind {
-            VarianceKind::Latent => latent_r,
-            VarianceKind::Observation => P::Refine::from_f64(latent.to_f64() + noise),
-        };
-    }
-    let _ = kernel;
-    Ok(out)
-}
-
-/// Svgp mean: storage `L⁻¹ k_*` dotted with the variational mean.
-pub(crate) fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
-    let mut sum = T::from_f64(0.0);
-    for (weight, mean) in solved.iter().zip(q_mean.iter()) {
-        sum += *weight * T::from_f64(*mean);
-    }
-    sum
-}
-
-/// `L v = b` with `L` lower-triangular: refined through the stored `f32` `L`
-/// against an `f64` reference `(L₆₄, b₆₄)`, which is also the fallback.
-struct TriangularSystem<'a> {
-    l: MatRef<'a, f32>,
-    l64: MatRef<'a, f64>,
-    rhs64: &'a [f64],
-}
-
-impl crate::precision::RefineSystem for TriangularSystem<'_> {
-    fn rhs(&self) -> &[f64] {
-        self.rhs64
-    }
-
-    fn residual(&self, v: &[f64], r: &mut [f64]) -> Result<f64, GprError> {
-        let mut l_inf = 0.0f64;
-        for (i, (ri, &bi)) in r.iter_mut().zip(self.rhs64).enumerate() {
-            let mut row = 0.0;
-            let mut sum = 0.0;
-            for (j, &vj) in v.iter().enumerate().take(i + 1) {
-                let lij = f64::from(self.l[(i, j)]);
-                row += lij.abs();
-                sum += lij * vj;
-            }
-            l_inf = l_inf.max(row);
-            *ri = bi - sum;
-        }
-        Ok(l_inf)
-    }
-
-    fn correct(&self, r: &[f64], v: &mut [f64]) {
-        let r32: Vec<f32> = r.iter().map(|value| *value as f32).collect();
-        let delta = forward_substitute(self.l, &r32);
-        for (slot, step) in v.iter_mut().zip(delta) {
-            *slot += f64::from(step);
-        }
-    }
-
-    fn fallback(&self) -> Result<Vec<f64>, GprError> {
-        Ok(forward_substitute(self.l64, self.rhs64))
-    }
-}
-
-/// Svgp mixed-precision mean: `v = L⁻¹ k_*` refined in `f64`, dotted with `q_mean`.
-///
-/// [`PromoteStorage`](crate::precision::PromoteStorage) refines against the
-/// stored `f32` `L` and `k_*` promoted to `f64`;
-/// [`ReevaluateKernel`](crate::precision::ReevaluateKernel) against `K_mm` and
-/// `k_*` evaluated and factored in `f64`.
-pub(crate) fn refined_mean<M: crate::math::KernelMath, R: crate::precision::ResidualFormula>(
-    kernel: &KernelSpec,
-    z_obs: &[f64],
-    query: &[f64],
-    k_mm_l: MatRef<'_, f32>,
-    solved: &[f32],
-    rhs: &[f32],
-    q_mean: &[f64],
-) -> Result<f64, GprError> {
-    let m = solved.len();
-    let (l64, rhs64) = if R::READS_STORAGE {
-        let mut l64 = Mat::<f64>::zeros(m, m);
-        let mut rhs64 = vec![0.0; m];
-        for i in 0..m {
-            rhs64[i] = rhs[i].to_f64();
-            for j in 0..=i {
-                l64[(i, j)] = k_mm_l[(i, j)].to_f64();
-            }
-        }
-        (l64, rhs64)
-    } else {
-        let d = query.len();
-        let compiled = kernel.compile();
-        let z64 = pack_points(z_obs, m, d);
-        let q64 = pack_points(query, 1, d);
-        let mut k_mm = Mat::<f64>::zeros(m, m);
-        let mut scratch = Mat::<f64>::zeros(m, m);
-        compiled.eval_gram::<M>(
-            GramInputs::points(z64.as_ref()),
-            k_mm.as_mut(),
-            Triangle::Lower,
-            scratch.as_mut(),
-            &mut Vec::new(),
-        )?;
-        let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
-        let mut chol_scratch = MemBuffer::new(req);
-        cholesky_lower_with_retries(
-            &mut k_mm,
-            &mut chol_scratch,
-            k_mm_jitter_policy().retry_jitters(),
-            CholeskyStage::Predict,
-        )?;
-        let k_star = kernel_cross::<M, _>(&compiled, z64.as_ref(), q64.as_ref())?;
-        (k_mm, (0..m).map(|i| k_star[(i, 0)]).collect())
-    };
-    let system = TriangularSystem {
-        l: k_mm_l,
-        l64: l64.as_ref(),
-        rhs64: &rhs64,
-    };
-    let start = solved.iter().map(|value| f64::from(*value)).collect();
-    let v = crate::precision::refine(&system, start)?;
-    let mut sum = 0.0;
-    for (weight, mean) in v.iter().zip(q_mean.iter()) {
-        sum += *weight * *mean;
-    }
-    Ok(sum)
-}
+use crate::sparse::SparseCore;
+use crate::svgp::FittedSvgp;
+use faer::{Mat, MatMut, MatRef};
 
 pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
@@ -487,7 +27,7 @@ where
     svgp_value_and_gradient_storage::<M, _>(model, out, batch)
 }
 
-fn svgp_value_and_gradient_storage<M: crate::math::KernelMath, P>(
+pub(super) fn svgp_value_and_gradient_storage<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
@@ -516,7 +56,7 @@ where
     Ok(kl - scale * ell)
 }
 
-fn storage_kl_grad<P: ModelPrecision>(
+pub(super) fn storage_kl_grad<P: ModelPrecision>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
     n_theta: usize,
@@ -551,13 +91,13 @@ fn storage_kl_grad<P: ModelPrecision>(
         .to_f64()
 }
 
-struct StoragePointCache<T: KernelScalar> {
+pub(super) struct StoragePointCache<T: KernelScalar> {
     resid: Vec<T>,
     var: Vec<T>,
     u: Mat<T>,
 }
 
-fn storage_point_cache<P: ModelPrecision>(
+pub(super) fn storage_point_cache<P: ModelPrecision>(
     model: &FittedSvgp<P>,
     batch: &[usize],
     m: usize,
@@ -592,7 +132,10 @@ fn storage_point_cache<P: ModelPrecision>(
     StoragePointCache { resid, var, u }
 }
 
-fn storage_batch_columns<T: KernelScalar>(full: MatRef<'_, T>, batch: &[usize]) -> Mat<T> {
+pub(super) fn storage_batch_columns<T: KernelScalar>(
+    full: MatRef<'_, T>,
+    batch: &[usize],
+) -> Mat<T> {
     let m = full.nrows();
     let mut owned = Mat::zeros(m, batch.len());
     for (b_idx, &col) in batch.iter().enumerate() {
@@ -603,7 +146,7 @@ fn storage_batch_columns<T: KernelScalar>(full: MatRef<'_, T>, batch: &[usize]) 
     owned
 }
 
-fn storage_data_q_grad<P: ModelPrecision>(
+pub(super) fn storage_data_q_grad<P: ModelPrecision>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
@@ -646,7 +189,7 @@ fn storage_data_q_grad<P: ModelPrecision>(
     (ell.to_f64(), resid2_var.to_f64())
 }
 
-fn storage_kernel_grad<M: crate::math::KernelMath, P>(
+pub(super) fn storage_kernel_grad<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
     batch: &[usize],
@@ -703,7 +246,7 @@ where
 }
 
 #[allow(clippy::type_complexity)]
-fn storage_kernel_tangents<M: crate::math::KernelMath, P>(
+pub(super) fn storage_kernel_tangents<M: crate::math::KernelMath, P>(
     compiled: &CompiledKernel<P::Storage>,
     x: MatRef<'_, P::Storage>,
     z: MatRef<'_, P::Storage>,
@@ -755,18 +298,14 @@ where
     let mut d_l = Mat::<P::Storage>::zeros(m, m);
     storage_cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
     crate::linalg::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        model.k_mm_l.as_ref(),
-        d_kmn.as_mut(),
-        faer_par_dims(m, n),
-    );
+    solve_lower(model.k_mm_l.as_ref(), d_kmn.as_mut());
     Ok((d_kmn, d_kdiag))
 }
 
-fn storage_cholesky_sensitivity<T: KernelScalar>(
+pub(super) fn storage_cholesky_sensitivity<T: KernelScalar>(
     l: MatRef<'_, T>,
     d_k: MatRef<'_, T>,
-    mut d_l: faer::MatMut<'_, T>,
+    mut d_l: MatMut<'_, T>,
     m: usize,
 ) {
     let two = T::from_f64(2.0);
@@ -787,7 +326,7 @@ fn storage_cholesky_sensitivity<T: KernelScalar>(
     }
 }
 
-fn promote_svgp_f64<P: ModelPrecision>(
+pub(super) fn promote_svgp_f64<P: ModelPrecision>(
     model: &FittedSvgp<P>,
 ) -> Result<FittedSvgp<crate::precision::DoublePrecision>, GprError>
 where
@@ -825,7 +364,7 @@ where
     })
 }
 
-fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
+pub(super) fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
@@ -851,7 +390,7 @@ fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     Ok(kl - scale * ell)
 }
 
-fn accumulate_kl_grad(
+pub(super) fn accumulate_kl_grad(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     n_theta: usize,
@@ -879,7 +418,7 @@ fn accumulate_kl_grad(
     0.5 * (tr_s + mean_norm2 - m as f64 - log_det_s)
 }
 
-struct ColMajor<'a> {
+pub(super) struct ColMajor<'a> {
     data: &'a [f64],
     m: usize,
 }
@@ -907,14 +446,14 @@ impl<'a> ColMajor<'a> {
     }
 }
 
-struct PointCache {
+pub(super) struct PointCache {
     resid: Vec<f64>,
     var: Vec<f64>,
     /// Columns are batch rows. `u[(j, b)] = (Lᵀ a)[j]` for that row.
     u: Mat<f64>,
 }
 
-fn point_cache(
+pub(super) fn point_cache(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     batch: &[usize],
     m: usize,
@@ -954,7 +493,7 @@ fn point_cache(
     PointCache { resid, var, u }
 }
 
-enum BatchCols<'a> {
+pub(super) enum BatchCols<'a> {
     Full(MatRef<'a, f64>),
     Owned(Mat<f64>),
 }
@@ -968,7 +507,7 @@ impl<'a> BatchCols<'a> {
     }
 }
 
-fn batch_columns<'a>(full: MatRef<'a, f64>, batch: &[usize]) -> BatchCols<'a> {
+pub(super) fn batch_columns<'a>(full: MatRef<'a, f64>, batch: &[usize]) -> BatchCols<'a> {
     let n = full.ncols();
     if batch.len() == n && batch.iter().enumerate().all(|(i, col)| *col == i) {
         return BatchCols::Full(full);
@@ -983,7 +522,7 @@ fn batch_columns<'a>(full: MatRef<'a, f64>, batch: &[usize]) -> BatchCols<'a> {
     BatchCols::Owned(owned)
 }
 
-fn accumulate_data_q_grad(
+pub(super) fn accumulate_data_q_grad(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
@@ -1025,7 +564,7 @@ fn accumulate_data_q_grad(
     (ell, resid2_var)
 }
 
-fn accumulate_kernel_grad<M: crate::math::KernelMath>(
+pub(super) fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     out: &mut [f64],
     batch: &[usize],
@@ -1100,10 +639,10 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     Ok(())
 }
 
-fn kernel_theta_tangents<M: crate::math::KernelMath>(
+pub(super) fn kernel_theta_tangents<M: crate::math::KernelMath>(
     compiled: &crate::kernel::CompiledKernel,
-    x: faer::MatRef<'_, f64>,
-    z: faer::MatRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    z: MatRef<'_, f64>,
     model: &FittedSvgp<crate::precision::DoublePrecision>,
     same_xz: bool,
     param_idx: usize,
@@ -1153,18 +692,14 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
     // Upper of `d_l` stays zero, so this is the lower-triangular product.
     crate::linalg::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
-    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-        model.k_mm_l.as_ref(),
-        d_kmn.as_mut(),
-        faer_par_dims(m, n),
-    );
+    solve_lower(model.k_mm_l.as_ref(), d_kmn.as_mut());
     Ok((d_kmn, d_kdiag))
 }
 
-fn cholesky_sensitivity(
-    l: faer::MatRef<'_, f64>,
-    d_k: faer::MatRef<'_, f64>,
-    mut d_l: faer::MatMut<'_, f64>,
+pub(super) fn cholesky_sensitivity(
+    l: MatRef<'_, f64>,
+    d_k: MatRef<'_, f64>,
+    mut d_l: MatMut<'_, f64>,
     m: usize,
 ) {
     for j in 0..m {
@@ -1182,123 +717,4 @@ fn cholesky_sensitivity(
             d_l[(i, j)] = acc / l[(j, j)];
         }
     }
-}
-
-fn user_to_unconstrained(
-    user: &[f64],
-    n_theta: usize,
-    m: usize,
-    intervals: &[Interval],
-) -> Result<Vec<f64>, GprError> {
-    let mut z = vec![0.0; user.len()];
-    let mapped = log_theta_to_z(&user[..n_theta], intervals)?;
-    z[..n_theta].copy_from_slice(&mapped);
-    z[n_theta..n_theta + m].copy_from_slice(&user[n_theta..n_theta + m]);
-    let mut packed = 0;
-    for j in 0..m {
-        for i in j..m {
-            let idx = n_theta + m + packed;
-            z[idx] = if i == j { user[idx].ln() } else { user[idx] };
-            packed += 1;
-        }
-    }
-    Ok(z)
-}
-
-fn unconstrained_to_user(
-    z: &[f64],
-    n_theta: usize,
-    m: usize,
-    intervals: &[Interval],
-) -> Result<Vec<f64>, GprError> {
-    let mut user = vec![0.0; z.len()];
-    let mapped = z_to_log_theta(&z[..n_theta], intervals)?;
-    user[..n_theta].copy_from_slice(&mapped);
-    user[n_theta..n_theta + m].copy_from_slice(&z[n_theta..n_theta + m]);
-    let mut packed = 0;
-    for j in 0..m {
-        for i in j..m {
-            let idx = n_theta + m + packed;
-            user[idx] = if i == j { z[idx].exp() } else { z[idx] };
-            packed += 1;
-        }
-    }
-    Ok(user)
-}
-
-fn user_grad_to_unconstrained(
-    user: &[f64],
-    z: &[f64],
-    intervals: &[Interval],
-    g_user: &[f64],
-    g_z: &mut [f64],
-    n_theta: usize,
-    m: usize,
-) {
-    g_z.copy_from_slice(g_user);
-    chain_logit_grad(
-        &z[..n_theta],
-        intervals,
-        &user[..n_theta],
-        &mut g_z[..n_theta],
-    );
-    let mut packed = 0;
-    for j in 0..m {
-        for i in j..m {
-            let idx = n_theta + m + packed;
-            if i == j {
-                g_z[idx] = g_user[idx] * user[idx];
-            }
-            packed += 1;
-        }
-    }
-}
-
-fn shuffle_indices(idx: &mut [usize], rng: &mut SmallRng) {
-    for i in (1..idx.len()).rev() {
-        let j = rng.random_range(0..=i);
-        idx.swap(i, j);
-    }
-}
-
-pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P>(
-    model: &mut FittedSvgp<P>,
-    adam: &Adam,
-) -> Result<(), GprError>
-where
-    P: crate::precision::GpScalar,
-{
-    let n = model.core.n;
-    let m = model.core.m;
-    let n_theta = model.core.kernel.num_params() + model.core.likelihood.num_params();
-    let p = model.num_params();
-    let mut intervals = vec![Interval::DEFAULT_POSITIVE; model.core.theta_len()];
-    model.core.theta_intervals(&mut intervals)?;
-    let mut user = vec![0.0; p];
-    model.get_params(&mut user)?;
-    let mut z = user_to_unconstrained(&user, n_theta, m, &intervals)?;
-    let mut moment1 = vec![0.0; p];
-    let mut moment2 = vec![0.0; p];
-    let mut g_user = vec![0.0; p];
-    let mut g_z = vec![0.0; p];
-    let mut order: Vec<usize> = (0..n).collect();
-    let mut rng = small_rng(adam.seed());
-    let mut timestep = 0_u64;
-    let batch_size = adam.batch_size();
-    for _ in 0..adam.epochs() {
-        shuffle_indices(&mut order, &mut rng);
-        let mut start = 0;
-        while start < n {
-            let end = start.saturating_add(batch_size).min(n);
-            let batch = &order[start..end];
-            user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
-            model.set_params(&user)?;
-            svgp_value_and_gradient::<M, _>(model, &mut g_user, batch)?;
-            user_grad_to_unconstrained(&user, &z, &intervals, &g_user, &mut g_z, n_theta, m);
-            adam.step(&mut z, &g_z, &mut moment1, &mut moment2, &mut timestep);
-            start = end;
-        }
-    }
-    user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
-    model.set_params(&user)
 }
