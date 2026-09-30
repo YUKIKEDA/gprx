@@ -74,6 +74,7 @@ where
     }
 
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        crate::objective::count_value_call!();
         if self.incremental {
             self.leaf_value(params, None)
         } else {
@@ -82,6 +83,7 @@ where
     }
 
     fn value_at_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
+        crate::objective::count_value_call!();
         if self.incremental {
             self.leaf_value(params, Some(indices))
         } else {
@@ -104,6 +106,7 @@ where
     P: crate::precision::GpScalar,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        crate::objective::count_joint_call!();
         self.model
             .value_and_gradient_into_fit(params, out)
             .map(|_| ())
@@ -114,6 +117,7 @@ where
         params: &[f64],
         out: &mut [f64],
     ) -> Result<f64, GprError> {
+        crate::objective::count_joint_call!();
         self.model.value_and_gradient_into_fit(params, out)
     }
 }

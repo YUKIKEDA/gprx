@@ -37,9 +37,19 @@ def na_row(note: str, fields: Sequence[str] = TIME_FIELDS) -> Row:
     return row
 
 
+#: When set (``directory, label``), :func:`run_cmd` also samples the process
+#: tree's RSS and writes ``<directory>/<label>.json`` (B1-1 RSS timelines).
+TIMELINE: tuple[Path, str] | None = None
+
+
 def run_cmd(args: list[str], cwd: Path, fields: Sequence[str] = TIME_FIELDS) -> Row:
     """Runs one runner process and reads its JSON row from the last stdout line."""
-    proc = subprocess.run(args, cwd=cwd, check=False, capture_output=True, text=True)
+    if TIMELINE is not None:
+        from .timeline import run_sampled
+
+        proc = run_sampled(args, cwd, *TIMELINE)
+    else:
+        proc = subprocess.run(args, cwd=cwd, check=False, capture_output=True, text=True)
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         return na_row(f"runner failed ({proc.returncode}): {err}", fields)

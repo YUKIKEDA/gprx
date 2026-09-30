@@ -181,6 +181,12 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R6-1 | Task | Deduplicate the `compare/` Python harness and problem definitions | [#248](https://github.com/YUKIKEDA/gprx/issues/248) | done |
 | R6-2 | Task | Align `design.md` pseudo-code with the implementation | [#249](https://github.com/YUKIKEDA/gprx/issues/249) | done |
 
+## B (real-dataset comparison)
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| B1-1 | Task | Real-dataset benchmark and library comparison in the README | [#298](https://github.com/YUKIKEDA/gprx/issues/298) | acceptance on #298 |
+
 ## Intentionally out of scope
 
 Adding or removing a bullet here is Grill → Issue (`.cursor/rules/workflow.mdc`). An agent does not add a row without that agreement.
