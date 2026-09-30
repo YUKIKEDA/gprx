@@ -12,8 +12,7 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l};
 use crate::objective::{IncrementalObjective, Objective};
 use crate::optimizer::{
-    FastSimulatedAnnealing, Fixed, Lbfgs, NelderMead, NonlinearCg, OptResult, Optimizer,
-    TrustRegion,
+    FastSimulatedAnnealing, Fixed, Lbfgs, NelderMead, OptResult, Optimizer, TrustRegion,
 };
 use crate::param::Interval;
 use crate::policy::{
@@ -79,10 +78,8 @@ fn matvec_sym(a: &Mat<f64>, x: &[f64]) -> Vec<f64> {
 #[test]
 fn is_send_sync() {
     assert_send_sync::<Gpr>();
-    assert_send_sync::<Gpr<NonlinearCg>>();
     assert_send_sync::<Gpr<NelderMead>>();
     assert_send_sync::<FittedGpr>();
-    assert_send_sync::<FittedGpr<NonlinearCg>>();
     assert_send_sync::<FittedGpr<NelderMead>>();
     assert_send_sync::<Prediction>();
     assert_send_sync::<PredictiveCovariance>();
@@ -2482,51 +2479,6 @@ fn lbfgs_knobs_affect_fit_and_refit() {
 }
 
 #[test]
-fn ncg_knobs_affect_fit_and_refit() {
-    let x = [0.0, 0.25, 0.6, 1.0];
-    let y = [0.1, -0.4, 0.2, 0.8];
-    let frozen = rbf_gpr(2.0, 0.2)
-        .with_optimizer(NonlinearCg::new().with_max_iterations(0))
-        .fit(&x, 4, 1, &y)
-        .expect("zero iters");
-    let mut frozen_params = [0.0; 2];
-    frozen.get_params(&mut frozen_params).expect("len 2");
-    assert_close(frozen_params[0], 2.0_f64.ln(), TOL);
-    assert_close(frozen_params[1], 0.2_f64.ln(), TOL);
-
-    let searched = rbf_gpr(2.0, 0.2)
-        .with_optimizer(
-            NonlinearCg::new()
-                .with_max_iterations(80)
-                .with_tolerance(1e-8)
-                .expect("tol"),
-        )
-        .fit(&x, 4, 1, &y)
-        .expect("search");
-    let mut searched_params = [0.0; 2];
-    searched.get_params(&mut searched_params).expect("len 2");
-    assert!(
-        frozen_params
-            .iter()
-            .zip(&searched_params)
-            .any(|(a, b)| (a - b).abs() > 1e-9),
-        "a real search should move θ: frozen={frozen_params:?} searched={searched_params:?}"
-    );
-
-    let mut restarted = rbf_gpr(2.0, 0.2)
-        .with_optimizer(NonlinearCg::new().with_restarts(std::num::NonZeroU32::MIN, 11))
-        .fit(&x, 4, 1, &y)
-        .expect("restarts");
-    let nlml_fit = restarted.neg_log_marginal_likelihood().expect("nlml");
-    restarted.refit().expect("refit");
-    let nlml_refit = restarted.neg_log_marginal_likelihood().expect("nlml");
-    assert!(
-        nlml_refit <= nlml_fit + 1e-9,
-        "refit should not raise NLML: fit={nlml_fit}, refit={nlml_refit}"
-    );
-}
-
-#[test]
 fn neldermead_fit_lowers_nlml() {
     let x = [0.0, 0.25, 0.6, 1.0];
     let y = [0.1, -0.4, 0.2, 0.8];
@@ -2909,16 +2861,6 @@ fn fast_approx_fit_nlml_does_not_rise() {
             .fit(&x, 3, 1, &y)
             .map_err(|(_, err)| err)
             .expect("lbfgs")
-            .neg_log_marginal_likelihood()
-            .expect("end"),
-    );
-    check(
-        Gpr::new(kernel(), noise())
-            .with_math(KernelExp::FastApprox)
-            .with_optimizer(NonlinearCg::new())
-            .fit(&x, 3, 1, &y)
-            .map_err(|(_, err)| err)
-            .expect("ncg")
             .neg_log_marginal_likelihood()
             .expect("end"),
     );

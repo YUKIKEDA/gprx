@@ -11,8 +11,8 @@ use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, frobenius2, solve_llt};
 use crate::sgpr::SgprObjective;
 use crate::{
-    FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, NonlinearCg, Optimizer,
-    PredictOptions, TrustRegion, VarianceKind,
+    FastSimulatedAnnealing, Fixed, FreeInducing, Gpr, Lbfgs, NelderMead, Optimizer, PredictOptions,
+    TrustRegion, VarianceKind,
 };
 use faer::{Mat, MatMut, MatRef};
 
@@ -945,16 +945,6 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
     check(
         Sgpr::new(kernel(), likelihood())
             .with_math(crate::KernelExp::FastApprox)
-            .with_optimizer(NonlinearCg::new())
-            .fit(&x, 4, 1, &y, &z, 2)
-            .map_err(|(_, err)| err)
-            .expect("ncg")
-            .neg_log_marginal_likelihood()
-            .expect("end"),
-    );
-    check(
-        Sgpr::new(kernel(), likelihood())
-            .with_math(crate::KernelExp::FastApprox)
             .with_optimizer(NelderMead::new())
             .fit(&x, 4, 1, &y, &z, 2)
             .map_err(|(_, err)| err)
@@ -982,11 +972,6 @@ fn fast_approx_rbf_n4_m2_fit_nlml_does_not_rise() {
             .neg_log_marginal_likelihood()
             .expect("end"),
     );
-}
-
-#[test]
-fn rbf_n4_m2_fit_ncg_drops_nlml() {
-    assert_fit_finishes_and_nlml_drops(NonlinearCg::new());
 }
 
 #[test]
@@ -1127,11 +1112,6 @@ where
 #[test]
 fn rbf_n8_m2_free_lbfgs_drops_nlml() {
     assert_free_solver_nlml_drops(Lbfgs::new());
-}
-
-#[test]
-fn rbf_n8_m2_free_ncg_drops_nlml() {
-    assert_free_solver_nlml_drops(NonlinearCg::new());
 }
 
 #[test]
