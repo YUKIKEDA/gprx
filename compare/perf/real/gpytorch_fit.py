@@ -22,8 +22,12 @@ from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
 
-from .metrics import score
+from . import maunaloa_kernels
+from .metrics import case_metrics
 from .timing import warmup_fits
+
+# Parameters are set from Python floats before `.double()`: keep them in float64.
+torch.set_default_dtype(torch.float64)
 
 ADAM_LR = 0.1
 ADAM_STEPS = 50
@@ -47,6 +51,11 @@ class ExactModel(gpytorch.models.ExactGP):
 
 def build(case: dict, x: torch.Tensor, y: torch.Tensor):
     likelihood = gpytorch.likelihoods.GaussianLikelihood(noise_constraint=GreaterThan(1e-5))
+    if case.get("kernel") == "mauna_loa":
+        likelihood.noise = case["theta_init"][-1]
+        model = ExactModel(x, y, likelihood, x.shape[1], 1.0, 1.0)
+        model.covar_module = maunaloa_kernels.gpytorch_kernel(case["theta_init"])
+        return model.double(), likelihood.double()
     likelihood.noise = case["noise_variance_init"]
     model = ExactModel(
         x, y, likelihood, x.shape[1], case["lengthscale_init"], case["signal_variance_init"]
@@ -162,10 +171,7 @@ def run(case: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(),
         "note": info["message"],
     }
-    if case.get("return_predictions"):
-        row["pred_mean"] = (np.asarray(mean).ravel() * case["y_std"] + case["y_mean"]).tolist()
-        row["pred_var"] = (np.asarray(var).ravel() * case["y_std"] ** 2).tolist()
-    row.update(score(mean, var, np.asarray(case["ys"]), case["y_mean"], case["y_std"]))
+    row.update(case_metrics(case, mean, var))
     return row
 
 

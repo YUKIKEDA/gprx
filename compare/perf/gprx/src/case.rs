@@ -204,6 +204,14 @@ pub struct RealCase {
     pub adam_epochs: u64,
     #[serde(default)]
     pub return_predictions: bool,
+    /// Points of `xs` that are scored (all when absent; none for a curve grid).
+    #[serde(default)]
+    pub n_test: Option<usize>,
+    /// `mauna_loa`: the composite kernel, with `theta_init` (else Constant × ARD RBF).
+    #[serde(default)]
+    pub kernel: Option<String>,
+    #[serde(default)]
+    pub theta_init: Vec<f64>,
 }
 
 fn default_model() -> String {

@@ -6,7 +6,9 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Instant;
 
 use gprx::internals as hooks;
-use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel};
+use gprx::kernel::{
+    ConstantKernel, KernelSpec, PeriodicKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel,
+};
 use gprx::{Adam, Fixed, GaussianLikelihood, Gpr, Lbfgs, Sgpr, Svgp};
 
 use crate::case::{FitRow, RealCase};
@@ -14,7 +16,38 @@ use crate::rss::peak_rss_bytes;
 
 const HISTORY: usize = 10;
 
+/// The Mauna Loa kernel of Rasmussen & Williams §5.4.3, `θ = [s1², ℓ1, s2², ℓ2,
+/// ℓ3, p, s3², ℓ4, α, s4², ℓ5, σn²]` (amplitudes as variances): a smooth trend,
+/// a decaying periodic term, a rational-quadratic medium-term term, a short-term term.
+fn mauna_loa(theta: &[f64]) -> Result<(KernelSpec, GaussianLikelihood), String> {
+    let [s1, l1, s2, l2, l3, p, s3, l4, a, s4, l5, noise] = theta else {
+        return Err(format!(
+            "mauna_loa needs 12 parameters, got {}",
+            theta.len()
+        ));
+    };
+    let c = |v: f64| -> Result<KernelSpec, String> {
+        Ok(KernelSpec::from(
+            ConstantKernel::new(v).map_err(|e| e.to_string())?,
+        ))
+    };
+    let rbf = |l: f64| -> Result<KernelSpec, String> {
+        Ok(KernelSpec::from(
+            RbfKernel::new(l).map_err(|e| e.to_string())?,
+        ))
+    };
+    let periodic = KernelSpec::from(PeriodicKernel::new(*l3, *p).map_err(|e| e.to_string())?);
+    let rq = KernelSpec::from(RationalQuadraticKernel::new(*l4, *a).map_err(|e| e.to_string())?);
+    let kernel =
+        c(*s1)? * rbf(*l1)? + c(*s2)? * rbf(*l2)? * periodic + c(*s3)? * rq + c(*s4)? * rbf(*l5)?;
+    let likelihood = GaussianLikelihood::new(*noise).map_err(|e| e.to_string())?;
+    Ok((kernel, likelihood))
+}
+
 fn model_parts(case: &RealCase) -> Result<(KernelSpec, GaussianLikelihood), String> {
+    if case.kernel.as_deref() == Some("mauna_loa") {
+        return mauna_loa(&case.theta_init);
+    }
     let ard =
         RbfArdKernel::new(&vec![case.lengthscale_init; case.n_cols]).map_err(|e| e.to_string())?;
     // Sgpr / Svgp have no coordinate derivative for a Product tree, so a
@@ -182,9 +215,10 @@ pub fn run(case: &RealCase) -> Result<FitRow, String> {
     let (fitted, fit_s) = fit_once(case)?;
     let (value_evals, joint_evals) = hooks::objective_call_counts();
 
-    let m = case.xs_n_rows as f64;
+    let n_test = case.n_test.unwrap_or(case.xs_n_rows);
+    let m = n_test as f64;
     let (mut sq, mut nlpd, mut inside) = (0.0, 0.0, 0.0);
-    for i in 0..case.xs_n_rows {
+    for i in 0..n_test {
         let mu = fitted.mean[i] * case.y_std + case.y_mean;
         let var = fitted.variance[i] * case.y_std * case.y_std;
         let err = case.ys[i] - mu;
@@ -211,9 +245,9 @@ pub fn run(case: &RealCase) -> Result<FitRow, String> {
         value_evals: Some(value_evals),
         iterations: None,
         nlml: fitted.nlml,
-        rmse: Some((sq / m).sqrt()),
-        nlpd: Some(nlpd / m),
-        coverage95: Some(inside / m),
+        rmse: (n_test > 0).then(|| (sq / m).sqrt()),
+        nlpd: (n_test > 0).then(|| nlpd / m),
+        coverage95: (n_test > 0).then(|| inside / m),
         peak_rss_bytes: Some(peak_rss_bytes()?),
         note: None,
         pred_mean: case.return_predictions.then(|| {
