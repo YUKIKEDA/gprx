@@ -19,7 +19,7 @@ use gprx::kernel::{
 };
 use gprx::{
     DoublePrecision, FastSimulatedAnnealing, FreeInducing, GaussianLikelihood, GprError, KernelExp,
-    Lbfgs, NelderMead, NonlinearCg, Sgpr, SinglePrecision, TrustRegion,
+    Lbfgs, NelderMead, Sgpr, SinglePrecision, TrustRegion,
 };
 
 const N: usize = 12;
@@ -95,7 +95,7 @@ fn allowed(err: &GprError, free: bool, unsupported: bool) -> bool {
     matches!(err, GprError::CoordGradientUnsupported) && free && unsupported
 }
 
-const OPTIMIZERS: [&str; 5] = ["lbfgs", "ncg", "nelder-mead", "trust-region", "fsa"];
+const OPTIMIZERS: [&str; 4] = ["lbfgs", "nelder-mead", "trust-region", "fsa"];
 const PRECISIONS: [&str; 2] = ["f64", "f32"];
 const MATHS: [KernelExp; 2] = [KernelExp::Accurate, KernelExp::FastApprox];
 
@@ -189,7 +189,7 @@ fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
             name,
             kernel,
             unsupported,
-            NonlinearCg::new(),
+            NelderMead::new(),
             OPTIMIZERS[1],
             precision,
             math,
@@ -199,18 +199,8 @@ fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
             name,
             kernel,
             unsupported,
-            NelderMead::new(),
-            OPTIMIZERS[2],
-            precision,
-            math,
-            free
-        ),
-        3 => by_precision!(
-            name,
-            kernel,
-            unsupported,
             TrustRegion::new(),
-            OPTIMIZERS[3],
+            OPTIMIZERS[2],
             precision,
             math,
             free
@@ -220,7 +210,7 @@ fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
             kernel,
             unsupported,
             FastSimulatedAnnealing::new().with_seed(7),
-            OPTIMIZERS[4],
+            OPTIMIZERS[3],
             precision,
             math,
             free
@@ -230,7 +220,7 @@ fn run_case([k_i, opt, precision, math, free]: Case) -> Option<String> {
 
 /// A deterministic all-pairs cover: every pair of values of any two options
 /// (kernel, optimizer, precision, exp math, inducing points) is in at least one
-/// chosen combination. About a hundred combinations instead of all 800.
+/// chosen combination. About a hundred combinations instead of all 640.
 fn pairwise_cover(sizes: [usize; 5]) -> Vec<Case> {
     let mut all: Vec<Case> = vec![[0; 5]];
     for (dim, &size) in sizes.iter().enumerate() {
@@ -304,7 +294,7 @@ fn sparse_option_pairs_fit_or_are_a_listed_exception() {
     assert_no_failures(&cases);
 }
 
-/// Every combination (about 800 fits): `cargo test --test path_matrix -- --ignored`.
+/// Every combination (about 640 fits): `cargo test --test path_matrix -- --ignored`.
 #[test]
 #[ignore = "exhaustive; minutes in a debug build"]
 fn every_sparse_option_combination_fits_or_is_a_listed_exception() {

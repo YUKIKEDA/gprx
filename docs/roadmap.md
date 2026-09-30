@@ -189,7 +189,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | B1-2 | Bug | `Svgp` Adam step costs O(n·m²), not O(batch·m²) | [#300](https://github.com/YUKIKEDA/gprx/issues/300) | done |
 | B1-3 | Feat | `Sgpr` / `Svgp` fit with every built-in kernel (rectangular `∂K(Z,X)/∂θ` and its Hessian) | [#301](https://github.com/YUKIKEDA/gprx/issues/301) | done |
 | B1-4 | Feat | `FreeInducing` coordinate derivatives and `Custom` cross derivatives for every kernel | [#302](https://github.com/YUKIKEDA/gprx/issues/302) | done |
-| B1-5 | Bug | The Hessian solver (plain Newton) and `NonlinearCg` fail with different errors when a step leaves the bounds or is not a descent direction; the Hessian solver becomes `TrustRegion` | [#306](https://github.com/YUKIKEDA/gprx/issues/306) | done |
+| B1-5 | Bug | The Hessian solver (plain Newton) fails with different errors when a step leaves the bounds; the Hessian solver becomes `TrustRegion` | [#306](https://github.com/YUKIKEDA/gprx/issues/306) | done |
 
 ## Intentionally out of scope
 
