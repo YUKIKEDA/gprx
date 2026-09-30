@@ -52,11 +52,27 @@ pub(crate) fn cholesky_lower_with_retries<T: KernelScalar>(
     retries: impl IntoIterator<Item = f64>,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
-    let backup = a.clone();
+    cholesky_lower_with_backup(a, &mut Mat::new(), scratch, retries, stage)
+}
+
+/// [`cholesky_lower_with_retries`] keeping the copy of `a` a retry starts
+/// from in `backup`, which is reused when it already has the shape of `a`.
+pub(crate) fn cholesky_lower_with_backup<T: KernelScalar>(
+    a: &mut Mat<T>,
+    backup: &mut Mat<T>,
+    scratch: &mut MemBuffer,
+    retries: impl IntoIterator<Item = f64>,
+    stage: CholeskyStage,
+) -> Result<(), GprError> {
+    if backup.nrows() == a.nrows() && backup.ncols() == a.ncols() {
+        backup.copy_from(&*a);
+    } else {
+        *backup = a.clone();
+    }
     let n = a.nrows();
     retry_with_jitter(retries, n, stage, |j| {
         if j != 0.0 {
-            a.copy_from(&backup);
+            a.copy_from(&*backup);
             add_to_diag(a.as_mut(), j);
         }
         cholesky_lower(a, scratch, 0.0, stage)
