@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-R1-5 ([#231](https://github.com/YUKIKEDA/gprx/issues/231), reclassify `GprError`). Acceptance is on #231. R1-4 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
+R2-1 ([#232](https://github.com/YUKIKEDA/gprx/issues/232), one input struct for kernel evaluation entry points). Acceptance is on #232. R1-5 is done. The other R rows also have acceptance on their Issues. The R rows (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226)) run before P5-5. P5-5 follows R4-1.
 
 ## Dependencies
 
@@ -161,8 +161,8 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R1-2 | Task | Collect linear algebra into a `linalg` module | [#228](https://github.com/YUKIKEDA/gprx/issues/228) | done |
 | R1-3 | Task | Collect input validation and column-major packing into a `data` module | [#229](https://github.com/YUKIKEDA/gprx/issues/229) | done |
 | R1-4 | Task | One place for shared test helpers and problem generators | [#230](https://github.com/YUKIKEDA/gprx/issues/230) | done |
-| R1-5 | Task | Reclassify `GprError` (shape, length, overflow, unused variants) | [#231](https://github.com/YUKIKEDA/gprx/issues/231) | in progress |
-| R2-1 | Task | One input struct for kernel evaluation entry points | [#232](https://github.com/YUKIKEDA/gprx/issues/232) | acceptance on #232 |
+| R1-5 | Task | Reclassify `GprError` (shape, length, overflow, unused variants) | [#231](https://github.com/YUKIKEDA/gprx/issues/231) | done |
+| R2-1 | Task | One input struct for kernel evaluation entry points | [#232](https://github.com/YUKIKEDA/gprx/issues/232) | in progress |
 | R2-2 | Task | Split stationary kernels into profile and driver; remove `f32_eval.rs` | [#233](https://github.com/YUKIKEDA/gprx/issues/233) | acceptance on #233 |
 | R2-3 | Feat | Custom kernels written once for f32 and f64 | [#234](https://github.com/YUKIKEDA/gprx/issues/234) | acceptance on #234 |
 | R2-4 | Task | Fix inconsistencies and leaks in the kernel and crate public surface | [#235](https://github.com/YUKIKEDA/gprx/issues/235) | acceptance on #235 |
