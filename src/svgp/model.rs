@@ -153,7 +153,7 @@ impl<O, M, P> Svgp<O, M, P> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         write_params(&self.kernel, &self.likelihood, out)
@@ -167,7 +167,7 @@ impl<O, M, P> Svgp<O, M, P> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, or [`GprError::InvalidNoiseVariance`] if the likelihood `θ`
     /// is invalid. Kernel and likelihood `θ` are committed together only
     /// after both writes succeed.

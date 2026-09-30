@@ -127,7 +127,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
@@ -154,7 +154,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is
     /// invalid, or [`GprError::CholeskyFailed`] if `K_mm` or `B` cannot be
     /// factored. A rejected slice or a Cholesky failure leaves stored `θ`
@@ -217,7 +217,7 @@ where
     pub(crate) fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         let n = self.num_params();
         if out.len() != n {
-            return Err(GprError::InvalidHyperparameter {
+            return Err(GprError::LengthMismatch {
                 reason: format!("expected {n} intervals, got {}", out.len()),
             });
         }
@@ -244,7 +244,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if a slice length is wrong,
+    /// Returns [`GprError::LengthMismatch`] if a slice length is wrong,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
     /// or [`GprError::CholeskyFailed`] if the VFE system cannot be factored.
     /// Kernel and likelihood `θ` are committed together only after the
@@ -301,7 +301,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if a slice length is wrong,
+    /// Returns [`GprError::LengthMismatch`] if a slice length is wrong,
     /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
     /// or [`GprError::CholeskyFailed`] if the VFE system cannot be factored.
     ///
@@ -543,7 +543,7 @@ where
     ///
     /// Returns [`GprError::DimensionMismatch`] if `n_cols` differs from the
     /// training features, [`GprError::EmptyInput`] if a dimension is zero, or
-    /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`] for a
+    /// [`GprError::LengthMismatch`] / [`GprError::NonFiniteInput`] for a
     /// badly packed or non-finite `xs`.
     ///
     /// # Examples

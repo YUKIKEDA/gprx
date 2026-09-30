@@ -134,12 +134,12 @@ impl ArdLengthscales {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `dim` is out of range.
+    /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.params
             .get(dim)
             .map(|param| param.value())
-            .ok_or_else(|| GprError::InvalidHyperparameter {
+            .ok_or_else(|| GprError::IndexOutOfRange {
                 reason: format!(
                     "lengthscale dimension {dim} is out of range (d={})",
                     self.num_params()
@@ -151,7 +151,7 @@ impl ArdLengthscales {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "ARD lengthscale parameters")?;
         out.copy_from_slice(&self.log_lengthscales);
@@ -162,8 +162,8 @@ impl ArdLengthscales {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
-    /// length or a `θ_d` is invalid.
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
+    /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(
             params.len(),
@@ -292,7 +292,7 @@ mod tests {
         let scales = ArdLengthscales::new(&[1.0]).expect("valid");
         assert!(matches!(
             scales.lengthscale(1),
-            Err(GprError::InvalidHyperparameter { .. })
+            Err(GprError::IndexOutOfRange { .. })
         ));
     }
 }

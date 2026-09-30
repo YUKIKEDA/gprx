@@ -71,7 +71,7 @@ impl<S: KernelScalar> DistBufs<'_, S> {
         if n == 0 || d == 0 {
             return Err(GprError::EmptyInput);
         }
-        let cols = n.checked_mul(d).ok_or(GprError::EmptyInput)?;
+        let cols = n.checked_mul(d).ok_or(GprError::SizeOverflow)?;
         if self.ard_sq_diff.nrows() == n && self.ard_sq_diff.ncols() == cols {
             return Ok(());
         }
@@ -521,7 +521,7 @@ where
             return Ok(());
         }
         self.query_xs
-            .resize(m.checked_mul(d).ok_or(GprError::EmptyInput)?, 0.0);
+            .resize(m.checked_mul(d).ok_or(GprError::SizeOverflow)?, 0.0);
         self.query_x = Mat::<P::Storage>::zeros(m, d);
         self.query_k_star = Mat::<P::Storage>::zeros(n, m);
         self.query_scratch = Mat::<P::Storage>::zeros(n, m);
@@ -566,7 +566,7 @@ where
             m.max(have_m.max(have_xq).max(1).saturating_mul(2))
         };
         self.query_xs
-            .resize(new_m.checked_mul(d).ok_or(GprError::EmptyInput)?, 0.0);
+            .resize(new_m.checked_mul(d).ok_or(GprError::SizeOverflow)?, 0.0);
         self.query_x = Mat::<P::Storage>::zeros(new_m, d);
         self.query_k_star = Mat::<P::Storage>::zeros(new_n, new_m);
         self.query_scratch = Mat::<P::Storage>::zeros(new_n, new_m);

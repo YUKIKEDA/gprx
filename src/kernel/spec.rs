@@ -193,7 +193,7 @@ impl KernelSpec {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "kernel parameters")?;
@@ -205,7 +205,7 @@ impl KernelSpec {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length or a leaf rejects its slice.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;

@@ -110,6 +110,33 @@ pub enum GprError {
         /// Why the value is invalid.
         reason: String,
     },
+    /// A matrix argument has the wrong number of rows or columns.
+    #[error("shape mismatch: {reason}")]
+    ShapeMismatch {
+        /// Which matrix and which shape was expected.
+        reason: String,
+    },
+    /// A slice argument has the wrong length.
+    #[error("length mismatch: {reason}")]
+    LengthMismatch {
+        /// Which slice and which length was expected.
+        reason: String,
+    },
+    /// A parameter, dimension, leaf, or change index is out of range.
+    #[error("index out of range: {reason}")]
+    IndexOutOfRange {
+        /// Which index and which range.
+        reason: String,
+    },
+    /// An optimizer, jitter policy, or transform setting is outside its domain.
+    #[error("invalid configuration: {reason}")]
+    InvalidConfig {
+        /// Which setting and why it is invalid.
+        reason: String,
+    },
+    /// `n_rows × n_cols` (or another buffer size) overflows `usize`.
+    #[error("size overflows usize")]
+    SizeOverflow,
     /// An [`crate::Interval`] or [`crate::BoundedParam`] could not be built.
     #[error(transparent)]
     InvalidInterval(#[from] crate::param::IntervalError),
@@ -204,6 +231,28 @@ mod tests {
                 jitter = 1e-6
             )
         );
+    }
+
+    #[test]
+    fn classified_input_errors_display_their_kind() {
+        let reason = || "expected 2 values, got 1".to_owned();
+        assert_eq!(
+            GprError::LengthMismatch { reason: reason() }.to_string(),
+            "length mismatch: expected 2 values, got 1"
+        );
+        assert_eq!(
+            GprError::ShapeMismatch { reason: reason() }.to_string(),
+            "shape mismatch: expected 2 values, got 1"
+        );
+        assert_eq!(
+            GprError::IndexOutOfRange { reason: reason() }.to_string(),
+            "index out of range: expected 2 values, got 1"
+        );
+        assert_eq!(
+            GprError::InvalidConfig { reason: reason() }.to_string(),
+            "invalid configuration: expected 2 values, got 1"
+        );
+        assert_eq!(GprError::SizeOverflow.to_string(), "size overflows usize");
     }
 
     #[test]

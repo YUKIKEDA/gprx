@@ -340,7 +340,7 @@ impl MinMaxTarget {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `lo` or `hi` is not
+    /// Returns [`GprError::InvalidConfig`] if `lo` or `hi` is not
     /// finite, or if `hi <= lo`.
     pub fn with_feature_range(lo: f64, hi: f64) -> Result<Self, GprError> {
         require_feature_range(lo, hi)?;
@@ -511,7 +511,7 @@ impl TargetTransform for FittedMinMaxTarget {
 
 fn require_feature_range(lo: f64, hi: f64) -> Result<(), GprError> {
     if !lo.is_finite() || !hi.is_finite() || hi <= lo {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::InvalidConfig {
             reason: format!("feature range must satisfy lo < hi and both finite, got [{lo}, {hi}]"),
         });
     }

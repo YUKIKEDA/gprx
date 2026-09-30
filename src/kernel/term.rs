@@ -47,7 +47,7 @@ use super::Triangle;
 ///         if out.is_empty() {
 ///             Ok(())
 ///         } else {
-///             Err(gprx::GprError::InvalidHyperparameter {
+///             Err(gprx::GprError::IndexOutOfRange {
 ///                 reason: "unit kernel has no parameters".to_owned(),
 ///             })
 ///         }
@@ -61,7 +61,7 @@ use super::Triangle;
 ///         if out.is_empty() {
 ///             Ok(())
 ///         } else {
-///             Err(gprx::GprError::InvalidHyperparameter {
+///             Err(gprx::GprError::IndexOutOfRange {
 ///                 reason: "unit kernel has no parameters".to_owned(),
 ///             })
 ///         }
@@ -77,7 +77,7 @@ use super::Triangle;
 ///             || out.nrows() != dist.nrows()
 ///             || out.ncols() != dist.ncols()
 ///         {
-///             return Err(gprx::GprError::InvalidHyperparameter {
+///             return Err(gprx::GprError::ShapeMismatch {
 ///                 reason: "unit kernel needs matching square matrices".to_owned(),
 ///             });
 ///         }
@@ -107,7 +107,7 @@ use super::Triangle;
 ///         mut out: MatMut<'_, T>,
 ///     ) -> Result<(), gprx::GprError> {
 ///         if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-///             return Err(gprx::GprError::InvalidHyperparameter {
+///             return Err(gprx::GprError::ShapeMismatch {
 ///                 reason: "unit kernel cross shape mismatch".to_owned(),
 ///             });
 ///         }
@@ -134,7 +134,7 @@ use super::Triangle;
 ///         param_idx: usize,
 ///         _uplo: Triangle,
 ///     ) -> Result<(), gprx::GprError> {
-///         Err(gprx::GprError::InvalidHyperparameter {
+///         Err(gprx::GprError::IndexOutOfRange {
 ///             reason: format!("unit kernel has no parameter {param_idx}"),
 ///         })
 ///     }
@@ -147,7 +147,7 @@ use super::Triangle;
 ///         j: usize,
 ///         _uplo: Triangle,
 ///     ) -> Result<(), gprx::GprError> {
-///         Err(gprx::GprError::InvalidHyperparameter {
+///         Err(gprx::GprError::IndexOutOfRange {
 ///             reason: format!("unit kernel has no parameter pair ({i}, {j})"),
 ///         })
 ///     }
@@ -160,7 +160,7 @@ use super::Triangle;
 ///         j: usize,
 ///         _uplo: Triangle,
 ///     ) -> Result<(), gprx::GprError> {
-///         Err(gprx::GprError::InvalidHyperparameter {
+///         Err(gprx::GprError::IndexOutOfRange {
 ///             reason: format!("unit kernel has no parameter pair ({i}, {j})"),
 ///         })
 ///     }
@@ -186,22 +186,22 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
     fn get_params(&self, out: &mut [f64]) -> Result<(), GprError>;
 
     /// Replaces log-`θ` from `params`.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
-    /// length or a value is rejected.
+    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
+    /// length, or [`GprError::InvalidHyperparameter`] if a value is rejected.
     fn set_params(&mut self, params: &[f64]) -> Result<(), GprError>;
 
     /// Writes the open interval on each user-unit parameter (`ℓ`, `c`, …).
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length.
+    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
     fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError>;
 
     /// Writes `k` from squared distances into `out` for `uplo`.
@@ -235,7 +235,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape errors as [`Self::apply`].
     fn grad(
         &self,
@@ -251,7 +251,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape errors as [`Self::apply`].
     fn hess(
         &self,
@@ -805,7 +805,7 @@ mod tests {
             if out.is_empty() {
                 Ok(())
             } else {
-                Err(crate::GprError::InvalidHyperparameter {
+                Err(crate::GprError::IndexOutOfRange {
                     reason: "unit kernel has no parameters".to_owned(),
                 })
             }
@@ -819,7 +819,7 @@ mod tests {
             if out.is_empty() {
                 Ok(())
             } else {
-                Err(crate::GprError::InvalidHyperparameter {
+                Err(crate::GprError::IndexOutOfRange {
                     reason: "unit kernel has no parameters".to_owned(),
                 })
             }
@@ -835,7 +835,7 @@ mod tests {
                 || out.nrows() != dist.nrows()
                 || out.ncols() != dist.ncols()
             {
-                return Err(crate::GprError::InvalidHyperparameter {
+                return Err(crate::GprError::ShapeMismatch {
                     reason: "unit kernel needs matching square matrices".to_owned(),
                 });
             }
@@ -865,7 +865,7 @@ mod tests {
             mut out: MatMut<'_, T>,
         ) -> Result<(), crate::GprError> {
             if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-                return Err(crate::GprError::InvalidHyperparameter {
+                return Err(crate::GprError::ShapeMismatch {
                     reason: "unit kernel cross shape mismatch".to_owned(),
                 });
             }
@@ -892,7 +892,7 @@ mod tests {
             param_idx: usize,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
-            Err(crate::GprError::InvalidHyperparameter {
+            Err(crate::GprError::IndexOutOfRange {
                 reason: format!("unit kernel has no parameter {param_idx}"),
             })
         }
@@ -905,7 +905,7 @@ mod tests {
             j: usize,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
-            Err(crate::GprError::InvalidHyperparameter {
+            Err(crate::GprError::IndexOutOfRange {
                 reason: format!("unit kernel has no parameter pair ({i}, {j})"),
             })
         }
@@ -918,7 +918,7 @@ mod tests {
             j: usize,
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
-            Err(crate::GprError::InvalidHyperparameter {
+            Err(crate::GprError::IndexOutOfRange {
                 reason: format!("unit kernel has no parameter pair ({i}, {j})"),
             })
         }
@@ -960,7 +960,7 @@ mod tests {
 
         fn get_params(&self, out: &mut [f64]) -> Result<(), crate::GprError> {
             if out.len() != 1 {
-                return Err(crate::GprError::InvalidHyperparameter {
+                return Err(crate::GprError::LengthMismatch {
                     reason: format!("expected 1 parameter, got {}", out.len()),
                 });
             }
@@ -973,7 +973,7 @@ mod tests {
             if params.len() == 1 {
                 Ok(())
             } else {
-                Err(crate::GprError::InvalidHyperparameter {
+                Err(crate::GprError::LengthMismatch {
                     reason: format!("expected 1 parameter, got {}", params.len()),
                 })
             }
@@ -981,7 +981,7 @@ mod tests {
 
         fn bounds_into(&self, out: &mut [Interval]) -> Result<(), crate::GprError> {
             if out.len() != 1 {
-                return Err(crate::GprError::InvalidHyperparameter {
+                return Err(crate::GprError::LengthMismatch {
                     reason: format!("expected 1 bound, got {}", out.len()),
                 });
             }

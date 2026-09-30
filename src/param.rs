@@ -8,8 +8,8 @@ use crate::likelihood::GaussianLikelihood;
 
 /// Why an [`Interval`] or [`BoundedParam`] could not be constructed.
 ///
-/// Invalid bounds are not [`crate::GprError::InvalidHyperparameter`]. That
-/// variant stays for data (wrong slice length, `NaN` in `X`).
+/// Invalid bounds are not [`crate::GprError::InvalidHyperparameter`], which
+/// is for a hyperparameter value outside its domain.
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
 pub enum IntervalError {
     /// `lo` or `hi` is non-finite, or `lo >= hi`.

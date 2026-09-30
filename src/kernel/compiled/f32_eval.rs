@@ -233,7 +233,7 @@ impl CompiledKernel<f32> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `param_idx` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape errors as [`Self::apply`].
     pub fn grad<M: crate::math::KernelMath>(
         &self,
@@ -333,7 +333,7 @@ impl CompiledKernel<f32> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidHyperparameter`] if `i` or `j` is out of
+    /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape errors as [`Self::apply`].
     pub fn hess<M: crate::math::KernelMath>(
         &self,
@@ -920,7 +920,7 @@ fn one_index(idx: usize, name: &str) -> Result<(), GprError> {
     if idx == 0 {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("{name} has a single parameter at index 0"),
         })
     }
@@ -930,7 +930,7 @@ fn pair_index(i: usize, j: usize, n: usize, name: &str) -> Result<(), GprError> 
     if i < n && j < n {
         Ok(())
     } else {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("{name} parameter pair ({i}, {j}) is out of range"),
         })
     }
@@ -946,7 +946,7 @@ fn scratch_ok(out: MatRef<'_, f32>, scratch: MatRef<'_, f32>) -> Result<(), GprE
 
 fn square_pair(dist: MatRef<'_, f32>, out: MatRef<'_, f32>) -> Result<usize, GprError> {
     if dist.nrows() != dist.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "distance matrix must be square, got {}x{}",
                 dist.nrows(),
@@ -955,7 +955,7 @@ fn square_pair(dist: MatRef<'_, f32>, out: MatRef<'_, f32>) -> Result<usize, Gpr
         });
     }
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -973,7 +973,7 @@ fn square_pair(dist: MatRef<'_, f32>, out: MatRef<'_, f32>) -> Result<usize, Gpr
 
 fn same_shape(dist: MatRef<'_, f32>, out: MatRef<'_, f32>) -> Result<(), GprError> {
     if out.nrows() != dist.nrows() || out.ncols() != dist.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -992,7 +992,7 @@ fn same_shape(dist: MatRef<'_, f32>, out: MatRef<'_, f32>) -> Result<(), GprErro
 fn require_points_square(x: MatRef<'_, f32>, out: MatRef<'_, f32>) -> Result<usize, GprError> {
     let n = out.nrows();
     if out.ncols() != n {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!("output must be square, got {}x{}", out.nrows(), out.ncols()),
         });
     }
@@ -1030,7 +1030,7 @@ fn require_cross_points(
         });
     }
     if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
@@ -1059,7 +1059,7 @@ fn require_coord(
         });
     }
     if dim >= x1.ncols() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: format!(
                 "coordinate dimension {dim} is out of range for d={}",
                 x1.ncols()
@@ -1067,7 +1067,7 @@ fn require_coord(
         });
     }
     if d_k.nrows() != x1.nrows() || d_k.ncols() != x2.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 d_k.nrows(),
@@ -1995,7 +1995,7 @@ fn linear_diag(variance: f64, x: MatRef<'_, f32>, out: &mut [f32]) -> Result<(),
         return Err(GprError::EmptyInput);
     }
     if out.len() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
         });
     }
@@ -2107,7 +2107,7 @@ fn rbf_ard_grad<M: crate::math::KernelMath>(
     uplo: Triangle,
 ) -> Result<(), GprError> {
     if idx >= leaf.num_params() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: format!(
                 "ARD RBF parameter {idx} is out of range (d={})",
                 leaf.num_params()
@@ -2224,7 +2224,7 @@ fn matern_ard_grad<M: crate::math::KernelMath>(
     uplo: Triangle,
 ) -> Result<(), GprError> {
     if idx >= leaf.num_params() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: format!(
                 "ARD Matern parameter index {idx} is out of range (d={})",
                 leaf.num_params()
@@ -2353,7 +2353,7 @@ fn rq_ard_grad(
 ) -> Result<(), GprError> {
     let d = leaf.lengthscales().num_params();
     if idx > d {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: format!("rational quadratic ARD parameter {idx} is out of range"),
         });
     }
@@ -2505,7 +2505,7 @@ fn rbf_ard_coord<M: crate::math::KernelMath>(
 ) -> Result<(), GprError> {
     require_coord(x1, x2, d_k.as_ref(), dim)?;
     if dim >= leaf.num_params() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::IndexOutOfRange {
             reason: format!(
                 "coordinate dimension {dim} is out of range for d={}",
                 leaf.num_params()
@@ -2544,7 +2544,7 @@ fn require_diag(x: MatRef<'_, f32>, out: &[f32]) -> Result<(), GprError> {
         return Err(GprError::EmptyInput);
     }
     if out.len() != x.nrows() {
-        return Err(GprError::InvalidHyperparameter {
+        return Err(GprError::LengthMismatch {
             reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
         });
     }
@@ -2624,7 +2624,7 @@ fn fold_coord_sum(
 
 fn rbf_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
     if idx >= d {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("ARD RBF parameter {idx} is out of range (d={d})"),
         })
     } else {
@@ -2634,7 +2634,7 @@ fn rbf_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
 
 fn matern_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
     if idx >= d {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("ARD Matern parameter index {idx} is out of range (d={d})"),
         })
     } else {
@@ -2644,7 +2644,7 @@ fn matern_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
 
 fn rq_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
     if idx > d {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("rational quadratic ARD parameter {idx} is out of range"),
         })
     } else {
@@ -2654,7 +2654,7 @@ fn rq_ard_param(idx: usize, d: usize) -> Result<(), GprError> {
 
 fn coord_in_ard(dim: usize, d: usize) -> Result<(), GprError> {
     if dim >= d {
-        Err(GprError::InvalidHyperparameter {
+        Err(GprError::IndexOutOfRange {
             reason: format!("coordinate dimension {dim} is out of range for d={d}"),
         })
     } else {
@@ -3441,7 +3441,7 @@ fn term_for_param(
         }
         offset += n;
     }
-    Err(GprError::InvalidHyperparameter {
+    Err(GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })
 }
@@ -3455,7 +3455,7 @@ fn term_index(terms: &[CompiledKernel<f32>], param_idx: usize) -> Result<(usize,
         }
         offset += n;
     }
-    Err(GprError::InvalidHyperparameter {
+    Err(GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })
 }
@@ -4030,7 +4030,7 @@ mod tests {
             uplo: Triangle,
         ) -> Result<(), GprError> {
             if param_idx != 0 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::IndexOutOfRange {
                     reason: "scale leaf has one parameter".to_owned(),
                 });
             }
@@ -4045,7 +4045,7 @@ mod tests {
             uplo: Triangle,
         ) -> Result<(), GprError> {
             if i != 0 || j != 0 {
-                return Err(GprError::InvalidHyperparameter {
+                return Err(GprError::IndexOutOfRange {
                     reason: "scale leaf has one parameter".to_owned(),
                 });
             }

@@ -1328,7 +1328,7 @@ mod tests {
             if out.is_empty() {
                 Ok(())
             } else {
-                Err(GprError::InvalidHyperparameter {
+                Err(GprError::IndexOutOfRange {
                     reason: "persist unit kernel has no parameters".to_owned(),
                 })
             }
@@ -1342,7 +1342,7 @@ mod tests {
             if out.is_empty() {
                 Ok(())
             } else {
-                Err(GprError::InvalidHyperparameter {
+                Err(GprError::IndexOutOfRange {
                     reason: "persist unit kernel has no parameters".to_owned(),
                 })
             }
@@ -1383,7 +1383,7 @@ mod tests {
             param_idx: usize,
             _uplo: Triangle,
         ) -> Result<(), GprError> {
-            Err(GprError::InvalidHyperparameter {
+            Err(GprError::IndexOutOfRange {
                 reason: format!("persist unit kernel has no parameter {param_idx}"),
             })
         }
@@ -1396,7 +1396,7 @@ mod tests {
             j: usize,
             _uplo: Triangle,
         ) -> Result<(), GprError> {
-            Err(GprError::InvalidHyperparameter {
+            Err(GprError::IndexOutOfRange {
                 reason: format!("persist unit kernel has no parameter pair ({i}, {j})"),
             })
         }
@@ -1409,7 +1409,7 @@ mod tests {
             j: usize,
             _uplo: Triangle,
         ) -> Result<(), GprError> {
-            Err(GprError::InvalidHyperparameter {
+            Err(GprError::IndexOutOfRange {
                 reason: format!("persist unit kernel has no parameter pair ({i}, {j})"),
             })
         }

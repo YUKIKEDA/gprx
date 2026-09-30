@@ -545,7 +545,7 @@ fn inducing_feature_mismatch_is_dimension_mismatch() {
 }
 
 #[test]
-fn inducing_length_mismatch_is_invalid_hyperparameter() {
+fn inducing_length_mismatch_is_length_mismatch() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
     let err = Sgpr::new(kernel, likelihood)
@@ -553,7 +553,7 @@ fn inducing_length_mismatch_is_invalid_hyperparameter() {
         .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0], &[0.0], 2)
         .map_err(|(_, e)| e)
         .expect_err("short z");
-    assert!(matches!(err, GprError::InvalidHyperparameter { .. }));
+    assert!(matches!(err, GprError::LengthMismatch { .. }));
 }
 
 #[test]
