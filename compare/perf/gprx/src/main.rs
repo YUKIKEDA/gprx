@@ -5,6 +5,7 @@
 //! gprx-perf exact CASE.json [--memory]
 //! gprx-perf online CASE.json [--stages | --delete]
 //! gprx-perf sparse CASE.json
+//! gprx-perf fit CASE.json            (needs `--features fit-counts`)
 //! gprx-perf sparse-online CASE.json incremental|full
 //! ```
 //!
@@ -12,6 +13,7 @@
 
 mod case;
 mod exact;
+mod fit;
 mod online;
 mod rss;
 mod shared;
@@ -26,9 +28,9 @@ use std::process::ExitCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use case::{Case, ResultRow, SparseCase, SparseOnlineCase, SparseOnlineResult};
+use case::{Case, FitRow, RealCase, ResultRow, SparseCase, SparseOnlineCase, SparseOnlineResult};
 
-const USAGE: &str = "usage: gprx-perf exact|online|sparse|sparse-online CASE.json [flags]\n  \
+const USAGE: &str = "usage: gprx-perf exact|online|sparse|sparse-online|fit CASE.json [flags]\n  \
      exact [--memory]\n  online [--stages|--delete]\n  sparse-online incremental|full";
 
 fn read_case<T: DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -88,6 +90,12 @@ fn sparse_online(path: &str, flags: &[String]) -> Result<ExitCode, String> {
     Ok(print_row(&row))
 }
 
+fn fit(path: &str) -> Result<ExitCode, String> {
+    let case: RealCase = read_case(path)?;
+    let row = fit::run(&case).unwrap_or_else(|e| FitRow::na("gprx", &case.name, &case.protocol, e));
+    Ok(print_row(&row))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let (Some(mode), Some(path)) = (args.first(), args.get(1)) else {
@@ -99,6 +107,7 @@ fn main() -> ExitCode {
         "exact" => exact(path, flags),
         "online" => online(path, flags),
         "sparse" => sparse(path),
+        "fit" => fit(path),
         "sparse-online" => sparse_online(path, flags),
         _ => {
             eprintln!("{USAGE}");

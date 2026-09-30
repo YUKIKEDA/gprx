@@ -62,3 +62,18 @@ pub fn grad_from_ard_cache<M: crate::KernelMath>(
 
 #[cfg(feature = "insert-stages")]
 pub use crate::gpr::take_insert_stages;
+
+/// Zeroes the counters of [`objective_call_counts`].
+#[cfg(feature = "bench-internals")]
+pub fn reset_objective_call_counts() {
+    crate::objective::call_counts::reset();
+}
+
+/// `(value-only calls, joint value-and-gradient calls)` the `Gpr` and `Sgpr`
+/// fit objectives received since [`reset_objective_call_counts`]. A
+/// gradient-only call counts as joint. The counters are global: read them
+/// after a single fit, with no other fit running.
+#[cfg(feature = "bench-internals")]
+pub fn objective_call_counts() -> (u64, u64) {
+    crate::objective::call_counts::read()
+}

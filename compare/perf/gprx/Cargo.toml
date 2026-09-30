@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [features]
 insert-stages = ["gprx/insert-stages"]
+# `fit` mode (B1-1): counts the objective calls of one fit.
+fit-counts = ["gprx/bench-internals"]
 
 [dependencies]
 gprx = { path = "../../.." }
