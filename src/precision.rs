@@ -10,9 +10,7 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
-use crate::kernel::{
-    CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
-};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_faer_owned, inf_norm, solve_llt_faer_owned, symmetrize_lower};
 use crate::transform::TargetTransform;
 
@@ -350,9 +348,7 @@ impl ResidualTag for ReevaluateKernel {
 }
 
 /// Bounds a model precision so distance fills and both scalars are known.
-pub(crate) trait ModelPrecision:
-    PrecisionPolicy<Storage: FillDistances> + Copy + Send + Sync + 'static
-{
+pub(crate) trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     /// `true` when predict weights are refined in `f64` from an `f32` factor.
     const REFINES_IN_F64: bool;
 
@@ -1030,7 +1026,6 @@ mod tests {
     >
     where
         P: crate::precision::GpScalar,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
         let likelihood = likelihood_at(noise);
@@ -1195,7 +1190,6 @@ mod tests {
         P: crate::precision::GpScalar
             + crate::sgpr::factor::MeanDot
             + crate::sgpr::factor::PublishSgprWeights,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
         let likelihood = likelihood_at(noise);
@@ -1261,7 +1255,6 @@ mod tests {
     ) -> crate::FittedSvgp<crate::Accurate, P>
     where
         P: crate::precision::GpScalar + crate::svgp::factor::SvgpMean,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let kernel = KernelSpec::from(must(RbfKernel::new(ell)));
         let likelihood = likelihood_at(noise);
@@ -1321,7 +1314,6 @@ mod tests {
     >
     where
         P: crate::precision::GpScalar,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let mut online = must(factor_exact::<P>(packed, y, ell, noise).into_online());
         must(online.insert(&[0.33], 0.2));
@@ -1393,7 +1385,6 @@ mod tests {
         P: crate::precision::GpScalar
             + crate::sgpr::factor::MeanDot
             + crate::sgpr::factor::PublishSgprWeights,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let mut online = factor_sgpr::<P>(packed, y, ell, noise).into_online();
         must(online.insert(&[0.33], 0.2));
@@ -1462,7 +1453,6 @@ mod tests {
     fn check_grad<P>(x: &[f64], y: &[f64])
     where
         P: crate::precision::GpScalar,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let mut fitted = factor_exact::<P>(x, y, 1.0, 0.1);
         let mut params = [0.0; 2];
@@ -1502,7 +1492,6 @@ mod tests {
     fn check_hess_exact<P>(x: &[f64], y: &[f64])
     where
         P: crate::precision::GpScalar,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let mut fitted = factor_exact::<P>(x, y, 1.0, 0.1);
         let mut params = [0.0; 2];
@@ -1539,7 +1528,6 @@ mod tests {
         P: crate::precision::GpScalar
             + crate::sgpr::factor::MeanDot
             + crate::sgpr::factor::PublishSgprWeights,
-        crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
     {
         let mut fitted = factor_sgpr::<P>(x, y, 1.0, 0.1);
         let mut params = [0.0; 2];

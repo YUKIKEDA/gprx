@@ -10,7 +10,6 @@ use crate::kernel::{KernelScalar, KernelSpec};
 use faer::{Mat, MatMut, MatRef};
 
 mod apply;
-mod f32_eval;
 mod grad;
 pub(crate) mod gram;
 mod hess;

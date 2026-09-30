@@ -639,7 +639,6 @@ where
     B: crate::gpr::AllocWorkspace,
     M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
     let kind = P::persist_kind();
@@ -695,7 +694,6 @@ where
     B: crate::gpr::AllocWorkspace,
     M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
     let kind = P::persist_kind();
@@ -750,7 +748,6 @@ where
     B: crate::gpr::AllocWorkspace,
     M: crate::math::KernelMath,
     P: crate::precision::GpScalar,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     let (ids, next_id) = ids
         .as_ref()
@@ -1041,7 +1038,6 @@ fn load_math<P>(
 ) -> Result<LoadedGpr, GprError>
 where
     P: PersistLoad + Seal<crate::Accurate> + Seal<crate::FastApprox>,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     match config.math {
         MathJson::Accurate => load_precision::<P, crate::Accurate>(dir, registry, config),
@@ -1057,7 +1053,6 @@ fn load_precision<P, M>(
 where
     P: PersistLoad + Seal<M>,
     M: crate::math::KernelMath,
-    crate::kernel::CompiledKernel<P::Storage>: crate::kernel::GramKernel<T = P::Storage>,
 {
     let ldlt_ids = match config.factor_kind {
         FactorKind::Ldlt => {

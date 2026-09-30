@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use crate::error::GprError;
 use crate::param::write_params;
 
-use crate::kernel::{CompiledKernel, GramKernel, KernelSpec};
+use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
@@ -102,9 +102,7 @@ impl<O, I, M, P> Sgpr<O, I, M, P> {
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
     #[allow(private_bounds)]
     pub fn with_precision<P2: GpScalar + MeanDot + PublishSgprWeights>(self) -> Sgpr<O, I, M, P2>
-    where
-        CompiledKernel<P2::Storage>: GramKernel<T = P2::Storage>,
-    {
+where {
         Sgpr {
             kernel: self.kernel,
             likelihood: self.likelihood,
@@ -224,7 +222,6 @@ impl<O, I, M, P> Sgpr<O, I, M, P> {
 impl<O, M, P> Sgpr<O, FixedInducing, M, P>
 where
     P: GpScalar + MeanDot + PublishSgprWeights,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
     M: crate::math::KernelMath,
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, M, P>>,
 {
@@ -295,7 +292,6 @@ where
 impl<O, M, P> Sgpr<O, FreeInducing, M, P>
 where
     P: GpScalar + MeanDot + PublishSgprWeights,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
     M: crate::math::KernelMath,
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FreeInducing, M, P>>,
 {
@@ -364,7 +360,6 @@ impl<I: InducingLayout, M, P> Sgpr<Fixed, I, M, P>
 where
     M: crate::math::KernelMath,
     P: GpScalar + MeanDot + PublishSgprWeights,
-    CompiledKernel<P::Storage>: GramKernel<T = P::Storage>,
 {
     /// Factors `K_mm = k(Z, Z)` at the current `θ` without a search.
     ///

@@ -2,10 +2,11 @@
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::{
-    Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
-    write_square_from_coords, write_triangle,
+    Triangle, finite_dist, finite_kernel, validate_log_positive, validate_positive_finite,
+    write_dense, write_square_from_coords, write_triangle,
 };
 use crate::error::GprError;
+use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
@@ -157,14 +158,14 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
-    pub fn apply(
+    pub fn apply<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_triangle(dist, out, uplo, |d| rq_from_sq_dist(d, ell_sq, alpha))
     }
 
@@ -174,15 +175,19 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
-    pub fn apply_cross(&self, dist: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<(), GprError> {
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+    pub fn apply_cross<T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_dense(dist, out, |d| rq_from_sq_dist(d, ell_sq, alpha))
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
-    pub fn fill_diag(&self, out: &mut [f64]) {
-        out.fill(1.0);
+    pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
+        out.fill(T::from_f64(1.0));
     }
 
     /// Writes `∂K/∂θ` into `d_k`. Index 0 is `log(ℓ)`, index 1 is `log(α)`.
@@ -191,10 +196,10 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0 or
     /// 1, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn grad(
+    pub fn grad<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -203,8 +208,8 @@ impl RationalQuadraticKernel {
                 reason: format!("rational quadratic parameter index {param_idx} is out of range"),
             });
         }
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_triangle(dist, d_k, uplo, |d| {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(if param_idx == 0 {
@@ -215,21 +220,21 @@ impl RationalQuadraticKernel {
         })
     }
 
-    pub(crate) fn apply_from_coords(
+    pub(crate) fn apply_from_coords<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        out: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_square_from_coords(x, out, uplo, |d| rq_from_sq_dist(d, ell_sq, alpha))
     }
 
-    pub(crate) fn grad_from_coords(
+    pub(crate) fn grad_from_coords<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -238,8 +243,8 @@ impl RationalQuadraticKernel {
                 reason: format!("rational quadratic parameter index {param_idx} is out of range"),
             });
         }
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_square_from_coords(x, d_k, uplo, |d| {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(if param_idx == 0 {
@@ -256,34 +261,34 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
-    pub fn hess(
+    pub fn hess<T: KernelScalar>(
         &self,
-        dist: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_rq_hess_idx(i, j)?;
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_triangle(dist, d2_k, uplo, |d| {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(rq_d2k(r2, alpha, i, j))
         })
     }
 
-    pub(crate) fn hess_from_coords(
+    pub(crate) fn hess_from_coords<T: KernelScalar>(
         &self,
-        x: MatRef<'_, f64>,
-        d2_k: MatMut<'_, f64>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_rq_hess_idx(i, j)?;
-        let ell_sq = self.lengthscale() * self.lengthscale();
-        let alpha = self.alpha();
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
         write_square_from_coords(x, d2_k, uplo, |d| {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(rq_d2k(r2, alpha, i, j))
@@ -291,56 +296,63 @@ impl RationalQuadraticKernel {
     }
 }
 
-pub(crate) fn rq_from_r2(r2: f64, alpha: f64) -> f64 {
-    let u = 1.0 + r2 / (2.0 * alpha);
+pub(crate) fn rq_from_r2<T: KernelScalar>(r2: T, alpha: T) -> T {
+    let u = T::from_f64(1.0) + r2 / (T::from_f64(2.0) * alpha);
     u.powf(-alpha)
 }
 
-pub(crate) fn rq_dk_dtheta_lengthscale(r2: f64, alpha: f64) -> f64 {
-    let u = 1.0 + r2 / (2.0 * alpha);
+pub(crate) fn rq_dk_dtheta_lengthscale<T: KernelScalar>(r2: T, alpha: T) -> T {
+    let u = T::from_f64(1.0) + r2 / (T::from_f64(2.0) * alpha);
     let k = u.powf(-alpha);
     (k / u) * r2
 }
 
-pub(crate) fn rq_dk_dtheta_alpha(r2: f64, alpha: f64) -> f64 {
-    let u = 1.0 + r2 / (2.0 * alpha);
+pub(crate) fn rq_dk_dtheta_alpha<T: KernelScalar>(r2: T, alpha: T) -> T {
+    let u = T::from_f64(1.0) + r2 / (T::from_f64(2.0) * alpha);
     let k = u.powf(-alpha);
-    alpha * k * (-u.ln() + 1.0 - 1.0 / u)
+    alpha * k * (-u.ln() + T::from_f64(1.0) - T::from_f64(1.0) / u)
 }
 
-pub(crate) fn rq_dk_dtheta_ard_dim(r2: f64, alpha: f64, dim_term: f64) -> f64 {
-    let u = 1.0 + r2 / (2.0 * alpha);
+pub(crate) fn rq_dk_dtheta_ard_dim<T: KernelScalar>(r2: T, alpha: T, dim_term: T) -> T {
+    let u = T::from_f64(1.0) + r2 / (T::from_f64(2.0) * alpha);
     let k = u.powf(-alpha);
     (k / u) * dim_term
 }
 
-pub(crate) fn rq_d2k(r2: f64, alpha: f64, i: usize, j: usize) -> f64 {
+pub(crate) fn rq_d2k<T: KernelScalar>(r2: T, alpha: T, i: usize, j: usize) -> T {
     let (a, b) = if i <= j { (i, j) } else { (j, i) };
-    let u = 1.0 + r2 / (2.0 * alpha);
+    let u = T::from_f64(1.0) + r2 / (T::from_f64(2.0) * alpha);
     let k = u.powf(-alpha);
     match (a, b) {
-        (0, 0) => -2.0 * (k / u) * r2 + (1.0 + 1.0 / alpha) * r2 * r2 * k / (u * u),
-        (0, 1) => (k / u) * r2 * (-alpha * u.ln() + (alpha + 1.0) * (u - 1.0) / u),
+        (0, 0) => {
+            -T::from_f64(2.0) * (k / u) * r2
+                + (T::from_f64(1.0) + T::from_f64(1.0) / alpha) * r2 * r2 * k / (u * u)
+        }
+        (0, 1) => {
+            (k / u)
+                * r2
+                * (-alpha * u.ln() + (alpha + T::from_f64(1.0)) * (u - T::from_f64(1.0)) / u)
+        }
         (1, 1) => {
-            let v = -u.ln() + 1.0 - 1.0 / u;
-            let dv = (1.0 - u) * (1.0 - u) / (u * u);
+            let v = -u.ln() + T::from_f64(1.0) - T::from_f64(1.0) / u;
+            let dv = (T::from_f64(1.0) - u) * (T::from_f64(1.0) - u) / (u * u);
             let h = alpha * k * v;
             h + (h * h) / k + alpha * k * dv
         }
-        _ => 0.0,
+        _ => T::from_f64(0.0),
     }
 }
 
-pub(crate) fn rq_d2k_ard(
-    r2: f64,
-    alpha: f64,
-    dim_i: f64,
-    dim_j: f64,
+pub(crate) fn rq_d2k_ard<T: KernelScalar>(
+    r2: T,
+    alpha: T,
+    dim_i: T,
+    dim_j: T,
     i: usize,
     j: usize,
     d: usize,
-) -> f64 {
-    let u = 1.0 + r2 / (2.0 * alpha);
+) -> T {
+    let u = T::from_f64(1.0) + r2 / (T::from_f64(2.0) * alpha);
     let k = u.powf(-alpha);
     let alpha_idx = d;
     if i == alpha_idx && j == alpha_idx {
@@ -348,12 +360,15 @@ pub(crate) fn rq_d2k_ard(
     }
     if i == alpha_idx || j == alpha_idx {
         let dim = if i == alpha_idx { dim_j } else { dim_i };
-        return (k / u) * dim * (-alpha * u.ln() + (alpha + 1.0) * (u - 1.0) / u);
+        return (k / u)
+            * dim
+            * (-alpha * u.ln() + (alpha + T::from_f64(1.0)) * (u - T::from_f64(1.0)) / u);
     }
     if i == j {
-        -2.0 * (k / u) * dim_i + (1.0 + 1.0 / alpha) * dim_i * dim_i * k / (u * u)
+        -T::from_f64(2.0) * (k / u) * dim_i
+            + (T::from_f64(1.0) + T::from_f64(1.0) / alpha) * dim_i * dim_i * k / (u * u)
     } else {
-        (1.0 + 1.0 / alpha) * dim_i * dim_j * k / (u * u)
+        (T::from_f64(1.0) + T::from_f64(1.0) / alpha) * dim_i * dim_j * k / (u * u)
     }
 }
 
@@ -367,14 +382,6 @@ fn require_rq_hess_idx(i: usize, j: usize) -> Result<(), GprError> {
     }
 }
 
-pub(crate) fn finite_kernel(value: f64) -> Result<f64, GprError> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
-}
-
 fn expect_two_params(len: usize) -> Result<(), GprError> {
     if len == 2 {
         Ok(())
@@ -385,12 +392,12 @@ fn expect_two_params(len: usize) -> Result<(), GprError> {
     }
 }
 
-fn scaled_r2(sq_dist: f64, ell_sq: f64) -> Result<f64, GprError> {
+fn scaled_r2<T: KernelScalar>(sq_dist: T, ell_sq: T) -> Result<T, GprError> {
     let d = finite_dist(sq_dist)?;
-    Ok(d.max(0.0) / ell_sq)
+    Ok(d.max(T::from_f64(0.0)) / ell_sq)
 }
 
-fn rq_from_sq_dist(sq_dist: f64, ell_sq: f64, alpha: f64) -> Result<f64, GprError> {
+fn rq_from_sq_dist<T: KernelScalar>(sq_dist: T, ell_sq: T, alpha: T) -> Result<T, GprError> {
     let r2 = scaled_r2(sq_dist, ell_sq)?;
     finite_kernel(rq_from_r2(r2, alpha))
 }
