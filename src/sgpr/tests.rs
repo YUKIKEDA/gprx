@@ -2,7 +2,11 @@ use super::factor::*;
 use super::*;
 use crate::data::pack_points;
 use crate::error::GprError;
-use crate::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
+use crate::kernel::{
+    ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
+    PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel,
+    WhiteKernel,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, frobenius2, solve_llt};
 use crate::sgpr::SgprObjective;
@@ -751,6 +755,132 @@ fn rbf_n4_z_eq_x_hessian_matches_grad_fd() {
     sparse.hessian_into(&params, &mut hess).expect("hess");
     let fd = fd_hess_from_grad(&mut sparse, &params);
     assert_slice_close(&hess, &fd, 2e-4);
+}
+
+/// A signal variance (`Constant × …`) and the leaves that had no rectangular
+/// θ-derivative: at `Z = X` value, gradient, and Hessian equal Exact's (#301).
+fn constant(v: f64) -> KernelSpec {
+    KernelSpec::from(ConstantKernel::new(v).expect("constant"))
+}
+
+const X_2D: [f64; 8] = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0];
+const Y_4: [f64; 4] = [0.0, 1.0, 0.5, 0.25];
+const X_1D: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
+
+#[test]
+fn constant_times_rbf_z_eq_x_matches_exact_value_grad_hess() {
+    assert_z_eq_x_matches_exact_derivs(
+        constant(1.7) * KernelSpec::from(RbfKernel::new(1.3).expect("ℓ")),
+        &X_1D,
+        4,
+        1,
+        &Y_4,
+    );
+}
+
+#[test]
+fn constant_times_ard_z_eq_x_matches_exact_value_grad_hess() {
+    assert_z_eq_x_matches_exact_derivs(constant(1.7) * kernel_ard(), &X_2D, 4, 2, &Y_4);
+}
+
+#[test]
+fn constant_times_matern_ard_z_eq_x_matches_exact_value_grad_hess() {
+    let matern =
+        KernelSpec::from(MaternArdKernel::new(&[1.0, 1.4], MaternNu::FiveHalves).expect("ℓ"));
+    assert_z_eq_x_matches_exact_derivs(constant(0.8) * matern, &X_2D, 4, 2, &Y_4);
+}
+
+#[test]
+fn constant_times_rq_ard_z_eq_x_matches_exact_value_grad_hess() {
+    let rq = KernelSpec::from(RationalQuadraticArdKernel::new(&[1.1, 0.9], 0.7).expect("ℓ"));
+    assert_z_eq_x_matches_exact_derivs(constant(2.1) * rq, &X_2D, 4, 2, &Y_4);
+}
+
+#[test]
+fn rbf_times_periodic_z_eq_x_matches_exact_value_grad_hess() {
+    assert_z_eq_x_matches_exact_derivs(
+        KernelSpec::from(RbfKernel::new(2.0).expect("ℓ"))
+            * KernelSpec::from(PeriodicKernel::new(0.9, 1.7).expect("periodic")),
+        &X_1D,
+        4,
+        1,
+        &Y_4,
+    );
+}
+
+#[test]
+fn constant_times_rq_plus_linear_z_eq_x_matches_exact_value_grad_hess() {
+    let rq = KernelSpec::from(RationalQuadraticKernel::new(1.1, 0.8).expect("rq"));
+    let linear = KernelSpec::from(LinearKernel::new(0.6).expect("linear"));
+    assert_z_eq_x_matches_exact_derivs(constant(0.6) * rq + linear, &X_1D, 4, 1, &Y_4);
+}
+
+/// A `fit` on `Constant × RBF` learns the signal variance and does not
+/// raise the negative bound, with the gradient (L-BFGS) and with the Hessian (Newton).
+fn assert_constant_times_rbf_fit_learns_the_variance<O>(optimizer: O)
+where
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,
+{
+    let x = [0.0, 0.7, 1.1, 2.0, 2.6, 3.0];
+    let y = [1.1, 1.9, 1.6, 1.2, 0.7, 0.5];
+    let z = [0.4, 1.5, 2.8];
+    let kernel = constant(0.6) * KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let start = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(&x, 6, 1, &y, &z, 3)
+        .map_err(|(_, e)| e)
+        .expect("start");
+    let mut before = vec![0.0; start.num_params()];
+    start.get_params(&mut before).expect("params");
+    let fitted = Sgpr::new(kernel, likelihood)
+        .with_optimizer(optimizer)
+        .fit(&x, 6, 1, &y, &z, 3)
+        .map_err(|(_, e)| e)
+        .expect("fit");
+    let mut after = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut after).expect("params");
+    assert!(
+        (after[0] - before[0]).abs() > 1e-3,
+        "the signal variance did not move: {} -> {}",
+        before[0],
+        after[0]
+    );
+    assert!(
+        fitted.neg_log_marginal_likelihood().expect("end")
+            <= start.neg_log_marginal_likelihood().expect("start"),
+    );
+}
+
+#[test]
+fn constant_times_rbf_lbfgs_fit_learns_the_variance() {
+    assert_constant_times_rbf_fit_learns_the_variance(Lbfgs::new());
+}
+
+#[test]
+fn constant_times_rbf_newton_fit_learns_the_variance() {
+    assert_constant_times_rbf_fit_learns_the_variance(Newton::new());
+}
+
+/// `Z ≠ X`: the gradient of the collapsed bound is the finite difference of
+/// its value, and the Hessian that of the gradient.
+#[test]
+fn constant_times_rbf_z_ne_x_gradient_and_hessian_match_fd() {
+    let kernel = constant(1.7) * KernelSpec::from(RbfKernel::new(1.3).expect("ℓ"));
+    let x = [0.0, 0.7, 1.1, 2.0, 2.6, 3.0];
+    let y = [0.1, 0.9, 0.6, 0.2, -0.3, -0.5];
+    let mut sparse = factor_sparse(kernel, &x, 6, 1, &y, &[0.4, 1.5, 2.8], 3);
+    let p = sparse.num_params();
+    let mut params = vec![0.0; p];
+    sparse.get_params(&mut params).expect("params");
+    let mut grad = vec![0.0; p];
+    sparse
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("grad");
+    assert_slice_close(&grad, &fd_grad_from_value(&mut sparse, &params), 1e-5);
+    let mut hess = vec![0.0; p * p];
+    sparse.hessian_into(&params, &mut hess).expect("hess");
+    assert_slice_close(&hess, &fd_hess_from_grad(&mut sparse, &params), 2e-4);
 }
 
 fn assert_fit_finishes_and_nlml_drops<O>(optimizer: O)

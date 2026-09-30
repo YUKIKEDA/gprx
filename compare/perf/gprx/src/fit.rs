@@ -50,15 +50,8 @@ fn model_parts(case: &RealCase) -> Result<(KernelSpec, GaussianLikelihood), Stri
     }
     let ard =
         RbfArdKernel::new(&vec![case.lengthscale_init; case.n_cols]).map_err(|e| e.to_string())?;
-    // Sgpr / Svgp have no coordinate derivative for a Product tree, so a
-    // `Constant × RBF` kernel cannot be fitted there: sparse cells leave the
-    // signal variance out (fixed at 1) in every library.
-    let kernel = if case.model == "exact" {
-        let constant = ConstantKernel::new(case.signal_variance_init).map_err(|e| e.to_string())?;
-        KernelSpec::from(constant) * KernelSpec::from(ard)
-    } else {
-        KernelSpec::from(ard)
-    };
+    let constant = ConstantKernel::new(case.signal_variance_init).map_err(|e| e.to_string())?;
+    let kernel = KernelSpec::from(constant) * KernelSpec::from(ard);
     let likelihood =
         GaussianLikelihood::new(case.noise_variance_init).map_err(|e| e.to_string())?;
     Ok((kernel, likelihood))
