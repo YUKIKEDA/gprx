@@ -2,7 +2,7 @@
 timelines (``--timeline``).
 
 ```text
-python -m perf.real.plot [--out DIR] [--protocol native|matched] [--timeline-case NAME]
+python -m perf.real.plot [--out DIR] [--protocol native|matched] [--timeline-case PREFIX]
 ```
 
 Palette: the validated categorical order (blue, orange, aqua, yellow,
@@ -155,8 +155,18 @@ def fit_time(rows: list[dict], protocol: str, out: Path) -> Path | None:
     return path
 
 
-def rss_timeline(case: str, protocol: str, out: Path, directory: Path) -> Path | None:
-    files = {l: directory / f"{case}_{protocol}_{l}.json" for l in STYLE}
+def timeline_groups(directory: Path) -> list[str]:
+    """The prefixes of the timeline files there (``<dataset>_<model>_s<k>_<protocol>``)."""
+    found = set()
+    for file in directory.glob("*.json") if directory.is_dir() else []:
+        for lib in STYLE:
+            if file.stem.endswith(f"_{lib}"):
+                found.add(file.stem[: -len(lib) - 1])
+    return sorted(found)
+
+
+def rss_timeline(case: str, out: Path, directory: Path) -> Path | None:
+    files = {l: directory / f"{case}_{l}.json" for l in STYLE}
     files = {l: f for l, f in files.items() if f.is_file()}
     if not files:
         return None
@@ -176,7 +186,7 @@ def rss_timeline(case: str, protocol: str, out: Path, directory: Path) -> Path |
     ax.set_ylabel("RSS of the process tree [MiB]")
     ax.legend(frameon=False, labelcolor=INK_2, loc="upper left")
     fig.tight_layout()
-    path = out / f"rss_timeline_{case}_{protocol}.svg"
+    path = out / f"rss_timeline_{case}.svg"
     fig.savefig(path)
     plt.close(fig)
     return path
@@ -231,7 +241,7 @@ def main(argv: list[str]) -> int:
     if "--curve" in argv:
         made.append(curve(option("--curve", ""), protocol, out))
     if "--timeline-case" in argv:
-        made.append(rss_timeline(option("--timeline-case", ""), protocol, out, OUT / "timeline"))
+        made.append(rss_timeline(option("--timeline-case", ""), out, OUT / "timeline"))
     for path in made:
         print(path if path else "nothing to plot")
     return 0

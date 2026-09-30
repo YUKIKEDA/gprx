@@ -1,7 +1,7 @@
 """B1-1: fit every library on the real datasets and print the tables.
 
 ```text
-python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline] [--model exact|sgpr|svgp] [--m 512]
+python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline] [--force-exact] [--model exact|sgpr|svgp] [--m 512]
 python -m perf.run_real --reprint
 ```
 
@@ -11,6 +11,7 @@ to ``out/real/results.json``.
 
 from __future__ import annotations
 
+import json
 import math
 import statistics
 import sys
@@ -21,7 +22,7 @@ from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start
 from .real.cases import N_INDUCING, splits_of, write_case, write_curve_case
 from .real.curves import CURVES
 from .real.data import DATASETS, OUT
-from .real.libs import RUNNERS, runners_for
+from .real.libs import FIT_FIELDS, RUNNERS, runners_for
 from .real.optimizers import OPTIMIZERS, meta
 
 RESULTS = OUT / "results.json"
@@ -94,6 +95,29 @@ def merge_rows(path, fresh: list[dict]) -> list[dict]:
     return list(kept.values())
 
 
+def available_gib() -> float | None:
+    try:
+        for line in open("/proc/meminfo", encoding="utf-8"):
+            if line.startswith("MemAvailable"):
+                return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        pass
+    return None
+
+
+def exact_skip_reason(n_rows: int, force: bool) -> str | None:
+    """Why an exact fit is not attempted: the kernel matrix and its factor
+    (two n × n f64 matrices, a lower bound of what any library needs) do not
+    fit in the available memory. ``--force-exact`` tries anyway."""
+    have = available_gib()
+    if force or have is None:
+        return None
+    need = 2 * n_rows * n_rows * 8 / 2**30
+    if need > 0.8 * have:
+        return f"K and its factor need at least {need:.1f} GiB; {have:.1f} GiB available"
+    return None
+
+
 def print_optimizers() -> None:
     print_table(
         "optimizers",
@@ -131,6 +155,17 @@ def main(argv: list[str]) -> int:
             )
             print(f"# {path.name}", flush=True)
             for lib in libs:
+                reason = (
+                    exact_skip_reason(json.loads(path.read_text(encoding="utf-8"))["n_rows"], "--force-exact" in argv)
+                    if model == "exact" and protocol != "fixed" and DATASETS.get(dataset) and DATASETS[dataset].tier in ("T2", "T3")
+                    else None
+                )
+                if reason is not None:
+                    row = na_row(reason, FIT_FIELDS)
+                    row.update(lib=lib, name=f"{dataset}_s{split}", protocol=protocol, model=model)
+                    rows.append(row)
+                    print(f"  {lib}: N/A {reason}", flush=True)
+                    continue
                 if "--timeline" in argv:
                     harness.TIMELINE = (OUT / "timeline", f"{dataset}_{model}_s{split}_{protocol}_{lib}")
                 row = runners[lib](path)
@@ -145,7 +180,10 @@ def main(argv: list[str]) -> int:
                     + (f" [{row.get('note')}]" if row.get("status") != "ok" else ""),
                     flush=True,
                 )
-    write_json(RESULTS, merge_rows(RESULTS, rows))
+    if "--timeline" not in argv:
+        # A timeline run only writes its RSS files: the sampler costs a little
+        # CPU, so its timings are not results.
+        write_json(RESULTS, merge_rows(RESULTS, rows))
     write_json(OUT / "meta.json", meta())
     print_tables(rows)
     print_optimizers()
