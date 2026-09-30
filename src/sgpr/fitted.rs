@@ -305,6 +305,45 @@ where
         Ok(())
     }
 
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
+    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
+    /// and `Z`, and `Z` in transformed coordinates. The factors are
+    /// not stored; [`crate::LoadedSgpr::load`] factors the system again at the saved `θ`
+    /// and `Z`. Caller-defined kernels and transforms need their
+    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
+    /// The optimizer and the inducing-point search are not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let model = Sgpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-sgpr-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// model.save(&dir)?;
+    /// let loaded = gprx::LoadedSgpr::load(&dir, &gprx::PersistRegistry::new())?;
+    /// assert_eq!(loaded.n(), model.n());
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_sgpr(self, dir.as_ref())
+    }
+
     /// Converts this model into an online sparse GPR.
     ///
     /// [`OnlineSgpr`] can append or drop training points and inducing
@@ -395,6 +434,11 @@ where
     #[cfg(test)]
     pub(crate) fn vfe_w_and_b_l(&self) -> (&[P::Storage], MatRef<'_, P::Storage>) {
         (&self.w, self.b_l.as_ref())
+    }
+
+    /// The training data, settings, and fitted transforms.
+    pub(crate) fn core(&self) -> &SparseCore {
+        &self.core
     }
 
     pub(crate) fn into_trainer(self) -> Sgpr<O, I, P> {
@@ -842,6 +886,20 @@ where
     #[cfg(test)]
     pub(crate) fn k_mm_l(&self) -> MatRef<'_, P::Storage> {
         self.k_mm_l.as_ref()
+    }
+}
+
+impl<P: crate::precision::GpScalar> FittedSgpr<Fixed, FixedInducing, P> {
+    /// The model of a persist directory: the VFE system factored at the
+    /// saved `θ` and `Z`, as [`Sgpr<Fixed>::factor`] does.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Sgpr<Fixed>::factor`].
+    pub(crate) fn from_persisted(core: SparseCore) -> Result<Self, GprError> {
+        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<Fixed, FixedInducing, M, P>(
+            core, Fixed
+        ))
     }
 }
 

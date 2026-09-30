@@ -283,3 +283,33 @@ unsafe fn f64_slice_unchecked(bytes: &[u8]) -> &[f64] {
         std::slice::from_raw_parts(bytes.as_ptr().cast::<f64>(), bytes.len() / size_of::<f64>())
     }
 }
+
+/// Writes `model.safetensors` with the named `f64` tensors `(name, shape,
+/// values)`, each column-major for a matrix.
+pub(super) fn write_f64_tensors(
+    dir: &Path,
+    tensors: &[(&str, Vec<usize>, &[f64])],
+) -> Result<(), GprError> {
+    let mut views = Vec::with_capacity(tensors.len());
+    for (name, shape, values) in tensors {
+        let cells: usize = shape.iter().product();
+        if values.len() != cells {
+            return Err(persist_err(format!(
+                "{name} has {} values, expected {cells}",
+                values.len()
+            )));
+        }
+        let view = TensorView::new(Dtype::F64, shape.clone(), f64_as_bytes(values))
+            .map_err(|err| persist_err(format!("{name} tensor: {err}")))?;
+        views.push((*name, view));
+    }
+    let bytes = serialize(views, None)
+        .map_err(|err| persist_err(format!("serialize safetensors: {err}")))?;
+    let path = dir.join(TENSOR_FILE);
+    std::fs::write(&path, bytes).map_err(|err| persist_err(format!("write {path:?}: {err}")))
+}
+
+/// Reads the `f64` tensor `name` of shape `shape` from `model.safetensors`.
+pub(super) fn read_f64(dir: &Path, name: &str, shape: &[usize]) -> Result<Vec<f64>, GprError> {
+    read_scalars::<f64>(dir, name, shape, Dtype::F64)
+}

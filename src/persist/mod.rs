@@ -3,6 +3,7 @@
 mod config;
 mod kernel;
 mod registry;
+mod sparse;
 mod tensors;
 mod transform;
 
@@ -25,6 +26,8 @@ use tensors::{
     FactorBytes, pack_lower, read_matrix, read_scalars, read_xy, scalar_bytes, write_tensors,
 };
 
+pub use sparse::{LoadedSgpr, LoadedSvgp};
+pub(crate) use sparse::{save_online_sgpr, save_sgpr, save_svgp};
 pub(crate) use tensors::MappedTensors;
 use transform::{
     encode_fitted_input, encode_fitted_target, encode_unfitted_input, encode_unfitted_target,
@@ -464,6 +467,7 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
         .map_err(|err| persist_err(format!("read {config_path:?}: {err}")))?;
+    config::parse_model(&bytes, &[config::ModelJson::Exact])?;
     let config = config::parse_config(&bytes)?;
     match (config.precision, config.residual) {
         (PrecisionJson::Double, _) => load_precision(

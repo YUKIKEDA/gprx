@@ -25,6 +25,7 @@
        → persist: 1 ディレクトリ（`config.json` + `model.safetensors`）。`format_version` 1。`factor_kind` は必須（`llt` / `ldlt`）。`llt` の `load` は `FittedGpr<Fixed>`。`ldlt` は `OnlineGpr<Fixed>`。因子があるとき mmap。再学習は `with_optimizer` → `refit`
        → OnlineGpr: `FittedGpr::into_online(self)` で LLT→LDLT。末尾 `insert` は `OnlineGpr` だけ
        → Phase 4: Sgpr は同様に学習済み型を返す
+       → Sparse の persist（R5-8、[#286](https://github.com/YUKIKEDA/gprx/issues/286)）: 同じディレクトリで、`model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を持つ。`FittedSgpr` / `OnlineSgpr` / `FittedSvgp::save`、`LoadedSgpr` / `LoadedSvgp::load`。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、学習後のモデルは同じ予測をビットで返す。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）
 ```
 
 主要な設計原則:
