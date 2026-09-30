@@ -607,6 +607,15 @@ This is the observation `p(y_i | X, y_{-i}, θ)`. The LOO variance of the latent
 
 sklearn has no LOO API. `just gen-goldens` applies the same GPML formula to `L_` / `alpha_` after fit and writes JSON. The Rust side factors at the `θ` sklearn chose with `FitOptions::FIXED` (optimizer differences are not mixed into LOO).
 
+`FittedSgpr` / `OnlineSgpr::loo_predict` (R5-7, [#285](https://github.com/YUKIKEDA/gprx/issues/285)) is the LOO of the collapsed VFE posterior at fixed `θ` and `Z`: the optimal `q(u)` without point `i`, predicted at `x_i`. With `A = L_mm⁻¹ K_mn`, `B = σn² I + A Aᵀ`, and `w = B⁻¹ A y`, leaving out `i` subtracts `a_i a_iᵀ` from `B`. Sherman–Morrison with `h = a_iᵀ B⁻¹ a_i` and `g = a_iᵀ w` gives
+
+```
+μ_i = (g - h y_i) / (1 - h)
+latent σ_i² = k(x_i, x_i) - ‖a_i‖² + σn² h / (1 - h)
+```
+
+One triangular solve `L_B⁻¹ A` makes the pass `O(n m²)`. At `Z = X` it is the Exact LOO. An `f32` storage assembles the VFE system again in `f64`, as its prediction does. SVGP has no LOO (§6.1).
+
 ## 7. Workspace and memory
 
 ### 7.1 Separate buffers
