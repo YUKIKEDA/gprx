@@ -263,7 +263,7 @@ where
     std::fs::write(&config_path, json)
         .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
     let packed = if with_factor {
-        Some(pack_saved_factor(model.ld_factor(), model.alpha())?)
+        Some(pack_saved_factor(model.ld_factor(), model.alpha()?)?)
     } else {
         None
     };

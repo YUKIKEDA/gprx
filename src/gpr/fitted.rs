@@ -1130,7 +1130,9 @@ where
     /// # }
     /// ```
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
-        Ok(self.core.neg_log_marginal_likelihood(self.factor()))
+        Ok(self
+            .core
+            .neg_log_marginal_likelihood(self.factor(), &self.core.factor_alpha))
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
@@ -1366,8 +1368,15 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
-        self.core
-            .write_prediction(self.factor(), xs, n_rows, n_cols, options, &mut out)?;
+        self.core.write_prediction(
+            self.factor(),
+            &self.core.alpha,
+            xs,
+            n_rows,
+            n_cols,
+            options,
+            &mut out,
+        )?;
         Ok(out)
     }
 
@@ -1451,7 +1460,7 @@ where
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         self.core
-            .write_covariance(self.factor(), xs, n_rows, n_cols, options)
+            .write_covariance(self.factor(), &self.core.alpha, xs, n_rows, n_cols, options)
     }
 
     /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
@@ -1509,8 +1518,16 @@ where
         n_draws: usize,
         seed: u64,
     ) -> Result<Vec<P::Refine>, GprError> {
-        self.core
-            .sample_with(self.factor(), xs, n_rows, n_cols, options, n_draws, seed)
+        self.core.sample_with(
+            self.factor(),
+            &self.core.alpha,
+            xs,
+            n_rows,
+            n_cols,
+            options,
+            n_draws,
+            seed,
+        )
     }
 
     /// Returns leave-one-out mean and observation variance at every training
@@ -1559,7 +1576,8 @@ where
         &self,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        self.core.loo_predict_with(self.factor(), options)
+        self.core
+            .loo_predict_with(self.factor(), &self.core.alpha, options)
     }
 }
 
