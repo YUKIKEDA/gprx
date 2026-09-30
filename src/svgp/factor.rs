@@ -5,28 +5,27 @@ use std::marker::PhantomData;
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatRef};
-use wide::f64x4;
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
 
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
-use crate::gpr::factor::{
-    cholesky_lower_with_policy, pack_points, require_param_len, symmetrize_lower, validate_query,
-    validate_training,
-};
+use crate::gpr::factor::{pack_points, require_param_len, validate_query, validate_training};
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     CompiledKernel, FillDistances, GramKernel, KernelScalar, KernelSpec, Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
+use crate::linalg::{
+    cholesky_lower_with_retries, dot_f64x4, faer_par, faer_par_dims, forward_substitute,
+    mat_mul_into, norm2_f64x4, symmetrize_lower,
+};
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
 use crate::param::Interval;
 use crate::precision::ModelPrecision;
 use crate::rng::small_rng;
-use crate::sgpr::{kernel_cross, mat_mul_into, validate_inducing};
-use crate::workspace::{faer_par, faer_par_dims};
+use crate::sgpr::{kernel_cross, validate_inducing};
 use crate::{PredictOptions, Prediction, VarianceKind};
 
 use super::fitted::FittedSvgp;
@@ -113,10 +112,10 @@ where
         Default::default(),
     );
     let mut chol_scratch = MemBuffer::new(req);
-    cholesky_lower_with_policy(
+    cholesky_lower_with_retries(
         &mut k_mm,
         &mut chol_scratch,
-        k_mm_jitter_policy(),
+        k_mm_jitter_policy().retry_jitters(),
         CholeskyStage::Fit,
     )?;
     // Same packed `X` and `Z` share a training White diagonal. Rectangular
@@ -437,7 +436,7 @@ fn refine_triangular(
             if ratio > 0.9 {
                 streak += 1;
                 if streak >= 2 {
-                    return forward_f64(l64, rhs64);
+                    return forward_substitute(l64, rhs64);
                 }
             } else {
                 streak = 0;
@@ -445,44 +444,12 @@ fn refine_triangular(
         }
         prev = Some(r_inf);
         let r32: Vec<f32> = r.iter().map(|value| *value as f32).collect();
-        let delta = forward_f32(l, &r32);
+        let delta = forward_substitute(l, &r32);
         for i in 0..m {
             v[i] += f64::from(delta[i]);
         }
     }
-    forward_f64(l64, rhs64)
-}
-
-fn forward_f32(l: MatRef<'_, f32>, b: &[f32]) -> Vec<f32> {
-    let m = b.len();
-    let mut x = vec![0.0f32; m];
-    for i in 0..m {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[(i, j)] * x[j];
-        }
-        let diag = l[(i, i)];
-        x[i] = if diag.to_f64().abs() > 0.0 {
-            sum / diag
-        } else {
-            0.0
-        };
-    }
-    x
-}
-
-fn forward_f64(l: MatRef<'_, f64>, b: &[f64]) -> Vec<f64> {
-    let m = b.len();
-    let mut x = vec![0.0; m];
-    for i in 0..m {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[(i, j)] * x[j];
-        }
-        let diag = l[(i, i)];
-        x[i] = if diag.abs() > 0.0 { sum / diag } else { 0.0 };
-    }
-    x
+    forward_substitute(l64, rhs64)
 }
 
 impl SvgpMean for crate::precision::MixedPrecision<crate::precision::PromoteStorage> {
@@ -539,10 +506,10 @@ impl SvgpMean for crate::precision::MixedPrecision<crate::precision::ReevaluateK
         )?;
         let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
         let mut chol_scratch = MemBuffer::new(req);
-        cholesky_lower_with_policy(
+        cholesky_lower_with_retries(
             &mut k_mm,
             &mut chol_scratch,
-            k_mm_jitter_policy(),
+            k_mm_jitter_policy().retry_jitters(),
             CholeskyStage::Predict,
         )?;
         let k_star = kernel_cross::<M, _>(&compiled, z64.as_ref(), q64.as_ref())?;
@@ -660,7 +627,7 @@ fn storage_point_cache<M: crate::math::KernelMath, P: ModelPrecision>(
         }
     }
     let mut u = Mat::<P::Storage>::zeros(m, b);
-    crate::sgpr::mat_mul_into(&mut u, q_l.transpose(), a.as_ref());
+    crate::linalg::mat_mul_into(&mut u, q_l.transpose(), a.as_ref());
     let mut resid = vec![P::Storage::from_f64(0.0); b];
     let mut var = vec![P::Storage::from_f64(0.0); b];
     let a_ref = a.as_ref();
@@ -718,13 +685,13 @@ fn storage_data_q_grad<M: crate::math::KernelMath, P: ModelPrecision>(
     }
     let a = storage_batch_columns(model.a.as_ref(), batch);
     let mut mean = Mat::<P::Storage>::zeros(m, 1);
-    crate::sgpr::mat_mul_into(&mut mean, a.as_ref(), resid_col.as_ref());
+    crate::linalg::mat_mul_into(&mut mean, a.as_ref(), resid_col.as_ref());
     let c = scale * inv_noise;
     for k in 0..m {
         out[n_theta + k] -= c * mean[(k, 0)].to_f64();
     }
     let mut gram = Mat::<P::Storage>::zeros(m, m);
-    crate::sgpr::mat_mul_into(&mut gram, a.as_ref(), cache.u.transpose());
+    crate::linalg::mat_mul_into(&mut gram, a.as_ref(), cache.u.transpose());
     let mut packed = 0;
     for j in 0..m {
         for i in j..m {
@@ -769,7 +736,7 @@ where
             storage_kernel_tangents::<M, P>(&compiled, x_mat, z_mat, model, same_xz, param_idx)?;
         let da_b = storage_batch_columns(d_a.as_ref(), batch);
         let mut lt = Mat::<P::Storage>::zeros(m, batch.len());
-        crate::sgpr::mat_mul_into(&mut lt, q_l.transpose(), da_b.as_ref());
+        crate::linalg::mat_mul_into(&mut lt, q_l.transpose(), da_b.as_ref());
         let mut g = P::Storage::from_f64(0.0);
         let inv = P::Storage::from_f64(inv_noise);
         let two = P::Storage::from_f64(2.0);
@@ -845,7 +812,7 @@ where
     }
     let mut d_l = Mat::<P::Storage>::zeros(m, m);
     storage_cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
-    crate::sgpr::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
+    crate::linalg::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
         model.k_mm_l.as_ref(),
         d_kmn.as_mut(),
@@ -997,31 +964,6 @@ impl<'a> ColMajor<'a> {
     }
 }
 
-fn load4(src: &[f64], i: usize) -> f64x4 {
-    f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
-}
-
-fn dot(left: &[f64], right: &[f64]) -> f64 {
-    let n = left.len().min(right.len());
-    let mut acc = f64x4::new([0.0; 4]);
-    let mut i = 0;
-    while i + 4 <= n {
-        acc += load4(left, i) * load4(right, i);
-        i += 4;
-    }
-    let parts = acc.to_array();
-    let mut sum = parts[0] + parts[1] + parts[2] + parts[3];
-    while i < n {
-        sum += left[i] * right[i];
-        i += 1;
-    }
-    sum
-}
-
-fn norm2(values: &[f64]) -> f64 {
-    dot(values, values)
-}
-
 struct PointCache {
     resid: Vec<f64>,
     var: Vec<f64>,
@@ -1046,8 +988,8 @@ fn point_cache<M: crate::math::KernelMath>(
         for (b_idx, &col) in batch.iter().enumerate() {
             let a_col = a_cm.col(b_idx);
             let u_col = u_cm.col(b_idx);
-            let mu = dot(a_col, mean);
-            var[b_idx] = model.k_diag[col] - norm2(a_col) + norm2(u_col);
+            let mu = dot_f64x4(a_col, mean);
+            var[b_idx] = model.k_diag[col] - norm2_f64x4(a_col) + norm2_f64x4(u_col);
             resid[b_idx] = model.y[col] - mu;
         }
     } else {
@@ -1187,9 +1129,9 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
             let mean = model.q_mean.as_slice();
             for (b_idx, &col) in batch.iter().enumerate() {
                 let da_col = da_cm.col(b_idx);
-                let dmu = dot(da_col, mean);
-                let d_anorm = 2.0 * dot(a_cm.col(col), da_col);
-                let d_lt = 2.0 * dot(u_cm.col(b_idx), lt_cm.col(b_idx));
+                let dmu = dot_f64x4(da_col, mean);
+                let d_anorm = 2.0 * dot_f64x4(a_cm.col(col), da_col);
+                let d_lt = 2.0 * dot_f64x4(u_cm.col(b_idx), lt_cm.col(b_idx));
                 let dvar = d_kdiag[col] - d_anorm + d_lt;
                 let resid = cache.resid[b_idx];
                 g += inv_noise * resid * dmu - 0.5 * inv_noise * dvar;
@@ -1265,7 +1207,7 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     let mut d_l = Mat::zeros(m, m);
     cholesky_sensitivity(model.k_mm_l.as_ref(), d_kmm.as_ref(), d_l.as_mut(), m);
     // Upper of `d_l` stays zero, so this is the lower-triangular product.
-    crate::sgpr::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
+    crate::linalg::mat_sub_mul(&mut d_kmn, d_l.as_ref(), model.a.as_ref());
     faer::linalg::triangular_solve::solve_lower_triangular_in_place(
         model.k_mm_l.as_ref(),
         d_kmn.as_mut(),

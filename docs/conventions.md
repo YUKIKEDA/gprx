@@ -12,6 +12,7 @@ Do not copy the public surface here or into `.cursor/rules/`. The current specif
 src/lib.rs                 public re-exports
 src/error.rs
 src/likelihood.rs
+src/linalg/                crate-private Cholesky, LDLT, solves, dense helpers, faer worker caps. Models do not define these
 src/math.rs                Accurate / FastApprox
 src/objective.rs
 src/online.rs              crate-private OnlineWorkspace
