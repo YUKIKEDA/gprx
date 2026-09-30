@@ -18,7 +18,8 @@ import sys
 from common import harness
 from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start, write_json
 
-from .real.cases import N_INDUCING, splits_of, write_case
+from .real.cases import N_INDUCING, splits_of, write_case, write_curve_case
+from .real.curves import CURVES
 from .real.data import DATASETS, OUT
 from .real.libs import RUNNERS, runners_for
 from .real.optimizers import OPTIMIZERS, meta
@@ -102,18 +103,22 @@ def main(argv: list[str]) -> int:
     runners = runners_for(model)
     libs = option(argv, "--libs", ",".join(RUNNERS)).split(",")
     limit = int(option(argv, "--splits", "0"))
-    unknown = [d for d in datasets if d not in DATASETS] + [l for l in libs if l not in runners]
+    unknown = [d for d in datasets if d not in DATASETS and d not in CURVES] + [l for l in libs if l not in runners]
     if unknown:
         print(f"unknown: {unknown}", file=sys.stderr)
         return 2
     start(BANNER)
     rows: list[dict] = []
     for dataset in datasets:
-        splits = list(splits_of(dataset))
+        splits = [0] if dataset in CURVES else list(splits_of(dataset))
         if limit:
             splits = splits[:limit]
         for split in splits:
-            path = write_case(dataset, split, protocol, model, n_inducing)
+            path = (
+                write_curve_case(dataset, protocol)
+                if dataset in CURVES
+                else write_case(dataset, split, protocol, model, n_inducing)
+            )
             print(f"# {path.name}", flush=True)
             for lib in libs:
                 if "--timeline" in argv:
