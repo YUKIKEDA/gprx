@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import plot
 from .data import OUT
+from .curves import CURVES
 from .libs import RUNNERS
 from .optimizers import OPTIMIZERS
 
@@ -163,6 +164,15 @@ def main(argv: list[str]) -> int:
                 path = maker(rows, protocol, BENCH)
                 if path:
                     figures.append(path.name)
+    for prefix in plot.timeline_groups(OUT / "timeline"):
+        path = plot.rss_timeline(prefix, BENCH, OUT / "timeline")
+        if path:
+            figures.append(path.name)
+    for curve_name in sorted({c["dataset"] for c in summary if c["dataset"] in CURVES}):
+        for protocol in sorted({c["protocol"] for c in summary if c["dataset"] == curve_name}):
+            path = plot.curve(curve_name, protocol, BENCH)
+            if path:
+                figures.append(path.name)
     body = "\n".join(
         [
             machine_line(meta),
