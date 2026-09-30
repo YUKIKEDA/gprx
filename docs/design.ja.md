@@ -452,7 +452,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。新しい `n×n` は Workspace に足さない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。`Q_j`（`n×n` 1 枚）と長さ n のベクトル 4 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない（R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)）。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
@@ -587,10 +587,12 @@ sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_
 struct WorkspaceCore<P: PrecisionPolicy> {
     k_matrix: Mat<P::Storage>,       // K → Cholesky後は L。Reuse の勾配中は W
     exp_buf: Mat<P::Storage>,        // カーネル評価、∂K/∂θ。Reuse の n-RHS はここ
-    kernel_scratch: Mat<P::Storage>, // product `∂K/∂θ`。等方 RBF では空
+    kernel_scratch: Mat<P::Storage>, // product / custom の `∂K/∂θ`。等方 RBF では空
     thread_scratch: Vec<Mat<P::Storage>>, // Rayonスレッド数ぶん事前分割
     rhs: Mat<P::Storage>,            // n×1、訓練 Cholesky の右辺 y → α
     faer_scratch: MemBuffer,         // faer公式のスクラッチ機構をそのまま使う
+    nested: Vec<Mat<P::Storage>>,    // 和・積の中の和・積の入れ子 1 段に n×n 1 枚。無ければ空
+    hessian: HessianScratch<P::Storage>, // Q_j と長さ n のベクトル 4 本。最初の Hessian まで空(§6.2)
 }
 
 struct FitBuffers<P: PrecisionPolicy> {
@@ -610,10 +612,13 @@ struct QueryWorkspace<P: PrecisionPolicy> {
     query_x: Mat<P::Storage>,        // m×d
     query_k_star: Mat<P::Storage>,   // n×m
     query_scratch: Mat<P::Storage>,
+    query_nested: Vec<Mat<P::Storage>>, // n×m ブロックの入れ子の和・積の段
     query_dist: Mat<P::Storage>,
     query_kss: Vec<f64>,
 }
 ```
+
+和・積の項がさらに複数項の和・積のときは、入れ子 1 段ごとに出力と同じ形のバッファがもう 1 枚要る（`CompiledKernel::nested_depth`）。crate 内の fit / predict の入口は、その段を `nested` / `query_nested` から借りる。最初の呼び出しで伸ばし、以後は使い回す（R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)）。公開の `CompiledKernel::apply` / `grad` / `hess` などはシグネチャを変えず、その呼び出しのぶんだけ段を用意する。対角の畳み込み（`fill_diag`、`fill_diag_points` と、その勾配・Hessian）は固定長のスタック上の行ブロックで項を合わせ、確保しない。
 
 fit 用バッファは`fit`開始時にサイズが確定するため、`reserve_exact`で一度だけ確保(または`Mat::zeros`で1回構築)し、以降のイテレーションでは同じ領域に上書きする。query バッファは `FittedGpr` の `QueryWorkspace` が持ち、最初の `predict_into` で `(n, m, d)` に合わせ、同じクエリ長では再利用する。`predict(&self)` は出力 `Vec` を毎回確保してよい。あわせて、faer公式の`PodStack`/`MemStack`をスクラッチ管理に採用し、自前でスクラッチ領域をアリーナに内包する設計はやめる。
 

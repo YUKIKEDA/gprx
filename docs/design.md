@@ -462,7 +462,7 @@ Analytic NLML Hessian (P2B-17 / [#109](https://github.com/YUKIKEDA/gprx/issues/1
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. No new `n×n` is added to Workspace. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
+`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. `Q_j` (one `n×n`) and four length-`n` vectors live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing (R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)). `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
 
 `value_and_gradient_into` runs this once and shares L, α, and `exp_buf` between the likelihood and the gradient. The default two-step `value` then `gradient_into` does not share them.
 
@@ -598,10 +598,12 @@ The buffer count is small and fixed, so they are separate fields. Storage and Re
 struct WorkspaceCore<P: PrecisionPolicy> {
     k_matrix: Mat<P::Storage>,       // K; L after Cholesky. W during a Reuse gradient
     exp_buf: Mat<P::Storage>,        // kernel evaluation, ∂K/∂θ. Reuse n-RHS lives here
-    kernel_scratch: Mat<P::Storage>, // product ∂K/∂θ. Empty for isotropic RBF
+    kernel_scratch: Mat<P::Storage>, // product / custom ∂K/∂θ. Empty for isotropic RBF
     thread_scratch: Vec<Mat<P::Storage>>, // split ahead of time, one per Rayon thread
     rhs: Mat<P::Storage>,            // n×1, training Cholesky right-hand side y → α
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
+    nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product in another. Empty otherwise
+    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
 }
 
 struct FitBuffers<P: PrecisionPolicy> {
@@ -621,10 +623,13 @@ struct QueryWorkspace<P: PrecisionPolicy> {
     query_x: Mat<P::Storage>,        // m×d
     query_k_star: Mat<P::Storage>,   // n×m
     query_scratch: Mat<P::Storage>,
+    query_nested: Vec<Mat<P::Storage>>, // nested sum / product levels of the n×m block
     query_dist: Mat<P::Storage>,
     query_kss: Vec<f64>,
 }
 ```
+
+A sum or product whose term is itself a multi-term sum or product needs one more output-shaped buffer per nesting level (`CompiledKernel::nested_depth`). The crate-internal fit / predict entry points take those levels from `nested` / `query_nested`, which grow on the first call and are reused after (R4-5c / [#272](https://github.com/YUKIKEDA/gprx/issues/272)). The public `CompiledKernel::apply` / `grad` / `hess` family keeps its signature and builds the levels for that one call. The diagonal folds (`fill_diag`, `fill_diag_points`, and their gradients and Hessians) combine terms in fixed-size stack blocks of rows and allocate nothing.
 
 Fit buffers have a known size at the start of `fit`, so they are allocated once with `reserve_exact` (or built once with `Mat::zeros`) and overwritten on later iterations. Query buffers live on `FittedGpr`'s `QueryWorkspace`. The first `predict_into` sizes them to `(n, m, d)`, and the same query length reuses them. `predict(&self)` may allocate the output `Vec` every call. faer's `PodStack` / `MemStack` is the scratch manager. A hand-rolled scratch arena is not used.
 

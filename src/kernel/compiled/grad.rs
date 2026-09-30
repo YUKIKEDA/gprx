@@ -1,6 +1,7 @@
-use super::apply::{apply_into, apply_into_mixed, apply_into_points};
+use super::apply::{combine_diag, mul_assign};
 use super::{
-    CompiledKernel, MixedKernelViews, ard_needs_coords, mul_triangle, require_scratch_shape,
+    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
+    require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
@@ -13,6 +14,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Product trees need `scratch` the same shape as `d_k` and distinct from
     /// it. Leaves ignore `scratch`.
     ///
+    /// A sum / product nested in another allocates one output-shaped buffer
+    /// per nesting level for the call.
+    ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
@@ -21,10 +25,24 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub fn grad<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, T>,
-        mut d_k: MatMut<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
+        self.grad_with::<M>(dist, d_k, param_idx, uplo, scratch, &mut nested)
+    }
+
+    /// [`Self::grad`] with caller-owned [`Nested`] levels.
+    pub(crate) fn grad_with<M: crate::math::KernelMath>(
+        &self,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
@@ -40,40 +58,72 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Custom(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad::<M>(dist, d_k, local, uplo, scratch)
+                term.grad_with::<M>(dist, d_k, local, uplo, scratch, nested)
             }
             Self::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
-                product_grad::<M, _>(terms, dist, d_k.as_mut(), param_idx, uplo, scratch.as_mut())
+                let (owner, local) = term_index_for_param(terms, param_idx)?;
+                product_with_owner(
+                    terms,
+                    owner,
+                    ProductBuffers::new(d_k, scratch, nested, uplo),
+                    |term, out, scratch, nested| {
+                        term.apply_with::<M>(dist, out, uplo, scratch, nested)
+                    },
+                    |term, out, scratch, nested| {
+                        term.grad_with::<M>(dist, out, local, uplo, scratch, nested)
+                    },
+                )
             }
         }
     }
 
     /// Writes `∂K/∂θ_{param_idx}` from point coordinates.
     ///
-    /// Product trees need `scratch` the same shape as `d_k` and distinct from
-    /// it. Leaves ignore `scratch`.
+    /// Product trees and custom distance leaves need `scratch` the same shape
+    /// as `d_k` and distinct from it; a custom leaf writes its distances
+    /// there. Other leaves ignore `scratch`.
+    ///
+    /// A sum / product nested in another allocates one output-shaped buffer
+    /// per nesting level for the call.
     ///
     /// # Errors
     ///
     /// [`GprError::IndexOutOfRange`] if `param_idx` is out of range,
-    /// [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is the
-    /// wrong size, or the same shape errors as [`Self::apply_points`].
-    #[allow(clippy::only_used_in_recursion)] // leaves ignore scratch; Sum forwards it
+    /// [`GprError::WorkspaceTooSmall`] if a product tree's or custom leaf's
+    /// `scratch` is the wrong size, or the same shape errors as
+    /// [`Self::apply_points`].
     pub fn grad_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
-        mut d_k: MatMut<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
+        self.grad_points_with::<M>(x, d_k, param_idx, uplo, scratch, &mut nested)
+    }
+
+    /// [`Self::grad_points`] with caller-owned [`Nested`] levels.
+    pub(crate) fn grad_points_with<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
             Self::Matern(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
             Self::Periodic(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
             Self::RationalQuadratic(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
-            Self::Custom(leaf) => grad_custom_from_coords(leaf, x, d_k, param_idx, uplo),
+            Self::Custom(leaf) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
+                grad_custom_from_coords(leaf, x, d_k, param_idx, uplo, scratch)
+            }
             Self::RbfArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
             Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::MaternArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
@@ -82,17 +132,21 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_points::<M>(x, d_k, local, uplo, scratch)
+                term.grad_points_with::<M>(x, d_k, local, uplo, scratch, nested)
             }
             Self::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
-                product_grad_points::<M, _>(
+                let (owner, local) = term_index_for_param(terms, param_idx)?;
+                product_with_owner(
                     terms,
-                    x,
-                    d_k.as_mut(),
-                    param_idx,
-                    uplo,
-                    scratch.as_mut(),
+                    owner,
+                    ProductBuffers::new(d_k, scratch, nested, uplo),
+                    |term, out, scratch, nested| {
+                        term.apply_points_with::<M>(x, out, uplo, scratch, nested)
+                    },
+                    |term, out, scratch, nested| {
+                        term.grad_points_with::<M>(x, out, local, uplo, scratch, nested)
+                    },
                 )
             }
         }
@@ -117,8 +171,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => {
                 require_diag_len(x, out)?;
                 let one = x.submatrix(0, 0, 1, x.ncols());
-                let mut cell = Mat::zeros(1, 1);
-                leaf.grad(one.as_ref(), cell.as_mut(), param_idx, Triangle::Lower)?;
+                eval_cell(|cell| leaf.grad(one, cell, param_idx, Triangle::Lower))?;
                 leaf.fill_diag_points(x, out)
             }
             Self::Rbf(leaf) => broadcast_self_diag(x, out, |one, cell| {
@@ -134,7 +187,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
             }),
             Self::Custom(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                grad_custom_from_coords(leaf, one, cell, param_idx, Triangle::Lower)
+                let mut dist = [T::from_f64(0.0)];
+                let dist = MatMut::from_column_major_slice_mut(&mut dist, 1, 1);
+                grad_custom_from_coords(leaf, one, cell, param_idx, Triangle::Lower, dist)
             }),
             Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
                 leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
@@ -159,6 +214,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    // The cache and `x` views, output, index, triangle, scratch, and levels.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn grad_from_ard_cache<M: crate::math::KernelMath>(
         &self,
         cache: MatRef<'_, T>,
@@ -167,6 +224,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         param_idx: usize,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         match self {
             Self::RbfArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
@@ -176,9 +234,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_from_ard_cache::<M>(cache, x, d_k, local, uplo, scratch)
+                term.grad_from_ard_cache::<M>(cache, x, d_k, local, uplo, scratch, nested)
             }
-            _ => self.grad_points::<M>(x, d_k, param_idx, uplo, scratch),
+            _ => self.grad_points_with::<M>(x, d_k, param_idx, uplo, scratch, nested),
         }
     }
 
@@ -186,10 +244,11 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn grad_mixed<M: crate::math::KernelMath>(
         &self,
         views: MixedKernelViews<'_, T>,
-        mut d_k: MatMut<'_, T>,
+        d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
-        mut scratch: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         match self {
             Self::Rbf(_)
@@ -198,30 +257,38 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.grad::<M>(views.dist, d_k, param_idx, uplo, scratch),
+            | Self::White(_) => {
+                self.grad_with::<M>(views.dist, d_k, param_idx, uplo, scratch, nested)
+            }
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => {
                 if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
-                    self.grad_from_ard_cache::<M>(cache, views.x, d_k, param_idx, uplo, scratch)
+                    self.grad_from_ard_cache::<M>(
+                        cache, views.x, d_k, param_idx, uplo, scratch, nested,
+                    )
                 } else {
-                    self.grad_points::<M>(views.x, d_k, param_idx, uplo, scratch)
+                    self.grad_points_with::<M>(views.x, d_k, param_idx, uplo, scratch, nested)
                 }
             }
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_mixed::<M>(views, d_k, local, uplo, scratch)
+                term.grad_mixed::<M>(views, d_k, local, uplo, scratch, nested)
             }
             Self::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
-                product_grad_mixed::<M, _>(
+                let (owner, local) = term_index_for_param(terms, param_idx)?;
+                product_with_owner(
                     terms,
-                    views,
-                    d_k.as_mut(),
-                    param_idx,
-                    uplo,
-                    scratch.as_mut(),
+                    owner,
+                    ProductBuffers::new(d_k, scratch, nested, uplo),
+                    |term, out, scratch, nested| {
+                        term.apply_mixed::<M>(views, out, uplo, scratch, nested)
+                    },
+                    |term, out, scratch, nested| {
+                        term.grad_mixed::<M>(views, out, local, uplo, scratch, nested)
+                    },
                 )
             }
         }
@@ -412,91 +479,118 @@ fn fold_coord_sum<T: KernelScalar>(
     Ok(())
 }
 
+/// A custom distance leaf's `∂K/∂θ` from coordinates: `scratch` (the shape
+/// of `d_k`, distinct from it) holds the pairwise squared distances.
 fn grad_custom_from_coords<T: KernelScalar>(
     leaf: &CustomKernel<T>,
     x: MatRef<'_, T>,
     mut d_k: MatMut<'_, T>,
     param_idx: usize,
     uplo: Triangle,
+    mut scratch: MatMut<'_, T>,
 ) -> Result<(), GprError> {
-    let n = d_k.nrows();
-    let mut dist = Mat::zeros(n, n);
-    write_square_from_coords(x, dist.as_mut(), uplo, Ok)?;
-    leaf.grad(dist.as_ref(), d_k.as_mut(), param_idx, uplo)
+    write_square_from_coords(x, scratch.as_mut(), uplo, Ok)?;
+    leaf.grad(scratch.as_ref(), d_k.as_mut(), param_idx, uplo)
 }
 
 fn term_for_param<T: KernelScalar>(
     terms: &[CompiledKernel<T>],
     param_idx: usize,
 ) -> Result<(&CompiledKernel<T>, usize), GprError> {
+    let (index, local) = term_index_for_param(terms, param_idx)?;
+    Ok((&terms[index], local))
+}
+
+/// The index of the term that owns `param_idx`, and the index within it.
+pub(super) fn term_index_for_param<T: KernelScalar>(
+    terms: &[CompiledKernel<T>],
+    param_idx: usize,
+) -> Result<(usize, usize), GprError> {
     let mut offset = 0;
-    for term in terms {
-        let n = term.num_params();
-        if param_idx < offset + n {
-            return Ok((term, param_idx - offset));
+    for (index, term) in terms.iter().enumerate() {
+        let count = term.num_params();
+        if param_idx < offset + count {
+            return Ok((index, param_idx - offset));
         }
-        offset += n;
+        offset += count;
     }
     Err(GprError::IndexOutOfRange {
         reason: format!("kernel parameter index {param_idx} is out of range"),
     })
 }
 
-fn product_grad<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    dist: MatRef<'_, T>,
-    mut d_k: MatMut<'_, T>,
-    param_idx: usize,
-    uplo: Triangle,
-    mut scratch: MatMut<'_, T>,
-) -> Result<(), GprError> {
-    let mut offset = 0;
-    let mut owner = None;
-    for (i, term) in terms.iter().enumerate() {
-        let n = term.num_params();
-        if param_idx < offset + n {
-            owner = Some((i, param_idx - offset));
-            break;
-        }
-        offset += n;
-    }
-    let (owner_i, local) = owner.ok_or_else(|| GprError::IndexOutOfRange {
-        reason: format!("kernel parameter index {param_idx} is out of range"),
-    })?;
+/// Output, scratch, nested levels, and triangle of one product fold.
+pub(super) struct ProductBuffers<'a, 'n, T> {
+    pub(super) out: MatMut<'a, T>,
+    pub(super) scratch: MatMut<'a, T>,
+    pub(super) nested: &'n mut Nested<T>,
+    pub(super) uplo: Triangle,
+}
 
-    let n = d_k.nrows();
-    let mut extra = None;
+impl<'a, 'n, T> ProductBuffers<'a, 'n, T> {
+    pub(super) fn new(
+        out: MatMut<'a, T>,
+        scratch: MatMut<'a, T>,
+        nested: &'n mut Nested<T>,
+        uplo: Triangle,
+    ) -> Self {
+        Self {
+            out,
+            scratch,
+            nested,
+            uplo,
+        }
+    }
+}
+
+/// Writes `deriv(terms[owner]) · ∏_{k ≠ owner} apply(terms[k])` into `out`.
+///
+/// Each writer gets `(term, out, scratch, nested levels below it)`.
+pub(super) fn product_with_owner<T: KernelScalar>(
+    terms: &[CompiledKernel<T>],
+    owner: usize,
+    buffers: ProductBuffers<'_, '_, T>,
+    mut apply: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
+    mut deriv: impl FnMut(
+        &CompiledKernel<T>,
+        MatMut<'_, T>,
+        MatMut<'_, T>,
+        &mut Nested<T>,
+    ) -> Result<(), GprError>,
+) -> Result<(), GprError> {
+    let ProductBuffers {
+        mut out,
+        mut scratch,
+        nested,
+        uplo,
+    } = buffers;
+    let (rows, cols) = (out.nrows(), out.ncols());
     let mut started = false;
-    for (j, term) in terms.iter().enumerate() {
-        if j == owner_i {
+    for (k, term) in terms.iter().enumerate() {
+        if k == owner {
             continue;
         }
-        if !started {
-            term.apply::<M>(dist, d_k.as_mut(), uplo, scratch.as_mut())?;
-            started = true;
+        if started {
+            let (own, deeper) = term_scratch(term, rows, cols, out.as_mut(), &mut *nested)?;
+            apply(term, scratch.as_mut(), own, deeper)?;
+            mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
         } else {
-            apply_into::<M, _>(
-                term,
-                dist,
-                scratch.as_mut(),
-                d_k.as_mut(),
-                uplo,
-                &mut extra,
-                n,
-            )?;
-            mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
+            apply(term, out.as_mut(), scratch.as_mut(), &mut *nested)?;
+            started = true;
         }
     }
+    let owner = &terms[owner];
     if started {
-        if terms[owner_i].needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            terms[owner_i].grad::<M>(dist, scratch.as_mut(), local, uplo, buf.as_mut())?;
-        } else {
-            terms[owner_i].grad::<M>(dist, scratch.as_mut(), local, uplo, d_k.as_mut())?;
-        }
-        mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
+        let (own, deeper) = term_scratch(owner, rows, cols, out.as_mut(), &mut *nested)?;
+        deriv(owner, scratch.as_mut(), own, deeper)?;
+        mul_triangle(out.as_mut(), scratch.as_ref(), uplo);
     } else {
-        terms[owner_i].grad::<M>(dist, d_k.as_mut(), local, uplo, scratch.as_mut())?;
+        deriv(owner, out, scratch, nested)?;
     }
     Ok(())
 }
@@ -523,10 +617,17 @@ pub(super) fn broadcast_self_diag<T: KernelScalar>(
 ) -> Result<(), GprError> {
     require_diag_len(x, out)?;
     let one = x.submatrix(0, 0, 1, x.ncols());
-    let mut cell = Mat::zeros(1, 1);
-    eval(one.as_ref(), cell.as_mut())?;
-    out.fill(cell[(0, 0)]);
+    out.fill(eval_cell(|cell| eval(one, cell))?);
     Ok(())
+}
+
+/// Runs `eval` on a stack `1 × 1` matrix and returns its entry.
+pub(super) fn eval_cell<T: KernelScalar>(
+    eval: impl FnOnce(MatMut<'_, T>) -> Result<(), GprError>,
+) -> Result<T, GprError> {
+    let mut cell = [T::from_f64(0.0)];
+    eval(MatMut::from_column_major_slice_mut(&mut cell, 1, 1))?;
+    Ok(cell[0])
 }
 
 pub(super) fn scale_by_other_diags<T: KernelScalar>(
@@ -536,15 +637,13 @@ pub(super) fn scale_by_other_diags<T: KernelScalar>(
     x: MatRef<'_, T>,
     out: &mut [T],
 ) -> Result<(), GprError> {
-    let mut tmp = vec![T::from_f64(0.0); out.len()];
     for (index, term) in terms.iter().enumerate() {
         if index == skip_a || Some(index) == skip_b {
             continue;
         }
-        term.fill_diag_points(x, &mut tmp)?;
-        for (dst, src) in out.iter_mut().zip(tmp.iter()) {
-            *dst *= *src;
-        }
+        combine_diag(out, mul_assign, |start, block| {
+            term.fill_diag_points(x.subrows(start, block.len()), block)
+        })?;
     }
     Ok(())
 }
@@ -555,153 +654,7 @@ fn product_grad_diag<M: crate::math::KernelMath, T: KernelScalar>(
     out: &mut [T],
     param_idx: usize,
 ) -> Result<(), GprError> {
-    let mut offset = 0;
-    let mut found = None;
-    for (index, term) in terms.iter().enumerate() {
-        let count = term.num_params();
-        if param_idx < offset + count {
-            found = Some((index, param_idx - offset));
-            break;
-        }
-        offset += count;
-    }
-    let (owner, local) = found.ok_or_else(|| GprError::IndexOutOfRange {
-        reason: format!("kernel parameter index {param_idx} is out of range"),
-    })?;
+    let (owner, local) = term_index_for_param(terms, param_idx)?;
     terms[owner].grad_diag_points::<M>(x, out, local)?;
     scale_by_other_diags(terms, owner, None, x, out)
-}
-
-fn product_grad_points<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    x: MatRef<'_, T>,
-    mut d_k: MatMut<'_, T>,
-    param_idx: usize,
-    uplo: Triangle,
-    mut scratch: MatMut<'_, T>,
-) -> Result<(), GprError> {
-    let mut offset = 0;
-    let mut owner = None;
-    for (i, term) in terms.iter().enumerate() {
-        let n = term.num_params();
-        if param_idx < offset + n {
-            owner = Some((i, param_idx - offset));
-            break;
-        }
-        offset += n;
-    }
-    let (owner_i, local) = owner.ok_or_else(|| GprError::IndexOutOfRange {
-        reason: format!("kernel parameter index {param_idx} is out of range"),
-    })?;
-
-    let n = d_k.nrows();
-    let mut extra = None;
-    let mut started = false;
-    for (j, term) in terms.iter().enumerate() {
-        if j == owner_i {
-            continue;
-        }
-        if !started {
-            term.apply_points::<M>(x, d_k.as_mut(), uplo, scratch.as_mut())?;
-            started = true;
-        } else {
-            apply_into_points::<M, _>(
-                term,
-                x,
-                scratch.as_mut(),
-                d_k.as_mut(),
-                uplo,
-                &mut extra,
-                n,
-            )?;
-            mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
-        }
-    }
-    if started {
-        if terms[owner_i].needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            terms[owner_i].grad_points::<M>(x, scratch.as_mut(), local, uplo, buf.as_mut())?;
-        } else {
-            terms[owner_i].grad_points::<M>(x, scratch.as_mut(), local, uplo, d_k.as_mut())?;
-        }
-        mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
-    } else {
-        terms[owner_i].grad_points::<M>(x, d_k.as_mut(), local, uplo, scratch.as_mut())?;
-    }
-    Ok(())
-}
-
-fn product_grad_mixed<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-    views: MixedKernelViews<'_, T>,
-    mut d_k: MatMut<'_, T>,
-    param_idx: usize,
-    uplo: Triangle,
-    mut scratch: MatMut<'_, T>,
-) -> Result<(), GprError> {
-    let mut offset = 0;
-    let mut owner = None;
-    for (i, term) in terms.iter().enumerate() {
-        let n = term.num_params();
-        if param_idx < offset + n {
-            owner = Some((i, param_idx - offset));
-            break;
-        }
-        offset += n;
-    }
-    let (owner_i, local) = owner.ok_or_else(|| GprError::IndexOutOfRange {
-        reason: format!("kernel parameter index {param_idx} is out of range"),
-    })?;
-
-    let n = d_k.nrows();
-    let mut extra = None;
-    let mut started = false;
-    for (j, term) in terms.iter().enumerate() {
-        if j == owner_i {
-            continue;
-        }
-        if !started {
-            term.apply_mixed::<M>(views, d_k.as_mut(), uplo, scratch.as_mut())?;
-            started = true;
-        } else {
-            apply_into_mixed::<M, _>(
-                term,
-                views,
-                scratch.as_mut(),
-                d_k.as_mut(),
-                uplo,
-                &mut extra,
-                n,
-            )?;
-            mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
-        }
-    }
-    if started {
-        if terms[owner_i].needs_internal_scratch() {
-            let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-            terms[owner_i].grad_mixed::<M>(views, scratch.as_mut(), local, uplo, buf.as_mut())?;
-        } else {
-            terms[owner_i].grad_mixed::<M>(views, scratch.as_mut(), local, uplo, d_k.as_mut())?;
-        }
-        mul_triangle(d_k.as_mut(), scratch.as_ref(), uplo);
-    } else {
-        terms[owner_i].grad_mixed::<M>(views, d_k.as_mut(), local, uplo, scratch.as_mut())?;
-    }
-    Ok(())
-}
-
-pub(super) fn write_product_grad<T: KernelScalar>(
-    term: &CompiledKernel<T>,
-    dest: MatMut<'_, T>,
-    fallback: MatMut<'_, T>,
-    extra: &mut Option<Mat<T>>,
-    n: usize,
-    mut grad: impl FnMut(&CompiledKernel<T>, MatMut<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
-) -> Result<(), GprError> {
-    if term.needs_internal_scratch() {
-        let buf = extra.get_or_insert_with(|| Mat::zeros(n, n));
-        grad(term, dest, buf.as_mut())
-    } else {
-        grad(term, dest, fallback)
-    }
 }

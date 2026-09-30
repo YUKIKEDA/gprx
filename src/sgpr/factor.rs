@@ -343,6 +343,7 @@ where
             k64.as_mut(),
             Triangle::Lower,
             scratch64.as_mut(),
+            &mut Vec::new(),
         )?;
         for col in 0..n_inducing {
             for row in col..n_inducing {
@@ -356,6 +357,7 @@ where
             k_mm.as_mut(),
             Triangle::Lower,
             scratch.as_mut(),
+            &mut Vec::new(),
         )?;
     }
     let req = llt::factor::cholesky_in_place_scratch::<T>(
@@ -382,6 +384,7 @@ where
                 gram64.as_mut(),
                 Triangle::Lower,
                 gram_scratch.as_mut(),
+                &mut Vec::new(),
             )?;
             let mut gram = Mat::<T>::zeros(n_rows, n_rows);
             for col in 0..n_rows {
@@ -409,6 +412,7 @@ where
             gram.as_mut(),
             Triangle::Lower,
             gram_scratch.as_mut(),
+            &mut Vec::new(),
         )?;
         symmetrize_lower(gram.as_mut(), n_rows);
         gram
@@ -834,6 +838,7 @@ where
         param_idx,
         Triangle::Full,
         scratch_mm.as_mut(),
+        &mut Vec::new(),
     )?;
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
@@ -983,6 +988,7 @@ where
         (i, j),
         Triangle::Full,
         scratch_mm.as_mut(),
+        &mut Vec::new(),
     )?;
     let mut d_kmn = Mat::zeros(m, n);
     let mut scratch_mn = Mat::zeros(m, n);
@@ -1247,7 +1253,15 @@ where
     let q = xs.nrows();
     let mut out = Mat::zeros(n, q);
     let mut scratch = Mat::zeros(n, q);
-    compiled.eval_cross::<M>(x, xs, None, out.as_mut(), scratch.as_mut(), &mut [])?;
+    compiled.eval_cross::<M>(
+        x,
+        xs,
+        None,
+        out.as_mut(),
+        scratch.as_mut(),
+        &mut Vec::new(),
+        &mut [],
+    )?;
     Ok(out)
 }
 
@@ -1327,6 +1341,7 @@ where
             k64.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),
+            &mut Vec::new(),
         )?;
         let req = llt::factor::cholesky_in_place_scratch::<f64>(m, faer_par(m), Default::default());
         let mut chol_scratch = MemBuffer::new(req);

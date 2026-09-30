@@ -36,7 +36,8 @@ pub fn apply_from_ard_cache<M: crate::KernelMath>(
     uplo: crate::kernel::Triangle,
     scratch: MatMut<'_, f64>,
 ) -> Result<(), crate::GprError> {
-    kernel.apply_from_ard_cache::<M>(cache, x, out, uplo, scratch)
+    let mut nested = kernel.nested_buffers(out.nrows(), out.ncols());
+    kernel.apply_from_ard_cache::<M>(cache, x, out, uplo, scratch, &mut nested)
 }
 
 /// [`CompiledKernel::grad_points`](crate::kernel::CompiledKernel::grad_points)
@@ -55,7 +56,8 @@ pub fn grad_from_ard_cache<M: crate::KernelMath>(
     uplo: crate::kernel::Triangle,
     scratch: MatMut<'_, f64>,
 ) -> Result<(), crate::GprError> {
-    kernel.grad_from_ard_cache::<M>(cache, x, d_k, param_idx, uplo, scratch)
+    let mut nested = kernel.nested_buffers(d_k.nrows(), d_k.ncols());
+    kernel.grad_from_ard_cache::<M>(cache, x, d_k, param_idx, uplo, scratch, &mut nested)
 }
 
 #[cfg(feature = "insert-stages")]

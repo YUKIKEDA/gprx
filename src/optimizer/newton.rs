@@ -195,21 +195,21 @@ fn run_newton<P: TwiceDifferentiable>(
         inner,
         tolerance: newton.tolerance,
     };
-    let (params, iterations) = {
-        let result = Executor::new(problem, solver)
-            .configure(|state| state.param(init.to_vec()).max_iters(newton.max_iterations))
-            .ctrlc(false)
-            .run()
-            .map_err(map_newton_error)?;
-        let state = result.state();
-        let params = state
-            .get_best_param()
-            .cloned()
-            .ok_or(GprError::OptimizationNotConverged {
-                iterations: state.get_iter() as usize,
+    let (params, iterations) =
+        {
+            let result = Executor::new(problem, solver)
+                .configure(|state| state.param(init.to_vec()).max_iters(newton.max_iterations))
+                .ctrlc(false)
+                .run()
+                .map_err(map_newton_error)?;
+            let state = result.state();
+            let params = state.get_best_param().cloned().ok_or_else(|| {
+                GprError::OptimizationNotConverged {
+                    iterations: state.get_iter() as usize,
+                }
             })?;
-        (params, state.get_iter())
-    };
+            (params, state.get_iter())
+        };
     let mut grad = vec![0.0; n];
     let value = objective.value_and_gradient_into(&params, &mut grad)?;
     Ok(OptResult {

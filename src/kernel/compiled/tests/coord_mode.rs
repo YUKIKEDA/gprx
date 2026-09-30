@@ -74,6 +74,7 @@ fn rbf_plus_linear_apply_adds_leaves() {
             out.as_mut(),
             Triangle::Full,
             scratch.as_mut(),
+            &mut [],
         )
         .expect("mix");
     let kr = apply_compiled(&rbf(1.0).compile(), dist.as_ref());
@@ -108,6 +109,7 @@ fn rbf_times_linear_apply_multiplies_leaves() {
             out.as_mut(),
             Triangle::Full,
             scratch.as_mut(),
+            &mut [],
         )
         .expect("mix");
     let kr = apply_compiled(&rbf(1.0).compile(), dist.as_ref());
@@ -149,6 +151,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
             kp.as_mut(),
             Triangle::Full,
             scratch.as_mut(),
+            &mut [],
         )
         .expect("plus");
     spec_minus
@@ -158,6 +161,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
             km.as_mut(),
             Triangle::Full,
             scratch.as_mut(),
+            &mut [],
         )
         .expect("minus");
     let mut dk = fill(2, 0.0);
@@ -168,6 +172,7 @@ fn rbf_plus_linear_grad_matches_finite_difference() {
             1,
             Triangle::Full,
             scratch.as_mut(),
+            &mut [],
         )
         .expect("grad");
     let fd = (kp[(0, 1)] - km[(0, 1)]) / (2.0 * h);

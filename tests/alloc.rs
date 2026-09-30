@@ -32,20 +32,46 @@ const NOISE: f64 = 0.1;
 const MAX_MLL_AND_GRAD_ALLOCS: usize = 0;
 
 /// One coordinate step (`value_at_changes`) of an incremental fit on a sum
-/// of two leaves, after a warmup step (R4-5 / #243). `θ` is written in place
-/// (#270); the rest is the composite kernel's own scratch, which #272 takes
-/// to 0. Do not raise without an Issue.
-const MAX_LEAF_STEP_ALLOCS: usize = 2;
+/// of two leaves, after a warmup step (R4-5 / #243, #270, #272). Do not
+/// raise without an Issue.
+const MAX_LEAF_STEP_ALLOCS: usize = 0;
 
 /// One `value_and_gradient_into` on composite kernels after a warmup call,
-/// by kernel. `θ` is written in place (#270); the rest is the composite
-/// kernel's own scratch (per row in the mixed-mode sum), which #272 takes to
-/// 0. Do not raise without an Issue.
-const MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS: [(&str, usize); 4] = [
-    ("sum_with_ard", 4117),
-    ("product", 7),
+/// by kernel (#270, #272). Do not raise without an Issue.
+const MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS: [(&str, usize); 6] = [
+    ("sum_with_ard", 0),
+    ("product", 0),
     ("ard", 0),
-    ("sum", 7),
+    ("sum", 0),
+    ("nested", 0),
+    ("nested_mixed", 0),
+];
+
+/// One `hessian_into` after a warmup call, by kernel: the isotropic RBF leaf,
+/// then the composite kernels (#272). Do not raise without an Issue.
+const MAX_HESSIAN_ALLOCS: [(&str, usize); 7] = [
+    ("rbf", 0),
+    ("sum_with_ard", 0),
+    ("product", 0),
+    ("ard", 0),
+    ("sum", 0),
+    ("nested", 0),
+    ("nested_mixed", 0),
+];
+
+/// Training points of the Hessian ratchet: it solves `n×n` systems per
+/// parameter pair, and its allocations do not depend on `n`.
+const N_HESSIAN: usize = 32;
+
+/// One `predict_into` of 100 points on composite kernels after a warmup call,
+/// by kernel (#272). Do not raise without an Issue.
+const MAX_COMPOSITE_PREDICT_100_ALLOCS: [(&str, usize); 6] = [
+    ("sum_with_ard", 0),
+    ("product", 0),
+    ("ard", 0),
+    ("sum", 0),
+    ("nested", 0),
+    ("nested_mixed", 0),
 ];
 
 /// One `predict_into` of 100 points after a warmup call. Do not raise without an Issue.
@@ -278,30 +304,53 @@ fn incremental_leaf_step_allocs_after_warmup() {
     assert_alloc_cap("leaf_step", count, MAX_LEAF_STEP_ALLOCS);
 }
 
+/// Flat sums and products, one ARD leaf, and a sum / product nested in
+/// another in distance mode and in mixed coordinate mode.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn composite_kernels() -> [(&'static str, KernelSpec); 6] {
+    let rbf = |ell: f64| KernelSpec::from(RbfKernel::new(ell).expect("ell"));
+    let ard = || KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell"));
+    let constant = |value: f64| KernelSpec::from(ConstantKernel::new(value).expect("constant"));
+    [
+        ("sum_with_ard", rbf(ELL) + ard()),
+        ("product", constant(1.5) * rbf(ELL)),
+        ("ard", ard()),
+        ("sum", rbf(ELL) + rbf(2.0 * ELL)),
+        (
+            "nested",
+            (rbf(ELL) + rbf(2.0 * ELL)) * (constant(1.5) * rbf(3.0 * ELL) + constant(0.5)),
+        ),
+        (
+            "nested_mixed",
+            (rbf(ELL) + ard()) * (constant(1.5) * rbf(3.0 * ELL) + constant(0.5)),
+        ),
+    ]
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
+    ensure_one_rayon_worker();
+    let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
+    let x = fill_column_major(n, D, SEED);
+    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
+    Gpr::new(kernel, likelihood)
+        .with_optimizer(Fixed)
+        .factor(&x, n, D, &y)
+        .map_err(|(_, e)| e)
+        .expect("spd")
+}
+
 /// `value_and_gradient_into` on composite kernels after a warmup call.
 #[test]
 fn composite_mll_and_grad_allocs_after_workspace() {
     let _guard = alloc_lock();
-    ensure_one_rayon_worker();
-    let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
-    let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
-    let kernels = [
-        KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
-            + KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell")),
-        KernelSpec::from(ConstantKernel::new(1.5).expect("constant"))
-            * KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
-        KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell")),
-        KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
-            + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell")),
-    ];
-    for ((label, cap), kernel) in MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS.into_iter().zip(kernels) {
-        let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
-        let mut gpr = Gpr::new(kernel, likelihood)
-            .with_optimizer(Fixed)
-            .factor(&x, N, D, &y)
-            .map_err(|(_, e)| e)
-            .expect("spd");
+    for ((label, cap), (name, kernel)) in MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS
+        .into_iter()
+        .zip(composite_kernels())
+    {
+        assert_eq!(label, name);
+        let mut gpr = fitted_with(kernel, N);
         let mut params = vec![0.0; gpr.num_params()];
         gpr.get_params(&mut params).expect("len");
         let mut grad = vec![0.0; params.len()];
@@ -312,5 +361,45 @@ fn composite_mll_and_grad_allocs_after_workspace() {
                 .expect("counted");
         });
         assert_alloc_cap(label, count, cap);
+    }
+}
+
+/// `hessian_into` on the RBF leaf and the composite kernels after a warmup call.
+#[test]
+fn hessian_allocs_after_warmup() {
+    let _guard = alloc_lock();
+    let kernels = std::iter::once(("rbf", KernelSpec::from(RbfKernel::new(ELL).expect("ell"))))
+        .chain(composite_kernels());
+    for ((label, cap), (name, kernel)) in MAX_HESSIAN_ALLOCS.into_iter().zip(kernels) {
+        assert_eq!(label, name);
+        let mut gpr = fitted_with(kernel, N_HESSIAN);
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("len");
+        let mut hess = vec![0.0; params.len() * params.len()];
+        gpr.hessian_into(&params, &mut hess).expect("warmup");
+        let count = allocs_in(|| {
+            gpr.hessian_into(&params, &mut hess).expect("counted");
+        });
+        assert_alloc_cap(&format!("hessian_{label}"), count, cap);
+    }
+}
+
+/// `predict_into` of 100 points on the composite kernels after a warmup call.
+#[test]
+fn composite_predict_100_allocs_after_workspace() {
+    let _guard = alloc_lock();
+    let xs = fill_column_major(M, D, SEED.wrapping_add(1));
+    for ((label, cap), (name, kernel)) in MAX_COMPOSITE_PREDICT_100_ALLOCS
+        .into_iter()
+        .zip(composite_kernels())
+    {
+        assert_eq!(label, name);
+        let mut gpr = fitted_with(kernel, N);
+        let mut pred = Prediction::default();
+        gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
+        let count = allocs_in(|| {
+            gpr.predict_into(&xs, M, D, &mut pred).expect("counted");
+        });
+        assert_alloc_cap(&format!("predict_100_{label}"), count, cap);
     }
 }

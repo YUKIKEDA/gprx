@@ -20,7 +20,7 @@ use crate::param::Interval;
 use crate::persist::{self, PersistedModel};
 use crate::precision::{GpScalar, StoredFactor};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::workspace::{FitWorkspace, QueryWorkspace, WorkspaceCore};
+use crate::workspace::{FitWorkspace, HessianScratch, QueryWorkspace, WorkspaceCore};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::super::online::OnlineGpr;
@@ -425,6 +425,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
                     grams,
                     core.k_matrix.as_mut(),
                     core.exp_buf.as_mut(),
+                    &mut core.nested,
                     Triangle::Lower,
                 )
             },
@@ -495,7 +496,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         out: &mut [f64],
     ) -> Result<(), GprError> {
         self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
-        if self.core.compiled.needs_product_grad_scratch() {
+        if self.core.compiled.needs_grad_scratch() {
             self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         }
         self.store
@@ -523,11 +524,26 @@ impl<P: GpScalar> ExactFit<'_, P> {
         })();
         self.store.buffers.core_mut().thread_scratch = thread_scratch;
         second?;
-        self.add_noise_first_order(n_kernel, n, noise, out)?;
+        let mut hess = std::mem::take(&mut self.store.buffers.core_mut().hessian);
+        hess.ensure(n);
+        let first = self.add_first_order(n_kernel, n, noise, out, &mut hess);
+        self.store.buffers.core_mut().hessian = hess;
+        first
+    }
+
+    fn add_first_order(
+        &mut self,
+        n_kernel: usize,
+        n: usize,
+        noise: f64,
+        out: &mut [f64],
+        hess: &mut HessianScratch<P::Storage>,
+    ) -> Result<(), GprError> {
+        self.add_noise_first_order(n_kernel, n, noise, out, hess)?;
         if !self.store.buffers.has_dedicated_w() {
             self.factorize_current()?;
         }
-        self.add_kernel_first_order(n_kernel, n, out)
+        self.add_kernel_first_order(n_kernel, n, out, hess)
     }
 
     fn write_second_deriv(
@@ -557,6 +573,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let WorkspaceCore {
             exp_buf,
             kernel_scratch,
+            nested,
             thread_scratch,
             ..
         } = core;
@@ -567,6 +584,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
             (i, j),
             Triangle::Lower,
             kernel_scratch.as_mut(),
+            nested,
         ))
     }
 
@@ -582,6 +600,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let WorkspaceCore {
             exp_buf,
             kernel_scratch,
+            nested,
             thread_scratch,
             ..
         } = core;
@@ -592,6 +611,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
             idx,
             Triangle::Lower,
             kernel_scratch.as_mut(),
+            nested,
         ))
     }
 
@@ -601,46 +621,38 @@ impl<P: GpScalar> ExactFit<'_, P> {
         n: usize,
         noise: f64,
         out: &mut [f64],
+        hess: &mut HessianScratch<P::Storage>,
     ) -> Result<(), GprError> {
         let n_params = n_kernel + 1;
         let zero = P::Storage::from_f64(0.0);
         let two = P::Storage::from_f64(2.0);
         let noise_s = P::Storage::from_f64(noise);
-        let (kinv_alpha, tr_kinv2) = {
+        let alpha = &self.core.factor_alpha;
+        let tr_kinv2 = {
             let w = self.store.buffers.gradient_w();
-            let mut w_alpha = vec![zero; n];
-            gemv_sym_lower(w, &self.core.factor_alpha, &mut w_alpha, n);
+            // `w_noise` holds `W α`, then `K⁻¹ α = α (αᵀα) - W α`, then `σn² K⁻¹ α`.
+            gemv_sym_lower(w, alpha, &mut hess.w_noise, n);
             let mut alpha_dot = zero;
-            for a in &self.core.factor_alpha {
+            for a in alpha {
                 alpha_dot += *a * *a;
             }
-            let mut kinv_alpha = vec![zero; n];
-            for i in 0..n {
-                kinv_alpha[i] = self.core.factor_alpha[i] * alpha_dot - w_alpha[i];
+            for (w_n, a) in hess.w_noise.iter_mut().zip(alpha) {
+                *w_n = noise_s * (*a * alpha_dot - *w_n);
             }
             let mut tr_kinv2 = zero;
             for col in 0..n {
-                let kinv_cc =
-                    self.core.factor_alpha[col] * self.core.factor_alpha[col] - w[(col, col)];
+                let kinv_cc = alpha[col] * alpha[col] - w[(col, col)];
                 tr_kinv2 += kinv_cc * kinv_cc;
                 for row in col + 1..n {
-                    let kinv_rc =
-                        self.core.factor_alpha[row] * self.core.factor_alpha[col] - w[(row, col)];
+                    let kinv_rc = alpha[row] * alpha[col] - w[(row, col)];
                     tr_kinv2 += two * kinv_rc * kinv_rc;
                 }
             }
-            (kinv_alpha, tr_kinv2)
+            tr_kinv2
         };
-        let u_n: Vec<P::Storage> = self
-            .core
-            .factor_alpha
-            .iter()
-            .map(|a| noise_s * *a)
-            .collect();
-        let w_n: Vec<P::Storage> = kinv_alpha.iter().map(|a| noise_s * *a).collect();
         let mut un_wn = zero;
-        for i in 0..n {
-            un_wn += u_n[i] * w_n[i];
+        for (a, w_n) in alpha.iter().zip(&hess.w_noise) {
+            un_wn += noise_s * *a * *w_n;
         }
         let nn = n_kernel;
         out[nn * n_params + nn] += -0.5 * noise * noise * tr_kinv2.to_f64() + un_wn.to_f64();
@@ -650,22 +662,13 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let cross = (|| {
             for i in 0..n_kernel {
                 self.write_first_deriv(i)?;
-                let tr = trace_ki_kinv2(
-                    self.store.buffers.core().exp_buf.as_ref(),
-                    self.store.buffers.gradient_w(),
-                    &self.core.factor_alpha,
-                    n,
-                );
-                let mut u_i = vec![P::Storage::from_f64(0.0); n];
-                gemv_sym_lower(
-                    self.store.buffers.core().exp_buf.as_ref(),
-                    &self.core.factor_alpha,
-                    &mut u_i,
-                    n,
-                );
-                let mut ui_wn = P::Storage::from_f64(0.0);
-                for k in 0..n {
-                    ui_wn += u_i[k] * w_n[k];
+                let ki = self.store.buffers.core().exp_buf.as_ref();
+                let alpha = &self.core.factor_alpha;
+                let tr = trace_ki_kinv2(ki, self.store.buffers.gradient_w(), alpha, n);
+                gemv_sym_lower(ki, alpha, &mut hess.u_i, n);
+                let mut ui_wn = zero;
+                for (u, w_n) in hess.u_i.iter().zip(&hess.w_noise) {
+                    ui_wn += *u * *w_n;
                 }
                 let hij = -0.5 * noise * tr.to_f64() + ui_wn.to_f64();
                 out[i * n_params + nn] += hij;
@@ -682,63 +685,54 @@ impl<P: GpScalar> ExactFit<'_, P> {
         n_kernel: usize,
         n: usize,
         out: &mut [f64],
+        hess: &mut HessianScratch<P::Storage>,
     ) -> Result<(), GprError> {
         if n_kernel == 0 {
             return Ok(());
         }
         self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         let n_params = n_kernel + 1;
+        let zero = P::Storage::from_f64(0.0);
         let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
         let result = (|| {
             for j in 0..n_kernel {
                 self.write_first_deriv(j)?;
-                let mut u_j = vec![P::Storage::from_f64(0.0); n];
                 gemv_sym_lower(
                     self.store.buffers.core().exp_buf.as_ref(),
                     &self.core.factor_alpha,
-                    &mut u_j,
+                    &mut hess.u_j,
                     n,
                 );
                 symmetrize_lower(self.store.buffers.core_mut().exp_buf.as_mut(), n);
                 self.solve_exp_against_l(n);
-                // `write_first_deriv` for a product reuses `kernel_scratch`.
-                let mut q_j = Mat::<P::Storage>::zeros(n, n);
-                {
-                    let core = self.store.buffers.core();
-                    for col in 0..n {
-                        for row in 0..n {
-                            q_j[(row, col)] = core.exp_buf[(row, col)];
-                        }
-                    }
-                }
-                let mut w_j = vec![P::Storage::from_f64(0.0); n];
-                gemv_full(q_j.as_ref(), &self.core.factor_alpha, &mut w_j, n);
+                // `write_first_deriv(i)` below overwrites `exp_buf`, so keep `Q_j`.
+                hess.q.copy_from(self.store.buffers.core().exp_buf.as_ref());
+                gemv_full(hess.q.as_ref(), &self.core.factor_alpha, &mut hess.w_j, n);
                 for i in 0..=j {
                     let tr;
-                    let mut ui_wj = P::Storage::from_f64(0.0);
+                    let mut ui_wj = zero;
                     if i == j {
-                        tr = trace_product(q_j.as_ref(), q_j.as_ref(), n);
-                        for k in 0..n {
-                            ui_wj += u_j[k] * w_j[k];
+                        tr = trace_product(hess.q.as_ref(), hess.q.as_ref(), n);
+                        for (u, w) in hess.u_j.iter().zip(&hess.w_j) {
+                            ui_wj += *u * *w;
                         }
                     } else {
                         self.write_first_deriv(i)?;
-                        let mut u_i = vec![P::Storage::from_f64(0.0); n];
                         gemv_sym_lower(
                             self.store.buffers.core().exp_buf.as_ref(),
                             &self.core.factor_alpha,
-                            &mut u_i,
+                            &mut hess.u_i,
                             n,
                         );
                         symmetrize_lower(self.store.buffers.core_mut().exp_buf.as_mut(), n);
                         self.solve_exp_against_l(n);
                         tr = trace_product(
                             self.store.buffers.core().exp_buf.as_ref(),
-                            q_j.as_ref(),
+                            hess.q.as_ref(),
                             n,
                         );
-                        for k in 0..n {
-                            ui_wj += u_i[k] * w_j[k];
+                        for (u, w) in hess.u_i.iter().zip(&hess.w_j) {
+                            ui_wj += *u * *w;
                         }
                     }
                     let add = -0.5 * tr.to_f64() + ui_wj.to_f64();
@@ -771,7 +765,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         n: usize,
         out: &mut [f64],
     ) -> Result<(), GprError> {
-        if self.core.compiled.needs_product_grad_scratch() {
+        if self.core.compiled.needs_grad_scratch() {
             self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
         }
         self.store
