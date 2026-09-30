@@ -40,7 +40,7 @@ src/kernel/                leaves live here, not in src/*.rs
   rbf.rs rbf_ard.rs matern.rs matern_ard.rs periodic.rs rq.rs rq_ard.rs    leaves: formulas over T, scans in mod.rs / ard.rs
   ard.rs                   shared checks and r² sums of the ARD leaves
   spec.rs term.rs dist.rs simd.rs lengthscale.rs scalar.rs
-src/optimizer/             mod.rs, logit.rs. lbfgs.rs ncg.rs neldermead.rs fsa.rs newton.rs. adam.rs does not implement Optimizer
+src/optimizer/             mod.rs, logit.rs. lbfgs.rs neldermead.rs trust_region.rs fsa.rs. adam.rs does not implement Optimizer
 src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs sparse.rs (save / load of Sgpr, OnlineSgpr, Svgp)
 src/sparse/                crate-private: SparseSpec / SparseCore and the inducing-point helpers Sgpr and Svgp share. Sgpr and Svgp do not import each other
 src/sgpr/                  model.rs fitted.rs online.rs objective.rs tests.rs

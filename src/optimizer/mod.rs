@@ -1,7 +1,7 @@
 //! argmin optimizer adapters and the [`Optimizer`] type slot.
 //!
-//! Does not implement L-BFGS, nonlinear CG, Nelder–Mead, or a trust-region method. [`Lbfgs`],
-//! [`NonlinearCg`], [`NelderMead`], and [`TrustRegion`] map user-unit [`crate::Interval`]
+//! Does not implement L-BFGS, Nelder–Mead, or a trust-region method. [`Lbfgs`],
+//! [`NelderMead`], and [`TrustRegion`] map user-unit [`crate::Interval`]
 //! through a logit so argmin stays unconstrained. Positive intervals
 //! (`lo > 0`) use a log-uniform logit, matching restart sampling. The
 //! unconstrained coordinate is scaled so the Jacobian is 1 at the interval
@@ -20,7 +20,6 @@ mod adam;
 mod fsa;
 mod lbfgs;
 mod logit;
-mod ncg;
 mod neldermead;
 mod trust_region;
 
@@ -30,7 +29,6 @@ pub use adam::Adam;
 pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
 pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta};
-pub use ncg::NonlinearCg;
 pub use neldermead::NelderMead;
 pub use trust_region::TrustRegion;
 
@@ -49,8 +47,8 @@ pub struct OptResult {
 
 /// Hyperparameter optimizer.
 ///
-/// `P` is the objective this algorithm can minimize. [`Lbfgs`] and
-/// [`NonlinearCg`] require [`crate::Differentiable`] plus bounds. [`TrustRegion`]
+/// `P` is the objective this algorithm can minimize. [`Lbfgs`]
+/// requires [`crate::Differentiable`] plus bounds. [`TrustRegion`]
 /// requires [`crate::TwiceDifferentiable`] plus bounds. [`NelderMead`]
 /// and [`FastSimulatedAnnealing`] require only [`crate::Objective`] plus bounds.
 pub trait Optimizer<P: ?Sized> {

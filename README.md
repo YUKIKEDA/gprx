@@ -35,7 +35,7 @@ Default `predict` variance is observation (`latent + σn²`). Use `predict_with`
 
 Transforms default to identity. Call `with_target_transform(StandardizeTarget::new())` before `fit` when the mean function is zero. Features can use `MinMaxInput` (default `[0, 1]`). Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in composition; using both at large values double-counts noise.
 
-`Gpr<Fixed>::factor` (after `with_optimizer(Fixed)`) factors at the kernel and likelihood `θ` already on the trainer. L-BFGS knobs live on `Lbfgs` (`with_max_iterations`, `with_tolerance`, `with_history_size`, `with_restarts`). Nonlinear CG and Nelder–Mead share the first three knobs except `history_size` (`NonlinearCg`, `NelderMead`). The Hessian solver is `TrustRegion` (`with_max_iterations`, `with_tolerance`, `with_restarts`, `with_radii`). Homemade Fast Simulated Annealing is `FastSimulatedAnnealing` (`with_max_iterations`, `with_restarts`, `with_initial_temperature`, `with_cooling_rate`, `with_seed`, `with_boundary`).
+`Gpr<Fixed>::factor` (after `with_optimizer(Fixed)`) factors at the kernel and likelihood `θ` already on the trainer. L-BFGS knobs live on `Lbfgs` (`with_max_iterations`, `with_tolerance`, `with_history_size`, `with_restarts`). Nelder–Mead has `with_max_iterations`, `with_tolerance`, and `with_restarts` (`NelderMead`). The Hessian solver is `TrustRegion` (`with_max_iterations`, `with_tolerance`, `with_restarts`, `with_radii`). Homemade Fast Simulated Annealing is `FastSimulatedAnnealing` (`with_max_iterations`, `with_restarts`, `with_initial_temperature`, `with_cooling_rate`, `with_seed`, `with_boundary`).
 
 ## Architecture and the saved format
 
