@@ -310,11 +310,11 @@ trait IncrementalObjective: Objective {
 }
 ```
 
-変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`Objective::value_at_changes` の既定は `value`。`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` が葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。
+変更 index は `IncrementalObjective::value_with_changes` の `&[usize]`。最適化器の受理済みの点からではなく、その目的関数で直前に評価した点から変わった座標をすべて並べる。棄却のあと FSA は戻した座標と新しい座標の両方を渡す（R4-5 / [#243](https://github.com/YUKIKEDA/gprx/issues/243)）。作り直す葉は index だけで決める。設計旧稿の `ChangeSet { Vec<usize> }` と、θ の数値差分による推測は置かない。列に無い変更は誤った値を黙って返さず `IndexOutOfRange` にする。空・重複・`i >= n_params` は境界で `GprError`。フル再計算は `Objective::value`。`Objective::value_at_changes` の既定は `value`。`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` が葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。
 
 `with_recompute_strategy` は無い。`CholeskyBuffer::Reuse` は常に全体を作り直す。`CholeskyBuffer::Retain` は最適化器が `USES_CHANGE_INDICES` を立てるとき葉を作り直す。`with_optimizer` / `refit` は新しい最適化器からフラグを決め直す。`Gpr<Fixed>::factor` は一発フル。L-BFGS / NCG / Nelder–Mead / Newton は既定の `false`。FSA は `true`。初回とリスタートは `value`、座標一歩は `value_at_changes`。
 
-葉の作り直しはコンパイル済み葉だけをキャッシュし、変更 index が触る葉だけ `apply` し直す。木の結合と **Cholesky は毎回フル**。低ランク更新はしない。Workspace に新しい `n×n` は足さない。実行時の NotImplemented は置かない。
+葉の作り直しはコンパイル済み葉だけをキャッシュし、変更 index が触る葉だけ `apply` し直す。葉ごとの Gram（葉 `L` 個で `L · n²`）と、再利用する dirty の印・直前の `θ` は、1回の `fit` / `refit` のあいだ `GprObjective` が持ち、Workspace には置かない。木の結合と **Cholesky は毎回フル**。低ランク更新はしない。Workspace に新しい `n×n` は足さない。実行時の NotImplemented は置かない。
 
 #### 5.4.1 葉の作り直しとfaer update APIの関係
 

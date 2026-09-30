@@ -17,7 +17,6 @@ use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
 use crate::optimizer::{Fixed, OptResult, Optimizer};
 use crate::param::Interval;
-use crate::param::write_params;
 use crate::persist::{self, PersistedModel};
 use crate::precision::{GpScalar, StoredFactor};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
@@ -71,6 +70,58 @@ struct Theta<S: KernelScalar> {
     kernel: KernelSpec,
     compiled: CompiledKernel<S>,
     likelihood: GaussianLikelihood,
+}
+
+/// Per-leaf Gram matrices an incremental objective keeps during `fit` /
+/// `refit` (`L · n²`, outside the fit buffers), plus the reused bookkeeping
+/// for one coordinate step.
+pub(crate) struct LeafCache<S> {
+    grams: Vec<Mat<S>>,
+    dirty: Vec<bool>,
+    /// `params` of the last evaluation that factored.
+    last: Vec<f64>,
+    /// `grams` match `last`.
+    primed: bool,
+}
+
+impl<S: KernelScalar> LeafCache<S> {
+    pub(crate) fn new() -> Self {
+        Self {
+            grams: Vec::new(),
+            dirty: Vec::new(),
+            last: Vec::new(),
+            primed: false,
+        }
+    }
+
+    /// Sizes the Grams for `n_leaves` leaves of order `n`. A resize drops them.
+    fn fit(&mut self, n_leaves: usize, n: usize) {
+        if self.grams.len() != n_leaves || self.grams.first().is_some_and(|m| m.nrows() != n) {
+            self.grams = (0..n_leaves).map(|_| Mat::<S>::zeros(n, n)).collect();
+            self.primed = false;
+        }
+        self.dirty.resize(n_leaves, true);
+    }
+
+    /// Rejects a step that changed a coordinate `changed` does not list.
+    fn require_listed(&self, params: &[f64], changed: &[usize]) -> Result<(), GprError> {
+        for (j, (prev, next)) in self.last.iter().zip(params).enumerate() {
+            if prev.to_bits() != next.to_bits() && !changed.contains(&j) {
+                return Err(GprError::IndexOutOfRange {
+                    reason: format!(
+                        "coordinate {j} changed since the previous evaluation but is not in the change indices"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, params: &[f64]) {
+        self.last.clear();
+        self.last.extend_from_slice(params);
+        self.primed = true;
+    }
 }
 
 /// The LLT factor of a batch fit: the fit buffers, plus a memory-mapped
@@ -291,12 +342,15 @@ impl<P: GpScalar> ExactFit<'_, P> {
     }
 
     /// Rebuilds dirty compiled leaves, recombines the tree, and factors.
+    ///
+    /// `indices` lists every coordinate that differs from the previous
+    /// evaluation through `cache`; only the leaves they touch are rebuilt.
+    /// `None`, or a cache that holds nothing yet, rebuilds every leaf.
     pub(crate) fn value_from_leaf_grams(
         &mut self,
         params: &[f64],
         indices: Option<&[usize]>,
-        leaf_grams: &mut Vec<Mat<P::Storage>>,
-        primed: &mut bool,
+        cache: &mut LeafCache<P::Storage>,
     ) -> Result<f64, GprError> {
         let n_kernel = self.core.kernel.num_params();
         let n_params = self.num_params();
@@ -307,24 +361,23 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let next = self.prepared_params(params, n_kernel)?;
         let n = self.core.n;
         let n_leaves = next.compiled.leaf_count();
-        if leaf_grams.len() != n_leaves || leaf_grams.first().is_none_or(|m| m.nrows() != n) {
-            *leaf_grams = (0..n_leaves)
-                .map(|_| Mat::<P::Storage>::zeros(n, n))
-                .collect();
-            *primed = false;
-        }
-        let mut dirty = vec![true; n_leaves];
-        if *primed && indices.is_some() {
-            dirty.fill(false);
-            let mut last = vec![0.0; n_params];
-            write_params(&self.core.kernel, &self.core.likelihood, &mut last)?;
-            for (j, (&prev, &param)) in last.iter().zip(params.iter()).enumerate() {
-                if prev.to_bits() != param.to_bits() && j < n_kernel {
-                    dirty[next.compiled.leaf_index_for_param(j)?] = true;
+        cache.fit(n_leaves, n);
+        match (cache.primed, indices) {
+            (true, Some(changed)) => {
+                cache.require_listed(params, changed)?;
+                cache.dirty.fill(false);
+                for &j in changed {
+                    if j < n_kernel {
+                        cache.dirty[next.compiled.leaf_index_for_param(j)?] = true;
+                    }
                 }
             }
+            _ => cache.dirty.fill(true),
         }
-        for (i, slot) in leaf_grams.iter_mut().enumerate() {
+        // Grams are only trusted again once this evaluation factors.
+        cache.primed = false;
+        let LeafCache { grams, dirty, .. } = &mut *cache;
+        for (i, slot) in grams.iter_mut().enumerate() {
             if dirty[i] {
                 let x = P::Storage::storage_cols(
                     self.core
@@ -353,18 +406,17 @@ impl<P: GpScalar> ExactFit<'_, P> {
             |ws| {
                 let core = ws.core_mut();
                 next.compiled.combine_from_leaf_grams(
-                    leaf_grams,
+                    grams,
                     core.k_matrix.as_mut(),
                     core.exp_buf.as_mut(),
                     Triangle::Lower,
                 )
             },
         ) {
-            *primed = false;
             let _ = self.factorize_current();
             return Err(err);
         }
-        *primed = true;
+        cache.record(params);
         self.commit_factor();
         self.commit_theta(next);
         let mut rows = P::Storage::empty_rows();
@@ -1724,19 +1776,17 @@ fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprE
             reason: "change indices must not be empty".to_owned(),
         });
     }
-    let mut seen = vec![false; n_params];
-    for &i in indices {
+    for (k, &i) in indices.iter().enumerate() {
         if i >= n_params {
             return Err(GprError::IndexOutOfRange {
                 reason: format!("change index {i} is out of range (n_params={n_params})"),
             });
         }
-        if seen[i] {
+        if indices[..k].contains(&i) {
             return Err(GprError::IndexOutOfRange {
                 reason: format!("change index {i} is duplicated"),
             });
         }
-        seen[i] = true;
     }
     Ok(())
 }

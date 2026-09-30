@@ -213,6 +213,9 @@ fn anneal<P: Objective>(
     let mut proposed = current.clone();
     let mut rng = small_rng(fsa.seed);
     let dim = n as f64;
+    // Coordinate of the last rejected proposal. The objective last evaluated
+    // that proposal, so the next step also lists it as changed.
+    let mut reverted: Option<usize> = None;
     for iteration in 0..fsa.max_iterations {
         let temperature = fsa.temperature(iteration, dim);
         for i in 0..n {
@@ -220,11 +223,22 @@ fn anneal<P: Objective>(
             let (lo, hi) = bounds[i];
             let step = cauchy_step(&mut rng, temperature) * (hi - lo);
             proposed[i] = apply_boundary(current[i] + step, lo, hi, fsa.boundary);
-            let proposed_energy = objective.value_at_changes(&proposed, &[i])?;
+            let changes = match reverted {
+                Some(r) if r != i => [r, i],
+                _ => [i, i],
+            };
+            let changed = if changes[0] == changes[1] {
+                &changes[..1]
+            } else {
+                &changes[..]
+            };
+            let proposed_energy = objective.value_at_changes(&proposed, changed)?;
+            reverted = Some(i);
             if !proposed_energy.is_finite() {
                 continue;
             }
             if metropolis_accept(&mut rng, proposed_energy - current_energy, temperature) {
+                reverted = None;
                 current.copy_from_slice(&proposed);
                 current_energy = proposed_energy;
                 if current_energy < best_energy {
