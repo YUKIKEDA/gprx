@@ -175,10 +175,6 @@ pub(super) fn read_xy(dir: &Path, n: usize, d: usize) -> Result<(Vec<f64>, Vec<f
     Ok((x, y))
 }
 
-pub(super) fn read_alpha(dir: &Path, n: usize) -> Result<Vec<f64>, GprError> {
-    read_scalars::<f64>(dir, TENSOR_ALPHA, &[n], Dtype::F64)
-}
-
 pub(super) fn read_scalars<T: Copy>(
     dir: &Path,
     name: &str,
