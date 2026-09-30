@@ -3,11 +3,9 @@
 use faer::Mat;
 
 use crate::error::GprError;
-use crate::gpr::{KernelExp, with_kernel_exp};
-use crate::param::write_params;
+use crate::gpr::with_kernel_exp;
+use crate::sparse::{SparseCore, sparse_core_accessors};
 
-use crate::kernel::KernelSpec;
-use crate::likelihood::GaussianLikelihood;
 use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
 use crate::{PredictOptions, Prediction};
 
@@ -26,80 +24,29 @@ use super::factor::{
 /// lower triangle of `L`.
 #[derive(Clone, Debug)]
 pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
-    pub(crate) kernel: KernelSpec,
-    pub(crate) likelihood: GaussianLikelihood,
-    pub(crate) x_obs: Vec<f64>,
-    pub(crate) z_obs: Vec<f64>,
-    pub(crate) y: Vec<f64>,
+    pub(super) core: SparseCore,
     /// Lower `L_mm` from `K_mm = L_mm L_mmᵀ`.
-    pub(crate) k_mm_l: Mat<P::Storage>,
+    pub(super) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
-    pub(crate) a: Mat<P::Storage>,
-    pub(crate) q_mean: Vec<f64>,
+    pub(super) a: Mat<P::Storage>,
+    pub(super) q_mean: Vec<f64>,
     /// Lower `L` from the whitened `S = L Lᵀ`.
-    pub(crate) q_l: Mat<f64>,
-    pub(crate) k_diag: Vec<P::Storage>,
-    pub(crate) n: usize,
-    pub(crate) m: usize,
-    pub(crate) d: usize,
-    pub(crate) math: KernelExp,
+    pub(super) q_l: Mat<f64>,
+    pub(super) k_diag: Vec<P::Storage>,
 }
 
 impl<P> FittedSvgp<P>
 where
     P: GpScalar,
 {
-    /// Returns the number of training points.
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    /// Returns the number of inducing points.
-    pub fn m(&self) -> usize {
-        self.m
-    }
-
-    /// Returns the feature dimension.
-    pub fn d(&self) -> usize {
-        self.d
-    }
-
-    /// Returns the kernel whose hyperparameters this model owns.
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.kernel
-    }
-
-    /// Returns the observation-noise model.
-    pub fn likelihood(&self) -> &GaussianLikelihood {
-        &self.likelihood
-    }
-
-    /// Returns the kernel `exp` mode the trainer set with `with_math`.
-    pub fn math(&self) -> KernelExp {
-        self.math
-    }
-
-    /// Returns the original training features in column-major order.
-    pub fn x(&self) -> &[f64] {
-        &self.x_obs
-    }
-
-    /// Returns the inducing features in column-major order.
-    pub fn z(&self) -> &[f64] {
-        &self.z_obs
-    }
-
-    /// Returns the original training targets.
-    pub fn y(&self) -> &[f64] {
-        &self.y
-    }
+    sparse_core_accessors!();
 
     /// Returns the concatenated parameter count.
     ///
     /// Kernel `θ`, likelihood `θ`, the whitened mean (`m` scalars), then the
     /// packed lower triangle of `L` (`m(m + 1) / 2` scalars).
     pub fn num_params(&self) -> usize {
-        self.kernel.num_params() + self.likelihood.num_params() + q_param_len(self.m)
+        self.core.theta_len() + q_param_len(self.core.m)
     }
 
     /// Writes kernel `θ`, likelihood `θ`, the whitened mean, and packed `L`.
@@ -113,8 +60,8 @@ where
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
-        let n_theta = self.kernel.num_params() + self.likelihood.num_params();
-        write_params(&self.kernel, &self.likelihood, &mut out[..n_theta])?;
+        let n_theta = self.core.theta_len();
+        self.core.read_theta(&mut out[..n_theta])?;
         pack_q(&self.q_mean, self.q_l.as_ref(), &mut out[n_theta..]);
         Ok(())
     }
@@ -161,29 +108,25 @@ where
     /// # }
     /// ```
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        let n_kernel = self.kernel.num_params();
-        let n_theta = n_kernel + self.likelihood.num_params();
+        let n_theta = self.core.theta_len();
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         if self.same_stored_params(params)? {
             return Ok(());
         }
-        let mut kernel = self.kernel.clone();
-        kernel.set_params(&params[..n_kernel])?;
-        let mut likelihood = self.likelihood;
-        likelihood.set_params(&params[n_kernel..n_theta])?;
-        let q = unpack_q(&params[n_theta..], self.m)?;
-        let state = with_kernel_exp!(self.math, M => assemble_svgp::<M, P::Storage>(
+        let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
+        let q = unpack_q(&params[n_theta..], self.core.m)?;
+        let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage>(
             &kernel,
-            &self.x_obs,
-            self.n,
-            self.d,
-            &self.y,
-            &self.z_obs,
-            self.m,
+            &self.core.x_obs,
+            self.core.n,
+            self.core.d,
+            &self.core.y,
+            &self.core.z_obs,
+            self.core.m,
             Some(q),
         ))?;
-        self.kernel = kernel;
-        self.likelihood = likelihood;
+        self.core.kernel = kernel;
+        self.core.likelihood = likelihood;
         self.k_mm_l = state.k_mm_l;
         self.a = state.a;
         self.q_mean = state.q_mean;
@@ -224,11 +167,11 @@ where
             self.a.as_ref(),
             &self.q_mean,
             self.q_l.as_ref(),
-            &self.y,
+            &self.core.y,
             &self.k_diag,
-            self.likelihood.noise_variance(),
-            self.n,
-            self.m,
+            self.core.likelihood.noise_variance(),
+            self.core.n,
+            self.core.m,
         ))
     }
 
@@ -277,8 +220,8 @@ where
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
-        let batch: Vec<usize> = (0..self.n).collect();
-        with_kernel_exp!(self.math, M => svgp_value_and_gradient::<M, _>(self, out, &batch))
+        let batch: Vec<usize> = (0..self.core.n).collect();
+        with_kernel_exp!(self.core.math, M => svgp_value_and_gradient::<M, _>(self, out, &batch))
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
@@ -359,21 +302,21 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        if n_cols != self.d {
+        if n_cols != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: n_cols,
-                expected_dim: self.d,
+                expected_dim: self.core.d,
             });
         }
-        with_kernel_exp!(self.math, M => svgp_predict::<M, P>(
-            &self.kernel,
-            &self.z_obs,
+        with_kernel_exp!(self.core.math, M => svgp_predict::<M, P>(
+            &self.core.kernel,
+            &self.core.z_obs,
             self.k_mm_l.as_ref(),
             &self.q_mean,
             self.q_l.as_ref(),
-            self.likelihood.noise_variance(),
-            self.m,
-            self.d,
+            self.core.likelihood.noise_variance(),
+            self.core.m,
+            self.core.d,
             xs,
             n_rows,
             n_cols,

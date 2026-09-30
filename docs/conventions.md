@@ -37,6 +37,7 @@ src/kernel/                leaves live here, not in src/*.rs
   spec.rs term.rs dist.rs simd.rs lengthscale.rs scalar.rs
 src/optimizer/             mod.rs, logit.rs. lbfgs.rs ncg.rs neldermead.rs fsa.rs newton.rs. adam.rs does not implement Optimizer
 src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs
+src/sparse/                crate-private: SparseSpec (trainer settings) and SparseCore (fitted data) shared by Sgpr and Svgp
 src/sgpr/                  model.rs, fitted.rs, factor.rs, online.rs, tests.rs
 src/svgp/                  model.rs, fitted.rs, factor.rs, tests.rs
 src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not split into leaves

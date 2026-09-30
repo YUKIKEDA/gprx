@@ -10,6 +10,7 @@ use crate::data::{pack_points, validate_inducing, validate_query, validate_train
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
 use crate::gpr::KernelExp;
+use crate::sparse::SparseCore;
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
@@ -275,14 +276,19 @@ where
         )?
     };
     Ok(FittedSgpr {
-        kernel,
-        likelihood,
+        core: SparseCore {
+            kernel,
+            likelihood,
+            math: KernelExp::of::<M>(),
+            x_obs: x.to_vec(),
+            z_obs: z.to_vec(),
+            y: y.to_vec(),
+            n: n_rows,
+            m: n_inducing,
+            d: n_cols,
+        },
         optimizer,
         inducing: PhantomData,
-        math: KernelExp::of::<M>(),
-        x_obs: x.to_vec(),
-        z_obs: z.to_vec(),
-        y: y.to_vec(),
         k_mm_l: state.k_mm_l,
         a: state.a,
         b_l: state.b_l,
@@ -290,9 +296,6 @@ where
         predict_w,
         k_diag_sum: state.k_diag_sum,
         a_frobenius2: state.a_frobenius2,
-        n: n_rows,
-        m: n_inducing,
-        d: n_cols,
     })
 }
 
@@ -535,9 +538,9 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
     where
         P: ModelPrecision<Storage = T>,
     {
-        let m = model.m;
-        let n = model.n;
-        let noise = lit::<T>(model.likelihood.noise_variance());
+        let m = model.core.m;
+        let n = model.core.n;
+        let noise = lit::<T>(model.core.likelihood.noise_variance());
         let a = model.a.as_ref();
         let w = model.w.as_slice();
         let mut y_norm2 = lit::<T>(0.0);
@@ -724,27 +727,27 @@ where
     P: ModelPrecision,
 {
     let mut y_cast = P::Storage::empty_rows();
-    let y_s = P::Storage::storage_rows(&model.y, &mut y_cast);
+    let y_s = P::Storage::storage_rows(&model.core.y, &mut y_cast);
     let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
-    let compiled = model.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.x_obs, model.n, model.d);
-    let z64 = pack_points(&model.z_obs, model.m, model.d);
+    let compiled = model.core.kernel.compile_as::<P::Storage>();
+    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let n_kernel = model.kernel.num_params();
+    let n_kernel = model.core.kernel.num_params();
     for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-        let var = kernel_theta_var::<M, _>(&compiled, x, z, model.n, i)?;
+        let var = kernel_theta_var::<M, _>(&compiled, x, z, model.core.n, i)?;
         *slot = engine.directional_owned(var).to_f64();
     }
     out[n_kernel] = engine
-        .directional_noise(model.likelihood.noise_variance())
+        .directional_noise(model.core.likelihood.noise_variance())
         .to_f64();
     if include_z {
         let mut idx = n_kernel + 1;
-        for dim in 0..model.d {
-            for p in 0..model.m {
+        for dim in 0..model.core.d {
+            for p in 0..model.core.m {
                 let var = z_coord_var::<M, _>(&compiled, x, z, p, dim)?;
                 out[idx] = engine.directional_owned(var).to_f64();
                 idx += 1;
@@ -763,7 +766,7 @@ where
     P: ModelPrecision,
 {
     let mut y_cast = P::Storage::empty_rows();
-    let y_s = P::Storage::storage_rows(&model.y, &mut y_cast);
+    let y_s = P::Storage::storage_rows(&model.core.y, &mut y_cast);
     let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
     let vars = collect_first_vars::<M, _, _, _>(model, include_z)?;
     let tangents: Vec<VfeTangent<P::Storage>> =
@@ -789,27 +792,34 @@ pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P>(
 where
     P: ModelPrecision,
 {
-    let compiled = model.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.x_obs, model.n, model.d);
-    let z64 = pack_points(&model.z_obs, model.m, model.d);
+    let compiled = model.core.kernel.compile_as::<P::Storage>();
+    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let n_kernel = model.kernel.num_params();
-    let n_theta = n_kernel + model.likelihood.num_params();
-    let mut vars = Vec::with_capacity(n_theta + if include_z { model.m * model.d } else { 0 });
+    let n_kernel = model.core.kernel.num_params();
+    let n_theta = n_kernel + model.core.likelihood.num_params();
+    let mut vars = Vec::with_capacity(
+        n_theta
+            + if include_z {
+                model.core.m * model.core.d
+            } else {
+                0
+            },
+    );
     for i in 0..n_kernel {
-        vars.push(kernel_theta_var::<M, _>(&compiled, x, z, model.n, i)?);
+        vars.push(kernel_theta_var::<M, _>(&compiled, x, z, model.core.n, i)?);
     }
     vars.push(likelihood_var(
-        model.m,
-        model.n,
-        model.likelihood.noise_variance(),
+        model.core.m,
+        model.core.n,
+        model.core.likelihood.noise_variance(),
     ));
     if include_z {
-        for dim in 0..model.d {
-            for p in 0..model.m {
+        for dim in 0..model.core.d {
+            for p in 0..model.core.m {
                 vars.push(z_coord_var::<M, _>(&compiled, x, z, p, dim)?);
             }
         }
@@ -904,17 +914,17 @@ pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P>(
 where
     P: ModelPrecision,
 {
-    let n_kernel = model.kernel.num_params();
-    let n_theta = n_kernel + model.likelihood.num_params();
-    let compiled = model.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.x_obs, model.n, model.d);
-    let z64 = pack_points(&model.z_obs, model.m, model.d);
+    let n_kernel = model.core.kernel.num_params();
+    let n_theta = n_kernel + model.core.likelihood.num_params();
+    let compiled = model.core.kernel.compile_as::<P::Storage>();
+    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let m = model.m;
-    let n = model.n;
+    let m = model.core.m;
+    let n = model.core.n;
     let z_index = |idx: usize| -> Option<(usize, usize)> {
         if !include_z || idx < n_theta {
             None
@@ -927,7 +937,7 @@ where
         return kernel_theta_second::<M, _>(&compiled, x, z, n, i, j);
     }
     if i == n_kernel && j == n_kernel {
-        return Ok(likelihood_var(m, n, model.likelihood.noise_variance()));
+        return Ok(likelihood_var(m, n, model.core.likelihood.noise_variance()));
     }
     if i < n_theta && j < n_theta {
         return Ok(KernelVar::<P::Storage> {

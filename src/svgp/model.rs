@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use crate::error::GprError;
 use crate::gpr::{KernelExp, with_kernel_exp};
-use crate::param::write_params;
+use crate::sparse::SparseSpec;
 
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
@@ -41,11 +41,9 @@ use super::fitted::FittedSvgp;
 /// ```
 #[derive(Clone, Debug)]
 pub struct Svgp<O = Fixed, P = DoublePrecision> {
-    pub(crate) kernel: KernelSpec,
-    pub(crate) likelihood: GaussianLikelihood,
-    pub(crate) optimizer: O,
-    pub(crate) math: KernelExp,
-    pub(crate) _precision: PhantomData<P>,
+    pub(super) spec: SparseSpec,
+    pub(super) optimizer: O,
+    pub(super) _precision: PhantomData<P>,
 }
 
 impl Svgp {
@@ -56,16 +54,24 @@ impl Svgp {
     /// the inducing count.
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
-            kernel,
-            likelihood,
+            spec: SparseSpec::new(kernel, likelihood),
             optimizer: Fixed,
-            math: KernelExp::default(),
             _precision: PhantomData,
         }
     }
 }
 
 impl<O, P> Svgp<O, P> {
+    /// The same settings under new type parameters, with `map` applied to
+    /// the optimizer.
+    fn retype<O2, P2>(self, map: impl FnOnce(O) -> O2) -> Svgp<O2, P2> {
+        Svgp {
+            spec: self.spec,
+            optimizer: map(self.optimizer),
+            _precision: PhantomData,
+        }
+    }
+
     /// Replaces the optimizer type parameter.
     ///
     /// [`Fixed`] keeps [`Svgp<Fixed>::factor`]. [`Adam`] enables
@@ -89,25 +95,12 @@ impl<O, P> Svgp<O, P> {
     /// # }
     /// ```
     pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, P> {
-        Svgp {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer,
-            math: self.math,
-            _precision: PhantomData,
-        }
+        self.retype(|_| optimizer)
     }
 
     /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
-    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, P2>
-where {
-        Svgp {
-            kernel: self.kernel,
-            likelihood: self.likelihood,
-            optimizer: self.optimizer,
-            math: self.math,
-            _precision: PhantomData,
-        }
+    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, P2> {
+        self.retype(|optimizer| optimizer)
     }
 
     /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
@@ -115,30 +108,30 @@ where {
     /// `factor`, `fit`, and predict use the same polynomial. Hyperparameter
     /// `exp(θ)` is unchanged.
     pub fn with_math(mut self, math: KernelExp) -> Self {
-        self.math = math;
+        self.spec.math = math;
         self
     }
 
     /// Returns the kernel `exp` mode.
     pub fn math(&self) -> KernelExp {
-        self.math
+        self.spec.math
     }
 
     /// Returns the kernel whose hyperparameters this trainer owns.
     pub fn kernel(&self) -> &KernelSpec {
-        &self.kernel
+        &self.spec.kernel
     }
 
     /// Returns the observation-noise model.
     pub fn likelihood(&self) -> &GaussianLikelihood {
-        &self.likelihood
+        &self.spec.likelihood
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
     ///
     /// Inducing coordinates and the variational posterior are not counted.
     pub fn num_params(&self) -> usize {
-        self.kernel.num_params() + self.likelihood.num_params()
+        self.spec.theta_len()
     }
 
     /// Writes kernel `θ` then likelihood `θ` into `out`.
@@ -148,7 +141,7 @@ where {
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        write_params(&self.kernel, &self.likelihood, out)
+        self.spec.read_theta(out)
     }
 
     /// Sets kernel then likelihood `θ` without forming the SVGP system.
@@ -164,15 +157,7 @@ where {
     /// is invalid. Kernel and likelihood `θ` are committed together only
     /// after both writes succeed.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        let n_kernel = self.kernel.num_params();
-        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
-        let mut kernel = self.kernel.clone();
-        kernel.set_params(&params[..n_kernel])?;
-        let mut likelihood = self.likelihood;
-        likelihood.set_params(&params[n_kernel..])?;
-        self.kernel = kernel;
-        self.likelihood = likelihood;
-        Ok(())
+        self.spec.write_theta(params)
     }
 }
 
@@ -221,9 +206,9 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSvgp<P>, (Self, GprError)> {
-        match with_kernel_exp!(self.math, M => assemble_fitted::<M, _>(
-            self.kernel.clone(),
-            self.likelihood,
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<M, _>(
+            self.spec.kernel.clone(),
+            self.spec.likelihood,
             x,
             n_rows,
             n_cols,
@@ -287,9 +272,9 @@ where
         z: &[f64],
         n_inducing: usize,
     ) -> Result<FittedSvgp<P>, (Self, GprError)> {
-        match with_kernel_exp!(self.math, M => assemble_fitted::<M, _>(
-            self.kernel.clone(),
-            self.likelihood,
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<M, _>(
+            self.spec.kernel.clone(),
+            self.spec.likelihood,
             x,
             n_rows,
             n_cols,
@@ -299,7 +284,7 @@ where
             None,
         )) {
             Ok(mut fitted) => match with_kernel_exp!(
-                self.math,
+                self.spec.math,
                 M => run_adam_fit::<M, _>(&mut fitted, &self.optimizer)
             ) {
                 Ok(()) => Ok(fitted),

@@ -11,6 +11,7 @@ use crate::data::{pack_points, validate_inducing, validate_query, validate_train
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::JitterPolicy;
 use crate::gpr::KernelExp;
+use crate::sparse::SparseCore;
 
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
@@ -59,20 +60,22 @@ where
 {
     let state = assemble_svgp::<M, P::Storage>(&kernel, x, n_rows, n_cols, y, z, n_inducing, q)?;
     Ok(FittedSvgp {
-        kernel,
-        likelihood,
-        x_obs: x.to_vec(),
-        z_obs: z.to_vec(),
-        y: y.to_vec(),
+        core: SparseCore {
+            kernel,
+            likelihood,
+            x_obs: x.to_vec(),
+            z_obs: z.to_vec(),
+            y: y.to_vec(),
+            n: n_rows,
+            m: n_inducing,
+            d: n_cols,
+            math: KernelExp::of::<M>(),
+        },
         k_mm_l: state.k_mm_l,
         a: state.a,
         q_mean: state.q_mean,
         q_l: state.q_l,
         k_diag: state.k_diag,
-        n: n_rows,
-        m: n_inducing,
-        d: n_cols,
-        math: KernelExp::of::<M>(),
     })
 }
 
@@ -492,16 +495,16 @@ fn svgp_value_and_gradient_storage<M: crate::math::KernelMath, P>(
 where
     P: ModelPrecision,
 {
-    let n = model.n;
-    let m = model.m;
-    let n_kernel = model.kernel.num_params();
-    let n_theta = n_kernel + model.likelihood.num_params();
+    let n = model.core.n;
+    let m = model.core.m;
+    let n_kernel = model.core.kernel.num_params();
+    let n_theta = n_kernel + model.core.likelihood.num_params();
     crate::data::require_count(out.len(), n_theta + q_param_len(m), "parameters")?;
     if batch.is_empty() {
         return Err(GprError::EmptyInput);
     }
     out.fill(0.0);
-    let noise = model.likelihood.noise_variance();
+    let noise = model.core.likelihood.noise_variance();
     let inv_noise = 1.0 / noise;
     let scale = n as f64 / batch.len() as f64;
     let kl = storage_kl_grad::<P>(model, out, n_theta, m);
@@ -584,7 +587,7 @@ fn storage_point_cache<P: ModelPrecision>(
             lt_norm += u_j * u_j;
         }
         var[b_idx] = model.k_diag[col] - a_norm + lt_norm;
-        resid[b_idx] = P::Storage::from_f64(model.y[col]) - mu;
+        resid[b_idx] = P::Storage::from_f64(model.core.y[col]) - mu;
     }
     StoragePointCache { resid, var, u }
 }
@@ -609,8 +612,8 @@ fn storage_data_q_grad<P: ModelPrecision>(
     inv_noise: f64,
     scale: f64,
 ) -> (f64, f64) {
-    let m = model.m;
-    let noise = model.likelihood.noise_variance();
+    let m = model.core.m;
+    let noise = model.core.likelihood.noise_variance();
     let log_2pi_noise = P::Storage::from_f64((2.0 * std::f64::consts::PI * noise).ln());
     let inv = P::Storage::from_f64(inv_noise);
     let half = P::Storage::from_f64(0.5);
@@ -655,15 +658,15 @@ fn storage_kernel_grad<M: crate::math::KernelMath, P>(
 where
     P: ModelPrecision,
 {
-    let m = model.m;
-    let compiled = model.kernel.compile_as::<P::Storage>();
-    let x64 = pack_points(&model.x_obs, model.n, model.d);
-    let z64 = pack_points(&model.z_obs, model.m, model.d);
+    let m = model.core.m;
+    let compiled = model.core.kernel.compile_as::<P::Storage>();
+    let x64 = pack_points(&model.core.x_obs, model.core.n, model.core.d);
+    let z64 = pack_points(&model.core.z_obs, model.core.m, model.core.d);
     let mut x_cast = P::Storage::empty_cols();
     let mut z_cast = P::Storage::empty_cols();
     let x_mat = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let same_xz = model.x_obs == model.z_obs;
+    let same_xz = model.core.x_obs == model.core.z_obs;
     let mut q_l = Mat::<P::Storage>::zeros(m, m);
     for j in 0..m {
         for i in 0..m {
@@ -711,8 +714,8 @@ fn storage_kernel_tangents<M: crate::math::KernelMath, P>(
 where
     P: ModelPrecision,
 {
-    let m = model.m;
-    let n = model.n;
+    let m = model.core.m;
+    let n = model.core.n;
     let mut d_kmm = Mat::<P::Storage>::zeros(m, m);
     let mut scratch_mm = Mat::<P::Storage>::zeros(m, m);
     compiled.grad_gram::<M>(
@@ -789,34 +792,36 @@ fn promote_svgp_f64<P: ModelPrecision>(
 ) -> Result<FittedSvgp<crate::precision::DoublePrecision>, GprError>
 where
 {
-    let mut k_mm_l = Mat::<f64>::zeros(model.m, model.m);
-    let mut a = Mat::<f64>::zeros(model.m, model.n);
-    for j in 0..model.m {
-        for i in j..model.m {
+    let mut k_mm_l = Mat::<f64>::zeros(model.core.m, model.core.m);
+    let mut a = Mat::<f64>::zeros(model.core.m, model.core.n);
+    for j in 0..model.core.m {
+        for i in j..model.core.m {
             k_mm_l[(i, j)] = model.k_mm_l[(i, j)].to_f64();
         }
     }
-    for col in 0..model.n {
-        for row in 0..model.m {
+    for col in 0..model.core.n {
+        for row in 0..model.core.m {
             a[(row, col)] = model.a[(row, col)].to_f64();
         }
     }
     let k_diag: Vec<f64> = model.k_diag.iter().map(|value| value.to_f64()).collect();
     Ok(FittedSvgp {
-        kernel: model.kernel.clone(),
-        likelihood: model.likelihood,
-        x_obs: model.x_obs.clone(),
-        z_obs: model.z_obs.clone(),
-        y: model.y.clone(),
+        core: SparseCore {
+            kernel: model.core.kernel.clone(),
+            likelihood: model.core.likelihood,
+            x_obs: model.core.x_obs.clone(),
+            z_obs: model.core.z_obs.clone(),
+            y: model.core.y.clone(),
+            n: model.core.n,
+            m: model.core.m,
+            d: model.core.d,
+            math: model.core.math,
+        },
         k_mm_l,
         a,
         q_mean: model.q_mean.clone(),
         q_l: model.q_l.clone(),
         k_diag,
-        n: model.n,
-        m: model.m,
-        d: model.d,
-        math: model.math,
     })
 }
 
@@ -825,16 +830,16 @@ fn svgp_value_and_gradient_f64<M: crate::math::KernelMath>(
     out: &mut [f64],
     batch: &[usize],
 ) -> Result<f64, GprError> {
-    let n = model.n;
-    let m = model.m;
-    let n_kernel = model.kernel.num_params();
-    let n_theta = n_kernel + model.likelihood.num_params();
+    let n = model.core.n;
+    let m = model.core.m;
+    let n_kernel = model.core.kernel.num_params();
+    let n_theta = n_kernel + model.core.likelihood.num_params();
     crate::data::require_count(out.len(), n_theta + q_param_len(m), "parameters")?;
     if batch.is_empty() {
         return Err(GprError::EmptyInput);
     }
     out.fill(0.0);
-    let noise = model.likelihood.noise_variance();
+    let noise = model.core.likelihood.noise_variance();
     let inv_noise = 1.0 / noise;
     let scale = n as f64 / batch.len() as f64;
     let kl = accumulate_kl_grad(model, out, n_theta, m);
@@ -928,7 +933,7 @@ fn point_cache(
             let u_col = u_cm.col(b_idx);
             let mu = dot_f64x4(a_col, mean);
             var[b_idx] = model.k_diag[col] - norm2_f64x4(a_col) + norm2_f64x4(u_col);
-            resid[b_idx] = model.y[col] - mu;
+            resid[b_idx] = model.core.y[col] - mu;
         }
     } else {
         for (b_idx, &col) in batch.iter().enumerate() {
@@ -943,7 +948,7 @@ fn point_cache(
                 lt_norm += u_j * u_j;
             }
             var[b_idx] = model.k_diag[col] - a_norm + lt_norm;
-            resid[b_idx] = model.y[col] - mu;
+            resid[b_idx] = model.core.y[col] - mu;
         }
     }
     PointCache { resid, var, u }
@@ -987,8 +992,8 @@ fn accumulate_data_q_grad(
     inv_noise: f64,
     scale: f64,
 ) -> (f64, f64) {
-    let m = model.m;
-    let noise = model.likelihood.noise_variance();
+    let m = model.core.m;
+    let noise = model.core.likelihood.noise_variance();
     let log_2pi_noise = (2.0 * std::f64::consts::PI * noise).ln();
     let mut ell = 0.0;
     let mut resid2_var = 0.0;
@@ -1029,11 +1034,11 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     inv_noise: f64,
     scale: f64,
 ) -> Result<(), GprError> {
-    let m = model.m;
-    let compiled = model.kernel.compile();
-    let x_mat = pack_points(&model.x_obs, model.n, model.d);
-    let z_mat = pack_points(&model.z_obs, model.m, model.d);
-    let same_xz = model.x_obs == model.z_obs;
+    let m = model.core.m;
+    let compiled = model.core.kernel.compile();
+    let x_mat = pack_points(&model.core.x_obs, model.core.n, model.core.d);
+    let z_mat = pack_points(&model.core.z_obs, model.core.m, model.core.d);
+    let same_xz = model.core.x_obs == model.core.z_obs;
     let mut ard_cross = match &compiled {
         crate::kernel::CompiledKernel::RbfArd(leaf) if !same_xz => {
             Some(leaf.grad_cross_all_from_coords::<M, _>(z_mat.as_ref(), x_mat.as_ref())?)
@@ -1104,8 +1109,8 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     param_idx: usize,
     pre_cross: Option<Mat<f64>>,
 ) -> Result<(Mat<f64>, Vec<f64>), GprError> {
-    let m = model.m;
-    let n = model.n;
+    let m = model.core.m;
+    let n = model.core.n;
     let mut d_kmm = Mat::zeros(m, m);
     let mut scratch_mm = Mat::zeros(m, m);
     compiled.grad_gram::<M>(
@@ -1177,19 +1182,6 @@ fn cholesky_sensitivity(
             d_l[(i, j)] = acc / l[(j, j)];
         }
     }
-}
-
-fn theta_intervals(
-    kernel: &KernelSpec,
-    likelihood: &GaussianLikelihood,
-) -> Result<Vec<Interval>, GprError> {
-    let n_kernel = kernel.num_params();
-    let n_theta = n_kernel + likelihood.num_params();
-    let mut out = vec![Interval::DEFAULT_POSITIVE; n_theta];
-    let mut offset = 0;
-    kernel.write_intervals(&mut out[..n_kernel], &mut offset)?;
-    out[n_kernel] = likelihood.bounds();
-    Ok(out)
 }
 
 fn user_to_unconstrained(
@@ -1276,11 +1268,12 @@ pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P>(
 where
     P: crate::precision::GpScalar,
 {
-    let n = model.n;
-    let m = model.m;
-    let n_theta = model.kernel.num_params() + model.likelihood.num_params();
+    let n = model.core.n;
+    let m = model.core.m;
+    let n_theta = model.core.kernel.num_params() + model.core.likelihood.num_params();
     let p = model.num_params();
-    let intervals = theta_intervals(&model.kernel, &model.likelihood)?;
+    let mut intervals = vec![Interval::DEFAULT_POSITIVE; model.core.theta_len()];
+    model.core.theta_intervals(&mut intervals)?;
     let mut user = vec![0.0; p];
     model.get_params(&mut user)?;
     let mut z = user_to_unconstrained(&user, n_theta, m, &intervals)?;
