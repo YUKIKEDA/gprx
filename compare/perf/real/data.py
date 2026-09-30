@@ -24,13 +24,16 @@ DATA = OUT / "data"
 CHECKSUMS = HERE / "checksums.json"
 
 YARIN = "https://raw.githubusercontent.com/yaringal/DropoutUncertaintyExps/master/UCI_Datasets"
+TREVANS = "https://raw.githubusercontent.com/treforevans/uci_datasets/master/uci_datasets"
 
 
 @dataclass(frozen=True)
 class Dataset:
     name: str
-    remote: str  # directory under YARIN
+    remote: str  # directory under the source
     tier: str
+    source: str = "yaringal"  # or "trevans" (treforevans/uci_datasets: 10 splits of 90 / 10)
+    files: tuple[str, ...] = ("data.csv.gz", "test_mask.csv.gz")
 
 
 #: Boston is left out (removed from scikit-learn 1.2 for its features).
@@ -45,6 +48,11 @@ DATASETS: dict[str, Dataset] = {
         Dataset("kin8nm", "kin8nm", "T1"),
         Dataset("naval", "naval-propulsion-plant", "T1"),
         Dataset("protein", "protein-tertiary-structure", "T2"),
+        Dataset("kin40k", "kin40k", "T2", "trevans"),
+        Dataset("3droad", "3droad", "T3", "trevans"),
+        Dataset("song", "song", "T3", "trevans", ("data.csv.gz", "data1.csv.gz", "test_mask.csv.gz")),
+        Dataset("buzz", "buzz", "T3", "trevans"),
+        Dataset("houseelectric", "houseelectric", "T3", "trevans"),
     )
 }
 
@@ -72,10 +80,15 @@ def _download(url: str, dest: Path) -> None:
 def fetch_file(dataset: Dataset, filename: str) -> Path:
     """The local copy of one file of ``dataset`` (downloaded when missing,
     verified against the pinned checksum when one exists)."""
-    rel = f"yaringal/{dataset.remote}/{filename}"
+    rel = f"{dataset.source}/{dataset.remote}/{filename}"
     path = DATA / rel
     if not path.is_file():
-        _download(f"{YARIN}/{dataset.remote}/data/{filename}", path)
+        url = (
+            f"{YARIN}/{dataset.remote}/data/{filename}"
+            if dataset.source == "yaringal"
+            else f"{TREVANS}/{dataset.remote}/{filename}"
+        )
+        _download(url, path)
     pinned = _pins().get(rel)
     if pinned is not None and _sha256(path) != pinned:
         raise RuntimeError(f"checksum mismatch for {rel}: delete {path} and fetch again")
@@ -83,6 +96,8 @@ def fetch_file(dataset: Dataset, filename: str) -> Path:
 
 
 def n_splits(dataset: Dataset) -> int:
+    if dataset.source == "trevans":
+        return 10
     return int(fetch_file(dataset, "n_splits.txt").read_text().split()[0])
 
 
@@ -100,13 +115,30 @@ class Split:
     y_std: float
 
 
+def _trevans_arrays(dataset: Dataset, split: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``x``, ``y`` and the train / test row indices of one split. The parsed
+    table is cached as ``.npy`` (parsing a 2M-row csv is slow)."""
+    cache = DATA / dataset.source / dataset.remote / "data.npy"
+    if not cache.is_file():
+        tables = [np.loadtxt(fetch_file(dataset, f), delimiter=",") for f in dataset.files if f.startswith("data")]
+        np.save(cache, np.concatenate(tables, axis=0))
+    data = np.load(cache)
+    mask = np.loadtxt(fetch_file(dataset, "test_mask.csv.gz"), dtype=bool, delimiter=",")
+    test = np.flatnonzero(mask[:, split])
+    train = np.flatnonzero(~mask[:, split])
+    return data[:, :-1], data[:, -1], train, test
+
+
 def load_split(dataset: Dataset, split: int) -> Split:
-    data = np.loadtxt(fetch_file(dataset, "data.txt"), ndmin=2)
-    features = _ints(fetch_file(dataset, "index_features.txt"))
-    target = int(_ints(fetch_file(dataset, "index_target.txt"))[0])
-    train = _ints(fetch_file(dataset, f"index_train_{split}.txt"))
-    test = _ints(fetch_file(dataset, f"index_test_{split}.txt"))
-    x, y = data[:, features], data[:, target]
+    if dataset.source == "trevans":
+        x, y, train, test = _trevans_arrays(dataset, split)
+    else:
+        data = np.loadtxt(fetch_file(dataset, "data.txt"), ndmin=2)
+        features = _ints(fetch_file(dataset, "index_features.txt"))
+        target = int(_ints(fetch_file(dataset, "index_target.txt"))[0])
+        train = _ints(fetch_file(dataset, f"index_train_{split}.txt"))
+        test = _ints(fetch_file(dataset, f"index_test_{split}.txt"))
+        x, y = data[:, features], data[:, target]
     x_train, y_train, x_test, y_test = x[train], y[train], x[test], y[test]
     mean, std = x_train.mean(axis=0), x_train.std(axis=0)
     std[std == 0.0] = 1.0
@@ -125,12 +157,15 @@ def pin_all() -> None:
     """Downloads every file of every dataset and writes ``checksums.json``."""
     pins: dict[str, str] = {}
     for dataset in DATASETS.values():
-        files = ["data.txt", "index_features.txt", "index_target.txt", "n_splits.txt"]
-        for i in range(n_splits(dataset)):
-            files += [f"index_train_{i}.txt", f"index_test_{i}.txt"]
+        if dataset.source == "trevans":
+            files = list(dataset.files)
+        else:
+            files = ["data.txt", "index_features.txt", "index_target.txt", "n_splits.txt"]
+            for i in range(n_splits(dataset)):
+                files += [f"index_train_{i}.txt", f"index_test_{i}.txt"]
         for filename in files:
             path = fetch_file(dataset, filename)
-            pins[f"yaringal/{dataset.remote}/{filename}"] = _sha256(path)
+            pins[f"{dataset.source}/{dataset.remote}/{filename}"] = _sha256(path)
     CHECKSUMS.write_text(json.dumps(pins, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"pinned {len(pins)} files in {CHECKSUMS}")
 

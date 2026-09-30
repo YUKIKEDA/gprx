@@ -37,7 +37,29 @@ fn make_gpr(case: &RealCase) -> Result<Gpr<Lbfgs>, String> {
     Ok(Gpr::new(kernel, likelihood).with_optimizer(lbfgs))
 }
 
+/// Untimed warm-up fits first: one below `n = 5000` (the first call pays the
+/// thread-pool and allocator start-up), none above, or `PERF_WARMUP`.
+fn warmup_fits(n_rows: usize) -> usize {
+    match std::env::var("PERF_WARMUP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(n) => n,
+        None if n_rows <= 5000 => 1,
+        None => 0,
+    }
+}
+
 pub fn run(case: &RealCase) -> Result<FitRow, String> {
+    if case.protocol != "fixed" {
+        for _ in 0..warmup_fits(case.n_rows) {
+            eprintln!("PHASE warmup");
+            let _ = make_gpr(case)?
+                .fit(&case.x, case.n_rows, case.n_cols, &case.y)
+                .map_err(|(_, e)| e.to_string())?;
+        }
+    }
+    eprintln!("PHASE fit");
     if case.protocol == "fixed" {
         let (kernel, likelihood) = model_parts(case)?;
         let gpr = Gpr::new(kernel, likelihood).with_optimizer(Fixed);
@@ -64,6 +86,7 @@ fn score_row<O>(
     fit_s: f64,
     (value_evals, joint_evals): (u64, u64),
 ) -> Result<FitRow, String> {
+    eprintln!("PHASE predict");
     let nlml = fitted
         .neg_log_marginal_likelihood()
         .map_err(|e| e.to_string())?;

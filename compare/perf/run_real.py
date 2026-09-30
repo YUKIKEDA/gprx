@@ -1,7 +1,7 @@
 """B1-1: fit every library on the real datasets and print the tables.
 
 ```text
-python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn]
+python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline]
 python -m perf.run_real --reprint
 ```
 
@@ -15,11 +15,13 @@ import math
 import statistics
 import sys
 
+from common import harness
 from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start, write_json
 
 from .real.cases import splits_of, write_case
 from .real.data import DATASETS, OUT
 from .real.libs import RUNNERS
+from .real.optimizers import OPTIMIZERS, meta
 
 RESULTS = OUT / "results.json"
 
@@ -81,6 +83,14 @@ def print_tables(rows: list[dict]) -> None:
         )
 
 
+def print_optimizers() -> None:
+    print_table(
+        "optimizers",
+        ("lib", "native", "matched", "space", "bounds"),
+        ((lib, o["native"], o["matched"], o["space"], o["bounds"]) for lib, o in OPTIMIZERS.items()),
+    )
+
+
 def main(argv: list[str]) -> int:
     if "--reprint" in argv:
         print_tables(read_rows(RESULTS))
@@ -103,6 +113,8 @@ def main(argv: list[str]) -> int:
             path = write_case(dataset, split, protocol)
             print(f"# {path.name}", flush=True)
             for lib in libs:
+                if "--timeline" in argv:
+                    harness.TIMELINE = (OUT / "timeline", f"{dataset}_s{split}_{protocol}_{lib}")
                 row = RUNNERS[lib](path)
                 row.setdefault("lib", lib)
                 row.setdefault("name", f"{dataset}_s{split}")
@@ -115,7 +127,9 @@ def main(argv: list[str]) -> int:
                     flush=True,
                 )
     write_json(RESULTS, rows)
+    write_json(OUT / "meta.json", meta())
     print_tables(rows)
+    print_optimizers()
     return 0
 
 
