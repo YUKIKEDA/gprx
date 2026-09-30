@@ -209,6 +209,13 @@ def curve(name: str, protocol: str, out: Path) -> Path | None:
         return None
     data = CURVES[name]()
     grid = data.x_grid.ravel()
+    expected = grid.shape[0] + (0 if data.x_test is None else data.x_test.shape[0])
+    stale = [r["lib"] for r in rows if len(r["pred_mean"]) != expected]
+    if stale:  # measured with another grid: re-run before plotting
+        print(f"curve {name}: {stale} were measured on a different grid; skipped", file=sys.stderr)
+    rows = [r for r in rows if len(r["pred_mean"]) == expected]
+    if not rows:
+        return None
     fig, axes = plt.subplots(1, len(rows), figsize=(max(2.6 * len(rows), 6.6), 3.0), squeeze=False, sharey=True)
     for ax, row in zip(axes[0], rows):
         _style_axes(ax)
