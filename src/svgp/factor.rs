@@ -271,7 +271,7 @@ pub(crate) fn svgp_neg_elbo<T: KernelScalar>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn svgp_predict<M: crate::math::KernelMath, P: ModelPrecision + SvgpMean>(
+pub(crate) fn svgp_predict<M: crate::math::KernelMath, P: ModelPrecision>(
     kernel: &KernelSpec,
     z_obs: &[f64],
     k_mm_l: MatRef<'_, P::Storage>,
@@ -352,20 +352,8 @@ where
     Ok(out)
 }
 
-/// Mean from the storage triangular solve, or a refined `f64` solve for mixed precision.
-pub trait SvgpMean: ModelPrecision {
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        z_obs: &[f64],
-        query: &[f64],
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        rhs: &[Self::Storage],
-        q_mean: &[f64],
-    ) -> Result<Self::Refine, GprError>;
-}
-
-fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
+/// Svgp mean: storage `L⁻¹ k_*` dotted with the variational mean.
+pub(crate) fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
     let mut sum = T::from_f64(0.0);
     for (weight, mean) in solved.iter().zip(q_mean.iter()) {
         sum += *weight * T::from_f64(*mean);
@@ -373,101 +361,65 @@ fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
     sum
 }
 
-impl SvgpMean for crate::precision::DoublePrecision {
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
-        _z_obs: &[f64],
-        _query: &[f64],
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        rhs: &[Self::Storage],
-        q_mean: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        let _ = (k_mm_l, rhs);
-        Ok(storage_q_dot(solved, q_mean))
-    }
+/// `L v = b` with `L` lower-triangular: refined through the stored `f32` `L`
+/// against an `f64` reference `(L₆₄, b₆₄)`, which is also the fallback.
+struct TriangularSystem<'a> {
+    l: MatRef<'a, f32>,
+    l64: MatRef<'a, f64>,
+    rhs64: &'a [f64],
 }
 
-impl SvgpMean for crate::precision::SinglePrecision {
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
-        _z_obs: &[f64],
-        _query: &[f64],
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        rhs: &[Self::Storage],
-        q_mean: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        let _ = (k_mm_l, rhs);
-        Ok(storage_q_dot(solved, q_mean))
+impl crate::precision::RefineSystem for TriangularSystem<'_> {
+    fn rhs(&self) -> &[f64] {
+        self.rhs64
     }
-}
 
-fn refine_triangular(
-    l: MatRef<'_, f32>,
-    solved: &[f32],
-    _rhs: &[f32],
-    l64: MatRef<'_, f64>,
-    rhs64: &[f64],
-) -> Vec<f64> {
-    let m = solved.len();
-    let mut v: Vec<f64> = solved.iter().map(|value| f64::from(*value)).collect();
-    let tol = 10.0 * m as f64 * f64::EPSILON;
-    let mut prev: Option<f64> = None;
-    let mut streak = 0usize;
-    for _ in 0..10 {
-        let mut r = vec![0.0; m];
+    fn residual(&self, v: &[f64], r: &mut [f64]) -> Result<f64, GprError> {
         let mut l_inf = 0.0f64;
-        for i in 0..m {
+        for (i, (ri, &bi)) in r.iter_mut().zip(self.rhs64).enumerate() {
             let mut row = 0.0;
             let mut sum = 0.0;
-            for j in 0..=i {
-                let lij = f64::from(l[(i, j)]);
+            for (j, &vj) in v.iter().enumerate().take(i + 1) {
+                let lij = f64::from(self.l[(i, j)]);
                 row += lij.abs();
-                sum += lij * v[j];
+                sum += lij * vj;
             }
             l_inf = l_inf.max(row);
-            r[i] = rhs64[i] - sum;
+            *ri = bi - sum;
         }
-        let r_inf = r.iter().fold(0.0f64, |acc, value| acc.max(value.abs()));
-        let v_inf = v.iter().fold(0.0f64, |acc, value| acc.max(value.abs()));
-        let b_inf = rhs64.iter().fold(0.0f64, |acc, value| acc.max(value.abs()));
-        let denom = l_inf * v_inf + b_inf;
-        if denom > 0.0 && r_inf / denom < tol {
-            return v;
-        }
-        if let Some(prev_r) = prev {
-            let ratio = if prev_r > 0.0 { r_inf / prev_r } else { 0.0 };
-            if ratio > 0.9 {
-                streak += 1;
-                if streak >= 2 {
-                    return forward_substitute(l64, rhs64);
-                }
-            } else {
-                streak = 0;
-            }
-        }
-        prev = Some(r_inf);
+        Ok(l_inf)
+    }
+
+    fn correct(&self, r: &[f64], v: &mut [f64]) {
         let r32: Vec<f32> = r.iter().map(|value| *value as f32).collect();
-        let delta = forward_substitute(l, &r32);
-        for i in 0..m {
-            v[i] += f64::from(delta[i]);
+        let delta = forward_substitute(self.l, &r32);
+        for (slot, step) in v.iter_mut().zip(delta) {
+            *slot += f64::from(step);
         }
     }
-    forward_substitute(l64, rhs64)
+
+    fn fallback(&self) -> Result<Vec<f64>, GprError> {
+        Ok(forward_substitute(self.l64, self.rhs64))
+    }
 }
 
-impl SvgpMean for crate::precision::MixedPrecision<crate::precision::PromoteStorage> {
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
-        _z_obs: &[f64],
-        _query: &[f64],
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        rhs: &[Self::Storage],
-        q_mean: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        let m = solved.len();
+/// Svgp mixed-precision mean: `v = L⁻¹ k_*` refined in `f64`, dotted with `q_mean`.
+///
+/// [`PromoteStorage`](crate::precision::PromoteStorage) refines against the
+/// stored `f32` `L` and `k_*` promoted to `f64`;
+/// [`ReevaluateKernel`](crate::precision::ReevaluateKernel) against `K_mm` and
+/// `k_*` evaluated and factored in `f64`.
+pub(crate) fn refined_mean<M: crate::math::KernelMath, R: crate::precision::ResidualFormula>(
+    kernel: &KernelSpec,
+    z_obs: &[f64],
+    query: &[f64],
+    k_mm_l: MatRef<'_, f32>,
+    solved: &[f32],
+    rhs: &[f32],
+    q_mean: &[f64],
+) -> Result<f64, GprError> {
+    let m = solved.len();
+    let (l64, rhs64) = if R::READS_STORAGE {
         let mut l64 = Mat::<f64>::zeros(m, m);
         let mut rhs64 = vec![0.0; m];
         for i in 0..m {
@@ -476,27 +428,8 @@ impl SvgpMean for crate::precision::MixedPrecision<crate::precision::PromoteStor
                 l64[(i, j)] = k_mm_l[(i, j)].to_f64();
             }
         }
-        let v = refine_triangular(k_mm_l, solved, rhs, l64.as_ref(), &rhs64);
-        let mut sum = 0.0;
-        for (weight, mean) in v.iter().zip(q_mean.iter()) {
-            sum += *weight * *mean;
-        }
-        Ok(sum)
-    }
-}
-
-impl SvgpMean for crate::precision::MixedPrecision<crate::precision::ReevaluateKernel> {
-    fn mean_from_factor<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
-        z_obs: &[f64],
-        query: &[f64],
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        rhs: &[Self::Storage],
-        q_mean: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        let _ = rhs;
-        let m = solved.len();
+        (l64, rhs64)
+    } else {
         let d = query.len();
         let compiled = kernel.compile();
         let z64 = pack_points(z_obs, m, d);
@@ -518,15 +451,20 @@ impl SvgpMean for crate::precision::MixedPrecision<crate::precision::ReevaluateK
             CholeskyStage::Predict,
         )?;
         let k_star = kernel_cross::<M, _>(&compiled, z64.as_ref(), q64.as_ref())?;
-        let l64 = k_mm;
-        let rhs64: Vec<f64> = (0..m).map(|i| k_star[(i, 0)]).collect();
-        let v = refine_triangular(k_mm_l, solved, solved, l64.as_ref(), &rhs64);
-        let mut sum = 0.0;
-        for (weight, mean) in v.iter().zip(q_mean.iter()) {
-            sum += *weight * *mean;
-        }
-        Ok(sum)
+        (k_mm, (0..m).map(|i| k_star[(i, 0)]).collect())
+    };
+    let system = TriangularSystem {
+        l: k_mm_l,
+        l64: l64.as_ref(),
+        rhs64: &rhs64,
+    };
+    let start = solved.iter().map(|value| f64::from(*value)).collect();
+    let v = crate::precision::refine(&system, start)?;
+    let mut sum = 0.0;
+    for (weight, mean) in v.iter().zip(q_mean.iter()) {
+        sum += *weight * *mean;
     }
+    Ok(sum)
 }
 
 pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(

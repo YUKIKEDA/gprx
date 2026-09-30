@@ -83,16 +83,6 @@ pub enum GprError {
     /// A matrix that must be positive definite (or semidefinite) is not.
     #[error("matrix is not positive semidefinite")]
     NonPositiveDefiniteMatrix,
-    /// Mixed-precision iterative refinement did not meet the residual tolerance.
-    #[error(
-        "mixed-precision iterative refinement did not converge after {iterations} iterations (residual norm={residual_norm})"
-    )]
-    RefinementNotConverged {
-        /// Number of refinement iterations performed.
-        iterations: usize,
-        /// Residual norm at termination.
-        residual_norm: f64,
-    },
     /// The kernel does not implement `grad_wrt_coord_dim`.
     #[error(
         "this kernel term does not implement Sparse GPR coordinate derivatives (grad_wrt_coord_dim)"
