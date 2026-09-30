@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use faer::{Mat, MatMut, MatRef};
 
+use crate::data::{pack_storage, validate_query};
 use crate::error::GprError;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
@@ -24,7 +25,6 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::QueryWorkspace;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::factor::{pack_storage, require_param_len, validate_query};
 use super::{
     AllocWorkspace, DistanceCacheSlot, FittedGpr, Gpr, JitterPolicy, PointId, RetainCholesky,
 };
@@ -739,7 +739,7 @@ where
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
-        require_param_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         self.kernel.get_params(&mut out[..n_kernel])?;
         self.likelihood.get_params(&mut out[n_kernel..])
     }

@@ -2,14 +2,12 @@
 
 use std::fmt;
 
-use super::{
-    Transform, UnfittedTransform, column_major_len, require_finite, require_len, require_nonempty,
-};
+use super::{Transform, UnfittedTransform};
 use crate::error::GprError;
 
 fn require_pack(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
-    let expected = column_major_len(n_rows, n_cols)?;
-    require_len(x, expected)
+    let expected = crate::data::column_major_len(n_rows, n_cols)?;
+    crate::data::require_count(x.len(), expected, "values")
 }
 
 fn require_column_count(n_cols: usize, expected: usize) -> Result<(), GprError> {
@@ -95,7 +93,7 @@ impl ColumnwiseInput {
         n_cols: usize,
     ) -> Result<FittedColumnwiseInput, GprError> {
         require_pack(x, n_rows, n_cols)?;
-        require_finite(x)?;
+        crate::data::require_finite(x)?;
         require_column_count(n_cols, self.maps.len())?;
         let mut fitted = Vec::with_capacity(self.maps.len());
         for (col, map) in self.maps.into_iter().enumerate() {
@@ -194,9 +192,12 @@ impl fmt::Debug for FittedColumnwiseInput {
 impl Transform for FittedColumnwiseInput {
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
         require_column_count(n_cols, self.maps.len())?;
-        require_nonempty(n_rows)?;
-        require_len(x, n_rows * n_cols)?;
-        require_finite(x)?;
+        crate::data::require_count(
+            x.len(),
+            crate::data::column_major_len(n_rows, n_cols)?,
+            "values",
+        )?;
+        crate::data::require_finite(x)?;
         for (col, map) in self.maps.iter().enumerate() {
             let start = col * n_rows;
             map.apply(&mut x[start..start + n_rows], n_rows, 1)?;
@@ -216,8 +217,7 @@ impl Transform for FittedColumnwiseInput {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColumnwiseInput, FittedColumnwiseInput, Transform, UnfittedTransform, require_finite,
-        require_pack,
+        ColumnwiseInput, FittedColumnwiseInput, Transform, UnfittedTransform, require_pack,
     };
     use crate::error::GprError;
     use crate::transform::{IdentityInput, MinMaxInput, StandardizeInput};
@@ -241,7 +241,7 @@ mod tests {
     impl TimesTwo {
         fn fit(self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<Self, GprError> {
             require_pack(x, n_rows, n_cols)?;
-            require_finite(x)?;
+            crate::data::require_finite(x)?;
             Ok(self)
         }
     }
@@ -268,7 +268,7 @@ mod tests {
     impl Transform for TimesTwo {
         fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
             require_pack(x, n_rows, n_cols)?;
-            require_finite(x)?;
+            crate::data::require_finite(x)?;
             for value in x {
                 *value *= 2.0;
             }

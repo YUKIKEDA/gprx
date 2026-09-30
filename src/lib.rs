@@ -39,6 +39,7 @@
 //! # }
 //! ```
 
+mod data;
 mod error;
 mod gpr;
 pub mod kernel;

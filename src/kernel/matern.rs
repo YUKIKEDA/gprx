@@ -1,9 +1,7 @@
 //! Isotropic Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::{
-    Triangle, expect_one_param, finite_dist, write_dense, write_square_from_coords, write_triangle,
-};
+use super::{Triangle, finite_dist, write_dense, write_square_from_coords, write_triangle};
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
@@ -131,7 +129,7 @@ impl MaternKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is not length 1.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        expect_one_param(out.len(), "Matern")?;
+        crate::data::require_count(out.len(), 1, "Matern parameter")?;
         out[0] = self.lengthscale.ln();
         Ok(())
     }
@@ -143,7 +141,7 @@ impl MaternKernel {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is not length 1
     /// or if the new `θ` is invalid.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        expect_one_param(params.len(), "Matern")?;
+        crate::data::require_count(params.len(), 1, "Matern parameter")?;
         let log_lengthscale = validate_log_lengthscale(params[0])?;
         self.lengthscale = BoundedParam::new(log_lengthscale.exp(), self.lengthscale.interval())?;
         Ok(())

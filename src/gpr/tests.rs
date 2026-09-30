@@ -1,6 +1,7 @@
 use super::{FittedGpr, Gpr};
+use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::gpr::factor::{FactorPolicy, factor_written_k_with_policy, pack_points};
+use crate::gpr::factor::{FactorPolicy, factor_written_k_with_policy};
 use crate::gpr::{
     AdaptiveJitter, CachedDistances, DistanceCacheSlot, FixedJitter, JitterPolicy, NoDistanceCache,
     PredictOptions, Prediction, PredictiveCovariance, RetainCholesky, ReuseCholesky,

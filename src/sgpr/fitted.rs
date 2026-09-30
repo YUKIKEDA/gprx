@@ -7,7 +7,8 @@ use faer::Mat;
 use faer::MatRef;
 
 use crate::error::GprError;
-use crate::gpr::factor::{require_param_len, write_params};
+use crate::param::write_params;
+
 use crate::kernel::{CompiledKernel, GramKernel, KernelScalar, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
@@ -129,7 +130,7 @@ where
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        require_param_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         let n_theta = self.kernel.num_params() + self.likelihood.num_params();
         write_params(&self.kernel, &self.likelihood, &mut out[..n_theta])?;
         if I::z_params(self.m, self.d) > 0 {
@@ -183,7 +184,7 @@ where
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
         let n_theta = n_kernel + self.likelihood.num_params();
-        require_param_len(params.len(), self.num_params())?;
+        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         if self.same_stored_params(params)? {
             return Ok(());
         }
@@ -280,8 +281,8 @@ where
         P: crate::precision::GpScalar,
     {
         let n_params = self.num_params();
-        require_param_len(params.len(), n_params)?;
-        require_param_len(out.len(), n_params)?;
+        crate::data::require_count(params.len(), n_params, "parameters")?;
+        crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let value = self.neg_log_marginal_likelihood()?;
         let include_z = I::z_params(self.m, self.d) > 0;
@@ -331,8 +332,8 @@ where
         P: crate::precision::GpScalar,
     {
         let n_params = self.num_params();
-        require_param_len(params.len(), n_params)?;
-        require_param_len(out.len(), n_params * n_params)?;
+        crate::data::require_count(params.len(), n_params, "parameters")?;
+        crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         self.set_params(params)?;
         let include_z = I::z_params(self.m, self.d) > 0;
         if !include_z && self.inducing_equals_training() {

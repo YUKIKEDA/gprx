@@ -2,7 +2,7 @@
 
 use std::any::Any;
 
-use super::{population_std, require_finite, require_nonempty};
+use super::population_std;
 use crate::error::GprError;
 
 /// Unfitted target map. [`Self::fit`] consumes it and returns a
@@ -132,7 +132,7 @@ impl IdentityTarget {
     ///
     /// Returns [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
     pub fn fit(self, y: &[f64]) -> Result<Self, GprError> {
-        require_finite(y)?;
+        crate::data::require_finite(y)?;
         Ok(self)
     }
 }
@@ -153,15 +153,15 @@ impl UnfittedTarget for IdentityTarget {
 
 impl TargetTransform for IdentityTarget {
     fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
-        require_finite(y)
+        crate::data::require_finite(y)
     }
 
     fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
-        require_finite(mean)
+        crate::data::require_finite(mean)
     }
 
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
-        require_finite(var)
+        crate::data::require_finite(var)
     }
 
     fn clone_box(&self) -> Box<dyn TargetTransform> {
@@ -209,8 +209,8 @@ impl StandardizeTarget {
     /// Returns [`GprError::EmptyInput`] when `y` is empty, or
     /// [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
     pub fn fit(self, y: &[f64]) -> Result<FittedStandardizeTarget, GprError> {
-        require_nonempty(y.len())?;
-        require_finite(y)?;
+        crate::data::require_nonempty(y.len())?;
+        crate::data::require_finite(y)?;
         let n = y.len() as f64;
         let mean = y.iter().sum::<f64>() / n;
         Ok(FittedStandardizeTarget {
@@ -266,7 +266,7 @@ impl FittedStandardizeTarget {
 
 impl TargetTransform for FittedStandardizeTarget {
     fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
-        require_finite(y)?;
+        crate::data::require_finite(y)?;
         let mean = self.mean;
         let std = self.std;
         for value in y {
@@ -276,7 +276,7 @@ impl TargetTransform for FittedStandardizeTarget {
     }
 
     fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
-        require_finite(mean)?;
+        crate::data::require_finite(mean)?;
         let loc = self.mean;
         let std = self.std;
         for value in mean {
@@ -286,7 +286,7 @@ impl TargetTransform for FittedStandardizeTarget {
     }
 
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
-        require_finite(var)?;
+        crate::data::require_finite(var)?;
         let scale = self.std * self.std;
         for value in var {
             *value *= scale;
@@ -362,8 +362,8 @@ impl MinMaxTarget {
     /// Returns [`GprError::EmptyInput`] when `y` is empty, or
     /// [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
     pub fn fit(self, y: &[f64]) -> Result<FittedMinMaxTarget, GprError> {
-        require_nonempty(y.len())?;
-        require_finite(y)?;
+        crate::data::require_nonempty(y.len())?;
+        crate::data::require_finite(y)?;
         let mut min = y[0];
         let mut max = y[0];
         for &value in &y[1..] {
@@ -467,7 +467,7 @@ impl FittedMinMaxTarget {
 
 impl TargetTransform for FittedMinMaxTarget {
     fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
-        require_finite(y)?;
+        crate::data::require_finite(y)?;
         let min = self.data_min;
         let span = self.data_span();
         let lo = self.range_lo;
@@ -479,7 +479,7 @@ impl TargetTransform for FittedMinMaxTarget {
     }
 
     fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
-        require_finite(mean)?;
+        crate::data::require_finite(mean)?;
         let min = self.data_min;
         let span = self.data_span();
         let lo = self.range_lo;
@@ -491,7 +491,7 @@ impl TargetTransform for FittedMinMaxTarget {
     }
 
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
-        require_finite(var)?;
+        crate::data::require_finite(var)?;
         let scale = self.data_span() / self.out_span();
         let scale2 = scale * scale;
         for value in var {

@@ -154,7 +154,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns [`GprError::InvalidHyperparameter`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        require_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "kernel parameters")?;
         let mut offset = 0;
         self.write_params(out, &mut offset)
     }
@@ -166,7 +166,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns [`GprError::InvalidHyperparameter`] if `params` is the wrong
     /// length or a leaf rejects its slice.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
-        require_len(params.len(), self.num_params())?;
+        crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;
         let mut next = self.clone();
         let mut offset = 0;
         next.apply_params(params, &mut offset)?;
@@ -526,16 +526,6 @@ fn flatten_product<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKer
             flatten_product(right, out);
         }
         other => out.push(CompiledKernel::<T>::from_spec(other)),
-    }
-}
-
-fn require_len(actual: usize, expected: usize) -> Result<(), GprError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(GprError::InvalidHyperparameter {
-            reason: format!("expected {expected} kernel parameters, got {actual}"),
-        })
     }
 }
 

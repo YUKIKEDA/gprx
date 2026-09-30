@@ -3,7 +3,8 @@
 use std::marker::PhantomData;
 
 use crate::error::GprError;
-use crate::gpr::factor::{require_param_len, write_params};
+use crate::param::write_params;
+
 use crate::kernel::{CompiledKernel, GramKernel, KernelSpec};
 use crate::likelihood::GaussianLikelihood;
 use crate::objective::SgprObjective;
@@ -208,7 +209,7 @@ impl<O, I, M, P> Sgpr<O, I, M, P> {
     /// after both writes succeed.
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
-        require_param_len(params.len(), self.num_params())?;
+        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let mut kernel = self.kernel.clone();
         kernel.set_params(&params[..n_kernel])?;
         let mut likelihood = self.likelihood;

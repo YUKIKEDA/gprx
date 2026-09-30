@@ -6,6 +6,7 @@ use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
 
+use crate::data::{pack_points, pack_storage, validate_query, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::ScalarOps;
 use crate::kernel::{
@@ -22,6 +23,7 @@ use crate::objective::GprObjective;
 use crate::online::OnlineWorkspace;
 use crate::optimizer::{Fixed, FullRecompute, OptResult, Optimizer, PoleRecompute};
 use crate::param::Interval;
+use crate::param::write_params;
 use crate::persist::{self, PersistedModel};
 use crate::precision::GpScalar;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
@@ -32,9 +34,8 @@ use super::super::online::OnlineGpr;
 
 use super::super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
-    neg_mll_from_factor, pack_points, pack_storage, require_param_len, validate_query,
-    validate_training, write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
-    write_kernel_hess_from_coords, write_params,
+    neg_mll_from_factor, write_kernel_grad, write_kernel_grad_from_coords, write_kernel_hess,
+    write_kernel_hess_from_coords,
 };
 use super::{AllocWorkspace, DistanceCacheSlot, FitBuffers, JitterPolicy, RetainCholesky};
 use super::{FittedGpr, Gpr};
@@ -473,7 +474,7 @@ where
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
-        require_param_len(out.len(), self.num_params())?;
+        crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         self.kernel.get_params(&mut out[..n_kernel])?;
         self.likelihood.get_params(&mut out[n_kernel..])
     }
@@ -527,7 +528,7 @@ where
     /// ```
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
-        require_param_len(params.len(), self.num_params())?;
+        crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let workspace = self.workspace.clone();
         let alpha = self.alpha.clone();
@@ -655,8 +656,8 @@ where
     ) -> Result<f64, GprError> {
         let n_kernel = self.kernel.num_params();
         let n_params = self.num_params();
-        require_param_len(params.len(), n_params)?;
-        require_param_len(out.len(), n_params)?;
+        crate::data::require_count(params.len(), n_params, "parameters")?;
+        crate::data::require_count(out.len(), n_params, "parameters")?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
@@ -702,7 +703,7 @@ where
     ) -> Result<f64, GprError> {
         let n_kernel = self.kernel.num_params();
         let n_params = self.num_params();
-        require_param_len(params.len(), n_params)?;
+        crate::data::require_count(params.len(), n_params, "parameters")?;
         if let Some(changed) = indices {
             require_change_indices(changed, n_params)?;
         }
@@ -821,8 +822,8 @@ where
     ) -> Result<(), GprError> {
         let n_kernel = self.kernel.num_params();
         let n_params = self.num_params();
-        require_param_len(params.len(), n_params)?;
-        require_param_len(out.len(), n_params * n_params)?;
+        crate::data::require_count(params.len(), n_params, "parameters")?;
+        crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         let (kernel, compiled, likelihood) = self.prepared_params(params, n_kernel)?;
         let n = self.n;
         let x = P::Storage::storage_cols(self.x.as_ref(), &mut self.x_cast);
