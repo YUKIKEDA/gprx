@@ -30,7 +30,9 @@ pub enum BoundaryPolicy {
 /// inverse CDF; worse points follow the Metropolis rule. Temperature follows
 /// Ingber’s dimension-normalized exponential schedule. The first
 /// evaluation and each restart use [`Objective::value`]. Each coordinate
-/// step uses [`Objective::value_at_changes`].
+/// step uses [`Objective::value_at_changes`]. A proposal the model cannot
+/// evaluate (not positive definite, not finite) is rejected like an infinite
+/// energy.
 ///
 /// References: Szu & Hartley (1987), “Fast simulated annealing”; Ingber
 /// (1989), “Very fast simulated re-annealing”.
@@ -232,7 +234,18 @@ fn anneal<P: Objective>(
             } else {
                 &changes[..]
             };
-            let proposed_energy = objective.value_at_changes(&proposed, changed)?;
+            // A proposal the model cannot evaluate (not positive definite, not
+            // finite) is rejected like an infinite energy; any other error is
+            // the caller's.
+            let proposed_energy = match objective.value_at_changes(&proposed, changed) {
+                Ok(value) => value,
+                Err(
+                    GprError::CholeskyFailed { .. }
+                    | GprError::NonFiniteKernelValue
+                    | GprError::NonPositiveDefiniteMatrix,
+                ) => f64::INFINITY,
+                Err(err) => return Err(err),
+            };
             reverted = Some(i);
             if !proposed_energy.is_finite() {
                 continue;
@@ -472,5 +485,37 @@ mod tests {
             .minimize(&mut obj, &[-1.0])
             .expect("fsa");
         assert!(result.value < start, "start={start}, best={}", result.value);
+    }
+    /// `x²` that cannot be evaluated (not positive definite) for `x > 0.5`.
+    struct Unevaluable;
+
+    impl Objective for Unevaluable {
+        fn num_params(&self) -> usize {
+            1
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            if params[0] > 0.5 {
+                return Err(GprError::NonPositiveDefiniteMatrix);
+            }
+            Ok(params[0] * params[0])
+        }
+    }
+
+    impl HasBounds for Unevaluable {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            out[0] = Interval::new(-2.0, 2.0).expect("finite");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_proposal_that_cannot_be_evaluated_is_rejected_not_fatal() {
+        let result = FastSimulatedAnnealing::new()
+            .with_seed(3)
+            .minimize(&mut Unevaluable, &[0.4])
+            .expect("annealing survives unevaluable proposals");
+        assert!(result.params[0] <= 0.5);
+        assert!(result.value <= 0.16 + 1e-12);
     }
 }
