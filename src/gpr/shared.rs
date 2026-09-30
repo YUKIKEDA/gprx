@@ -18,7 +18,7 @@ use crate::linalg::{
     log_det_from_l, mul_lower_vec,
 };
 use crate::param::write_params;
-use crate::precision::{GpScalar, StoredFactor, TrainSystem};
+use crate::precision::{GpScalar, InverseBuffers, StoredFactor, TrainSystem};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{QueryWorkspace, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
@@ -430,7 +430,12 @@ impl<P: GpScalar> GprCore<P> {
                 VarianceKind::Observation => latent + noise_s,
             };
         }
-        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut [])?;
+        P::inverse_mean_variance(
+            self.y_transform.as_ref(),
+            &mut mean,
+            &mut [],
+            &mut InverseBuffers::default(),
+        )?;
         let mut covariance = vec![P::Refine::from_f64(0.0); m * m];
         for col in 0..m {
             for row in 0..m {
@@ -526,7 +531,12 @@ impl<P: GpScalar> GprCore<P> {
                 VarianceKind::Latent => (obs - noise).max(0.0),
             });
         }
-        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut variance)?;
+        P::inverse_mean_variance(
+            self.y_transform.as_ref(),
+            &mut mean,
+            &mut variance,
+            &mut InverseBuffers::default(),
+        )?;
         Ok(Prediction {
             mean,
             variance,
@@ -606,7 +616,12 @@ impl<P: GpScalar> GprCore<P> {
                 VarianceKind::Latent => (obs - noise).max(0.0),
             });
         }
-        P::inverse_mean_variance(self.y_transform.as_ref(), &mut mean, &mut variance)?;
+        P::inverse_mean_variance(
+            self.y_transform.as_ref(),
+            &mut mean,
+            &mut variance,
+            &mut InverseBuffers::default(),
+        )?;
         Ok(Prediction {
             mean,
             variance,
@@ -704,7 +719,12 @@ fn write_moments<P: GpScalar>(
         };
         out.variance[col] = P::Refine::from_f64(var_s.to_f64());
     }
-    P::inverse_mean_variance(core.y_transform, &mut out.mean, &mut out.variance)?;
+    P::inverse_mean_variance(
+        core.y_transform,
+        &mut out.mean,
+        &mut out.variance,
+        &mut InverseBuffers::default(),
+    )?;
     out.variance_kind = options.variance_kind;
     Ok(())
 }

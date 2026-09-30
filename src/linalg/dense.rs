@@ -189,16 +189,6 @@ pub(crate) fn round_mat<T: KernelScalar>(src: MatRef<'_, f64>) -> Mat<T> {
     out
 }
 
-pub(crate) fn promote_mat<T: KernelScalar>(src: MatRef<'_, T>) -> Mat<f64> {
-    let mut out = Mat::<f64>::zeros(src.nrows(), src.ncols());
-    for col in 0..src.ncols() {
-        for row in 0..src.nrows() {
-            out[(row, col)] = src[(row, col)].to_f64();
-        }
-    }
-    out
-}
-
 pub(crate) fn gram_aat_plus_noise<T: KernelScalar>(a: MatRef<'_, T>, noise: f64) -> Mat<T> {
     let m = a.nrows();
     let mut b = Mat::zeros(m, m);

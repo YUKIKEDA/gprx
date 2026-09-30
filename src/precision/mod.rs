@@ -168,10 +168,14 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     ) -> Result<(), GprError>;
 
     /// Maps predicted mean and variance back through the target transform.
+    ///
+    /// A storage-scalar `Refine` (`f32`) maps through `f64` copies kept in
+    /// `buffers`, so a caller that keeps them allocates nothing.
     fn inverse_mean_variance(
         transform: &dyn TargetTransform,
         mean: &mut [Self::Refine],
         variance: &mut [Self::Refine],
+        buffers: &mut InverseBuffers,
     ) -> Result<(), GprError>;
 
     /// Maps a predicted covariance back through the target transform.
@@ -210,16 +214,39 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
         reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError>;
 
-    /// Svgp: mean from the storage triangular solve (refined for mixed).
+    /// Svgp: the `f64` system a refining precision refines every query mean
+    /// against, built once per prediction: `l64`, the `f64` lower factor of
+    /// `K_mm`, and `k64`, `K(Z, X*)` in `f64` (`m × q`). A precision that
+    /// does not refine leaves both untouched.
     ///
-    /// `reference` returns the `f64` factor of `K_mm` and `k_*`; only a
-    /// refining precision calls it.
+    /// [`PromoteStorage`] promotes the storage `k_mm_l` and `k_zs`;
+    /// [`ReevaluateKernel`] calls `reevaluate`, which factors and evaluates
+    /// them again in `f64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `reevaluate`.
+    fn svgp_mean_reference(
+        k_mm_l: MatRef<'_, Self::Storage>,
+        k_zs: MatRef<'_, Self::Storage>,
+        reevaluate: &mut Reevaluate<'_>,
+        l64: &mut Mat<f64>,
+        k64: &mut Mat<f64>,
+    ) -> Result<(), GprError>;
+
+    /// Svgp: mean from the storage triangular solve `solved = L_mm⁻¹ k_*`,
+    /// refined for mixed against `l64` and `k64_col`, this query's column of
+    /// the [`Self::svgp_mean_reference`] system.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the refinement fallback.
     fn mean_from_factor(
         k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
-        rhs: &[Self::Storage],
         q_mean: &[f64],
-        reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
+        l64: MatRef<'_, f64>,
+        k64_col: &[f64],
     ) -> Result<Self::Refine, GprError>;
 }
 
@@ -244,6 +271,17 @@ fn storage_means<P: ModelPrecision>(
         }
         *slot = P::Refine::from_f64(sum);
     }
+}
+
+/// Writes the `f64` factor of `K_mm` and `K(Z, X*)` in `f64` into its two
+/// arguments ([`ModelPrecision::svgp_mean_reference`]).
+pub type Reevaluate<'a> = dyn FnMut(&mut Mat<f64>, &mut Mat<f64>) -> Result<(), GprError> + 'a;
+
+/// `f64` copies an `f32` prediction maps through the target transform.
+#[derive(Debug, Default)]
+pub struct InverseBuffers {
+    mean64: Vec<f64>,
+    variance64: Vec<f64>,
 }
 
 fn inverse_f64_mean_variance(
@@ -287,6 +325,7 @@ impl ModelPrecision for DoublePrecision {
         transform: &dyn TargetTransform,
         mean: &mut [Self::Refine],
         variance: &mut [Self::Refine],
+        _buffers: &mut InverseBuffers,
     ) -> Result<(), GprError> {
         inverse_f64_mean_variance(transform, mean, variance)
     }
@@ -335,12 +374,22 @@ impl ModelPrecision for DoublePrecision {
         Ok(out)
     }
 
+    fn svgp_mean_reference(
+        _k_mm_l: MatRef<'_, Self::Storage>,
+        _k_zs: MatRef<'_, Self::Storage>,
+        _reevaluate: &mut Reevaluate<'_>,
+        _l64: &mut Mat<f64>,
+        _k64: &mut Mat<f64>,
+    ) -> Result<(), GprError> {
+        Ok(())
+    }
+
     fn mean_from_factor(
         _k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
-        _rhs: &[Self::Storage],
         q_mean: &[f64],
-        _reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
+        _l64: MatRef<'_, f64>,
+        _k64_col: &[f64],
     ) -> Result<Self::Refine, GprError> {
         Ok(sparse::storage_q_dot(solved, q_mean))
     }
@@ -378,15 +427,19 @@ impl ModelPrecision for SinglePrecision {
         transform: &dyn TargetTransform,
         mean: &mut [Self::Refine],
         variance: &mut [Self::Refine],
+        buffers: &mut InverseBuffers,
     ) -> Result<(), GprError> {
-        let mut mean64: Vec<f64> = mean.iter().copied().map(f32::to_f64).collect();
-        let mut var64: Vec<f64> = variance.iter().copied().map(f32::to_f64).collect();
-        inverse_f64_mean_variance(transform, &mut mean64, &mut var64)?;
-        for (slot, value) in mean.iter_mut().zip(mean64) {
-            *slot = f32::from_f64(value);
+        let InverseBuffers { mean64, variance64 } = buffers;
+        mean64.clear();
+        mean64.extend(mean.iter().copied().map(f32::to_f64));
+        variance64.clear();
+        variance64.extend(variance.iter().copied().map(f32::to_f64));
+        inverse_f64_mean_variance(transform, mean64, variance64)?;
+        for (slot, value) in mean.iter_mut().zip(mean64.iter()) {
+            *slot = f32::from_f64(*value);
         }
-        for (slot, value) in variance.iter_mut().zip(var64) {
-            *slot = f32::from_f64(value);
+        for (slot, value) in variance.iter_mut().zip(variance64.iter()) {
+            *slot = f32::from_f64(*value);
         }
         Ok(())
     }
@@ -433,12 +486,22 @@ impl ModelPrecision for SinglePrecision {
         Ok(out)
     }
 
+    fn svgp_mean_reference(
+        _k_mm_l: MatRef<'_, Self::Storage>,
+        _k_zs: MatRef<'_, Self::Storage>,
+        _reevaluate: &mut Reevaluate<'_>,
+        _l64: &mut Mat<f64>,
+        _k64: &mut Mat<f64>,
+    ) -> Result<(), GprError> {
+        Ok(())
+    }
+
     fn mean_from_factor(
         _k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
-        _rhs: &[Self::Storage],
         q_mean: &[f64],
-        _reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
+        _l64: MatRef<'_, f64>,
+        _k64_col: &[f64],
     ) -> Result<Self::Refine, GprError> {
         Ok(sparse::storage_q_dot(solved, q_mean))
     }
@@ -479,6 +542,7 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
         transform: &dyn TargetTransform,
         mean: &mut [Self::Refine],
         variance: &mut [Self::Refine],
+        _buffers: &mut InverseBuffers,
     ) -> Result<(), GprError> {
         inverse_f64_mean_variance(transform, mean, variance)
     }
@@ -514,14 +578,30 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
         sparse::refine_vfe_weights::<R>(a, b_l, w, y, noise, reference)
     }
 
+    fn svgp_mean_reference(
+        k_mm_l: MatRef<'_, Self::Storage>,
+        k_zs: MatRef<'_, Self::Storage>,
+        reevaluate: &mut Reevaluate<'_>,
+        l64: &mut Mat<f64>,
+        k64: &mut Mat<f64>,
+    ) -> Result<(), GprError> {
+        if R::READS_STORAGE {
+            sparse::promote_into(k_mm_l, l64, true);
+            sparse::promote_into(k_zs, k64, false);
+            Ok(())
+        } else {
+            reevaluate(l64, k64)
+        }
+    }
+
     fn mean_from_factor(
         k_mm_l: MatRef<'_, Self::Storage>,
         solved: &[Self::Storage],
-        rhs: &[Self::Storage],
         q_mean: &[f64],
-        reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
+        l64: MatRef<'_, f64>,
+        k64_col: &[f64],
     ) -> Result<Self::Refine, GprError> {
-        sparse::refine_svgp_mean::<R>(k_mm_l, solved, rhs, q_mean, reference)
+        sparse::refine_svgp_mean(k_mm_l, solved, q_mean, l64, k64_col)
     }
 }
 

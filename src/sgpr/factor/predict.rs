@@ -1,160 +1,252 @@
 //! VFE predictive mean and variance.
 
 use super::lit;
-use crate::data::{pack_points, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{KernelScalar, KernelSpec, Triangle};
-use crate::linalg::{
-    cholesky_lower_with_retries, llt_scratch, promote_mat, solve_llt, solve_lower,
-};
-use crate::policy::JitterPolicy;
-use crate::precision::ModelPrecision;
-use crate::sparse::KernelScratch;
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
+use crate::linalg::{cholesky_lower_with_backup, solve_lower};
+use crate::policy::{JitterPolicy, with_kernel_exp};
+use crate::precision::{DoublePrecision, ModelPrecision};
+use crate::sparse::{PredictBuffers, PredictScratch, SparseCore, pack_into, view};
 use crate::{PredictOptions, Prediction, VarianceKind};
 use faer::{Mat, MatRef};
 
+/// The fitted VFE system a prediction reads, in transformed units.
+pub(crate) struct VfeSystem<'a, P: ModelPrecision> {
+    pub(crate) kernel: &'a KernelSpec,
+    pub(crate) k_mm_jitter: JitterPolicy,
+    pub(crate) z: &'a [f64],
+    pub(crate) k_mm_l: MatRef<'a, P::Storage>,
+    pub(crate) b_l: MatRef<'a, P::Storage>,
+    pub(crate) predict_w: &'a [P::Refine],
+    pub(crate) noise: f64,
+    pub(crate) m: usize,
+    pub(crate) d: usize,
+}
+
+impl<'a, P: ModelPrecision> VfeSystem<'a, P> {
+    pub(crate) fn new(
+        core: &'a SparseCore,
+        k_mm_l: MatRef<'a, P::Storage>,
+        b_l: MatRef<'a, P::Storage>,
+        predict_w: &'a [P::Refine],
+    ) -> Self {
+        Self {
+            kernel: &core.kernel,
+            k_mm_jitter: core.jitter,
+            z: &core.z_train,
+            k_mm_l,
+            b_l,
+            predict_w,
+            noise: core.likelihood.noise_variance(),
+            m: core.m,
+            d: core.d,
+        }
+    }
+}
+
+/// Maps the queries `xs` (original coordinates) through the input
+/// transform, writes the diagonal VFE prediction into `out`, and maps it
+/// back through the target transform. After a warmup call with the same
+/// shapes, this allocates nothing.
+///
+/// # Errors
+///
+/// Returns the query errors of [`SparseCore::map_query_into`], or
+/// [`GprError::CholeskyFailed`] when a rounding storage cannot factor
+/// `K_mm` in `f64`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn vfe_predict<M: crate::math::KernelMath, P>(
-    kernel: &KernelSpec,
-    k_mm_jitter: JitterPolicy,
-    z_obs: &[f64],
-    k_mm_l: MatRef<'_, P::Storage>,
-    b_l: MatRef<'_, P::Storage>,
-    predict_w: &[P::Refine],
-    noise: f64,
-    m: usize,
-    d: usize,
+pub(crate) fn predict_vfe_into<P: ModelPrecision>(
+    core: &SparseCore,
+    sys: &VfeSystem<'_, P>,
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
     options: PredictOptions,
-) -> Result<Prediction<P::Refine>, GprError>
-where
-    P: ModelPrecision,
-{
-    let mut ks = KernelScratch::new();
-    let mut ks64 = KernelScratch::new();
-    if n_cols != d {
-        return Err(GprError::DimensionMismatch {
-            x_dim: n_cols,
-            expected_dim: d,
+    scratch: &mut PredictScratch<P::Storage>,
+    out: &mut Prediction<P::Refine>,
+) -> Result<(), GprError> {
+    let mut mapped = std::mem::take(&mut scratch.xs);
+    let result = core
+        .map_query_into(xs, n_rows, n_cols, &mut mapped)
+        .and_then(|()| {
+            with_kernel_exp!(core.math, M => vfe_predict_into::<M, P>(
+                sys, &mapped, n_rows, options, scratch, out
+            ))
         });
-    }
-    validate_query(xs, n_rows, n_cols)?;
+    scratch.xs = mapped;
+    result?;
+    core.inverse_prediction_in_place::<P>(out, &mut scratch.inverse)
+}
+
+/// Writes the diagonal VFE prediction at the transformed queries `xs`
+/// (`n_rows × d`, column-major) into `out`, in transformed units.
+///
+/// A rounding storage (`f32`) predicts in `f64`: `K_mm` factored again in
+/// `f64`, `B` and the weights promoted.
+pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
+    sys: &VfeSystem<'_, P>,
+    xs: &[f64],
+    n_rows: usize,
+    options: PredictOptions,
+    scratch: &mut PredictScratch<P::Storage>,
+    out: &mut Prediction<P::Refine>,
+) -> Result<(), GprError> {
+    let zero = P::Refine::from_f64(0.0);
+    out.mean.clear();
+    out.mean.resize(n_rows, zero);
+    out.variance.clear();
+    out.variance.resize(n_rows, zero);
+    out.variance_kind = options.variance_kind;
+    let (m, d) = (sys.m, sys.d);
+    let kind = options.variance_kind;
     if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let compiled64 = kernel.compile();
-        let z64 = pack_points(z_obs, m, d);
-        let mut k64 = Mat::<f64>::zeros(m, m);
-        ks64.gram::<M>(
-            &compiled64,
-            GramInputs::points(z64.as_ref()),
-            k64.as_mut(),
-            Triangle::Lower,
-        )?;
-        let mut chol_scratch = llt_scratch::<f64>(m);
-        cholesky_lower_with_retries(
-            &mut k64,
-            &mut chol_scratch,
-            k_mm_jitter.retry_jitters(),
+        let PredictScratch {
+            plan64,
+            f64: bufs,
+            k_mm64,
+            k_mm64_backup,
+            llt64,
+            b_l64,
+            w64,
+            ..
+        } = scratch;
+        let compiled = plan64.get(sys.kernel);
+        if k_mm64.nrows() != m || k_mm64.ncols() != m {
+            *k_mm64 = Mat::zeros(m, m);
+        }
+        {
+            let z64 = pack_into(&mut bufs.z, sys.z, m, d);
+            bufs.kernel.gram::<M>(
+                compiled,
+                GramInputs::points(z64.as_ref()),
+                k_mm64.as_mut(),
+                Triangle::Lower,
+            )?;
+        }
+        cholesky_lower_with_backup(
+            k_mm64,
+            k_mm64_backup,
+            PredictScratch::<P::Storage>::llt64(llt64, m),
+            sys.k_mm_jitter.retry_jitters(),
             CholeskyStage::Predict,
         )?;
-        let b64 = promote_mat(b_l);
-        let w64: Vec<f64> = predict_w.iter().map(|value| value.to_f64()).collect();
-        let pred = vfe_predict::<M, crate::precision::DoublePrecision>(
-            kernel,
-            k_mm_jitter,
-            z_obs,
-            k64.as_ref(),
-            b64.as_ref(),
-            &w64,
-            noise,
+        let mut b64 = view(b_l64, m, m);
+        for col in 0..m {
+            for row in 0..m {
+                b64[(row, col)] = sys.b_l[(row, col)].to_f64();
+            }
+        }
+        w64.clear();
+        w64.extend(sys.predict_w.iter().map(|value| value.to_f64()));
+        let w64 = w64.as_slice();
+        return vfe_latent::<M, f64>(
+            compiled,
+            bufs,
+            sys.z,
             m,
             d,
             xs,
             n_rows,
-            n_cols,
-            options,
-        )?;
-        return Ok(Prediction {
-            mean: pred
-                .mean
-                .iter()
-                .map(|value| P::Refine::from_f64(*value))
-                .collect(),
-            variance: pred
-                .variance
-                .iter()
-                .map(|value| P::Refine::from_f64(*value))
-                .collect(),
-            variance_kind: pred.variance_kind,
-        });
+            k_mm64.as_ref(),
+            b_l64.as_ref().submatrix(0, 0, m, m),
+            sys.noise,
+            |col, column, latent| {
+                let mean = <DoublePrecision as ModelPrecision>::mean_dot(column, w64);
+                out.mean[col] = P::Refine::from_f64(mean);
+                out.variance[col] = P::Refine::from_f64(variance(latent, sys.noise, kind));
+            },
+        );
     }
-    let compiled = kernel.compile_as::<P::Storage>();
-    let z64 = pack_points(z_obs, m, d);
-    let query64 = pack_points(xs, n_rows, n_cols);
-    let mut k_sz = if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let compiled64 = kernel.compile();
-        let cross = ks64.cross::<M>(&compiled64, z64.as_ref(), query64.as_ref())?;
-        let mut stored = Mat::<P::Storage>::zeros(m, n_rows);
-        for col in 0..cross.ncols() {
-            for row in 0..cross.nrows() {
-                stored[(row, col)] = P::Storage::from_f64(cross[(row, col)]);
-            }
-        }
-        stored
-    } else {
-        let mut z_cast = P::Storage::empty_cols();
-        let z_mat = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-        let mut q_cast = P::Storage::empty_cols();
-        let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
-        ks.cross::<M>(&compiled, z_mat, query_x)?
-    };
-    solve_lower(k_mm_l, k_sz.as_mut());
-    let mut kss = vec![lit::<P::Storage>(0.0); n_rows];
-    if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let compiled64 = kernel.compile();
-        let mut diag = vec![0.0f64; n_rows];
-        compiled64.fill_diag_points(query64.as_ref(), &mut diag)?;
-        for (slot, value) in kss.iter_mut().zip(diag) {
-            *slot = P::Storage::from_f64(value);
-        }
-    } else {
-        let mut q_cast = P::Storage::empty_cols();
-        let query_x = P::Storage::storage_cols(query64.as_ref(), &mut q_cast);
-        compiled.fill_diag_points(query_x, &mut kss)?;
+    let PredictScratch {
+        plan,
+        storage: bufs,
+        ..
+    } = scratch;
+    let compiled = plan.get(sys.kernel);
+    vfe_latent::<M, P::Storage>(
+        compiled,
+        bufs,
+        sys.z,
+        m,
+        d,
+        xs,
+        n_rows,
+        sys.k_mm_l,
+        sys.b_l,
+        sys.noise,
+        |col, column, latent| {
+            out.mean[col] = P::mean_dot(column, sys.predict_w);
+            out.variance[col] = P::Refine::from_f64(variance(latent.to_f64(), sys.noise, kind));
+        },
+    )
+}
+
+/// Latent or observation variance from the clamped latent variance.
+fn variance(latent: f64, noise: f64, kind: VarianceKind) -> f64 {
+    match kind {
+        VarianceKind::Latent => latent,
+        VarianceKind::Observation => latent + noise,
     }
-    let mut binv_astar = k_sz.clone();
-    solve_llt(b_l, binv_astar.as_mut());
-    let noise_s = lit::<P::Storage>(noise);
-    let zero = P::Refine::from_f64(0.0);
-    let mut out = Prediction {
-        mean: vec![zero; n_rows],
-        variance: vec![zero; n_rows],
-        variance_kind: options.variance_kind,
-    };
+}
+
+/// For each query column: `a* = L_mm⁻¹ k(Z, x*)` and the latent variance
+/// `k(x*, x*) − ‖a*‖² + σn² ‖L_B⁻¹ a*‖²` clamped at zero, passed to
+/// `write(col, a*, latent)`.
+#[allow(clippy::too_many_arguments)]
+fn vfe_latent<M: crate::math::KernelMath, S: KernelScalar>(
+    compiled: &CompiledKernel<S>,
+    bufs: &mut PredictBuffers<S>,
+    z: &[f64],
+    m: usize,
+    d: usize,
+    xs: &[f64],
+    n_rows: usize,
+    k_mm_l: MatRef<'_, S>,
+    b_l: MatRef<'_, S>,
+    noise: f64,
+    mut write: impl FnMut(usize, &[S], S),
+) -> Result<(), GprError> {
+    let PredictBuffers {
+        kernel,
+        z: z_buf,
+        query,
+        k_sz,
+        solved,
+        kss,
+        column,
+        ..
+    } = bufs;
+    let z_mat = pack_into(z_buf, z, m, d);
+    let q_mat = pack_into(query, xs, n_rows, d);
+    let mut a_star = view(k_sz, m, n_rows);
+    kernel.cross_into::<M>(compiled, z_mat.as_ref(), q_mat.as_ref(), a_star.as_mut())?;
+    solve_lower(k_mm_l, a_star.as_mut());
+    kss.clear();
+    kss.resize(n_rows, lit::<S>(0.0));
+    compiled.fill_diag_points(q_mat.as_ref(), kss)?;
+    let mut b_solved = view(solved, m, n_rows);
+    b_solved.copy_from(a_star.as_ref());
+    solve_lower(b_l, b_solved.as_mut());
+    let noise_s = lit::<S>(noise);
+    column.clear();
+    column.resize(m, lit::<S>(0.0));
     for col in 0..n_rows {
-        let mut column = vec![lit::<P::Storage>(0.0); m];
-        let mut a_norm = lit::<P::Storage>(0.0);
-        let mut binv_norm = lit::<P::Storage>(0.0);
+        let mut a_norm = lit::<S>(0.0);
+        let mut b_norm = lit::<S>(0.0);
         for row in 0..m {
-            let a_star = k_sz[(row, col)];
-            column[row] = a_star;
-            a_norm += a_star * a_star;
-            let solved = binv_astar[(row, col)];
-            binv_norm += a_star * solved;
+            let a = a_star[(row, col)];
+            column[row] = a;
+            a_norm += a * a;
+            let b = b_solved[(row, col)];
+            b_norm += b * b;
         }
-        let mut latent = kss[col] - a_norm + noise_s * binv_norm;
+        let mut latent = kss[col] - a_norm + noise_s * b_norm;
         if latent.to_f64() < 0.0 {
-            latent = lit::<P::Storage>(0.0);
+            latent = lit::<S>(0.0);
         }
-        let latent_r = P::Refine::from_f64(latent.to_f64());
-        out.mean[col] = P::mean_dot(&column, predict_w);
-        out.variance[col] = match options.variance_kind {
-            VarianceKind::Latent => latent_r,
-            VarianceKind::Observation => P::Refine::from_f64(latent.to_f64() + noise),
-        };
+        write(col, column, latent);
     }
-    Ok(out)
+    Ok(())
 }

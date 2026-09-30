@@ -129,36 +129,23 @@ fn residual_inf(
     b_inf
 }
 
-/// Svgp mean: `v = L⁻¹ k_*` refined in `f64`, dotted with `q_mean`.
+/// Svgp mean: `v = L⁻¹ k_*` refined in `f64` against `(l64, k64_col)`,
+/// dotted with `q_mean`.
 ///
-/// [`super::PromoteStorage`] refines against the stored `f32` `L` and `k_*`
-/// promoted to `f64`; [`super::ReevaluateKernel`] against the `f64` `L` and
-/// `k_*` of `reference`.
-pub(crate) fn refine_svgp_mean<R: ResidualFormula>(
+/// [`super::PromoteStorage`] passes the stored `f32` `L` and `k_*` promoted
+/// to `f64`; [`super::ReevaluateKernel`] the `f64` factor and `k_*`
+/// ([`super::ModelPrecision::svgp_mean_reference`]).
+pub(crate) fn refine_svgp_mean(
     k_mm_l: MatRef<'_, f32>,
     solved: &[f32],
-    rhs: &[f32],
     q_mean: &[f64],
-    reference: &dyn Fn() -> Result<(Mat<f64>, Vec<f64>), GprError>,
+    l64: MatRef<'_, f64>,
+    k64_col: &[f64],
 ) -> Result<f64, GprError> {
-    let m = solved.len();
-    let (l64, rhs64) = if R::READS_STORAGE {
-        let mut l64 = Mat::<f64>::zeros(m, m);
-        let mut rhs64 = vec![0.0; m];
-        for i in 0..m {
-            rhs64[i] = rhs[i].to_f64();
-            for j in 0..=i {
-                l64[(i, j)] = k_mm_l[(i, j)].to_f64();
-            }
-        }
-        (l64, rhs64)
-    } else {
-        reference()?
-    };
     let system = TriangularSystem {
         l: k_mm_l,
-        l64: l64.as_ref(),
-        rhs64: &rhs64,
+        l64,
+        rhs64: k64_col,
     };
     let start = solved.iter().map(|value| f64::from(*value)).collect();
     let v = refine(&system, start)?;
@@ -167,6 +154,27 @@ pub(crate) fn refine_svgp_mean<R: ResidualFormula>(
         sum += *weight * *mean;
     }
     Ok(sum)
+}
+
+/// `src` promoted to `f64` into `out`, which is resized only when its shape
+/// differs. With `lower_only`, the strict upper triangle is zero.
+pub(super) fn promote_into<T: KernelScalar>(
+    src: MatRef<'_, T>,
+    out: &mut Mat<f64>,
+    lower_only: bool,
+) {
+    if out.nrows() != src.nrows() || out.ncols() != src.ncols() {
+        *out = Mat::zeros(src.nrows(), src.ncols());
+    }
+    for col in 0..src.ncols() {
+        for row in 0..src.nrows() {
+            out[(row, col)] = if lower_only && row < col {
+                0.0
+            } else {
+                src[(row, col)].to_f64()
+            };
+        }
+    }
 }
 
 /// `L v = b` with `L` lower-triangular: refined through the stored `f32` `L`

@@ -15,14 +15,17 @@ use crate::points::PointRegistry;
 use crate::policy::with_kernel_exp;
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sgpr::SgprObjective;
-use crate::sparse::{KernelScratch, SparseCore, SparseScratch, sparse_core_accessors};
+use crate::sparse::{
+    KernelScratch, PredictScratch, SparseCore, SparseScratch, sparse_core_accessors,
+};
 use crate::{PredictOptions, Prediction};
 
 use super::FixedInducing;
 use super::factor::{
-    VfeState, append_column, append_point, assemble_vfe, inducing_delete, inducing_insert,
-    kernel_column, kernel_diag_at, point_at, publish_sgpr_weights, refresh_w, remove_column,
-    remove_point, solve_lmm, vfe_neg_log_marginal_likelihood, vfe_predict,
+    VfeState, VfeSystem, append_column, append_point, assemble_vfe, inducing_delete,
+    inducing_insert, kernel_column, kernel_diag_at, point_at, predict_vfe_into,
+    publish_sgpr_weights, refresh_w, remove_column, remove_point, solve_lmm,
+    vfe_neg_log_marginal_likelihood,
 };
 use super::fitted::FittedSgpr;
 
@@ -432,23 +435,75 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        let xs = self.core.map_query(xs, n_rows, n_cols)?;
-        let prediction = with_kernel_exp!(self.core.math, M => vfe_predict::<M, P>(
-            &self.core.kernel,
-            self.core.jitter,
-            &self.core.z_train,
-            self.k_mm_l.as_ref(),
-            self.b_l.as_ref(),
-            &self.predict_w,
-            self.core.likelihood.noise_variance(),
-            self.core.m,
-            self.core.d,
-            &xs,
+        let mut out = Prediction::default();
+        predict_vfe_into::<P>(
+            &self.core,
+            &VfeSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                self.b_l.as_ref(),
+                &self.predict_w,
+            ),
+            xs,
             n_rows,
             n_cols,
             options,
-        ))?;
-        self.core.inverse_prediction::<P>(prediction)
+            &mut PredictScratch::default(),
+            &mut out,
+        )?;
+        Ok(out)
+    }
+
+    /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
+    ///
+    /// Same values as [`Self::predict`]. The buffers are kept on the model
+    /// and `out` keeps its capacity, so a call after one with the same
+    /// shapes allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`FittedSgpr::predict`].
+    pub fn predict_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        self.predict_with_into(xs, n_rows, n_cols, PredictOptions::default(), out)
+    }
+
+    /// Predicts at `xs` with an explicit variance kind into `out`.
+    ///
+    /// Same values as [`Self::predict_with`], with the buffers of
+    /// [`Self::predict_into`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`FittedSgpr::predict`].
+    pub fn predict_with_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        predict_vfe_into::<P>(
+            &self.core,
+            &VfeSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                self.b_l.as_ref(),
+                &self.predict_w,
+            ),
+            xs,
+            n_rows,
+            n_cols,
+            options,
+            &mut self.scratch.predict,
+            out,
+        )
     }
 
     /// Appends one training point at the current `θ` with a rank-1 VFE update.
