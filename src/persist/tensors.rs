@@ -9,6 +9,7 @@ use safetensors::tensor::{Dtype, TensorView};
 use safetensors::{SafeTensors, serialize};
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 
 use super::{TENSOR_FILE, persist_err};
 
@@ -24,35 +25,113 @@ pub(crate) struct MappedTensors {
     n: usize,
 }
 
-impl MappedTensors {
-    pub(super) fn open(dir: &Path, n: usize) -> Result<Self, GprError> {
+/// `model.safetensors` opened once for a load: read into memory, or memory
+/// mapped when its `f64` factor stays mapped ([`Self::into_mapped_l`]).
+/// Every tensor of the load comes from this one read.
+pub(super) struct TensorFile {
+    source: TensorSource,
+}
+
+enum TensorSource {
+    Read(Vec<u8>),
+    Mapped(Mmap),
+}
+
+impl TensorFile {
+    /// Reads the whole file into memory.
+    pub(super) fn read(dir: &Path) -> Result<Self, GprError> {
         let path = dir.join(TENSOR_FILE);
-        let file = File::open(&path).map_err(|err| persist_err(format!("open {path:?}: {err}")))?;
-        // Safety: the persist directory is treated as read-only after save.
-        // This map stays alive on `MappedTensors` and is not written through.
+        let bytes = std::fs::read(&path)
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {path:?}: {err}")))?;
+        Ok(Self {
+            source: TensorSource::Read(bytes),
+        })
+    }
+
+    /// Maps the file; only the pages a load touches are read.
+    pub(super) fn map(dir: &Path) -> Result<Self, GprError> {
+        let path = dir.join(TENSOR_FILE);
+        let file = File::open(&path)
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("open {path:?}: {err}")))?;
+        // Safety: this map stays alive on `MappedTensors` and is not written
+        // through. gprx never writes into an existing `model.safetensors`:
+        // a save renames a new file over the path (`atomic::write_atomic`),
+        // so this mapping keeps the old file. Another program that truncates
+        // or rewrites the file in place is outside what gprx can guard.
         let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|err| persist_err(format!("mmap {path:?}: {err}")))?;
-        let tensors = SafeTensors::deserialize(&mmap)
-            .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
-        let tensor = tensors
-            .tensor(TENSOR_L)
-            .map_err(|err| persist_err(format!("missing tensor {TENSOR_L}: {err}")))?;
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("mmap {path:?}: {err}")))?;
+        Ok(Self {
+            source: TensorSource::Mapped(mmap),
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.source {
+            TensorSource::Read(bytes) => bytes,
+            TensorSource::Mapped(mmap) => mmap,
+        }
+    }
+
+    /// The parsed header over the file's bytes.
+    pub(super) fn tensors(&self) -> Result<SafeTensors<'_>, GprError> {
+        SafeTensors::deserialize(self.bytes()).map_err(|err| {
+            persist_err(
+                PersistErrorKind::Tensor,
+                format!("safetensors header: {err}"),
+            )
+        })
+    }
+
+    /// Keeps the map so the model can borrow its `n × n` `f64` factor `l`.
+    pub(super) fn into_mapped_l(self, n: usize) -> Result<MappedTensors, GprError> {
+        match self.source {
+            TensorSource::Mapped(mmap) => MappedTensors::from_mmap(mmap, n),
+            TensorSource::Read(_) => Err(persist_err(
+                PersistErrorKind::Tensor,
+                "the factor was read, not mapped",
+            )),
+        }
+    }
+}
+
+impl MappedTensors {
+    fn from_mmap(mmap: Mmap, n: usize) -> Result<Self, GprError> {
+        let tensors = SafeTensors::deserialize(&mmap).map_err(|err| {
+            persist_err(
+                PersistErrorKind::Tensor,
+                format!("safetensors header: {err}"),
+            )
+        })?;
+        let tensor = tensors.tensor(TENSOR_L).map_err(|err| {
+            persist_err(
+                PersistErrorKind::Tensor,
+                format!("missing tensor {TENSOR_L}: {err}"),
+            )
+        })?;
         validate_f64_shape(&tensor, &[n, n], TENSOR_L)?;
         let data = tensor.data();
         if data.as_ptr() as usize % align_of::<f64>() != 0 {
-            return Err(persist_err(format!(
-                "tensor {TENSOR_L} is not aligned for f64"
-            )));
+            return Err(persist_err(
+                PersistErrorKind::Tensor,
+                format!("tensor {TENSOR_L} is not aligned for f64"),
+            ));
         }
         let l_offset = offset_in_mmap(&mmap, data)?;
         let nbytes = n
             .checked_mul(n)
             .and_then(|cells| cells.checked_mul(size_of::<f64>()))
-            .ok_or_else(|| persist_err("L byte length overflowed"))?;
+            .ok_or_else(|| persist_err(PersistErrorKind::Tensor, "L byte length overflowed"))?;
         if l_offset.checked_add(nbytes).is_none() || l_offset + nbytes > mmap.len() {
-            return Err(persist_err("L tensor is outside the mapped file"));
+            return Err(persist_err(
+                PersistErrorKind::Tensor,
+                "L tensor is outside the mapped file",
+            ));
         }
-        Ok(Self { mmap, l_offset, n })
+        let mapped = Self { mmap, l_offset, n };
+        // Safety of the read: the bounds and alignment are checked above.
+        let values = unsafe { f64_slice_unchecked(&mapped.mmap[l_offset..l_offset + nbytes]) };
+        require_finite_tensor(values, TENSOR_L)?;
+        Ok(mapped)
     }
 
     pub(crate) fn l_view(&self) -> MatRef<'_, f64> {
@@ -98,56 +177,60 @@ pub(super) fn write_tensors(
     factor: Option<FactorBytes<'_>>,
 ) -> Result<(), GprError> {
     if x.len() != n * d {
-        return Err(persist_err(format!(
-            "x has {} values, expected n*d = {}",
-            x.len(),
-            n * d
-        )));
+        return Err(persist_err(
+            PersistErrorKind::Tensor,
+            format!("x has {} values, expected n*d = {}", x.len(), n * d),
+        ));
     }
     if y.len() != n {
-        return Err(persist_err(format!(
-            "y has {} values, expected n = {n}",
-            y.len()
-        )));
+        return Err(persist_err(
+            PersistErrorKind::Tensor,
+            format!("y has {} values, expected n = {n}", y.len()),
+        ));
     }
     let x_bytes = f64_as_bytes(x);
     let y_bytes = f64_as_bytes(y);
     let x_view = TensorView::new(Dtype::F64, vec![n, d], x_bytes)
-        .map_err(|err| persist_err(format!("x tensor: {err}")))?;
+        .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("x tensor: {err}")))?;
     let y_view = TensorView::new(Dtype::F64, vec![n], y_bytes)
-        .map_err(|err| persist_err(format!("y tensor: {err}")))?;
+        .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("y tensor: {err}")))?;
     let bytes = if let Some(factor) = factor {
         let l_cells = match factor.l_dtype {
             Dtype::F32 => factor.l.len() / size_of::<f32>(),
             Dtype::F64 => factor.l.len() / size_of::<f64>(),
             other => {
-                return Err(persist_err(format!("L dtype {other:?} is not f32 or f64")));
+                return Err(persist_err(
+                    PersistErrorKind::Tensor,
+                    format!("L dtype {other:?} is not f32 or f64"),
+                ));
             }
         };
         let alpha_cells = match factor.alpha_dtype {
             Dtype::F32 => factor.alpha.len() / size_of::<f32>(),
             Dtype::F64 => factor.alpha.len() / size_of::<f64>(),
             other => {
-                return Err(persist_err(format!(
-                    "alpha dtype {other:?} is not f32 or f64"
-                )));
+                return Err(persist_err(
+                    PersistErrorKind::Tensor,
+                    format!("alpha dtype {other:?} is not f32 or f64"),
+                ));
             }
         };
         if l_cells != n * n {
-            return Err(persist_err(format!(
-                "L has {l_cells} values, expected n*n = {}",
-                n * n
-            )));
+            return Err(persist_err(
+                PersistErrorKind::Tensor,
+                format!("L has {l_cells} values, expected n*n = {}", n * n),
+            ));
         }
         if alpha_cells != n {
-            return Err(persist_err(format!(
-                "alpha has {alpha_cells} values, expected n = {n}"
-            )));
+            return Err(persist_err(
+                PersistErrorKind::Tensor,
+                format!("alpha has {alpha_cells} values, expected n = {n}"),
+            ));
         }
         let l_view = TensorView::new(factor.l_dtype, vec![n, n], factor.l)
-            .map_err(|err| persist_err(format!("L tensor: {err}")))?;
+            .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("L tensor: {err}")))?;
         let alpha_view = TensorView::new(factor.alpha_dtype, vec![n], factor.alpha)
-            .map_err(|err| persist_err(format!("alpha tensor: {err}")))?;
+            .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("alpha tensor: {err}")))?;
         serialize(
             [
                 (TENSOR_X, x_view),
@@ -160,45 +243,50 @@ pub(super) fn write_tensors(
     } else {
         serialize([(TENSOR_X, x_view), (TENSOR_Y, y_view)], None)
     }
-    .map_err(|err| persist_err(format!("serialize safetensors: {err}")))?;
+    .map_err(|err| {
+        persist_err(
+            PersistErrorKind::Tensor,
+            format!("serialize safetensors: {err}"),
+        )
+    })?;
     let path = dir.join(TENSOR_FILE);
-    std::fs::write(&path, bytes).map_err(|err| persist_err(format!("write {path:?}: {err}")))
+    super::atomic::write_atomic(&path, &bytes)
 }
 
-pub(super) fn read_xy(dir: &Path, n: usize, d: usize) -> Result<(Vec<f64>, Vec<f64>), GprError> {
-    let path = dir.join(TENSOR_FILE);
-    let bytes = std::fs::read(&path).map_err(|err| persist_err(format!("read {path:?}: {err}")))?;
-    let tensors = SafeTensors::deserialize(&bytes)
-        .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
-    let x = copy_f64_tensor(&tensors, TENSOR_X, &[n, d])?;
-    let y = copy_f64_tensor(&tensors, TENSOR_Y, &[n])?;
+pub(super) fn read_xy(
+    tensors: &SafeTensors<'_>,
+    n: usize,
+    d: usize,
+) -> Result<(Vec<f64>, Vec<f64>), GprError> {
+    let x = copy_f64_tensor(tensors, TENSOR_X, &[n, d])?;
+    let y = copy_f64_tensor(tensors, TENSOR_Y, &[n])?;
     Ok((x, y))
 }
 
-pub(super) fn read_scalars<T: Copy>(
-    dir: &Path,
+pub(super) fn read_scalars<T: crate::kernel::KernelScalar>(
+    tensors: &SafeTensors<'_>,
     name: &str,
     shape: &[usize],
     dtype: Dtype,
 ) -> Result<Vec<T>, GprError> {
-    let path = dir.join(TENSOR_FILE);
-    let bytes = std::fs::read(&path).map_err(|err| persist_err(format!("read {path:?}: {err}")))?;
-    let tensors = SafeTensors::deserialize(&bytes)
-        .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
-    let tensor = tensors
-        .tensor(name)
-        .map_err(|err| persist_err(format!("missing tensor {name}: {err}")))?;
+    let tensor = tensors.tensor(name).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Tensor,
+            format!("missing tensor {name}: {err}"),
+        )
+    })?;
     validate_shape(&tensor, shape, name, dtype)?;
     let data = scalar_slice::<T>(tensor.data())?;
+    require_finite_tensor(data, name)?;
     Ok(data.to_vec())
 }
 
-pub(super) fn read_matrix<T: Copy>(
-    dir: &Path,
+pub(super) fn read_matrix<T: crate::kernel::KernelScalar>(
+    tensors: &SafeTensors<'_>,
     n: usize,
     dtype: Dtype,
 ) -> Result<faer::Mat<T>, GprError> {
-    let values = read_scalars::<T>(dir, TENSOR_L, &[n, n], dtype)?;
+    let values = read_scalars::<T>(tensors, TENSOR_L, &[n, n], dtype)?;
     Ok(faer::Mat::from_fn(n, n, |row, col| values[col * n + row]))
 }
 
@@ -207,12 +295,31 @@ fn copy_f64_tensor(
     name: &str,
     shape: &[usize],
 ) -> Result<Vec<f64>, GprError> {
-    let tensor = tensors
-        .tensor(name)
-        .map_err(|err| persist_err(format!("missing tensor {name}: {err}")))?;
+    let tensor = tensors.tensor(name).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Tensor,
+            format!("missing tensor {name}: {err}"),
+        )
+    })?;
     validate_f64_shape(&tensor, shape, name)?;
     let data = f64_slice(tensor.data())?;
+    require_finite_tensor(data, name)?;
     Ok(data.to_vec())
+}
+
+/// Rejects a stored tensor holding `NaN` or `±∞`. gprx never writes one, so
+/// such a file was damaged or edited.
+fn require_finite_tensor<T: crate::kernel::KernelScalar>(
+    values: &[T],
+    name: &str,
+) -> Result<(), GprError> {
+    match values.iter().position(|value| !value.to_f64().is_finite()) {
+        None => Ok(()),
+        Some(index) => Err(persist_err(
+            PersistErrorKind::Tensor,
+            format!("tensor {name} holds a non-finite value at index {index}"),
+        )),
+    }
 }
 
 fn validate_shape(
@@ -222,16 +329,22 @@ fn validate_shape(
     dtype: Dtype,
 ) -> Result<(), GprError> {
     if tensor.dtype() != dtype {
-        return Err(persist_err(format!(
-            "tensor {name} dtype is {:?}, expected {dtype:?}",
-            tensor.dtype()
-        )));
+        return Err(persist_err(
+            PersistErrorKind::Tensor,
+            format!(
+                "tensor {name} dtype is {:?}, expected {dtype:?}",
+                tensor.dtype()
+            ),
+        ));
     }
     if tensor.shape() != shape {
-        return Err(persist_err(format!(
-            "tensor {name} shape is {:?}, expected {shape:?}",
-            tensor.shape()
-        )));
+        return Err(persist_err(
+            PersistErrorKind::Tensor,
+            format!(
+                "tensor {name} shape is {:?}, expected {shape:?}",
+                tensor.shape()
+            ),
+        ));
     }
     Ok(())
 }
@@ -249,7 +362,10 @@ fn offset_in_mmap(mmap: &Mmap, data: &[u8]) -> Result<usize, GprError> {
     let base = mmap.as_ptr() as usize;
     let ptr = data.as_ptr() as usize;
     if ptr < base {
-        return Err(persist_err("tensor pointer is before the mapped file"));
+        return Err(persist_err(
+            PersistErrorKind::Tensor,
+            "tensor pointer is before the mapped file",
+        ));
     }
     Ok(ptr - base)
 }
@@ -262,10 +378,14 @@ fn f64_as_bytes(values: &[f64]) -> &[u8] {
 
 fn scalar_slice<T: Copy>(bytes: &[u8]) -> Result<&[T], GprError> {
     if bytes.as_ptr() as usize % align_of::<T>() != 0 {
-        return Err(persist_err("tensor is not aligned"));
+        return Err(persist_err(
+            PersistErrorKind::Tensor,
+            "tensor is not aligned",
+        ));
     }
     if bytes.len() % size_of::<T>() != 0 {
         return Err(persist_err(
+            PersistErrorKind::Tensor,
             "tensor length is not a multiple of the scalar size",
         ));
     }
@@ -294,22 +414,32 @@ pub(super) fn write_f64_tensors(
     for (name, shape, values) in tensors {
         let cells: usize = shape.iter().product();
         if values.len() != cells {
-            return Err(persist_err(format!(
-                "{name} has {} values, expected {cells}",
-                values.len()
-            )));
+            return Err(persist_err(
+                PersistErrorKind::Tensor,
+                format!("{name} has {} values, expected {cells}", values.len()),
+            ));
         }
-        let view = TensorView::new(Dtype::F64, shape.clone(), f64_as_bytes(values))
-            .map_err(|err| persist_err(format!("{name} tensor: {err}")))?;
+        let view =
+            TensorView::new(Dtype::F64, shape.clone(), f64_as_bytes(values)).map_err(|err| {
+                persist_err(PersistErrorKind::Tensor, format!("{name} tensor: {err}"))
+            })?;
         views.push((*name, view));
     }
-    let bytes = serialize(views, None)
-        .map_err(|err| persist_err(format!("serialize safetensors: {err}")))?;
+    let bytes = serialize(views, None).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Tensor,
+            format!("serialize safetensors: {err}"),
+        )
+    })?;
     let path = dir.join(TENSOR_FILE);
-    std::fs::write(&path, bytes).map_err(|err| persist_err(format!("write {path:?}: {err}")))
+    super::atomic::write_atomic(&path, &bytes)
 }
 
 /// Reads the `f64` tensor `name` of shape `shape` from `model.safetensors`.
-pub(super) fn read_f64(dir: &Path, name: &str, shape: &[usize]) -> Result<Vec<f64>, GprError> {
-    read_scalars::<f64>(dir, name, shape, Dtype::F64)
+pub(super) fn read_f64(
+    tensors: &SafeTensors<'_>,
+    name: &str,
+    shape: &[usize],
+) -> Result<Vec<f64>, GprError> {
+    read_scalars::<f64>(tensors, name, shape, Dtype::F64)
 }

@@ -408,38 +408,48 @@ fn try_grad_rbf_cross<M: KernelMath>(
         finite_slice(col_slice(x1, dim)?)?;
         finite_slice(col_slice(x2, dim)?)?;
     }
-    let mut s = vec![0.0; n];
-    let mut dk = vec![0.0; n];
+    // Columns in stack chunks, so the gradient of a mini-batch step does not
+    // allocate.
+    const CHUNK: usize = 256;
+    let mut s_buf = [0.0f64; CHUNK];
+    let mut dk_buf = [0.0f64; CHUNK];
     let neg = f64x4::new([-inv_two_ell_sq; 4]);
     let scale = f64x4::new([inv_ell_sq; 4]);
-    for row in 0..m {
-        s.fill(0.0);
-        for dim in 0..d {
-            let z = col_slice(x1, dim)?[row];
-            add_squared(col_slice(x2, dim)?, z, &mut s);
-        }
-        let mut i = 0;
-        while i + 4 <= n {
-            let sv = load4(&s, i);
-            let value = M::d1_f64x4(sv * neg) * sv * scale;
-            if !all_finite4(value) {
-                return Err(GprError::NonFiniteKernelValue);
+    let mut start = 0;
+    while start < n {
+        let len = CHUNK.min(n - start);
+        let s = &mut s_buf[..len];
+        let dk = &mut dk_buf[..len];
+        for row in 0..m {
+            s.fill(0.0);
+            for dim in 0..d {
+                let z = col_slice(x1, dim)?[row];
+                add_squared(&col_slice(x2, dim)?[start..start + len], z, s);
             }
-            store4(&mut dk, i, value);
-            i += 4;
-        }
-        while i < n {
-            let d1 = M::jet(-s[i] * inv_two_ell_sq).d1;
-            let value = d1 * s[i] * inv_ell_sq;
-            if !value.is_finite() {
-                return Err(GprError::NonFiniteKernelValue);
+            let mut i = 0;
+            while i + 4 <= len {
+                let sv = load4(s, i);
+                let value = M::d1_f64x4(sv * neg) * sv * scale;
+                if !all_finite4(value) {
+                    return Err(GprError::NonFiniteKernelValue);
+                }
+                store4(dk, i, value);
+                i += 4;
             }
-            dk[i] = value;
-            i += 1;
+            while i < len {
+                let d1 = M::jet(-s[i] * inv_two_ell_sq).d1;
+                let value = d1 * s[i] * inv_ell_sq;
+                if !value.is_finite() {
+                    return Err(GprError::NonFiniteKernelValue);
+                }
+                dk[i] = value;
+                i += 1;
+            }
+            for (col, value) in dk.iter().enumerate() {
+                d_k[(row, start + col)] = *value;
+            }
         }
-        for (col, value) in dk.iter().enumerate() {
-            d_k[(row, col)] = *value;
-        }
+        start += len;
     }
     Ok(true)
 }
