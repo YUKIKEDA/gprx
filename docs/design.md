@@ -97,6 +97,8 @@ The likelihood is a concrete type, not a trait: Gaussian noise is the only likel
 - Do not iteratively refine that factor back onto the original `A`. The gap between the preconditioner `LLᵀ ≈ A + jI` and the target `A` grows, and the contraction `||I - (LLᵀ)^{-1} A||` can exceed 1 and diverge (§4.2).
 - The sparse models factor `K_mm = k(Z, Z)`, which carries no observation noise. `Sgpr` / `Svgp` take their own `with_jitter_policy` for `K_mm`, and its default is `adaptive(1e-8, 10, 5, 1e-3)` rather than the Exact default: close inducing points leave `K_mm` singular in floating point. Fit, factor, `set_params`, predict, and the online updates all use that policy.
 
+**Subnormal values** (decided in #51). A subnormal `f64` is a positive finite number, and gprx takes it as IEEE 754 says: no public entry point rejects it, and none flushes it to zero. gprx never reads or writes the floating-point control register (MXCSR on x86, FPCR on AArch64): flush-to-zero and denormals-are-zero belong to the calling process, which sets both together if it wants them; gprx offers no switch for one without the other. "This noise is too small to be useful" is a separate, model-level question, answered by the parameter's `Interval` (the default `Interval::DEFAULT_POSITIVE` is `(1e-5, 1e5)`, so a subnormal noise variance is reachable only through bounds the caller widened) and by `JitterPolicy` when a factorization fails. It is not a rule about subnormals.
+
 ### 4.1 Precision: f32 / f64 / mixed
 
 The goals are both "less memory" and "more speed". Use mixed-precision iterative refinement, and **split where it applies between fit and predict**.
