@@ -854,7 +854,20 @@ fn check_hess_sgpr<P>(x: &[f64], y: &[f64])
 where
     P: crate::precision::GpScalar,
 {
-    let mut fitted = factor_sgpr::<P>(x, y, 1.0, 0.1);
+    // Four inducing points: at `Z = X` (eight close points) `K_mm` is too
+    // ill-conditioned for an `f32` Hessian to meet 5% against differences of
+    // `f32` gradients. The bound is the VFE one at every `Z` (#327).
+    let z: Vec<f64> = (0..4).map(|i| i as f64 / 3.0).collect();
+    let mut fitted = must(
+        Sgpr::new(
+            KernelSpec::from(must(RbfKernel::new(1.0))),
+            likelihood_at(0.1),
+        )
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(x, y.len(), 1, y, &z, 4)
+        .map_err(|(_, err)| err),
+    );
     let mut params = [0.0; 2];
     must(fitted.get_params(&mut params));
     let mut hess = [0.0; 4];
