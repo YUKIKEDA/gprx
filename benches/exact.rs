@@ -186,8 +186,7 @@ fn kernel_exp_ard(c: &mut Criterion) {
     let compiled = KernelSpec::from(RbfArdKernel::new(&ells).expect("valid lengthscale")).compile();
     let (x, _) = sphere_xy();
     let x_mat = pack_points(&x, N, D_ARD);
-    let mut cache = Mat::zeros(N, N * D_ARD);
-    fill_ard_squared_diff(x_mat.as_ref(), cache.as_mut(), &mut []);
+    let cache = fill_ard_squared_diff(x_mat.as_ref()).expect("cache size");
     let mut k = Mat::zeros(N, N);
     let mut dk = Mat::zeros(N, N);
     let mut scratch = Mat::zeros(N, N);
@@ -197,7 +196,7 @@ fn kernel_exp_ard(c: &mut Criterion) {
         b.iter(|| {
             apply_from_ard_cache::<gprx::Accurate>(
                 &compiled,
-                std::hint::black_box(cache.as_ref()),
+                std::hint::black_box(&cache),
                 x_mat.as_ref(),
                 k.as_mut(),
                 Triangle::Lower,
@@ -207,7 +206,7 @@ fn kernel_exp_ard(c: &mut Criterion) {
             for idx in 0..n_theta {
                 grad_from_ard_cache::<gprx::Accurate>(
                     &compiled,
-                    cache.as_ref(),
+                    &cache,
                     x_mat.as_ref(),
                     dk.as_mut(),
                     idx,
@@ -223,7 +222,7 @@ fn kernel_exp_ard(c: &mut Criterion) {
         b.iter(|| {
             apply_from_ard_cache::<gprx::FastApprox>(
                 &compiled,
-                std::hint::black_box(cache.as_ref()),
+                std::hint::black_box(&cache),
                 x_mat.as_ref(),
                 k.as_mut(),
                 Triangle::Lower,
@@ -233,7 +232,7 @@ fn kernel_exp_ard(c: &mut Criterion) {
             for idx in 0..n_theta {
                 grad_from_ard_cache::<gprx::FastApprox>(
                     &compiled,
-                    cache.as_ref(),
+                    &cache,
                     x_mat.as_ref(),
                     dk.as_mut(),
                     idx,

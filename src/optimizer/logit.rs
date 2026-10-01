@@ -49,19 +49,32 @@ impl<P: Differentiable> Differentiable for LogitMapped<'_, P> {
 
 impl<P: TwiceDifferentiable> TwiceDifferentiable for LogitMapped<'_, P> {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        // The chain rule's second-order term needs the gradient as well.
+        let mut grad = vec![0.0; params.len()];
+        self.value_gradient_hessian_into(params, &mut grad, out)
+            .map(|_| ())
+    }
+
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
         z_to_log_theta_into(params, self.intervals, &mut self.log_scratch)?;
         let n = params.len();
-        if out.len() != n * n {
+        if hess.len() != n * n {
             return Err(GprError::LengthMismatch {
-                reason: format!("expected {} Hessian entries, got {}", n * n, out.len()),
+                reason: format!("expected {} Hessian entries, got {}", n * n, hess.len()),
             });
         }
-        let mut grad = vec![0.0; n];
-        self.inner
-            .value_and_gradient_into(&self.log_scratch, &mut grad)?;
-        self.inner.hessian_into(&self.log_scratch, out)?;
-        chain_logit_hess(params, self.intervals, &self.log_scratch, &grad, out);
-        Ok(())
+        let value = self
+            .inner
+            .value_gradient_hessian_into(&self.log_scratch, grad, hess)?;
+        // The second-order term needs the gradient in log-θ, before its chain.
+        chain_logit_hess(params, self.intervals, &self.log_scratch, grad, hess);
+        chain_logit_grad(params, self.intervals, &self.log_scratch, grad);
+        Ok(value)
     }
 }
 
@@ -82,20 +95,47 @@ where
         log_scratch: vec![0.0; init_z.len()],
     };
     let run = run(&mut mapped, init_z)?;
-    let log_theta = z_to_log_theta(&run.params, intervals)?;
-    let value = objective.value(&log_theta)?;
     keep_better(
         best,
         OptResult {
-            params: log_theta,
-            value,
+            params: z_to_log_theta(&run.params, intervals)?,
+            value: run.value,
             iterations: run.iterations,
         },
     );
     Ok(())
 }
 
+/// The value of an argmin run at its best point, from the run's own record.
+///
+/// The solver evaluated that point already, so it is not evaluated again. A
+/// run whose best is the barrier (every point it tried failed) has no
+/// result: `evaluate` runs at that point once more so the model's own error
+/// (for example an unsupported gradient) is returned instead of a generic
+/// failure to converge.
+pub(super) fn best_value(
+    cost: f64,
+    iterations: u64,
+    evaluate: impl FnOnce() -> Result<f64, GprError>,
+) -> Result<f64, GprError> {
+    if cost.is_finite() && cost < BARRIER_COST {
+        return Ok(cost);
+    }
+    evaluate()?;
+    Err(GprError::OptimizationNotConverged {
+        iterations: iterations as usize,
+    })
+}
+
+/// Keeps the lower of `best` and `candidate`.
+///
+/// A candidate whose value is not finite is never kept, so one run that ends
+/// at `NaN` or `±∞` cannot block a later finite run. When no run is finite,
+/// `best` stays `None` and the caller reports no result.
 pub(super) fn keep_better(best: &mut Option<OptResult>, candidate: OptResult) {
+    if !candidate.value.is_finite() {
+        return;
+    }
     match best {
         None => *best = Some(candidate),
         Some(current) if candidate.value < current.value => *best = Some(candidate),
@@ -125,17 +165,35 @@ pub(crate) fn z_to_log_theta(z: &[f64], intervals: &[Interval]) -> Result<Vec<f6
     Ok(log_theta)
 }
 
-fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Result<(), GprError> {
+pub(crate) fn z_to_log_theta_into(
+    z: &[f64],
+    intervals: &[Interval],
+    out: &mut [f64],
+) -> Result<(), GprError> {
     if z.len() != intervals.len() || out.len() != z.len() {
         return Err(GprError::ShapeMismatch {
             reason: "logit map length mismatch".to_owned(),
         });
     }
     for i in 0..z.len() {
-        let x = z_to_user(z[i], intervals[i]);
-        out[i] = if intervals[i].lo() > 0.0 { x.ln() } else { x };
+        out[i] = z_to_param(z[i], intervals[i]);
     }
     Ok(())
+}
+
+/// The model parameter of `z`: `log θ` on a positive interval, `θ` otherwise.
+///
+/// A positive interval is log-uniform, so `log θ = log lo + u · log(hi / lo)`
+/// is formed directly rather than as `ln(exp(…))`.
+fn z_to_param(z: f64, interval: Interval) -> f64 {
+    let u = sigmoid(z / logit_scale(interval));
+    if interval.lo() > 0.0 {
+        let ln_lo = interval.lo().ln();
+        let ln_hi = interval.hi().ln();
+        ln_lo + u * (ln_hi - ln_lo)
+    } else {
+        interval.lo() + u * interval.width()
+    }
 }
 
 pub(crate) fn chain_logit_grad(
@@ -208,6 +266,7 @@ fn user_to_z(x: f64, interval: Interval) -> Result<f64, GprError> {
     Ok(logit(u.clamp(f64::EPSILON, 1.0 - f64::EPSILON)) * logit_scale(interval))
 }
 
+#[cfg(test)]
 fn z_to_user(z: f64, interval: Interval) -> f64 {
     let t = z / logit_scale(interval);
     let u = sigmoid(t);
@@ -279,7 +338,7 @@ fn log_uniform_open(rng: &mut SmallRng, interval: Interval) -> f64 {
 /// Cost returned to argmin when a trial point is non-finite or rejected (for
 /// example outside an open [`Interval`]). More–Thuente can then backtrack
 /// instead of aborting the whole solve.
-const BARRIER_COST: f64 = 1.0e300;
+pub(super) const BARRIER_COST: f64 = 1.0e300;
 
 pub(super) struct EvalCache<'a, P: ?Sized> {
     objective: &'a mut P,
@@ -425,8 +484,8 @@ pub(super) fn map_argmin_error(err: ArgminError) -> GprError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedProblem, CostFunction, EvalCache, Gradient, log_theta_to_z, logit, sigmoid,
-        user_to_z, z_to_log_theta_into, z_to_user,
+        CachedProblem, CostFunction, EvalCache, Gradient, keep_better, log_theta_to_z, logit,
+        sigmoid, user_to_z, z_to_log_theta_into, z_to_user,
     };
     use crate::error::GprError;
     use crate::gpr::Gpr;
@@ -434,6 +493,7 @@ mod tests {
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
     use crate::optimizer::Fixed;
+    use crate::optimizer::OptResult;
     use crate::param::Interval;
     use std::cell::RefCell;
 
@@ -604,6 +664,30 @@ mod tests {
         assert_close(z_to_user(back[0], interval), x, TOL);
     }
 
+    fn run(value: f64) -> OptResult {
+        OptResult {
+            params: vec![value],
+            value,
+            iterations: 1,
+        }
+    }
+
+    #[test]
+    fn keep_better_skips_non_finite_runs() {
+        let mut best = None;
+        keep_better(&mut best, run(f64::NAN));
+        assert!(best.is_none(), "a NaN run must not become the result");
+        keep_better(&mut best, run(f64::INFINITY));
+        assert!(best.is_none(), "an infinite run must not become the result");
+        keep_better(&mut best, run(2.0));
+        keep_better(&mut best, run(f64::NAN));
+        keep_better(&mut best, run(f64::NEG_INFINITY));
+        keep_better(&mut best, run(3.0));
+        keep_better(&mut best, run(1.0));
+        let kept = best.expect("a finite run");
+        assert_close(kept.value, 1.0, TOL);
+    }
+
     #[test]
     fn logit_roundtrip_stays_inside_interval() {
         let interval = Interval::DEFAULT_POSITIVE;
@@ -613,5 +697,28 @@ mod tests {
         assert_close(back, x, TOL);
         assert!(interval.contains(back));
         assert_close(sigmoid(logit(0.25)), 0.25, TOL);
+    }
+
+    #[test]
+    fn z_to_param_is_the_log_of_the_user_value() {
+        for interval in [
+            Interval::new(1e-5, 1e5).expect("positive"),
+            Interval::new(0.3, 7.0).expect("positive"),
+            Interval::new(-2.0, 3.0).expect("signed"),
+        ] {
+            for z in [-40.0, -3.0, -0.25, 0.0, 0.5, 2.0, 40.0] {
+                let user = z_to_user(z, interval);
+                let want = if interval.lo() > 0.0 { user.ln() } else { user };
+                let got = super::z_to_param(z, interval);
+                assert!(
+                    (got - want).abs() <= 4.0 * f64::EPSILON * want.abs().max(1.0),
+                    "{interval:?} z={z}: {got} vs {want}"
+                );
+                if z.abs() <= 2.0 {
+                    let theta = if interval.lo() > 0.0 { got.exp() } else { got };
+                    assert!(interval.contains(theta), "{interval:?} z={z}: {theta}");
+                }
+            }
+        }
     }
 }
