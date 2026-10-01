@@ -94,8 +94,8 @@ const M_SPARSE: usize = 32;
 const MAX_SPARSE_ALLOCS: [(&str, usize); 5] = [
     ("sgpr_mll_and_grad", 19),
     ("sgpr_hessian", 111),
-    ("online_sgpr_insert", 10),
-    ("online_sgpr_insert_nested", 18),
+    ("online_sgpr_insert", 8),
+    ("online_sgpr_insert_nested", 16),
     ("svgp_mll_and_grad", 20),
 ];
 
