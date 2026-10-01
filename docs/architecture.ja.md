@@ -196,10 +196,21 @@ flowchart LR
 
 | 変えたいもの | 見る場所 | 一緒に触るもの |
 | --- | --- | --- |
-| カーネルの葉 | `kernel/<leaf>.rs` と `kernel/compiled/` | `kernel/spec.rs`、`persist/kernel.rs`（新しい JSON のタグ）、design §5 |
+| カーネルの葉 | `kernel/<leaf>.rs` と `kernel/compiled/` | `kernel/spec.rs`、`persist/kernel.rs`（新しい JSON のタグ）、design §5。下の手順 |
 | 全モデルの最適化器 | `optimizer/` | モデルには触らない。新しい能力の trait が要るときだけ `objective.rs` |
 | Exact だけがすること（オンライン LDLT、`Gpr` の LOO） | `gpr/` | 因子は `linalg/ldlt.rs` |
 | 2 つの Sparse 族が共通にすること | `sparse/` | `sgpr/` と `svgp/` が呼ぶ |
 | 精度の規則 | `precision/` | クロージャを渡すモデルの `factor/` |
 | 保存の配置 | `persist/` | [persist-format.ja.md](persist-format.ja.md)。古いファイルを読み誤りうるなら `FORMAT_VERSION` |
 | 新しいモデル族 | `gpr/` の隣の新しいディレクトリ | `persist/` に `Loaded*` を 1 つ。ほかのモデルを import してはいけない |
+
+### 組み込みのカーネルの葉を足す
+
+葉は静的にディスパッチする。`KernelSpec` と `CompiledKernel` の各操作は葉ごとに 1 つの腕を持つ `match` で、全部で約 40 ある。そのため呼び出しはコンパイラがインライン化・ベクトル化できる直接の呼び出しになる（design §5）。代わりに、新しい葉はそのすべてに触る。答えが葉によって変わる `match` はすべての葉を名指しし、ワイルドカードを持たないので、腕が足りない場所はコンパイラが列挙する。残るワイルドカードは、どの葉にも正しい既定（速い経路が無いときに座標から計算する）か、葉と合成の区別だけ。葉を足す手順:
+
+1. `kernel/<leaf>.rs`: パラメータ（`θ` とその `Interval`）、距離または座標からの値・`∂K/∂θ`・`∂²K/∂θ∂θ`（正方と長方形）、対角。`FreeInducing` で動かすなら座標微分（`grad_wrt_coord_dim` と混合の Hessian）。動かさないなら `CoordGradientUnsupported` を返す
+2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める腕
+3. `kernel/compiled/`: `CompiledKernel` の variant と、コンパイラが求める腕。すべての葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む
+4. `persist/kernel.rs`: JSON のタグ。古い版の保存ファイルも読めること（persist-format.md）
+5. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互の塊、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す
+6. design §5 と、`kernel/mod.rs`・`lib.rs` の公開の再エクスポート
