@@ -21,10 +21,10 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::FixedInducing;
 use super::factor::{
-    VfeState, VfeSystem, append_column, append_point, assemble_vfe, inducing_delete,
-    inducing_insert, kernel_column, kernel_diag_at, point_at, predict_vfe_covariance,
-    predict_vfe_into, publish_sgpr_weights, refresh_w, remove_column, remove_point, solve_lmm,
-    vfe_loo, vfe_neg_log_marginal_likelihood,
+    VfeState, VfeSystem, append_column, append_point, assemble_vfe, assemble_vfe_with_f64_w,
+    inducing_delete, inducing_insert, kernel_column, kernel_diag_at, point_at,
+    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, refresh_w, remove_column,
+    remove_point, solve_lmm, vfe_loo, vfe_neg_log_marginal_likelihood,
 };
 use super::fitted::FittedSgpr;
 
@@ -267,13 +267,18 @@ where
     }
 
     fn apply_vfe(&mut self, state: VfeState<P::Storage>) -> Result<(), GprError> {
+        self.set_vfe(state);
+        self.refresh_predict_w()
+    }
+
+    /// Takes `state` as the VFE system. The predict weights are the caller's.
+    fn set_vfe(&mut self, state: VfeState<P::Storage>) {
         self.k_mm_l = state.k_mm_l;
         self.a = state.a;
         self.b_l = state.b_l;
         self.w = state.w;
         self.k_diag_sum = state.k_diag_sum;
         self.a_frobenius2 = state.a_frobenius2;
-        self.refresh_predict_w()
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
@@ -996,7 +1001,7 @@ where
         z_obs: Vec<f64>,
         m: usize,
     ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+        let (state, w64) = with_kernel_exp!(self.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage>(
             &self.core.kernel,
             self.core.jitter,
             self.core.likelihood,
@@ -1012,7 +1017,15 @@ where
         self.core.z_train = z_train;
         self.core.z_obs = z_obs;
         self.core.m = m;
-        self.apply_vfe(state)
+        match w64 {
+            // The `f64` weights of this assembly are the refined predict weights.
+            Some(w64) if P::REFINES_IN_F64 => {
+                self.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
+                self.set_vfe(state);
+                Ok(())
+            }
+            _ => self.apply_vfe(state),
+        }
     }
 
     /// Removes the inducing point identified by `id` and packs every buffer.
