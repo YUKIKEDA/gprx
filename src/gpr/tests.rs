@@ -2927,3 +2927,25 @@ fn three_factor_product_gradient_matches_finite_difference() {
         }
     }
 }
+
+/// Periodic and RQ leaves take the one-pass weighted gradient when the
+/// distances are cached; both paths match central differences.
+#[test]
+fn periodic_and_rq_gradients_match_finite_difference_on_both_paths() {
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5, 0.3, 0.7, -0.1];
+    let kernel = KernelSpec::from(PeriodicKernel::new(0.9, 1.4).expect("valid"))
+        * KernelSpec::from(ConstantKernel::new(1.3).expect("valid"))
+        + KernelSpec::from(crate::kernel::RationalQuadraticKernel::new(0.7, 1.6).expect("valid"));
+    for cache in [DistanceCachePolicy::Cached, DistanceCachePolicy::Uncached] {
+        let mut gpr = Gpr::new(
+            kernel.clone(),
+            GaussianLikelihood::new(0.16).expect("valid"),
+        )
+        .with_distance_cache_policy(cache)
+        .with_optimizer(Fixed)
+        .factor(&x, 8, 1, &y)
+        .expect("spd");
+        assert_mll_grad_matches_finite_difference(&mut gpr);
+    }
+}
