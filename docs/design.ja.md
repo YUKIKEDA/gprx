@@ -468,7 +468,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 4. `L Lᵀ α = y` を前進・後退代入で解く(O(n²))
 5. `L`から`K⁻¹`を計算する(三角ソルブで `L Lᵀ X = I`、O(n³)が1回)
 6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]`(対称なので下三角のみ)
-7. 各θ_iについて `∂K/∂θ_i` を`exp_buf`へ評価し、`⟨W, ∂K/∂θ_i⟩_F` をO(n²)で積算。カーネルパラメータは`KernelTerm::grad`、ノイズは`GaussianLikelihood::noise_grad_diag`(対角のみ)
+7. カーネルの全θ_iの `⟨W, ∂K/∂θ_i⟩_F` を、カーネルの木を 1 回たどって積算する（`CompiledKernel::weighted_grads`）。和は重みをそのまま各項へ渡す。積は各因子の Gram を 1 回だけ評価し、因子 `c` へ重み `W ∘ ∏_{s≠c} K_s` を渡す。葉は自分の `∂K/∂θ_i` を使い回す `n×n` の枠へ書き、受け取った重みとの Frobenius 積を取る（パラメータごとに O(n²)）。積の因子をパラメータごとに評価し直すことはない。ノイズは`GaussianLikelihood::noise_grad_diag`(対角のみ)
 
 全体コストはO(n³ + p n²)。K⁻¹をパラメータごとに作り直さない。
 

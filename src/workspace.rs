@@ -42,6 +42,10 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     pub(crate) nested: Vec<Mat<P::Storage>>,
     /// Buffers of the exact Hessian. Empty until the first Hessian. Scratch.
     pub(crate) hessian: HessianScratch<P::Storage>,
+    /// `n×n` buffers of the joint gradient's walk of the kernel tree
+    /// (`CompiledKernel::weighted_grads`). Empty until the first gradient.
+    /// Scratch.
+    pub(crate) weighted: Vec<Mat<P::Storage>>,
     /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
     /// (`0` without a retry). `k_matrix` then holds the factor of `A + (σn² + j) I`.
     pub(crate) factor_jitter: f64,
@@ -139,6 +143,9 @@ pub trait FitWorkspace: Clone + Send + Sync + 'static {
     /// `W` after [`Self::form_gradient_w`].
     fn gradient_w(&self) -> MatRef<'_, <Self::Policy as PrecisionPolicy>::Storage>;
 
+    /// `W` with the buffers a kernel-gradient walk writes, borrowed apart.
+    fn split_gradient(&mut self) -> GradientViews<'_, <Self::Policy as PrecisionPolicy>::Storage>;
+
     /// Whether this workspace stores `dist_cache` / `ard_sq_diff`.
     #[allow(dead_code)] // used by unit tests on `FittedGpr::workspace`
     fn has_distance_cache(&self) -> bool {
@@ -150,6 +157,17 @@ pub trait FitWorkspace: Clone + Send + Sync + 'static {
     fn has_dedicated_w(&self) -> bool {
         false
     }
+}
+
+/// `W` and the buffers a kernel-gradient walk writes, borrowed apart from
+/// one [`FitWorkspace`] (see [`FitWorkspace::split_gradient`]).
+pub(crate) struct GradientViews<'a, S> {
+    pub(crate) w: MatRef<'a, S>,
+    pub(crate) kernel_scratch: &'a mut Mat<S>,
+    pub(crate) nested: &'a mut Vec<Mat<S>>,
+    pub(crate) thread_scratch: &'a mut Vec<Mat<S>>,
+    pub(crate) weighted: &'a mut Vec<Mat<S>>,
+    pub(crate) dist: Option<&'a mut DistCache<S>>,
 }
 
 /// Predict-into buffers owned by [`crate::FittedGpr`].
@@ -206,6 +224,7 @@ where
             theta: Vec::new(),
             nested: Vec::new(),
             hessian: HessianScratch::default(),
+            weighted: Vec::new(),
             factor_jitter: 0.0,
         })
     }
@@ -282,6 +301,7 @@ where
             theta: self.theta.clone(),
             nested: Vec::new(),
             hessian: HessianScratch::default(),
+            weighted: Vec::new(),
             factor_jitter: self.factor_jitter,
         }
     }
@@ -367,6 +387,21 @@ where
         match &self.w_matrix {
             Some(w_matrix) => w_matrix.as_ref(),
             None => self.core.k_matrix.as_ref(),
+        }
+    }
+
+    fn split_gradient(&mut self) -> GradientViews<'_, P::Storage> {
+        let core = &mut self.core;
+        GradientViews {
+            w: match &self.w_matrix {
+                Some(w_matrix) => w_matrix.as_ref(),
+                None => core.k_matrix.as_ref(),
+            },
+            kernel_scratch: &mut core.kernel_scratch,
+            nested: &mut core.nested,
+            thread_scratch: &mut core.thread_scratch,
+            weighted: &mut core.weighted,
+            dist: self.dist.as_mut(),
         }
     }
 

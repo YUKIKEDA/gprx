@@ -15,6 +15,7 @@ mod coord;
 mod grad;
 pub(crate) mod gram;
 mod hess;
+mod weighted;
 
 #[cfg(test)]
 mod tests;

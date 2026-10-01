@@ -475,7 +475,7 @@ Standard algorithm (Rasmussen & Williams / the GPy family):
 4. Solve `L Lᵀ α = y` by forward and back substitution (O(n²))
 5. Compute `K⁻¹` from `L` (triangular solves of `L Lᵀ X = I`, one O(n³))
 6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]` (symmetric, so lower triangle only)
-7. For each θ_i, evaluate `∂K/∂θ_i` into `exp_buf` and accumulate `⟨W, ∂K/∂θ_i⟩_F` in O(n²). Kernel parameters use `KernelTerm::grad`. Noise uses `Likelihood::noise_grad_diag` (diagonal only)
+7. Accumulate `⟨W, ∂K/∂θ_i⟩_F` for every kernel θ_i in one walk of the kernel tree (`CompiledKernel::weighted_grads`): a Sum hands its weight to every term; a Product evaluates each factor's Gram once and hands factor `c` the weight `W ∘ ∏_{s≠c} K_s`; a leaf writes its `∂K/∂θ_i` into a reused `n×n` buffer and takes the Frobenius product with the weight it was handed, O(n²) per parameter. No factor of a product is evaluated once per parameter. Noise uses `Likelihood::noise_grad_diag` (diagonal only)
 
 Total cost is O(n³ + p n²). `K⁻¹` is not rebuilt per parameter.
 
