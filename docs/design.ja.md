@@ -740,6 +740,8 @@ pub struct OptResult {
 
 数値計算固有の失敗理由を拡充する。
 
+集合が増えうる公開 enum は `#[non_exhaustive]` にする: `GprError`、`CholeskyStage`、`IntervalError`、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`、`PersistKind`、`KernelSpec`、`CompiledKernel`、`DistanceCachePolicy`、`JitterPolicy`、`KernelExp`、`BoundaryPolicy`。これらへの variant の追加は破壊的変更にならない。クレート外の `match` には `_` が要る。閉じた集合は網羅的な `match` を書けるよう付けない: `Triangle`、`MaternNu`、`VarianceKind`、`CholeskyBuffer`。
+
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
 pub enum GprError {

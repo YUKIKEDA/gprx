@@ -73,6 +73,7 @@ impl<'a, T> MixedKernelViews<'a, T> {
 /// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum CompiledKernel<T: KernelScalar = f64> {
     /// Isotropic RBF.
     Rbf(RbfKernel),

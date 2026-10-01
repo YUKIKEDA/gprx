@@ -94,6 +94,7 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// # }
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LoadedGpr {
     /// [`crate::DoublePrecision`] model.
     Double(FittedGpr<Fixed>),
