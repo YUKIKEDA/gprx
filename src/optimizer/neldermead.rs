@@ -7,7 +7,7 @@ use argmin::core::{Executor, State};
 use argmin::solver::neldermead::NelderMead as ArgminNelderMead;
 
 use crate::error::GprError;
-use crate::objective::{HasBounds, Objective};
+use crate::objective::Objective;
 use crate::param::Interval;
 
 use super::logit::{
@@ -96,7 +96,7 @@ impl NelderMead {
     }
 }
 
-impl<P: Objective + HasBounds> Optimizer<P> for NelderMead {
+impl<P: Objective> Optimizer<P> for NelderMead {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
