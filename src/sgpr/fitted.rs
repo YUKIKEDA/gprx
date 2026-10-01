@@ -236,23 +236,16 @@ where
         self.set_params(params)?;
         let value = self.neg_log_marginal_likelihood()?;
         let include_z = I::z_params(self.core.m, self.core.d) > 0;
-        if !include_z && self.inducing_equals_training() {
-            let mut exact = self.exact_fitted()?;
-            exact.value_and_gradient_into(params, out)?;
-        } else {
-            let mut ks = std::mem::take(&mut self.scratch.storage);
-            let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(
-                self, out, include_z, &mut ks
-            ));
-            self.scratch.storage = ks;
-            result?;
-        }
+        let mut ks = std::mem::take(&mut self.scratch.storage);
+        let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(
+            self, out, include_z, &mut ks
+        ));
+        self.scratch.storage = ks;
+        result?;
         Ok(value)
     }
 
     /// Writes the Hessian of the negative ELBO (row-major `p×p`) into `out`.
-    ///
-    /// When `Z = X` this matches [`crate::FittedGpr::hessian_into`].
     ///
     /// # Errors
     ///
@@ -291,17 +284,12 @@ where
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         self.set_params(params)?;
         let include_z = I::z_params(self.core.m, self.core.d) > 0;
-        if !include_z && self.inducing_equals_training() {
-            let mut exact = self.exact_fitted()?;
-            exact.hessian_into(params, out)?;
-        } else {
-            let mut ks = std::mem::take(&mut self.scratch.storage);
-            let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(
-                self, out, include_z, &mut ks
-            ));
-            self.scratch.storage = ks;
-            result?;
-        }
+        let mut ks = std::mem::take(&mut self.scratch.storage);
+        let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(
+            self, out, include_z, &mut ks
+        ));
+        self.scratch.storage = ks;
+        result?;
         Ok(())
     }
 
@@ -380,26 +368,6 @@ where
     /// ```
     pub fn into_online(self) -> OnlineSgpr<O, P> {
         OnlineSgpr::from_fitted(self)
-    }
-
-    fn inducing_equals_training(&self) -> bool {
-        self.core.x_train == self.core.z_train
-    }
-
-    fn exact_fitted(&self) -> Result<crate::FittedGpr<Fixed, P>, GprError>
-    where
-        P: crate::precision::GpScalar,
-    {
-        crate::Gpr::new(self.core.kernel.clone(), self.core.likelihood)
-            .with_optimizer(Fixed)
-            .with_precision::<P>()
-            .factor(
-                &self.core.x_train,
-                self.core.n,
-                self.core.d,
-                &self.core.y_train,
-            )
-            .map_err(|(_, e)| e)
     }
 
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
@@ -497,8 +465,11 @@ where
 
     /// Returns the negative VFE evidence lower bound (the sparse NLML).
     ///
-    /// When `Z = X` this matches [`crate::FittedGpr::neg_log_marginal_likelihood`]
-    /// of [`crate::Gpr<Fixed>::factor`] on the same data.
+    /// When `Z = X` and the kernel has no White leaf, this matches
+    /// [`crate::FittedGpr::neg_log_marginal_likelihood`] of
+    /// [`crate::Gpr<Fixed>::factor`] on the same data. `K(Z, X)` never holds
+    /// a White leaf's diagonal, so the bound does not jump when `Z` moves off
+    /// `X`.
     ///
     /// # Errors
     ///

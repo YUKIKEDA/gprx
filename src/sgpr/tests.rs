@@ -470,18 +470,29 @@ fn rbf_ard_n4_z_eq_x_matches_exact() {
     );
 }
 
+/// A White leaf adds nothing to the rectangular `K(Z, X)`, so the VFE bound
+/// does not depend on whether `Z` equals `X` bit for bit (#327): `Z = X`, a
+/// row permutation of it, and `Z` one step of 1e-9 away agree.
 #[test]
-fn rbf_plus_white_n4_z_eq_x_matches_exact() {
-    assert_matches_exact(
-        KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
-            + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
-        &[0.0, 1.0, 2.0, 3.0],
-        4,
-        1,
-        &[0.0, 1.0, 0.5, 0.25],
-        &[0.25, 3.5],
-        2,
-    );
+fn rbf_plus_white_bound_is_continuous_at_z_eq_x() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+        + KernelSpec::from(WhiteKernel::new(0.05).expect("white"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let nlml = |z: &[f64]| {
+        Sgpr::new(kernel.clone(), likelihood)
+            .with_optimizer(Fixed)
+            .factor(&x, 4, 1, &y, z, 4)
+            .map_err(|(_, e)| e)
+            .expect("factor")
+            .neg_log_marginal_likelihood()
+            .expect("nlml")
+    };
+    let at_x = nlml(&x);
+    assert_close(nlml(&[3.0, 1.0, 0.0, 2.0]), at_x, TOL);
+    let nudged: Vec<f64> = x.iter().map(|v| v + 1e-9).collect();
+    assert_close(nlml(&nudged), at_x, 1e-6);
 }
 
 #[test]
@@ -724,16 +735,26 @@ fn rbf_ard_n4_z_eq_x_matches_exact_value_grad_hess() {
     );
 }
 
+/// At `Z = X` with a White leaf, the analytic gradient matches central
+/// differences of the bound: value and gradient read the same `K(Z, X)`.
 #[test]
-fn rbf_plus_white_n4_z_eq_x_matches_exact_value_grad_hess() {
-    assert_z_eq_x_matches_exact_derivs(
-        KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
-            + KernelSpec::from(WhiteKernel::new(0.05).expect("white")),
-        &[0.0, 1.0, 2.0, 3.0],
-        4,
-        1,
-        &[0.0, 1.0, 0.5, 0.25],
-    );
+fn rbf_plus_white_z_eq_x_gradient_matches_fd() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+        + KernelSpec::from(WhiteKernel::new(0.05).expect("white"));
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let mut sparse = Sgpr::new(kernel, GaussianLikelihood::new(0.1).expect("noise"))
+        .with_optimizer(Fixed)
+        .factor(&x, 4, 1, &[0.0, 1.0, 0.5, 0.25], &x, 4)
+        .map_err(|(_, e)| e)
+        .expect("sparse");
+    let mut params = vec![0.0; sparse.num_params()];
+    sparse.get_params(&mut params).expect("params");
+    let mut grad = vec![0.0; params.len()];
+    sparse
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("vg");
+    let fd = fd_grad_from_value(&mut sparse, &params);
+    assert_slice_close(&grad, &fd, 1e-5);
 }
 
 #[test]
