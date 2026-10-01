@@ -86,7 +86,7 @@ where
     P: ModelPrecision,
 {
     let mut scratch = SparseScratch::<P::Storage>::default();
-    let state = assemble_vfe::<M, P::Storage>(
+    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage>(
         &core.kernel,
         core.jitter,
         core.likelihood,
@@ -99,7 +99,9 @@ where
         &mut scratch.storage,
         &mut scratch.f64,
     )?;
-    let predict_w = if P::REFINES_IN_F64 {
+    let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, w64) {
+        w64.into_iter().map(P::Refine::from_f64).collect()
+    } else if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64>(
             &core.kernel,
             core.jitter,
@@ -181,14 +183,7 @@ where
             ks64,
             &mut KernelScratch::new(),
         )?;
-        return Ok(VfeState {
-            k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
-            a: round_mat::<T>(state.a.as_ref()),
-            b_l: round_mat::<T>(state.b_l.as_ref()),
-            w: state.w.iter().map(|value| T::from_f64(*value)).collect(),
-            k_diag_sum: T::from_f64(state.k_diag_sum),
-            a_frobenius2: T::from_f64(state.a_frobenius2),
-        });
+        return Ok(round_vfe(&state));
     }
     let compiled = kernel.compile_as::<T>();
     let x64 = pack_points(x, n_rows, n_cols);
@@ -199,30 +194,14 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
-    let round_kernel = T::ROUNDS_FROM_F64;
+    // A rounding scalar returned above, so `T` is evaluated as stored below.
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
-    if round_kernel {
-        let compiled64 = kernel.compile();
-        let mut k64 = Mat::<f64>::zeros(n_inducing, n_inducing);
-        ks64.gram::<M>(
-            &compiled64,
-            GramInputs::points(z64.as_ref()),
-            k64.as_mut(),
-            Triangle::Lower,
-        )?;
-        for col in 0..n_inducing {
-            for row in col..n_inducing {
-                k_mm[(row, col)] = T::from_f64(k64[(row, col)]);
-            }
-        }
-    } else {
-        ks.gram::<M>(
-            &compiled,
-            GramInputs::points(z_mat.as_ref()),
-            k_mm.as_mut(),
-            Triangle::Lower,
-        )?;
-    }
+    ks.gram::<M>(
+        &compiled,
+        GramInputs::points(z_mat.as_ref()),
+        k_mm.as_mut(),
+        Triangle::Lower,
+    )?;
     let mut chol_scratch = llt_scratch::<T>(n_inducing);
     cholesky_lower_with_retries(
         &mut k_mm,
@@ -232,35 +211,7 @@ where
     )?;
     // Same packed `X` and `Z` share a training White diagonal. Rectangular
     // `apply_cross` leaves White at zero.
-    let mut a = if round_kernel {
-        let compiled64 = kernel.compile();
-        if x == z {
-            let mut gram64 = Mat::<f64>::zeros(n_rows, n_rows);
-            ks64.gram::<M>(
-                &compiled64,
-                GramInputs::points(x64.as_ref()),
-                gram64.as_mut(),
-                Triangle::Lower,
-            )?;
-            let mut gram = Mat::<T>::zeros(n_rows, n_rows);
-            for col in 0..n_rows {
-                for row in col..n_rows {
-                    gram[(row, col)] = T::from_f64(gram64[(row, col)]);
-                }
-            }
-            symmetrize_lower(gram.as_mut(), n_rows);
-            gram
-        } else {
-            let cross = ks64.cross::<M>(&compiled64, z64.as_ref(), x64.as_ref())?;
-            let mut stored = Mat::<T>::zeros(n_inducing, n_rows);
-            for col in 0..n_rows {
-                for row in 0..n_inducing {
-                    stored[(row, col)] = T::from_f64(cross[(row, col)]);
-                }
-            }
-            stored
-        }
-    } else if x == z {
+    let mut a = if x == z {
         let mut gram = Mat::zeros(n_rows, n_rows);
         ks.gram::<M>(
             &compiled,
@@ -284,30 +235,11 @@ where
         CholeskyStage::Fit,
     )?;
     let mut k_diag = vec![lit::<T>(0.0); n_rows];
-    if round_kernel {
-        let compiled64 = kernel.compile();
-        let mut diag = vec![0.0f64; n_rows];
-        compiled64.fill_diag_points(x64.as_ref(), &mut diag)?;
-        for (slot, value) in k_diag.iter_mut().zip(diag) {
-            *slot = T::from_f64(value);
-        }
-    } else {
-        compiled.fill_diag_points(x_mat.as_ref(), &mut k_diag)?;
-    }
+    compiled.fill_diag_points(x_mat.as_ref(), &mut k_diag)?;
     let k_diag_sum = k_diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
     let a_frobenius2 = frobenius2(a.as_ref());
     let mut ay = Mat::zeros(n_inducing, 1);
-    if round_kernel {
-        for i in 0..n_inducing {
-            let mut sum = 0.0f64;
-            for j in 0..n_rows {
-                sum += a[(i, j)].to_f64() * y[j];
-            }
-            ay[(i, 0)] = T::from_f64(sum);
-        }
-    } else {
-        matvec_columns(a.as_ref(), y_s, ay.as_mut());
-    }
+    matvec_columns(a.as_ref(), y_s, ay.as_mut());
     solve_llt(b.as_ref(), ay.as_mut());
     let mut w = vec![lit::<T>(0.0); n_inducing];
     for i in 0..n_inducing {
@@ -321,6 +253,71 @@ where
         k_diag_sum,
         a_frobenius2,
     })
+}
+
+/// `state` rounded to a storage scalar that is evaluated in `f64`.
+fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
+    VfeState {
+        k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
+        a: round_mat::<T>(state.a.as_ref()),
+        b_l: round_mat::<T>(state.b_l.as_ref()),
+        w: state.w.iter().map(|value| T::from_f64(*value)).collect(),
+        k_diag_sum: T::from_f64(state.k_diag_sum),
+        a_frobenius2: T::from_f64(state.a_frobenius2),
+    }
+}
+
+/// [`assemble_vfe`] in the storage scalar `T`, plus the `f64` weights `w`
+/// when `T` is evaluated in `f64` and rounded (`ROUNDS_FROM_F64`).
+///
+/// A refining precision publishes those `f64` weights as its predict
+/// weights. Taking them from the same `f64` assembly saves assembling the
+/// whole system a second time. A scalar that is not rounded returns `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar>(
+    kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    y: &[f64],
+    z: &[f64],
+    n_inducing: usize,
+    ks: &mut KernelScratch<T>,
+    ks64: &mut KernelScratch<f64>,
+) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {
+    if T::ROUNDS_FROM_F64 {
+        let state = assemble_vfe::<M, f64>(
+            kernel,
+            k_mm_jitter,
+            likelihood,
+            x,
+            n_rows,
+            n_cols,
+            y,
+            z,
+            n_inducing,
+            ks64,
+            &mut KernelScratch::new(),
+        )?;
+        let rounded = round_vfe(&state);
+        return Ok((rounded, Some(state.w)));
+    }
+    let state = assemble_vfe::<M, T>(
+        kernel,
+        k_mm_jitter,
+        likelihood,
+        x,
+        n_rows,
+        n_cols,
+        y,
+        z,
+        n_inducing,
+        ks,
+        ks64,
+    )?;
+    Ok((state, None))
 }
 
 pub(crate) fn fill_z_intervals(

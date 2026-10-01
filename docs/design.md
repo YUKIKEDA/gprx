@@ -276,11 +276,11 @@ pub enum DistanceCachePolicy {
 /// Crate-private. What Cached stores (§7.1).
 struct DistCache<S> {
     dist: Option<Mat<S>>,        // n×n squared Euclidean, for distance-mode leaves
-    ard_sq_diff: Option<Mat<S>>, // raw (Δx_d)² as n × (n·d), for ARD leaves
+    ard_sq_diff: Option<ArdSqDiffBuf<S>>, // raw (Δx_d)², packed lower triangles, for ARD leaves
 }
 ```
 
-The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout is column-major `n × (n·d)`: dimension `k` is columns `[k n, (k+1) n)`, and each block is lower triangular. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
+The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout keeps only the lower triangle (diagonal included) of each dimension, packed column by column: `d · n(n+1)/2` values, dimension `k` after the first `k · n(n+1)/2`, column `j` holding rows `j..n` contiguously. A reader of another triangle reads the pair `(j, i)` for `(i, j)`. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
 
 The policy is a runtime enum because no combination with the other policies is illegal (§6.3). An `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes; `K` itself is `n²×sizeof(T)` (about 200MB at n=5000, f64), and an ARD cache is `d` times that. Choosing the policy from `n`, `d`, and a memory budget is open (§14).
 
@@ -485,7 +485,7 @@ Analytic NLML Hessian:
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. `Q_j` (one `n×n`) and four length-`n` vectors live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
+`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. The first-order term runs over every parameter `i` once, the noise included (`A_i = σn² I`): with `A = L Lᵀ`, `S_i = L⁻¹ A_i L⁻ᵀ` (two triangular solves) and `v_i = L⁻¹ A_i α` give `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F` and `αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j`, so the whole Hessian costs `O(p n³ + p² n²)`. The `p` matrices `S_i` (`p · n²`), the `n × p` matrix of `v_i`, and one length-`n` vector live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩, because `W` was written over `L`.
 
 `value_and_gradient_into` runs this once and shares L, α, and `exp_buf` between the likelihood and the gradient. The default two-step `value` then `gradient_into` does not share them.
 
@@ -589,7 +589,7 @@ Preconditions:
 - NaN/Inf in the input is `NonFiniteInput`
 - Cholesky failure is `Err((gpr, err))`. A half-built `FittedGpr` is not returned
 
-The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)`. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
+The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as packed lower triangles, `d · n(n+1)/2` values. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
 
 ### 6.4 Leave-one-out
 
@@ -632,7 +632,7 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
     theta: Vec<f64>,                 // θ before the current write, restored when A does not factor
     nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product (§5.3)
-    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
+    hessian: HessianScratch<P::Storage>, // S_i (p · n²), v_i (n × p), one n-vector. Empty until the first Hessian (§6.2)
     factor_jitter: f64,              // j of the last successful factor (§4.0)
 }
 
