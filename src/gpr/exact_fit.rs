@@ -703,21 +703,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         self.store
             .buffers
             .form_gradient_w(&self.core.factor_alpha, n);
-        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
-        let result = (|| {
-            for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-                self.write_first_deriv(i)?;
-                let inner = frobenius_lower(
-                    self.store.buffers.gradient_w(),
-                    self.store.buffers.core().exp_buf.as_ref(),
-                    n,
-                );
-                *slot = -0.5 * inner.to_f64();
-            }
-            Ok::<(), GprError>(())
-        })();
-        self.store.buffers.core_mut().thread_scratch = thread_scratch;
-        result?;
+        self.kernel_gradient_into(n, &mut out[..n_kernel])?;
         let mut noise_inner = 0.0;
         let d_noise = self.core.likelihood.noise_variance();
         let w = self.store.buffers.gradient_w();
@@ -725,6 +711,41 @@ impl<P: GpScalar> ExactFit<'_, P> {
             noise_inner += w[(i, i)].to_f64() * d_noise;
         }
         out[n_kernel] = -0.5 * noise_inner;
+        Ok(())
+    }
+
+    /// Writes `-½ ⟨W, ∂K/∂θ_i⟩_F` for every kernel parameter into `out`, in
+    /// one walk of the kernel tree (`CompiledKernel::weighted_grads`): each
+    /// factor of a product is evaluated once, not once per parameter.
+    fn kernel_gradient_into(&mut self, n: usize, out: &mut [f64]) -> Result<(), GprError> {
+        if out.is_empty() {
+            return Ok(());
+        }
+        let x = P::Storage::storage_cols(
+            self.core
+                .x
+                .as_ref()
+                .submatrix(0, 0, self.core.n, self.core.d),
+            &mut self.core.x_cast,
+        );
+        let compiled = &self.core.compiled;
+        let views = self.store.buffers.split_gradient();
+        views.weighted.retain(|m| m.nrows() == n && m.ncols() == n);
+        while views.weighted.len() < compiled.weighted_buffers() {
+            views.weighted.push(Mat::zeros(n, n));
+        }
+        let inputs = fill_cached_inputs(compiled, x, views.dist, views.thread_scratch)?;
+        with_kernel_exp!(self.core.policies.math, M => compiled.weighted_grads::<M>(
+            inputs,
+            views.w,
+            out,
+            views.kernel_scratch.as_mut(),
+            views.nested,
+            views.weighted,
+        ))?;
+        for value in out.iter_mut() {
+            *value *= -0.5;
+        }
         Ok(())
     }
 
