@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::kernel::ArdLengthscales;
 use crate::kernel::{
     ConstantKernel, CustomKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel,
@@ -248,13 +249,15 @@ fn encode_custom(kernel: &CustomKernel) -> Result<KernelJson, GprError> {
     let persist_id = kernel.persist_id();
     if persist_id.is_empty() {
         return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
             "custom kernel persist_id is empty; implement KernelTerm::persist_id",
         ));
     }
     if persist_id.starts_with(RESERVED_PREFIX) {
-        return Err(persist_err(format!(
-            "persist_id {persist_id:?} uses the reserved {RESERVED_PREFIX} prefix"
-        )));
+        return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
+            format!("persist_id {persist_id:?} uses the reserved {RESERVED_PREFIX} prefix"),
+        ));
     }
     Ok(KernelJson::Custom {
         persist_id: persist_id.to_owned(),

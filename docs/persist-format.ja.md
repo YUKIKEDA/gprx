@@ -27,7 +27,7 @@
 | `online_sgpr` | `OnlineSgpr::save` | `LoadedSgpr::load` | `m`、`point_ids`、`next_point_id`、`inducing_ids`、`next_inducing_id` | `x`、`y`、`z`、`z_train` |
 | `svgp` | `FittedSvgp::save` | `LoadedSvgp::load` | `m` | `x`、`y`、`z`、`z_train`、`q_mean`、`q_l` |
 
-間違ったローダーで読むと、`GprError::PersistFailed` で断られ、メッセージに正しいローダーの名前が入る（例: "config.json holds a svgp model; load it with LoadedSvgp::load"）。`LoadedGpr::load` も同じ。
+間違ったローダーで読むと、`GprError::PersistFailed`（`kind: WrongModel`）で断られ、メッセージに正しいローダーの名前が入る（例: "config.json holds a svgp model; load it with LoadedSvgp::load"）。`LoadedGpr::load` も同じ。
 
 ## 3. Exact の `config.json`
 
@@ -180,9 +180,9 @@ enum は serde の外部タグで、名前は `snake_case`。フィールドの�
 `custom` の項目は、`persist_id` と `state`（その型が選んだ任意の JSON）を持つ。読み込みでは、`PersistRegistry` が `persist_id` を、その種類の復元関数に引き戻す。種類は、カーネル、学習前の入力の変換、学習後の入力の変換、学習前の目的変数の変換、学習後の目的変数の変換の 5 つ。`load` の前に登録する: `register_kernel`、`register_unfitted_input`、`register_fitted_input`、`register_unfitted_target`、`register_fitted_target`。
 
 - 組み込みのカーネルと変換は、上の閉じたタグを使い、登録しない。
-- `persist_id` は空でなく、`gprx.`（`RESERVED_PREFIX`）で始まってはならない。`save` と `register_*` のどちらも、`PersistFailed` で断る。
-- 読み込みで、復元が登録されていない `persist_id` は `PersistFailed`。同じ種類に同じ `persist_id` を 2 回登録しても `PersistFailed`。
-- `persist_id` を実装していない `custom` のカーネルや変換を `save` すると `PersistFailed`。
+- `persist_id` は空でなく、`gprx.`（`RESERVED_PREFIX`）で始まってはならない。`save` と `register_*` のどちらも、`PersistFailed`（`kind: InvalidPersistId`）で断る。
+- 読み込みで、復元が登録されていない `persist_id` は `PersistFailed`（`kind: UnregisteredId`）。同じ種類に同じ `persist_id` を 2 回登録すると `PersistFailed`（`kind: InvalidPersistId`）。
+- `persist_id` を実装していない `custom` のカーネルや変換を `save` すると `PersistFailed`（`kind: NotPersistable`）。
 
 ## 6. `model.safetensors`
 
@@ -241,7 +241,7 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 
 | 状況 | エラー |
 | --- | --- |
-| ファイルを読み書きできない、JSON として不正、テンソルが無い、形か dtype が違う、テンソルが揃っていない、`model` に対してローダーが違う、`point_ids` の長さが違う、登録されていない、または予約された `persist_id`、`q` が不正 | `GprError::PersistFailed(message)` |
+| ファイルを読み書きできない、JSON として不正、テンソルが無い、形か dtype が違う、テンソルが揃っていない、`model` に対してローダーが違う、`point_ids` の長さが違う、登録されていない、または予約された `persist_id`、`q` が不正 | `GprError::PersistFailed { kind, reason }`: `Io`（読み書き）、`Config`（JSON、キー、`point_ids`）、`Tensor`（テンソル、`q`）、`WrongModel`、`UnregisteredId`、`InvalidPersistId`、`NotPersistable` |
 | `format_version` が `1` でない | `GprError::UnsupportedPersistVersion` |
 | `n`、`d`、（Sparse の）`m` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |

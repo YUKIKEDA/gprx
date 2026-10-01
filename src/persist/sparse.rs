@@ -13,6 +13,7 @@ use std::path::Path;
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::optimizer::Fixed;
 use crate::points::{IdRegistry, PointRegistry};
 use crate::precision::GpScalar;
@@ -54,7 +55,8 @@ fn write_sparse<P: GpScalar>(
     ids: Option<OnlineIds>,
     q: Option<(&[f64], faer::MatRef<'_, f64>)>,
 ) -> Result<(), GprError> {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {dir:?}: {err}")))?;
     let kind = P::persist_kind();
     let (point_ids, next_point_id, inducing_ids, next_inducing_id) = match ids {
         Some(ids) => (
@@ -87,10 +89,18 @@ fn write_sparse<P: GpScalar>(
         next_inducing_id,
     };
     let config_path = dir.join(CONFIG_FILE);
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
+    let json = serde_json::to_vec_pretty(&config).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("serialize config.json: {err}"),
+        )
+    })?;
+    std::fs::write(&config_path, json).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Io,
+            format!("write {config_path:?}: {err}"),
+        )
+    })?;
     let (n, m, d) = (core.n, core.m, core.d);
     let mut tensors: Vec<(&str, Vec<usize>, &[f64])> = vec![
         (TENSOR_X, vec![n, d], &core.x_obs),
@@ -137,7 +147,7 @@ pub(crate) fn save_svgp<P: GpScalar>(model: &FittedSvgp<P>, dir: &Path) -> Resul
 fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprError> {
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
-        .map_err(|err| persist_err(format!("read {config_path:?}: {err}")))?;
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
     parse_model(&bytes, expected)?;
     parse_sparse_config(&bytes)
 }
@@ -174,7 +184,12 @@ fn read_core(
 
 /// The saved online identifiers.
 fn read_ids(config: &SparseConfig) -> Result<(PointRegistry, InducingRegistry), GprError> {
-    let missing = |key: &str| persist_err(format!("online_sgpr config missing {key}"));
+    let missing = |key: &str| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("online_sgpr config missing {key}"),
+        )
+    };
     let points = IdRegistry::from_persisted(
         config
             .point_ids
@@ -207,6 +222,7 @@ fn read_q(dir: &Path, m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
     let positive = (0..m).all(|i| q_l[(i, i)] > 0.0);
     if !(finite && lower && positive) {
         return Err(persist_err(
+            PersistErrorKind::Tensor,
             "q_l must be lower triangular with a positive diagonal, and q finite",
         ));
     }

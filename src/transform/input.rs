@@ -40,6 +40,7 @@ pub trait UnfittedTransform: Send + Sync {
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
+            kind: crate::error::PersistErrorKind::NotPersistable,
             reason: "this input transform does not implement persist_state".to_owned(),
         })
     }
@@ -87,6 +88,7 @@ pub trait Transform: Send + Sync {
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
+            kind: crate::error::PersistErrorKind::NotPersistable,
             reason: "this input transform does not implement persist_state".to_owned(),
         })
     }
