@@ -2,12 +2,12 @@
 
 use std::num::NonZeroU32;
 
-use rand::rngs::SmallRng;
+use crate::rng::SeededRng;
 
 use crate::error::GprError;
 use crate::objective::{HasBounds, Objective};
 use crate::param::Interval;
-use crate::rng::{open_unit, small_rng};
+use crate::rng::{open_unit, seeded_rng};
 
 use super::logit::keep_better;
 use super::{OptResult, Optimizer, Restarts};
@@ -148,7 +148,7 @@ impl FastSimulatedAnnealing {
         Ok(self)
     }
 
-    /// Sets the seed passed to the crate [`rand::rngs::SmallRng`].
+    /// Sets the seed passed to gprx's seeded generator (Xoshiro256++, the same on every platform).
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
@@ -181,7 +181,7 @@ impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
         let mut best: Option<OptResult> = None;
         keep_better(&mut best, anneal(self, objective, init, &intervals)?);
         if let Some(restarts) = self.restarts {
-            let mut rng = small_rng(restarts.seed);
+            let mut rng = seeded_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let start = sample_in_param_space(&intervals, &mut rng, self.boundary);
                 let _ = anneal(self, objective, &start, &intervals)
@@ -213,7 +213,7 @@ fn anneal<P: Objective>(
     let mut best = current.clone();
     let mut best_energy = current_energy;
     let mut proposed = current.clone();
-    let mut rng = small_rng(fsa.seed);
+    let mut rng = seeded_rng(fsa.seed);
     let dim = n as f64;
     // Coordinate of the last rejected proposal. The objective last evaluated
     // that proposal, so the next step also lists it as changed.
@@ -301,14 +301,14 @@ fn apply_boundary(x: f64, lo: f64, hi: f64, policy: BoundaryPolicy) -> f64 {
     }
 }
 
-fn cauchy_step(rng: &mut SmallRng, temperature: f64) -> f64 {
+fn cauchy_step(rng: &mut SeededRng, temperature: f64) -> f64 {
     let u = open_unit(rng);
     let sign = if u >= 0.5 { 1.0 } else { -1.0 };
     let t = temperature.max(1e-12);
     sign * t * ((1.0 + 1.0 / t).powf((2.0 * u - 1.0).abs()) - 1.0)
 }
 
-fn metropolis_accept(rng: &mut SmallRng, delta: f64, temperature: f64) -> bool {
+fn metropolis_accept(rng: &mut SeededRng, delta: f64, temperature: f64) -> bool {
     if delta <= 0.0 {
         true
     } else {
@@ -319,7 +319,7 @@ fn metropolis_accept(rng: &mut SmallRng, delta: f64, temperature: f64) -> bool {
 
 fn sample_in_param_space(
     intervals: &[Interval],
-    rng: &mut SmallRng,
+    rng: &mut SeededRng,
     boundary: BoundaryPolicy,
 ) -> Vec<f64> {
     intervals
@@ -342,7 +342,7 @@ mod tests {
     use crate::objective::{HasBounds, Objective};
     use crate::optimizer::{Fixed, Optimizer};
     use crate::param::Interval;
-    use crate::rng::small_rng;
+    use crate::rng::seeded_rng;
 
     struct Rosenbrock;
 
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn metropolis_accepts_improvement_and_rejects_huge_increase() {
-        let mut rng = small_rng(1);
+        let mut rng = seeded_rng(1);
         assert!(metropolis_accept(&mut rng, -0.25, 1.0));
         assert!(!metropolis_accept(&mut rng, 1.0e9, 1.0e-12));
     }

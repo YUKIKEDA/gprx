@@ -391,7 +391,11 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     // *_with variants take PredictOptions; get_params / set_params /
     // value_and_gradient_into / hessian_into; into_online / into_trainer / save
 }
+```
 
+すべての `seed`（sample、最適化のリスタート、FSA、SVGP の Adam のシャッフル）は、gprx 自身の Xoshiro256++（状態を SplitMix64 で seed から作る、`src/rng.rs`）を始める。同じ seed と同じ gprx の版なら、どのプラットフォームでも、どの `rand` の版でも同じ乱数列になる。最初の出力はテストで固定する。乱数列を変えるのは破壊的変更。
+
+```rust
 pub enum VarianceKind {
     Latent,      // variance of the latent f* (no noise)
     Observation, // variance of the observation y* (includes σn²). Default
@@ -909,7 +913,7 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
    - ノイズパラメータ(`log_noise_variance`)の勾配比較。`∂K/∂θ = σn² I`であること
    - 悪条件行列での勾配安定性
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
-5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順は `SmallRng` でランダム化する
+5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順はテスト内の種つき `rand` でランダム化する
 5b. **オンライン insert の外部照合**: 同じ θ の libgp `add_pattern` と predict（平均・観測分散）および NLML を相対 `1e-8`。delete の外部 API は無い。`cargo test` はコミット済み JSON を読む（C++ を呼ばない）
 5c. **Sparse の外部照合**: 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch 潰し SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
 5d. **Sparse オンラインの外部照合**: 同じ初期 θ の `OnlineSgpr` の `insert` / `delete` / `insert_inducing` / `delete_inducing` を、各段階の GPyTorch 潰し SGPR（フル再組み立て）と相対 `1e-8`（平均・Observation・Latent・NLML）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
@@ -953,7 +957,7 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 - criterion は `n = 256`。ライブラリ横断のハーネスは `n = 256 / 1024 / 4096`（Forrester）と `16×16 / 32×32 / 64×64`（球）
 - 等方: 1 次元 Forrester `f(x)=(6x-2)² sin(12x-4)`、`x ∈ [0, 1]`、RBF + `GaussianLikelihood` + `StandardizeTarget`。初期ハイパラ `ℓ = 1`、`σn² = 0.1`
 - ARD: 2 次元重み付き球 `f=(x/0.25)²+(y/1)²`、`[0, 1]²` の 16×16 格子。初期 `ℓ_d = 4`（`ℓ_d = 1` では線探索が初手で止まる）
-- `y` は上記の関数 + `N(0, 1)`（`SmallRng`。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は `Uncached` で尾根を歩く）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
+- `y` は上記の関数 + `N(0, 1)`（gprx の種つき乱数。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は `Uncached` で尾根を歩く）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
 - `benches/exact.rs` の criterion グループ（存在する経路だけ）:
   1. `kernel_rbf` — K の下三角構築
   2. `cholesky_alpha` — `A` の LLT と `α`

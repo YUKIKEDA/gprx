@@ -57,7 +57,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `error` | The one error type and the Cholesky stage tag | Public: `GprError`, `CholeskyStage` | `param` |
 | `param` | A positive parameter with an interval; the flat `θ` write helper | Public: `Interval`, `BoundedParam`, `IntervalError` | `data`, `error`, `kernel`, `likelihood` |
 | `data` | Boundary checks (shape, finite, counts) and column-major packing for caller data | Crate | `error`, `kernel` |
-| `rng` | A small seeded generator for sampling and annealing | Crate: `SmallRng` | none |
+| `rng` | A small seeded generator for sampling and annealing | Crate: `SeededRng` (Xoshiro256++) | none |
 | `math` | Kernel `exp` implementations (accurate or fast approximate), selected by the `KernelExp` policy | Public: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
 | `linalg` | Cholesky, LDLT, triangular solves, dense helpers, faer worker caps. Models do not define these | Crate | `error`, `kernel` |
 | `policy` | Runtime policies: distance cache, Cholesky buffer, kernel `exp`, jitter | Public: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |
