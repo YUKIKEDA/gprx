@@ -5,10 +5,9 @@ use super::step::AdamStep;
 use crate::error::GprError;
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta_into};
 use crate::param::Interval;
-use crate::rng::small_rng;
+use crate::rng::SeededRng;
+use crate::rng::seeded_rng;
 use crate::svgp::FittedSvgp;
-use rand::RngExt;
-use rand::rngs::SmallRng;
 
 pub(super) fn user_to_unconstrained(
     user: &[f64],
@@ -83,9 +82,9 @@ pub(super) fn user_grad_to_unconstrained(
     }
 }
 
-pub(super) fn shuffle_indices(idx: &mut [usize], rng: &mut SmallRng) {
+pub(super) fn shuffle_indices(idx: &mut [usize], rng: &mut SeededRng) {
     for i in (1..idx.len()).rev() {
-        let j = rng.random_range(0..=i);
+        let j = rng.up_to(i);
         idx.swap(i, j);
     }
 }
@@ -111,7 +110,7 @@ where
     let mut g_user = vec![0.0; p];
     let mut g_z = vec![0.0; p];
     let mut order: Vec<usize> = (0..n).collect();
-    let mut rng = small_rng(adam.seed());
+    let mut rng = seeded_rng(adam.seed());
     let mut timestep = 0_u64;
     let batch_size = adam.batch_size();
     let mut step = AdamStep::new(model);

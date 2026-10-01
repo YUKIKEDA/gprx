@@ -13,6 +13,7 @@ use std::path::Path;
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::optimizer::Fixed;
 use crate::points::{IdRegistry, PointRegistry};
 use crate::precision::GpScalar;
@@ -26,11 +27,12 @@ use super::config::{
     parse_model, parse_sparse_config,
 };
 use super::kernel::KernelJson;
-use super::tensors::{read_f64, write_f64_tensors};
+use super::tensors::{TensorFile, read_f64, write_f64_tensors};
 use super::transform::{
     encode_fitted_input, encode_fitted_target, encode_unfitted_input, encode_unfitted_target,
 };
 use super::{CONFIG_FILE, FORMAT_VERSION, PersistRegistry, persist_err, widen};
+use safetensors::SafeTensors;
 
 const TENSOR_X: &str = "x";
 const TENSOR_Y: &str = "y";
@@ -54,7 +56,8 @@ fn write_sparse<P: GpScalar>(
     ids: Option<OnlineIds>,
     q: Option<(&[f64], faer::MatRef<'_, f64>)>,
 ) -> Result<(), GprError> {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {dir:?}: {err}")))?;
     let kind = P::persist_kind();
     let (point_ids, next_point_id, inducing_ids, next_inducing_id) = match ids {
         Some(ids) => (
@@ -86,11 +89,12 @@ fn write_sparse<P: GpScalar>(
         inducing_ids,
         next_inducing_id,
     };
-    let config_path = dir.join(CONFIG_FILE);
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
+    let json = serde_json::to_vec_pretty(&config).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("serialize config.json: {err}"),
+        )
+    })?;
     let (n, m, d) = (core.n, core.m, core.d);
     let mut tensors: Vec<(&str, Vec<usize>, &[f64])> = vec![
         (TENSOR_X, vec![n, d], &core.x_obs),
@@ -107,7 +111,8 @@ fn write_sparse<P: GpScalar>(
         tensors.push((TENSOR_Q_MEAN, vec![m], q_mean));
         tensors.push((TENSOR_Q_L, vec![m, m], &q_l_values));
     }
-    write_f64_tensors(dir, &tensors)
+    write_f64_tensors(dir, &tensors)?;
+    super::write_config(dir, &json)
 }
 
 pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout, P: GpScalar>(
@@ -137,7 +142,7 @@ pub(crate) fn save_svgp<P: GpScalar>(model: &FittedSvgp<P>, dir: &Path) -> Resul
 fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprError> {
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
-        .map_err(|err| persist_err(format!("read {config_path:?}: {err}")))?;
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
     parse_model(&bytes, expected)?;
     parse_sparse_config(&bytes)
 }
@@ -145,7 +150,7 @@ fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprEr
 /// The core of a sparse persist directory, with the fitted transforms
 /// read back from the config.
 fn read_core(
-    dir: &Path,
+    tensors: &SafeTensors<'_>,
     config: &SparseConfig,
     registry: &PersistRegistry,
 ) -> Result<SparseCore, GprError> {
@@ -162,10 +167,10 @@ fn read_core(
         spec,
         x_transform: config.x_transform.clone().decode(registry)?,
         y_transform: config.y_transform.clone().decode(registry)?,
-        x_obs: read_f64(dir, TENSOR_X, &[n, d])?,
-        y_obs: read_f64(dir, TENSOR_Y, &[n])?,
-        z_obs: read_f64(dir, TENSOR_Z, &[m, d])?,
-        z_train: read_f64(dir, TENSOR_Z_TRAIN, &[m, d])?,
+        x_obs: read_f64(tensors, TENSOR_X, &[n, d])?,
+        y_obs: read_f64(tensors, TENSOR_Y, &[n])?,
+        z_obs: read_f64(tensors, TENSOR_Z, &[m, d])?,
+        z_train: read_f64(tensors, TENSOR_Z_TRAIN, &[m, d])?,
         n,
         m,
         d,
@@ -174,7 +179,12 @@ fn read_core(
 
 /// The saved online identifiers.
 fn read_ids(config: &SparseConfig) -> Result<(PointRegistry, InducingRegistry), GprError> {
-    let missing = |key: &str| persist_err(format!("online_sgpr config missing {key}"));
+    let missing = |key: &str| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("online_sgpr config missing {key}"),
+        )
+    };
     let points = IdRegistry::from_persisted(
         config
             .point_ids
@@ -198,15 +208,16 @@ fn read_ids(config: &SparseConfig) -> Result<(PointRegistry, InducingRegistry), 
 
 /// The saved whitened `q(u)`: a finite mean and a lower `L` with a positive
 /// diagonal.
-fn read_q(dir: &Path, m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
-    let q_mean = read_f64(dir, TENSOR_Q_MEAN, &[m])?;
-    let values = read_f64(dir, TENSOR_Q_L, &[m, m])?;
+fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
+    let q_mean = read_f64(tensors, TENSOR_Q_MEAN, &[m])?;
+    let values = read_f64(tensors, TENSOR_Q_L, &[m, m])?;
     let q_l = Mat::from_fn(m, m, |row, col| values[col * m + row]);
     let finite = q_mean.iter().chain(&values).all(|value| value.is_finite());
     let lower = (0..m).all(|col| (0..col).all(|row| q_l[(row, col)] == 0.0));
     let positive = (0..m).all(|i| q_l[(i, i)] > 0.0);
     if !(finite && lower && positive) {
         return Err(persist_err(
+            PersistErrorKind::Tensor,
             "q_l must be lower triangular with a positive diagonal, and q finite",
         ));
     }
@@ -250,6 +261,7 @@ fn read_q(dir: &Path, m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LoadedSgpr {
     /// [`crate::DoublePrecision`] model.
     Double(FittedSgpr<Fixed>),
@@ -281,8 +293,11 @@ fn load_sgpr_as<P: GpScalar>(
     registry: &PersistRegistry,
     variants: SgprVariants<P>,
 ) -> Result<LoadedSgpr, GprError> {
-    let fitted =
-        FittedSgpr::<Fixed, FixedInducing, P>::from_persisted(read_core(dir, config, registry)?)?;
+    let fitted = FittedSgpr::<Fixed, FixedInducing, P>::from_persisted(read_core(
+        &TensorFile::read(dir)?.tensors()?,
+        config,
+        registry,
+    )?)?;
     if config.model == ModelJson::OnlineSgpr {
         let (points, inducing) = read_ids(config)?;
         Ok((variants.online)(OnlineSgpr::from_persisted(
@@ -450,6 +465,7 @@ impl LoadedSgpr {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LoadedSvgp {
     /// [`crate::DoublePrecision`] model.
     Double(FittedSvgp),
@@ -467,8 +483,10 @@ fn load_svgp_as<P: GpScalar>(
     registry: &PersistRegistry,
     variant: fn(FittedSvgp<P>) -> LoadedSvgp,
 ) -> Result<LoadedSvgp, GprError> {
-    let core = read_core(dir, config, registry)?;
-    let (q_mean, q_l) = read_q(dir, config.m)?;
+    let file = TensorFile::read(dir)?;
+    let tensors = file.tensors()?;
+    let core = read_core(&tensors, config, registry)?;
+    let (q_mean, q_l) = read_q(&tensors, config.m)?;
     Ok(variant(FittedSvgp::from_persisted(core, q_mean, q_l)?))
 }
 

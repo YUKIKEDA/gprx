@@ -43,8 +43,6 @@ pub(crate) struct GradBuffers {
     d_l: Mat<f64>,
     lt: Mat<f64>,
     ard: Vec<Mat<f64>>,
-    /// `K(X, X)` or its derivative when `X` equals `Z` (`n = m`).
-    full: Mat<f64>,
     ks: KernelScratch<f64>,
 }
 
@@ -68,7 +66,6 @@ impl Default for GradBuffers {
             d_l: Mat::new(),
             lt: Mat::new(),
             ard: Vec::new(),
-            full: Mat::new(),
             ks: KernelScratch::new(),
         }
     }
@@ -140,12 +137,8 @@ where
         d_l,
         lt,
         ard,
-        full,
         ks,
     } = bufs;
-    // The whole `X` when it equals `Z` (`n = m`): its Gram carries the White
-    // diagonal that a rectangular `K(Z, X_b)` leaves at zero.
-    let same_points = core.x_train == core.z_train;
     let mut k_mm_l = view(k_mm_l, m, m);
     for j in 0..m {
         for i in j..m {
@@ -168,18 +161,9 @@ where
     }
     let z = z.into_const();
     let mut a = view(a, m, b);
-    if same_points {
-        let mut gram = view(full, n, n);
-        ks.gram::<M>(
-            compiled,
-            GramInputs::points(z),
-            gram.as_mut(),
-            Triangle::Full,
-        )?;
-        copy_columns(gram.as_ref(), batch, a.as_mut());
-    } else {
-        ks.cross_into::<M>(compiled, z, x, a.as_mut())?;
-    }
+    // `K(Z, X_b)` is the rectangular cross covariance even when `Z` equals
+    // `X`: a White leaf adds nothing to it.
+    ks.cross_into::<M>(compiled, z, x, a.as_mut())?;
     solve_lower(k_mm_l, a.as_mut());
     let a = a.into_const();
     k_diag.resize(b, 0.0);
@@ -222,7 +206,7 @@ where
     );
     out[n_kernel] = -scale * (-0.5 * b as f64 + 0.5 * inv_noise * resid2_var);
     let ard_ready = match compiled {
-        CompiledKernel::RbfArd(leaf) if !same_points => {
+        CompiledKernel::RbfArd(leaf) => {
             leaf.grad_cross_all_from_coords_into::<M>(z, x, ard)?;
             true
         }
@@ -238,22 +222,7 @@ where
             param_idx,
             Triangle::Full,
         )?;
-        let mut d_a = if same_points {
-            let mut grad_full = view(full, n, n);
-            ks.grad::<M>(
-                compiled,
-                GramInputs::points(z),
-                grad_full.as_mut(),
-                param_idx,
-                Triangle::Full,
-            )?;
-            for (b_idx, &row) in batch.iter().enumerate() {
-                d_kdiag[b_idx] = grad_full[(row, row)];
-            }
-            let mut cross = view(d_kzx, m, b);
-            copy_columns(grad_full.as_ref(), batch, cross.as_mut());
-            cross
-        } else if ard_ready {
+        let mut d_a = if ard_ready {
             compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
             ard[param_idx].as_mut().submatrix_mut(0, 0, m, b)
         } else {
@@ -345,15 +314,6 @@ impl<'a> ColMajor<'a> {
     fn col(&self, j: usize) -> &'a [f64] {
         let start = j * self.m;
         &self.data[start..start + self.m]
-    }
-}
-
-/// The columns `batch` of `full`, in that order, into `out`.
-fn copy_columns(full: MatRef<'_, f64>, batch: &[usize], mut out: MatMut<'_, f64>) {
-    for (b_idx, &col) in batch.iter().enumerate() {
-        for row in 0..full.nrows() {
-            out[(row, b_idx)] = full[(row, col)];
-        }
     }
 }
 
