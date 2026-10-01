@@ -269,11 +269,11 @@ pub enum DistanceCachePolicy {
 /// Crate-private. What Cached stores (§7.1).
 struct DistCache<S> {
     dist: Option<Mat<S>>,        // n×n squared Euclidean, for distance-mode leaves
-    ard_sq_diff: Option<Mat<S>>, // raw (Δx_d)² as n × (n·d), for ARD leaves
+    ard_sq_diff: Option<ArdSqDiffBuf<S>>, // raw (Δx_d)², packed lower triangles, for ARD leaves
 }
 ```
 
-置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは列優先 `n × (n·d)` で、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
+置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
 
 ほかの方針とのどの組み合わせも不正ではないので、方針は実行時の enum にする（§6.3）。`(n,n,d)` テンソルは `n²×d×sizeof(T)` バイト。`K` 自体が `n²×sizeof(T)`（n=5000、f64 で約 200MB）で、ARD キャッシュはその `d` 倍になる。`n`・`d`・メモリ予算から方針を選ぶ仕組みは未決（§14）。
 
@@ -581,7 +581,7 @@ struct GprObjective<'a, P: GpScalar = DoublePrecision> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を、詰めた下三角（`d · n(n+1)/2` 個）に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
 
 ### 6.4 Leave-one-out
 
