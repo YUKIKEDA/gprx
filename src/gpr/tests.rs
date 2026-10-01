@@ -1157,8 +1157,8 @@ fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
             .ard_sq_diff
             .as_ref()
             .expect("filled at fit")
-            .ncols(),
-        6
+            .shape(),
+        (3, 2)
     );
     let mut params = [0.0; 3];
     never.get_params(&mut params).expect("len 3");
@@ -1197,7 +1197,7 @@ fn rbf_ard_fit_optimizes_with_always_cache() {
     );
     let dist = gpr.store.buffers.dist.as_ref().expect("distance cache");
     let ard = dist.ard_sq_diff.as_ref().expect("filled at fit");
-    assert_eq!(ard.ncols(), 6);
+    assert_eq!(ard.shape(), (3, 2));
 }
 
 #[test]
@@ -1261,14 +1261,7 @@ fn always_reuses_poisoned_ard_cache() {
     {
         let ws = gpr.store.buffers.dist.as_mut().expect("distance cache");
         let ard = ws.ard_sq_diff.as_mut().expect("filled at fit");
-        let n = 3;
-        for dim in 0..2 {
-            for col in 0..n {
-                for row in col..n {
-                    ard[(row, dim * n + col)] = 999.0;
-                }
-            }
-        }
+        ard.poison(999.0);
     }
     let poisoned = gpr
         .value_and_gradient_into(&params, &mut grad)
@@ -1289,8 +1282,7 @@ fn always_ard_cache_retiling_follows_n() {
     {
         let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
         let ard = ws.ard_sq_diff.as_ref().expect("filled at fit");
-        assert_eq!(ard.nrows(), 3);
-        assert_eq!(ard.ncols(), 6);
+        assert_eq!(ard.shape(), (3, 2));
     }
     let gpr = gpr
         .into_trainer()
@@ -1304,8 +1296,7 @@ fn always_ard_cache_retiling_follows_n() {
         .expect("spd n=4");
     let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
     let ard = ws.ard_sq_diff.as_ref().expect("filled at fit");
-    assert_eq!(ard.nrows(), 4);
-    assert_eq!(ard.ncols(), 8);
+    assert_eq!(ard.shape(), (4, 2));
 }
 
 #[test]

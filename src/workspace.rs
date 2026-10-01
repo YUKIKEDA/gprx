@@ -58,8 +58,8 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
 pub struct DistCache<S> {
     /// Pairwise squared distances for isotropic (distance-mode) leaves (`n × n`).
     pub(crate) dist: Option<Mat<S>>,
-    /// Raw `(Δx_d)²` for ARD leaves (`n × (n·d)`).
-    pub(crate) ard_sq_diff: Option<Mat<S>>,
+    /// Raw `(Δx_d)²` for ARD leaves (`d · n(n+1)/2`, lower triangles).
+    pub(crate) ard_sq_diff: Option<crate::kernel::ArdSqDiffBuf<S>>,
 }
 
 /// Fit buffers for one training size: the shared core, plus the distance
