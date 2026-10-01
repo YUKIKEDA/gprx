@@ -14,7 +14,7 @@ The examples in this file are real output of `save` (a fit of 8 points, then `sa
   model.safetensors    the numbers: X, y, and (per model) Z, q(u), L, α
 ```
 
-`save` creates `<dir>` (and parents) if it is missing and overwrites the two files. Nothing else is written. The solver and the Cholesky buffer policy are not stored: a loaded model is `Fixed` and uses `CholeskyBuffer::Retain`. To train it again, call `with_optimizer` and then `refit` on the typed model.
+`save` creates `<dir>` (and parents) if it is missing and replaces the two files. Each file is written to a temporary file in `<dir>` and renamed over its name, `model.safetensors` first and `config.json` last, so a reader sees the old file or the new one, and a save that fails part way leaves the previous `config.json`. Nothing else is left behind. The solver and the Cholesky buffer policy are not stored: a loaded model is `Fixed` and uses `CholeskyBuffer::Retain`. To train it again, call `with_optimizer` and then `refit` on the typed model.
 
 ## 2. Which model is in the directory
 
@@ -228,7 +228,7 @@ No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. 
 | Call | `has_factor` | Tensors | On load |
 | --- | --- | --- | --- |
 | `save` (Exact) | `false` | `x`, `y` | Builds the Gram matrix at the stored `θ`, factors it (retrying by the stored `jitter` policy), and solves for `α`. Costs `O(n³)` |
-| `save_with_factor` (Exact) | `true` | `x`, `y`, `l`, `alpha` | Skips the factorization. An `F64` factor is memory-mapped (the file must stay unchanged while the model lives; the tensor bytes must be 8-byte aligned or load fails with `PersistFailed`). An `F32` factor is copied out |
+| `save_with_factor` (Exact) | `true` | `x`, `y`, `l`, `alpha` | Skips the factorization. An `F64` factor is memory-mapped (a later gprx save into the same directory renames a new file over it and leaves the mapped file alone; another program must not rewrite the file in place while the model lives; the tensor bytes must be 8-byte aligned or load fails with `PersistFailed`). An `F32` factor is copied out |
 | `save` (`sgpr`, `online_sgpr`, `svgp`) | not written | as §6.2 | Applies the stored fitted maps to `x`; factors `K_mm` at the stored `θ` and `z_train`; rebuilds the VFE system (`sgpr`), or checks `q` and rebuilds `A` and `k_diag` (`svgp`) |
 
 For `ldlt` and `online_sgpr`, the saved ids are restored, so the next `insert` returns the id it would have returned before `save`.
