@@ -95,17 +95,36 @@ where
         log_scratch: vec![0.0; init_z.len()],
     };
     let run = run(&mut mapped, init_z)?;
-    let log_theta = z_to_log_theta(&run.params, intervals)?;
-    let value = objective.value(&log_theta)?;
     keep_better(
         best,
         OptResult {
-            params: log_theta,
-            value,
+            params: z_to_log_theta(&run.params, intervals)?,
+            value: run.value,
             iterations: run.iterations,
         },
     );
     Ok(())
+}
+
+/// The value of an argmin run at its best point, from the run's own record.
+///
+/// The solver evaluated that point already, so it is not evaluated again. A
+/// run whose best is the barrier (every point it tried failed) has no
+/// result: `evaluate` runs at that point once more so the model's own error
+/// (for example an unsupported gradient) is returned instead of a generic
+/// failure to converge.
+pub(super) fn best_value(
+    cost: f64,
+    iterations: u64,
+    evaluate: impl FnOnce() -> Result<f64, GprError>,
+) -> Result<f64, GprError> {
+    if cost.is_finite() && cost < BARRIER_COST {
+        return Ok(cost);
+    }
+    evaluate()?;
+    Err(GprError::OptimizationNotConverged {
+        iterations: iterations as usize,
+    })
 }
 
 /// Keeps the lower of `best` and `candidate`.
@@ -300,7 +319,7 @@ fn log_uniform_open(rng: &mut SmallRng, interval: Interval) -> f64 {
 /// Cost returned to argmin when a trial point is non-finite or rejected (for
 /// example outside an open [`Interval`]). More–Thuente can then backtrack
 /// instead of aborting the whole solve.
-const BARRIER_COST: f64 = 1.0e300;
+pub(super) const BARRIER_COST: f64 = 1.0e300;
 
 pub(super) struct EvalCache<'a, P: ?Sized> {
     objective: &'a mut P,
