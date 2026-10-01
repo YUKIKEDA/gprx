@@ -6,6 +6,7 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::{Mat, MatMut, MatRef};
 
@@ -36,7 +37,7 @@ pub(crate) enum CoordMode {
 pub(crate) struct MixedKernelViews<'a, T = f64> {
     pub(crate) dist: MatRef<'a, T>,
     pub(crate) x: MatRef<'a, T>,
-    pub(crate) ard_cache: Option<MatRef<'a, T>>,
+    pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
 }
 
 impl<'a, T> MixedKernelViews<'a, T> {
