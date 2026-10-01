@@ -478,7 +478,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。`Q_j`（`n×n` 1 枚）と長さ n のベクトル 4 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。一次の項は、ノイズ（`A_i = σn² I`）を含む各パラメータ `i` について 1 回ずつ計算する。`A = L Lᵀ` として、`S_i = L⁻¹ A_i L⁻ᵀ`（三角解 2 回）と `v_i = L⁻¹ A_i α` から `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F`、`αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j` を得るので、Hessian 全体は `O(p n³ + p² n²)`。`p` 枚の `S_i`（`p · n²`）、`v_i` を並べた `n × p`、長さ n のベクトル 1 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直す（`W` が `L` を上書きしたため）。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
@@ -624,7 +624,7 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
     theta: Vec<f64>,                 // θ before the current write, restored when A does not factor
     nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product (§5.3)
-    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
+    hessian: HessianScratch<P::Storage>, // S_i (p · n²), v_i (n × p), one n-vector. Empty until the first Hessian (§6.2)
     factor_jitter: f64,              // j of the last successful factor (§4.0)
 }
 
