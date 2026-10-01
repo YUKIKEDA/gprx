@@ -14,6 +14,7 @@ use super::{OptResult, Optimizer, Restarts};
 
 /// How a proposed coordinate is folded back into an open parameter interval.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BoundaryPolicy {
     /// Projects onto the open interval by clamping just inside the endpoints.
     #[default]
