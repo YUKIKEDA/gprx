@@ -323,6 +323,67 @@ where
     })
 }
 
+/// What an Exact save writes, read from either Exact model. The two models
+/// differ only in the factor kind, the point ids, and where the factor lives.
+struct ExactSave<'a> {
+    n: usize,
+    d: usize,
+    kind: crate::precision::PersistKind,
+    factor_kind: FactorKind,
+    policies: Policies,
+    kernel: &'a KernelSpec,
+    likelihood: &'a GaussianLikelihood,
+    factor_jitter: f64,
+    x_unfitted: &'a dyn UnfittedTransform,
+    y_unfitted: &'a dyn UnfittedTarget,
+    x_transform: &'a dyn Transform,
+    y_transform: &'a dyn TargetTransform,
+    point_ids: Option<(Vec<u64>, u64)>,
+    x: &'a [f64],
+    y: &'a [f64],
+    factor: Option<PackedFactor>,
+}
+
+/// Writes the tensors, then `config.json`, of an Exact model.
+fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
+    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
+    let (point_ids, next_point_id) = match save.point_ids {
+        Some((ids, next)) => (Some(ids), Some(next)),
+        None => (None, None),
+    };
+    let config = ModelConfig {
+        format_version: FORMAT_VERSION,
+        n: save.n,
+        d: save.d,
+        has_factor: save.factor.is_some(),
+        factor_kind: save.factor_kind,
+        precision: PrecisionJson::from_persist(save.kind),
+        residual: ResidualJson::from_persist(save.kind),
+        math: MathJson::encode(save.policies.math),
+        kernel: KernelJson::encode(save.kernel)?,
+        likelihood: LikelihoodJson::encode(save.likelihood),
+        jitter: JitterJson::encode(save.policies.jitter),
+        factor_jitter: save.factor_jitter,
+        distance_cache: Some(DistanceCacheJson::encode(save.policies.distance_cache)),
+        x_unfitted: encode_unfitted_input(save.x_unfitted)?,
+        y_unfitted: encode_unfitted_target(save.y_unfitted)?,
+        x_transform: encode_fitted_input(save.x_transform)?,
+        y_transform: encode_fitted_target(save.y_transform)?,
+        point_ids,
+        next_point_id,
+    };
+    let json = serde_json::to_vec_pretty(&config)
+        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
+    let factor_refs = save.factor.as_ref().map(|packed| FactorBytes {
+        l_dtype: packed.l_dtype,
+        l: packed.l.as_slice(),
+        alpha_dtype: packed.alpha_dtype,
+        alpha: packed.alpha.as_slice(),
+    });
+    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs)?;
+    write_config(dir, &json)
+}
+
 pub(crate) fn save_fitted<O, P>(
     model: &FittedGpr<O, P>,
     dir: &Path,
@@ -331,44 +392,32 @@ pub(crate) fn save_fitted<O, P>(
 where
     P: crate::precision::GpScalar,
 {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
-    let kind = P::persist_kind();
-    let config = ModelConfig {
-        format_version: FORMAT_VERSION,
-        n: model.n(),
-        d: model.d(),
-        has_factor: with_factor,
-        factor_kind: FactorKind::Llt,
-        precision: PrecisionJson::from_persist(kind),
-        residual: ResidualJson::from_persist(kind),
-        math: MathJson::encode(model.policies().math),
-        kernel: KernelJson::encode(model.kernel())?,
-        likelihood: LikelihoodJson::encode(model.likelihood()),
-        jitter: JitterJson::encode(model.policies().jitter),
-        factor_jitter: model.factor_jitter(),
-        distance_cache: Some(DistanceCacheJson::encode(model.policies().distance_cache)),
-        x_unfitted: encode_unfitted_input(model.x_unfitted())?,
-        y_unfitted: encode_unfitted_target(model.y_unfitted())?,
-        x_transform: encode_fitted_input(model.x_transform())?,
-        y_transform: encode_fitted_target(model.y_transform())?,
-        point_ids: None,
-        next_point_id: None,
-    };
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    let packed = if with_factor {
+    let factor = if with_factor {
         Some(pack_saved_factor(model.chol_l(), model.alpha())?)
     } else {
         None
     };
-    let factor_refs = packed.as_ref().map(|packed| FactorBytes {
-        l_dtype: packed.l_dtype,
-        l: packed.l.as_slice(),
-        alpha_dtype: packed.alpha_dtype,
-        alpha: packed.alpha.as_slice(),
-    });
-    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)?;
-    write_config(dir, &json)
+    save_exact(
+        dir,
+        ExactSave {
+            n: model.n(),
+            d: model.d(),
+            kind: P::persist_kind(),
+            factor_kind: FactorKind::Llt,
+            policies: model.policies(),
+            kernel: model.kernel(),
+            likelihood: model.likelihood(),
+            factor_jitter: model.factor_jitter(),
+            x_unfitted: model.x_unfitted(),
+            y_unfitted: model.y_unfitted(),
+            x_transform: model.x_transform(),
+            y_transform: model.y_transform(),
+            point_ids: None,
+            x: model.x(),
+            y: model.y(),
+            factor,
+        },
+    )
 }
 
 pub(crate) fn save_online<O, P>(
@@ -379,44 +428,32 @@ pub(crate) fn save_online<O, P>(
 where
     P: crate::precision::GpScalar,
 {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
-    let kind = P::persist_kind();
-    let config = ModelConfig {
-        format_version: FORMAT_VERSION,
-        n: model.n(),
-        d: model.d(),
-        has_factor: with_factor,
-        factor_kind: FactorKind::Ldlt,
-        precision: PrecisionJson::from_persist(kind),
-        residual: ResidualJson::from_persist(kind),
-        math: MathJson::encode(model.policies().math),
-        kernel: KernelJson::encode(model.kernel())?,
-        likelihood: LikelihoodJson::encode(model.likelihood()),
-        jitter: JitterJson::encode(model.policies().jitter),
-        factor_jitter: model.factor_jitter(),
-        distance_cache: Some(DistanceCacheJson::encode(model.policies().distance_cache)),
-        x_unfitted: encode_unfitted_input(model.x_unfitted())?,
-        y_unfitted: encode_unfitted_target(model.y_unfitted())?,
-        x_transform: encode_fitted_input(model.x_transform())?,
-        y_transform: encode_fitted_target(model.y_transform())?,
-        point_ids: Some(model.persist_point_ids()),
-        next_point_id: Some(model.persist_next_point_id()),
-    };
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    let packed = if with_factor {
+    let factor = if with_factor {
         Some(pack_saved_factor(model.ld_factor(), model.alpha()?)?)
     } else {
         None
     };
-    let factor_refs = packed.as_ref().map(|packed| FactorBytes {
-        l_dtype: packed.l_dtype,
-        l: packed.l.as_slice(),
-        alpha_dtype: packed.alpha_dtype,
-        alpha: packed.alpha.as_slice(),
-    });
-    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)?;
-    write_config(dir, &json)
+    save_exact(
+        dir,
+        ExactSave {
+            n: model.n(),
+            d: model.d(),
+            kind: P::persist_kind(),
+            factor_kind: FactorKind::Ldlt,
+            policies: model.policies(),
+            kernel: model.kernel(),
+            likelihood: model.likelihood(),
+            factor_jitter: model.factor_jitter(),
+            x_unfitted: model.x_unfitted(),
+            y_unfitted: model.y_unfitted(),
+            x_transform: model.x_transform(),
+            y_transform: model.y_transform(),
+            point_ids: Some((model.persist_point_ids(), model.persist_next_point_id())),
+            x: model.x(),
+            y: model.y(),
+            factor,
+        },
+    )
 }
 
 fn apply_online_ids<O, P>(
