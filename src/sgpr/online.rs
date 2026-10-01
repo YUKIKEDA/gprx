@@ -21,10 +21,10 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::FixedInducing;
 use super::factor::{
-    VfeState, VfeSystem, append_column, append_point, assemble_vfe, inducing_delete,
-    inducing_insert, kernel_column, kernel_diag_at, point_at, predict_vfe_covariance,
-    predict_vfe_into, publish_sgpr_weights, refresh_w, remove_column, remove_point, solve_lmm,
-    vfe_loo, vfe_neg_log_marginal_likelihood,
+    VfeState, VfeSystem, append_column, append_point, assemble_vfe, assemble_vfe_with_f64_w,
+    inducing_delete, inducing_insert, kernel_column, kernel_diag_at, point_at,
+    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, refresh_w, remove_column,
+    remove_point, solve_lmm, vfe_loo, vfe_neg_log_marginal_likelihood,
 };
 use super::fitted::FittedSgpr;
 
@@ -139,6 +139,21 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     inducing: InducingRegistry,
 }
 
+/// The fields of an [`OnlineSgpr`] an online update writes, kept by
+/// [`OnlineSgpr::atomically`] to undo a failed update.
+struct UpdateUndo<P: ModelPrecision> {
+    core: SparseCore,
+    k_mm_l: Mat<P::Storage>,
+    a: Mat<P::Storage>,
+    b_l: Mat<P::Storage>,
+    w: Vec<P::Storage>,
+    predict_w: Vec<P::Refine>,
+    k_diag_sum: P::Storage,
+    a_frobenius2: P::Storage,
+    registry: PointRegistry,
+    inducing: InducingRegistry,
+}
+
 impl<O, P> OnlineSgpr<O, P>
 where
     P: crate::precision::GpScalar,
@@ -195,6 +210,51 @@ where
         self.a_frobenius2 = fitted.a_frobenius2;
     }
 
+    /// Runs one online update so that it either completes or changes nothing.
+    ///
+    /// Every update runs its failing steps (kernel evaluation, transforms,
+    /// re-assembly, Cholesky) before its first write, and the writes after
+    /// that cannot fail, except one: a precision that refines in `f64`
+    /// ([`ModelPrecision::REFINES_IN_F64`]) assembles its predict weights
+    /// again from the updated data, and that can fail after the buffers
+    /// changed. For such a precision this keeps a copy of every field an
+    /// update writes and puts it back on failure. Other precisions skip the
+    /// copy, so their updates allocate nothing for it.
+    pub(super) fn atomically<R>(
+        &mut self,
+        update: impl FnOnce(&mut Self) -> Result<R, GprError>,
+    ) -> Result<R, GprError> {
+        if !P::REFINES_IN_F64 {
+            return update(self);
+        }
+        let undo = UpdateUndo::<P> {
+            core: self.core.clone(),
+            k_mm_l: self.k_mm_l.clone(),
+            a: self.a.clone(),
+            b_l: self.b_l.clone(),
+            w: self.w.clone(),
+            predict_w: self.predict_w.clone(),
+            k_diag_sum: self.k_diag_sum,
+            a_frobenius2: self.a_frobenius2,
+            registry: self.registry.clone(),
+            inducing: self.inducing.clone(),
+        };
+        let result = update(self);
+        if result.is_err() {
+            self.core = undo.core;
+            self.k_mm_l = undo.k_mm_l;
+            self.a = undo.a;
+            self.b_l = undo.b_l;
+            self.w = undo.w;
+            self.predict_w = undo.predict_w;
+            self.k_diag_sum = undo.k_diag_sum;
+            self.a_frobenius2 = undo.a_frobenius2;
+            self.registry = undo.registry;
+            self.inducing = undo.inducing;
+        }
+        result
+    }
+
     fn vfe_state(&self) -> VfeState<P::Storage> {
         VfeState::<P::Storage> {
             k_mm_l: self.k_mm_l.clone(),
@@ -207,13 +267,18 @@ where
     }
 
     fn apply_vfe(&mut self, state: VfeState<P::Storage>) -> Result<(), GprError> {
+        self.set_vfe(state);
+        self.refresh_predict_w()
+    }
+
+    /// Takes `state` as the VFE system. The predict weights are the caller's.
+    fn set_vfe(&mut self, state: VfeState<P::Storage>) {
         self.k_mm_l = state.k_mm_l;
         self.a = state.a;
         self.b_l = state.b_l;
         self.w = state.w;
         self.k_diag_sum = state.k_diag_sum;
         self.a_frobenius2 = state.a_frobenius2;
-        self.refresh_predict_w()
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
@@ -671,7 +736,7 @@ where
             return Err(GprError::NonFiniteInput);
         }
         let mut mapped = std::mem::take(&mut self.scratch.point);
-        let result = self.insert_mapped(x_new, y_new, &mut mapped);
+        let result = self.atomically(|model| model.insert_mapped(x_new, y_new, &mut mapped));
         self.scratch.point = mapped;
         result
     }
@@ -700,8 +765,10 @@ where
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = a_col[(i, 0)];
         }
+        let k_diag = kernel_diag_at::<P::Storage>(&self.core.kernel, x_new, self.core.d)?;
+        // No step below fails until the predict weights (see `atomically`).
         self.a_frobenius2 += frobenius2(a_col.as_ref());
-        self.k_diag_sum += kernel_diag_at::<P::Storage>(&self.core.kernel, x_new, self.core.d)?;
+        self.k_diag_sum += k_diag;
         self.a = append_column(&self.a, a_col.as_ref());
         chol_rank1_update(&mut self.b_l, &mut v);
         append_point(&mut self.core.x_train, self.core.n, self.core.d, x_new);
@@ -757,6 +824,11 @@ where
             return Err(GprError::EmptyInput);
         }
         let idx = self.registry.index_of(id)?;
+        self.atomically(|model| model.delete_at(idx))
+    }
+
+    /// [`Self::delete`] of the point at buffer index `idx`.
+    fn delete_at(&mut self, idx: usize) -> Result<(), GprError> {
         let mut v = vec![P::Storage::from_f64(0.0); self.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = self.a[(i, idx)];
@@ -787,33 +859,41 @@ where
             self.core.n -= 1;
             self.recompute_w()?;
         } else {
-            let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
-                &self.core.kernel,
-                self.core.jitter,
-                self.core.likelihood,
-                &x_next,
-                self.core.n - 1,
-                self.core.d,
-                &y_next,
-                &self.core.z_train,
-                self.core.m,
-                &mut self.scratch.storage,
-                &mut self.scratch.f64,
-            ))?;
-            self.core.x_train = x_next;
-            self.core.y_train = y_next;
-            self.core.x_obs = x_obs_next;
-            self.core.y_obs = y_obs_next;
-            self.core.n -= 1;
-            self.k_mm_l = state.k_mm_l;
-            self.a = state.a;
-            self.b_l = state.b_l;
-            self.w = state.w;
-            self.k_diag_sum = state.k_diag_sum;
-            self.a_frobenius2 = state.a_frobenius2;
+            self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next)?;
         }
         self.registry.remove_at(idx);
         Ok(())
+    }
+
+    /// The [`Self::delete`] path when the downdate of `B` fails: assembles
+    /// the VFE system again from the remaining points (one fewer than now)
+    /// and publishes its predict weights with it.
+    pub(super) fn delete_by_reassembly(
+        &mut self,
+        x_next: Vec<f64>,
+        y_next: Vec<f64>,
+        x_obs_next: Vec<f64>,
+        y_obs_next: Vec<f64>,
+    ) -> Result<(), GprError> {
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+            &self.core.kernel,
+            self.core.jitter,
+            self.core.likelihood,
+            &x_next,
+            self.core.n - 1,
+            self.core.d,
+            &y_next,
+            &self.core.z_train,
+            self.core.m,
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
+        ))?;
+        self.core.x_train = x_next;
+        self.core.y_train = y_next;
+        self.core.x_obs = x_obs_next;
+        self.core.y_obs = y_obs_next;
+        self.core.n -= 1;
+        self.apply_vfe(state)
     }
 
     /// Appends one inducing point at the current `θ` with a bordered VFE update.
@@ -873,6 +953,11 @@ where
         if z_new.iter().any(|v| !v.is_finite()) {
             return Err(GprError::NonFiniteInput);
         }
+        self.atomically(|model| model.insert_inducing_checked(z_new))
+    }
+
+    /// [`Self::insert_inducing`] after the checks.
+    fn insert_inducing_checked(&mut self, z_new: &[f64]) -> Result<InducingId, GprError> {
         let z_obs = z_new;
         let mut z_new = Vec::with_capacity(z_obs.len());
         self.core.map_point(z_obs, &mut z_new)?;
@@ -916,7 +1001,7 @@ where
         z_obs: Vec<f64>,
         m: usize,
     ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+        let (state, w64) = with_kernel_exp!(self.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage>(
             &self.core.kernel,
             self.core.jitter,
             self.core.likelihood,
@@ -932,7 +1017,15 @@ where
         self.core.z_train = z_train;
         self.core.z_obs = z_obs;
         self.core.m = m;
-        self.apply_vfe(state)
+        match w64 {
+            // The `f64` weights of this assembly are the refined predict weights.
+            Some(w64) if P::REFINES_IN_F64 => {
+                self.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
+                self.set_vfe(state);
+                Ok(())
+            }
+            _ => self.apply_vfe(state),
+        }
     }
 
     /// Removes the inducing point identified by `id` and packs every buffer.
@@ -980,6 +1073,11 @@ where
             return Err(GprError::EmptyInput);
         }
         let idx = self.inducing.index_of(id)?;
+        self.atomically(|model| model.delete_inducing_at(idx))
+    }
+
+    /// [`Self::delete_inducing`] of the inducing point at index `idx`.
+    fn delete_inducing_at(&mut self, idx: usize) -> Result<(), GprError> {
         let mut state = self.vfe_state();
         inducing_delete(
             &mut state,
