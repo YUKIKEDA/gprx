@@ -246,7 +246,7 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 | `n`, `d`, or (sparse) `m` is `0`; empty `lengthscales` | `GprError::EmptyInput` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
 
-Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. An open Issue concerns reading a directory you did not write: the finiteness of a stored `x`, `y`, `alpha`, or `l` ([#154](https://github.com/YUKIKEDA/gprx/issues/154)). The reader checks shapes and dtypes, and, for `q`, finiteness and triangularity.
+Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. The reader checks shapes and dtypes, that every stored tensor is finite (a `NaN` or `±∞` fails with `PersistFailed`), and, for `q`, finiteness and triangularity.
 
 ## 9. Reading the files without gprx
 
