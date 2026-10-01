@@ -38,6 +38,23 @@ predict 100 has `k = 100`. Leaving `faer_par(n)` in place uses 16 threads at n=1
 
 Wall time is one face of the cost. The algorithm (n solves for A⁻¹) is the same as sklearn. The `n×n` allocation of `I` / `W` is #142 / P2B-19.
 
+## Addendum: n=550 with a composite kernel (2026-10-01, [#376](https://github.com/YUKIKEDA/gprx/issues/376))
+
+The table above has no size where the factor is only part of a joint eval. Mauna Loa (matched B1-1 case, n=550, `C×RBF + C×RBF×Periodic + C×RQ + C×RBF`) was measured on a 4-logical-processor VM, so `faer_par(550)` is 4 workers. Joint MLL+grad, one eval, 3 runs each.
+
+| State | Threads | faer as the formula says | faer `Par::Seq` (trial change) |
+|---|---:|---:|---:|
+| Before #373 | 1 | 34–38 ms | — |
+| Before #373 | 4 | 40–49 ms | 29.5 ms |
+| After #373–#375 | 1 | 17.9–18.5 ms | 17.9–18.4 ms |
+| After #373–#375 | 2 | 19.1–19.5 ms | 17.5–18.5 ms |
+| After #373–#375 | 3 | 18.0–18.9 ms | 17.3–17.8 ms |
+| After #373–#375 | 4 | 16.4–16.7 ms | 16.3–16.5 ms |
+
+Before #373, about 14% of the 4-thread CPU time was spindle (the pool faer's gemm runs on Rayon workers) waiting in its barrier, `_mm_pause`, and `sched_yield`. It competed with the kernel fill, which was then scalar libm and heavy. After #373–#375 spindle still spins (about 21% of the CPU time at 4 threads), but the wall time with and without faer parallelism is the same at 4 threads. It is 1–2 ms apart at 2–3 threads. Most of what remains on the main thread is gprx's own serial `n²` loops, not faer.
+
+Decision: the formula stays. The serial loops are parallelized in [#377](https://github.com/YUKIKEDA/gprx/issues/377). A size or machine that shows faer losing wall time again reopens this record.
+
 ## Consequences
 
 - On an unset 16-thread pool, the square kernel at n=256 uses 4 faer threads, predict 100 at n=1024 uses 6, and predict 100 at n=4096 uses 8
