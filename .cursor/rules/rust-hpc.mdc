@@ -13,7 +13,7 @@ Sources: faer (views + `MemStack` scratch, defer alloc to the caller), [Numerica
 - No `clone` / `to_owned` / `collect::<Vec<_>>()` on hot paths. If you need a temp, it already lives in `Workspace`.
 - Do not hide `O(n²)` copies behind convenience APIs. A function that must allocate is named `to_*` and is not used in `fit` after setup.
 - One Rayon pool, shared with faer. No `par_iter` inside a faer-parallel region. Split `thread_scratch` before the parallel region (design §7.1).
-- `#[inline]` only after `just bench` shows it matters. Kernel SIMD lives in `src/kernel/simd.rs` (P2-5 / P2-7): unit row-stride RBF `apply`/`grad`/`apply_cross`, ARD RBF `apply`/`grad`, and squared-distance / `(Δx_d)²` row loops. Other leaves stay scalar until measured.
+- `#[inline]` only after `just bench` shows it matters. Kernel SIMD lives in `src/kernel/simd.rs` (P2-5 / P2-7): unit row-stride RBF `apply`/`grad`/`apply_cross`, ARD RBF `apply`/`grad`, ARD Matérn / RQ value and `θ` derivative (`src/kernel/ard_simd.rs`), and squared-distance / `(Δx_d)²` row loops. Other leaves stay scalar until measured.
 - Keep indices `usize`. Do not iterate with `i32` to “be like BLAS” in Rust.
 - Parallel / SIMD may change bitwise results. Tests compare with tolerances, not bit-identity, unless a test is explicitly sequential.
 - `f32`/`f64` mixing only at documented `PrecisionPolicy` boundaries. Do not silently `as f64` in a kernel loop.

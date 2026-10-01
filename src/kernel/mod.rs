@@ -19,6 +19,7 @@
 //! notes](crate).
 
 mod ard;
+mod ard_simd;
 mod compiled;
 mod constant;
 mod dist;
