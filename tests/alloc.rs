@@ -652,6 +652,11 @@ fn sparse_predict_into_allocs_after_warmup() {
 /// rebuilt `A` and the tangents of every point.
 const MAX_SVGP_STEP_BYTES_GROWTH: f64 = 1.25;
 
+/// Bytes per step the growth check tolerates on top of the ratio. A step now
+/// allocates nothing (#353), so the ratio alone would fail on one stray
+/// allocation from the thread pool spread over the steps.
+const SVGP_STEP_BYTES_SLACK: f64 = 1024.0;
+
 /// Bytes of one `Svgp::fit` with `epochs` epochs of mini-batches of 32.
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
@@ -694,7 +699,7 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
     let large = svgp_step_bytes(4096);
     eprintln!("svgp step bytes: n=512 {small:.0}, n=4096 {large:.0}");
     assert!(
-        large <= MAX_SVGP_STEP_BYTES_GROWTH * small,
+        large <= MAX_SVGP_STEP_BYTES_GROWTH * small + SVGP_STEP_BYTES_SLACK,
         "an Adam step allocates {large:.0} bytes at n=4096 and {small:.0} at n=512: it scales with n"
     );
 }
