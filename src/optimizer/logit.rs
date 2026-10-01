@@ -49,19 +49,32 @@ impl<P: Differentiable> Differentiable for LogitMapped<'_, P> {
 
 impl<P: TwiceDifferentiable> TwiceDifferentiable for LogitMapped<'_, P> {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        // The chain rule's second-order term needs the gradient as well.
+        let mut grad = vec![0.0; params.len()];
+        self.value_gradient_hessian_into(params, &mut grad, out)
+            .map(|_| ())
+    }
+
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
         z_to_log_theta_into(params, self.intervals, &mut self.log_scratch)?;
         let n = params.len();
-        if out.len() != n * n {
+        if hess.len() != n * n {
             return Err(GprError::LengthMismatch {
-                reason: format!("expected {} Hessian entries, got {}", n * n, out.len()),
+                reason: format!("expected {} Hessian entries, got {}", n * n, hess.len()),
             });
         }
-        let mut grad = vec![0.0; n];
-        self.inner
-            .value_and_gradient_into(&self.log_scratch, &mut grad)?;
-        self.inner.hessian_into(&self.log_scratch, out)?;
-        chain_logit_hess(params, self.intervals, &self.log_scratch, &grad, out);
-        Ok(())
+        let value = self
+            .inner
+            .value_gradient_hessian_into(&self.log_scratch, grad, hess)?;
+        // The second-order term needs the gradient in log-θ, before its chain.
+        chain_logit_hess(params, self.intervals, &self.log_scratch, grad, hess);
+        chain_logit_grad(params, self.intervals, &self.log_scratch, grad);
+        Ok(value)
     }
 }
 
