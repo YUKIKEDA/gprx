@@ -8,7 +8,7 @@ use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
 
 use crate::error::GprError;
-use crate::objective::{Differentiable, HasBounds};
+use crate::objective::Differentiable;
 use crate::param::Interval;
 
 use super::logit::{
@@ -110,7 +110,7 @@ impl Lbfgs {
     }
 }
 
-impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
+impl<P: Differentiable> Optimizer<P> for Lbfgs {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
@@ -315,6 +315,10 @@ mod tests {
     }
 
     impl Objective for CountingObj<'_> {
+        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
+            self.inner.fill_intervals(out)
+        }
+
         fn num_params(&self) -> usize {
             self.inner.num_params()
         }
@@ -337,12 +341,6 @@ mod tests {
         ) -> Result<f64, GprError> {
             self.joint_evals += 1;
             self.inner.value_and_gradient_into(params, out)
-        }
-    }
-
-    impl crate::objective::HasBounds for CountingObj<'_> {
-        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
-            self.inner.fill_intervals(out)
         }
     }
 

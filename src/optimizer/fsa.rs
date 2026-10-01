@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use rand::rngs::SmallRng;
 
 use crate::error::GprError;
-use crate::objective::{HasBounds, Objective};
+use crate::objective::Objective;
 use crate::param::Interval;
 use crate::rng::{open_unit, small_rng};
 
@@ -165,7 +165,7 @@ impl FastSimulatedAnnealing {
     }
 }
 
-impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
+impl<P: Objective> Optimizer<P> for FastSimulatedAnnealing {
     const USES_CHANGE_INDICES: bool = true;
 
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
@@ -361,7 +361,7 @@ mod tests {
     use crate::gpr::Gpr;
     use crate::kernel::{KernelSpec, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
-    use crate::objective::{HasBounds, Objective};
+    use crate::objective::Objective;
     use crate::optimizer::{Fixed, Optimizer};
     use crate::param::Interval;
     use crate::rng::small_rng;
@@ -369,6 +369,18 @@ mod tests {
     struct Rosenbrock;
 
     impl Objective for Rosenbrock {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            if out.len() != 2 {
+                return Err(GprError::ShapeMismatch {
+                    reason: "Rosenbrock is 2-D".to_owned(),
+                });
+            }
+            let interval = Interval::new(-5.0, 5.0).expect("finite");
+            out[0] = interval;
+            out[1] = interval;
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             2
         }
@@ -385,25 +397,21 @@ mod tests {
         }
     }
 
-    impl HasBounds for Rosenbrock {
-        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-            if out.len() != 2 {
-                return Err(GprError::ShapeMismatch {
-                    reason: "Rosenbrock is 2-D".to_owned(),
-                });
-            }
-            let interval = Interval::new(-5.0, 5.0).expect("finite");
-            out[0] = interval;
-            out[1] = interval;
-            Ok(())
-        }
-    }
-
     struct Bowl1d {
         target: f64,
     }
 
     impl Objective for Bowl1d {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            if out.len() != 1 {
+                return Err(GprError::ShapeMismatch {
+                    reason: "bowl is 1-D".to_owned(),
+                });
+            }
+            out[0] = Interval::new(-2.0, 2.0).expect("finite");
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             1
         }
@@ -416,18 +424,6 @@ mod tests {
             }
             let d = params[0] - self.target;
             Ok(d * d)
-        }
-    }
-
-    impl HasBounds for Bowl1d {
-        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-            if out.len() != 1 {
-                return Err(GprError::ShapeMismatch {
-                    reason: "bowl is 1-D".to_owned(),
-                });
-            }
-            out[0] = Interval::new(-2.0, 2.0).expect("finite");
-            Ok(())
         }
     }
 
@@ -512,6 +508,11 @@ mod tests {
     struct Unevaluable;
 
     impl Objective for Unevaluable {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            out[0] = Interval::new(-2.0, 2.0).expect("finite");
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             1
         }
@@ -521,13 +522,6 @@ mod tests {
                 return Err(GprError::NonPositiveDefiniteMatrix);
             }
             Ok(params[0] * params[0])
-        }
-    }
-
-    impl HasBounds for Unevaluable {
-        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-            out[0] = Interval::new(-2.0, 2.0).expect("finite");
-            Ok(())
         }
     }
 

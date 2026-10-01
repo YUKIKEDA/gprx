@@ -11,7 +11,7 @@ use argmin::core::{
 use argmin::solver::trustregion::{Steihaug, TrustRegion as ArgminTrustRegion};
 
 use crate::error::GprError;
-use crate::objective::{HasBounds, TwiceDifferentiable};
+use crate::objective::TwiceDifferentiable;
 use crate::param::Interval;
 
 use super::logit::{
@@ -137,7 +137,7 @@ impl TrustRegion {
     }
 }
 
-impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for TrustRegion {
+impl<P: TwiceDifferentiable> Optimizer<P> for TrustRegion {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
