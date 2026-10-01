@@ -146,6 +146,29 @@ pub trait TwiceDifferentiable: Differentiable {
     /// Returns [`GprError`] when a slice length is wrong or the model cannot
     /// evaluate at `params`.
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
+
+    /// Returns the value at `params` and writes the gradient into `grad` and
+    /// the Hessian (row-major `n×n`) into `hess`.
+    ///
+    /// A second-order solver evaluates all three at each candidate. The
+    /// default calls [`Differentiable::value_and_gradient_into`] then
+    /// [`Self::hessian_into`]. Override it when the three share work, as
+    /// the GPR fit objective does: one factorization serves all three.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Differentiable::value_and_gradient_into`] and
+    /// [`Self::hessian_into`].
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
+        let value = self.value_and_gradient_into(params, grad)?;
+        self.hessian_into(params, hess)?;
+        Ok(value)
+    }
 }
 
 /// Partial kernel rebuild from changed parameter indices.
