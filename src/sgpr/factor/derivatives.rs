@@ -8,7 +8,7 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, Triangle};
 use crate::linalg::{
     copy_mat, dot, frobenius_dot, gemm, mat_add_mul, mat_sub_mul, mat_vec, quad_form, solve_llt,
-    solve_lower,
+    solve_lower, solve_lower_transpose,
 };
 use crate::precision::ModelPrecision;
 use crate::sgpr::FittedSgpr;
@@ -20,6 +20,27 @@ pub(crate) struct KernelVar<T: KernelScalar> {
     pub(crate) d_kmn: Mat<T>,
     pub(crate) d_kdiag: T,
     pub(crate) d_noise: T,
+}
+
+/// The bound's first derivative as weights on the kernel matrices: for any
+/// direction, `dF = ⟨w_mm, ∂K_mm⟩ + ⟨w_mn, ∂K_mn⟩ + w_diag · Σᵢ ∂k(xᵢ, xᵢ)`
+/// (the noise apart). Formed once in `O(m² n)`, so each kernel parameter or
+/// inducing coordinate then costs only its kernel derivatives and an
+/// `O(m n)` contraction.
+pub(crate) struct VfeAdjoint<T: KernelScalar> {
+    /// Symmetric `m × m`.
+    pub(crate) w_mm: Mat<T>,
+    pub(crate) w_mn: Mat<T>,
+    pub(crate) w_diag: T,
+}
+
+impl<T: KernelScalar> VfeAdjoint<T> {
+    /// `dF` for one direction of the kernel matrices.
+    pub(crate) fn contract(&self, d_kmm: MatRef<'_, T>, d_kmn: MatRef<'_, T>, d_kdiag: T) -> T {
+        frobenius_dot(self.w_mm.as_ref(), d_kmm)
+            + frobenius_dot(self.w_mn.as_ref(), d_kmn)
+            + self.w_diag * d_kdiag
+    }
 }
 
 pub(crate) struct VfeEngine<'a, T: KernelScalar> {
@@ -71,6 +92,58 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
         }
     }
 
+    /// [`VfeAdjoint`] of the bound.
+    ///
+    /// With `B = σ² I + A Aᵀ`, `w = B⁻¹ A y`, and `r = y − Aᵀ w`, the bound
+    /// moves with `A` as `⟨G, dA⟩` for `G = B⁻¹ A − (w rᵀ + A) / σ²`, and with
+    /// `Σ diag K` as `1 / (2σ²)`. `dA = L⁻¹ ∂K_mn − Φ_L A`, where
+    /// `Φ = L⁻¹ ∂K_mm L⁻ᵀ` and `Φ_L` is its lower triangle with the diagonal
+    /// halved (`dL = L Φ_L`). So `w_mn = L⁻ᵀ G` and
+    /// `w_mm = −sym(L⁻ᵀ tril½(G Aᵀ) L⁻¹)`.
+    fn adjoint(&self) -> VfeAdjoint<T> {
+        let (m, n) = (self.m, self.n);
+        let mut g = Mat::zeros(m, n);
+        copy_mat(self.a, g.as_mut());
+        solve_llt(self.b_l, g.as_mut());
+        let mut resid = self.y.to_vec();
+        for (j, r) in resid.iter_mut().enumerate() {
+            for i in 0..m {
+                *r -= self.a[(i, j)] * self.w[i];
+            }
+        }
+        let inv_noise = lit::<T>(1.0) / self.noise;
+        for j in 0..n {
+            for i in 0..m {
+                g[(i, j)] -= (self.w[i] * resid[j] + self.a[(i, j)]) * inv_noise;
+            }
+        }
+        let mut h = Mat::zeros(m, m);
+        gemm(
+            h.as_mut(),
+            Accum::Replace,
+            g.as_ref(),
+            self.a.transpose(),
+            lit::<T>(1.0),
+        );
+        solve_lower_transpose(self.l, g.as_mut());
+        let mut x = tril_half(h.as_ref());
+        solve_lower_transpose(self.l, x.as_mut());
+        let mut xt = x.transpose().to_owned();
+        solve_lower_transpose(self.l, xt.as_mut());
+        let mut w_mm = Mat::zeros(m, m);
+        let half = lit::<T>(0.5);
+        for j in 0..m {
+            for i in 0..m {
+                w_mm[(i, j)] = -half * (xt[(j, i)] + xt[(i, j)]);
+            }
+        }
+        VfeAdjoint {
+            w_mm,
+            w_mn: g,
+            w_diag: half * inv_noise,
+        }
+    }
+
     fn tangent_from(
         &self,
         d_kmm: MatRef<'_, T>,
@@ -111,6 +184,7 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
         )
     }
 
+    #[cfg(test)]
     fn directional_owned(&self, var: KernelVar<T>) -> T {
         let t = self.tangent_from(var.d_kmm.as_ref(), var.d_kmn, var.d_kdiag, var.d_noise);
         self.directional_from_tangent(&t)
@@ -134,6 +208,7 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
         lit::<T>(0.5) * (n_minus_m * d_noise / self.noise + d_logdet_b + d_quad) + d_trace
     }
 
+    #[cfg(test)]
     fn directional_from_tangent(&self, t: &VfeTangent<T>) -> T {
         let quad = self.quad;
         let trace = self.trace;
@@ -239,20 +314,38 @@ where
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
+    let adjoint = engine.adjoint();
     let n_kernel = model.core.kernel.num_params();
     for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
         let var = kernel_theta_var::<M, _>(&compiled, ks, x, z, model.core.n, i)?;
-        *slot = engine.directional_owned(var).to_f64();
+        *slot = adjoint
+            .contract(var.d_kmm.as_ref(), var.d_kmn.as_ref(), var.d_kdiag)
+            .to_f64();
     }
     out[n_kernel] = engine
         .directional_noise(model.core.likelihood.noise_variance())
         .to_f64();
     if include_z {
+        let (m, n) = (model.core.m, model.core.n);
+        let mut g_zz = Mat::zeros(m, m);
+        let mut g_xz = Mat::zeros(n, m);
+        let two = lit::<P::Storage>(2.0);
         let mut idx = n_kernel + 1;
         for dim in 0..model.core.d {
-            for p in 0..model.core.m {
-                let var = z_coord_var::<M, _>(&compiled, ks, x, z, p, dim)?;
-                out[idx] = engine.directional_owned(var).to_f64();
+            // `∂k(zᵢ, z_p)/∂z_p[dim]` for every pair, once per dimension; the
+            // coordinate `p` moves row and column `p` of `K_mm` and row `p`
+            // of `K_mn`.
+            compiled.grad_wrt_coord_dim_with::<M>(z, z, g_zz.as_mut(), dim, ks.scratch(m, m))?;
+            compiled.grad_wrt_coord_dim_with::<M>(x, z, g_xz.as_mut(), dim, ks.scratch(n, m))?;
+            for p in 0..m {
+                let mut sum = lit::<P::Storage>(0.0);
+                for i in 0..m {
+                    sum += two * adjoint.w_mm[(i, p)] * g_zz[(i, p)];
+                }
+                for col in 0..n {
+                    sum += adjoint.w_mn[(p, col)] * g_xz[(col, p)];
+                }
+                out[idx] = sum.to_f64();
                 idx += 1;
             }
         }
@@ -764,4 +857,75 @@ pub(crate) fn dw_from<T: KernelScalar>(
         out[i] = rhs[(i, 0)];
     }
     out
+}
+
+#[cfg(test)]
+mod adjoint_tests {
+    use super::{VfeEngine, kernel_theta_var, z_coord_var};
+    use crate::data::pack_points;
+    use crate::kernel::{KernelSpec, PeriodicKernel, RbfArdKernel};
+    use crate::likelihood::GaussianLikelihood;
+    use crate::math::Accurate;
+    use crate::sparse::KernelScratch;
+    use crate::{FreeInducing, Sgpr};
+
+    /// The adjoint weights give, for every kernel parameter and inducing
+    /// coordinate, the same derivative as the per-direction tangent.
+    #[test]
+    fn adjoint_matches_per_direction_tangent() {
+        let x = [0.0, 0.4, 0.9, 1.5, 2.2, 2.8, 0.3, -0.5, 1.1, 0.7, 1.9, 0.2];
+        let y = [0.3, -0.1, 0.8, 0.2, -0.6, 0.4];
+        let z = [0.1, 1.2, 2.5, 0.6, -0.2, 1.0];
+        let kernel = KernelSpec::from(RbfArdKernel::new(&[0.8, 1.6]).expect("ell"))
+            * KernelSpec::from(PeriodicKernel::new(1.1, 2.3).expect("periodic"));
+        let model = Sgpr::new(kernel, GaussianLikelihood::new(0.2).expect("noise"))
+            .with_inducing(FreeInducing)
+            .with_optimizer(crate::Fixed)
+            .factor(&x, 6, 2, &y, &z, 3)
+            .map_err(|(_, e)| e)
+            .expect("factor");
+        let engine = VfeEngine::<f64>::from_model(&model, &model.core.y_train);
+        let adjoint = engine.adjoint();
+        let compiled = model.core.kernel.compile();
+        let xm = pack_points(&model.core.x_train, 6, 2);
+        let zm = pack_points(&model.core.z_train, 3, 2);
+        let mut ks = KernelScratch::new();
+        for i in 0..model.core.kernel.num_params() {
+            let var = kernel_theta_var::<Accurate, f64>(
+                &compiled,
+                &mut ks,
+                xm.as_ref(),
+                zm.as_ref(),
+                6,
+                i,
+            )
+            .expect("var");
+            let via_adjoint = adjoint.contract(var.d_kmm.as_ref(), var.d_kmn.as_ref(), var.d_kdiag);
+            let direct = engine.directional_owned(var);
+            assert!(
+                (via_adjoint - direct).abs() <= 1e-10 * direct.abs().max(1.0),
+                "θ{i}"
+            );
+        }
+        for dim in 0..2 {
+            for p in 0..3 {
+                let var = z_coord_var::<Accurate, f64>(
+                    &compiled,
+                    &mut ks,
+                    xm.as_ref(),
+                    zm.as_ref(),
+                    p,
+                    dim,
+                )
+                .expect("var");
+                let via_adjoint =
+                    adjoint.contract(var.d_kmm.as_ref(), var.d_kmn.as_ref(), var.d_kdiag);
+                let direct = engine.directional_owned(var);
+                assert!(
+                    (via_adjoint - direct).abs() <= 1e-10 * direct.abs().max(1.0),
+                    "z[{p}, {dim}]"
+                );
+            }
+        }
+    }
 }

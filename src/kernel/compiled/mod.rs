@@ -6,6 +6,7 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::{Mat, MatMut, MatRef};
 
@@ -14,6 +15,7 @@ mod coord;
 mod grad;
 pub(crate) mod gram;
 mod hess;
+mod weighted;
 
 #[cfg(test)]
 mod tests;
@@ -36,7 +38,7 @@ pub(crate) enum CoordMode {
 pub(crate) struct MixedKernelViews<'a, T = f64> {
     pub(crate) dist: MatRef<'a, T>,
     pub(crate) x: MatRef<'a, T>,
-    pub(crate) ard_cache: Option<MatRef<'a, T>>,
+    pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
 }
 
 impl<'a, T> MixedKernelViews<'a, T> {
@@ -71,6 +73,7 @@ impl<'a, T> MixedKernelViews<'a, T> {
 /// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum CompiledKernel<T: KernelScalar = f64> {
     /// Isotropic RBF.
     Rbf(RbfKernel),

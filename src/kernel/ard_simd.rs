@@ -9,6 +9,7 @@
 //! `false`, and the caller runs its scalar loop, which also names the error.
 
 use super::Triangle;
+use super::dist::ArdSqDiff;
 use crate::error::GprError;
 use faer::{MatMut, MatRef};
 use wide::f64x4;
@@ -24,8 +25,9 @@ pub(crate) enum Source<'a> {
         x: MatRef<'a, f64>,
         y: MatRef<'a, f64>,
     },
-    /// `cache[row, d · n + col]`, the `n × (n·d)` `(Δx_d)²` cache.
-    Cache { cache: MatRef<'a, f64>, n: usize },
+    /// Packed lower triangle of `(Δx_d)²`. Only [`Rows::Square`]
+    /// [`Triangle::Lower`] reads it; other triangles fall back to the scalar loop.
+    Cache { cache: ArdSqDiff<'a, f64> },
 }
 
 /// Which rows of each column a loop writes.
@@ -65,8 +67,8 @@ pub(crate) fn try_fill<P: Profile>(
                 return Ok(false);
             }
         }
-        Source::Cache { cache, .. } => {
-            if cache.nrows() > 0 && cache.row_stride() != 1 {
+        Source::Cache { .. } => {
+            if !matches!(rows, Rows::Square(Triangle::Lower)) {
                 return Ok(false);
             }
         }
@@ -94,8 +96,10 @@ pub(crate) fn try_fill<P: Profile>(
                         let xs = column(x, dim, start, len);
                         add_weighted(xs, |v| (v - z) * (v - z), w, r2, picked.then_some(&mut *t));
                     }
-                    Source::Cache { cache, n } => {
-                        let sq = column(cache, dim * n + col, start, len);
+                    Source::Cache { cache } => {
+                        let stored = cache.column(dim, col);
+                        let offset = start - col;
+                        let sq = &stored[offset..offset + len];
                         add_weighted(sq, |v| v, w, r2, picked.then_some(&mut *t));
                     }
                 }
@@ -161,7 +165,7 @@ fn add_weighted(
 mod tests {
     use crate::kernel::ard::{Pick, r2_from_cache, r2_from_coords};
     use crate::kernel::{
-        MaternArdKernel, MaternNu, RationalQuadraticArdKernel, Triangle, fill_ard_squared_diff,
+        ArdSqDiffBuf, MaternArdKernel, MaternNu, RationalQuadraticArdKernel, Triangle,
     };
     use crate::math::{Accurate, FastApprox, KernelMath};
     use faer::Mat;
@@ -196,8 +200,7 @@ mod tests {
         let xs = points(7, d, 0.25);
         let kernel = MaternArdKernel::new(&[0.8, 1.7, 1.1], nu).expect("ell");
         let w = kernel.lengthscales().inv_ell_sq().to_vec();
-        let mut cache = Mat::zeros(n, n * d);
-        fill_ard_squared_diff(x0.as_ref(), cache.as_mut(), &mut []);
+        let cache = ArdSqDiffBuf::new(x0.as_ref()).expect("cache");
         for p in [None, Some(0), Some(2)] {
             let mut out = Mat::zeros(n, n);
             let mut from_cache = Mat::zeros(n, n);
@@ -208,7 +211,7 @@ mod tests {
                         .expect("apply");
                     kernel
                         .apply_from_sq_diff::<M, f64>(
-                            cache.as_ref(),
+                            cache.view(),
                             from_cache.as_mut(),
                             Triangle::Full,
                         )
@@ -220,7 +223,7 @@ mod tests {
                         .expect("grad");
                     kernel
                         .grad_from_sq_diff::<M, f64>(
-                            cache.as_ref(),
+                            cache.view(),
                             from_cache.as_mut(),
                             idx,
                             Triangle::Full,
@@ -250,7 +253,7 @@ mod tests {
                     );
                     // The cache holds the lower triangle, which `Lower` reads.
                     if row >= col {
-                        let tc = r2_from_cache(cache.as_ref(), n, row, col, &w, pick).expect("r2");
+                        let tc = r2_from_cache(cache.view(), row, col, &w, pick).expect("r2");
                         assert_close(tc.r2, t.r2, "cache r2");
                         assert_close(
                             from_cache[(row, col)],
@@ -308,8 +311,7 @@ mod tests {
         let alpha = 1.3;
         let kernel = RationalQuadraticArdKernel::new(&[0.9, 1.6], alpha).expect("rq");
         let w = kernel.lengthscales().inv_ell_sq().to_vec();
-        let mut cache = Mat::zeros(n, n * d);
-        fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
+        let cache = ArdSqDiffBuf::new(x.as_ref()).expect("cache");
         for p in [None, Some(0), Some(1), Some(2)] {
             let mut out = Mat::zeros(n, n);
             let mut from_cache = Mat::zeros(n, n);
@@ -320,7 +322,7 @@ mod tests {
                         .apply(x.as_ref(), out.as_mut(), Triangle::Lower)
                         .expect("apply");
                     kernel
-                        .apply_from_sq_diff(cache.as_ref(), from_cache.as_mut(), Triangle::Lower)
+                        .apply_from_sq_diff(cache.view(), from_cache.as_mut(), Triangle::Lower)
                         .expect("cache");
                     kernel
                         .apply_cross(x.as_ref(), xs.as_ref(), cross.as_mut())
@@ -331,12 +333,7 @@ mod tests {
                         .grad(x.as_ref(), out.as_mut(), idx, Triangle::Lower)
                         .expect("grad");
                     kernel
-                        .grad_from_sq_diff(
-                            cache.as_ref(),
-                            from_cache.as_mut(),
-                            idx,
-                            Triangle::Lower,
-                        )
+                        .grad_from_sq_diff(cache.view(), from_cache.as_mut(), idx, Triangle::Lower)
                         .expect("cache");
                     kernel
                         .grad_cross_from_coords(x.as_ref(), xs.as_ref(), cross.as_mut(), idx)

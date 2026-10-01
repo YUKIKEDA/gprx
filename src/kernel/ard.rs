@@ -4,6 +4,7 @@
 //! `r² = Σ_d w_d Δ_d²` (`w_d = 1/ℓ_d²`). The shape checks, the `r²` sums from
 //! coordinates or from the `(Δx_d)²` cache, and the matrix loops live here.
 
+use super::dist::ArdSqDiff;
 use super::{KernelScalar, Triangle, write_square};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
@@ -104,7 +105,7 @@ pub(crate) fn r2_from_coords<T: KernelScalar>(
     })
 }
 
-/// [`ArdR2`] of the pair `(row, col)` from the `n × (n·d)` `(Δx_d)²` cache.
+/// [`ArdR2`] of the pair `(row, col)`, in either order, from the `(Δx_d)²` cache.
 ///
 /// # Errors
 ///
@@ -112,15 +113,14 @@ pub(crate) fn r2_from_coords<T: KernelScalar>(
 /// [`GprError::NonFiniteKernelValue`] if `r²` is not finite.
 #[inline]
 pub(crate) fn r2_from_cache<T: KernelScalar>(
-    cache: MatRef<'_, T>,
-    n: usize,
+    cache: ArdSqDiff<'_, T>,
     row: usize,
     col: usize,
     inv_ell_sq: &[f64],
     pick: Pick,
 ) -> Result<ArdR2<T>, GprError> {
     sum_r2(inv_ell_sq, pick, |dim| {
-        let v = cache[(row, dim * n + col)];
+        let v = cache.get(dim, row, col);
         if v.is_finite() {
             Ok(v)
         } else {
@@ -221,17 +221,17 @@ pub(crate) fn write_from_points<T: KernelScalar>(
     write_square(out, uplo, pair)
 }
 
-/// Writes `uplo` of `out` from the `(Δx_d)²` cache. `pair(n, row, col)` is the value.
+/// Writes `uplo` of `out` from the `(Δx_d)²` cache. `pair(row, col)` is the value.
 pub(crate) fn write_from_cache<T: KernelScalar>(
-    cache: MatRef<'_, T>,
+    cache: ArdSqDiff<'_, T>,
     out: MatMut<'_, T>,
     d: usize,
     uplo: Triangle,
-    mut pair: impl FnMut(usize, usize, usize) -> Result<T, GprError>,
+    pair: impl FnMut(usize, usize) -> Result<T, GprError>,
 ) -> Result<(), GprError> {
     let n = require_square_out(out.as_ref())?;
     super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-    write_square(out, uplo, |row, col| pair(n, row, col))
+    write_square(out, uplo, pair)
 }
 
 /// [`write_from_points`] through the vectorized loop of `profile` when the
@@ -267,7 +267,7 @@ pub(crate) fn write_from_points_simd<T: KernelScalar, P: super::ard_simd::Profil
 /// scalar is `f64` and the layout allows it; `pair` otherwise.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::ard_simd::Profile>(
-    cache: MatRef<'_, T>,
+    cache: ArdSqDiff<'_, T>,
     mut out: MatMut<'_, T>,
     d: usize,
     uplo: Triangle,
@@ -278,9 +278,9 @@ pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::ard_simd::Profile
 ) -> Result<(), GprError> {
     let n = require_square_out(out.as_ref())?;
     super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-    if let (Some(cache), Some(o)) = (T::as_f64_ref(cache), T::as_f64_mut(out.rb_mut()))
+    if let (Some(cache), Some(o)) = (cache.as_f64(), T::as_f64_mut(out.rb_mut()))
         && super::ard_simd::try_fill(
-            super::ard_simd::Source::Cache { cache, n },
+            super::ard_simd::Source::Cache { cache },
             o,
             inv_ell_sq,
             pick,

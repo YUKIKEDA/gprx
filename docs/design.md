@@ -97,6 +97,8 @@ The likelihood is a concrete type, not a trait: Gaussian noise is the only likel
 - Do not iteratively refine that factor back onto the original `A`. The gap between the preconditioner `LLᵀ ≈ A + jI` and the target `A` grows, and the contraction `||I - (LLᵀ)^{-1} A||` can exceed 1 and diverge (§4.2).
 - The sparse models factor `K_mm = k(Z, Z)`, which carries no observation noise. `Sgpr` / `Svgp` take their own `with_jitter_policy` for `K_mm`, and its default is `adaptive(1e-8, 10, 5, 1e-3)` rather than the Exact default: close inducing points leave `K_mm` singular in floating point. Fit, factor, `set_params`, predict, and the online updates all use that policy.
 
+**Subnormal values** (decided in #51). A subnormal `f64` is a positive finite number, and gprx takes it as IEEE 754 says: no public entry point rejects it, and none flushes it to zero. gprx never reads or writes the floating-point control register (MXCSR on x86, FPCR on AArch64): flush-to-zero and denormals-are-zero belong to the calling process, which sets both together if it wants them; gprx offers no switch for one without the other. "This noise is too small to be useful" is a separate, model-level question, answered by the parameter's `Interval` (the default `Interval::DEFAULT_POSITIVE` is `(1e-5, 1e5)`, so a subnormal noise variance is reachable only through bounds the caller widened) and by `JitterPolicy` when a factorization fails. It is not a rule about subnormals.
+
 ### 4.1 Precision: f32 / f64 / mixed
 
 The goals are both "less memory" and "more speed". Use mixed-precision iterative refinement, and **split where it applies between fit and predict**.
@@ -276,11 +278,11 @@ pub enum DistanceCachePolicy {
 /// Crate-private. What Cached stores (§7.1).
 struct DistCache<S> {
     dist: Option<Mat<S>>,        // n×n squared Euclidean, for distance-mode leaves
-    ard_sq_diff: Option<Mat<S>>, // raw (Δx_d)² as n × (n·d), for ARD leaves
+    ard_sq_diff: Option<ArdSqDiffBuf<S>>, // raw (Δx_d)², packed lower triangles, for ARD leaves
 }
 ```
 
-The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout is column-major `n × (n·d)`: dimension `k` is columns `[k n, (k+1) n)`, and each block is lower triangular. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
+The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout keeps only the lower triangle (diagonal included) of each dimension, packed column by column: `d · n(n+1)/2` values, dimension `k` after the first `k · n(n+1)/2`, column `j` holding rows `j..n` contiguously. A reader of another triangle reads the pair `(j, i)` for `(i, j)`. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
 
 The policy is a runtime enum because no combination with the other policies is illegal (§6.3). An `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes; `K` itself is `n²×sizeof(T)` (about 200MB at n=5000, f64), and an ARD cache is `d` times that. Choosing the policy from `n`, `d`, and a memory budget is open (§14).
 
@@ -398,7 +400,11 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     // *_with variants take PredictOptions; get_params / set_params /
     // value_and_gradient_into / hessian_into; into_online / into_trainer / save
 }
+```
 
+Every `seed` (sample, optimizer restarts, FSA, the SVGP Adam shuffle) starts gprx's own Xoshiro256++ generator, its state filled from the seed by SplitMix64 (`src/rng.rs`). The same seed and the same gprx version give the same draws on every platform and with any `rand` version; a test pins the first outputs. Changing the sequence is a breaking change.
+
+```rust
 pub enum VarianceKind {
     Latent,      // variance of the latent f* (no noise)
     Observation, // variance of the observation y* (includes σn²). Default
@@ -427,11 +433,11 @@ pub struct PredictOptions {
 
 ### 6.1 Inducing-point cache for Sparse GPR
 
-The Sparse approximation is VFE. The reason is [ADR 0002](adr/0002-sparse-vfe.md). FITC is not shipped. SVGP is a separate public type (`Svgp` / `FittedSvgp`). The reason is [ADR 0006](adr/0006-sparse-svgp.md). `Svgp<Fixed>::factor` LLTs `K_mm` at the caller's `Z` and places a whitened `q(u)` at the prior (mean 0, `L = I`). `Svgp<Adam>::fit` starts from that prior and moves kernel `θ`, likelihood `θ`, and the whitened `q` with minibatch Adam. A step forms `A_b = L⁻¹ K(Z, X_b)`, `k_diag`, and `∂K(Z, X_b)/∂θ` for its own points only and refactors `K_mm`, so it costs `O(b (m² + m d) + m³)` and nothing in it scales with `n`. Its kernel gradient is formed in reverse, as for VFE: weights on `∂K_mm` and `∂K(Z, X_b)` are built once per step in `O(m² b)`, and each kernel parameter is then a contraction in `O(m² + m b)` rather than a solve per parameter; `A` and `k_diag` of all `n` points are built once before the first step and once after the last. The gradient is computed in `f64` whatever the storage scalar is. `Adam` is not an `Optimizer`. `FittedSvgp` returns diagonal `predict` / `predict_with` (and `predict_into` / `predict_with_into`), `neg_elbo`, and a full-data `value_and_gradient_into`. At the optimal `q` (Titsias) it matches `FittedSgpr` at the same `θ`, `X`, and `Z`. The public types are `Sgpr` / `FittedSgpr`. The default is `Sgpr<Lbfgs, FixedInducing>`. `fit` searches kernel and likelihood `θ`. `Sgpr<Fixed, I>::factor` LLTs `K_mm = k(Z, Z)` at the caller's inducing locations `Z`. By default `Z` is not in params. `fit` after `with_inducing(FreeInducing)` moves kernel `θ`, likelihood `θ`, and column-major `Z` together in the same `Optimizer`. `FittedSgpr` returns diagonal `predict` / `predict_with` (and `predict_into` / `predict_with_into`), `neg_log_marginal_likelihood` (the negative VFE ELBO), `value_and_gradient_into`, and `hessian_into` (row-major `p×p`). At `Z = X` it matches Exact `Gpr<Fixed>::factor`. There is no k-means. External checks are §12 (5c, 5d); wall time and RSS are §15.
+The Sparse approximation is VFE. The reason is [ADR 0002](adr/0002-sparse-vfe.md). FITC is not shipped. SVGP is a separate public type (`Svgp` / `FittedSvgp`). The reason is [ADR 0006](adr/0006-sparse-svgp.md). `Svgp<Fixed>::factor` LLTs `K_mm` at the caller's `Z` and places a whitened `q(u)` at the prior (mean 0, `L = I`). `Svgp<Adam>::fit` starts from that prior and moves kernel `θ`, likelihood `θ`, and the whitened `q` with minibatch Adam. A step forms `A_b = L⁻¹ K(Z, X_b)`, `k_diag`, and `∂K(Z, X_b)/∂θ` for its own points only and refactors `K_mm`, so it costs `O(b (m² + m d) + m³)` and nothing in it scales with `n`. Its kernel gradient is formed in reverse, as for VFE: weights on `∂K_mm` and `∂K(Z, X_b)` are built once per step in `O(m² b)`, and each kernel parameter is then a contraction in `O(m² + m b)` rather than a solve per parameter; `A` and `k_diag` of all `n` points are built once before the first step and once after the last. The gradient is computed in `f64` whatever the storage scalar is. `Adam` is not an `Optimizer`. `FittedSvgp` returns diagonal `predict` / `predict_with` (and `predict_into` / `predict_with_into`), `neg_elbo`, and a full-data `value_and_gradient_into`. At the optimal `q` (Titsias) it matches `FittedSgpr` at the same `θ`, `X`, and `Z`. The public types are `Sgpr` / `FittedSgpr`. The default is `Sgpr<Lbfgs, FixedInducing>`. `fit` searches kernel and likelihood `θ`. `Sgpr<Fixed, I>::factor` LLTs `K_mm = k(Z, Z)` at the caller's inducing locations `Z`. By default `Z` is not in params. `fit` after `with_inducing(FreeInducing)` moves kernel `θ`, likelihood `θ`, and column-major `Z` together in the same `Optimizer`. `FittedSgpr` returns diagonal `predict` / `predict_with` (and `predict_into` / `predict_with_into`), `neg_log_marginal_likelihood` (the negative VFE ELBO), `value_and_gradient_into`, and `hessian_into` (row-major `p×p`). At `Z = X` it matches Exact `Gpr<Fixed>::factor` for a kernel without a White leaf. `K(Z, X)` is always the rectangular cross covariance, whatever the values of `Z` and `X`, so a White leaf adds nothing to it (it does add to `K_mm` and to `diag K(X, X)`): the bound is continuous in `Z`, does not depend on whether `Z` equals `X` bit for bit or on the order of its rows, and the value, gradient, and Hessian all come from the same VFE formulas. With a White leaf, the bound at `Z = X` is therefore not the Exact likelihood: White is noise the inducing points do not explain. There is no k-means. External checks are §12 (5c, 5d); wall time and RSS are §15.
 
 The diagonal of `K(X,X)` is invariant, so it is computed once and reused. `K(X,Z)` and `K(Z,Z)` must be recomputed whenever Z moves, but `m` (the number of inducing points) is small, so that cost is negligible next to the O(nm²) Cholesky and is not cached. The joint gradient and Hessian of `K(X,X)` sum the diagonal `∂k(x_i, x_i)/∂θ` in `O(n)`. Gradients of `K(Z,Z)` and `K(Z,X)` stay dense.
 
-The gradient of inducing coordinates is `grad_wrt_coord_dim` and the Hessian is `hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim` (§5.1). Every built-in leaf has them, Sum and Product trees compose them (the radial leaves from `g'(q)`, `g''(q)` of `k = g(q)`, `q = Σ w_d Δ_d²`, one implementation; a Product by the product rule over each term's value and first and second derivative). Matérn with `ν = 1/2` returns `GprError::CoordGradientUnsupported`, not a panic: its coordinate derivative is undefined where two points coincide, and `Z ⊂ X` starts there. A `Custom` leaf provides them through `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, and `grad_wrt_sq_dist_theta`, and the rectangular `∂K/∂θ` through `grad_cross` / `hess_cross`; a leaf that leaves the defaults returns `CoordGradientUnsupported`. The default `FixedInducing` `fit` does not call this API: it needs the rectangular `∂K(Z, X)/∂θ` and `∂²K(Z, X)/∂θ∂θ` (`grad_cross_points` / `hess_cross_points`), which every built-in leaf and every Sum / Product tree of them provides, so a `Constant × RBF` signal variance fits in `Sgpr` and `Svgp` as in Exact. A `Custom` leaf needs `KernelTerm::grad_cross` / `hess_cross` (see above). `FreeInducing` calls the coordinate API once per dimension during joint optimization. The reason is [ADR 0003](adr/0003-sparse-z-joint.md).
+The gradient of inducing coordinates is `grad_wrt_coord_dim` and the Hessian is `hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim` (§5.1). Every built-in leaf has them, Sum and Product trees compose them (the radial leaves from `g'(q)`, `g''(q)` of `k = g(q)`, `q = Σ w_d Δ_d²`, one implementation; a Product by the product rule over each term's value and first and second derivative). Matérn with `ν = 1/2` returns `GprError::CoordGradientUnsupported`, not a panic: its coordinate derivative is undefined where two points coincide, and `Z ⊂ X` starts there. A `Custom` leaf provides them through `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, and `grad_wrt_sq_dist_theta`, and the rectangular `∂K/∂θ` through `grad_cross` / `hess_cross`; a leaf that leaves the defaults returns `CoordGradientUnsupported`. The default `FixedInducing` `fit` does not call this API: it needs the rectangular `∂K(Z, X)/∂θ` and `∂²K(Z, X)/∂θ∂θ` (`grad_cross_points` / `hess_cross_points`), which every built-in leaf and every Sum / Product tree of them provides, so a `Constant × RBF` signal variance fits in `Sgpr` and `Svgp` as in Exact. A `Custom` leaf needs `KernelTerm::grad_cross` / `hess_cross` (see above). `FreeInducing` calls the coordinate API once per dimension during joint optimization. The VFE gradient is formed in reverse: the bound moves with `A = L⁻¹ K_mn` as `⟨G, dA⟩` for `G = B⁻¹A − (w rᵀ + A)/σ²` (`B = σ² I + A Aᵀ`, `w = B⁻¹ A y`, `r = y − Aᵀ w`), which gives weights `w_mn = L⁻ᵀ G`, `w_mm = −sym(L⁻ᵀ tril½(G Aᵀ) L⁻¹)`, and `1/(2σ²)` on `Σ diag K`, once in `O(m² n)`. Each kernel parameter is then its `∂K_mm`, `∂K_mn`, `∂ diag K` contracted with them in `O(m n)`, and each inducing coordinate `z_p[dim]` reads only row and column `p` (`O(m + n)` from the per-dimension coordinate derivatives), instead of an `O(m² n)` solve per direction. The reason is [ADR 0003](adr/0003-sparse-z-joint.md).
 
 **The default is: the caller passes Z, and the optimization targets are kernel hyperparameters and noise only.** Free Z switches with `FixedInducing` / `FreeInducing`. The same `Optimizer` moves kernel `θ`, likelihood `θ`, and column-major `Z` together. The interval is the raw coordinates of the training-`X` box, opened a little. L-BFGS history length is `p = p_θ + m×d`, and the extra storage is `history_size × m × d` values of `f64` (small next to the VFE `O(nm²)`, because `m` is small). Alternating is not shipped.
 
@@ -475,7 +481,7 @@ Standard algorithm (Rasmussen & Williams / the GPy family):
 4. Solve `L Lᵀ α = y` by forward and back substitution (O(n²))
 5. Compute `K⁻¹` from `L` (triangular solves of `L Lᵀ X = I`, one O(n³))
 6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]` (symmetric, so lower triangle only)
-7. For each θ_i, evaluate `∂K/∂θ_i` into `exp_buf` and accumulate `⟨W, ∂K/∂θ_i⟩_F` in O(n²). Kernel parameters use `KernelTerm::grad`. Noise uses `Likelihood::noise_grad_diag` (diagonal only)
+7. Accumulate `⟨W, ∂K/∂θ_i⟩_F` for every kernel θ_i in one walk of the kernel tree (`CompiledKernel::weighted_grads`): a Sum hands its weight to every term; a Product evaluates each factor's Gram once and hands factor `c` the weight `W ∘ ∏_{s≠c} K_s`; a leaf writes its `∂K/∂θ_i` into a reused `n×n` buffer and takes the Frobenius product with the weight it was handed, O(n²) per parameter. A Periodic or RQ leaf on cached distances instead makes one pass over its pairs that shares each entry's `sin` / `cos` / `exp` (or `ln` / `exp`) between its two parameters and accumulates both products directly, and a Constant leaf is `c · Σ weight`; neither writes a `∂K`. No factor of a product is evaluated once per parameter. Noise uses `Likelihood::noise_grad_diag` (diagonal only)
 
 Total cost is O(n³ + p n²). `K⁻¹` is not rebuilt per parameter.
 
@@ -485,7 +491,7 @@ Analytic NLML Hessian:
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. `Q_j` (one `n×n`) and four length-`n` vectors live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
+`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. The first-order term runs over every parameter `i` once, the noise included (`A_i = σn² I`): with `A = L Lᵀ`, `S_i = L⁻¹ A_i L⁻ᵀ` (two triangular solves) and `v_i = L⁻¹ A_i α` give `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F` and `αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j`, so the whole Hessian costs `O(p n³ + p² n²)`. The `p` matrices `S_i` (`p · n²`), the `n × p` matrix of `v_i`, and one length-`n` vector live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩, because `W` was written over `L`.
 
 `value_and_gradient_into` runs this once and shares L, α, and `exp_buf` between the likelihood and the gradient. The default two-step `value` then `gradient_into` does not share them.
 
@@ -589,7 +595,7 @@ Preconditions:
 - NaN/Inf in the input is `NonFiniteInput`
 - Cholesky failure is `Err((gpr, err))`. A half-built `FittedGpr` is not returned
 
-The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)`. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
+The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as packed lower triangles, `d · n(n+1)/2` values. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
 
 ### 6.4 Leave-one-out
 
@@ -613,7 +619,7 @@ sklearn has no LOO API. `just gen-goldens` applies the same GPML formula to `L_`
 latent σ_i² = k(x_i, x_i) - ‖a_i‖² + σn² h / (1 - h)
 ```
 
-One triangular solve `L_B⁻¹ A` makes the pass `O(n m²)`. At `Z = X` it is the Exact LOO. An `f32` storage assembles the VFE system again in `f64`, as its prediction does. SVGP has no LOO (§6.1).
+One triangular solve `L_B⁻¹ A` makes the pass `O(n m²)`. At `Z = X` it is the Exact LOO for a kernel without a White leaf. An `f32` storage assembles the VFE system again in `f64`, as its prediction does. SVGP has no LOO (§6.1).
 
 ## 7. Workspace and memory
 
@@ -632,7 +638,7 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
     theta: Vec<f64>,                 // θ before the current write, restored when A does not factor
     nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product (§5.3)
-    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
+    hessian: HessianScratch<P::Storage>, // S_i (p · n²), v_i (n × p), one n-vector. Empty until the first Hessian (§6.2)
     factor_jitter: f64,              // j of the last successful factor (§4.0)
 }
 
@@ -740,13 +746,15 @@ pub struct OptResult {
 // Optimizer<P> is in §5.4: `P` is the objective type the algorithm can minimize.
 ```
 
-`init` is a slice (it does not consume the caller's `Vec`). `GprObjective` overrides `value_and_gradient_into` and shares L, α, W, and `exp_buf` by the §6.2 steps. `GprObjective` implements `TwiceDifferentiable`, and `hessian_into` forwards to `FittedGpr`. `SgprObjective` is the same crate-private adapter for `Sgpr`. Bounds come from each parameter's `Interval` (crate-private `HasBounds`).
+`init` is a slice (it does not consume the caller's `Vec`). `GprObjective` overrides `value_and_gradient_into` and shares L, α, W, and `exp_buf` by the §6.2 steps. `GprObjective` implements `TwiceDifferentiable`, and `hessian_into` forwards to `FittedGpr`. `SgprObjective` is the same crate-private adapter for `Sgpr`. Bounds come from each parameter's `Interval` through `Objective::fill_intervals` (public, so a user optimizer reads them and can call a built-in optimizer on the same objective; the default is `Interval::DEFAULT_POSITIVE`).
 
 The trainer bound is `O: for<'a> Optimizer<GprObjective<'a, P>>`. The default is `Lbfgs`. `Lbfgs` needs `Differentiable`, `TrustRegion` needs `TwiceDifferentiable`, and `NelderMead` / `FastSimulatedAnnealing` need only `Objective`. The argmin adapters map each user-unit interval through a logit so argmin stays unconstrained (log-uniform for positive intervals, scaled so the Jacobian is 1 at the midpoint); `TrustRegion` also maps the analytic Hessian. `TrustRegion` is argmin's trust-region method with the Steihaug subproblem, the solver that uses the Hessian: an indefinite or singular Hessian and a step out of the bounds are handled by the region shrinking (a candidate that cannot be evaluated, Hessian included, costs a barrier value), and a solver failure is `OptimizationNotConverged`. `FastSimulatedAnnealing` is gprx's own value-only solver (Cauchy / Metropolis): it walks the log-`θ` it receives, with no logit, and is the example of a user optimizer. The objective types are crate-private, so a user optimizer implements `Optimizer<P>` generically over the capability it needs (`impl<P: Objective> Optimizer<P> for Mine`) and replaces the same type parameter through `with_optimizer`; there is no second solver setting next to it to ignore (`.cursor/rules/types.mdc`). gprx does not implement its own quasi-Newton. `Adam` is the minibatch loop of `Svgp` and is not an `Optimizer`. There is no runtime NotImplemented.
 
 ## 10. `GprError`
 
 Cover the failures that are specific to numerical work.
+
+A public enum whose set can grow is `#[non_exhaustive]`: `GprError`, `CholeskyStage`, `IntervalError`, `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`, `PersistKind`, `KernelSpec`, `CompiledKernel`, `DistanceCachePolicy`, `JitterPolicy`, `KernelExp`, and `BoundaryPolicy`. Adding a variant to one of them is not a breaking change; a `match` outside the crate needs a `_` arm. A closed set stays exhaustive so callers can match every case: `Triangle`, `MaternNu`, `VarianceKind`, `CholeskyBuffer`.
 
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
@@ -772,7 +780,7 @@ pub enum GprError {
     WorkspaceTooSmall,
     InvalidPointId,
     InvalidInducingId,
-    PersistFailed { reason: String },
+    PersistFailed { kind: PersistErrorKind, reason: String }, // kind: Io / Config / Tensor / InvalidPersistId / NotPersistable / UnregisteredId / WrongModel
     UnsupportedPersistVersion { found: u32, supported: u32 },
 }
 
@@ -781,7 +789,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 Display text is English (see `src/error.rs`).
 
-`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`. An interval that does not contain its value is `InvalidInterval`. Save / load failures are `PersistFailed`, and a file from another format version is `UnsupportedPersistVersion`.
+`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`. An interval that does not contain its value is `InvalidInterval`. Save / load failures are `PersistFailed`, whose `kind` (`PersistErrorKind`, non-exhaustive) says which part failed so a caller can branch without reading `reason`, and a file from another format version is `UnsupportedPersistVersion`.
 
 **Error versus panic**: failures caused by user input (`DimensionMismatch` and similar) and by the model or the data (`CholeskyFailed` and similar) return `Result` and stay recoverable. `CoordGradientUnsupported` is not an internal panic, so it returns this error instead of `unimplemented!()`. There is no `NotFitted` variant. An unfitted call cannot be formed.
 
@@ -917,7 +925,7 @@ Correctness comes before speed: every path has its correctness tests before it i
    - Gradient of the noise parameter (`log_noise_variance`). `∂K/∂θ = σn² I`
    - Gradient stability on an ill-conditioned matrix
 4. **Online updates**: one-point add/delete matches a full refit, delete at an arbitrary index, repeated add and delete, and agreement of PointId with the internal index (the §11 invariant)
-5. **Online property tests**: at every stage of a random insert/delete sequence, incremental == `Gpr<Fixed>::factor` (mean, variance, LML, alpha). Delete order is randomized with `SmallRng`
+5. **Online property tests**: at every stage of a random insert/delete sequence, incremental == `Gpr<Fixed>::factor` (mean, variance, LML, alpha). Delete order is randomized with a seeded `rand` generator in the test
 5b. **External check of online insert**: libgp `add_pattern` at the same θ, against predict (mean and observation variance) and NLML, relative `1e-8`. There is no external delete API. `cargo test` reads committed JSON (it does not call C++)
 5c. **External check of Sparse**: `Sgpr<Fixed>::factor` against collapsed GPyTorch SGPR, and `Svgp<Fixed>::factor` (prior `q`) against whitened SVGP, at the same initial θ, relative `1e-8` (mean, Observation, Latent, NLML / ELBO). `cargo test` reads committed JSON (it does not call Python)
 5d. **External check of Sparse online**: `OnlineSgpr` `insert` / `delete` / `insert_inducing` / `delete_inducing` against a collapsed GPyTorch SGPR (full reassemble) at each stage, same initial θ, relative `1e-8` (mean, Observation, Latent, NLML). `cargo test` reads committed JSON (it does not call Python)
@@ -961,7 +969,7 @@ The input has to be the same every time, or a faster run cannot be told from a d
 - Criterion uses `n = 256`. The cross-library harness uses `n = 256 / 1024 / 4096` (Forrester) and `16×16 / 32×32 / 64×64` (sphere)
 - Isotropic: 1-D Forrester `f(x)=(6x-2)² sin(12x-4)`, `x ∈ [0, 1]`, RBF + `GaussianLikelihood` + `StandardizeTarget`. Initial hyperparameters `ℓ = 1`, `σn² = 0.1`
 - ARD: 2-D weighted sphere `f=(x/0.25)²+(y/1)²`, a 16×16 grid on `[0, 1]²`. Initial `ℓ_d = 4` (`ℓ_d = 1` dies on the first line search)
-- `y` is that function plus `N(0, 1)` (`SmallRng`. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on `Uncached`). It is not an independent random series (L-BFGS eval counts move with the landscape)
+- `y` is that function plus `N(0, 1)` (gprx's seeded generator. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on `Uncached`). It is not an independent random series (L-BFGS eval counts move with the landscape)
 - Criterion groups in `benches/exact.rs` (only paths that exist):
   1. `kernel_rbf` — lower-triangle build of K
   2. `cholesky_alpha` — LLT of `A` and `α`

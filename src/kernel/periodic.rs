@@ -251,6 +251,40 @@ impl PeriodicKernel {
         })
     }
 
+    /// `⟨weight, ∂K/∂θ_p⟩_F` for both parameters over the lower triangle
+    /// of `dist`, in one pass: each entry's `sin`, `cos`, and `exp` serve
+    /// both derivatives, and no `∂K` matrix is written.
+    pub(crate) fn weighted_grads_dist<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
+        let pi = T::from_f64(std::f64::consts::PI);
+        let (two, four) = (T::from_f64(2.0), T::from_f64(4.0));
+        let (mut g_ell, mut g_period) = (0.0, 0.0);
+        for col in 0..dist.ncols() {
+            for row in col..dist.nrows() {
+                let r = euclidean_from_sq(dist[(row, col)])?;
+                let alpha = pi * r / period;
+                let (s, c) = (alpha.sin(), alpha.cos());
+                let z = -two * s * s * inv_ell_sq;
+                let e = if M::ACCURATE { z.exp() } else { M::jet(z).d1 };
+                let dk_ell = finite_kernel(e * four * s * s * inv_ell_sq)?;
+                let dk_period = finite_kernel(e * four * s * c * alpha * inv_ell_sq)?;
+                let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
+                g_ell += w * dk_ell.to_f64();
+                g_period += w * dk_period.to_f64();
+            }
+        }
+        out[0] = g_ell;
+        out[1] = g_period;
+        Ok(())
+    }
+
     pub(crate) fn apply_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
