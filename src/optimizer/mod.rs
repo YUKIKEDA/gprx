@@ -28,7 +28,7 @@ use std::num::NonZeroU32;
 pub use adam::Adam;
 pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
-pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta};
+pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta_into};
 pub use neldermead::NelderMead;
 pub use trust_region::TrustRegion;
 
