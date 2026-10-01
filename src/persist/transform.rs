@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::transform::{
     ColumnwiseInput, FittedColumnwiseInput, FittedMinMaxInput, FittedMinMaxTarget, FittedPipeline,
     FittedStandardizeInput, FittedStandardizeTarget, FittedTargetPipeline, IdentityInput,
@@ -383,17 +384,22 @@ impl FittedTargetJson {
 
 fn require_id(id: Option<&'static str>, what: &str) -> Result<String, GprError> {
     let id = id.ok_or_else(|| {
-        persist_err(format!(
-            "{what} is not a built-in and does not implement persist_id"
-        ))
+        persist_err(
+            PersistErrorKind::NotPersistable,
+            format!("{what} is not a built-in and does not implement persist_id"),
+        )
     })?;
     if id.is_empty() {
-        return Err(persist_err(format!("{what} persist_id is empty")));
+        return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
+            format!("{what} persist_id is empty"),
+        ));
     }
     if id.starts_with(RESERVED_PREFIX) {
-        return Err(persist_err(format!(
-            "persist_id {id:?} uses the reserved {RESERVED_PREFIX} prefix"
-        )));
+        return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
+            format!("persist_id {id:?} uses the reserved {RESERVED_PREFIX} prefix"),
+        ));
     }
     Ok(id.to_owned())
 }

@@ -8,6 +8,7 @@ use faer::{Mat, MatRef};
 
 use crate::data::{pack_points, validate_training};
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{KernelScalar, KernelSpec};
@@ -921,14 +922,17 @@ where
             return Err(GprError::EmptyInput);
         }
         if parts.x_obs.len() % n != 0 {
-            return Err(persist::persist_err("persisted x length is not n * d"));
+            return Err(persist::persist_err(
+                PersistErrorKind::Tensor,
+                "persisted x length is not n * d",
+            ));
         }
         let d = parts.x_obs.len() / n;
         if parts.alpha.len() != n {
-            return Err(persist::persist_err(format!(
-                "alpha has {} values, expected n = {n}",
-                parts.alpha.len()
-            )));
+            return Err(persist::persist_err(
+                PersistErrorKind::Tensor,
+                format!("alpha has {} values, expected n = {n}", parts.alpha.len()),
+            ));
         }
         let mut x_buf = parts.x_obs.clone();
         parts.x_transform.apply(&mut x_buf, n, d)?;

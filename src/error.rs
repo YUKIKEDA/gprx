@@ -15,6 +15,46 @@ pub enum CholeskyStage {
     /// Incremental delete on an online model.
     OnlineDelete,
 }
+/// The part of a save or load that failed ([`GprError::PersistFailed`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PersistErrorKind {
+    /// The file system: creating the directory, or reading, writing,
+    /// renaming, opening, or mapping a file.
+    Io,
+    /// `config.json` is not valid JSON, misses a key, or holds values that
+    /// disagree with each other (for example point ids and `n`).
+    Config,
+    /// `model.safetensors` is damaged: a missing tensor, a wrong dtype or
+    /// shape, a misaligned or out-of-range buffer, or values the model
+    /// cannot hold.
+    Tensor,
+    /// A `persist_id` is empty, uses the reserved prefix, or is registered
+    /// twice.
+    InvalidPersistId,
+    /// A custom kernel or transform has no persist form: it does not
+    /// implement `persist_id` or `persist_state`.
+    NotPersistable,
+    /// A saved custom kernel or transform names a `persist_id` the
+    /// [`crate::PersistRegistry`] passed to the load does not hold.
+    UnregisteredId,
+    /// The directory holds another kind of model than the one being loaded.
+    WrongModel,
+}
+
+impl std::fmt::Display for PersistErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Io => "io",
+            Self::Config => "config",
+            Self::Tensor => "tensor",
+            Self::InvalidPersistId => "invalid persist_id",
+            Self::NotPersistable => "not persistable",
+            Self::UnregisteredId => "unregistered persist_id",
+            Self::WrongModel => "wrong model",
+        })
+    }
+}
 
 /// Error type returned by gprx operations.
 ///
@@ -162,9 +202,11 @@ pub enum GprError {
     #[error("the given InducingId does not exist")]
     InvalidInducingId,
     /// Saving or loading a fitted model failed.
-    #[error("persist failed: {reason}")]
+    #[error("persist failed ({kind}): {reason}")]
     PersistFailed {
-        /// Why the save or load could not finish.
+        /// Which part of the save or load failed, for a caller to branch on.
+        kind: PersistErrorKind,
+        /// Why the save or load could not finish, for a person to read.
         reason: String,
     },
     /// `config.json` `format_version` is not supported by this crate.
@@ -179,6 +221,7 @@ pub enum GprError {
 
 #[cfg(test)]
 mod tests {
+    use super::PersistErrorKind;
     use super::{CholeskyStage, GprError};
 
     use crate::test_check::assert_send_sync;
@@ -206,10 +249,11 @@ mod tests {
         );
         assert_eq!(
             GprError::PersistFailed {
+                kind: PersistErrorKind::Tensor,
                 reason: "missing l".to_owned()
             }
             .to_string(),
-            "persist failed: missing l"
+            "persist failed (tensor): missing l"
         );
         assert_eq!(
             GprError::UnsupportedPersistVersion {

@@ -770,7 +770,7 @@ pub enum GprError {
     WorkspaceTooSmall,
     InvalidPointId,
     InvalidInducingId,
-    PersistFailed { reason: String },
+    PersistFailed { kind: PersistErrorKind, reason: String }, // kind: Io / Config / Tensor / InvalidPersistId / NotPersistable / UnregisteredId / WrongModel
     UnsupportedPersistVersion { found: u32, supported: u32 },
 }
 
@@ -779,7 +779,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 表示文は英語（`src/error.rs`）。
 
-`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。保存・読み込みの失敗は `PersistFailed`、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
+`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。保存・読み込みの失敗は `PersistFailed`（どこで失敗したかを `kind`（`PersistErrorKind`、non_exhaustive）で示し、呼び出し側は `reason` を読まずに分岐できる）、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
 
 **Error/panicの線引き**: ユーザー入力起因(`DimensionMismatch`等)、モデル/データ起因(`CholeskyFailed`等)は`Result`で返し回復可能にする。`CoordGradientUnsupported`はライブラリ内部panic対象ではないため`unimplemented!()`ではなく本Errorを返す。`NotFitted` の variant は無い。未学習の呼び出しは書けない。
 

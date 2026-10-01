@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::persist::persist_err;
 
 /// Stable identity of one training point on [`crate::OnlineGpr`].
@@ -108,16 +109,20 @@ impl<I: RegistryId> IdRegistry<I> {
         for (index, &raw) in ids.iter().enumerate() {
             let id = I::from_raw(raw);
             if id_to_index.insert(id, index).is_some() {
-                return Err(persist_err(format!("config has duplicate {key}")));
+                return Err(persist_err(
+                    PersistErrorKind::Config,
+                    format!("config has duplicate {key}"),
+                ));
             }
             index_to_id.push(id);
             max_id = Some(max_id.map_or(raw, |seen: u64| seen.max(raw)));
         }
         if let Some(max_id) = max_id {
             if next_id <= max_id {
-                return Err(persist_err(format!(
-                    "config next id must exceed every stored value of {key}"
-                )));
+                return Err(persist_err(
+                    PersistErrorKind::Config,
+                    format!("config next id must exceed every stored value of {key}"),
+                ));
             }
         }
         Ok(Self {
