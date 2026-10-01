@@ -10,9 +10,7 @@ use super::assemble::q_param_len;
 use crate::data::pack_points;
 use crate::error::GprError;
 use crate::kernel::{GramInputs, KernelScalar, Triangle};
-use crate::linalg::{
-    dot_f64x4, mat_mul_into, mat_sub_mul, norm2_f64x4, solve_lower, symmetrize_lower,
-};
+use crate::linalg::{dot_f64x4, mat_mul_into, mat_sub_mul, norm2_f64x4, solve_lower};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseCore, SparseScratch};
 use crate::svgp::FittedSvgp;
@@ -88,9 +86,6 @@ struct BatchTerms {
     a: Mat<f64>,
     /// `k(x, x)` of each batch point.
     k_diag: Vec<f64>,
-    /// The whole `X` when it equals `Z` (`n = m`): its Gram carries the White
-    /// diagonal that a rectangular `K(Z, X_b)` leaves at zero.
-    x_full: Option<Mat<f64>>,
 }
 
 fn batch_terms<M: crate::math::KernelMath>(
@@ -109,42 +104,11 @@ fn batch_terms<M: crate::math::KernelMath>(
         }
     }
     let z = pack_points(&core.z_train, m, d);
-    let x_full = (core.x_train == core.z_train).then(|| pack_points(&core.x_train, n, d));
-    let mut a = if let Some(full) = &x_full {
-        let mut gram = Mat::zeros(n, n);
-        ks.gram::<M>(
-            &compiled,
-            GramInputs::points(full.as_ref()),
-            gram.as_mut(),
-            Triangle::Lower,
-        )?;
-        symmetrize_lower(gram.as_mut(), n);
-        columns(gram.as_ref(), batch)
-    } else {
-        ks.cross::<M>(&compiled, z.as_ref(), x.as_ref())?
-    };
+    let mut a = ks.cross::<M>(&compiled, z.as_ref(), x.as_ref())?;
     solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![0.0; b];
     compiled.fill_diag_points(x.as_ref(), &mut k_diag)?;
-    Ok(BatchTerms {
-        x,
-        z,
-        a,
-        k_diag,
-        x_full,
-    })
-}
-
-/// The columns `batch` of `full`, in that order.
-fn columns(full: MatRef<'_, f64>, batch: &[usize]) -> Mat<f64> {
-    let rows = full.nrows();
-    let mut owned = Mat::zeros(rows, batch.len());
-    for (b_idx, &col) in batch.iter().enumerate() {
-        for row in 0..rows {
-            owned[(row, b_idx)] = full[(row, col)];
-        }
-    }
-    owned
+    Ok(BatchTerms { x, z, a, k_diag })
 }
 
 fn accumulate_kl_grad(
@@ -323,7 +287,7 @@ fn accumulate_kernel_grad<M: crate::math::KernelMath>(
     let b = batch.len();
     let compiled = core.kernel.compile();
     let mut ard_cross = match &compiled {
-        crate::kernel::CompiledKernel::RbfArd(leaf) if terms.x_full.is_none() => {
+        crate::kernel::CompiledKernel::RbfArd(leaf) => {
             Some(leaf.grad_cross_all_from_coords::<M, _>(terms.z.as_ref(), terms.x.as_ref())?)
         }
         _ => None,
@@ -394,19 +358,6 @@ fn kernel_theta_tangents<M: crate::math::KernelMath>(
     let mut d_kzx = if let Some(pre) = pre_cross {
         compiled.grad_diag_points::<M>(terms.x.as_ref(), &mut d_kdiag, param_idx)?;
         pre
-    } else if let Some(full) = &terms.x_full {
-        let mut gram = Mat::zeros(core.n, core.n);
-        ks.grad::<M>(
-            compiled,
-            GramInputs::points(full.as_ref()),
-            gram.as_mut(),
-            param_idx,
-            Triangle::Full,
-        )?;
-        for (b_idx, &row) in batch.iter().enumerate() {
-            d_kdiag[b_idx] = gram[(row, row)];
-        }
-        columns(gram.as_ref(), batch)
     } else {
         let mut cross = Mat::zeros(m, b);
         compiled.grad_cross_points::<M>(
