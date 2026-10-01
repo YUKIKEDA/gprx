@@ -64,9 +64,8 @@ pub use term::{CustomKernel, KernelTerm};
 pub use white::WhiteKernel;
 
 use crate::error::GprError;
-use dist::{col_chunk, worker_count};
+use dist::{par_lower_blocks, worker_count};
 use faer::{MatMut, MatRef};
-use rayon::prelude::*;
 
 /// Which triangle of a symmetric kernel matrix to write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,19 +242,15 @@ fn write_lower_parallel<T: KernelScalar>(
     kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = dist.nrows();
-    let n_parts = worker_count();
-    out.par_col_partition_mut(n_parts)
-        .enumerate()
-        .try_for_each(|(chunk_idx, mut part)| {
-            let (start, len) = col_chunk(n, chunk_idx, n_parts);
-            for local in 0..len {
-                let col = start + local;
-                for row in col..n {
-                    part[(row, local)] = kernel(dist[(row, col)])?;
-                }
+    par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            for row in col..n {
+                part[(row, local)] = kernel(dist[(row, col)])?;
             }
-            Ok::<(), GprError>(())
-        })
+        }
+        Ok::<(), GprError>(())
+    })
 }
 
 /// Returns `value` if it is finite, else [`GprError::NonFiniteKernelValue`].
@@ -346,20 +341,16 @@ fn write_lower_from_coords_parallel<T: KernelScalar>(
     kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
     let n = x.nrows();
-    let n_parts = worker_count();
-    out.par_col_partition_mut(n_parts)
-        .enumerate()
-        .try_for_each(|(chunk_idx, mut part)| {
-            let (start, len) = col_chunk(n, chunk_idx, n_parts);
-            for local in 0..len {
-                let col = start + local;
-                for row in col..n {
-                    let d = finite_dist(pair_squared_euclidean(x, row, col))?;
-                    part[(row, local)] = kernel(d)?;
-                }
+    par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            for row in col..n {
+                let d = finite_dist(pair_squared_euclidean(x, row, col))?;
+                part[(row, local)] = kernel(d)?;
             }
-            Ok::<(), GprError>(())
-        })
+        }
+        Ok::<(), GprError>(())
+    })
 }
 
 /// Writes every entry of a rectangular `out`. `pair(row, col)` is the value.
