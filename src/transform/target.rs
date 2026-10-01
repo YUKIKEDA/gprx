@@ -458,6 +458,14 @@ impl FittedMinMaxTarget {
         if !data_min.is_finite() || !data_max.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
+        // `fit` never yields `min > max`; `data_span` would hide it as 1.
+        if data_min > data_max {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "fitted min-max target needs data_min <= data_max, got {data_min} > {data_max}"
+                ),
+            });
+        }
         Ok(Self {
             data_min,
             data_max,
@@ -691,5 +699,15 @@ mod tests {
     #[test]
     fn minmax_target_rejects() {
         assert!(MinMaxTarget::with_feature_range(1.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn fitted_min_max_target_rejects_reversed_extrema() {
+        assert!(matches!(
+            FittedMinMaxTarget::from_parts(2.0, 1.0, 0.0, 1.0),
+            Err(GprError::InvalidHyperparameter { .. })
+        ));
+        assert!(FittedMinMaxTarget::from_parts(1.0, 1.0, 0.0, 1.0).is_ok());
+        assert!(FittedMinMaxTarget::from_parts(1.0, 2.0, 0.0, 1.0).is_ok());
     }
 }

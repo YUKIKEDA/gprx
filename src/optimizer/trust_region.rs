@@ -11,11 +11,11 @@ use argmin::core::{
 use argmin::solver::trustregion::{Steihaug, TrustRegion as ArgminTrustRegion};
 
 use crate::error::GprError;
-use crate::objective::{HasBounds, TwiceDifferentiable};
+use crate::objective::TwiceDifferentiable;
 use crate::param::Interval;
 
 use super::logit::{
-    LogitMapped, keep_better, log_theta_to_z, sample_log_uniform_z, z_to_log_theta,
+    LogitMapped, best_value, keep_better, log_theta_to_z, sample_log_uniform_z, z_to_log_theta,
 };
 use super::{OptResult, Optimizer, Restarts};
 
@@ -137,7 +137,7 @@ impl TrustRegion {
     }
 }
 
-impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for TrustRegion {
+impl<P: TwiceDifferentiable> Optimizer<P> for TrustRegion {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
@@ -151,7 +151,7 @@ impl<P: TwiceDifferentiable + HasBounds> Optimizer<P> for TrustRegion {
         let first_z = log_theta_to_z(init, &intervals)?;
         consider(self, objective, &intervals, &first_z, &mut best)?;
         if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
+            let mut rng = crate::rng::seeded_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider(self, objective, &intervals, &z, &mut best);
@@ -174,14 +174,11 @@ fn consider<P: TwiceDifferentiable>(
         log_scratch: vec![0.0; init_z.len()],
     };
     let run = run_trust_region(optimizer, &mut mapped, init_z)?;
-    let log_theta = z_to_log_theta(&run.params, intervals)?;
-    let mut grad = vec![0.0; log_theta.len()];
-    let value = objective.value_and_gradient_into(&log_theta, &mut grad)?;
     keep_better(
         best,
         OptResult {
-            params: log_theta,
-            value,
+            params: z_to_log_theta(&run.params, intervals)?,
+            value: run.value,
             iterations: run.iterations,
         },
     );
@@ -234,12 +231,11 @@ fn run_trust_region<P: TwiceDifferentiable>(
         .ok_or(GprError::OptimizationNotConverged {
             iterations: iterations as usize,
         })?;
-    let value = state.get_best_cost();
-    if !value.is_finite() {
-        return Err(GprError::OptimizationNotConverged {
-            iterations: iterations as usize,
-        });
-    }
+    let cost = state.get_best_cost();
+    let value = best_value(cost, iterations, || {
+        let mut grad = vec![0.0; n];
+        objective.value_and_gradient_into(&params, &mut grad)
+    })?;
     Ok(OptResult {
         params,
         value,
@@ -335,12 +331,13 @@ impl<'a, P: TwiceDifferentiable + ?Sized> HessCache<'a, P> {
                 return Ok(value);
             }
         }
-        let value = self
-            .objective
-            .value_and_gradient_into(param, &mut self.grad)?;
-        let hessian = self.objective.hessian_into(param, &mut self.hess);
-        if hessian.is_err()
-            || !value.is_finite()
+        // The model's own error (for example an unsupported gradient) keeps
+        // its type; `cost` turns any failure here into a bad step.
+        self.value = None;
+        let value =
+            self.objective
+                .value_gradient_hessian_into(param, &mut self.grad, &mut self.hess)?;
+        if !value.is_finite()
             || self.grad.iter().any(|g| !g.is_finite())
             || self.hess.iter().any(|h| !h.is_finite())
         {
@@ -614,5 +611,72 @@ mod tests {
         assert!(TrustRegion::new().with_radii(0.0, 1.0).is_err());
         assert!(TrustRegion::new().with_radii(2.0, 1.0).is_err());
         assert!(TrustRegion::new().with_radii(1.0, f64::INFINITY).is_err());
+    }
+
+    /// Quadratic bowl that counts which entry points a solver uses.
+    #[derive(Default)]
+    struct CountingBowl {
+        separate_gradients: usize,
+        separate_hessians: usize,
+        joint: usize,
+    }
+
+    impl Objective for CountingBowl {
+        fn num_params(&self) -> usize {
+            2
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            Ok((params[0] - 0.3).powi(2) + 2.0 * (params[1] + 0.2).powi(2))
+        }
+    }
+
+    impl Differentiable for CountingBowl {
+        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.separate_gradients += 1;
+            out[0] = 2.0 * (params[0] - 0.3);
+            out[1] = 4.0 * (params[1] + 0.2);
+            Ok(())
+        }
+    }
+
+    impl TwiceDifferentiable for CountingBowl {
+        fn hessian_into(&mut self, _params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.separate_hessians += 1;
+            out.copy_from_slice(&[2.0, 0.0, 0.0, 4.0]);
+            Ok(())
+        }
+
+        fn value_gradient_hessian_into(
+            &mut self,
+            params: &[f64],
+            grad: &mut [f64],
+            hess: &mut [f64],
+        ) -> Result<f64, GprError> {
+            self.joint += 1;
+            grad[0] = 2.0 * (params[0] - 0.3);
+            grad[1] = 4.0 * (params[1] + 0.2);
+            hess.copy_from_slice(&[2.0, 0.0, 0.0, 4.0]);
+            self.value(params)
+        }
+    }
+
+    #[test]
+    fn trust_region_evaluates_each_candidate_through_the_joint_entry_point() {
+        let mut bowl = CountingBowl::default();
+        let result = TrustRegion::new()
+            .minimize_unconstrained(&mut bowl, &[2.0, 1.0])
+            .expect("minimize");
+        assert_close(result.params[0], 0.3, TOL);
+        assert_close(result.params[1], -0.2, TOL);
+        assert!(bowl.joint > 0);
+        assert_eq!(
+            bowl.separate_hessians, 0,
+            "a candidate's Hessian is part of the joint call"
+        );
+        assert_eq!(
+            bowl.separate_gradients, 0,
+            "a candidate's gradient is part of the joint call"
+        );
     }
 }

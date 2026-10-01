@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Stage at which a Cholesky factorization failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum CholeskyStage {
     /// Factorization during batch fit.
     Fit,
@@ -82,6 +83,7 @@ impl std::fmt::Display for PersistErrorKind {
 /// # }
 /// ```
 #[derive(Clone, Debug, Error, PartialEq)]
+#[non_exhaustive]
 pub enum GprError {
     /// Input feature dimension does not match the fitted model.
     #[error("input dimension mismatch: X.ncols()={x_dim}, expected {expected_dim}")]
