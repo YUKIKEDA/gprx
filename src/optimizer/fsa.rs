@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use crate::rng::SeededRng;
 
 use crate::error::GprError;
-use crate::objective::{HasBounds, Objective};
+use crate::objective::Objective;
 use crate::param::Interval;
 use crate::rng::{open_unit, seeded_rng};
 
@@ -14,6 +14,7 @@ use super::{OptResult, Optimizer, Restarts};
 
 /// How a proposed coordinate is folded back into an open parameter interval.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BoundaryPolicy {
     /// Projects onto the open interval by clamping just inside the endpoints.
     #[default]
@@ -110,7 +111,10 @@ impl FastSimulatedAnnealing {
     ///
     /// Extra starts are drawn log-uniform in each positive interval (uniform
     /// in the parameter space of `init` otherwise). The first start is `init`.
-    /// Failed extra starts are discarded.
+    /// Failed extra starts are discarded. `seed` draws the starts. Each
+    /// extra start anneals with its own random steps, derived from
+    /// [`Self::with_seed`] and the restart number; the first start uses
+    /// [`Self::with_seed`] itself.
     pub fn with_restarts(mut self, n: NonZeroU32, seed: u64) -> Self {
         self.restarts = Some(Restarts { n, seed });
         self
@@ -161,7 +165,7 @@ impl FastSimulatedAnnealing {
     }
 }
 
-impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
+impl<P: Objective> Optimizer<P> for FastSimulatedAnnealing {
     const USES_CHANGE_INDICES: bool = true;
 
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
@@ -179,12 +183,16 @@ impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
         let mut intervals = vec![Interval::DEFAULT_POSITIVE; n];
         objective.fill_intervals(&mut intervals)?;
         let mut best: Option<OptResult> = None;
-        keep_better(&mut best, anneal(self, objective, init, &intervals)?);
+        keep_better(
+            &mut best,
+            anneal(self, objective, init, &intervals, self.seed)?,
+        );
         if let Some(restarts) = self.restarts {
             let mut rng = seeded_rng(restarts.seed);
-            for _ in 0..restarts.n.get() {
+            for restart in 1..=u64::from(restarts.n.get()) {
                 let start = sample_in_param_space(&intervals, &mut rng, self.boundary);
-                let _ = anneal(self, objective, &start, &intervals)
+                let seed = restart_seed(self.seed, restart);
+                let _ = anneal(self, objective, &start, &intervals, seed)
                     .map(|candidate| keep_better(&mut best, candidate));
             }
         }
@@ -192,11 +200,25 @@ impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
     }
 }
 
+/// Seed of the annealing walk of restart `restart` (1-based).
+///
+/// Each restart draws its own Cauchy steps and Metropolis decisions, so the
+/// restarts do not repeat one noise sequence from different starts. The
+/// first run keeps [`FastSimulatedAnnealing::with_seed`] itself. SplitMix64
+/// of the pair keeps nearby seeds and restart numbers far apart.
+fn restart_seed(seed: u64, restart: u64) -> u64 {
+    let mut z = seed ^ restart.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 fn anneal<P: Objective>(
     fsa: &FastSimulatedAnnealing,
     objective: &mut P,
     init: &[f64],
     intervals: &[Interval],
+    seed: u64,
 ) -> Result<OptResult, GprError> {
     let n = init.len();
     let bounds: Vec<(f64, f64)> = intervals.iter().copied().map(param_bounds).collect();
@@ -213,7 +235,7 @@ fn anneal<P: Objective>(
     let mut best = current.clone();
     let mut best_energy = current_energy;
     let mut proposed = current.clone();
-    let mut rng = seeded_rng(fsa.seed);
+    let mut rng = seeded_rng(seed);
     let dim = n as f64;
     // Coordinate of the last rejected proposal. The objective last evaluated
     // that proposal, so the next step also lists it as changed.
@@ -339,7 +361,7 @@ mod tests {
     use crate::gpr::Gpr;
     use crate::kernel::{KernelSpec, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
-    use crate::objective::{HasBounds, Objective};
+    use crate::objective::Objective;
     use crate::optimizer::{Fixed, Optimizer};
     use crate::param::Interval;
     use crate::rng::seeded_rng;
@@ -347,6 +369,18 @@ mod tests {
     struct Rosenbrock;
 
     impl Objective for Rosenbrock {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            if out.len() != 2 {
+                return Err(GprError::ShapeMismatch {
+                    reason: "Rosenbrock is 2-D".to_owned(),
+                });
+            }
+            let interval = Interval::new(-5.0, 5.0).expect("finite");
+            out[0] = interval;
+            out[1] = interval;
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             2
         }
@@ -363,25 +397,21 @@ mod tests {
         }
     }
 
-    impl HasBounds for Rosenbrock {
-        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-            if out.len() != 2 {
-                return Err(GprError::ShapeMismatch {
-                    reason: "Rosenbrock is 2-D".to_owned(),
-                });
-            }
-            let interval = Interval::new(-5.0, 5.0).expect("finite");
-            out[0] = interval;
-            out[1] = interval;
-            Ok(())
-        }
-    }
-
     struct Bowl1d {
         target: f64,
     }
 
     impl Objective for Bowl1d {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            if out.len() != 1 {
+                return Err(GprError::ShapeMismatch {
+                    reason: "bowl is 1-D".to_owned(),
+                });
+            }
+            out[0] = Interval::new(-2.0, 2.0).expect("finite");
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             1
         }
@@ -394,18 +424,6 @@ mod tests {
             }
             let d = params[0] - self.target;
             Ok(d * d)
-        }
-    }
-
-    impl HasBounds for Bowl1d {
-        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-            if out.len() != 1 {
-                return Err(GprError::ShapeMismatch {
-                    reason: "bowl is 1-D".to_owned(),
-                });
-            }
-            out[0] = Interval::new(-2.0, 2.0).expect("finite");
-            Ok(())
         }
     }
 
@@ -490,6 +508,11 @@ mod tests {
     struct Unevaluable;
 
     impl Objective for Unevaluable {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            out[0] = Interval::new(-2.0, 2.0).expect("finite");
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             1
         }
@@ -502,13 +525,6 @@ mod tests {
         }
     }
 
-    impl HasBounds for Unevaluable {
-        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-            out[0] = Interval::new(-2.0, 2.0).expect("finite");
-            Ok(())
-        }
-    }
-
     #[test]
     fn a_proposal_that_cannot_be_evaluated_is_rejected_not_fatal() {
         let result = FastSimulatedAnnealing::new()
@@ -517,5 +533,80 @@ mod tests {
             .expect("annealing survives unevaluable proposals");
         assert!(result.params[0] <= 0.5);
         assert!(result.value <= 0.16 + 1e-12);
+    }
+
+    /// Flat objective on two open intervals that records every point it sees.
+    struct FlatRecorder {
+        calls: Vec<(bool, Vec<f64>)>,
+    }
+
+    impl Objective for FlatRecorder {
+        fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+            out.fill(Interval::new(-5.0, 5.0).expect("finite"));
+            Ok(())
+        }
+
+        fn num_params(&self) -> usize {
+            2
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            self.calls.push((true, params.to_vec()));
+            Ok(0.0)
+        }
+
+        fn value_at_changes(
+            &mut self,
+            params: &[f64],
+            _indices: &[usize],
+        ) -> Result<f64, GprError> {
+            self.calls.push((false, params.to_vec()));
+            Ok(0.0)
+        }
+    }
+
+    #[test]
+    fn restarts_anneal_with_different_random_steps() {
+        // A flat objective accepts every proposal, so each walk is its start
+        // plus its Cauchy steps. With periodic folding the steps are the
+        // differences of consecutive points modulo the width.
+        let mut objective = FlatRecorder { calls: Vec::new() };
+        FastSimulatedAnnealing::new()
+            .with_max_iterations(20)
+            .with_boundary(BoundaryPolicy::Periodic)
+            .with_restarts(std::num::NonZeroU32::new(2).expect("2"), 5)
+            .minimize(&mut objective, &[0.5, -0.5])
+            .expect("minimize");
+        let width = 10.0;
+        let mut walks: Vec<Vec<f64>> = Vec::new();
+        let mut previous: Option<Vec<f64>> = None;
+        for (starts_walk, point) in objective.calls {
+            if starts_walk {
+                walks.push(Vec::new());
+            } else if let (Some(prev), Some(walk)) = (&previous, walks.last_mut()) {
+                for (a, b) in point.iter().zip(prev) {
+                    let step = (a - b).rem_euclid(width);
+                    if step > 0.0 {
+                        walk.push(step);
+                    }
+                }
+            }
+            previous = Some(point);
+        }
+        assert_eq!(walks.len(), 3, "first run and two restarts");
+        for (i, a) in walks.iter().enumerate() {
+            for b in &walks[i + 1..] {
+                let same = a
+                    .iter()
+                    .zip(b)
+                    .filter(|(x, y)| (*x - *y).abs() < 1e-9)
+                    .count();
+                assert!(
+                    same * 2 < a.len().min(b.len()),
+                    "two walks share {same} of {} steps",
+                    a.len().min(b.len())
+                );
+            }
+        }
     }
 }

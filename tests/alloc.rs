@@ -94,8 +94,8 @@ const M_SPARSE: usize = 32;
 const MAX_SPARSE_ALLOCS: [(&str, usize); 5] = [
     ("sgpr_mll_and_grad", 19),
     ("sgpr_hessian", 111),
-    ("online_sgpr_insert", 10),
-    ("online_sgpr_insert_nested", 18),
+    ("online_sgpr_insert", 8),
+    ("online_sgpr_insert_nested", 16),
     ("svgp_mll_and_grad", 20),
 ];
 
@@ -697,4 +697,42 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
         large <= MAX_SVGP_STEP_BYTES_GROWTH * small,
         "an Adam step allocates {large:.0} bytes at n=4096 and {small:.0} at n=512: it scales with n"
     );
+}
+
+/// Allocations one more Adam epoch adds to `Svgp::fit` (64 points, batches
+/// of 8: eight steps per epoch). Do not raise without an Issue.
+const MAX_SVGP_ADAM_EPOCH_ALLOCS: usize = 192;
+
+#[test]
+fn svgp_adam_epoch_allocs() {
+    let _guard = alloc_lock();
+    let n = 64;
+    let x: Vec<f64> = (0..n).map(|i| i as f64 / 8.0).collect();
+    let y: Vec<f64> = x.iter().map(|v| v.sin()).collect();
+    let z: Vec<f64> = (0..8).map(|i| i as f64).collect();
+    let fit = |epochs: u64| {
+        allocs_in(|| {
+            let fitted = Svgp::new(
+                KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
+                GaussianLikelihood::new(0.1).expect("noise"),
+            )
+            .with_optimizer(
+                Adam::new()
+                    .with_batch_size(NonZeroUsize::new(8).expect("8"))
+                    .with_epochs(NonZeroU64::new(epochs).expect("epochs")),
+            )
+            .fit(&x, n, 1, &y, &z, 8)
+            .map_err(|(_, e)| e)
+            .expect("fit");
+            std::hint::black_box(fitted);
+        })
+    };
+    // Warm the thread pool, then take the least of a few differences: the
+    // counter sees the whole process, not only this fit.
+    fit(1);
+    let per_epoch = (0..3)
+        .map(|_| fit(3).saturating_sub(fit(1)) / 2)
+        .min()
+        .unwrap_or(usize::MAX);
+    assert_alloc_cap("svgp_adam_epoch", per_epoch, MAX_SVGP_ADAM_EPOCH_ALLOCS);
 }

@@ -102,6 +102,25 @@ pub trait Objective {
         let _ = indices;
         self.value(params)
     }
+
+    /// Writes the [`Interval`] of each parameter, in user units, into `out`
+    /// (length [`Self::num_params`]).
+    ///
+    /// The built-in optimizers search inside these intervals, so a user
+    /// optimizer can read them too and call a built-in one on the same
+    /// objective. The GPR fit objectives write the intervals the kernel and
+    /// likelihood declare. The default writes [`Interval::DEFAULT_POSITIVE`]
+    /// for every parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`] when `out.len()` is not
+    /// [`Self::num_params`].
+    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        crate::data::require_count(out.len(), self.num_params(), "parameters")?;
+        out.fill(Interval::DEFAULT_POSITIVE);
+        Ok(())
+    }
 }
 
 /// First-order objective. Supertrait of [`Objective`].
@@ -146,6 +165,29 @@ pub trait TwiceDifferentiable: Differentiable {
     /// Returns [`GprError`] when a slice length is wrong or the model cannot
     /// evaluate at `params`.
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
+
+    /// Returns the value at `params` and writes the gradient into `grad` and
+    /// the Hessian (row-major `n×n`) into `hess`.
+    ///
+    /// A second-order solver evaluates all three at each candidate. The
+    /// default calls [`Differentiable::value_and_gradient_into`] then
+    /// [`Self::hessian_into`]. Override it when the three share work, as
+    /// the GPR fit objective does: one factorization serves all three.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Differentiable::value_and_gradient_into`] and
+    /// [`Self::hessian_into`].
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
+        let value = self.value_and_gradient_into(params, grad)?;
+        self.hessian_into(params, hess)?;
+        Ok(value)
+    }
 }
 
 /// Partial kernel rebuild from changed parameter indices.
@@ -169,7 +211,33 @@ pub trait IncrementalObjective: Objective {
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError>;
 }
 
-/// Supplies per-parameter [`Interval`] in user units (crate-private).
-pub(crate) trait HasBounds {
-    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError>;
+#[cfg(test)]
+mod interval_tests {
+    use super::Objective;
+    use crate::error::GprError;
+    use crate::param::Interval;
+
+    struct Plain;
+
+    impl Objective for Plain {
+        fn num_params(&self) -> usize {
+            2
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            Ok(params.iter().map(|p| p * p).sum())
+        }
+    }
+
+    #[test]
+    fn default_intervals_are_the_default_positive_range() {
+        let mut out = [Interval::new(1.0, 2.0).expect("valid"); 2];
+        Plain.fill_intervals(&mut out).expect("len 2");
+        assert_eq!(out, [Interval::DEFAULT_POSITIVE; 2]);
+        let mut short = [Interval::DEFAULT_POSITIVE; 1];
+        assert!(matches!(
+            Plain.fill_intervals(&mut short),
+            Err(GprError::LengthMismatch { .. })
+        ));
+    }
 }
