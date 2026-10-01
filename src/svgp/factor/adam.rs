@@ -2,7 +2,7 @@
 
 use super::gradient::svgp_value_and_gradient;
 use crate::error::GprError;
-use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta};
+use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta_into};
 use crate::param::Interval;
 use crate::rng::small_rng;
 use crate::svgp::FittedSvgp;
@@ -30,15 +30,18 @@ pub(super) fn user_to_unconstrained(
     Ok(z)
 }
 
-pub(super) fn unconstrained_to_user(
+/// Maps the unconstrained Adam coordinates `z` to user parameters in `user`
+/// (the same length): kernel and likelihood `θ` through the interval logit,
+/// the mean as is, and the diagonal of `L` through `exp`. Writes into a
+/// buffer the loop keeps, so a step does not allocate.
+pub(super) fn unconstrained_to_user_into(
     z: &[f64],
     n_theta: usize,
     m: usize,
     intervals: &[Interval],
-) -> Result<Vec<f64>, GprError> {
-    let mut user = vec![0.0; z.len()];
-    let mapped = z_to_log_theta(&z[..n_theta], intervals)?;
-    user[..n_theta].copy_from_slice(&mapped);
+    user: &mut [f64],
+) -> Result<(), GprError> {
+    z_to_log_theta_into(&z[..n_theta], intervals, &mut user[..n_theta])?;
     user[n_theta..n_theta + m].copy_from_slice(&z[n_theta..n_theta + m]);
     let mut packed = 0;
     for j in 0..m {
@@ -48,7 +51,7 @@ pub(super) fn unconstrained_to_user(
             packed += 1;
         }
     }
-    Ok(user)
+    Ok(())
 }
 
 pub(super) fn user_grad_to_unconstrained(
@@ -116,7 +119,7 @@ where
         while start < n {
             let end = start.saturating_add(batch_size).min(n);
             let batch = &order[start..end];
-            user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
+            unconstrained_to_user_into(&z, n_theta, m, &intervals, &mut user)?;
             model.set_params_light(&user)?;
             let mut scratch = std::mem::take(&mut model.scratch);
             let result = svgp_value_and_gradient::<M, _>(model, &mut g_user, batch, &mut scratch);
@@ -127,7 +130,7 @@ where
             start = end;
         }
     }
-    user = unconstrained_to_user(&z, n_theta, m, &intervals)?;
+    unconstrained_to_user_into(&z, n_theta, m, &intervals, &mut user)?;
     model.set_params_light(&user)?;
     // The steps left `A` and `k_diag` stale: one pass over all n rebuilds them.
     model.rebuild_data_terms()
