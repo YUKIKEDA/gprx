@@ -49,19 +49,32 @@ impl<P: Differentiable> Differentiable for LogitMapped<'_, P> {
 
 impl<P: TwiceDifferentiable> TwiceDifferentiable for LogitMapped<'_, P> {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        // The chain rule's second-order term needs the gradient as well.
+        let mut grad = vec![0.0; params.len()];
+        self.value_gradient_hessian_into(params, &mut grad, out)
+            .map(|_| ())
+    }
+
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
         z_to_log_theta_into(params, self.intervals, &mut self.log_scratch)?;
         let n = params.len();
-        if out.len() != n * n {
+        if hess.len() != n * n {
             return Err(GprError::LengthMismatch {
-                reason: format!("expected {} Hessian entries, got {}", n * n, out.len()),
+                reason: format!("expected {} Hessian entries, got {}", n * n, hess.len()),
             });
         }
-        let mut grad = vec![0.0; n];
-        self.inner
-            .value_and_gradient_into(&self.log_scratch, &mut grad)?;
-        self.inner.hessian_into(&self.log_scratch, out)?;
-        chain_logit_hess(params, self.intervals, &self.log_scratch, &grad, out);
-        Ok(())
+        let value = self
+            .inner
+            .value_gradient_hessian_into(&self.log_scratch, grad, hess)?;
+        // The second-order term needs the gradient in log-θ, before its chain.
+        chain_logit_hess(params, self.intervals, &self.log_scratch, grad, hess);
+        chain_logit_grad(params, self.intervals, &self.log_scratch, grad);
+        Ok(value)
     }
 }
 
@@ -95,7 +108,15 @@ where
     Ok(())
 }
 
+/// Keeps the lower of `best` and `candidate`.
+///
+/// A candidate whose value is not finite is never kept, so one run that ends
+/// at `NaN` or `±∞` cannot block a later finite run. When no run is finite,
+/// `best` stays `None` and the caller reports no result.
 pub(super) fn keep_better(best: &mut Option<OptResult>, candidate: OptResult) {
+    if !candidate.value.is_finite() {
+        return;
+    }
     match best {
         None => *best = Some(candidate),
         Some(current) if candidate.value < current.value => *best = Some(candidate),
@@ -425,8 +446,8 @@ pub(super) fn map_argmin_error(err: ArgminError) -> GprError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedProblem, CostFunction, EvalCache, Gradient, log_theta_to_z, logit, sigmoid,
-        user_to_z, z_to_log_theta_into, z_to_user,
+        CachedProblem, CostFunction, EvalCache, Gradient, keep_better, log_theta_to_z, logit,
+        sigmoid, user_to_z, z_to_log_theta_into, z_to_user,
     };
     use crate::error::GprError;
     use crate::gpr::Gpr;
@@ -434,6 +455,7 @@ mod tests {
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
     use crate::optimizer::Fixed;
+    use crate::optimizer::OptResult;
     use crate::param::Interval;
     use std::cell::RefCell;
 
@@ -602,6 +624,30 @@ mod tests {
         assert_close(out[0], x, TOL);
         let back = log_theta_to_z(&out, &[interval]).expect("z");
         assert_close(z_to_user(back[0], interval), x, TOL);
+    }
+
+    fn run(value: f64) -> OptResult {
+        OptResult {
+            params: vec![value],
+            value,
+            iterations: 1,
+        }
+    }
+
+    #[test]
+    fn keep_better_skips_non_finite_runs() {
+        let mut best = None;
+        keep_better(&mut best, run(f64::NAN));
+        assert!(best.is_none(), "a NaN run must not become the result");
+        keep_better(&mut best, run(f64::INFINITY));
+        assert!(best.is_none(), "an infinite run must not become the result");
+        keep_better(&mut best, run(2.0));
+        keep_better(&mut best, run(f64::NAN));
+        keep_better(&mut best, run(f64::NEG_INFINITY));
+        keep_better(&mut best, run(3.0));
+        keep_better(&mut best, run(1.0));
+        let kept = best.expect("a finite run");
+        assert_close(kept.value, 1.0, TOL);
     }
 
     #[test]
