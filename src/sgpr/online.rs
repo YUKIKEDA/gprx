@@ -6,8 +6,7 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
-use crate::kernel::ScalarOps;
-use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
+use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2, solve_llt};
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::points::PointId;
 use crate::points::{IdRegistry, PointRegistry, RegistryId};
@@ -21,10 +20,10 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::FixedInducing;
 use super::factor::{
-    VfeState, VfeSystem, append_column, append_point, assemble_vfe, assemble_vfe_with_f64_w,
+    VfeState, VfeSystem, a_times_y, append_point, assemble_vfe, assemble_vfe_with_f64_w,
     inducing_delete, inducing_insert, kernel_column, kernel_diag_at, point_at,
-    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, refresh_w, remove_column,
-    remove_point, solve_lmm, vfe_loo, vfe_neg_log_marginal_likelihood,
+    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, push_column,
+    remove_column_in_place, remove_point, solve_lmm, vfe_loo, vfe_neg_log_marginal_likelihood,
 };
 use super::fitted::FittedSgpr;
 
@@ -135,6 +134,9 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     predict_w: Vec<P::Refine>,
     k_diag_sum: P::Storage,
     a_frobenius2: P::Storage,
+    /// `A y` in `f64`, kept through rank-1 updates so `w = B⁻¹ A y` costs
+    /// one `O(m²)` solve instead of a pass over all `n` columns.
+    ay: Vec<f64>,
     registry: PointRegistry,
     inducing: InducingRegistry,
 }
@@ -150,6 +152,7 @@ struct UpdateUndo<P: ModelPrecision> {
     predict_w: Vec<P::Refine>,
     k_diag_sum: P::Storage,
     a_frobenius2: P::Storage,
+    ay: Vec<f64>,
     registry: PointRegistry,
     inducing: InducingRegistry,
 }
@@ -161,7 +164,9 @@ where
     pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P>) -> Self {
         let registry = PointRegistry::from_count(fitted.core.n);
         let inducing = InducingRegistry::from_count(fitted.core.m);
+        let ay = a_times_y(fitted.a.as_ref(), &fitted.core.y_train);
         Self {
+            ay,
             core: fitted.core,
             scratch: fitted.scratch,
             optimizer: fitted.optimizer,
@@ -208,6 +213,7 @@ where
         self.predict_w = fitted.predict_w;
         self.k_diag_sum = fitted.k_diag_sum;
         self.a_frobenius2 = fitted.a_frobenius2;
+        self.ay = a_times_y(self.a.as_ref(), &self.core.y_train);
     }
 
     /// Runs one online update so that it either completes or changes nothing.
@@ -236,6 +242,7 @@ where
             predict_w: self.predict_w.clone(),
             k_diag_sum: self.k_diag_sum,
             a_frobenius2: self.a_frobenius2,
+            ay: self.ay.clone(),
             registry: self.registry.clone(),
             inducing: self.inducing.clone(),
         };
@@ -249,6 +256,7 @@ where
             self.predict_w = undo.predict_w;
             self.k_diag_sum = undo.k_diag_sum;
             self.a_frobenius2 = undo.a_frobenius2;
+            self.ay = undo.ay;
             self.registry = undo.registry;
             self.inducing = undo.inducing;
         }
@@ -279,6 +287,7 @@ where
         self.w = state.w;
         self.k_diag_sum = state.k_diag_sum;
         self.a_frobenius2 = state.a_frobenius2;
+        self.ay = a_times_y(self.a.as_ref(), &self.core.y_train);
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
@@ -319,13 +328,16 @@ where
         Ok(())
     }
 
+    /// `w = B⁻¹ A y` from the kept `A y`: one `O(m²)` solve.
     fn recompute_w(&mut self) -> Result<(), GprError> {
-        let w = {
-            let mut y_cast = P::Storage::empty_rows();
-            let y_s = P::Storage::storage_rows(&self.core.y_train, &mut y_cast);
-            refresh_w(self.a.as_ref(), self.b_l.as_ref(), y_s)
-        };
-        self.w = w;
+        let m = self.core.m;
+        let mut rhs = Mat::<P::Storage>::zeros(m, 1);
+        for (row, value) in self.ay.iter().enumerate() {
+            rhs[(row, 0)] = P::Storage::from_f64(*value);
+        }
+        solve_llt(self.b_l.as_ref(), rhs.as_mut());
+        self.w.clear();
+        self.w.extend((0..m).map(|row| rhs[(row, 0)]));
         self.refresh_predict_w()
     }
 
@@ -711,6 +723,14 @@ where
 
     /// Appends one training point at the current `θ` with a rank-1 VFE update.
     ///
+    /// Costs `O(m² + n·d)`, amortized: `A` grows in place, `A y` is updated
+    /// with the new column, and `w = B⁻¹ A y` is one solve with the updated
+    /// factor of `B`. The `O(n·d)` part moves the column-major training `X`.
+    /// A precision that refines in `f64` ([`crate::MixedPrecision`]) also
+    /// assembles its `f64` predict weights again from all `n` points,
+    /// `O(n·m²)`: its weights are the exact `f64` solution, which no rank-1
+    /// update of the stored `f32` factor reproduces.
+    ///
     /// `x_new` has length [`Self::d`]. `x_new` and `y_new` are in the
     /// original units and go through the transforms fitted at training.
     /// Inducing coordinates are not moved.
@@ -772,7 +792,10 @@ where
         // No step below fails until the predict weights (see `atomically`).
         self.a_frobenius2 += frobenius2(a_col.as_ref());
         self.k_diag_sum += k_diag;
-        self.a = append_column(&self.a, a_col.as_ref());
+        for (row, slot) in self.ay.iter_mut().enumerate() {
+            *slot += a_col[(row, 0)].to_f64() * y_new;
+        }
+        push_column(&mut self.a, a_col.as_ref());
         chol_rank1_update(&mut self.b_l, &mut v);
         append_point(&mut self.core.x_train, self.core.n, self.core.d, x_new);
         append_point(&mut self.core.x_obs, self.core.n, self.core.d, x_obs);
@@ -856,7 +879,11 @@ where
         if chol_rank1_downdate(&mut b_trial, &mut v_trial) {
             self.k_diag_sum -= diag;
             self.a_frobenius2 -= col_norm;
-            self.a = remove_column(&self.a, idx);
+            let y_idx = self.core.y_train[idx];
+            for (row, slot) in self.ay.iter_mut().enumerate() {
+                *slot -= self.a[(row, idx)].to_f64() * y_idx;
+            }
+            remove_column_in_place(&mut self.a, idx);
             self.b_l = b_trial;
             self.core.x_train = x_next;
             self.core.y_train = y_next;
