@@ -4,6 +4,7 @@ use super::{
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::{CustomKernel, Triangle, write_rect_from_coords, write_square_from_coords};
 use faer::{MatMut, MatRef};
 
@@ -377,7 +378,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
 
     pub(crate) fn apply_from_ard_cache<M: crate::math::KernelMath>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         x: MatRef<'_, T>,
         mut out: MatMut<'_, T>,
         uplo: Triangle,
@@ -620,7 +621,7 @@ fn fold_terms_points<M: crate::math::KernelMath, T: KernelScalar>(
 
 fn fold_terms_ard_cache<M: crate::math::KernelMath, T: KernelScalar>(
     terms: &[CompiledKernel<T>],
-    cache: MatRef<'_, T>,
+    cache: ArdSqDiff<'_, T>,
     x: MatRef<'_, T>,
     mut out: MatMut<'_, T>,
     uplo: Triangle,

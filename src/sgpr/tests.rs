@@ -1826,3 +1826,68 @@ fn delete_by_reassembly_publishes_weights_of_the_remaining_points() {
     assert_slice_close(&got.mean, &want.mean, 1e-10);
     assert_slice_close(&got.variance, &want.variance, 1e-10);
 }
+
+/// Everything an online update could leave behind, compared bit for bit.
+#[derive(Debug, PartialEq)]
+struct OnlineFingerprint {
+    n: usize,
+    m: usize,
+    points: Vec<crate::PointId>,
+    inducing: Vec<InducingId>,
+    mean: Vec<f64>,
+    variance: Vec<f64>,
+    nlml: f64,
+}
+
+fn online_fingerprint(online: &OnlineSgpr<Fixed, crate::MixedPrecision>) -> OnlineFingerprint {
+    let pred = online.predict(&[0.3, 1.7, 3.2], 3, 1).expect("predict");
+    OnlineFingerprint {
+        n: online.n(),
+        m: online.m(),
+        points: online.point_ids().to_vec(),
+        inducing: online.inducing_ids().to_vec(),
+        mean: pred.mean,
+        variance: pred.variance,
+        nlml: online.neg_log_marginal_likelihood().expect("nlml"),
+    }
+}
+
+#[test]
+fn failed_online_updates_leave_the_model_unchanged() {
+    // A refining precision is the one whose updates can fail after a write.
+    let mut online = Sgpr::new(
+        KernelSpec::from(RbfKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_optimizer(Fixed)
+    .with_precision::<crate::MixedPrecision>()
+    .factor(
+        &[0.0, 1.0, 2.0, 3.0],
+        4,
+        1,
+        &[0.0, 1.0, 0.5, 0.25],
+        &[0.5, 2.5],
+        2,
+    )
+    .expect("factor")
+    .into_online();
+    let before = online_fingerprint(&online);
+    let first_point = online.point_ids()[0];
+    let first_inducing = online.inducing_ids()[0];
+    // Every update succeeds, then a later step of the same call fails.
+    let err = online
+        .atomically(|model| {
+            model.insert(&[4.0], 0.1)?;
+            model.delete(first_point)?;
+            model.insert_inducing(&[1.5])?;
+            model.delete_inducing(first_inducing)?;
+            Err::<(), _>(GprError::NonFiniteInput)
+        })
+        .expect_err("injected failure");
+    assert!(matches!(err, GprError::NonFiniteInput));
+    assert_eq!(online_fingerprint(&online), before);
+    // The model is still usable and its next update takes the next id.
+    let id = online.insert(&[4.0], 0.1).expect("insert");
+    assert_eq!(online.n(), 5);
+    assert_eq!(online.point_ids().last().copied(), Some(id));
+}

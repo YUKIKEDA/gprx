@@ -95,7 +95,15 @@ where
     Ok(())
 }
 
+/// Keeps the lower of `best` and `candidate`.
+///
+/// A candidate whose value is not finite is never kept, so one run that ends
+/// at `NaN` or `±∞` cannot block a later finite run. When no run is finite,
+/// `best` stays `None` and the caller reports no result.
 pub(super) fn keep_better(best: &mut Option<OptResult>, candidate: OptResult) {
+    if !candidate.value.is_finite() {
+        return;
+    }
     match best {
         None => *best = Some(candidate),
         Some(current) if candidate.value < current.value => *best = Some(candidate),
@@ -425,8 +433,8 @@ pub(super) fn map_argmin_error(err: ArgminError) -> GprError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedProblem, CostFunction, EvalCache, Gradient, log_theta_to_z, logit, sigmoid,
-        user_to_z, z_to_log_theta_into, z_to_user,
+        CachedProblem, CostFunction, EvalCache, Gradient, keep_better, log_theta_to_z, logit,
+        sigmoid, user_to_z, z_to_log_theta_into, z_to_user,
     };
     use crate::error::GprError;
     use crate::gpr::Gpr;
@@ -434,6 +442,7 @@ mod tests {
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
     use crate::optimizer::Fixed;
+    use crate::optimizer::OptResult;
     use crate::param::Interval;
     use std::cell::RefCell;
 
@@ -602,6 +611,30 @@ mod tests {
         assert_close(out[0], x, TOL);
         let back = log_theta_to_z(&out, &[interval]).expect("z");
         assert_close(z_to_user(back[0], interval), x, TOL);
+    }
+
+    fn run(value: f64) -> OptResult {
+        OptResult {
+            params: vec![value],
+            value,
+            iterations: 1,
+        }
+    }
+
+    #[test]
+    fn keep_better_skips_non_finite_runs() {
+        let mut best = None;
+        keep_better(&mut best, run(f64::NAN));
+        assert!(best.is_none(), "a NaN run must not become the result");
+        keep_better(&mut best, run(f64::INFINITY));
+        assert!(best.is_none(), "an infinite run must not become the result");
+        keep_better(&mut best, run(2.0));
+        keep_better(&mut best, run(f64::NAN));
+        keep_better(&mut best, run(f64::NEG_INFINITY));
+        keep_better(&mut best, run(3.0));
+        keep_better(&mut best, run(1.0));
+        let kept = best.expect("a finite run");
+        assert_close(kept.value, 1.0, TOL);
     }
 
     #[test]
