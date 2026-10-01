@@ -118,3 +118,49 @@ struct Restarts {
     n: NonZeroU32,
     seed: u64,
 }
+
+/// The restart loop every built-in optimizer shares.
+///
+/// Checks `init`'s length, reads the intervals, runs once from
+/// `first_start(init)`, then once from each start `sample` draws with the
+/// restart seed. `run` receives `None` for the first run and `Some(k)` for
+/// restart `k` (1-based), and adds its result to the best so far. The first
+/// run's error is returned; a restart's error only drops that restart. Fails
+/// when no run produced a result.
+fn minimize_with_restarts<P: crate::objective::Objective + ?Sized>(
+    objective: &mut P,
+    init: &[f64],
+    restarts: Option<Restarts>,
+    first_start: impl FnOnce(&[f64], &[crate::param::Interval]) -> Result<Vec<f64>, GprError>,
+    mut sample: impl FnMut(
+        &[crate::param::Interval],
+        &mut crate::rng::SeededRng,
+    ) -> Result<Vec<f64>, GprError>,
+    mut run: impl FnMut(
+        &mut P,
+        &[crate::param::Interval],
+        &[f64],
+        Option<u64>,
+        &mut Option<OptResult>,
+    ) -> Result<(), GprError>,
+) -> Result<OptResult, GprError> {
+    let n = objective.num_params();
+    if init.len() != n {
+        return Err(GprError::LengthMismatch {
+            reason: format!("expected {n} parameters, got {}", init.len()),
+        });
+    }
+    let mut intervals = vec![crate::param::Interval::DEFAULT_POSITIVE; n];
+    objective.fill_intervals(&mut intervals)?;
+    let mut best: Option<OptResult> = None;
+    let start = first_start(init, &intervals)?;
+    run(objective, &intervals, &start, None, &mut best)?;
+    if let Some(restarts) = restarts {
+        let mut rng = crate::rng::seeded_rng(restarts.seed);
+        for restart in 1..=u64::from(restarts.n.get()) {
+            let start = sample(&intervals, &mut rng)?;
+            let _ = run(objective, &intervals, &start, Some(restart), &mut best);
+        }
+    }
+    best.ok_or(GprError::OptimizationNotConverged { iterations: 0 })
+}
