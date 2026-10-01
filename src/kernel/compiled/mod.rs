@@ -591,6 +591,16 @@ pub(crate) type Nested<T> = [Mat<T>];
 
 /// Grows `levels` to `depth` buffers of at least `rows × cols`. Allocates
 /// only when a level is missing or too small.
+/// [`ensure_nested`] at the depth `compiled` needs.
+pub(crate) fn ensure_nested_levels<T: KernelScalar>(
+    levels: &mut Vec<Mat<T>>,
+    compiled: &CompiledKernel<T>,
+    rows: usize,
+    cols: usize,
+) {
+    ensure_nested(levels, compiled.nested_depth(), rows, cols);
+}
+
 pub(crate) fn ensure_nested<T: KernelScalar>(
     levels: &mut Vec<Mat<T>>,
     depth: usize,

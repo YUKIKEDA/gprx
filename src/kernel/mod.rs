@@ -39,6 +39,7 @@ mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
+pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
 pub use constant::ConstantKernel;
 #[cfg(any(test, feature = "bench-internals"))]

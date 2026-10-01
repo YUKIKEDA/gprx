@@ -700,39 +700,50 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
 }
 
 /// Allocations one more Adam epoch adds to `Svgp::fit` (64 points, batches
-/// of 8: eight steps per epoch). Do not raise without an Issue.
-const MAX_SVGP_ADAM_EPOCH_ALLOCS: usize = 192;
+/// of 8: eight steps per epoch), by kernel. RBF-ARD's own kernel routines
+/// still build small working vectors per call (#167 removes them). Do not
+/// raise without an Issue.
+const MAX_SVGP_ADAM_EPOCH_ALLOCS: [(&str, usize); 3] =
+    [("rbf", 0), ("rbf_ard", 80), ("constant_times_rbf", 0)];
 
 #[test]
 fn svgp_adam_epoch_allocs() {
     let _guard = alloc_lock();
     let n = 64;
-    let x: Vec<f64> = (0..n).map(|i| i as f64 / 8.0).collect();
-    let y: Vec<f64> = x.iter().map(|v| v.sin()).collect();
-    let z: Vec<f64> = (0..8).map(|i| i as f64).collect();
-    let fit = |epochs: u64| {
-        allocs_in(|| {
-            let fitted = Svgp::new(
-                KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
-                GaussianLikelihood::new(0.1).expect("noise"),
-            )
-            .with_optimizer(
-                Adam::new()
-                    .with_batch_size(NonZeroUsize::new(8).expect("8"))
-                    .with_epochs(NonZeroU64::new(epochs).expect("epochs")),
-            )
-            .fit(&x, n, 1, &y, &z, 8)
-            .map_err(|(_, e)| e)
-            .expect("fit");
-            std::hint::black_box(fitted);
-        })
-    };
-    // Warm the thread pool, then take the least of a few differences: the
-    // counter sees the whole process, not only this fit.
-    fit(1);
-    let per_epoch = (0..3)
-        .map(|_| fit(3).saturating_sub(fit(1)) / 2)
-        .min()
-        .unwrap_or(usize::MAX);
-    assert_alloc_cap("svgp_adam_epoch", per_epoch, MAX_SVGP_ADAM_EPOCH_ALLOCS);
+    let x: Vec<f64> = (0..n * 2)
+        .map(|i| (i % n) as f64 / 8.0 + (i / n) as f64)
+        .collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 / 8.0).sin()).collect();
+    let z: Vec<f64> = (0..16).map(|i| (i % 8) as f64 + (i / 8) as f64).collect();
+    let kernels = [
+        KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
+        KernelSpec::from(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell")),
+        KernelSpec::from(ConstantKernel::new(1.5).expect("c"))
+            * KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
+    ];
+    for ((label, cap), kernel) in MAX_SVGP_ADAM_EPOCH_ALLOCS.iter().zip(kernels) {
+        let fit = |epochs: u64| {
+            allocs_in(|| {
+                let fitted =
+                    Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1).expect("noise"))
+                        .with_optimizer(
+                            Adam::new()
+                                .with_batch_size(NonZeroUsize::new(8).expect("8"))
+                                .with_epochs(NonZeroU64::new(epochs).expect("epochs")),
+                        )
+                        .fit(&x, n, 2, &y, &z, 8)
+                        .map_err(|(_, e)| e)
+                        .expect("fit");
+                std::hint::black_box(fitted);
+            })
+        };
+        // Warm the thread pool, then take the least of a few differences: the
+        // counter sees the whole process, not only this fit.
+        fit(1);
+        let per_epoch = (0..3)
+            .map(|_| fit(3).saturating_sub(fit(1)) / 2)
+            .min()
+            .unwrap_or(usize::MAX);
+        assert_alloc_cap(&format!("svgp_adam_epoch_{label}"), per_epoch, *cap);
+    }
 }
