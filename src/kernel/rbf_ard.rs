@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::require_ard_sq_diff_shape;
+use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::{
     try_apply_rbf_ard_cache, try_apply_rbf_ard_cross, try_apply_rbf_ard_points,
@@ -254,26 +254,26 @@ impl RbfArdKernel {
 
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let n = ard::require_square_out(out.as_ref())?;
         require_ard_sq_diff_shape(cache, n, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
-        if let Some((cf, of)) = f64_pair(cache, out.rb_mut())
+        if let (Some(cf), Some(of)) = (cache.as_f64(), T::as_f64_mut(out.rb_mut()))
             && try_apply_rbf_ard_cache::<M>(cf, of, uplo, w)?
         {
             return Ok(());
         }
         write_square(out, uplo, |row, col| {
-            rbf_value::<M, T>(ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?)
+            rbf_value::<M, T>(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?)
         })
     }
 
     pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         mut d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -282,7 +282,7 @@ impl RbfArdKernel {
         let n = ard::require_square_out(d_k.as_ref())?;
         require_ard_sq_diff_shape(cache, n, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
-        if let Some((cf, of)) = f64_pair(cache, d_k.rb_mut())
+        if let (Some(cf), Some(of)) = (cache.as_f64(), T::as_f64_mut(d_k.rb_mut()))
             && try_grad_rbf_ard_cache::<M>(cf, of, uplo, w, param_idx)?
         {
             return Ok(());
@@ -290,7 +290,6 @@ impl RbfArdKernel {
         write_square(d_k, uplo, |row, col| {
             rbf_grad::<M, T>(ard::r2_from_cache(
                 cache,
-                n,
                 row,
                 col,
                 w,
@@ -336,7 +335,7 @@ impl RbfArdKernel {
 
     pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
@@ -344,9 +343,9 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         ard::require_param_pair(NAME, i, j, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
-        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
+        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |row, col| {
             rbf_hess::<M, T>(
-                ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?,
+                ard::r2_from_cache(cache, row, col, w, Pick::pair(i, j))?,
                 i == j,
             )
         })
@@ -913,48 +912,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_from_sq_diff_matches_apply_lower() {
-        let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
-        let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8]]);
-        let n = 4;
-        let d = 2;
-        let mut cache = Mat::zeros(n, n * d);
-        crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
-        let mut from_points = fill(n, 0.0);
-        let mut from_cache = fill(n, f64::NAN);
-        rbf.apply(x.as_ref(), from_points.as_mut(), Triangle::Lower)
-            .expect("points");
-        rbf.apply_from_sq_diff::<crate::math::Accurate, _>(
-            cache.as_ref(),
-            from_cache.as_mut(),
-            Triangle::Lower,
-        )
-        .expect("cache");
-        assert_lower_close(from_cache.as_ref(), from_points.as_ref(), TOL);
+    /// Every triangle of `got` that `uplo` writes matches `want`.
+    fn assert_uplo_close(got: MatRef<'_, f64>, want: MatRef<'_, f64>, uplo: Triangle) {
+        let n = got.nrows();
+        for col in 0..n {
+            for row in 0..n {
+                let written = match uplo {
+                    Triangle::Lower => row >= col,
+                    Triangle::Upper => row <= col,
+                    Triangle::Full => true,
+                };
+                if written {
+                    assert_close(got[(row, col)], want[(row, col)], TOL);
+                }
+            }
+        }
     }
 
     #[test]
-    fn grad_from_sq_diff_matches_grad_lower() {
+    fn apply_from_sq_diff_matches_apply_for_every_triangle() {
+        let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
+        let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8]]);
+        let n = 4;
+        let cache = crate::kernel::ArdSqDiffBuf::new(x.as_ref()).expect("size");
+        for uplo in [Triangle::Lower, Triangle::Upper, Triangle::Full] {
+            let mut from_points = fill(n, 0.0);
+            let mut from_cache = fill(n, f64::NAN);
+            rbf.apply(x.as_ref(), from_points.as_mut(), uplo)
+                .expect("points");
+            rbf.apply_from_sq_diff::<crate::math::Accurate, _>(
+                cache.view(),
+                from_cache.as_mut(),
+                uplo,
+            )
+            .expect("cache");
+            assert_uplo_close(from_cache.as_ref(), from_points.as_ref(), uplo);
+        }
+    }
+
+    #[test]
+    fn grad_from_sq_diff_matches_grad_for_every_triangle() {
         let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8], [0.7, -1.1]]);
         let n = 5;
         let d = 2;
-        let mut cache = Mat::zeros(n, n * d);
-        crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
-        for param_idx in 0..d {
-            let mut from_points = fill(n, 0.0);
-            let mut from_cache = fill(n, f64::NAN);
-            rbf.grad(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
-                .expect("points");
-            rbf.grad_from_sq_diff::<crate::math::Accurate, _>(
-                cache.as_ref(),
-                from_cache.as_mut(),
-                param_idx,
-                Triangle::Lower,
-            )
-            .expect("cache");
-            assert_lower_close(from_cache.as_ref(), from_points.as_ref(), TOL);
+        let cache = crate::kernel::ArdSqDiffBuf::new(x.as_ref()).expect("size");
+        for uplo in [Triangle::Lower, Triangle::Upper, Triangle::Full] {
+            for param_idx in 0..d {
+                let mut from_points = fill(n, 0.0);
+                let mut from_cache = fill(n, f64::NAN);
+                rbf.grad(x.as_ref(), from_points.as_mut(), param_idx, uplo)
+                    .expect("points");
+                rbf.grad_from_sq_diff::<crate::math::Accurate, _>(
+                    cache.view(),
+                    from_cache.as_mut(),
+                    param_idx,
+                    uplo,
+                )
+                .expect("cache");
+                assert_uplo_close(from_cache.as_ref(), from_points.as_ref(), uplo);
+            }
         }
     }
 

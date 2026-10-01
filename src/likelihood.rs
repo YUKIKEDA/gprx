@@ -272,4 +272,22 @@ mod tests {
             Err(GprError::IndexOutOfRange { .. })
         ));
     }
+
+    /// Subnormal noise is a positive finite value and is taken as is, inside
+    /// bounds that allow it (docs/design.md §4.0, #51).
+    #[test]
+    fn subnormal_noise_inside_widened_bounds_is_kept() {
+        let interval = crate::param::Interval::new(0.0, 1.0).expect("valid");
+        let mut likelihood = GaussianLikelihood::new(0.5)
+            .expect("valid")
+            .with_bounds(interval)
+            .expect("inside");
+        likelihood.set_params(&[-740.0]).expect("subnormal");
+        let noise = likelihood.noise_variance();
+        assert!(noise > 0.0 && !noise.is_normal(), "{noise:e}");
+        assert!(
+            GaussianLikelihood::new(noise).is_err(),
+            "outside the default interval"
+        );
+    }
 }

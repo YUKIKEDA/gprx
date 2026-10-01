@@ -2,6 +2,7 @@
 
 use super::ard::{self, ArdR2, Pick};
 use super::ard_simd::Profile;
+use super::dist::ArdSqDiff;
 use super::finite_kernel;
 use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
 use super::{ArdLengthscales, KernelScalar, Triangle, write_rect};
@@ -268,7 +269,7 @@ impl MaternArdKernel {
 
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -283,8 +284,8 @@ impl MaternArdKernel {
             w,
             None,
             &profile,
-            |n, row, col| {
-                let t = ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?;
+            |_, row, col| {
+                let t = ard::r2_from_cache(cache, row, col, w, Pick::NONE)?;
                 matern_value::<M, T>(nu, t)
             },
         )
@@ -292,7 +293,7 @@ impl MaternArdKernel {
 
     pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -310,8 +311,8 @@ impl MaternArdKernel {
             w,
             pick,
             &profile,
-            |n, row, col| {
-                let t = ard::r2_from_cache(cache, n, row, col, w, Pick::one(param_idx))?;
+            |_, row, col| {
+                let t = ard::r2_from_cache(cache, row, col, w, Pick::one(param_idx))?;
                 matern_grad::<M, T>(nu, t)
             },
         )
@@ -353,7 +354,7 @@ impl MaternArdKernel {
 
     pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
@@ -362,8 +363,8 @@ impl MaternArdKernel {
         ard::require_param_pair(NAME, i, j, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |row, col| {
+            let t = ard::r2_from_cache(cache, row, col, w, Pick::pair(i, j))?;
             matern_hess::<M, T>(nu, t, i == j)
         })
     }

@@ -11,6 +11,7 @@ use crate::likelihood::GaussianLikelihood;
 /// Invalid bounds are not [`crate::GprError::InvalidHyperparameter`], which
 /// is for a hyperparameter value outside its domain.
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
+#[non_exhaustive]
 pub enum IntervalError {
     /// `lo` or `hi` is non-finite, or `lo >= hi`.
     #[error("interval bounds must be finite and satisfy lo < hi (got lo={lo}, hi={hi})")]

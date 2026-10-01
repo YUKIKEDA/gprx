@@ -668,10 +668,10 @@ fn mini_batch_value_and_gradient_match_the_batch_formula_and_fd() {
     check_batch(kernel_rbf(), &x_1d, 6, 1, &z_1d, &[0, 1, 2, 3, 4, 5]);
 }
 
-/// `X == Z` (the Gram of `X` carries the White diagonal): a batch reads the
-/// columns of that Gram.
+/// `Z = X` with a White leaf uses the same rectangular `K(Z, X)` as any
+/// other inducing set: White stays on `k(x, x)`, not on the cross covariance.
 #[test]
-fn mini_batch_gradient_with_z_equal_to_x_keeps_the_white_diagonal() {
+fn mini_batch_gradient_with_z_equal_to_x_matches_the_rectangular_cross() {
     let x: Vec<f64> = (0..4).map(|i| 0.5 * i as f64).collect();
     check_batch(kernel_rbf_white(), &x, 4, 1, &x, &[3, 0]);
 }

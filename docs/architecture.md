@@ -57,7 +57,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `error` | The one error type and the Cholesky stage tag | Public: `GprError`, `CholeskyStage` | `param` |
 | `param` | A positive parameter with an interval; the flat `θ` write helper | Public: `Interval`, `BoundedParam`, `IntervalError` | `data`, `error`, `kernel`, `likelihood` |
 | `data` | Boundary checks (shape, finite, counts) and column-major packing for caller data | Crate | `error`, `kernel` |
-| `rng` | A small seeded generator for sampling and annealing | Crate: `SmallRng` | none |
+| `rng` | A small seeded generator for sampling and annealing | Crate: `SeededRng` (Xoshiro256++) | none |
 | `math` | Kernel `exp` implementations (accurate or fast approximate), selected by the `KernelExp` policy | Public: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
 | `linalg` | Cholesky, LDLT, triangular solves, dense helpers, faer worker caps. Models do not define these | Crate | `error`, `kernel` |
 | `policy` | Runtime policies: distance cache, Cholesky buffer, kernel `exp`, jitter | Public: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |
@@ -73,7 +73,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `precision` | Storage and predict scalars as one policy; mixed-precision refinement | Public: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
 | `workspace` | Reusable buffers: Gram, `W`, distance cache, `exp` buffer, faer scratch; the per-query buffers | Crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
 | `prediction` | What a predict call returns, and drawing posterior samples from a covariance | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
-| `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective`. Crate: `HasBounds` | `error`, `param` |
+| `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective` | `error`, `param` |
 | `optimizer` | Solvers over those traits: argmin adapters, the homemade annealing, and the `Fixed` marker; Adam for SVGP (not an `Optimizer`) | Public: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
 ### Models

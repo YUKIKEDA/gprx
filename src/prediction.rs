@@ -105,7 +105,7 @@ impl<T> Default for PredictiveCovariance<T> {
 
 impl<T: KernelScalar> PredictiveCovariance<T> {
     /// `n_draws` posterior draws, column-major `m × n_draws`: each column is
-    /// `μ + L z` with `z ∼ N(0, I)` from the crate `SmallRng` at `seed`, and
+    /// `μ + L z` with `z ∼ N(0, I)` from gprx's seeded generator at `seed` (Xoshiro256++, the same on every platform), and
     /// `L` the Cholesky factor of [`Self::covariance`], retried with `jitter`.
     /// Zero draws return an empty vector without factoring.
     pub(crate) fn draw(
@@ -131,7 +131,7 @@ impl<T: KernelScalar> PredictiveCovariance<T> {
             jitter.retry_jitters(),
             CholeskyStage::Predict,
         )?;
-        let mut rng = crate::rng::small_rng(seed);
+        let mut rng = crate::rng::seeded_rng(seed);
         let zero = T::from_f64(0.0);
         let mut out = vec![zero; m * n_draws];
         let mut z = vec![zero; m];
