@@ -417,6 +417,28 @@ impl<P: GpScalar> ExactFit<'_, P> {
         self.fill_hessian_from_factor(n_kernel, n, out)
     }
 
+    /// Joint value, gradient, and Hessian during `fit` from one
+    /// factorization of `A`.
+    ///
+    /// The gradient forms `W` from that factor. A dedicated `W` keeps `L`, so
+    /// the Hessian reads the same factor; [`crate::CholeskyBuffer::Reuse`]
+    /// wrote `W` over `L`, so `L` is rebuilt at the same `θ` first.
+    pub(crate) fn value_gradient_hessian_into_fit(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
+        let n_params = self.num_params();
+        crate::data::require_count(hess.len(), n_params * n_params, "parameters")?;
+        let nlml = self.value_and_gradient_into_fit(params, grad)?;
+        self.restore_cholesky_if_overwritten()?;
+        let n_kernel = self.core.kernel.num_params();
+        let n = self.core.n;
+        self.fill_hessian_from_factor(n_kernel, n, hess)?;
+        Ok(nlml)
+    }
+
     fn fill_hessian_from_factor(
         &mut self,
         n_kernel: usize,
@@ -663,6 +685,15 @@ impl<P: GpScalar> ExactFit<'_, P> {
                         iterations: opt.iterations as usize,
                     });
                 }
+                // The model holds the last θ the optimizer evaluated, which is
+                // not the result after restarts, a rejected annealing step, or
+                // a caller optimizer that searched past its best point.
+                if !self.holds_params(&opt.params)? {
+                    if let Err(err) = self.factor_at(&opt.params) {
+                        self.revert_theta(kernel_before, likelihood_before);
+                        return Err(err);
+                    }
+                }
                 Ok(())
             }
             Err(err) => {
@@ -670,6 +701,17 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 Err(err)
             }
         }
+    }
+
+    /// Whether the stored `θ` is bit-for-bit `params`.
+    fn holds_params(&mut self, params: &[f64]) -> Result<bool, GprError> {
+        let current = &mut self.store.buffers.core_mut().theta;
+        current.resize(params.len(), 0.0);
+        self.core.get_params(current)?;
+        Ok(current
+            .iter()
+            .zip(params)
+            .all(|(a, b)| a.to_bits() == b.to_bits()))
     }
 
     fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {
