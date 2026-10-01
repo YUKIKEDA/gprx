@@ -105,7 +105,30 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 }
                 Ok(())
             }
+            Self::Constant(leaf) => {
+                // `∂k/∂log c = c` at every pair.
+                let mut sum = 0.0;
+                for col in 0..n {
+                    sum += weight[(col, col)].to_f64();
+                    for row in col + 1..n {
+                        sum += 2.0 * weight[(row, col)].to_f64();
+                    }
+                }
+                out[0] = leaf.constant() * sum;
+                Ok(())
+            }
             _ => {
+                // Leaves whose parameters share each entry's transcendental
+                // work: one pass, no `∂K` matrix.
+                match (self, inputs.dist) {
+                    (Self::Periodic(leaf), Some(dist)) => {
+                        return leaf.weighted_grads_dist::<M, T>(dist, weight, out);
+                    }
+                    (Self::RationalQuadratic(leaf), Some(dist)) => {
+                        return leaf.weighted_grads_dist(dist, weight, out);
+                    }
+                    _ => {}
+                }
                 let Some(d_k) = bufs.first_mut() else {
                     return Err(too_few_buffers());
                 };
