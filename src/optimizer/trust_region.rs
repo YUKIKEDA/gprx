@@ -151,7 +151,7 @@ impl<P: TwiceDifferentiable> Optimizer<P> for TrustRegion {
         let first_z = log_theta_to_z(init, &intervals)?;
         consider(self, objective, &intervals, &first_z, &mut best)?;
         if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
+            let mut rng = crate::rng::seeded_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider(self, objective, &intervals, &z, &mut best);

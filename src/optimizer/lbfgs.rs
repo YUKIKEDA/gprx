@@ -124,7 +124,7 @@ impl<P: Differentiable> Optimizer<P> for Lbfgs {
         let first_z = log_theta_to_z(init, &intervals)?;
         consider_run(self, objective, &intervals, &first_z, &mut best)?;
         if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
+            let mut rng = crate::rng::seeded_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider_run(self, objective, &intervals, &z, &mut best);
@@ -398,7 +398,7 @@ mod tests {
     }
 
     fn sphere_bench_xy() -> (Vec<f64>, Vec<f64>) {
-        // SmallRng seed 0 walks a ridge on DistanceCachePolicy::Uncached (~485 evals).
+        // Seed 0 walks a ridge on DistanceCachePolicy::Uncached (~485 evals).
         sphere_bench_xy_with_seed(9)
     }
 
@@ -488,6 +488,11 @@ mod tests {
     }
 
     impl Objective for RecordingBowl {
+        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
+            out.fill(crate::param::Interval::new(-5.0, 5.0).expect("finite"));
+            Ok(())
+        }
+
         fn num_params(&self) -> usize {
             2
         }
@@ -518,13 +523,6 @@ mod tests {
     impl crate::objective::TwiceDifferentiable for RecordingBowl {
         fn hessian_into(&mut self, _params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
             out.copy_from_slice(&[2.0, 0.0, 0.0, 4.0]);
-            Ok(())
-        }
-    }
-
-    impl crate::objective::HasBounds for RecordingBowl {
-        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
-            out.fill(crate::param::Interval::new(-5.0, 5.0).expect("finite"));
             Ok(())
         }
     }

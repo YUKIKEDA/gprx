@@ -8,7 +8,7 @@
 //! not allocate worker scratch that a multi-thread pool would.
 
 mod common;
-use common::rng::{open_unit, small_rng};
+use common::rng::{open_unit, seeded_rng};
 use gprx::Adam;
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{
@@ -124,7 +124,7 @@ fn ensure_one_rayon_worker() {
 }
 
 fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
-    let mut rng = small_rng(seed);
+    let mut rng = seeded_rng(seed);
     let mut x = vec![0.0; n * d];
     for col in 0..d {
         for row in 0..n {
@@ -139,7 +139,7 @@ fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let gpr = Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -192,7 +192,7 @@ fn fast_approx_mll_and_grad_allocs_after_workspace() {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let mut gpr = Gpr::new(kernel, likelihood)
         .with_math(KernelExp::FastApprox)
@@ -235,7 +235,7 @@ where
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let gpr = Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -322,7 +322,7 @@ fn incremental_leaf_step_allocs_after_warmup() {
         + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     Gpr::new(kernel, likelihood)
         .with_optimizer(LeafStepProbe)
@@ -361,7 +361,7 @@ fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
     ensure_one_rayon_worker();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let x = fill_column_major(n, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
     Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -438,7 +438,7 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
     ensure_one_rayon_worker();
     let x = fill_column_major(N, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let x_new: Vec<f64> = (0..D).map(|dim| 0.1 * dim as f64).collect();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
@@ -532,7 +532,7 @@ fn sparse_predict_counts<P: GpScalar>(
     let x = fill_column_major(N, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let mut pred = Prediction::default();
@@ -658,7 +658,7 @@ fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
     ensure_one_rayon_worker();
     let x = fill_column_major(n, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let adam = Adam::new()
