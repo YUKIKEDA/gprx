@@ -374,6 +374,36 @@ impl RbfKernel {
         })
     }
 
+    /// `⟨weight, ∂K/∂log ℓ⟩_F` into `out[0]` and `⟨weight, K⟩_F` returned,
+    /// from this leaf's Gram `k` at the same `θ` over the lower triangle:
+    /// `∂k/∂log ℓ = k s / ℓ²`, so no `exp` is evaluated. Only the `exp`
+    /// algebra of [`crate::Accurate`] has `∂k = k ·`; callers check that.
+    pub(crate) fn weighted_grads_from_gram<T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        k: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+    ) -> Result<f64, GprError> {
+        let (_, inv_ell_sq) = self.inv_scales();
+        let (mut g_ell, mut value) = (0.0, 0.0);
+        for col in 0..dist.ncols() {
+            let mut g_col = 0.0;
+            let mut v_col = 0.0;
+            for row in col..dist.nrows() {
+                let s = finite_dist(dist[(row, col)])?.to_f64();
+                let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
+                let wk = w * k[(row, col)].to_f64();
+                v_col += wk;
+                g_col += wk * s;
+            }
+            g_ell += g_col;
+            value += v_col;
+        }
+        out[0] = g_ell * inv_ell_sq;
+        Ok(value)
+    }
+
     /// `(1 / (2ℓ²), 1 / ℓ²)` in `f64`.
     fn inv_scales(&self) -> (f64, f64) {
         let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());

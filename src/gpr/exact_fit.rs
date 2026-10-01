@@ -5,7 +5,7 @@ use faer::{Mat, MatMut, MatRef};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle, WeightedWalk};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{frobenius_lower, gemv_sym_lower, solve_lower};
 use crate::optimizer::{OptResult, Optimizer};
@@ -14,8 +14,8 @@ use crate::precision::{GpScalar, StoredFactor};
 use crate::workspace::{FitWorkspace, HessianScratch, WorkspaceCore};
 
 use super::factor::{
-    FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
-    fill_cached_inputs, neg_mll_from_factor,
+    FactorPolicy, apply_compiled_to, factor_train_keeping_with_policy, factor_train_with_policy,
+    factor_written_k_with_policy, fill_cached_inputs, neg_mll_from_factor,
 };
 use super::{FitBuffers, GprCore, LltStore, Policies};
 use crate::policy::{DistanceCachePolicy, with_kernel_exp};
@@ -191,8 +191,19 @@ impl<P: GpScalar> ExactFit<'_, P> {
     /// reused buffer. When `A` does not factor, that `θ` is written back and
     /// `L` / `α` are rebuilt at it, so nothing is copied up front.
     fn factor_at(&mut self, params: &[f64]) -> Result<(), GprError> {
+        self.factor_at_with(params, false)
+    }
+
+    /// [`Self::factor_at`]; `keep` leaves the product factor Grams the joint
+    /// gradient reads ([`CompiledKernel::eval_gram_keeping`]).
+    fn factor_at_with(&mut self, params: &[f64], keep: bool) -> Result<(), GprError> {
         self.write_theta(params)?;
-        if let Err(err) = self.factor() {
+        let factored = if keep {
+            self.factor_keeping()
+        } else {
+            self.factor()
+        };
+        if let Err(err) = factored {
             self.restore_theta();
             let _ = self.factorize_current();
             return Err(err);
@@ -271,6 +282,54 @@ impl<P: GpScalar> ExactFit<'_, P> {
         Ok(())
     }
 
+    /// [`Self::factor`] that keeps the product factor Grams for
+    /// [`Self::kernel_gradient_into`] in the leading `weighted` buffers.
+    fn factor_keeping(&mut self) -> Result<(), GprError> {
+        let products = self.core.compiled.kept_products();
+        if products == 0 {
+            return self.factor();
+        }
+        self.store.release_mapped();
+        let n = self.core.n;
+        self.ensure_weighted(n)?;
+        let x = P::Storage::storage_cols(
+            self.core
+                .x
+                .as_ref()
+                .submatrix(0, 0, self.core.n, self.core.d),
+            &mut self.core.x_cast,
+        );
+        with_kernel_exp!(self.core.policies.math, M => factor_train_keeping_with_policy::<_, _, M>(
+            &self.core.compiled,
+            x,
+            &mut self.store.buffers,
+            &self.core.y_train,
+            self.core.likelihood.noise_variance(),
+            FactorPolicy {
+                jitter: self.core.policies.jitter,
+                stage: CholeskyStage::Fit,
+            },
+            products,
+        ))?;
+        self.commit_factor();
+        Ok(())
+    }
+
+    /// Sizes the gradient walk's `n×n` buffers ([`CompiledKernel::weighted_buffers`])
+    /// and, for a tree that needs it, `kernel_scratch`.
+    fn ensure_weighted(&mut self, n: usize) -> Result<(), GprError> {
+        let compiled = &self.core.compiled;
+        let core = self.store.buffers.core_mut();
+        if compiled.needs_grad_scratch() {
+            core.ensure_kernel_scratch(n)?;
+        }
+        core.weighted.retain(|m| m.nrows() == n && m.ncols() == n);
+        while core.weighted.len() < compiled.weighted_buffers() {
+            core.weighted.push(Mat::zeros(n, n));
+        }
+        Ok(())
+    }
+
     /// Joint MLL+grad used during `fit`. Does not restore `L` when the buffer
     /// overwrites the factor; the optimizer's next step rebuilds `A`.
     pub(crate) fn value_and_gradient_into_fit(
@@ -282,7 +341,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let n_params = self.num_params();
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params, "parameters")?;
-        self.factor_at(params)?;
+        self.factor_at_with(params, true)?;
         let n = self.core.n;
         let mut rows = P::Storage::empty_rows();
         let y = P::Storage::storage_rows(&self.core.y_train, &mut rows);
@@ -628,9 +687,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
         n: usize,
         out: &mut [f64],
     ) -> Result<(), GprError> {
-        if self.core.compiled.needs_grad_scratch() {
-            self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
-        }
         self.store
             .buffers
             .form_gradient_w(&self.core.factor_alpha, n);
@@ -646,12 +702,14 @@ impl<P: GpScalar> ExactFit<'_, P> {
     }
 
     /// Writes `-½ ⟨W, ∂K/∂θ_i⟩_F` for every kernel parameter into `out`, in
-    /// one walk of the kernel tree (`CompiledKernel::weighted_grads`): each
-    /// factor of a product is evaluated once, not once per parameter.
+    /// one walk of the kernel tree (`CompiledKernel::weighted_grads`). The
+    /// walk reads the product factor Grams [`Self::factor_keeping`] left at
+    /// this `θ`.
     fn kernel_gradient_into(&mut self, n: usize, out: &mut [f64]) -> Result<(), GprError> {
         if out.is_empty() {
             return Ok(());
         }
+        self.ensure_weighted(n)?;
         let x = P::Storage::storage_cols(
             self.core
                 .x
@@ -660,19 +718,22 @@ impl<P: GpScalar> ExactFit<'_, P> {
             &mut self.core.x_cast,
         );
         let compiled = &self.core.compiled;
+        let kept_products = compiled.kept_products();
         let views = self.store.buffers.split_gradient();
-        views.weighted.retain(|m| m.nrows() == n && m.ncols() == n);
-        while views.weighted.len() < compiled.weighted_buffers() {
-            views.weighted.push(Mat::zeros(n, n));
-        }
+        let (kept, bufs) = views.weighted.split_at_mut(compiled.kept_buffers());
         let inputs = fill_cached_inputs(compiled, x, views.dist, views.thread_scratch)?;
-        with_kernel_exp!(self.core.policies.math, M => compiled.weighted_grads::<M>(
+        let mut walk = WeightedWalk {
             inputs,
+            scratch: views.kernel_scratch.as_mut(),
+            nested: views.nested,
+            kept,
+            kept_products,
+        };
+        with_kernel_exp!(self.core.policies.math, M => compiled.weighted_grads::<M>(
+            &mut walk,
             views.w,
             out,
-            views.kernel_scratch.as_mut(),
-            views.nested,
-            views.weighted,
+            bufs,
         ))?;
         for value in out.iter_mut() {
             *value *= -0.5;
