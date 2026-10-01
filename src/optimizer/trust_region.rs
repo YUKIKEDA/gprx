@@ -15,7 +15,7 @@ use crate::objective::{HasBounds, TwiceDifferentiable};
 use crate::param::Interval;
 
 use super::logit::{
-    LogitMapped, keep_better, log_theta_to_z, sample_log_uniform_z, z_to_log_theta,
+    LogitMapped, best_value, keep_better, log_theta_to_z, sample_log_uniform_z, z_to_log_theta,
 };
 use super::{OptResult, Optimizer, Restarts};
 
@@ -174,14 +174,11 @@ fn consider<P: TwiceDifferentiable>(
         log_scratch: vec![0.0; init_z.len()],
     };
     let run = run_trust_region(optimizer, &mut mapped, init_z)?;
-    let log_theta = z_to_log_theta(&run.params, intervals)?;
-    let mut grad = vec![0.0; log_theta.len()];
-    let value = objective.value_and_gradient_into(&log_theta, &mut grad)?;
     keep_better(
         best,
         OptResult {
-            params: log_theta,
-            value,
+            params: z_to_log_theta(&run.params, intervals)?,
+            value: run.value,
             iterations: run.iterations,
         },
     );
@@ -234,12 +231,11 @@ fn run_trust_region<P: TwiceDifferentiable>(
         .ok_or(GprError::OptimizationNotConverged {
             iterations: iterations as usize,
         })?;
-    let value = state.get_best_cost();
-    if !value.is_finite() {
-        return Err(GprError::OptimizationNotConverged {
-            iterations: iterations as usize,
-        });
-    }
+    let cost = state.get_best_cost();
+    let value = best_value(cost, iterations, || {
+        let mut grad = vec![0.0; n];
+        objective.value_and_gradient_into(&params, &mut grad)
+    })?;
     Ok(OptResult {
         params,
         value,
