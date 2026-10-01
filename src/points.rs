@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::persist::persist_err;
 
 /// Stable identity of one training point on [`crate::OnlineGpr`].
@@ -108,16 +109,20 @@ impl<I: RegistryId> IdRegistry<I> {
         for (index, &raw) in ids.iter().enumerate() {
             let id = I::from_raw(raw);
             if id_to_index.insert(id, index).is_some() {
-                return Err(persist_err(format!("config has duplicate {key}")));
+                return Err(persist_err(
+                    PersistErrorKind::Config,
+                    format!("config has duplicate {key}"),
+                ));
             }
             index_to_id.push(id);
             max_id = Some(max_id.map_or(raw, |seen: u64| seen.max(raw)));
         }
         if let Some(max_id) = max_id {
             if next_id <= max_id {
-                return Err(persist_err(format!(
-                    "config next id must exceed every stored value of {key}"
-                )));
+                return Err(persist_err(
+                    PersistErrorKind::Config,
+                    format!("config next id must exceed every stored value of {key}"),
+                ));
             }
         }
         Ok(Self {
@@ -148,6 +153,23 @@ impl<I: RegistryId> IdRegistry<I> {
         self.id_to_index.get(&id).copied().ok_or_else(I::unknown)
     }
 
+    /// Fails when no identifier is left to hand out.
+    ///
+    /// The last value, `u64::MAX`, is never handed out, so every
+    /// identifier this registry gives is distinct. An update calls this
+    /// before it changes anything, then [`Self::insert`] after.
+    pub(crate) fn require_room(&self) -> Result<(), GprError> {
+        if self.next_id < u64::MAX {
+            Ok(())
+        } else {
+            Err(GprError::IndexOutOfRange {
+                reason: format!("no {} identifier is left to assign", I::PERSIST_KEY),
+            })
+        }
+    }
+
+    /// Hands out the next identifier. [`Self::require_room`] must have
+    /// passed; otherwise the counter does not move past `u64::MAX`.
     pub(crate) fn insert(&mut self) -> I {
         let id = I::from_raw(self.next_id);
         let index = self.index_to_id.len();
@@ -163,5 +185,25 @@ impl<I: RegistryId> IdRegistry<I> {
         for (shifted, remaining) in self.index_to_id.iter().enumerate().skip(index) {
             self.id_to_index.insert(*remaining, shifted);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PointId, PointRegistry};
+    use crate::error::GprError;
+
+    #[test]
+    fn the_last_identifier_is_never_handed_out() {
+        let mut registry = PointRegistry::from_persisted(&[0, 1], u64::MAX - 1).expect("valid");
+        registry.require_room().expect("one left");
+        let id = registry.insert();
+        assert_eq!(id, PointId(u64::MAX - 1));
+        assert!(matches!(
+            registry.require_room(),
+            Err(GprError::IndexOutOfRange { .. })
+        ));
+        let full = PointRegistry::from_persisted(&[0], u64::MAX).expect("valid");
+        assert!(full.require_room().is_err());
     }
 }

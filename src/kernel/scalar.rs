@@ -46,8 +46,12 @@ pub(crate) mod sealed {
             scratch: &mut [Mat<Self>],
         );
 
-        /// Writes the `n × (n·d)` raw `(Δx_d)²` cache.
-        fn write_ard(x: MatRef<'_, Self>, cache: MatMut<'_, Self>, scratch: &mut [Mat<Self>]);
+        /// Writes the packed raw `(Δx_d)²` cache of
+        /// [`crate::kernel::dist::ArdSqDiffBuf`].
+        fn write_ard(x: MatRef<'_, Self>, cache: &mut [Self]);
+
+        /// This slice as `f64` when the scalar is `f64`, for the SIMD paths.
+        fn as_f64_slice(values: &[Self]) -> Option<&[f64]>;
 
         fn empty_rows() -> Self::RowCast;
 
@@ -278,8 +282,12 @@ impl sealed::ScalarOps for f64 {
         super::dist::fill_squared_euclidean_cross(x_train, x_test, dist, scratch);
     }
 
-    fn write_ard(x: MatRef<'_, Self>, cache: faer::MatMut<'_, Self>, scratch: &mut [Mat<Self>]) {
-        super::dist::fill_ard_squared_diff(x, cache, scratch);
+    fn write_ard(x: MatRef<'_, Self>, cache: &mut [Self]) {
+        super::dist::fill_ard_squared_diff(x, cache);
+    }
+
+    fn as_f64_slice(values: &[Self]) -> Option<&[f64]> {
+        Some(values)
     }
 
     fn empty_rows() -> Self::RowCast {}
@@ -397,8 +405,12 @@ impl sealed::ScalarOps for f32 {
         super::dist::fill_cross_scalar(x_train, x_test, dist);
     }
 
-    fn write_ard(x: MatRef<'_, Self>, cache: faer::MatMut<'_, Self>, _scratch: &mut [Mat<Self>]) {
+    fn write_ard(x: MatRef<'_, Self>, cache: &mut [Self]) {
         super::dist::fill_ard_scalar(x, cache);
+    }
+
+    fn as_f64_slice(_values: &[Self]) -> Option<&[f64]> {
+        None
     }
 
     fn empty_rows() -> Self::RowCast {

@@ -93,6 +93,8 @@ pub enum JitterPolicy {
 - jitterを増やして得た因子で、元の `A` へ反復改良で「戻す」ことはしない。前処理行列 `LLᵀ ≈ A + jI` と目標 `A` の乖離が拡大し、縮小率 `||I - (LLᵀ)^{-1} A||` が1を超えて発散し得るため(§4.2)。
 - Sparse のモデルが分解する `K_mm = k(Z, Z)` には観測ノイズが入らない。`Sgpr` / `Svgp` は `K_mm` 用の `with_jitter_policy` を持ち、既定は Exact の既定ではなく `adaptive(1e-8, 10, 5, 1e-3)` にする。近い誘導点では、浮動小数点で `K_mm` が特異になるため。fit、factor、`set_params`、予測、オンライン更新は、すべてこの方針を使う。
 
+**非正規化数**（#51 で決定）。非正規化数の `f64` は正の有限値であり、gprx は IEEE 754 のとおりに扱う。公開の入口で拒否もゼロへのフラッシュもしない。gprx は浮動小数点の制御レジスタ（x86 の MXCSR、AArch64 の FPCR）を読み書きしない。flush-to-zero と denormals-are-zero は呼び出し側のプロセスが決めることで、使うなら両方をまとめて設定する。片方だけのスイッチは置かない。「ノイズが小さすぎて役に立たない」はモデルの問題として別に扱い、パラメータの `Interval`（既定の `Interval::DEFAULT_POSITIVE` は `(1e-5, 1e5)` なので、非正規化数のノイズ分散には呼び出し側が範囲を広げたときしか届かない）と、分解が失敗したときの `JitterPolicy` が受け持つ。非正規化数の規則ではない。
+
 ### 4.1 精度ポリシー: f32/f64/混合精度
 
 目的は「メモリ削減」と「計算速度」の両方。混合精度反復改良(mixed-precision iterative refinement)を採用するが、**適用範囲をfit時とpredict時で分ける**。
@@ -269,11 +271,11 @@ pub enum DistanceCachePolicy {
 /// Crate-private. What Cached stores (§7.1).
 struct DistCache<S> {
     dist: Option<Mat<S>>,        // n×n squared Euclidean, for distance-mode leaves
-    ard_sq_diff: Option<Mat<S>>, // raw (Δx_d)² as n × (n·d), for ARD leaves
+    ard_sq_diff: Option<ArdSqDiffBuf<S>>, // raw (Δx_d)², packed lower triangles, for ARD leaves
 }
 ```
 
-置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは列優先 `n × (n·d)` で、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
+置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
 
 ほかの方針とのどの組み合わせも不正ではないので、方針は実行時の enum にする（§6.3）。`(n,n,d)` テンソルは `n²×d×sizeof(T)` バイト。`K` 自体が `n²×sizeof(T)`（n=5000、f64 で約 200MB）で、ARD キャッシュはその `d` 倍になる。`n`・`d`・メモリ予算から方針を選ぶ仕組みは未決（§14）。
 
@@ -391,7 +393,11 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     // *_with variants take PredictOptions; get_params / set_params /
     // value_and_gradient_into / hessian_into; into_online / into_trainer / save
 }
+```
 
+すべての `seed`（sample、最適化のリスタート、FSA、SVGP の Adam のシャッフル）は、gprx 自身の Xoshiro256++（状態を SplitMix64 で seed から作る、`src/rng.rs`）を始める。同じ seed と同じ gprx の版なら、どのプラットフォームでも、どの `rand` の版でも同じ乱数列になる。最初の出力はテストで固定する。乱数列を変えるのは破壊的変更。
+
+```rust
 pub enum VarianceKind {
     Latent,      // variance of the latent f* (no noise)
     Observation, // variance of the observation y* (includes σn²). Default
@@ -420,7 +426,7 @@ pub struct PredictOptions {
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
-Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`Svgp<Adam>::fit` が同じ prior からミニバッチ Adam でカーネル `θ`・尤度 `θ`・whitened `q` を動かす。1 ステップは、自分の点の `A_b = L⁻¹ K(Z, X_b)`・`k_diag`・`∂K(Z, X_b)/∂θ` だけを作り、`K_mm` を分解し直すので、計算量は `O(b (m² + m d) + m³)` で、`n` に依存しない。全 `n` 点の `A` と `k_diag` は、最初のステップの前と最後のステップの後に 1 回ずつ作る。勾配は、格納の精度によらず `f64` で計算する。`Adam` は `Optimizer` ではない。`FittedSvgp` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_elbo`、全データ `value_and_gradient_into` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する。公開型は `Sgpr` / `FittedSgpr`。既定は `Sgpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`Sgpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSgpr` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。k-means は置かない。外部照合は §12（5c、5d）、時間と RSS は §15。
+Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`Svgp<Adam>::fit` が同じ prior からミニバッチ Adam でカーネル `θ`・尤度 `θ`・whitened `q` を動かす。1 ステップは、自分の点の `A_b = L⁻¹ K(Z, X_b)`・`k_diag`・`∂K(Z, X_b)/∂θ` だけを作り、`K_mm` を分解し直すので、計算量は `O(b (m² + m d) + m³)` で、`n` に依存しない。全 `n` 点の `A` と `k_diag` は、最初のステップの前と最後のステップの後に 1 回ずつ作る。勾配は、格納の精度によらず `f64` で計算する。`Adam` は `Optimizer` ではない。`FittedSvgp` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_elbo`、全データ `value_and_gradient_into` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する。公開型は `Sgpr` / `FittedSgpr`。既定は `Sgpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`Sgpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSgpr` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。White の葉を含まないカーネルでは、`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。`K(Z, X)` は `Z` と `X` の値によらず常に長方形の相互共分散なので、White の葉はそこに何も足さない（`K_mm` と `diag K(X, X)` には足す）。そのため境界は `Z` について連続で、`Z` と `X` のビット一致や行の順序に依らず、値・勾配・Hessian はすべて同じ VFE の式から出る。White の葉を含むと、`Z = X` の境界は Exact の尤度にならない（White は誘導点が説明しないノイズとして扱う）。k-means は置かない。外部照合は §12（5c、5d）、時間と RSS は §15。
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。joint の `K(X,X)` 勾配とヘッセは対角 `∂k(x_i, x_i)/∂θ` を `O(n)` で足す。`K(Z,Z)` と `K(Z,X)` の勾配は密行列のまま。
 
@@ -468,7 +474,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 4. `L Lᵀ α = y` を前進・後退代入で解く(O(n²))
 5. `L`から`K⁻¹`を計算する(三角ソルブで `L Lᵀ X = I`、O(n³)が1回)
 6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]`(対称なので下三角のみ)
-7. 各θ_iについて `∂K/∂θ_i` を`exp_buf`へ評価し、`⟨W, ∂K/∂θ_i⟩_F` をO(n²)で積算。カーネルパラメータは`KernelTerm::grad`、ノイズは`GaussianLikelihood::noise_grad_diag`(対角のみ)
+7. カーネルの全θ_iの `⟨W, ∂K/∂θ_i⟩_F` を、カーネルの木を 1 回たどって積算する（`CompiledKernel::weighted_grads`）。和は重みをそのまま各項へ渡す。積は各因子の Gram を 1 回だけ評価し、因子 `c` へ重み `W ∘ ∏_{s≠c} K_s` を渡す。葉は自分の `∂K/∂θ_i` を使い回す `n×n` の枠へ書き、受け取った重みとの Frobenius 積を取る（パラメータごとに O(n²)）。積の因子をパラメータごとに評価し直すことはない。ノイズは`GaussianLikelihood::noise_grad_diag`(対角のみ)
 
 全体コストはO(n³ + p n²)。K⁻¹をパラメータごとに作り直さない。
 
@@ -478,7 +484,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。`Q_j`（`n×n` 1 枚）と長さ n のベクトル 4 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。一次の項は、ノイズ（`A_i = σn² I`）を含む各パラメータ `i` について 1 回ずつ計算する。`A = L Lᵀ` として、`S_i = L⁻¹ A_i L⁻ᵀ`（三角解 2 回）と `v_i = L⁻¹ A_i α` から `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F`、`αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j` を得るので、Hessian 全体は `O(p n³ + p² n²)`。`p` 枚の `S_i`（`p · n²`）、`v_i` を並べた `n × p`、長さ n のベクトル 1 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直す（`W` が `L` を上書きしたため）。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
@@ -581,7 +587,7 @@ struct GprObjective<'a, P: GpScalar = DoublePrecision> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を、詰めた下三角（`d · n(n+1)/2` 個）に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
 
 ### 6.4 Leave-one-out
 
@@ -605,7 +611,7 @@ sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_
 潜在 σ_i² = k(x_i, x_i) - ‖a_i‖² + σn² h / (1 - h)
 ```
 
-三角解 `L_B⁻¹ A` を 1 回解けば、全体で `O(n m²)`。`Z = X` では Exact の LOO になる。`f32` の格納は、予測と同じく VFE 系を `f64` で組み直す。SVGP は LOO を持たない（§6.1）。
+三角解 `L_B⁻¹ A` を 1 回解けば、全体で `O(n m²)`。White の葉を含まないカーネルでは、`Z = X` で Exact の LOO になる。`f32` の格納は、予測と同じく VFE 系を `f64` で組み直す。SVGP は LOO を持たない（§6.1）。
 
 ## 7. Workspaceとメモリ管理
 
@@ -624,7 +630,7 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
     theta: Vec<f64>,                 // θ before the current write, restored when A does not factor
     nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product (§5.3)
-    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
+    hessian: HessianScratch<P::Storage>, // S_i (p · n²), v_i (n × p), one n-vector. Empty until the first Hessian (§6.2)
     factor_jitter: f64,              // j of the last successful factor (§4.0)
 }
 
@@ -732,13 +738,15 @@ pub struct OptResult {
 // Optimizer<P> is in §5.4: `P` is the objective type the algorithm can minimize.
 ```
 
-`init`はスライスにする(呼び出し側のVecを消費しない)。`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。`SgprObjective` は `Sgpr` 用の同じ crate 内アダプタ。区間は各パラメータの `Interval` から取る（crate 内の `HasBounds`）。
+`init`はスライスにする(呼び出し側のVecを消費しない)。`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。`SgprObjective` は `Sgpr` 用の同じ crate 内アダプタ。区間は各パラメータの `Interval` から `Objective::fill_intervals` で取る（公開。ユーザーの Optimizer も読め、同じ目的関数で組み込みの最適化器を呼べる。既定は `Interval::DEFAULT_POSITIVE`）。
 
 トレーナーの境界は `O: for<'a> Optimizer<GprObjective<'a, P>>`。既定は `Lbfgs`。`Lbfgs` は `Differentiable`、`TrustRegion` は `TwiceDifferentiable`、`NelderMead` / `FastSimulatedAnnealing` は `Objective` だけを要る。argmin のアダプタは、ユーザー単位の区間を logit で写して argmin を制約なしのまま動かす（正の区間は対数一様、中点でヤコビアンが 1 になるよう縮尺）。`TrustRegion` は解析ヘッセも写す。`TrustRegion` は argmin の信頼領域法（部分問題は Steihaug）で、Hessian を使うソルバ。Hessian が非正定・特異でも、ステップが区間の外へ出ても、領域が縮むことで扱う（評価できない候補は、Hessian も含めてバリア値の費用にする）。ソルバの失敗は `OptimizationNotConverged`。`FastSimulatedAnnealing` は gprx 自前の値だけのソルバ（Cauchy / Metropolis）で、logit は使わず受け取った log-`θ` を歩く。自作最適化器の例でもある。目的関数の型は crate 内なので、自作の最適化器は要る能力について `Optimizer<P>` をジェネリックに impl し（`impl<P: Objective> Optimizer<P> for Mine`）、`with_optimizer` で同じ型パラメータを差し替える。その隣に無視される別のソルバ設定は置かない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。`Adam` は `Svgp` のミニバッチのループで、`Optimizer` ではない。実行時の NotImplemented は置かない。
 
 ## 10. エラー型 GprError
 
 数値計算固有の失敗理由を拡充する。
+
+集合が増えうる公開 enum は `#[non_exhaustive]` にする: `GprError`、`CholeskyStage`、`IntervalError`、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`、`PersistKind`、`KernelSpec`、`CompiledKernel`、`DistanceCachePolicy`、`JitterPolicy`、`KernelExp`、`BoundaryPolicy`。これらへの variant の追加は破壊的変更にならない。クレート外の `match` には `_` が要る。閉じた集合は網羅的な `match` を書けるよう付けない: `Triangle`、`MaternNu`、`VarianceKind`、`CholeskyBuffer`。
 
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
@@ -764,7 +772,7 @@ pub enum GprError {
     WorkspaceTooSmall,
     InvalidPointId,
     InvalidInducingId,
-    PersistFailed { reason: String },
+    PersistFailed { kind: PersistErrorKind, reason: String }, // kind: Io / Config / Tensor / InvalidPersistId / NotPersistable / UnregisteredId / WrongModel
     UnsupportedPersistVersion { found: u32, supported: u32 },
 }
 
@@ -773,7 +781,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 表示文は英語（`src/error.rs`）。
 
-`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。保存・読み込みの失敗は `PersistFailed`、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
+`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。保存・読み込みの失敗は `PersistFailed`（どこで失敗したかを `kind`（`PersistErrorKind`、non_exhaustive）で示し、呼び出し側は `reason` を読まずに分岐できる）、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
 
 **Error/panicの線引き**: ユーザー入力起因(`DimensionMismatch`等)、モデル/データ起因(`CholeskyFailed`等)は`Result`で返し回復可能にする。`CoordGradientUnsupported`はライブラリ内部panic対象ではないため`unimplemented!()`ではなく本Errorを返す。`NotFitted` の variant は無い。未学習の呼び出しは書けない。
 
@@ -909,7 +917,7 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
    - ノイズパラメータ(`log_noise_variance`)の勾配比較。`∂K/∂θ = σn² I`であること
    - 悪条件行列での勾配安定性
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
-5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順は `SmallRng` でランダム化する
+5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順はテスト内の種つき `rand` でランダム化する
 5b. **オンライン insert の外部照合**: 同じ θ の libgp `add_pattern` と predict（平均・観測分散）および NLML を相対 `1e-8`。delete の外部 API は無い。`cargo test` はコミット済み JSON を読む（C++ を呼ばない）
 5c. **Sparse の外部照合**: 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch 潰し SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
 5d. **Sparse オンラインの外部照合**: 同じ初期 θ の `OnlineSgpr` の `insert` / `delete` / `insert_inducing` / `delete_inducing` を、各段階の GPyTorch 潰し SGPR（フル再組み立て）と相対 `1e-8`（平均・Observation・Latent・NLML）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
@@ -953,7 +961,7 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 - criterion は `n = 256`。ライブラリ横断のハーネスは `n = 256 / 1024 / 4096`（Forrester）と `16×16 / 32×32 / 64×64`（球）
 - 等方: 1 次元 Forrester `f(x)=(6x-2)² sin(12x-4)`、`x ∈ [0, 1]`、RBF + `GaussianLikelihood` + `StandardizeTarget`。初期ハイパラ `ℓ = 1`、`σn² = 0.1`
 - ARD: 2 次元重み付き球 `f=(x/0.25)²+(y/1)²`、`[0, 1]²` の 16×16 格子。初期 `ℓ_d = 4`（`ℓ_d = 1` では線探索が初手で止まる）
-- `y` は上記の関数 + `N(0, 1)`（`SmallRng`。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は `Uncached` で尾根を歩く）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
+- `y` は上記の関数 + `N(0, 1)`（gprx の種つき乱数。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は `Uncached` で尾根を歩く）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
 - `benches/exact.rs` の criterion グループ（存在する経路だけ）:
   1. `kernel_rbf` — K の下三角構築
   2. `cholesky_alpha` — `A` の LLT と `α`
