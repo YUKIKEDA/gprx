@@ -6,6 +6,7 @@ use super::{
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::radial;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
@@ -220,7 +221,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn grad_from_ard_cache<M: crate::math::KernelMath>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         x: MatRef<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
