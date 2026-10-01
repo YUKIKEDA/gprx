@@ -2,9 +2,7 @@
 //! optimizer objective.
 
 use crate::error::GprError;
-use crate::objective::{
-    Differentiable, HasBounds, IncrementalObjective, Objective, TwiceDifferentiable,
-};
+use crate::objective::{Differentiable, IncrementalObjective, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 
 use super::{ExactFit, LeafCache};
@@ -73,6 +71,10 @@ where
         self.model.num_params()
     }
 
+    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        self.model.fill_intervals(out)
+    }
+
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
         crate::objective::count_value_call!();
         if self.incremental {
@@ -129,14 +131,16 @@ where
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into_fit(params, out)
     }
-}
 
-impl<P> HasBounds for GprObjective<'_, P>
-where
-    P: crate::precision::GpScalar,
-{
-    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-        self.model.fill_intervals(out)
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
+        crate::objective::count_joint_call!();
+        self.model
+            .value_gradient_hessian_into_fit(params, grad, hess)
     }
 }
 

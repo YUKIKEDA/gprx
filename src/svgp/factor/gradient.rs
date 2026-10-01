@@ -5,25 +5,80 @@
 //! points are formed here: `A_b = L⁻¹ K(Z, X_b)` (`m × b`), `k_diag`, and
 //! `∂K(Z, X_b)/∂θ`. A step costs `O(b·(m² + m·d) + m³)`; nothing in it scales
 //! with `n`. A full-data gradient is the batch of every point.
+//!
+//! Every intermediate lives in [`GradBuffers`], which the Adam loop keeps
+//! between steps: once they have grown to the largest batch, a step
+//! allocates nothing here. The kernel routines themselves allocate nothing
+//! for the isotropic leaves and their sums and products; the RBF-ARD
+//! routines still build small per-call working vectors (`tests/alloc.rs`,
+//! `svgp_adam_epoch_rbf_ard`), which #167 removes with the ARD SIMD paths.
 
 use super::assemble::q_param_len;
-use crate::data::pack_points;
 use crate::error::GprError;
-use crate::kernel::{GramInputs, KernelScalar, Triangle};
-use crate::linalg::{
-    dot_f64x4, mat_mul_into, mat_sub_mul, norm2_f64x4, solve_lower, symmetrize_lower,
-};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
+use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower};
 use crate::precision::ModelPrecision;
-use crate::sparse::{KernelScratch, SparseCore, SparseScratch};
+use crate::sparse::{KernelScratch, SparseScratch, view};
 use crate::svgp::FittedSvgp;
-use faer::{Mat, MatMut, MatRef};
+use faer::reborrow::IntoConst;
+use faer::{Accum, Mat, MatMut, MatRef};
+
+/// The intermediates of one gradient, grown to the largest batch and viewed
+/// at each call's shape. Scratch: contents mean nothing between calls.
+pub(crate) struct GradBuffers {
+    k_mm_l: Mat<f64>,
+    x: Mat<f64>,
+    z: Mat<f64>,
+    a: Mat<f64>,
+    k_diag: Vec<f64>,
+    u: Mat<f64>,
+    resid: Vec<f64>,
+    var: Vec<f64>,
+    resid_col: Mat<f64>,
+    mean: Mat<f64>,
+    gram: Mat<f64>,
+    d_kmm: Mat<f64>,
+    d_kdiag: Vec<f64>,
+    d_kzx: Mat<f64>,
+    d_l: Mat<f64>,
+    lt: Mat<f64>,
+    ard: Vec<Mat<f64>>,
+    ks: KernelScratch<f64>,
+}
+
+impl Default for GradBuffers {
+    fn default() -> Self {
+        Self {
+            k_mm_l: Mat::new(),
+            x: Mat::new(),
+            z: Mat::new(),
+            a: Mat::new(),
+            k_diag: Vec::new(),
+            u: Mat::new(),
+            resid: Vec::new(),
+            var: Vec::new(),
+            resid_col: Mat::new(),
+            mean: Mat::new(),
+            gram: Mat::new(),
+            d_kmm: Mat::new(),
+            d_kdiag: Vec::new(),
+            d_kzx: Mat::new(),
+            d_l: Mat::new(),
+            lt: Mat::new(),
+            ard: Vec::new(),
+            ks: KernelScratch::new(),
+        }
+    }
+}
 
 /// The mini-batch negative ELBO `KL − (n / b) Σ_{i ∈ batch} ell_i` and its
 /// gradient in `out` (kernel `θ`, likelihood `θ`, the whitened mean, then the
 /// packed `L`). The batch is every point for the full-data value.
 ///
 /// Reads `θ`, `K_mm`'s factor, and `q` of `model`; never its cached `A` or
-/// `k_diag`, which a mini-batch fit leaves stale until it ends.
+/// `k_diag`, which a mini-batch fit leaves stale until it ends. Compiles the
+/// kernel and sizes new buffers for this call; the Adam loop keeps both with
+/// [`svgp_value_and_gradient_with`].
 pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
     model: &FittedSvgp<P>,
     out: &mut [f64],
@@ -33,118 +88,176 @@ pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
 where
     P: ModelPrecision,
 {
+    let compiled = model.core.kernel.compile();
+    let mut bufs = GradBuffers {
+        ks: std::mem::take(&mut scratch.f64),
+        ..GradBuffers::default()
+    };
+    let result = svgp_value_and_gradient_with::<M, P>(model, out, batch, &compiled, &mut bufs);
+    scratch.f64 = bufs.ks;
+    result
+}
+
+/// [`svgp_value_and_gradient`] with the kernel compiled at the model's `θ`
+/// (`compiled`) and the buffers of earlier calls.
+pub(crate) fn svgp_value_and_gradient_with<M: crate::math::KernelMath, P>(
+    model: &FittedSvgp<P>,
+    out: &mut [f64],
+    batch: &[usize],
+    compiled: &CompiledKernel<f64>,
+    bufs: &mut GradBuffers,
+) -> Result<f64, GprError>
+where
+    P: ModelPrecision,
+{
     let core = &model.core;
-    let (n, m) = (core.n, core.m);
+    let (n, m, d) = (core.n, core.m, core.d);
+    let b = batch.len();
     let n_kernel = core.kernel.num_params();
     let n_theta = n_kernel + core.likelihood.num_params();
     crate::data::require_count(out.len(), n_theta + q_param_len(m), "parameters")?;
-    if batch.is_empty() {
+    if b == 0 {
         return Err(GprError::EmptyInput);
     }
-    let mut k_mm_l = Mat::<f64>::zeros(m, m);
+    let GradBuffers {
+        k_mm_l,
+        x,
+        z,
+        a,
+        k_diag,
+        u,
+        resid,
+        var,
+        resid_col,
+        mean,
+        gram,
+        d_kmm,
+        d_kdiag,
+        d_kzx,
+        d_l,
+        lt,
+        ard,
+        ks,
+    } = bufs;
+    let mut k_mm_l = view(k_mm_l, m, m);
     for j in 0..m {
         for i in j..m {
             k_mm_l[(i, j)] = model.k_mm_l[(i, j)].to_f64();
         }
     }
-    let ks = &mut scratch.f64;
-    let terms = batch_terms::<M>(core, k_mm_l.as_ref(), batch, ks)?;
-    out.fill(0.0);
-    let noise = core.likelihood.noise_variance();
-    let inv_noise = 1.0 / noise;
-    let scale = n as f64 / batch.len() as f64;
-    let kl = accumulate_kl_grad(&model.q_mean, model.q_l.as_ref(), out, n_theta, m);
-    let cache = point_cache(
-        &terms,
-        &core.y_train,
-        batch,
-        &model.q_mean,
-        model.q_l.as_ref(),
-        m,
-    );
-    let (ell, resid2_var) =
-        accumulate_data_q_grad(&terms, &cache, out, n_theta, noise, inv_noise, scale);
-    out[n_kernel] = -scale * (-0.5 * batch.len() as f64 + 0.5 * inv_noise * resid2_var);
-    let inputs = KernelGradInputs {
-        core,
-        terms: &terms,
-        k_mm_l: k_mm_l.as_ref(),
-        q_mean: &model.q_mean,
-        q_l: model.q_l.as_ref(),
-        cache: &cache,
-        batch,
-    };
-    accumulate_kernel_grad::<M>(&inputs, out, n_kernel, inv_noise, scale, ks)?;
-    Ok(kl - scale * ell)
-}
-
-/// What the batch points contribute, in `f64`.
-struct BatchTerms {
-    /// `X_b`, `b × d`.
-    x: Mat<f64>,
-    /// `Z`, `m × d`.
-    z: Mat<f64>,
-    /// `A_b = L⁻¹ K(Z, X_b)`, `m × b`.
-    a: Mat<f64>,
-    /// `k(x, x)` of each batch point.
-    k_diag: Vec<f64>,
-    /// The whole `X` when it equals `Z` (`n = m`): its Gram carries the White
-    /// diagonal that a rectangular `K(Z, X_b)` leaves at zero.
-    x_full: Option<Mat<f64>>,
-}
-
-fn batch_terms<M: crate::math::KernelMath>(
-    core: &SparseCore,
-    k_mm_l: MatRef<'_, f64>,
-    batch: &[usize],
-    ks: &mut KernelScratch<f64>,
-) -> Result<BatchTerms, GprError> {
-    let (n, m, d) = (core.n, core.m, core.d);
-    let b = batch.len();
-    let compiled = core.kernel.compile();
-    let mut x = Mat::<f64>::zeros(b, d);
+    let k_mm_l = k_mm_l.into_const();
+    let mut x = view(x, b, d);
     for (b_idx, &row) in batch.iter().enumerate() {
         for j in 0..d {
             x[(b_idx, j)] = core.x_train[j * n + row];
         }
     }
-    let z = pack_points(&core.z_train, m, d);
-    let x_full = (core.x_train == core.z_train).then(|| pack_points(&core.x_train, n, d));
-    let mut a = if let Some(full) = &x_full {
-        let mut gram = Mat::zeros(n, n);
-        ks.gram::<M>(
-            &compiled,
-            GramInputs::points(full.as_ref()),
-            gram.as_mut(),
-            Triangle::Lower,
-        )?;
-        symmetrize_lower(gram.as_mut(), n);
-        columns(gram.as_ref(), batch)
-    } else {
-        ks.cross::<M>(&compiled, z.as_ref(), x.as_ref())?
-    };
-    solve_lower(k_mm_l, a.as_mut());
-    let mut k_diag = vec![0.0; b];
-    compiled.fill_diag_points(x.as_ref(), &mut k_diag)?;
-    Ok(BatchTerms {
-        x,
-        z,
-        a,
-        k_diag,
-        x_full,
-    })
-}
-
-/// The columns `batch` of `full`, in that order.
-fn columns(full: MatRef<'_, f64>, batch: &[usize]) -> Mat<f64> {
-    let rows = full.nrows();
-    let mut owned = Mat::zeros(rows, batch.len());
-    for (b_idx, &col) in batch.iter().enumerate() {
-        for row in 0..rows {
-            owned[(row, b_idx)] = full[(row, col)];
+    let x = x.into_const();
+    let mut z = view(z, m, d);
+    for j in 0..d {
+        for i in 0..m {
+            z[(i, j)] = core.z_train[j * m + i];
         }
     }
-    owned
+    let z = z.into_const();
+    let mut a = view(a, m, b);
+    // `K(Z, X_b)` is the rectangular cross covariance even when `Z` equals
+    // `X`: a White leaf adds nothing to it.
+    ks.cross_into::<M>(compiled, z, x, a.as_mut())?;
+    solve_lower(k_mm_l, a.as_mut());
+    let a = a.into_const();
+    k_diag.resize(b, 0.0);
+    compiled.fill_diag_points(x, k_diag)?;
+    out.fill(0.0);
+    let noise = core.likelihood.noise_variance();
+    let inv_noise = 1.0 / noise;
+    let scale = n as f64 / b as f64;
+    let kl = accumulate_kl_grad(&model.q_mean, model.q_l.as_ref(), out, n_theta, m);
+    let mut u = view(u, m, b);
+    gemm(u.as_mut(), Accum::Replace, model.q_l.transpose(), a, 1.0);
+    let u = u.into_const();
+    resid.resize(b, 0.0);
+    var.resize(b, 0.0);
+    point_terms(
+        a,
+        u,
+        k_diag,
+        &core.y_train,
+        batch,
+        &model.q_mean,
+        resid,
+        var,
+    );
+    let (ell, resid2_var) = accumulate_data_q_grad(
+        a,
+        u,
+        resid,
+        var,
+        DataBuffers {
+            resid_col: view(resid_col, b, 1),
+            mean: view(mean, m, 1),
+            gram: view(gram, m, m),
+        },
+        out,
+        n_theta,
+        noise,
+        inv_noise,
+        scale,
+    );
+    out[n_kernel] = -scale * (-0.5 * b as f64 + 0.5 * inv_noise * resid2_var);
+    let ard_ready = match compiled {
+        CompiledKernel::RbfArd(leaf) => {
+            leaf.grad_cross_all_from_coords_into::<M>(z, x, ard)?;
+            true
+        }
+        _ => false,
+    };
+    d_kdiag.resize(b, 0.0);
+    for param_idx in 0..n_kernel {
+        let mut d_kmm = view(d_kmm, m, m);
+        ks.grad::<M>(
+            compiled,
+            GramInputs::points(z),
+            d_kmm.as_mut(),
+            param_idx,
+            Triangle::Full,
+        )?;
+        let mut d_a = if ard_ready {
+            compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
+            ard[param_idx].as_mut().submatrix_mut(0, 0, m, b)
+        } else {
+            compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
+            let mut cross = view(d_kzx, m, b);
+            ks.grad_cross::<M>(compiled, z, x, cross.as_mut(), param_idx)?;
+            cross
+        };
+        let mut d_l = view(d_l, m, m);
+        d_l.fill(0.0);
+        cholesky_sensitivity(k_mm_l, d_kmm.as_ref(), d_l.as_mut(), m);
+        // Upper of `d_l` stays zero, so this is the lower-triangular product.
+        gemm(d_a.as_mut(), Accum::Add, d_l.as_ref(), a, -1.0);
+        solve_lower(k_mm_l, d_a.as_mut());
+        let mut lt = view(lt, m, b);
+        gemm(
+            lt.as_mut(),
+            Accum::Replace,
+            model.q_l.transpose(),
+            d_a.as_ref(),
+            1.0,
+        );
+        out[param_idx] = -scale
+            * kernel_param_term(
+                d_a.as_ref(),
+                a,
+                u,
+                lt.as_ref(),
+                d_kdiag,
+                resid,
+                &model.q_mean,
+                inv_noise,
+            );
+    }
+    Ok(kl - scale * ell)
 }
 
 fn accumulate_kl_grad(
@@ -204,83 +317,87 @@ impl<'a> ColMajor<'a> {
     }
 }
 
-struct PointCache {
-    resid: Vec<f64>,
-    var: Vec<f64>,
-    /// Columns are batch points. `u[(j, b)] = (Lᵀ a)[j]` for that point.
-    u: Mat<f64>,
-}
-
-fn point_cache(
-    terms: &BatchTerms,
+/// `resid = y − A_bᵀ m` and `var = k_diag − ‖a‖² + ‖Lᵀ a‖²` of each batch
+/// point (columns of `a` and `u = Lᵀ A_b`).
+#[allow(clippy::too_many_arguments)]
+fn point_terms(
+    a: MatRef<'_, f64>,
+    u: MatRef<'_, f64>,
+    k_diag: &[f64],
     y_train: &[f64],
     batch: &[usize],
     q_mean: &[f64],
-    q_l: MatRef<'_, f64>,
-    m: usize,
-) -> PointCache {
-    let b = batch.len();
-    let mut u = Mat::zeros(m, b);
-    mat_mul_into(&mut u, q_l.transpose(), terms.a.as_ref());
-    let mut resid = vec![0.0; b];
-    let mut var = vec![0.0; b];
-    if let (Some(a_cm), Some(u_cm)) = (ColMajor::new(terms.a.as_ref()), ColMajor::new(u.as_ref())) {
-        for b_idx in 0..b {
+    resid: &mut [f64],
+    var: &mut [f64],
+) {
+    let m = a.nrows();
+    if let (Some(a_cm), Some(u_cm)) = (ColMajor::new(a), ColMajor::new(u)) {
+        for (b_idx, &row) in batch.iter().enumerate() {
             let a_col = a_cm.col(b_idx);
             let u_col = u_cm.col(b_idx);
             let mu = dot_f64x4(a_col, q_mean);
-            var[b_idx] = terms.k_diag[b_idx] - norm2_f64x4(a_col) + norm2_f64x4(u_col);
-            resid[b_idx] = y_train[batch[b_idx]] - mu;
+            var[b_idx] = k_diag[b_idx] - norm2_f64x4(a_col) + norm2_f64x4(u_col);
+            resid[b_idx] = y_train[row] - mu;
         }
     } else {
-        for b_idx in 0..b {
+        for (b_idx, &row) in batch.iter().enumerate() {
             let mut mu = 0.0;
             let mut a_norm = 0.0;
             let mut lt_norm = 0.0;
             for j in 0..m {
-                let a_j = terms.a[(j, b_idx)];
+                let a_j = a[(j, b_idx)];
                 let u_j = u[(j, b_idx)];
                 mu += a_j * q_mean[j];
                 a_norm += a_j * a_j;
                 lt_norm += u_j * u_j;
             }
-            var[b_idx] = terms.k_diag[b_idx] - a_norm + lt_norm;
-            resid[b_idx] = y_train[batch[b_idx]] - mu;
+            var[b_idx] = k_diag[b_idx] - a_norm + lt_norm;
+            resid[b_idx] = y_train[row] - mu;
         }
     }
-    PointCache { resid, var, u }
 }
 
+/// Views [`accumulate_data_q_grad`] writes.
+struct DataBuffers<'a> {
+    resid_col: MatMut<'a, f64>,
+    mean: MatMut<'a, f64>,
+    gram: MatMut<'a, f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn accumulate_data_q_grad(
-    terms: &BatchTerms,
-    cache: &PointCache,
+    a: MatRef<'_, f64>,
+    u: MatRef<'_, f64>,
+    resid: &[f64],
+    var: &[f64],
+    bufs: DataBuffers<'_>,
     out: &mut [f64],
     n_theta: usize,
     noise: f64,
     inv_noise: f64,
     scale: f64,
 ) -> (f64, f64) {
-    let m = terms.a.nrows();
+    let DataBuffers {
+        mut resid_col,
+        mut mean,
+        mut gram,
+    } = bufs;
+    let m = a.nrows();
     let log_2pi_noise = (2.0 * std::f64::consts::PI * noise).ln();
     let mut ell = 0.0;
     let mut resid2_var = 0.0;
-    let b = terms.a.ncols();
-    let mut resid_col = Mat::zeros(b, 1);
-    for (b_idx, &resid) in cache.resid.iter().enumerate() {
-        let var = cache.var[b_idx];
-        ell += -0.5 * log_2pi_noise - 0.5 * inv_noise * (resid * resid + var);
-        resid2_var += resid * resid + var;
-        resid_col[(b_idx, 0)] = resid;
+    for (b_idx, (&r, &v)) in resid.iter().zip(var).enumerate() {
+        ell += -0.5 * log_2pi_noise - 0.5 * inv_noise * (r * r + v);
+        resid2_var += r * r + v;
+        resid_col[(b_idx, 0)] = r;
     }
-    let mut mean = Mat::zeros(m, 1);
-    mat_mul_into(&mut mean, terms.a.as_ref(), resid_col.as_ref());
+    gemm(mean.as_mut(), Accum::Replace, a, resid_col.as_ref(), 1.0);
     let c = scale * inv_noise;
     for k in 0..m {
         out[n_theta + k] -= c * mean[(k, 0)];
     }
     // `M_ij = Σ_b a_i u_j` for `i ≥ j`, the packed `L` derivative.
-    let mut gram = Mat::zeros(m, m);
-    mat_mul_into(&mut gram, terms.a.as_ref(), cache.u.transpose());
+    gemm(gram.as_mut(), Accum::Replace, a, u.transpose(), 1.0);
     let mut packed = 0;
     for j in 0..m {
         for i in j..m {
@@ -291,140 +408,50 @@ fn accumulate_data_q_grad(
     (ell, resid2_var)
 }
 
-/// What the kernel-parameter gradient reads.
-struct KernelGradInputs<'a> {
-    core: &'a SparseCore,
-    terms: &'a BatchTerms,
-    k_mm_l: MatRef<'a, f64>,
-    q_mean: &'a [f64],
-    q_l: MatRef<'a, f64>,
-    cache: &'a PointCache,
-    batch: &'a [usize],
-}
-
-fn accumulate_kernel_grad<M: crate::math::KernelMath>(
-    inputs: &KernelGradInputs<'_>,
-    out: &mut [f64],
-    n_kernel: usize,
+/// `Σ_b inv_noise · resid · ∂μ − ½ inv_noise · ∂var` for one kernel `θ`.
+#[allow(clippy::too_many_arguments)]
+fn kernel_param_term(
+    d_a: MatRef<'_, f64>,
+    a: MatRef<'_, f64>,
+    u: MatRef<'_, f64>,
+    lt: MatRef<'_, f64>,
+    d_kdiag: &[f64],
+    resid: &[f64],
+    q_mean: &[f64],
     inv_noise: f64,
-    scale: f64,
-    ks: &mut KernelScratch<f64>,
-) -> Result<(), GprError> {
-    let KernelGradInputs {
-        core,
-        terms,
-        q_mean,
-        q_l,
-        cache,
-        batch,
-        ..
-    } = *inputs;
-    let m = core.m;
-    let b = batch.len();
-    let compiled = core.kernel.compile();
-    let mut ard_cross = match &compiled {
-        crate::kernel::CompiledKernel::RbfArd(leaf) if terms.x_full.is_none() => {
-            Some(leaf.grad_cross_all_from_coords::<M, _>(terms.z.as_ref(), terms.x.as_ref())?)
+) -> f64 {
+    let m = a.nrows();
+    let mut g = 0.0;
+    if let (Some(da_cm), Some(a_cm), Some(u_cm), Some(lt_cm)) = (
+        ColMajor::new(d_a),
+        ColMajor::new(a),
+        ColMajor::new(u),
+        ColMajor::new(lt),
+    ) {
+        for (b_idx, &d_kdiag_b) in d_kdiag.iter().enumerate() {
+            let da_col = da_cm.col(b_idx);
+            let dmu = dot_f64x4(da_col, q_mean);
+            let d_anorm = 2.0 * dot_f64x4(a_cm.col(b_idx), da_col);
+            let d_lt = 2.0 * dot_f64x4(u_cm.col(b_idx), lt_cm.col(b_idx));
+            let dvar = d_kdiag_b - d_anorm + d_lt;
+            g += inv_noise * resid[b_idx] * dmu - 0.5 * inv_noise * dvar;
         }
-        _ => None,
-    };
-    for (param_idx, slot) in out.iter_mut().take(n_kernel).enumerate() {
-        let pre = ard_cross
-            .as_mut()
-            .map(|mats| std::mem::replace(&mut mats[param_idx], Mat::zeros(0, 0)));
-        let (d_a, d_kdiag) = kernel_theta_tangents::<M>(&compiled, inputs, ks, param_idx, pre)?;
-        let mut lt = Mat::zeros(m, b);
-        mat_mul_into(&mut lt, q_l.transpose(), d_a.as_ref());
-        let mut g = 0.0;
-        if let (Some(da_cm), Some(a_cm), Some(u_cm), Some(lt_cm)) = (
-            ColMajor::new(d_a.as_ref()),
-            ColMajor::new(terms.a.as_ref()),
-            ColMajor::new(cache.u.as_ref()),
-            ColMajor::new(lt.as_ref()),
-        ) {
-            for (b_idx, &d_kdiag_b) in d_kdiag.iter().enumerate() {
-                let da_col = da_cm.col(b_idx);
-                let dmu = dot_f64x4(da_col, q_mean);
-                let d_anorm = 2.0 * dot_f64x4(a_cm.col(b_idx), da_col);
-                let d_lt = 2.0 * dot_f64x4(u_cm.col(b_idx), lt_cm.col(b_idx));
-                let dvar = d_kdiag_b - d_anorm + d_lt;
-                let resid = cache.resid[b_idx];
-                g += inv_noise * resid * dmu - 0.5 * inv_noise * dvar;
-            }
-        } else {
-            for b_idx in 0..b {
-                let resid = cache.resid[b_idx];
-                let mut dmu = 0.0;
-                let mut d_anorm = 0.0;
-                let mut d_lt = 0.0;
-                for r in 0..m {
-                    let da_r = d_a[(r, b_idx)];
-                    dmu += da_r * q_mean[r];
-                    d_anorm += 2.0 * terms.a[(r, b_idx)] * da_r;
-                    d_lt += 2.0 * cache.u[(r, b_idx)] * lt[(r, b_idx)];
-                }
-                let dvar = d_kdiag[b_idx] - d_anorm + d_lt;
-                g += inv_noise * resid * dmu - 0.5 * inv_noise * dvar;
-            }
-        }
-        *slot = -scale * g;
-    }
-    Ok(())
-}
-
-/// `∂A_b/∂θ_{param_idx}` (`m × b`) and `∂k_diag/∂θ` of the batch points.
-fn kernel_theta_tangents<M: crate::math::KernelMath>(
-    compiled: &crate::kernel::CompiledKernel,
-    inputs: &KernelGradInputs<'_>,
-    ks: &mut KernelScratch<f64>,
-    param_idx: usize,
-    pre_cross: Option<Mat<f64>>,
-) -> Result<(Mat<f64>, Vec<f64>), GprError> {
-    let (core, terms, batch) = (inputs.core, inputs.terms, inputs.batch);
-    let (m, b) = (core.m, batch.len());
-    let mut d_kmm = Mat::zeros(m, m);
-    ks.grad::<M>(
-        compiled,
-        GramInputs::points(terms.z.as_ref()),
-        d_kmm.as_mut(),
-        param_idx,
-        Triangle::Full,
-    )?;
-    let mut d_kdiag = vec![0.0; b];
-    let mut d_kzx = if let Some(pre) = pre_cross {
-        compiled.grad_diag_points::<M>(terms.x.as_ref(), &mut d_kdiag, param_idx)?;
-        pre
-    } else if let Some(full) = &terms.x_full {
-        let mut gram = Mat::zeros(core.n, core.n);
-        ks.grad::<M>(
-            compiled,
-            GramInputs::points(full.as_ref()),
-            gram.as_mut(),
-            param_idx,
-            Triangle::Full,
-        )?;
-        for (b_idx, &row) in batch.iter().enumerate() {
-            d_kdiag[b_idx] = gram[(row, row)];
-        }
-        columns(gram.as_ref(), batch)
     } else {
-        let mut cross = Mat::zeros(m, b);
-        compiled.grad_cross_points::<M>(
-            terms.z.as_ref(),
-            terms.x.as_ref(),
-            cross.as_mut(),
-            param_idx,
-            ks.scratch(m, b),
-        )?;
-        compiled.grad_diag_points::<M>(terms.x.as_ref(), &mut d_kdiag, param_idx)?;
-        cross
-    };
-    let mut d_l = Mat::zeros(m, m);
-    cholesky_sensitivity(inputs.k_mm_l, d_kmm.as_ref(), d_l.as_mut(), m);
-    // Upper of `d_l` stays zero, so this is the lower-triangular product.
-    mat_sub_mul(&mut d_kzx, d_l.as_ref(), terms.a.as_ref());
-    solve_lower(inputs.k_mm_l, d_kzx.as_mut());
-    Ok((d_kzx, d_kdiag))
+        for (b_idx, &d_kdiag_b) in d_kdiag.iter().enumerate() {
+            let mut dmu = 0.0;
+            let mut d_anorm = 0.0;
+            let mut d_lt = 0.0;
+            for r in 0..m {
+                let da_r = d_a[(r, b_idx)];
+                dmu += da_r * q_mean[r];
+                d_anorm += 2.0 * a[(r, b_idx)] * da_r;
+                d_lt += 2.0 * u[(r, b_idx)] * lt[(r, b_idx)];
+            }
+            let dvar = d_kdiag_b - d_anorm + d_lt;
+            g += inv_noise * resid[b_idx] * dmu - 0.5 * inv_noise * dvar;
+        }
+    }
+    g
 }
 
 fn cholesky_sensitivity(
