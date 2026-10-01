@@ -220,36 +220,44 @@ impl RationalQuadraticKernel {
         })
     }
 
-    /// `⟨weight, ∂K/∂θ_p⟩_F` for both parameters over the lower triangle
-    /// of `dist`, in one pass: each entry's `ln` and `exp` serve both
-    /// derivatives, and no `∂K` matrix is written.
+    /// `⟨weight, ∂K/∂θ_p⟩_F` for both parameters over the lower triangle of
+    /// `dist`, in one pass, and returns `⟨weight, K⟩_F`. Each entry's `ln`
+    /// serves both derivatives, and no `∂K` matrix is written.
+    ///
+    /// `k` is this leaf's Gram at the same `θ` when the caller kept it; its
+    /// entries replace `exp(−α ln u)`.
     pub(crate) fn weighted_grads_dist<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
+        k: Option<MatRef<'_, T>>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
-    ) -> Result<(), GprError> {
+    ) -> Result<f64, GprError> {
         let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
         let alpha = T::from_f64(self.alpha());
         let one = T::from_f64(1.0);
         let two_alpha = T::from_f64(2.0) * alpha;
-        let (mut g_ell, mut g_alpha) = (0.0, 0.0);
+        let (mut g_ell, mut g_alpha, mut value) = (0.0, 0.0, 0.0);
         for col in 0..dist.ncols() {
             for row in col..dist.nrows() {
                 let r2 = scaled_r2(dist[(row, col)], ell_sq)?;
                 let u = one + r2 / two_alpha;
                 let ln_u = u.ln();
-                let k = (-alpha * ln_u).exp();
-                let dk_ell = finite_kernel((k / u) * r2)?;
-                let dk_alpha = finite_kernel(alpha * k * (-ln_u + one - one / u))?;
+                let kv = match k {
+                    Some(k) => k[(row, col)],
+                    None => (-alpha * ln_u).exp(),
+                };
+                let dk_ell = finite_kernel((kv / u) * r2)?;
+                let dk_alpha = finite_kernel(alpha * kv * (-ln_u + one - one / u))?;
                 let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
                 g_ell += w * dk_ell.to_f64();
                 g_alpha += w * dk_alpha.to_f64();
+                value += w * kv.to_f64();
             }
         }
         out[0] = g_ell;
         out[1] = g_alpha;
-        Ok(())
+        Ok(value)
     }
 
     pub(crate) fn apply_from_coords<T: KernelScalar>(
