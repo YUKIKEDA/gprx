@@ -74,7 +74,12 @@ def snelson() -> Curve:
     return Curve(x, y, grid)
 
 
-MAUNA_LOA_URL = "https://raw.githubusercontent.com/datasets/co2-ppm/main/data/co2-mm-mlo.csv"
+#: A commit, not ``main``: upstream appends a month every month, which would break
+#: the pin in ``checksums.json``.
+MAUNA_LOA_COMMIT = "c38f24fd57d35d6ca2da6156d552dd4e1c8b8e96"
+MAUNA_LOA_URL = (
+    f"https://raw.githubusercontent.com/datasets/co2-ppm/{MAUNA_LOA_COMMIT}/data/co2-mm-mlo.csv"
+)
 MAUNA_LOA_REL = "co2-ppm/co2-mm-mlo.csv"
 #: Rasmussen & Williams train on 1958-2003 and extrapolate.
 MAUNA_LOA_SPLIT_YEAR = 2004.0
