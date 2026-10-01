@@ -9,6 +9,7 @@ use super::{
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::{Triangle, visit_triangle};
 use faer::{MatMut, MatRef};
 
@@ -240,7 +241,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn hess_from_ard_cache<M: crate::math::KernelMath>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         x: MatRef<'_, T>,
         d2_k: MatMut<'_, T>,
         pair: (usize, usize),
