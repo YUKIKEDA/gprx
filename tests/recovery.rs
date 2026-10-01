@@ -64,7 +64,7 @@ fn sample_gp(x: &[f64], ell: f64, noise: f64, seed: u64) -> Vec<f64> {
     let n = x.len();
     let mut a = rbf_cov(x, ell, noise);
     cholesky_lower(&mut a, n);
-    let mut rng = small_rng(seed);
+    let mut rng = seeded_rng(seed);
     let z: Vec<f64> = (0..n).map(|_| unit_normal(&mut rng)).collect();
     let mut y = vec![0.0; n];
     for i in 0..n {
@@ -85,7 +85,7 @@ fn rbf_gpr(ell: f64, noise: f64) -> Result<Gpr, GprError> {
 }
 
 mod common;
-use common::rng::{small_rng, unit_normal};
+use common::rng::{seeded_rng, unit_normal};
 use common::{assert_close_named, rel_err};
 
 #[test]
