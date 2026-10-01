@@ -1784,3 +1784,45 @@ fn online_inducing_insert_failing_k_mm_leaves_model_unchanged() {
         .expect("the default retries");
     assert_eq!(retrying.m(), 3);
 }
+
+#[test]
+fn delete_by_reassembly_publishes_weights_of_the_remaining_points() {
+    let x = [0.0, 0.7, 1.3, 2.0, 2.6, 3.1];
+    let y = [0.2, 0.9, 0.4, -0.3, 0.1, 0.6];
+    let z = [0.5, 1.5, 2.8];
+    let sgpr = || {
+        Sgpr::new(
+            KernelSpec::from(RbfKernel::new(0.8).expect("valid")),
+            GaussianLikelihood::new(0.05).expect("valid"),
+        )
+        .with_optimizer(Fixed)
+    };
+    let mut online = sgpr()
+        .factor(&x, 6, 1, &y, &z, 3)
+        .expect("factor")
+        .into_online();
+    let removed = 2;
+    let x_next = remove_point(online.core.x_train.as_slice(), 6, 1, removed);
+    let y_next: Vec<f64> = y
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != removed)
+        .map(|(_, v)| *v)
+        .collect();
+    online
+        .delete_by_reassembly(
+            x_next.clone(),
+            y_next.clone(),
+            x_next.clone(),
+            y_next.clone(),
+        )
+        .expect("reassemble");
+    let rebuilt = sgpr()
+        .factor(&x_next, 5, 1, &y_next, &z, 3)
+        .expect("factor");
+    let xs = [0.4, 1.3, 2.9];
+    let got = online.predict(&xs, 3, 1).expect("predict");
+    let want = rebuilt.predict(&xs, 3, 1).expect("predict");
+    assert_slice_close(&got.mean, &want.mean, 1e-10);
+    assert_slice_close(&got.variance, &want.variance, 1e-10);
+}
