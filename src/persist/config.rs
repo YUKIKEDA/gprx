@@ -316,6 +316,12 @@ struct ModelTag {
 
 /// Reads only the `model` key of `config.json` and checks it is one of
 /// `expected`.
+///
+/// Every parse of `config.json` goes through `serde_json::from_slice`, whose
+/// recursion limit (128 nested arrays or objects) rejects a deeply nested
+/// `sum` / `product` / `pipeline` / `columnwise` tree as invalid JSON before
+/// any recursive decode runs. Keep that limit: do not parse `config.json`
+/// with the `unbounded_depth` feature or `disable_recursion_limit`.
 pub(super) fn parse_model(bytes: &[u8], expected: &[ModelJson]) -> Result<ModelJson, GprError> {
     let tag: ModelTag = serde_json::from_slice(bytes)
         .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;

@@ -4,7 +4,7 @@
 //! `insert-stages`. Nothing here is part of the model API.
 
 #[cfg(feature = "bench-internals")]
-use faer::{Mat, MatMut, MatRef};
+use faer::{MatMut, MatRef};
 
 /// Writes the full pairwise squared Euclidean distances of the rows of `x`
 /// with the library's parallel fill (the `kernel_rbf` bench input).
@@ -13,11 +13,19 @@ pub fn fill_pairwise_sq_euclidean(x: MatRef<'_, f64>, dist: MatMut<'_, f64>) {
     crate::kernel::fill_squared_euclidean(x, dist, &mut []);
 }
 
-/// Writes the raw `(Δx_d)²` cache (`n × (n·d)`, dimension `k` in columns
-/// `[k n, (k+1) n)`, lower triangle of each block) that ARD fits read.
+/// The raw `(Δx_d)²` cache that ARD fits read: the lower triangle of each
+/// dimension, packed by column (`d · n(n+1)/2` values).
 #[cfg(feature = "bench-internals")]
-pub fn fill_ard_squared_diff(x: MatRef<'_, f64>, cache: MatMut<'_, f64>, scratch: &mut [Mat<f64>]) {
-    crate::kernel::fill_ard_squared_diff(x, cache, scratch);
+pub struct ArdCache(crate::kernel::ArdSqDiffBuf<f64>);
+
+/// Fills the [`ArdCache`] of the rows of `x` with the library's parallel fill.
+///
+/// # Errors
+///
+/// Returns [`crate::GprError::SizeOverflow`] when the cache size overflows.
+#[cfg(feature = "bench-internals")]
+pub fn fill_ard_squared_diff(x: MatRef<'_, f64>) -> Result<ArdCache, crate::GprError> {
+    crate::kernel::ArdSqDiffBuf::new(x).map(ArdCache)
 }
 
 /// [`CompiledKernel::apply_points`](crate::kernel::CompiledKernel::apply_points)
@@ -26,18 +34,19 @@ pub fn fill_ard_squared_diff(x: MatRef<'_, f64>, cache: MatMut<'_, f64>, scratch
 ///
 /// # Errors
 ///
-/// Same as `apply_points`, or a shape error when `cache` is not `n × (n·d)`.
+/// Same as `apply_points`, or a shape error when `cache` was filled for
+/// another `n` or `d`.
 #[cfg(feature = "bench-internals")]
 pub fn apply_from_ard_cache<M: crate::KernelMath>(
     kernel: &crate::kernel::CompiledKernel,
-    cache: MatRef<'_, f64>,
+    cache: &ArdCache,
     x: MatRef<'_, f64>,
     out: MatMut<'_, f64>,
     uplo: crate::kernel::Triangle,
     scratch: MatMut<'_, f64>,
 ) -> Result<(), crate::GprError> {
     let mut nested = kernel.nested_buffers(out.nrows(), out.ncols());
-    kernel.apply_from_ard_cache::<M>(cache, x, out, uplo, scratch, &mut nested)
+    kernel.apply_from_ard_cache::<M>(cache.0.view(), x, out, uplo, scratch, &mut nested)
 }
 
 /// [`CompiledKernel::grad_points`](crate::kernel::CompiledKernel::grad_points)
@@ -49,7 +58,7 @@ pub fn apply_from_ard_cache<M: crate::KernelMath>(
 #[cfg(feature = "bench-internals")]
 pub fn grad_from_ard_cache<M: crate::KernelMath>(
     kernel: &crate::kernel::CompiledKernel,
-    cache: MatRef<'_, f64>,
+    cache: &ArdCache,
     x: MatRef<'_, f64>,
     d_k: MatMut<'_, f64>,
     param_idx: usize,
@@ -57,7 +66,15 @@ pub fn grad_from_ard_cache<M: crate::KernelMath>(
     scratch: MatMut<'_, f64>,
 ) -> Result<(), crate::GprError> {
     let mut nested = kernel.nested_buffers(d_k.nrows(), d_k.ncols());
-    kernel.grad_from_ard_cache::<M>(cache, x, d_k, param_idx, uplo, scratch, &mut nested)
+    kernel.grad_from_ard_cache::<M>(
+        cache.0.view(),
+        x,
+        d_k,
+        param_idx,
+        uplo,
+        scratch,
+        &mut nested,
+    )
 }
 
 #[cfg(feature = "insert-stages")]
