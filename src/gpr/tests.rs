@@ -1157,8 +1157,8 @@ fn never_and_always_match_rbf_ard_nlml_grad_and_predict() {
             .ard_sq_diff
             .as_ref()
             .expect("filled at fit")
-            .ncols(),
-        6
+            .shape(),
+        (3, 2)
     );
     let mut params = [0.0; 3];
     never.get_params(&mut params).expect("len 3");
@@ -1197,7 +1197,7 @@ fn rbf_ard_fit_optimizes_with_always_cache() {
     );
     let dist = gpr.store.buffers.dist.as_ref().expect("distance cache");
     let ard = dist.ard_sq_diff.as_ref().expect("filled at fit");
-    assert_eq!(ard.ncols(), 6);
+    assert_eq!(ard.shape(), (3, 2));
 }
 
 #[test]
@@ -1261,14 +1261,7 @@ fn always_reuses_poisoned_ard_cache() {
     {
         let ws = gpr.store.buffers.dist.as_mut().expect("distance cache");
         let ard = ws.ard_sq_diff.as_mut().expect("filled at fit");
-        let n = 3;
-        for dim in 0..2 {
-            for col in 0..n {
-                for row in col..n {
-                    ard[(row, dim * n + col)] = 999.0;
-                }
-            }
-        }
+        ard.poison(999.0);
     }
     let poisoned = gpr
         .value_and_gradient_into(&params, &mut grad)
@@ -1289,8 +1282,7 @@ fn always_ard_cache_retiling_follows_n() {
     {
         let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
         let ard = ws.ard_sq_diff.as_ref().expect("filled at fit");
-        assert_eq!(ard.nrows(), 3);
-        assert_eq!(ard.ncols(), 6);
+        assert_eq!(ard.shape(), (3, 2));
     }
     let gpr = gpr
         .into_trainer()
@@ -1304,8 +1296,7 @@ fn always_ard_cache_retiling_follows_n() {
         .expect("spd n=4");
     let ws = gpr.store.buffers.dist.as_ref().expect("distance cache");
     let ard = ws.ard_sq_diff.as_ref().expect("filled at fit");
-    assert_eq!(ard.nrows(), 4);
-    assert_eq!(ard.ncols(), 8);
+    assert_eq!(ard.shape(), (4, 2));
 }
 
 #[test]
@@ -3018,4 +3009,74 @@ fn fast_approx_fit_nlml_does_not_rise() {
             .neg_log_marginal_likelihood()
             .expect("end"),
     );
+}
+
+#[test]
+fn hessian_is_the_same_with_reuse_and_retain_buffers() {
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0, -1.0];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5];
+    let kernel = KernelSpec::from(RbfArdKernel::new(&[1.25, 0.8]).expect("valid"))
+        + KernelSpec::from(MaternKernel::new(0.9, MaternNu::FiveHalves).expect("valid"));
+    let hessian = |buffer| {
+        let mut gpr = Gpr::new(
+            kernel.clone(),
+            GaussianLikelihood::new(0.16).expect("valid"),
+        )
+        .with_cholesky_buffer(buffer)
+        .with_optimizer(Fixed)
+        .factor(&x, 5, 2, &y)
+        .expect("spd");
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("len");
+        let mut hess = vec![0.0; params.len() * params.len()];
+        gpr.hessian_into(&params, &mut hess).expect("spd");
+        hess
+    };
+    let retain = hessian(CholeskyBuffer::Retain);
+    let reuse = hessian(CholeskyBuffer::Reuse);
+    for (a, b) in retain.iter().zip(&reuse) {
+        assert_close(*a, *b, 1e-10);
+    }
+}
+
+#[test]
+fn joint_value_gradient_hessian_matches_separate_calls() {
+    use crate::objective::{Differentiable, TwiceDifferentiable};
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3];
+    let y = [0.4, -0.2, 0.9, 0.1];
+    for buffer in [CholeskyBuffer::Retain, CholeskyBuffer::Reuse] {
+        let mut fitted = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+            .with_cholesky_buffer(buffer)
+            .with_optimizer(Fixed)
+            .factor(&x, 4, 2, &y)
+            .expect("spd");
+        let mut params = [0.0; 3];
+        fitted.get_params(&mut params).expect("len 3");
+        params[0] += 0.2;
+        params[2] -= 0.3;
+        let mut grad = [0.0; 3];
+        let mut hess = [0.0; 9];
+        let value = fitted
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        fitted.hessian_into(&params, &mut hess).expect("spd");
+        let mut objective = fitted.objective();
+        let mut joint_grad = [0.0; 3];
+        let mut joint_hess = [0.0; 9];
+        let joint = objective
+            .value_gradient_hessian_into(&params, &mut joint_grad, &mut joint_hess)
+            .expect("spd");
+        assert_close(joint, value, TOL);
+        for (a, b) in joint_grad.iter().zip(&grad) {
+            assert_close(*a, *b, TOL);
+        }
+        for (a, b) in joint_hess.iter().zip(&hess) {
+            assert_close(*a, *b, 1e-8);
+        }
+        let mut again = [0.0; 3];
+        let value_again = objective
+            .value_and_gradient_into(&params, &mut again)
+            .expect("spd");
+        assert_close(value_again, value, TOL);
+    }
 }

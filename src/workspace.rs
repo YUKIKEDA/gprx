@@ -58,8 +58,8 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
 pub struct DistCache<S> {
     /// Pairwise squared distances for isotropic (distance-mode) leaves (`n × n`).
     pub(crate) dist: Option<Mat<S>>,
-    /// Raw `(Δx_d)²` for ARD leaves (`n × (n·d)`).
-    pub(crate) ard_sq_diff: Option<Mat<S>>,
+    /// Raw `(Δx_d)²` for ARD leaves (`d · n(n+1)/2`, lower triangles).
+    pub(crate) ard_sq_diff: Option<crate::kernel::ArdSqDiffBuf<S>>,
 }
 
 /// Fit buffers for one training size: the shared core, plus the distance
@@ -232,48 +232,38 @@ where
     }
 }
 
-/// Buffers of the exact Hessian (`hessian_into`): `Q_j = K⁻¹ ∂K/∂θ_j` and
-/// the length-`n` vectors of one parameter pair. Scratch.
+/// Buffers of the exact Hessian (`hessian_into`): the half-solved
+/// derivatives `S_i` and `v_i` of every parameter. Scratch.
 pub(crate) struct HessianScratch<S> {
-    /// `Q_j` (`n×n`).
-    pub(crate) q: Mat<S>,
-    /// `σn² K⁻¹ α`.
-    pub(crate) w_noise: Vec<S>,
-    /// `∂K/∂θ_i α`.
-    pub(crate) u_i: Vec<S>,
-    /// `∂K/∂θ_j α`.
-    pub(crate) u_j: Vec<S>,
-    /// `Q_j α`.
-    pub(crate) w_j: Vec<S>,
+    /// `S_i = L⁻¹ ∂A/∂θ_i L⁻ᵀ`, one `n×n` per parameter.
+    pub(crate) s: Vec<Mat<S>>,
+    /// `v_i = L⁻¹ ∂A/∂θ_i α` in column `i` (`n × p`).
+    pub(crate) v: Mat<S>,
+    /// `∂A/∂θ_i α` before its solve.
+    pub(crate) u: Vec<S>,
 }
 
 impl<S> Default for HessianScratch<S> {
     fn default() -> Self {
         Self {
-            q: Mat::new(),
-            w_noise: Vec::new(),
-            u_i: Vec::new(),
-            u_j: Vec::new(),
-            w_j: Vec::new(),
+            s: Vec::new(),
+            v: Mat::new(),
+            u: Vec::new(),
         }
     }
 }
 
 impl<S: KernelScalar> HessianScratch<S> {
-    /// Sizes every buffer for `n` training points. No-op when already sized.
-    pub(crate) fn ensure(&mut self, n: usize) {
-        if self.q.nrows() != n || self.q.ncols() != n {
-            self.q = Mat::zeros(n, n);
+    /// Sizes every buffer for `n` training points and `p` parameters.
+    /// No-op when already sized.
+    pub(crate) fn ensure(&mut self, n: usize, p: usize) {
+        if self.s.len() != p || self.s.first().is_some_and(|m| m.nrows() != n) {
+            self.s = (0..p).map(|_| Mat::zeros(n, n)).collect();
         }
-        let zero = S::from_f64(0.0);
-        for v in [
-            &mut self.w_noise,
-            &mut self.u_i,
-            &mut self.u_j,
-            &mut self.w_j,
-        ] {
-            v.resize(n, zero);
+        if self.v.nrows() != n || self.v.ncols() != p {
+            self.v = Mat::zeros(n, p);
         }
+        self.u.resize(n, S::from_f64(0.0));
     }
 }
 
