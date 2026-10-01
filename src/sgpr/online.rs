@@ -787,33 +787,41 @@ where
             self.core.n -= 1;
             self.recompute_w()?;
         } else {
-            let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
-                &self.core.kernel,
-                self.core.jitter,
-                self.core.likelihood,
-                &x_next,
-                self.core.n - 1,
-                self.core.d,
-                &y_next,
-                &self.core.z_train,
-                self.core.m,
-                &mut self.scratch.storage,
-                &mut self.scratch.f64,
-            ))?;
-            self.core.x_train = x_next;
-            self.core.y_train = y_next;
-            self.core.x_obs = x_obs_next;
-            self.core.y_obs = y_obs_next;
-            self.core.n -= 1;
-            self.k_mm_l = state.k_mm_l;
-            self.a = state.a;
-            self.b_l = state.b_l;
-            self.w = state.w;
-            self.k_diag_sum = state.k_diag_sum;
-            self.a_frobenius2 = state.a_frobenius2;
+            self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next)?;
         }
         self.registry.remove_at(idx);
         Ok(())
+    }
+
+    /// The [`Self::delete`] path when the downdate of `B` fails: assembles
+    /// the VFE system again from the remaining points (one fewer than now)
+    /// and publishes its predict weights with it.
+    pub(super) fn delete_by_reassembly(
+        &mut self,
+        x_next: Vec<f64>,
+        y_next: Vec<f64>,
+        x_obs_next: Vec<f64>,
+        y_obs_next: Vec<f64>,
+    ) -> Result<(), GprError> {
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
+            &self.core.kernel,
+            self.core.jitter,
+            self.core.likelihood,
+            &x_next,
+            self.core.n - 1,
+            self.core.d,
+            &y_next,
+            &self.core.z_train,
+            self.core.m,
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
+        ))?;
+        self.core.x_train = x_next;
+        self.core.y_train = y_next;
+        self.core.x_obs = x_obs_next;
+        self.core.y_obs = y_obs_next;
+        self.core.n -= 1;
+        self.apply_vfe(state)
     }
 
     /// Appends one inducing point at the current `θ` with a bordered VFE update.
