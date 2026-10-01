@@ -8,7 +8,7 @@ use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower_with_retries, frobenius2, gram_aat_plus_noise, llt_scratch, matvec_columns,
-    round_mat, solve_llt, solve_lower, symmetrize_lower,
+    round_mat, solve_llt, solve_lower,
 };
 use crate::param::Interval;
 use crate::policy::JitterPolicy;
@@ -209,21 +209,10 @@ where
         k_mm_jitter.retry_jitters(),
         CholeskyStage::Fit,
     )?;
-    // Same packed `X` and `Z` share a training White diagonal. Rectangular
-    // `apply_cross` leaves White at zero.
-    let mut a = if x == z {
-        let mut gram = Mat::zeros(n_rows, n_rows);
-        ks.gram::<M>(
-            &compiled,
-            GramInputs::points(x_mat.as_ref()),
-            gram.as_mut(),
-            Triangle::Lower,
-        )?;
-        symmetrize_lower(gram.as_mut(), n_rows);
-        gram
-    } else {
-        ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref())?
-    };
+    // `K(Z, X)` is the rectangular cross covariance whatever the values of
+    // `Z` and `X`: a White leaf adds nothing to it, so the objective does not
+    // jump when a free `Z` leaves `X` (docs/design.md §5).
+    let mut a = ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref())?;
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);

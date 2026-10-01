@@ -19,7 +19,7 @@ Phase 4 fixed inducing-point Sparse as VFE (Titsias / SGPR) in [ADR 0002](0002-s
 
 ## Rationale
 
-VFE eliminates `q(u)` in closed form. It already matches Exact at `Z = X`, and the online rank-1 update sits on that factor. SVGP is the uncollapsed form of the same ELBO, and the optimal `q` returns to VFE. Replacing VFE would throw away the P4-2…10 path. A flag for whether `q` is present adds an ignored field or a runtime error. A separate type leaves VFE as it is, and SVGP always has `q`.
+VFE eliminates `q(u)` in closed form. It already matches Exact at `Z = X` (for a kernel without a White leaf), and the online rank-1 update sits on that factor. SVGP is the uncollapsed form of the same ELBO, and the optimal `q` returns to VFE. Replacing VFE would throw away the P4-2…10 path. A flag for whether `q` is present adds an ignored field or a runtime error. A separate type leaves VFE as it is, and SVGP always has `q`.
 
 Nothing new has been added to the reason for shipping FITC since ADR 0002. Overestimating the likelihood, and leaving the default of the reference implementations, is the same mismatch.
 
