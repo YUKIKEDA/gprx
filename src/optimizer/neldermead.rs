@@ -8,7 +8,6 @@ use argmin::solver::neldermead::NelderMead as ArgminNelderMead;
 
 use crate::error::GprError;
 use crate::objective::{HasBounds, Objective};
-use crate::param::Interval;
 
 use super::logit::{
     ValueCache, ValueProblem, consider_value_run, log_theta_to_z, map_argmin_error,
@@ -98,29 +97,18 @@ impl NelderMead {
 
 impl<P: Objective + HasBounds> Optimizer<P> for NelderMead {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
-        let n = objective.num_params();
-        if init.len() != n {
-            return Err(GprError::LengthMismatch {
-                reason: format!("expected {n} parameters, got {}", init.len()),
-            });
-        }
-        let mut intervals = vec![Interval::DEFAULT_POSITIVE; n];
-        objective.fill_intervals(&mut intervals)?;
-        let mut best: Option<OptResult> = None;
-        let first_z = log_theta_to_z(init, &intervals)?;
-        consider_value_run(objective, &intervals, &first_z, &mut best, |mapped, z| {
-            run_neldermead(self, mapped, z)
-        })?;
-        if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
-            for _ in 0..restarts.n.get() {
-                let z = sample_log_uniform_z(&intervals, &mut rng)?;
-                let _ = consider_value_run(objective, &intervals, &z, &mut best, |mapped, z| {
+        super::minimize_with_restarts(
+            objective,
+            init,
+            self.restarts,
+            log_theta_to_z,
+            sample_log_uniform_z,
+            |objective, intervals, z, best| {
+                consider_value_run(objective, intervals, z, best, |mapped, z| {
                     run_neldermead(self, mapped, z)
-                });
-            }
-        }
-        best.ok_or(GprError::OptimizationNotConverged { iterations: 0 })
+                })
+            },
+        )
     }
 }
 

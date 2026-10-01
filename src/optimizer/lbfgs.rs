@@ -112,25 +112,14 @@ impl Lbfgs {
 
 impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
-        let n = objective.num_params();
-        if init.len() != n {
-            return Err(GprError::LengthMismatch {
-                reason: format!("expected {n} parameters, got {}", init.len()),
-            });
-        }
-        let mut intervals = vec![Interval::DEFAULT_POSITIVE; n];
-        objective.fill_intervals(&mut intervals)?;
-        let mut best: Option<OptResult> = None;
-        let first_z = log_theta_to_z(init, &intervals)?;
-        consider_run(self, objective, &intervals, &first_z, &mut best)?;
-        if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
-            for _ in 0..restarts.n.get() {
-                let z = sample_log_uniform_z(&intervals, &mut rng)?;
-                let _ = consider_run(self, objective, &intervals, &z, &mut best);
-            }
-        }
-        best.ok_or(GprError::OptimizationNotConverged { iterations: 0 })
+        super::minimize_with_restarts(
+            objective,
+            init,
+            self.restarts,
+            log_theta_to_z,
+            sample_log_uniform_z,
+            |objective, intervals, z, best| consider_run(self, objective, intervals, z, best),
+        )
     }
 }
 
