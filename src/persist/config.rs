@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::param::{BoundedParam, Interval};
 use crate::policy::{DistanceCachePolicy, KernelExp};
 use crate::{GaussianLikelihood, JitterPolicy};
@@ -60,19 +61,24 @@ impl ModelConfig {
     }
 
     pub(super) fn online_ids(&self) -> Result<(&[u64], u64), GprError> {
-        let ids = self
-            .point_ids
-            .as_deref()
-            .ok_or_else(|| persist_err("ldlt config missing point_ids"))?;
-        let next_id = self
-            .next_point_id
-            .ok_or_else(|| persist_err("ldlt config missing next_point_id"))?;
+        let ids = self.point_ids.as_deref().ok_or_else(|| {
+            persist_err(PersistErrorKind::Config, "ldlt config missing point_ids")
+        })?;
+        let next_id = self.next_point_id.ok_or_else(|| {
+            persist_err(
+                PersistErrorKind::Config,
+                "ldlt config missing next_point_id",
+            )
+        })?;
         if ids.len() != self.n {
-            return Err(persist_err(format!(
-                "point_ids has {} values, expected n = {}",
-                ids.len(),
-                self.n
-            )));
+            return Err(persist_err(
+                PersistErrorKind::Config,
+                format!(
+                    "point_ids has {} values, expected n = {}",
+                    ids.len(),
+                    self.n
+                ),
+            ));
         }
         Ok((ids, next_id))
     }
@@ -323,16 +329,23 @@ struct ModelTag {
 /// any recursive decode runs. Keep that limit: do not parse `config.json`
 /// with the `unbounded_depth` feature or `disable_recursion_limit`.
 pub(super) fn parse_model(bytes: &[u8], expected: &[ModelJson]) -> Result<ModelJson, GprError> {
-    let tag: ModelTag = serde_json::from_slice(bytes)
-        .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;
+    let tag: ModelTag = serde_json::from_slice(bytes).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("config.json is not valid JSON: {err}"),
+        )
+    })?;
     if expected.contains(&tag.model) {
         Ok(tag.model)
     } else {
-        Err(persist_err(format!(
-            "config.json holds a {} model; load it with {}",
-            tag.model.name(),
-            tag.model.loader()
-        )))
+        Err(persist_err(
+            PersistErrorKind::WrongModel,
+            format!(
+                "config.json holds a {} model; load it with {}",
+                tag.model.name(),
+                tag.model.loader()
+            ),
+        ))
     }
 }
 
@@ -369,8 +382,12 @@ pub(super) struct SparseConfig {
 }
 
 pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError> {
-    let config: SparseConfig = serde_json::from_slice(bytes)
-        .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;
+    let config: SparseConfig = serde_json::from_slice(bytes).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("config.json is not valid JSON: {err}"),
+        )
+    })?;
     if config.format_version != FORMAT_VERSION {
         return Err(GprError::UnsupportedPersistVersion {
             found: config.format_version,
@@ -384,8 +401,12 @@ pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError
 }
 
 pub(super) fn parse_config(bytes: &[u8]) -> Result<ModelConfig, GprError> {
-    let config: ModelConfig = serde_json::from_slice(bytes)
-        .map_err(|err| persist_err(format!("config.json is not valid JSON: {err}")))?;
+    let config: ModelConfig = serde_json::from_slice(bytes).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("config.json is not valid JSON: {err}"),
+        )
+    })?;
     config.validate_version()?;
     if config.n == 0 || config.d == 0 {
         return Err(GprError::EmptyInput);

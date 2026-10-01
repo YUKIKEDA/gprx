@@ -11,6 +11,7 @@ mod transform;
 use std::path::Path;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::gpr::{FittedGpr, OnlineGpr, Policies};
 use crate::kernel::KernelSpec;
 use crate::optimizer::Fixed;
@@ -293,8 +294,9 @@ fn write_config(dir: &Path, json: &[u8]) -> Result<(), GprError> {
     atomic::write_atomic(&dir.join(CONFIG_FILE), json)
 }
 
-pub(crate) fn persist_err(reason: impl Into<String>) -> GprError {
+pub(crate) fn persist_err(kind: PersistErrorKind, reason: impl Into<String>) -> GprError {
     GprError::PersistFailed {
+        kind,
         reason: reason.into(),
     }
 }
@@ -347,7 +349,8 @@ struct ExactSave<'a> {
 
 /// Writes the tensors, then `config.json`, of an Exact model.
 fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {dir:?}: {err}")))?;
     let (point_ids, next_point_id) = match save.point_ids {
         Some((ids, next)) => (Some(ids), Some(next)),
         None => (None, None),
@@ -373,8 +376,12 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         point_ids,
         next_point_id,
     };
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
+    let json = serde_json::to_vec_pretty(&config).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("serialize config.json: {err}"),
+        )
+    })?;
     let factor_refs = save.factor.as_ref().map(|packed| FactorBytes {
         l_dtype: packed.l_dtype,
         l: packed.l.as_slice(),
@@ -466,7 +473,7 @@ where
 {
     let (ids, next_id) = ids
         .as_ref()
-        .ok_or_else(|| persist_err("ldlt config missing point_ids"))?;
+        .ok_or_else(|| persist_err(PersistErrorKind::Config, "ldlt config missing point_ids"))?;
     online.apply_persisted_ids(ids, *next_id)
 }
 
@@ -540,7 +547,7 @@ struct Variants<P: crate::precision::GpScalar> {
 fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
-        .map_err(|err| persist_err(format!("read {config_path:?}: {err}")))?;
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
     config::parse_model(&bytes, &[config::ModelJson::Exact])?;
     let config = config::parse_config(&bytes)?;
     match (config.precision, config.residual) {
@@ -667,6 +674,7 @@ mod tests {
     use super::{
         CONFIG_FILE, FORMAT_VERSION, LoadedGpr, PersistRegistry, RESERVED_PREFIX, persist_err,
     };
+    use crate::error::PersistErrorKind;
     use crate::kernel::{KernelSpec, KernelTerm, LinearKernel, RbfKernel, Triangle};
     use crate::param::Interval;
     use crate::transform::{StandardizeInput, StandardizeTarget};
@@ -805,8 +813,8 @@ mod tests {
 
     #[test]
     fn persist_err_is_failed_variant() {
-        match persist_err("missing l") {
-            GprError::PersistFailed { reason } => assert_eq!(reason, "missing l"),
+        match persist_err(PersistErrorKind::Tensor, "missing l") {
+            GprError::PersistFailed { reason, .. } => assert_eq!(reason, "missing l"),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -890,7 +898,8 @@ mod tests {
             .expect("save");
             poison_tensor(&dir, name);
             match LoadedGpr::load(&dir, &PersistRegistry::new()) {
-                Err(GprError::PersistFailed { reason }) => {
+                Err(GprError::PersistFailed { kind, reason }) => {
+                    assert_eq!(kind, PersistErrorKind::Tensor);
                     assert!(reason.contains("non-finite"), "{name}: {reason}");
                     assert!(
                         reason.contains(&format!("tensor {name} ")),
@@ -928,7 +937,8 @@ mod tests {
         .expect("save");
         poison_tensor(&dir, "y");
         match crate::LoadedSgpr::load(&dir, &PersistRegistry::new()) {
-            Err(GprError::PersistFailed { reason }) => {
+            Err(GprError::PersistFailed { kind, reason }) => {
+                assert_eq!(kind, PersistErrorKind::Tensor);
                 assert!(reason.contains("non-finite"), "{reason}");
             }
             other => panic!("unexpected {:?}", other.err().map(|e| e.to_string())),
@@ -1064,7 +1074,8 @@ mod tests {
             broken[key] = value;
             std::fs::write(&path, serde_json::to_vec(&broken).expect("encode")).expect("write");
             match LoadedGpr::load(&dir, &PersistRegistry::new()) {
-                Err(GprError::PersistFailed { reason }) => {
+                Err(GprError::PersistFailed { kind, reason }) => {
+                    assert_eq!(kind, PersistErrorKind::Config);
                     assert!(reason.contains("recursion limit"), "{key}: {reason}");
                 }
                 other => panic!("{key}: unexpected {:?}", other.err()),
@@ -1286,7 +1297,10 @@ mod tests {
             })
             .expect_err("reserved");
         match err {
-            GprError::PersistFailed { reason } => {
+            GprError::PersistFailed {
+                kind: PersistErrorKind::InvalidPersistId,
+                reason,
+            } => {
                 assert!(reason.contains("gprx."), "{reason}");
             }
             other => panic!("unexpected {other:?}"),
@@ -1306,7 +1320,10 @@ mod tests {
         let dir = temp_dir("custom-kernel");
         fitted.save(&dir).expect("save");
         match LoadedGpr::load(&dir, &PersistRegistry::new()) {
-            Err(GprError::PersistFailed { reason }) => {
+            Err(GprError::PersistFailed {
+                kind: PersistErrorKind::UnregisteredId,
+                reason,
+            }) => {
                 assert!(reason.contains("test.persist_unit"), "{reason}");
             }
             other => panic!("unexpected {other:?}"),
@@ -1320,6 +1337,18 @@ mod tests {
         let loaded = LoadedGpr::load(&dir, &registry).expect("load");
         assert!(matches!(loaded, LoadedGpr::Double(_)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_directory_is_an_io_failure() {
+        let dir = temp_dir("missing-dir").join("does-not-exist");
+        match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+            Err(GprError::PersistFailed {
+                kind: PersistErrorKind::Io,
+                ..
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

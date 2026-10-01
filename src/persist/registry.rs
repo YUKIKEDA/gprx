@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::kernel::CustomKernel;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 
@@ -234,9 +235,10 @@ fn insert_unique<T>(
 ) -> Result<(), GprError> {
     validate_persist_id(&persist_id)?;
     if map.contains_key(&persist_id) {
-        return Err(persist_err(format!(
-            "{kind} persist_id {persist_id:?} is already registered"
-        )));
+        return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
+            format!("{kind} persist_id {persist_id:?} is already registered"),
+        ));
     }
     map.insert(persist_id, value);
     Ok(())
@@ -248,20 +250,25 @@ fn lookup<'a, T>(
     kind: &str,
 ) -> Result<&'a T, GprError> {
     map.get(persist_id).ok_or_else(|| {
-        persist_err(format!(
-            "{kind} persist_id {persist_id:?} is not registered"
-        ))
+        persist_err(
+            PersistErrorKind::UnregisteredId,
+            format!("{kind} persist_id {persist_id:?} is not registered"),
+        )
     })
 }
 
 pub(super) fn validate_persist_id(persist_id: &str) -> Result<(), GprError> {
     if persist_id.is_empty() {
-        return Err(persist_err("persist_id must not be empty"));
+        return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
+            "persist_id must not be empty",
+        ));
     }
     if persist_id.starts_with(RESERVED_PREFIX) {
-        return Err(persist_err(format!(
-            "persist_id {persist_id:?} uses the reserved {RESERVED_PREFIX} prefix"
-        )));
+        return Err(persist_err(
+            PersistErrorKind::InvalidPersistId,
+            format!("persist_id {persist_id:?} uses the reserved {RESERVED_PREFIX} prefix"),
+        ));
     }
     Ok(())
 }

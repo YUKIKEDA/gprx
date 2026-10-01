@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::GprError;
+use crate::error::{GprError, PersistErrorKind};
 
 use super::persist_err;
 
@@ -22,7 +22,8 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GprError> {
     let temp = temp_path(path)?;
     let written = write_synced(&temp, bytes).and_then(|()| {
-        std::fs::rename(&temp, path).map_err(|err| persist_err(format!("replace {path:?}: {err}")))
+        std::fs::rename(&temp, path)
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("replace {path:?}: {err}")))
     });
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -33,7 +34,7 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GprError> {
 fn temp_path(path: &Path) -> Result<PathBuf, GprError> {
     let name = path
         .file_name()
-        .ok_or_else(|| persist_err(format!("{path:?} has no file name")))?;
+        .ok_or_else(|| persist_err(PersistErrorKind::Io, format!("{path:?} has no file name")))?;
     let mut temp_name = std::ffi::OsString::from(".");
     temp_name.push(name);
     temp_name.push(format!(
@@ -49,10 +50,10 @@ fn write_synced(temp: &Path, bytes: &[u8]) -> Result<(), GprError> {
         .write(true)
         .create_new(true)
         .open(temp)
-        .map_err(|err| persist_err(format!("create {temp:?}: {err}")))?;
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {temp:?}: {err}")))?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|err| persist_err(format!("write {temp:?}: {err}")))
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}")))
 }
 
 #[cfg(test)]
