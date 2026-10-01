@@ -104,6 +104,69 @@ where
     a.and(b)
 }
 
+/// Rows `col..` of column `col` of `m` as a slice, when `m` is column-major.
+#[inline(always)]
+pub(crate) fn lower_col<T>(m: MatRef<'_, T>, col: usize) -> Option<&[T]> {
+    m.col(col).try_as_col_major().map(|c| &c.as_slice()[col..])
+}
+
+/// Rows `row..` of column `local` of the block `m` as a slice, when `m` is
+/// column-major.
+#[inline(always)]
+pub(crate) fn lower_col_mut<T>(m: MatMut<'_, T>, local: usize, row: usize) -> Option<&mut [T]> {
+    m.col_mut(local)
+        .try_as_col_major_mut()
+        .map(|c| &mut c.as_slice_mut()[row..])
+}
+
+/// Column blocks of every [`par_lower_fold`]. Fixed, not the pool size: a
+/// sum near an optimum is mostly cancellation, and its rounding steers an
+/// optimizer, so the order of the partial sums must not depend on the
+/// machine.
+pub(crate) const FOLD_BLOCKS: usize = 16;
+
+/// Folds `f(first_col, end_col)` over [`FOLD_BLOCKS`] column blocks of
+/// [`lower_block_start`] on the Rayon pool and joins the partial results
+/// left to right with `join`, so the result depends neither on scheduling
+/// nor on the pool size. Returns the first error of the left-most failing
+/// block.
+pub(crate) fn par_lower_fold<R, E, F, J>(n: usize, f: &F, join: &J) -> Result<R, E>
+where
+    R: Send,
+    E: Send,
+    F: Fn(usize, usize) -> Result<R, E> + Sync,
+    J: Fn(R, R) -> R + Sync,
+{
+    fold_lower_blocks(n, (0, FOLD_BLOCKS), FOLD_BLOCKS, f, join)
+}
+
+fn fold_lower_blocks<R, E, F, J>(
+    n: usize,
+    (lo, hi): (usize, usize),
+    n_blocks: usize,
+    f: &F,
+    join: &J,
+) -> Result<R, E>
+where
+    R: Send,
+    E: Send,
+    F: Fn(usize, usize) -> Result<R, E> + Sync,
+    J: Fn(R, R) -> R + Sync,
+{
+    if hi - lo <= 1 {
+        return f(
+            lower_block_start(n, lo, n_blocks),
+            lower_block_start(n, hi, n_blocks),
+        );
+    }
+    let mid = lo + (hi - lo) / 2;
+    let (a, b) = rayon::join(
+        || fold_lower_blocks(n, (lo, mid), n_blocks, f, join),
+        || fold_lower_blocks(n, (mid, hi), n_blocks, f, join),
+    );
+    Ok(join(a?, b?))
+}
+
 fn partition_count(thread_scratch: &[Mat<f64>]) -> usize {
     if thread_scratch.is_empty() {
         worker_count()
