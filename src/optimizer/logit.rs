@@ -172,10 +172,24 @@ fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Re
         });
     }
     for i in 0..z.len() {
-        let x = z_to_user(z[i], intervals[i]);
-        out[i] = if intervals[i].lo() > 0.0 { x.ln() } else { x };
+        out[i] = z_to_param(z[i], intervals[i]);
     }
     Ok(())
+}
+
+/// The model parameter of `z`: `log θ` on a positive interval, `θ` otherwise.
+///
+/// A positive interval is log-uniform, so `log θ = log lo + u · log(hi / lo)`
+/// is formed directly rather than as `ln(exp(…))`.
+fn z_to_param(z: f64, interval: Interval) -> f64 {
+    let u = sigmoid(z / logit_scale(interval));
+    if interval.lo() > 0.0 {
+        let ln_lo = interval.lo().ln();
+        let ln_hi = interval.hi().ln();
+        ln_lo + u * (ln_hi - ln_lo)
+    } else {
+        interval.lo() + u * interval.width()
+    }
 }
 
 pub(crate) fn chain_logit_grad(
@@ -248,6 +262,7 @@ fn user_to_z(x: f64, interval: Interval) -> Result<f64, GprError> {
     Ok(logit(u.clamp(f64::EPSILON, 1.0 - f64::EPSILON)) * logit_scale(interval))
 }
 
+#[cfg(test)]
 fn z_to_user(z: f64, interval: Interval) -> f64 {
     let t = z / logit_scale(interval);
     let u = sigmoid(t);
@@ -678,5 +693,28 @@ mod tests {
         assert_close(back, x, TOL);
         assert!(interval.contains(back));
         assert_close(sigmoid(logit(0.25)), 0.25, TOL);
+    }
+
+    #[test]
+    fn z_to_param_is_the_log_of_the_user_value() {
+        for interval in [
+            Interval::new(1e-5, 1e5).expect("positive"),
+            Interval::new(0.3, 7.0).expect("positive"),
+            Interval::new(-2.0, 3.0).expect("signed"),
+        ] {
+            for z in [-40.0, -3.0, -0.25, 0.0, 0.5, 2.0, 40.0] {
+                let user = z_to_user(z, interval);
+                let want = if interval.lo() > 0.0 { user.ln() } else { user };
+                let got = super::z_to_param(z, interval);
+                assert!(
+                    (got - want).abs() <= 4.0 * f64::EPSILON * want.abs().max(1.0),
+                    "{interval:?} z={z}: {got} vs {want}"
+                );
+                if z.abs() <= 2.0 {
+                    let theta = if interval.lo() > 0.0 { got.exp() } else { got };
+                    assert!(interval.contains(theta), "{interval:?} z={z}: {theta}");
+                }
+            }
+        }
     }
 }
