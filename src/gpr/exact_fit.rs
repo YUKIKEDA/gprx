@@ -421,6 +421,28 @@ impl<P: GpScalar> ExactFit<'_, P> {
         self.fill_hessian_from_factor(n_kernel, n, out)
     }
 
+    /// Joint value, gradient, and Hessian during `fit` from one
+    /// factorization of `A`.
+    ///
+    /// The gradient forms `W` from that factor. A dedicated `W` keeps `L`, so
+    /// the Hessian reads the same factor; [`crate::CholeskyBuffer::Reuse`]
+    /// wrote `W` over `L`, so `L` is rebuilt at the same `θ` first.
+    pub(crate) fn value_gradient_hessian_into_fit(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
+        let n_params = self.num_params();
+        crate::data::require_count(hess.len(), n_params * n_params, "parameters")?;
+        let nlml = self.value_and_gradient_into_fit(params, grad)?;
+        self.restore_cholesky_if_overwritten()?;
+        let n_kernel = self.core.kernel.num_params();
+        let n = self.core.n;
+        self.fill_hessian_from_factor(n_kernel, n, hess)?;
+        Ok(nlml)
+    }
+
     fn fill_hessian_from_factor(
         &mut self,
         n_kernel: usize,
