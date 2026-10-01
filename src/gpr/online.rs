@@ -426,7 +426,9 @@ where
     ///
     /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
-    /// [`GprError::EmptyInput`] if the workspace cannot accept a row, or
+    /// [`GprError::EmptyInput`] if the workspace cannot accept a row,
+    /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
+    /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::CholeskyFailed`] if the new pivot `δ` is not positive.
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
@@ -441,6 +443,7 @@ where
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
+        self.registry.require_room()?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;

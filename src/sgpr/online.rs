@@ -655,7 +655,9 @@ where
     /// # Errors
     ///
     /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
-    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`, or
+    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
+    /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
+    /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::EmptyInput`] if `d` is zero.
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
@@ -670,6 +672,7 @@ where
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
+        self.registry.require_room()?;
         let mut mapped = std::mem::take(&mut self.scratch.point);
         let result = self.insert_mapped(x_new, y_new, &mut mapped);
         self.scratch.point = mapped;
@@ -873,6 +876,7 @@ where
         if z_new.iter().any(|v| !v.is_finite()) {
             return Err(GprError::NonFiniteInput);
         }
+        self.inducing.require_room()?;
         let z_obs = z_new;
         let mut z_new = Vec::with_capacity(z_obs.len());
         self.core.map_point(z_obs, &mut z_new)?;

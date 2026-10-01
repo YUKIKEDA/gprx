@@ -784,6 +784,42 @@ mod tests {
     }
 
     #[test]
+    fn loaded_online_model_refuses_to_reuse_its_last_point_id() {
+        let dir = temp_dir("ids-exhausted");
+        Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.5, -1.0])
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online()
+        .expect("online")
+        .save_with_factor(&dir)
+        .expect("save");
+        let path = dir.join(CONFIG_FILE);
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        config["next_point_id"] = serde_json::json!(u64::MAX - 1);
+        std::fs::write(&path, serde_json::to_vec(&config).expect("encode")).expect("write");
+        let LoadedGpr::OnlineDouble(mut online) =
+            LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load")
+        else {
+            panic!("an online f64 model");
+        };
+        let id = online.insert(&[2.0], 0.25).expect("one id left");
+        assert_eq!(online.n(), 3);
+        let err = online.insert(&[3.0], 0.5).expect_err("ids exhausted");
+        assert!(matches!(err, GprError::IndexOutOfRange { .. }), "{err:?}");
+        assert_eq!(online.n(), 3);
+        assert_eq!(online.point_ids().last().copied(), Some(id));
+        online.delete(id).expect("the id still names one point");
+        assert_eq!(online.n(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn mapped_factor_survives_failed_set_params() {
         let fitted = Gpr::new(
             KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
