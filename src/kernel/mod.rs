@@ -42,8 +42,9 @@ pub use compiled::CompiledKernel;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
 pub use constant::ConstantKernel;
+pub(crate) use dist::ArdSqDiffBuf;
 #[cfg(any(test, feature = "bench-internals"))]
-pub(crate) use dist::{fill_ard_squared_diff, fill_squared_euclidean};
+pub(crate) use dist::fill_squared_euclidean;
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};

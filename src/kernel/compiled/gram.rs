@@ -1,5 +1,6 @@
 //! Fit / predict entry points of [`CompiledKernel`](super::CompiledKernel).
 
+use crate::kernel::dist::ArdSqDiff;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
@@ -16,7 +17,7 @@ use super::{CompiledKernel, CoordMode, MixedKernelViews, ensure_nested};
 pub(crate) struct GramInputs<'a, T> {
     pub(crate) x: MatRef<'a, T>,
     pub(crate) dist: Option<MatRef<'a, T>>,
-    pub(crate) ard: Option<MatRef<'a, T>>,
+    pub(crate) ard: Option<ArdSqDiff<'a, T>>,
 }
 
 impl<'a, T> GramInputs<'a, T> {
@@ -214,9 +215,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 
     /// The ARD cache when this scalar reads it and the tree has ARD leaves.
-    fn ard_view<'a>(&self, ard: Option<MatRef<'a, T>>) -> Option<MatRef<'a, T>> {
+    fn ard_view<'a>(&self, ard: Option<ArdSqDiff<'a, T>>) -> Option<ArdSqDiff<'a, T>> {
         if T::READS_ARD_CACHE && self.needs_ard_sq_diff() {
-            ard.filter(|cache| cache.ncols() > 0)
+            ard.filter(|cache| cache.n() > 0 && cache.d() > 0)
         } else {
             None
         }
