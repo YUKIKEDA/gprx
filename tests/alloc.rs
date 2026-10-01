@@ -705,11 +705,9 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
 }
 
 /// Allocations one more Adam epoch adds to `Svgp::fit` (64 points, batches
-/// of 8: eight steps per epoch), by kernel. RBF-ARD's own kernel routines
-/// still build small working vectors per call (#167 removes them). Do not
-/// raise without an Issue.
+/// of 8: eight steps per epoch), by kernel. Do not raise without an Issue.
 const MAX_SVGP_ADAM_EPOCH_ALLOCS: [(&str, usize); 3] =
-    [("rbf", 0), ("rbf_ard", 80), ("constant_times_rbf", 0)];
+    [("rbf", 0), ("rbf_ard", 0), ("constant_times_rbf", 0)];
 
 #[test]
 fn svgp_adam_epoch_allocs() {
