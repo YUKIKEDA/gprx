@@ -6,6 +6,7 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::{Mat, MatMut, MatRef};
 
@@ -14,7 +15,10 @@ mod coord;
 mod grad;
 pub(crate) mod gram;
 mod hess;
+mod weighted;
 
+#[cfg(test)]
+mod leaf_table;
 #[cfg(test)]
 mod tests;
 
@@ -36,7 +40,7 @@ pub(crate) enum CoordMode {
 pub(crate) struct MixedKernelViews<'a, T = f64> {
     pub(crate) dist: MatRef<'a, T>,
     pub(crate) x: MatRef<'a, T>,
-    pub(crate) ard_cache: Option<MatRef<'a, T>>,
+    pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
 }
 
 impl<'a, T> MixedKernelViews<'a, T> {
@@ -71,6 +75,7 @@ impl<'a, T> MixedKernelViews<'a, T> {
 /// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum CompiledKernel<T: KernelScalar = f64> {
     /// Isotropic RBF.
     Rbf(RbfKernel),
@@ -272,10 +277,21 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Whether `∂K/∂θ` reads an output-shaped `scratch`: a product, or a
     /// custom leaf that may hold its distances there.
     pub(crate) fn needs_grad_scratch(&self) -> bool {
+        // Every leaf is listed, so a new leaf is a compile error here until
+        // its answer is chosen (docs/architecture.md, adding a leaf).
         match self {
             Self::Product(_) | Self::Custom(_) => true,
             Self::Sum(terms) => terms.iter().any(Self::needs_grad_scratch),
-            _ => false,
+            Self::Rbf(_)
+            | Self::RbfArd(_)
+            | Self::Matern(_)
+            | Self::MaternArd(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::RationalQuadraticArd(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_) => false,
         }
     }
 
@@ -377,10 +393,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 
     pub(crate) fn needs_ard_sq_diff(&self) -> bool {
+        // Every leaf is listed (see `needs_grad_scratch`).
         match self {
             Self::RbfArd(_) | Self::MaternArd(_) | Self::RationalQuadraticArd(_) => true,
             Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::needs_ard_sq_diff),
-            _ => false,
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_)
+            | Self::Custom(_) => false,
         }
     }
 
@@ -591,6 +615,16 @@ pub(crate) type Nested<T> = [Mat<T>];
 
 /// Grows `levels` to `depth` buffers of at least `rows × cols`. Allocates
 /// only when a level is missing or too small.
+/// [`ensure_nested`] at the depth `compiled` needs.
+pub(crate) fn ensure_nested_levels<T: KernelScalar>(
+    levels: &mut Vec<Mat<T>>,
+    compiled: &CompiledKernel<T>,
+    rows: usize,
+    cols: usize,
+) {
+    ensure_nested(levels, compiled.nested_depth(), rows, cols);
+}
+
 pub(crate) fn ensure_nested<T: KernelScalar>(
     levels: &mut Vec<Mat<T>>,
     depth: usize,

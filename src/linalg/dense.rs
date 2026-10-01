@@ -54,27 +54,6 @@ pub(crate) fn gemv_sym_lower<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut
     }
 }
 
-pub(crate) fn gemv_full<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
-    let zero = T::from_f64(0.0);
-    for i in 0..n {
-        let mut s = zero;
-        for j in 0..n {
-            s += a[(i, j)] * x[j];
-        }
-        y[i] = s;
-    }
-}
-
-pub(crate) fn trace_product<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>, n: usize) -> T {
-    let mut tr = T::from_f64(0.0);
-    for col in 0..n {
-        for row in 0..n {
-            tr += a[(row, col)] * b[(col, row)];
-        }
-    }
-    tr
-}
-
 pub(crate) fn matvec_columns<T: KernelScalar>(a: MatRef<'_, T>, y: &[T], ay: MatMut<'_, T>) {
     T::matvec_columns(a, y, ay);
 }
@@ -123,14 +102,6 @@ pub(crate) fn mat_add_mul<T: KernelScalar>(
     right: MatRef<'_, T>,
 ) {
     gemm(dest.as_mut(), Accum::Add, left, right, T::from_f64(1.0));
-}
-
-pub(crate) fn mat_mul_into<T: KernelScalar>(
-    dest: &mut Mat<T>,
-    left: MatRef<'_, T>,
-    right: MatRef<'_, T>,
-) {
-    gemm(dest.as_mut(), Accum::Replace, left, right, T::from_f64(1.0));
 }
 
 pub(crate) fn gemm<T: KernelScalar>(

@@ -668,10 +668,10 @@ fn mini_batch_value_and_gradient_match_the_batch_formula_and_fd() {
     check_batch(kernel_rbf(), &x_1d, 6, 1, &z_1d, &[0, 1, 2, 3, 4, 5]);
 }
 
-/// `X == Z` (the Gram of `X` carries the White diagonal): a batch reads the
-/// columns of that Gram.
+/// `Z = X` with a White leaf uses the same rectangular `K(Z, X)` as any
+/// other inducing set: White stays on `k(x, x)`, not on the cross covariance.
 #[test]
-fn mini_batch_gradient_with_z_equal_to_x_keeps_the_white_diagonal() {
+fn mini_batch_gradient_with_z_equal_to_x_matches_the_rectangular_cross() {
     let x: Vec<f64> = (0..4).map(|i| 0.5 * i as f64).collect();
     check_batch(kernel_rbf_white(), &x, 4, 1, &x, &[3, 0]);
 }
@@ -733,6 +733,61 @@ fn mini_batch_fit_rebuilds_a_and_k_diag_at_the_end() {
         assert_close(fitted.k_diag[col], fresh.k_diag[col], TOL);
         for row in 0..2 {
             assert_close(fitted.a[(row, col)], fresh.a[(row, col)], TOL);
+        }
+    }
+}
+
+/// The Adam step's in-place update reaches the same model as the light update
+/// on fresh buffers, through several steps on the same buffers, and leaves
+/// the model unchanged when a step is rejected.
+#[test]
+fn adam_step_update_matches_light_update() {
+    let kernel = KernelSpec::from(RbfKernel::new(0.9).expect("ell"))
+        * KernelSpec::from(crate::kernel::ConstantKernel::new(1.3).expect("c"));
+    let x = [0.0, 0.4, 0.9, 1.5, 2.2, 2.8];
+    let z = [0.2, 1.4, 2.6];
+    let (mut light, params) = shifted_model(kernel, &x, 6, 1, &z);
+    let mut stepped = light.clone();
+    let mut step = super::factor::AdamStep::new(&stepped);
+    let mut moved = params.clone();
+    for k in 0..3 {
+        moved[0] += 0.1 * (k as f64 + 1.0);
+        moved[2] -= 0.05;
+        light.set_params_light(&moved).expect("light");
+        crate::policy::with_kernel_exp!(
+            stepped.core.math,
+            M => stepped.set_params_step::<M>(&moved, &mut step)
+        )
+        .expect("step");
+        assert_eq!(light.q_mean, stepped.q_mean);
+        assert_eq!(light.q_l, stepped.q_l);
+        assert_eq!(light.core.kernel, stepped.core.kernel);
+        assert_lower_eq(light.k_mm_l.as_ref(), stepped.k_mm_l.as_ref());
+        assert_eq!(step.compiled, stepped.core.kernel.compile());
+    }
+    let before = stepped.clone();
+    let mut bad = moved.clone();
+    let n_theta = stepped.core.theta_len();
+    bad[0] += 0.2;
+    bad[n_theta + 3] = -1.0; // a non-positive diagonal of `L`
+    let err = crate::policy::with_kernel_exp!(
+        stepped.core.math,
+        M => stepped.set_params_step::<M>(&bad, &mut step)
+    );
+    assert!(err.is_err());
+    assert_eq!(before.core.kernel, stepped.core.kernel);
+    assert_lower_eq(before.k_mm_l.as_ref(), stepped.k_mm_l.as_ref());
+    assert_eq!(before.q_l, stepped.q_l);
+    assert_eq!(step.compiled, stepped.core.kernel.compile());
+}
+
+/// The lower triangles agree bit for bit (a factor's upper triangle is not
+/// read).
+fn assert_lower_eq(a: MatRef<'_, f64>, b: MatRef<'_, f64>) {
+    assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()));
+    for j in 0..a.ncols() {
+        for i in j..a.nrows() {
+            assert_eq!(a[(i, j)], b[(i, j)], "({i}, {j})");
         }
     }
 }

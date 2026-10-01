@@ -220,6 +220,38 @@ impl RationalQuadraticKernel {
         })
     }
 
+    /// `⟨weight, ∂K/∂θ_p⟩_F` for both parameters over the lower triangle
+    /// of `dist`, in one pass: each entry's `ln` and `exp` serve both
+    /// derivatives, and no `∂K` matrix is written.
+    pub(crate) fn weighted_grads_dist<T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
+        let alpha = T::from_f64(self.alpha());
+        let one = T::from_f64(1.0);
+        let two_alpha = T::from_f64(2.0) * alpha;
+        let (mut g_ell, mut g_alpha) = (0.0, 0.0);
+        for col in 0..dist.ncols() {
+            for row in col..dist.nrows() {
+                let r2 = scaled_r2(dist[(row, col)], ell_sq)?;
+                let u = one + r2 / two_alpha;
+                let ln_u = u.ln();
+                let k = (-alpha * ln_u).exp();
+                let dk_ell = finite_kernel((k / u) * r2)?;
+                let dk_alpha = finite_kernel(alpha * k * (-ln_u + one - one / u))?;
+                let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
+                g_ell += w * dk_ell.to_f64();
+                g_alpha += w * dk_alpha.to_f64();
+            }
+        }
+        out[0] = g_ell;
+        out[1] = g_alpha;
+        Ok(())
+    }
+
     pub(crate) fn apply_from_coords<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,

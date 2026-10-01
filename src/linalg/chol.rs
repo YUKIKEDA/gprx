@@ -315,6 +315,17 @@ pub(crate) fn solve_llt_f64_accum(l: MatRef<'_, f32>, mut rhs: MatMut<'_, f32>) 
     }
 }
 
+/// Solves `Lᵀ X = B` in place for lower `L`.
+pub(crate) fn solve_lower_transpose<T: KernelScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>) {
+    let n = l.nrows();
+    let n_rhs = rhs.ncols();
+    faer::linalg::triangular_solve::solve_upper_triangular_in_place(
+        l.transpose(),
+        rhs,
+        faer_par_dims(n, n_rhs),
+    );
+}
+
 pub(crate) fn solve_lower<T: KernelScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>) {
     let n = l.nrows();
     let n_rhs = rhs.ncols();
