@@ -20,6 +20,7 @@
 use super::gram::GramInputs;
 use super::{CompiledKernel, add_triangle};
 use crate::error::GprError;
+use crate::kernel::dist::{par_lower_blocks, par_lower_fold, worker_count};
 use crate::kernel::{KernelScalar, Triangle};
 use faer::{Mat, MatMut, MatRef};
 
@@ -392,7 +393,6 @@ impl<T: KernelScalar> CompiledKernel<T> {
         bufs: &mut [Mat<T>],
         node: Node<'_, T>,
     ) -> Result<f64, GprError> {
-        let n = weight.nrows();
         let scale = Self::constant_scale(terms);
         let has_constant = terms.iter().any(|t| matches!(t, Self::Constant(_)));
         let need_value = node.value || has_constant;
@@ -456,7 +456,6 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     Some(kept) => kept,
                     None => evaluated,
                 };
-                let scale_t = T::from_f64(scale);
                 let mut offset = 0;
                 let mut c = 0;
                 let mut value = 0.0;
@@ -466,17 +465,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                         offset += count;
                         continue;
                     }
-                    for col in 0..n {
-                        for row in col..n {
-                            let mut v = weight[(row, col)] * scale_t;
-                            for (s, gram) in grams.iter().enumerate() {
-                                if s != c {
-                                    v *= gram[(row, col)];
-                                }
-                            }
-                            handed[(row, col)] = v;
-                        }
-                    }
+                    write_handed(handed.as_mut(), weight, scale, grams, c);
                     // A leaf finds `⟨handed, K_c⟩ = ⟨V, K_product⟩` in its own
                     // pass; a nested sum or product reads it from its Gram.
                     let leaf = !matches!(t, Self::Sum(_) | Self::Product(_));
@@ -591,58 +580,114 @@ struct Node<'g, T> {
     value: bool,
 }
 
-/// `out = scale · ∏ grams` (or `out += …` when `accumulate`) on the lower triangle.
+/// `out = scale · ∏ grams` (or `out += …` when `accumulate`) on the lower
+/// triangle, on the Rayon pool.
 fn write_scaled_product<T: KernelScalar>(
-    mut out: MatMut<'_, T>,
+    out: MatMut<'_, T>,
     scale: f64,
     grams: &[Mat<T>],
     accumulate: bool,
 ) {
     let n = out.nrows();
     let scale = T::from_f64(scale);
-    for col in 0..n {
-        for row in col..n {
-            let mut v = scale;
-            for gram in grams {
-                v *= gram[(row, col)];
+    let _ = par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            for row in col..n {
+                let mut v = scale;
+                for gram in grams {
+                    v *= gram[(row, col)];
+                }
+                part[(row, local)] = if accumulate {
+                    part[(row, local)] + v
+                } else {
+                    v
+                };
             }
-            out[(row, col)] = if accumulate { out[(row, col)] + v } else { v };
         }
-    }
+        Ok::<(), ()>(())
+    });
 }
 
-fn copy_lower<T: KernelScalar>(mut out: MatMut<'_, T>, src: MatRef<'_, T>, n: usize) {
-    for col in 0..n {
-        for row in col..n {
-            out[(row, col)] = src[(row, col)];
+/// The weight handed to factor `c` of a product: `scale · weight ∘ ∏_{s≠c} grams[s]`
+/// on the lower triangle, on the Rayon pool.
+fn write_handed<T: KernelScalar>(
+    out: MatMut<'_, T>,
+    weight: MatRef<'_, T>,
+    scale: f64,
+    grams: &[Mat<T>],
+    c: usize,
+) {
+    let n = out.nrows();
+    let scale = T::from_f64(scale);
+    let _ = par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            for row in col..n {
+                let mut v = weight[(row, col)] * scale;
+                for (s, gram) in grams.iter().enumerate() {
+                    if s != c {
+                        v *= gram[(row, col)];
+                    }
+                }
+                part[(row, local)] = v;
+            }
         }
-    }
+        Ok::<(), ()>(())
+    });
 }
 
-/// `⟨a, b⟩_F` of two symmetric matrices from their lower triangles, in `f64`.
+fn copy_lower<T: KernelScalar>(out: MatMut<'_, T>, src: MatRef<'_, T>, n: usize) {
+    let _ = par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            for row in col..n {
+                part[(row, local)] = src[(row, col)];
+            }
+        }
+        Ok::<(), ()>(())
+    });
+}
+
+/// `⟨a, b⟩_F` of two symmetric matrices from their lower triangles, in
+/// `f64`, on the Rayon pool (blocks joined in order).
 fn lower_dot<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> f64 {
-    let n = a.nrows();
-    let mut sum = 0.0;
-    for col in 0..n {
-        sum += a[(col, col)].to_f64() * b[(col, col)].to_f64();
-        for row in col + 1..n {
-            sum += 2.0 * a[(row, col)].to_f64() * b[(row, col)].to_f64();
+    lower_fold(a.nrows(), |col, rows| {
+        let mut off = 0.0;
+        for row in rows {
+            off += a[(row, col)].to_f64() * b[(row, col)].to_f64();
         }
-    }
-    sum
+        a[(col, col)].to_f64() * b[(col, col)].to_f64() + 2.0 * off
+    })
 }
 
-/// `Σ_ij a_ij` of a symmetric matrix from its lower triangle, in `f64`.
+/// `Σ_ij a_ij` of a symmetric matrix from its lower triangle, in `f64`,
+/// on the Rayon pool (blocks joined in order).
 fn lower_sum<T: KernelScalar>(a: MatRef<'_, T>) -> f64 {
-    let n = a.nrows();
-    let mut sum = 0.0;
-    for col in 0..n {
-        sum += a[(col, col)].to_f64();
-        for row in col + 1..n {
-            sum += 2.0 * a[(row, col)].to_f64();
+    lower_fold(a.nrows(), |col, rows| {
+        let mut off = 0.0;
+        for row in rows {
+            off += a[(row, col)].to_f64();
         }
-    }
-    sum
+        a[(col, col)].to_f64() + 2.0 * off
+    })
+}
+
+/// Sums `column(col, col + 1..n)` (one column of the lower triangle, its
+/// strict part as the row range) over every column.
+fn lower_fold(n: usize, column: impl Fn(usize, std::ops::Range<usize>) -> f64 + Sync) -> f64 {
+    par_lower_fold(
+        n,
+        &|start, end| {
+            let mut sum = 0.0;
+            for col in start..end {
+                sum += column(col, col + 1..n);
+            }
+            Ok::<f64, ()>(sum)
+        },
+        &|a, b| a + b,
+    )
+    .unwrap_or(0.0)
 }
 
 fn too_few_buffers() -> GprError {
