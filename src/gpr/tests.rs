@@ -3011,6 +3011,38 @@ fn fast_approx_fit_nlml_does_not_rise() {
     );
 }
 
+/// `Constant × RBF × Periodic + RBF-ARD`, the shape of the Mauna Loa kernel:
+/// a three-factor product whose gradient the tree walk forms from each
+/// factor's Gram once.
+fn three_factor_product_kernel() -> KernelSpec {
+    KernelSpec::from(ConstantKernel::new(1.3).expect("valid"))
+        * KernelSpec::from(RbfKernel::new(1.7).expect("valid"))
+        * KernelSpec::from(PeriodicKernel::new(0.9, 1.4).expect("valid"))
+        + KernelSpec::from(RbfArdKernel::new(&[0.6, 2.2]).expect("valid"))
+}
+
+#[test]
+fn three_factor_product_gradient_matches_finite_difference() {
+    let x = [
+        0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0, -1.0, 0.5, 0.25,
+    ];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5, 0.3];
+    for buffer in [CholeskyBuffer::Retain, CholeskyBuffer::Reuse] {
+        for cache in [DistanceCachePolicy::Cached, DistanceCachePolicy::Uncached] {
+            let mut gpr = Gpr::new(
+                three_factor_product_kernel(),
+                GaussianLikelihood::new(0.16).expect("valid"),
+            )
+            .with_cholesky_buffer(buffer)
+            .with_distance_cache_policy(cache)
+            .with_optimizer(Fixed)
+            .factor(&x, 6, 2, &y)
+            .expect("spd");
+            assert_mll_grad_matches_finite_difference(&mut gpr);
+        }
+    }
+}
+
 #[test]
 fn hessian_is_the_same_with_reuse_and_retain_buffers() {
     let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0, -1.0];
