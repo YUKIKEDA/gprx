@@ -720,7 +720,9 @@ where
     /// # Errors
     ///
     /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
-    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`, or
+    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
+    /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
+    /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::EmptyInput`] if `d` is zero.
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
@@ -735,6 +737,7 @@ where
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
+        self.registry.require_room()?;
         let mut mapped = std::mem::take(&mut self.scratch.point);
         let result = self.atomically(|model| model.insert_mapped(x_new, y_new, &mut mapped));
         self.scratch.point = mapped;
@@ -909,7 +912,9 @@ where
     ///
     /// Returns [`GprError::DimensionMismatch`] if `z_new` is the wrong length,
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
-    /// [`GprError::EmptyInput`] if `d` is zero, or
+    /// [`GprError::EmptyInput`] if `d` is zero,
+    /// [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left (only a
+    /// loaded `next_inducing_id` near `u64::MAX` reaches this), or
     /// [`GprError::CholeskyFailed`] if the full reassemble of the enlarged
     /// inducing set fails.
     ///
@@ -953,6 +958,7 @@ where
         if z_new.iter().any(|v| !v.is_finite()) {
             return Err(GprError::NonFiniteInput);
         }
+        self.inducing.require_room()?;
         self.atomically(|model| model.insert_inducing_checked(z_new))
     }
 
