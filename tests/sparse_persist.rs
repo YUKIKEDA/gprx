@@ -14,7 +14,8 @@ use gprx::persist::{LoadedGpr, LoadedSgpr, LoadedSvgp, PersistRegistry};
 use gprx::transform::{MinMaxInput, StandardizeInput, StandardizeTarget};
 use gprx::{
     Adam, Fixed, FreeInducing, GaussianLikelihood, Gpr, GprError, JitterPolicy, KernelExp,
-    MixedPrecision, PromoteStorage, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
+    MixedPrecision, PersistErrorKind, PromoteStorage, ReevaluateKernel, Sgpr, SinglePrecision,
+    Svgp,
 };
 
 mod common;
@@ -311,7 +312,10 @@ fn each_loader_rejects_the_other_models() {
         .expect("save");
     let registry = PersistRegistry::new();
     let names_loader = |result: Result<(), GprError>, loader: &str| match result {
-        Err(GprError::PersistFailed { reason }) => {
+        Err(GprError::PersistFailed {
+            kind: PersistErrorKind::WrongModel,
+            reason,
+        }) => {
             assert!(reason.contains(loader), "{reason}");
         }
         other => panic!("expected PersistFailed naming {loader}, got {other:?}"),

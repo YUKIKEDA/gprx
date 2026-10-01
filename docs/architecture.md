@@ -57,7 +57,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `error` | The one error type and the Cholesky stage tag | Public: `GprError`, `CholeskyStage` | `param` |
 | `param` | A positive parameter with an interval; the flat `θ` write helper | Public: `Interval`, `BoundedParam`, `IntervalError` | `data`, `error`, `kernel`, `likelihood` |
 | `data` | Boundary checks (shape, finite, counts) and column-major packing for caller data | Crate | `error`, `kernel` |
-| `rng` | A small seeded generator for sampling and annealing | Crate: `SmallRng` | none |
+| `rng` | A small seeded generator for sampling and annealing | Crate: `SeededRng` (Xoshiro256++) | none |
 | `math` | Kernel `exp` implementations (accurate or fast approximate), selected by the `KernelExp` policy | Public: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
 | `linalg` | Cholesky, LDLT, triangular solves, dense helpers, faer worker caps. Models do not define these | Crate | `error`, `kernel` |
 | `policy` | Runtime policies: distance cache, Cholesky buffer, kernel `exp`, jitter | Public: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |
@@ -73,7 +73,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `precision` | Storage and predict scalars as one policy; mixed-precision refinement | Public: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
 | `workspace` | Reusable buffers: Gram, `W`, distance cache, `exp` buffer, faer scratch; the per-query buffers | Crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
 | `prediction` | What a predict call returns, and drawing posterior samples from a covariance | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
-| `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective`. Crate: `HasBounds` | `error`, `param` |
+| `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective` | `error`, `param` |
 | `optimizer` | Solvers over those traits: argmin adapters, the homemade annealing, and the `Fixed` marker; Adam for SVGP (not an `Optimizer`) | Public: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
 ### Models
@@ -196,10 +196,21 @@ Inside one call, the order is fixed: input map → target map → kernel and lik
 
 | To change… | Look in | Also touch |
 | --- | --- | --- |
-| A kernel leaf | `kernel/<leaf>.rs` and `kernel/compiled/` | `kernel/spec.rs`, `persist/kernel.rs` (a new JSON tag), design §5 |
+| A kernel leaf | `kernel/<leaf>.rs` and `kernel/compiled/` | `kernel/spec.rs`, `persist/kernel.rs` (a new JSON tag), design §5; the checklist below |
 | The optimizer for all models | `optimizer/` | nothing in a model, unless a new capability trait is needed in `objective.rs` |
 | Something only Exact does (online LDLT, LOO of `Gpr`) | `gpr/` | `linalg/ldlt.rs` for the factor |
 | Something both sparse families do | `sparse/` | `sgpr/` and `svgp/` call it |
 | A precision rule | `precision/` | the model's `factor/` that passes a closure |
 | The saved layout | `persist/` | [persist-format.md](persist-format.md), and `FORMAT_VERSION` if a reader could misread an old file |
 | A new model family | a new directory beside `gpr/` | one `Loaded*` type in `persist/`; it must not import another model |
+
+### Adding a built-in kernel leaf
+
+Leaves are dispatched statically: every operation on `KernelSpec` and `CompiledKernel` is a `match` with one arm per leaf, about forty in all, so a call is a direct call the compiler can inline and vectorize (§5 of the design). The cost is that a new leaf touches each of them. Those matches name every leaf and have no wildcard where the answer depends on the leaf, so the compiler lists each place still missing an arm. Where a wildcard remains, it is a fallback that is right for any leaf (a leaf computed from coordinates when there is no faster path) or the leaf-versus-composite split. To add a leaf:
+
+1. `kernel/<leaf>.rs`: the parameters (`θ` and their `Interval`s), and the value, `∂K/∂θ`, and `∂²K/∂θ∂θ` from distances or coordinates, square and rectangular, and the diagonal. The coordinate derivatives (`grad_wrt_coord_dim` and the mixed Hessians) if `FreeInducing` should move it; otherwise it returns `CoordGradientUnsupported`.
+2. `kernel/spec.rs`: the `KernelSpec` variant, its `From`, and the arms the compiler asks for.
+3. `kernel/compiled/`: the `CompiledKernel` variant and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf.
+4. `persist/kernel.rs`: its JSON tag; a saved file from an older version must still read (persist-format.md).
+5. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load.
+6. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.

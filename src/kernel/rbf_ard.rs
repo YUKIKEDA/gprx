@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::require_ard_sq_diff_shape;
+use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::{
     try_apply_rbf_ard_cache, try_apply_rbf_ard_cross, try_apply_rbf_ard_points,
@@ -254,26 +254,26 @@ impl RbfArdKernel {
 
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let n = ard::require_square_out(out.as_ref())?;
         require_ard_sq_diff_shape(cache, n, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
-        if let Some((cf, of)) = f64_pair(cache, out.rb_mut())
+        if let (Some(cf), Some(of)) = (cache.as_f64(), T::as_f64_mut(out.rb_mut()))
             && try_apply_rbf_ard_cache::<M>(cf, of, uplo, w)?
         {
             return Ok(());
         }
         write_square(out, uplo, |row, col| {
-            rbf_value::<M, T>(ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?)
+            rbf_value::<M, T>(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?)
         })
     }
 
     pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         mut d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -282,7 +282,7 @@ impl RbfArdKernel {
         let n = ard::require_square_out(d_k.as_ref())?;
         require_ard_sq_diff_shape(cache, n, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
-        if let Some((cf, of)) = f64_pair(cache, d_k.rb_mut())
+        if let (Some(cf), Some(of)) = (cache.as_f64(), T::as_f64_mut(d_k.rb_mut()))
             && try_grad_rbf_ard_cache::<M>(cf, of, uplo, w, param_idx)?
         {
             return Ok(());
@@ -290,7 +290,6 @@ impl RbfArdKernel {
         write_square(d_k, uplo, |row, col| {
             rbf_grad::<M, T>(ard::r2_from_cache(
                 cache,
-                n,
                 row,
                 col,
                 w,
@@ -336,7 +335,7 @@ impl RbfArdKernel {
 
     pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
@@ -344,9 +343,9 @@ impl RbfArdKernel {
     ) -> Result<(), GprError> {
         ard::require_param_pair(NAME, i, j, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
-        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
+        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |row, col| {
             rbf_hess::<M, T>(
-                ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?,
+                ard::r2_from_cache(cache, row, col, w, Pick::pair(i, j))?,
                 i == j,
             )
         })
@@ -397,37 +396,61 @@ impl RbfArdKernel {
         })
     }
 
-    /// One pass of `∂k/∂θ_d` for every lengthscale. Same values as
-    /// [`Self::grad_cross_from_coords`] called once per `d`.
-    pub(crate) fn grad_cross_all_from_coords<M: KernelMath, T: KernelScalar>(
+    /// Every lengthscale's `∂K(x1, x2)/∂θ_d` into `out`, one matrix per
+    /// lengthscale, from one `exp` per entry; the same values as
+    /// [`Self::grad_cross_from_coords`] called once per `d`. The matrices are
+    /// grown to `x1.nrows() × x2.nrows()` and reused; each is written at its
+    /// top-left block of that shape. Up to 1024 columns, nothing is
+    /// allocated once they have grown.
+    pub(crate) fn grad_cross_all_from_coords_into<M: KernelMath>(
         &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-    ) -> Result<Vec<Mat<T>>, GprError> {
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        out: &mut Vec<Mat<f64>>,
+    ) -> Result<(), GprError> {
         let d = self.num_params();
-        let mut out: Vec<Mat<T>> = (0..d).map(|_| Mat::zeros(x1.nrows(), x2.nrows())).collect();
+        let (rows, cols) = (x1.nrows(), x2.nrows());
+        out.resize_with(d, Mat::new);
         if d == 0 {
-            return Ok(out);
+            return Ok(());
         }
-        super::require_coord_grad(x1, x2, out[0].as_ref(), 0)?;
+        for mat in out.iter_mut() {
+            let _ = crate::sparse::view(mat, rows, cols);
+        }
+        super::require_coord_grad(x1, x2, out[0].as_ref().submatrix(0, 0, rows, cols), 0)?;
         let w = self.lengthscales.inv_ell_sq();
-        let slots: Option<Vec<MatMut<'_, f64>>> =
-            out.iter_mut().map(|m| T::as_f64_mut(m.as_mut())).collect();
-        if let (Some(af), Some(bf), Some(mut slots)) = (T::as_f64_ref(x1), T::as_f64_ref(x2), slots)
-            && try_grad_rbf_ard_cross_all::<M>(af, bf, &mut slots, w)?
-        {
-            return Ok(out);
+        let unit = out.iter().all(|mat| ard_unit_cols(mat.as_ref()));
+        if unit && ard_simd_inputs(x1, x2, d)? && cols <= 1024 {
+            return write_cross_rows::<M>(
+                x1,
+                x2,
+                w,
+                Which::All,
+                0,
+                cols,
+                0,
+                &mut |dim, row, col, v| {
+                    out[dim][(row, col)] = v;
+                },
+            );
         }
-        let mut terms = vec![T::from_f64(0.0); d];
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let k = ard_grad_terms::<M, T>(x1, row, x2, col, w, &mut terms)?;
-                for (dest, &term) in out.iter_mut().zip(&terms) {
+        let mut views: Vec<MatMut<'_, f64>> = out
+            .iter_mut()
+            .map(|mat| mat.as_mut().submatrix_mut(0, 0, rows, cols))
+            .collect();
+        if try_fill_ard_cross::<M>(x1, x2, &mut views, w, Which::All)? {
+            return Ok(());
+        }
+        let mut terms = vec![0.0; d];
+        for col in 0..cols {
+            for row in 0..rows {
+                let k = ard_grad_terms::<M, f64>(x1, row, x2, col, w, &mut terms)?;
+                for (dest, &term) in views.iter_mut().zip(&terms) {
                     dest[(row, col)] = k * term;
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
@@ -452,6 +475,22 @@ impl RbfArdKernel {
 
 const NAME: &str = "RBF";
 
+/// The lengthscales a cross pass writes `∂k/∂θ_d` for.
+#[derive(Clone, Copy)]
+enum Which {
+    One(usize),
+    All,
+}
+
+impl Which {
+    fn includes(self, dim: usize) -> bool {
+        match self {
+            Self::One(d) => d == dim,
+            Self::All => true,
+        }
+    }
+}
+
 fn try_grad_rbf_ard_cross<M: KernelMath>(
     x1: MatRef<'_, f64>,
     x2: MatRef<'_, f64>,
@@ -462,40 +501,43 @@ fn try_grad_rbf_ard_cross<M: KernelMath>(
     if param_idx >= inv_ell_sq.len() {
         return Ok(false);
     }
-    let mut write = vec![false; inv_ell_sq.len()];
-    write[param_idx] = true;
     let mut one = [d_k];
-    try_fill_ard_cross::<M>(x1, x2, &mut one, inv_ell_sq, &write)
+    try_fill_ard_cross::<M>(x1, x2, &mut one, inv_ell_sq, Which::One(param_idx))
 }
 
-fn try_grad_rbf_ard_cross_all<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    slots: &mut [MatMut<'_, f64>],
-    inv_ell_sq: &[f64],
-) -> Result<bool, GprError> {
-    if slots.len() != inv_ell_sq.len() {
+/// Whether both inputs have unit row stride and `d` finite columns.
+fn ard_simd_inputs(x1: MatRef<'_, f64>, x2: MatRef<'_, f64>, d: usize) -> Result<bool, GprError> {
+    if d == 0 || x1.ncols() != d || x2.ncols() != d {
         return Ok(false);
     }
-    let write = vec![true; inv_ell_sq.len()];
-    try_fill_ard_cross::<M>(x1, x2, slots, inv_ell_sq, &write)
+    if !ard_unit_cols(x1) || !ard_unit_cols(x2) {
+        return Ok(false);
+    }
+    for dim in 0..d {
+        ard_finite(ard_col(x1, dim)?)?;
+        ard_finite(ard_col(x2, dim)?)?;
+    }
+    Ok(true)
 }
 
 /// `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²` with one `exp` for every lengthscale.
+/// `out` holds one matrix per written lengthscale: the one of
+/// [`Which::One`], or one per lengthscale for [`Which::All`].
 fn try_fill_ard_cross<M: KernelMath>(
     x1: MatRef<'_, f64>,
     x2: MatRef<'_, f64>,
     out: &mut [MatMut<'_, f64>],
     inv_ell_sq: &[f64],
-    write: &[bool],
+    which: Which,
 ) -> Result<bool, GprError> {
     let m = x1.nrows();
     let n = x2.nrows();
     let d = inv_ell_sq.len();
-    if d == 0 || write.len() != d || out.len() != d || x1.ncols() != d || x2.ncols() != d {
-        return Ok(false);
-    }
-    if !ard_unit_cols(x1) || !ard_unit_cols(x2) {
+    let expected = match which {
+        Which::One(_) => 1,
+        Which::All => d,
+    };
+    if out.len() != expected || !ard_simd_inputs(x1, x2, d)? {
         return Ok(false);
     }
     for dest in out.iter() {
@@ -503,35 +545,40 @@ fn try_fill_ard_cross<M: KernelMath>(
             return Ok(false);
         }
     }
-    for dim in 0..d {
-        ard_finite(ard_col(x1, dim)?)?;
-        ard_finite(ard_col(x2, dim)?)?;
-    }
+    let slot = |dim: usize| match which {
+        Which::One(_) => 0,
+        Which::All => dim,
+    };
     if n <= 1024 {
-        write_ard_cross::<M>(x1, x2, out, inv_ell_sq, write, 0, n)?;
+        write_cross_rows::<M>(
+            x1,
+            x2,
+            inv_ell_sq,
+            which,
+            0,
+            n,
+            0,
+            &mut |dim, row, col, v| {
+                out[slot(dim)][(row, col)] = v;
+            },
+        )?;
         return Ok(true);
     }
     let n_parts = super::dist::worker_count();
-    let mut slots = Vec::with_capacity(d);
-    for mat in out.iter_mut() {
-        slots.push(packed_mut(mat));
-    }
-    let shared = ShareBases(slots);
+    let shared = ShareBases(out.iter_mut().map(packed_mut).collect());
     let results: Vec<Result<(), GprError>> = (0..n_parts)
         .into_par_iter()
         .map(|idx| {
             let (start, len) = super::dist::col_chunk(n, idx, n_parts);
-            write_packed::<M>(
+            write_cross_rows::<M>(
                 x1,
                 x2,
-                shared.slots(),
                 inv_ell_sq,
-                write,
-                ArdSpan {
-                    x_begin: start,
-                    dest_col: start,
-                    len,
-                },
+                which,
+                start,
+                len,
+                start,
+                &mut |dim, row, col, v| store_packed(&shared.slots()[slot(dim)], row, col, v),
             )
         })
         .collect();
@@ -541,119 +588,62 @@ fn try_fill_ard_cross<M: KernelMath>(
     Ok(true)
 }
 
-fn write_ard_cross<M: KernelMath>(
+/// Writes `∂k/∂θ_d` of the lengthscales in `which` for every row of `x1`
+/// and the `len` points of `x2` from `x_begin`, at destination columns from
+/// `dest_col`, through `store(dim, row, col, value)`. Columns go in stack
+/// blocks; each lengthscale's term is formed again after the `exp` rather
+/// than kept, so nothing is allocated.
+#[allow(clippy::too_many_arguments)]
+fn write_cross_rows<M: KernelMath>(
     x1: MatRef<'_, f64>,
     x2: MatRef<'_, f64>,
-    dest: &mut [MatMut<'_, f64>],
     inv_ell_sq: &[f64],
-    write: &[bool],
-    start: usize,
+    which: Which,
+    x_begin: usize,
     len: usize,
+    dest_col: usize,
+    store: &mut dyn FnMut(usize, usize, usize, f64),
 ) -> Result<(), GprError> {
-    let d = inv_ell_sq.len();
-    for mat in dest.iter() {
-        if mat.ncols() > 0 && mat.row_stride() != 1 {
-            return Err(GprError::UnsupportedKernelOperation {
-                reason: "expected unit row-stride for ARD cross grad".to_owned(),
-            });
-        }
-    }
-    let mut packed = Vec::with_capacity(d);
-    for mat in dest.iter_mut() {
-        packed.push(packed_mut(mat));
-    }
-    write_packed::<M>(
-        x1,
-        x2,
-        &packed,
-        inv_ell_sq,
-        write,
-        ArdSpan {
-            x_begin: start,
-            dest_col: 0,
-            len,
-        },
-    )
-}
-
-fn write_packed<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    packed: &[PackedMut],
-    inv_ell_sq: &[f64],
-    write: &[bool],
-    span: ArdSpan,
-) -> Result<(), GprError> {
-    let m = x1.nrows();
-    let d = inv_ell_sq.len();
-    let len = span.len;
-    let mut r2 = vec![0.0; len];
-    let mut scratch = vec![0.0; len];
-    let mut saved: Vec<Vec<f64>> = write
-        .iter()
-        .map(|flag| if *flag { vec![0.0; len] } else { Vec::new() })
-        .collect();
-    let mut k = vec![0.0; len];
+    const BLOCK: usize = 256;
+    let mut r2_buf = [0.0f64; BLOCK];
+    let mut k_buf = [0.0f64; BLOCK];
+    let mut term_buf = [0.0f64; BLOCK];
     let half = f64x4::new([-0.5; 4]);
-    let mut x_dim = Vec::with_capacity(d);
-    for dim in 0..d {
-        x_dim.push(ard_col(x2, dim)?);
-    }
-    for row in 0..m {
-        r2.fill(0.0);
-        for dim in 0..d {
-            let z = ard_col(x1, dim)?[row];
-            let acc = if write[dim] {
-                &mut saved[dim]
-            } else {
-                &mut scratch
-            };
-            acc.fill(0.0);
-            add_weighted_sq(
-                &x_dim[dim][span.x_begin..span.x_begin + len],
-                z,
-                inv_ell_sq[dim],
-                acc,
-            );
-            add_slice(acc, &mut r2);
-        }
-        exp_scaled::<M>(&r2, &mut k, half)?;
-        for dim in 0..d {
-            if !write[dim] {
-                continue;
+    let mut offset = 0;
+    while offset < len {
+        let block = BLOCK.min(len - offset);
+        let begin = x_begin + offset;
+        let (r2, k, term) = (
+            &mut r2_buf[..block],
+            &mut k_buf[..block],
+            &mut term_buf[..block],
+        );
+        for row in 0..x1.nrows() {
+            r2.fill(0.0);
+            for (dim, &w) in inv_ell_sq.iter().enumerate() {
+                let z = ard_col(x1, dim)?[row];
+                add_weighted_sq(&ard_col(x2, dim)?[begin..begin + block], z, w, r2);
             }
-            let src = &saved[dim];
-            let mut i = 0;
-            while i + 4 <= len {
-                let dk = load4(&k, i) * load4(src, i);
-                if !all_finite4(dk) {
-                    return Err(GprError::NonFiniteKernelValue);
+            exp_scaled::<M>(r2, k, half)?;
+            for (dim, &w) in inv_ell_sq.iter().enumerate() {
+                if !which.includes(dim) {
+                    continue;
                 }
-                let lanes = dk.to_array();
-                let col = span.dest_col + i;
-                store_packed(&packed[dim], row, col, lanes[0]);
-                store_packed(&packed[dim], row, col + 1, lanes[1]);
-                store_packed(&packed[dim], row, col + 2, lanes[2]);
-                store_packed(&packed[dim], row, col + 3, lanes[3]);
-                i += 4;
-            }
-            while i < len {
-                let dk = k[i] * src[i];
-                if !dk.is_finite() {
-                    return Err(GprError::NonFiniteKernelValue);
+                let z = ard_col(x1, dim)?[row];
+                term.fill(0.0);
+                add_weighted_sq(&ard_col(x2, dim)?[begin..begin + block], z, w, term);
+                for (i, (&kv, &tv)) in k.iter().zip(term.iter()).enumerate() {
+                    let dk = kv * tv;
+                    if !dk.is_finite() {
+                        return Err(GprError::NonFiniteKernelValue);
+                    }
+                    store(dim, row, dest_col + offset + i, dk);
                 }
-                store_packed(&packed[dim], row, span.dest_col + i, dk);
-                i += 1;
             }
         }
+        offset += block;
     }
     Ok(())
-}
-
-struct ArdSpan {
-    x_begin: usize,
-    dest_col: usize,
-    len: usize,
 }
 
 struct PackedMut {
@@ -699,18 +689,6 @@ fn store_packed(slot: &PackedMut, row: usize, col: usize, value: f64) {
     // SAFETY: row stride is +1 and `(row, col)` is inside this matrix.
     unsafe {
         *slot.ptr.offset(row as isize + col as isize * slot.stride) = value;
-    }
-}
-
-fn add_slice(src: &[f64], acc: &mut [f64]) {
-    let mut i = 0;
-    while i + 4 <= src.len() {
-        store4(acc, i, load4(acc, i) + load4(src, i));
-        i += 4;
-    }
-    while i < src.len() {
-        acc[i] += src[i];
-        i += 1;
     }
 }
 
@@ -934,48 +912,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_from_sq_diff_matches_apply_lower() {
-        let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
-        let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8]]);
-        let n = 4;
-        let d = 2;
-        let mut cache = Mat::zeros(n, n * d);
-        crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
-        let mut from_points = fill(n, 0.0);
-        let mut from_cache = fill(n, f64::NAN);
-        rbf.apply(x.as_ref(), from_points.as_mut(), Triangle::Lower)
-            .expect("points");
-        rbf.apply_from_sq_diff::<crate::math::Accurate, _>(
-            cache.as_ref(),
-            from_cache.as_mut(),
-            Triangle::Lower,
-        )
-        .expect("cache");
-        assert_lower_close(from_cache.as_ref(), from_points.as_ref(), TOL);
+    /// Every triangle of `got` that `uplo` writes matches `want`.
+    fn assert_uplo_close(got: MatRef<'_, f64>, want: MatRef<'_, f64>, uplo: Triangle) {
+        let n = got.nrows();
+        for col in 0..n {
+            for row in 0..n {
+                let written = match uplo {
+                    Triangle::Lower => row >= col,
+                    Triangle::Upper => row <= col,
+                    Triangle::Full => true,
+                };
+                if written {
+                    assert_close(got[(row, col)], want[(row, col)], TOL);
+                }
+            }
+        }
     }
 
     #[test]
-    fn grad_from_sq_diff_matches_grad_lower() {
+    fn apply_from_sq_diff_matches_apply_for_every_triangle() {
+        let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
+        let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8]]);
+        let n = 4;
+        let cache = crate::kernel::ArdSqDiffBuf::new(x.as_ref()).expect("size");
+        for uplo in [Triangle::Lower, Triangle::Upper, Triangle::Full] {
+            let mut from_points = fill(n, 0.0);
+            let mut from_cache = fill(n, f64::NAN);
+            rbf.apply(x.as_ref(), from_points.as_mut(), uplo)
+                .expect("points");
+            rbf.apply_from_sq_diff::<crate::math::Accurate, _>(
+                cache.view(),
+                from_cache.as_mut(),
+                uplo,
+            )
+            .expect("cache");
+            assert_uplo_close(from_cache.as_ref(), from_points.as_ref(), uplo);
+        }
+    }
+
+    #[test]
+    fn grad_from_sq_diff_matches_grad_for_every_triangle() {
         let rbf = RbfArdKernel::new(&[1.25, 0.8]).expect("valid");
         let x = points_2d(&[[0.0, 0.0], [1.0, 0.5], [0.2, 1.3], [-0.4, 0.8], [0.7, -1.1]]);
         let n = 5;
         let d = 2;
-        let mut cache = Mat::zeros(n, n * d);
-        crate::kernel::fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
-        for param_idx in 0..d {
-            let mut from_points = fill(n, 0.0);
-            let mut from_cache = fill(n, f64::NAN);
-            rbf.grad(x.as_ref(), from_points.as_mut(), param_idx, Triangle::Lower)
-                .expect("points");
-            rbf.grad_from_sq_diff::<crate::math::Accurate, _>(
-                cache.as_ref(),
-                from_cache.as_mut(),
-                param_idx,
-                Triangle::Lower,
-            )
-            .expect("cache");
-            assert_lower_close(from_cache.as_ref(), from_points.as_ref(), TOL);
+        let cache = crate::kernel::ArdSqDiffBuf::new(x.as_ref()).expect("size");
+        for uplo in [Triangle::Lower, Triangle::Upper, Triangle::Full] {
+            for param_idx in 0..d {
+                let mut from_points = fill(n, 0.0);
+                let mut from_cache = fill(n, f64::NAN);
+                rbf.grad(x.as_ref(), from_points.as_mut(), param_idx, uplo)
+                    .expect("points");
+                rbf.grad_from_sq_diff::<crate::math::Accurate, _>(
+                    cache.view(),
+                    from_cache.as_mut(),
+                    param_idx,
+                    uplo,
+                )
+                .expect("cache");
+                assert_uplo_close(from_cache.as_ref(), from_points.as_ref(), uplo);
+            }
         }
     }
 

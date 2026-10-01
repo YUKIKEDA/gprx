@@ -129,6 +129,7 @@ impl ResidualFormula for ReevaluateKernel {}
 
 /// Which precision a persist directory records. Absent on disk means double.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum PersistKind {
     Double,
     Single,
