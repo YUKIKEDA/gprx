@@ -2895,3 +2895,45 @@ fn fast_approx_fit_nlml_does_not_rise() {
             .expect("end"),
     );
 }
+
+#[test]
+fn joint_value_gradient_hessian_matches_separate_calls() {
+    use crate::objective::{Differentiable, TwiceDifferentiable};
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3];
+    let y = [0.4, -0.2, 0.9, 0.1];
+    for buffer in [CholeskyBuffer::Retain, CholeskyBuffer::Reuse] {
+        let mut fitted = rbf_ard_gpr(&[1.25, 0.8], 0.16)
+            .with_cholesky_buffer(buffer)
+            .with_optimizer(Fixed)
+            .factor(&x, 4, 2, &y)
+            .expect("spd");
+        let mut params = [0.0; 3];
+        fitted.get_params(&mut params).expect("len 3");
+        params[0] += 0.2;
+        params[2] -= 0.3;
+        let mut grad = [0.0; 3];
+        let mut hess = [0.0; 9];
+        let value = fitted
+            .value_and_gradient_into(&params, &mut grad)
+            .expect("spd");
+        fitted.hessian_into(&params, &mut hess).expect("spd");
+        let mut objective = fitted.objective();
+        let mut joint_grad = [0.0; 3];
+        let mut joint_hess = [0.0; 9];
+        let joint = objective
+            .value_gradient_hessian_into(&params, &mut joint_grad, &mut joint_hess)
+            .expect("spd");
+        assert_close(joint, value, TOL);
+        for (a, b) in joint_grad.iter().zip(&grad) {
+            assert_close(*a, *b, TOL);
+        }
+        for (a, b) in joint_hess.iter().zip(&hess) {
+            assert_close(*a, *b, 1e-8);
+        }
+        let mut again = [0.0; 3];
+        let value_again = objective
+            .value_and_gradient_into(&params, &mut again)
+            .expect("spd");
+        assert_close(value_again, value, TOL);
+    }
+}

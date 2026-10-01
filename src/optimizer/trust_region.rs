@@ -335,12 +335,13 @@ impl<'a, P: TwiceDifferentiable + ?Sized> HessCache<'a, P> {
                 return Ok(value);
             }
         }
-        let value = self
-            .objective
-            .value_and_gradient_into(param, &mut self.grad)?;
-        let hessian = self.objective.hessian_into(param, &mut self.hess);
-        if hessian.is_err()
-            || !value.is_finite()
+        // The model's own error (for example an unsupported gradient) keeps
+        // its type; `cost` turns any failure here into a bad step.
+        self.value = None;
+        let value =
+            self.objective
+                .value_gradient_hessian_into(param, &mut self.grad, &mut self.hess)?;
+        if !value.is_finite()
             || self.grad.iter().any(|g| !g.is_finite())
             || self.hess.iter().any(|h| !h.is_finite())
         {
@@ -614,5 +615,72 @@ mod tests {
         assert!(TrustRegion::new().with_radii(0.0, 1.0).is_err());
         assert!(TrustRegion::new().with_radii(2.0, 1.0).is_err());
         assert!(TrustRegion::new().with_radii(1.0, f64::INFINITY).is_err());
+    }
+
+    /// Quadratic bowl that counts which entry points a solver uses.
+    #[derive(Default)]
+    struct CountingBowl {
+        separate_gradients: usize,
+        separate_hessians: usize,
+        joint: usize,
+    }
+
+    impl Objective for CountingBowl {
+        fn num_params(&self) -> usize {
+            2
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            Ok((params[0] - 0.3).powi(2) + 2.0 * (params[1] + 0.2).powi(2))
+        }
+    }
+
+    impl Differentiable for CountingBowl {
+        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.separate_gradients += 1;
+            out[0] = 2.0 * (params[0] - 0.3);
+            out[1] = 4.0 * (params[1] + 0.2);
+            Ok(())
+        }
+    }
+
+    impl TwiceDifferentiable for CountingBowl {
+        fn hessian_into(&mut self, _params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.separate_hessians += 1;
+            out.copy_from_slice(&[2.0, 0.0, 0.0, 4.0]);
+            Ok(())
+        }
+
+        fn value_gradient_hessian_into(
+            &mut self,
+            params: &[f64],
+            grad: &mut [f64],
+            hess: &mut [f64],
+        ) -> Result<f64, GprError> {
+            self.joint += 1;
+            grad[0] = 2.0 * (params[0] - 0.3);
+            grad[1] = 4.0 * (params[1] + 0.2);
+            hess.copy_from_slice(&[2.0, 0.0, 0.0, 4.0]);
+            self.value(params)
+        }
+    }
+
+    #[test]
+    fn trust_region_evaluates_each_candidate_through_the_joint_entry_point() {
+        let mut bowl = CountingBowl::default();
+        let result = TrustRegion::new()
+            .minimize_unconstrained(&mut bowl, &[2.0, 1.0])
+            .expect("minimize");
+        assert_close(result.params[0], 0.3, TOL);
+        assert_close(result.params[1], -0.2, TOL);
+        assert!(bowl.joint > 0);
+        assert_eq!(
+            bowl.separate_hessians, 0,
+            "a candidate's Hessian is part of the joint call"
+        );
+        assert_eq!(
+            bowl.separate_gradients, 0,
+            "a candidate's gradient is part of the joint call"
+        );
     }
 }
