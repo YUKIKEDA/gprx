@@ -269,11 +269,11 @@ pub enum DistanceCachePolicy {
 /// Crate-private. What Cached stores (§7.1).
 struct DistCache<S> {
     dist: Option<Mat<S>>,        // n×n squared Euclidean, for distance-mode leaves
-    ard_sq_diff: Option<Mat<S>>, // raw (Δx_d)² as n × (n·d), for ARD leaves
+    ard_sq_diff: Option<ArdSqDiffBuf<S>>, // raw (Δx_d)², packed lower triangles, for ARD leaves
 }
 ```
 
-置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは列優先 `n × (n·d)` で、次元 `k` は列 `[k n, (k+1) n)`、各ブロックは下三角。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
+置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
 
 ほかの方針とのどの組み合わせも不正ではないので、方針は実行時の enum にする（§6.3）。`(n,n,d)` テンソルは `n²×d×sizeof(T)` バイト。`K` 自体が `n²×sizeof(T)`（n=5000、f64 で約 200MB）で、ARD キャッシュはその `d` 倍になる。`n`・`d`・メモリ予算から方針を選ぶ仕組みは未決（§14）。
 
@@ -478,7 +478,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。`Q_j`（`n×n` 1 枚）と長さ n のベクトル 4 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直して一次項の `Q_i = K⁻¹ K_i` を解く。
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。一次の項は、ノイズ（`A_i = σn² I`）を含む各パラメータ `i` について 1 回ずつ計算する。`A = L Lᵀ` として、`S_i = L⁻¹ A_i L⁻ᵀ`（三角解 2 回）と `v_i = L⁻¹ A_i α` から `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F`、`αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j` を得るので、Hessian 全体は `O(p n³ + p² n²)`。`p` 枚の `S_i`（`p · n²`）、`v_i` を並べた `n × p`、長さ n のベクトル 1 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直す（`W` が `L` を上書きしたため）。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
@@ -581,7 +581,7 @@ struct GprObjective<'a, P: GpScalar = DoublePrecision> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を、詰めた下三角（`d · n(n+1)/2` 個）に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
 
 ### 6.4 Leave-one-out
 
@@ -624,7 +624,7 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
     theta: Vec<f64>,                 // θ before the current write, restored when A does not factor
     nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product (§5.3)
-    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
+    hessian: HessianScratch<P::Storage>, // S_i (p · n²), v_i (n × p), one n-vector. Empty until the first Hessian (§6.2)
     factor_jitter: f64,              // j of the last successful factor (§4.0)
 }
 

@@ -53,9 +53,9 @@ impl TensorFile {
         let file = File::open(&path).map_err(|err| persist_err(format!("open {path:?}: {err}")))?;
         // Safety: this map stays alive on `MappedTensors` and is not written
         // through. gprx never writes into an existing `model.safetensors`:
-        // a save renames a new file over the path, so this mapping keeps
-        // the old file. Another program that truncates or rewrites the file
-        // in place is outside what gprx can guard.
+        // a save renames a new file over the path (`atomic::write_atomic`),
+        // so this mapping keeps the old file. Another program that truncates
+        // or rewrites the file in place is outside what gprx can guard.
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|err| persist_err(format!("mmap {path:?}: {err}")))?;
         Ok(Self {
@@ -221,7 +221,7 @@ pub(super) fn write_tensors(
     }
     .map_err(|err| persist_err(format!("serialize safetensors: {err}")))?;
     let path = dir.join(TENSOR_FILE);
-    std::fs::write(&path, bytes).map_err(|err| persist_err(format!("write {path:?}: {err}")))
+    super::atomic::write_atomic(&path, &bytes)
 }
 
 pub(super) fn read_xy(
@@ -377,7 +377,7 @@ pub(super) fn write_f64_tensors(
     let bytes = serialize(views, None)
         .map_err(|err| persist_err(format!("serialize safetensors: {err}")))?;
     let path = dir.join(TENSOR_FILE);
-    std::fs::write(&path, bytes).map_err(|err| persist_err(format!("write {path:?}: {err}")))
+    super::atomic::write_atomic(&path, &bytes)
 }
 
 /// Reads the `f64` tensor `name` of shape `shape` from `model.safetensors`.

@@ -87,11 +87,8 @@ fn write_sparse<P: GpScalar>(
         inducing_ids,
         next_inducing_id,
     };
-    let config_path = dir.join(CONFIG_FILE);
     let json = serde_json::to_vec_pretty(&config)
         .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
     let (n, m, d) = (core.n, core.m, core.d);
     let mut tensors: Vec<(&str, Vec<usize>, &[f64])> = vec![
         (TENSOR_X, vec![n, d], &core.x_obs),
@@ -108,7 +105,8 @@ fn write_sparse<P: GpScalar>(
         tensors.push((TENSOR_Q_MEAN, vec![m], q_mean));
         tensors.push((TENSOR_Q_L, vec![m, m], &q_l_values));
     }
-    write_f64_tensors(dir, &tensors)
+    write_f64_tensors(dir, &tensors)?;
+    super::write_config(dir, &json)
 }
 
 pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout, P: GpScalar>(
