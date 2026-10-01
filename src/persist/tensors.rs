@@ -24,8 +24,31 @@ pub(crate) struct MappedTensors {
     n: usize,
 }
 
-impl MappedTensors {
-    pub(super) fn open(dir: &Path, n: usize) -> Result<Self, GprError> {
+/// `model.safetensors` opened once for a load: read into memory, or memory
+/// mapped when its `f64` factor stays mapped ([`Self::into_mapped_l`]).
+/// Every tensor of the load comes from this one read.
+pub(super) struct TensorFile {
+    source: TensorSource,
+}
+
+enum TensorSource {
+    Read(Vec<u8>),
+    Mapped(Mmap),
+}
+
+impl TensorFile {
+    /// Reads the whole file into memory.
+    pub(super) fn read(dir: &Path) -> Result<Self, GprError> {
+        let path = dir.join(TENSOR_FILE);
+        let bytes =
+            std::fs::read(&path).map_err(|err| persist_err(format!("read {path:?}: {err}")))?;
+        Ok(Self {
+            source: TensorSource::Read(bytes),
+        })
+    }
+
+    /// Maps the file; only the pages a load touches are read.
+    pub(super) fn map(dir: &Path) -> Result<Self, GprError> {
         let path = dir.join(TENSOR_FILE);
         let file = File::open(&path).map_err(|err| persist_err(format!("open {path:?}: {err}")))?;
         // Safety: this map stays alive on `MappedTensors` and is not written
@@ -35,6 +58,35 @@ impl MappedTensors {
         // or rewrites the file in place is outside what gprx can guard.
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|err| persist_err(format!("mmap {path:?}: {err}")))?;
+        Ok(Self {
+            source: TensorSource::Mapped(mmap),
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.source {
+            TensorSource::Read(bytes) => bytes,
+            TensorSource::Mapped(mmap) => mmap,
+        }
+    }
+
+    /// The parsed header over the file's bytes.
+    pub(super) fn tensors(&self) -> Result<SafeTensors<'_>, GprError> {
+        SafeTensors::deserialize(self.bytes())
+            .map_err(|err| persist_err(format!("safetensors header: {err}")))
+    }
+
+    /// Keeps the map so the model can borrow its `n × n` `f64` factor `l`.
+    pub(super) fn into_mapped_l(self, n: usize) -> Result<MappedTensors, GprError> {
+        match self.source {
+            TensorSource::Mapped(mmap) => MappedTensors::from_mmap(mmap, n),
+            TensorSource::Read(_) => Err(persist_err("the factor was read, not mapped")),
+        }
+    }
+}
+
+impl MappedTensors {
+    fn from_mmap(mmap: Mmap, n: usize) -> Result<Self, GprError> {
         let tensors = SafeTensors::deserialize(&mmap)
             .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
         let tensor = tensors
@@ -172,26 +224,22 @@ pub(super) fn write_tensors(
     super::atomic::write_atomic(&path, &bytes)
 }
 
-pub(super) fn read_xy(dir: &Path, n: usize, d: usize) -> Result<(Vec<f64>, Vec<f64>), GprError> {
-    let path = dir.join(TENSOR_FILE);
-    let bytes = std::fs::read(&path).map_err(|err| persist_err(format!("read {path:?}: {err}")))?;
-    let tensors = SafeTensors::deserialize(&bytes)
-        .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
-    let x = copy_f64_tensor(&tensors, TENSOR_X, &[n, d])?;
-    let y = copy_f64_tensor(&tensors, TENSOR_Y, &[n])?;
+pub(super) fn read_xy(
+    tensors: &SafeTensors<'_>,
+    n: usize,
+    d: usize,
+) -> Result<(Vec<f64>, Vec<f64>), GprError> {
+    let x = copy_f64_tensor(tensors, TENSOR_X, &[n, d])?;
+    let y = copy_f64_tensor(tensors, TENSOR_Y, &[n])?;
     Ok((x, y))
 }
 
 pub(super) fn read_scalars<T: crate::kernel::KernelScalar>(
-    dir: &Path,
+    tensors: &SafeTensors<'_>,
     name: &str,
     shape: &[usize],
     dtype: Dtype,
 ) -> Result<Vec<T>, GprError> {
-    let path = dir.join(TENSOR_FILE);
-    let bytes = std::fs::read(&path).map_err(|err| persist_err(format!("read {path:?}: {err}")))?;
-    let tensors = SafeTensors::deserialize(&bytes)
-        .map_err(|err| persist_err(format!("safetensors header: {err}")))?;
     let tensor = tensors
         .tensor(name)
         .map_err(|err| persist_err(format!("missing tensor {name}: {err}")))?;
@@ -202,11 +250,11 @@ pub(super) fn read_scalars<T: crate::kernel::KernelScalar>(
 }
 
 pub(super) fn read_matrix<T: crate::kernel::KernelScalar>(
-    dir: &Path,
+    tensors: &SafeTensors<'_>,
     n: usize,
     dtype: Dtype,
 ) -> Result<faer::Mat<T>, GprError> {
-    let values = read_scalars::<T>(dir, TENSOR_L, &[n, n], dtype)?;
+    let values = read_scalars::<T>(tensors, TENSOR_L, &[n, n], dtype)?;
     Ok(faer::Mat::from_fn(n, n, |row, col| values[col * n + row]))
 }
 
@@ -333,6 +381,10 @@ pub(super) fn write_f64_tensors(
 }
 
 /// Reads the `f64` tensor `name` of shape `shape` from `model.safetensors`.
-pub(super) fn read_f64(dir: &Path, name: &str, shape: &[usize]) -> Result<Vec<f64>, GprError> {
-    read_scalars::<f64>(dir, name, shape, Dtype::F64)
+pub(super) fn read_f64(
+    tensors: &SafeTensors<'_>,
+    name: &str,
+    shape: &[usize],
+) -> Result<Vec<f64>, GprError> {
+    read_scalars::<f64>(tensors, name, shape, Dtype::F64)
 }

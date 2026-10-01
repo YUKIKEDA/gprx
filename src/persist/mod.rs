@@ -432,32 +432,65 @@ where
     online.apply_persisted_ids(ids, *next_id)
 }
 
-/// `α` in the precision's refine scalar.
-fn read_alpha<P: crate::precision::GpScalar>(
-    dir: &Path,
-    n: usize,
-) -> Result<Vec<P::Refine>, GprError> {
-    read_scalars::<P::Refine>(
-        dir,
-        tensors::TENSOR_ALPHA,
-        &[n],
-        <P::Refine as ScalarOps>::DTYPE,
-    )
+/// The stored tensors of an Exact model, from one open of `model.safetensors`.
+struct ExactTensors<P: crate::precision::GpScalar> {
+    x_obs: Vec<f64>,
+    y_obs: Vec<f64>,
+    /// `α` in the precision's refine scalar, when the factor is stored.
+    alpha: Option<Vec<P::Refine>>,
+    owned_l: Option<faer::Mat<P::Storage>>,
+    mapped: Option<MappedTensors>,
 }
 
-/// `L` in the precision's storage scalar. An `f64` factor stays
-/// memory-mapped; an `f32` factor is copied out.
-#[allow(clippy::type_complexity)]
-fn read_factor<P: crate::precision::GpScalar>(
+/// Reads `x`, `y`, and the factor `α` / `L` in one open of the file.
+///
+/// An `f64` factor stays memory-mapped, so the file is mapped and the small
+/// tensors are copied out of the same map; otherwise it is read once.
+fn read_exact_tensors<P: crate::precision::GpScalar>(
     dir: &Path,
     n: usize,
-) -> Result<(Option<faer::Mat<P::Storage>>, Option<MappedTensors>), GprError> {
-    let dtype = <P::Storage as ScalarOps>::DTYPE;
-    if dtype == safetensors::Dtype::F64 {
-        Ok((None, Some(MappedTensors::open(dir, n)?)))
+    d: usize,
+    has_factor: bool,
+) -> Result<ExactTensors<P>, GprError> {
+    let storage = <P::Storage as ScalarOps>::DTYPE;
+    let map_l = has_factor && storage == safetensors::Dtype::F64;
+    let file = if map_l {
+        tensors::TensorFile::map(dir)?
     } else {
-        Ok((Some(read_matrix::<P::Storage>(dir, n, dtype)?), None))
-    }
+        tensors::TensorFile::read(dir)?
+    };
+    let (x_obs, y_obs, alpha, owned_l) = {
+        let tensors = file.tensors()?;
+        let (x_obs, y_obs) = read_xy(&tensors, n, d)?;
+        let alpha = if has_factor {
+            Some(read_scalars::<P::Refine>(
+                &tensors,
+                tensors::TENSOR_ALPHA,
+                &[n],
+                <P::Refine as ScalarOps>::DTYPE,
+            )?)
+        } else {
+            None
+        };
+        let owned_l = if has_factor && !map_l {
+            Some(read_matrix::<P::Storage>(&tensors, n, storage)?)
+        } else {
+            None
+        };
+        (x_obs, y_obs, alpha, owned_l)
+    };
+    let mapped = if map_l {
+        Some(file.into_mapped_l(n)?)
+    } else {
+        None
+    };
+    Ok(ExactTensors {
+        x_obs,
+        y_obs,
+        alpha,
+        owned_l,
+        mapped,
+    })
 }
 
 /// The [`LoadedGpr`] variants that hold precision `P`.
@@ -543,10 +576,14 @@ where
     let y_unfitted = config.y_unfitted.decode(registry)?;
     let x_transform = config.x_transform.decode(registry)?;
     let y_transform = config.y_transform.decode(registry)?;
-    let (x_obs, y_obs) = read_xy(dir, config.n, config.d)?;
-    if config.has_factor {
-        let alpha = read_alpha::<P>(dir, config.n)?;
-        let (owned_l, mapped) = read_factor::<P>(dir, config.n)?;
+    let ExactTensors {
+        x_obs,
+        y_obs,
+        alpha,
+        owned_l,
+        mapped,
+    } = read_exact_tensors::<P>(dir, config.n, config.d, config.has_factor)?;
+    if let Some(alpha) = alpha {
         let parts = PersistedModel {
             kernel,
             likelihood,
