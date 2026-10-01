@@ -351,9 +351,12 @@ fn validation_error_does_not_yield_fitted_model() {
 fn indefinite_matrix_returns_cholesky_failed() {
     let mut a = faer::mat![[1.0, 2.0], [2.0, 1.0]];
     let mut rhs = faer::mat![[1.0], [0.0]];
-    let mut ws =
-        FitBuffers::<DoublePrecision>::new(2, DistanceCachePolicy::Cached, CholeskyBuffer::Retain)
-            .expect("n > 0");
+    let mut ws = FitBuffers::<DoublePrecision>::new(
+        2,
+        crate::workspace::CachePlan::Full,
+        CholeskyBuffer::Retain,
+    )
+    .expect("n > 0");
     let err = cholesky_and_solve(
         &mut a,
         &mut rhs,
@@ -558,9 +561,12 @@ fn adaptive_jitter_recovers_after_growth() {
 #[test]
 fn factor_retry_does_not_accumulate_into_failed_cholesky() {
     let n = 2;
-    let mut ws =
-        FitBuffers::<DoublePrecision>::new(n, DistanceCachePolicy::Cached, CholeskyBuffer::Retain)
-            .expect("n > 0");
+    let mut ws = FitBuffers::<DoublePrecision>::new(
+        n,
+        crate::workspace::CachePlan::Full,
+        CholeskyBuffer::Retain,
+    )
+    .expect("n > 0");
     let y = [1.0, 0.0];
     let noise = 0.1;
     let jitter = 1.0;
@@ -2894,4 +2900,65 @@ fn fast_approx_fit_nlml_does_not_rise() {
             .neg_log_marginal_likelihood()
             .expect("end"),
     );
+}
+
+/// `Auto` keeps the isotropic distances only when there is an isotropic RBF
+/// leaf, never the ARD `(Δx_d)²`, and its values match `Cached` and
+/// `Uncached`.
+#[test]
+fn auto_cache_keeps_only_the_isotropic_rbf_distances() {
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0, -1.0];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5];
+    let rbf = || KernelSpec::from(RbfKernel::new(1.1).expect("valid"));
+    let ard = || KernelSpec::from(RbfArdKernel::new(&[0.9, 1.6]).expect("valid"));
+    let matern = || KernelSpec::from(MaternKernel::new(1.2, MaternNu::FiveHalves).expect("valid"));
+    // (kernel, isotropic distances kept, ARD tensor kept)
+    let cases = [
+        (rbf(), true, false),
+        (ard(), false, false),
+        (rbf() + ard(), true, false),
+        (matern(), false, false),
+        (matern() * rbf(), true, false),
+    ];
+    for (kernel, keeps_dist, keeps_ard) in cases {
+        let fit = |policy| {
+            Gpr::new(
+                kernel.clone(),
+                GaussianLikelihood::new(0.16).expect("valid"),
+            )
+            .with_distance_cache_policy(policy)
+            .with_optimizer(Fixed)
+            .factor(&x, 5, 2, &y)
+            .expect("spd")
+        };
+        let mut auto = fit(DistanceCachePolicy::Auto);
+        let cache = auto.store.buffers.dist.as_ref();
+        assert_eq!(
+            cache.is_some_and(|c| c.dist.is_some()),
+            keeps_dist,
+            "{kernel:?}"
+        );
+        assert_eq!(
+            cache.is_some_and(|c| c.ard_sq_diff.is_some()),
+            keeps_ard,
+            "{kernel:?}"
+        );
+        let mut params = vec![0.0; auto.num_params()];
+        auto.get_params(&mut params).expect("params");
+        let mut g_auto = vec![0.0; params.len()];
+        let v_auto = auto
+            .value_and_gradient_into(&params, &mut g_auto)
+            .expect("auto");
+        for policy in [DistanceCachePolicy::Cached, DistanceCachePolicy::Uncached] {
+            let mut other = fit(policy);
+            let mut g = vec![0.0; params.len()];
+            let v = other
+                .value_and_gradient_into(&params, &mut g)
+                .expect("other");
+            assert_close(v_auto, v, 1e-10);
+            for (a, b) in g_auto.iter().zip(&g) {
+                assert_close(*a, *b, 1e-9);
+            }
+        }
+    }
 }

@@ -271,6 +271,7 @@ Training coordinates do not change during a fit, so the pairwise distances are c
 pub enum DistanceCachePolicy {
     Cached,   // default: fill once per fit, reuse (the speed pole)
     Uncached, // recompute from X on every kernel build (the memory pole)
+    Auto,     // the isotropic n×n only, and only with an isotropic RBF leaf (measured, §5.2)
 }
 
 /// Crate-private. What Cached stores (§7.1).
@@ -495,7 +496,7 @@ The default `CholeskyBuffer` is `Retain`. `K⁻¹` → `W` is written into a ded
 
 The public surface splits the trainer from the fitted model.
 
-`Gpr<O = Lbfgs, P = DoublePrecision>` holds a `KernelSpec`, a `GaussianLikelihood`, transforms, an optimizer `O`, and four runtime policies: `DistanceCachePolicy { Cached, Uncached }`, `CholeskyBuffer { Retain, Reuse }`, `KernelExp { Accurate, FastApprox }`, and `JitterPolicy` (§4.0). They are plain enums. No combination is illegal, so none is a type parameter. The `Gpr::new` default is the speed pole (`Cached` + `Retain`) with `Accurate`. The public switch is `with_prefer_memory` / `with_prefer_speed`. The memory pole is `Uncached` + `Reuse`. `with_distance_cache_policy` / `with_cholesky_buffer` / `with_math` / `with_jitter_policy` set one policy each. A kernel that never reads pairwise distances (standalone Linear / Constant / White) allocates no distance cache whatever the policy says; there is no `from_points`. `FittedGpr` has no `with_prefer_*` (`into_trainer` → prefer → `refit`); it exposes the policies through getters. The types stay at the crate root. `Gpr<O: Optimizer>::fit(self, …)` moves hyperparameters with `O` and, on success, returns `FittedGpr<O, P>`. Fixed hyperparameters are `Gpr<Fixed>::factor`. There is no `optimize: bool`. On failure the consumed `Gpr<O, P>` is returned with the error. There is no `fitted: bool` and no `GprError::NotFitted`. An unfitted `transform` / `apply` cannot happen (`StandardizeTarget::fit(self)` returns `FittedStandardizeTarget`). On `FittedGpr`, `L` / `α` / `X` / the compiled kernel are not `Option`, so no call can find a missing piece.
+`Gpr<O = Lbfgs, P = DoublePrecision>` holds a `KernelSpec`, a `GaussianLikelihood`, transforms, an optimizer `O`, and four runtime policies: `DistanceCachePolicy { Cached, Uncached, Auto }`, `CholeskyBuffer { Retain, Reuse }`, `KernelExp { Accurate, FastApprox }`, and `JitterPolicy` (§4.0). They are plain enums. No combination is illegal, so none is a type parameter. The `Gpr::new` default is the speed pole (`Cached` + `Retain`) with `Accurate`. The public switch is `with_prefer_memory` / `with_prefer_speed`. The memory pole is `Uncached` + `Reuse`. `with_distance_cache_policy` / `with_cholesky_buffer` / `with_math` / `with_jitter_policy` set one policy each. A kernel that never reads pairwise distances (standalone Linear / Constant / White) allocates no distance cache whatever the policy says; there is no `from_points`. `FittedGpr` has no `with_prefer_*` (`into_trainer` → prefer → `refit`); it exposes the policies through getters. The types stay at the crate root. `Gpr<O: Optimizer>::fit(self, …)` moves hyperparameters with `O` and, on success, returns `FittedGpr<O, P>`. Fixed hyperparameters are `Gpr<Fixed>::factor`. There is no `optimize: bool`. On failure the consumed `Gpr<O, P>` is returned with the error. There is no `fitted: bool` and no `GprError::NotFitted`. An unfitted `transform` / `apply` cannot happen (`StandardizeTarget::fit(self)` returns `FittedStandardizeTarget`). On `FittedGpr`, `L` / `α` / `X` / the compiled kernel are not `Option`, so no call can find a missing piece.
 
 `FittedGpr` holds what inference needs: `L`, `α`, training `X`, the kernel, the likelihood, and the transforms. `W`, `∂K`, and argmin state live only during `fit` and are not kept on the fitted value. Calling `predict` in the same process immediately after `fit` is treated as the minority path. The main path hands over a fitted model, so the inference object is `FittedGpr`.
 
@@ -516,7 +517,7 @@ pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
 
 /// Crate-private. Shared by the trainer and its fitted models.
 struct Policies {
-    distance_cache: DistanceCachePolicy, // Cached (default) | Uncached
+    distance_cache: DistanceCachePolicy, // Cached (default) | Uncached | Auto
     cholesky_buffer: CholeskyBuffer,     // Retain (default) | Reuse
     math: KernelExp,                     // Accurate (default) | FastApprox
     jitter: JitterPolicy,                // fixed(0.0) (default)
@@ -589,7 +590,21 @@ Preconditions:
 - NaN/Inf in the input is `NonFiniteInput`
 - Cholesky failure is `Err((gpr, err))`. A half-built `FittedGpr` is not returned
 
-The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)`. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
+The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)`. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` / `auto` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
+
+`Auto` keeps only what a benchmark showed to pay off (one joint value-and-gradient evaluation, `Cached` against `Uncached`, release, 4 cores, median; ratio = `Uncached` / `Cached`, above 1 means the cache helped):
+
+| Leaf | `d` | `n` = 512 | 1024 | 2048 | 4096 |
+| --- | --- | --- | --- | --- | --- |
+| RBF | 1 | 1.12 | 1.92 | 2.02 | 1.61 |
+| RBF | 4 | 1.77 | 1.92 | 1.87 | 1.70 |
+| Matérn 5/2 | 1 | 1.04 | 0.93 | 1.00 | 0.98 |
+| Matérn 5/2 | 4 | 1.44 | 0.85 | 0.93 | 1.15 |
+| Periodic | 1 | 2.22 | 0.84 | 0.55 | — |
+| RBF-ARD | 1–16 | 0.95–0.97 | 0.90–1.02 | 0.45–0.96 | 0.82–1.02 |
+| Matérn 5/2-ARD | 1–16 | 0.88–1.00 | 0.83–1.02 | 0.83–1.00 | 0.84–1.12 |
+
+The ARD tensor costs `d` matrices of `n×n` and was never faster to read than `X` (memory bandwidth, not arithmetic, bounds that loop). The isotropic `n×n` costs one matrix and pays off where the leaf's distance path is vectorized (RBF); Matérn, Periodic, and RQ gained nothing consistent. So `Auto` caches the isotropic distances when the tree has an isotropic RBF leaf, and never the ARD tensor. It is not the default: `Cached` stays the speed pole the persist default and the benchmarks assume. Re-measure when a leaf's distance or ARD path changes.
 
 ### 6.4 Leave-one-out
 
@@ -938,7 +953,7 @@ Order and status are [roadmap.md](roadmap.md). Acceptance text stays on each Iss
 ## 14. Open items
 
 1. **Checking mixed-precision refinement parameters**: the §4.2 defaults have a theoretical basis, and they have not been checked on a real workload. That includes the accuracy gap between `PromoteStorage` and `ReevaluateKernel`, and `log|K|` plus the trace term when MixedPrecision is used during fit
-2. **Choosing the distance-cache policy automatically** (a `DistanceCachePolicy::Auto` from `n`, `d`, and a memory budget, §5.2): it needs a measurement that accounts for kernel kind, SIMD efficiency, and memory bandwidth. Tracked as P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43)); acceptance is set after Grill
+2. **Choosing the distance-cache policy automatically**: `DistanceCachePolicy::Auto` (§5.2) decides from the kernel kind, by a measurement of kernel kind, SIMD, and memory bandwidth (P5-5, [#43](https://github.com/YUKIKEDA/gprx/issues/43)). It does not take a memory budget: the only tensor it keeps is the `n×n` the fit already needs one of
 
 ## 15. Benchmark strategy
 

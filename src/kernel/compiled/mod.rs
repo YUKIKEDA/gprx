@@ -376,6 +376,17 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    /// Whether the tree has an isotropic RBF leaf, whose distance path is
+    /// the one a cached `n×n` distance matrix speeds up
+    /// ([`crate::DistanceCachePolicy::Auto`]).
+    pub(crate) fn has_isotropic_rbf(&self) -> bool {
+        match self {
+            Self::Rbf(_) => true,
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::has_isotropic_rbf),
+            _ => false,
+        }
+    }
+
     pub(crate) fn needs_ard_sq_diff(&self) -> bool {
         match self {
             Self::RbfArd(_) | Self::MaternArd(_) | Self::RationalQuadraticArd(_) => true,

@@ -15,7 +15,7 @@ use crate::linalg::{
 use crate::optimizer::{OptResult, Optimizer};
 use crate::param::Interval;
 use crate::precision::{GpScalar, StoredFactor};
-use crate::workspace::{FitWorkspace, HessianScratch, WorkspaceCore};
+use crate::workspace::{CachePlan, FitWorkspace, HessianScratch, WorkspaceCore};
 
 use super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_with_policy, factor_written_k_with_policy,
@@ -38,10 +38,15 @@ pub(crate) fn fit_buffers<P: GpScalar>(
     policies: Policies,
     compiled: &CompiledKernel<P::Storage>,
 ) -> Result<FitBuffers<P>, GprError> {
-    let cache = if compiled.reads_distances()? || compiled.needs_ard_sq_diff() {
-        policies.distance_cache
-    } else {
-        DistanceCachePolicy::Uncached
+    let reads_dist = compiled.reads_distances()?;
+    let cache = match policies.distance_cache {
+        _ if !reads_dist && !compiled.needs_ard_sq_diff() => CachePlan::Off,
+        DistanceCachePolicy::Cached => CachePlan::Full,
+        DistanceCachePolicy::Uncached => CachePlan::Off,
+        DistanceCachePolicy::Auto if reads_dist && compiled.has_isotropic_rbf() => {
+            CachePlan::DistancesOnly
+        }
+        DistanceCachePolicy::Auto => CachePlan::Off,
     };
     FitBuffers::<P>::new(n, cache, policies.cholesky_buffer)
 }

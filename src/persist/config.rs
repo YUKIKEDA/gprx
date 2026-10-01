@@ -258,6 +258,7 @@ impl JitterJson {
 pub(super) enum DistanceCacheJson {
     Always,
     Never,
+    Auto,
 }
 
 impl DistanceCacheJson {
@@ -265,6 +266,7 @@ impl DistanceCacheJson {
         match policy {
             DistanceCachePolicy::Cached => Self::Always,
             DistanceCachePolicy::Uncached => Self::Never,
+            DistanceCachePolicy::Auto => Self::Auto,
         }
     }
 
@@ -272,6 +274,7 @@ impl DistanceCacheJson {
         match self {
             Self::Always => DistanceCachePolicy::Cached,
             Self::Never => DistanceCachePolicy::Uncached,
+            Self::Auto => DistanceCachePolicy::Auto,
         }
     }
 }

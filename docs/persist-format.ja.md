@@ -47,7 +47,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 | `likelihood` | オブジェクト | 必須 | 観測ノイズ（5.2 節） |
 | `jitter` | オブジェクト | 必須 | `JitterPolicy`（5.3 節） |
 | `factor_jitter` | 数 | `0` なら省略 | 保存した因子を作ったときの対角のジッター |
-| `distance_cache` | `"always"`、`"never"` | 任意 | `DistanceCachePolicy`（`Cached` / `Uncached`）。無ければ既定の `Cached` |
+| `distance_cache` | `"always"`、`"never"`、`"auto"` | 任意 | `DistanceCachePolicy`（`Cached` / `Uncached` / `Auto`）。無ければ既定の `Cached` |
 | `x_unfitted` | オブジェクトか文字列 | 必須 | fit の前に設定した入力の変換（5.4 節） |
 | `y_unfitted` | オブジェクトか文字列 | 必須 | fit の前に設定した目的変数の変換（5.4 節） |
 | `x_transform` | オブジェクトか文字列 | 必須 | 学習後の入力の変換。学習した統計を持つ（5.4 節） |

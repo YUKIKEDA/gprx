@@ -60,6 +60,21 @@ pub struct DistCache<S> {
     pub(crate) dist: Option<Mat<S>>,
     /// Raw `(Δx_d)²` for ARD leaves (`n × (n·d)`).
     pub(crate) ard_sq_diff: Option<Mat<S>>,
+    /// Never fill [`Self::ard_sq_diff`]: ARD leaves read `X`
+    /// ([`crate::DistanceCachePolicy::Auto`]).
+    pub(crate) skip_ard: bool,
+}
+
+/// What a fit caches, resolved from [`crate::DistanceCachePolicy`] and the
+/// compiled kernel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CachePlan {
+    /// No distance cache.
+    Off,
+    /// Isotropic distances and the ARD `(Δx_d)²`, as the kernel reads them.
+    Full,
+    /// Isotropic distances only.
+    DistancesOnly,
 }
 
 /// Fit buffers for one training size: the shared core, plus the distance
@@ -91,13 +106,17 @@ impl<P: PrecisionPolicy> FitBuffers<P> {
     /// Returns [`GprError::EmptyInput`] if `n` is zero.
     pub(crate) fn new(
         n: usize,
-        cache: crate::policy::DistanceCachePolicy,
+        cache: CachePlan,
         buffer: crate::policy::CholeskyBuffer,
     ) -> Result<Self, GprError> {
         let core = WorkspaceCore::new(n)?;
         let dist = match cache {
-            crate::policy::DistanceCachePolicy::Cached => Some(DistCache::default()),
-            crate::policy::DistanceCachePolicy::Uncached => None,
+            CachePlan::Full => Some(DistCache::default()),
+            CachePlan::DistancesOnly => Some(DistCache {
+                skip_ard: true,
+                ..DistCache::default()
+            }),
+            CachePlan::Off => None,
         };
         let w_matrix = match buffer {
             crate::policy::CholeskyBuffer::Retain => Some(Mat::<P::Storage>::zeros(n, n)),
@@ -482,7 +501,7 @@ where
 mod tests {
     use super::{FitBuffers, FitWorkspace, QueryWorkspace, WorkspaceCore, faer_scratch_req};
     use crate::error::GprError;
-    use crate::policy::{CholeskyBuffer, DistanceCachePolicy};
+    use crate::policy::CholeskyBuffer;
     use crate::precision::DoublePrecision;
     use crate::test_check::assert_send_sync;
 
@@ -492,7 +511,7 @@ mod tests {
     }
 
     fn speed(n: usize) -> Result<FitBuffers<DoublePrecision>, GprError> {
-        FitBuffers::new(n, DistanceCachePolicy::Cached, CholeskyBuffer::Retain)
+        FitBuffers::new(n, crate::workspace::CachePlan::Full, CholeskyBuffer::Retain)
     }
 
     #[test]
@@ -505,7 +524,7 @@ mod tests {
         let n = 8;
         let ws = FitBuffers::<DoublePrecision>::new(
             n,
-            DistanceCachePolicy::Cached,
+            crate::workspace::CachePlan::Full,
             CholeskyBuffer::Reuse,
         )
         .expect("n > 0");
@@ -517,7 +536,7 @@ mod tests {
         assert!(ws.overwrites_cholesky());
         let uncached = FitBuffers::<DoublePrecision>::new(
             n,
-            DistanceCachePolicy::Uncached,
+            crate::workspace::CachePlan::Off,
             CholeskyBuffer::Reuse,
         )
         .expect("n > 0");

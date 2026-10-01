@@ -840,6 +840,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_distance_cache_round_trips() {
+        let fitted = Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_distance_cache_policy(crate::DistanceCachePolicy::Auto)
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+        .map_err(|(_, e)| e)
+        .expect("factor");
+        let dir = temp_dir("auto-cache");
+        fitted.save(&dir).expect("save");
+        let config = std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("config");
+        assert!(config.contains("\"distance_cache\": \"auto\""), "{config}");
+        let LoadedGpr::Double(model) =
+            LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load")
+        else {
+            panic!("a double-precision llt model");
+        };
+        assert_eq!(
+            model.distance_cache_policy(),
+            crate::DistanceCachePolicy::Auto
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn standardize_roundtrip_and_refit() {
         let fitted = Gpr::new(
             KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),

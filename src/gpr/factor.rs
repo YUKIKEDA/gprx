@@ -92,7 +92,7 @@ pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
         *thread_scratch = pool;
         d.dist = Some(dist);
     }
-    let reads_ard = T::READS_ARD_CACHE && compiled.needs_ard_sq_diff();
+    let reads_ard = T::READS_ARD_CACHE && !d.skip_ard && compiled.needs_ard_sq_diff();
     if reads_ard && d.ard_sq_diff.is_none() {
         let n = x.nrows();
         let cols = n.checked_mul(x.ncols()).ok_or(GprError::SizeOverflow)?;

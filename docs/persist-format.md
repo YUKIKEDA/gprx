@@ -47,7 +47,7 @@ A JSON object, written pretty-printed. Unknown keys are ignored on read. "Omitte
 | `likelihood` | object | required | Observation noise (§5.2) |
 | `jitter` | object | required | The `JitterPolicy` (§5.3) |
 | `factor_jitter` | number | omitted when `0` | The diagonal jitter the stored factor was built with |
-| `distance_cache` | `"always"`, `"never"` | optional | `DistanceCachePolicy` (`Cached` / `Uncached`). Absent reads as the default, `Cached` |
+| `distance_cache` | `"always"`, `"never"`, `"auto"` | optional | `DistanceCachePolicy` (`Cached` / `Uncached` / `Auto`). Absent reads as the default, `Cached` |
 | `x_unfitted` | object or string | required | Input map as configured before fit (§5.4) |
 | `y_unfitted` | object or string | required | Target map as configured before fit (§5.4) |
 | `x_transform` | object or string | required | Input map as fitted: its learned statistics (§5.4) |

@@ -264,6 +264,7 @@ ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が�
 pub enum DistanceCachePolicy {
     Cached,   // default: fill once per fit, reuse (the speed pole)
     Uncached, // recompute from X on every kernel build (the memory pole)
+    Auto,     // the isotropic n×n only, and only with an isotropic RBF leaf (measured, §5.2)
 }
 
 /// Crate-private. What Cached stores (§7.1).
@@ -488,7 +489,7 @@ H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ
 
 公開面はトレーナーと学習済みモデルを分ける。
 
-`Gpr<O = Lbfgs, P = DoublePrecision>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、実行時の方針 4 つを持つ：`DistanceCachePolicy { Cached, Uncached }`、`CholeskyBuffer { Retain, Reuse }`、`KernelExp { Accurate, FastApprox }`、`JitterPolicy`（§4.0）。どれも素の enum。不正な組み合わせが無いので型パラメータにしない。`Gpr::new` の既定は速さ極（`Cached` + `Retain`）で `Accurate`。公開の切り替えは `with_prefer_memory` / `with_prefer_speed`。メモリ極は `Uncached` + `Reuse`。`with_distance_cache_policy` / `with_cholesky_buffer` / `with_math` / `with_jitter_policy` はそれぞれ 1 つを設定する。対距離を読まないカーネル（単独の Linear / Constant / White）は方針によらず距離キャッシュを確保しない。`from_points` は無い。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。方針は getter で読める。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, P>` を返す。固定ハイパラは `Gpr<Fixed>::factor`。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, P>` をエラーと一緒に返す。`fitted: bool` と `GprError::NotFitted` は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。`FittedGpr` の `L` / `α` / `X` / コンパイル済みカーネルは `Option` にしないので、欠けた部品に出会う呼び出しは無い。
+`Gpr<O = Lbfgs, P = DoublePrecision>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、実行時の方針 4 つを持つ：`DistanceCachePolicy { Cached, Uncached, Auto }`、`CholeskyBuffer { Retain, Reuse }`、`KernelExp { Accurate, FastApprox }`、`JitterPolicy`（§4.0）。どれも素の enum。不正な組み合わせが無いので型パラメータにしない。`Gpr::new` の既定は速さ極（`Cached` + `Retain`）で `Accurate`。公開の切り替えは `with_prefer_memory` / `with_prefer_speed`。メモリ極は `Uncached` + `Reuse`。`with_distance_cache_policy` / `with_cholesky_buffer` / `with_math` / `with_jitter_policy` はそれぞれ 1 つを設定する。対距離を読まないカーネル（単独の Linear / Constant / White）は方針によらず距離キャッシュを確保しない。`from_points` は無い。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。方針は getter で読める。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, P>` を返す。固定ハイパラは `Gpr<Fixed>::factor`。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, P>` をエラーと一緒に返す。`fitted: bool` と `GprError::NotFitted` は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。`FittedGpr` の `L` / `α` / `X` / コンパイル済みカーネルは `Option` にしないので、欠けた部品に出会う呼び出しは無い。
 
 `FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
@@ -509,7 +510,7 @@ pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
 
 /// Crate-private. Shared by the trainer and its fitted models.
 struct Policies {
-    distance_cache: DistanceCachePolicy, // Cached (default) | Uncached
+    distance_cache: DistanceCachePolicy, // Cached (default) | Uncached | Auto
     cholesky_buffer: CholeskyBuffer,     // Retain (default) | Reuse
     math: KernelExp,                     // Accurate (default) | FastApprox
     jitter: JitterPolicy,                // fixed(0.0) (default)
@@ -581,7 +582,21 @@ struct GprObjective<'a, P: GpScalar = DoublePrecision> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を `n × (n·d)` に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`）。`Uncached` + `Retain` は、葉の作り直しを保ったまま RSS がいちばん小さい組み合わせ（`with_distance_cache_policy` だけで作る）。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never` / `auto`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
+
+`Auto` はベンチマークで得になったものだけを持つ（値と勾配の joint 評価 1 回を `Cached` と `Uncached` で比べた中央値。release、4 コア。比は `Uncached` / `Cached` で、1 より大きければキャッシュが効いた）:
+
+| 葉 | `d` | `n` = 512 | 1024 | 2048 | 4096 |
+| --- | --- | --- | --- | --- | --- |
+| RBF | 1 | 1.12 | 1.92 | 2.02 | 1.61 |
+| RBF | 4 | 1.77 | 1.92 | 1.87 | 1.70 |
+| Matérn 5/2 | 1 | 1.04 | 0.93 | 1.00 | 0.98 |
+| Matérn 5/2 | 4 | 1.44 | 0.85 | 0.93 | 1.15 |
+| Periodic | 1 | 2.22 | 0.84 | 0.55 | — |
+| RBF-ARD | 1–16 | 0.95–0.97 | 0.90–1.02 | 0.45–0.96 | 0.82–1.02 |
+| Matérn 5/2-ARD | 1–16 | 0.88–1.00 | 0.83–1.02 | 0.83–1.00 | 0.84–1.12 |
+
+ARD のテンソルは `n×n` を `d` 枚使い、`X` から作り直すより速く読めたことは無かった（そのループを縛るのは演算ではなくメモリ帯域）。等方の `n×n` は 1 枚で、葉の距離の経路がベクトル化されている RBF で効いた。Matérn、Periodic、RQ では一貫した得が無かった。そこで `Auto` は、木に等方の RBF の葉があるときだけ等方の距離を持ち、ARD のテンソルは持たない。既定にはしない（保存の既定とベンチマークが前提にする速さ極は `Cached` のまま）。葉の距離や ARD の経路を変えたら測り直す。
 
 ### 6.4 Leave-one-out
 
@@ -930,7 +945,7 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 ## 14. 未解決事項
 
 1. **混合精度反復改良のパラメータ検証**: §4.2のデフォルト値は理論根拠付きだが、実ワークロードでの検証は未実施。`PromoteStorage`と`ReevaluateKernel`の精度差、fit時MixedPrecisionのlog|K|・トレース項も含む
-2. **距離キャッシュ方針の自動選択**（`n`・`d`・メモリ予算から選ぶ `DistanceCachePolicy::Auto`、§5.2）: カーネル種別・SIMD効率・メモリ帯域を考慮した実測が必要。P5-5（[#43](https://github.com/YUKIKEDA/gprx/issues/43)）で扱い、完了条件は Grill 後
+2. **距離キャッシュ方針の自動選択**: `DistanceCachePolicy::Auto`（§5.2）が、カーネル種別・SIMD・メモリ帯域の実測からカーネルの種類で決める（P5-5、[#43](https://github.com/YUKIKEDA/gprx/issues/43)）。メモリ予算は取らない。持つのは、学習がすでに 1 枚必要とする `n×n` だけ
 
 ## 15. ベンチマーク戦略
 

@@ -9,8 +9,9 @@ use crate::error::GprError;
 /// them while `X` is unchanged: isotropic fits store an `n×n`
 /// squared-Euclidean matrix, ARD fits also store raw `(Δx_d)²` as
 /// `n × (n·d)`. [`Self::Uncached`] recomputes them from `X` on every kernel
-/// build. A kernel that does not read distances (standalone Linear,
-/// Constant, White) never allocates the cache.
+/// build. [`Self::Auto`] keeps only what was measured to pay off. A kernel
+/// that does not read distances (standalone Linear, Constant, White) never
+/// allocates the cache.
 ///
 /// # Examples
 ///
@@ -34,6 +35,17 @@ pub enum DistanceCachePolicy {
     Cached,
     /// Recompute from `X` on every kernel build (the memory pole).
     Uncached,
+    /// Cache the isotropic `n×n` squared distances when the kernel has an
+    /// isotropic RBF leaf, and never the ARD `(Δx_d)²`.
+    ///
+    /// Chosen from a benchmark of one joint value-and-gradient evaluation
+    /// (`docs/design.md` §5.2): reading the `n × (n·d)` ARD cache was never
+    /// faster than recomputing from `X` (0.45× to 1.12× the time, at
+    /// `d = 1…16`, `n = 256…4096`), while it costs `d` matrices of `n×n`; the
+    /// isotropic RBF, whose distance path is vectorized, ran 1.1× to 2.0×
+    /// faster from the cache for one more `n×n`; isotropic Matérn, Periodic,
+    /// and RQ gained nothing consistent. Same values as the other policies.
+    Auto,
 }
 
 /// Where the gradient matrix `W = ααᵀ - K⁻¹` lives during a fit.
