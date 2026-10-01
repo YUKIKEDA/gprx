@@ -1798,6 +1798,73 @@ impl<P: crate::Objective + ?Sized> Optimizer<P> for FailAfterMoving {
 }
 
 #[test]
+fn delete_by_reassembly_publishes_weights_of_the_remaining_points() {
+    let x = [0.0, 0.7, 1.3, 2.0, 2.6, 3.1];
+    let y = [0.2, 0.9, 0.4, -0.3, 0.1, 0.6];
+    let z = [0.5, 1.5, 2.8];
+    let sgpr = || {
+        Sgpr::new(
+            KernelSpec::from(RbfKernel::new(0.8).expect("valid")),
+            GaussianLikelihood::new(0.05).expect("valid"),
+        )
+        .with_optimizer(Fixed)
+    };
+    let mut online = sgpr()
+        .factor(&x, 6, 1, &y, &z, 3)
+        .expect("factor")
+        .into_online();
+    let removed = 2;
+    let x_next = remove_point(online.core.x_train.as_slice(), 6, 1, removed);
+    let y_next: Vec<f64> = y
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != removed)
+        .map(|(_, v)| *v)
+        .collect();
+    online
+        .delete_by_reassembly(
+            x_next.clone(),
+            y_next.clone(),
+            x_next.clone(),
+            y_next.clone(),
+        )
+        .expect("reassemble");
+    let rebuilt = sgpr()
+        .factor(&x_next, 5, 1, &y_next, &z, 3)
+        .expect("factor");
+    let xs = [0.4, 1.3, 2.9];
+    let got = online.predict(&xs, 3, 1).expect("predict");
+    let want = rebuilt.predict(&xs, 3, 1).expect("predict");
+    assert_slice_close(&got.mean, &want.mean, 1e-10);
+    assert_slice_close(&got.variance, &want.variance, 1e-10);
+}
+
+/// Everything an online update could leave behind, compared bit for bit.
+#[derive(Debug, PartialEq)]
+struct OnlineFingerprint {
+    n: usize,
+    m: usize,
+    points: Vec<crate::PointId>,
+    inducing: Vec<InducingId>,
+    mean: Vec<f64>,
+    variance: Vec<f64>,
+    nlml: f64,
+}
+
+fn online_fingerprint(online: &OnlineSgpr<Fixed, crate::MixedPrecision>) -> OnlineFingerprint {
+    let pred = online.predict(&[0.3, 1.7, 3.2], 3, 1).expect("predict");
+    OnlineFingerprint {
+        n: online.n(),
+        m: online.m(),
+        points: online.point_ids().to_vec(),
+        inducing: online.inducing_ids().to_vec(),
+        mean: pred.mean,
+        variance: pred.variance,
+        nlml: online.neg_log_marginal_likelihood().expect("nlml"),
+    }
+}
+
+#[test]
 fn failed_search_restores_the_model_from_its_parameters() {
     let x = [0.0, 0.7, 1.3, 2.0, 2.6, 3.1];
     let y = [0.2, 0.9, 0.4, -0.3, 0.1, 0.6];
@@ -1834,4 +1901,44 @@ fn failed_search_restores_the_model_from_its_parameters() {
         nlml_before,
         1e-12,
     );
+}
+
+#[test]
+fn failed_online_updates_leave_the_model_unchanged() {
+    // A refining precision is the one whose updates can fail after a write.
+    let mut online = Sgpr::new(
+        KernelSpec::from(RbfKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_optimizer(Fixed)
+    .with_precision::<crate::MixedPrecision>()
+    .factor(
+        &[0.0, 1.0, 2.0, 3.0],
+        4,
+        1,
+        &[0.0, 1.0, 0.5, 0.25],
+        &[0.5, 2.5],
+        2,
+    )
+    .expect("factor")
+    .into_online();
+    let before = online_fingerprint(&online);
+    let first_point = online.point_ids()[0];
+    let first_inducing = online.inducing_ids()[0];
+    // Every update succeeds, then a later step of the same call fails.
+    let err = online
+        .atomically(|model| {
+            model.insert(&[4.0], 0.1)?;
+            model.delete(first_point)?;
+            model.insert_inducing(&[1.5])?;
+            model.delete_inducing(first_inducing)?;
+            Err::<(), _>(GprError::NonFiniteInput)
+        })
+        .expect_err("injected failure");
+    assert!(matches!(err, GprError::NonFiniteInput));
+    assert_eq!(online_fingerprint(&online), before);
+    // The model is still usable and its next update takes the next id.
+    let id = online.insert(&[4.0], 0.1).expect("insert");
+    assert_eq!(online.n(), 5);
+    assert_eq!(online.point_ids().last().copied(), Some(id));
 }
