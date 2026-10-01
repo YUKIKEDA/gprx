@@ -1,6 +1,8 @@
 //! ARD rational quadratic kernel.
 
 use super::ard::{self, ArdR2, Pick};
+use super::ard_simd::Profile;
+use super::dist::ArdSqDiff;
 use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::{
@@ -10,6 +12,7 @@ use super::{
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
+use wide::f64x4;
 
 /// ARD rational quadratic: `k = (1 + r² / (2α))^(-α)` with
 /// `r² = Σ_d (x_d-x'_d)² / ℓ_d²`.
@@ -199,7 +202,9 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_points(x, out, self.lengthscales.num_params(), uplo, |row, col| {
+        let d = self.lengthscales.num_params();
+        let profile = RqProfile::value(self.alpha());
+        ard::write_from_points_simd(x, out, d, uplo, w, None, &profile, |row, col| {
             rq_value(ard::r2_from_coords(x, row, x, col, w, Pick::NONE)?, alpha)
         })
     }
@@ -216,10 +221,11 @@ impl RationalQuadraticArdKernel {
         xs: MatRef<'_, T>,
         out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        ard::require_cross(x, xs, out.as_ref(), self.lengthscales.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        super::write_rect(out, |row, col| {
+        let d = self.lengthscales.num_params();
+        let profile = RqProfile::value(self.alpha());
+        ard::write_cross_simd(x, xs, out, d, w, None, &profile, |row, col| {
             rq_value(ard::r2_from_coords(x, row, xs, col, w, Pick::NONE)?, alpha)
         })
     }
@@ -247,7 +253,8 @@ impl RationalQuadraticArdKernel {
         ard::require_param(NAME, param_idx, d + 1)?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_points(x, d_k, d, uplo, |row, col| {
+        let (profile, pick) = RqProfile::grad(self.alpha(), param_idx, d);
+        ard::write_from_points_simd(x, d_k, d, uplo, w, pick, &profile, |row, col| {
             let t = ard::r2_from_coords(x, row, x, col, w, Pick::one(param_idx))?;
             rq_grad(t, alpha, param_idx == d)
         })
@@ -255,29 +262,22 @@ impl RationalQuadraticArdKernel {
 
     pub(crate) fn apply_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_cache(
-            cache,
-            out,
-            self.lengthscales.num_params(),
-            uplo,
-            |n, row, col| {
-                rq_value(
-                    ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?,
-                    alpha,
-                )
-            },
-        )
+        let d = self.lengthscales.num_params();
+        let profile = RqProfile::value(self.alpha());
+        ard::write_from_cache_simd(cache, out, d, uplo, w, None, &profile, |_, row, col| {
+            rq_value(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?, alpha)
+        })
     }
 
     pub(crate) fn grad_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -286,8 +286,9 @@ impl RationalQuadraticArdKernel {
         ard::require_param(NAME, param_idx, d + 1)?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_cache(cache, d_k, d, uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::one(param_idx))?;
+        let (profile, pick) = RqProfile::grad(self.alpha(), param_idx, d);
+        ard::write_from_cache_simd(cache, d_k, d, uplo, w, pick, &profile, |_, row, col| {
+            let t = ard::r2_from_cache(cache, row, col, w, Pick::one(param_idx))?;
             rq_grad(t, alpha, param_idx == d)
         })
     }
@@ -319,7 +320,7 @@ impl RationalQuadraticArdKernel {
 
     pub(crate) fn hess_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
@@ -329,8 +330,8 @@ impl RationalQuadraticArdKernel {
         ard::require_param_pair(NAME, i, j, d + 1)?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_cache(cache, d2_k, d, uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+        ard::write_from_cache(cache, d2_k, d, uplo, |row, col| {
+            let t = ard::r2_from_cache(cache, row, col, w, Pick::pair(i, j))?;
             rq_hess(t, alpha, (i, j), d)
         })
     }
@@ -345,10 +346,10 @@ impl RationalQuadraticArdKernel {
     ) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         ard::require_param(NAME, param_idx, d + 1)?;
-        ard::require_cross(x1, x2, d_k.as_ref(), d)?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        write_rect(d_k, |row, col| {
+        let (profile, pick) = RqProfile::grad(self.alpha(), param_idx, d);
+        ard::write_cross_simd(x1, x2, d_k, d, w, pick, &profile, |row, col| {
             let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::one(param_idx))?;
             rq_grad(t, alpha, param_idx == d)
         })
@@ -379,6 +380,70 @@ const NAME: &str = "rational quadratic";
 
 fn rq_value<T: KernelScalar>(t: ArdR2<T>, alpha: T) -> Result<T, GprError> {
     finite_kernel(rq_from_r2(t.r2.max(T::from_f64(0.0)), alpha))
+}
+
+/// What [`RqProfile`] writes for four pairs.
+#[derive(Clone, Copy)]
+enum RqOutput {
+    Value,
+    /// `∂k/∂θ_d` from the picked term `t = w_d Δ_d²`.
+    GradDim,
+    /// `∂k/∂log(α)`.
+    GradAlpha,
+}
+
+/// The RQ-ARD value or derivative of four pairs from `r²`
+/// ([`ard_simd`](super::ard_simd)), with `u^{−α} = exp(−α ln u)` for
+/// `u = 1 + r² / (2α)`.
+struct RqProfile {
+    alpha: f64,
+    output: RqOutput,
+}
+
+impl RqProfile {
+    fn value(alpha: f64) -> Self {
+        Self {
+            alpha,
+            output: RqOutput::Value,
+        }
+    }
+
+    /// The derivative profile of `param_idx` and the dimension it picks.
+    fn grad(alpha: f64, param_idx: usize, d: usize) -> (Self, Option<usize>) {
+        if param_idx == d {
+            (
+                Self {
+                    alpha,
+                    output: RqOutput::GradAlpha,
+                },
+                None,
+            )
+        } else {
+            (
+                Self {
+                    alpha,
+                    output: RqOutput::GradDim,
+                },
+                Some(param_idx),
+            )
+        }
+    }
+}
+
+impl Profile for RqProfile {
+    #[inline(always)]
+    fn eval(&self, r2: f64x4, t: f64x4) -> f64x4 {
+        let alpha = f64x4::splat(self.alpha);
+        let one = f64x4::ONE;
+        let u = one + r2.max(f64x4::ZERO) / (f64x4::splat(2.0) * alpha);
+        let ln_u = u.ln();
+        let k = (-alpha * ln_u).exp();
+        match self.output {
+            RqOutput::Value => k,
+            RqOutput::GradDim => k / u * t,
+            RqOutput::GradAlpha => alpha * k * (one - one / u - ln_u),
+        }
+    }
 }
 
 /// `wrt_alpha` selects `∂/∂log(α)`; otherwise `∂/∂θ_d` from `t.dim_i`.

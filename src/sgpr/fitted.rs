@@ -236,23 +236,16 @@ where
         self.set_params(params)?;
         let value = self.neg_log_marginal_likelihood()?;
         let include_z = I::z_params(self.core.m, self.core.d) > 0;
-        if !include_z && self.inducing_equals_training() {
-            let mut exact = self.exact_fitted()?;
-            exact.value_and_gradient_into(params, out)?;
-        } else {
-            let mut ks = std::mem::take(&mut self.scratch.storage);
-            let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(
-                self, out, include_z, &mut ks
-            ));
-            self.scratch.storage = ks;
-            result?;
-        }
+        let mut ks = std::mem::take(&mut self.scratch.storage);
+        let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(
+            self, out, include_z, &mut ks
+        ));
+        self.scratch.storage = ks;
+        result?;
         Ok(value)
     }
 
     /// Writes the Hessian of the negative ELBO (row-major `p×p`) into `out`.
-    ///
-    /// When `Z = X` this matches [`crate::FittedGpr::hessian_into`].
     ///
     /// # Errors
     ///
@@ -291,17 +284,12 @@ where
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         self.set_params(params)?;
         let include_z = I::z_params(self.core.m, self.core.d) > 0;
-        if !include_z && self.inducing_equals_training() {
-            let mut exact = self.exact_fitted()?;
-            exact.hessian_into(params, out)?;
-        } else {
-            let mut ks = std::mem::take(&mut self.scratch.storage);
-            let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(
-                self, out, include_z, &mut ks
-            ));
-            self.scratch.storage = ks;
-            result?;
-        }
+        let mut ks = std::mem::take(&mut self.scratch.storage);
+        let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(
+            self, out, include_z, &mut ks
+        ));
+        self.scratch.storage = ks;
+        result?;
         Ok(())
     }
 
@@ -382,26 +370,6 @@ where
         OnlineSgpr::from_fitted(self)
     }
 
-    fn inducing_equals_training(&self) -> bool {
-        self.core.x_train == self.core.z_train
-    }
-
-    fn exact_fitted(&self) -> Result<crate::FittedGpr<Fixed, P>, GprError>
-    where
-        P: crate::precision::GpScalar,
-    {
-        crate::Gpr::new(self.core.kernel.clone(), self.core.likelihood)
-            .with_optimizer(Fixed)
-            .with_precision::<P>()
-            .factor(
-                &self.core.x_train,
-                self.core.n,
-                self.core.d,
-                &self.core.y_train,
-            )
-            .map_err(|(_, e)| e)
-    }
-
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
             &self.core.kernel,
@@ -456,49 +424,58 @@ where
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
-        let before = self.clone();
         let optimizer = self.optimizer.clone();
         let result = {
             let mut obj = SgprObjective::new(self);
             optimizer.minimize(&mut obj, &init)
         };
-        self.commit_or_revert_optimize(before, result)
+        self.commit_or_revert_optimize(&init, result)
     }
 
+    /// Takes the optimizer's result, or rebuilds the model at `init` (the
+    /// parameters before the search) when the search failed.
+    ///
+    /// Only the parameters are kept for the way back, not a copy of the
+    /// model: the VFE system at `init` factored before the search, so it is
+    /// assembled again from them.
     fn commit_or_revert_optimize(
         &mut self,
-        before: Self,
+        init: &[f64],
         result: Result<OptResult, GprError>,
     ) -> Result<(), GprError> {
-        match result {
-            Ok(opt) => {
-                if opt.params.len() != self.num_params() || !opt.value.is_finite() {
-                    *self = before;
-                    return Err(GprError::OptimizationNotConverged {
-                        iterations: opt.iterations as usize,
-                    });
-                }
-                if let Err(err) = self.set_params(&opt.params) {
-                    *self = before;
-                    return Err(err);
-                }
-                if let Err(err) = self.refresh_predict_w() {
-                    *self = before;
-                    return Err(err);
-                }
-                Ok(())
+        let committed = match result {
+            Ok(opt) if opt.params.len() != self.num_params() || !opt.value.is_finite() => {
+                Err(GprError::OptimizationNotConverged {
+                    iterations: opt.iterations as usize,
+                })
             }
-            Err(err) => {
-                *self = before;
-                Err(err)
-            }
+            Ok(opt) => self
+                .set_params(&opt.params)
+                .and_then(|()| self.refresh_predict_w()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = committed {
+            self.revert_to(init);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn revert_to(&mut self, init: &[f64]) {
+        // `init` factored before the search; a failure here would leave the
+        // model at the last factored point, which is still consistent.
+        if self.set_params(init).is_ok() {
+            let _ = self.refresh_predict_w();
         }
     }
 
     /// Returns the negative VFE evidence lower bound (the sparse NLML).
     ///
-    /// When `Z = X` this matches [`crate::FittedGpr::neg_log_marginal_likelihood`]
-    /// of [`crate::Gpr<Fixed>::factor`] on the same data.
+    /// When `Z = X` and the kernel has no White leaf, this matches
+    /// [`crate::FittedGpr::neg_log_marginal_likelihood`] of
+    /// [`crate::Gpr<Fixed>::factor`] on the same data. `K(Z, X)` never holds
+    /// a White leaf's diagonal, so the bound does not jump when `Z` moves off
+    /// `X`.
     ///
     /// # Errors
     ///
@@ -713,7 +690,7 @@ where
     /// Each column of the returned column-major `m × n_draws` matrix is
     /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
     /// posterior covariance, the same draw as [`crate::FittedGpr::sample`].
-    /// `seed` is the crate [`rand::rngs::SmallRng`] start state. Zero draws
+    /// `seed` is the start state of gprx's seeded generator (Xoshiro256++; the same seed gives the same draws on every platform). Zero draws
     /// returns an empty vector after the covariance is formed.
     ///
     /// # Errors

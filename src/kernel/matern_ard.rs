@@ -1,12 +1,16 @@
 //! ARD Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
 use super::ard::{self, ArdR2, Pick};
+use super::ard_simd::Profile;
+use super::dist::ArdSqDiff;
 use super::finite_kernel;
 use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
 use super::{ArdLengthscales, KernelScalar, Triangle, write_rect};
 use crate::error::GprError;
 use crate::math::KernelMath;
 use faer::{MatMut, MatRef};
+use std::marker::PhantomData;
+use wide::{CmpGt, f64x4};
 
 /// ARD Matérn: `k` is a function of `r = √(Σ_d (x_d-x'_d)² / ℓ_d²)`.
 ///
@@ -158,10 +162,20 @@ impl MaternArdKernel {
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        ard::write_from_points(x, out, self.num_params(), uplo, |row, col| {
-            let t = ard::r2_from_coords(x, row, x, col, w, Pick::NONE)?;
-            matern_value::<M, T>(nu, t)
-        })
+        let profile = MaternValue4::<M>::new(nu);
+        ard::write_from_points_simd(
+            x,
+            out,
+            self.num_params(),
+            uplo,
+            w,
+            None,
+            &profile,
+            |row, col| {
+                let t = ard::r2_from_coords(x, row, x, col, w, Pick::NONE)?;
+                matern_value::<M, T>(nu, t)
+            },
+        )
     }
 
     /// Writes rectangular `k(x, xs)` (train × test) into `out`.
@@ -185,13 +199,22 @@ impl MaternArdKernel {
         xs: MatRef<'_, T>,
         out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        ard::require_cross(x, xs, out.as_ref(), self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        super::write_rect(out, |row, col| {
-            let t = ard::r2_from_coords(x, row, xs, col, w, Pick::NONE)?;
-            matern_value::<M, T>(nu, t)
-        })
+        let profile = MaternValue4::<M>::new(nu);
+        ard::write_cross_simd(
+            x,
+            xs,
+            out,
+            self.num_params(),
+            w,
+            None,
+            &profile,
+            |row, col| {
+                let t = ard::r2_from_coords(x, row, xs, col, w, Pick::NONE)?;
+                matern_value::<M, T>(nu, t)
+            },
+        )
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
@@ -227,29 +250,50 @@ impl MaternArdKernel {
         ard::require_param(NAME, param_idx, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        ard::write_from_points(x, d_k, self.num_params(), uplo, |row, col| {
-            let t = ard::r2_from_coords(x, row, x, col, w, Pick::one(param_idx))?;
-            matern_grad::<M, T>(nu, t)
-        })
+        let profile = MaternGrad4::<M>::new(nu);
+        let pick = Some(param_idx);
+        ard::write_from_points_simd(
+            x,
+            d_k,
+            self.num_params(),
+            uplo,
+            w,
+            pick,
+            &profile,
+            |row, col| {
+                let t = ard::r2_from_coords(x, row, x, col, w, Pick::one(param_idx))?;
+                matern_grad::<M, T>(nu, t)
+            },
+        )
     }
 
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        ard::write_from_cache(cache, out, self.num_params(), uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?;
-            matern_value::<M, T>(nu, t)
-        })
+        let profile = MaternValue4::<M>::new(nu);
+        ard::write_from_cache_simd(
+            cache,
+            out,
+            self.num_params(),
+            uplo,
+            w,
+            None,
+            &profile,
+            |_, row, col| {
+                let t = ard::r2_from_cache(cache, row, col, w, Pick::NONE)?;
+                matern_value::<M, T>(nu, t)
+            },
+        )
     }
 
     pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -257,10 +301,21 @@ impl MaternArdKernel {
         ard::require_param(NAME, param_idx, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        ard::write_from_cache(cache, d_k, self.num_params(), uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::one(param_idx))?;
-            matern_grad::<M, T>(nu, t)
-        })
+        let profile = MaternGrad4::<M>::new(nu);
+        let pick = Some(param_idx);
+        ard::write_from_cache_simd(
+            cache,
+            d_k,
+            self.num_params(),
+            uplo,
+            w,
+            pick,
+            &profile,
+            |_, row, col| {
+                let t = ard::r2_from_cache(cache, row, col, w, Pick::one(param_idx))?;
+                matern_grad::<M, T>(nu, t)
+            },
+        )
     }
 
     /// Writes `∂²K/∂θ_i ∂θ_j` for ARD `θ_d = log(ℓ_d)`.
@@ -299,7 +354,7 @@ impl MaternArdKernel {
 
     pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
@@ -308,8 +363,8 @@ impl MaternArdKernel {
         ard::require_param_pair(NAME, i, j, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+        ard::write_from_cache(cache, d2_k, self.num_params(), uplo, |row, col| {
+            let t = ard::r2_from_cache(cache, row, col, w, Pick::pair(i, j))?;
             matern_hess::<M, T>(nu, t, i == j)
         })
     }
@@ -323,13 +378,23 @@ impl MaternArdKernel {
         param_idx: usize,
     ) -> Result<(), GprError> {
         ard::require_param(NAME, param_idx, self.num_params())?;
-        ard::require_cross(x1, x2, d_k.as_ref(), self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         let nu = self.nu;
-        write_rect(d_k, |row, col| {
-            let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::one(param_idx))?;
-            matern_grad::<M, T>(nu, t)
-        })
+        let profile = MaternGrad4::<M>::new(nu);
+        let pick = Some(param_idx);
+        ard::write_cross_simd(
+            x1,
+            x2,
+            d_k,
+            self.num_params(),
+            w,
+            pick,
+            &profile,
+            |row, col| {
+                let t = ard::r2_from_coords(x1, row, x2, col, w, Pick::one(param_idx))?;
+                matern_grad::<M, T>(nu, t)
+            },
+        )
     }
 
     /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block, from coordinates.
@@ -353,6 +418,96 @@ impl MaternArdKernel {
 }
 
 const NAME: &str = "Matern";
+
+/// `k` of four pairs from `r²` ([`ard_simd`](super::ard_simd)).
+struct MaternValue4<M> {
+    nu: MaternNu,
+    _math: PhantomData<M>,
+}
+
+impl<M> MaternValue4<M> {
+    fn new(nu: MaternNu) -> Self {
+        Self {
+            nu,
+            _math: PhantomData,
+        }
+    }
+}
+
+impl<M: KernelMath> Profile for MaternValue4<M> {
+    #[inline(always)]
+    fn eval(&self, r2: f64x4, _t: f64x4) -> f64x4 {
+        let r = r2.max(f64x4::ZERO).sqrt();
+        let one = f64x4::ONE;
+        match self.nu {
+            MaternNu::Half => M::exp_f64x4(-r),
+            MaternNu::ThreeHalves => {
+                let rho = r * f64x4::splat(3.0_f64.sqrt());
+                (one + rho) * M::exp_f64x4(-rho)
+            }
+            MaternNu::FiveHalves => {
+                let rho = r * f64x4::splat(5.0_f64.sqrt());
+                (one + rho + rho * rho / f64x4::splat(3.0)) * M::exp_f64x4(-rho)
+            }
+        }
+    }
+}
+
+/// `∂k/∂θ_d` of four pairs from `r²` and `t = w_d Δ_d²`, as
+/// [`matern_dk_dtheta_ard`] for each mode.
+struct MaternGrad4<M> {
+    nu: MaternNu,
+    _math: PhantomData<M>,
+}
+
+impl<M> MaternGrad4<M> {
+    fn new(nu: MaternNu) -> Self {
+        Self {
+            nu,
+            _math: PhantomData,
+        }
+    }
+}
+
+impl<M: KernelMath> Profile for MaternGrad4<M> {
+    #[inline(always)]
+    fn eval(&self, r2: f64x4, t: f64x4) -> f64x4 {
+        let r = r2.max(f64x4::ZERO).sqrt();
+        let one = f64x4::ONE;
+        let positive = r.cmp_gt(f64x4::ZERO);
+        // `r = 0` makes every derivative zero; divide by 1 there instead.
+        let safe_r = positive.blend(r, one);
+        let value = if M::ACCURATE {
+            match self.nu {
+                MaternNu::Half => (-r).exp() * t / safe_r,
+                MaternNu::ThreeHalves => {
+                    f64x4::splat(3.0) * t * (-(r * f64x4::splat(3.0_f64.sqrt()))).exp()
+                }
+                MaternNu::FiveHalves => {
+                    let rho = r * f64x4::splat(5.0_f64.sqrt());
+                    f64x4::splat(5.0 / 3.0) * (one + rho) * (-rho).exp() * t
+                }
+            }
+        } else {
+            match self.nu {
+                MaternNu::Half => M::d1_f64x4(-r) * t / safe_r,
+                MaternNu::ThreeHalves => {
+                    let s3 = f64x4::splat(3.0_f64.sqrt());
+                    let rho = r * s3;
+                    ((one + rho) * M::d1_f64x4(-rho) - M::exp_f64x4(-rho)) * s3 * t / safe_r
+                }
+                MaternNu::FiveHalves => {
+                    let s5 = f64x4::splat(5.0_f64.sqrt());
+                    let rho = r * s5;
+                    let a = one + rho + rho * rho / f64x4::splat(3.0);
+                    let ap = one + f64x4::splat(2.0) * rho / f64x4::splat(3.0);
+                    (a * M::d1_f64x4(-rho) - ap * M::exp_f64x4(-rho)) * s5 * t / safe_r
+                }
+            }
+        };
+        positive.blend(value, f64x4::ZERO)
+    }
+}
 
 fn matern_value<M: KernelMath, T: KernelScalar>(nu: MaternNu, t: ArdR2<T>) -> Result<T, GprError> {
     let r = t.r2.max(T::from_f64(0.0)).sqrt();

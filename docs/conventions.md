@@ -24,7 +24,7 @@ src/points.rs              PointId and the crate-private PointRegistry
 src/policy.rs              runtime policies (distance cache, Cholesky buffer, KernelExp, jitter)
 src/precision/             precision policies and refinement. Does not import a model: models pass their f64 reference as a closure
 src/prediction.rs          Prediction, PredictiveCovariance, PredictOptions, VarianceKind
-src/rng.rs                 crate-private SmallRng
+src/rng.rs                 crate-private SeededRng (Xoshiro256++)
 src/workspace.rs           Workspace and QueryWorkspace. Do not pack them into one struct
 src/gpr/                   one responsibility per file, no #[path]. Models import the shared layers above, never each other
   trainer.rs fitted.rs online.rs    Gpr, FittedGpr, OnlineGpr
