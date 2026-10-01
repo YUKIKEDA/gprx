@@ -754,6 +754,15 @@ impl<P: GpScalar> ExactFit<'_, P> {
                         iterations: opt.iterations as usize,
                     });
                 }
+                // The model holds the last θ the optimizer evaluated, which is
+                // not the result after restarts, a rejected annealing step, or
+                // a caller optimizer that searched past its best point.
+                if !self.holds_params(&opt.params)? {
+                    if let Err(err) = self.factor_at(&opt.params) {
+                        self.revert_theta(kernel_before, likelihood_before);
+                        return Err(err);
+                    }
+                }
                 Ok(())
             }
             Err(err) => {
@@ -761,6 +770,17 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 Err(err)
             }
         }
+    }
+
+    /// Whether the stored `θ` is bit-for-bit `params`.
+    fn holds_params(&mut self, params: &[f64]) -> Result<bool, GprError> {
+        let current = &mut self.store.buffers.core_mut().theta;
+        current.resize(params.len(), 0.0);
+        self.core.get_params(current)?;
+        Ok(current
+            .iter()
+            .zip(params)
+            .all(|(a, b)| a.to_bits() == b.to_bits()))
     }
 
     fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {

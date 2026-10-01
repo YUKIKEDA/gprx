@@ -1,6 +1,7 @@
 //! ARD rational quadratic kernel.
 
 use super::ard::{self, ArdR2, Pick};
+use super::dist::ArdSqDiff;
 use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::{
@@ -255,7 +256,7 @@ impl RationalQuadraticArdKernel {
 
     pub(crate) fn apply_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
@@ -266,18 +267,13 @@ impl RationalQuadraticArdKernel {
             out,
             self.lengthscales.num_params(),
             uplo,
-            |n, row, col| {
-                rq_value(
-                    ard::r2_from_cache(cache, n, row, col, w, Pick::NONE)?,
-                    alpha,
-                )
-            },
+            |row, col| rq_value(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?, alpha),
         )
     }
 
     pub(crate) fn grad_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -286,8 +282,8 @@ impl RationalQuadraticArdKernel {
         ard::require_param(NAME, param_idx, d + 1)?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_cache(cache, d_k, d, uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::one(param_idx))?;
+        ard::write_from_cache(cache, d_k, d, uplo, |row, col| {
+            let t = ard::r2_from_cache(cache, row, col, w, Pick::one(param_idx))?;
             rq_grad(t, alpha, param_idx == d)
         })
     }
@@ -319,7 +315,7 @@ impl RationalQuadraticArdKernel {
 
     pub(crate) fn hess_from_sq_diff<T: KernelScalar>(
         &self,
-        cache: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,
@@ -329,8 +325,8 @@ impl RationalQuadraticArdKernel {
         ard::require_param_pair(NAME, i, j, d + 1)?;
         let w = self.lengthscales.inv_ell_sq();
         let alpha = T::from_f64(self.alpha());
-        ard::write_from_cache(cache, d2_k, d, uplo, |n, row, col| {
-            let t = ard::r2_from_cache(cache, n, row, col, w, Pick::pair(i, j))?;
+        ard::write_from_cache(cache, d2_k, d, uplo, |row, col| {
+            let t = ard::r2_from_cache(cache, row, col, w, Pick::pair(i, j))?;
             rq_hess(t, alpha, (i, j), d)
         })
     }
