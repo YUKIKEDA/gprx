@@ -8,7 +8,7 @@
 //! not allocate worker scratch that a multi-thread pool would.
 
 mod common;
-use common::rng::{open_unit, small_rng};
+use common::rng::{open_unit, seeded_rng};
 use gprx::Adam;
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
 use gprx::{
@@ -94,8 +94,8 @@ const M_SPARSE: usize = 32;
 const MAX_SPARSE_ALLOCS: [(&str, usize); 5] = [
     ("sgpr_mll_and_grad", 19),
     ("sgpr_hessian", 111),
-    ("online_sgpr_insert", 10),
-    ("online_sgpr_insert_nested", 18),
+    ("online_sgpr_insert", 8),
+    ("online_sgpr_insert_nested", 16),
     ("svgp_mll_and_grad", 20),
 ];
 
@@ -124,7 +124,7 @@ fn ensure_one_rayon_worker() {
 }
 
 fn fill_column_major(n: usize, d: usize, seed: u64) -> Vec<f64> {
-    let mut rng = small_rng(seed);
+    let mut rng = seeded_rng(seed);
     let mut x = vec![0.0; n * d];
     for col in 0..d {
         for row in 0..n {
@@ -139,7 +139,7 @@ fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let gpr = Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -192,7 +192,7 @@ fn fast_approx_mll_and_grad_allocs_after_workspace() {
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let mut gpr = Gpr::new(kernel, likelihood)
         .with_math(KernelExp::FastApprox)
@@ -235,7 +235,7 @@ where
     let kernel = KernelSpec::from(RbfKernel::new(ELL)?);
     let likelihood = GaussianLikelihood::new(NOISE)?;
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let gpr = Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -322,7 +322,7 @@ fn incremental_leaf_step_allocs_after_warmup() {
         + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let x = fill_column_major(N, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     Gpr::new(kernel, likelihood)
         .with_optimizer(LeafStepProbe)
@@ -361,7 +361,7 @@ fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
     ensure_one_rayon_worker();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let x = fill_column_major(n, D, SEED);
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
     Gpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
@@ -438,7 +438,7 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
     ensure_one_rayon_worker();
     let x = fill_column_major(N, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let x_new: Vec<f64> = (0..D).map(|dim| 0.1 * dim as f64).collect();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
@@ -532,7 +532,7 @@ fn sparse_predict_counts<P: GpScalar>(
     let x = fill_column_major(N, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..N).map(|_| open_unit(&mut rng)).collect();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
     let mut pred = Prediction::default();
@@ -652,13 +652,18 @@ fn sparse_predict_into_allocs_after_warmup() {
 /// rebuilt `A` and the tangents of every point.
 const MAX_SVGP_STEP_BYTES_GROWTH: f64 = 1.25;
 
+/// Bytes per step the growth check tolerates on top of the ratio. A step now
+/// allocates nothing (#353), so the ratio alone would fail on one stray
+/// allocation from the thread pool spread over the steps.
+const SVGP_STEP_BYTES_SLACK: f64 = 1024.0;
+
 /// Bytes of one `Svgp::fit` with `epochs` epochs of mini-batches of 32.
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
     ensure_one_rayon_worker();
     let x = fill_column_major(n, D, SEED);
     let z = fill_column_major(M_SPARSE, D, SEED.wrapping_add(2));
-    let mut rng = small_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
     let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let adam = Adam::new()
@@ -694,7 +699,56 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
     let large = svgp_step_bytes(4096);
     eprintln!("svgp step bytes: n=512 {small:.0}, n=4096 {large:.0}");
     assert!(
-        large <= MAX_SVGP_STEP_BYTES_GROWTH * small,
+        large <= MAX_SVGP_STEP_BYTES_GROWTH * small + SVGP_STEP_BYTES_SLACK,
         "an Adam step allocates {large:.0} bytes at n=4096 and {small:.0} at n=512: it scales with n"
     );
+}
+
+/// Allocations one more Adam epoch adds to `Svgp::fit` (64 points, batches
+/// of 8: eight steps per epoch), by kernel. RBF-ARD's own kernel routines
+/// still build small working vectors per call (#167 removes them). Do not
+/// raise without an Issue.
+const MAX_SVGP_ADAM_EPOCH_ALLOCS: [(&str, usize); 3] =
+    [("rbf", 0), ("rbf_ard", 80), ("constant_times_rbf", 0)];
+
+#[test]
+fn svgp_adam_epoch_allocs() {
+    let _guard = alloc_lock();
+    let n = 64;
+    let x: Vec<f64> = (0..n * 2)
+        .map(|i| (i % n) as f64 / 8.0 + (i / n) as f64)
+        .collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 / 8.0).sin()).collect();
+    let z: Vec<f64> = (0..16).map(|i| (i % 8) as f64 + (i / 8) as f64).collect();
+    let kernels = [
+        KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
+        KernelSpec::from(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell")),
+        KernelSpec::from(ConstantKernel::new(1.5).expect("c"))
+            * KernelSpec::from(RbfKernel::new(ELL).expect("ell")),
+    ];
+    for ((label, cap), kernel) in MAX_SVGP_ADAM_EPOCH_ALLOCS.iter().zip(kernels) {
+        let fit = |epochs: u64| {
+            allocs_in(|| {
+                let fitted =
+                    Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1).expect("noise"))
+                        .with_optimizer(
+                            Adam::new()
+                                .with_batch_size(NonZeroUsize::new(8).expect("8"))
+                                .with_epochs(NonZeroU64::new(epochs).expect("epochs")),
+                        )
+                        .fit(&x, n, 2, &y, &z, 8)
+                        .map_err(|(_, e)| e)
+                        .expect("fit");
+                std::hint::black_box(fitted);
+            })
+        };
+        // Warm the thread pool, then take the least of a few differences: the
+        // counter sees the whole process, not only this fit.
+        fit(1);
+        let per_epoch = (0..3)
+            .map(|_| fit(3).saturating_sub(fit(1)) / 2)
+            .min()
+            .unwrap_or(usize::MAX);
+        assert_alloc_cap(&format!("svgp_adam_epoch_{label}"), per_epoch, *cap);
+    }
 }

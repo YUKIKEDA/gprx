@@ -14,7 +14,7 @@
   model.safetensors    数値: X、y、そして（モデルによって）Z、q(u)、L、α
 ```
 
-`save` は、`<dir>`（と親）が無ければ作り、2 つのファイルを上書きする。それ以外は書かない。ソルバーと Cholesky のバッファの方針は保存しない。読み込んだモデルは `Fixed` で、`CholeskyBuffer::Retain` になる。もう一度学習するには、型のついたモデルで `with_optimizer` を呼んでから `refit` する。
+`save` は、`<dir>`（と親）が無ければ作り、2 つのファイルを置き換える。各ファイルは `<dir>` の一時ファイルに書いてから名前を付け替える（rename）。`model.safetensors` が先、`config.json` が最後である。読む側には古いファイルか新しいファイルのどちらかが見え、途中で失敗した保存は前の `config.json` を残す。それ以外は残さない。ソルバーと Cholesky のバッファの方針は保存しない。読み込んだモデルは `Fixed` で、`CholeskyBuffer::Retain` になる。もう一度学習するには、型のついたモデルで `with_optimizer` を呼んでから `refit` する。
 
 ## 2. ディレクトリの中身はどのモデルか
 
@@ -27,7 +27,7 @@
 | `online_sgpr` | `OnlineSgpr::save` | `LoadedSgpr::load` | `m`、`point_ids`、`next_point_id`、`inducing_ids`、`next_inducing_id` | `x`、`y`、`z`、`z_train` |
 | `svgp` | `FittedSvgp::save` | `LoadedSvgp::load` | `m` | `x`、`y`、`z`、`z_train`、`q_mean`、`q_l` |
 
-間違ったローダーで読むと、`GprError::PersistFailed` で断られ、メッセージに正しいローダーの名前が入る（例: "config.json holds a svgp model; load it with LoadedSvgp::load"）。`LoadedGpr::load` も同じ。
+間違ったローダーで読むと、`GprError::PersistFailed`（`kind: WrongModel`）で断られ、メッセージに正しいローダーの名前が入る（例: "config.json holds a svgp model; load it with LoadedSvgp::load"）。`LoadedGpr::load` も同じ。
 
 ## 3. Exact の `config.json`
 
@@ -180,9 +180,9 @@ enum は serde の外部タグで、名前は `snake_case`。フィールドの�
 `custom` の項目は、`persist_id` と `state`（その型が選んだ任意の JSON）を持つ。読み込みでは、`PersistRegistry` が `persist_id` を、その種類の復元関数に引き戻す。種類は、カーネル、学習前の入力の変換、学習後の入力の変換、学習前の目的変数の変換、学習後の目的変数の変換の 5 つ。`load` の前に登録する: `register_kernel`、`register_unfitted_input`、`register_fitted_input`、`register_unfitted_target`、`register_fitted_target`。
 
 - 組み込みのカーネルと変換は、上の閉じたタグを使い、登録しない。
-- `persist_id` は空でなく、`gprx.`（`RESERVED_PREFIX`）で始まってはならない。`save` と `register_*` のどちらも、`PersistFailed` で断る。
-- 読み込みで、復元が登録されていない `persist_id` は `PersistFailed`。同じ種類に同じ `persist_id` を 2 回登録しても `PersistFailed`。
-- `persist_id` を実装していない `custom` のカーネルや変換を `save` すると `PersistFailed`。
+- `persist_id` は空でなく、`gprx.`（`RESERVED_PREFIX`）で始まってはならない。`save` と `register_*` のどちらも、`PersistFailed`（`kind: InvalidPersistId`）で断る。
+- 読み込みで、復元が登録されていない `persist_id` は `PersistFailed`（`kind: UnregisteredId`）。同じ種類に同じ `persist_id` を 2 回登録すると `PersistFailed`（`kind: InvalidPersistId`）。
+- `persist_id` を実装していない `custom` のカーネルや変換を `save` すると `PersistFailed`（`kind: NotPersistable`）。
 
 ## 6. `model.safetensors`
 
@@ -228,7 +228,7 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 | 呼び出し | `has_factor` | テンソル | 読み込み |
 | --- | --- | --- | --- |
 | `save`（Exact） | `false` | `x`、`y` | 保存した `θ` で Gram 行列を作り、分解し（保存した `jitter` の方針で再試行する）、`α` を解く。`O(n³)` |
-| `save_with_factor`（Exact） | `true` | `x`、`y`、`l`、`alpha` | 分解を省く。`F64` の因子はメモリマップする（モデルが生きている間ファイルを変えないこと。テンソルのバイト列は 8 バイトに揃っていること。揃っていなければ `PersistFailed`）。`F32` の因子はコピーして取り出す |
+| `save_with_factor`（Exact） | `true` | `x`、`y`、`l`、`alpha` | 分解を省く。`F64` の因子はメモリマップする（同じディレクトリへの gprx の保存は新しいファイルを rename で置くので、マップ中のファイルには触れない。モデルが生きている間、他のプログラムがファイルをその場で書き換えないこと。テンソルのバイト列は 8 バイトに揃っていること。揃っていなければ `PersistFailed`）。`F32` の因子はコピーして取り出す |
 | `save`（`sgpr`、`online_sgpr`、`svgp`） | 書かない | 6.2 節 | 保存した学習後の変換を `x` にかけ、保存した `θ` と `z_train` で `K_mm` を分解し、VFE の系を組み直す（`sgpr`）。または `q` を検査して `A` と `k_diag` を組み直す（`svgp`） |
 
 `ldlt` と `online_sgpr` では、保存した id を復元するので、次の `insert` は、`save` の前に返したはずの id を返す。
@@ -241,12 +241,12 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 
 | 状況 | エラー |
 | --- | --- |
-| ファイルを読み書きできない、JSON として不正、テンソルが無い、形か dtype が違う、テンソルが揃っていない、`model` に対してローダーが違う、`point_ids` の長さが違う、登録されていない、または予約された `persist_id`、`q` が不正 | `GprError::PersistFailed(message)` |
+| ファイルを読み書きできない、JSON として不正、テンソルが無い、形か dtype が違う、テンソルが揃っていない、`model` に対してローダーが違う、`point_ids` の長さが違う、登録されていない、または予約された `persist_id`、`q` が不正 | `GprError::PersistFailed { kind, reason }`: `Io`（読み書き）、`Config`（JSON、キー、`point_ids`）、`Tensor`（テンソル、`q`）、`WrongModel`、`UnregisteredId`、`InvalidPersistId`、`NotPersistable` |
 | `format_version` が `1` でない | `GprError::UnsupportedPersistVersion` |
 | `n`、`d`、（Sparse の）`m` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |
 
-ディレクトリは、信頼できる入力として扱う。自分で書いていないディレクトリを読むことに関する、開いている Issue が 2 つある: `sum` / `product` / `pipeline` の木の再帰の深さ（[#151](https://github.com/YUKIKEDA/gprx/issues/151)）と、保存した `x`、`y`、`alpha`、`l` が有限かどうか（[#154](https://github.com/YUKIKEDA/gprx/issues/154)）。読み込みが検査するのは、形と dtype、および `q` の有限性と下三角であること。
+ディレクトリは、信頼できる入力として扱う。JSON パーサーの上限（配列とオブジェクトの入れ子 128 段）より深い `sum` / `product` / `pipeline` / `columnwise` の木は、デコードの前に `PersistFailed` になる。読み込みが検査するのは、形と dtype、保存したテンソルがすべて有限であること（`NaN` や `±∞` は `PersistFailed`）、および `q` の有限性と下三角であること。
 
 ## 9. gprx なしでファイルを読む
 

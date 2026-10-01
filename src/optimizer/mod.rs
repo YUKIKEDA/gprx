@@ -28,7 +28,7 @@ use std::num::NonZeroU32;
 pub use adam::Adam;
 pub use fsa::{BoundaryPolicy, FastSimulatedAnnealing};
 pub use lbfgs::Lbfgs;
-pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta};
+pub(crate) use logit::{chain_logit_grad, log_theta_to_z, z_to_log_theta_into};
 pub use neldermead::NelderMead;
 pub use trust_region::TrustRegion;
 
@@ -48,9 +48,49 @@ pub struct OptResult {
 /// Hyperparameter optimizer.
 ///
 /// `P` is the objective this algorithm can minimize. [`Lbfgs`]
-/// requires [`crate::Differentiable`] plus bounds. [`TrustRegion`]
-/// requires [`crate::TwiceDifferentiable`] plus bounds. [`NelderMead`]
-/// and [`FastSimulatedAnnealing`] require only [`crate::Objective`] plus bounds.
+/// requires [`crate::Differentiable`], [`TrustRegion`]
+/// [`crate::TwiceDifferentiable`], and [`NelderMead`] and
+/// [`FastSimulatedAnnealing`] only [`crate::Objective`]. Every one searches
+/// inside [`crate::Objective::fill_intervals`].
+///
+/// A user optimizer implements this generically over the capability it
+/// needs. It can read the intervals and call a built-in optimizer on the
+/// same objective:
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{
+///     Differentiable, GaussianLikelihood, Gpr, GprError, Interval, Lbfgs, NelderMead,
+///     OptResult, Optimizer,
+/// };
+///
+/// /// A short Nelder–Mead pass, then L-BFGS from its result.
+/// #[derive(Clone, Debug)]
+/// struct Polish;
+///
+/// impl<P: Differentiable> Optimizer<P> for Polish {
+///     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
+///         let mut intervals = vec![Interval::DEFAULT_POSITIVE; objective.num_params()];
+///         objective.fill_intervals(&mut intervals)?;
+///         let coarse = NelderMead::new()
+///             .with_max_iterations(20)
+///             .minimize(objective, init)?;
+///         Lbfgs::new().minimize(objective, &coarse.params)
+///     }
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
+/// let fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_optimizer(Polish)
+/// .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 0.8, 0.9, 0.1])
+/// .map_err(|(_, e)| e)?;
+/// assert!(fitted.neg_log_marginal_likelihood()?.is_finite());
+/// # Ok(())
+/// # }
+/// ```
 pub trait Optimizer<P: ?Sized> {
     /// Minimizes `objective` from `init` without taking ownership of `init`.
     ///
@@ -77,4 +117,50 @@ pub struct Fixed;
 struct Restarts {
     n: NonZeroU32,
     seed: u64,
+}
+
+/// The restart loop every built-in optimizer shares.
+///
+/// Checks `init`'s length, reads the intervals, runs once from
+/// `first_start(init)`, then once from each start `sample` draws with the
+/// restart seed. `run` receives `None` for the first run and `Some(k)` for
+/// restart `k` (1-based), and adds its result to the best so far. The first
+/// run's error is returned; a restart's error only drops that restart. Fails
+/// when no run produced a result.
+fn minimize_with_restarts<P: crate::objective::Objective + ?Sized>(
+    objective: &mut P,
+    init: &[f64],
+    restarts: Option<Restarts>,
+    first_start: impl FnOnce(&[f64], &[crate::param::Interval]) -> Result<Vec<f64>, GprError>,
+    mut sample: impl FnMut(
+        &[crate::param::Interval],
+        &mut crate::rng::SeededRng,
+    ) -> Result<Vec<f64>, GprError>,
+    mut run: impl FnMut(
+        &mut P,
+        &[crate::param::Interval],
+        &[f64],
+        Option<u64>,
+        &mut Option<OptResult>,
+    ) -> Result<(), GprError>,
+) -> Result<OptResult, GprError> {
+    let n = objective.num_params();
+    if init.len() != n {
+        return Err(GprError::LengthMismatch {
+            reason: format!("expected {n} parameters, got {}", init.len()),
+        });
+    }
+    let mut intervals = vec![crate::param::Interval::DEFAULT_POSITIVE; n];
+    objective.fill_intervals(&mut intervals)?;
+    let mut best: Option<OptResult> = None;
+    let start = first_start(init, &intervals)?;
+    run(objective, &intervals, &start, None, &mut best)?;
+    if let Some(restarts) = restarts {
+        let mut rng = crate::rng::seeded_rng(restarts.seed);
+        for restart in 1..=u64::from(restarts.n.get()) {
+            let start = sample(&intervals, &mut rng)?;
+            let _ = run(objective, &intervals, &start, Some(restart), &mut best);
+        }
+    }
+    best.ok_or(GprError::OptimizationNotConverged { iterations: 0 })
 }

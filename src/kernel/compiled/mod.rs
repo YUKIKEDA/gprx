@@ -6,6 +6,7 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
+use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::{Mat, MatMut, MatRef};
 
@@ -37,7 +38,7 @@ pub(crate) enum CoordMode {
 pub(crate) struct MixedKernelViews<'a, T = f64> {
     pub(crate) dist: MatRef<'a, T>,
     pub(crate) x: MatRef<'a, T>,
-    pub(crate) ard_cache: Option<MatRef<'a, T>>,
+    pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
 }
 
 impl<'a, T> MixedKernelViews<'a, T> {
@@ -72,6 +73,7 @@ impl<'a, T> MixedKernelViews<'a, T> {
 /// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum CompiledKernel<T: KernelScalar = f64> {
     /// Isotropic RBF.
     Rbf(RbfKernel),
@@ -592,6 +594,16 @@ pub(crate) type Nested<T> = [Mat<T>];
 
 /// Grows `levels` to `depth` buffers of at least `rows × cols`. Allocates
 /// only when a level is missing or too small.
+/// [`ensure_nested`] at the depth `compiled` needs.
+pub(crate) fn ensure_nested_levels<T: KernelScalar>(
+    levels: &mut Vec<Mat<T>>,
+    compiled: &CompiledKernel<T>,
+    rows: usize,
+    cols: usize,
+) {
+    ensure_nested(levels, compiled.nested_depth(), rows, cols);
+}
+
 pub(crate) fn ensure_nested<T: KernelScalar>(
     levels: &mut Vec<Mat<T>>,
     depth: usize,
