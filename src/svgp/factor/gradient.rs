@@ -16,7 +16,9 @@
 use super::assemble::q_param_len;
 use crate::error::GprError;
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
-use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower};
+use crate::linalg::{
+    dot_f64x4, frobenius_dot, gemm, norm2_f64x4, solve_lower, solve_lower_transpose,
+};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseScratch, view};
 use crate::svgp::FittedSvgp;
@@ -40,8 +42,12 @@ pub(crate) struct GradBuffers {
     d_kmm: Mat<f64>,
     d_kdiag: Vec<f64>,
     d_kzx: Mat<f64>,
-    d_l: Mat<f64>,
-    lt: Mat<f64>,
+    /// `G`, then the weight `L⁻ᵀ G` on `∂K(Z, X_b)` (`m × b`).
+    w_mn: Mat<f64>,
+    /// `G Aᵀ`, then the weight on `∂K_mm` (`m × m`).
+    w_mm: Mat<f64>,
+    /// `tril½(G Aᵀ)` through `L⁻ᵀ` (`m × m`).
+    half: Mat<f64>,
     ard: Vec<Mat<f64>>,
     /// `K(X, X)` or its derivative when `X` equals `Z` (`n = m`).
     full: Mat<f64>,
@@ -65,8 +71,9 @@ impl Default for GradBuffers {
             d_kmm: Mat::new(),
             d_kdiag: Vec::new(),
             d_kzx: Mat::new(),
-            d_l: Mat::new(),
-            lt: Mat::new(),
+            w_mn: Mat::new(),
+            w_mm: Mat::new(),
+            half: Mat::new(),
             ard: Vec::new(),
             full: Mat::new(),
             ks: KernelScratch::new(),
@@ -137,8 +144,9 @@ where
         d_kmm,
         d_kdiag,
         d_kzx,
-        d_l,
-        lt,
+        w_mn,
+        w_mm,
+        half,
         ard,
         full,
         ks,
@@ -221,6 +229,21 @@ where
         scale,
     );
     out[n_kernel] = -scale * (-0.5 * b as f64 + 0.5 * inv_noise * resid2_var);
+    let (w_mm, w_mn) = adjoint_weights(
+        AdjointInputs {
+            k_mm_l,
+            a,
+            u,
+            q_l: model.q_l.as_ref(),
+            q_mean: &model.q_mean,
+            resid,
+            inv_noise,
+        },
+        view(w_mm, m, m),
+        view(w_mn, m, b),
+        view(half, m, m),
+    );
+    let (w_mm, w_mn) = (w_mm.into_const(), w_mn.into_const());
     let ard_ready = match compiled {
         CompiledKernel::RbfArd(leaf) if !same_points => {
             leaf.grad_cross_all_from_coords_into::<M>(z, x, ard)?;
@@ -238,7 +261,7 @@ where
             param_idx,
             Triangle::Full,
         )?;
-        let mut d_a = if same_points {
+        let d_kzx = if same_points {
             let mut grad_full = view(full, n, n);
             ks.grad::<M>(
                 compiled,
@@ -252,41 +275,20 @@ where
             }
             let mut cross = view(d_kzx, m, b);
             copy_columns(grad_full.as_ref(), batch, cross.as_mut());
-            cross
+            cross.into_const()
         } else if ard_ready {
             compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
-            ard[param_idx].as_mut().submatrix_mut(0, 0, m, b)
+            ard[param_idx].as_ref().submatrix(0, 0, m, b)
         } else {
             compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
             let mut cross = view(d_kzx, m, b);
             ks.grad_cross::<M>(compiled, z, x, cross.as_mut(), param_idx)?;
-            cross
+            cross.into_const()
         };
-        let mut d_l = view(d_l, m, m);
-        d_l.fill(0.0);
-        cholesky_sensitivity(k_mm_l, d_kmm.as_ref(), d_l.as_mut(), m);
-        // Upper of `d_l` stays zero, so this is the lower-triangular product.
-        gemm(d_a.as_mut(), Accum::Add, d_l.as_ref(), a, -1.0);
-        solve_lower(k_mm_l, d_a.as_mut());
-        let mut lt = view(lt, m, b);
-        gemm(
-            lt.as_mut(),
-            Accum::Replace,
-            model.q_l.transpose(),
-            d_a.as_ref(),
-            1.0,
-        );
-        out[param_idx] = -scale
-            * kernel_param_term(
-                d_a.as_ref(),
-                a,
-                u,
-                lt.as_ref(),
-                d_kdiag,
-                resid,
-                &model.q_mean,
-                inv_noise,
-            );
+        let d_kdiag_sum: f64 = d_kdiag.iter().sum();
+        let g = frobenius_dot(w_mm, d_kmm.as_ref()) + frobenius_dot(w_mn, d_kzx)
+            - 0.5 * inv_noise * d_kdiag_sum;
+        out[param_idx] = -scale * g;
     }
     Ok(kl - scale * ell)
 }
@@ -448,71 +450,78 @@ fn accumulate_data_q_grad(
     (ell, resid2_var)
 }
 
-/// `Σ_b inv_noise · resid · ∂μ − ½ inv_noise · ∂var` for one kernel `θ`.
-#[allow(clippy::too_many_arguments)]
-fn kernel_param_term(
-    d_a: MatRef<'_, f64>,
-    a: MatRef<'_, f64>,
-    u: MatRef<'_, f64>,
-    lt: MatRef<'_, f64>,
-    d_kdiag: &[f64],
-    resid: &[f64],
-    q_mean: &[f64],
+/// What [`adjoint_weights`] reads.
+struct AdjointInputs<'a> {
+    k_mm_l: MatRef<'a, f64>,
+    a: MatRef<'a, f64>,
+    u: MatRef<'a, f64>,
+    q_l: MatRef<'a, f64>,
+    q_mean: &'a [f64],
+    resid: &'a [f64],
     inv_noise: f64,
-) -> f64 {
-    let m = a.nrows();
-    let mut g = 0.0;
-    if let (Some(da_cm), Some(a_cm), Some(u_cm), Some(lt_cm)) = (
-        ColMajor::new(d_a),
-        ColMajor::new(a),
-        ColMajor::new(u),
-        ColMajor::new(lt),
-    ) {
-        for (b_idx, &d_kdiag_b) in d_kdiag.iter().enumerate() {
-            let da_col = da_cm.col(b_idx);
-            let dmu = dot_f64x4(da_col, q_mean);
-            let d_anorm = 2.0 * dot_f64x4(a_cm.col(b_idx), da_col);
-            let d_lt = 2.0 * dot_f64x4(u_cm.col(b_idx), lt_cm.col(b_idx));
-            let dvar = d_kdiag_b - d_anorm + d_lt;
-            g += inv_noise * resid[b_idx] * dmu - 0.5 * inv_noise * dvar;
-        }
-    } else {
-        for (b_idx, &d_kdiag_b) in d_kdiag.iter().enumerate() {
-            let mut dmu = 0.0;
-            let mut d_anorm = 0.0;
-            let mut d_lt = 0.0;
-            for r in 0..m {
-                let da_r = d_a[(r, b_idx)];
-                dmu += da_r * q_mean[r];
-                d_anorm += 2.0 * a[(r, b_idx)] * da_r;
-                d_lt += 2.0 * u[(r, b_idx)] * lt[(r, b_idx)];
-            }
-            let dvar = d_kdiag_b - d_anorm + d_lt;
-            g += inv_noise * resid[b_idx] * dmu - 0.5 * inv_noise * dvar;
-        }
-    }
-    g
 }
 
-fn cholesky_sensitivity(
-    l: MatRef<'_, f64>,
-    d_k: MatRef<'_, f64>,
-    mut d_l: MatMut<'_, f64>,
-    m: usize,
-) {
-    for j in 0..m {
-        let mut acc = d_k[(j, j)];
-        for k in 0..j {
-            acc -= 2.0 * l[(j, k)] * d_l[(j, k)];
-        }
-        d_l[(j, j)] = acc / (2.0 * l[(j, j)]);
-        for i in j + 1..m {
-            let mut acc = d_k[(i, j)];
-            for k in 0..j {
-                acc -= d_l[(i, k)] * l[(j, k)] + l[(i, k)] * d_l[(j, k)];
-            }
-            acc -= l[(i, j)] * d_l[(j, j)];
-            d_l[(i, j)] = acc / l[(j, j)];
+/// The batch term's derivative as weights on the kernel matrices: for any
+/// kernel direction, `g = ⟨w_mm, ∂K_mm⟩ + ⟨w_mn, ∂K(Z, X_b)⟩ − Σ ∂k_diag / (2σ²)`.
+///
+/// `g` moves with `A_b` as `⟨G, dA⟩` for `G = (m residᵀ + A_b − L_q U) / σ²`
+/// (`U = L_qᵀ A_b`), and `dA = L⁻¹ ∂K(Z, X_b) − Φ_L A_b` with
+/// `Φ = L⁻¹ ∂K_mm L⁻ᵀ` and `Φ_L` its lower triangle with the diagonal
+/// halved. So `w_mn = L⁻ᵀ G` and `w_mm = −sym(L⁻ᵀ tril½(G A_bᵀ) L⁻¹)`,
+/// formed once per step in `O(m² b)`; each parameter is then `O(m² + m b)`.
+fn adjoint_weights<'a>(
+    inputs: AdjointInputs<'_>,
+    mut w_mm: MatMut<'a, f64>,
+    mut w_mn: MatMut<'a, f64>,
+    mut half: MatMut<'_, f64>,
+) -> (MatMut<'a, f64>, MatMut<'a, f64>) {
+    let AdjointInputs {
+        k_mm_l,
+        a,
+        u,
+        q_l,
+        q_mean,
+        resid,
+        inv_noise,
+    } = inputs;
+    let m = a.nrows();
+    gemm(w_mn.as_mut(), Accum::Replace, q_l, u, -inv_noise);
+    for (j, &r) in resid.iter().enumerate() {
+        for i in 0..m {
+            w_mn[(i, j)] += inv_noise * (q_mean[i] * r + a[(i, j)]);
         }
     }
+    gemm(
+        w_mm.as_mut(),
+        Accum::Replace,
+        w_mn.as_ref(),
+        a.transpose(),
+        1.0,
+    );
+    solve_lower_transpose(k_mm_l, w_mn.as_mut());
+    for j in 0..m {
+        for i in 0..m {
+            half[(i, j)] = match i.cmp(&j) {
+                std::cmp::Ordering::Greater => w_mm[(i, j)],
+                std::cmp::Ordering::Equal => 0.5 * w_mm[(i, j)],
+                std::cmp::Ordering::Less => 0.0,
+            };
+        }
+    }
+    // `L⁻ᵀ T`, transposed into `w_mm`, then `L⁻ᵀ (L⁻ᵀ T)ᵀ = (L⁻ᵀ T L⁻¹)ᵀ`.
+    solve_lower_transpose(k_mm_l, half.as_mut());
+    for j in 0..m {
+        for i in 0..m {
+            w_mm[(i, j)] = half[(j, i)];
+        }
+    }
+    solve_lower_transpose(k_mm_l, w_mm.as_mut());
+    for j in 0..m {
+        for i in j..m {
+            let sym = -0.5 * (w_mm[(i, j)] + w_mm[(j, i)]);
+            w_mm[(i, j)] = sym;
+            w_mm[(j, i)] = sym;
+        }
+    }
+    (w_mm, w_mn)
 }
