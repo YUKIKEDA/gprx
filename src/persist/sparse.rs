@@ -249,6 +249,7 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// # }
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LoadedSgpr {
     /// [`crate::DoublePrecision`] model.
     Double(FittedSgpr<Fixed>),
@@ -452,6 +453,7 @@ impl LoadedSgpr {
 /// # }
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LoadedSvgp {
     /// [`crate::DoublePrecision`] model.
     Double(FittedSvgp),

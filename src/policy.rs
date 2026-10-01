@@ -28,6 +28,7 @@ use crate::error::GprError;
 /// # }
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum DistanceCachePolicy {
     /// Fill once per fit and reuse (the speed pole).
     #[default]
@@ -75,6 +76,7 @@ pub enum CholeskyBuffer {
 /// ([`crate::FastApprox`]); fit and predict use the same one.
 /// Hyperparameter `exp(θ)` is unchanged.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum KernelExp {
     /// Exact libm / SIMD `exp`.
     #[default]
@@ -138,6 +140,7 @@ pub(crate) use with_kernel_exp;
 /// # }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum JitterPolicy {
     /// Retry the failed factor with this non-negative `j` on the diagonal.
     Fixed(FixedJitter),
