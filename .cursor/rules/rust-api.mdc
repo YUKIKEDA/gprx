@@ -17,6 +17,7 @@ Source: [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/checkli
 - `Send + Sync` on public GPR types unless a later design says otherwise.
 - Prefer `pub(crate)` and crate-private modules. Public surface is listed in `layout.mdc`. Do not `pub use` faer types. Mutually exclusive options are types, not ignored fields (`.cursor/rules/types.mdc`).
 - Hot-path functions take views (`MatRef`/`MatMut`/`&[T]`/`&mut [T]`), not owned `Mat`/`Vec` the callee will not store. In-place out-params: `foo_into(..., out: &mut [T])`.
+- A public enum whose set can grow (errors, loaded-model kinds, kernel leaves, policies) is `#[non_exhaustive]`. A closed set (`Triangle`, `MaternNu`) is not. The list is in `docs/design.md` §10.
 - Feature names: no placeholders (`fast`, `experimental` as the only name). Phase 1 has no features unless M0 needs one.
 
 ```rust

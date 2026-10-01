@@ -1,5 +1,6 @@
 //! Save and load a fitted GPR directory (`config.json` + `model.safetensors`).
 
+mod atomic;
 mod config;
 mod kernel;
 mod registry;
@@ -93,6 +94,7 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// # }
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum LoadedGpr {
     /// [`crate::DoublePrecision`] model.
     Double(FittedGpr<Fixed>),
@@ -285,6 +287,12 @@ pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precisio
     pub factor_jitter: f64,
 }
 
+/// Writes `config.json` last, after the tensors it describes, so a save
+/// that fails part way never leaves a new config over old tensors.
+fn write_config(dir: &Path, json: &[u8]) -> Result<(), GprError> {
+    atomic::write_atomic(&dir.join(CONFIG_FILE), json)
+}
+
 pub(crate) fn persist_err(reason: impl Into<String>) -> GprError {
     GprError::PersistFailed {
         reason: reason.into(),
@@ -316,6 +324,67 @@ where
     })
 }
 
+/// What an Exact save writes, read from either Exact model. The two models
+/// differ only in the factor kind, the point ids, and where the factor lives.
+struct ExactSave<'a> {
+    n: usize,
+    d: usize,
+    kind: crate::precision::PersistKind,
+    factor_kind: FactorKind,
+    policies: Policies,
+    kernel: &'a KernelSpec,
+    likelihood: &'a GaussianLikelihood,
+    factor_jitter: f64,
+    x_unfitted: &'a dyn UnfittedTransform,
+    y_unfitted: &'a dyn UnfittedTarget,
+    x_transform: &'a dyn Transform,
+    y_transform: &'a dyn TargetTransform,
+    point_ids: Option<(Vec<u64>, u64)>,
+    x: &'a [f64],
+    y: &'a [f64],
+    factor: Option<PackedFactor>,
+}
+
+/// Writes the tensors, then `config.json`, of an Exact model.
+fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
+    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
+    let (point_ids, next_point_id) = match save.point_ids {
+        Some((ids, next)) => (Some(ids), Some(next)),
+        None => (None, None),
+    };
+    let config = ModelConfig {
+        format_version: FORMAT_VERSION,
+        n: save.n,
+        d: save.d,
+        has_factor: save.factor.is_some(),
+        factor_kind: save.factor_kind,
+        precision: PrecisionJson::from_persist(save.kind),
+        residual: ResidualJson::from_persist(save.kind),
+        math: MathJson::encode(save.policies.math),
+        kernel: KernelJson::encode(save.kernel)?,
+        likelihood: LikelihoodJson::encode(save.likelihood),
+        jitter: JitterJson::encode(save.policies.jitter),
+        factor_jitter: save.factor_jitter,
+        distance_cache: Some(DistanceCacheJson::encode(save.policies.distance_cache)),
+        x_unfitted: encode_unfitted_input(save.x_unfitted)?,
+        y_unfitted: encode_unfitted_target(save.y_unfitted)?,
+        x_transform: encode_fitted_input(save.x_transform)?,
+        y_transform: encode_fitted_target(save.y_transform)?,
+        point_ids,
+        next_point_id,
+    };
+    let json = serde_json::to_vec_pretty(&config)
+        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
+    let factor_refs = save.factor.as_ref().map(|packed| FactorBytes {
+        l_dtype: packed.l_dtype,
+        l: packed.l.as_slice(),
+        alpha_dtype: packed.alpha_dtype,
+        alpha: packed.alpha.as_slice(),
+    });
+    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs)?;
+    write_config(dir, &json)
+}
+
 pub(crate) fn save_fitted<O, P>(
     model: &FittedGpr<O, P>,
     dir: &Path,
@@ -324,46 +393,32 @@ pub(crate) fn save_fitted<O, P>(
 where
     P: crate::precision::GpScalar,
 {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
-    let kind = P::persist_kind();
-    let config = ModelConfig {
-        format_version: FORMAT_VERSION,
-        n: model.n(),
-        d: model.d(),
-        has_factor: with_factor,
-        factor_kind: FactorKind::Llt,
-        precision: PrecisionJson::from_persist(kind),
-        residual: ResidualJson::from_persist(kind),
-        math: MathJson::encode(model.policies().math),
-        kernel: KernelJson::encode(model.kernel())?,
-        likelihood: LikelihoodJson::encode(model.likelihood()),
-        jitter: JitterJson::encode(model.policies().jitter),
-        factor_jitter: model.factor_jitter(),
-        distance_cache: Some(DistanceCacheJson::encode(model.policies().distance_cache)),
-        x_unfitted: encode_unfitted_input(model.x_unfitted())?,
-        y_unfitted: encode_unfitted_target(model.y_unfitted())?,
-        x_transform: encode_fitted_input(model.x_transform())?,
-        y_transform: encode_fitted_target(model.y_transform())?,
-        point_ids: None,
-        next_point_id: None,
-    };
-    let config_path = dir.join(CONFIG_FILE);
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
-    let packed = if with_factor {
+    let factor = if with_factor {
         Some(pack_saved_factor(model.chol_l(), model.alpha())?)
     } else {
         None
     };
-    let factor_refs = packed.as_ref().map(|packed| FactorBytes {
-        l_dtype: packed.l_dtype,
-        l: packed.l.as_slice(),
-        alpha_dtype: packed.alpha_dtype,
-        alpha: packed.alpha.as_slice(),
-    });
-    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
+    save_exact(
+        dir,
+        ExactSave {
+            n: model.n(),
+            d: model.d(),
+            kind: P::persist_kind(),
+            factor_kind: FactorKind::Llt,
+            policies: model.policies(),
+            kernel: model.kernel(),
+            likelihood: model.likelihood(),
+            factor_jitter: model.factor_jitter(),
+            x_unfitted: model.x_unfitted(),
+            y_unfitted: model.y_unfitted(),
+            x_transform: model.x_transform(),
+            y_transform: model.y_transform(),
+            point_ids: None,
+            x: model.x(),
+            y: model.y(),
+            factor,
+        },
+    )
 }
 
 pub(crate) fn save_online<O, P>(
@@ -374,46 +429,32 @@ pub(crate) fn save_online<O, P>(
 where
     P: crate::precision::GpScalar,
 {
-    std::fs::create_dir_all(dir).map_err(|err| persist_err(format!("create {dir:?}: {err}")))?;
-    let kind = P::persist_kind();
-    let config = ModelConfig {
-        format_version: FORMAT_VERSION,
-        n: model.n(),
-        d: model.d(),
-        has_factor: with_factor,
-        factor_kind: FactorKind::Ldlt,
-        precision: PrecisionJson::from_persist(kind),
-        residual: ResidualJson::from_persist(kind),
-        math: MathJson::encode(model.policies().math),
-        kernel: KernelJson::encode(model.kernel())?,
-        likelihood: LikelihoodJson::encode(model.likelihood()),
-        jitter: JitterJson::encode(model.policies().jitter),
-        factor_jitter: model.factor_jitter(),
-        distance_cache: Some(DistanceCacheJson::encode(model.policies().distance_cache)),
-        x_unfitted: encode_unfitted_input(model.x_unfitted())?,
-        y_unfitted: encode_unfitted_target(model.y_unfitted())?,
-        x_transform: encode_fitted_input(model.x_transform())?,
-        y_transform: encode_fitted_target(model.y_transform())?,
-        point_ids: Some(model.persist_point_ids()),
-        next_point_id: Some(model.persist_next_point_id()),
-    };
-    let config_path = dir.join(CONFIG_FILE);
-    let json = serde_json::to_vec_pretty(&config)
-        .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
-    let packed = if with_factor {
+    let factor = if with_factor {
         Some(pack_saved_factor(model.ld_factor(), model.alpha()?)?)
     } else {
         None
     };
-    let factor_refs = packed.as_ref().map(|packed| FactorBytes {
-        l_dtype: packed.l_dtype,
-        l: packed.l.as_slice(),
-        alpha_dtype: packed.alpha_dtype,
-        alpha: packed.alpha.as_slice(),
-    });
-    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
+    save_exact(
+        dir,
+        ExactSave {
+            n: model.n(),
+            d: model.d(),
+            kind: P::persist_kind(),
+            factor_kind: FactorKind::Ldlt,
+            policies: model.policies(),
+            kernel: model.kernel(),
+            likelihood: model.likelihood(),
+            factor_jitter: model.factor_jitter(),
+            x_unfitted: model.x_unfitted(),
+            y_unfitted: model.y_unfitted(),
+            x_transform: model.x_transform(),
+            y_transform: model.y_transform(),
+            point_ids: Some((model.persist_point_ids(), model.persist_next_point_id())),
+            x: model.x(),
+            y: model.y(),
+            factor,
+        },
+    )
 }
 
 fn apply_online_ids<O, P>(
@@ -429,32 +470,65 @@ where
     online.apply_persisted_ids(ids, *next_id)
 }
 
-/// `α` in the precision's refine scalar.
-fn read_alpha<P: crate::precision::GpScalar>(
-    dir: &Path,
-    n: usize,
-) -> Result<Vec<P::Refine>, GprError> {
-    read_scalars::<P::Refine>(
-        dir,
-        tensors::TENSOR_ALPHA,
-        &[n],
-        <P::Refine as ScalarOps>::DTYPE,
-    )
+/// The stored tensors of an Exact model, from one open of `model.safetensors`.
+struct ExactTensors<P: crate::precision::GpScalar> {
+    x_obs: Vec<f64>,
+    y_obs: Vec<f64>,
+    /// `α` in the precision's refine scalar, when the factor is stored.
+    alpha: Option<Vec<P::Refine>>,
+    owned_l: Option<faer::Mat<P::Storage>>,
+    mapped: Option<MappedTensors>,
 }
 
-/// `L` in the precision's storage scalar. An `f64` factor stays
-/// memory-mapped; an `f32` factor is copied out.
-#[allow(clippy::type_complexity)]
-fn read_factor<P: crate::precision::GpScalar>(
+/// Reads `x`, `y`, and the factor `α` / `L` in one open of the file.
+///
+/// An `f64` factor stays memory-mapped, so the file is mapped and the small
+/// tensors are copied out of the same map; otherwise it is read once.
+fn read_exact_tensors<P: crate::precision::GpScalar>(
     dir: &Path,
     n: usize,
-) -> Result<(Option<faer::Mat<P::Storage>>, Option<MappedTensors>), GprError> {
-    let dtype = <P::Storage as ScalarOps>::DTYPE;
-    if dtype == safetensors::Dtype::F64 {
-        Ok((None, Some(MappedTensors::open(dir, n)?)))
+    d: usize,
+    has_factor: bool,
+) -> Result<ExactTensors<P>, GprError> {
+    let storage = <P::Storage as ScalarOps>::DTYPE;
+    let map_l = has_factor && storage == safetensors::Dtype::F64;
+    let file = if map_l {
+        tensors::TensorFile::map(dir)?
     } else {
-        Ok((Some(read_matrix::<P::Storage>(dir, n, dtype)?), None))
-    }
+        tensors::TensorFile::read(dir)?
+    };
+    let (x_obs, y_obs, alpha, owned_l) = {
+        let tensors = file.tensors()?;
+        let (x_obs, y_obs) = read_xy(&tensors, n, d)?;
+        let alpha = if has_factor {
+            Some(read_scalars::<P::Refine>(
+                &tensors,
+                tensors::TENSOR_ALPHA,
+                &[n],
+                <P::Refine as ScalarOps>::DTYPE,
+            )?)
+        } else {
+            None
+        };
+        let owned_l = if has_factor && !map_l {
+            Some(read_matrix::<P::Storage>(&tensors, n, storage)?)
+        } else {
+            None
+        };
+        (x_obs, y_obs, alpha, owned_l)
+    };
+    let mapped = if map_l {
+        Some(file.into_mapped_l(n)?)
+    } else {
+        None
+    };
+    Ok(ExactTensors {
+        x_obs,
+        y_obs,
+        alpha,
+        owned_l,
+        mapped,
+    })
 }
 
 /// The [`LoadedGpr`] variants that hold precision `P`.
@@ -540,10 +614,14 @@ where
     let y_unfitted = config.y_unfitted.decode(registry)?;
     let x_transform = config.x_transform.decode(registry)?;
     let y_transform = config.y_transform.decode(registry)?;
-    let (x_obs, y_obs) = read_xy(dir, config.n, config.d)?;
-    if config.has_factor {
-        let alpha = read_alpha::<P>(dir, config.n)?;
-        let (owned_l, mapped) = read_factor::<P>(dir, config.n)?;
+    let ExactTensors {
+        x_obs,
+        y_obs,
+        alpha,
+        owned_l,
+        mapped,
+    } = read_exact_tensors::<P>(dir, config.n, config.d, config.has_factor)?;
+    if let Some(alpha) = alpha {
         let parts = PersistedModel {
             kernel,
             likelihood,
@@ -780,6 +858,313 @@ mod tests {
         let got = model.predict(&[0.25], 1, 1).expect("loaded predict");
         assert_close(got.mean[0], want.mean[0], TOL);
         assert_close(got.variance[0], want.variance[0], TOL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Overwrites the first value of the `f64` tensor `name` with `NaN`.
+    fn poison_tensor(dir: &std::path::Path, name: &str) {
+        let path = dir.join(super::TENSOR_FILE);
+        let mut bytes = std::fs::read(&path).expect("read");
+        let offset = {
+            let tensors = safetensors::SafeTensors::deserialize(&bytes).expect("header");
+            let data = tensors.tensor(name).expect("tensor").data();
+            data.as_ptr() as usize - bytes.as_ptr() as usize
+        };
+        bytes[offset..offset + 8].copy_from_slice(&f64::NAN.to_le_bytes());
+        std::fs::write(&path, bytes).expect("write");
+    }
+
+    #[test]
+    fn non_finite_stored_tensors_fail_to_load() {
+        for name in ["x", "y", "l", "alpha"] {
+            let dir = temp_dir("nan-tensor");
+            Gpr::new(
+                KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+                GaussianLikelihood::new(0.1).expect("noise"),
+            )
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.5, -1.0, 2.0])
+            .map_err(|(_, e)| e)
+            .expect("factor")
+            .save_with_factor(&dir)
+            .expect("save");
+            poison_tensor(&dir, name);
+            match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+                Err(GprError::PersistFailed { reason }) => {
+                    assert!(reason.contains("non-finite"), "{name}: {reason}");
+                    assert!(
+                        reason.contains(&format!("tensor {name} ")),
+                        "{name}: {reason}"
+                    );
+                }
+                other => panic!(
+                    "{name}: unexpected {:?}",
+                    other.err().map(|e| e.to_string())
+                ),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn non_finite_stored_sparse_tensor_fails_to_load() {
+        let dir = temp_dir("nan-sparse");
+        crate::Sgpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(
+            &[0.0, 1.0, 2.0, 3.0],
+            4,
+            1,
+            &[0.5, -1.0, 2.0, 0.0],
+            &[0.5, 2.5],
+            2,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .save(&dir)
+        .expect("save");
+        poison_tensor(&dir, "y");
+        match crate::LoadedSgpr::load(&dir, &PersistRegistry::new()) {
+            Err(GprError::PersistFailed { reason }) => {
+                assert!(reason.contains("non-finite"), "{reason}");
+            }
+            other => panic!("unexpected {:?}", other.err().map(|e| e.to_string())),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Swaps `data_min` and `data_max` in every object of `value` holding both.
+    fn swap_extrema(value: &mut serde_json::Value) -> usize {
+        let mut swapped = 0;
+        match value {
+            serde_json::Value::Object(map) => {
+                if let (Some(lo), Some(hi)) =
+                    (map.get("data_min").cloned(), map.get("data_max").cloned())
+                {
+                    map.insert("data_min".to_owned(), hi);
+                    map.insert("data_max".to_owned(), lo);
+                    swapped += 1;
+                }
+                for child in map.values_mut() {
+                    swapped += swap_extrema(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    swapped += swap_extrema(child);
+                }
+            }
+            _ => {}
+        }
+        swapped
+    }
+
+    #[test]
+    fn reversed_min_max_extrema_fail_to_load() {
+        for key in ["x_transform", "y_transform"] {
+            let dir = temp_dir("minmax-reversed");
+            Gpr::new(
+                KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+                GaussianLikelihood::new(0.1).expect("noise"),
+            )
+            .with_input_transform(crate::transform::MinMaxInput::new())
+            .with_target_transform(crate::transform::MinMaxTarget::new())
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.5, -1.0, 2.0])
+            .map_err(|(_, e)| e)
+            .expect("factor")
+            .save(&dir)
+            .expect("save");
+            assert!(LoadedGpr::load(&dir, &PersistRegistry::new()).is_ok());
+            let path = dir.join(CONFIG_FILE);
+            let mut config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+            assert_eq!(swap_extrema(&mut config[key]), 1, "{key}");
+            std::fs::write(&path, serde_json::to_vec(&config).expect("encode")).expect("write");
+            match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+                Err(GprError::InvalidHyperparameter { reason }) => {
+                    assert!(reason.contains("data_min <= data_max"), "{key}: {reason}");
+                }
+                other => panic!("{key}: unexpected {:?}", other.err()),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    fn fixed_rbf(x: &[f64], y: &[f64]) -> crate::FittedGpr<Fixed> {
+        Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(x, x.len(), 1, y)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+    }
+
+    /// `depth` levels of `wrap` around `leaf`.
+    fn nested(
+        leaf: &serde_json::Value,
+        depth: usize,
+        wrap: fn(serde_json::Value) -> serde_json::Value,
+    ) -> serde_json::Value {
+        let mut value = leaf.clone();
+        for _ in 0..depth {
+            value = wrap(value);
+        }
+        value
+    }
+
+    #[test]
+    fn deeply_nested_config_trees_are_rejected_without_overflow() {
+        let dir = temp_dir("deep-config");
+        fixed_rbf(&[0.0, 1.0], &[0.0, 1.0])
+            .save(&dir)
+            .expect("save");
+        let path = dir.join(CONFIG_FILE);
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let kernel = config["kernel"].clone();
+        let input = config["x_unfitted"].clone();
+        // Well past the parser's limit of 128 nested values, and shallow
+        // enough that building and dropping the test value is safe.
+        let depth = 300;
+        let cases = [
+            (
+                "kernel",
+                nested(&kernel, depth, |inner| {
+                    let leaf = serde_json::json!({
+                        "rbf": { "lengthscale": { "value": 1.0, "lo": 1e-5, "hi": 1e5 } }
+                    });
+                    serde_json::json!({ "sum": { "left": inner, "right": leaf } })
+                }),
+            ),
+            (
+                "x_unfitted",
+                nested(
+                    &input,
+                    depth,
+                    |inner| serde_json::json!({ "pipeline": { "steps": [inner] } }),
+                ),
+            ),
+            (
+                "x_unfitted",
+                nested(
+                    &input,
+                    depth,
+                    |inner| serde_json::json!({ "columnwise": { "maps": [inner] } }),
+                ),
+            ),
+        ];
+        for (key, value) in cases {
+            let mut broken = config.clone();
+            broken[key] = value;
+            std::fs::write(&path, serde_json::to_vec(&broken).expect("encode")).expect("write");
+            match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+                Err(GprError::PersistFailed { reason }) => {
+                    assert!(reason.contains("recursion limit"), "{key}: {reason}");
+                }
+                other => panic!("{key}: unexpected {:?}", other.err()),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mapped_model_keeps_its_factor_when_its_directory_is_saved_over() {
+        let x_big: Vec<f64> = (0..30).map(|i| f64::from(i) / 5.0).collect();
+        let y_big: Vec<f64> = x_big.iter().map(|v| v.sin()).collect();
+        let dir = temp_dir("mapped-overwrite");
+        fixed_rbf(&x_big, &y_big)
+            .save_with_factor(&dir)
+            .expect("save big");
+        let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
+        let before = loaded.predict(&[0.3], 1, 1).expect("predict");
+        // A smaller model over the same files: an in-place rewrite would
+        // shrink the mapped file under `loaded` and fault on the next read.
+        fixed_rbf(&[0.0, 1.0, 2.0], &[0.5, -0.5, 0.25])
+            .save_with_factor(&dir)
+            .expect("save small");
+        let after = loaded.predict(&[0.3], 1, 1).expect("predict");
+        assert_close(after.mean[0], before.mean[0], TOL);
+        assert_close(after.variance[0], before.variance[0], TOL);
+        let reloaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("reload");
+        assert_eq!(reloaded.n(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_tensor_write_leaves_the_previous_config() {
+        let dir = temp_dir("failed-tensors");
+        fixed_rbf(&[0.0, 1.0], &[0.0, 1.0])
+            .save(&dir)
+            .expect("save");
+        let config_before = std::fs::read(dir.join(CONFIG_FILE)).expect("config");
+        let tensors = dir.join(super::TENSOR_FILE);
+        std::fs::remove_file(&tensors).expect("remove tensors");
+        // A non-empty directory where the tensor file goes cannot be replaced.
+        std::fs::create_dir_all(tensors.join("blocker")).expect("blocker");
+        let err = fixed_rbf(&[0.0, 1.0, 2.0], &[0.0, 1.0, 0.5])
+            .save(&dir)
+            .expect_err("tensor write must fail");
+        assert!(matches!(err, GprError::PersistFailed { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read(dir.join(CONFIG_FILE)).expect("config"),
+            config_before
+        );
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.contains(".tmp-")),
+            "temporary files left: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loaded_online_model_refuses_to_reuse_its_last_point_id() {
+        let dir = temp_dir("ids-exhausted");
+        Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(&[0.0, 1.0], 2, 1, &[0.5, -1.0])
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online()
+        .expect("online")
+        .save_with_factor(&dir)
+        .expect("save");
+        let path = dir.join(CONFIG_FILE);
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        config["next_point_id"] = serde_json::json!(u64::MAX - 1);
+        std::fs::write(&path, serde_json::to_vec(&config).expect("encode")).expect("write");
+        let LoadedGpr::OnlineDouble(mut online) =
+            LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load")
+        else {
+            panic!("an online f64 model");
+        };
+        let id = online.insert(&[2.0], 0.25).expect("one id left");
+        assert_eq!(online.n(), 3);
+        let err = online.insert(&[3.0], 0.5).expect_err("ids exhausted");
+        assert!(matches!(err, GprError::IndexOutOfRange { .. }), "{err:?}");
+        assert_eq!(online.n(), 3);
+        assert_eq!(online.point_ids().last().copied(), Some(id));
+        online.delete(id).expect("the id still names one point");
+        assert_eq!(online.n(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

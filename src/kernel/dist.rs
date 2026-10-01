@@ -1,6 +1,7 @@
 //! Pairwise squared-Euclidean distances, filled by Rayon column partitions.
 
-use super::simd::{try_fill_ard_chunk, try_fill_cross_chunk, try_fill_lower_chunk};
+use super::KernelScalar;
+use super::simd::{try_fill_ard_column, try_fill_cross_chunk, try_fill_lower_chunk};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
@@ -72,84 +73,172 @@ pub(crate) fn fill_squared_euclidean(
     copy_lower_to_upper(dist);
 }
 
-/// Writes raw `(Δx_d)²` into an `n × (n·d)` cache (dimension `k` uses columns
-/// `[k n, (k+1) n)`). Only the lower triangle of each `n×n` block is filled.
-pub(crate) fn fill_ard_squared_diff(
-    x: MatRef<'_, f64>,
-    mut cache: MatMut<'_, f64>,
-    thread_scratch: &mut [Mat<f64>],
-) {
+/// Number of entries in the lower triangle (diagonal included) of an
+/// `n × n` matrix.
+fn packed_len(n: usize) -> Result<usize, GprError> {
+    n.checked_add(1)
+        .and_then(|n1| n.checked_mul(n1))
+        .map(|cells| cells / 2)
+        .ok_or(GprError::SizeOverflow)
+}
+
+/// Offset of column `col` in a column-packed lower triangle of order `n`.
+#[inline]
+fn packed_col_offset(n: usize, col: usize) -> usize {
+    // Columns 0..col hold n, n-1, …, n-col+1 entries.
+    col * (2 * n - col + 1) / 2
+}
+
+/// Raw `(Δx_d)²` for every pair of rows of `x`, owned.
+///
+/// Only the lower triangle (diagonal included) of each dimension is stored,
+/// column by column, so the cache holds `d · n(n+1)/2` values instead of
+/// `d · n²`. Read it through [`Self::view`].
+#[derive(Clone, Debug)]
+pub(crate) struct ArdSqDiffBuf<T> {
+    data: Vec<T>,
+    n: usize,
+    d: usize,
+}
+
+impl<T: KernelScalar> ArdSqDiffBuf<T> {
+    /// Fills the cache for the rows of `x`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    pub(crate) fn new(x: MatRef<'_, T>) -> Result<Self, GprError> {
+        let n = x.nrows();
+        let d = x.ncols();
+        let len = packed_len(n)?
+            .checked_mul(d)
+            .ok_or(GprError::SizeOverflow)?;
+        let mut data = vec![T::from_f64(0.0); len];
+        T::write_ard(x, &mut data);
+        Ok(Self { data, n, d })
+    }
+
+    /// `(points, dimensions)` the cache was filled for.
+    #[cfg(test)]
+    pub(crate) fn shape(&self) -> (usize, usize) {
+        (self.n, self.d)
+    }
+
+    /// Number of stored values.
+    #[cfg(test)]
+    pub(crate) fn stored_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Overwrites every cached value, to show that a reader uses the cache.
+    #[cfg(test)]
+    pub(crate) fn poison(&mut self, value: T) {
+        self.data.fill(value);
+    }
+
+    pub(crate) fn view(&self) -> ArdSqDiff<'_, T> {
+        ArdSqDiff {
+            data: &self.data,
+            n: self.n,
+            d: self.d,
+            block: self.data.len().checked_div(self.d).unwrap_or(0),
+        }
+    }
+}
+
+/// Borrowed raw `(Δx_d)²` cache of [`ArdSqDiffBuf`].
+///
+/// [`Self::get`] reads any pair, in either order. [`Self::column`] is the
+/// contiguous stored part of one column: rows `col..n`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ArdSqDiff<'a, T> {
+    data: &'a [T],
+    n: usize,
+    d: usize,
+    /// Entries per dimension, `n(n+1)/2`.
+    block: usize,
+}
+
+impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
+    /// Number of points.
+    pub(crate) fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Number of dimensions.
+    pub(crate) fn d(&self) -> usize {
+        self.d
+    }
+
+    /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
+    #[inline]
+    pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
+        let start = dim * self.block + packed_col_offset(self.n, col);
+        &self.data[start..start + (self.n - col)]
+    }
+
+    /// `(x_row,dim − x_col,dim)²` for any pair.
+    #[inline]
+    pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
+        let (row, col) = if row >= col { (row, col) } else { (col, row) };
+        self.column(dim, col)[row - col]
+    }
+
+    /// The same cache as `f64` when `T` is `f64`, for the SIMD paths.
+    pub(crate) fn as_f64(self) -> Option<ArdSqDiff<'a, f64>> {
+        Some(ArdSqDiff {
+            data: T::as_f64_slice(self.data)?,
+            n: self.n,
+            d: self.d,
+            block: self.block,
+        })
+    }
+}
+
+/// Writes raw `(Δx_d)²` into `cache`, packed as [`ArdSqDiffBuf`] stores it.
+/// Columns are filled in parallel.
+pub(crate) fn fill_ard_squared_diff(x: MatRef<'_, f64>, cache: &mut [f64]) {
     let n = x.nrows();
     let d = x.ncols();
     if n == 0 || d == 0 {
         return;
     }
-    debug_assert_eq!(cache.nrows(), n);
-    debug_assert_eq!(cache.ncols(), n * d);
-    let n_parts = partition_count(thread_scratch);
-    if thread_scratch.is_empty() {
-        cache
-            .rb_mut()
-            .par_col_partition_mut(n_parts)
-            .enumerate()
-            .for_each(|(chunk_idx, part)| {
-                fill_ard_chunk(x, part, chunk_idx, n_parts);
-            });
-    } else {
-        cache
-            .rb_mut()
-            .par_col_partition_mut(n_parts)
-            .zip(thread_scratch.par_iter_mut())
-            .enumerate()
-            .for_each(|(chunk_idx, (part, _scratch))| {
-                fill_ard_chunk(x, part, chunk_idx, n_parts);
-            });
+    debug_assert_eq!(cache.len(), d * n * (n + 1) / 2);
+    let mut columns: Vec<(usize, usize, &mut [f64])> = Vec::with_capacity(n * d);
+    let mut rest = cache;
+    for dim in 0..d {
+        for col in 0..n {
+            let (head, tail) = rest.split_at_mut(n - col);
+            columns.push((dim, col, head));
+            rest = tail;
+        }
     }
+    columns.into_par_iter().for_each(|(dim, col, dest)| {
+        if !try_fill_ard_column(x, dim, col, dest) {
+            for (offset, slot) in dest.iter_mut().enumerate() {
+                let diff = x[(col + offset, dim)] - x[(col, dim)];
+                *slot = diff * diff;
+            }
+        }
+    });
 }
 
-pub(crate) fn require_ard_sq_diff_shape<T>(
-    cache: MatRef<'_, T>,
+/// Requires `cache` to hold `n` points in `d` dimensions.
+pub(crate) fn require_ard_sq_diff_shape<T: KernelScalar>(
+    cache: ArdSqDiff<'_, T>,
     n: usize,
     d: usize,
 ) -> Result<(), GprError> {
-    let cols = n.checked_mul(d).ok_or(GprError::SizeOverflow)?;
-    if cache.nrows() == n && cache.ncols() == cols {
+    if cache.n() == n && cache.d() == d {
         Ok(())
     } else {
         Err(GprError::ShapeMismatch {
             reason: format!(
-                "ARD cache is {}x{}, expected {}x{}",
-                cache.nrows(),
-                cache.ncols(),
-                n,
-                cols
+                "ARD cache holds {} points in {} dimensions, expected {n} in {d}",
+                cache.n(),
+                cache.d()
             ),
         })
-    }
-}
-
-fn fill_ard_chunk(
-    x: MatRef<'_, f64>,
-    mut dist_chunk: MatMut<'_, f64>,
-    chunk_idx: usize,
-    n_chunks: usize,
-) {
-    let n = x.nrows();
-    let d = x.ncols();
-    let total = n * d;
-    let (start, len) = col_chunk(total, chunk_idx, n_chunks);
-    debug_assert_eq!(dist_chunk.ncols(), len);
-    if try_fill_ard_chunk(x, dist_chunk.rb_mut(), chunk_idx, n_chunks) {
-        return;
-    }
-    for local in 0..len {
-        let global = start + local;
-        let dim = global / n;
-        let col = global % n;
-        for row in col..n {
-            let diff = x[(row, dim)] - x[(col, dim)];
-            dist_chunk[(row, local)] = diff * diff;
-        }
     }
 }
 
@@ -286,14 +375,16 @@ pub(crate) fn fill_cross_scalar(
     }
 }
 
-pub(crate) fn fill_ard_scalar(x: MatRef<'_, f32>, mut cache: MatMut<'_, f32>) {
+pub(crate) fn fill_ard_scalar(x: MatRef<'_, f32>, cache: &mut [f32]) {
     let n = x.nrows();
-    let d = x.ncols();
-    for dim in 0..d {
+    let mut slots = cache.iter_mut();
+    for dim in 0..x.ncols() {
         for col in 0..n {
-            for row in 0..n {
+            for row in col..n {
                 let diff = x[(row, dim)] - x[(col, dim)];
-                cache[(row, dim * n + col)] = diff * diff;
+                if let Some(slot) = slots.next() {
+                    *slot = diff * diff;
+                }
             }
         }
     }
@@ -302,8 +393,7 @@ pub(crate) fn fill_ard_scalar(x: MatRef<'_, f32>, mut cache: MatMut<'_, f32>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        col_chunk, fill_ard_squared_diff, fill_squared_euclidean, fill_squared_euclidean_cross,
-        worker_count,
+        ArdSqDiffBuf, col_chunk, fill_squared_euclidean, fill_squared_euclidean_cross, worker_count,
     };
     use faer::Mat;
 
@@ -406,17 +496,32 @@ mod tests {
 
     #[test]
     fn ard_fill_matches_per_dim_squared_diff() {
-        let x = Mat::from_fn(5, 3, |r, c| (r as f64) * 0.1 + (c as f64) * 0.3);
+        let x = Mat::from_fn(5, 3, |r, c| {
+            (r as f64) * 0.1 + (c as f64) * 0.3 + (r * c) as f64
+        });
         let n = 5;
         let d = 3;
-        let mut cache = Mat::zeros(n, n * d);
-        fill_ard_squared_diff(x.as_ref(), cache.as_mut(), &mut []);
+        let cache = ArdSqDiffBuf::new(x.as_ref()).expect("size");
+        let view = cache.view();
+        assert_eq!((view.n(), view.d()), (n, d));
+        // The lower triangle of each dimension only: d · n(n+1)/2, not d · n².
+        assert_eq!(cache.stored_len(), d * n * (n + 1) / 2);
         for dim in 0..d {
             for col in 0..n {
-                for row in col..n {
+                assert_eq!(view.column(dim, col).len(), n - col);
+                for row in 0..n {
                     let diff = x[(row, dim)] - x[(col, dim)];
-                    let got = cache[(row, dim * n + col)];
-                    assert!((got - diff * diff).abs() <= 1e-15);
+                    assert!((view.get(dim, row, col) - diff * diff).abs() <= 1e-15);
+                }
+            }
+        }
+        let x32 = Mat::from_fn(5, 3, |r, c| x[(r, c)] as f32);
+        let cache32 = ArdSqDiffBuf::new(x32.as_ref()).expect("size");
+        for dim in 0..d {
+            for col in 0..n {
+                for row in 0..n {
+                    let diff = x32[(row, dim)] - x32[(col, dim)];
+                    assert!((cache32.view().get(dim, row, col) - diff * diff).abs() <= 1e-6);
                 }
             }
         }
