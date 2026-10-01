@@ -15,6 +15,7 @@ import json
 import math
 import statistics
 import sys
+import urllib.error
 
 from common import harness
 from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start, write_json
@@ -148,11 +149,22 @@ def main(argv: list[str]) -> int:
         if limit:
             splits = splits[:limit]
         for split in splits:
-            path = (
-                write_curve_case(dataset, protocol)
-                if dataset in CURVES
-                else write_case(dataset, split, protocol, model, n_inducing)
-            )
+            try:
+                path = (
+                    write_curve_case(dataset, protocol)
+                    if dataset in CURVES
+                    else write_case(dataset, split, protocol, model, n_inducing)
+                )
+            except urllib.error.URLError as err:
+                # The source is not reachable from this machine (e.g. a proxy
+                # denies the host): every library is N/A for this case, with why.
+                reason = f"source not reachable: {err.reason}"
+                for lib in libs:
+                    row = na_row(reason, FIT_FIELDS)
+                    row.update(lib=lib, name=f"{dataset}_s{split}", protocol=protocol, model=model)
+                    rows.append(row)
+                print(f"# {dataset}_s{split}: N/A {reason}", flush=True)
+                continue
             print(f"# {path.name}", flush=True)
             for lib in libs:
                 reason = (
