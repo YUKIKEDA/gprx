@@ -16,6 +16,8 @@ pub(crate) mod gram;
 mod hess;
 
 #[cfg(test)]
+mod leaf_table;
+#[cfg(test)]
 mod tests;
 
 /// Whether a compiled tree evaluates from a distance matrix or from coordinates.
@@ -272,10 +274,21 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Whether `∂K/∂θ` reads an output-shaped `scratch`: a product, or a
     /// custom leaf that may hold its distances there.
     pub(crate) fn needs_grad_scratch(&self) -> bool {
+        // Every leaf is listed, so a new leaf is a compile error here until
+        // its answer is chosen (docs/architecture.md, adding a leaf).
         match self {
             Self::Product(_) | Self::Custom(_) => true,
             Self::Sum(terms) => terms.iter().any(Self::needs_grad_scratch),
-            _ => false,
+            Self::Rbf(_)
+            | Self::RbfArd(_)
+            | Self::Matern(_)
+            | Self::MaternArd(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::RationalQuadraticArd(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_) => false,
         }
     }
 
@@ -377,10 +390,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 
     pub(crate) fn needs_ard_sq_diff(&self) -> bool {
+        // Every leaf is listed (see `needs_grad_scratch`).
         match self {
             Self::RbfArd(_) | Self::MaternArd(_) | Self::RationalQuadraticArd(_) => true,
             Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::needs_ard_sq_diff),
-            _ => false,
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_)
+            | Self::Custom(_) => false,
         }
     }
 
