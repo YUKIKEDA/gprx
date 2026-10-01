@@ -182,18 +182,37 @@ pub(crate) fn pack_q(mean: &[f64], l: MatRef<'_, f64>, out: &mut [f64]) {
 }
 
 pub(crate) fn unpack_q(params: &[f64], m: usize) -> Result<(Vec<f64>, Mat<f64>), GprError> {
-    crate::data::require_count(params.len(), q_param_len(m), "parameters")?;
     let mut mean = vec![0.0; m];
-    for (i, slot) in mean.iter_mut().enumerate() {
-        let v = params[i];
+    let mut l = Mat::zeros(m, m);
+    unpack_q_into(params, m, &mut mean, &mut l)?;
+    Ok((mean, l))
+}
+
+/// [`unpack_q`] into `mean` (length `m`) and the lower triangle of `l`
+/// (`m × m`, its upper triangle zeroed). On error their contents are
+/// partly written and mean nothing.
+pub(crate) fn unpack_q_into(
+    params: &[f64],
+    m: usize,
+    mean: &mut Vec<f64>,
+    l: &mut Mat<f64>,
+) -> Result<(), GprError> {
+    crate::data::require_count(params.len(), q_param_len(m), "parameters")?;
+    mean.resize(m, 0.0);
+    for (slot, &v) in mean.iter_mut().zip(params) {
         if !v.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
         *slot = v;
     }
-    let mut l = Mat::zeros(m, m);
+    if l.nrows() != m || l.ncols() != m {
+        *l = Mat::zeros(m, m);
+    }
     let mut k = 0;
     for j in 0..m {
+        for i in 0..j {
+            l[(i, j)] = 0.0;
+        }
         for i in j..m {
             let v = params[m + k];
             if !v.is_finite() {
@@ -208,7 +227,7 @@ pub(crate) fn unpack_q(params: &[f64], m: usize) -> Result<(Vec<f64>, Mat<f64>),
             k += 1;
         }
     }
-    Ok((mean, l))
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

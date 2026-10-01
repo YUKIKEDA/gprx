@@ -104,14 +104,6 @@ pub(crate) fn mat_add_mul<T: KernelScalar>(
     gemm(dest.as_mut(), Accum::Add, left, right, T::from_f64(1.0));
 }
 
-pub(crate) fn mat_mul_into<T: KernelScalar>(
-    dest: &mut Mat<T>,
-    left: MatRef<'_, T>,
-    right: MatRef<'_, T>,
-) {
-    gemm(dest.as_mut(), Accum::Replace, left, right, T::from_f64(1.0));
-}
-
 pub(crate) fn gemm<T: KernelScalar>(
     dest: MatMut<'_, T>,
     accum: Accum,

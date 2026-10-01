@@ -398,35 +398,41 @@ impl RbfArdKernel {
 
     /// One pass of `∂k/∂θ_d` for every lengthscale. Same values as
     /// [`Self::grad_cross_from_coords`] called once per `d`.
-    pub(crate) fn grad_cross_all_from_coords<M: KernelMath, T: KernelScalar>(
+    /// Every lengthscale's `∂K(x1, x2)/∂θ_d` into `out`, one matrix per
+    /// lengthscale, from one `exp` per entry. The matrices are grown to
+    /// `x1.nrows() × x2.nrows()` and reused; each is written at its top-left
+    /// block of that shape.
+    pub(crate) fn grad_cross_all_from_coords_into<M: KernelMath>(
         &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-    ) -> Result<Vec<Mat<T>>, GprError> {
+        x1: MatRef<'_, f64>,
+        x2: MatRef<'_, f64>,
+        out: &mut Vec<Mat<f64>>,
+    ) -> Result<(), GprError> {
         let d = self.num_params();
-        let mut out: Vec<Mat<T>> = (0..d).map(|_| Mat::zeros(x1.nrows(), x2.nrows())).collect();
+        let (rows, cols) = (x1.nrows(), x2.nrows());
+        out.resize_with(d, Mat::new);
         if d == 0 {
-            return Ok(out);
+            return Ok(());
         }
-        super::require_coord_grad(x1, x2, out[0].as_ref(), 0)?;
+        let mut slots: Vec<MatMut<'_, f64>> = out
+            .iter_mut()
+            .map(|mat| crate::sparse::view(mat, rows, cols))
+            .collect();
+        super::require_coord_grad(x1, x2, slots[0].as_ref(), 0)?;
         let w = self.lengthscales.inv_ell_sq();
-        let slots: Option<Vec<MatMut<'_, f64>>> =
-            out.iter_mut().map(|m| T::as_f64_mut(m.as_mut())).collect();
-        if let (Some(af), Some(bf), Some(mut slots)) = (T::as_f64_ref(x1), T::as_f64_ref(x2), slots)
-            && try_grad_rbf_ard_cross_all::<M>(af, bf, &mut slots, w)?
-        {
-            return Ok(out);
+        if try_grad_rbf_ard_cross_all::<M>(x1, x2, &mut slots, w)? {
+            return Ok(());
         }
-        let mut terms = vec![T::from_f64(0.0); d];
-        for col in 0..x2.nrows() {
-            for row in 0..x1.nrows() {
-                let k = ard_grad_terms::<M, T>(x1, row, x2, col, w, &mut terms)?;
-                for (dest, &term) in out.iter_mut().zip(&terms) {
+        let mut terms = vec![0.0; d];
+        for col in 0..cols {
+            for row in 0..rows {
+                let k = ard_grad_terms::<M, f64>(x1, row, x2, col, w, &mut terms)?;
+                for (dest, &term) in slots.iter_mut().zip(&terms) {
                     dest[(row, col)] = k * term;
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
