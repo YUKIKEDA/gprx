@@ -125,7 +125,11 @@ pub(crate) fn z_to_log_theta(z: &[f64], intervals: &[Interval]) -> Result<Vec<f6
     Ok(log_theta)
 }
 
-fn z_to_log_theta_into(z: &[f64], intervals: &[Interval], out: &mut [f64]) -> Result<(), GprError> {
+pub(crate) fn z_to_log_theta_into(
+    z: &[f64],
+    intervals: &[Interval],
+    out: &mut [f64],
+) -> Result<(), GprError> {
     if z.len() != intervals.len() || out.len() != z.len() {
         return Err(GprError::ShapeMismatch {
             reason: "logit map length mismatch".to_owned(),
