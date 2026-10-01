@@ -1,7 +1,5 @@
 //! [`ExactFit`]: every hyperparameter write, gradient, and Hessian of an Exact GPR.
 
-use dyn_stack::MemStack;
-use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
@@ -9,9 +7,7 @@ use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
-use crate::linalg::{
-    faer_par, frobenius_lower, gemv_full, gemv_sym_lower, symmetrize_lower, trace_product,
-};
+use crate::linalg::{frobenius_lower, gemv_sym_lower, solve_lower};
 use crate::optimizer::{OptResult, Optimizer};
 use crate::param::Interval;
 use crate::precision::{GpScalar, StoredFactor};
@@ -428,9 +424,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
         out: &mut [f64],
     ) -> Result<(), GprError> {
         self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
-        if self.core.compiled.needs_grad_scratch() {
-            self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
-        }
         self.store
             .buffers
             .form_gradient_w(&self.core.factor_alpha, n);
@@ -457,12 +450,20 @@ impl<P: GpScalar> ExactFit<'_, P> {
         self.store.buffers.core_mut().thread_scratch = thread_scratch;
         second?;
         let mut hess = std::mem::take(&mut self.store.buffers.core_mut().hessian);
-        hess.ensure(n);
+        hess.ensure(n, n_params);
         let first = self.add_first_order(n_kernel, n, noise, out, &mut hess);
         self.store.buffers.core_mut().hessian = hess;
         first
     }
 
+    /// Adds the first-order part of the Hessian of every pair:
+    /// `−½ tr(A⁻¹ A_i A⁻¹ A_j) + αᵀ A_i A⁻¹ A_j α`, with `A_i = ∂A/∂θ_i`
+    /// (the kernel's `∂K/∂θ_i`, or `σn² I` for the noise).
+    ///
+    /// With `A = L Lᵀ`, `S_i = L⁻¹ A_i L⁻ᵀ` and `v_i = L⁻¹ A_i α` give
+    /// `tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F` and `αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j`.
+    /// Each `S_i` takes two triangular solves, so the pairs cost
+    /// `O(p n³ + p² n²)` and `hess` keeps `p` matrices of `n × n`.
     fn add_first_order(
         &mut self,
         n_kernel: usize,
@@ -471,11 +472,63 @@ impl<P: GpScalar> ExactFit<'_, P> {
         out: &mut [f64],
         hess: &mut HessianScratch<P::Storage>,
     ) -> Result<(), GprError> {
-        self.add_noise_first_order(n_kernel, n, noise, out, hess)?;
         if !self.store.buffers.has_dedicated_w() {
+            // `W` was written over `L` for the second-order part.
             self.factorize_current()?;
         }
-        self.add_kernel_first_order(n_kernel, n, out, hess)
+        let n_params = n_kernel + 1;
+        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
+        let halves = (|| {
+            for i in 0..n_params {
+                if i < n_kernel {
+                    self.write_first_deriv(i)?;
+                } else {
+                    zero_and_maybe_noise(
+                        self.store.buffers.core_mut().exp_buf.as_mut(),
+                        n,
+                        true,
+                        noise,
+                    );
+                }
+                let l = self.store.buffers.core().k_matrix.as_ref();
+                let d_a = self.store.buffers.core().exp_buf.as_ref();
+                gemv_sym_lower(d_a, &self.core.factor_alpha, &mut hess.u, n);
+                let mut v_i = hess.v.as_mut().col_mut(i);
+                for (row, value) in hess.u.iter().enumerate() {
+                    v_i[row] = *value;
+                }
+                solve_lower(l, hess.v.as_mut().subcols_mut(i, 1));
+                let s_i = &mut hess.s[i];
+                for col in 0..n {
+                    for row in col..n {
+                        s_i[(row, col)] = d_a[(row, col)];
+                        s_i[(col, row)] = d_a[(row, col)];
+                    }
+                }
+                // `L⁻¹ A_i`, then `L⁻¹ (L⁻¹ A_i)ᵀ = L⁻¹ A_i L⁻ᵀ`.
+                solve_lower(l, s_i.as_mut());
+                transpose_square_in_place(s_i.as_mut(), n);
+                solve_lower(l, s_i.as_mut());
+            }
+            Ok::<(), GprError>(())
+        })();
+        self.store.buffers.core_mut().thread_scratch = thread_scratch;
+        halves?;
+        for i in 0..n_params {
+            for j in 0..=i {
+                let tr = frobenius_full(hess.s[i].as_ref(), hess.s[j].as_ref(), n);
+                let mut v_dot = 0.0;
+                for row in 0..n {
+                    v_dot += hess.v[(row, i)].to_f64() * hess.v[(row, j)].to_f64();
+                }
+                let add = -0.5 * tr + v_dot;
+                out[i * n_params + j] += add;
+                if i != j {
+                    out[j * n_params + i] += add;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn write_second_deriv(
@@ -545,150 +598,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
             kernel_scratch.as_mut(),
             nested,
         ))
-    }
-
-    fn add_noise_first_order(
-        &mut self,
-        n_kernel: usize,
-        n: usize,
-        noise: f64,
-        out: &mut [f64],
-        hess: &mut HessianScratch<P::Storage>,
-    ) -> Result<(), GprError> {
-        let n_params = n_kernel + 1;
-        let zero = P::Storage::from_f64(0.0);
-        let two = P::Storage::from_f64(2.0);
-        let noise_s = P::Storage::from_f64(noise);
-        let alpha = &self.core.factor_alpha;
-        let tr_kinv2 = {
-            let w = self.store.buffers.gradient_w();
-            // `w_noise` holds `W α`, then `K⁻¹ α = α (αᵀα) - W α`, then `σn² K⁻¹ α`.
-            gemv_sym_lower(w, alpha, &mut hess.w_noise, n);
-            let mut alpha_dot = zero;
-            for a in alpha {
-                alpha_dot += *a * *a;
-            }
-            for (w_n, a) in hess.w_noise.iter_mut().zip(alpha) {
-                *w_n = noise_s * (*a * alpha_dot - *w_n);
-            }
-            let mut tr_kinv2 = zero;
-            for col in 0..n {
-                let kinv_cc = alpha[col] * alpha[col] - w[(col, col)];
-                tr_kinv2 += kinv_cc * kinv_cc;
-                for row in col + 1..n {
-                    let kinv_rc = alpha[row] * alpha[col] - w[(row, col)];
-                    tr_kinv2 += two * kinv_rc * kinv_rc;
-                }
-            }
-            tr_kinv2
-        };
-        let mut un_wn = zero;
-        for (a, w_n) in alpha.iter().zip(&hess.w_noise) {
-            un_wn += noise_s * *a * *w_n;
-        }
-        let nn = n_kernel;
-        out[nn * n_params + nn] += -0.5 * noise * noise * tr_kinv2.to_f64() + un_wn.to_f64();
-
-        self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
-        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
-        let cross = (|| {
-            for i in 0..n_kernel {
-                self.write_first_deriv(i)?;
-                let ki = self.store.buffers.core().exp_buf.as_ref();
-                let alpha = &self.core.factor_alpha;
-                let tr = trace_ki_kinv2(ki, self.store.buffers.gradient_w(), alpha, n);
-                gemv_sym_lower(ki, alpha, &mut hess.u_i, n);
-                let mut ui_wn = zero;
-                for (u, w_n) in hess.u_i.iter().zip(&hess.w_noise) {
-                    ui_wn += *u * *w_n;
-                }
-                let hij = -0.5 * noise * tr.to_f64() + ui_wn.to_f64();
-                out[i * n_params + nn] += hij;
-                out[nn * n_params + i] += hij;
-            }
-            Ok::<(), GprError>(())
-        })();
-        self.store.buffers.core_mut().thread_scratch = thread_scratch;
-        cross
-    }
-
-    fn add_kernel_first_order(
-        &mut self,
-        n_kernel: usize,
-        n: usize,
-        out: &mut [f64],
-        hess: &mut HessianScratch<P::Storage>,
-    ) -> Result<(), GprError> {
-        if n_kernel == 0 {
-            return Ok(());
-        }
-        self.store.buffers.core_mut().ensure_kernel_scratch(n)?;
-        let n_params = n_kernel + 1;
-        let zero = P::Storage::from_f64(0.0);
-        let thread_scratch = std::mem::take(&mut self.store.buffers.core_mut().thread_scratch);
-        let result = (|| {
-            for j in 0..n_kernel {
-                self.write_first_deriv(j)?;
-                gemv_sym_lower(
-                    self.store.buffers.core().exp_buf.as_ref(),
-                    &self.core.factor_alpha,
-                    &mut hess.u_j,
-                    n,
-                );
-                symmetrize_lower(self.store.buffers.core_mut().exp_buf.as_mut(), n);
-                self.solve_exp_against_l(n);
-                // `write_first_deriv(i)` below overwrites `exp_buf`, so keep `Q_j`.
-                hess.q.copy_from(self.store.buffers.core().exp_buf.as_ref());
-                gemv_full(hess.q.as_ref(), &self.core.factor_alpha, &mut hess.w_j, n);
-                for i in 0..=j {
-                    let tr;
-                    let mut ui_wj = zero;
-                    if i == j {
-                        tr = trace_product(hess.q.as_ref(), hess.q.as_ref(), n);
-                        for (u, w) in hess.u_j.iter().zip(&hess.w_j) {
-                            ui_wj += *u * *w;
-                        }
-                    } else {
-                        self.write_first_deriv(i)?;
-                        gemv_sym_lower(
-                            self.store.buffers.core().exp_buf.as_ref(),
-                            &self.core.factor_alpha,
-                            &mut hess.u_i,
-                            n,
-                        );
-                        symmetrize_lower(self.store.buffers.core_mut().exp_buf.as_mut(), n);
-                        self.solve_exp_against_l(n);
-                        tr = trace_product(
-                            self.store.buffers.core().exp_buf.as_ref(),
-                            hess.q.as_ref(),
-                            n,
-                        );
-                        for (u, w) in hess.u_i.iter().zip(&hess.w_j) {
-                            ui_wj += *u * *w;
-                        }
-                    }
-                    let add = -0.5 * tr.to_f64() + ui_wj.to_f64();
-                    out[i * n_params + j] += add;
-                    if i != j {
-                        out[j * n_params + i] += add;
-                    }
-                }
-            }
-            Ok::<(), GprError>(())
-        })();
-        self.store.buffers.core_mut().thread_scratch = thread_scratch;
-        result
-    }
-
-    fn solve_exp_against_l(&mut self, n: usize) {
-        let core = self.store.buffers.core_mut();
-        let stack = MemStack::new(&mut core.faer_scratch);
-        llt::solve::solve_in_place(
-            core.k_matrix.as_ref(),
-            core.exp_buf.as_mut(),
-            faer_par(n),
-            stack,
-        );
     }
 
     fn fill_gradient_from_factor(
@@ -842,34 +751,23 @@ fn zero_and_maybe_noise<T: KernelScalar>(
     }
 }
 
-fn kinv_from_w<T: KernelScalar>(alpha: &[T], w: MatRef<'_, T>, row: usize, col: usize) -> T {
-    let (r, c) = if row >= col { (row, col) } else { (col, row) };
-    alpha[row] * alpha[col] - w[(r, c)]
-}
-
-fn ki_sym<T: Copy>(ki: MatRef<'_, T>, row: usize, col: usize) -> T {
-    if row >= col {
-        ki[(row, col)]
-    } else {
-        ki[(col, row)]
-    }
-}
-
-fn trace_ki_kinv2<T: KernelScalar>(
-    ki: MatRef<'_, T>,
-    w: MatRef<'_, T>,
-    alpha: &[T],
-    n: usize,
-) -> T {
-    let mut tr = T::from_f64(0.0);
-    for c in 0..n {
-        for b in 0..n {
-            let mut m_bc = T::from_f64(0.0);
-            for k in 0..n {
-                m_bc += ki_sym(ki, b, k) * kinv_from_w(alpha, w, k, c);
-            }
-            tr += kinv_from_w(alpha, w, b, c) * m_bc;
+/// `⟨a, b⟩_F` over the full `n × n` matrices, accumulated in `f64`.
+fn frobenius_full<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>, n: usize) -> f64 {
+    let mut sum = 0.0;
+    for col in 0..n {
+        for row in 0..n {
+            sum += a[(row, col)].to_f64() * b[(row, col)].to_f64();
         }
     }
-    tr
+    sum
+}
+
+fn transpose_square_in_place<T: KernelScalar>(mut a: MatMut<'_, T>, n: usize) {
+    for col in 0..n {
+        for row in col + 1..n {
+            let upper = a[(col, row)];
+            a[(col, row)] = a[(row, col)];
+            a[(row, col)] = upper;
+        }
+    }
 }

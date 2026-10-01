@@ -2895,3 +2895,31 @@ fn fast_approx_fit_nlml_does_not_rise() {
             .expect("end"),
     );
 }
+
+#[test]
+fn hessian_is_the_same_with_reuse_and_retain_buffers() {
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0, -1.0];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5];
+    let kernel = KernelSpec::from(RbfArdKernel::new(&[1.25, 0.8]).expect("valid"))
+        + KernelSpec::from(MaternKernel::new(0.9, MaternNu::FiveHalves).expect("valid"));
+    let hessian = |buffer| {
+        let mut gpr = Gpr::new(
+            kernel.clone(),
+            GaussianLikelihood::new(0.16).expect("valid"),
+        )
+        .with_cholesky_buffer(buffer)
+        .with_optimizer(Fixed)
+        .factor(&x, 5, 2, &y)
+        .expect("spd");
+        let mut params = vec![0.0; gpr.num_params()];
+        gpr.get_params(&mut params).expect("len");
+        let mut hess = vec![0.0; params.len() * params.len()];
+        gpr.hessian_into(&params, &mut hess).expect("spd");
+        hess
+    };
+    let retain = hessian(CholeskyBuffer::Retain);
+    let reuse = hessian(CholeskyBuffer::Reuse);
+    for (a, b) in retain.iter().zip(&reuse) {
+        assert_close(*a, *b, 1e-10);
+    }
+}
