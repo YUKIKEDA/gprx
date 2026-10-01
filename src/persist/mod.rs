@@ -786,6 +786,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Overwrites the first value of the `f64` tensor `name` with `NaN`.
+    fn poison_tensor(dir: &std::path::Path, name: &str) {
+        let path = dir.join(super::TENSOR_FILE);
+        let mut bytes = std::fs::read(&path).expect("read");
+        let offset = {
+            let tensors = safetensors::SafeTensors::deserialize(&bytes).expect("header");
+            let data = tensors.tensor(name).expect("tensor").data();
+            data.as_ptr() as usize - bytes.as_ptr() as usize
+        };
+        bytes[offset..offset + 8].copy_from_slice(&f64::NAN.to_le_bytes());
+        std::fs::write(&path, bytes).expect("write");
+    }
+
+    #[test]
+    fn non_finite_stored_tensors_fail_to_load() {
+        for name in ["x", "y", "l", "alpha"] {
+            let dir = temp_dir("nan-tensor");
+            Gpr::new(
+                KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+                GaussianLikelihood::new(0.1).expect("noise"),
+            )
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.5, -1.0, 2.0])
+            .map_err(|(_, e)| e)
+            .expect("factor")
+            .save_with_factor(&dir)
+            .expect("save");
+            poison_tensor(&dir, name);
+            match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+                Err(GprError::PersistFailed { reason }) => {
+                    assert!(reason.contains("non-finite"), "{name}: {reason}");
+                    assert!(
+                        reason.contains(&format!("tensor {name} ")),
+                        "{name}: {reason}"
+                    );
+                }
+                other => panic!(
+                    "{name}: unexpected {:?}",
+                    other.err().map(|e| e.to_string())
+                ),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn non_finite_stored_sparse_tensor_fails_to_load() {
+        let dir = temp_dir("nan-sparse");
+        crate::Sgpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(
+            &[0.0, 1.0, 2.0, 3.0],
+            4,
+            1,
+            &[0.5, -1.0, 2.0, 0.0],
+            &[0.5, 2.5],
+            2,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .save(&dir)
+        .expect("save");
+        poison_tensor(&dir, "y");
+        match crate::LoadedSgpr::load(&dir, &PersistRegistry::new()) {
+            Err(GprError::PersistFailed { reason }) => {
+                assert!(reason.contains("non-finite"), "{reason}");
+            }
+            other => panic!("unexpected {:?}", other.err().map(|e| e.to_string())),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Swaps `data_min` and `data_max` in every object of `value` holding both.
     fn swap_extrema(value: &mut serde_json::Value) -> usize {
         let mut swapped = 0;
