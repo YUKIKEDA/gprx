@@ -597,6 +597,22 @@ impl<T: KernelScalar> KernelScratch<T> {
         Ok(out)
     }
 
+    /// `∂K(x1, x2)/∂θ_{param_idx}` (`x1.nrows() × x2.nrows()`) into `d_k`,
+    /// with this scratch's output-shaped buffer and nesting levels.
+    pub(crate) fn grad_cross<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        let (rows, cols) = (d_k.nrows(), d_k.ncols());
+        crate::kernel::ensure_nested_levels(&mut self.nested, compiled, rows, cols);
+        let scratch = view(&mut self.scratch, rows, cols);
+        compiled.grad_cross_points_with::<M>(x1, x2, d_k, param_idx, scratch, &mut self.nested)
+    }
+
     /// An output-shaped scratch for a kernel call that takes one directly.
     pub(crate) fn scratch(&mut self, rows: usize, cols: usize) -> MatMut<'_, T> {
         view(&mut self.scratch, rows, cols)
