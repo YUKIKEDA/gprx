@@ -8,6 +8,7 @@ use std::time::Instant;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::data::pack_storage;
+use crate::error::PersistErrorKind;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
@@ -355,11 +356,14 @@ where
     ) -> Result<(), GprError> {
         let registry = PointRegistry::from_persisted(ids, next_id)?;
         if registry.len() != self.core.n {
-            return Err(persist_err(format!(
-                "point_ids has {} values, expected n = {}",
-                registry.len(),
-                self.core.n
-            )));
+            return Err(persist_err(
+                PersistErrorKind::Config,
+                format!(
+                    "point_ids has {} values, expected n = {}",
+                    registry.len(),
+                    self.core.n
+                ),
+            ));
         }
         self.registry = registry;
         Ok(())

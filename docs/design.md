@@ -772,7 +772,7 @@ pub enum GprError {
     WorkspaceTooSmall,
     InvalidPointId,
     InvalidInducingId,
-    PersistFailed { reason: String },
+    PersistFailed { kind: PersistErrorKind, reason: String }, // kind: Io / Config / Tensor / InvalidPersistId / NotPersistable / UnregisteredId / WrongModel
     UnsupportedPersistVersion { found: u32, supported: u32 },
 }
 
@@ -781,7 +781,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 Display text is English (see `src/error.rs`).
 
-`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`. An interval that does not contain its value is `InvalidInterval`. Save / load failures are `PersistFailed`, and a file from another format version is `UnsupportedPersistVersion`.
+`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`. An interval that does not contain its value is `InvalidInterval`. Save / load failures are `PersistFailed`, whose `kind` (`PersistErrorKind`, non-exhaustive) says which part failed so a caller can branch without reading `reason`, and a file from another format version is `UnsupportedPersistVersion`.
 
 **Error versus panic**: failures caused by user input (`DimensionMismatch` and similar) and by the model or the data (`CholeskyFailed` and similar) return `Result` and stay recoverable. `CoordGradientUnsupported` is not an internal panic, so it returns this error instead of `unimplemented!()`. There is no `NotFitted` variant. An unfitted call cannot be formed.
 

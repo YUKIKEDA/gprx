@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::error::PersistErrorKind;
 use crate::kernel::KernelScalar;
 use crate::kernel::ScalarOps;
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2};
@@ -1021,13 +1022,16 @@ where
     ) -> Result<Self, GprError> {
         let mut online = Self::from_fitted(fitted);
         if points.len() != online.core.n || inducing.len() != online.core.m {
-            return Err(crate::persist::persist_err(format!(
-                "config has {} point ids and {} inducing ids, expected n = {} and m = {}",
-                points.len(),
-                inducing.len(),
-                online.core.n,
-                online.core.m
-            )));
+            return Err(crate::persist::persist_err(
+                PersistErrorKind::Config,
+                format!(
+                    "config has {} point ids and {} inducing ids, expected n = {} and m = {}",
+                    points.len(),
+                    inducing.len(),
+                    online.core.n,
+                    online.core.m
+                ),
+            ));
         }
         online.registry = points;
         online.inducing = inducing;

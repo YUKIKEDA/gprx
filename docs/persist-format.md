@@ -27,7 +27,7 @@ The `model` key of `config.json` says. An Exact file has no `model` key and read
 | `online_sgpr` | `OnlineSgpr::save` | `LoadedSgpr::load` | `m`, `point_ids`, `next_point_id`, `inducing_ids`, `next_inducing_id` | `x`, `y`, `z`, `z_train` |
 | `svgp` | `FittedSvgp::save` | `LoadedSvgp::load` | `m` | `x`, `y`, `z`, `z_train`, `q_mean`, `q_l` |
 
-A directory read by the wrong loader is refused with `GprError::PersistFailed`, and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too.
+A directory read by the wrong loader is refused with `GprError::PersistFailed` (`kind: WrongModel`), and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too.
 
 ## 3. `config.json` of an Exact model
 
@@ -180,9 +180,9 @@ Target, unfitted (`y_unfitted`): `"identity"`, `"standardize"`, `min_max` (`rang
 A `custom` entry carries a `persist_id` and a `state` (any JSON the type chose). On load, `PersistRegistry` maps the `persist_id` back to a restore function for that kind: a kernel, an unfitted input map, a fitted input map, an unfitted target map, or a fitted target map. Register them before `load`: `register_kernel`, `register_unfitted_input`, `register_fitted_input`, `register_unfitted_target`, `register_fitted_target`.
 
 - Built-in kernels and maps use the closed tags above and are never registered.
-- `persist_id` must be non-empty and must not start with `gprx.` (`RESERVED_PREFIX`). `save` and `register_*` both refuse it with `PersistFailed`.
-- A `persist_id` with no registered restore on load is `PersistFailed`. A `persist_id` registered twice for the same kind is also `PersistFailed`.
-- `save` of a `custom` kernel or map that does not implement `persist_id` is `PersistFailed`.
+- `persist_id` must be non-empty and must not start with `gprx.` (`RESERVED_PREFIX`). `save` and `register_*` both refuse it with `PersistFailed` (`kind: InvalidPersistId`).
+- A `persist_id` with no registered restore on load is `PersistFailed` (`kind: UnregisteredId`). A `persist_id` registered twice for the same kind is `PersistFailed` (`kind: InvalidPersistId`).
+- `save` of a `custom` kernel or map that does not implement `persist_id` is `PersistFailed` (`kind: NotPersistable`).
 
 ## 6. `model.safetensors`
 
@@ -241,7 +241,7 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 
 | Condition | Error |
 | --- | --- |
-| File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed(message)` |
+| File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
 | `n`, `d`, or (sparse) `m` is `0`; empty `lengthscales` | `GprError::EmptyInput` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
