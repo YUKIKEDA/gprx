@@ -48,9 +48,49 @@ pub struct OptResult {
 /// Hyperparameter optimizer.
 ///
 /// `P` is the objective this algorithm can minimize. [`Lbfgs`]
-/// requires [`crate::Differentiable`] plus bounds. [`TrustRegion`]
-/// requires [`crate::TwiceDifferentiable`] plus bounds. [`NelderMead`]
-/// and [`FastSimulatedAnnealing`] require only [`crate::Objective`] plus bounds.
+/// requires [`crate::Differentiable`], [`TrustRegion`]
+/// [`crate::TwiceDifferentiable`], and [`NelderMead`] and
+/// [`FastSimulatedAnnealing`] only [`crate::Objective`]. Every one searches
+/// inside [`crate::Objective::fill_intervals`].
+///
+/// A user optimizer implements this generically over the capability it
+/// needs. It can read the intervals and call a built-in optimizer on the
+/// same objective:
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{
+///     Differentiable, GaussianLikelihood, Gpr, GprError, Interval, Lbfgs, NelderMead,
+///     OptResult, Optimizer,
+/// };
+///
+/// /// A short Nelder–Mead pass, then L-BFGS from its result.
+/// #[derive(Clone, Debug)]
+/// struct Polish;
+///
+/// impl<P: Differentiable> Optimizer<P> for Polish {
+///     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
+///         let mut intervals = vec![Interval::DEFAULT_POSITIVE; objective.num_params()];
+///         objective.fill_intervals(&mut intervals)?;
+///         let coarse = NelderMead::new()
+///             .with_max_iterations(20)
+///             .minimize(objective, init)?;
+///         Lbfgs::new().minimize(objective, &coarse.params)
+///     }
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
+/// let fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_optimizer(Polish)
+/// .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 0.8, 0.9, 0.1])
+/// .map_err(|(_, e)| e)?;
+/// assert!(fitted.neg_log_marginal_likelihood()?.is_finite());
+/// # Ok(())
+/// # }
+/// ```
 pub trait Optimizer<P: ?Sized> {
     /// Minimizes `objective` from `init` without taking ownership of `init`.
     ///
