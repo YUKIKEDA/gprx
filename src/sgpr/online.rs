@@ -791,7 +791,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] when `n == 1`, or
+    /// Returns [`GprError::InsufficientData`] when `n == 1`, or
     /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted.
     ///
     /// # Examples
@@ -824,7 +824,10 @@ where
     /// ```
     pub fn delete(&mut self, id: PointId) -> Result<(), GprError> {
         if self.core.n <= 1 {
-            return Err(GprError::EmptyInput);
+            return Err(GprError::InsufficientData {
+                n: self.core.n,
+                min: 2,
+            });
         }
         let idx = self.registry.index_of(id)?;
         self.atomically(|model| model.delete_at(idx))
@@ -1042,7 +1045,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] when `m == 1`, or
+    /// Returns [`GprError::InsufficientData`] when `m == 1`, or
     /// [`GprError::InvalidInducingId`] when `id` is unknown or already
     /// deleted.
     ///
@@ -1076,7 +1079,10 @@ where
     /// ```
     pub fn delete_inducing(&mut self, id: InducingId) -> Result<(), GprError> {
         if self.core.m <= 1 {
-            return Err(GprError::EmptyInput);
+            return Err(GprError::InsufficientData {
+                n: self.core.m,
+                min: 2,
+            });
         }
         let idx = self.inducing.index_of(id)?;
         self.atomically(|model| model.delete_inducing_at(idx))
