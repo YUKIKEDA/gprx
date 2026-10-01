@@ -129,6 +129,17 @@ where
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into_fit(params, out)
     }
+
+    fn value_gradient_hessian_into(
+        &mut self,
+        params: &[f64],
+        grad: &mut [f64],
+        hess: &mut [f64],
+    ) -> Result<f64, GprError> {
+        crate::objective::count_joint_call!();
+        self.model
+            .value_gradient_hessian_into_fit(params, grad, hess)
+    }
 }
 
 impl<P> HasBounds for GprObjective<'_, P>
