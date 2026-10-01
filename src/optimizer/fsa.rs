@@ -165,30 +165,22 @@ impl<P: Objective + HasBounds> Optimizer<P> for FastSimulatedAnnealing {
     const USES_CHANGE_INDICES: bool = true;
 
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
-        let n = objective.num_params();
-        if init.len() != n {
-            return Err(GprError::LengthMismatch {
-                reason: format!("expected {n} parameters, got {}", init.len()),
-            });
-        }
-        if n == 0 {
+        if objective.num_params() == 0 {
             return Err(GprError::LengthMismatch {
                 reason: "FSA requires at least one parameter".to_owned(),
             });
         }
-        let mut intervals = vec![Interval::DEFAULT_POSITIVE; n];
-        objective.fill_intervals(&mut intervals)?;
-        let mut best: Option<OptResult> = None;
-        keep_better(&mut best, anneal(self, objective, init, &intervals)?);
-        if let Some(restarts) = self.restarts {
-            let mut rng = small_rng(restarts.seed);
-            for _ in 0..restarts.n.get() {
-                let start = sample_in_param_space(&intervals, &mut rng, self.boundary);
-                let _ = anneal(self, objective, &start, &intervals)
-                    .map(|candidate| keep_better(&mut best, candidate));
-            }
-        }
-        best.ok_or(GprError::OptimizationNotConverged { iterations: 0 })
+        super::minimize_with_restarts(
+            objective,
+            init,
+            self.restarts,
+            |init, _| Ok(init.to_vec()),
+            |intervals, rng| Ok(sample_in_param_space(intervals, rng, self.boundary)),
+            |objective, intervals, start, best| {
+                keep_better(best, anneal(self, objective, start, intervals)?);
+                Ok(())
+            },
+        )
     }
 }
 
