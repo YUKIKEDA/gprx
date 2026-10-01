@@ -797,6 +797,74 @@ mod tests {
         .expect("factor")
     }
 
+    /// `depth` levels of `wrap` around `leaf`.
+    fn nested(
+        leaf: &serde_json::Value,
+        depth: usize,
+        wrap: fn(serde_json::Value) -> serde_json::Value,
+    ) -> serde_json::Value {
+        let mut value = leaf.clone();
+        for _ in 0..depth {
+            value = wrap(value);
+        }
+        value
+    }
+
+    #[test]
+    fn deeply_nested_config_trees_are_rejected_without_overflow() {
+        let dir = temp_dir("deep-config");
+        fixed_rbf(&[0.0, 1.0], &[0.0, 1.0])
+            .save(&dir)
+            .expect("save");
+        let path = dir.join(CONFIG_FILE);
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let kernel = config["kernel"].clone();
+        let input = config["x_unfitted"].clone();
+        // Well past the parser's limit of 128 nested values, and shallow
+        // enough that building and dropping the test value is safe.
+        let depth = 300;
+        let cases = [
+            (
+                "kernel",
+                nested(&kernel, depth, |inner| {
+                    let leaf = serde_json::json!({
+                        "rbf": { "lengthscale": { "value": 1.0, "lo": 1e-5, "hi": 1e5 } }
+                    });
+                    serde_json::json!({ "sum": { "left": inner, "right": leaf } })
+                }),
+            ),
+            (
+                "x_unfitted",
+                nested(
+                    &input,
+                    depth,
+                    |inner| serde_json::json!({ "pipeline": { "steps": [inner] } }),
+                ),
+            ),
+            (
+                "x_unfitted",
+                nested(
+                    &input,
+                    depth,
+                    |inner| serde_json::json!({ "columnwise": { "maps": [inner] } }),
+                ),
+            ),
+        ];
+        for (key, value) in cases {
+            let mut broken = config.clone();
+            broken[key] = value;
+            std::fs::write(&path, serde_json::to_vec(&broken).expect("encode")).expect("write");
+            match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+                Err(GprError::PersistFailed { reason }) => {
+                    assert!(reason.contains("recursion limit"), "{key}: {reason}");
+                }
+                other => panic!("{key}: unexpected {:?}", other.err()),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn mapped_model_keeps_its_factor_when_its_directory_is_saved_over() {
         let x_big: Vec<f64> = (0..30).map(|i| f64::from(i) / 5.0).collect();
