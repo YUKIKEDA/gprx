@@ -276,11 +276,11 @@ pub enum DistanceCachePolicy {
 /// Crate-private. What Cached stores (§7.1).
 struct DistCache<S> {
     dist: Option<Mat<S>>,        // n×n squared Euclidean, for distance-mode leaves
-    ard_sq_diff: Option<Mat<S>>, // raw (Δx_d)² as n × (n·d), for ARD leaves
+    ard_sq_diff: Option<ArdSqDiffBuf<S>>, // raw (Δx_d)², packed lower triangles, for ARD leaves
 }
 ```
 
-The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout is column-major `n × (n·d)`: dimension `k` is columns `[k n, (k+1) n)`, and each block is lower triangular. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
+The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout keeps only the lower triangle (diagonal included) of each dimension, packed column by column: `d · n(n+1)/2` values, dimension `k` after the first `k · n(n+1)/2`, column `j` holding rows `j..n` contiguously. A reader of another triangle reads the pair `(j, i)` for `(i, j)`. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
 
 The policy is a runtime enum because no combination with the other policies is illegal (§6.3). An `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes; `K` itself is `n²×sizeof(T)` (about 200MB at n=5000, f64), and an ARD cache is `d` times that. Choosing the policy from `n`, `d`, and a memory budget is open (§14).
 
@@ -398,7 +398,11 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     // *_with variants take PredictOptions; get_params / set_params /
     // value_and_gradient_into / hessian_into; into_online / into_trainer / save
 }
+```
 
+Every `seed` (sample, optimizer restarts, FSA, the SVGP Adam shuffle) starts gprx's own Xoshiro256++ generator, its state filled from the seed by SplitMix64 (`src/rng.rs`). The same seed and the same gprx version give the same draws on every platform and with any `rand` version; a test pins the first outputs. Changing the sequence is a breaking change.
+
+```rust
 pub enum VarianceKind {
     Latent,      // variance of the latent f* (no noise)
     Observation, // variance of the observation y* (includes σn²). Default
@@ -475,7 +479,7 @@ Standard algorithm (Rasmussen & Williams / the GPy family):
 4. Solve `L Lᵀ α = y` by forward and back substitution (O(n²))
 5. Compute `K⁻¹` from `L` (triangular solves of `L Lᵀ X = I`, one O(n³))
 6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]` (symmetric, so lower triangle only)
-7. For each θ_i, evaluate `∂K/∂θ_i` into `exp_buf` and accumulate `⟨W, ∂K/∂θ_i⟩_F` in O(n²). Kernel parameters use `KernelTerm::grad`. Noise uses `Likelihood::noise_grad_diag` (diagonal only)
+7. Accumulate `⟨W, ∂K/∂θ_i⟩_F` for every kernel θ_i in one walk of the kernel tree (`CompiledKernel::weighted_grads`): a Sum hands its weight to every term; a Product evaluates each factor's Gram once and hands factor `c` the weight `W ∘ ∏_{s≠c} K_s`; a leaf writes its `∂K/∂θ_i` into a reused `n×n` buffer and takes the Frobenius product with the weight it was handed, O(n²) per parameter. No factor of a product is evaluated once per parameter. Noise uses `Likelihood::noise_grad_diag` (diagonal only)
 
 Total cost is O(n³ + p n²). `K⁻¹` is not rebuilt per parameter.
 
@@ -485,7 +489,7 @@ Analytic NLML Hessian:
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. `Q_j` (one `n×n`) and four length-`n` vectors live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩ and solves the first-order term `Q_i = K⁻¹ K_i`.
+`KernelTerm::hess` / `hess_points` write `∂²K` for one pair `(i, j)`. Custom, Sum, and Product are analytic. `FittedGpr::hessian_into` is the public entry, and `GprObjective` forwards to `TwiceDifferentiable`. The first-order term runs over every parameter `i` once, the noise included (`A_i = σn² I`): with `A = L Lᵀ`, `S_i = L⁻¹ A_i L⁻ᵀ` (two triangular solves) and `v_i = L⁻¹ A_i α` give `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F` and `αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j`, so the whole Hessian costs `O(p n³ + p² n²)`. The `p` matrices `S_i` (`p · n²`), the `n × p` matrix of `v_i`, and one length-`n` vector live in `WorkspaceCore::hessian`: empty until the first Hessian, reused after it, so a Hessian after the first allocates nothing. `CholeskyBuffer::Reuse` Chols again after ⟨W, K_ij⟩, because `W` was written over `L`.
 
 `value_and_gradient_into` runs this once and shares L, α, and `exp_buf` between the likelihood and the gradient. The default two-step `value` then `gradient_into` does not share them.
 
@@ -589,7 +593,7 @@ Preconditions:
 - NaN/Inf in the input is `NonFiniteInput`
 - Cholesky failure is `Err((gpr, err))`. A half-built `FittedGpr` is not returned
 
-The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as `n × (n·d)`. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
+The default distance-cache policy is `Cached`. At the start of `fit` the squared distances of the training points are filled once, and later hyperparameter iterations rewrite only the kernel. Isotropic is `n×n`. ARD stores raw `(Δx_d)²` as packed lower triangles, `d · n(n+1)/2` values. `Uncached` does not put those tensors on the Workspace, and both isotropic and ARD compute distances from `X`. The public memory pole is `with_prefer_memory` (`Uncached` + `Reuse`). The speed pole stays the default (`with_prefer_speed`). `Uncached` + `Retain` is the lowest-RSS setting that keeps leaf rebuilds (`with_distance_cache_policy` alone). The cache is allocated only when the compiled kernel reads distances: `RBF + White` and `Constant * RBF` do; standalone Linear / Constant / White do not, and their policy is kept but unused. persist tags are `always` / `never` (a missing tag loads as `Cached`). `LoadedGpr` has one variant per precision and factor kind (8), because both are type parameters of the model. `predict` / `predict_with` (widened to `f64`), `n`, `d`, and `is_online` work on any variant without a `match`; a variant is matched only for the typed model (`predict_into`, `insert`, `refit`). `load` is `Retain`.
 
 ### 6.4 Leave-one-out
 
@@ -632,7 +636,7 @@ struct WorkspaceCore<P: PrecisionPolicy> {
     faer_scratch: MemBuffer,         // faer's own scratch, used as-is
     theta: Vec<f64>,                 // θ before the current write, restored when A does not factor
     nested: Vec<Mat<P::Storage>>,    // one n×n per nesting level of a sum / product (§5.3)
-    hessian: HessianScratch<P::Storage>, // Q_j and four n-vectors. Empty until the first Hessian (§6.2)
+    hessian: HessianScratch<P::Storage>, // S_i (p · n²), v_i (n × p), one n-vector. Empty until the first Hessian (§6.2)
     factor_jitter: f64,              // j of the last successful factor (§4.0)
 }
 
@@ -740,13 +744,15 @@ pub struct OptResult {
 // Optimizer<P> is in §5.4: `P` is the objective type the algorithm can minimize.
 ```
 
-`init` is a slice (it does not consume the caller's `Vec`). `GprObjective` overrides `value_and_gradient_into` and shares L, α, W, and `exp_buf` by the §6.2 steps. `GprObjective` implements `TwiceDifferentiable`, and `hessian_into` forwards to `FittedGpr`. `SgprObjective` is the same crate-private adapter for `Sgpr`. Bounds come from each parameter's `Interval` (crate-private `HasBounds`).
+`init` is a slice (it does not consume the caller's `Vec`). `GprObjective` overrides `value_and_gradient_into` and shares L, α, W, and `exp_buf` by the §6.2 steps. `GprObjective` implements `TwiceDifferentiable`, and `hessian_into` forwards to `FittedGpr`. `SgprObjective` is the same crate-private adapter for `Sgpr`. Bounds come from each parameter's `Interval` through `Objective::fill_intervals` (public, so a user optimizer reads them and can call a built-in optimizer on the same objective; the default is `Interval::DEFAULT_POSITIVE`).
 
 The trainer bound is `O: for<'a> Optimizer<GprObjective<'a, P>>`. The default is `Lbfgs`. `Lbfgs` needs `Differentiable`, `TrustRegion` needs `TwiceDifferentiable`, and `NelderMead` / `FastSimulatedAnnealing` need only `Objective`. The argmin adapters map each user-unit interval through a logit so argmin stays unconstrained (log-uniform for positive intervals, scaled so the Jacobian is 1 at the midpoint); `TrustRegion` also maps the analytic Hessian. `TrustRegion` is argmin's trust-region method with the Steihaug subproblem, the solver that uses the Hessian: an indefinite or singular Hessian and a step out of the bounds are handled by the region shrinking (a candidate that cannot be evaluated, Hessian included, costs a barrier value), and a solver failure is `OptimizationNotConverged`. `FastSimulatedAnnealing` is gprx's own value-only solver (Cauchy / Metropolis): it walks the log-`θ` it receives, with no logit, and is the example of a user optimizer. The objective types are crate-private, so a user optimizer implements `Optimizer<P>` generically over the capability it needs (`impl<P: Objective> Optimizer<P> for Mine`) and replaces the same type parameter through `with_optimizer`; there is no second solver setting next to it to ignore (`.cursor/rules/types.mdc`). gprx does not implement its own quasi-Newton. `Adam` is the minibatch loop of `Svgp` and is not an `Optimizer`. There is no runtime NotImplemented.
 
 ## 10. `GprError`
 
 Cover the failures that are specific to numerical work.
+
+A public enum whose set can grow is `#[non_exhaustive]`: `GprError`, `CholeskyStage`, `IntervalError`, `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`, `PersistKind`, `KernelSpec`, `CompiledKernel`, `DistanceCachePolicy`, `JitterPolicy`, `KernelExp`, and `BoundaryPolicy`. Adding a variant to one of them is not a breaking change; a `match` outside the crate needs a `_` arm. A closed set stays exhaustive so callers can match every case: `Triangle`, `MaternNu`, `VarianceKind`, `CholeskyBuffer`.
 
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
@@ -917,7 +923,7 @@ Correctness comes before speed: every path has its correctness tests before it i
    - Gradient of the noise parameter (`log_noise_variance`). `∂K/∂θ = σn² I`
    - Gradient stability on an ill-conditioned matrix
 4. **Online updates**: one-point add/delete matches a full refit, delete at an arbitrary index, repeated add and delete, and agreement of PointId with the internal index (the §11 invariant)
-5. **Online property tests**: at every stage of a random insert/delete sequence, incremental == `Gpr<Fixed>::factor` (mean, variance, LML, alpha). Delete order is randomized with `SmallRng`
+5. **Online property tests**: at every stage of a random insert/delete sequence, incremental == `Gpr<Fixed>::factor` (mean, variance, LML, alpha). Delete order is randomized with a seeded `rand` generator in the test
 5b. **External check of online insert**: libgp `add_pattern` at the same θ, against predict (mean and observation variance) and NLML, relative `1e-8`. There is no external delete API. `cargo test` reads committed JSON (it does not call C++)
 5c. **External check of Sparse**: `Sgpr<Fixed>::factor` against collapsed GPyTorch SGPR, and `Svgp<Fixed>::factor` (prior `q`) against whitened SVGP, at the same initial θ, relative `1e-8` (mean, Observation, Latent, NLML / ELBO). `cargo test` reads committed JSON (it does not call Python)
 5d. **External check of Sparse online**: `OnlineSgpr` `insert` / `delete` / `insert_inducing` / `delete_inducing` against a collapsed GPyTorch SGPR (full reassemble) at each stage, same initial θ, relative `1e-8` (mean, Observation, Latent, NLML). `cargo test` reads committed JSON (it does not call Python)
@@ -961,7 +967,7 @@ The input has to be the same every time, or a faster run cannot be told from a d
 - Criterion uses `n = 256`. The cross-library harness uses `n = 256 / 1024 / 4096` (Forrester) and `16×16 / 32×32 / 64×64` (sphere)
 - Isotropic: 1-D Forrester `f(x)=(6x-2)² sin(12x-4)`, `x ∈ [0, 1]`, RBF + `GaussianLikelihood` + `StandardizeTarget`. Initial hyperparameters `ℓ = 1`, `σn² = 0.1`
 - ARD: 2-D weighted sphere `f=(x/0.25)²+(y/1)²`, a 16×16 grid on `[0, 1]²`. Initial `ℓ_d = 4` (`ℓ_d = 1` dies on the first line search)
-- `y` is that function plus `N(0, 1)` (`SmallRng`. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on `Uncached`). It is not an independent random series (L-BFGS eval counts move with the landscape)
+- `y` is that function plus `N(0, 1)` (gprx's seeded generator. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on `Uncached`). It is not an independent random series (L-BFGS eval counts move with the landscape)
 - Criterion groups in `benches/exact.rs` (only paths that exist):
   1. `kernel_rbf` — lower-triangle build of K
   2. `cholesky_alpha` — LLT of `A` and `α`

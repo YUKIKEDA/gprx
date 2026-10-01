@@ -495,6 +495,15 @@ impl FittedMinMaxInput {
         if data_min.is_empty() {
             return Err(GprError::EmptyInput);
         }
+        // `fit` never yields `min > max`; `column_span` would hide it as 1.
+        if let Some(col) = (0..data_min.len()).find(|&col| data_min[col] > data_max[col]) {
+            return Err(GprError::InvalidHyperparameter {
+                reason: format!(
+                    "fitted min-max input needs data_min <= data_max, column {col} has {} > {}",
+                    data_min[col], data_max[col]
+                ),
+            });
+        }
         Ok(Self {
             data_min,
             data_max,
@@ -703,5 +712,14 @@ mod tests {
         assert_close(z[1], 1.0, TOL);
         assert!(MinMaxInput::with_feature_range(1.0, 1.0).is_err());
         assert!(MinMaxInput::with_feature_range(0.0, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn fitted_min_max_input_rejects_reversed_extrema() {
+        assert!(matches!(
+            FittedMinMaxInput::from_parts(vec![0.0, 3.0], vec![1.0, 2.0], 0.0, 1.0),
+            Err(GprError::InvalidHyperparameter { .. })
+        ));
+        assert!(FittedMinMaxInput::from_parts(vec![0.0, 2.0], vec![1.0, 2.0], 0.0, 1.0).is_ok());
     }
 }

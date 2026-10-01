@@ -37,6 +37,7 @@ pub struct ParameterBinding {
 /// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum KernelSpec {
     /// Isotropic RBF leaf.
     Rbf(RbfKernel),

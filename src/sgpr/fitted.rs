@@ -456,42 +456,48 @@ where
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
-        let before = self.clone();
         let optimizer = self.optimizer.clone();
         let result = {
             let mut obj = SgprObjective::new(self);
             optimizer.minimize(&mut obj, &init)
         };
-        self.commit_or_revert_optimize(before, result)
+        self.commit_or_revert_optimize(&init, result)
     }
 
+    /// Takes the optimizer's result, or rebuilds the model at `init` (the
+    /// parameters before the search) when the search failed.
+    ///
+    /// Only the parameters are kept for the way back, not a copy of the
+    /// model: the VFE system at `init` factored before the search, so it is
+    /// assembled again from them.
     fn commit_or_revert_optimize(
         &mut self,
-        before: Self,
+        init: &[f64],
         result: Result<OptResult, GprError>,
     ) -> Result<(), GprError> {
-        match result {
-            Ok(opt) => {
-                if opt.params.len() != self.num_params() || !opt.value.is_finite() {
-                    *self = before;
-                    return Err(GprError::OptimizationNotConverged {
-                        iterations: opt.iterations as usize,
-                    });
-                }
-                if let Err(err) = self.set_params(&opt.params) {
-                    *self = before;
-                    return Err(err);
-                }
-                if let Err(err) = self.refresh_predict_w() {
-                    *self = before;
-                    return Err(err);
-                }
-                Ok(())
+        let committed = match result {
+            Ok(opt) if opt.params.len() != self.num_params() || !opt.value.is_finite() => {
+                Err(GprError::OptimizationNotConverged {
+                    iterations: opt.iterations as usize,
+                })
             }
-            Err(err) => {
-                *self = before;
-                Err(err)
-            }
+            Ok(opt) => self
+                .set_params(&opt.params)
+                .and_then(|()| self.refresh_predict_w()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = committed {
+            self.revert_to(init);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn revert_to(&mut self, init: &[f64]) {
+        // `init` factored before the search; a failure here would leave the
+        // model at the last factored point, which is still consistent.
+        if self.set_params(init).is_ok() {
+            let _ = self.refresh_predict_w();
         }
     }
 
@@ -713,7 +719,7 @@ where
     /// Each column of the returned column-major `m × n_draws` matrix is
     /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
     /// posterior covariance, the same draw as [`crate::FittedGpr::sample`].
-    /// `seed` is the crate [`rand::rngs::SmallRng`] start state. Zero draws
+    /// `seed` is the start state of gprx's seeded generator (Xoshiro256++; the same seed gives the same draws on every platform). Zero draws
     /// returns an empty vector after the covariance is formed.
     ///
     /// # Errors

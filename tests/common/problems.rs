@@ -1,9 +1,9 @@
 //! Fixed regression problems shared by tests and benches.
 //!
 //! `y` is the named function plus `noise_std · N(0, 1)` from the crate's
-//! seeded `SmallRng` (`src/rng.rs`). The including module provides `rng`.
+//! seeded `SeededRng` (`src/rng.rs`). The including module provides `rng`.
 
-use super::rng::{small_rng, unit_normal};
+use super::rng::{seeded_rng, unit_normal};
 
 /// `n` evenly spaced points on `[lo, hi]`.
 pub fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
@@ -31,7 +31,7 @@ pub fn weighted_sphere(x0: f64, x1: f64) -> f64 {
 /// 1-D Forrester on `linspace(0, 1, n)` with noise from `seed`.
 pub fn forrester_xy(n: usize, seed: u64, noise_std: f64) -> (Vec<f64>, Vec<f64>) {
     let x = linspace(0.0, 1.0, n);
-    let mut rng = small_rng(seed);
+    let mut rng = seeded_rng(seed);
     let y = x
         .iter()
         .map(|&xi| forrester(xi) + noise_std * unit_normal(&mut rng))
@@ -48,7 +48,7 @@ pub fn sphere_xy(side: usize, seed: u64, noise_std: f64) -> (Vec<f64>, Vec<f64>)
         x[row] = (row % side) as f64 / denom;
         x[n + row] = (row / side) as f64 / denom;
     }
-    let mut rng = small_rng(seed);
+    let mut rng = seeded_rng(seed);
     let y = (0..n)
         .map(|row| weighted_sphere(x[row], x[n + row]) + noise_std * unit_normal(&mut rng))
         .collect();
