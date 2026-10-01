@@ -685,7 +685,7 @@ fit()終了 → FittedGpr が L, α, X を保持（Reuse はここで Chol し�
 
 ## 8. 並列化・SIMD、数学関数バックエンド
 
-- カーネル評価内側ループは `wide::f64x4` でベクトル化する。対象は列優先・単位行ストライドの等方 RBF `apply` / `grad` / `apply_cross`、ARD RBF `apply` / `grad`、二乗距離と `(Δx_d)²` の行ループ。ストライドが 1 でないビューはスカラーに落とす。`std::simd` は安定化まで使わない。Matérn / Periodic / RQ の内側は未導入。
+- カーネル評価内側ループは `wide::f64x4` でベクトル化する。対象は列優先・単位行ストライドの等方 RBF `apply` / `grad` / `apply_cross`、ARD RBF `apply` / `grad` / 長方形の `grad`、ARD Matérn と ARD RQ の値と `θ` 微分（座標から、`(Δx_d)²` キャッシュから、長方形。`src/kernel/ard_simd.rs`: 4 行ぶんの `r²` を作ってから動径の式を `f64x4` で評価する。RQ の `u^{−α}` は `exp(−α ln u)`）、二乗距離と `(Δx_d)²` の行ループ。ストライドが 1 でないビューと、有限でない値はスカラーに落とす（スカラーがエラーを名指しする）。`std::simd` は安定化まで使わない。等方の Matérn / Periodic / RQ の内側は未導入。
 - 距離行列・カーネル行列構築はRayonでブロック並列化
 - faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有。faer の本数は `min(プール, n/64, n·k/16384, k/12)`（[ADR 0001](adr/0001-faer-parallel-degree.md)）。`k` は RHS 列。カーネル埋めはプール全部
 

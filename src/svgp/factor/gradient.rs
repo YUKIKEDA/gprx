@@ -8,10 +8,8 @@
 //!
 //! Every intermediate lives in [`GradBuffers`], which the Adam loop keeps
 //! between steps: once they have grown to the largest batch, a step
-//! allocates nothing here. The kernel routines themselves allocate nothing
-//! for the isotropic leaves and their sums and products; the RBF-ARD
-//! routines still build small per-call working vectors (`tests/alloc.rs`,
-//! `svgp_adam_epoch_rbf_ard`), which #167 removes with the ARD SIMD paths.
+//! allocates nothing, the kernel routines included (`tests/alloc.rs`,
+//! `svgp_adam_epoch_*`).
 
 use super::assemble::q_param_len;
 use crate::error::GprError;
