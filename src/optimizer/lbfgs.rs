@@ -8,12 +8,12 @@ use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
 
 use crate::error::GprError;
-use crate::objective::{Differentiable, HasBounds};
+use crate::objective::Differentiable;
 use crate::param::Interval;
 
 use super::logit::{
-    CachedProblem, EvalCache, LogitMapped, keep_better, log_theta_to_z, map_argmin_error,
-    sample_log_uniform_z, z_to_log_theta,
+    CachedProblem, EvalCache, LogitMapped, best_value, keep_better, log_theta_to_z,
+    map_argmin_error, sample_log_uniform_z, z_to_log_theta,
 };
 use super::{OptResult, Optimizer, Restarts};
 
@@ -110,7 +110,7 @@ impl Lbfgs {
     }
 }
 
-impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
+impl<P: Differentiable> Optimizer<P> for Lbfgs {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
@@ -124,7 +124,7 @@ impl<P: Differentiable + HasBounds> Optimizer<P> for Lbfgs {
         let first_z = log_theta_to_z(init, &intervals)?;
         consider_run(self, objective, &intervals, &first_z, &mut best)?;
         if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
+            let mut rng = crate::rng::seeded_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider_run(self, objective, &intervals, &z, &mut best);
@@ -147,14 +147,11 @@ fn consider_run<P: Differentiable>(
         log_scratch: vec![0.0; init_z.len()],
     };
     let run = run_lbfgs(lbfgs, &mut mapped, init_z)?;
-    let log_theta = z_to_log_theta(&run.params, intervals)?;
-    let mut grad = vec![0.0; log_theta.len()];
-    let value = objective.value_and_gradient_into(&log_theta, &mut grad)?;
     keep_better(
         best,
         OptResult {
-            params: log_theta,
-            value,
+            params: z_to_log_theta(&run.params, intervals)?,
+            value: run.value,
             iterations: run.iterations,
         },
     );
@@ -180,7 +177,7 @@ fn run_lbfgs<P: Differentiable>(
         LBFGS::new(linesearch, lbfgs.history_size.get())
             .with_tolerance_grad(lbfgs.tolerance)
             .map_err(map_argmin_error)?;
-    let (params, iterations) =
+    let (params, cost, iterations) =
         {
             let result = Executor::new(problem, solver)
                 .configure(|state| state.param(init.to_vec()).max_iters(lbfgs.max_iterations))
@@ -193,10 +190,12 @@ fn run_lbfgs<P: Differentiable>(
                     iterations: state.get_iter() as usize,
                 }
             })?;
-            (params, state.get_iter())
+            (params, state.get_best_cost(), state.get_iter())
         };
-    let mut grad = vec![0.0; n];
-    let value = objective.value_and_gradient_into(&params, &mut grad)?;
+    let value = best_value(cost, iterations, || {
+        let mut grad = vec![0.0; n];
+        objective.value_and_gradient_into(&params, &mut grad)
+    })?;
     Ok(OptResult {
         params,
         value,
@@ -316,6 +315,10 @@ mod tests {
     }
 
     impl Objective for CountingObj<'_> {
+        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
+            self.inner.fill_intervals(out)
+        }
+
         fn num_params(&self) -> usize {
             self.inner.num_params()
         }
@@ -338,12 +341,6 @@ mod tests {
         ) -> Result<f64, GprError> {
             self.joint_evals += 1;
             self.inner.value_and_gradient_into(params, out)
-        }
-    }
-
-    impl crate::objective::HasBounds for CountingObj<'_> {
-        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
-            self.inner.fill_intervals(out)
         }
     }
 
@@ -401,7 +398,7 @@ mod tests {
     }
 
     fn sphere_bench_xy() -> (Vec<f64>, Vec<f64>) {
-        // SmallRng seed 0 walks a ridge on DistanceCachePolicy::Uncached (~485 evals).
+        // Seed 0 walks a ridge on DistanceCachePolicy::Uncached (~485 evals).
         sphere_bench_xy_with_seed(9)
     }
 
@@ -465,5 +462,97 @@ mod tests {
         assert_close(start_a, start_n, TOL);
         assert_close(value_a, value_n, TOL);
         assert!(value_a < start_a - 1.0, "start={start_a}, best={value_a}");
+    }
+
+    /// Bowl on two positive intervals that records every evaluated point.
+    #[derive(Default)]
+    struct RecordingBowl {
+        points: Vec<Vec<f64>>,
+    }
+
+    impl RecordingBowl {
+        fn f(params: &[f64]) -> f64 {
+            (params[0] - 0.3).powi(2) + 2.0 * (params[1] + 0.2).powi(2)
+        }
+
+        fn times_evaluated(&self, params: &[f64]) -> usize {
+            self.points
+                .iter()
+                .filter(|p| {
+                    p.iter()
+                        .zip(params)
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                })
+                .count()
+        }
+    }
+
+    impl Objective for RecordingBowl {
+        fn fill_intervals(&self, out: &mut [crate::param::Interval]) -> Result<(), GprError> {
+            out.fill(crate::param::Interval::new(-5.0, 5.0).expect("finite"));
+            Ok(())
+        }
+
+        fn num_params(&self) -> usize {
+            2
+        }
+
+        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+            self.points.push(params.to_vec());
+            Ok(Self::f(params))
+        }
+    }
+
+    impl Differentiable for RecordingBowl {
+        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            self.value_and_gradient_into(params, out).map(|_| ())
+        }
+
+        fn value_and_gradient_into(
+            &mut self,
+            params: &[f64],
+            out: &mut [f64],
+        ) -> Result<f64, GprError> {
+            self.points.push(params.to_vec());
+            out[0] = 2.0 * (params[0] - 0.3);
+            out[1] = 4.0 * (params[1] + 0.2);
+            Ok(Self::f(params))
+        }
+    }
+
+    impl crate::objective::TwiceDifferentiable for RecordingBowl {
+        fn hessian_into(&mut self, _params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+            out.copy_from_slice(&[2.0, 0.0, 0.0, 4.0]);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn optimizers_do_not_evaluate_their_result_again() {
+        let init = [2.0, 1.0];
+        let mut bowl = RecordingBowl::default();
+        let result = Lbfgs::new().minimize(&mut bowl, &init).expect("lbfgs");
+        assert_close(result.value, RecordingBowl::f(&result.params), 1e-15);
+        assert_eq!(bowl.times_evaluated(&result.params), 1, "L-BFGS");
+
+        let mut bowl = RecordingBowl::default();
+        let result = crate::optimizer::NelderMead::new()
+            .minimize(&mut bowl, &init)
+            .expect("nelder-mead");
+        assert_close(result.value, RecordingBowl::f(&result.params), 1e-15);
+        assert_eq!(bowl.times_evaluated(&result.params), 1, "Nelder-Mead");
+
+        let mut bowl = RecordingBowl::default();
+        let result = crate::optimizer::TrustRegion::new()
+            .minimize(&mut bowl, &init)
+            .expect("trust region");
+        assert_close(result.value, RecordingBowl::f(&result.params), 1e-15);
+        // Each trust-region candidate is evaluated once for its gradient and
+        // once more inside the logit Hessian (#318), but not a third time.
+        assert!(
+            bowl.times_evaluated(&result.params) <= 2,
+            "trust region evaluated its result {} times",
+            bowl.times_evaluated(&result.params)
+        );
     }
 }

@@ -7,11 +7,11 @@ use argmin::core::{Executor, State};
 use argmin::solver::neldermead::NelderMead as ArgminNelderMead;
 
 use crate::error::GprError;
-use crate::objective::{HasBounds, Objective};
+use crate::objective::Objective;
 use crate::param::Interval;
 
 use super::logit::{
-    ValueCache, ValueProblem, consider_value_run, log_theta_to_z, map_argmin_error,
+    ValueCache, ValueProblem, best_value, consider_value_run, log_theta_to_z, map_argmin_error,
     sample_log_uniform_z,
 };
 use super::{OptResult, Optimizer, Restarts};
@@ -96,7 +96,7 @@ impl NelderMead {
     }
 }
 
-impl<P: Objective + HasBounds> Optimizer<P> for NelderMead {
+impl<P: Objective> Optimizer<P> for NelderMead {
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
         let n = objective.num_params();
         if init.len() != n {
@@ -112,7 +112,7 @@ impl<P: Objective + HasBounds> Optimizer<P> for NelderMead {
             run_neldermead(self, mapped, z)
         })?;
         if let Some(restarts) = self.restarts {
-            let mut rng = crate::rng::small_rng(restarts.seed);
+            let mut rng = crate::rng::seeded_rng(restarts.seed);
             for _ in 0..restarts.n.get() {
                 let z = sample_log_uniform_z(&intervals, &mut rng)?;
                 let _ = consider_value_run(objective, &intervals, &z, &mut best, |mapped, z| {
@@ -142,7 +142,7 @@ fn run_neldermead<P: Objective>(
     let solver = ArgminNelderMead::new(simplex)
         .with_sd_tolerance(nm.tolerance)
         .map_err(map_argmin_error)?;
-    let (params, iterations) =
+    let (params, value, iterations) =
         {
             let result = Executor::new(problem, solver)
                 .configure(|state| state.param(init.to_vec()).max_iters(nm.max_iterations))
@@ -155,9 +155,9 @@ fn run_neldermead<P: Objective>(
                     iterations: state.get_iter() as usize,
                 }
             })?;
-            (params, state.get_iter())
+            (params, state.get_best_cost(), state.get_iter())
         };
-    let value = objective.value(&params)?;
+    let value = best_value(value, iterations, || objective.value(&params))?;
     Ok(OptResult {
         params,
         value,
@@ -257,9 +257,9 @@ mod tests {
             "start={start}, best={}",
             result.value
         );
-        let mut got = [0.0; 2];
-        gpr.get_params(&mut got).expect("len 2");
-        assert_close(got[0], result.params[0], TOL);
-        assert_close(got[1], result.params[1], TOL);
+        // The trainer, not the solver, puts the model at the result (#313):
+        // the value it reports is the objective's at those parameters.
+        let at_result = gpr.objective().value(&result.params).expect("result");
+        assert_close(at_result, result.value, TOL);
     }
 }
