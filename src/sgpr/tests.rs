@@ -1784,3 +1784,54 @@ fn online_inducing_insert_failing_k_mm_leaves_model_unchanged() {
         .expect("the default retries");
     assert_eq!(retrying.m(), 3);
 }
+
+/// Moves the model to another point, then fails.
+#[derive(Clone, Debug)]
+struct FailAfterMoving;
+
+impl<P: crate::Objective + ?Sized> Optimizer<P> for FailAfterMoving {
+    fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<crate::OptResult, GprError> {
+        let moved: Vec<f64> = init.iter().map(|p| p + 0.7).collect();
+        objective.value(&moved)?;
+        Err(GprError::OptimizationNotConverged { iterations: 1 })
+    }
+}
+
+#[test]
+fn failed_search_restores_the_model_from_its_parameters() {
+    let x = [0.0, 0.7, 1.3, 2.0, 2.6, 3.1];
+    let y = [0.2, 0.9, 0.4, -0.3, 0.1, 0.6];
+    let z = [0.5, 1.5, 2.8];
+    let spec = Sgpr::new(
+        KernelSpec::from(RbfKernel::new(0.8).expect("valid")),
+        GaussianLikelihood::new(0.05).expect("valid"),
+    )
+    .with_precision::<crate::MixedPrecision>()
+    .spec;
+    let core = crate::sparse::SparseCore::prepare(&spec, &x, 6, 1, &y, &z, 3).expect("core");
+    let mut fitted =
+        assemble_fitted::<_, FixedInducing, crate::math::Accurate, crate::MixedPrecision>(
+            core,
+            FailAfterMoving,
+        )
+        .expect("assemble");
+    fitted.refresh_predict_w().expect("weights");
+    let mut before = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut before).expect("params");
+    let xs = [0.4, 1.3, 2.9];
+    let pred_before = fitted.predict(&xs, 3, 1).expect("predict");
+    let nlml_before = fitted.neg_log_marginal_likelihood().expect("nlml");
+    let err = fitted.optimize_hyperparameters().expect_err("fails");
+    assert!(matches!(err, GprError::OptimizationNotConverged { .. }));
+    let mut after = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut after).expect("params");
+    assert_eq!(after, before);
+    let pred_after = fitted.predict(&xs, 3, 1).expect("predict");
+    assert_slice_close(&pred_after.mean, &pred_before.mean, 1e-12);
+    assert_slice_close(&pred_after.variance, &pred_before.variance, 1e-12);
+    assert_close(
+        fitted.neg_log_marginal_likelihood().expect("nlml"),
+        nlml_before,
+        1e-12,
+    );
+}
