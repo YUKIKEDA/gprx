@@ -1,7 +1,7 @@
 //! [`SgprObjective`]: the negative VFE bound as an optimizer objective.
 
 use crate::error::GprError;
-use crate::objective::{Differentiable, HasBounds, Objective, TwiceDifferentiable};
+use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 
 use super::{FittedSgpr, InducingLayout};
@@ -35,6 +35,10 @@ where
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
+    }
+
+    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        self.model.fill_intervals(out)
     }
 
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
@@ -72,14 +76,5 @@ where
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into(params, out)
-    }
-}
-
-impl<O, I: InducingLayout, P> HasBounds for SgprObjective<'_, O, I, P>
-where
-    P: crate::precision::GpScalar,
-{
-    fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
-        self.model.fill_intervals(out)
     }
 }

@@ -14,7 +14,7 @@ The examples in this file are real output of `save` (a fit of 8 points, then `sa
   model.safetensors    the numbers: X, y, and (per model) Z, q(u), L, α
 ```
 
-`save` creates `<dir>` (and parents) if it is missing and overwrites the two files. Nothing else is written. The solver and the Cholesky buffer policy are not stored: a loaded model is `Fixed` and uses `CholeskyBuffer::Retain`. To train it again, call `with_optimizer` and then `refit` on the typed model.
+`save` creates `<dir>` (and parents) if it is missing and replaces the two files. Each file is written to a temporary file in `<dir>` and renamed over its name, `model.safetensors` first and `config.json` last, so a reader sees the old file or the new one, and a save that fails part way leaves the previous `config.json`. Nothing else is left behind. The solver and the Cholesky buffer policy are not stored: a loaded model is `Fixed` and uses `CholeskyBuffer::Retain`. To train it again, call `with_optimizer` and then `refit` on the typed model.
 
 ## 2. Which model is in the directory
 
@@ -27,7 +27,7 @@ The `model` key of `config.json` says. An Exact file has no `model` key and read
 | `online_sgpr` | `OnlineSgpr::save` | `LoadedSgpr::load` | `m`, `point_ids`, `next_point_id`, `inducing_ids`, `next_inducing_id` | `x`, `y`, `z`, `z_train` |
 | `svgp` | `FittedSvgp::save` | `LoadedSvgp::load` | `m` | `x`, `y`, `z`, `z_train`, `q_mean`, `q_l` |
 
-A directory read by the wrong loader is refused with `GprError::PersistFailed`, and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too.
+A directory read by the wrong loader is refused with `GprError::PersistFailed` (`kind: WrongModel`), and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too.
 
 ## 3. `config.json` of an Exact model
 
@@ -180,9 +180,9 @@ Target, unfitted (`y_unfitted`): `"identity"`, `"standardize"`, `min_max` (`rang
 A `custom` entry carries a `persist_id` and a `state` (any JSON the type chose). On load, `PersistRegistry` maps the `persist_id` back to a restore function for that kind: a kernel, an unfitted input map, a fitted input map, an unfitted target map, or a fitted target map. Register them before `load`: `register_kernel`, `register_unfitted_input`, `register_fitted_input`, `register_unfitted_target`, `register_fitted_target`.
 
 - Built-in kernels and maps use the closed tags above and are never registered.
-- `persist_id` must be non-empty and must not start with `gprx.` (`RESERVED_PREFIX`). `save` and `register_*` both refuse it with `PersistFailed`.
-- A `persist_id` with no registered restore on load is `PersistFailed`. A `persist_id` registered twice for the same kind is also `PersistFailed`.
-- `save` of a `custom` kernel or map that does not implement `persist_id` is `PersistFailed`.
+- `persist_id` must be non-empty and must not start with `gprx.` (`RESERVED_PREFIX`). `save` and `register_*` both refuse it with `PersistFailed` (`kind: InvalidPersistId`).
+- A `persist_id` with no registered restore on load is `PersistFailed` (`kind: UnregisteredId`). A `persist_id` registered twice for the same kind is `PersistFailed` (`kind: InvalidPersistId`).
+- `save` of a `custom` kernel or map that does not implement `persist_id` is `PersistFailed` (`kind: NotPersistable`).
 
 ## 6. `model.safetensors`
 
@@ -228,7 +228,7 @@ No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. 
 | Call | `has_factor` | Tensors | On load |
 | --- | --- | --- | --- |
 | `save` (Exact) | `false` | `x`, `y` | Builds the Gram matrix at the stored `θ`, factors it (retrying by the stored `jitter` policy), and solves for `α`. Costs `O(n³)` |
-| `save_with_factor` (Exact) | `true` | `x`, `y`, `l`, `alpha` | Skips the factorization. An `F64` factor is memory-mapped (the file must stay unchanged while the model lives; the tensor bytes must be 8-byte aligned or load fails with `PersistFailed`). An `F32` factor is copied out |
+| `save_with_factor` (Exact) | `true` | `x`, `y`, `l`, `alpha` | Skips the factorization. An `F64` factor is memory-mapped (a later gprx save into the same directory renames a new file over it and leaves the mapped file alone; another program must not rewrite the file in place while the model lives; the tensor bytes must be 8-byte aligned or load fails with `PersistFailed`). An `F32` factor is copied out |
 | `save` (`sgpr`, `online_sgpr`, `svgp`) | not written | as §6.2 | Applies the stored fitted maps to `x`; factors `K_mm` at the stored `θ` and `z_train`; rebuilds the VFE system (`sgpr`), or checks `q` and rebuilds `A` and `k_diag` (`svgp`) |
 
 For `ldlt` and `online_sgpr`, the saved ids are restored, so the next `insert` returns the id it would have returned before `save`.
@@ -241,12 +241,12 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 
 | Condition | Error |
 | --- | --- |
-| File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed(message)` |
+| File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
 | `n`, `d`, or (sparse) `m` is `0`; empty `lengthscales` | `GprError::EmptyInput` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
 
-Treat a directory as trusted input. Two open Issues concern reading a directory you did not write: the recursion depth of a `sum` / `product` / `pipeline` tree ([#151](https://github.com/YUKIKEDA/gprx/issues/151)) and the finiteness of a stored `x`, `y`, `alpha`, or `l` ([#154](https://github.com/YUKIKEDA/gprx/issues/154)). The reader checks shapes and dtypes, and, for `q`, finiteness and triangularity.
+Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. The reader checks shapes and dtypes, that every stored tensor is finite (a `NaN` or `±∞` fails with `PersistFailed`), and, for `q`, finiteness and triangularity.
 
 ## 9. Reading the files without gprx
 
