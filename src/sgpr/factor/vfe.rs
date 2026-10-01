@@ -86,7 +86,7 @@ where
     P: ModelPrecision,
 {
     let mut scratch = SparseScratch::<P::Storage>::default();
-    let state = assemble_vfe::<M, P::Storage>(
+    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage>(
         &core.kernel,
         core.jitter,
         core.likelihood,
@@ -99,7 +99,9 @@ where
         &mut scratch.storage,
         &mut scratch.f64,
     )?;
-    let predict_w = if P::REFINES_IN_F64 {
+    let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, w64) {
+        w64.into_iter().map(P::Refine::from_f64).collect()
+    } else if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64>(
             &core.kernel,
             core.jitter,
@@ -181,14 +183,7 @@ where
             ks64,
             &mut KernelScratch::new(),
         )?;
-        return Ok(VfeState {
-            k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
-            a: round_mat::<T>(state.a.as_ref()),
-            b_l: round_mat::<T>(state.b_l.as_ref()),
-            w: state.w.iter().map(|value| T::from_f64(*value)).collect(),
-            k_diag_sum: T::from_f64(state.k_diag_sum),
-            a_frobenius2: T::from_f64(state.a_frobenius2),
-        });
+        return Ok(round_vfe(&state));
     }
     let compiled = kernel.compile_as::<T>();
     let x64 = pack_points(x, n_rows, n_cols);
@@ -321,6 +316,71 @@ where
         k_diag_sum,
         a_frobenius2,
     })
+}
+
+/// `state` rounded to a storage scalar that is evaluated in `f64`.
+fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
+    VfeState {
+        k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
+        a: round_mat::<T>(state.a.as_ref()),
+        b_l: round_mat::<T>(state.b_l.as_ref()),
+        w: state.w.iter().map(|value| T::from_f64(*value)).collect(),
+        k_diag_sum: T::from_f64(state.k_diag_sum),
+        a_frobenius2: T::from_f64(state.a_frobenius2),
+    }
+}
+
+/// [`assemble_vfe`] in the storage scalar `T`, plus the `f64` weights `w`
+/// when `T` is evaluated in `f64` and rounded (`ROUNDS_FROM_F64`).
+///
+/// A refining precision publishes those `f64` weights as its predict
+/// weights. Taking them from the same `f64` assembly saves assembling the
+/// whole system a second time. A scalar that is not rounded returns `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar>(
+    kernel: &KernelSpec,
+    k_mm_jitter: JitterPolicy,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+    y: &[f64],
+    z: &[f64],
+    n_inducing: usize,
+    ks: &mut KernelScratch<T>,
+    ks64: &mut KernelScratch<f64>,
+) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {
+    if T::ROUNDS_FROM_F64 {
+        let state = assemble_vfe::<M, f64>(
+            kernel,
+            k_mm_jitter,
+            likelihood,
+            x,
+            n_rows,
+            n_cols,
+            y,
+            z,
+            n_inducing,
+            ks64,
+            &mut KernelScratch::new(),
+        )?;
+        let rounded = round_vfe(&state);
+        return Ok((rounded, Some(state.w)));
+    }
+    let state = assemble_vfe::<M, T>(
+        kernel,
+        k_mm_jitter,
+        likelihood,
+        x,
+        n_rows,
+        n_cols,
+        y,
+        z,
+        n_inducing,
+        ks,
+        ks64,
+    )?;
+    Ok((state, None))
 }
 
 pub(crate) fn fill_z_intervals(
