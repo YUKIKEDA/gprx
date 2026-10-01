@@ -1,6 +1,7 @@
 //! Mini-batch Adam over kernel `θ`, likelihood `θ`, and `q`.
 
-use super::gradient::svgp_value_and_gradient;
+use super::gradient::svgp_value_and_gradient_with;
+use super::step::AdamStep;
 use crate::error::GprError;
 use crate::optimizer::{Adam, chain_logit_grad, log_theta_to_z, z_to_log_theta_into};
 use crate::param::Interval;
@@ -113,6 +114,7 @@ where
     let mut rng = small_rng(adam.seed());
     let mut timestep = 0_u64;
     let batch_size = adam.batch_size();
+    let mut step = AdamStep::new(model);
     for _ in 0..adam.epochs() {
         shuffle_indices(&mut order, &mut rng);
         let mut start = 0;
@@ -120,11 +122,14 @@ where
             let end = start.saturating_add(batch_size).min(n);
             let batch = &order[start..end];
             unconstrained_to_user_into(&z, n_theta, m, &intervals, &mut user)?;
-            model.set_params_light(&user)?;
-            let mut scratch = std::mem::take(&mut model.scratch);
-            let result = svgp_value_and_gradient::<M, _>(model, &mut g_user, batch, &mut scratch);
-            model.scratch = scratch;
-            result?;
+            model.set_params_step::<M>(&user, &mut step)?;
+            svgp_value_and_gradient_with::<M, _>(
+                model,
+                &mut g_user,
+                batch,
+                &step.compiled,
+                &mut step.grad,
+            )?;
             user_grad_to_unconstrained(&user, &z, &intervals, &g_user, &mut g_z, n_theta, m);
             adam.step(&mut z, &g_z, &mut moment1, &mut moment2, &mut timestep);
             start = end;
