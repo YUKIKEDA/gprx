@@ -1,6 +1,7 @@
 //! Periodic (exp-sine-squared) kernel.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
+use super::periodic_rq_simd::{PeriodicScales, try_apply_periodic, try_weighted_periodic};
 use super::{
     Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
     write_rect_from_coords, write_square_from_coords, write_triangle,
@@ -9,6 +10,7 @@ use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::math::KernelMath;
 use crate::param::{BoundedParam, Interval};
+use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
 /// Periodic kernel: `k = exp( -2 sin²(π ‖x-x'‖ / p) / ℓ² )`.
@@ -172,14 +174,25 @@ impl PeriodicKernel {
     pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
-        out: MatMut<'_, T>,
+        mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        if try_apply_periodic::<M, T>(dist, out.rb_mut(), uplo, self.simd_scales())? {
+            return Ok(());
+        }
         let ell = T::from_f64(self.lengthscale());
         let period = T::from_f64(self.period());
         write_triangle(dist, out, uplo, |d| {
             periodic_from_sq_dist::<M, _>(d, ell, period)
         })
+    }
+
+    fn simd_scales(&self) -> PeriodicScales {
+        let ell = self.lengthscale();
+        PeriodicScales {
+            pi_over_period: std::f64::consts::PI / self.period(),
+            two_inv_ell_sq: 2.0 / (ell * ell),
+        }
     }
 
     /// Writes rectangular `k(dist)` into `out` (train × test).
@@ -267,6 +280,11 @@ impl PeriodicKernel {
         weight: MatRef<'_, T>,
         out: &mut [f64],
     ) -> Result<f64, GprError> {
+        if let Some(value) =
+            try_weighted_periodic::<M, T>(dist, k, weight, self.simd_scales(), out)?
+        {
+            return Ok(value);
+        }
         let ell = T::from_f64(self.lengthscale());
         let period = T::from_f64(self.period());
         let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
