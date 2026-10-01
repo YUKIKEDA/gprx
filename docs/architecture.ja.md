@@ -57,7 +57,7 @@ flowchart TB
 | `error` | 唯一のエラー型と、Cholesky の段の印 | 公開: `GprError`, `CholeskyStage` | `param` |
 | `param` | 区間つきの正のパラメータと、平らな `θ` の書き込み補助 | 公開: `Interval`, `BoundedParam`, `IntervalError` | `data`, `error`, `kernel`, `likelihood` |
 | `data` | 呼び出し側のデータの境界検査（形、有限、個数）と列優先の詰め込み | crate | `error`, `kernel` |
-| `rng` | サンプリングと焼きなましのための、種つきの小さな乱数 | crate: `SmallRng` | none |
+| `rng` | サンプリングと焼きなましのための、種つきの小さな乱数 | crate: `SeededRng`（Xoshiro256++） | none |
 | `math` | カーネルの `exp` の実装（厳密 / 高速近似）。`KernelExp` の方針で選ぶ | 公開: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
 | `linalg` | Cholesky、LDLT、三角解、密行列の補助、faer のワーカー数の上限。モデルは自前で持たない | crate | `error`, `kernel` |
 | `policy` | 実行時の方針: 距離キャッシュ、Cholesky のバッファ、カーネルの `exp`、ジッター | 公開: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |
@@ -73,7 +73,7 @@ flowchart TB
 | `precision` | 格納と予測のスカラーを 1 つの方針にまとめる。混合精度の反復改善 | 公開: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
 | `workspace` | 使い回すバッファ: Gram、`W`、距離キャッシュ、`exp` のバッファ、faer の scratch。クエリごとのバッファ | crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
 | `prediction` | 予測が返すものと、共分散からの事後標本の生成 | 公開: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
-| `objective` | モデルの学習の目的関数が実装する trait。ソルバーがモデルを知らなくて済む | 公開: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective`。crate: `HasBounds` | `error`, `param` |
+| `objective` | モデルの学習の目的関数が実装する trait。ソルバーがモデルを知らなくて済む | 公開: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective` | `error`, `param` |
 | `optimizer` | その trait の上のソルバー: argmin のアダプタ、自前の焼きなまし、`Fixed` の印。SVGP 用の Adam（`Optimizer` ではない） | 公開: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
 ### モデル

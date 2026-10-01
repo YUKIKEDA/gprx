@@ -12,36 +12,38 @@ use crate::linalg::{
 use crate::sparse::KernelScratch;
 use faer::{Mat, MatMut, MatRef};
 
-pub(crate) fn append_column<T: KernelScalar>(a: &Mat<T>, col: MatRef<'_, T>) -> Mat<T> {
+/// Appends `col` (`m × 1`) as a new last column of `a` in place.
+///
+/// The column capacity doubles when it runs out, so a run of appends costs
+/// `O(m)` each, amortized, instead of copying all of `a` every time.
+pub(crate) fn push_column<T: KernelScalar>(a: &mut Mat<T>, col: MatRef<'_, T>) {
     let m = a.nrows();
     let n = a.ncols();
-    let mut out = Mat::zeros(m, n + 1);
-    for j in 0..n {
-        for i in 0..m {
-            out[(i, j)] = a[(i, j)];
-        }
-    }
-    for i in 0..m {
-        out[(i, n)] = col[(i, 0)];
-    }
-    out
+    a.reserve(m, (n + 1).next_power_of_two());
+    a.resize_with(m, n + 1, |row, _| col[(row, 0)]);
 }
 
-pub(crate) fn remove_column<T: KernelScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
+/// Removes column `idx` of `a` in place, shifting the later columns left.
+pub(crate) fn remove_column_in_place<T: KernelScalar>(a: &mut Mat<T>, idx: usize) {
     let m = a.nrows();
     let n = a.ncols();
-    let mut out = Mat::zeros(m, n - 1);
-    let mut dest = 0;
-    for j in 0..n {
-        if j == idx {
-            continue;
+    for col in idx..n - 1 {
+        for row in 0..m {
+            a[(row, col)] = a[(row, col + 1)];
         }
-        for i in 0..m {
-            out[(i, dest)] = a[(i, j)];
-        }
-        dest += 1;
     }
-    out
+    a.truncate(m, n - 1);
+}
+
+/// `A y` in `f64` (`m`), whatever the storage scalar of `A` (`m × n`).
+pub(crate) fn a_times_y<T: KernelScalar>(a: MatRef<'_, T>, y: &[f64]) -> Vec<f64> {
+    let mut ay = vec![0.0; a.nrows()];
+    for (col, &y_col) in y.iter().enumerate().take(a.ncols()) {
+        for (row, slot) in ay.iter_mut().enumerate() {
+            *slot += a[(row, col)].to_f64() * y_col;
+        }
+    }
+    ay
 }
 
 /// Appends one point to column-major `x` (`n × d`) in place. Growth is

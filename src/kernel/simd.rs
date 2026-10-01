@@ -2,10 +2,10 @@
 //!
 //! Uses [`wide::f64x4`]. When a view is not unit row-stride, callers keep the
 //! scalar path. `wide::exp` may differ from scalar `f64::exp` by a few ULP.
-//! ARD caches store raw `(Δx_d)²` as `n × (n·d)` (dimension `k` uses columns
-//! `[k n, (k+1) n)`).
+//! ARD caches store raw `(Δx_d)²` as packed lower triangles
+//! ([`super::dist::ArdSqDiff`]); each cached column holds rows `col..n`.
 
-use super::dist::{col_chunk, worker_count};
+use super::dist::{ArdSqDiff, col_chunk, worker_count};
 use super::{Triangle, finite_dist, require_same_shape, require_square_pair};
 use crate::error::GprError;
 use crate::math::{FastApprox, KernelMath, MathOps, f64x4_all_finite};
@@ -600,8 +600,14 @@ pub(crate) fn try_grad_rbf<M: KernelMath>(
     Ok(true)
 }
 
-pub(crate) fn ard_cache_col(n: usize, dim: usize, col: usize) -> usize {
-    dim * n + col
+/// Offset of row `row_start` in the cached column `col`, which stores rows
+/// `col..n` only. Rows above the diagonal are not cached.
+fn cached_rows_offset(row_start: usize, col: usize) -> Result<usize, GprError> {
+    row_start
+        .checked_sub(col)
+        .ok_or_else(|| GprError::UnsupportedKernelOperation {
+            reason: "the ARD cache holds the lower triangle only".to_owned(),
+        })
 }
 
 fn scale_add(src: &[f64], scale: f64, acc: &mut [f64]) -> Result<(), GprError> {
@@ -720,7 +726,7 @@ fn rbf_ard_grad_in_place<M: KernelMath>(
 }
 
 fn accumulate_ard_r2(
-    cache: Option<MatRef<'_, f64>>,
+    cache: Option<ArdSqDiff<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     inv_ell_sq: &[f64],
     pair_col: usize,
@@ -730,14 +736,10 @@ fn accumulate_ard_r2(
     dest.fill(0.0);
     let n_rows = dest.len();
     if let Some(cache) = cache {
-        let n = cache.nrows();
+        let offset = cached_rows_offset(row_start, pair_col)?;
         for (dim, &w) in inv_ell_sq.iter().enumerate() {
-            let Some(src) = col_slice(cache, ard_cache_col(n, dim, pair_col)) else {
-                return Err(GprError::UnsupportedKernelOperation {
-                    reason: "expected unit row-stride for SIMD ARD".to_owned(),
-                });
-            };
-            scale_add(&src[row_start..row_start + n_rows], w, dest)?;
+            let src = cache.column(dim, pair_col);
+            scale_add(&src[offset..offset + n_rows], w, dest)?;
         }
         return Ok(());
     }
@@ -761,7 +763,7 @@ fn accumulate_ard_r2(
 }
 
 fn map_ard_column<M: KernelMath>(
-    cache: Option<MatRef<'_, f64>>,
+    cache: Option<ArdSqDiff<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     mut out: MatMut<'_, f64>,
     window: ColWindow,
@@ -786,17 +788,10 @@ fn map_ard_column<M: KernelMath>(
         None => rbf_exp_in_place::<M>(dest, 0.5),
         Some(dim) => {
             if let Some(cache) = cache {
-                let n = cache.nrows();
-                let Some(src) = col_slice(cache, ard_cache_col(n, dim, window.dist_col)) else {
-                    return Err(GprError::UnsupportedKernelOperation {
-                        reason: "expected unit row-stride for SIMD ARD".to_owned(),
-                    });
-                };
-                rbf_ard_grad_in_place::<M>(
-                    dest,
-                    &src[window.row_start..window.row_end],
-                    inv_ell_sq[dim],
-                )
+                let offset = cached_rows_offset(window.row_start, window.dist_col)?;
+                let src = cache.column(dim, window.dist_col);
+                let len = window.row_end - window.row_start;
+                rbf_ard_grad_in_place::<M>(dest, &src[offset..offset + len], inv_ell_sq[dim])
             } else {
                 let x = x.ok_or_else(|| GprError::UnsupportedKernelOperation {
                     reason: "ARD SIMD needs coordinates or a squared-diff cache".to_owned(),
@@ -818,7 +813,7 @@ fn map_ard_column<M: KernelMath>(
 }
 
 fn rbf_ard_lower_parallel<M: KernelMath>(
-    cache: Option<MatRef<'_, f64>>,
+    cache: Option<ArdSqDiff<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     out: MatMut<'_, f64>,
     inv_ell_sq: &[f64],
@@ -851,7 +846,7 @@ fn rbf_ard_lower_parallel<M: KernelMath>(
 }
 
 fn rbf_ard_serial_uplo<M: KernelMath>(
-    cache: Option<MatRef<'_, f64>>,
+    cache: Option<ArdSqDiff<'_, f64>>,
     x: Option<MatRef<'_, f64>>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
@@ -900,62 +895,25 @@ fn rbf_ard_serial_uplo<M: KernelMath>(
     }
 }
 
-fn require_ard_cache(cache: MatRef<'_, f64>, n: usize, d: usize) -> Result<(), GprError> {
-    if cache.nrows() == n && cache.ncols() == n.saturating_mul(d) {
-        Ok(())
-    } else {
-        Err(GprError::ShapeMismatch {
-            reason: format!(
-                "ARD cache is {}x{}, expected {}x{}",
-                cache.nrows(),
-                cache.ncols(),
-                n,
-                n * d
-            ),
-        })
-    }
-}
-
-/// Fills one column-partition of an `n × (n·d)` raw `(Δx_d)²` cache.
-pub(crate) fn try_fill_ard_chunk(
+/// Fills the packed column `col` of dimension `dim` of a raw `(Δx_d)²`
+/// cache: rows `col..n`. Returns `false` when `x` is not column-major.
+pub(crate) fn try_fill_ard_column(
     x: MatRef<'_, f64>,
-    mut dist_chunk: MatMut<'_, f64>,
-    chunk_idx: usize,
-    n_chunks: usize,
+    dim: usize,
+    col: usize,
+    dest: &mut [f64],
 ) -> bool {
-    if !unit_row_stride(x) {
+    let Some(xdim) = col_slice(x, dim) else {
         return false;
-    }
-    let n = x.nrows();
-    let d = x.ncols();
-    let total = n.saturating_mul(d);
-    let (start, len) = col_chunk(total, chunk_idx, n_chunks);
-    if dist_chunk.ncols() != len {
-        return false;
-    }
-    if len > 0 && col_slice_mut(dist_chunk.rb_mut(), 0).is_none() {
-        return false;
-    }
-    for local in 0..len {
-        let global = start + local;
-        let dim = global / n;
-        let col = global % n;
-        let Some(dest) = col_slice_mut(dist_chunk.rb_mut(), local) else {
-            return false;
-        };
-        let dest = &mut dest[col..];
-        dest.fill(0.0);
-        let Some(xdim) = col_slice(x, dim) else {
-            return false;
-        };
-        add_squared_diff(&xdim[col..], xdim[col], dest);
-    }
+    };
+    dest.fill(0.0);
+    add_squared_diff(&xdim[col..], xdim[col], dest);
     true
 }
 
 /// Writes ARD RBF from a raw `(Δx_d)²` cache when views are column-major.
 pub(crate) fn try_apply_rbf_ard_cache<M: KernelMath>(
-    cache: MatRef<'_, f64>,
+    cache: ArdSqDiff<'_, f64>,
     mut out: MatMut<'_, f64>,
     uplo: Triangle,
     inv_ell_sq: &[f64],
@@ -964,8 +922,9 @@ pub(crate) fn try_apply_rbf_ard_cache<M: KernelMath>(
     if out.ncols() != n {
         return Ok(false);
     }
-    require_ard_cache(cache, n, inv_ell_sq.len())?;
-    if !unit_row_stride(cache) || !unit_row_stride(out.as_ref()) {
+    super::dist::require_ard_sq_diff_shape(cache, n, inv_ell_sq.len())?;
+    // The cache stores the lower triangle; the scalar path reads any pair.
+    if uplo != Triangle::Lower || !unit_row_stride(out.as_ref()) {
         return Ok(false);
     }
     rbf_ard_serial_uplo::<M>(Some(cache), None, out.rb_mut(), uplo, inv_ell_sq, None)?;
@@ -992,7 +951,7 @@ pub(crate) fn try_apply_rbf_ard_points<M: KernelMath>(
 
 /// Writes ARD RBF `∂k/∂θ_d` from a raw `(Δx_d)²` cache.
 pub(crate) fn try_grad_rbf_ard_cache<M: KernelMath>(
-    cache: MatRef<'_, f64>,
+    cache: ArdSqDiff<'_, f64>,
     mut d_k: MatMut<'_, f64>,
     uplo: Triangle,
     inv_ell_sq: &[f64],
@@ -1002,8 +961,9 @@ pub(crate) fn try_grad_rbf_ard_cache<M: KernelMath>(
     if d_k.ncols() != n || param_idx >= inv_ell_sq.len() {
         return Ok(false);
     }
-    require_ard_cache(cache, n, inv_ell_sq.len())?;
-    if !unit_row_stride(cache) || !unit_row_stride(d_k.as_ref()) {
+    super::dist::require_ard_sq_diff_shape(cache, n, inv_ell_sq.len())?;
+    // The cache stores the lower triangle; the scalar path reads any pair.
+    if uplo != Triangle::Lower || !unit_row_stride(d_k.as_ref()) {
         return Ok(false);
     }
     rbf_ard_serial_uplo::<M>(

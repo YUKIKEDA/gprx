@@ -381,6 +381,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// Returns [`GprError::PersistFailed`] when this leaf has no persist form.
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
+            kind: crate::error::PersistErrorKind::NotPersistable,
             reason: "this custom kernel does not implement persist_state".to_owned(),
         })
     }
