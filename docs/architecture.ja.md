@@ -57,7 +57,7 @@ flowchart TB
 | `error` | 唯一のエラー型と、Cholesky の段の印 | 公開: `GprError`, `CholeskyStage` | `param` |
 | `param` | 区間つきの正のパラメータと、平らな `θ` の書き込み補助 | 公開: `Interval`, `BoundedParam`, `IntervalError` | `data`, `error`, `kernel`, `likelihood` |
 | `data` | 呼び出し側のデータの境界検査（形、有限、個数）と列優先の詰め込み | crate | `error`, `kernel` |
-| `rng` | サンプリングと焼きなましのための、種つきの小さな乱数 | crate: `SmallRng` | none |
+| `rng` | サンプリングと焼きなましのための、種つきの小さな乱数 | crate: `SeededRng`（Xoshiro256++） | none |
 | `math` | カーネルの `exp` の実装（厳密 / 高速近似）。`KernelExp` の方針で選ぶ | 公開: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
 | `linalg` | Cholesky、LDLT、三角解、密行列の補助、faer のワーカー数の上限。モデルは自前で持たない | crate | `error`, `kernel` |
 | `policy` | 実行時の方針: 距離キャッシュ、Cholesky のバッファ、カーネルの `exp`、ジッター | 公開: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |

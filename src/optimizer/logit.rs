@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use argmin::core::{CostFunction, Error as ArgminError, Gradient};
 
-use rand::rngs::SmallRng;
+use crate::rng::SeededRng;
 
 use crate::error::GprError;
 use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
@@ -255,7 +255,7 @@ fn sigmoid(z: f64) -> f64 {
 
 pub(super) fn sample_log_uniform_z(
     intervals: &[Interval],
-    rng: &mut SmallRng,
+    rng: &mut SeededRng,
 ) -> Result<Vec<f64>, GprError> {
     let mut z = vec![0.0; intervals.len()];
     for (slot, interval) in z.iter_mut().zip(intervals.iter().copied()) {
@@ -265,7 +265,7 @@ pub(super) fn sample_log_uniform_z(
     Ok(z)
 }
 
-fn log_uniform_open(rng: &mut SmallRng, interval: Interval) -> f64 {
+fn log_uniform_open(rng: &mut SeededRng, interval: Interval) -> f64 {
     let u = open_unit(rng);
     if interval.lo() > 0.0 {
         let ln_lo = interval.lo().ln();

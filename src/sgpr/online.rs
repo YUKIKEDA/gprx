@@ -493,7 +493,7 @@ where
     /// Each column of the returned column-major `m × n_draws` matrix is
     /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
     /// posterior covariance, the same draw as [`crate::FittedGpr::sample`].
-    /// `seed` is the crate [`rand::rngs::SmallRng`] start state. Zero draws
+    /// `seed` is the start state of gprx's seeded generator (Xoshiro256++; the same seed gives the same draws on every platform). Zero draws
     /// returns an empty vector after the covariance is formed.
     ///
     /// # Errors

@@ -398,7 +398,11 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     // *_with variants take PredictOptions; get_params / set_params /
     // value_and_gradient_into / hessian_into; into_online / into_trainer / save
 }
+```
 
+Every `seed` (sample, optimizer restarts, FSA, the SVGP Adam shuffle) starts gprx's own Xoshiro256++ generator, its state filled from the seed by SplitMix64 (`src/rng.rs`). The same seed and the same gprx version give the same draws on every platform and with any `rand` version; a test pins the first outputs. Changing the sequence is a breaking change.
+
+```rust
 pub enum VarianceKind {
     Latent,      // variance of the latent f* (no noise)
     Observation, // variance of the observation y* (includes σn²). Default
@@ -917,7 +921,7 @@ Correctness comes before speed: every path has its correctness tests before it i
    - Gradient of the noise parameter (`log_noise_variance`). `∂K/∂θ = σn² I`
    - Gradient stability on an ill-conditioned matrix
 4. **Online updates**: one-point add/delete matches a full refit, delete at an arbitrary index, repeated add and delete, and agreement of PointId with the internal index (the §11 invariant)
-5. **Online property tests**: at every stage of a random insert/delete sequence, incremental == `Gpr<Fixed>::factor` (mean, variance, LML, alpha). Delete order is randomized with `SmallRng`
+5. **Online property tests**: at every stage of a random insert/delete sequence, incremental == `Gpr<Fixed>::factor` (mean, variance, LML, alpha). Delete order is randomized with a seeded `rand` generator in the test
 5b. **External check of online insert**: libgp `add_pattern` at the same θ, against predict (mean and observation variance) and NLML, relative `1e-8`. There is no external delete API. `cargo test` reads committed JSON (it does not call C++)
 5c. **External check of Sparse**: `Sgpr<Fixed>::factor` against collapsed GPyTorch SGPR, and `Svgp<Fixed>::factor` (prior `q`) against whitened SVGP, at the same initial θ, relative `1e-8` (mean, Observation, Latent, NLML / ELBO). `cargo test` reads committed JSON (it does not call Python)
 5d. **External check of Sparse online**: `OnlineSgpr` `insert` / `delete` / `insert_inducing` / `delete_inducing` against a collapsed GPyTorch SGPR (full reassemble) at each stage, same initial θ, relative `1e-8` (mean, Observation, Latent, NLML). `cargo test` reads committed JSON (it does not call Python)
@@ -961,7 +965,7 @@ The input has to be the same every time, or a faster run cannot be told from a d
 - Criterion uses `n = 256`. The cross-library harness uses `n = 256 / 1024 / 4096` (Forrester) and `16×16 / 32×32 / 64×64` (sphere)
 - Isotropic: 1-D Forrester `f(x)=(6x-2)² sin(12x-4)`, `x ∈ [0, 1]`, RBF + `GaussianLikelihood` + `StandardizeTarget`. Initial hyperparameters `ℓ = 1`, `σn² = 0.1`
 - ARD: 2-D weighted sphere `f=(x/0.25)²+(y/1)²`, a 16×16 grid on `[0, 1]²`. Initial `ℓ_d = 4` (`ℓ_d = 1` dies on the first line search)
-- `y` is that function plus `N(0, 1)` (`SmallRng`. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on `Uncached`). It is not an independent random series (L-BFGS eval counts move with the landscape)
+- `y` is that function plus `N(0, 1)` (gprx's seeded generator. Forrester seed `0`, ARD sphere seed `9`. Seed `0` walks a ridge on `Uncached`). It is not an independent random series (L-BFGS eval counts move with the landscape)
 - Criterion groups in `benches/exact.rs` (only paths that exist):
   1. `kernel_rbf` — lower-triangle build of K
   2. `cholesky_alpha` — LLT of `A` and `α`
