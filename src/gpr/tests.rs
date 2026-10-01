@@ -2478,6 +2478,130 @@ fn lbfgs_knobs_affect_fit_and_refit() {
     );
 }
 
+/// Returns `init` as the result, after evaluating a worse point last.
+#[derive(Clone, Debug)]
+struct BestThenWorse;
+
+impl<P: Objective + ?Sized> Optimizer<P> for BestThenWorse {
+    fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
+        let value = objective.value(init)?;
+        let worse: Vec<f64> = init.iter().map(|p| p + 1.5).collect();
+        objective.value(&worse)?;
+        Ok(OptResult {
+            params: init.to_vec(),
+            value,
+            iterations: 1,
+        })
+    }
+}
+
+fn wavy_data() -> (Vec<f64>, Vec<f64>) {
+    let x: Vec<f64> = (0..30).map(|i| f64::from(i) / 5.0).collect();
+    let y = x
+        .iter()
+        .map(|v| (v * 1.3).sin() + 0.1 * (v * 7.0).cos())
+        .collect();
+    (x, y)
+}
+
+#[test]
+fn fit_and_refit_hold_the_optimizer_result_not_the_last_evaluation() {
+    let (x, y) = wavy_data();
+    let mut fitted = rbf_gpr(1.0, 0.1)
+        .with_optimizer(BestThenWorse)
+        .fit(&x, 30, 1, &y)
+        .expect("fit");
+    let at_init = rbf_gpr(1.0, 0.1)
+        .with_optimizer(Fixed)
+        .factor(&x, 30, 1, &y)
+        .expect("factor");
+    let mut params = [0.0; 2];
+    fitted.get_params(&mut params).expect("len 2");
+    assert_close(params[0], 0.0, TOL);
+    assert_close(params[1], 0.1_f64.ln(), TOL);
+    let nlml = fitted.neg_log_marginal_likelihood().expect("nlml");
+    assert_close(
+        nlml,
+        at_init.neg_log_marginal_likelihood().expect("nlml"),
+        TOL,
+    );
+    let pred = fitted.predict(&[0.3], 1, 1).expect("predict");
+    let pred_init = at_init.predict(&[0.3], 1, 1).expect("predict");
+    assert_close(pred.mean[0], pred_init.mean[0], TOL);
+
+    fitted.refit().expect("refit");
+    fitted.get_params(&mut params).expect("len 2");
+    assert_close(params[0], 0.0, TOL);
+
+    let mut online = rbf_gpr(1.0, 0.1)
+        .with_optimizer(BestThenWorse)
+        .fit(&x, 30, 1, &y)
+        .expect("fit")
+        .into_online()
+        .expect("online");
+    online.refit().expect("refit");
+    online.get_params(&mut params).expect("len 2");
+    assert_close(params[0], 0.0, TOL);
+    assert_close(
+        online.neg_log_marginal_likelihood().expect("nlml"),
+        nlml,
+        1e-8,
+    );
+}
+
+#[test]
+fn lbfgs_restarts_never_end_worse_than_the_first_start() {
+    let (x, y) = wavy_data();
+    let plain = rbf_gpr(1.0, 0.1)
+        .fit(&x, 30, 1, &y)
+        .expect("fit")
+        .neg_log_marginal_likelihood()
+        .expect("nlml");
+    for seed in 0..10 {
+        let restarted = rbf_gpr(1.0, 0.1)
+            .with_optimizer(
+                Lbfgs::new().with_restarts(std::num::NonZeroU32::new(3).expect("3"), seed),
+            )
+            .fit(&x, 30, 1, &y)
+            .expect("fit")
+            .neg_log_marginal_likelihood()
+            .expect("nlml");
+        assert!(
+            restarted <= plain + 1e-8,
+            "seed {seed}: restarts ended at {restarted}, first start alone reaches {plain}"
+        );
+    }
+}
+
+#[test]
+fn annealing_never_ends_worse_than_its_start() {
+    let (x, y) = wavy_data();
+    let at_init = rbf_gpr(1.0, 0.1)
+        .with_optimizer(Fixed)
+        .factor(&x, 30, 1, &y)
+        .expect("factor")
+        .neg_log_marginal_likelihood()
+        .expect("nlml");
+    for iterations in 1..6 {
+        for seed in 0..5 {
+            let annealed = rbf_gpr(1.0, 0.1)
+                .with_optimizer(
+                    FastSimulatedAnnealing::new()
+                        .with_max_iterations(iterations)
+                        .with_seed(seed),
+                )
+                .fit(&x, 30, 1, &y)
+                .expect("fit")
+                .neg_log_marginal_likelihood()
+                .expect("nlml");
+            assert!(
+                annealed <= at_init + 1e-8,
+                "iterations {iterations}, seed {seed}: ended at {annealed} above the start {at_init}"
+            );
+        }
+    }
+}
+
 #[test]
 fn neldermead_fit_lowers_nlml() {
     let x = [0.0, 0.25, 0.6, 1.0];
