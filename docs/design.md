@@ -748,6 +748,8 @@ The trainer bound is `O: for<'a> Optimizer<GprObjective<'a, P>>`. The default is
 
 Cover the failures that are specific to numerical work.
 
+A public enum whose set can grow is `#[non_exhaustive]`: `GprError`, `CholeskyStage`, `IntervalError`, `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`, `PersistKind`, `KernelSpec`, `CompiledKernel`, `DistanceCachePolicy`, `JitterPolicy`, `KernelExp`, and `BoundaryPolicy`. Adding a variant to one of them is not a breaking change; a `match` outside the crate needs a `_` arm. A closed set stays exhaustive so callers can match every case: `Triangle`, `MaternNu`, `VarianceKind`, `CholeskyBuffer`.
+
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
 pub enum GprError {
