@@ -318,7 +318,7 @@ fn delete_unknown_point_id_is_invalid() {
 }
 
 #[test]
-fn delete_last_point_is_empty_input() {
+fn delete_last_point_is_insufficient_data() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
     let fitted = factor_oracle(kernel, likelihood, &X1, 4, 1, &Y0, &Z1, 2);
@@ -328,8 +328,27 @@ fn delete_last_point_is_empty_input() {
         online.delete(id).expect("delete");
     }
     let last = online.point_ids()[0];
-    assert!(matches!(online.delete(last), Err(GprError::EmptyInput)));
+    // The same variant as `OnlineGpr::delete` of its last point.
+    assert!(matches!(
+        online.delete(last),
+        Err(GprError::InsufficientData { n: 1, min: 2 })
+    ));
     assert_eq!(online.n(), 1);
+    let mut exact = gprx::Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+        GaussianLikelihood::new(0.1).expect("noise"),
+    )
+    .with_optimizer(gprx::Fixed)
+    .factor(&[0.0], 1, 1, &[0.5])
+    .map_err(|(_, e)| e)
+    .expect("factor")
+    .into_online()
+    .expect("online");
+    let only = exact.point_ids()[0];
+    assert!(matches!(
+        exact.delete(only),
+        Err(GprError::InsufficientData { n: 1, min: 2 })
+    ));
 }
 
 #[test]
@@ -550,7 +569,7 @@ fn delete_unknown_inducing_id_is_invalid() {
 }
 
 #[test]
-fn delete_last_inducing_is_empty_input() {
+fn delete_last_inducing_is_insufficient_data() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
     let likelihood = GaussianLikelihood::new(0.1).expect("noise");
     let fitted = factor_oracle(kernel, likelihood, &X1, 4, 1, &Y0, &Z1, 2);
@@ -562,7 +581,7 @@ fn delete_last_inducing_is_empty_input() {
     let last = online.inducing_ids()[0];
     assert!(matches!(
         online.delete_inducing(last),
-        Err(GprError::EmptyInput)
+        Err(GprError::InsufficientData { n: 1, min: 2 })
     ));
     assert_eq!(online.m(), 1);
 }

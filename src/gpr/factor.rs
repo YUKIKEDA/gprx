@@ -3,6 +3,7 @@
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
+use crate::kernel::ArdSqDiffBuf;
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
@@ -94,13 +95,7 @@ pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
     }
     let reads_ard = T::READS_ARD_CACHE && compiled.needs_ard_sq_diff();
     if reads_ard && d.ard_sq_diff.is_none() {
-        let n = x.nrows();
-        let cols = n.checked_mul(x.ncols()).ok_or(GprError::SizeOverflow)?;
-        let mut ard = Mat::<T>::zeros(n, cols);
-        let mut pool = std::mem::take(thread_scratch);
-        T::write_ard(x, ard.as_mut(), &mut pool);
-        *thread_scratch = pool;
-        d.ard_sq_diff = Some(ard);
+        d.ard_sq_diff = Some(ArdSqDiffBuf::new(x)?);
     }
     let d: &'a crate::workspace::DistCache<T> = d;
     Ok(GramInputs {
@@ -111,7 +106,7 @@ pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
             None
         },
         ard: if reads_ard {
-            d.ard_sq_diff.as_ref().map(Mat::as_ref)
+            d.ard_sq_diff.as_ref().map(ArdSqDiffBuf::view)
         } else {
             None
         },
