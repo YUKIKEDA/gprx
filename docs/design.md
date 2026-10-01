@@ -693,7 +693,7 @@ A batch-fit Workspace has fixed n. Capacity growth for online learning belongs t
 
 ## 8. Parallelism, SIMD, and the math backend
 
-- The inner kernel loop is vectorized with `wide::f64x4`. The targets are column-major, unit-row-stride isotropic RBF `apply` / `grad` / `apply_cross`, ARD RBF `apply` / `grad`, and the row loops of squared distance and `(Δx_d)²`. A view whose stride is not 1 falls back to scalar. `std::simd` is not used until it is stable. The inner loops of Matérn / Periodic / RQ are not vectorized yet.
+- The inner kernel loop is vectorized with `wide::f64x4`. The targets are column-major, unit-row-stride isotropic RBF `apply` / `grad` / `apply_cross`, ARD RBF `apply` / `grad` / rectangular `grad`, the ARD Matérn and ARD RQ value and `θ` derivative (from coordinates, from the `(Δx_d)²` cache, and rectangular; `src/kernel/ard_simd.rs`: `r²` of four rows at once, then the radial profile in `f64x4`, with RQ's `u^{−α}` as `exp(−α ln u)`), and the row loops of squared distance and `(Δx_d)²`. A view whose stride is not 1, or a value that is not finite, falls back to scalar, which also names the error. `std::simd` is not used until it is stable. The inner loops of the isotropic Matérn / Periodic / RQ are not vectorized yet.
 - Distance-matrix and kernel-matrix construction is block-parallel with Rayon
 - faer is itself Rayon-parallel, so do not nest a second pool. Share one `rayon::ThreadPool`. faer's thread count is `min(pool, n/64, n·k/16384, k/12)` ([ADR 0001](adr/0001-faer-parallel-degree.md)). `k` is the number of right-hand-side columns. Kernel fill uses the whole pool
 
