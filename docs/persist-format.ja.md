@@ -246,7 +246,7 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 | `n`、`d`、（Sparse の）`m` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |
 
-ディレクトリは、信頼できる入力として扱う。自分で書いていないディレクトリを読むことに関する、開いている Issue が 2 つある: `sum` / `product` / `pipeline` の木の再帰の深さ（[#151](https://github.com/YUKIKEDA/gprx/issues/151)）と、保存した `x`、`y`、`alpha`、`l` が有限かどうか（[#154](https://github.com/YUKIKEDA/gprx/issues/154)）。読み込みが検査するのは、形と dtype、および `q` の有限性と下三角であること。
+ディレクトリは、信頼できる入力として扱う。自分で書いていないディレクトリを読むことに関する、開いている Issue が 1 つある: `sum` / `product` / `pipeline` の木の再帰の深さ（[#151](https://github.com/YUKIKEDA/gprx/issues/151)）。読み込みが検査するのは、形と dtype、保存したテンソルがすべて有限であること（`NaN` や `±∞` は `PersistFailed`）、および `q` が下三角であること。
 
 ## 9. gprx なしでファイルを読む
 

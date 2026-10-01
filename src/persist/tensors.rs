@@ -52,7 +52,11 @@ impl MappedTensors {
         if l_offset.checked_add(nbytes).is_none() || l_offset + nbytes > mmap.len() {
             return Err(persist_err("L tensor is outside the mapped file"));
         }
-        Ok(Self { mmap, l_offset, n })
+        let mapped = Self { mmap, l_offset, n };
+        // Safety of the read: the bounds and alignment are checked above.
+        let values = unsafe { f64_slice_unchecked(&mapped.mmap[l_offset..l_offset + nbytes]) };
+        require_finite_tensor(values, TENSOR_L)?;
+        Ok(mapped)
     }
 
     pub(crate) fn l_view(&self) -> MatRef<'_, f64> {
@@ -175,7 +179,7 @@ pub(super) fn read_xy(dir: &Path, n: usize, d: usize) -> Result<(Vec<f64>, Vec<f
     Ok((x, y))
 }
 
-pub(super) fn read_scalars<T: Copy>(
+pub(super) fn read_scalars<T: crate::kernel::KernelScalar>(
     dir: &Path,
     name: &str,
     shape: &[usize],
@@ -190,10 +194,11 @@ pub(super) fn read_scalars<T: Copy>(
         .map_err(|err| persist_err(format!("missing tensor {name}: {err}")))?;
     validate_shape(&tensor, shape, name, dtype)?;
     let data = scalar_slice::<T>(tensor.data())?;
+    require_finite_tensor(data, name)?;
     Ok(data.to_vec())
 }
 
-pub(super) fn read_matrix<T: Copy>(
+pub(super) fn read_matrix<T: crate::kernel::KernelScalar>(
     dir: &Path,
     n: usize,
     dtype: Dtype,
@@ -212,7 +217,22 @@ fn copy_f64_tensor(
         .map_err(|err| persist_err(format!("missing tensor {name}: {err}")))?;
     validate_f64_shape(&tensor, shape, name)?;
     let data = f64_slice(tensor.data())?;
+    require_finite_tensor(data, name)?;
     Ok(data.to_vec())
+}
+
+/// Rejects a stored tensor holding `NaN` or `±∞`. gprx never writes one, so
+/// such a file was damaged or edited.
+fn require_finite_tensor<T: crate::kernel::KernelScalar>(
+    values: &[T],
+    name: &str,
+) -> Result<(), GprError> {
+    match values.iter().position(|value| !value.to_f64().is_finite()) {
+        None => Ok(()),
+        Some(index) => Err(persist_err(format!(
+            "tensor {name} holds a non-finite value at index {index}"
+        ))),
+    }
 }
 
 fn validate_shape(
