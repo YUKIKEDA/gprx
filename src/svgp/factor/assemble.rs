@@ -4,7 +4,7 @@ use crate::data::{pack_points, validate_inducing, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GramInputs;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
-use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower, symmetrize_lower};
+use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower};
 use crate::policy::JitterPolicy;
 use crate::precision::ModelPrecision;
 use crate::sparse::SparseCore;
@@ -143,21 +143,8 @@ where
     let mut z_cast = T::empty_cols();
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
-    // Same packed `X` and `Z` share a training White diagonal. Rectangular
-    // `apply_cross` leaves White at zero.
-    let mut a = if x == z {
-        let mut gram = Mat::zeros(n_rows, n_rows);
-        ks.gram::<M>(
-            &compiled,
-            GramInputs::points(x_mat),
-            gram.as_mut(),
-            Triangle::Lower,
-        )?;
-        symmetrize_lower(gram.as_mut(), n_rows);
-        gram
-    } else {
-        ks.cross::<M>(&compiled, z_mat, x_mat)?
-    };
+    // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
+    let mut a = ks.cross::<M>(&compiled, z_mat, x_mat)?;
     solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];
     compiled.fill_diag_points(x_mat, &mut k_diag)?;

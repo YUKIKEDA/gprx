@@ -8,7 +8,7 @@ use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower_with_retries, frobenius2, gram_aat_plus_noise, llt_scratch, matvec_columns,
-    round_mat, solve_llt, solve_lower, symmetrize_lower,
+    round_mat, solve_llt, solve_lower,
 };
 use crate::param::Interval;
 use crate::policy::JitterPolicy;
@@ -230,46 +230,19 @@ where
         k_mm_jitter.retry_jitters(),
         CholeskyStage::Fit,
     )?;
-    // Same packed `X` and `Z` share a training White diagonal. Rectangular
-    // `apply_cross` leaves White at zero.
+    // `K(Z, X)` is the rectangular cross covariance whatever the values of
+    // `Z` and `X`: a White leaf adds nothing to it, so the objective does not
+    // jump when a free `Z` leaves `X` (docs/design.md §5).
     let mut a = if round_kernel {
         let compiled64 = kernel.compile();
-        if x == z {
-            let mut gram64 = Mat::<f64>::zeros(n_rows, n_rows);
-            ks64.gram::<M>(
-                &compiled64,
-                GramInputs::points(x64.as_ref()),
-                gram64.as_mut(),
-                Triangle::Lower,
-            )?;
-            let mut gram = Mat::<T>::zeros(n_rows, n_rows);
-            for col in 0..n_rows {
-                for row in col..n_rows {
-                    gram[(row, col)] = T::from_f64(gram64[(row, col)]);
-                }
+        let cross = ks64.cross::<M>(&compiled64, z64.as_ref(), x64.as_ref())?;
+        let mut stored = Mat::<T>::zeros(n_inducing, n_rows);
+        for col in 0..n_rows {
+            for row in 0..n_inducing {
+                stored[(row, col)] = T::from_f64(cross[(row, col)]);
             }
-            symmetrize_lower(gram.as_mut(), n_rows);
-            gram
-        } else {
-            let cross = ks64.cross::<M>(&compiled64, z64.as_ref(), x64.as_ref())?;
-            let mut stored = Mat::<T>::zeros(n_inducing, n_rows);
-            for col in 0..n_rows {
-                for row in 0..n_inducing {
-                    stored[(row, col)] = T::from_f64(cross[(row, col)]);
-                }
-            }
-            stored
         }
-    } else if x == z {
-        let mut gram = Mat::zeros(n_rows, n_rows);
-        ks.gram::<M>(
-            &compiled,
-            GramInputs::points(x_mat.as_ref()),
-            gram.as_mut(),
-            Triangle::Lower,
-        )?;
-        symmetrize_lower(gram.as_mut(), n_rows);
-        gram
+        stored
     } else {
         ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref())?
     };
