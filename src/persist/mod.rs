@@ -783,6 +783,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Swaps `data_min` and `data_max` in every object of `value` holding both.
+    fn swap_extrema(value: &mut serde_json::Value) -> usize {
+        let mut swapped = 0;
+        match value {
+            serde_json::Value::Object(map) => {
+                if let (Some(lo), Some(hi)) =
+                    (map.get("data_min").cloned(), map.get("data_max").cloned())
+                {
+                    map.insert("data_min".to_owned(), hi);
+                    map.insert("data_max".to_owned(), lo);
+                    swapped += 1;
+                }
+                for child in map.values_mut() {
+                    swapped += swap_extrema(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    swapped += swap_extrema(child);
+                }
+            }
+            _ => {}
+        }
+        swapped
+    }
+
+    #[test]
+    fn reversed_min_max_extrema_fail_to_load() {
+        for key in ["x_transform", "y_transform"] {
+            let dir = temp_dir("minmax-reversed");
+            Gpr::new(
+                KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+                GaussianLikelihood::new(0.1).expect("noise"),
+            )
+            .with_input_transform(crate::transform::MinMaxInput::new())
+            .with_target_transform(crate::transform::MinMaxTarget::new())
+            .with_optimizer(Fixed)
+            .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.5, -1.0, 2.0])
+            .map_err(|(_, e)| e)
+            .expect("factor")
+            .save(&dir)
+            .expect("save");
+            assert!(LoadedGpr::load(&dir, &PersistRegistry::new()).is_ok());
+            let path = dir.join(CONFIG_FILE);
+            let mut config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+            assert_eq!(swap_extrema(&mut config[key]), 1, "{key}");
+            std::fs::write(&path, serde_json::to_vec(&config).expect("encode")).expect("write");
+            match LoadedGpr::load(&dir, &PersistRegistry::new()) {
+                Err(GprError::InvalidHyperparameter { reason }) => {
+                    assert!(reason.contains("data_min <= data_max"), "{key}: {reason}");
+                }
+                other => panic!("{key}: unexpected {:?}", other.err()),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn mapped_factor_survives_failed_set_params() {
         let fitted = Gpr::new(
