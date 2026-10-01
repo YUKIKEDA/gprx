@@ -1,5 +1,6 @@
 //! Save and load a fitted GPR directory (`config.json` + `model.safetensors`).
 
+mod atomic;
 mod config;
 mod kernel;
 mod registry;
@@ -285,6 +286,12 @@ pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precisio
     pub factor_jitter: f64,
 }
 
+/// Writes `config.json` last, after the tensors it describes, so a save
+/// that fails part way never leaves a new config over old tensors.
+fn write_config(dir: &Path, json: &[u8]) -> Result<(), GprError> {
+    atomic::write_atomic(&dir.join(CONFIG_FILE), json)
+}
+
 pub(crate) fn persist_err(reason: impl Into<String>) -> GprError {
     GprError::PersistFailed {
         reason: reason.into(),
@@ -347,11 +354,8 @@ where
         point_ids: None,
         next_point_id: None,
     };
-    let config_path = dir.join(CONFIG_FILE);
     let json = serde_json::to_vec_pretty(&config)
         .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
     let packed = if with_factor {
         Some(pack_saved_factor(model.chol_l(), model.alpha())?)
     } else {
@@ -363,7 +367,8 @@ where
         alpha_dtype: packed.alpha_dtype,
         alpha: packed.alpha.as_slice(),
     });
-    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
+    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)?;
+    write_config(dir, &json)
 }
 
 pub(crate) fn save_online<O, P>(
@@ -397,11 +402,8 @@ where
         point_ids: Some(model.persist_point_ids()),
         next_point_id: Some(model.persist_next_point_id()),
     };
-    let config_path = dir.join(CONFIG_FILE);
     let json = serde_json::to_vec_pretty(&config)
         .map_err(|err| persist_err(format!("serialize config.json: {err}")))?;
-    std::fs::write(&config_path, json)
-        .map_err(|err| persist_err(format!("write {config_path:?}: {err}")))?;
     let packed = if with_factor {
         Some(pack_saved_factor(model.ld_factor(), model.alpha()?)?)
     } else {
@@ -413,7 +415,8 @@ where
         alpha_dtype: packed.alpha_dtype,
         alpha: packed.alpha.as_slice(),
     });
-    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)
+    write_tensors(dir, model.x(), model.y(), model.n(), model.d(), factor_refs)?;
+    write_config(dir, &json)
 }
 
 fn apply_online_ids<O, P>(
@@ -783,6 +786,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn fixed_rbf(x: &[f64], y: &[f64]) -> crate::FittedGpr<Fixed> {
+        Gpr::new(
+            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+            GaussianLikelihood::new(0.1).expect("noise"),
+        )
+        .with_optimizer(Fixed)
+        .factor(x, x.len(), 1, y)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+    }
+
     /// `depth` levels of `wrap` around `leaf`.
     fn nested(
         leaf: &serde_json::Value,
@@ -799,16 +813,9 @@ mod tests {
     #[test]
     fn deeply_nested_config_trees_are_rejected_without_overflow() {
         let dir = temp_dir("deep-config");
-        Gpr::new(
-            KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
-            GaussianLikelihood::new(0.1).expect("noise"),
-        )
-        .with_optimizer(Fixed)
-        .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
-        .map_err(|(_, e)| e)
-        .expect("factor")
-        .save(&dir)
-        .expect("save");
+        fixed_rbf(&[0.0, 1.0], &[0.0, 1.0])
+            .save(&dir)
+            .expect("save");
         let path = dir.join(CONFIG_FILE);
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
@@ -855,6 +862,65 @@ mod tests {
                 other => panic!("{key}: unexpected {:?}", other.err()),
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mapped_model_keeps_its_factor_when_its_directory_is_saved_over() {
+        let x_big: Vec<f64> = (0..30).map(|i| f64::from(i) / 5.0).collect();
+        let y_big: Vec<f64> = x_big.iter().map(|v| v.sin()).collect();
+        let dir = temp_dir("mapped-overwrite");
+        fixed_rbf(&x_big, &y_big)
+            .save_with_factor(&dir)
+            .expect("save big");
+        let loaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("load");
+        let before = loaded.predict(&[0.3], 1, 1).expect("predict");
+        // A smaller model over the same files: an in-place rewrite would
+        // shrink the mapped file under `loaded` and fault on the next read.
+        fixed_rbf(&[0.0, 1.0, 2.0], &[0.5, -0.5, 0.25])
+            .save_with_factor(&dir)
+            .expect("save small");
+        let after = loaded.predict(&[0.3], 1, 1).expect("predict");
+        assert_close(after.mean[0], before.mean[0], TOL);
+        assert_close(after.variance[0], before.variance[0], TOL);
+        let reloaded = LoadedGpr::load(&dir, &PersistRegistry::new()).expect("reload");
+        assert_eq!(reloaded.n(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_tensor_write_leaves_the_previous_config() {
+        let dir = temp_dir("failed-tensors");
+        fixed_rbf(&[0.0, 1.0], &[0.0, 1.0])
+            .save(&dir)
+            .expect("save");
+        let config_before = std::fs::read(dir.join(CONFIG_FILE)).expect("config");
+        let tensors = dir.join(super::TENSOR_FILE);
+        std::fs::remove_file(&tensors).expect("remove tensors");
+        // A non-empty directory where the tensor file goes cannot be replaced.
+        std::fs::create_dir_all(tensors.join("blocker")).expect("blocker");
+        let err = fixed_rbf(&[0.0, 1.0, 2.0], &[0.0, 1.0, 0.5])
+            .save(&dir)
+            .expect_err("tensor write must fail");
+        assert!(matches!(err, GprError::PersistFailed { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read(dir.join(CONFIG_FILE)).expect("config"),
+            config_before
+        );
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.contains(".tmp-")),
+            "temporary files left: {names:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
