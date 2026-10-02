@@ -650,7 +650,7 @@ fn copy_lower<T: KernelScalar>(out: MatMut<'_, T>, src: MatRef<'_, T>, n: usize)
 }
 
 /// `⟨a, b⟩_F` of two symmetric matrices from their lower triangles, in
-/// `f64`, on the Rayon pool (blocks joined in order).
+/// `f64`, on the Rayon pool (column sums added in column order).
 fn lower_dot<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> f64 {
     lower_fold(a.nrows(), |col, rows| {
         let mut off = 0.0;
@@ -662,7 +662,7 @@ fn lower_dot<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> f64 {
 }
 
 /// `Σ_ij a_ij` of a symmetric matrix from its lower triangle, in `f64`,
-/// on the Rayon pool (blocks joined in order).
+/// on the Rayon pool (column sums added in column order).
 fn lower_sum<T: KernelScalar>(a: MatRef<'_, T>) -> f64 {
     lower_fold(a.nrows(), |col, rows| {
         let mut off = 0.0;
