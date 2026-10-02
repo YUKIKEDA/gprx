@@ -36,6 +36,10 @@ pub(crate) struct VfeAdjoint<T: KernelScalar> {
 
 impl<T: KernelScalar> VfeAdjoint<T> {
     /// `dF` for one direction of the kernel matrices.
+    ///
+    /// The first derivative contracts in one walk instead of calling this.
+    /// The adjoint test still checks one direction against the tangent.
+    #[cfg(test)]
     pub(crate) fn contract(&self, d_kmm: MatRef<'_, T>, d_kmn: MatRef<'_, T>, d_kdiag: T) -> T {
         frobenius_dot(self.w_mm.as_ref(), d_kmm)
             + frobenius_dot(self.w_mn.as_ref(), d_kmn)
@@ -316,12 +320,17 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let adjoint = engine.adjoint();
     let n_kernel = model.core.kernel.num_params();
-    for (i, slot) in out.iter_mut().enumerate().take(n_kernel) {
-        let var = kernel_theta_var::<M, _>(&compiled, ks, x, z, model.core.n, i)?;
-        *slot = adjoint
-            .contract(var.d_kmm.as_ref(), var.d_kmn.as_ref(), var.d_kdiag)
-            .to_f64();
-    }
+    // One walk per matrix. The Hessian still forms each ∂K in `kernel_theta_var`.
+    ks.write_square_contraction::<M>(&compiled, z, adjoint.w_mm.as_ref(), &mut out[..n_kernel])?;
+    ks.add_cross_contraction::<M>(
+        &compiled,
+        z,
+        x,
+        adjoint.w_mn.as_ref(),
+        1.0,
+        &mut out[..n_kernel],
+    )?;
+    ks.add_diag_contraction::<M>(&compiled, x, adjoint.w_diag.to_f64(), &mut out[..n_kernel])?;
     out[n_kernel] = engine
         .directional_noise(model.core.likelihood.noise_variance())
         .to_f64();
@@ -432,6 +441,11 @@ where
     Ok(vars)
 }
 
+/// `∂K_mm`, `∂K(Z, X)`, and `Σ ∂k_ii` of one kernel parameter.
+///
+/// The VFE Hessian forms these matrices because the factor tangent needs
+/// `∂K` itself. The first derivative does not: [`analytic_gradient`]
+/// contracts the adjoint in one walk per matrix.
 pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
     compiled: &CompiledKernel<T>,
     ks: &mut KernelScratch<T>,

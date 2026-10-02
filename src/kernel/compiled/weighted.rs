@@ -14,8 +14,9 @@
 //! Grams the factor step kept ([`CompiledKernel::eval_gram_keeping`]) when
 //! the budget allowed it, and evaluates them otherwise. A leaf that is handed
 //! its own Gram builds `∂K/∂θ` from those values instead of the
-//! transcendental functions. Every matrix is the lower triangle of a
-//! symmetric `n × n`.
+//! transcendental functions. Every matrix of the square walk is the lower
+//! triangle of a symmetric `n × n`. The rectangular walk is a full matrix,
+//! and the diagonal walk sums `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
 use super::{CompiledKernel, add_triangle};
@@ -134,6 +135,12 @@ impl<T: KernelScalar> CompiledKernel<T> {
             }
             _ => 1,
         }
+    }
+
+    /// Buffers of one contraction that keeps no Grams ([`Self::weighted_grads`]
+    /// with `kept_products = 0`, and the rectangular and diagonal walks).
+    pub(crate) fn contraction_buffers(&self) -> usize {
+        self.walk_buffers(0)
     }
 
     /// The walk's own buffers when the first `products` products read kept Grams.
@@ -506,6 +513,384 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
         Ok(value)
     }
+
+    /// Writes `⟨weight, ∂K(x1, x2)/∂θ_p⟩_F` for every parameter into `out`.
+    ///
+    /// The rectangle is full, not a triangle. A product evaluates each
+    /// non-constant factor once and hands the others down in the weight, as
+    /// [`Self::weighted_grads`] does for a square Gram. `out` is replaced.
+    /// `bufs` holds [`Self::contraction_buffers`] matrices of `weight`'s shape.
+    // The two point sets, the weight, the output, and three scratch kinds.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn weighted_cross_grads<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        bufs: &mut [Mat<T>],
+        mut scratch: MatMut<'_, T>,
+        nested: &mut [Mat<T>],
+    ) -> Result<(), GprError> {
+        out.fill(0.0);
+        let mut offset = 0;
+        for (t, _) in self.keep_plan(0) {
+            let count = t.num_params();
+            t.cross_walk::<M>(
+                x1,
+                x2,
+                weight,
+                &mut out[offset..offset + count],
+                bufs,
+                scratch.as_mut(),
+                nested,
+                false,
+            )?;
+            offset += count;
+        }
+        Ok(())
+    }
+
+    /// `⟨weight, ∂K(x1, x2)/∂θ⟩` of one node. Returns `⟨weight, K⟩_F` when
+    /// `want_value` is set.
+    // Same arguments as [`Self::weighted_cross_grads`], plus the value flag.
+    #[allow(clippy::too_many_arguments)]
+    fn cross_walk<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        bufs: &mut [Mat<T>],
+        mut scratch: MatMut<'_, T>,
+        nested: &mut [Mat<T>],
+        want_value: bool,
+    ) -> Result<f64, GprError> {
+        match self {
+            Self::Sum(terms) => {
+                let mut offset = 0;
+                let mut value = 0.0;
+                for t in terms {
+                    let count = t.num_params();
+                    value += t.cross_walk::<M>(
+                        x1,
+                        x2,
+                        weight,
+                        &mut out[offset..offset + count],
+                        bufs,
+                        scratch.as_mut(),
+                        nested,
+                        want_value,
+                    )?;
+                    offset += count;
+                }
+                Ok(value)
+            }
+            Self::Product(terms) => self.cross_product::<M>(
+                terms, x1, x2, weight, out, bufs, scratch, nested, want_value,
+            ),
+            Self::Constant(leaf) => {
+                let value = leaf.constant() * rect_sum(weight);
+                out[0] = value;
+                Ok(value)
+            }
+            _ => self.cross_leaf::<M>(x1, x2, weight, out, bufs, scratch, nested, want_value),
+        }
+    }
+
+    // The product's terms plus the arguments of [`Self::cross_walk`].
+    #[allow(clippy::too_many_arguments)]
+    fn cross_product<M: crate::math::KernelMath>(
+        &self,
+        terms: &[Self],
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        bufs: &mut [Mat<T>],
+        mut scratch: MatMut<'_, T>,
+        nested: &mut [Mat<T>],
+        want_value: bool,
+    ) -> Result<f64, GprError> {
+        let scale = Self::constant_scale(terms);
+        let has_constant = terms.iter().any(|t| matches!(t, Self::Constant(_)));
+        let need_value = want_value || has_constant;
+        let varying = Self::varying_factors(terms);
+        let value = match varying {
+            0 => scale * rect_sum(weight),
+            1 => {
+                let mut offset = 0;
+                let mut value = 0.0;
+                for t in terms {
+                    let count = t.num_params();
+                    if !matches!(t, Self::Constant(_)) {
+                        let slot = &mut out[offset..offset + count];
+                        let inner = t.cross_walk::<M>(
+                            x1,
+                            x2,
+                            weight,
+                            slot,
+                            bufs,
+                            scratch.as_mut(),
+                            nested,
+                            need_value,
+                        )?;
+                        for g in slot.iter_mut() {
+                            *g *= scale;
+                        }
+                        value = scale * inner;
+                    }
+                    offset += count;
+                }
+                value
+            }
+            _ => {
+                if bufs.len() < varying + 1 {
+                    return Err(too_few_buffers());
+                }
+                let (grams, rest) = bufs.split_at_mut(varying);
+                let Some((handed, deeper)) = rest.split_first_mut() else {
+                    return Err(too_few_buffers());
+                };
+                let factors = terms.iter().filter(|t| !matches!(t, Self::Constant(_)));
+                for (factor, gram) in factors.zip(grams.iter_mut()) {
+                    factor.apply_cross_points_with::<M>(
+                        x1,
+                        x2,
+                        gram.as_mut(),
+                        scratch.as_mut(),
+                        nested,
+                    )?;
+                }
+                let mut offset = 0;
+                let mut c = 0;
+                let mut value = 0.0;
+                for t in terms {
+                    let count = t.num_params();
+                    if matches!(t, Self::Constant(_)) {
+                        offset += count;
+                        continue;
+                    }
+                    write_handed_rect(handed.as_mut(), weight, scale, grams, c);
+                    let leaf = !matches!(t, Self::Sum(_) | Self::Product(_));
+                    let inner = t.cross_walk::<M>(
+                        x1,
+                        x2,
+                        handed.as_ref(),
+                        &mut out[offset..offset + count],
+                        deeper,
+                        scratch.as_mut(),
+                        nested,
+                        need_value && c == 0 && leaf,
+                    )?;
+                    if need_value && c == 0 {
+                        value = if leaf {
+                            inner
+                        } else {
+                            rect_dot(handed.as_ref(), grams[c].as_ref())
+                        };
+                    }
+                    c += 1;
+                    offset += count;
+                }
+                value
+            }
+        };
+        let mut offset = 0;
+        for t in terms {
+            if matches!(t, Self::Constant(_)) {
+                out[offset] = value;
+            }
+            offset += t.num_params();
+        }
+        Ok(value)
+    }
+
+    // The arguments of [`Self::cross_walk`].
+    #[allow(clippy::too_many_arguments)]
+    fn cross_leaf<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        bufs: &mut [Mat<T>],
+        mut scratch: MatMut<'_, T>,
+        nested: &mut [Mat<T>],
+        want_value: bool,
+    ) -> Result<f64, GprError> {
+        let Some(d_k) = bufs.first_mut() else {
+            return Err(too_few_buffers());
+        };
+        let value = if want_value {
+            self.apply_cross_points_with::<M>(x1, x2, d_k.as_mut(), scratch.as_mut(), nested)?;
+            rect_dot(weight, d_k.as_ref())
+        } else {
+            0.0
+        };
+        for (p, slot) in out.iter_mut().enumerate() {
+            self.grad_cross_points_with::<M>(x1, x2, d_k.as_mut(), p, scratch.as_mut(), nested)?;
+            *slot = rect_dot(weight, d_k.as_ref());
+        }
+        Ok(value)
+    }
+
+    /// Writes `Σ_i ∂k(x_i, x_i)/∂θ_p` for every parameter into `out`.
+    ///
+    /// A product reads each non-constant factor's diagonal once and scales
+    /// the factor that owns `θ`. `out` is replaced. `accum` is scratch.
+    pub(crate) fn weighted_diag_sums<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        out: &mut [f64],
+        accum: &mut DiagAccum<T>,
+    ) -> Result<(), GprError> {
+        out.fill(0.0);
+        let mut cursor = 0;
+        let mut offset = 0;
+        for (t, _) in self.keep_plan(0) {
+            let count = t.num_params();
+            t.diag_accum::<M>(x, 0, &mut out[offset..offset + count], accum, &mut cursor)?;
+            offset += count;
+        }
+        Ok(())
+    }
+
+    /// One node of [`Self::weighted_diag_sums`]. `depth == 0` scales by ones.
+    /// A deeper node reads its scale at `accum.scale[(depth - 1) * n..]`.
+    fn diag_accum<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        depth: usize,
+        out: &mut [f64],
+        accum: &mut DiagAccum<T>,
+        cursor: &mut usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Sum(terms) => {
+                let mut offset = 0;
+                for t in terms {
+                    let count = t.num_params();
+                    t.diag_accum::<M>(x, depth, &mut out[offset..offset + count], accum, cursor)?;
+                    offset += count;
+                }
+                Ok(())
+            }
+            Self::Product(terms) => self.diag_product::<M>(terms, x, depth, out, accum, cursor),
+            _ => self.diag_leaf::<M>(x, depth, out, accum),
+        }
+    }
+
+    fn diag_leaf<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        depth: usize,
+        out: &mut [f64],
+        accum: &mut DiagAccum<T>,
+    ) -> Result<(), GprError> {
+        let n = x.nrows();
+        accum.fit_row(n);
+        for (p, slot) in out.iter_mut().enumerate() {
+            self.grad_diag_points::<M>(x, &mut accum.row[..n], p)?;
+            let mut sum = 0.0;
+            for i in 0..n {
+                sum += accum.scale_at(depth, n, i) * accum.row[i].to_f64();
+            }
+            *slot = sum;
+        }
+        Ok(())
+    }
+
+    fn diag_product<M: crate::math::KernelMath>(
+        &self,
+        terms: &[Self],
+        x: MatRef<'_, T>,
+        depth: usize,
+        out: &mut [f64],
+        accum: &mut DiagAccum<T>,
+        cursor: &mut usize,
+    ) -> Result<(), GprError> {
+        let n = x.nrows();
+        let saved = *cursor;
+        let n_varying = terms
+            .iter()
+            .filter(|t| !matches!(t, Self::Constant(_)))
+            .count();
+        accum.fit_flat(saved + n_varying * n);
+        let mut k = 0;
+        for t in terms {
+            if matches!(t, Self::Constant(_)) {
+                continue;
+            }
+            let start = saved + k * n;
+            t.fill_diag_points(x, &mut accum.flat[start..start + n])?;
+            k += 1;
+        }
+        *cursor = saved + n_varying * n;
+        accum.fit_scale((depth + 1) * n);
+        let mut offset = 0;
+        k = 0;
+        for t in terms {
+            let count = t.num_params();
+            if !matches!(t, Self::Constant(_)) {
+                let frame = depth * n;
+                for i in 0..n {
+                    let mut v =
+                        T::from_f64(Self::constant_scale(terms) * accum.scale_at(depth, n, i));
+                    for s in 0..n_varying {
+                        if s != k {
+                            v *= accum.flat[saved + s * n + i];
+                        }
+                    }
+                    accum.scale[frame + i] = v;
+                }
+                t.diag_accum::<M>(
+                    x,
+                    depth + 1,
+                    &mut out[offset..offset + count],
+                    accum,
+                    cursor,
+                )?;
+                k += 1;
+            }
+            offset += count;
+        }
+        offset = 0;
+        for (index, t) in terms.iter().enumerate() {
+            let count = t.num_params();
+            if matches!(t, Self::Constant(_)) {
+                let others = Self::constant_scale_except(terms, index);
+                accum.fit_row(n);
+                for (p, slot) in out[offset..offset + count].iter_mut().enumerate() {
+                    t.grad_diag_points::<M>(x, &mut accum.row[..n], p)?;
+                    let mut sum = 0.0;
+                    for i in 0..n {
+                        let mut v = accum.row[i].to_f64() * others * accum.scale_at(depth, n, i);
+                        for s in 0..n_varying {
+                            v *= accum.flat[saved + s * n + i].to_f64();
+                        }
+                        sum += v;
+                    }
+                    *slot = sum;
+                }
+            }
+            offset += count;
+        }
+        *cursor = saved;
+        Ok(())
+    }
+
+    /// `∏ c` over constant factors other than `skip`.
+    fn constant_scale_except(terms: &[Self], skip: usize) -> f64 {
+        terms
+            .iter()
+            .enumerate()
+            .map(|(i, t)| match t {
+                Self::Constant(leaf) if i != skip => leaf.constant(),
+                _ => 1.0,
+            })
+            .product()
+    }
 }
 
 /// What a node of the walk is handed besides its weight.
@@ -609,6 +994,102 @@ fn lower_fold(n: usize, column: impl Fn(usize, std::ops::Range<usize>) -> f64 + 
         },
         &|a, b| a + b,
     )
+}
+
+/// The weight handed to factor `c` of a product, on the full rectangle:
+/// `scale · weight ∘ ∏_{s≠c} grams[s]`.
+fn write_handed_rect<T: KernelScalar>(
+    mut out: MatMut<'_, T>,
+    weight: MatRef<'_, T>,
+    scale: f64,
+    grams: &[Mat<T>],
+    c: usize,
+) {
+    let scale = T::from_f64(scale);
+    let (rows, cols) = (out.nrows(), out.ncols());
+    for col in 0..cols {
+        for row in 0..rows {
+            let mut v = weight[(row, col)] * scale;
+            for (s, gram) in grams.iter().enumerate() {
+                if s != c {
+                    v *= gram[(row, col)];
+                }
+            }
+            out[(row, col)] = v;
+        }
+    }
+}
+
+/// `⟨a, b⟩_F` of two full rectangles, summed in `f64`.
+fn rect_dot<T: KernelScalar>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> f64 {
+    let mut sum = 0.0;
+    for col in 0..a.ncols() {
+        for row in 0..a.nrows() {
+            sum += a[(row, col)].to_f64() * b[(row, col)].to_f64();
+        }
+    }
+    sum
+}
+
+/// `Σ_ij a_ij` of a full rectangle, summed in `f64`.
+fn rect_sum<T: KernelScalar>(a: MatRef<'_, T>) -> f64 {
+    let mut sum = 0.0;
+    for col in 0..a.ncols() {
+        for row in 0..a.nrows() {
+            sum += a[(row, col)].to_f64();
+        }
+    }
+    sum
+}
+
+/// Scratch for [`CompiledKernel::weighted_diag_sums`].
+///
+/// `flat` holds factor diagonals, `row` one parameter's `∂k_ii`, and
+/// `scale` one length-`n` frame per product depth. It starts empty and grows
+/// to the largest `n` asked for.
+pub(crate) struct DiagAccum<T> {
+    flat: Vec<T>,
+    row: Vec<T>,
+    scale: Vec<T>,
+}
+
+impl<T> DiagAccum<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            flat: Vec::new(),
+            row: Vec::new(),
+            scale: Vec::new(),
+        }
+    }
+}
+
+impl<T: KernelScalar> DiagAccum<T> {
+    fn fit_flat(&mut self, n: usize) {
+        if self.flat.len() < n {
+            self.flat.resize(n, T::from_f64(0.0));
+        }
+    }
+
+    fn fit_row(&mut self, n: usize) {
+        if self.row.len() < n {
+            self.row.resize(n, T::from_f64(0.0));
+        }
+    }
+
+    fn fit_scale(&mut self, n: usize) {
+        if self.scale.len() < n {
+            self.scale.resize(n, T::from_f64(0.0));
+        }
+    }
+
+    /// The per-point scale at `depth`. Depth 0 is ones.
+    fn scale_at(&self, depth: usize, n: usize, i: usize) -> f64 {
+        if depth == 0 {
+            1.0
+        } else {
+            self.scale[(depth - 1) * n + i].to_f64()
+        }
+    }
 }
 
 fn too_few_buffers() -> GprError {
@@ -735,5 +1216,122 @@ mod tests {
     fn keeping_any_number_of_products_gives_the_same_bits() {
         every_keep_count_gives_the_same_bits::<Accurate>();
         every_keep_count_gives_the_same_bits::<FastApprox>();
+    }
+
+    fn assert_rel(got: &[f64], expect: &[f64]) {
+        assert_eq!(got.len(), expect.len());
+        for (i, (g, e)) in got.iter().zip(expect).enumerate() {
+            let scale = e.abs().max(1.0);
+            assert!(
+                (g - e).abs() <= 1e-8 * scale,
+                "i={i} walk={g} per-param={e}"
+            );
+        }
+    }
+
+    /// Constant × RBF × Periodic, plus an RBF: the square, rectangular, and
+    /// diagonal contractions match one `∂K/∂θ` per parameter.
+    fn contractions_match_per_parameter<M: KernelMath>() {
+        let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("c"));
+        let rbf = |l| KernelSpec::from(RbfKernel::new(l).expect("ell"));
+        let periodic = |l, p| KernelSpec::from(PeriodicKernel::new(l, p).expect("periodic"));
+        let compiled = (c(1.3) * rbf(1.7) * periodic(0.9, 1.4) + rbf(0.6)).compile();
+        let xz = [0.2, 0.9, 1.4];
+        let xx = [0.0, 0.5, 1.1, 1.8, 2.4];
+        let z = Mat::from_fn(xz.len(), 1, |i, _| xz[i]);
+        let x = Mat::from_fn(xx.len(), 1, |i, _| xx[i]);
+        let (m, n) = (z.nrows(), x.nrows());
+        let raw = Mat::from_fn(m, m, |i, j| 0.2 * (i + 1) as f64 - 0.15 * (j + 1) as f64);
+        let weight_zz = Mat::from_fn(m, m, |i, j| 0.5 * (raw[(i, j)] + raw[(j, i)]));
+        let weight_zx = Mat::from_fn(m, n, |i, j| 0.3 * (i + 1) as f64 - 0.2 * j as f64 + 0.05);
+        let dist = sq_dist_1d(&xz);
+        let inputs = GramInputs {
+            x: z.as_ref(),
+            dist: Some(dist.as_ref()),
+            ard: None,
+        };
+        let n_params = compiled.num_params();
+        let mut got = vec![0.0; n_params];
+        let mut expect = vec![0.0; n_params];
+        let mut scratch = Mat::zeros(m, m);
+        let mut nested = Vec::new();
+        let mut bufs = vec![Mat::zeros(m, m); compiled.contraction_buffers()];
+        {
+            let mut walk = WeightedWalk {
+                inputs,
+                scratch: scratch.as_mut(),
+                nested: &mut nested,
+                kept: &[],
+                kept_products: 0,
+            };
+            compiled
+                .weighted_grads::<M>(&mut walk, weight_zz.as_ref(), &mut got, &mut bufs)
+                .expect("square");
+        }
+        let mut d_k = Mat::zeros(m, m);
+        for (p, slot) in expect.iter_mut().enumerate() {
+            compiled
+                .grad_gram::<M>(
+                    inputs,
+                    d_k.as_mut(),
+                    p,
+                    Triangle::Lower,
+                    scratch.as_mut(),
+                    &mut nested,
+                )
+                .expect("grad");
+            *slot = super::lower_dot(weight_zz.as_ref(), d_k.as_ref());
+        }
+        assert_rel(&got, &expect);
+
+        let mut cross_scratch = Mat::zeros(m, n);
+        let mut cross_nested = Vec::new();
+        crate::kernel::ensure_nested_levels(&mut cross_nested, &compiled, m, n);
+        let mut cross_bufs = vec![Mat::zeros(m, n); compiled.contraction_buffers()];
+        compiled
+            .weighted_cross_grads::<M>(
+                z.as_ref(),
+                x.as_ref(),
+                weight_zx.as_ref(),
+                &mut got,
+                &mut cross_bufs,
+                cross_scratch.as_mut(),
+                &mut cross_nested,
+            )
+            .expect("cross");
+        let mut d_cross = Mat::zeros(m, n);
+        for (p, slot) in expect.iter_mut().enumerate() {
+            compiled
+                .grad_cross_points_with::<M>(
+                    z.as_ref(),
+                    x.as_ref(),
+                    d_cross.as_mut(),
+                    p,
+                    cross_scratch.as_mut(),
+                    &mut cross_nested,
+                )
+                .expect("grad cross");
+            *slot = super::rect_dot(weight_zx.as_ref(), d_cross.as_ref());
+        }
+        assert_rel(&got, &expect);
+
+        let mut accum = super::DiagAccum::new();
+        compiled
+            .weighted_diag_sums::<M>(x.as_ref(), &mut got, &mut accum)
+            .expect("diag");
+        let mut row = vec![0.0; n];
+        for (p, slot) in expect.iter_mut().enumerate() {
+            compiled
+                .grad_diag_points::<M>(x.as_ref(), &mut row, p)
+                .expect("grad diag");
+            *slot = row.iter().sum();
+        }
+        assert_rel(&got, &expect);
+    }
+
+    #[test]
+    fn cross_and_diag_contractions_match_per_parameter() {
+        contractions_match_per_parameter::<Accurate>();
+        contractions_match_per_parameter::<FastApprox>();
     }
 }

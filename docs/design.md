@@ -485,6 +485,8 @@ Standard algorithm (Rasmussen & Williams / the GPy family):
 
 Total cost is O(n³ + p n²). `K⁻¹` is not rebuilt per parameter.
 
+Sgpr and Svgp kernel-parameter gradients use this walk for `K(Z, Z)`, the same walk over the full rectangle for `K(Z, X)`, and the same walk over the diagonal for `Σ_i ∂k(x_i, x_i)/∂θ`. A product's other factors are evaluated once in each of those three contractions. The VFE Hessian still forms each `∂K`, because the factor tangent needs the matrix.
+
 Analytic NLML Hessian:
 
 ```
