@@ -4,12 +4,11 @@ use super::ard::{self, ArdR2, Pick};
 use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
-use super::simd::unit_row_stride;
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
 use crate::error::GprError;
 use crate::math::KernelMath;
 use faer::reborrow::ReborrowMut;
-use faer::{Mat, MatMut, MatRef};
+use faer::{MatMut, MatRef};
 
 /// ARD RBF: `k = exp( -½ Σ_d (x_d - x'_d)² / ℓ_d² )`.
 ///
@@ -392,63 +391,6 @@ impl RbfArdKernel {
         })
     }
 
-    /// Every lengthscale's `∂K(x1, x2)/∂θ_d` into `out`, one matrix per
-    /// lengthscale, from one `exp` per entry; the same values as
-    /// [`Self::grad_cross_from_coords`] called once per `d`. The matrices are
-    /// grown to `x1.nrows() × x2.nrows()` and reused; each is written at its
-    /// top-left block of that shape. Up to 1024 columns, nothing is
-    /// allocated once they have grown.
-    pub(crate) fn grad_cross_all_from_coords_into<M: KernelMath>(
-        &self,
-        x1: MatRef<'_, f64>,
-        x2: MatRef<'_, f64>,
-        out: &mut Vec<Mat<f64>>,
-    ) -> Result<(), GprError> {
-        let d = self.num_params();
-        let (rows, cols) = (x1.nrows(), x2.nrows());
-        out.resize_with(d, Mat::new);
-        if d == 0 {
-            return Ok(());
-        }
-        for mat in out.iter_mut() {
-            let _ = crate::sparse::view(mat, rows, cols);
-        }
-        super::require_coord_grad(x1, x2, out[0].as_ref().submatrix(0, 0, rows, cols), 0)?;
-        let w = self.lengthscales.inv_ell_sq();
-        let unit = out.iter().all(|mat| unit_row_stride(mat.as_ref()));
-        if unit && lanes::cross_inputs(x1, x2, d)? && cols <= 1024 {
-            return lanes::write_cross_rows::<M>(
-                x1,
-                x2,
-                w,
-                Which::All,
-                0,
-                cols,
-                0,
-                &mut |dim, row, col, v| {
-                    out[dim][(row, col)] = v;
-                },
-            );
-        }
-        let mut views: Vec<MatMut<'_, f64>> = out
-            .iter_mut()
-            .map(|mat| mat.as_mut().submatrix_mut(0, 0, rows, cols))
-            .collect();
-        if lanes::try_grad_cross::<M>(x1, x2, &mut views, w, Which::All)? {
-            return Ok(());
-        }
-        let mut terms = vec![0.0; d];
-        for col in 0..cols {
-            for row in 0..rows {
-                let k = ard_grad_terms::<M, f64>(x1, row, x2, col, w, &mut terms)?;
-                for (dest, &term) in views.iter_mut().zip(&terms) {
-                    dest[(row, col)] = k * term;
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,
@@ -512,31 +454,6 @@ fn rbf_grad<M: KernelMath, T: KernelScalar>(t: ArdR2<T>) -> Result<T, GprError> 
 
 fn rbf_hess<M: KernelMath, T: KernelScalar>(t: ArdR2<T>, same: bool) -> Result<T, GprError> {
     finite_kernel(ard_hess_terms::<M, T>(t.r2, t.dim_i, t.dim_j, same))
-}
-
-/// Writes `w_d Δ_d²` for every `d` into `terms` and returns `k'(r²)`.
-fn ard_grad_terms<M: KernelMath, T: KernelScalar>(
-    x: MatRef<'_, T>,
-    row: usize,
-    xs: MatRef<'_, T>,
-    col: usize,
-    inv_ell_sq: &[f64],
-    terms: &mut [T],
-) -> Result<T, GprError> {
-    let mut r2 = T::from_f64(0.0);
-    for (dim, &w) in inv_ell_sq.iter().enumerate() {
-        let diff = x[(row, dim)] - xs[(col, dim)];
-        if !diff.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        let term = diff * diff * T::from_f64(w);
-        r2 += term;
-        terms[dim] = term;
-    }
-    if !r2.is_finite() {
-        return Err(GprError::NonFiniteKernelValue);
-    }
-    finite_kernel(ard_d1::<M, T>(r2))
 }
 
 #[cfg(test)]

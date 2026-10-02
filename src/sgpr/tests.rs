@@ -904,6 +904,27 @@ fn constant_times_rbf_z_ne_x_gradient_and_hessian_match_fd() {
     assert_slice_close(&hess, &fd_hess_from_grad(&mut sparse, &params), 2e-4);
 }
 
+/// Constant × RBF × Periodic, plus an RBF: the one-walk gradient matches the
+/// finite difference of the collapsed bound.
+#[test]
+fn three_factor_product_gradient_matches_fd() {
+    let kernel = KernelSpec::from(ConstantKernel::new(1.3).expect("c"))
+        * KernelSpec::from(RbfKernel::new(1.7).expect("ell"))
+        * KernelSpec::from(PeriodicKernel::new(0.9, 1.4).expect("periodic"))
+        + KernelSpec::from(RbfKernel::new(0.6).expect("ell"));
+    let x = [0.0, 0.7, 1.1, 2.0, 2.6, 3.0];
+    let y = [0.1, 0.9, 0.6, 0.2, -0.3, -0.5];
+    let mut sparse = factor_sparse(kernel, &x, 6, 1, &y, &[0.4, 1.5, 2.8], 3);
+    let p = sparse.num_params();
+    let mut params = vec![0.0; p];
+    sparse.get_params(&mut params).expect("params");
+    let mut grad = vec![0.0; p];
+    sparse
+        .value_and_gradient_into(&params, &mut grad)
+        .expect("grad");
+    assert_slice_close(&grad, &fd_grad_from_value(&mut sparse, &params), 1e-4);
+}
+
 fn assert_fit_finishes_and_nlml_drops<O>(optimizer: O)
 where
     O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing>>,

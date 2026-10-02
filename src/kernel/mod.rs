@@ -41,7 +41,7 @@ mod white;
 pub use compiled::CompiledKernel;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
-pub(crate) use compiled::weighted::WeightedWalk;
+pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;
 #[cfg(any(test, feature = "bench-internals"))]

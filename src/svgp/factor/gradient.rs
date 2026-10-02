@@ -2,8 +2,9 @@
 //!
 //! One implementation, in `f64` whatever the storage scalar is (an `f32`
 //! model only widens the `m × m` factor of `K_mm`). The terms of the batch
-//! points are formed here: `A_b = L⁻¹ K(Z, X_b)` (`m × b`), `k_diag`, and
-//! `∂K(Z, X_b)/∂θ`. A step costs `O(b·(m² + m·d) + m³)`; nothing in it scales
+//! points are formed here: `A_b = L⁻¹ K(Z, X_b)` (`m × b`) and `k_diag`.
+//! The kernel-parameter term is three contractions, each one walk of the
+//! kernel tree. A step costs `O(b·(m² + m·d) + m³)`; nothing in it scales
 //! with `n`. A full-data gradient is the batch of every point.
 //!
 //! Every intermediate lives in [`GradBuffers`], which the Adam loop keeps
@@ -13,10 +14,8 @@
 
 use super::assemble::q_param_len;
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
-use crate::linalg::{
-    dot_f64x4, frobenius_dot, gemm, norm2_f64x4, solve_lower, solve_lower_transpose,
-};
+use crate::kernel::{CompiledKernel, KernelScalar};
+use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseScratch, view};
 use crate::svgp::FittedSvgp;
@@ -37,16 +36,12 @@ pub(crate) struct GradBuffers {
     resid_col: Mat<f64>,
     mean: Mat<f64>,
     gram: Mat<f64>,
-    d_kmm: Mat<f64>,
-    d_kdiag: Vec<f64>,
-    d_kzx: Mat<f64>,
     /// `G`, then the weight `L⁻ᵀ G` on `∂K(Z, X_b)` (`m × b`).
     w_mn: Mat<f64>,
     /// `G Aᵀ`, then the weight on `∂K_mm` (`m × m`).
     w_mm: Mat<f64>,
     /// `tril½(G Aᵀ)` through `L⁻ᵀ` (`m × m`).
     half: Mat<f64>,
-    ard: Vec<Mat<f64>>,
     ks: KernelScratch<f64>,
 }
 
@@ -64,13 +59,9 @@ impl Default for GradBuffers {
             resid_col: Mat::new(),
             mean: Mat::new(),
             gram: Mat::new(),
-            d_kmm: Mat::new(),
-            d_kdiag: Vec::new(),
-            d_kzx: Mat::new(),
             w_mn: Mat::new(),
             w_mm: Mat::new(),
             half: Mat::new(),
-            ard: Vec::new(),
             ks: KernelScratch::new(),
         }
     }
@@ -136,13 +127,9 @@ where
         resid_col,
         mean,
         gram,
-        d_kmm,
-        d_kdiag,
-        d_kzx,
         w_mn,
         w_mm,
         half,
-        ard,
         ks,
     } = bufs;
     let mut k_mm_l = view(k_mm_l, m, m);
@@ -226,36 +213,12 @@ where
         view(half, m, m),
     );
     let (w_mm, w_mn) = (w_mm.into_const(), w_mn.into_const());
-    let ard_ready = match compiled {
-        CompiledKernel::RbfArd(leaf) => {
-            leaf.grad_cross_all_from_coords_into::<M>(z, x, ard)?;
-            true
-        }
-        _ => false,
-    };
-    d_kdiag.resize(b, 0.0);
-    for param_idx in 0..n_kernel {
-        let mut d_kmm = view(d_kmm, m, m);
-        ks.grad::<M>(
-            compiled,
-            GramInputs::points(z),
-            d_kmm.as_mut(),
-            param_idx,
-            Triangle::Full,
-        )?;
-        let d_kzx = if ard_ready {
-            compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
-            ard[param_idx].as_ref().submatrix(0, 0, m, b)
-        } else {
-            compiled.grad_diag_points::<M>(x, d_kdiag, param_idx)?;
-            let mut cross = view(d_kzx, m, b);
-            ks.grad_cross::<M>(compiled, z, x, cross.as_mut(), param_idx)?;
-            cross.into_const()
-        };
-        let d_kdiag_sum: f64 = d_kdiag.iter().sum();
-        let g = frobenius_dot(w_mm, d_kmm.as_ref()) + frobenius_dot(w_mn, d_kzx)
-            - 0.5 * inv_noise * d_kdiag_sum;
-        out[param_idx] = -scale * g;
+    // `g = ⟨w_mm, ∂K_mm⟩ + ⟨w_mn, ∂K(Z, X_b)⟩ − Σ ∂k_ii / (2σ²)`, then `−scale · g`.
+    ks.write_square_contraction::<M>(compiled, z, w_mm, &mut out[..n_kernel])?;
+    ks.add_cross_contraction::<M>(compiled, z, x, w_mn, 1.0, &mut out[..n_kernel])?;
+    ks.add_diag_contraction::<M>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
+    for slot in &mut out[..n_kernel] {
+        *slot *= -scale;
     }
     Ok(kl - scale * ell)
 }
