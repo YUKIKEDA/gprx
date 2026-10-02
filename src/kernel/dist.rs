@@ -160,10 +160,16 @@ where
         );
     }
     let mid = lo + (hi - lo) / 2;
-    let (a, b) = rayon::join(
-        || fold_lower_blocks(n, (lo, mid), n_blocks, f, join),
-        || fold_lower_blocks(n, (mid, hi), n_blocks, f, join),
-    );
+    let left = || fold_lower_blocks(n, (lo, mid), n_blocks, f, join);
+    let right = || fold_lower_blocks(n, (mid, hi), n_blocks, f, join);
+    // One worker: the same tree, in order, without `rayon::join`. A join from
+    // outside the pool queues a job, and the queue allocates a block every
+    // few dozen jobs, which would break the zero-allocation hot path.
+    let (a, b) = if rayon::current_num_threads() > 1 {
+        rayon::join(left, right)
+    } else {
+        (left(), right())
+    };
     Ok(join(a?, b?))
 }
 
