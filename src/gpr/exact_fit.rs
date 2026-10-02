@@ -164,7 +164,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     pub(crate) fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
-        self.factor_at(params)?;
+        self.factor_at(params, Keep::Nothing)?;
         if let Err(err) = self.finish() {
             self.restore_theta();
             let _ = self.factorize_current();
@@ -190,25 +190,16 @@ impl<P: GpScalar> ExactFit<'_, P> {
     /// place (no clone of the kernel trees), with the previous `θ` kept in a
     /// reused buffer. When `A` does not factor, that `θ` is written back and
     /// `L` / `α` are rebuilt at it, so nothing is copied up front.
-    fn factor_at(&mut self, params: &[f64]) -> Result<(), GprError> {
-        self.factor_at_with(params, false)
-    }
-
-    /// [`Self::factor_at`]; `keep` leaves the product factor Grams the joint
-    /// gradient reads ([`CompiledKernel::eval_gram_keeping`]).
-    fn factor_at_with(&mut self, params: &[f64], keep: bool) -> Result<(), GprError> {
+    fn factor_at(&mut self, params: &[f64], keep: Keep) -> Result<KeptGrams, GprError> {
         self.write_theta(params)?;
-        let factored = if keep {
-            self.factor_keeping()
-        } else {
-            self.factor()
-        };
-        if let Err(err) = factored {
-            self.restore_theta();
-            let _ = self.factorize_current();
-            return Err(err);
+        match self.factor_with(keep) {
+            Ok(kept) => Ok(kept),
+            Err(err) => {
+                self.restore_theta();
+                let _ = self.factorize_current();
+                Err(err)
+            }
         }
-        Ok(())
     }
 
     /// Writes `params` into the stored kernel, compiled kernel, and likelihood.
@@ -259,39 +250,24 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     /// Factors `A` at the stored `θ` into the buffers.
     fn factor(&mut self) -> Result<(), GprError> {
-        self.store.release_mapped();
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
-            &mut self.core.x_cast,
-        );
-        with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
-            &self.core.compiled,
-            x,
-            &mut self.store.buffers,
-            &self.core.y_train,
-            self.core.likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-        ))?;
-        self.commit_factor();
-        Ok(())
+        self.factor_with(Keep::Nothing).map(|_| ())
     }
 
-    /// [`Self::factor`] that keeps the product factor Grams for
-    /// [`Self::kernel_gradient_into`] in the leading `weighted` buffers.
-    fn factor_keeping(&mut self) -> Result<(), GprError> {
-        let products = self.core.compiled.kept_products();
-        if products == 0 {
-            return self.factor();
-        }
+    /// Factors `A` at the stored `θ` into the buffers. With
+    /// [`Keep::FactorGrams`], the product factor Grams the joint gradient
+    /// reads ([`CompiledKernel::eval_gram_keeping`]) stay in the leading
+    /// `weighted` buffers, and the returned [`KeptGrams`] says how many
+    /// products kept them at this `θ`.
+    fn factor_with(&mut self, keep: Keep) -> Result<KeptGrams, GprError> {
+        let products = match keep {
+            Keep::Nothing => 0,
+            Keep::FactorGrams => self.core.compiled.kept_products(),
+        };
         self.store.release_mapped();
         let n = self.core.n;
-        self.ensure_weighted(n)?;
+        if products > 0 {
+            self.ensure_weighted(n, products)?;
+        }
         let x = P::Storage::storage_cols(
             self.core
                 .x
@@ -299,32 +275,38 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 .submatrix(0, 0, self.core.n, self.core.d),
             &mut self.core.x_cast,
         );
-        with_kernel_exp!(self.core.policies.math, M => factor_train_keeping_with_policy::<_, _, M>(
-            &self.core.compiled,
-            x,
-            &mut self.store.buffers,
-            &self.core.y_train,
-            self.core.likelihood.noise_variance(),
-            FactorPolicy {
-                jitter: self.core.policies.jitter,
-                stage: CholeskyStage::Fit,
-            },
-            products,
-        ))?;
+        let policy = FactorPolicy {
+            jitter: self.core.policies.jitter,
+            stage: CholeskyStage::Fit,
+        };
+        let compiled = &self.core.compiled;
+        let noise = self.core.likelihood.noise_variance();
+        let buffers = &mut self.store.buffers;
+        let y = &self.core.y_train;
+        if products == 0 {
+            with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
+                compiled, x, buffers, y, noise, policy,
+            ))?;
+        } else {
+            with_kernel_exp!(self.core.policies.math, M => factor_train_keeping_with_policy::<_, _, M>(
+                compiled, x, buffers, y, noise, policy, products,
+            ))?;
+        }
         self.commit_factor();
-        Ok(())
+        Ok(KeptGrams { products })
     }
 
-    /// Sizes the gradient walk's `n×n` buffers ([`CompiledKernel::weighted_buffers`])
-    /// and, for a tree that needs it, `kernel_scratch`.
-    fn ensure_weighted(&mut self, n: usize) -> Result<(), GprError> {
+    /// Sizes the gradient walk's `n×n` buffers when `products` products keep
+    /// their Grams ([`CompiledKernel::weighted_buffers`]) and, for a tree
+    /// that needs it, `kernel_scratch`.
+    fn ensure_weighted(&mut self, n: usize, products: usize) -> Result<(), GprError> {
         let compiled = &self.core.compiled;
         let core = self.store.buffers.core_mut();
         if compiled.needs_grad_scratch() {
             core.ensure_kernel_scratch(n)?;
         }
         core.weighted.retain(|m| m.nrows() == n && m.ncols() == n);
-        while core.weighted.len() < compiled.weighted_buffers() {
+        while core.weighted.len() < compiled.weighted_buffers(products) {
             core.weighted.push(Mat::zeros(n, n));
         }
         Ok(())
@@ -341,7 +323,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let n_params = self.num_params();
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params, "parameters")?;
-        self.factor_at_with(params, true)?;
+        let kept = self.factor_at(params, Keep::FactorGrams)?;
         let n = self.core.n;
         let mut rows = P::Storage::empty_rows();
         let y = P::Storage::storage_rows(&self.core.y_train, &mut rows);
@@ -352,7 +334,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
             n,
         )
         .to_f64();
-        self.fill_gradient_from_factor(n_kernel, n, out)?;
+        self.fill_gradient_from_factor(n_kernel, n, out, kept)?;
         Ok(nlml)
     }
 
@@ -471,7 +453,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let n_params = self.num_params();
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
-        self.factor_at(params)?;
+        self.factor_at(params, Keep::Nothing)?;
         let n = self.core.n;
         self.fill_hessian_from_factor(n_kernel, n, out)
     }
@@ -686,11 +668,12 @@ impl<P: GpScalar> ExactFit<'_, P> {
         n_kernel: usize,
         n: usize,
         out: &mut [f64],
+        kept: KeptGrams,
     ) -> Result<(), GprError> {
         self.store
             .buffers
             .form_gradient_w(&self.core.factor_alpha, n);
-        self.kernel_gradient_into(n, &mut out[..n_kernel])?;
+        self.kernel_gradient_into(n, &mut out[..n_kernel], kept)?;
         let mut noise_inner = 0.0;
         let d_noise = self.core.likelihood.noise_variance();
         let w = self.store.buffers.gradient_w();
@@ -703,13 +686,19 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     /// Writes `-½ ⟨W, ∂K/∂θ_i⟩_F` for every kernel parameter into `out`, in
     /// one walk of the kernel tree (`CompiledKernel::weighted_grads`). The
-    /// walk reads the product factor Grams [`Self::factor_keeping`] left at
-    /// this `θ`.
-    fn kernel_gradient_into(&mut self, n: usize, out: &mut [f64]) -> Result<(), GprError> {
+    /// walk reads the product factor Grams `kept` says the factor of this
+    /// `θ` left ([`Self::factor_with`]).
+    fn kernel_gradient_into(
+        &mut self,
+        n: usize,
+        out: &mut [f64],
+        kept: KeptGrams,
+    ) -> Result<(), GprError> {
         if out.is_empty() {
             return Ok(());
         }
-        self.ensure_weighted(n)?;
+        let KeptGrams { products } = kept;
+        self.ensure_weighted(n, products)?;
         let x = P::Storage::storage_cols(
             self.core
                 .x
@@ -718,16 +707,15 @@ impl<P: GpScalar> ExactFit<'_, P> {
             &mut self.core.x_cast,
         );
         let compiled = &self.core.compiled;
-        let kept_products = compiled.kept_products();
         let views = self.store.buffers.split_gradient();
-        let (kept, bufs) = views.weighted.split_at_mut(compiled.kept_buffers());
+        let (kept, bufs) = views.weighted.split_at_mut(compiled.kept_buffers(products));
         let inputs = fill_cached_inputs(compiled, x, views.dist, views.thread_scratch)?;
         let mut walk = WeightedWalk {
             inputs,
             scratch: views.kernel_scratch.as_mut(),
             nested: views.nested,
             kept,
-            kept_products,
+            kept_products: products,
         };
         with_kernel_exp!(self.core.policies.math, M => compiled.weighted_grads::<M>(
             &mut walk,
@@ -771,7 +759,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 // not the result after restarts, a rejected annealing step, or
                 // a caller optimizer that searched past its best point.
                 if !self.holds_params(&opt.params)? {
-                    if let Err(err) = self.factor_at(&opt.params) {
+                    if let Err(err) = self.factor_at(&opt.params, Keep::Nothing) {
                         self.revert_theta(kernel_before, likelihood_before);
                         return Err(err);
                     }
@@ -833,6 +821,22 @@ impl<P: GpScalar> ExactFit<'_, P> {
         out[n_kernel] = self.core.likelihood.bounds();
         Ok(())
     }
+}
+
+/// Whether a factor keeps the product factor Grams for the joint gradient.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Keep {
+    Nothing,
+    FactorGrams,
+}
+
+/// What the last factor left in the leading `weighted` buffers: the factor
+/// Grams of the first `products` products that keep them, at the `θ` of that
+/// factor. Only [`ExactFit::factor_with`] makes one, and the joint gradient
+/// takes it by value, so the walk reads kept Grams only right after the
+/// factor that wrote them.
+struct KeptGrams {
+    products: usize,
 }
 
 fn require_change_indices(indices: &[usize], n_params: usize) -> Result<(), GprError> {
