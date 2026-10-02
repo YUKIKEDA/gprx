@@ -17,6 +17,7 @@
 //! coordinate step uses [`crate::Objective::value_at_changes`].
 
 mod adam;
+mod adapter;
 mod fsa;
 mod lbfgs;
 mod logit;
@@ -119,6 +120,17 @@ struct Restarts {
     seed: u64,
 }
 
+/// Checks that `init` has the objective's `n` parameters.
+fn require_params(init: &[f64], n: usize) -> Result<(), GprError> {
+    if init.len() == n {
+        Ok(())
+    } else {
+        Err(GprError::LengthMismatch {
+            reason: format!("expected {n} parameters, got {}", init.len()),
+        })
+    }
+}
+
 /// The restart loop every built-in optimizer shares.
 ///
 /// Checks `init`'s length, reads the intervals, runs once from
@@ -145,11 +157,7 @@ fn minimize_with_restarts<P: crate::objective::Objective + ?Sized>(
     ) -> Result<(), GprError>,
 ) -> Result<OptResult, GprError> {
     let n = objective.num_params();
-    if init.len() != n {
-        return Err(GprError::LengthMismatch {
-            reason: format!("expected {n} parameters, got {}", init.len()),
-        });
-    }
+    require_params(init, n)?;
     let mut intervals = vec![crate::param::Interval::DEFAULT_POSITIVE; n];
     objective.fill_intervals(&mut intervals)?;
     let mut best: Option<OptResult> = None;

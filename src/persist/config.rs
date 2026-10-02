@@ -6,6 +6,7 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::param::{BoundedParam, Interval};
 use crate::policy::{DistanceCachePolicy, KernelExp};
+use crate::precision::PersistKind;
 use crate::{GaussianLikelihood, JitterPolicy};
 
 use super::kernel::KernelJson;
@@ -23,8 +24,8 @@ pub(super) struct ModelConfig {
     /// Omitted on disk means [`PrecisionJson::Double`].
     #[serde(default, skip_serializing_if = "PrecisionJson::is_double")]
     pub precision: PrecisionJson,
-    /// Omitted on disk means [`ResidualJson::PromoteStorage`]. Used when
-    /// [`Self::precision`] is [`PrecisionJson::Mixed`].
+    /// Omitted on disk means [`ResidualJson::PromoteStorage`]. Read only
+    /// through [`Self::persist_kind`].
     #[serde(default, skip_serializing_if = "ResidualJson::is_promote_storage")]
     pub residual: ResidualJson,
     /// Omitted on disk means [`MathJson::Accurate`].
@@ -49,6 +50,11 @@ pub(super) struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// The precision this directory records ([`decode_precision`]).
+    pub(super) fn persist_kind(&self) -> PersistKind {
+        decode_precision(self.precision, self.residual)
+    }
+
     pub(super) fn validate_version(&self) -> Result<(), GprError> {
         if self.format_version == FORMAT_VERSION {
             Ok(())
@@ -107,13 +113,24 @@ impl PrecisionJson {
         matches!(kind, Self::Double)
     }
 
-    pub(super) fn from_persist(kind: crate::precision::PersistKind) -> Self {
+    pub(super) fn from_persist(kind: PersistKind) -> Self {
         match kind {
-            crate::precision::PersistKind::Double => Self::Double,
-            crate::precision::PersistKind::Single => Self::Single,
-            crate::precision::PersistKind::MixedPromote
-            | crate::precision::PersistKind::MixedReevaluate => Self::Mixed,
+            PersistKind::Double => Self::Double,
+            PersistKind::Single => Self::Single,
+            PersistKind::MixedPromote | PersistKind::MixedReevaluate => Self::Mixed,
         }
+    }
+}
+
+/// The precision a `precision` / `residual` pair records. `residual` only
+/// tells the two mixed precisions apart; with `double` or `single` it is not
+/// read. The one place the pair is decoded on load.
+pub(super) fn decode_precision(precision: PrecisionJson, residual: ResidualJson) -> PersistKind {
+    match (precision, residual) {
+        (PrecisionJson::Double, _) => PersistKind::Double,
+        (PrecisionJson::Single, _) => PersistKind::Single,
+        (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => PersistKind::MixedPromote,
+        (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => PersistKind::MixedReevaluate,
     }
 }
 
@@ -146,7 +163,7 @@ impl MathJson {
     }
 }
 
-/// Mixed-precision residual. Ignored unless [`PrecisionJson`] is `mixed`.
+/// Mixed-precision residual. Decoded with `precision` by [`decode_precision`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ResidualJson {
@@ -160,9 +177,9 @@ impl ResidualJson {
         matches!(kind, Self::PromoteStorage)
     }
 
-    pub(super) fn from_persist(kind: crate::precision::PersistKind) -> Self {
+    pub(super) fn from_persist(kind: PersistKind) -> Self {
         match kind {
-            crate::precision::PersistKind::MixedReevaluate => Self::ReevaluateKernel,
+            PersistKind::MixedReevaluate => Self::ReevaluateKernel,
             _ => Self::PromoteStorage,
         }
     }
@@ -360,6 +377,7 @@ pub(super) struct SparseConfig {
     pub d: usize,
     #[serde(default, skip_serializing_if = "PrecisionJson::is_double")]
     pub precision: PrecisionJson,
+    /// Read only through [`Self::persist_kind`].
     #[serde(default, skip_serializing_if = "ResidualJson::is_promote_storage")]
     pub residual: ResidualJson,
     #[serde(default, skip_serializing_if = "MathJson::is_accurate")]
@@ -379,6 +397,13 @@ pub(super) struct SparseConfig {
     pub inducing_ids: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub next_inducing_id: Option<u64>,
+}
+
+impl SparseConfig {
+    /// The precision this directory records ([`decode_precision`]).
+    pub(super) fn persist_kind(&self) -> PersistKind {
+        decode_precision(self.precision, self.residual)
+    }
 }
 
 pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError> {
@@ -416,4 +441,50 @@ pub(super) fn parse_config(bytes: &[u8]) -> Result<ModelConfig, GprError> {
 
 fn is_zero(value: &f64) -> bool {
     *value == 0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PrecisionJson, ResidualJson, decode_precision};
+    use crate::precision::PersistKind;
+
+    /// Every pair decodes, and the residual only splits `mixed`.
+    #[test]
+    fn decode_precision_reads_the_residual_only_for_mixed() {
+        for residual in [ResidualJson::PromoteStorage, ResidualJson::ReevaluateKernel] {
+            assert_eq!(
+                decode_precision(PrecisionJson::Double, residual),
+                PersistKind::Double
+            );
+            assert_eq!(
+                decode_precision(PrecisionJson::Single, residual),
+                PersistKind::Single
+            );
+        }
+        assert_eq!(
+            decode_precision(PrecisionJson::Mixed, ResidualJson::PromoteStorage),
+            PersistKind::MixedPromote
+        );
+        assert_eq!(
+            decode_precision(PrecisionJson::Mixed, ResidualJson::ReevaluateKernel),
+            PersistKind::MixedReevaluate
+        );
+    }
+
+    /// Decoding what a save wrote gives back the precision it saved.
+    #[test]
+    fn decode_inverts_the_save_encoding() {
+        for kind in [
+            PersistKind::Double,
+            PersistKind::Single,
+            PersistKind::MixedPromote,
+            PersistKind::MixedReevaluate,
+        ] {
+            let pair = (
+                PrecisionJson::from_persist(kind),
+                ResidualJson::from_persist(kind),
+            );
+            assert_eq!(decode_precision(pair.0, pair.1), kind);
+        }
+    }
 }

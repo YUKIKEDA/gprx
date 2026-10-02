@@ -1835,7 +1835,7 @@ fn delete_by_reassembly_publishes_weights_of_the_remaining_points() {
         .expect("factor")
         .into_online();
     let removed = 2;
-    let x_next = remove_point(online.core.x_train.as_slice(), 6, 1, removed);
+    let x_next = remove_point(online.state.core.x_train.as_slice(), 6, 1, removed);
     let y_next: Vec<f64> = y
         .iter()
         .enumerate()
@@ -1872,15 +1872,25 @@ struct OnlineFingerprint {
     nlml: f64,
 }
 
-fn online_fingerprint(online: &OnlineSgpr<Fixed, crate::MixedPrecision>) -> OnlineFingerprint {
+fn online_fingerprint<P: crate::precision::GpScalar>(
+    online: &OnlineSgpr<Fixed, P>,
+) -> OnlineFingerprint {
     let pred = online.predict(&[0.3, 1.7, 3.2], 3, 1).expect("predict");
     OnlineFingerprint {
         n: online.n(),
         m: online.m(),
         points: online.point_ids().to_vec(),
         inducing: online.inducing_ids().to_vec(),
-        mean: pred.mean,
-        variance: pred.variance,
+        mean: pred
+            .mean
+            .iter()
+            .map(|v| crate::kernel::KernelScalar::to_f64(*v))
+            .collect(),
+        variance: pred
+            .variance
+            .iter()
+            .map(|v| crate::kernel::KernelScalar::to_f64(*v))
+            .collect(),
         nlml: online.neg_log_marginal_likelihood().expect("nlml"),
     }
 }
@@ -1962,4 +1972,46 @@ fn failed_online_updates_leave_the_model_unchanged() {
     let id = online.insert(&[4.0], 0.1).expect("insert");
     assert_eq!(online.n(), 5);
     assert_eq!(online.point_ids().last().copied(), Some(id));
+}
+
+/// Precisions that do not copy the state before an update: every failing
+/// update fails before its first write, so the model is unchanged.
+fn rejected_updates_leave_the_model_unchanged<P: crate::precision::GpScalar>() {
+    let mut online = Sgpr::new(
+        KernelSpec::from(RbfKernel::new(1.0).expect("valid")),
+        GaussianLikelihood::new(0.1).expect("valid"),
+    )
+    .with_optimizer(Fixed)
+    .with_precision::<P>()
+    .factor(
+        &[0.0, 1.0, 2.0, 3.0],
+        4,
+        1,
+        &[0.0, 1.0, 0.5, 0.25],
+        &[0.5, 2.5],
+        2,
+    )
+    .unwrap_or_else(|(_, e)| panic!("factor: {e}"))
+    .into_online();
+    let gone = online.point_ids()[0];
+    online.delete(gone).expect("delete");
+    let gone_inducing = online.insert_inducing(&[1.5]).expect("insert inducing");
+    online
+        .delete_inducing(gone_inducing)
+        .expect("delete inducing");
+    let before = online_fingerprint(&online);
+    assert!(online.insert(&[f64::NAN], 0.1).is_err());
+    assert!(online.insert(&[4.0], f64::INFINITY).is_err());
+    assert!(online.insert(&[4.0, 1.0], 0.1).is_err());
+    assert!(online.delete(gone).is_err());
+    assert!(online.insert_inducing(&[f64::NAN]).is_err());
+    assert!(online.insert_inducing(&[1.0, 2.0]).is_err());
+    assert!(online.delete_inducing(gone_inducing).is_err());
+    assert_eq!(online_fingerprint(&online), before);
+}
+
+#[test]
+fn rejected_updates_leave_double_and_single_unchanged() {
+    rejected_updates_leave_the_model_unchanged::<crate::DoublePrecision>();
+    rejected_updates_leave_the_model_unchanged::<crate::SinglePrecision>();
 }
