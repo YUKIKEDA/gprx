@@ -207,3 +207,78 @@ fn predict_into_rejects_bad_queries() {
         Err(GprError::DimensionMismatch { .. })
     ));
 }
+
+/// Inducing points close enough that `K_mm` is ill-conditioned, so an
+/// `f32` solve through it loses digits.
+const CLOSE_Z: [f64; 6] = [0.5, 0.5005, 1.6, 2.4, 0.1, 0.1004];
+
+/// Relative distance of a rounding-storage prediction to the `f64` one.
+fn max_rel_gap<R: Into<f64> + Copy>(narrow: &Prediction<R>, wide: &Prediction<f64>) -> f64 {
+    let gap = |a: &[R], b: &[f64]| {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| ((*a).into() - b).abs() / b.abs().max(1.0))
+            .fold(0.0, f64::max)
+    };
+    gap(&narrow.mean, &wide.mean).max(gap(&narrow.variance, &wide.variance))
+}
+
+/// One `f32` ulp, relative: the most the final rounding of an `f64` value
+/// to `f32` moves it.
+const ULP_F32: f64 = f32::EPSILON as f64;
+
+/// Every sparse model predicts a rounding storage in `f64` (`K_mm`
+/// factored again in `f64`), so `SinglePrecision` and `DoublePrecision`
+/// differ only by the final rounding to `f32`. A variance formed in `f32`
+/// through this `K_mm` is several ulps off.
+#[test]
+fn single_precision_sparse_predictions_are_made_in_f64() {
+    let x = points(N, 0.0);
+    let y = targets(&x, N);
+    let queries = points(5, 0.37);
+    let rbf = || KernelSpec::from(RbfKernel::new(1.0).expect("valid"));
+    let noise = || GaussianLikelihood::new(0.05).expect("valid");
+    let options = PredictOptions {
+        variance_kind: VarianceKind::Latent,
+    };
+
+    let sgpr = |kernel| Sgpr::new(kernel, noise()).with_optimizer(Fixed);
+    let wide = sgpr(rbf())
+        .factor(&x, N, D, &y, &CLOSE_Z, 3)
+        .map_err(|(_, e)| e)
+        .expect("f64 sgpr");
+    let narrow = sgpr(rbf())
+        .with_precision::<SinglePrecision>()
+        .factor(&x, N, D, &y, &CLOSE_Z, 3)
+        .map_err(|(_, e)| e)
+        .expect("f32 sgpr");
+    let gap = max_rel_gap(
+        &narrow.predict_with(&queries, 5, D, options).expect("f32"),
+        &wide.predict_with(&queries, 5, D, options).expect("f64"),
+    );
+    assert!(gap <= ULP_F32, "Sgpr f32 vs f64: {gap}");
+
+    // A variational `q` away from the prior, the same in both precisions.
+    let mut wide = Svgp::new(rbf(), noise())
+        .factor(&x, N, D, &y, &CLOSE_Z, 3)
+        .map_err(|(_, e)| e)
+        .expect("f64 svgp");
+    let mut narrow = Svgp::new(rbf(), noise())
+        .with_precision::<SinglePrecision>()
+        .factor(&x, N, D, &y, &CLOSE_Z, 3)
+        .map_err(|(_, e)| e)
+        .expect("f32 svgp");
+    let mut params = vec![0.0; wide.num_params()];
+    wide.get_params(&mut params).expect("params");
+    let n_theta = params.len() - 3 - 6;
+    for (i, slot) in params[n_theta..].iter_mut().enumerate() {
+        *slot += 0.3 * (i as f64 + 1.0).sin();
+    }
+    wide.set_params(&params).expect("f64 q");
+    narrow.set_params(&params).expect("f32 q");
+    let gap = max_rel_gap(
+        &narrow.predict_with(&queries, 5, D, options).expect("f32"),
+        &wide.predict_with(&queries, 5, D, options).expect("f64"),
+    );
+    assert!(gap <= ULP_F32, "Svgp f32 vs f64: {gap}");
+}

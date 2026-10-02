@@ -140,25 +140,6 @@ pub(crate) fn solve_llt_faer_owned<T: KernelScalar>(l: MatRef<'_, T>, rhs: MatMu
     llt::solve::solve_in_place(l, rhs, par, MemStack::new(&mut buf));
 }
 
-/// Forward substitution `L x = b` in this scalar. A zero pivot yields `0`.
-pub(crate) fn forward_substitute<T: KernelScalar>(l: MatRef<'_, T>, b: &[T]) -> Vec<T> {
-    let m = b.len();
-    let mut x = vec![T::from_f64(0.0); m];
-    for i in 0..m {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[(i, j)] * x[j];
-        }
-        let diag = l[(i, i)];
-        x[i] = if diag.abs().to_f64() > 0.0 {
-            sum / diag
-        } else {
-            T::from_f64(0.0)
-        };
-    }
-    x
-}
-
 pub(crate) fn log_det_from_l<T: KernelScalar>(l: MatRef<'_, T>, n: usize) -> T {
     let mut log_diag = T::from_f64(0.0);
     for i in 0..n {
