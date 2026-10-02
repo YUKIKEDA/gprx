@@ -104,6 +104,107 @@ where
     a.and(b)
 }
 
+/// Rows `col..` of column `col` of `m` as a slice, when `m` is column-major.
+#[inline(always)]
+pub(crate) fn lower_col<T>(m: MatRef<'_, T>, col: usize) -> Option<&[T]> {
+    m.col(col).try_as_col_major().map(|c| &c.as_slice()[col..])
+}
+
+/// Rows `row..` of column `local` of the block `m` as a slice, when `m` is
+/// column-major.
+#[inline(always)]
+pub(crate) fn lower_col_mut<T>(m: MatMut<'_, T>, local: usize, row: usize) -> Option<&mut [T]> {
+    m.col_mut(local)
+        .try_as_col_major_mut()
+        .map(|c| &mut c.as_slice_mut()[row..])
+}
+
+/// Columns evaluated together before their results are folded in order.
+/// The fold itself is one column at a time, so this width does not change
+/// the sum.
+const COL_CHUNK: usize = 16;
+
+/// Folds `f(col, col + 1)` from column `0` to column `n`, with `join`, in
+/// that column order.
+///
+/// A group of [`COL_CHUNK`] columns is evaluated on the Rayon pool, then
+/// folded on this thread. The association is the serial scan
+/// `acc = join(acc, f(col, col + 1))`, so the result depends neither on
+/// scheduling nor on the pool size. Joining area blocks is a different
+/// association: near an optimum the gradient is mostly cancellation, and
+/// that rounding steers L-BFGS. `n = 0` calls `f(0, 0)` once. Returns the
+/// first error of the left-most failing column.
+pub(crate) fn par_lower_fold<R, E, F, J>(n: usize, f: &F, join: &J) -> Result<R, E>
+where
+    R: Send,
+    E: Send,
+    F: Fn(usize, usize) -> Result<R, E> + Sync,
+    J: Fn(R, R) -> R + Sync,
+{
+    if n == 0 {
+        return f(0, 0);
+    }
+    let mut acc: Option<R> = None;
+    let mut start = 0;
+    while start < n {
+        let len = COL_CHUNK.min(n - start);
+        let mut slots: [Option<R>; COL_CHUNK] = std::array::from_fn(|_| None);
+        fill_col_sums(&mut slots[..len], start, f)?;
+        for (i, slot) in slots[..len].iter_mut().enumerate() {
+            let part = match slot.take() {
+                Some(part) => part,
+                None => {
+                    debug_assert!(false, "par_lower_fold wrote every column");
+                    f(start + i, start + i + 1)?
+                }
+            };
+            acc = Some(match acc {
+                None => part,
+                Some(prev) => join(prev, part),
+            });
+        }
+        start += len;
+    }
+    // `n > 0` and every column was written, so `acc` holds the fold.
+    match acc {
+        Some(acc) => Ok(acc),
+        None => f(0, 0),
+    }
+}
+
+/// Writes `f(col, col + 1)` into `slots[0..]`, column `col0` first.
+fn fill_col_sums<R, E, F>(slots: &mut [Option<R>], col0: usize, f: &F) -> Result<(), E>
+where
+    R: Send,
+    E: Send,
+    F: Fn(usize, usize) -> Result<R, E> + Sync,
+{
+    let n = slots.len();
+    if n == 0 {
+        return Ok(());
+    }
+    if n == 1 {
+        slots[0] = Some(f(col0, col0 + 1)?);
+        return Ok(());
+    }
+    let mid = n / 2;
+    let (left, right) = slots.split_at_mut(mid);
+    // One worker: the same columns, in order, without `rayon::join`. A join
+    // from outside the pool queues a job, and the queue allocates a block
+    // every few dozen jobs, which would break the zero-allocation hot path.
+    let (a, b) = if rayon::current_num_threads() > 1 {
+        rayon::join(
+            || fill_col_sums(left, col0, f),
+            || fill_col_sums(right, col0 + mid, f),
+        )
+    } else {
+        let a = fill_col_sums(left, col0, f);
+        let b = fill_col_sums(right, col0 + mid, f);
+        (a, b)
+    };
+    a.and(b)
+}
+
 fn partition_count(thread_scratch: &[Mat<f64>]) -> usize {
     if thread_scratch.is_empty() {
         worker_count()
@@ -450,7 +551,8 @@ pub(crate) fn fill_ard_scalar(x: MatRef<'_, f32>, cache: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArdSqDiffBuf, col_chunk, fill_squared_euclidean, fill_squared_euclidean_cross, worker_count,
+        ArdSqDiffBuf, col_chunk, fill_squared_euclidean, fill_squared_euclidean_cross,
+        par_lower_fold, worker_count,
     };
     use faer::Mat;
 
@@ -542,6 +644,38 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Column sums added left to right, including pairs that do not commute
+    /// under rounding. A balanced join of area blocks fails this.
+    #[test]
+    fn par_lower_fold_matches_a_serial_column_sum() {
+        fn term(col: usize) -> f64 {
+            if col % 2 == 0 {
+                1.0e16
+            } else {
+                -1.0e16 + col as f64
+            }
+        }
+        for n in [0, 1, 2, 15, 16, 17, 64, 256] {
+            let got = par_lower_fold(
+                n,
+                &|start, end| {
+                    let mut sum = 0.0;
+                    for col in start..end {
+                        sum += term(col);
+                    }
+                    Ok::<f64, ()>(sum)
+                },
+                &|a, b| a + b,
+            )
+            .expect("infallible");
+            let mut expect = 0.0;
+            for col in 0..n {
+                expect += term(col);
+            }
+            assert_eq!(got.to_bits(), expect.to_bits(), "n={n}");
         }
     }
 

@@ -6,8 +6,9 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
-use crate::kernel::dist::ArdSqDiff;
+use crate::kernel::dist::{ArdSqDiff, lower_col, lower_col_mut, par_lower_blocks, worker_count};
 use crate::kernel::{KernelScalar, KernelSpec};
+use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
 
 mod apply;
@@ -738,22 +739,44 @@ fn copy_triangle<T: Copy>(mut dest: MatMut<'_, T>, src: MatRef<'_, T>, uplo: Tri
     });
 }
 
-fn add_triangle<T: Copy + std::ops::Add<Output = T>>(
-    mut acc: MatMut<'_, T>,
-    src: MatRef<'_, T>,
-    uplo: Triangle,
-) {
-    visit_triangle(acc.nrows(), uplo, |row, col| {
-        acc[(row, col)] = acc[(row, col)] + src[(row, col)];
-    });
+fn add_triangle<T: KernelScalar>(acc: MatMut<'_, T>, src: MatRef<'_, T>, uplo: Triangle) {
+    zip_triangle(acc, src, uplo, |a, s| a + s);
 }
 
-fn mul_triangle<T: Copy + std::ops::Mul<Output = T>>(
+fn mul_triangle<T: KernelScalar>(acc: MatMut<'_, T>, src: MatRef<'_, T>, uplo: Triangle) {
+    zip_triangle(acc, src, uplo, |a, s| a * s);
+}
+
+/// `acc = op(acc, src)` on `uplo`; the lower triangle runs on the Rayon pool.
+fn zip_triangle<T: KernelScalar>(
     mut acc: MatMut<'_, T>,
     src: MatRef<'_, T>,
     uplo: Triangle,
+    op: impl Fn(T, T) -> T + Sync,
 ) {
-    visit_triangle(acc.nrows(), uplo, |row, col| {
-        acc[(row, col)] = acc[(row, col)] * src[(row, col)];
+    let n = acc.nrows();
+    if matches!(uplo, Triangle::Lower) {
+        let _ = par_lower_blocks(acc, worker_count(), &|start, mut part: MatMut<'_, T>| {
+            for local in 0..part.ncols() {
+                let col = start + local;
+                if let (Some(dest), Some(from)) = (
+                    lower_col_mut(part.rb_mut(), local, col),
+                    lower_col(src, col),
+                ) {
+                    for (a, &b) in dest.iter_mut().zip(from) {
+                        *a = op(*a, b);
+                    }
+                } else {
+                    for row in col..n {
+                        part[(row, local)] = op(part[(row, local)], src[(row, col)]);
+                    }
+                }
+            }
+            Ok::<(), ()>(())
+        });
+        return;
+    }
+    visit_triangle(n, uplo, |row, col| {
+        acc[(row, col)] = op(acc[(row, col)], src[(row, col)]);
     });
 }

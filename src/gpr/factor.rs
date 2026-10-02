@@ -1,6 +1,7 @@
 //! Training Gram assembly, Cholesky, and MLL helpers.
 
 use faer::{Mat, MatMut, MatRef};
+use rayon::prelude::*;
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::ArdSqDiffBuf;
@@ -226,7 +227,10 @@ where
     W: FitWorkspace,
 {
     let zero = <W::Policy as PrecisionPolicy>::Storage::from_f64(0.0);
-    ws.core_mut().k_matrix.fill(zero);
+    let k = ws.core_mut().k_matrix.as_mut();
+    let n_parts = rayon::current_num_threads().clamp(1, k.ncols().max(1));
+    k.par_col_partition_mut(n_parts)
+        .for_each(|mut block| block.fill(zero));
 }
 
 pub(crate) fn neg_mll_from_factor<T: KernelScalar>(
