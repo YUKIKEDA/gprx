@@ -1,7 +1,7 @@
 //! Periodic (exp-sine-squared) kernel.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::periodic_rq_simd::{PeriodicScales, try_apply_periodic, try_weighted_periodic};
+use super::stationary_simd::{PeriodicScales, try_apply_periodic, try_weighted_periodic};
 use super::{
     Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
     write_rect_from_coords, write_square_from_coords, write_triangle,
