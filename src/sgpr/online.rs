@@ -124,10 +124,19 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 /// ```
 #[derive(Clone, Debug)]
 pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
-    pub(super) core: SparseCore,
+    /// Everything an online update writes; [`OnlineSgpr::atomically`]
+    /// copies and restores it as one value.
+    pub(super) state: OnlineState<P>,
     /// Kernel scratch kept between `&mut self` calls.
     pub(super) scratch: SparseScratch<P::Storage>,
     optimizer: O,
+}
+
+/// The fields of an [`OnlineSgpr`] an online update writes. A field added
+/// here is undone by [`OnlineSgpr::atomically`] with the rest.
+#[derive(Clone, Debug)]
+pub(super) struct OnlineState<P: ModelPrecision> {
+    pub(super) core: SparseCore,
     k_mm_l: Mat<P::Storage>,
     a: Mat<P::Storage>,
     b_l: Mat<P::Storage>,
@@ -142,22 +151,6 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     inducing: InducingRegistry,
 }
 
-/// The fields of an [`OnlineSgpr`] an online update writes, kept by
-/// [`OnlineSgpr::atomically`] to undo a failed update.
-struct UpdateUndo<P: ModelPrecision> {
-    core: SparseCore,
-    k_mm_l: Mat<P::Storage>,
-    a: Mat<P::Storage>,
-    b_l: Mat<P::Storage>,
-    w: Vec<P::Storage>,
-    predict_w: Vec<P::Refine>,
-    k_diag_sum: P::Storage,
-    a_frobenius2: P::Storage,
-    ay: Vec<f64>,
-    registry: PointRegistry,
-    inducing: InducingRegistry,
-}
-
 impl<O, P> OnlineSgpr<O, P>
 where
     P: crate::precision::GpScalar,
@@ -167,19 +160,21 @@ where
         let inducing = InducingRegistry::from_count(fitted.core.m);
         let ay = a_times_y(fitted.a.as_ref(), &fitted.core.y_train);
         Self {
-            ay,
-            core: fitted.core,
+            state: OnlineState {
+                ay,
+                core: fitted.core,
+                k_mm_l: fitted.k_mm_l,
+                a: fitted.a,
+                b_l: fitted.b_l,
+                w: fitted.w,
+                predict_w: fitted.predict_w,
+                k_diag_sum: fitted.k_diag_sum,
+                a_frobenius2: fitted.a_frobenius2,
+                registry,
+                inducing,
+            },
             scratch: fitted.scratch,
             optimizer: fitted.optimizer,
-            k_mm_l: fitted.k_mm_l,
-            a: fitted.a,
-            b_l: fitted.b_l,
-            w: fitted.w,
-            predict_w: fitted.predict_w,
-            k_diag_sum: fitted.k_diag_sum,
-            a_frobenius2: fitted.a_frobenius2,
-            registry,
-            inducing,
         }
     }
 
@@ -188,33 +183,33 @@ where
         O: Clone,
     {
         FittedSgpr {
-            core: self.core.clone(),
+            core: self.state.core.clone(),
             // Lent for the call; `adopt_fitted` takes it back.
             scratch: std::mem::take(&mut self.scratch),
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
-            k_mm_l: self.k_mm_l.clone(),
-            a: self.a.clone(),
-            b_l: self.b_l.clone(),
-            w: self.w.clone(),
-            predict_w: self.predict_w.clone(),
-            k_diag_sum: self.k_diag_sum,
-            a_frobenius2: self.a_frobenius2,
+            k_mm_l: self.state.k_mm_l.clone(),
+            a: self.state.a.clone(),
+            b_l: self.state.b_l.clone(),
+            w: self.state.w.clone(),
+            predict_w: self.state.predict_w.clone(),
+            k_diag_sum: self.state.k_diag_sum,
+            a_frobenius2: self.state.a_frobenius2,
         }
     }
 
     fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
-        self.core = fitted.core;
+        self.state.core = fitted.core;
         self.scratch = fitted.scratch;
         self.optimizer = fitted.optimizer;
-        self.k_mm_l = fitted.k_mm_l;
-        self.a = fitted.a;
-        self.b_l = fitted.b_l;
-        self.w = fitted.w;
-        self.predict_w = fitted.predict_w;
-        self.k_diag_sum = fitted.k_diag_sum;
-        self.a_frobenius2 = fitted.a_frobenius2;
-        self.ay = a_times_y(self.a.as_ref(), &self.core.y_train);
+        self.state.k_mm_l = fitted.k_mm_l;
+        self.state.a = fitted.a;
+        self.state.b_l = fitted.b_l;
+        self.state.w = fitted.w;
+        self.state.predict_w = fitted.predict_w;
+        self.state.k_diag_sum = fitted.k_diag_sum;
+        self.state.a_frobenius2 = fitted.a_frobenius2;
+        self.state.ay = a_times_y(self.state.a.as_ref(), &self.state.core.y_train);
     }
 
     /// Runs one online update so that it either completes or changes nothing.
@@ -224,9 +219,10 @@ where
     /// that cannot fail, except one: a precision that refines in `f64`
     /// ([`ModelPrecision::REFINES_IN_F64`]) assembles its predict weights
     /// again from the updated data, and that can fail after the buffers
-    /// changed. For such a precision this keeps a copy of every field an
-    /// update writes and puts it back on failure. Other precisions skip the
-    /// copy, so their updates allocate nothing for it.
+    /// changed. For such a precision this copies [`OnlineState`], every
+    /// field an update writes, and puts it back on failure. Other precisions
+    /// skip the copy, so their updates allocate nothing for it; they rely on
+    /// every failing step coming before the first write.
     pub(super) fn atomically<R>(
         &mut self,
         update: impl FnOnce(&mut Self) -> Result<R, GprError>,
@@ -234,44 +230,22 @@ where
         if !P::REFINES_IN_F64 {
             return update(self);
         }
-        let undo = UpdateUndo::<P> {
-            core: self.core.clone(),
-            k_mm_l: self.k_mm_l.clone(),
-            a: self.a.clone(),
-            b_l: self.b_l.clone(),
-            w: self.w.clone(),
-            predict_w: self.predict_w.clone(),
-            k_diag_sum: self.k_diag_sum,
-            a_frobenius2: self.a_frobenius2,
-            ay: self.ay.clone(),
-            registry: self.registry.clone(),
-            inducing: self.inducing.clone(),
-        };
+        let undo = self.state.clone();
         let result = update(self);
         if result.is_err() {
-            self.core = undo.core;
-            self.k_mm_l = undo.k_mm_l;
-            self.a = undo.a;
-            self.b_l = undo.b_l;
-            self.w = undo.w;
-            self.predict_w = undo.predict_w;
-            self.k_diag_sum = undo.k_diag_sum;
-            self.a_frobenius2 = undo.a_frobenius2;
-            self.ay = undo.ay;
-            self.registry = undo.registry;
-            self.inducing = undo.inducing;
+            self.state = undo;
         }
         result
     }
 
     fn vfe_state(&self) -> VfeState<P::Storage> {
         VfeState::<P::Storage> {
-            k_mm_l: self.k_mm_l.clone(),
-            a: self.a.clone(),
-            b_l: self.b_l.clone(),
-            w: self.w.clone(),
-            k_diag_sum: self.k_diag_sum,
-            a_frobenius2: self.a_frobenius2,
+            k_mm_l: self.state.k_mm_l.clone(),
+            a: self.state.a.clone(),
+            b_l: self.state.b_l.clone(),
+            w: self.state.w.clone(),
+            k_diag_sum: self.state.k_diag_sum,
+            a_frobenius2: self.state.a_frobenius2,
         }
     }
 
@@ -282,83 +256,84 @@ where
 
     /// Takes `state` as the VFE system. The predict weights are the caller's.
     fn set_vfe(&mut self, state: VfeState<P::Storage>) {
-        self.k_mm_l = state.k_mm_l;
-        self.a = state.a;
-        self.b_l = state.b_l;
-        self.w = state.w;
-        self.k_diag_sum = state.k_diag_sum;
-        self.a_frobenius2 = state.a_frobenius2;
-        self.ay = a_times_y(self.a.as_ref(), &self.core.y_train);
+        self.state.k_mm_l = state.k_mm_l;
+        self.state.a = state.a;
+        self.state.b_l = state.b_l;
+        self.state.w = state.w;
+        self.state.k_diag_sum = state.k_diag_sum;
+        self.state.a_frobenius2 = state.a_frobenius2;
+        self.state.ay = a_times_y(self.state.a.as_ref(), &self.state.core.y_train);
     }
 
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
-            self.predict_w = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, f64>(
-                &self.core.kernel,
-                self.core.jitter,
-                self.core.likelihood,
-                &self.core.x_train,
-                self.core.n,
-                self.core.d,
-                &self.core.y_train,
-                &self.core.z_train,
-                self.core.m,
-                &mut self.scratch.f64,
-                &mut KernelScratch::new(),
-            ))?
-            .w
-            .into_iter()
-            .map(P::Refine::from_f64)
-            .collect();
+            self.state.predict_w =
+                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64>(
+                    &self.state.core.kernel,
+                    self.state.core.jitter,
+                    self.state.core.likelihood,
+                    &self.state.core.x_train,
+                    self.state.core.n,
+                    self.state.core.d,
+                    &self.state.core.y_train,
+                    &self.state.core.z_train,
+                    self.state.core.m,
+                    &mut self.scratch.f64,
+                    &mut KernelScratch::new(),
+                ))?
+                .w
+                .into_iter()
+                .map(P::Refine::from_f64)
+                .collect();
             return Ok(());
         }
-        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
-            &self.core.kernel,
-            self.core.jitter,
-            self.a.as_ref(),
-            self.b_l.as_ref(),
-            &self.w,
-            &self.core.x_train,
-            &self.core.y_train,
-            &self.core.z_train,
-            self.core.likelihood.noise_variance(),
-            self.core.n,
-            self.core.m,
-            self.core.d,
+        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P>(
+            &self.state.core.kernel,
+            self.state.core.jitter,
+            self.state.a.as_ref(),
+            self.state.b_l.as_ref(),
+            &self.state.w,
+            &self.state.core.x_train,
+            &self.state.core.y_train,
+            &self.state.core.z_train,
+            self.state.core.likelihood.noise_variance(),
+            self.state.core.n,
+            self.state.core.m,
+            self.state.core.d,
         ))?;
         Ok(())
     }
 
     /// `w = B⁻¹ A y` from the kept `A y`: one `O(m²)` solve.
     fn recompute_w(&mut self) -> Result<(), GprError> {
-        let m = self.core.m;
+        let m = self.state.core.m;
         let mut rhs = Mat::<P::Storage>::zeros(m, 1);
-        for (row, value) in self.ay.iter().enumerate() {
+        for (row, value) in self.state.ay.iter().enumerate() {
             rhs[(row, 0)] = P::Storage::from_f64(*value);
         }
-        solve_llt(self.b_l.as_ref(), rhs.as_mut());
-        self.w.clear();
-        self.w.extend((0..m).map(|row| rhs[(row, 0)]));
+        solve_llt(self.state.b_l.as_ref(), rhs.as_mut());
+        self.state.w.clear();
+        self.state.w.extend((0..m).map(|row| rhs[(row, 0)]));
         self.refresh_predict_w()
     }
 
-    sparse_core_accessors!();
+    sparse_core_accessors!(state.core);
 
     /// Returns training-point identifiers in buffer order.
     pub fn point_ids(&self) -> &[PointId] {
-        self.registry.ids()
+        self.state.registry.ids()
     }
 
     /// Returns inducing-point identifiers in buffer order.
     pub fn inducing_ids(&self) -> &[InducingId] {
-        self.inducing.ids()
+        self.state.inducing.ids()
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
     ///
     /// Inducing coordinates are not counted.
     pub fn num_params(&self) -> usize {
-        self.core.theta_len()
+        self.state.core.theta_len()
     }
 
     /// Writes kernel `θ` then likelihood `θ` into `out`.
@@ -368,7 +343,7 @@ where
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
-        self.core.read_theta(out)
+        self.state.core.read_theta(out)
     }
 
     /// Sets kernel then likelihood `θ` and rebuilds the VFE factors.
@@ -434,15 +409,15 @@ where
     /// The stored factors are already valid, so this returns `Ok`.
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
         vfe_neg_log_marginal_likelihood(
-            self.a.as_ref(),
-            self.b_l.as_ref(),
-            &self.w,
-            &self.core.y_train,
-            self.k_diag_sum,
-            self.a_frobenius2,
-            self.core.likelihood.noise_variance(),
-            self.core.n,
-            self.core.m,
+            self.state.a.as_ref(),
+            self.state.b_l.as_ref(),
+            &self.state.w,
+            &self.state.core.y_train,
+            self.state.k_diag_sum,
+            self.state.a_frobenius2,
+            self.state.core.likelihood.noise_variance(),
+            self.state.core.n,
+            self.state.core.m,
         )
     }
 
@@ -474,12 +449,12 @@ where
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
         predict_vfe_into::<P>(
-            &self.core,
+            &self.state.core,
             &VfeSystem::new(
-                &self.core,
-                self.k_mm_l.as_ref(),
-                self.b_l.as_ref(),
-                &self.predict_w,
+                &self.state.core,
+                self.state.k_mm_l.as_ref(),
+                self.state.b_l.as_ref(),
+                &self.state.predict_w,
             ),
             xs,
             n_rows,
@@ -552,12 +527,12 @@ where
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         predict_vfe_covariance::<P>(
-            &self.core,
+            &self.state.core,
             &VfeSystem::new(
-                &self.core,
-                self.k_mm_l.as_ref(),
-                self.b_l.as_ref(),
-                &self.predict_w,
+                &self.state.core,
+                self.state.k_mm_l.as_ref(),
+                self.state.b_l.as_ref(),
+                &self.state.predict_w,
             ),
             xs,
             n_rows,
@@ -606,7 +581,7 @@ where
         seed: u64,
     ) -> Result<Vec<P::Refine>, GprError> {
         self.predict_covariance_with(xs, n_rows, n_cols, options)?
-            .draw(n_draws, seed, self.core.jitter)
+            .draw(n_draws, seed, self.state.core.jitter)
     }
 
     /// Returns the leave-one-out mean and observation variance at every
@@ -662,10 +637,10 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         vfe_loo::<P>(
-            &self.core,
-            self.a.as_ref(),
-            self.b_l.as_ref(),
-            &self.w,
+            &self.state.core,
+            self.state.a.as_ref(),
+            self.state.b_l.as_ref(),
+            &self.state.w,
             options,
         )
     }
@@ -706,12 +681,12 @@ where
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
         predict_vfe_into::<P>(
-            &self.core,
+            &self.state.core,
             &VfeSystem::new(
-                &self.core,
-                self.k_mm_l.as_ref(),
-                self.b_l.as_ref(),
-                &self.predict_w,
+                &self.state.core,
+                self.state.k_mm_l.as_ref(),
+                self.state.b_l.as_ref(),
+                &self.state.predict_w,
             ),
             xs,
             n_rows,
@@ -746,19 +721,19 @@ where
     /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::EmptyInput`] if `d` is zero.
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
-        if x_new.len() != self.core.d {
+        if x_new.len() != self.state.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
-                expected_dim: self.core.d,
+                expected_dim: self.state.core.d,
             });
         }
-        if self.core.d == 0 {
+        if self.state.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        self.registry.require_room()?;
+        self.state.registry.require_room()?;
         let mut mapped = std::mem::take(&mut self.scratch.point);
         let result = self.atomically(|model| model.insert_mapped(x_new, y_new, &mut mapped));
         self.scratch.point = mapped;
@@ -773,38 +748,49 @@ where
         y_obs: f64,
         mapped: &mut Vec<f64>,
     ) -> Result<PointId, GprError> {
-        self.core.map_point(x_obs, mapped)?;
+        self.state.core.map_point(x_obs, mapped)?;
         let x_new = mapped.as_slice();
-        let y_new = self.core.map_target(y_obs)?;
-        let mut a_col = with_kernel_exp!(self.core.math, M => kernel_column::<M, P::Storage>(
-            &self.core.kernel,
-            &self.core.z_train,
-            self.core.m,
+        let y_new = self.state.core.map_target(y_obs)?;
+        let mut a_col = with_kernel_exp!(self.state.core.math, M => kernel_column::<M, P::Storage>(
+            &self.state.core.kernel,
+            &self.state.core.z_train,
+            self.state.core.m,
             x_new,
-            self.core.d,
+            self.state.core.d,
             &mut self.scratch.storage,
         ))?;
-        solve_lmm(self.k_mm_l.as_ref(), a_col.as_mut());
-        let mut v = vec![P::Storage::from_f64(0.0); self.core.m];
+        solve_lmm(self.state.k_mm_l.as_ref(), a_col.as_mut());
+        let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = a_col[(i, 0)];
         }
-        let k_diag = kernel_diag_at::<P::Storage>(&self.core.kernel, x_new, self.core.d)?;
+        let k_diag =
+            kernel_diag_at::<P::Storage>(&self.state.core.kernel, x_new, self.state.core.d)?;
         // No step below fails until the predict weights (see `atomically`).
-        self.a_frobenius2 += frobenius2(a_col.as_ref());
-        self.k_diag_sum += k_diag;
-        for (row, slot) in self.ay.iter_mut().enumerate() {
+        self.state.a_frobenius2 += frobenius2(a_col.as_ref());
+        self.state.k_diag_sum += k_diag;
+        for (row, slot) in self.state.ay.iter_mut().enumerate() {
             *slot += a_col[(row, 0)].to_f64() * y_new;
         }
-        push_column(&mut self.a, a_col.as_ref());
-        chol_rank1_update(&mut self.b_l, &mut v);
-        append_point(&mut self.core.x_train, self.core.n, self.core.d, x_new);
-        append_point(&mut self.core.x_obs, self.core.n, self.core.d, x_obs);
-        self.core.y_train.push(y_new);
-        self.core.y_obs.push(y_obs);
-        self.core.n += 1;
+        push_column(&mut self.state.a, a_col.as_ref());
+        chol_rank1_update(&mut self.state.b_l, &mut v);
+        append_point(
+            &mut self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            x_new,
+        );
+        append_point(
+            &mut self.state.core.x_obs,
+            self.state.core.n,
+            self.state.core.d,
+            x_obs,
+        );
+        self.state.core.y_train.push(y_new);
+        self.state.core.y_obs.push(y_obs);
+        self.state.core.n += 1;
         self.recompute_w()?;
-        Ok(self.registry.insert())
+        Ok(self.state.registry.insert())
     }
 
     /// Removes the training point identified by `id` and packs every buffer.
@@ -847,55 +833,70 @@ where
     /// # }
     /// ```
     pub fn delete(&mut self, id: PointId) -> Result<(), GprError> {
-        if self.core.n <= 1 {
+        if self.state.core.n <= 1 {
             return Err(GprError::InsufficientData {
-                n: self.core.n,
+                n: self.state.core.n,
                 min: 2,
             });
         }
-        let idx = self.registry.index_of(id)?;
+        let idx = self.state.registry.index_of(id)?;
         self.atomically(|model| model.delete_at(idx))
     }
 
     /// [`Self::delete`] of the point at buffer index `idx`.
     fn delete_at(&mut self, idx: usize) -> Result<(), GprError> {
-        let mut v = vec![P::Storage::from_f64(0.0); self.core.m];
+        let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
-            *slot = self.a[(i, idx)];
+            *slot = self.state.a[(i, idx)];
         }
-        let x_pt = point_at(&self.core.x_train, self.core.n, self.core.d, idx);
-        let diag = kernel_diag_at::<P::Storage>(&self.core.kernel, &x_pt, self.core.d)?;
+        let x_pt = point_at(
+            &self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            idx,
+        );
+        let diag = kernel_diag_at::<P::Storage>(&self.state.core.kernel, &x_pt, self.state.core.d)?;
         let mut col_norm = P::Storage::from_f64(0.0);
         for value in &v {
             col_norm += *value * *value;
         }
-        let x_next = remove_point(&self.core.x_train, self.core.n, self.core.d, idx);
-        let mut y_next = self.core.y_train.clone();
+        let x_next = remove_point(
+            &self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            idx,
+        );
+        let mut y_next = self.state.core.y_train.clone();
         y_next.remove(idx);
-        let x_obs_next = remove_point(&self.core.x_obs, self.core.n, self.core.d, idx);
-        let mut y_obs_next = self.core.y_obs.clone();
+        let x_obs_next = remove_point(
+            &self.state.core.x_obs,
+            self.state.core.n,
+            self.state.core.d,
+            idx,
+        );
+        let mut y_obs_next = self.state.core.y_obs.clone();
         y_obs_next.remove(idx);
-        let mut b_trial = self.b_l.clone();
+        let mut b_trial = self.state.b_l.clone();
         let mut v_trial = v;
         if chol_rank1_downdate(&mut b_trial, &mut v_trial) {
-            self.k_diag_sum -= diag;
-            self.a_frobenius2 -= col_norm;
-            let y_idx = self.core.y_train[idx];
-            for (row, slot) in self.ay.iter_mut().enumerate() {
-                *slot -= self.a[(row, idx)].to_f64() * y_idx;
+            self.state.k_diag_sum -= diag;
+            self.state.a_frobenius2 -= col_norm;
+            let y_idx = self.state.core.y_train[idx];
+            for (row, slot) in self.state.ay.iter_mut().enumerate() {
+                *slot -= self.state.a[(row, idx)].to_f64() * y_idx;
             }
-            remove_column_in_place(&mut self.a, idx);
-            self.b_l = b_trial;
-            self.core.x_train = x_next;
-            self.core.y_train = y_next;
-            self.core.x_obs = x_obs_next;
-            self.core.y_obs = y_obs_next;
-            self.core.n -= 1;
+            remove_column_in_place(&mut self.state.a, idx);
+            self.state.b_l = b_trial;
+            self.state.core.x_train = x_next;
+            self.state.core.y_train = y_next;
+            self.state.core.x_obs = x_obs_next;
+            self.state.core.y_obs = y_obs_next;
+            self.state.core.n -= 1;
             self.recompute_w()?;
         } else {
             self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next)?;
         }
-        self.registry.remove_at(idx);
+        self.state.registry.remove_at(idx);
         Ok(())
     }
 
@@ -909,24 +910,24 @@ where
         x_obs_next: Vec<f64>,
         y_obs_next: Vec<f64>,
     ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, P::Storage>(
-            &self.core.kernel,
-            self.core.jitter,
-            self.core.likelihood,
+        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage>(
+            &self.state.core.kernel,
+            self.state.core.jitter,
+            self.state.core.likelihood,
             &x_next,
-            self.core.n - 1,
-            self.core.d,
+            self.state.core.n - 1,
+            self.state.core.d,
             &y_next,
-            &self.core.z_train,
-            self.core.m,
+            &self.state.core.z_train,
+            self.state.core.m,
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
-        self.core.x_train = x_next;
-        self.core.y_train = y_next;
-        self.core.x_obs = x_obs_next;
-        self.core.y_obs = y_obs_next;
-        self.core.n -= 1;
+        self.state.core.x_train = x_next;
+        self.state.core.y_train = y_next;
+        self.state.core.x_obs = x_obs_next;
+        self.state.core.y_obs = y_obs_next;
+        self.state.core.n -= 1;
         self.apply_vfe(state)
     }
 
@@ -977,19 +978,19 @@ where
     /// # }
     /// ```
     pub fn insert_inducing(&mut self, z_new: &[f64]) -> Result<InducingId, GprError> {
-        if z_new.len() != self.core.d {
+        if z_new.len() != self.state.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: z_new.len(),
-                expected_dim: self.core.d,
+                expected_dim: self.state.core.d,
             });
         }
-        if self.core.d == 0 {
+        if self.state.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
         if z_new.iter().any(|v| !v.is_finite()) {
             return Err(GprError::NonFiniteInput);
         }
-        self.inducing.require_room()?;
+        self.state.inducing.require_room()?;
         self.atomically(|model| model.insert_inducing_checked(z_new))
     }
 
@@ -997,32 +998,32 @@ where
     fn insert_inducing_checked(&mut self, z_new: &[f64]) -> Result<InducingId, GprError> {
         let z_obs = z_new;
         let mut z_new = Vec::with_capacity(z_obs.len());
-        self.core.map_point(z_obs, &mut z_new)?;
+        self.state.core.map_point(z_obs, &mut z_new)?;
         let z_new = z_new.as_slice();
         let mut state = self.vfe_state();
-        match with_kernel_exp!(self.core.math, M => inducing_insert::<M, _>(
+        match with_kernel_exp!(self.state.core.math, M => inducing_insert::<M, _>(
             &mut state,
-            &self.core.kernel,
-            self.core.likelihood.noise_variance(),
-            &self.core.x_train,
-            self.core.n,
-            self.core.d,
-            &self.core.y_train,
-            &self.core.z_train,
-            self.core.m,
+            &self.state.core.kernel,
+            self.state.core.likelihood.noise_variance(),
+            &self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            &self.state.core.y_train,
+            &self.state.core.z_train,
+            self.state.core.m,
             z_new,
             &mut self.scratch.storage,
         )) {
             Ok(()) | Err(GprError::CholeskyFailed { .. }) => {}
             Err(err) => return Err(err),
         }
-        let (m, d) = (self.core.m, self.core.d);
-        let mut z_train = self.core.z_train.clone();
+        let (m, d) = (self.state.core.m, self.state.core.d);
+        let mut z_train = self.state.core.z_train.clone();
         append_point(&mut z_train, m, d, z_new);
-        let mut z_obs_next = self.core.z_obs.clone();
+        let mut z_obs_next = self.state.core.z_obs.clone();
         append_point(&mut z_obs_next, m, d, z_obs);
         self.commit_inducing(z_train, z_obs_next, m + 1)?;
-        Ok(self.inducing.insert())
+        Ok(self.state.inducing.insert())
     }
 
     /// Factors the VFE system at the inducing set `z_train` (`m × d`) and
@@ -1038,26 +1039,26 @@ where
         z_obs: Vec<f64>,
         m: usize,
     ) -> Result<(), GprError> {
-        let (state, w64) = with_kernel_exp!(self.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage>(
-            &self.core.kernel,
-            self.core.jitter,
-            self.core.likelihood,
-            &self.core.x_train,
-            self.core.n,
-            self.core.d,
-            &self.core.y_train,
+        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage>(
+            &self.state.core.kernel,
+            self.state.core.jitter,
+            self.state.core.likelihood,
+            &self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            &self.state.core.y_train,
             &z_train,
             m,
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
-        self.core.z_train = z_train;
-        self.core.z_obs = z_obs;
-        self.core.m = m;
+        self.state.core.z_train = z_train;
+        self.state.core.z_obs = z_obs;
+        self.state.core.m = m;
         match w64 {
             // The `f64` weights of this assembly are the refined predict weights.
             Some(w64) if P::REFINES_IN_F64 => {
-                self.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
+                self.state.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
                 self.set_vfe(state);
                 Ok(())
             }
@@ -1106,13 +1107,13 @@ where
     /// # }
     /// ```
     pub fn delete_inducing(&mut self, id: InducingId) -> Result<(), GprError> {
-        if self.core.m <= 1 {
+        if self.state.core.m <= 1 {
             return Err(GprError::InsufficientData {
-                n: self.core.m,
+                n: self.state.core.m,
                 min: 2,
             });
         }
-        let idx = self.inducing.index_of(id)?;
+        let idx = self.state.inducing.index_of(id)?;
         self.atomically(|model| model.delete_inducing_at(idx))
     }
 
@@ -1121,28 +1122,28 @@ where
         let mut state = self.vfe_state();
         inducing_delete(
             &mut state,
-            self.core.likelihood.noise_variance(),
-            &self.core.y_train,
+            self.state.core.likelihood.noise_variance(),
+            &self.state.core.y_train,
             idx,
         )?;
-        let (m, d) = (self.core.m, self.core.d);
-        let z_train = remove_point(&self.core.z_train, m, d, idx);
-        let z_obs = remove_point(&self.core.z_obs, m, d, idx);
+        let (m, d) = (self.state.core.m, self.state.core.d);
+        let z_train = remove_point(&self.state.core.z_train, m, d, idx);
+        let z_obs = remove_point(&self.state.core.z_obs, m, d, idx);
         self.commit_inducing(z_train, z_obs, m - 1)?;
-        self.inducing.remove_at(idx);
+        self.state.inducing.remove_at(idx);
         Ok(())
     }
 
     pub(crate) fn core(&self) -> &SparseCore {
-        &self.core
+        &self.state.core
     }
 
     pub(crate) fn point_registry(&self) -> &PointRegistry {
-        &self.registry
+        &self.state.registry
     }
 
     pub(crate) fn inducing_registry(&self) -> &InducingRegistry {
-        &self.inducing
+        &self.state.inducing
     }
 
     /// The online model of a persist directory: `fitted` with the saved
@@ -1158,20 +1159,20 @@ where
         inducing: InducingRegistry,
     ) -> Result<Self, GprError> {
         let mut online = Self::from_fitted(fitted);
-        if points.len() != online.core.n || inducing.len() != online.core.m {
+        if points.len() != online.state.core.n || inducing.len() != online.state.core.m {
             return Err(crate::persist::persist_err(
                 PersistErrorKind::Config,
                 format!(
                     "config has {} point ids and {} inducing ids, expected n = {} and m = {}",
                     points.len(),
                     inducing.len(),
-                    online.core.n,
-                    online.core.m
+                    online.state.core.n,
+                    online.state.core.m
                 ),
             ));
         }
-        online.registry = points;
-        online.inducing = inducing;
+        online.state.registry = points;
+        online.state.inducing = inducing;
         Ok(online)
     }
 
@@ -1252,17 +1253,17 @@ where
     /// ```
     pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
         FittedSgpr {
-            core: self.core,
+            core: self.state.core,
             scratch: self.scratch,
             optimizer: self.optimizer,
             inducing: PhantomData,
-            k_mm_l: self.k_mm_l,
-            a: self.a,
-            b_l: self.b_l,
-            w: self.w,
-            predict_w: self.predict_w,
-            k_diag_sum: self.k_diag_sum,
-            a_frobenius2: self.a_frobenius2,
+            k_mm_l: self.state.k_mm_l,
+            a: self.state.a,
+            b_l: self.state.b_l,
+            w: self.state.w,
+            predict_w: self.state.predict_w,
+            k_diag_sum: self.state.k_diag_sum,
+            a_frobenius2: self.state.a_frobenius2,
         }
     }
 }
