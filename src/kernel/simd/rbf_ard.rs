@@ -339,18 +339,16 @@ pub(crate) fn try_grad_points<M: KernelMath>(
     Ok(true)
 }
 
-/// The lengthscales a cross pass writes `∂k/∂θ_d` for.
+/// The lengthscale a cross pass writes `∂k/∂θ_d` for.
 #[derive(Clone, Copy)]
 pub(crate) enum Which {
     One(usize),
-    All,
 }
 
 impl Which {
     fn includes(self, dim: usize) -> bool {
         match self {
             Self::One(d) => d == dim,
-            Self::All => true,
         }
     }
 }
@@ -376,9 +374,8 @@ pub(crate) fn cross_inputs(
 }
 
 /// `∂k/∂θ_d = k · w_d (Δ_d)²` with one `exp` for every lengthscale.
-/// `out` holds one matrix per written lengthscale: the one of
-/// [`Which::One`], or one per lengthscale for [`Which::All`]. `Ok(false)`
-/// when a view is not column-major or a shape does not match.
+/// `out` holds the one matrix of [`Which::One`]. `Ok(false)` when a view is
+/// not column-major or a shape does not match.
 pub(crate) fn try_grad_cross<M: KernelMath>(
     x1: MatRef<'_, f64>,
     x2: MatRef<'_, f64>,
@@ -392,7 +389,6 @@ pub(crate) fn try_grad_cross<M: KernelMath>(
     let expected = match which {
         Which::One(dim) if dim < d => 1,
         Which::One(_) => return Ok(false),
-        Which::All => d,
     };
     if out.len() != expected || !cross_inputs(x1, x2, d)? {
         return Ok(false);
@@ -402,10 +398,6 @@ pub(crate) fn try_grad_cross<M: KernelMath>(
             return Ok(false);
         }
     }
-    let slot = |dim: usize| match which {
-        Which::One(_) => 0,
-        Which::All => dim,
-    };
     if n <= 1024 {
         write_cross_rows::<M>(
             x1,
@@ -415,8 +407,8 @@ pub(crate) fn try_grad_cross<M: KernelMath>(
             0,
             n,
             0,
-            &mut |dim, row, col, v| {
-                out[slot(dim)][(row, col)] = v;
+            &mut |_dim, row, col, v| {
+                out[0][(row, col)] = v;
             },
         )?;
         return Ok(true);
@@ -435,12 +427,12 @@ pub(crate) fn try_grad_cross<M: KernelMath>(
                 start,
                 len,
                 start,
-                &mut |dim, row, col, v| {
+                &mut |_dim, row, col, v| {
                     // SAFETY: `shared` holds the column-major matrices of
                     // `out`, each `m × n` with row stride 1 (checked above);
                     // `row < m`, and `col` is in this worker's own column
                     // range of `n`, which no other worker writes.
-                    unsafe { store_packed(&shared.slots()[slot(dim)], row, col, v) }
+                    unsafe { store_packed(&shared.slots()[0], row, col, v) }
                 },
             )
         })
