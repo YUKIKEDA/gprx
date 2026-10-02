@@ -8,9 +8,10 @@
 //! (non-unit row stride), or a value that is not finite, makes them report
 //! `false`, and the caller runs its scalar loop, which also names the error.
 
-use super::Triangle;
-use super::dist::ArdSqDiff;
+use super::col_slice;
 use crate::error::GprError;
+use crate::kernel::Triangle;
+use crate::kernel::dist::ArdSqDiff;
 use faer::{MatMut, MatRef};
 use wide::f64x4;
 
@@ -93,7 +94,9 @@ pub(crate) fn try_fill<P: Profile>(
                 match source {
                     Source::Points { x, y } => {
                         let z = y[(col, dim)];
-                        let xs = column(x, dim, start, len);
+                        let Some(xs) = column(x, dim, start, len) else {
+                            return Ok(false);
+                        };
                         add_weighted(xs, |v| (v - z) * (v - z), w, r2, picked.then_some(&mut *t));
                     }
                     Source::Cache { cache } => {
@@ -126,14 +129,10 @@ pub(crate) fn try_fill<P: Profile>(
     Ok(true)
 }
 
-/// Rows `start..start + len` of column `col` of `m` (unit row stride).
-fn column(m: MatRef<'_, f64>, col: usize, start: usize, len: usize) -> &[f64] {
-    let col_ref = m.col(col);
-    let base = col_ref.as_ptr();
-    // SAFETY: the caller checked that `m` has unit row stride, so the
-    // `m.nrows()` entries of column `col` are contiguous; `start + len` is at
-    // most `m.nrows()`.
-    unsafe { std::slice::from_raw_parts(base.add(start), len) }
+/// Rows `start..start + len` of column `col` of `m`, when `m` is
+/// column-major.
+fn column(m: MatRef<'_, f64>, col: usize, start: usize, len: usize) -> Option<&[f64]> {
+    col_slice(m, col).map(|values| &values[start..start + len])
 }
 
 /// `r2 += w · sq(v)` over `src`, and `t = w · sq(v)` when `t` is given.
@@ -238,9 +237,9 @@ mod tests {
                         r2_from_coords(x0.as_ref(), row, x0.as_ref(), col, &w, pick).expect("r2");
                     let want = match p {
                         None => {
-                            super::super::matern::matern_from_r::<M, f64>(nu, t.r2.max(0.0).sqrt())
+                            crate::kernel::matern::matern_from_r::<M, f64>(nu, t.r2.max(0.0).sqrt())
                         }
-                        Some(_) => super::super::matern::matern_dk_dtheta_ard::<M, f64>(
+                        Some(_) => crate::kernel::matern::matern_dk_dtheta_ard::<M, f64>(
                             nu,
                             t.r2.max(0.0).sqrt(),
                             t.dim_i,
@@ -279,9 +278,9 @@ mod tests {
                         r2_from_coords(x0.as_ref(), row, xs.as_ref(), col, &w, pick).expect("r2");
                     let r = t.r2.max(0.0).sqrt();
                     let want = match p {
-                        None => super::super::matern::matern_from_r::<M, f64>(nu, r),
+                        None => crate::kernel::matern::matern_from_r::<M, f64>(nu, r),
                         Some(_) => {
-                            super::super::matern::matern_dk_dtheta_ard::<M, f64>(nu, r, t.dim_i)
+                            crate::kernel::matern::matern_dk_dtheta_ard::<M, f64>(nu, r, t.dim_i)
                         }
                     };
                     assert_close(
@@ -304,7 +303,7 @@ mod tests {
 
     #[test]
     fn rq_simd_matches_scalar_formulas() {
-        use super::super::rq::{rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
+        use crate::kernel::rq::{rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
         let (n, d) = (9, 2);
         let x = points(n, d, 0.0);
         let xs = points(6, d, -0.3);

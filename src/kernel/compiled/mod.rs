@@ -6,7 +6,7 @@ use super::{
     WhiteKernel, visit_triangle,
 };
 use crate::error::GprError;
-use crate::kernel::dist::{ArdSqDiff, lower_col, lower_col_mut, par_lower_blocks, worker_count};
+use crate::kernel::dist::{ArdSqDiff, for_each_lower_col, lower_col};
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
@@ -756,23 +756,18 @@ fn zip_triangle<T: KernelScalar>(
 ) {
     let n = acc.nrows();
     if matches!(uplo, Triangle::Lower) {
-        let _ = par_lower_blocks(acc, worker_count(), &|start, mut part: MatMut<'_, T>| {
-            for local in 0..part.ncols() {
-                let col = start + local;
-                if let (Some(dest), Some(from)) = (
-                    lower_col_mut(part.rb_mut(), local, col),
-                    lower_col(src, col),
-                ) {
-                    for (a, &b) in dest.iter_mut().zip(from) {
-                        *a = op(*a, b);
-                    }
-                } else {
-                    for row in col..n {
-                        part[(row, local)] = op(part[(row, local)], src[(row, col)]);
-                    }
+        for_each_lower_col(acc, &|col, mut rows| {
+            if let (Some(dest), Some(from)) =
+                (rows.rb_mut().try_as_col_major_mut(), lower_col(src, col))
+            {
+                for (a, &b) in dest.as_slice_mut().iter_mut().zip(from) {
+                    *a = op(*a, b);
+                }
+            } else {
+                for i in 0..rows.nrows() {
+                    rows[i] = op(rows[i], src[(col + i, col)]);
                 }
             }
-            Ok::<(), ()>(())
         });
         return;
     }

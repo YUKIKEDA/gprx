@@ -245,7 +245,9 @@ pub(crate) fn norm2_f64x4(values: &[f64]) -> f64 {
     dot_f64x4(values, values)
 }
 
-pub(crate) fn load4(src: &[f64], i: usize) -> f64x4 {
+/// Four lanes of `src` for [`dot_f64x4`]. `linalg` sits below `kernel`, so it does
+/// not read `kernel::simd`.
+fn load4(src: &[f64], i: usize) -> f64x4 {
     f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
 }
 

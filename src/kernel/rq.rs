@@ -1,7 +1,8 @@
 //! Isotropic rational quadratic kernel.
 
+use super::dist::par_lower_fold;
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::stationary_simd::{RqScales, try_apply_rq, try_weighted_rq};
+use super::simd::stationary::{RqScales, try_apply_rq, try_weighted_rq};
 use super::{
     Triangle, finite_dist, finite_kernel, validate_log_positive, validate_positive_finite,
     write_dense, write_rect_from_coords, write_square_from_coords, write_triangle,
@@ -252,24 +253,33 @@ impl RationalQuadraticKernel {
         let alpha = T::from_f64(self.alpha());
         let one = T::from_f64(1.0);
         let two_alpha = T::from_f64(2.0) * alpha;
-        let (mut g_ell, mut g_alpha, mut value) = (0.0, 0.0, 0.0);
-        for col in 0..dist.ncols() {
-            for row in col..dist.nrows() {
-                let r2 = scaled_r2(dist[(row, col)], ell_sq)?;
-                let u = one + r2 / two_alpha;
-                let ln_u = u.ln();
-                let kv = match k {
-                    Some(k) => k[(row, col)],
-                    None => (-alpha * ln_u).exp(),
-                };
-                let dk_ell = finite_kernel((kv / u) * r2)?;
-                let dk_alpha = finite_kernel(alpha * kv * (-ln_u + one - one / u))?;
-                let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
-                g_ell += w * dk_ell.to_f64();
-                g_alpha += w * dk_alpha.to_f64();
-                value += w * kv.to_f64();
-            }
-        }
+        let n = dist.nrows();
+        // Column by column, folded in column order like the lane path.
+        let [g_ell, g_alpha, value] = par_lower_fold(
+            n,
+            &|start, end| {
+                let mut sums = [0.0; 3];
+                for col in start..end {
+                    for row in col..n {
+                        let r2 = scaled_r2(dist[(row, col)], ell_sq)?;
+                        let u = one + r2 / two_alpha;
+                        let ln_u = u.ln();
+                        let kv = match k {
+                            Some(k) => k[(row, col)],
+                            None => (-alpha * ln_u).exp(),
+                        };
+                        let dk_ell = finite_kernel((kv / u) * r2)?;
+                        let dk_alpha = finite_kernel(alpha * kv * (-ln_u + one - one / u))?;
+                        let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
+                        sums[0] += w * dk_ell.to_f64();
+                        sums[1] += w * dk_alpha.to_f64();
+                        sums[2] += w * kv.to_f64();
+                    }
+                }
+                Ok::<_, GprError>(sums)
+            },
+            &|a: [f64; 3], b: [f64; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+        )?;
         out[0] = g_ell;
         out[1] = g_alpha;
         Ok(value)
