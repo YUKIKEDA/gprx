@@ -5,7 +5,8 @@
 //!
 //! `f32` storage is widened to `f64` lanes and rounded once on the store;
 //! `f64` takes the same lanes. A column's last partial lane is padded, so it
-//! uses the same lane functions as the rest. The rational quadratic
+//! uses the same lane functions as the rest, except an `f64` [`crate::Accurate`]
+//! isotropic RBF remainder, which uses scalar `exp`. The rational quadratic
 //! `u^{-α}` is `exp(−α ln u)` here.
 
 use super::{
@@ -122,6 +123,9 @@ pub(crate) struct RbfScales {
 /// `exp(−d / (2ℓ²))`, or with `grad` its `∂/∂log ℓ = k d / ℓ²` (the
 /// [`KernelMath`] derivative, as the `f64` lanes take it). Like the scalar
 /// path, only `d` is checked: both are finite for a finite `d`.
+///
+/// Full lanes use `wide`. An `f64` [`crate::Accurate`] remainder uses scalar
+/// `exp`: the padded `wide` exp moves the Forrester L-BFGS walk.
 fn rbf_slice<M: KernelMath, T: KernelScalar>(
     dist: &[T],
     out: &mut [T],
@@ -130,7 +134,7 @@ fn rbf_slice<M: KernelMath, T: KernelScalar>(
 ) -> Result<(), GprError> {
     let neg_half = f64x4::splat(-s.half_inv_ell_sq);
     let inv = f64x4::splat(s.inv_ell_sq);
-    // Full lanes first, then one padded lane for the tail.
+    // Full lanes first. The remainder is a padded lane, except f64 Accurate.
     let full = dist.len() - dist.len() % LANES;
     let mut i = 0;
     if grad {
@@ -139,18 +143,52 @@ fn rbf_slice<M: KernelMath, T: KernelScalar>(
             store4(out, i, lane(checked_input(load4(dist, i))?));
             i += LANES;
         }
-        if i < dist.len() {
-            store(out, i, lane(checked_input(load(dist, i, 0.0))?));
-        }
     } else {
         let lane = |d: f64x4| M::exp_f64x4(d * neg_half);
         while i < full {
             store4(out, i, lane(checked_input(load4(dist, i))?));
             i += LANES;
         }
-        if i < dist.len() {
-            store(out, i, lane(checked_input(load(dist, i, 0.0))?));
+    }
+    if i == dist.len() {
+        return Ok(());
+    }
+    if M::ACCURATE && !T::ROUNDS_FROM_F64 {
+        return accurate_f64_tail::<M, T>(dist, out, i, s, grad);
+    }
+    let tail = checked_input(load(dist, i, 0.0))?;
+    store(
+        out,
+        i,
+        if grad {
+            M::d1_f64x4(tail * neg_half) * tail * inv
+        } else {
+            M::exp_f64x4(tail * neg_half)
+        },
+    );
+    Ok(())
+}
+
+/// Scalar `exp` for the `f64` [`crate::Accurate`] entries past the last full lane.
+fn accurate_f64_tail<M: KernelMath, T: KernelScalar>(
+    dist: &[T],
+    out: &mut [T],
+    mut i: usize,
+    s: RbfScales,
+    grad: bool,
+) -> Result<(), GprError> {
+    while i < dist.len() {
+        let d = dist[i].to_f64();
+        if !d.is_finite() {
+            return Err(GprError::NonFiniteInput);
         }
+        let dk = M::jet(T::from_f64(-d * s.half_inv_ell_sq)).d1.to_f64();
+        out[i] = if grad {
+            T::from_f64(dk * d * s.inv_ell_sq)
+        } else {
+            T::from_f64(dk)
+        };
+        i += 1;
     }
     Ok(())
 }
@@ -699,7 +737,8 @@ mod tests {
         );
     }
 
-    /// `f64` takes the same RBF lanes as `f32`, padded tail included.
+    /// Full `f64` lanes stay within a few ULP of scalar `exp`. An Accurate
+    /// remainder is that scalar `exp`.
     #[test]
     fn f64_rbf_slice_matches_scalar_within_tol() {
         use crate::math::MathOps;
@@ -712,10 +751,16 @@ mod tests {
         let mut grad = vec![0.0; 10];
         super::rbf_slice::<Accurate, f64>(&dist, &mut value, s, false).expect("finite");
         super::rbf_slice::<Accurate, f64>(&dist, &mut grad, s, true).expect("finite");
+        let full = dist.len() - dist.len() % 4;
         for (i, &d) in dist.iter().enumerate() {
             let k = (-d * 0.5).exp();
-            assert_rel(value[i], k, 1e-12);
-            assert_rel(grad[i], k * d, 1e-12);
+            if i < full {
+                assert_rel(value[i], k, 1e-12);
+                assert_rel(grad[i], k * d, 1e-12);
+            } else {
+                assert_eq!(value[i].to_bits(), k.to_bits());
+                assert_eq!(grad[i].to_bits(), (k * d).to_bits());
+            }
         }
         // `FastApprox` lanes are its scalar polynomial, bit for bit.
         super::rbf_slice::<FastApprox, f64>(&dist, &mut value, s, false).expect("finite");
