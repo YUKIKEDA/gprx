@@ -237,7 +237,7 @@ pub(crate) fn write_from_cache<T: KernelScalar>(
 /// [`write_from_points`] through the vectorized loop of `profile` when the
 /// scalar is `f64` and the layout allows it; `pair` otherwise.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_from_points_simd<T: KernelScalar, P: super::ard_simd::Profile>(
+pub(crate) fn write_from_points_simd<T: KernelScalar, P: super::simd::ard::Profile>(
     x: MatRef<'_, T>,
     mut out: MatMut<'_, T>,
     d: usize,
@@ -249,12 +249,12 @@ pub(crate) fn write_from_points_simd<T: KernelScalar, P: super::ard_simd::Profil
 ) -> Result<(), GprError> {
     require_square_points(x, out.as_ref(), d)?;
     if let (Some(x), Some(o)) = (T::as_f64_ref(x), T::as_f64_mut(out.rb_mut()))
-        && super::ard_simd::try_fill(
-            super::ard_simd::Source::Points { x, y: x },
+        && super::simd::ard::try_fill(
+            super::simd::ard::Source::Points { x, y: x },
             o,
             inv_ell_sq,
             pick,
-            super::ard_simd::Rows::Square(uplo),
+            super::simd::ard::Rows::Square(uplo),
             profile,
         )?
     {
@@ -266,7 +266,7 @@ pub(crate) fn write_from_points_simd<T: KernelScalar, P: super::ard_simd::Profil
 /// [`write_from_cache`] through the vectorized loop of `profile` when the
 /// scalar is `f64` and the layout allows it; `pair` otherwise.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::ard_simd::Profile>(
+pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::simd::ard::Profile>(
     cache: ArdSqDiff<'_, T>,
     mut out: MatMut<'_, T>,
     d: usize,
@@ -279,12 +279,12 @@ pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::ard_simd::Profile
     let n = require_square_out(out.as_ref())?;
     super::dist::require_ard_sq_diff_shape(cache, n, d)?;
     if let (Some(cache), Some(o)) = (cache.as_f64(), T::as_f64_mut(out.rb_mut()))
-        && super::ard_simd::try_fill(
-            super::ard_simd::Source::Cache { cache },
+        && super::simd::ard::try_fill(
+            super::simd::ard::Source::Cache { cache },
             o,
             inv_ell_sq,
             pick,
-            super::ard_simd::Rows::Square(uplo),
+            super::simd::ard::Rows::Square(uplo),
             profile,
         )?
     {
@@ -297,7 +297,7 @@ pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::ard_simd::Profile
 /// the vectorized loop of `profile` when the scalar is `f64` and the layout
 /// allows it; `pair` otherwise.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_cross_simd<T: KernelScalar, P: super::ard_simd::Profile>(
+pub(crate) fn write_cross_simd<T: KernelScalar, P: super::simd::ard::Profile>(
     x: MatRef<'_, T>,
     xs: MatRef<'_, T>,
     mut out: MatMut<'_, T>,
@@ -312,12 +312,12 @@ pub(crate) fn write_cross_simd<T: KernelScalar, P: super::ard_simd::Profile>(
         T::as_f64_ref(x),
         T::as_f64_ref(xs),
         T::as_f64_mut(out.rb_mut()),
-    ) && super::ard_simd::try_fill(
-        super::ard_simd::Source::Points { x, y: xs },
+    ) && super::simd::ard::try_fill(
+        super::simd::ard::Source::Points { x, y: xs },
         o,
         inv_ell_sq,
         pick,
-        super::ard_simd::Rows::All,
+        super::simd::ard::Rows::All,
         profile,
     )? {
         return Ok(());

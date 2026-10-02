@@ -1,10 +1,10 @@
 //! ARD rational quadratic kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::ard_simd::Profile;
 use super::dist::ArdSqDiff;
 use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
+use super::simd::ard::Profile;
 use super::{
     ArdLengthscales, KernelScalar, Triangle, validate_log_positive, validate_positive_finite,
     write_rect,

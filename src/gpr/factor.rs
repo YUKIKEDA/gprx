@@ -228,7 +228,7 @@ where
 {
     let zero = <W::Policy as PrecisionPolicy>::Storage::from_f64(0.0);
     let k = ws.core_mut().k_matrix.as_mut();
-    let n_parts = rayon::current_num_threads().clamp(1, k.ncols().max(1));
+    let n_parts = crate::kernel::worker_count().clamp(1, k.ncols().max(1));
     k.par_col_partition_mut(n_parts)
         .for_each(|mut block| block.fill(zero));
 }

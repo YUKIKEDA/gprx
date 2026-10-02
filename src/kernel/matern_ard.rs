@@ -1,10 +1,10 @@
 //! ARD Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
 use super::ard::{self, ArdR2, Pick};
-use super::ard_simd::Profile;
 use super::dist::ArdSqDiff;
 use super::finite_kernel;
 use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
+use super::simd::ard::Profile;
 use super::{ArdLengthscales, KernelScalar, Triangle, write_rect};
 use crate::error::GprError;
 use crate::math::KernelMath;

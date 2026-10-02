@@ -19,7 +19,6 @@
 //! notes](crate).
 
 mod ard;
-mod ard_simd;
 mod compiled;
 mod constant;
 mod dist;
@@ -36,7 +35,6 @@ mod rq_ard;
 mod scalar;
 mod simd;
 mod spec;
-mod stationary_simd;
 mod term;
 mod white;
 
@@ -64,7 +62,8 @@ pub use term::{CustomKernel, KernelTerm};
 pub use white::WhiteKernel;
 
 use crate::error::GprError;
-use dist::{par_lower_blocks, worker_count};
+use dist::par_lower_cols;
+pub(crate) use dist::worker_count;
 use faer::{MatMut, MatRef};
 
 /// Which triangle of a symmetric kernel matrix to write.
@@ -241,15 +240,11 @@ fn write_lower_parallel<T: KernelScalar>(
     out: MatMut<'_, T>,
     kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
-    let n = dist.nrows();
-    par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
-        for local in 0..part.ncols() {
-            let col = start + local;
-            for row in col..n {
-                part[(row, local)] = kernel(dist[(row, col)])?;
-            }
+    par_lower_cols(out, &|col, mut rows| {
+        for i in 0..rows.nrows() {
+            rows[i] = kernel(dist[(col + i, col)])?;
         }
-        Ok::<(), GprError>(())
+        Ok(())
     })
 }
 
@@ -340,16 +335,11 @@ fn write_lower_from_coords_parallel<T: KernelScalar>(
     out: MatMut<'_, T>,
     kernel: impl Fn(T) -> Result<T, GprError> + Sync,
 ) -> Result<(), GprError> {
-    let n = x.nrows();
-    par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
-        for local in 0..part.ncols() {
-            let col = start + local;
-            for row in col..n {
-                let d = finite_dist(pair_squared_euclidean(x, row, col))?;
-                part[(row, local)] = kernel(d)?;
-            }
+    par_lower_cols(out, &|col, mut rows| {
+        for i in 0..rows.nrows() {
+            rows[i] = kernel(finite_dist(pair_squared_euclidean(x, col + i, col))?)?;
         }
-        Ok::<(), GprError>(())
+        Ok(())
     })
 }
 

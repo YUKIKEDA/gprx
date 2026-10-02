@@ -20,7 +20,7 @@
 use super::gram::GramInputs;
 use super::{CompiledKernel, add_triangle};
 use crate::error::GprError;
-use crate::kernel::dist::{par_lower_blocks, par_lower_fold, worker_count};
+use crate::kernel::dist::{for_each_lower_col, lower_fold_infallible};
 use crate::kernel::{KernelScalar, Triangle};
 use faer::{Mat, MatMut, MatRef};
 use std::ops::Range;
@@ -191,7 +191,6 @@ impl<T: KernelScalar> CompiledKernel<T> {
         if products == 0 {
             return self.eval_gram::<M>(inputs, out, Triangle::Lower, scratch, nested);
         }
-        let n = out.nrows();
         let root_is_sum = matches!(self, Self::Sum(_));
         for (i, (t, slot)) in self.keep_plan(products).enumerate() {
             match (t, slot) {
@@ -219,7 +218,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                         nested,
                     )?;
                     if i == 0 {
-                        copy_lower(out.as_mut(), term.as_ref(), n);
+                        copy_lower(out.as_mut(), term.as_ref());
                     } else {
                         add_triangle(out.as_mut(), term.as_ref(), Triangle::Lower);
                     }
@@ -528,24 +527,15 @@ fn write_scaled_product<T: KernelScalar>(
     grams: &[Mat<T>],
     accumulate: bool,
 ) {
-    let n = out.nrows();
     let scale = T::from_f64(scale);
-    let _ = par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
-        for local in 0..part.ncols() {
-            let col = start + local;
-            for row in col..n {
-                let mut v = scale;
-                for gram in grams {
-                    v *= gram[(row, col)];
-                }
-                part[(row, local)] = if accumulate {
-                    part[(row, local)] + v
-                } else {
-                    v
-                };
+    for_each_lower_col(out, &|col, mut rows| {
+        for i in 0..rows.nrows() {
+            let mut v = scale;
+            for gram in grams {
+                v *= gram[(col + i, col)];
             }
+            rows[i] = if accumulate { rows[i] + v } else { v };
         }
-        Ok::<(), ()>(())
     });
 }
 
@@ -558,34 +548,26 @@ fn write_handed<T: KernelScalar>(
     grams: &[Mat<T>],
     c: usize,
 ) {
-    let n = out.nrows();
     let scale = T::from_f64(scale);
-    let _ = par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
-        for local in 0..part.ncols() {
-            let col = start + local;
-            for row in col..n {
-                let mut v = weight[(row, col)] * scale;
-                for (s, gram) in grams.iter().enumerate() {
-                    if s != c {
-                        v *= gram[(row, col)];
-                    }
+    for_each_lower_col(out, &|col, mut rows| {
+        for i in 0..rows.nrows() {
+            let row = col + i;
+            let mut v = weight[(row, col)] * scale;
+            for (s, gram) in grams.iter().enumerate() {
+                if s != c {
+                    v *= gram[(row, col)];
                 }
-                part[(row, local)] = v;
             }
+            rows[i] = v;
         }
-        Ok::<(), ()>(())
     });
 }
 
-fn copy_lower<T: KernelScalar>(out: MatMut<'_, T>, src: MatRef<'_, T>, n: usize) {
-    let _ = par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
-        for local in 0..part.ncols() {
-            let col = start + local;
-            for row in col..n {
-                part[(row, local)] = src[(row, col)];
-            }
+fn copy_lower<T: KernelScalar>(out: MatMut<'_, T>, src: MatRef<'_, T>) {
+    for_each_lower_col(out, &|col, mut rows| {
+        for i in 0..rows.nrows() {
+            rows[i] = src[(col + i, col)];
         }
-        Ok::<(), ()>(())
     });
 }
 
@@ -616,18 +598,17 @@ fn lower_sum<T: KernelScalar>(a: MatRef<'_, T>) -> f64 {
 /// Sums `column(col, col + 1..n)` (one column of the lower triangle, its
 /// strict part as the row range) over every column.
 fn lower_fold(n: usize, column: impl Fn(usize, std::ops::Range<usize>) -> f64 + Sync) -> f64 {
-    par_lower_fold(
+    lower_fold_infallible(
         n,
         &|start, end| {
             let mut sum = 0.0;
             for col in start..end {
                 sum += column(col, col + 1..n);
             }
-            Ok::<f64, ()>(sum)
+            sum
         },
         &|a, b| a + b,
     )
-    .unwrap_or(0.0)
 }
 
 fn too_few_buffers() -> GprError {
