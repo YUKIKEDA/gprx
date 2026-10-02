@@ -378,6 +378,16 @@ fn rbf_times_periodic_prior_grad_matches_fd() {
     check_full_grad(kernel_rbf() * periodic, &X_1D, 4, 1, &Z_1D);
 }
 
+/// Constant × RBF × Periodic, plus an RBF: the one-walk gradient matches the
+/// finite difference of the full-data ELBO.
+#[test]
+fn three_factor_product_prior_grad_matches_fd() {
+    let periodic = KernelSpec::from(PeriodicKernel::new(0.9, 1.4).expect("periodic"));
+    let kernel = constant(1.3) * kernel_rbf() * periodic
+        + KernelSpec::from(RbfKernel::new(0.6).expect("ell"));
+    check_full_grad(kernel, &X_1D, 4, 1, &Z_1D);
+}
+
 #[test]
 fn constant_times_rbf_fit_reproduces_and_does_not_worsen() {
     check_fit_seed_and_elbo(constant(1.7) * kernel_rbf(), &X_1D, 4, 1, &Z_1D);

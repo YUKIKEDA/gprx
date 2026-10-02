@@ -10,7 +10,7 @@ use faer::{Mat, MatMut, MatRef};
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
+use crate::kernel::{CompiledKernel, DiagAccum, GramInputs, KernelScalar, Triangle, WeightedWalk};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::KernelExp;
@@ -502,6 +502,13 @@ pub(crate) struct KernelScratch<T> {
     scratch: Mat<T>,
     nested: Vec<Mat<T>>,
     dist: Mat<T>,
+    /// Exact `m × m` buffers of one square contraction.
+    square: Vec<Mat<T>>,
+    /// Exact `m × n` buffers of one rectangular contraction.
+    cross: Vec<Mat<T>>,
+    /// One parameter block, reused by the rectangular and diagonal adds.
+    partial: Vec<f64>,
+    diag: DiagAccum<T>,
 }
 
 impl<T> Clone for KernelScratch<T> {
@@ -511,6 +518,10 @@ impl<T> Clone for KernelScratch<T> {
             scratch: Mat::new(),
             nested: Vec::new(),
             dist: Mat::new(),
+            square: Vec::new(),
+            cross: Vec::new(),
+            partial: Vec::new(),
+            diag: DiagAccum::new(),
         }
     }
 }
@@ -533,6 +544,10 @@ impl<T: KernelScalar> KernelScratch<T> {
             scratch: Mat::new(),
             nested: Vec::new(),
             dist: Mat::new(),
+            square: Vec::new(),
+            cross: Vec::new(),
+            partial: Vec::new(),
+            diag: DiagAccum::new(),
         }
     }
 
@@ -600,25 +615,133 @@ impl<T: KernelScalar> KernelScratch<T> {
         Ok(out)
     }
 
-    /// `∂K(x1, x2)/∂θ_{param_idx}` (`x1.nrows() × x2.nrows()`) into `d_k`,
-    /// with this scratch's output-shaped buffer and nesting levels.
-    pub(crate) fn grad_cross<M: crate::math::KernelMath>(
+    /// Writes `⟨weight, ∂K(x, x)/∂θ⟩_F` for every kernel parameter into `out`.
+    ///
+    /// One walk, keeping no Grams. `out` is replaced. Squared distances are
+    /// filled when the tree reads them; ARD leaves fall back to `x`.
+    pub(crate) fn write_square_contraction<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        x: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let m = x.nrows();
+        let reads = compiled.reads_distances()?;
+        let KernelScratch {
+            scratch,
+            nested,
+            dist,
+            square,
+            ..
+        } = self;
+        if reads {
+            let mut filled = view(dist, m, m);
+            let mut none: [Mat<T>; 0] = [];
+            T::write_squared(x, filled.as_mut(), &mut none);
+        }
+        let dist_view = reads.then(|| dist.as_ref().submatrix(0, 0, m, m));
+        let nbuf = compiled.contraction_buffers();
+        fit_exact(square, nbuf, m, m);
+        crate::kernel::ensure_nested_levels(nested, compiled, m, m);
+        let mut walk = WeightedWalk {
+            inputs: GramInputs {
+                x,
+                dist: dist_view,
+                ard: None,
+            },
+            scratch: view(scratch, m, m),
+            nested,
+            kept: &[],
+            kept_products: 0,
+        };
+        compiled.weighted_grads::<M>(&mut walk, weight, out, &mut square[..nbuf])
+    }
+
+    /// Adds `coeff · ⟨weight, ∂K(x1, x2)/∂θ⟩_F` for every kernel parameter.
+    ///
+    /// One walk of the full rectangle. A product evaluates each non-constant
+    /// factor once.
+    pub(crate) fn add_cross_contraction<M: crate::math::KernelMath>(
         &mut self,
         compiled: &CompiledKernel<T>,
         x1: MatRef<'_, T>,
         x2: MatRef<'_, T>,
-        d_k: MatMut<'_, T>,
-        param_idx: usize,
+        weight: MatRef<'_, T>,
+        coeff: f64,
+        out: &mut [f64],
     ) -> Result<(), GprError> {
-        let (rows, cols) = (d_k.nrows(), d_k.ncols());
-        crate::kernel::ensure_nested_levels(&mut self.nested, compiled, rows, cols);
-        let scratch = view(&mut self.scratch, rows, cols);
-        compiled.grad_cross_points_with::<M>(x1, x2, d_k, param_idx, scratch, &mut self.nested)
+        let n_params = compiled.num_params();
+        let (rows, cols) = (weight.nrows(), weight.ncols());
+        let nbuf = compiled.contraction_buffers();
+        let KernelScratch {
+            scratch,
+            nested,
+            cross,
+            partial,
+            ..
+        } = self;
+        if partial.len() < n_params {
+            partial.resize(n_params, 0.0);
+        }
+        fit_exact(cross, nbuf, rows, cols);
+        crate::kernel::ensure_nested_levels(nested, compiled, rows, cols);
+        compiled.weighted_cross_grads::<M>(
+            x1,
+            x2,
+            weight,
+            &mut partial[..n_params],
+            &mut cross[..nbuf],
+            view(scratch, rows, cols),
+            nested,
+        )?;
+        for (slot, part) in out.iter_mut().zip(partial.iter()) {
+            *slot += coeff * part;
+        }
+        Ok(())
+    }
+
+    /// Adds `coeff · Σ_i ∂k(x_i, x_i)/∂θ` for every kernel parameter.
+    ///
+    /// One walk. A product reads each non-constant factor's diagonal once.
+    pub(crate) fn add_diag_contraction<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        x: MatRef<'_, T>,
+        coeff: f64,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let n_params = compiled.num_params();
+        let KernelScratch { partial, diag, .. } = self;
+        if partial.len() < n_params {
+            partial.resize(n_params, 0.0);
+        }
+        compiled.weighted_diag_sums::<M>(x, &mut partial[..n_params], diag)?;
+        for (slot, part) in out.iter_mut().zip(partial.iter()) {
+            *slot += coeff * part;
+        }
+        Ok(())
     }
 
     /// An output-shaped scratch for a kernel call that takes one directly.
     pub(crate) fn scratch(&mut self, rows: usize, cols: usize) -> MatMut<'_, T> {
         view(&mut self.scratch, rows, cols)
+    }
+}
+
+/// `pool` grown to `count` matrices of exactly `rows × cols`.
+///
+/// A later call of the same shape allocates nothing. A different shape
+/// replaces the matrix: a walk reads `Mat::nrows`, so a larger buffer viewed
+/// as a corner would contract the wrong pairs.
+fn fit_exact<T: KernelScalar>(pool: &mut Vec<Mat<T>>, count: usize, rows: usize, cols: usize) {
+    if pool.len() < count {
+        pool.resize_with(count, Mat::new);
+    }
+    for mat in &mut pool[..count] {
+        if mat.nrows() != rows || mat.ncols() != cols {
+            *mat = Mat::zeros(rows, cols);
+        }
     }
 }
 

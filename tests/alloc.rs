@@ -92,11 +92,11 @@ const M_SPARSE: usize = 32;
 /// factors, so these are not zero; the kernel scratch of the `&mut self`
 /// paths is kept on the model between calls. Do not raise without an Issue.
 const MAX_SPARSE_ALLOCS: [(&str, usize); 5] = [
-    ("sgpr_mll_and_grad", 19),
-    ("sgpr_hessian", 111),
+    ("sgpr_mll_and_grad", 12),
+    ("sgpr_hessian", 109),
     ("online_sgpr_insert", 8),
     ("online_sgpr_insert_nested", 16),
-    ("svgp_mll_and_grad", 20),
+    ("svgp_mll_and_grad", 16),
 ];
 
 /// One sparse `predict_into` of 100 points after a warmup call, by model,
