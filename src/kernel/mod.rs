@@ -28,7 +28,6 @@ mod linear;
 mod matern;
 mod matern_ard;
 mod periodic;
-mod periodic_rq_simd;
 mod radial;
 mod rbf;
 mod rbf_ard;
@@ -37,6 +36,7 @@ mod rq_ard;
 mod scalar;
 mod simd;
 mod spec;
+mod stationary_simd;
 mod term;
 mod white;
 
