@@ -3043,6 +3043,82 @@ fn three_factor_product_gradient_matches_finite_difference() {
     }
 }
 
+/// The Mauna Loa kernel: constants as scalars, one product whose two
+/// varying factors the factor step keeps, `C × RQ` with one varying factor.
+fn mauna_loa_shape_kernel() -> KernelSpec {
+    let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("valid"));
+    let rbf = |l| KernelSpec::from(RbfKernel::new(l).expect("valid"));
+    c(1.3) * rbf(2.1)
+        + c(0.7) * rbf(1.7) * KernelSpec::from(PeriodicKernel::new(0.9, 1.4).expect("valid"))
+        + c(0.4)
+            * KernelSpec::from(
+                crate::kernel::RationalQuadraticKernel::new(0.6, 0.8).expect("valid"),
+            )
+        + c(0.2) * rbf(0.3)
+}
+
+#[test]
+fn mauna_loa_shape_gradient_matches_finite_difference_on_every_path() {
+    assert!(mauna_loa_shape_kernel().compile().kept_products() > 0);
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0, -1.0];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5, 0.3, 0.7, -0.1, 0.2, 0.6];
+    for math in [KernelExp::Accurate, KernelExp::FastApprox] {
+        for buffer in [CholeskyBuffer::Retain, CholeskyBuffer::Reuse] {
+            for cache in [DistanceCachePolicy::Cached, DistanceCachePolicy::Uncached] {
+                let mut gpr = Gpr::new(
+                    mauna_loa_shape_kernel(),
+                    GaussianLikelihood::new(0.16).expect("valid"),
+                )
+                .with_math(math)
+                .with_cholesky_buffer(buffer)
+                .with_distance_cache_policy(cache)
+                .with_optimizer(Fixed)
+                .factor(&x, 10, 1, &y)
+                .expect("spd");
+                assert_mll_grad_matches_finite_difference(&mut gpr);
+            }
+        }
+    }
+}
+
+/// Three two-factor products: keeping their Grams would take more buffers
+/// than evaluating them in the walk, so none are kept and the walk
+/// evaluates every factor.
+#[test]
+fn products_past_the_buffer_budget_evaluate_their_factors() {
+    let rbf = |l| KernelSpec::from(RbfKernel::new(l).expect("valid"));
+    let periodic = |p| KernelSpec::from(PeriodicKernel::new(0.9, p).expect("valid"));
+    let kernel = rbf(1.1) * periodic(1.4) + rbf(0.7) * periodic(2.0) + rbf(2.5) * periodic(0.8);
+    assert_eq!(kernel.compile().kept_products(), 0);
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5, 0.3, 0.7, -0.1];
+    let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"))
+        .with_optimizer(Fixed)
+        .factor(&x, 8, 1, &y)
+        .expect("spd");
+    assert_mll_grad_matches_finite_difference(&mut gpr);
+}
+
+/// A product of constants only, and a constant times a sum.
+#[test]
+fn constant_only_and_constant_times_sum_gradients_match_finite_difference() {
+    let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("valid"));
+    let rbf = |l| KernelSpec::from(RbfKernel::new(l).expect("valid"));
+    let x = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9];
+    let y = [0.4, -0.2, 0.9, 0.1, -0.5, 0.3];
+    for kernel in [
+        c(0.5) * c(1.5) + rbf(1.0),
+        c(0.5) * (rbf(1.0) + KernelSpec::from(PeriodicKernel::new(0.9, 1.4).expect("valid"))),
+        c(0.5) * rbf(0.8) * (rbf(1.0) + c(0.3)),
+    ] {
+        let mut gpr = Gpr::new(kernel, GaussianLikelihood::new(0.16).expect("valid"))
+            .with_optimizer(Fixed)
+            .factor(&x, 6, 1, &y)
+            .expect("spd");
+        assert_mll_grad_matches_finite_difference(&mut gpr);
+    }
+}
+
 /// Periodic and RQ leaves take the one-pass weighted gradient when the
 /// distances are cached; both paths match central differences.
 #[test]

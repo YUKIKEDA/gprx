@@ -149,6 +149,43 @@ where
     })
 }
 
+/// [`factor_train_with_policy`] for the joint gradient: the factor Grams
+/// of the first `products` products stay in the leading
+/// [`CompiledKernel::kept_buffers`] of `weighted` for the gradient walk.
+/// `weighted` and `kernel_scratch` must already be `n×n`.
+pub(crate) fn factor_train_keeping_with_policy<T, W, M: crate::math::KernelMath>(
+    compiled: &CompiledKernel<T>,
+    x: MatRef<'_, T>,
+    ws: &mut W,
+    y: &[f64],
+    noise: f64,
+    policy: FactorPolicy,
+    products: usize,
+) -> Result<(), GprError>
+where
+    T: KernelScalar,
+    W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
+{
+    let kept = compiled.kept_buffers();
+    factor_written_k_with_policy(ws, y, noise, policy, |ws| {
+        let (core, dist) = ws.split_fit();
+        let inputs = fill_cached_inputs(compiled, x, dist, &mut core.thread_scratch)?;
+        let grams = core
+            .weighted
+            .get_mut(..kept)
+            .ok_or(GprError::WorkspaceTooSmall)?;
+        compiled.eval_gram_keeping::<M>(
+            inputs,
+            core.k_matrix.as_mut(),
+            core.exp_buf.as_mut(),
+            core.kernel_scratch.as_mut(),
+            &mut core.nested,
+            grams,
+            products,
+        )
+    })
+}
+
 /// Factors after `write_k` fills the lower training Gram (no noise).
 ///
 /// Clears `k_matrix` before every `write_k`. In-place Cholesky overwrites

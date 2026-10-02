@@ -43,8 +43,10 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     /// Buffers of the exact Hessian. Empty until the first Hessian. Scratch.
     pub(crate) hessian: HessianScratch<P::Storage>,
     /// `n×n` buffers of the joint gradient's walk of the kernel tree
-    /// (`CompiledKernel::weighted_grads`). Empty until the first gradient.
-    /// Scratch.
+    /// (`CompiledKernel::weighted_grads`). The leading
+    /// `CompiledKernel::kept_buffers` hold the product factor Grams the
+    /// joint gradient's factor step kept at the current `θ`; the rest are
+    /// scratch. Empty until the first gradient.
     pub(crate) weighted: Vec<Mat<P::Storage>>,
     /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
     /// (`0` without a retry). `k_matrix` then holds the factor of `A + (σn² + j) I`.
