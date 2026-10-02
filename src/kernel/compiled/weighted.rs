@@ -23,6 +23,7 @@ use crate::error::GprError;
 use crate::kernel::dist::{par_lower_blocks, par_lower_fold, worker_count};
 use crate::kernel::{KernelScalar, Triangle};
 use faer::{Mat, MatMut, MatRef};
+use std::ops::Range;
 
 /// Where the walk is: the inputs, the scratch it shares, and the kept
 /// factor Grams with the number of products allowed to read them.
@@ -56,26 +57,43 @@ impl<T: KernelScalar> CompiledKernel<T> {
             .product()
     }
 
-    /// The products whose factor Grams the factor step can keep, in walk
-    /// order: the root itself, or each term of a root sum, when it has two
-    /// or more non-constant factors. Sums are flattened when the tree is
-    /// compiled, so no other product is reached through sums only.
-    fn keep_candidates(&self) -> impl Iterator<Item = &[Self]> {
+    /// The root terms (the terms of a root sum, else the root itself) in
+    /// walk order, each with the range of the kept Grams its factor Grams
+    /// take when it is one of the first `products` products that keep them.
+    ///
+    /// A product can keep its Grams when it has two or more non-constant
+    /// factors. Sums are flattened when the tree is compiled, so no other
+    /// product is reached through sums only. This is the one place that
+    /// decides which products keep their Grams and where those Grams are;
+    /// the buffer count, [`Self::eval_gram_keeping`], and
+    /// [`Self::weighted_grads`] all read it.
+    fn keep_plan(&self, products: usize) -> impl Iterator<Item = (&Self, Option<Range<usize>>)> {
         let roots: &[Self] = match self {
             Self::Sum(terms) => terms,
             other => std::slice::from_ref(other),
         };
-        roots.iter().filter_map(|t| match t {
-            Self::Product(terms) if Self::varying_factors(terms) >= 2 => Some(terms.as_slice()),
-            _ => None,
+        let (mut kept, mut offset) = (0, 0);
+        roots.iter().map(move |t| {
+            let slot = match t {
+                Self::Product(factors)
+                    if Self::varying_factors(factors) >= 2 && kept < products =>
+                {
+                    kept += 1;
+                    let grams = offset..offset + Self::varying_factors(factors);
+                    offset = grams.end;
+                    Some(grams)
+                }
+                _ => None,
+            };
+            (t, slot)
         })
     }
 
-    /// `n×n` Grams kept for the first `products` candidates.
+    /// `n×n` Grams kept for the first `products` products.
     fn kept_grams(&self, products: usize) -> usize {
-        self.keep_candidates()
-            .take(products)
-            .map(Self::varying_factors)
+        self.keep_plan(products)
+            .filter_map(|(_, slot)| slot)
+            .map(|grams| grams.len())
             .sum()
     }
 
@@ -85,23 +103,25 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// evaluates every factor (constants included) would take.
     pub(crate) fn kept_products(&self) -> usize {
         let budget = self.unkept_buffers();
-        let candidates = self.keep_candidates().count();
+        let candidates = self
+            .keep_plan(usize::MAX)
+            .filter(|(_, slot)| slot.is_some())
+            .count();
         (0..=candidates)
             .rev()
             .find(|&p| self.kept_grams(p) + self.walk_buffers(p) <= budget)
             .unwrap_or(0)
     }
 
-    /// The `n × n` buffers of the joint gradient: the kept Grams first
-    /// (see [`Self::kept_products`]), then the walk's own.
-    pub(crate) fn weighted_buffers(&self) -> usize {
-        let products = self.kept_products();
+    /// The `n × n` buffers of the joint gradient when the first `products`
+    /// products keep their Grams: the kept Grams first, then the walk's own.
+    pub(crate) fn weighted_buffers(&self, products: usize) -> usize {
         self.kept_grams(products) + self.walk_buffers(products)
     }
 
-    /// The Grams [`Self::weighted_buffers`] starts with.
-    pub(crate) fn kept_buffers(&self) -> usize {
-        self.kept_grams(self.kept_products())
+    /// The kept Grams [`Self::weighted_buffers`] starts with.
+    pub(crate) fn kept_buffers(&self, products: usize) -> usize {
+        self.kept_grams(products)
     }
 
     /// Buffers of a walk that evaluates every product factor: each factor's
@@ -116,28 +136,12 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
-    /// The walk's own buffers when the first `kept` candidates read kept Grams.
-    fn walk_buffers(&self, kept: usize) -> usize {
-        match self {
-            Self::Sum(terms) => {
-                let mut seen = 0;
-                terms
-                    .iter()
-                    .map(|t| {
-                        let keeps = match t {
-                            Self::Product(f) if Self::varying_factors(f) >= 2 => {
-                                seen += 1;
-                                seen <= kept
-                            }
-                            _ => false,
-                        };
-                        t.node_buffers(keeps)
-                    })
-                    .max()
-                    .unwrap_or(0)
-            }
-            other => other.node_buffers(kept > 0),
-        }
+    /// The walk's own buffers when the first `products` products read kept Grams.
+    fn walk_buffers(&self, products: usize) -> usize {
+        self.keep_plan(products)
+            .map(|(t, slot)| t.node_buffers(slot.is_some()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Buffers of one node below the root. `keeps` says a product reads kept Grams.
@@ -188,64 +192,41 @@ impl<T: KernelScalar> CompiledKernel<T> {
             return self.eval_gram::<M>(inputs, out, Triangle::Lower, scratch, nested);
         }
         let n = out.nrows();
-        match self {
-            Self::Sum(terms) => {
-                let mut seen = 0;
-                let mut offset = 0;
-                for (i, t) in terms.iter().enumerate() {
-                    let keeps = match t {
-                        Self::Product(f) if Self::varying_factors(f) >= 2 => {
-                            seen += 1;
-                            seen <= products
-                        }
-                        _ => false,
-                    };
-                    match t {
-                        Self::Product(factors) if keeps => {
-                            let count = Self::varying_factors(factors);
-                            let grams = &mut kept[offset..offset + count];
-                            offset += count;
-                            Self::keep_factor_grams::<M>(
-                                factors,
-                                inputs,
-                                grams,
-                                scratch.as_mut(),
-                                nested,
-                            )?;
-                            write_scaled_product(
-                                out.as_mut(),
-                                Self::constant_scale(factors),
-                                grams,
-                                i > 0,
-                            );
-                        }
-                        _ => {
-                            t.eval_gram::<M>(
-                                inputs,
-                                term.as_mut(),
-                                Triangle::Lower,
-                                scratch.as_mut(),
-                                nested,
-                            )?;
-                            if i == 0 {
-                                copy_lower(out.as_mut(), term.as_ref(), n);
-                            } else {
-                                add_triangle(out.as_mut(), term.as_ref(), Triangle::Lower);
-                            }
-                        }
+        let root_is_sum = matches!(self, Self::Sum(_));
+        for (i, (t, slot)) in self.keep_plan(products).enumerate() {
+            match (t, slot) {
+                (Self::Product(factors), Some(range)) => {
+                    let grams = &mut kept[range];
+                    Self::keep_factor_grams::<M>(factors, inputs, grams, scratch.as_mut(), nested)?;
+                    write_scaled_product(out.as_mut(), Self::constant_scale(factors), grams, i > 0);
+                }
+                // The root itself, with nothing kept: straight into `out`.
+                _ if !root_is_sum => {
+                    t.eval_gram::<M>(
+                        inputs,
+                        out.as_mut(),
+                        Triangle::Lower,
+                        scratch.as_mut(),
+                        nested,
+                    )?;
+                }
+                _ => {
+                    t.eval_gram::<M>(
+                        inputs,
+                        term.as_mut(),
+                        Triangle::Lower,
+                        scratch.as_mut(),
+                        nested,
+                    )?;
+                    if i == 0 {
+                        copy_lower(out.as_mut(), term.as_ref(), n);
+                    } else {
+                        add_triangle(out.as_mut(), term.as_ref(), Triangle::Lower);
                     }
                 }
-                Ok(())
             }
-            Self::Product(factors) if Self::varying_factors(factors) >= 2 => {
-                let count = Self::varying_factors(factors);
-                let grams = &mut kept[..count];
-                Self::keep_factor_grams::<M>(factors, inputs, grams, scratch, nested)?;
-                write_scaled_product(out, Self::constant_scale(factors), grams, false);
-                Ok(())
-            }
-            _ => self.eval_gram::<M>(inputs, out, Triangle::Lower, scratch, nested),
         }
+        Ok(())
     }
 
     /// Evaluates every non-constant factor into its kept Gram.
@@ -282,65 +263,24 @@ impl<T: KernelScalar> CompiledKernel<T> {
         out: &mut [f64],
         bufs: &mut [Mat<T>],
     ) -> Result<(), GprError> {
-        let products = walk.kept_products;
         let kept = walk.kept;
-        match self {
-            Self::Sum(terms) => {
-                let mut seen = 0;
-                let mut kept_offset = 0;
-                let mut offset = 0;
-                for t in terms {
-                    let count = t.num_params();
-                    let grams = match t {
-                        Self::Product(f) if Self::varying_factors(f) >= 2 => {
-                            seen += 1;
-                            if seen <= products {
-                                let varying = Self::varying_factors(f);
-                                let grams = &kept[kept_offset..kept_offset + varying];
-                                kept_offset += varying;
-                                Some(grams)
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-                    t.walk::<M>(
-                        walk,
-                        weight,
-                        &mut out[offset..offset + count],
-                        bufs,
-                        Node {
-                            grams,
-                            own: None,
-                            value: false,
-                        },
-                    )?;
-                    offset += count;
-                }
-                Ok(())
-            }
-            _ => {
-                let grams = match self {
-                    Self::Product(f) if products > 0 && Self::varying_factors(f) >= 2 => {
-                        Some(&kept[..Self::varying_factors(f)])
-                    }
-                    _ => None,
-                };
-                self.walk::<M>(
-                    walk,
-                    weight,
-                    out,
-                    bufs,
-                    Node {
-                        grams,
-                        own: None,
-                        value: false,
-                    },
-                )
-                .map(|_| ())
-            }
+        let mut offset = 0;
+        for (t, slot) in self.keep_plan(walk.kept_products) {
+            let count = t.num_params();
+            t.walk::<M>(
+                walk,
+                weight,
+                &mut out[offset..offset + count],
+                bufs,
+                Node {
+                    grams: slot.map(|range| &kept[range]),
+                    own: None,
+                    value: false,
+                },
+            )?;
+            offset += count;
         }
+        Ok(())
     }
 
     /// One node of [`Self::weighted_grads`]. Returns `⟨weight, K⟩_F` when
@@ -692,4 +632,127 @@ fn lower_fold(n: usize, column: impl Fn(usize, std::ops::Range<usize>) -> f64 + 
 
 fn too_few_buffers() -> GprError {
     GprError::WorkspaceTooSmall
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompiledKernel, WeightedWalk};
+    use crate::kernel::compiled::gram::GramInputs;
+    use crate::kernel::{
+        ConstantKernel, KernelSpec, PeriodicKernel, RationalQuadraticKernel, RbfKernel, Triangle,
+    };
+    use crate::math::{Accurate, FastApprox, KernelMath};
+    use crate::test_check::sq_dist_1d;
+    use faer::Mat;
+
+    /// Under one root sum: two products that can keep their Grams, one
+    /// product with a single non-constant factor, and a bare leaf.
+    fn mixed_root_sum() -> CompiledKernel<f64> {
+        let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("valid"));
+        let rbf = |l| KernelSpec::from(RbfKernel::new(l).expect("valid"));
+        let periodic = |l, p| KernelSpec::from(PeriodicKernel::new(l, p).expect("valid"));
+        let rq = KernelSpec::from(RationalQuadraticKernel::new(0.6, 0.8).expect("valid"));
+        (c(1.3) * rbf(1.7) * periodic(0.9, 1.4)
+            + rbf(0.6) * periodic(1.1, 2.3)
+            + c(0.4) * rq
+            + rbf(2.2))
+        .compile()
+    }
+
+    fn lower_bits(m: &Mat<f64>) -> Vec<u64> {
+        let n = m.nrows();
+        (0..n)
+            .flat_map(|col| (col..n).map(move |row| (row, col)))
+            .map(|(row, col)| m[(row, col)].to_bits())
+            .collect()
+    }
+
+    /// `K` and every `⟨W, ∂K/∂θ⟩` when the first `products` products keep
+    /// their Grams.
+    fn keep_and_walk<M: KernelMath>(
+        compiled: &CompiledKernel<f64>,
+        products: usize,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let xs = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0];
+        let n = xs.len();
+        let x = Mat::from_fn(n, 1, |i, _| xs[i]);
+        let dist = sq_dist_1d(&xs);
+        let inputs = GramInputs {
+            x: x.as_ref(),
+            dist: Some(dist.as_ref()),
+            ard: None,
+        };
+        let weight = Mat::from_fn(n, n, |i, j| {
+            let (a, b) = (i.max(j) as f64, i.min(j) as f64);
+            0.3 * a - 0.7 * b + 0.05 * a * b - 0.4
+        });
+        let zeros = |count: usize| (0..count).map(|_| Mat::zeros(n, n)).collect::<Vec<_>>();
+        let mut kept = zeros(compiled.kept_buffers(products));
+        let mut bufs = zeros(compiled.weighted_buffers(products) - kept.len());
+        let (mut k, mut scratch, mut term) = (Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n));
+        let mut nested = Vec::new();
+        compiled
+            .eval_gram_keeping::<M>(
+                inputs,
+                k.as_mut(),
+                scratch.as_mut(),
+                term.as_mut(),
+                &mut nested,
+                &mut kept,
+                products,
+            )
+            .expect("gram");
+        let mut grads = vec![0.0; compiled.num_params()];
+        let mut walk = WeightedWalk {
+            inputs,
+            scratch: scratch.as_mut(),
+            nested: &mut nested,
+            kept: &kept,
+            kept_products: products,
+        };
+        compiled
+            .weighted_grads::<M>(&mut walk, weight.as_ref(), &mut grads, &mut bufs)
+            .expect("walk");
+        (lower_bits(&k), grads.iter().map(|g| g.to_bits()).collect())
+    }
+
+    fn every_keep_count_gives_the_same_bits<M: KernelMath>() {
+        let compiled = mixed_root_sum();
+        let candidates = compiled
+            .keep_plan(usize::MAX)
+            .filter(|(_, slot)| slot.is_some())
+            .count();
+        assert_eq!(candidates, 2);
+        let (k0, g0) = keep_and_walk::<M>(&compiled, 0);
+        let n = 9;
+        let mut plain = Mat::zeros(n, n);
+        let xs = [0.0, 0.8, 1.7, 0.2, -0.4, 0.9, 1.1, 0.3, 2.0];
+        let x = Mat::from_fn(n, 1, |i, _| xs[i]);
+        let dist = sq_dist_1d(&xs);
+        compiled
+            .eval_gram::<M>(
+                GramInputs {
+                    x: x.as_ref(),
+                    dist: Some(dist.as_ref()),
+                    ard: None,
+                },
+                plain.as_mut(),
+                Triangle::Lower,
+                Mat::zeros(n, n).as_mut(),
+                &mut Vec::new(),
+            )
+            .expect("gram");
+        assert_eq!(k0, lower_bits(&plain));
+        for products in 1..=candidates {
+            let (k, g) = keep_and_walk::<M>(&compiled, products);
+            assert_eq!(k, k0, "K with {products} kept");
+            assert_eq!(g, g0, "gradient with {products} kept");
+        }
+    }
+
+    #[test]
+    fn keeping_any_number_of_products_gives_the_same_bits() {
+        every_keep_count_gives_the_same_bits::<Accurate>();
+        every_keep_count_gives_the_same_bits::<FastApprox>();
+    }
 }
