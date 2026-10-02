@@ -9,7 +9,7 @@ use crate::objective::Objective;
 use crate::param::Interval;
 use crate::rng::{open_unit, seeded_rng};
 
-use super::logit::keep_better;
+use super::adapter::keep_better;
 use super::{OptResult, Optimizer, Restarts};
 
 /// How a proposed coordinate is folded back into an open parameter interval.
