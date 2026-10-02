@@ -226,32 +226,64 @@ pub(crate) fn cholesky_lower<T: KernelScalar>(
     T::cholesky_lower(a, scratch, jitter, stage)
 }
 
+/// Rows of column `j` that [`cholesky_lower_f64_accum`] carries in `f64` at once.
+const F64_ACCUM_ROWS: usize = 64;
+
 /// [`cholesky_lower`] for `f32`, accumulating each dot product in `f64`.
+///
+/// Column `j` is formed in blocks of [`F64_ACCUM_ROWS`] rows held in `f64`
+/// on the stack: for each `k < j`, the block subtracts `a[i, k] · a[j, k]`,
+/// reading column `k` contiguously. Every entry subtracts its terms in
+/// ascending `k`, so the factor is the same bit for bit as the entry-by-entry
+/// dot products.
 pub(crate) fn cholesky_lower_f64_accum(
     a: &mut Mat<f32>,
     jitter: f64,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
     let n = a.nrows();
+    let mut acc = [0.0f64; F64_ACCUM_ROWS];
     for j in 0..n {
-        for i in j..n {
-            let mut sum = f64::from(a[(i, j)]);
+        let mut start = j;
+        while start < n {
+            let len = F64_ACCUM_ROWS.min(n - start);
+            let acc = &mut acc[..len];
+            for (t, slot) in acc.iter_mut().enumerate() {
+                *slot = f64::from(a[(start + t, j)]);
+            }
             for k in 0..j {
-                sum -= f64::from(a[(i, k)]) * f64::from(a[(j, k)]);
-            }
-            if i == j {
-                if sum.is_nan() || sum <= 0.0 {
-                    return Err(GprError::CholeskyFailed {
-                        jitter,
-                        matrix_size: n,
-                        stage,
-                    });
+                let ajk = f64::from(a[(j, k)]);
+                match a.as_ref().col(k).try_as_col_major() {
+                    Some(col) => {
+                        for (slot, &aik) in acc.iter_mut().zip(&col.as_slice()[start..start + len])
+                        {
+                            *slot -= f64::from(aik) * ajk;
+                        }
+                    }
+                    None => {
+                        for (t, slot) in acc.iter_mut().enumerate() {
+                            *slot -= f64::from(a[(start + t, k)]) * ajk;
+                        }
+                    }
                 }
-                a[(j, j)] = sum.sqrt() as f32;
-            } else {
-                let diag = f64::from(a[(j, j)]);
-                a[(i, j)] = (sum / diag) as f32;
             }
+            for (t, &sum) in acc.iter().enumerate() {
+                let i = start + t;
+                if i == j {
+                    if sum.is_nan() || sum <= 0.0 {
+                        return Err(GprError::CholeskyFailed {
+                            jitter,
+                            matrix_size: n,
+                            stage,
+                        });
+                    }
+                    a[(j, j)] = sum.sqrt() as f32;
+                } else {
+                    let diag = f64::from(a[(j, j)]);
+                    a[(i, j)] = (sum / diag) as f32;
+                }
+            }
+            start += len;
         }
     }
     Ok(())
@@ -437,4 +469,76 @@ pub(crate) fn chol_rank1_downdate<T: KernelScalar>(l: &mut Mat<T>, v: &mut [T]) 
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cholesky_lower_f64_accum;
+    use crate::error::{CholeskyStage, GprError};
+    use faer::Mat;
+
+    /// The entry-by-entry form the blocked factor must match bit for bit.
+    fn reference(a: &mut Mat<f32>) -> Result<(), ()> {
+        let n = a.nrows();
+        for j in 0..n {
+            for i in j..n {
+                let mut sum = f64::from(a[(i, j)]);
+                for k in 0..j {
+                    sum -= f64::from(a[(i, k)]) * f64::from(a[(j, k)]);
+                }
+                if i == j {
+                    if sum.is_nan() || sum <= 0.0 {
+                        return Err(());
+                    }
+                    a[(j, j)] = sum.sqrt() as f32;
+                } else {
+                    a[(i, j)] = (sum / f64::from(a[(j, j)])) as f32;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A smooth kernel Gram plus a small diagonal: SPD and ill-conditioned
+    /// enough that rounding matters.
+    fn gram(n: usize, diag: f32) -> Mat<f32> {
+        Mat::from_fn(n, n, |i, j| {
+            let d = (i as f32 - j as f32) * 0.37;
+            (-0.5 * d * d).exp() + if i == j { diag } else { 0.0 }
+        })
+    }
+
+    #[test]
+    fn blocked_factor_matches_the_entry_by_entry_factor_bit_for_bit() {
+        for n in [1, 2, 5, 63, 64, 65, 129, 200] {
+            let mut blocked = gram(n, 1e-2);
+            let mut expect = blocked.clone();
+            cholesky_lower_f64_accum(&mut blocked, 0.0, CholeskyStage::Fit).expect("spd");
+            reference(&mut expect).expect("spd");
+            for j in 0..n {
+                for i in j..n {
+                    assert_eq!(
+                        blocked[(i, j)].to_bits(),
+                        expect[(i, j)].to_bits(),
+                        "n={n} ({i}, {j})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indefinite_matrix_fails_like_the_entry_by_entry_factor() {
+        let mut a = gram(70, 0.0);
+        a[(66, 66)] = -1.0;
+        assert!(reference(&mut a.clone()).is_err());
+        assert_eq!(
+            cholesky_lower_f64_accum(&mut a, 0.5, CholeskyStage::Fit),
+            Err(GprError::CholeskyFailed {
+                jitter: 0.5,
+                matrix_size: 70,
+                stage: CholeskyStage::Fit,
+            })
+        );
+    }
 }
