@@ -1,7 +1,7 @@
 //! Isotropic rational quadratic kernel.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::periodic_rq_simd::{RqScales, try_apply_rq, try_weighted_rq};
+use super::stationary_simd::{RqScales, try_apply_rq, try_weighted_rq};
 use super::{
     Triangle, finite_dist, finite_kernel, validate_log_positive, validate_positive_finite,
     write_dense, write_rect_from_coords, write_square_from_coords, write_triangle,
