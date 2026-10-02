@@ -1,11 +1,12 @@
 //! Pairwise squared-Euclidean distances, filled by Rayon column partitions.
 
 use super::KernelScalar;
-use super::simd::{try_fill_ard_column, try_fill_cross_chunk, try_fill_lower_chunk};
+use super::simd::dist::{try_fill_ard_column, try_fill_cross_chunk, try_fill_lower_col};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
-use faer::{Mat, MatMut, MatRef};
+use faer::{ColMut, Mat, MatMut, MatRef};
 use rayon::prelude::*;
+use std::convert::Infallible;
 
 /// Returns the Rayon pool size, at least 1.
 pub(crate) fn worker_count() -> usize {
@@ -104,19 +105,74 @@ where
     a.and(b)
 }
 
+/// Runs `f(col, rows)` for every column `col` of the lower triangle of the
+/// square `out`, on the Rayon pool in [`par_lower_blocks`] of
+/// [`worker_count`]: `rows` is rows `col..n` of that column. Returns the
+/// first error of the left-most failing block.
+pub(crate) fn par_lower_cols<T, E, F>(out: MatMut<'_, T>, f: &F) -> Result<(), E>
+where
+    T: Send,
+    E: Send,
+    F: Fn(usize, ColMut<'_, T>) -> Result<(), E> + Sync,
+{
+    par_lower_cols_in(out, worker_count(), f)
+}
+
+/// [`par_lower_cols`] over `n_blocks` blocks.
+pub(crate) fn par_lower_cols_in<T, E, F>(
+    out: MatMut<'_, T>,
+    n_blocks: usize,
+    f: &F,
+) -> Result<(), E>
+where
+    T: Send,
+    E: Send,
+    F: Fn(usize, ColMut<'_, T>) -> Result<(), E> + Sync,
+{
+    let n = out.nrows();
+    par_lower_blocks(out, n_blocks, &|start, mut part: MatMut<'_, T>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            f(col, part.rb_mut().col_mut(local).subrows_mut(col, n - col))?;
+        }
+        Ok(())
+    })
+}
+
+/// [`par_lower_cols`] for an `f` that cannot fail.
+pub(crate) fn for_each_lower_col<T, F>(out: MatMut<'_, T>, f: &F)
+where
+    T: Send,
+    F: Fn(usize, ColMut<'_, T>) + Sync,
+{
+    let done: Result<(), Infallible> = par_lower_cols(out, &|col, rows| {
+        f(col, rows);
+        Ok(())
+    });
+    match done {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
+}
+
+/// [`par_lower_fold`] for an `f` that cannot fail.
+pub(crate) fn lower_fold_infallible<R, F, J>(n: usize, f: &F, join: &J) -> R
+where
+    R: Send,
+    F: Fn(usize, usize) -> R + Sync,
+    J: Fn(R, R) -> R + Sync,
+{
+    let folded: Result<R, Infallible> = par_lower_fold(n, &|start, end| Ok(f(start, end)), join);
+    match folded {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
 /// Rows `col..` of column `col` of `m` as a slice, when `m` is column-major.
 #[inline(always)]
 pub(crate) fn lower_col<T>(m: MatRef<'_, T>, col: usize) -> Option<&[T]> {
     m.col(col).try_as_col_major().map(|c| &c.as_slice()[col..])
-}
-
-/// Rows `row..` of column `local` of the block `m` as a slice, when `m` is
-/// column-major.
-#[inline(always)]
-pub(crate) fn lower_col_mut<T>(m: MatMut<'_, T>, local: usize, row: usize) -> Option<&mut [T]> {
-    m.col_mut(local)
-        .try_as_col_major_mut()
-        .map(|c| &mut c.as_slice_mut()[row..])
 }
 
 /// Columns evaluated together before their results are folded in order.
@@ -230,10 +286,14 @@ pub(crate) fn fill_squared_euclidean(
         return;
     }
     let n_parts = partition_count(thread_scratch);
-    let _ = par_lower_blocks(dist.rb_mut(), n_parts, &|start, part| {
-        fill_lower_chunk(x, part, start);
-        Ok::<(), ()>(())
+    let done: Result<(), Infallible> = par_lower_cols_in(dist.rb_mut(), n_parts, &|col, rows| {
+        fill_lower_col(x, col, rows);
+        Ok(())
     });
+    match done {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     copy_lower_to_upper(dist);
 }
 
@@ -418,68 +478,52 @@ pub(crate) fn fill_squared_euclidean_cross(
         return;
     }
     if m == 1 {
-        fill_cross_chunk(x_train, x_test, dist.rb_mut(), 0, 1);
+        fill_cross_chunk(x_train, x_test, dist.rb_mut(), 0);
         return;
     }
     let n_parts = partition_count(thread_scratch);
-    if thread_scratch.is_empty() {
-        dist.rb_mut()
-            .par_col_partition_mut(n_parts)
-            .enumerate()
-            .for_each(|(chunk_idx, part)| {
-                fill_cross_chunk(x_train, x_test, part, chunk_idx, n_parts);
-            });
-    } else {
-        dist.rb_mut()
-            .par_col_partition_mut(n_parts)
-            .zip(thread_scratch.par_iter_mut())
-            .enumerate()
-            .for_each(|(chunk_idx, (part, _scratch))| {
-                fill_cross_chunk(x_train, x_test, part, chunk_idx, n_parts);
-            });
-    }
+    dist.rb_mut()
+        .par_col_partition_mut(n_parts)
+        .enumerate()
+        .for_each(|(chunk_idx, part)| {
+            let (start, _) = col_chunk(m, chunk_idx, n_parts);
+            fill_cross_chunk(x_train, x_test, part, start);
+        });
 }
 
-fn fill_lower_chunk(x: MatRef<'_, f64>, mut dist_chunk: MatMut<'_, f64>, start: usize) {
-    let n = x.nrows();
-    let d = x.ncols();
-    let len = dist_chunk.ncols();
-    if try_fill_lower_chunk(x, dist_chunk.rb_mut(), start) {
+/// Rows `col..n` of column `col` of the squared distances of `x`.
+fn fill_lower_col(x: MatRef<'_, f64>, col: usize, mut rows: ColMut<'_, f64>) {
+    if let Some(dest) = rows.rb_mut().try_as_col_major_mut()
+        && try_fill_lower_col(x, col, dest.as_slice_mut())
+    {
         return;
     }
-    for local in 0..len {
-        let col = start + local;
-        for row in col..n {
-            let mut sum = 0.0;
-            for dim in 0..d {
-                let diff = x[(row, dim)] - x[(col, dim)];
-                sum += diff * diff;
-            }
-            dist_chunk[(row, local)] = sum;
+    for (i, row) in (col..x.nrows()).enumerate() {
+        let mut sum = 0.0;
+        for dim in 0..x.ncols() {
+            let diff = x[(row, dim)] - x[(col, dim)];
+            sum += diff * diff;
         }
+        rows[i] = sum;
     }
 }
 
+/// The train–test squared distances of the test points
+/// `start..start + dist_chunk.ncols()`.
 fn fill_cross_chunk(
     x_train: MatRef<'_, f64>,
     x_test: MatRef<'_, f64>,
     mut dist_chunk: MatMut<'_, f64>,
-    chunk_idx: usize,
-    n_chunks: usize,
+    start: usize,
 ) {
-    let n = x_train.nrows();
-    let d = x_train.ncols();
-    let m = x_test.nrows();
-    let (start, len) = col_chunk(m, chunk_idx, n_chunks);
-    debug_assert_eq!(dist_chunk.ncols(), len);
-    if try_fill_cross_chunk(x_train, x_test, dist_chunk.rb_mut(), chunk_idx, n_chunks) {
+    if try_fill_cross_chunk(x_train, x_test, dist_chunk.rb_mut(), start) {
         return;
     }
-    for local in 0..len {
+    for local in 0..dist_chunk.ncols() {
         let col = start + local;
-        for row in 0..n {
+        for row in 0..x_train.nrows() {
             let mut sum = 0.0;
-            for dim in 0..d {
+            for dim in 0..x_train.ncols() {
                 let diff = x_train[(row, dim)] - x_test[(col, dim)];
                 sum += diff * diff;
             }
@@ -634,7 +678,7 @@ mod tests {
                             part[(row, local)] += (start + local) as f64 + 1.0;
                         }
                     }
-                    Ok::<(), ()>(())
+                    Ok::<(), std::convert::Infallible>(())
                 })
                 .expect("infallible");
                 for col in 0..n {
@@ -666,7 +710,7 @@ mod tests {
                     for col in start..end {
                         sum += term(col);
                     }
-                    Ok::<f64, ()>(sum)
+                    Ok::<f64, std::convert::Infallible>(sum)
                 },
                 &|a, b| a + b,
             )
