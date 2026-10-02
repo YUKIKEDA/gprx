@@ -16,7 +16,7 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::optimizer::Fixed;
 use crate::points::{IdRegistry, PointRegistry};
-use crate::precision::GpScalar;
+use crate::precision::{GpScalar, PersistKind};
 use crate::sgpr::{FittedSgpr, FixedInducing, InducingRegistry, OnlineSgpr};
 use crate::sparse::{PersistedSparse, SparseCore, SparseSpec};
 use crate::svgp::FittedSvgp;
@@ -324,8 +324,8 @@ impl LoadedSgpr {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let config = read_config(dir, &[ModelJson::Sgpr, ModelJson::OnlineSgpr])?;
-        match (config.precision, config.residual) {
-            (PrecisionJson::Double, _) => load_sgpr_as(
+        match config.persist_kind() {
+            PersistKind::Double => load_sgpr_as(
                 dir,
                 &config,
                 registry,
@@ -334,7 +334,7 @@ impl LoadedSgpr {
                     online: Self::OnlineDouble,
                 },
             ),
-            (PrecisionJson::Single, _) => load_sgpr_as(
+            PersistKind::Single => load_sgpr_as(
                 dir,
                 &config,
                 registry,
@@ -343,7 +343,7 @@ impl LoadedSgpr {
                     online: Self::OnlineSingle,
                 },
             ),
-            (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => load_sgpr_as(
+            PersistKind::MixedPromote => load_sgpr_as(
                 dir,
                 &config,
                 registry,
@@ -352,7 +352,7 @@ impl LoadedSgpr {
                     online: Self::OnlineMixed,
                 },
             ),
-            (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => load_sgpr_as(
+            PersistKind::MixedReevaluate => load_sgpr_as(
                 dir,
                 &config,
                 registry,
@@ -502,15 +502,11 @@ impl LoadedSvgp {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let config = read_config(dir, &[ModelJson::Svgp])?;
-        match (config.precision, config.residual) {
-            (PrecisionJson::Double, _) => load_svgp_as(dir, &config, registry, Self::Double),
-            (PrecisionJson::Single, _) => load_svgp_as(dir, &config, registry, Self::Single),
-            (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => {
-                load_svgp_as(dir, &config, registry, Self::Mixed)
-            }
-            (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => {
-                load_svgp_as(dir, &config, registry, Self::Reevaluate)
-            }
+        match config.persist_kind() {
+            PersistKind::Double => load_svgp_as(dir, &config, registry, Self::Double),
+            PersistKind::Single => load_svgp_as(dir, &config, registry, Self::Single),
+            PersistKind::MixedPromote => load_svgp_as(dir, &config, registry, Self::Mixed),
+            PersistKind::MixedReevaluate => load_svgp_as(dir, &config, registry, Self::Reevaluate),
         }
     }
 
