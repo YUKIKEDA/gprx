@@ -214,41 +214,6 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
         noise: f64,
         reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError>;
-
-    /// Svgp: the `f64` system a refining precision refines every query mean
-    /// against, built once per prediction: `l64`, the `f64` lower factor of
-    /// `K_mm`, and `k64`, `K(Z, X*)` in `f64` (`m × q`). A precision that
-    /// does not refine leaves both untouched.
-    ///
-    /// [`PromoteStorage`] promotes the storage `k_mm_l` and `k_zs`;
-    /// [`ReevaluateKernel`] calls `reevaluate`, which factors and evaluates
-    /// them again in `f64`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of `reevaluate`.
-    fn svgp_mean_reference(
-        k_mm_l: MatRef<'_, Self::Storage>,
-        k_zs: MatRef<'_, Self::Storage>,
-        reevaluate: &mut Reevaluate<'_>,
-        l64: &mut Mat<f64>,
-        k64: &mut Mat<f64>,
-    ) -> Result<(), GprError>;
-
-    /// Svgp: mean from the storage triangular solve `solved = L_mm⁻¹ k_*`,
-    /// refined for mixed against `l64` and `k64_col`, this query's column of
-    /// the [`Self::svgp_mean_reference`] system.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of the refinement fallback.
-    fn mean_from_factor(
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        q_mean: &[f64],
-        l64: MatRef<'_, f64>,
-        k64_col: &[f64],
-    ) -> Result<Self::Refine, GprError>;
 }
 
 fn copy_to_refine<P: ModelPrecision>(values: &[P::Storage], out: &mut Vec<P::Refine>) {
@@ -273,10 +238,6 @@ fn storage_means<P: ModelPrecision>(
         *slot = P::Refine::from_f64(sum);
     }
 }
-
-/// Writes the `f64` factor of `K_mm` and `K(Z, X*)` in `f64` into its two
-/// arguments ([`ModelPrecision::svgp_mean_reference`]).
-pub type Reevaluate<'a> = dyn FnMut(&mut Mat<f64>, &mut Mat<f64>) -> Result<(), GprError> + 'a;
 
 /// `f64` copies an `f32` prediction maps through the target transform.
 #[derive(Debug, Default)]
@@ -374,26 +335,6 @@ impl ModelPrecision for DoublePrecision {
         copy_to_refine::<Self>(w, &mut out);
         Ok(out)
     }
-
-    fn svgp_mean_reference(
-        _k_mm_l: MatRef<'_, Self::Storage>,
-        _k_zs: MatRef<'_, Self::Storage>,
-        _reevaluate: &mut Reevaluate<'_>,
-        _l64: &mut Mat<f64>,
-        _k64: &mut Mat<f64>,
-    ) -> Result<(), GprError> {
-        Ok(())
-    }
-
-    fn mean_from_factor(
-        _k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        q_mean: &[f64],
-        _l64: MatRef<'_, f64>,
-        _k64_col: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        Ok(sparse::storage_q_dot(solved, q_mean))
-    }
 }
 
 impl ModelPrecision for SinglePrecision {
@@ -486,26 +427,6 @@ impl ModelPrecision for SinglePrecision {
         copy_to_refine::<Self>(w, &mut out);
         Ok(out)
     }
-
-    fn svgp_mean_reference(
-        _k_mm_l: MatRef<'_, Self::Storage>,
-        _k_zs: MatRef<'_, Self::Storage>,
-        _reevaluate: &mut Reevaluate<'_>,
-        _l64: &mut Mat<f64>,
-        _k64: &mut Mat<f64>,
-    ) -> Result<(), GprError> {
-        Ok(())
-    }
-
-    fn mean_from_factor(
-        _k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        q_mean: &[f64],
-        _l64: MatRef<'_, f64>,
-        _k64_col: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        Ok(sparse::storage_q_dot(solved, q_mean))
-    }
 }
 
 impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
@@ -577,32 +498,6 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
         reference: &dyn Fn() -> Result<F64Vfe, GprError>,
     ) -> Result<Vec<Self::Refine>, GprError> {
         sparse::refine_vfe_weights::<R>(a, b_l, w, y, noise, reference)
-    }
-
-    fn svgp_mean_reference(
-        k_mm_l: MatRef<'_, Self::Storage>,
-        k_zs: MatRef<'_, Self::Storage>,
-        reevaluate: &mut Reevaluate<'_>,
-        l64: &mut Mat<f64>,
-        k64: &mut Mat<f64>,
-    ) -> Result<(), GprError> {
-        if R::READS_STORAGE {
-            sparse::promote_into(k_mm_l, l64, true);
-            sparse::promote_into(k_zs, k64, false);
-            Ok(())
-        } else {
-            reevaluate(l64, k64)
-        }
-    }
-
-    fn mean_from_factor(
-        k_mm_l: MatRef<'_, Self::Storage>,
-        solved: &[Self::Storage],
-        q_mean: &[f64],
-        l64: MatRef<'_, f64>,
-        k64_col: &[f64],
-    ) -> Result<Self::Refine, GprError> {
-        sparse::refine_svgp_mean(k_mm_l, solved, q_mean, l64, k64_col)
     }
 }
 
