@@ -185,12 +185,12 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| R7-1 | Task | One SIMD layer and one parallel lower-triangle walk in `kernel` | [#388](https://github.com/YUKIKEDA/gprx/issues/388) | Set after Grill on #388 |
-| R7-2 | Task | One plan for the joint gradient's kept Grams, tied to `θ` by type | [#389](https://github.com/YUKIKEDA/gprx/issues/389) | Set after Grill on #389 |
-| R7-3 | Bug | f32-storage prediction: `Sgpr` recomputes in f64, `Svgp` stays in f32 | [#390](https://github.com/YUKIKEDA/gprx/issues/390) | Set after Grill on #390 |
-| R7-4 | Task | One set of argmin adapters; one error kind for argmin failures | [#391](https://github.com/YUKIKEDA/gprx/issues/391) | Set after Grill on #391 |
-| R7-5 | Task | `OnlineSgpr` undoes a failed update from one state value, not a field list | [#392](https://github.com/YUKIKEDA/gprx/issues/392) | Set after Grill on #392 |
-| R7-6 | Task | Decode `precision` and `residual` into one type once when loading | [#393](https://github.com/YUKIKEDA/gprx/issues/393) | Set after Grill on #393 |
+| R7-1 | Task | One SIMD layer and one parallel lower-triangle walk in `kernel` | [#388](https://github.com/YUKIKEDA/gprx/issues/388) | acceptance on #388 |
+| R7-2 | Task | One plan for the joint gradient's kept Grams, tied to `θ` by type | [#389](https://github.com/YUKIKEDA/gprx/issues/389) | acceptance on #389 |
+| R7-3 | Bug | f32-storage prediction: `Sgpr` recomputes in f64, `Svgp` stays in f32 | [#390](https://github.com/YUKIKEDA/gprx/issues/390) | acceptance on #390 |
+| R7-4 | Task | One set of argmin adapters; one error kind for argmin failures | [#391](https://github.com/YUKIKEDA/gprx/issues/391) | acceptance on #391 |
+| R7-5 | Task | `OnlineSgpr` undoes a failed update from one state value, not a field list | [#392](https://github.com/YUKIKEDA/gprx/issues/392) | acceptance on #392 |
+| R7-6 | Task | Decode `precision` and `residual` into one type once when loading | [#393](https://github.com/YUKIKEDA/gprx/issues/393) | acceptance on #393 |
 
 ## B (real-dataset comparison)
 
