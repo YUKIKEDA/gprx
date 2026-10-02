@@ -1,5 +1,6 @@
 //! Isotropic squared-exponential (RBF) kernel.
 
+use super::dist::{lower_col, par_lower_fold};
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::scalar::f64_pair;
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
@@ -386,20 +387,47 @@ impl RbfKernel {
         out: &mut [f64],
     ) -> Result<f64, GprError> {
         let (_, inv_ell_sq) = self.inv_scales();
-        let (mut g_ell, mut value) = (0.0, 0.0);
-        for col in 0..dist.ncols() {
-            let mut g_col = 0.0;
-            let mut v_col = 0.0;
-            for row in col..dist.nrows() {
-                let s = finite_dist(dist[(row, col)])?.to_f64();
-                let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
-                let wk = w * k[(row, col)].to_f64();
-                v_col += wk;
-                g_col += wk * s;
-            }
-            g_ell += g_col;
-            value += v_col;
-        }
+        let n = dist.nrows();
+        let (g_ell, value) = par_lower_fold(
+            n,
+            &|start, end| {
+                let (mut g, mut v) = (0.0, 0.0);
+                for col in start..end {
+                    let w = weight[(col, col)].to_f64();
+                    let wk = w * k[(col, col)].to_f64();
+                    v += wk;
+                    g += wk * finite_dist(dist[(col, col)])?.to_f64();
+                    let (mut g_col, mut v_col) = (0.0, 0.0);
+                    if let (Some(d), Some(w), Some(kc)) = (
+                        lower_col(dist, col),
+                        lower_col(weight, col),
+                        lower_col(k, col),
+                    ) {
+                        for ((&s, &w), &kv) in d[1..].iter().zip(&w[1..]).zip(&kc[1..]) {
+                            let wk = w.to_f64() * kv.to_f64();
+                            v_col += wk;
+                            g_col += wk * s.to_f64();
+                        }
+                        if !g_col.is_finite() {
+                            for &s in &d[1..] {
+                                finite_dist(s)?;
+                            }
+                        }
+                    } else {
+                        for row in col + 1..n {
+                            let s = finite_dist(dist[(row, col)])?.to_f64();
+                            let wk = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
+                            v_col += wk;
+                            g_col += wk * s;
+                        }
+                    }
+                    v += 2.0 * v_col;
+                    g += 2.0 * g_col;
+                }
+                Ok::<_, GprError>((g, v))
+            },
+            &|a: (f64, f64), b: (f64, f64)| (a.0 + b.0, a.1 + b.1),
+        )?;
         out[0] = g_ell * inv_ell_sq;
         Ok(value)
     }

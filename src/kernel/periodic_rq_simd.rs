@@ -7,7 +7,7 @@
 //! `wide`'s `sin`, `cos`, `ln`, and `exp` may differ from libm by a few ULP.
 //! The rational quadratic `u^{-α}` is `exp(−α ln u)` here.
 
-use super::dist::{par_lower_blocks, worker_count};
+use super::dist::{par_lower_blocks, par_lower_fold, worker_count};
 use super::{KernelScalar, Triangle, require_square_pair};
 use crate::error::GprError;
 use crate::math::{KernelMath, f64x4_all_finite};
@@ -46,6 +46,7 @@ fn unit_row_stride<T: KernelScalar>(mat: MatRef<'_, T>) -> bool {
 }
 
 /// Four lanes from `src[i..]`, padded with `pad` past the end.
+#[inline(always)]
 fn load<T: KernelScalar>(src: &[T], i: usize, pad: f64) -> f64x4 {
     let mut lanes = [pad; LANES];
     for (lane, value) in lanes.iter_mut().zip(&src[i..]) {
@@ -54,6 +55,7 @@ fn load<T: KernelScalar>(src: &[T], i: usize, pad: f64) -> f64x4 {
     f64x4::new(lanes)
 }
 
+#[inline(always)]
 fn store<T: KernelScalar>(dest: &mut [T], i: usize, v: f64x4) {
     for (slot, value) in dest[i..].iter_mut().zip(v.to_array()) {
         *slot = T::from_f64(value);
@@ -77,6 +79,7 @@ fn rq_lanes(d: f64x4, s: RqScales) -> (f64x4, f64x4, f64x4) {
     (r2, u, u.ln())
 }
 
+#[inline(always)]
 fn checked_input(d: f64x4) -> Result<f64x4, GprError> {
     if f64x4_all_finite(d) {
         Ok(d)
@@ -85,6 +88,7 @@ fn checked_input(d: f64x4) -> Result<f64x4, GprError> {
     }
 }
 
+#[inline(always)]
 fn checked_kernel(v: f64x4) -> Result<f64x4, GprError> {
     if f64x4_all_finite(v) {
         Ok(v)
@@ -217,6 +221,7 @@ impl<'a, T: KernelScalar> LowerColumns<'a, T> {
 }
 
 /// `w` lanes of a column slice: the diagonal (`i = 0`) once, the rest twice.
+#[inline(always)]
 fn sym_weight<T: KernelScalar>(w: &[T], i: usize) -> f64x4 {
     let v = load(w, i, 0.0) * f64x4::splat(2.0);
     if i == 0 {
@@ -228,6 +233,16 @@ fn sym_weight<T: KernelScalar>(w: &[T], i: usize) -> f64x4 {
     }
 }
 
+/// Per-block `[∂ first, ∂ second, value]` of a weighted pass; `None` when
+/// a column is not unit row-stride.
+type Sums = [f64; 3];
+
+fn join_sums(a: Option<Sums>, b: Option<Sums>) -> Option<Sums> {
+    let (a, b) = (a?, b?);
+    Some([a[0] + b[0], a[1] + b[1], a[2] + b[2]])
+}
+
+#[inline(always)]
 fn sum_lanes(v: f64x4) -> f64 {
     v.to_array().iter().sum()
 }
@@ -247,41 +262,51 @@ pub(crate) fn try_weighted_periodic<M: KernelMath, T: KernelScalar>(
         return Ok(None);
     };
     let two_inv = f64x4::splat(2.0 * s.two_inv_ell_sq);
-    let (mut g_ell, mut g_period, mut value) = (f64x4::ZERO, f64x4::ZERO, f64x4::ZERO);
-    for col in 0..dist.ncols() {
-        let Some((d, w, kc)) = cols.column(col) else {
-            return Ok(None);
-        };
-        let mut i = 0;
-        while i < d.len() {
-            let dv = checked_input(load(d, i, 0.0))?;
-            let wv = sym_weight(w, i);
-            let alpha = dv.max(f64x4::ZERO).sqrt() * f64x4::splat(s.pi_over_period);
-            let (sin, cos) = alpha.sin_cos();
-            let z = -(sin * sin) * f64x4::splat(s.two_inv_ell_sq);
-            let (kv, e) = match (M::ACCURATE, kc) {
-                (true, Some(kc)) => {
-                    let kv = load(kc, i, 0.0);
-                    (kv, kv)
-                }
-                (true, None) => {
-                    let kv = z.exp();
-                    (kv, kv)
-                }
-                (false, _) => (M::exp_f64x4(z), M::d1_f64x4(z)),
+    let block = |start: usize, end: usize| -> Result<Option<Sums>, GprError> {
+        let (mut g_ell, mut g_period, mut value) = (f64x4::ZERO, f64x4::ZERO, f64x4::ZERO);
+        for col in start..end {
+            let Some((d, w, kc)) = cols.column(col) else {
+                return Ok(None);
             };
-            // `∂k/∂log ℓ = 4 s² / ℓ² · e`, `∂k/∂log p = 4 s c α / ℓ² · e`.
-            let dk_ell = checked_kernel(e * two_inv * sin * sin)?;
-            let dk_period = checked_kernel(e * two_inv * sin * cos * alpha)?;
-            g_ell += wv * dk_ell;
-            g_period += wv * dk_period;
-            value += wv * kv;
-            i += LANES;
+            let mut i = 0;
+            while i < d.len() {
+                let dv = checked_input(load(d, i, 0.0))?;
+                let wv = sym_weight(w, i);
+                let alpha = dv.max(f64x4::ZERO).sqrt() * f64x4::splat(s.pi_over_period);
+                let (sin, cos) = alpha.sin_cos();
+                let z = -(sin * sin) * f64x4::splat(s.two_inv_ell_sq);
+                let (kv, e) = match (M::ACCURATE, kc) {
+                    (true, Some(kc)) => {
+                        let kv = load(kc, i, 0.0);
+                        (kv, kv)
+                    }
+                    (true, None) => {
+                        let kv = z.exp();
+                        (kv, kv)
+                    }
+                    (false, _) => (M::exp_f64x4(z), M::d1_f64x4(z)),
+                };
+                // `∂k/∂log ℓ = 4 s² / ℓ² · e`, `∂k/∂log p = 4 s c α / ℓ² · e`.
+                let dk_ell = checked_kernel(e * two_inv * sin * sin)?;
+                let dk_period = checked_kernel(e * two_inv * sin * cos * alpha)?;
+                g_ell += wv * dk_ell;
+                g_period += wv * dk_period;
+                value += wv * kv;
+                i += LANES;
+            }
         }
-    }
-    out[0] = sum_lanes(g_ell);
-    out[1] = sum_lanes(g_period);
-    Ok(Some(sum_lanes(value)))
+        Ok(Some([
+            sum_lanes(g_ell),
+            sum_lanes(g_period),
+            sum_lanes(value),
+        ]))
+    };
+    let Some([g_ell, g_period, value]) = par_lower_fold(dist.ncols(), &block, &join_sums)? else {
+        return Ok(None);
+    };
+    out[0] = g_ell;
+    out[1] = g_period;
+    Ok(Some(value))
 }
 
 /// One-pass `⟨weight, ∂K/∂log ℓ⟩`, `⟨weight, ∂K/∂log α⟩`, and the returned
@@ -298,31 +323,41 @@ pub(crate) fn try_weighted_rq<T: KernelScalar>(
         return Ok(None);
     };
     let alpha = f64x4::splat(s.alpha);
-    let (mut g_ell, mut g_alpha, mut value) = (f64x4::ZERO, f64x4::ZERO, f64x4::ZERO);
-    for col in 0..dist.ncols() {
-        let Some((d, w, kc)) = cols.column(col) else {
-            return Ok(None);
-        };
-        let mut i = 0;
-        while i < d.len() {
-            let dv = checked_input(load(d, i, 0.0))?;
-            let wv = sym_weight(w, i);
-            let (r2, u, ln_u) = rq_lanes(dv, s);
-            let kv = match kc {
-                Some(kc) => load(kc, i, 0.0),
-                None => (-alpha * ln_u).exp(),
+    let block = |start: usize, end: usize| -> Result<Option<Sums>, GprError> {
+        let (mut g_ell, mut g_alpha, mut value) = (f64x4::ZERO, f64x4::ZERO, f64x4::ZERO);
+        for col in start..end {
+            let Some((d, w, kc)) = cols.column(col) else {
+                return Ok(None);
             };
-            let dk_ell = checked_kernel(kv / u * r2)?;
-            let dk_alpha = checked_kernel(alpha * kv * (f64x4::ONE - ln_u - f64x4::ONE / u))?;
-            g_ell += wv * dk_ell;
-            g_alpha += wv * dk_alpha;
-            value += wv * kv;
-            i += LANES;
+            let mut i = 0;
+            while i < d.len() {
+                let dv = checked_input(load(d, i, 0.0))?;
+                let wv = sym_weight(w, i);
+                let (r2, u, ln_u) = rq_lanes(dv, s);
+                let kv = match kc {
+                    Some(kc) => load(kc, i, 0.0),
+                    None => (-alpha * ln_u).exp(),
+                };
+                let dk_ell = checked_kernel(kv / u * r2)?;
+                let dk_alpha = checked_kernel(alpha * kv * (f64x4::ONE - ln_u - f64x4::ONE / u))?;
+                g_ell += wv * dk_ell;
+                g_alpha += wv * dk_alpha;
+                value += wv * kv;
+                i += LANES;
+            }
         }
-    }
-    out[0] = sum_lanes(g_ell);
-    out[1] = sum_lanes(g_alpha);
-    Ok(Some(sum_lanes(value)))
+        Ok(Some([
+            sum_lanes(g_ell),
+            sum_lanes(g_alpha),
+            sum_lanes(value),
+        ]))
+    };
+    let Some([g_ell, g_alpha, value]) = par_lower_fold(dist.ncols(), &block, &join_sums)? else {
+        return Ok(None);
+    };
+    out[0] = g_ell;
+    out[1] = g_alpha;
+    Ok(Some(value))
 }
 
 #[cfg(test)]
