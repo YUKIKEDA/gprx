@@ -167,7 +167,7 @@ where
     T: KernelScalar,
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
-    let kept = compiled.kept_buffers();
+    let kept = compiled.kept_buffers(products);
     factor_written_k_with_policy(ws, y, noise, policy, |ws| {
         let (core, dist) = ws.split_fit();
         let inputs = fill_cached_inputs(compiled, x, dist, &mut core.thread_scratch)?;
