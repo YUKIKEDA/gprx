@@ -1,17 +1,11 @@
 //! Logit map from user-unit [`Interval`] to unconstrained argmin coordinates.
 
-use std::cell::RefCell;
-
-use argmin::core::{CostFunction, Error as ArgminError, Gradient};
-
 use crate::rng::SeededRng;
 
 use crate::error::GprError;
 use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 use crate::rng::open_unit;
-
-use super::OptResult;
 
 pub(super) struct LogitMapped<'a, P> {
     pub(super) inner: &'a mut P,
@@ -75,71 +69,6 @@ impl<P: TwiceDifferentiable> TwiceDifferentiable for LogitMapped<'_, P> {
         chain_logit_hess(params, self.intervals, &self.log_scratch, grad, hess);
         chain_logit_grad(params, self.intervals, &self.log_scratch, grad);
         Ok(value)
-    }
-}
-
-pub(super) fn consider_value_run<P, F>(
-    objective: &mut P,
-    intervals: &[Interval],
-    init_z: &[f64],
-    best: &mut Option<OptResult>,
-    mut run: F,
-) -> Result<(), GprError>
-where
-    P: Objective,
-    F: FnMut(&mut LogitMapped<'_, P>, &[f64]) -> Result<OptResult, GprError>,
-{
-    let mut mapped = LogitMapped {
-        inner: objective,
-        intervals,
-        log_scratch: vec![0.0; init_z.len()],
-    };
-    let run = run(&mut mapped, init_z)?;
-    keep_better(
-        best,
-        OptResult {
-            params: z_to_log_theta(&run.params, intervals)?,
-            value: run.value,
-            iterations: run.iterations,
-        },
-    );
-    Ok(())
-}
-
-/// The value of an argmin run at its best point, from the run's own record.
-///
-/// The solver evaluated that point already, so it is not evaluated again. A
-/// run whose best is the barrier (every point it tried failed) has no
-/// result: `evaluate` runs at that point once more so the model's own error
-/// (for example an unsupported gradient) is returned instead of a generic
-/// failure to converge.
-pub(super) fn best_value(
-    cost: f64,
-    iterations: u64,
-    evaluate: impl FnOnce() -> Result<f64, GprError>,
-) -> Result<f64, GprError> {
-    if cost.is_finite() && cost < BARRIER_COST {
-        return Ok(cost);
-    }
-    evaluate()?;
-    Err(GprError::OptimizationNotConverged {
-        iterations: iterations as usize,
-    })
-}
-
-/// Keeps the lower of `best` and `candidate`.
-///
-/// A candidate whose value is not finite is never kept, so one run that ends
-/// at `NaN` or `±∞` cannot block a later finite run. When no run is finite,
-/// `best` stays `None` and the caller reports no result.
-pub(super) fn keep_better(best: &mut Option<OptResult>, candidate: OptResult) {
-    if !candidate.value.is_finite() {
-        return;
-    }
-    match best {
-        None => *best = Some(candidate),
-        Some(current) if candidate.value < current.value => *best = Some(candidate),
-        Some(_) => {}
     }
 }
 
@@ -335,236 +264,19 @@ fn log_uniform_open(rng: &mut SeededRng, interval: Interval) -> f64 {
     }
 }
 
-/// Cost returned to argmin when a trial point is non-finite or rejected (for
-/// example outside an open [`Interval`]). More–Thuente can then backtrack
-/// instead of aborting the whole solve.
-pub(super) const BARRIER_COST: f64 = 1.0e300;
-
-pub(super) struct EvalCache<'a, P: ?Sized> {
-    objective: &'a mut P,
-    params: Vec<f64>,
-    value: Option<f64>,
-    grad: Vec<f64>,
-}
-
-impl<'a, P: Differentiable + ?Sized> EvalCache<'a, P> {
-    pub(super) fn new(objective: &'a mut P, n: usize) -> Self {
-        Self {
-            objective,
-            params: Vec::new(),
-            value: None,
-            grad: vec![0.0; n],
-        }
-    }
-
-    fn eval(&mut self, param: &[f64]) -> Result<f64, GprError> {
-        if let Some(value) = self.value {
-            if same_params(&self.params, param) {
-                return Ok(value);
-            }
-        }
-        if self.grad.len() != param.len() {
-            self.grad.resize(param.len(), 0.0);
-        }
-        match self
-            .objective
-            .value_and_gradient_into(param, &mut self.grad)
-        {
-            Ok(value) if value.is_finite() && self.grad.iter().all(|g| g.is_finite()) => {
-                self.params.clear();
-                self.params.extend_from_slice(param);
-                self.value = Some(value);
-                Ok(value)
-            }
-            Ok(_) | Err(_) => {
-                self.params.clear();
-                self.params.extend_from_slice(param);
-                self.grad.fill(0.0);
-                self.value = Some(BARRIER_COST);
-                Ok(BARRIER_COST)
-            }
-        }
-    }
-}
-
-pub(super) struct CachedProblem<'a, P: ?Sized> {
-    pub(super) inner: RefCell<EvalCache<'a, P>>,
-}
-
-impl<P: Differentiable + ?Sized> CostFunction for CachedProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Output = f64;
-
-    fn cost(&self, param: &Self::Param) -> Result<Self::Output, ArgminError> {
-        self.inner
-            .borrow_mut()
-            .eval(param)
-            .map_err(ArgminError::from)
-    }
-}
-
-impl<P: Differentiable + ?Sized> Gradient for CachedProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Gradient = Vec<f64>;
-
-    fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, ArgminError> {
-        let mut inner = self.inner.borrow_mut();
-        inner.eval(param).map_err(ArgminError::from)?;
-        Ok(inner.grad.clone())
-    }
-}
-
-pub(super) struct ValueCache<'a, P: ?Sized> {
-    objective: &'a mut P,
-    params: Vec<f64>,
-    value: Option<f64>,
-}
-
-impl<'a, P: Objective + ?Sized> ValueCache<'a, P> {
-    pub(super) fn new(objective: &'a mut P) -> Self {
-        Self {
-            objective,
-            params: Vec::new(),
-            value: None,
-        }
-    }
-
-    fn eval(&mut self, param: &[f64]) -> Result<f64, GprError> {
-        if let Some(value) = self.value {
-            if same_params(&self.params, param) {
-                return Ok(value);
-            }
-        }
-        match self.objective.value(param) {
-            Ok(value) if value.is_finite() => {
-                self.params.clear();
-                self.params.extend_from_slice(param);
-                self.value = Some(value);
-                Ok(value)
-            }
-            Ok(_) | Err(_) => {
-                self.params.clear();
-                self.params.extend_from_slice(param);
-                self.value = Some(BARRIER_COST);
-                Ok(BARRIER_COST)
-            }
-        }
-    }
-}
-
-pub(super) struct ValueProblem<'a, P: ?Sized> {
-    pub(super) inner: RefCell<ValueCache<'a, P>>,
-}
-
-impl<P: Objective + ?Sized> CostFunction for ValueProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Output = f64;
-
-    fn cost(&self, param: &Self::Param) -> Result<Self::Output, ArgminError> {
-        self.inner
-            .borrow_mut()
-            .eval(param)
-            .map_err(ArgminError::from)
-    }
-}
-
-fn same_params(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
-pub(super) fn map_argmin_error(err: ArgminError) -> GprError {
-    if let Some(gpr) = err.downcast_ref::<GprError>() {
-        return gpr.clone();
-    }
-    GprError::InvalidHyperparameter {
-        reason: err.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        CachedProblem, CostFunction, EvalCache, Gradient, keep_better, log_theta_to_z, logit,
-        sigmoid, user_to_z, z_to_log_theta_into, z_to_user,
-    };
-    use crate::error::GprError;
+    use super::{log_theta_to_z, logit, sigmoid, user_to_z, z_to_log_theta_into, z_to_user};
     use crate::gpr::Gpr;
     use crate::kernel::{KernelSpec, RbfKernel};
     use crate::likelihood::GaussianLikelihood;
     use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
     use crate::optimizer::Fixed;
-    use crate::optimizer::OptResult;
     use crate::param::Interval;
-    use std::cell::RefCell;
 
     const TOL: f64 = 1e-6;
 
     use crate::test_check::assert_close;
-
-    struct Quadratic {
-        joint_evals: usize,
-    }
-
-    impl Objective for Quadratic {
-        fn num_params(&self) -> usize {
-            2
-        }
-
-        fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
-            let mut dummy = [0.0; 2];
-            self.value_and_gradient_into(params, &mut dummy)
-        }
-    }
-
-    impl Differentiable for Quadratic {
-        fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
-            self.value_and_gradient_into(params, out).map(|_| ())
-        }
-
-        fn value_and_gradient_into(
-            &mut self,
-            params: &[f64],
-            out: &mut [f64],
-        ) -> Result<f64, GprError> {
-            if params.len() != 2 || out.len() != 2 {
-                return Err(GprError::ShapeMismatch {
-                    reason: "quadratic is 2-D".to_owned(),
-                });
-            }
-            self.joint_evals += 1;
-            out[0] = params[0];
-            out[1] = params[1];
-            Ok(0.5 * (params[0] * params[0] + params[1] * params[1]))
-        }
-    }
-
-    #[test]
-    fn shared_point_uses_one_joint_eval() {
-        let mut obj = Quadratic { joint_evals: 0 };
-        let param = vec![0.3, -0.2];
-        {
-            let problem = CachedProblem {
-                inner: RefCell::new(EvalCache::new(&mut obj, 2)),
-            };
-            let cost = problem.cost(&param).expect("cost");
-            let grad = problem.gradient(&param).expect("grad");
-            assert_close(cost, 0.5 * (0.3 * 0.3 + 0.2 * 0.2), TOL);
-            assert_close(grad[0], 0.3, TOL);
-            assert_close(grad[1], -0.2, TOL);
-        }
-        assert_eq!(obj.joint_evals, 1);
-        {
-            let problem = CachedProblem {
-                inner: RefCell::new(EvalCache::new(&mut obj, 2)),
-            };
-            let other = vec![-1.0, 0.5];
-            let _ = problem.cost(&param).expect("cost");
-            let _ = problem.gradient(&param).expect("grad");
-            let _ = problem.cost(&other).expect("other");
-            let _ = problem.gradient(&other).expect("other grad");
-        }
-        assert_eq!(obj.joint_evals, 3);
-    }
 
     #[test]
     fn logit_mapped_hess_matches_finite_difference() {
@@ -662,30 +374,6 @@ mod tests {
         assert_close(out[0], x, TOL);
         let back = log_theta_to_z(&out, &[interval]).expect("z");
         assert_close(z_to_user(back[0], interval), x, TOL);
-    }
-
-    fn run(value: f64) -> OptResult {
-        OptResult {
-            params: vec![value],
-            value,
-            iterations: 1,
-        }
-    }
-
-    #[test]
-    fn keep_better_skips_non_finite_runs() {
-        let mut best = None;
-        keep_better(&mut best, run(f64::NAN));
-        assert!(best.is_none(), "a NaN run must not become the result");
-        keep_better(&mut best, run(f64::INFINITY));
-        assert!(best.is_none(), "an infinite run must not become the result");
-        keep_better(&mut best, run(2.0));
-        keep_better(&mut best, run(f64::NAN));
-        keep_better(&mut best, run(f64::NEG_INFINITY));
-        keep_better(&mut best, run(3.0));
-        keep_better(&mut best, run(1.0));
-        let kept = best.expect("a finite run");
-        assert_close(kept.value, 1.0, TOL);
     }
 
     #[test]
