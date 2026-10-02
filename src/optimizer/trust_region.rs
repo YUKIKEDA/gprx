@@ -1,29 +1,21 @@
 //! Trust-region optimizer (argmin `TrustRegion` with the Steihaug subproblem):
 //! the solver that uses the analytic Hessian.
 
-use std::cell::RefCell;
 use std::num::NonZeroU32;
 
 use argmin::core::{
-    CostFunction, Error as ArgminError, Executor, Gradient, Hessian, IterState, KV, Problem,
-    Solver, State, TerminationReason, TerminationStatus,
+    Error as ArgminError, IterState, KV, Problem, Solver, TerminationReason, TerminationStatus,
 };
 use argmin::solver::trustregion::{Steihaug, TrustRegion as ArgminTrustRegion};
 
 use crate::error::GprError;
 use crate::objective::TwiceDifferentiable;
-use crate::param::Interval;
 
-use super::logit::{
-    LogitMapped, best_value, keep_better, log_theta_to_z, sample_log_uniform_z, z_to_log_theta,
+use super::adapter::{
+    CachedProblem, EvalCache, RunEnd, WithHessian, best_value, consider_logit_run, run_argmin,
 };
+use super::logit::{log_theta_to_z, sample_log_uniform_z};
 use super::{OptResult, Optimizer, Restarts};
-
-/// Cost of a point that cannot be evaluated (out of the bounds, not finite,
-/// not positive definite): the ratio of actual to predicted reduction turns
-/// negative and the region shrinks. The same barrier the L-BFGS and
-/// nonlinear-CG adapters use.
-const BARRIER_COST: f64 = 1.0e300;
 
 /// Trust-region method with the Steihaug conjugate-gradient subproblem, via
 /// argmin. It uses the analytic Hessian ([`crate::TwiceDifferentiable`]).
@@ -145,33 +137,13 @@ impl<P: TwiceDifferentiable> Optimizer<P> for TrustRegion {
             self.restarts,
             log_theta_to_z,
             sample_log_uniform_z,
-            |objective, intervals, z, _restart, best| consider(self, objective, intervals, z, best),
+            |objective, intervals, z, _restart, best| {
+                consider_logit_run(objective, intervals, z, best, |mapped, z| {
+                    run_trust_region(self, mapped, z)
+                })
+            },
         )
     }
-}
-
-fn consider<P: TwiceDifferentiable>(
-    optimizer: &TrustRegion,
-    objective: &mut P,
-    intervals: &[Interval],
-    init_z: &[f64],
-    best: &mut Option<OptResult>,
-) -> Result<(), GprError> {
-    let mut mapped = LogitMapped {
-        inner: objective,
-        intervals,
-        log_scratch: vec![0.0; init_z.len()],
-    };
-    let run = run_trust_region(optimizer, &mut mapped, init_z)?;
-    keep_better(
-        best,
-        OptResult {
-            params: z_to_log_theta(&run.params, intervals)?,
-            value: run.value,
-            iterations: run.iterations,
-        },
-    );
-    Ok(())
 }
 
 fn run_trust_region<P: TwiceDifferentiable>(
@@ -180,18 +152,11 @@ fn run_trust_region<P: TwiceDifferentiable>(
     init: &[f64],
 ) -> Result<OptResult, GprError> {
     let n = objective.num_params();
-    if init.len() != n {
-        return Err(GprError::LengthMismatch {
-            reason: format!("expected {n} parameters, got {}", init.len()),
-        });
-    }
-    let mut cache = HessCache::new(objective, n);
+    super::require_params(init, n)?;
+    let mut cache = EvalCache::<_, WithHessian>::new(objective, n);
     // The start must be evaluable; an error there is the caller's, not a
     // failure to make progress.
-    cache.ensure(init)?;
-    let problem = TrustRegionProblem {
-        inner: RefCell::new(cache),
-    };
+    cache.try_eval(init)?;
     let subproblem = Steihaug::<Vec<f64>, f64>::new().with_max_iters(4 * n as u64 + 10);
     let inner = ArgminTrustRegion::new(subproblem)
         .with_radius(optimizer.initial_radius)
@@ -203,24 +168,16 @@ fn run_trust_region<P: TwiceDifferentiable>(
         inner,
         tolerance: optimizer.tolerance,
     };
-    let result = Executor::new(problem, solver)
-        .configure(|state| {
-            state
-                .param(init.to_vec())
-                .max_iters(optimizer.max_iterations)
-        })
-        .ctrlc(false)
-        .run()
-        .map_err(map_error)?;
-    let state = result.state();
-    let iterations = state.get_iter();
-    let params = state
-        .get_best_param()
-        .cloned()
-        .ok_or(GprError::OptimizationNotConverged {
-            iterations: iterations as usize,
-        })?;
-    let cost = state.get_best_cost();
+    let RunEnd {
+        params,
+        cost,
+        iterations,
+    } = run_argmin(
+        CachedProblem::new(cache),
+        solver,
+        init,
+        optimizer.max_iterations,
+    )?;
     let value = best_value(cost, iterations, || {
         let mut grad = vec![0.0; n];
         objective.value_and_gradient_into(&params, &mut grad)
@@ -230,15 +187,6 @@ fn run_trust_region<P: TwiceDifferentiable>(
         value,
         iterations,
     })
-}
-
-/// Failures of the solver (a subproblem or a numerical condition of argmin)
-/// are a failure to make progress; the objective's own errors keep their type.
-fn map_error(err: ArgminError) -> GprError {
-    match err.downcast_ref::<GprError>() {
-        Some(gpr) => gpr.clone(),
-        None => GprError::OptimizationNotConverged { iterations: 0 },
-    }
 }
 
 /// Stops on the gradient norm.
@@ -281,103 +229,6 @@ where
             }
         }
         self.inner.terminate(state)
-    }
-}
-
-/// The objective with the buffers of the last evaluation: value, gradient, and
-/// Hessian. A trust-region iteration evaluates one candidate, so the Hessian
-/// computed there is the one argmin asks for when it accepts the step, and a
-/// candidate whose Hessian cannot be computed is a bad step.
-struct HessCache<'a, P: ?Sized> {
-    objective: &'a mut P,
-    params: Vec<f64>,
-    value: Option<f64>,
-    grad: Vec<f64>,
-    hess: Vec<f64>,
-}
-
-impl<'a, P: TwiceDifferentiable + ?Sized> HessCache<'a, P> {
-    fn new(objective: &'a mut P, n: usize) -> Self {
-        Self {
-            objective,
-            params: Vec::new(),
-            value: None,
-            grad: vec![0.0; n],
-            hess: vec![0.0; n * n],
-        }
-    }
-
-    /// Value, gradient, and Hessian at `param`, into `self.grad` / `self.hess`.
-    fn ensure(&mut self, param: &[f64]) -> Result<f64, GprError> {
-        if let Some(value) = self.value {
-            if self.params.len() == param.len()
-                && self
-                    .params
-                    .iter()
-                    .zip(param)
-                    .all(|(a, b)| a.to_bits() == b.to_bits())
-            {
-                return Ok(value);
-            }
-        }
-        // The model's own error (for example an unsupported gradient) keeps
-        // its type; `cost` turns any failure here into a bad step.
-        self.value = None;
-        let value =
-            self.objective
-                .value_gradient_hessian_into(param, &mut self.grad, &mut self.hess)?;
-        if !value.is_finite()
-            || self.grad.iter().any(|g| !g.is_finite())
-            || self.hess.iter().any(|h| !h.is_finite())
-        {
-            self.value = None;
-            return Err(GprError::OptimizationNotConverged { iterations: 0 });
-        }
-        self.params.clear();
-        self.params.extend_from_slice(param);
-        self.value = Some(value);
-        Ok(value)
-    }
-}
-
-struct TrustRegionProblem<'a, P: ?Sized> {
-    inner: RefCell<HessCache<'a, P>>,
-}
-
-impl<P: TwiceDifferentiable + ?Sized> CostFunction for TrustRegionProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Output = f64;
-
-    fn cost(&self, param: &Self::Param) -> Result<Self::Output, ArgminError> {
-        // A point that cannot be evaluated is a bad step, not an error.
-        Ok(self
-            .inner
-            .borrow_mut()
-            .ensure(param)
-            .unwrap_or(BARRIER_COST))
-    }
-}
-
-impl<P: TwiceDifferentiable + ?Sized> Gradient for TrustRegionProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Gradient = Vec<f64>;
-
-    fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, ArgminError> {
-        let mut inner = self.inner.borrow_mut();
-        inner.ensure(param).map_err(ArgminError::from)?;
-        Ok(inner.grad.clone())
-    }
-}
-
-impl<P: TwiceDifferentiable + ?Sized> Hessian for TrustRegionProblem<'_, P> {
-    type Param = Vec<f64>;
-    type Hessian = Vec<Vec<f64>>;
-
-    fn hessian(&self, param: &Self::Param) -> Result<Self::Hessian, ArgminError> {
-        let mut inner = self.inner.borrow_mut();
-        inner.ensure(param).map_err(ArgminError::from)?;
-        let n = param.len();
-        Ok(inner.hess.chunks(n).map(<[f64]>::to_vec).collect())
     }
 }
 

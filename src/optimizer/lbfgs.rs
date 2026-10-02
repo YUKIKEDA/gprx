@@ -1,20 +1,18 @@
 //! Limited-memory BFGS via argmin.
 
-use std::cell::RefCell;
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use argmin::core::{Executor, State};
 use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
 
 use crate::error::GprError;
 use crate::objective::Differentiable;
-use crate::param::Interval;
 
-use super::logit::{
-    CachedProblem, EvalCache, LogitMapped, best_value, keep_better, log_theta_to_z,
-    map_argmin_error, sample_log_uniform_z, z_to_log_theta,
+use super::adapter::{
+    CachedProblem, EvalCache, RunEnd, WithGradient, best_value, consider_logit_run, run_argmin,
+    solver_config_error,
 };
+use super::logit::{log_theta_to_z, sample_log_uniform_z};
 use super::{OptResult, Optimizer, Restarts};
 
 /// Limited-memory BFGS via argmin.
@@ -119,34 +117,12 @@ impl<P: Differentiable> Optimizer<P> for Lbfgs {
             log_theta_to_z,
             sample_log_uniform_z,
             |objective, intervals, z, _restart, best| {
-                consider_run(self, objective, intervals, z, best)
+                consider_logit_run(objective, intervals, z, best, |mapped, z| {
+                    run_lbfgs(self, mapped, z)
+                })
             },
         )
     }
-}
-
-fn consider_run<P: Differentiable>(
-    lbfgs: &Lbfgs,
-    objective: &mut P,
-    intervals: &[Interval],
-    init_z: &[f64],
-    best: &mut Option<OptResult>,
-) -> Result<(), GprError> {
-    let mut mapped = LogitMapped {
-        inner: objective,
-        intervals,
-        log_scratch: vec![0.0; init_z.len()],
-    };
-    let run = run_lbfgs(lbfgs, &mut mapped, init_z)?;
-    keep_better(
-        best,
-        OptResult {
-            params: z_to_log_theta(&run.params, intervals)?,
-            value: run.value,
-            iterations: run.iterations,
-        },
-    );
-    Ok(())
 }
 
 fn run_lbfgs<P: Differentiable>(
@@ -155,34 +131,18 @@ fn run_lbfgs<P: Differentiable>(
     init: &[f64],
 ) -> Result<OptResult, GprError> {
     let n = objective.num_params();
-    if init.len() != n {
-        return Err(GprError::LengthMismatch {
-            reason: format!("expected {n} parameters, got {}", init.len()),
-        });
-    }
-    let problem = CachedProblem {
-        inner: RefCell::new(EvalCache::new(objective, n)),
-    };
+    super::require_params(init, n)?;
     let linesearch = MoreThuenteLineSearch::<Vec<f64>, Vec<f64>, f64>::new();
     let solver: LBFGS<_, Vec<f64>, Vec<f64>, f64> =
         LBFGS::new(linesearch, lbfgs.history_size.get())
             .with_tolerance_grad(lbfgs.tolerance)
-            .map_err(map_argmin_error)?;
-    let (params, cost, iterations) =
-        {
-            let result = Executor::new(problem, solver)
-                .configure(|state| state.param(init.to_vec()).max_iters(lbfgs.max_iterations))
-                .ctrlc(false)
-                .run()
-                .map_err(map_argmin_error)?;
-            let state = result.state();
-            let params = state.get_best_param().cloned().ok_or_else(|| {
-                GprError::OptimizationNotConverged {
-                    iterations: state.get_iter() as usize,
-                }
-            })?;
-            (params, state.get_best_cost(), state.get_iter())
-        };
+            .map_err(solver_config_error)?;
+    let problem = CachedProblem::new(EvalCache::<_, WithGradient>::new(objective, n));
+    let RunEnd {
+        params,
+        cost,
+        iterations,
+    } = run_argmin(problem, solver, init, lbfgs.max_iterations)?;
     let value = best_value(cost, iterations, || {
         let mut grad = vec![0.0; n];
         objective.value_and_gradient_into(&params, &mut grad)
