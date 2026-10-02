@@ -1,18 +1,17 @@
 //! Nelder–Mead via argmin. Uses [`Objective::value`] only.
 
-use std::cell::RefCell;
 use std::num::NonZeroU32;
 
-use argmin::core::{Executor, State};
 use argmin::solver::neldermead::NelderMead as ArgminNelderMead;
 
 use crate::error::GprError;
 use crate::objective::Objective;
 
-use super::logit::{
-    ValueCache, ValueProblem, best_value, consider_value_run, log_theta_to_z, map_argmin_error,
-    sample_log_uniform_z,
+use super::adapter::{
+    CachedProblem, EvalCache, RunEnd, ValueOnly, best_value, consider_logit_run, run_argmin,
+    solver_config_error,
 };
+use super::logit::{log_theta_to_z, sample_log_uniform_z};
 use super::{OptResult, Optimizer, Restarts};
 
 /// Nelder–Mead via argmin. Uses [`Objective::value`] only.
@@ -104,7 +103,7 @@ impl<P: Objective> Optimizer<P> for NelderMead {
             log_theta_to_z,
             sample_log_uniform_z,
             |objective, intervals, z, _restart, best| {
-                consider_value_run(objective, intervals, z, best, |mapped, z| {
+                consider_logit_run(objective, intervals, z, best, |mapped, z| {
                     run_neldermead(self, mapped, z)
                 })
             },
@@ -118,34 +117,17 @@ fn run_neldermead<P: Objective>(
     init: &[f64],
 ) -> Result<OptResult, GprError> {
     let n = objective.num_params();
-    if init.len() != n {
-        return Err(GprError::LengthMismatch {
-            reason: format!("expected {n} parameters, got {}", init.len()),
-        });
-    }
-    let problem = ValueProblem {
-        inner: RefCell::new(ValueCache::new(objective)),
-    };
-    let simplex = initial_simplex(init);
-    let solver = ArgminNelderMead::new(simplex)
+    super::require_params(init, n)?;
+    let solver = ArgminNelderMead::new(initial_simplex(init))
         .with_sd_tolerance(nm.tolerance)
-        .map_err(map_argmin_error)?;
-    let (params, value, iterations) =
-        {
-            let result = Executor::new(problem, solver)
-                .configure(|state| state.param(init.to_vec()).max_iters(nm.max_iterations))
-                .ctrlc(false)
-                .run()
-                .map_err(map_argmin_error)?;
-            let state = result.state();
-            let params = state.get_best_param().cloned().ok_or_else(|| {
-                GprError::OptimizationNotConverged {
-                    iterations: state.get_iter() as usize,
-                }
-            })?;
-            (params, state.get_best_cost(), state.get_iter())
-        };
-    let value = best_value(value, iterations, || objective.value(&params))?;
+        .map_err(solver_config_error)?;
+    let problem = CachedProblem::new(EvalCache::<_, ValueOnly>::new(objective, n));
+    let RunEnd {
+        params,
+        cost,
+        iterations,
+    } = run_argmin(problem, solver, init, nm.max_iterations)?;
+    let value = best_value(cost, iterations, || objective.value(&params))?;
     Ok(OptResult {
         params,
         value,

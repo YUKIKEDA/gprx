@@ -1,15 +1,17 @@
 //! VFE predictive mean and variance.
 
 use super::lit;
-use crate::error::{CholeskyStage, GprError};
-use crate::kernel::GramInputs;
-use crate::kernel::ScalarOps;
+use crate::error::GprError;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
-use crate::linalg::{cholesky_lower_with_backup, solve_lower};
+use crate::kernel::{GramInputs, ScalarOps};
+use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::{DoublePrecision, ModelPrecision};
-use crate::sparse::{PredictBuffers, PredictScratch, SparseCore, pack_into, view};
-use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
+use crate::sparse::{
+    F64System, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
+    reset_prediction, view,
+};
+use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use faer::{Mat, MatRef};
 
 /// The fitted VFE system a prediction reads, in transformed units.
@@ -93,45 +95,17 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
     scratch: &mut PredictScratch<P::Storage>,
     out: &mut Prediction<P::Refine>,
 ) -> Result<(), GprError> {
-    let zero = P::Refine::from_f64(0.0);
-    out.mean.clear();
-    out.mean.resize(n_rows, zero);
-    out.variance.clear();
-    out.variance.resize(n_rows, zero);
-    out.variance_kind = options.variance_kind;
+    reset_prediction(out, n_rows, options.variance_kind);
     let (m, d) = (sys.m, sys.d);
     let kind = options.variance_kind;
     if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let PredictScratch {
-            plan64,
-            f64: bufs,
-            k_mm64,
-            k_mm64_backup,
-            llt64,
+        let F64System {
+            compiled,
+            bufs,
+            k_mm_l,
             b_l64,
             w64,
-            ..
-        } = scratch;
-        let compiled = plan64.get(sys.kernel);
-        if k_mm64.nrows() != m || k_mm64.ncols() != m {
-            *k_mm64 = Mat::zeros(m, m);
-        }
-        {
-            let z64 = pack_into(&mut bufs.z, sys.z, m, d);
-            bufs.kernel.gram::<M>(
-                compiled,
-                GramInputs::points(z64.as_ref()),
-                k_mm64.as_mut(),
-                Triangle::Lower,
-            )?;
-        }
-        cholesky_lower_with_backup(
-            k_mm64,
-            k_mm64_backup,
-            PredictScratch::<P::Storage>::llt64(llt64, m),
-            sys.k_mm_jitter.retry_jitters(),
-            CholeskyStage::Predict,
-        )?;
+        } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter)?;
         let mut b64 = view(b_l64, m, m);
         for col in 0..m {
             for row in 0..m {
@@ -149,13 +123,14 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
             d,
             xs,
             n_rows,
-            k_mm64.as_ref(),
+            k_mm_l,
             b_l64.as_ref().submatrix(0, 0, m, m),
             sys.noise,
             |col, column, latent| {
                 let mean = <DoublePrecision as ModelPrecision>::mean_dot(column, w64);
                 out.mean[col] = P::Refine::from_f64(mean);
-                out.variance[col] = P::Refine::from_f64(variance(latent, sys.noise, kind));
+                out.variance[col] =
+                    P::Refine::from_f64(predictive_variance(latent, sys.noise, kind));
             },
         );
     }
@@ -178,17 +153,10 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
         sys.noise,
         |col, column, latent| {
             out.mean[col] = P::mean_dot(column, sys.predict_w);
-            out.variance[col] = P::Refine::from_f64(variance(latent.to_f64(), sys.noise, kind));
+            out.variance[col] =
+                P::Refine::from_f64(predictive_variance(latent.to_f64(), sys.noise, kind));
         },
     )
-}
-
-/// Latent or observation variance from the clamped latent variance.
-fn variance(latent: f64, noise: f64, kind: VarianceKind) -> f64 {
-    match kind {
-        VarianceKind::Latent => latent,
-        VarianceKind::Observation => latent + noise,
-    }
 }
 
 /// For each query column: `a* = L_mm⁻¹ k(Z, x*)` and the latent variance
