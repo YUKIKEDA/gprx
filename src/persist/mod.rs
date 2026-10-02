@@ -19,6 +19,7 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::{GaussianLikelihood, PredictOptions, Prediction};
 
 use crate::kernel::ScalarOps;
+use crate::precision::PersistKind;
 use config::{
     DistanceCacheJson, FactorKind, JitterJson, LikelihoodJson, MathJson, ModelConfig,
     PrecisionJson, ResidualJson,
@@ -331,7 +332,7 @@ where
 struct ExactSave<'a> {
     n: usize,
     d: usize,
-    kind: crate::precision::PersistKind,
+    kind: PersistKind,
     factor_kind: FactorKind,
     policies: Policies,
     kernel: &'a KernelSpec,
@@ -550,8 +551,9 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
     config::parse_model(&bytes, &[config::ModelJson::Exact])?;
     let config = config::parse_config(&bytes)?;
-    match (config.precision, config.residual) {
-        (PrecisionJson::Double, _) => load_precision(
+    // Each arm names its own precision type, so the call stays in the arm.
+    match config.persist_kind() {
+        PersistKind::Double => load_precision(
             dir,
             registry,
             config,
@@ -560,7 +562,7 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                 online: LoadedGpr::OnlineDouble,
             },
         ),
-        (PrecisionJson::Single, _) => load_precision(
+        PersistKind::Single => load_precision(
             dir,
             registry,
             config,
@@ -569,7 +571,7 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                 online: LoadedGpr::OnlineSingle,
             },
         ),
-        (PrecisionJson::Mixed, ResidualJson::PromoteStorage) => load_precision(
+        PersistKind::MixedPromote => load_precision(
             dir,
             registry,
             config,
@@ -578,7 +580,7 @@ fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprErro
                 online: LoadedGpr::OnlineMixed,
             },
         ),
-        (PrecisionJson::Mixed, ResidualJson::ReevaluateKernel) => load_precision(
+        PersistKind::MixedReevaluate => load_precision(
             dir,
             registry,
             config,
