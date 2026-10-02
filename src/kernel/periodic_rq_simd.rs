@@ -7,13 +7,12 @@
 //! `wide`'s `sin`, `cos`, `ln`, and `exp` may differ from libm by a few ULP.
 //! The rational quadratic `u^{-α}` is `exp(−α ln u)` here.
 
-use super::dist::{col_chunk, worker_count};
+use super::dist::{par_lower_blocks, worker_count};
 use super::{KernelScalar, Triangle, require_square_pair};
 use crate::error::GprError;
 use crate::math::{KernelMath, f64x4_all_finite};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
-use rayon::prelude::*;
 use wide::f64x4;
 
 const LANES: usize = 4;
@@ -150,16 +149,12 @@ fn try_map_square<T: KernelScalar>(
         f(&src[start..end], &mut dest[start..end])
     };
     if matches!(uplo, Triangle::Lower) {
-        let n_parts = worker_count();
-        out.par_col_partition_mut(n_parts)
-            .enumerate()
-            .try_for_each(|(chunk_idx, mut part)| {
-                let (start, len) = col_chunk(n, chunk_idx, n_parts);
-                for local in 0..len {
-                    column(start + local, col_slice_mut(part.rb_mut(), local))?;
-                }
-                Ok::<(), GprError>(())
-            })?;
+        par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
+            for local in 0..part.ncols() {
+                column(start + local, col_slice_mut(part.rb_mut(), local))?;
+            }
+            Ok::<(), GprError>(())
+        })?;
     } else {
         for col in 0..n {
             column(col, col_slice_mut(out.rb_mut(), col))?;

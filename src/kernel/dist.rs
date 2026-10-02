@@ -29,6 +29,81 @@ pub(crate) fn col_chunk(n: usize, idx: usize, n_chunks: usize) -> (usize, usize)
     (begin, start(idx + 1) - begin)
 }
 
+/// Entries of the lower triangle (diagonal included) in columns `[0, c)` of
+/// an `n × n` matrix: `c n − c (c − 1) / 2`.
+fn lower_area(n: usize, c: usize) -> u128 {
+    let (n, c) = (n as u128, c as u128);
+    c * n - c * c.saturating_sub(1) / 2
+}
+
+/// First column of block `idx` of `n_blocks` whose lower triangles hold
+/// about equal entries: the `c` whose `lower_area(c) · n_blocks` is nearest
+/// `idx · lower_area(n)`, so two blocks differ by at most one column's
+/// entries. Block `n_blocks` starts at `n`.
+pub(crate) fn lower_block_start(n: usize, idx: usize, n_blocks: usize) -> usize {
+    let n_blocks = n_blocks.max(1);
+    if idx >= n_blocks {
+        return n;
+    }
+    let target = idx as u128 * lower_area(n, n);
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if lower_area(n, mid) * n_blocks as u128 >= target {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    // `lo` is the first column at or past the target; the one before may be nearer.
+    let k = n_blocks as u128;
+    if lo > 0 && target - lower_area(n, lo - 1) * k < lower_area(n, lo) * k - target {
+        lo - 1
+    } else {
+        lo
+    }
+}
+
+/// Runs `f(first_col, block)` on the Rayon pool over `n_blocks` column
+/// blocks of the square `out` whose lower triangles hold about equal
+/// entries ([`lower_block_start`]). Splits by halving, so nothing is
+/// allocated. Returns the first error of the left-most failing block.
+pub(crate) fn par_lower_blocks<T, E, F>(out: MatMut<'_, T>, n_blocks: usize, f: &F) -> Result<(), E>
+where
+    T: Send,
+    E: Send,
+    F: Fn(usize, MatMut<'_, T>) -> Result<(), E> + Sync,
+{
+    let n = out.ncols();
+    let n_blocks = n_blocks.max(1);
+    split_lower_blocks(out, n, (0, n_blocks), n_blocks, f)
+}
+
+fn split_lower_blocks<T, E, F>(
+    block: MatMut<'_, T>,
+    n: usize,
+    (lo, hi): (usize, usize),
+    n_blocks: usize,
+    f: &F,
+) -> Result<(), E>
+where
+    T: Send,
+    E: Send,
+    F: Fn(usize, MatMut<'_, T>) -> Result<(), E> + Sync,
+{
+    let start = lower_block_start(n, lo, n_blocks);
+    if hi - lo <= 1 {
+        return f(start, block);
+    }
+    let mid = lo + (hi - lo) / 2;
+    let (left, right) = block.split_at_col_mut(lower_block_start(n, mid, n_blocks) - start);
+    let (a, b) = rayon::join(
+        || split_lower_blocks(left, n, (lo, mid), n_blocks, f),
+        || split_lower_blocks(right, n, (mid, hi), n_blocks, f),
+    );
+    a.and(b)
+}
+
 fn partition_count(thread_scratch: &[Mat<f64>]) -> usize {
     if thread_scratch.is_empty() {
         worker_count()
@@ -54,22 +129,10 @@ pub(crate) fn fill_squared_euclidean(
         return;
     }
     let n_parts = partition_count(thread_scratch);
-    if thread_scratch.is_empty() {
-        dist.rb_mut()
-            .par_col_partition_mut(n_parts)
-            .enumerate()
-            .for_each(|(chunk_idx, part)| {
-                fill_lower_chunk(x, part, chunk_idx, n_parts);
-            });
-    } else {
-        dist.rb_mut()
-            .par_col_partition_mut(n_parts)
-            .zip(thread_scratch.par_iter_mut())
-            .enumerate()
-            .for_each(|(chunk_idx, (part, _scratch))| {
-                fill_lower_chunk(x, part, chunk_idx, n_parts);
-            });
-    }
+    let _ = par_lower_blocks(dist.rb_mut(), n_parts, &|start, part| {
+        fill_lower_chunk(x, part, start);
+        Ok::<(), ()>(())
+    });
     copy_lower_to_upper(dist);
 }
 
@@ -276,17 +339,11 @@ pub(crate) fn fill_squared_euclidean_cross(
     }
 }
 
-fn fill_lower_chunk(
-    x: MatRef<'_, f64>,
-    mut dist_chunk: MatMut<'_, f64>,
-    chunk_idx: usize,
-    n_chunks: usize,
-) {
+fn fill_lower_chunk(x: MatRef<'_, f64>, mut dist_chunk: MatMut<'_, f64>, start: usize) {
     let n = x.nrows();
     let d = x.ncols();
-    let (start, len) = col_chunk(n, chunk_idx, n_chunks);
-    debug_assert_eq!(dist_chunk.ncols(), len);
-    if try_fill_lower_chunk(x, dist_chunk.rb_mut(), chunk_idx, n_chunks) {
+    let len = dist_chunk.ncols();
+    if try_fill_lower_chunk(x, dist_chunk.rb_mut(), start) {
         return;
     }
     for local in 0..len {
@@ -426,6 +483,64 @@ mod tests {
                     covered += len;
                 }
                 assert_eq!(covered, n, "n={n} chunks={chunks}");
+            }
+        }
+    }
+
+    #[test]
+    fn lower_blocks_cover_every_column_once_with_balanced_area() {
+        for n in [0, 1, 2, 3, 7, 64, 550, 1001] {
+            for blocks in [1, 2, 3, 4, 8, 16, 37] {
+                let starts: Vec<usize> = (0..=blocks)
+                    .map(|i| super::lower_block_start(n, i, blocks))
+                    .collect();
+                assert_eq!(starts[0], 0);
+                assert_eq!(starts[blocks], n);
+                assert!(
+                    starts.windows(2).all(|w| w[0] <= w[1]),
+                    "n={n} blocks={blocks}"
+                );
+                let areas: Vec<u128> = starts
+                    .windows(2)
+                    .map(|w| super::lower_area(n, w[1]) - super::lower_area(n, w[0]))
+                    .collect();
+                // Each boundary is the column nearest its share, so every
+                // block is within one column (≤ n entries) of the even share.
+                let (k, total) = (blocks as u128, super::lower_area(n, n));
+                for area in &areas {
+                    assert!(
+                        (area * k).abs_diff(total) <= n as u128 * k,
+                        "n={n} blocks={blocks} areas={areas:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn par_lower_blocks_hands_every_column_to_one_block() {
+        for n in [1, 5, 9, 130] {
+            for blocks in [1, 3, 4, 16] {
+                let mut out = Mat::<f64>::zeros(n, n);
+                super::par_lower_blocks(out.as_mut(), blocks, &|start,
+                                                                mut part: faer::MatMut<
+                    '_,
+                    f64,
+                >| {
+                    for local in 0..part.ncols() {
+                        for row in start + local..n {
+                            part[(row, local)] += (start + local) as f64 + 1.0;
+                        }
+                    }
+                    Ok::<(), ()>(())
+                })
+                .expect("infallible");
+                for col in 0..n {
+                    for row in 0..n {
+                        let want = if row >= col { col as f64 + 1.0 } else { 0.0 };
+                        assert_eq!(out[(row, col)].to_bits(), want.to_bits());
+                    }
+                }
             }
         }
     }
