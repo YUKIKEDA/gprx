@@ -5,7 +5,7 @@
 //! ARD caches store raw `(Δx_d)²` as packed lower triangles
 //! ([`super::dist::ArdSqDiff`]); each cached column holds rows `col..n`.
 
-use super::dist::{ArdSqDiff, col_chunk, worker_count};
+use super::dist::{ArdSqDiff, col_chunk, par_lower_blocks, worker_count};
 use super::{Triangle, finite_dist, require_same_shape, require_square_pair};
 use crate::error::GprError;
 use crate::math::{FastApprox, KernelMath, MathOps, f64x4_all_finite};
@@ -221,15 +221,13 @@ fn rbf_grad_slice_fast(
 pub(crate) fn try_fill_lower_chunk(
     x: MatRef<'_, f64>,
     mut dist_chunk: MatMut<'_, f64>,
-    chunk_idx: usize,
-    n_chunks: usize,
+    start: usize,
 ) -> bool {
     if !unit_row_stride(x) {
         return false;
     }
-    let n = x.nrows();
     let d = x.ncols();
-    let (start, len) = col_chunk(n, chunk_idx, n_chunks);
+    let len = dist_chunk.ncols();
     if len > 0 && col_slice_mut(dist_chunk.rb_mut(), 0).is_none() {
         return false;
     }
@@ -347,41 +345,37 @@ fn rbf_lower_parallel<M: KernelMath>(
     inv_ell_sq: Option<f64>,
 ) -> Result<(), GprError> {
     let n = dist.nrows();
-    let n_parts = worker_count();
-    out.par_col_partition_mut(n_parts)
-        .enumerate()
-        .try_for_each(|(chunk_idx, mut part)| {
-            let (start, len) = col_chunk(n, chunk_idx, n_parts);
-            for local in 0..len {
-                let col = start + local;
-                match inv_ell_sq {
-                    None => apply_rbf_range::<M>(
-                        dist,
-                        part.rb_mut(),
-                        ColWindow {
-                            dist_col: col,
-                            out_col: local,
-                            row_start: col,
-                            row_end: n,
-                        },
-                        inv_two_ell_sq,
-                    )?,
-                    Some(inv_ell) => grad_rbf_range::<M>(
-                        dist,
-                        part.rb_mut(),
-                        ColWindow {
-                            dist_col: col,
-                            out_col: local,
-                            row_start: col,
-                            row_end: n,
-                        },
-                        inv_two_ell_sq,
-                        inv_ell,
-                    )?,
-                }
+    par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, f64>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            match inv_ell_sq {
+                None => apply_rbf_range::<M>(
+                    dist,
+                    part.rb_mut(),
+                    ColWindow {
+                        dist_col: col,
+                        out_col: local,
+                        row_start: col,
+                        row_end: n,
+                    },
+                    inv_two_ell_sq,
+                )?,
+                Some(inv_ell) => grad_rbf_range::<M>(
+                    dist,
+                    part.rb_mut(),
+                    ColWindow {
+                        dist_col: col,
+                        out_col: local,
+                        row_start: col,
+                        row_end: n,
+                    },
+                    inv_two_ell_sq,
+                    inv_ell,
+                )?,
             }
-            Ok::<(), GprError>(())
-        })
+        }
+        Ok::<(), GprError>(())
+    })
 }
 
 /// Writes isotropic RBF `exp(-d / (2ℓ²))` when `dist`/`out` are column-major.
@@ -820,29 +814,25 @@ fn rbf_ard_lower_parallel<M: KernelMath>(
     param_idx: Option<usize>,
 ) -> Result<(), GprError> {
     let n = out.nrows();
-    let n_parts = worker_count();
-    out.par_col_partition_mut(n_parts)
-        .enumerate()
-        .try_for_each(|(chunk_idx, mut part)| {
-            let (start, len) = col_chunk(n, chunk_idx, n_parts);
-            for local in 0..len {
-                let col = start + local;
-                map_ard_column::<M>(
-                    cache,
-                    x,
-                    part.rb_mut(),
-                    ColWindow {
-                        dist_col: col,
-                        out_col: local,
-                        row_start: col,
-                        row_end: n,
-                    },
-                    inv_ell_sq,
-                    param_idx,
-                )?;
-            }
-            Ok::<(), GprError>(())
-        })
+    par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, f64>| {
+        for local in 0..part.ncols() {
+            let col = start + local;
+            map_ard_column::<M>(
+                cache,
+                x,
+                part.rb_mut(),
+                ColWindow {
+                    dist_col: col,
+                    out_col: local,
+                    row_start: col,
+                    row_end: n,
+                },
+                inv_ell_sq,
+                param_idx,
+            )?;
+        }
+        Ok::<(), GprError>(())
+    })
 }
 
 fn rbf_ard_serial_uplo<M: KernelMath>(
