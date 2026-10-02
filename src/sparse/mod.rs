@@ -423,59 +423,62 @@ fn stage_theta(
 }
 
 /// Public read accessors of a fitted sparse model, from its `core:
-/// SparseCore` field. One set of docs for [`crate::FittedSgpr`],
+/// SparseCore` field (or the field path given, such as `state.core`). One set of docs for [`crate::FittedSgpr`],
 /// [`crate::OnlineSgpr`], and [`crate::FittedSvgp`].
 macro_rules! sparse_core_accessors {
     () => {
+        $crate::sparse::sparse_core_accessors!(core);
+    };
+    ($($core:ident).+) => {
         /// Returns the number of training points.
         pub fn n(&self) -> usize {
-            self.core.n
+            self.$($core).+.n
         }
 
         /// Returns the number of inducing points.
         pub fn m(&self) -> usize {
-            self.core.m
+            self.$($core).+.m
         }
 
         /// Returns the feature dimension.
         pub fn d(&self) -> usize {
-            self.core.d
+            self.$($core).+.d
         }
 
         /// Returns the kernel whose hyperparameters this model owns.
         pub fn kernel(&self) -> &$crate::kernel::KernelSpec {
-            &self.core.kernel
+            &self.$($core).+.kernel
         }
 
         /// Returns the observation-noise model.
         pub fn likelihood(&self) -> &$crate::GaussianLikelihood {
-            &self.core.likelihood
+            &self.$($core).+.likelihood
         }
 
         /// Returns the jitter retries used when `K_mm` fails to factor.
         pub fn jitter_policy(&self) -> $crate::JitterPolicy {
-            self.core.jitter
+            self.$($core).+.jitter
         }
 
         /// Returns the kernel `exp` mode the trainer set with `with_math`.
         pub fn math(&self) -> $crate::KernelExp {
-            self.core.math
+            self.$($core).+.math
         }
 
         /// Returns the original training features in column-major order.
         pub fn x(&self) -> &[f64] {
-            &self.core.x_obs
+            &self.$($core).+.x_obs
         }
 
         /// Returns the inducing features in column-major order, in the
         /// original coordinates of `X`.
         pub fn z(&self) -> &[f64] {
-            &self.core.z_obs
+            &self.$($core).+.z_obs
         }
 
         /// Returns the original training targets.
         pub fn y(&self) -> &[f64] {
-            &self.core.y_obs
+            &self.$($core).+.y_obs
         }
     };
 }
