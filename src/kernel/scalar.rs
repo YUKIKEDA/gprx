@@ -53,6 +53,9 @@ pub(crate) mod sealed {
         /// This slice as `f64` when the scalar is `f64`, for the SIMD paths.
         fn as_f64_slice(values: &[Self]) -> Option<&[f64]>;
 
+        /// [`Self::as_f64_slice`] for a mutable slice.
+        fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]>;
+
         fn empty_rows() -> Self::RowCast;
 
         fn empty_cols() -> Self::ColCast;
@@ -290,6 +293,10 @@ impl sealed::ScalarOps for f64 {
         Some(values)
     }
 
+    fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]> {
+        Some(values)
+    }
+
     fn empty_rows() -> Self::RowCast {}
 
     fn empty_cols() -> Self::ColCast {}
@@ -410,6 +417,10 @@ impl sealed::ScalarOps for f32 {
     }
 
     fn as_f64_slice(_values: &[Self]) -> Option<&[f64]> {
+        None
+    }
+
+    fn as_f64_slice_mut(_values: &mut [Self]) -> Option<&mut [f64]> {
         None
     }
 

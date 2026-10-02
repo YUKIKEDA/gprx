@@ -2,10 +2,8 @@
 
 use super::dist::{lower_col, par_lower_fold};
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::scalar::f64_pair;
-use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
-use super::stationary_simd::{
-    RbfScales, try_apply_rbf_cross as try_apply_rbf_cross_lanes, try_square_rbf,
+use super::simd::stationary::{
+    RbfScales, try_apply_rbf_cross, try_grad_rbf_cross_from_coords, try_square_rbf,
 };
 use super::{
     KernelScalar, Triangle, finite_dist, write_dense, write_rect_from_coords,
@@ -16,7 +14,6 @@ use crate::math::{Accurate, ExpJet, KernelMath};
 use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
-use wide::f64x4;
 
 /// Isotropic RBF: `k = exp( -‖x-x'‖² / (2ℓ²) )`.
 ///
@@ -149,16 +146,10 @@ impl RbfKernel {
         mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
-        let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        if let Some((d, o)) = f64_pair(dist, out.rb_mut())
-            && try_apply_rbf::<M>(d, o, uplo, inv_two_ell_sq)?
-        {
-            return Ok(());
-        }
         if try_square_rbf::<M, T>(dist, out.rb_mut(), uplo, self.lane_scales(), false)? {
             return Ok(());
         }
-        let inv_two_ell_sq = T::from_f64(inv_two_ell_sq);
+        let inv_two_ell_sq = T::from_f64(self.lane_scales().half_inv_ell_sq);
         write_triangle(dist, out, uplo, |d| {
             rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq)
         })
@@ -183,16 +174,10 @@ impl RbfKernel {
         dist: MatRef<'_, T>,
         mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        let inv_two_ell_sq = 0.5 / (self.lengthscale() * self.lengthscale());
-        if let Some((d, o)) = f64_pair(dist, out.rb_mut())
-            && try_apply_rbf_cross::<M>(d, o, inv_two_ell_sq)?
-        {
+        if try_apply_rbf_cross::<M, T>(dist, out.rb_mut(), self.lane_scales())? {
             return Ok(());
         }
-        if try_apply_rbf_cross_lanes::<M, T>(dist, out.rb_mut(), self.lane_scales())? {
-            return Ok(());
-        }
-        let inv_two_ell_sq = T::from_f64(inv_two_ell_sq);
+        let inv_two_ell_sq = T::from_f64(self.lane_scales().half_inv_ell_sq);
         write_dense(dist, out, |d| rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq))
     }
 
@@ -227,16 +212,10 @@ impl RbfKernel {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         require_rbf_param_idx(param_idx)?;
-        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales();
-        if let Some((d, o)) = f64_pair(dist, d_k.rb_mut())
-            && try_grad_rbf::<M>(d, o, uplo, inv_two_ell_sq, inv_ell_sq)?
-        {
-            return Ok(());
-        }
         if try_square_rbf::<M, T>(dist, d_k.rb_mut(), uplo, self.lane_scales(), true)? {
             return Ok(());
         }
-        let (inv_two_ell_sq, inv_ell_sq) = (T::from_f64(inv_two_ell_sq), T::from_f64(inv_ell_sq));
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
         write_triangle(dist, d_k, uplo, |d| {
             rbf_grad_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
         })
@@ -357,11 +336,10 @@ impl RbfKernel {
     ) -> Result<(), GprError> {
         require_rbf_param_idx(param_idx)?;
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
-        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales();
-        if try_grad_rbf_cross::<M, T>(x1, x2, d_k.rb_mut(), inv_two_ell_sq, inv_ell_sq)? {
+        if try_grad_rbf_cross_from_coords::<M, T>(x1, x2, d_k.rb_mut(), self.lane_scales())? {
             return Ok(());
         }
-        let (inv_two_ell_sq, inv_ell_sq) = (T::from_f64(inv_two_ell_sq), T::from_f64(inv_ell_sq));
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
         super::write_rect(d_k, |row, col| {
             let (jet, _, s) = rbf_pair_with_s::<M, _>(x1, row, x2, col, 0, inv_two_ell_sq)?;
             Ok(jet.d1 * s * inv_ell_sq)
@@ -461,136 +439,6 @@ impl RbfKernel {
     fn inv_scales_t<T: KernelScalar>(&self) -> (T, T) {
         let (half, full) = self.inv_scales();
         (T::from_f64(half), T::from_f64(full))
-    }
-}
-
-/// `∂k/∂θ = k s / ℓ²` on a rectangular pair. Stays off the square Gram helpers.
-///
-/// `f32` storage is widened to `f64` lanes and rounded once on the store.
-fn try_grad_rbf_cross<M: KernelMath, T: KernelScalar>(
-    x1: MatRef<'_, T>,
-    x2: MatRef<'_, T>,
-    mut d_k: MatMut<'_, T>,
-    inv_two_ell_sq: f64,
-    inv_ell_sq: f64,
-) -> Result<bool, GprError> {
-    let m = x1.nrows();
-    let n = x2.nrows();
-    let d = x1.ncols();
-    if d == 0 || x2.ncols() != d || d_k.nrows() != m || d_k.ncols() != n {
-        return Ok(false);
-    }
-    if !unit_cols(x1) || !unit_cols(x2) || !unit_cols(d_k.as_ref()) {
-        return Ok(false);
-    }
-    for dim in 0..d {
-        finite_slice(col_slice(x1, dim)?)?;
-        finite_slice(col_slice(x2, dim)?)?;
-    }
-    // Columns in stack chunks, so the gradient of a mini-batch step does not
-    // allocate.
-    const CHUNK: usize = 256;
-    let mut s_buf = [0.0f64; CHUNK];
-    let mut dk_buf = [0.0f64; CHUNK];
-    let neg = f64x4::new([-inv_two_ell_sq; 4]);
-    let scale = f64x4::new([inv_ell_sq; 4]);
-    let mut start = 0;
-    while start < n {
-        let len = CHUNK.min(n - start);
-        let s = &mut s_buf[..len];
-        let dk = &mut dk_buf[..len];
-        for row in 0..m {
-            s.fill(0.0);
-            for dim in 0..d {
-                let z = col_slice(x1, dim)?[row].to_f64();
-                add_squared(&col_slice(x2, dim)?[start..start + len], z, s);
-            }
-            let mut i = 0;
-            while i + 4 <= len {
-                let sv = load4(s, i);
-                let value = M::d1_f64x4(sv * neg) * sv * scale;
-                if !all_finite4(value) {
-                    return Err(GprError::NonFiniteKernelValue);
-                }
-                store4(dk, i, value);
-                i += 4;
-            }
-            while i < len {
-                let d1 = M::jet(-s[i] * inv_two_ell_sq).d1;
-                let value = d1 * s[i] * inv_ell_sq;
-                if !value.is_finite() {
-                    return Err(GprError::NonFiniteKernelValue);
-                }
-                dk[i] = value;
-                i += 1;
-            }
-            for (col, value) in dk.iter().enumerate() {
-                d_k[(row, start + col)] = T::from_f64(*value);
-            }
-        }
-        start += len;
-    }
-    Ok(true)
-}
-
-fn unit_cols<T: KernelScalar>(mat: MatRef<'_, T>) -> bool {
-    mat.ncols() == 0 || mat.col(0).try_as_col_major().is_some()
-}
-
-fn col_slice<'a, T: KernelScalar>(mat: MatRef<'a, T>, col: usize) -> Result<&'a [T], GprError> {
-    mat.col(col)
-        .try_as_col_major()
-        .map(|c| c.as_slice())
-        .ok_or_else(|| GprError::UnsupportedKernelOperation {
-            reason: "expected unit row-stride for RBF cross grad".to_owned(),
-        })
-}
-
-fn finite_slice<T: KernelScalar>(values: &[T]) -> Result<(), GprError> {
-    if values.iter().all(|v| v.is_finite()) {
-        Ok(())
-    } else {
-        Err(GprError::NonFiniteInput)
-    }
-}
-
-fn load4(src: &[f64], i: usize) -> f64x4 {
-    f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
-}
-
-fn store4(dest: &mut [f64], i: usize, v: f64x4) {
-    let a = v.to_array();
-    dest[i] = a[0];
-    dest[i + 1] = a[1];
-    dest[i + 2] = a[2];
-    dest[i + 3] = a[3];
-}
-
-fn all_finite4(v: f64x4) -> bool {
-    let a = v.to_array();
-    a[0].is_finite() && a[1].is_finite() && a[2].is_finite() && a[3].is_finite()
-}
-
-/// Adds `(x[i] − x0)²` into `acc[i]` in `f64`.
-fn add_squared<T: KernelScalar>(x: &[T], x0: f64, acc: &mut [f64]) {
-    let x0v = f64x4::new([x0; 4]);
-    let mut i = 0;
-    while i + 4 <= x.len() {
-        let xv = f64x4::new([
-            x[i].to_f64(),
-            x[i + 1].to_f64(),
-            x[i + 2].to_f64(),
-            x[i + 3].to_f64(),
-        ]);
-        let d = xv - x0v;
-        let av = load4(acc, i);
-        store4(acc, i, av + d * d);
-        i += 4;
-    }
-    while i < x.len() {
-        let d = x[i].to_f64() - x0;
-        acc[i] += d * d;
-        i += 1;
     }
 }
 

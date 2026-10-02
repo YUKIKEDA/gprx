@@ -1,24 +1,26 @@
 //! `f64x4` paths of the isotropic stationary leaves over any storage: the
-//! Periodic and rational-quadratic square Gram from cached squared
-//! distances and their one-pass weighted gradient, and the RBF value and
-//! `∂K/∂θ` of `f32` storage (`f64` RBF keeps [`super::simd`]).
+//! RBF, Periodic, and rational-quadratic square Gram from cached squared
+//! distances, the RBF `∂K/∂θ` and rectangle, the rectangular RBF `∂K/∂θ`
+//! from coordinates, and the one-pass weighted gradient of Periodic and RQ.
 //!
-//! All read column-major views with unit row stride; anything else returns
-//! `Ok(false)` / `Ok(None)` and the caller keeps its scalar loop. `f32`
-//! storage is widened to `f64` lanes and rounded once on the store.
-//! `wide`'s `sin`, `cos`, `ln`, and `exp` may differ from libm by a few ULP.
-//! The rational quadratic `u^{-α}` is `exp(−α ln u)` here.
+//! `f32` storage is widened to `f64` lanes and rounded once on the store;
+//! `f64` takes the same lanes. A column's last partial lane is padded, so it
+//! uses the same lane functions as the rest. The rational quadratic
+//! `u^{-α}` is `exp(−α ln u)` here.
 
-use super::dist::{par_lower_blocks, par_lower_fold, worker_count};
-use super::{KernelScalar, Triangle, require_same_shape, require_square_pair};
+use super::{
+    LANES, add_squared_diff, checked_input, checked_kernel, col_slice, col_slice_checked,
+    col_slice_mut_checked, finite_slice, load, load4, rows_checked, store, store4, sum_lanes,
+    unit_row_stride,
+};
 use crate::error::GprError;
-use crate::math::{KernelMath, f64x4_all_finite};
+use crate::kernel::dist::{col_chunk, par_lower_cols, par_lower_fold, worker_count};
+use crate::kernel::{KernelScalar, Triangle, require_same_shape, require_square_pair};
+use crate::math::KernelMath;
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 use rayon::prelude::*;
 use wide::f64x4;
-
-const LANES: usize = 4;
 
 /// Periodic constants: `π / p` and `2 / ℓ²`.
 #[derive(Clone, Copy)]
@@ -32,53 +34,6 @@ pub(crate) struct PeriodicScales {
 pub(crate) struct RqScales {
     pub(crate) inv_ell_sq: f64,
     pub(crate) alpha: f64,
-}
-
-fn col_slice<T: KernelScalar>(mat: MatRef<'_, T>, col: usize) -> Option<&[T]> {
-    mat.col(col).try_as_col_major().map(|c| c.as_slice())
-}
-
-fn col_slice_mut<T: KernelScalar>(mat: MatMut<'_, T>, col: usize) -> Option<&mut [T]> {
-    mat.col_mut(col)
-        .try_as_col_major_mut()
-        .map(|c| c.as_slice_mut())
-}
-
-fn unit_row_stride<T: KernelScalar>(mat: MatRef<'_, T>) -> bool {
-    mat.ncols() == 0 || col_slice(mat, 0).is_some()
-}
-
-/// Four lanes from `src[i..]`, padded with `pad` past the end.
-#[inline(always)]
-fn load<T: KernelScalar>(src: &[T], i: usize, pad: f64) -> f64x4 {
-    if let Some(lanes) = src.get(i..i + LANES) {
-        return f64x4::new([
-            lanes[0].to_f64(),
-            lanes[1].to_f64(),
-            lanes[2].to_f64(),
-            lanes[3].to_f64(),
-        ]);
-    }
-    let mut lanes = [pad; LANES];
-    for (lane, value) in lanes.iter_mut().zip(&src[i..]) {
-        *lane = value.to_f64();
-    }
-    f64x4::new(lanes)
-}
-
-#[inline(always)]
-fn store<T: KernelScalar>(dest: &mut [T], i: usize, v: f64x4) {
-    let a = v.to_array();
-    if let Some(lanes) = dest.get_mut(i..i + LANES) {
-        lanes[0] = T::from_f64(a[0]);
-        lanes[1] = T::from_f64(a[1]);
-        lanes[2] = T::from_f64(a[2]);
-        lanes[3] = T::from_f64(a[3]);
-        return;
-    }
-    for (slot, value) in dest[i..].iter_mut().zip(a) {
-        *slot = T::from_f64(value);
-    }
 }
 
 /// `exp(−2 sin²(π √d / p) / ℓ²)`, with `sin(π √d / p)` and `π √d / p`.
@@ -96,24 +51,6 @@ fn rq_lanes(d: f64x4, s: RqScales) -> (f64x4, f64x4, f64x4) {
     let r2 = d.max(f64x4::ZERO) * f64x4::splat(s.inv_ell_sq);
     let u = f64x4::ONE + r2 / f64x4::splat(2.0 * s.alpha);
     (r2, u, u.ln())
-}
-
-#[inline(always)]
-fn checked_input(d: f64x4) -> Result<f64x4, GprError> {
-    if f64x4_all_finite(d) {
-        Ok(d)
-    } else {
-        Err(GprError::NonFiniteInput)
-    }
-}
-
-#[inline(always)]
-fn checked_kernel(v: f64x4) -> Result<f64x4, GprError> {
-    if f64x4_all_finite(v) {
-        Ok(v)
-    } else {
-        Err(GprError::NonFiniteKernelValue)
-    }
 }
 
 fn periodic_slice<M: KernelMath, T: KernelScalar>(
@@ -157,31 +94,20 @@ fn try_map_square<T: KernelScalar>(
     if !unit_row_stride(dist) || !unit_row_stride(out.as_ref()) {
         return Ok(false);
     }
-    let rows = |col: usize| match uplo {
-        Triangle::Lower => (col, n),
-        Triangle::Upper => (0, col + 1),
-        Triangle::Full => (0, n),
-    };
-    let column = |dist_col: usize, dest: Option<&mut [T]>| -> Result<(), GprError> {
-        let (Some(src), Some(dest)) = (col_slice(dist, dist_col), dest) else {
-            return Err(GprError::UnsupportedKernelOperation {
-                reason: "expected unit row-stride for SIMD kernel".to_owned(),
-            });
-        };
-        let (start, end) = rows(dist_col);
-        f(&src[start..end], &mut dest[start..end])
-    };
     if matches!(uplo, Triangle::Lower) {
-        par_lower_blocks(out, worker_count(), &|start, mut part: MatMut<'_, T>| {
-            for local in 0..part.ncols() {
-                column(start + local, col_slice_mut(part.rb_mut(), local))?;
-            }
-            Ok::<(), GprError>(())
+        par_lower_cols(out, &|col, rows| {
+            f(&col_slice_checked(dist, col)?[col..], rows_checked(rows)?)
         })?;
-    } else {
-        for col in 0..n {
-            column(col, col_slice_mut(out.rb_mut(), col))?;
-        }
+        return Ok(true);
+    }
+    for col in 0..n {
+        let end = if matches!(uplo, Triangle::Upper) {
+            col + 1
+        } else {
+            n
+        };
+        let src = &col_slice_checked(dist, col)?[..end];
+        f(src, &mut col_slice_mut_checked(out.rb_mut(), col)?[..end])?;
     }
     Ok(true)
 }
@@ -194,7 +120,8 @@ pub(crate) struct RbfScales {
 }
 
 /// `exp(−d / (2ℓ²))`, or with `grad` its `∂/∂log ℓ = k d / ℓ²` (the
-/// [`KernelMath`] derivative, as the `f64` lanes take it).
+/// [`KernelMath`] derivative, as the `f64` lanes take it). Like the scalar
+/// path, only `d` is checked: both are finite for a finite `d`.
 fn rbf_slice<M: KernelMath, T: KernelScalar>(
     dist: &[T],
     out: &mut [T],
@@ -203,17 +130,27 @@ fn rbf_slice<M: KernelMath, T: KernelScalar>(
 ) -> Result<(), GprError> {
     let neg_half = f64x4::splat(-s.half_inv_ell_sq);
     let inv = f64x4::splat(s.inv_ell_sq);
+    // Full lanes first, then one padded lane for the tail.
+    let full = dist.len() - dist.len() % LANES;
     let mut i = 0;
-    while i < dist.len() {
-        let d = checked_input(load(dist, i, 0.0))?;
-        let z = d * neg_half;
-        let v = if grad {
-            M::d1_f64x4(z) * d * inv
-        } else {
-            M::exp_f64x4(z)
-        };
-        store(out, i, checked_kernel(v)?);
-        i += LANES;
+    if grad {
+        let lane = |d: f64x4| M::d1_f64x4(d * neg_half) * d * inv;
+        while i < full {
+            store4(out, i, lane(checked_input(load4(dist, i))?));
+            i += LANES;
+        }
+        if i < dist.len() {
+            store(out, i, lane(checked_input(load(dist, i, 0.0))?));
+        }
+    } else {
+        let lane = |d: f64x4| M::exp_f64x4(d * neg_half);
+        while i < full {
+            store4(out, i, lane(checked_input(load4(dist, i))?));
+            i += LANES;
+        }
+        if i < dist.len() {
+            store(out, i, lane(checked_input(load(dist, i, 0.0))?));
+        }
     }
     Ok(())
 }
@@ -243,24 +180,23 @@ pub(crate) fn try_apply_rbf_cross<M: KernelMath, T: KernelScalar>(
         return Ok(false);
     }
     let m = dist.ncols();
+    let column = |col: usize, dest: &mut [T]| {
+        rbf_slice::<M, T>(col_slice_checked(dist, col)?, dest, s, false)
+    };
+    if m == 1 {
+        column(0, col_slice_mut_checked(out, 0)?)?;
+        return Ok(true);
+    }
     let n_parts = worker_count().clamp(1, m.max(1));
     out.rb_mut()
         .par_col_partition_mut(n_parts)
         .enumerate()
         .try_for_each(|(chunk_idx, mut part)| {
-            let (start, len) = super::dist::col_chunk(m, chunk_idx, n_parts);
+            let (start, len) = col_chunk(m, chunk_idx, n_parts);
             for local in 0..len {
-                let (Some(src), Some(dest)) = (
-                    col_slice(dist, start + local),
-                    col_slice_mut(part.rb_mut(), local),
-                ) else {
-                    return Err(GprError::UnsupportedKernelOperation {
-                        reason: "expected unit row-stride for SIMD kernel".to_owned(),
-                    });
-                };
-                rbf_slice::<M, T>(src, dest, s, false)?;
+                column(start + local, col_slice_mut_checked(part.rb_mut(), local)?)?;
             }
-            Ok(())
+            Ok::<(), GprError>(())
         })?;
     Ok(true)
 }
@@ -338,11 +274,6 @@ type Sums = [f64; 3];
 fn join_sums(a: Option<Sums>, b: Option<Sums>) -> Option<Sums> {
     let (a, b) = (a?, b?);
     Some([a[0] + b[0], a[1] + b[1], a[2] + b[2]])
-}
-
-#[inline(always)]
-fn sum_lanes(v: f64x4) -> f64 {
-    v.to_array().iter().sum()
 }
 
 /// One-pass `⟨weight, ∂K/∂log ℓ⟩`, `⟨weight, ∂K/∂log p⟩`, and the returned
@@ -456,6 +387,57 @@ pub(crate) fn try_weighted_rq<T: KernelScalar>(
     out[0] = g_ell;
     out[1] = g_alpha;
     Ok(Some(value))
+}
+
+/// `∂k/∂log ℓ = k s / ℓ²` of the RBF on a rectangular pair, from
+/// coordinates (`x1` rows × `x2` rows), or `Ok(false)` when a view is not
+/// column-major or the shapes do not match. Columns go in stack chunks, so
+/// the gradient of a mini-batch step does not allocate.
+pub(crate) fn try_grad_rbf_cross_from_coords<M: KernelMath, T: KernelScalar>(
+    x1: MatRef<'_, T>,
+    x2: MatRef<'_, T>,
+    mut d_k: MatMut<'_, T>,
+    s: RbfScales,
+) -> Result<bool, GprError> {
+    const CHUNK: usize = 256;
+    let (m, n, d) = (x1.nrows(), x2.nrows(), x1.ncols());
+    if d == 0 || x2.ncols() != d || d_k.nrows() != m || d_k.ncols() != n {
+        return Ok(false);
+    }
+    if !unit_row_stride(x1) || !unit_row_stride(x2) || !unit_row_stride(d_k.as_ref()) {
+        return Ok(false);
+    }
+    for dim in 0..d {
+        finite_slice(col_slice_checked(x1, dim)?)?;
+        finite_slice(col_slice_checked(x2, dim)?)?;
+    }
+    let mut s_buf = [0.0f64; CHUNK];
+    let mut dk_buf = [0.0f64; CHUNK];
+    let neg = f64x4::splat(-s.half_inv_ell_sq);
+    let scale = f64x4::splat(s.inv_ell_sq);
+    let mut start = 0;
+    while start < n {
+        let len = CHUNK.min(n - start);
+        let (sq, dk) = (&mut s_buf[..len], &mut dk_buf[..len]);
+        for row in 0..m {
+            sq.fill(0.0);
+            for dim in 0..d {
+                let z = col_slice_checked(x1, dim)?[row].to_f64();
+                add_squared_diff(&col_slice_checked(x2, dim)?[start..start + len], z, sq);
+            }
+            let mut i = 0;
+            while i < len {
+                let sv = load(sq, i, 0.0);
+                store(dk, i, checked_kernel(M::d1_f64x4(sv * neg) * sv * scale)?);
+                i += LANES;
+            }
+            for (col, value) in dk.iter().enumerate() {
+                d_k[(row, start + col)] = T::from_f64(*value);
+            }
+        }
+        start += len;
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -715,5 +697,53 @@ mod tests {
             ),
             Err(GprError::NonFiniteInput)
         );
+    }
+
+    /// `f64` takes the same RBF lanes as `f32`, padded tail included.
+    #[test]
+    fn f64_rbf_slice_matches_scalar_within_tol() {
+        use crate::math::MathOps;
+        let dist: Vec<f64> = (0..10).map(|i| (i as f64) * 0.4).collect();
+        let s = super::RbfScales {
+            half_inv_ell_sq: 0.5,
+            inv_ell_sq: 1.0,
+        };
+        let mut value = vec![0.0; 10];
+        let mut grad = vec![0.0; 10];
+        super::rbf_slice::<Accurate, f64>(&dist, &mut value, s, false).expect("finite");
+        super::rbf_slice::<Accurate, f64>(&dist, &mut grad, s, true).expect("finite");
+        for (i, &d) in dist.iter().enumerate() {
+            let k = (-d * 0.5).exp();
+            assert_rel(value[i], k, 1e-12);
+            assert_rel(grad[i], k * d, 1e-12);
+        }
+        // `FastApprox` lanes are its scalar polynomial, bit for bit.
+        super::rbf_slice::<FastApprox, f64>(&dist, &mut value, s, false).expect("finite");
+        super::rbf_slice::<FastApprox, f64>(&dist, &mut grad, s, true).expect("finite");
+        for (i, &d) in dist.iter().enumerate() {
+            let jet = FastApprox::jet(-d * 0.5);
+            assert_eq!(value[i].to_bits(), jet.v.to_bits());
+            assert_eq!(grad[i].to_bits(), (jet.d1 * d).to_bits());
+        }
+    }
+
+    #[test]
+    fn f64_rbf_slice_rejects_nan() {
+        let dist = [0.0, 1.0, f64::NAN, 3.0, 4.0];
+        let mut out = [0.0; 5];
+        let s = super::RbfScales {
+            half_inv_ell_sq: 0.5,
+            inv_ell_sq: 1.0,
+        };
+        for grad in [false, true] {
+            assert_eq!(
+                super::rbf_slice::<Accurate, f64>(&dist, &mut out, s, grad),
+                Err(GprError::NonFiniteInput)
+            );
+            assert_eq!(
+                super::rbf_slice::<FastApprox, f64>(&dist, &mut out, s, grad),
+                Err(GprError::NonFiniteInput)
+            );
+        }
     }
 }

@@ -1,7 +1,8 @@
 //! Periodic (exp-sine-squared) kernel.
 
+use super::dist::par_lower_fold;
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
-use super::stationary_simd::{PeriodicScales, try_apply_periodic, try_weighted_periodic};
+use super::simd::stationary::{PeriodicScales, try_apply_periodic, try_weighted_periodic};
 use super::{
     Triangle, finite_dist, validate_log_positive, validate_positive_finite, write_dense,
     write_rect_from_coords, write_square_from_coords, write_triangle,
@@ -290,31 +291,40 @@ impl PeriodicKernel {
         let inv_ell_sq = T::from_f64(1.0) / (ell * ell);
         let pi = T::from_f64(std::f64::consts::PI);
         let (two, four) = (T::from_f64(2.0), T::from_f64(4.0));
-        let (mut g_ell, mut g_period, mut value) = (0.0, 0.0, 0.0);
-        for col in 0..dist.ncols() {
-            for row in col..dist.nrows() {
-                let r = euclidean_from_sq(dist[(row, col)])?;
-                let alpha = pi * r / period;
-                let (s, c) = (alpha.sin(), alpha.cos());
-                let (kv, e) = match (M::ACCURATE, k) {
-                    (true, Some(k)) => (k[(row, col)], k[(row, col)]),
-                    (true, None) => {
-                        let e = (-two * s * s * inv_ell_sq).exp();
-                        (e, e)
+        let n = dist.nrows();
+        // Column by column, folded in column order like the lane path.
+        let [g_ell, g_period, value] = par_lower_fold(
+            n,
+            &|start, end| {
+                let mut sums = [0.0; 3];
+                for col in start..end {
+                    for row in col..n {
+                        let r = euclidean_from_sq(dist[(row, col)])?;
+                        let alpha = pi * r / period;
+                        let (s, c) = (alpha.sin(), alpha.cos());
+                        let (kv, e) = match (M::ACCURATE, k) {
+                            (true, Some(k)) => (k[(row, col)], k[(row, col)]),
+                            (true, None) => {
+                                let e = (-two * s * s * inv_ell_sq).exp();
+                                (e, e)
+                            }
+                            (false, _) => {
+                                let jet = M::jet(-two * s * s * inv_ell_sq);
+                                (jet.v, jet.d1)
+                            }
+                        };
+                        let dk_ell = finite_kernel(e * four * s * s * inv_ell_sq)?;
+                        let dk_period = finite_kernel(e * four * s * c * alpha * inv_ell_sq)?;
+                        let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
+                        sums[0] += w * dk_ell.to_f64();
+                        sums[1] += w * dk_period.to_f64();
+                        sums[2] += w * kv.to_f64();
                     }
-                    (false, _) => {
-                        let jet = M::jet(-two * s * s * inv_ell_sq);
-                        (jet.v, jet.d1)
-                    }
-                };
-                let dk_ell = finite_kernel(e * four * s * s * inv_ell_sq)?;
-                let dk_period = finite_kernel(e * four * s * c * alpha * inv_ell_sq)?;
-                let w = weight[(row, col)].to_f64() * if row == col { 1.0 } else { 2.0 };
-                g_ell += w * dk_ell.to_f64();
-                g_period += w * dk_period.to_f64();
-                value += w * kv.to_f64();
-            }
-        }
+                }
+                Ok::<_, GprError>(sums)
+            },
+            &|a: [f64; 3], b: [f64; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+        )?;
         out[0] = g_ell;
         out[1] = g_period;
         Ok(value)

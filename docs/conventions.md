@@ -39,7 +39,8 @@ src/kernel/                leaves live here, not in src/*.rs
   constant.rs linear.rs white.rs
   rbf.rs rbf_ard.rs matern.rs matern_ard.rs periodic.rs rq.rs rq_ard.rs    leaves: formulas over T, scans in mod.rs / ard.rs
   ard.rs                   shared checks and r² sums of the ARD leaves
-  spec.rs term.rs dist.rs simd.rs lengthscale.rs scalar.rs
+  spec.rs term.rs dist.rs lengthscale.rs scalar.rs radial.rs
+  simd/                    mod.rs (the lane helpers), stationary.rs, rbf_ard.rs, ard.rs, dist.rs. Every f64x4 loop of the leaves
 src/optimizer/             mod.rs, logit.rs. lbfgs.rs neldermead.rs trust_region.rs fsa.rs. adam.rs does not implement Optimizer
 src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs sparse.rs (save / load of Sgpr, OnlineSgpr, Svgp)
 src/sparse/                crate-private: SparseSpec / SparseCore and the inducing-point helpers Sgpr and Svgp share. Sgpr and Svgp do not import each other

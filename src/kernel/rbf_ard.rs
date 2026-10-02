@@ -3,17 +3,13 @@
 use super::ard::{self, ArdR2, Pick};
 use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
-use super::simd::{
-    try_apply_rbf_ard_cache, try_apply_rbf_ard_cross, try_apply_rbf_ard_points,
-    try_grad_rbf_ard_cache, try_grad_rbf_ard_points,
-};
+use super::simd::rbf_ard::{self as lanes, Which};
+use super::simd::unit_row_stride;
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
 use crate::error::GprError;
 use crate::math::KernelMath;
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
-use rayon::prelude::*;
-use wide::f64x4;
 
 /// ARD RBF: `k = exp( -½ Σ_d (x_d - x'_d)² / ℓ_d² )`.
 ///
@@ -160,7 +156,7 @@ impl RbfArdKernel {
         ard::require_square_points(x, out.as_ref(), self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         if let Some((xf, of)) = f64_pair(x, out.rb_mut())
-            && try_apply_rbf_ard_points::<M>(xf, of, uplo, w)?
+            && lanes::try_apply_points::<M>(xf, of, uplo, w)?
         {
             return Ok(());
         }
@@ -193,7 +189,7 @@ impl RbfArdKernel {
         ard::require_cross(x, xs, out.as_ref(), self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         if let (Some(xf), Some((xsf, of))) = (T::as_f64_ref(x), f64_pair(xs, out.rb_mut()))
-            && try_apply_rbf_ard_cross::<M>(xf, xsf, of, w)?
+            && lanes::try_apply_cross::<M>(xf, xsf, of, w)?
         {
             return Ok(());
         }
@@ -236,7 +232,7 @@ impl RbfArdKernel {
         ard::require_square_points(x, d_k.as_ref(), self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         if let Some((xf, of)) = f64_pair(x, d_k.rb_mut())
-            && try_grad_rbf_ard_points::<M>(xf, of, uplo, w, param_idx)?
+            && lanes::try_grad_points::<M>(xf, of, uplo, w, param_idx)?
         {
             return Ok(());
         }
@@ -262,7 +258,7 @@ impl RbfArdKernel {
         require_ard_sq_diff_shape(cache, n, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         if let (Some(cf), Some(of)) = (cache.as_f64(), T::as_f64_mut(out.rb_mut()))
-            && try_apply_rbf_ard_cache::<M>(cf, of, uplo, w)?
+            && lanes::try_apply_cache::<M>(cf, of, uplo, w)?
         {
             return Ok(());
         }
@@ -283,7 +279,7 @@ impl RbfArdKernel {
         require_ard_sq_diff_shape(cache, n, self.num_params())?;
         let w = self.lengthscales.inv_ell_sq();
         if let (Some(cf), Some(of)) = (cache.as_f64(), T::as_f64_mut(d_k.rb_mut()))
-            && try_grad_rbf_ard_cache::<M>(cf, of, uplo, w, param_idx)?
+            && lanes::try_grad_cache::<M>(cf, of, uplo, w, param_idx)?
         {
             return Ok(());
         }
@@ -380,7 +376,7 @@ impl RbfArdKernel {
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
         let w = self.lengthscales.inv_ell_sq();
         if let (Some(af), Some((bf, of))) = (T::as_f64_ref(x1), f64_pair(x2, d_k.rb_mut()))
-            && try_grad_rbf_ard_cross::<M>(af, bf, of, w, param_idx)?
+            && lanes::try_grad_cross::<M>(af, bf, &mut [of], w, Which::One(param_idx))?
         {
             return Ok(());
         }
@@ -419,9 +415,9 @@ impl RbfArdKernel {
         }
         super::require_coord_grad(x1, x2, out[0].as_ref().submatrix(0, 0, rows, cols), 0)?;
         let w = self.lengthscales.inv_ell_sq();
-        let unit = out.iter().all(|mat| ard_unit_cols(mat.as_ref()));
-        if unit && ard_simd_inputs(x1, x2, d)? && cols <= 1024 {
-            return write_cross_rows::<M>(
+        let unit = out.iter().all(|mat| unit_row_stride(mat.as_ref()));
+        if unit && lanes::cross_inputs(x1, x2, d)? && cols <= 1024 {
+            return lanes::write_cross_rows::<M>(
                 x1,
                 x2,
                 w,
@@ -438,7 +434,7 @@ impl RbfArdKernel {
             .iter_mut()
             .map(|mat| mat.as_mut().submatrix_mut(0, 0, rows, cols))
             .collect();
-        if try_fill_ard_cross::<M>(x1, x2, &mut views, w, Which::All)? {
+        if lanes::try_grad_cross::<M>(x1, x2, &mut views, w, Which::All)? {
             return Ok(());
         }
         let mut terms = vec![0.0; d];
@@ -474,278 +470,6 @@ impl RbfArdKernel {
 }
 
 const NAME: &str = "RBF";
-
-/// The lengthscales a cross pass writes `∂k/∂θ_d` for.
-#[derive(Clone, Copy)]
-enum Which {
-    One(usize),
-    All,
-}
-
-impl Which {
-    fn includes(self, dim: usize) -> bool {
-        match self {
-            Self::One(d) => d == dim,
-            Self::All => true,
-        }
-    }
-}
-
-fn try_grad_rbf_ard_cross<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    d_k: MatMut<'_, f64>,
-    inv_ell_sq: &[f64],
-    param_idx: usize,
-) -> Result<bool, GprError> {
-    if param_idx >= inv_ell_sq.len() {
-        return Ok(false);
-    }
-    let mut one = [d_k];
-    try_fill_ard_cross::<M>(x1, x2, &mut one, inv_ell_sq, Which::One(param_idx))
-}
-
-/// Whether both inputs have unit row stride and `d` finite columns.
-fn ard_simd_inputs(x1: MatRef<'_, f64>, x2: MatRef<'_, f64>, d: usize) -> Result<bool, GprError> {
-    if d == 0 || x1.ncols() != d || x2.ncols() != d {
-        return Ok(false);
-    }
-    if !ard_unit_cols(x1) || !ard_unit_cols(x2) {
-        return Ok(false);
-    }
-    for dim in 0..d {
-        ard_finite(ard_col(x1, dim)?)?;
-        ard_finite(ard_col(x2, dim)?)?;
-    }
-    Ok(true)
-}
-
-/// `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²` with one `exp` for every lengthscale.
-/// `out` holds one matrix per written lengthscale: the one of
-/// [`Which::One`], or one per lengthscale for [`Which::All`].
-fn try_fill_ard_cross<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    out: &mut [MatMut<'_, f64>],
-    inv_ell_sq: &[f64],
-    which: Which,
-) -> Result<bool, GprError> {
-    let m = x1.nrows();
-    let n = x2.nrows();
-    let d = inv_ell_sq.len();
-    let expected = match which {
-        Which::One(_) => 1,
-        Which::All => d,
-    };
-    if out.len() != expected || !ard_simd_inputs(x1, x2, d)? {
-        return Ok(false);
-    }
-    for dest in out.iter() {
-        if dest.nrows() != m || dest.ncols() != n || !ard_unit_cols(dest.as_ref()) {
-            return Ok(false);
-        }
-    }
-    let slot = |dim: usize| match which {
-        Which::One(_) => 0,
-        Which::All => dim,
-    };
-    if n <= 1024 {
-        write_cross_rows::<M>(
-            x1,
-            x2,
-            inv_ell_sq,
-            which,
-            0,
-            n,
-            0,
-            &mut |dim, row, col, v| {
-                out[slot(dim)][(row, col)] = v;
-            },
-        )?;
-        return Ok(true);
-    }
-    let n_parts = super::dist::worker_count();
-    let shared = ShareBases(out.iter_mut().map(packed_mut).collect());
-    let results: Vec<Result<(), GprError>> = (0..n_parts)
-        .into_par_iter()
-        .map(|idx| {
-            let (start, len) = super::dist::col_chunk(n, idx, n_parts);
-            write_cross_rows::<M>(
-                x1,
-                x2,
-                inv_ell_sq,
-                which,
-                start,
-                len,
-                start,
-                &mut |dim, row, col, v| store_packed(&shared.slots()[slot(dim)], row, col, v),
-            )
-        })
-        .collect();
-    for result in results {
-        result?;
-    }
-    Ok(true)
-}
-
-/// Writes `∂k/∂θ_d` of the lengthscales in `which` for every row of `x1`
-/// and the `len` points of `x2` from `x_begin`, at destination columns from
-/// `dest_col`, through `store(dim, row, col, value)`. Columns go in stack
-/// blocks; each lengthscale's term is formed again after the `exp` rather
-/// than kept, so nothing is allocated.
-#[allow(clippy::too_many_arguments)]
-fn write_cross_rows<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    inv_ell_sq: &[f64],
-    which: Which,
-    x_begin: usize,
-    len: usize,
-    dest_col: usize,
-    store: &mut dyn FnMut(usize, usize, usize, f64),
-) -> Result<(), GprError> {
-    const BLOCK: usize = 256;
-    let mut r2_buf = [0.0f64; BLOCK];
-    let mut k_buf = [0.0f64; BLOCK];
-    let mut term_buf = [0.0f64; BLOCK];
-    let half = f64x4::new([-0.5; 4]);
-    let mut offset = 0;
-    while offset < len {
-        let block = BLOCK.min(len - offset);
-        let begin = x_begin + offset;
-        let (r2, k, term) = (
-            &mut r2_buf[..block],
-            &mut k_buf[..block],
-            &mut term_buf[..block],
-        );
-        for row in 0..x1.nrows() {
-            r2.fill(0.0);
-            for (dim, &w) in inv_ell_sq.iter().enumerate() {
-                let z = ard_col(x1, dim)?[row];
-                add_weighted_sq(&ard_col(x2, dim)?[begin..begin + block], z, w, r2);
-            }
-            exp_scaled::<M>(r2, k, half)?;
-            for (dim, &w) in inv_ell_sq.iter().enumerate() {
-                if !which.includes(dim) {
-                    continue;
-                }
-                let z = ard_col(x1, dim)?[row];
-                term.fill(0.0);
-                add_weighted_sq(&ard_col(x2, dim)?[begin..begin + block], z, w, term);
-                for (i, (&kv, &tv)) in k.iter().zip(term.iter()).enumerate() {
-                    let dk = kv * tv;
-                    if !dk.is_finite() {
-                        return Err(GprError::NonFiniteKernelValue);
-                    }
-                    store(dim, row, dest_col + offset + i, dk);
-                }
-            }
-        }
-        offset += block;
-    }
-    Ok(())
-}
-
-struct PackedMut {
-    ptr: *mut f64,
-    stride: isize,
-}
-
-struct ShareBases(Vec<PackedMut>);
-
-impl ShareBases {
-    fn slots(&self) -> &[PackedMut] {
-        &self.0
-    }
-}
-
-/// # Safety
-///
-/// Each pointer is a column-major matrix. Parallel callers write disjoint
-/// columns of those matrices and do not read the columns they write.
-unsafe impl Send for ShareBases {}
-
-/// # Safety
-///
-/// Each pointer is a column-major matrix. Parallel callers write disjoint
-/// columns of those matrices and do not read the columns they write.
-unsafe impl Sync for ShareBases {}
-
-fn packed_mut(mat: &mut MatMut<'_, f64>) -> PackedMut {
-    let view = mat.rb_mut();
-    debug_assert!(view.ncols() == 0 || view.row_stride() == 1);
-    PackedMut {
-        ptr: view.as_ptr_mut(),
-        stride: view.col_stride(),
-    }
-}
-
-/// # Safety
-///
-/// `slot` addresses a column-major matrix whose row stride is `+1`.
-/// `row` is inside that matrix and `col` is inside its column count.
-#[inline(always)]
-fn store_packed(slot: &PackedMut, row: usize, col: usize, value: f64) {
-    // SAFETY: row stride is +1 and `(row, col)` is inside this matrix.
-    unsafe {
-        *slot.ptr.offset(row as isize + col as isize * slot.stride) = value;
-    }
-}
-
-fn ard_unit_cols(mat: MatRef<'_, f64>) -> bool {
-    mat.ncols() == 0 || mat.col(0).try_as_col_major().is_some()
-}
-
-fn ard_col<'a>(mat: MatRef<'a, f64>, col: usize) -> Result<&'a [f64], GprError> {
-    mat.col(col)
-        .try_as_col_major()
-        .map(|c| c.as_slice())
-        .ok_or_else(|| GprError::UnsupportedKernelOperation {
-            reason: "expected unit row-stride for ARD cross grad".to_owned(),
-        })
-}
-
-fn ard_finite(values: &[f64]) -> Result<(), GprError> {
-    if values.iter().all(|v| v.is_finite()) {
-        Ok(())
-    } else {
-        Err(GprError::NonFiniteInput)
-    }
-}
-
-fn load4(src: &[f64], i: usize) -> f64x4 {
-    f64x4::new([src[i], src[i + 1], src[i + 2], src[i + 3]])
-}
-
-fn store4(dest: &mut [f64], i: usize, v: f64x4) {
-    let a = v.to_array();
-    dest[i] = a[0];
-    dest[i + 1] = a[1];
-    dest[i + 2] = a[2];
-    dest[i + 3] = a[3];
-}
-
-fn all_finite4(v: f64x4) -> bool {
-    let a = v.to_array();
-    a[0].is_finite() && a[1].is_finite() && a[2].is_finite() && a[3].is_finite()
-}
-
-fn add_weighted_sq(x: &[f64], x0: f64, w: f64, acc: &mut [f64]) {
-    let x0v = f64x4::new([x0; 4]);
-    let wv = f64x4::new([w; 4]);
-    let mut i = 0;
-    while i + 4 <= x.len() {
-        let d = load4(x, i) - x0v;
-        let av = load4(acc, i);
-        store4(acc, i, av + d * d * wv);
-        i += 4;
-    }
-    while i < x.len() {
-        let d = x[i] - x0;
-        acc[i] += d * d * w;
-        i += 1;
-    }
-}
 
 fn ard_value<M: KernelMath, T: KernelScalar>(r2: T) -> T {
     M::exp(T::from_f64(-0.5) * r2)
@@ -813,28 +537,6 @@ fn ard_grad_terms<M: KernelMath, T: KernelScalar>(
         return Err(GprError::NonFiniteKernelValue);
     }
     finite_kernel(ard_d1::<M, T>(r2))
-}
-
-fn exp_scaled<M: KernelMath>(src: &[f64], dest: &mut [f64], scale: f64x4) -> Result<(), GprError> {
-    let mut i = 0;
-    while i + 4 <= src.len() {
-        let z = load4(src, i) * scale;
-        let v = if M::ACCURATE { z.exp() } else { M::d1_f64x4(z) };
-        if !all_finite4(v) {
-            return Err(GprError::NonFiniteKernelValue);
-        }
-        store4(dest, i, v);
-        i += 4;
-    }
-    while i < src.len() {
-        let v = ard_d1::<M, f64>(src[i]);
-        if !v.is_finite() {
-            return Err(GprError::NonFiniteKernelValue);
-        }
-        dest[i] = v;
-        i += 1;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
