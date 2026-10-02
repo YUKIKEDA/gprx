@@ -10,9 +10,7 @@ use faer::{Mat, MatRef};
 
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
-use crate::linalg::{
-    forward_substitute, gram_aat_plus_noise_in_scalar, matvec_promoted, solve_llt,
-};
+use crate::linalg::{gram_aat_plus_noise_in_scalar, matvec_promoted, solve_llt};
 
 use super::{RefineSystem, ResidualFormula, refine};
 
@@ -129,96 +127,6 @@ fn residual_inf(
     b_inf
 }
 
-/// Svgp mean: `v = L⁻¹ k_*` refined in `f64` against `(l64, k64_col)`,
-/// dotted with `q_mean`.
-///
-/// [`super::PromoteStorage`] passes the stored `f32` `L` and `k_*` promoted
-/// to `f64`; [`super::ReevaluateKernel`] the `f64` factor and `k_*`
-/// ([`super::ModelPrecision::svgp_mean_reference`]).
-pub(crate) fn refine_svgp_mean(
-    k_mm_l: MatRef<'_, f32>,
-    solved: &[f32],
-    q_mean: &[f64],
-    l64: MatRef<'_, f64>,
-    k64_col: &[f64],
-) -> Result<f64, GprError> {
-    let system = TriangularSystem {
-        l: k_mm_l,
-        l64,
-        rhs64: k64_col,
-    };
-    let start = solved.iter().map(|value| f64::from(*value)).collect();
-    let v = refine(&system, start)?;
-    let mut sum = 0.0;
-    for (weight, mean) in v.iter().zip(q_mean.iter()) {
-        sum += *weight * *mean;
-    }
-    Ok(sum)
-}
-
-/// `src` promoted to `f64` into `out`, which is resized only when its shape
-/// differs. With `lower_only`, the strict upper triangle is zero.
-pub(super) fn promote_into<T: KernelScalar>(
-    src: MatRef<'_, T>,
-    out: &mut Mat<f64>,
-    lower_only: bool,
-) {
-    if out.nrows() != src.nrows() || out.ncols() != src.ncols() {
-        *out = Mat::zeros(src.nrows(), src.ncols());
-    }
-    for col in 0..src.ncols() {
-        for row in 0..src.nrows() {
-            out[(row, col)] = if lower_only && row < col {
-                0.0
-            } else {
-                src[(row, col)].to_f64()
-            };
-        }
-    }
-}
-
-/// `L v = b` with `L` lower-triangular: refined through the stored `f32` `L`
-/// against an `f64` reference `(L₆₄, b₆₄)`, which is also the fallback.
-struct TriangularSystem<'a> {
-    l: MatRef<'a, f32>,
-    l64: MatRef<'a, f64>,
-    rhs64: &'a [f64],
-}
-
-impl RefineSystem for TriangularSystem<'_> {
-    fn rhs(&self) -> &[f64] {
-        self.rhs64
-    }
-
-    fn residual(&self, v: &[f64], r: &mut [f64]) -> Result<f64, GprError> {
-        let mut l_inf = 0.0f64;
-        for (i, (ri, &bi)) in r.iter_mut().zip(self.rhs64).enumerate() {
-            let mut row = 0.0;
-            let mut sum = 0.0;
-            for (j, &vj) in v.iter().enumerate().take(i + 1) {
-                let lij = f64::from(self.l[(i, j)]);
-                row += lij.abs();
-                sum += lij * vj;
-            }
-            l_inf = l_inf.max(row);
-            *ri = bi - sum;
-        }
-        Ok(l_inf)
-    }
-
-    fn correct(&self, r: &[f64], v: &mut [f64]) {
-        let r32: Vec<f32> = r.iter().map(|value| *value as f32).collect();
-        let delta = forward_substitute(self.l, &r32);
-        for (slot, step) in v.iter_mut().zip(delta) {
-            *slot += f64::from(step);
-        }
-    }
-
-    fn fallback(&self) -> Result<Vec<f64>, GprError> {
-        Ok(forward_substitute(self.l64, self.rhs64))
-    }
-}
-
 /// Sgpr mean: storage `k_*` column dotted with storage weights.
 pub(super) fn storage_dot<T: KernelScalar>(column: &[T], weights: &[T]) -> T {
     let mut sum = T::from_f64(0.0);
@@ -233,15 +141,6 @@ pub(super) fn promoted_dot(column: &[f32], weights: &[f64]) -> f64 {
     let mut sum = 0.0;
     for (kernel, weight) in column.iter().zip(weights.iter()) {
         sum += kernel.to_f64() * *weight;
-    }
-    sum
-}
-
-/// Svgp mean: storage `L⁻¹ k_*` dotted with the variational mean.
-pub(super) fn storage_q_dot<T: KernelScalar>(solved: &[T], q_mean: &[f64]) -> T {
-    let mut sum = T::from_f64(0.0);
-    for (weight, mean) in solved.iter().zip(q_mean.iter()) {
-        sum += *weight * T::from_f64(*mean);
     }
     sum
 }

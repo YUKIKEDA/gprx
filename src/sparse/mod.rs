@@ -701,8 +701,6 @@ pub(crate) struct PredictScratch<S: KernelScalar> {
     pub(crate) llt64: Option<(usize, MemBuffer)>,
     pub(crate) b_l64: Mat<f64>,
     pub(crate) w64: Vec<f64>,
-    /// `K(Z, X*)` in `f64`, the reference of a mixed SVGP mean.
-    pub(crate) k_zs64: Mat<f64>,
 }
 
 impl<S: KernelScalar> Default for PredictScratch<S> {
@@ -719,7 +717,6 @@ impl<S: KernelScalar> Default for PredictScratch<S> {
             llt64: None,
             b_l64: Mat::new(),
             w64: Vec::new(),
-            k_zs64: Mat::new(),
         }
     }
 }
@@ -746,6 +743,92 @@ impl<S: KernelScalar> PredictScratch<S> {
         &mut llt
             .get_or_insert_with(|| (m, crate::linalg::llt_scratch::<f64>(m)))
             .1
+    }
+
+    /// The `f64` system a rounding storage predicts through, shared by every
+    /// sparse model: `kernel` compiled in `f64`, and `K_mm = k(Z, Z)`
+    /// evaluated and factored in `f64` with the `K_mm` retries of `jitter`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel's evaluation errors, or
+    /// [`GprError::CholeskyFailed`] when `K_mm` does not factor in `f64`.
+    pub(crate) fn f64_system<M: crate::math::KernelMath>(
+        &mut self,
+        kernel: &KernelSpec,
+        z: &[f64],
+        m: usize,
+        d: usize,
+        jitter: JitterPolicy,
+    ) -> Result<F64System<'_>, GprError> {
+        let Self {
+            plan64,
+            f64: bufs,
+            k_mm64,
+            k_mm64_backup,
+            llt64,
+            b_l64,
+            w64,
+            ..
+        } = self;
+        let compiled = plan64.get(kernel);
+        if k_mm64.nrows() != m || k_mm64.ncols() != m {
+            *k_mm64 = Mat::zeros(m, m);
+        }
+        let z64 = pack_into(&mut bufs.z, z, m, d);
+        bufs.kernel.gram::<M>(
+            compiled,
+            GramInputs::points(z64.as_ref()),
+            k_mm64.as_mut(),
+            Triangle::Lower,
+        )?;
+        crate::linalg::cholesky_lower_with_backup(
+            k_mm64,
+            k_mm64_backup,
+            Self::llt64(llt64, m),
+            jitter.retry_jitters(),
+            crate::error::CholeskyStage::Predict,
+        )?;
+        Ok(F64System {
+            compiled,
+            bufs,
+            k_mm_l: k_mm64.as_ref(),
+            b_l64,
+            w64,
+        })
+    }
+}
+
+/// The `f64` system of [`PredictScratch::f64_system`], with the buffers a
+/// model promotes its own factors into (`B`'s factor and the weights of a VFE
+/// prediction).
+pub(crate) struct F64System<'a> {
+    pub(crate) compiled: &'a CompiledKernel<f64>,
+    pub(crate) bufs: &'a mut PredictBuffers<f64>,
+    pub(crate) k_mm_l: MatRef<'a, f64>,
+    pub(crate) b_l64: &'a mut Mat<f64>,
+    pub(crate) w64: &'a mut Vec<f64>,
+}
+
+/// Clears `out` to `n_rows` zero means and variances of `kind`.
+pub(crate) fn reset_prediction<R: KernelScalar>(
+    out: &mut Prediction<R>,
+    n_rows: usize,
+    kind: crate::VarianceKind,
+) {
+    let zero = R::from_f64(0.0);
+    out.mean.clear();
+    out.mean.resize(n_rows, zero);
+    out.variance.clear();
+    out.variance.resize(n_rows, zero);
+    out.variance_kind = kind;
+}
+
+/// Latent or observation variance from the clamped latent variance.
+pub(crate) fn predictive_variance(latent: f64, noise: f64, kind: crate::VarianceKind) -> f64 {
+    match kind {
+        crate::VarianceKind::Latent => latent,
+        crate::VarianceKind::Observation => latent + noise,
     }
 }
 
