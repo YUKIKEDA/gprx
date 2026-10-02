@@ -1,18 +1,21 @@
-//! `f64x4` paths of the Periodic and rational-quadratic leaves: the square
-//! Gram from cached squared distances, and the one-pass weighted gradient.
+//! `f64x4` paths of the isotropic stationary leaves over any storage: the
+//! Periodic and rational-quadratic square Gram from cached squared
+//! distances and their one-pass weighted gradient, and the RBF value and
+//! `∂K/∂θ` of `f32` storage (`f64` RBF keeps [`super::simd`]).
 //!
-//! Both read column-major views with unit row stride; anything else returns
+//! All read column-major views with unit row stride; anything else returns
 //! `Ok(false)` / `Ok(None)` and the caller keeps its scalar loop. `f32`
 //! storage is widened to `f64` lanes and rounded once on the store.
 //! `wide`'s `sin`, `cos`, `ln`, and `exp` may differ from libm by a few ULP.
 //! The rational quadratic `u^{-α}` is `exp(−α ln u)` here.
 
 use super::dist::{par_lower_blocks, par_lower_fold, worker_count};
-use super::{KernelScalar, Triangle, require_square_pair};
+use super::{KernelScalar, Triangle, require_same_shape, require_square_pair};
 use crate::error::GprError;
 use crate::math::{KernelMath, f64x4_all_finite};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
+use rayon::prelude::*;
 use wide::f64x4;
 
 const LANES: usize = 4;
@@ -48,6 +51,14 @@ fn unit_row_stride<T: KernelScalar>(mat: MatRef<'_, T>) -> bool {
 /// Four lanes from `src[i..]`, padded with `pad` past the end.
 #[inline(always)]
 fn load<T: KernelScalar>(src: &[T], i: usize, pad: f64) -> f64x4 {
+    if let Some(lanes) = src.get(i..i + LANES) {
+        return f64x4::new([
+            lanes[0].to_f64(),
+            lanes[1].to_f64(),
+            lanes[2].to_f64(),
+            lanes[3].to_f64(),
+        ]);
+    }
     let mut lanes = [pad; LANES];
     for (lane, value) in lanes.iter_mut().zip(&src[i..]) {
         *lane = value.to_f64();
@@ -57,7 +68,15 @@ fn load<T: KernelScalar>(src: &[T], i: usize, pad: f64) -> f64x4 {
 
 #[inline(always)]
 fn store<T: KernelScalar>(dest: &mut [T], i: usize, v: f64x4) {
-    for (slot, value) in dest[i..].iter_mut().zip(v.to_array()) {
+    let a = v.to_array();
+    if let Some(lanes) = dest.get_mut(i..i + LANES) {
+        lanes[0] = T::from_f64(a[0]);
+        lanes[1] = T::from_f64(a[1]);
+        lanes[2] = T::from_f64(a[2]);
+        lanes[3] = T::from_f64(a[3]);
+        return;
+    }
+    for (slot, value) in dest[i..].iter_mut().zip(a) {
         *slot = T::from_f64(value);
     }
 }
@@ -164,6 +183,85 @@ fn try_map_square<T: KernelScalar>(
             column(col, col_slice_mut(out.rb_mut(), col))?;
         }
     }
+    Ok(true)
+}
+
+/// RBF constants: `1 / (2ℓ²)` and `1 / ℓ²`.
+#[derive(Clone, Copy)]
+pub(crate) struct RbfScales {
+    pub(crate) half_inv_ell_sq: f64,
+    pub(crate) inv_ell_sq: f64,
+}
+
+/// `exp(−d / (2ℓ²))`, or with `grad` its `∂/∂log ℓ = k d / ℓ²` (the
+/// [`KernelMath`] derivative, as the `f64` lanes take it).
+fn rbf_slice<M: KernelMath, T: KernelScalar>(
+    dist: &[T],
+    out: &mut [T],
+    s: RbfScales,
+    grad: bool,
+) -> Result<(), GprError> {
+    let neg_half = f64x4::splat(-s.half_inv_ell_sq);
+    let inv = f64x4::splat(s.inv_ell_sq);
+    let mut i = 0;
+    while i < dist.len() {
+        let d = checked_input(load(dist, i, 0.0))?;
+        let z = d * neg_half;
+        let v = if grad {
+            M::d1_f64x4(z) * d * inv
+        } else {
+            M::exp_f64x4(z)
+        };
+        store(out, i, checked_kernel(v)?);
+        i += LANES;
+    }
+    Ok(())
+}
+
+/// Writes the RBF Gram (or with `grad` its `∂K/∂log ℓ`) for `uplo` from
+/// squared distances.
+pub(crate) fn try_square_rbf<M: KernelMath, T: KernelScalar>(
+    dist: MatRef<'_, T>,
+    out: MatMut<'_, T>,
+    uplo: Triangle,
+    s: RbfScales,
+    grad: bool,
+) -> Result<bool, GprError> {
+    try_map_square(dist, out, uplo, |src, dest| {
+        rbf_slice::<M, T>(src, dest, s, grad)
+    })
+}
+
+/// Writes the rectangular RBF `k(dist)` (train × test) from squared distances.
+pub(crate) fn try_apply_rbf_cross<M: KernelMath, T: KernelScalar>(
+    dist: MatRef<'_, T>,
+    mut out: MatMut<'_, T>,
+    s: RbfScales,
+) -> Result<bool, GprError> {
+    require_same_shape(dist, out.as_ref())?;
+    if !unit_row_stride(dist) || !unit_row_stride(out.as_ref()) {
+        return Ok(false);
+    }
+    let m = dist.ncols();
+    let n_parts = worker_count().clamp(1, m.max(1));
+    out.rb_mut()
+        .par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, mut part)| {
+            let (start, len) = super::dist::col_chunk(m, chunk_idx, n_parts);
+            for local in 0..len {
+                let (Some(src), Some(dest)) = (
+                    col_slice(dist, start + local),
+                    col_slice_mut(part.rb_mut(), local),
+                ) else {
+                    return Err(GprError::UnsupportedKernelOperation {
+                        reason: "expected unit row-stride for SIMD kernel".to_owned(),
+                    });
+                };
+                rbf_slice::<M, T>(src, dest, s, false)?;
+            }
+            Ok(())
+        })?;
     Ok(true)
 }
 
@@ -539,5 +637,83 @@ mod tests {
                 assert_rel(f64::from(rq[(i, j)]), rq_ref(d).0, 1e-6);
             }
         }
+    }
+
+    const RBF: super::RbfScales = super::RbfScales {
+        half_inv_ell_sq: 0.5 / (1.6 * 1.6),
+        inv_ell_sq: 1.0 / (1.6 * 1.6),
+    };
+
+    fn rbf_ref<M: KernelMath>(d: f64, grad: bool) -> f64 {
+        let jet = M::jet(-d * RBF.half_inv_ell_sq);
+        if grad {
+            jet.d1 * d * RBF.inv_ell_sq
+        } else {
+            jet.v
+        }
+    }
+
+    /// `f32` RBF lanes are the `f64` formula rounded once.
+    fn f32_rbf_matches<M: KernelMath>() {
+        let d = dist();
+        let d32 = Mat::<f32>::from_fn(7, 7, |i, j| d[(i, j)] as f32);
+        for grad in [false, true] {
+            for uplo in [Triangle::Lower, Triangle::Upper, Triangle::Full] {
+                let mut out = Mat::<f32>::zeros(7, 7);
+                assert!(
+                    super::try_square_rbf::<M, f32>(d32.as_ref(), out.as_mut(), uplo, RBF, grad)
+                        .expect("finite")
+                );
+                for j in 0..7 {
+                    for i in 0..7 {
+                        let inside = match uplo {
+                            Triangle::Lower => i >= j,
+                            Triangle::Upper => i <= j,
+                            Triangle::Full => true,
+                        };
+                        let want = if inside {
+                            rbf_ref::<M>(f64::from(d32[(i, j)]), grad) as f32
+                        } else {
+                            0.0
+                        };
+                        assert_rel(f64::from(out[(i, j)]), f64::from(want), 1e-6);
+                    }
+                }
+            }
+        }
+        let rect = Mat::<f32>::from_fn(7, 5, |i, j| d32[(i, j + 2)]);
+        let mut out = Mat::<f32>::zeros(7, 5);
+        assert!(
+            super::try_apply_rbf_cross::<M, f32>(rect.as_ref(), out.as_mut(), RBF).expect("finite")
+        );
+        for j in 0..5 {
+            for i in 0..7 {
+                let want = rbf_ref::<M>(f64::from(rect[(i, j)]), false);
+                assert_rel(f64::from(out[(i, j)]), want, 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn f32_rbf_lanes_round_the_f64_formula() {
+        f32_rbf_matches::<Accurate>();
+        f32_rbf_matches::<FastApprox>();
+    }
+
+    #[test]
+    fn f32_rbf_non_finite_distance_is_an_input_error() {
+        let mut d = Mat::<f32>::from_fn(5, 5, |i, j| (i as f32 - j as f32).powi(2));
+        d[(3, 1)] = f32::INFINITY;
+        let mut out = Mat::<f32>::zeros(5, 5);
+        assert_eq!(
+            super::try_square_rbf::<Accurate, f32>(
+                d.as_ref(),
+                out.as_mut(),
+                Triangle::Lower,
+                RBF,
+                false
+            ),
+            Err(GprError::NonFiniteInput)
+        );
     }
 }
