@@ -15,8 +15,9 @@
 //! the budget allowed it, and evaluates them otherwise. A leaf that is handed
 //! its own Gram builds `∂K/∂θ` from those values instead of the
 //! transcendental functions. Every matrix of the square walk is the lower
-//! triangle of a symmetric `n × n`. The rectangular walk is a full matrix,
-//! and the diagonal walk sums `∂k(x_i, x_i)/∂θ`.
+//! triangle of a symmetric `n × n`. The rectangular walk is a full matrix.
+//! An ARD RBF rectangle contracts every lengthscale from one `exp` and does
+//! not form `∂K`. The diagonal walk sums `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
 use super::{CompiledKernel, add_triangle};
@@ -531,6 +532,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         bufs: &mut [Mat<T>],
         mut scratch: MatMut<'_, T>,
         nested: &mut [Mat<T>],
+        jobs: &mut Vec<f64>,
     ) -> Result<(), GprError> {
         out.fill(0.0);
         let mut offset = 0;
@@ -544,6 +546,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 bufs,
                 scratch.as_mut(),
                 nested,
+                jobs,
                 false,
             )?;
             offset += count;
@@ -564,6 +567,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         bufs: &mut [Mat<T>],
         mut scratch: MatMut<'_, T>,
         nested: &mut [Mat<T>],
+        jobs: &mut Vec<f64>,
         want_value: bool,
     ) -> Result<f64, GprError> {
         match self {
@@ -580,6 +584,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                         bufs,
                         scratch.as_mut(),
                         nested,
+                        jobs,
                         want_value,
                     )?;
                     offset += count;
@@ -587,14 +592,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Ok(value)
             }
             Self::Product(terms) => self.cross_product::<M>(
-                terms, x1, x2, weight, out, bufs, scratch, nested, want_value,
+                terms, x1, x2, weight, out, bufs, scratch, nested, jobs, want_value,
             ),
             Self::Constant(leaf) => {
                 let value = leaf.constant() * rect_sum(weight);
                 out[0] = value;
                 Ok(value)
             }
-            _ => self.cross_leaf::<M>(x1, x2, weight, out, bufs, scratch, nested, want_value),
+            _ => self.cross_leaf::<M>(x1, x2, weight, out, bufs, scratch, nested, jobs, want_value),
         }
     }
 
@@ -610,6 +615,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         bufs: &mut [Mat<T>],
         mut scratch: MatMut<'_, T>,
         nested: &mut [Mat<T>],
+        jobs: &mut Vec<f64>,
         want_value: bool,
     ) -> Result<f64, GprError> {
         let scale = Self::constant_scale(terms);
@@ -633,6 +639,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                             bufs,
                             scratch.as_mut(),
                             nested,
+                            jobs,
                             need_value,
                         )?;
                         for g in slot.iter_mut() {
@@ -681,6 +688,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                         deeper,
                         scratch.as_mut(),
                         nested,
+                        jobs,
                         need_value && c == 0 && leaf,
                     )?;
                     if need_value && c == 0 {
@@ -717,8 +725,12 @@ impl<T: KernelScalar> CompiledKernel<T> {
         bufs: &mut [Mat<T>],
         mut scratch: MatMut<'_, T>,
         nested: &mut [Mat<T>],
+        jobs: &mut Vec<f64>,
         want_value: bool,
     ) -> Result<f64, GprError> {
+        if let Self::RbfArd(leaf) = self {
+            return leaf.contract_cross::<M, T>(x1, x2, weight, out, jobs, want_value);
+        }
         let Some(d_k) = bufs.first_mut() else {
             return Err(too_few_buffers());
         };
@@ -1101,7 +1113,8 @@ mod tests {
     use super::{CompiledKernel, WeightedWalk};
     use crate::kernel::compiled::gram::GramInputs;
     use crate::kernel::{
-        ConstantKernel, KernelSpec, PeriodicKernel, RationalQuadraticKernel, RbfKernel, Triangle,
+        ConstantKernel, KernelSpec, PeriodicKernel, RationalQuadraticKernel, RbfArdKernel,
+        RbfKernel, Triangle,
     };
     use crate::math::{Accurate, FastApprox, KernelMath};
     use crate::test_check::sq_dist_1d;
@@ -1297,6 +1310,7 @@ mod tests {
                 &mut cross_bufs,
                 cross_scratch.as_mut(),
                 &mut cross_nested,
+                &mut Vec::new(),
             )
             .expect("cross");
         let mut d_cross = Mat::zeros(m, n);
@@ -1333,5 +1347,81 @@ mod tests {
     fn cross_and_diag_contractions_match_per_parameter() {
         contractions_match_per_parameter::<Accurate>();
         contractions_match_per_parameter::<FastApprox>();
+    }
+
+    /// Constant × ARD RBF, plus an ARD RBF. The rectangle is wider than one
+    /// column batch and the column length is not a multiple of four, so the
+    /// one-exp contraction covers a second batch and a scalar tail.
+    fn ard_cross_contraction_matches_per_parameter<M: KernelMath>() {
+        let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("c"));
+        let ard = |ls: &[f64]| KernelSpec::from(RbfArdKernel::new(ls).expect("ard"));
+        let compiled = (c(1.3) * ard(&[0.7, 1.4, 2.2]) + ard(&[0.5, 0.9, 1.1])).compile();
+        let d = 3;
+        let z_rows = [
+            [0.2, -0.4, 0.7],
+            [1.1, 0.3, -0.2],
+            [-0.5, 0.8, 1.4],
+            [0.0, 0.2, 0.9],
+            [1.5, -1.0, 0.4],
+            [0.6, 0.1, -0.8],
+        ];
+        let mut x_rows = [[0.0; 3]; 20];
+        for (i, row) in x_rows.iter_mut().enumerate() {
+            row[0] = 0.15 * i as f64 - 0.4;
+            row[1] = 0.07 * (i as f64 - 3.0);
+            row[2] = -0.11 * i as f64 + 0.5;
+        }
+        let z = Mat::from_fn(z_rows.len(), d, |i, j| z_rows[i][j]);
+        let x = Mat::from_fn(x_rows.len(), d, |i, j| x_rows[i][j]);
+        let (m, n) = (z.nrows(), x.nrows());
+        let weight = Mat::from_fn(m, n, |i, j| 0.3 * (i + 1) as f64 - 0.2 * j as f64 + 0.05);
+        let mut got = vec![0.0; compiled.num_params()];
+        let mut expect = vec![0.0; compiled.num_params()];
+        let mut scratch = Mat::zeros(m, n);
+        let mut nested = Vec::new();
+        crate::kernel::ensure_nested_levels(&mut nested, &compiled, m, n);
+        let mut bufs = vec![Mat::zeros(m, n); compiled.contraction_buffers()];
+        compiled
+            .weighted_cross_grads::<M>(
+                z.as_ref(),
+                x.as_ref(),
+                weight.as_ref(),
+                &mut got,
+                &mut bufs,
+                scratch.as_mut(),
+                &mut nested,
+                &mut Vec::new(),
+            )
+            .expect("cross");
+        let mut d_cross = Mat::zeros(m, n);
+        for (p, slot) in expect.iter_mut().enumerate() {
+            compiled
+                .grad_cross_points_with::<M>(
+                    z.as_ref(),
+                    x.as_ref(),
+                    d_cross.as_mut(),
+                    p,
+                    scratch.as_mut(),
+                    &mut nested,
+                )
+                .expect("grad cross");
+            *slot = super::rect_dot(weight.as_ref(), d_cross.as_ref());
+        }
+        for (i, (g, e)) in got.iter().zip(&expect).enumerate() {
+            let scale = e.abs().max(1.0);
+            // Column totals are folded from the first column to the last.
+            // `rect_dot` is one running total, so the two sums differ in the
+            // last digits.
+            assert!(
+                (g - e).abs() <= 1e-7 * scale,
+                "i={i} walk={g} per-param={e}"
+            );
+        }
+    }
+
+    #[test]
+    fn ard_cross_contraction_matches_one_parameter_at_a_time() {
+        ard_cross_contraction_matches_per_parameter::<Accurate>();
+        ard_cross_contraction_matches_per_parameter::<FastApprox>();
     }
 }

@@ -1,6 +1,7 @@
 //! `f64x4` paths of the ARD RBF leaf: the value and `∂K/∂θ_d` of a square
 //! output from coordinates or the packed `(Δx_d)²` cache, the rectangle, and
-//! the rectangular `∂K/∂θ_d` from coordinates.
+//! the rectangular `∂K/∂θ_d` from coordinates. The rectangular contraction
+//! forms every lengthscale from one `exp`.
 //!
 //! ARD caches store raw `(Δx_d)²` as packed lower triangles
 //! ([`crate::kernel::dist::ArdSqDiff`]); each cached column holds rows
@@ -534,6 +535,215 @@ fn d1_half<M: KernelMath>(src: &[f64], dest: &mut [f64]) -> Result<(), GprError>
         i += 1;
     }
     Ok(())
+}
+
+/// Columns of one rectangular contraction evaluated together, then folded
+/// from the first column to the last. Same batch as [`crate::kernel::dist::par_lower_fold`].
+const COLUMN_BATCH: usize = 16;
+
+/// `⟨weight, ∂K/∂θ_d⟩` for every lengthscale, and `⟨weight, K⟩` when
+/// `want_value` is set. One `exp` per pair. `Ok(None)` when a view is not
+/// column-major. Column totals are added from the first column to the last,
+/// so the sum does not depend on the pool size.
+pub(crate) fn try_contract_cross<M: KernelMath>(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    weight: MatRef<'_, f64>,
+    inv_ell_sq: &[f64],
+    out: &mut [f64],
+    jobs: &mut Vec<f64>,
+    want_value: bool,
+) -> Result<Option<f64>, GprError> {
+    let m = x1.nrows();
+    let n = x2.nrows();
+    let d = inv_ell_sq.len();
+    if out.len() != d || weight.nrows() != m || weight.ncols() != n || !cross_inputs(x1, x2, d)? {
+        return Ok(None);
+    }
+    if !unit_row_stride(weight) {
+        return Ok(None);
+    }
+    let batch = COLUMN_BATCH.min(n);
+    let row_stride = m
+        .checked_mul(2)
+        .and_then(|rows| rows.checked_mul(batch))
+        .ok_or(GprError::SizeOverflow)?;
+    let grad_stride = d.checked_mul(batch).ok_or(GprError::SizeOverflow)?;
+    let need = row_stride
+        .checked_add(grad_stride)
+        .ok_or(GprError::SizeOverflow)?;
+    if jobs.len() < need {
+        jobs.resize(need, 0.0);
+    }
+    let (scratch, rest) = jobs.split_at_mut(row_stride);
+    let slots = &mut rest[..grad_stride];
+    let mut values = [0.0; COLUMN_BATCH];
+    out.fill(0.0);
+    let mut value = 0.0;
+    let mut start = 0;
+    while start < n {
+        let len = batch.min(n - start);
+        fill_contract_batch::<M>(
+            x1,
+            x2,
+            weight,
+            inv_ell_sq,
+            start,
+            &mut scratch[..len * 2 * m],
+            &mut slots[..len * d],
+            &mut values[..len],
+            want_value,
+        )?;
+        for i in 0..len {
+            if want_value {
+                value += values[i];
+            }
+            for dim in 0..d {
+                out[dim] += slots[i * d + dim];
+            }
+        }
+        start += len;
+    }
+    if !value.is_finite() || out.iter().any(|g| !g.is_finite()) {
+        return Err(GprError::NonFiniteKernelValue);
+    }
+    Ok(Some(value))
+}
+
+/// Column `col0` and the `values.len()` columns after it, one slot each.
+#[allow(clippy::too_many_arguments)]
+fn fill_contract_batch<M: KernelMath>(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    weight: MatRef<'_, f64>,
+    inv_ell_sq: &[f64],
+    col0: usize,
+    scratch: &mut [f64],
+    slots: &mut [f64],
+    values: &mut [f64],
+    want_value: bool,
+) -> Result<(), GprError> {
+    let n = values.len();
+    let m = x1.nrows();
+    let d = inv_ell_sq.len();
+    if n == 0 {
+        return Ok(());
+    }
+    if n == 1 {
+        let (r2, k) = scratch.split_at_mut(m);
+        values[0] = contract_column::<M>(
+            x1,
+            x2,
+            weight,
+            inv_ell_sq,
+            col0,
+            r2,
+            k,
+            &mut slots[..d],
+            want_value,
+        )?;
+        return Ok(());
+    }
+    let mid = n / 2;
+    let (left_scratch, right_scratch) = scratch.split_at_mut(mid * 2 * m);
+    let (left_slots, right_slots) = slots.split_at_mut(mid * d);
+    let (left_values, right_values) = values.split_at_mut(mid);
+    let (left, right) = if rayon::current_num_threads() > 1 {
+        rayon::join(
+            || {
+                fill_contract_batch::<M>(
+                    x1,
+                    x2,
+                    weight,
+                    inv_ell_sq,
+                    col0,
+                    left_scratch,
+                    left_slots,
+                    left_values,
+                    want_value,
+                )
+            },
+            || {
+                fill_contract_batch::<M>(
+                    x1,
+                    x2,
+                    weight,
+                    inv_ell_sq,
+                    col0 + mid,
+                    right_scratch,
+                    right_slots,
+                    right_values,
+                    want_value,
+                )
+            },
+        )
+    } else {
+        let left = fill_contract_batch::<M>(
+            x1,
+            x2,
+            weight,
+            inv_ell_sq,
+            col0,
+            left_scratch,
+            left_slots,
+            left_values,
+            want_value,
+        );
+        let right = fill_contract_batch::<M>(
+            x1,
+            x2,
+            weight,
+            inv_ell_sq,
+            col0 + mid,
+            right_scratch,
+            right_slots,
+            right_values,
+            want_value,
+        );
+        (left, right)
+    };
+    left.and(right)
+}
+
+/// One column of `⟨W, K⟩` and `⟨W, ∂K/∂θ_d⟩`. Rows are summed from the first
+/// row to the last. `r2` and `k` each hold `m` entries; `grad` holds `d`.
+#[allow(clippy::too_many_arguments)]
+fn contract_column<M: KernelMath>(
+    x1: MatRef<'_, f64>,
+    x2: MatRef<'_, f64>,
+    weight: MatRef<'_, f64>,
+    inv_ell_sq: &[f64],
+    col: usize,
+    r2: &mut [f64],
+    k: &mut [f64],
+    grad: &mut [f64],
+    want_value: bool,
+) -> Result<f64, GprError> {
+    let m = x1.nrows();
+    r2.fill(0.0);
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let x0 = col_slice_checked(x2, dim)?[col];
+        add_squared_diff_scaled(col_slice_checked(x1, dim)?, x0, w, r2);
+    }
+    d1_half::<M>(r2, k)?;
+    let wcol = col_slice_checked(weight, col)?;
+    let mut value = 0.0;
+    if want_value {
+        for row in 0..m {
+            value += wcol[row] * k[row];
+        }
+    }
+    for (dim, &w) in inv_ell_sq.iter().enumerate() {
+        let x0 = col_slice_checked(x2, dim)?[col];
+        let xdim = col_slice_checked(x1, dim)?;
+        let mut g = 0.0;
+        for row in 0..m {
+            let delta = xdim[row] - x0;
+            g += wcol[row] * k[row] * (w * delta * delta);
+        }
+        grad[dim] = g;
+    }
+    Ok(value)
 }
 
 /// The base pointer and column stride of a column-major matrix.
