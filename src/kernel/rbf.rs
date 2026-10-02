@@ -4,6 +4,9 @@ use super::dist::{lower_col, par_lower_fold};
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
 use super::scalar::f64_pair;
 use super::simd::{try_apply_rbf, try_apply_rbf_cross, try_grad_rbf};
+use super::stationary_simd::{
+    RbfScales, try_apply_rbf_cross as try_apply_rbf_cross_lanes, try_square_rbf,
+};
 use super::{
     KernelScalar, Triangle, finite_dist, write_dense, write_rect_from_coords,
     write_square_from_coords, write_triangle,
@@ -152,6 +155,9 @@ impl RbfKernel {
         {
             return Ok(());
         }
+        if try_square_rbf::<M, T>(dist, out.rb_mut(), uplo, self.lane_scales(), false)? {
+            return Ok(());
+        }
         let inv_two_ell_sq = T::from_f64(inv_two_ell_sq);
         write_triangle(dist, out, uplo, |d| {
             rbf_from_sq_dist::<M, _>(d, inv_two_ell_sq)
@@ -181,6 +187,9 @@ impl RbfKernel {
         if let Some((d, o)) = f64_pair(dist, out.rb_mut())
             && try_apply_rbf_cross::<M>(d, o, inv_two_ell_sq)?
         {
+            return Ok(());
+        }
+        if try_apply_rbf_cross_lanes::<M, T>(dist, out.rb_mut(), self.lane_scales())? {
             return Ok(());
         }
         let inv_two_ell_sq = T::from_f64(inv_two_ell_sq);
@@ -222,6 +231,9 @@ impl RbfKernel {
         if let Some((d, o)) = f64_pair(dist, d_k.rb_mut())
             && try_grad_rbf::<M>(d, o, uplo, inv_two_ell_sq, inv_ell_sq)?
         {
+            return Ok(());
+        }
+        if try_square_rbf::<M, T>(dist, d_k.rb_mut(), uplo, self.lane_scales(), true)? {
             return Ok(());
         }
         let (inv_two_ell_sq, inv_ell_sq) = (T::from_f64(inv_two_ell_sq), T::from_f64(inv_ell_sq));
@@ -346,9 +358,7 @@ impl RbfKernel {
         require_rbf_param_idx(param_idx)?;
         super::require_coord_grad(x1, x2, d_k.as_ref(), 0)?;
         let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales();
-        if let (Some(a), Some((b, o))) = (T::as_f64_ref(x1), f64_pair(x2, d_k.rb_mut()))
-            && try_grad_rbf_cross::<M>(a, b, o, inv_two_ell_sq, inv_ell_sq)?
-        {
+        if try_grad_rbf_cross::<M, T>(x1, x2, d_k.rb_mut(), inv_two_ell_sq, inv_ell_sq)? {
             return Ok(());
         }
         let (inv_two_ell_sq, inv_ell_sq) = (T::from_f64(inv_two_ell_sq), T::from_f64(inv_ell_sq));
@@ -432,6 +442,15 @@ impl RbfKernel {
         Ok(value)
     }
 
+    /// [`Self::inv_scales`] for the lanes of [`super::stationary_simd`].
+    fn lane_scales(&self) -> RbfScales {
+        let (half_inv_ell_sq, inv_ell_sq) = self.inv_scales();
+        RbfScales {
+            half_inv_ell_sq,
+            inv_ell_sq,
+        }
+    }
+
     /// `(1 / (2ℓ²), 1 / ℓ²)` in `f64`.
     fn inv_scales(&self) -> (f64, f64) {
         let inv_ell_sq = 1.0 / (self.lengthscale() * self.lengthscale());
@@ -446,10 +465,12 @@ impl RbfKernel {
 }
 
 /// `∂k/∂θ = k s / ℓ²` on a rectangular pair. Stays off the square Gram helpers.
-fn try_grad_rbf_cross<M: KernelMath>(
-    x1: MatRef<'_, f64>,
-    x2: MatRef<'_, f64>,
-    mut d_k: MatMut<'_, f64>,
+///
+/// `f32` storage is widened to `f64` lanes and rounded once on the store.
+fn try_grad_rbf_cross<M: KernelMath, T: KernelScalar>(
+    x1: MatRef<'_, T>,
+    x2: MatRef<'_, T>,
+    mut d_k: MatMut<'_, T>,
     inv_two_ell_sq: f64,
     inv_ell_sq: f64,
 ) -> Result<bool, GprError> {
@@ -481,7 +502,7 @@ fn try_grad_rbf_cross<M: KernelMath>(
         for row in 0..m {
             s.fill(0.0);
             for dim in 0..d {
-                let z = col_slice(x1, dim)?[row];
+                let z = col_slice(x1, dim)?[row].to_f64();
                 add_squared(&col_slice(x2, dim)?[start..start + len], z, s);
             }
             let mut i = 0;
@@ -504,7 +525,7 @@ fn try_grad_rbf_cross<M: KernelMath>(
                 i += 1;
             }
             for (col, value) in dk.iter().enumerate() {
-                d_k[(row, start + col)] = *value;
+                d_k[(row, start + col)] = T::from_f64(*value);
             }
         }
         start += len;
@@ -512,11 +533,11 @@ fn try_grad_rbf_cross<M: KernelMath>(
     Ok(true)
 }
 
-fn unit_cols(mat: MatRef<'_, f64>) -> bool {
+fn unit_cols<T: KernelScalar>(mat: MatRef<'_, T>) -> bool {
     mat.ncols() == 0 || mat.col(0).try_as_col_major().is_some()
 }
 
-fn col_slice<'a>(mat: MatRef<'a, f64>, col: usize) -> Result<&'a [f64], GprError> {
+fn col_slice<'a, T: KernelScalar>(mat: MatRef<'a, T>, col: usize) -> Result<&'a [T], GprError> {
     mat.col(col)
         .try_as_col_major()
         .map(|c| c.as_slice())
@@ -525,7 +546,7 @@ fn col_slice<'a>(mat: MatRef<'a, f64>, col: usize) -> Result<&'a [f64], GprError
         })
 }
 
-fn finite_slice(values: &[f64]) -> Result<(), GprError> {
+fn finite_slice<T: KernelScalar>(values: &[T]) -> Result<(), GprError> {
     if values.iter().all(|v| v.is_finite()) {
         Ok(())
     } else {
@@ -550,17 +571,24 @@ fn all_finite4(v: f64x4) -> bool {
     a[0].is_finite() && a[1].is_finite() && a[2].is_finite() && a[3].is_finite()
 }
 
-fn add_squared(x: &[f64], x0: f64, acc: &mut [f64]) {
+/// Adds `(x[i] − x0)²` into `acc[i]` in `f64`.
+fn add_squared<T: KernelScalar>(x: &[T], x0: f64, acc: &mut [f64]) {
     let x0v = f64x4::new([x0; 4]);
     let mut i = 0;
     while i + 4 <= x.len() {
-        let d = load4(x, i) - x0v;
+        let xv = f64x4::new([
+            x[i].to_f64(),
+            x[i + 1].to_f64(),
+            x[i + 2].to_f64(),
+            x[i + 3].to_f64(),
+        ]);
+        let d = xv - x0v;
         let av = load4(acc, i);
         store4(acc, i, av + d * d);
         i += 4;
     }
     while i < x.len() {
-        let d = x[i] - x0;
+        let d = x[i].to_f64() - x0;
         acc[i] += d * d;
         i += 1;
     }
@@ -655,6 +683,45 @@ mod tests {
     const TOL: f64 = 1e-10;
 
     use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, sq_dist_1d};
+
+    /// `f32` coordinates take the same widened `f64` lanes as `f64`.
+    #[test]
+    fn f32_cross_grad_from_coords_rounds_the_f64_lanes() {
+        use crate::math::{Accurate, FastApprox};
+        let x1 = faer::Mat::<f64>::from_fn(5, 2, |i, d| 0.3 * i as f64 - 0.7 * d as f64);
+        let x2 = faer::Mat::<f64>::from_fn(7, 2, |i, d| 0.45 * i as f64 + 0.2 * d as f64 - 1.0);
+        let x1_32 = faer::Mat::<f32>::from_fn(5, 2, |i, d| x1[(i, d)] as f32);
+        let x2_32 = faer::Mat::<f32>::from_fn(7, 2, |i, d| x2[(i, d)] as f32);
+        let rbf = RbfKernel::new(1.3).expect("valid");
+        let mut want = faer::Mat::<f64>::zeros(5, 7);
+        let mut got = faer::Mat::<f32>::zeros(5, 7);
+        rbf.grad_cross_from_coords::<Accurate, f64>(x1.as_ref(), x2.as_ref(), want.as_mut(), 0)
+            .expect("finite");
+        rbf.grad_cross_from_coords::<Accurate, f32>(
+            x1_32.as_ref(),
+            x2_32.as_ref(),
+            got.as_mut(),
+            0,
+        )
+        .expect("finite");
+        for j in 0..7 {
+            for i in 0..5 {
+                assert_close(f64::from(got[(i, j)]), want[(i, j)], 1e-6);
+            }
+        }
+        rbf.grad_cross_from_coords::<FastApprox, f32>(
+            x1_32.as_ref(),
+            x2_32.as_ref(),
+            got.as_mut(),
+            0,
+        )
+        .expect("finite");
+        for j in 0..7 {
+            for i in 0..5 {
+                assert_close(f64::from(got[(i, j)]), want[(i, j)], 1e-5);
+            }
+        }
+    }
 
     #[test]
     fn is_send_sync() {
