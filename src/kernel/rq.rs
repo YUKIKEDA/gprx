@@ -1,6 +1,7 @@
 //! Isotropic rational quadratic kernel.
 
 use super::lengthscale::{validate_lengthscale, validate_log_lengthscale};
+use super::periodic_rq_simd::{RqScales, try_apply_rq, try_weighted_rq};
 use super::{
     Triangle, finite_dist, finite_kernel, validate_log_positive, validate_positive_finite,
     write_dense, write_rect_from_coords, write_square_from_coords, write_triangle,
@@ -8,6 +9,7 @@ use super::{
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
+use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
 /// Isotropic rational quadratic: `k = (1 + ‖x-x'‖² / (2αℓ²))^(-α)`.
@@ -161,12 +163,22 @@ impl RationalQuadraticKernel {
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
-        out: MatMut<'_, T>,
+        mut out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        if try_apply_rq(dist, out.rb_mut(), uplo, self.simd_scales())? {
+            return Ok(());
+        }
         let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
         let alpha = T::from_f64(self.alpha());
         write_triangle(dist, out, uplo, |d| rq_from_sq_dist(d, ell_sq, alpha))
+    }
+
+    fn simd_scales(&self) -> RqScales {
+        RqScales {
+            inv_ell_sq: 1.0 / (self.lengthscale() * self.lengthscale()),
+            alpha: self.alpha(),
+        }
     }
 
     /// Writes rectangular `k(dist)` into `out` (train × test).
@@ -233,6 +245,9 @@ impl RationalQuadraticKernel {
         weight: MatRef<'_, T>,
         out: &mut [f64],
     ) -> Result<f64, GprError> {
+        if let Some(value) = try_weighted_rq(dist, k, weight, self.simd_scales(), out)? {
+            return Ok(value);
+        }
         let ell_sq = T::from_f64(self.lengthscale() * self.lengthscale());
         let alpha = T::from_f64(self.alpha());
         let one = T::from_f64(1.0);
