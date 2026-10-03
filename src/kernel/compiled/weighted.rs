@@ -17,7 +17,8 @@
 //! transcendental functions. Every matrix of the square walk is the lower
 //! triangle of a symmetric `n × n`. The rectangular walk is a full matrix.
 //! An ARD RBF rectangle contracts every lengthscale from one `exp` and does
-//! not form `∂K`. The diagonal walk sums `∂k(x_i, x_i)/∂θ`.
+//! not form `∂K`. An Accurate square ARD RBF forms `k` once and contracts
+//! every lengthscale from that `k`. The diagonal walk sums `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
 use super::{CompiledKernel, add_triangle};
@@ -484,6 +485,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
             }
             _ => {}
         }
+        // Accurate ARD RBF: `∂k/∂θ_d = k · w_d (Δ_d)²`, so one Gram covers
+        // every lengthscale. `FastApprox` stays on the per-parameter loop:
+        // its derivative is the jet, not `k` times the squared distance.
+        if M::ACCURATE && matches!(self, Self::RbfArd(_)) {
+            if let Some(value) = self.contract_ard_square::<M>(walk, weight, out, bufs, node)? {
+                return Ok(value);
+            }
+        }
         let Some(d_k) = bufs.first_mut() else {
             return Err(too_few_buffers());
         };
@@ -513,6 +522,44 @@ impl<T: KernelScalar> CompiledKernel<T> {
             *slot = lower_dot(weight, d_k.as_ref());
         }
         Ok(value)
+    }
+
+    /// Accurate square ARD RBF: one Gram, then every lengthscale from `k`.
+    fn contract_ard_square<M: crate::math::KernelMath>(
+        &self,
+        walk: &mut WeightedWalk<'_, '_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        bufs: &mut [Mat<T>],
+        node: Node<'_, T>,
+    ) -> Result<Option<f64>, GprError> {
+        let Self::RbfArd(leaf) = self else {
+            return Ok(None);
+        };
+        // `apply_points_with` rejects a scratch that is not `n×n`. A bare ARD
+        // leaf does not allocate that scratch, and this Gram does not read it.
+        if node.own.is_none() {
+            let Some(gram) = bufs.first_mut() else {
+                return Err(too_few_buffers());
+            };
+            if let Some(cache) = walk.inputs.ard {
+                leaf.apply_from_sq_diff::<M, T>(cache, gram.as_mut(), Triangle::Lower)?;
+            } else {
+                leaf.apply_math::<M, T>(walk.inputs.x, gram.as_mut(), Triangle::Lower)?;
+            }
+        }
+        let own = node.own;
+        let k = match own {
+            Some(k) => k,
+            None => bufs[0].as_ref(),
+        };
+        leaf.contract_square(walk.inputs.x, weight, k, walk.inputs.ard, out)?;
+        let value = match (own, node.value) {
+            (Some(k), _) => lower_dot(weight, k),
+            (None, true) => lower_dot(weight, bufs[0].as_ref()),
+            (None, false) => 0.0,
+        };
+        Ok(Some(value))
     }
 
     /// Writes `⟨weight, ∂K(x1, x2)/∂θ_p⟩_F` for every parameter into `out`.
@@ -1347,6 +1394,64 @@ mod tests {
     fn cross_and_diag_contractions_match_per_parameter() {
         contractions_match_per_parameter::<Accurate>();
         contractions_match_per_parameter::<FastApprox>();
+    }
+
+    /// Constant × ARD RBF, and a bare ARD RBF. `n` is not a multiple of the
+    /// column chunk, so the one-`k` contraction covers a partial last chunk.
+    fn ard_square_contraction_matches_per_parameter<M: KernelMath>() {
+        let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("c"));
+        let ard = |ls: &[f64]| KernelSpec::from(RbfArdKernel::new(ls).expect("ard"));
+        for spec in [c(1.3) * ard(&[0.7, 1.4, 2.2]), ard(&[0.5, 0.9, 1.1])] {
+            let compiled = spec.compile();
+            let d = 3;
+            let n = 20;
+            let x = Mat::from_fn(n, d, |i, j| 0.15 * i as f64 - 0.11 * j as f64 - 0.4);
+            let inputs = GramInputs::points(x.as_ref());
+            let weight = Mat::from_fn(n, n, |i, j| 0.3 * (i + 1) as f64 - 0.2 * j as f64 + 0.05);
+            let mut got = vec![0.0; compiled.num_params()];
+            let mut expect = vec![0.0; compiled.num_params()];
+            let mut scratch = Mat::zeros(n, n);
+            let mut nested = Vec::new();
+            crate::kernel::ensure_nested_levels(&mut nested, &compiled, n, n);
+            let mut bufs = vec![Mat::zeros(n, n); compiled.weighted_buffers(0)];
+            let mut walk = WeightedWalk {
+                inputs,
+                scratch: scratch.as_mut(),
+                nested: &mut nested,
+                kept: &[],
+                kept_products: 0,
+            };
+            compiled
+                .weighted_grads::<M>(&mut walk, weight.as_ref(), &mut got, &mut bufs)
+                .expect("walk");
+            let mut d_k = Mat::zeros(n, n);
+            for (p, slot) in expect.iter_mut().enumerate() {
+                compiled
+                    .grad_gram::<M>(
+                        inputs,
+                        d_k.as_mut(),
+                        p,
+                        Triangle::Lower,
+                        scratch.as_mut(),
+                        &mut nested,
+                    )
+                    .expect("grad");
+                *slot = super::lower_dot(weight.as_ref(), d_k.as_ref());
+            }
+            for (i, (g, e)) in got.iter().zip(&expect).enumerate() {
+                let scale = e.abs().max(1.0);
+                assert!(
+                    (g - e).abs() <= 1e-7 * scale,
+                    "i={i} walk={g} per-param={e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ard_square_contraction_matches_one_parameter_at_a_time() {
+        ard_square_contraction_matches_per_parameter::<Accurate>();
+        ard_square_contraction_matches_per_parameter::<FastApprox>();
     }
 
     /// Constant × ARD RBF, plus an ARD RBF. The rectangle is wider than one
