@@ -107,22 +107,32 @@ fn residual_inf(
 ) -> f64 {
     let m = rhs.len();
     let mut b_inf = 0.0f64;
-    for i in 0..m {
-        let mut row = 0.0;
-        let mut sum = 0.0;
+    const BLOCK: usize = 64;
+    let mut start = 0;
+    while start < m {
+        let len = BLOCK.min(m - start);
+        let mut sum = [0.0f64; BLOCK];
+        let mut abs_row = [0.0f64; BLOCK];
         for j in 0..m {
-            let bij = if let Some(b) = b32 {
-                f64::from(b[(i, j)])
-            } else if let Some(b) = b64 {
-                b[(i, j)]
-            } else {
-                0.0
-            };
-            row += bij.abs();
-            sum += bij * w[j];
+            let wj = w[j];
+            for t in 0..len {
+                let i = start + t;
+                let bij = if let Some(b) = b32 {
+                    f64::from(b[(i, j)])
+                } else if let Some(b) = b64 {
+                    b[(i, j)]
+                } else {
+                    0.0
+                };
+                abs_row[t] += bij.abs();
+                sum[t] += bij * wj;
+            }
         }
-        b_inf = b_inf.max(row);
-        r[i] = rhs[i] - sum;
+        for t in 0..len {
+            b_inf = b_inf.max(abs_row[t]);
+            r[start + t] = rhs[start + t] - sum[t];
+        }
+        start += BLOCK;
     }
     b_inf
 }

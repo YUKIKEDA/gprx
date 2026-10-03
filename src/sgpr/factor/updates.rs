@@ -7,7 +7,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{KernelScalar, KernelSpec};
 use crate::linalg::{
     append_chol_border, cholesky_lower_owned, delete_chol_row, frobenius2, gram_aat_plus_noise,
-    mul_lower_left, solve_lower,
+    mat_vec, mul_lower_left, solve_lower,
 };
 use crate::sparse::KernelScratch;
 use faer::{Mat, MatMut, MatRef};
@@ -183,14 +183,7 @@ where
         a_new[j] = value;
         a_new_norm2 += value * value;
     }
-    let mut v = vec![lit::<T>(0.0); m];
-    for (i, slot) in v.iter_mut().enumerate() {
-        let mut sum = lit::<T>(0.0);
-        for (j, a_val) in a_new.iter().enumerate() {
-            sum += state.a[(i, j)] * a_val;
-        }
-        *slot = sum;
-    }
+    let v = mat_vec(state.a.as_ref(), &a_new);
     let mut b_border = Mat::zeros(m, 1);
     for i in 0..m {
         b_border[(i, 0)] = v[i];
@@ -276,15 +269,13 @@ pub(super) fn remove_row<T: KernelScalar>(a: &Mat<T>, idx: usize) -> Mat<T> {
     let m = a.nrows();
     let n = a.ncols();
     let mut out = Mat::zeros(m - 1, n);
-    let mut dest = 0;
-    for i in 0..m {
-        if i == idx {
-            continue;
+    for j in 0..n {
+        for i in 0..idx {
+            out[(i, j)] = a[(i, j)];
         }
-        for j in 0..n {
-            out[(dest, j)] = a[(i, j)];
+        for i in (idx + 1)..m {
+            out[(i - 1, j)] = a[(i, j)];
         }
-        dest += 1;
     }
     out
 }

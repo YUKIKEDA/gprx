@@ -7,8 +7,8 @@ use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
 use crate::kernel::{CompiledKernel, KernelScalar, Triangle};
 use crate::linalg::{
-    copy_mat, dot, frobenius_dot, gemm, mat_add_mul, mat_sub_mul, mat_vec, quad_form, solve_llt,
-    solve_lower, solve_lower_transpose,
+    copy_mat, dot, dot_ay, frobenius_dot, gemm, mat_add_mul, mat_sub_mul, mat_vec, quad_form,
+    solve_llt, solve_lower, solve_lower_transpose,
 };
 use crate::precision::ModelPrecision;
 use crate::sgpr::FittedSgpr;
@@ -74,14 +74,7 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
         for v in y {
             y_norm2 += v * v;
         }
-        let mut ay_dot_w = lit::<T>(0.0);
-        for i in 0..m {
-            let mut ay_i = lit::<T>(0.0);
-            for j in 0..n {
-                ay_i += a[(i, j)] * y[j];
-            }
-            ay_dot_w += ay_i * w[i];
-        }
+        let ay_dot_w = dot_ay(a, y, w);
         Self {
             l: model.k_mm_l.as_ref(),
             a,
@@ -160,14 +153,7 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
         solve_lower(self.l, da.as_mut());
         mat_sub_mul(&mut da, phi_l.as_ref(), self.a);
         let db = noise_plus_sym_prod(da.as_ref(), self.a, d_noise);
-        let mut u = vec![lit::<T>(0.0); self.m];
-        for i in 0..self.m {
-            let mut sum = lit::<T>(0.0);
-            for j in 0..self.n {
-                sum += da[(i, j)] * self.y[j];
-            }
-            u[i] = sum;
-        }
+        let u = mat_vec(da.as_ref(), self.y);
         VfeTangent::<T> {
             phi,
             phi_l,
@@ -246,14 +232,7 @@ impl<'a, T: KernelScalar> VfeEngine<'a, T> {
             self.a,
             dd.d_noise,
         );
-        let mut ddu = vec![lit::<T>(0.0); self.m];
-        for i in 0..self.m {
-            let mut sum = lit::<T>(0.0);
-            for j in 0..self.n {
-                sum += dda[(i, j)] * self.y[j];
-            }
-            ddu[i] = sum;
-        }
+        let ddu = mat_vec(dda.as_ref(), self.y);
         let d_logdet_b_i = trace_solve(self.b_l, ti.db.as_ref());
         let _ = d_logdet_b_i;
         let d2_logdet_b = second_logdet_b(self.b_l, ti.db.as_ref(), tj.db.as_ref(), ddb.as_ref());
