@@ -17,8 +17,9 @@
 //! transcendental functions. Every matrix of the square walk is the lower
 //! triangle of a symmetric `n × n`. The rectangular walk is a full matrix.
 //! An ARD RBF rectangle contracts every lengthscale from one `exp` and does
-//! not form `∂K`. An Accurate square ARD RBF forms `k` once and contracts
-//! every lengthscale from that `k`. The diagonal walk sums `∂k(x_i, x_i)/∂θ`.
+//! not form `∂K`. An Accurate square ARD RBF forms `k` once and folds every
+//! lengthscale from that `k` as one matrix product. The diagonal walk sums
+//! `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
 use super::{CompiledKernel, add_triangle};
@@ -38,6 +39,9 @@ pub(crate) struct WeightedWalk<'a, 'b, T> {
     pub(crate) kept: &'b [Mat<T>],
     /// How many products read `kept` ([`CompiledKernel::kept_products`]).
     pub(crate) kept_products: usize,
+    /// Workspace for the ARD lengthscale matrix product. The caller keeps it
+    /// across evaluations.
+    pub(crate) fold: &'b mut Vec<f64>,
 }
 
 impl<T: KernelScalar> CompiledKernel<T> {
@@ -486,8 +490,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
             _ => {}
         }
         // Accurate ARD RBF: `∂k/∂θ_d = k · w_d (Δ_d)²`, so one Gram covers
-        // every lengthscale. `FastApprox` stays on the per-parameter loop:
-        // its derivative is the jet, not `k` times the squared distance.
+        // every lengthscale and the sum is one matrix product. `FastApprox`
+        // stays on the per-parameter loop: its derivative is the jet, not
+        // `k` times the squared distance.
         if M::ACCURATE && matches!(self, Self::RbfArd(_)) {
             if let Some(value) = self.contract_ard_square::<M>(walk, weight, out, bufs, node)? {
                 return Ok(value);
@@ -553,7 +558,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Some(k) => k,
             None => bufs[0].as_ref(),
         };
-        leaf.contract_square(walk.inputs.x, weight, k, walk.inputs.ard, out)?;
+        leaf.contract_square(walk.inputs.x, weight, k, walk.inputs.ard, out, walk.fold)?;
         let value = match (own, node.value) {
             (Some(k), _) => lower_dot(weight, k),
             (None, true) => lower_dot(weight, bufs[0].as_ref()),
@@ -1225,12 +1230,14 @@ mod tests {
             )
             .expect("gram");
         let mut grads = vec![0.0; compiled.num_params()];
+        let mut fold = Vec::new();
         let mut walk = WeightedWalk {
             inputs,
             scratch: scratch.as_mut(),
             nested: &mut nested,
             kept: &kept,
             kept_products: products,
+            fold: &mut fold,
         };
         compiled
             .weighted_grads::<M>(&mut walk, weight.as_ref(), &mut grads, &mut bufs)
@@ -1317,12 +1324,14 @@ mod tests {
         let mut nested = Vec::new();
         let mut bufs = vec![Mat::zeros(m, m); compiled.contraction_buffers()];
         {
+            let mut fold = Vec::new();
             let mut walk = WeightedWalk {
                 inputs,
                 scratch: scratch.as_mut(),
                 nested: &mut nested,
                 kept: &[],
                 kept_products: 0,
+                fold: &mut fold,
             };
             compiled
                 .weighted_grads::<M>(&mut walk, weight_zz.as_ref(), &mut got, &mut bufs)
@@ -1396,8 +1405,8 @@ mod tests {
         contractions_match_per_parameter::<FastApprox>();
     }
 
-    /// Constant × ARD RBF, and a bare ARD RBF. `n` is not a multiple of the
-    /// column chunk, so the one-`k` contraction covers a partial last chunk.
+    /// Constant × ARD RBF, and a bare ARD RBF. The lengthscale sum is one
+    /// matrix product of the lower triangle.
     fn ard_square_contraction_matches_per_parameter<M: KernelMath>() {
         let c = |v| KernelSpec::from(ConstantKernel::new(v).expect("c"));
         let ard = |ls: &[f64]| KernelSpec::from(RbfArdKernel::new(ls).expect("ard"));
@@ -1414,12 +1423,14 @@ mod tests {
             let mut nested = Vec::new();
             crate::kernel::ensure_nested_levels(&mut nested, &compiled, n, n);
             let mut bufs = vec![Mat::zeros(n, n); compiled.weighted_buffers(0)];
+            let mut fold = Vec::new();
             let mut walk = WeightedWalk {
                 inputs,
                 scratch: scratch.as_mut(),
                 nested: &mut nested,
                 kept: &[],
                 kept_products: 0,
+                fold: &mut fold,
             };
             compiled
                 .weighted_grads::<M>(&mut walk, weight.as_ref(), &mut got, &mut bufs)
@@ -1514,9 +1525,8 @@ mod tests {
         }
         for (i, (g, e)) in got.iter().zip(&expect).enumerate() {
             let scale = e.abs().max(1.0);
-            // Column totals are folded from the first column to the last.
-            // `rect_dot` is one running total, so the two sums differ in the
-            // last digits.
+            // The lengthscale sum is one matrix product. `rect_dot` is one
+            // running total, so the two sums differ in the last digits.
             assert!(
                 (g - e).abs() <= 1e-7 * scale,
                 "i={i} walk={g} per-param={e}"

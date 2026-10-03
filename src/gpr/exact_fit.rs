@@ -716,6 +716,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
             nested: views.nested,
             kept,
             kept_products: products,
+            fold: views.ard_fold,
         };
         with_kernel_exp!(self.core.policies.math, M => compiled.weighted_grads::<M>(
             &mut walk,
