@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
+use super::dist::{ArdSqDiff, lower_fold_infallible, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -245,6 +245,92 @@ impl RbfArdKernel {
                 Pick::one(param_idx),
             )?)
         })
+    }
+
+    /// Folds `⟨W, ∂K/∂θ_d⟩` for every lengthscale from one lower-triangle Gram.
+    ///
+    /// Accurate math has `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²`. The diagonal is zero.
+    /// Each strict lower pair is counted twice. Column totals are added from
+    /// the first column to the last, the same association as a per-parameter
+    /// `⟨W, ∂K⟩`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`] when `out` is not one entry per
+    /// lengthscale, [`GprError::ShapeMismatch`] or [`GprError::NonFiniteInput`]
+    /// from the point and Gram checks, and [`GprError::NonFiniteKernelValue`]
+    /// when a folded total is not finite.
+    pub(crate) fn contract_square<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        k: MatRef<'_, T>,
+        diffs: Option<ArdSqDiff<'_, T>>,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let d = w.len();
+        if out.len() != d {
+            return Err(GprError::LengthMismatch {
+                reason: format!("gradient has {} entries, expected {d}", out.len()),
+            });
+        }
+        let n = ard::require_square_points(x, k, d)?;
+        if weight.nrows() != n || weight.ncols() != n {
+            return Err(GprError::ShapeMismatch {
+                reason: format!(
+                    "weight is {}x{}, expected {n}x{n}",
+                    weight.nrows(),
+                    weight.ncols()
+                ),
+            });
+        }
+        if let Some(cache) = diffs {
+            require_ard_sq_diff_shape(cache, n, d)?;
+        }
+        for (dim, slot) in out.iter_mut().enumerate() {
+            let wd = w[dim];
+            let sum = lower_fold_infallible(
+                n,
+                &|start, end| {
+                    let mut acc = 0.0;
+                    for col in start..end {
+                        // One `2 *` after the strict lower sum, matching
+                        // `lower_dot`: diagonal once (here zero), off-diagonal
+                        // twice.
+                        let mut off = 0.0;
+                        if let Some(cache) = diffs {
+                            let sq = cache.column(dim, col);
+                            for (offset, sq_row) in sq.iter().enumerate().skip(1) {
+                                let row = col + offset;
+                                off += weight[(row, col)].to_f64()
+                                    * k[(row, col)].to_f64()
+                                    * sq_row.to_f64()
+                                    * wd;
+                            }
+                        } else {
+                            let x_col = x[(col, dim)].to_f64();
+                            for row in (col + 1)..n {
+                                let delta = x[(row, dim)].to_f64() - x_col;
+                                off += weight[(row, col)].to_f64()
+                                    * k[(row, col)].to_f64()
+                                    * delta
+                                    * delta
+                                    * wd;
+                            }
+                        }
+                        acc += 2.0 * off;
+                    }
+                    acc
+                },
+                &|left, right| left + right,
+            );
+            if !sum.is_finite() {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+            *slot = sum;
+        }
+        Ok(())
     }
 
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
@@ -917,5 +1003,33 @@ mod tests {
     fn f32_cross_contraction_matches_per_parameter() {
         f32_contract_matches::<crate::math::Accurate>();
         f32_contract_matches::<crate::math::FastApprox>();
+    }
+
+    #[test]
+    fn f32_square_contraction_matches_per_parameter() {
+        let rbf = RbfArdKernel::new(&[0.8, 1.6, 0.4]).expect("ard");
+        let n = 7;
+        let d = 3;
+        let x = Mat::from_fn(n, d, |i, j| 0.2 * i as f32 - 0.15 * j as f32);
+        let mut k = Mat::zeros(n, n);
+        rbf.apply(x.as_ref(), k.as_mut(), Triangle::Lower)
+            .expect("value");
+        let weight = Mat::from_fn(n, n, |i, j| 0.1 * (i + 1) as f32 - 0.05 * j as f32);
+        let mut out = [0.0; 3];
+        rbf.contract_square(x.as_ref(), weight.as_ref(), k.as_ref(), None, &mut out)
+            .expect("contract");
+        let mut dk = Mat::zeros(n, n);
+        for (dim, &got) in out.iter().enumerate() {
+            rbf.grad(x.as_ref(), dk.as_mut(), dim, Triangle::Lower)
+                .expect("grad");
+            let mut dot = 0.0;
+            for col in 0..n {
+                dot += f64::from(weight[(col, col)]) * f64::from(dk[(col, col)]);
+                for row in (col + 1)..n {
+                    dot += 2.0 * f64::from(weight[(row, col)]) * f64::from(dk[(row, col)]);
+                }
+            }
+            assert_close(got, dot, 1e-5);
+        }
     }
 }
