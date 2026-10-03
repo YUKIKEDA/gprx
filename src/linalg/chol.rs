@@ -309,11 +309,14 @@ pub(crate) fn solve_llt_f64_accum(l: MatRef<'_, f32>, mut rhs: MatMut<'_, f32>) 
     let mut x = vec![0.0f64; n];
     for col in 0..n_rhs {
         for i in 0..n {
-            let mut sum = f64::from(rhs[(i, col)]);
-            for j in 0..i {
-                sum -= f64::from(l[(i, j)]) * y[j];
+            y[i] = f64::from(rhs[(i, col)]);
+        }
+        for j in 0..n {
+            y[j] /= f64::from(l[(j, j)]);
+            let yj = y[j];
+            for i in (j + 1)..n {
+                y[i] -= f64::from(l[(i, j)]) * yj;
             }
-            y[i] = sum / f64::from(l[(i, i)]);
         }
         for i in (0..n).rev() {
             let mut sum = y[i];

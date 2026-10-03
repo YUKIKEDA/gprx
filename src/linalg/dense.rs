@@ -42,15 +42,35 @@ pub(crate) fn symmetrize_lower<T: KernelScalar>(mut a: MatMut<'_, T>, n: usize) 
 }
 
 pub(crate) fn gemv_sym_lower<T: KernelScalar>(a: MatRef<'_, T>, x: &[T], y: &mut [T], n: usize) {
-    for i in 0..n {
-        let mut s = a[(i, i)] * x[i];
-        for j in 0..i {
-            s += a[(i, j)] * x[j];
+    // The strictly lower part is accumulated down each column. Adding that sum
+    // to the diagonal in one step differs in the last bits from folding each
+    // lower term onto the diagonal. The upper part stays in ascending column
+    // order, which is already contiguous.
+    const BLOCK: usize = 64;
+    let mut start = 0;
+    while start < n {
+        let len = BLOCK.min(n - start);
+        let mut lower = [T::from_f64(0.0); BLOCK];
+        for j in 0..n {
+            let xj = x[j];
+            let i_begin = (j + 1).max(start);
+            let i_end = start + len;
+            if i_begin >= i_end {
+                continue;
+            }
+            for i in i_begin..i_end {
+                lower[i - start] += a[(i, j)] * xj;
+            }
         }
-        for j in i + 1..n {
-            s += a[(j, i)] * x[j];
+        for (t, &low) in lower.iter().enumerate().take(len) {
+            let i = start + t;
+            let mut s = a[(i, i)] * x[i] + low;
+            for j in (i + 1)..n {
+                s += a[(j, i)] * x[j];
+            }
+            y[i] = s;
         }
-        y[i] = s;
+        start += len;
     }
 }
 
@@ -59,25 +79,72 @@ pub(crate) fn matvec_columns<T: KernelScalar>(a: MatRef<'_, T>, y: &[T], ay: Mat
 }
 
 /// [`matvec_columns`] for `f32`: each row sum in `f64`.
+///
+/// Rows are visited in blocks so the `f64` totals stay on the stack. Within a
+/// block every row still adds columns `0..n` in order, matching the
+/// one-row dot product bit for bit.
 pub(crate) fn matvec_columns_f64_accum(a: MatRef<'_, f32>, y: &[f32], mut ay: MatMut<'_, f32>) {
-    for i in 0..a.nrows() {
-        let mut sum = 0.0f64;
-        for j in 0..a.ncols() {
-            sum += f64::from(a[(i, j)]) * f64::from(y[j]);
+    const BLOCK: usize = 64;
+    let m = a.nrows();
+    let n = a.ncols();
+    let mut start = 0;
+    while start < m {
+        let len = BLOCK.min(m - start);
+        let mut acc = [0.0f64; BLOCK];
+        for j in 0..n {
+            let yj = f64::from(y[j]);
+            for t in 0..len {
+                acc[t] += f64::from(a[(start + t, j)]) * yj;
+            }
         }
-        ay[(i, 0)] = sum as f32;
+        for (t, &sum) in acc.iter().enumerate().take(len) {
+            ay[(start + t, 0)] = sum as f32;
+        }
+        start += len;
     }
 }
 
 /// [`matvec_columns`] for `f64`.
+///
+/// Each entry of `ay` is still `Σ_j A[(i, j)] y[j]` with `j` ascending. The
+/// inner loop walks down a column.
 pub(crate) fn matvec_columns_native(a: MatRef<'_, f64>, y: &[f64], mut ay: MatMut<'_, f64>) {
-    for i in 0..a.nrows() {
-        let mut sum = 0.0;
-        for j in 0..a.ncols() {
-            sum += a[(i, j)] * y[j];
-        }
-        ay[(i, 0)] = sum;
+    let m = a.nrows();
+    let n = a.ncols();
+    for i in 0..m {
+        ay[(i, 0)] = 0.0;
     }
+    for j in 0..n {
+        let yj = y[j];
+        for i in 0..m {
+            ay[(i, 0)] += a[(i, j)] * yj;
+        }
+    }
+}
+
+/// `wᵀ A y`. Each row of `A` is summed in ascending column order, then scaled
+/// by `w`, so the value matches a per-row dot product.
+pub(crate) fn dot_ay<T: KernelScalar>(a: MatRef<'_, T>, y: &[T], w: &[T]) -> T {
+    const BLOCK: usize = 64;
+    let m = a.nrows();
+    let n = a.ncols();
+    let mut total = T::from_f64(0.0);
+    let mut start = 0;
+    while start < m {
+        let len = BLOCK.min(m - start);
+        let mut acc = [T::from_f64(0.0); BLOCK];
+        for j in 0..n {
+            let yj = y[j];
+            for t in 0..len {
+                acc[t] += a[(start + t, j)] * yj;
+            }
+        }
+        for t in 0..len {
+            total += acc[t] * w[start + t];
+        }
+        start += len;
+    }
+    total
 }
 
 pub(crate) fn copy_mat<T: KernelScalar>(src: MatRef<'_, T>, mut dest: MatMut<'_, T>) {
@@ -139,13 +206,14 @@ pub(crate) fn quad_form<T: KernelScalar>(w: &[T], m: MatRef<'_, T>) -> T {
 }
 
 pub(crate) fn mat_vec<T: KernelScalar>(m: MatRef<'_, T>, v: &[T]) -> Vec<T> {
-    let mut out = vec![T::from_f64(0.0); m.nrows()];
-    for i in 0..m.nrows() {
-        let mut sum = T::from_f64(0.0);
-        for j in 0..m.ncols() {
-            sum += m[(i, j)] * v[j];
+    let rows = m.nrows();
+    let cols = m.ncols();
+    let mut out = vec![T::from_f64(0.0); rows];
+    for j in 0..cols {
+        let vj = v[j];
+        for i in 0..rows {
+            out[i] += m[(i, j)] * vj;
         }
-        out[i] = sum;
     }
     out
 }
@@ -171,17 +239,36 @@ pub(crate) fn gram_aat_plus_noise<T: KernelScalar>(a: MatRef<'_, T>, noise: f64)
 }
 
 /// `a aᵀ` for `f32`: each entry in `f64`.
+///
+/// Tiles of `b` are accumulated with `t` ascending, so each entry matches the
+/// row-wise dot product. A tile is read down the columns of `a`.
 pub(crate) fn gram_aat_f64_accum(a: MatRef<'_, f32>, mut b: MatMut<'_, f32>) {
+    const TILE: usize = 32;
     let m = a.nrows();
     let n = a.ncols();
-    for i in 0..m {
-        for j in 0..m {
-            let mut sum = 0.0f64;
+    let mut i0 = 0;
+    while i0 < m {
+        let ni = TILE.min(m - i0);
+        let mut j0 = 0;
+        while j0 < m {
+            let nj = TILE.min(m - j0);
+            let mut acc = [0.0f64; TILE * TILE];
             for t in 0..n {
-                sum += f64::from(a[(i, t)]) * f64::from(a[(j, t)]);
+                for jj in 0..nj {
+                    let aj = f64::from(a[(j0 + jj, t)]);
+                    for ii in 0..ni {
+                        acc[jj * TILE + ii] += f64::from(a[(i0 + ii, t)]) * aj;
+                    }
+                }
             }
-            b[(i, j)] = sum as f32;
+            for jj in 0..nj {
+                for ii in 0..ni {
+                    b[(i0 + ii, j0 + jj)] = acc[jj * TILE + ii] as f32;
+                }
+            }
+            j0 += TILE;
         }
+        i0 += TILE;
     }
 }
 
@@ -206,12 +293,11 @@ pub(crate) fn mul_lower_left<T: KernelScalar>(l: MatRef<'_, T>, a: MatRef<'_, T>
     let n = a.ncols();
     let mut out = Mat::zeros(m, n);
     for j in 0..n {
-        for i in 0..m {
-            let mut sum = T::from_f64(0.0);
-            for t in 0..=i {
-                sum += l[(i, t)] * a[(t, j)];
+        for t in 0..m {
+            let at = a[(t, j)];
+            for i in t..m {
+                out[(i, j)] += l[(i, t)] * at;
             }
-            out[(i, j)] = sum;
         }
     }
     out
@@ -265,25 +351,44 @@ pub(crate) fn fill_identity<T: KernelScalar>(mut a: faer::MatMut<'_, T>) {
 }
 
 /// `a aᵀ + noise I`, summed in this scalar (no `f64` accumulation).
+///
+/// Same tile order as [`gram_aat_f64_accum`]: `k` ascends inside each entry.
 pub(crate) fn gram_aat_plus_noise_in_scalar<T: KernelScalar>(
     a: MatRef<'_, T>,
     noise: f64,
 ) -> Mat<T> {
+    const TILE: usize = 32;
     let m = a.nrows();
     let n = a.ncols();
     let noise = T::from_f64(noise);
     let mut b = Mat::<T>::zeros(m, m);
-    for i in 0..m {
-        for j in 0..m {
-            let mut sum = T::from_f64(0.0);
+    let mut i0 = 0;
+    while i0 < m {
+        let ni = TILE.min(m - i0);
+        let mut j0 = 0;
+        while j0 < m {
+            let nj = TILE.min(m - j0);
+            let mut acc = [T::from_f64(0.0); TILE * TILE];
             for k in 0..n {
-                sum += a[(i, k)] * a[(j, k)];
+                for jj in 0..nj {
+                    let aj = a[(j0 + jj, k)];
+                    for ii in 0..ni {
+                        acc[jj * TILE + ii] += a[(i0 + ii, k)] * aj;
+                    }
+                }
             }
-            if i == j {
-                sum += noise;
+            for jj in 0..nj {
+                for ii in 0..ni {
+                    let mut sum = acc[jj * TILE + ii];
+                    if i0 + ii == j0 + jj {
+                        sum += noise;
+                    }
+                    b[(i0 + ii, j0 + jj)] = sum;
+                }
             }
-            b[(i, j)] = sum;
+            j0 += TILE;
         }
+        i0 += TILE;
     }
     b
 }
@@ -292,12 +397,10 @@ pub(crate) fn gram_aat_plus_noise_in_scalar<T: KernelScalar>(
 pub(crate) fn matvec_promoted<T: KernelScalar>(a: MatRef<'_, T>, y: &[f64]) -> Vec<f64> {
     let m = a.nrows();
     let mut out = vec![0.0; m];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let mut sum = 0.0;
-        for (j, &yj) in y.iter().enumerate().take(a.ncols()) {
-            sum += a[(i, j)].to_f64() * yj;
+    for (j, &yj) in y.iter().enumerate().take(a.ncols()) {
+        for i in 0..m {
+            out[i] += a[(i, j)].to_f64() * yj;
         }
-        *slot = sum;
     }
     out
 }
@@ -307,11 +410,84 @@ pub(crate) fn mul_lower_vec<T: KernelScalar>(l: MatRef<'_, T>, z: &[T], out: &mu
     let m = l.nrows();
     debug_assert_eq!(z.len(), m);
     debug_assert_eq!(out.len(), m);
-    for i in 0..m {
-        let mut s = T::from_f64(0.0);
-        for (j, &zj) in z.iter().enumerate().take(i + 1) {
-            s += l[(i, j)] * zj;
+    for slot in out.iter_mut().take(m) {
+        *slot = T::from_f64(0.0);
+    }
+    for j in 0..m {
+        let zj = z[j];
+        for i in j..m {
+            out[i] += l[(i, j)] * zj;
         }
-        out[i] = s;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dot_ay, gram_aat_f64_accum, matvec_columns_f64_accum, matvec_columns_native};
+    use faer::Mat;
+
+    #[test]
+    fn column_matvec_matches_row_dot_bits() {
+        let (m, n) = (70_usize, 40_usize);
+        let mut a = Mat::<f64>::zeros(m, n);
+        let mut y = vec![0.0; n];
+        for j in 0..n {
+            y[j] = (j as f64) * 0.01 - 0.2;
+            for i in 0..m {
+                a[(i, j)] = ((i * 3 + j * 5) % 17) as f64 * 0.1 - 0.8;
+            }
+        }
+        let mut ay = Mat::<f64>::zeros(m, 1);
+        matvec_columns_native(a.as_ref(), &y, ay.as_mut());
+        for i in 0..m {
+            let mut sum = 0.0;
+            for j in 0..n {
+                sum += a[(i, j)] * y[j];
+            }
+            assert_eq!(ay[(i, 0)].to_bits(), sum.to_bits());
+        }
+        let w: Vec<f64> = (0..m).map(|i| (i as f64) * 0.02).collect();
+        let mut dot = 0.0;
+        for (i, &wi) in w.iter().enumerate() {
+            let mut sum = 0.0;
+            for j in 0..n {
+                sum += a[(i, j)] * y[j];
+            }
+            dot += sum * wi;
+        }
+        assert_eq!(dot_ay(a.as_ref(), &y, &w).to_bits(), dot.to_bits());
+    }
+
+    #[test]
+    fn f32_column_products_match_row_dots_bits() {
+        let (m, n) = (70_usize, 35_usize);
+        let mut a = Mat::<f32>::zeros(m, n);
+        let mut y = vec![0.0f32; n];
+        for j in 0..n {
+            y[j] = (j as f32) * 0.01;
+            for i in 0..m {
+                a[(i, j)] = ((i + j * 3) % 11) as f32 * 0.05;
+            }
+        }
+        let mut ay = Mat::<f32>::zeros(m, 1);
+        matvec_columns_f64_accum(a.as_ref(), &y, ay.as_mut());
+        for i in 0..m {
+            let mut sum = 0.0f64;
+            for j in 0..n {
+                sum += f64::from(a[(i, j)]) * f64::from(y[j]);
+            }
+            assert_eq!(ay[(i, 0)].to_bits(), (sum as f32).to_bits());
+        }
+        let mut b = Mat::<f32>::zeros(m, m);
+        gram_aat_f64_accum(a.as_ref(), b.as_mut());
+        for i in 0..m {
+            for j in 0..m {
+                let mut sum = 0.0f64;
+                for t in 0..n {
+                    sum += f64::from(a[(i, t)]) * f64::from(a[(j, t)]);
+                }
+                assert_eq!(b[(i, j)].to_bits(), (sum as f32).to_bits());
+            }
+        }
     }
 }
