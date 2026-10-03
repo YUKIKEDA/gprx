@@ -48,6 +48,9 @@ pub struct WorkspaceCore<P: PrecisionPolicy> {
     /// joint gradient's factor step kept at the current `θ`; the rest are
     /// scratch. Empty until the first gradient.
     pub(crate) weighted: Vec<Mat<P::Storage>>,
+    /// Scratch for the ARD lengthscale matrix product. Grown on the first
+    /// gradient and kept, so a later evaluation does not allocate.
+    pub(crate) ard_fold: Vec<f64>,
     /// Diagonal jitter `j` the last successful factor of `A + σn² I` added
     /// (`0` without a retry). `k_matrix` then holds the factor of `A + (σn² + j) I`.
     pub(crate) factor_jitter: f64,
@@ -170,6 +173,7 @@ pub(crate) struct GradientViews<'a, S> {
     pub(crate) thread_scratch: &'a mut Vec<Mat<S>>,
     pub(crate) weighted: &'a mut Vec<Mat<S>>,
     pub(crate) dist: Option<&'a mut DistCache<S>>,
+    pub(crate) ard_fold: &'a mut Vec<f64>,
 }
 
 /// Predict-into buffers owned by [`crate::FittedGpr`].
@@ -227,6 +231,7 @@ where
             nested: Vec::new(),
             hessian: HessianScratch::default(),
             weighted: Vec::new(),
+            ard_fold: Vec::new(),
             factor_jitter: 0.0,
         })
     }
@@ -304,6 +309,7 @@ where
             nested: Vec::new(),
             hessian: HessianScratch::default(),
             weighted: Vec::new(),
+            ard_fold: Vec::new(),
             factor_jitter: self.factor_jitter,
         }
     }
@@ -404,6 +410,7 @@ where
             thread_scratch: &mut core.thread_scratch,
             weighted: &mut core.weighted,
             dist: self.dist.as_mut(),
+            ard_fold: &mut core.ard_fold,
         }
     }
 

@@ -5,7 +5,8 @@
 //! points are formed here: `A_b = L⁻¹ K(Z, X_b)` (`m × b`) and `k_diag`.
 //! The kernel-parameter term is three contractions, each one walk of the
 //! kernel tree. A step costs `O(b·(m² + m·d) + m³)`; nothing in it scales
-//! with `n`. A full-data gradient is the batch of every point.
+//! with `n`. The `m·d` term is one matrix product per ARD contraction.
+//! A full-data gradient is the batch of every point.
 //!
 //! Every intermediate lives in [`GradBuffers`], which the Adam loop keeps
 //! between steps: once they have grown to the largest batch, a step

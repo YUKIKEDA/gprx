@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdSqDiff, lower_fold_infallible, require_ard_sq_diff_shape};
+use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -249,16 +249,17 @@ impl RbfArdKernel {
 
     /// Folds `⟨W, ∂K/∂θ_d⟩` for every lengthscale from one lower-triangle Gram.
     ///
-    /// Accurate math has `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²`. The diagonal is zero.
-    /// Each strict lower pair is counted twice. Column totals are added from
-    /// the first column to the last, the same association as a per-parameter
-    /// `⟨W, ∂K⟩`.
+    /// Accurate math has `∂k/∂θ_d = k · (Δ_d)² / ℓ_d²`. The diagonal is zero
+    /// and each strict lower pair is counted twice, which is the symmetric
+    /// product `2 (Σ_i x_i² row_sum_i − xᵀ S x)` with `S_ij = S_ji = W_ij k_ij`
+    /// off the diagonal. `fold` keeps that workspace between calls.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] when `out` is not one entry per
     /// lengthscale, [`GprError::ShapeMismatch`] or [`GprError::NonFiniteInput`]
-    /// from the point and Gram checks, and [`GprError::NonFiniteKernelValue`]
+    /// from the point and Gram checks, [`GprError::SizeOverflow`] when the
+    /// workspace does not fit in `usize`, and [`GprError::NonFiniteKernelValue`]
     /// when a folded total is not finite.
     pub(crate) fn contract_square<T: KernelScalar>(
         &self,
@@ -267,6 +268,7 @@ impl RbfArdKernel {
         k: MatRef<'_, T>,
         diffs: Option<ArdSqDiff<'_, T>>,
         out: &mut [f64],
+        fold: &mut Vec<f64>,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
         let d = w.len();
@@ -288,49 +290,34 @@ impl RbfArdKernel {
         if let Some(cache) = diffs {
             require_ard_sq_diff_shape(cache, n, d)?;
         }
-        for (dim, slot) in out.iter_mut().enumerate() {
-            let wd = w[dim];
-            let sum = lower_fold_infallible(
-                n,
-                &|start, end| {
-                    let mut acc = 0.0;
-                    for col in start..end {
-                        // One `2 *` after the strict lower sum, matching
-                        // `lower_dot`: diagonal once (here zero), off-diagonal
-                        // twice.
-                        let mut off = 0.0;
-                        if let Some(cache) = diffs {
-                            let sq = cache.column(dim, col);
-                            for (offset, sq_row) in sq.iter().enumerate().skip(1) {
-                                let row = col + offset;
-                                off += weight[(row, col)].to_f64()
-                                    * k[(row, col)].to_f64()
-                                    * sq_row.to_f64()
-                                    * wd;
-                            }
-                        } else {
-                            let x_col = x[(col, dim)].to_f64();
-                            for row in (col + 1)..n {
-                                let delta = x[(row, dim)].to_f64() - x_col;
-                                off += weight[(row, col)].to_f64()
-                                    * k[(row, col)].to_f64()
-                                    * delta
-                                    * delta
-                                    * wd;
-                            }
-                        }
-                        acc += 2.0 * off;
-                    }
-                    acc
-                },
-                &|left, right| left + right,
-            );
-            if !sum.is_finite() {
-                return Err(GprError::NonFiniteKernelValue);
-            }
-            *slot = sum;
+        let x_len = n.checked_mul(d).ok_or(GprError::SizeOverflow)?;
+        let s_len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
+        let need = x_len
+            .checked_add(s_len)
+            .and_then(|sum| sum.checked_add(n))
+            .and_then(|sum| sum.checked_add(x_len))
+            .ok_or(GprError::SizeOverflow)?;
+        if fold.len() < need {
+            fold.resize(need, 0.0);
         }
-        Ok(())
+        let (x64, rest) = fold.split_at_mut(x_len);
+        let (s, rest) = rest.split_at_mut(s_len);
+        let (row_sum, prod) = rest.split_at_mut(n);
+        let prod = &mut prod[..x_len];
+        for dim in 0..d {
+            for row in 0..n {
+                x64[dim * n + row] = x[(row, dim)].to_f64();
+            }
+        }
+        for col in 0..n {
+            s[col * n + col] = 0.0;
+            for row in (col + 1)..n {
+                let value = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
+                s[col * n + row] = value;
+                s[row * n + col] = value;
+            }
+        }
+        lanes::fold_square_lengthscales(x64, s, w, row_sum, prod, out)
     }
 
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
@@ -1016,8 +1003,16 @@ mod tests {
             .expect("value");
         let weight = Mat::from_fn(n, n, |i, j| 0.1 * (i + 1) as f32 - 0.05 * j as f32);
         let mut out = [0.0; 3];
-        rbf.contract_square(x.as_ref(), weight.as_ref(), k.as_ref(), None, &mut out)
-            .expect("contract");
+        let mut fold = Vec::new();
+        rbf.contract_square(
+            x.as_ref(),
+            weight.as_ref(),
+            k.as_ref(),
+            None,
+            &mut out,
+            &mut fold,
+        )
+        .expect("contract");
         let mut dk = Mat::zeros(n, n);
         for (dim, &got) in out.iter().enumerate() {
             rbf.grad(x.as_ref(), dk.as_mut(), dim, Triangle::Lower)

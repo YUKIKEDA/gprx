@@ -508,8 +508,8 @@ pub(crate) struct KernelScratch<T> {
     cross: Vec<Mat<T>>,
     /// One parameter block, reused by the rectangular and diagonal adds.
     partial: Vec<f64>,
-    /// Column scratch for the ARD rectangular contraction. Grown on the
-    /// first call and kept, so a later step does not allocate.
+    /// Scratch for the ARD lengthscale matrix products. Grown on the first
+    /// call and kept, so a later step does not allocate.
     jobs: Vec<f64>,
     diag: DiagAccum<T>,
 }
@@ -638,6 +638,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             nested,
             dist,
             square,
+            jobs,
             ..
         } = self;
         if reads {
@@ -659,6 +660,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             nested,
             kept: &[],
             kept_products: 0,
+            fold: jobs,
         };
         compiled.weighted_grads::<M>(&mut walk, weight, out, &mut square[..nbuf])
     }
