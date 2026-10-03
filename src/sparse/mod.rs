@@ -508,6 +508,9 @@ pub(crate) struct KernelScratch<T> {
     cross: Vec<Mat<T>>,
     /// One parameter block, reused by the rectangular and diagonal adds.
     partial: Vec<f64>,
+    /// Column scratch for the ARD rectangular contraction. Grown on the
+    /// first call and kept, so a later step does not allocate.
+    jobs: Vec<f64>,
     diag: DiagAccum<T>,
 }
 
@@ -521,6 +524,7 @@ impl<T> Clone for KernelScratch<T> {
             square: Vec::new(),
             cross: Vec::new(),
             partial: Vec::new(),
+            jobs: Vec::new(),
             diag: DiagAccum::new(),
         }
     }
@@ -547,6 +551,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             square: Vec::new(),
             cross: Vec::new(),
             partial: Vec::new(),
+            jobs: Vec::new(),
             diag: DiagAccum::new(),
         }
     }
@@ -679,6 +684,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             nested,
             cross,
             partial,
+            jobs,
             ..
         } = self;
         if partial.len() < n_params {
@@ -694,6 +700,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             &mut cross[..nbuf],
             view(scratch, rows, cols),
             nested,
+            jobs,
         )?;
         for (slot, part) in out.iter_mut().zip(partial.iter()) {
             *slot += coeff * part;
