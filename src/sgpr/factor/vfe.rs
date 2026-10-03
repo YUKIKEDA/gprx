@@ -7,8 +7,8 @@ use crate::kernel::GramInputs;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
-    cholesky_lower_with_retries, frobenius2, gram_aat_plus_noise, llt_scratch, matvec_columns,
-    round_mat, solve_llt, solve_lower,
+    cholesky_lower_with_retries, dot_ay, frobenius2, gram_aat_plus_noise, llt_scratch,
+    matvec_columns, round_mat, solve_llt, solve_lower,
 };
 use crate::param::Interval;
 use crate::policy::JitterPolicy;
@@ -370,14 +370,7 @@ pub(crate) fn vfe_neg_log_marginal_likelihood<T: KernelScalar>(
     for value in y_s {
         y_norm2 += *value * *value;
     }
-    let mut ay_dot_w = lit::<T>(0.0);
-    for i in 0..m {
-        let mut ay_i = lit::<T>(0.0);
-        for j in 0..n {
-            ay_i += a[(i, j)] * y_s[j];
-        }
-        ay_dot_w += ay_i * w[i];
-    }
+    let ay_dot_w = dot_ay(a, y_s, w);
     let quad = (y_norm2 - ay_dot_w) / noise_s;
     let trace = (k_diag_sum - a_frobenius2) / (lit::<T>(2.0) * noise_s);
     let log_two_pi = lit::<T>((2.0 * std::f64::consts::PI).ln());
