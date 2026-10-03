@@ -391,6 +391,86 @@ impl RbfArdKernel {
         })
     }
 
+    /// `⟨weight, ∂K(x1, x2)/∂θ_d⟩` for every lengthscale into `out`, and
+    /// `⟨weight, K⟩` when `want_value` is set.
+    ///
+    /// One `exp` per pair. A column-major `f64` view uses the lane path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`] when `out` is not one slot per
+    /// lengthscale, [`GprError::EmptyInput`] or [`GprError::DimensionMismatch`]
+    /// when the point matrices do not match this leaf, [`GprError::ShapeMismatch`]
+    /// when `weight` is not `x1.nrows() × x2.nrows()`, or a non-finite error
+    /// from the kernel value.
+    pub(crate) fn contract_cross<M: KernelMath, T: KernelScalar>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        jobs: &mut Vec<f64>,
+        want_value: bool,
+    ) -> Result<f64, GprError> {
+        let d = self.num_params();
+        crate::data::require_count(out.len(), d, "kernel parameters")?;
+        if x1.nrows() == 0 || x2.nrows() == 0 || x1.ncols() == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        if x1.ncols() != d || x2.ncols() != d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: x2.ncols(),
+                expected_dim: d,
+            });
+        }
+        if weight.nrows() != x1.nrows() || weight.ncols() != x2.nrows() {
+            return Err(GprError::ShapeMismatch {
+                reason: format!(
+                    "weight is {}x{}, expected {}x{}",
+                    weight.nrows(),
+                    weight.ncols(),
+                    x1.nrows(),
+                    x2.nrows()
+                ),
+            });
+        }
+        let w = self.lengthscales.inv_ell_sq();
+        if let (Some(a), Some(b), Some(wt)) =
+            (T::as_f64_ref(x1), T::as_f64_ref(x2), T::as_f64_ref(weight))
+            && let Some(value) = lanes::try_contract_cross::<M>(a, b, wt, w, out, jobs, want_value)?
+        {
+            return Ok(value);
+        }
+        out.fill(0.0);
+        let mut value = 0.0;
+        for col in 0..x2.nrows() {
+            for row in 0..x1.nrows() {
+                let mut r2 = T::from_f64(0.0);
+                for dim in 0..d {
+                    let diff = x1[(row, dim)] - x2[(col, dim)];
+                    if !diff.is_finite() {
+                        return Err(GprError::NonFiniteInput);
+                    }
+                    r2 += diff * diff * T::from_f64(w[dim]);
+                }
+                let k = finite_kernel(ard_d1::<M, T>(r2))?;
+                let wk = weight[(row, col)] * k;
+                if want_value {
+                    value += wk.to_f64();
+                }
+                for dim in 0..d {
+                    let diff = x1[(row, dim)] - x2[(col, dim)];
+                    let term = diff * diff * T::from_f64(w[dim]);
+                    out[dim] += (wk * term).to_f64();
+                }
+            }
+        }
+        if !value.is_finite() || out.iter().any(|g| !g.is_finite()) {
+            return Err(GprError::NonFiniteKernelValue);
+        }
+        Ok(value)
+    }
+
     pub(crate) fn hess_cross_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,
@@ -791,5 +871,51 @@ mod tests {
             rbf.apply(nan.as_ref(), k.as_mut(), Triangle::Full),
             Err(GprError::NonFiniteInput)
         ));
+    }
+
+    fn f32_contract_matches<M: crate::math::KernelMath>() {
+        let rbf = RbfArdKernel::new(&[0.8, 1.6]).expect("ard");
+        let x1 = Mat::from_fn(4, 2, |i, j| 0.3 * i as f32 - 0.2 * j as f32);
+        let x2 = Mat::from_fn(5, 2, |i, j| 0.2 * j as f32 - 0.1 * i as f32);
+        let weight = Mat::from_fn(4, 5, |i, j| 0.1 * (i + 1) as f32 - 0.05 * j as f32);
+        let mut out = [0.0; 2];
+        let value = rbf
+            .contract_cross::<M, f32>(
+                x1.as_ref(),
+                x2.as_ref(),
+                weight.as_ref(),
+                &mut out,
+                &mut Vec::new(),
+                true,
+            )
+            .expect("contract");
+        let mut k = Mat::zeros(4, 5);
+        rbf.apply_cross_math::<M, f32>(x1.as_ref(), x2.as_ref(), k.as_mut())
+            .expect("value");
+        let mut expect_v = 0.0;
+        for col in 0..5 {
+            for row in 0..4 {
+                expect_v += f64::from(weight[(row, col)]) * f64::from(k[(row, col)]);
+            }
+        }
+        assert_close(value, expect_v, 1e-5);
+        let mut dk = Mat::zeros(4, 5);
+        for (dim, &got) in out.iter().enumerate() {
+            rbf.grad_cross_from_coords::<M, f32>(x1.as_ref(), x2.as_ref(), dk.as_mut(), dim)
+                .expect("grad");
+            let mut dot = 0.0;
+            for col in 0..5 {
+                for row in 0..4 {
+                    dot += f64::from(weight[(row, col)]) * f64::from(dk[(row, col)]);
+                }
+            }
+            assert_close(got, dot, 1e-5);
+        }
+    }
+
+    #[test]
+    fn f32_cross_contraction_matches_per_parameter() {
+        f32_contract_matches::<crate::math::Accurate>();
+        f32_contract_matches::<crate::math::FastApprox>();
     }
 }
