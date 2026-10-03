@@ -55,6 +55,22 @@ Before #373, about 14% of the 4-thread CPU time was spindle (the pool faer's gem
 
 Decision: the formula stays. The serial loops are parallelized in [#377](https://github.com/YUKIKEDA/gprx/issues/377). A size or machine that shows faer losing wall time again reopens this record.
 
+## Addendum: inducing point panel at m=512 (2026-10-03, [#405](https://github.com/YUKIKEDA/gprx/issues/405))
+
+On this machine (16 logical processors), `faer_degree(512, n, 16)` is 8 because `512/64 = 8`, even when `n` is the training length (8611 or 7373). The `m×m` product `A Aᵀ` has the same cap: its output is `512×512`, and the inner dimension `n` is not an argument of the degree. Kernel fill keeps the whole pool. A trial build dropped the `nrows/64` cap when the panel was long, so both the triangular solve and that product used 16 workers. Square `n = 256` stayed at 4.
+
+The clock is `value_and_gradient_into` with the stored parameters left unchanged, so `same_stored_params` skips `assemble_vfe`. Rebuilding the factor, including `A Aᵀ`, is outside the timer. The numbers are the gradient side: the marginal likelihood and the analytic gradient on a factor that is already there. Release, `Constant × RbfArd`, fixed inducing points taken from the first 512 rows. Synthetic columns, not the UCI rows. Mean after one untimed warmup.
+
+| Shape | Workers on the panel | Time |
+|---|---:|---:|
+| Sgpr n=8611, d=4, m=512 | 8 | 208.0 ms (5 reps) |
+| Sgpr n=8611, d=4, m=512 | 16 | 211.1 ms (5 reps) |
+| Sgpr n=7373, d=8, m=512 | 8 | 179.0 ms (5 reps) |
+| Sgpr n=7373, d=8, m=512 | 16 | 198.5 ms (5 reps) |
+| Exact Forrester n=256 | 4 (unchanged) | 1.4 ms at 8-worker build, 1.6 ms at 16-worker build (20 reps) |
+
+16 workers did not shorten that gradient side. Square `n = 256` stayed at degree 4 on both builds. The formula stays.
+
 ## Consequences
 
 - On an unset 16-thread pool, the square kernel at n=256 uses 4 faer threads, predict 100 at n=1024 uses 6, and predict 100 at n=4096 uses 8
