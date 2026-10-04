@@ -21,6 +21,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// Returns [`GprError`] if shapes mismatch, `scratch` is the wrong size, a
     /// leaf fails, or a sum/product has no terms.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn apply<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, T>,
@@ -85,6 +87,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// # Errors
     ///
     /// Returns the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn apply_cross<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, T>,
@@ -146,6 +150,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
     /// terms or a leaf needs coordinates.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
@@ -200,6 +206,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
     /// terms, [`GprError::LengthMismatch`] if a sum/product's `out` is not
     /// `x.nrows()` long, or the same shape errors as the leaf.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn fill_diag_points(&self, x: MatRef<'_, T>, out: &mut [T]) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
@@ -257,6 +265,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// # Errors
     ///
     /// Same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn apply_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
@@ -319,6 +329,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// # Errors
     ///
     /// Same as [`Self::apply_points`].
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn apply_cross_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
