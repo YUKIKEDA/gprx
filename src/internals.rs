@@ -1,7 +1,8 @@
 //! Measurement hooks for this repository's benches and `compare/perf`.
 //!
 //! Present only with the non-default features `bench-internals` or
-//! `insert-stages`. Nothing here is part of the model API.
+//! `insert-stages`. Nothing here is part of the model API, and this module
+//! is not covered by semantic versioning.
 
 #[cfg(feature = "bench-internals")]
 use faer::{MatMut, MatRef};
