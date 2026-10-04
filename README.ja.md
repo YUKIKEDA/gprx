@@ -361,7 +361,7 @@ flowchart TB
 
 ## 比較
 
-精度、学習時間、メモリを他のライブラリと比べた結果は、[比較](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.ja.md)にある。
+精度、学習時間、メモリを他のライブラリと比べた結果は、[English](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.md) | [比較](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.ja.md) にある。
 
 ## ライセンス
 
