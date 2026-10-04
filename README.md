@@ -36,7 +36,7 @@ Same program: `cargo run --example fit_predict`.
 
 `X` and inducing inputs `Z` are column-major `f64`: feature 0 for every row, then feature 1. `n_rows` is the point count, `n_cols` the feature count. `y` has length `n_rows`. Empty input, a length that is not `n_rows * n_cols`, or `NaN` / `Inf` is `GprError`.
 
-There is no `n_jobs` setter. Distance fills use the process-wide Rayon pool. Set `RAYON_NUM_THREADS` before the process starts, or call `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first fit or predict. The pool can be initialized only once. One worker is sequential. Training Cholesky and the `W` n-RHS solve cap the linear-algebra backend at `min(pool, n / 64)`. Predict and covariance triangular solves also cap at `n · m / 16384` and `m / 12`. Kernel fills still use the full pool.
+scikit-learn's `n_jobs` knob is not on this crate. Distance fills use the process-wide Rayon pool, and that pool is the thread count. Set `RAYON_NUM_THREADS` before the process starts, or call `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first fit or predict. The pool can be initialized only once. One worker is sequential. Training Cholesky and the `W` n-RHS solve cap the linear-algebra backend at `min(pool, n / 64)`. Predict and covariance substitute into the triangular factor `L`, and that work also caps at `n · m / 16384` and `m / 12`. Kernel fills still use the full pool.
 
 `gprx::internals` (`bench-internals`, `insert-stages`) is outside semantic versioning. Do not depend on it.
 
@@ -717,41 +717,7 @@ fn main() -> Result<(), GprError> {
 
 ## Architecture and the saved format
 
-Three model families (`Gpr`, `Sgpr`, `Svgp`) are built from the same blocks and never import one another. The map below is the whole crate; each box is a module under `src/`.
-
-```mermaid
-flowchart TB
-    api["<b>Public API</b><br/>lib.rs re-exports; pub mods kernel, transform, persist"]
-    subgraph models["Models — one directory per family"]
-        direction LR
-        gpr["<b>gpr</b><br/>Exact GPR"]
-        sgpr["<b>sgpr</b><br/>Sparse GPR (VFE)"]
-        svgp["<b>svgp</b><br/>SVGP (minibatch)"]
-    end
-    sparse["<b>sparse</b><br/>crate-private core shared by sgpr and svgp"]
-    persist["<b>persist</b><br/>save / load directories"]
-    subgraph services["Building blocks the models compose"]
-        direction LR
-        kernel["<b>kernel</b><br/>spec, compiled, leaves"]
-        likelihood["<b>likelihood</b>"]
-        transform["<b>transform</b><br/>input / target maps"]
-        precision["<b>precision</b><br/>f32 / f64 / mixed"]
-        optimizer["<b>optimizer</b><br/>+ objective traits"]
-        workspace["<b>workspace</b><br/>+ prediction"]
-    end
-    subgraph foundation["Foundation — scalars, numerics, checks"]
-        direction LR
-        f1["linalg · math · policy"]
-        f2["param · data · error · rng · points"]
-    end
-    api --> models
-    gpr --> services
-    sgpr --> sparse --> services
-    svgp --> sparse
-    services --> foundation
-    persist -.->|"reads and rebuilds"| models
-    models -.->|"save, persist_err"| persist
-```
+Three model families (`Gpr`, `Sgpr`, `Svgp`) are built from the same blocks and never import one another. The crate map is [Architecture §1](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.md#1-at-a-glance).
 
 - [`docs/architecture.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.md): every module, what it is responsible for, which way its imports point, the public types by family, and where to change what.
 - [`docs/persist-format.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md): what `save` writes. The keys of `config.json`, the tensors of `model.safetensors` (names, shapes, dtypes, column-major layout), the JSON form of kernels and transforms, `Custom` restore, versions, and errors.

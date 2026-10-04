@@ -59,7 +59,7 @@ flowchart TB
 | `data` | 呼び出し側のデータの境界検査（形、有限、個数）と列優先の詰め込み | crate | `error`, `kernel` |
 | `rng` | サンプリングと焼きなましのための、シードつきの小さな乱数 | crate: `SeededRng`（Xoshiro256++） | none |
 | `math` | カーネルの `exp` の実装（厳密 / 高速近似）。`KernelExp` の方針で選ぶ | 公開: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
-| `linalg` | Cholesky、LDLT、三角解、密行列の補助、faer のワーカー数の上限。モデルは自前で持たない | crate | `error`, `kernel` |
+| `linalg` | Cholesky、LDLT、三角行列への代入、密行列の補助、faer のワーカー数の上限。モデルは自前で持たない | crate | `error`, `kernel` |
 | `policy` | 実行時の方針: 距離キャッシュ、Cholesky のバッファ、カーネルの `exp`、ジッター | 公開: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |
 | `points` | 追加・削除される点の安定した id | 公開: `PointId`。crate: `IdRegistry` | `error`, `persist` |
 

@@ -36,9 +36,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 `X` と誘導点 `Z` は列優先の `f64` である。特徴 0 の全行、次に特徴 1。`n_rows` が点数、`n_cols` が特徴数。`y` の長さは `n_rows`。空、長さが `n_rows * n_cols` でない、`NaN` か `Inf` は `GprError`。
 
-`n_jobs` はない。距離の計算は、プロセス全体の Rayon プールを使う。スレッド数は、プロセス開始前の `RAYON_NUM_THREADS` か、最初の `fit` か `predict` の前に呼ぶ `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` で決まる。プールの初期化は一度だけ。ワーカーが 1 つなら、計算は逐次になる。
+`n_jobs` は scikit-learn のスレッド数のノブで、gprx には無い。距離の計算はプロセス全体の Rayon プールを使い、そのプールの大きさがスレッド数になる。プロセス開始前の `RAYON_NUM_THREADS` か、最初の `fit` か `predict` の前に呼ぶ `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` で決まる。プールの初期化は一度だけ。ワーカーが 1 つなら、計算は逐次になる。
 
-学習のコレスキーと、`W` の複数右辺は、線形代数側の並列度を `min(プール, n / 64)` で頭打ちにする。予測と共分散の三角解は、さらに `n · m / 16384` と `m / 12` でも頭打ちにする。カーネルを埋める処理は、プール全体を使う。
+学習のコレスキーと、`W` の複数右辺は、線形代数側の並列度を `min(プール, n / 64)` で頭打ちにする。予測と共分散は三角行列 `L` への代入で、その並列度はさらに `n · m / 16384` と `m / 12` で頭打ちにする。カーネルを埋める処理は、プール全体を使う。
 
 `gprx::internals`（`bench-internals`、`insert-stages`）はセマンティックバージョニングの対象外である。直接依存してはならない。
 
@@ -733,41 +733,7 @@ fn main() -> Result<(), GprError> {
 
 ## アーキテクチャと保存フォーマット
 
-3 つのモデル（`Gpr`、`Sgpr`、`Svgp`）は、同じ部品から作られ、互いを import しない。下の図がクレート全体の地図で、各枠は `src/` のモジュール。
-
-```mermaid
-flowchart TB
-    api["<b>公開 API</b><br/>lib.rs の再エクスポート。pub mod は kernel, transform, persist"]
-    subgraph models["モデル — モデルごとに 1 ディレクトリ"]
-        direction LR
-        gpr["<b>gpr</b><br/>Exact GPR"]
-        sgpr["<b>sgpr</b><br/>Sparse GPR (VFE)"]
-        svgp["<b>svgp</b><br/>SVGP (ミニバッチ)"]
-    end
-    sparse["<b>sparse</b><br/>sgpr と svgp が共有する crate 内の中核"]
-    persist["<b>persist</b><br/>ディレクトリへの保存と読み込み"]
-    subgraph services["モデルが組み合わせる部品"]
-        direction LR
-        kernel["<b>kernel</b><br/>spec, compiled, カーネルの葉"]
-        likelihood["<b>likelihood</b>"]
-        transform["<b>transform</b><br/>入力 / 目的変数の変換"]
-        precision["<b>precision</b><br/>f32 / f64 / 混合"]
-        optimizer["<b>optimizer</b><br/>+ objective の trait"]
-        workspace["<b>workspace</b><br/>+ prediction"]
-    end
-    subgraph foundation["基盤 — スカラー、数値計算、検査"]
-        direction LR
-        f1["linalg · math · policy"]
-        f2["param · data · error · rng · points"]
-    end
-    api --> models
-    gpr --> services
-    sgpr --> sparse --> services
-    svgp --> sparse
-    services --> foundation
-    persist -.->|"読んで組み直す"| models
-    models -.->|"save, persist_err"| persist
-```
+3 つのモデル（`Gpr`、`Sgpr`、`Svgp`）は、同じ部品から作られ、互いを import しない。クレートの地図は [アーキテクチャの全体像](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.ja.md#1-全体像)。
 
 - [`docs/architecture.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.ja.md): 全モジュールの責務、import の向き、モデルごとの公開型、何を変えるときどこを見るか。
 - [`docs/persist-format.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md): `save` が書くもの。`config.json` のキー、`model.safetensors` のテンソル（名前、形、dtype、列優先の並び）、カーネルと変換の JSON の形、`Custom` の復元、版、エラー。
