@@ -12,13 +12,12 @@ import time
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import minimize
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
-
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
+from scipy.optimize import minimize
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
 
 from . import maunaloa_kernels
 from .metrics import case_metrics
@@ -85,7 +84,7 @@ def run(case: dict) -> dict:
     y = np.asarray(case["y"], dtype=np.float64)
     m = int(case["xs_n_rows"])
     xs = np.asarray(case["xs"], dtype=np.float64).reshape(d, m).T
-    ys = np.asarray(case["ys"], dtype=np.float64)
+    np.asarray(case["ys"], dtype=np.float64)
 
     for _ in range(warmup_fits(n)):
         phase("warmup")

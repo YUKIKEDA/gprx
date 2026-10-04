@@ -14,11 +14,10 @@ from pathlib import Path
 
 import GPy
 import numpy as np
-from scipy.optimize import minimize
-
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
+from scipy.optimize import minimize
 
 from . import maunaloa_kernels
 from .metrics import case_metrics
@@ -42,16 +41,16 @@ def build(case: dict, x: np.ndarray, y: np.ndarray):
 
 
 class Counter:
-    def __init__(self, model) -> None:  # noqa: ANN001
+    def __init__(self, model) -> None:
         self.joint = 0
         self.value = 0
         objective_grads, objective = model._objective_grads, model._objective
 
-        def counted_joint(x):  # noqa: ANN001
+        def counted_joint(x):
             self.joint += 1
             return objective_grads(x)
 
-        def counted_value(x):  # noqa: ANN001
+        def counted_value(x):
             self.value += 1
             return objective(x)
 
@@ -59,7 +58,7 @@ class Counter:
         model._objective = counted_value
 
 
-def train(case: dict, model) -> dict:  # noqa: ANN001
+def train(case: dict, model) -> dict:
     counter = Counter(model)
     protocol = case["protocol"]
     if protocol == "fixed":
@@ -94,7 +93,7 @@ def train(case: dict, model) -> dict:  # noqa: ANN001
     }
 
 
-def counter_joint(counter: Counter, model, x):  # noqa: ANN001
+def counter_joint(counter: Counter, model, x):
     value, grad = model._objective_grads(x)
     return value, grad
 

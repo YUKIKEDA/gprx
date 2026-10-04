@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
 from common.problems import (
     all_cases,
     as_f64_list,

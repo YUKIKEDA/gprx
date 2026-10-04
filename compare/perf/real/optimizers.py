@@ -14,8 +14,6 @@ import re
 from importlib import metadata
 from pathlib import Path
 
-from .data import OUT
-
 REPO = Path(__file__).resolve().parents[3]
 
 LBFGSB_MATCHED = (
@@ -94,6 +92,30 @@ def _cpu_model() -> str:
     return platform.processor() or "unknown"
 
 
+def _windows_memory() -> tuple[int, int] | None:
+    """Total and available physical bytes, from ``GlobalMemoryStatusEx``."""
+    import ctypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = (
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        )
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return int(status.ullTotalPhys), int(status.ullAvailPhys)
+
+
 def _memory_gib() -> float | None:
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -101,6 +123,28 @@ def _memory_gib() -> float | None:
                 return round(int(line.split()[1]) / (1024 * 1024), 1)
     except OSError:
         pass
+    windows = _windows_memory()
+    if windows is not None:
+        return round(windows[0] / 2**30, 1)
+    return None
+
+
+def total_gib() -> float | None:
+    """Installed physical memory, in GiB."""
+    return _memory_gib()
+
+
+def available_gib() -> float | None:
+    """Physical memory that is free right now, in GiB."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable"):
+                return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        pass
+    windows = _windows_memory()
+    if windows is not None:
+        return windows[1] / 2**30
     return None
 
 

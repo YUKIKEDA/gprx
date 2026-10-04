@@ -18,13 +18,12 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import gpytorch
 import numpy as np
 import torch
-from gpytorch.constraints import GreaterThan
-
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
+from gpytorch.constraints import GreaterThan
 
-from .gpytorch_fit import ADAM_LR, ADAM_STEPS, optimize_lbfgsb_or_adam
+from .gpytorch_fit import optimize_lbfgsb_or_adam
 from .metrics import case_metrics
 from .timing import warmup_fits
 

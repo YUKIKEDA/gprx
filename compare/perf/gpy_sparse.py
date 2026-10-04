@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-
 from common.problems import unpack_column_major as unpack_rows
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
@@ -36,7 +35,7 @@ def arrays(case: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return x, y, z, xs
 
 
-def make_kernel(GPy, case: dict):  # noqa: ANN001
+def make_kernel(GPy, case: dict):
     lengthscales = np.asarray(case["lengthscales_init"], dtype=np.float64)
     d = int(case["n_cols"])
     ard = bool(case["ard"])
@@ -49,7 +48,7 @@ def make_kernel(GPy, case: dict):  # noqa: ANN001
     return kernel
 
 
-def make_sgpr(GPy, case: dict, x, y, z):  # noqa: ANN001
+def make_sgpr(GPy, case: dict, x, y, z):
     kernel = make_kernel(GPy, case)
     model = GPy.models.SparseGPRegression(x, y, kernel=kernel, Z=z)
     model.Gaussian_noise.variance = float(case["noise_variance_init"])
@@ -59,7 +58,7 @@ def make_sgpr(GPy, case: dict, x, y, z):  # noqa: ANN001
     return model
 
 
-def make_svgp(GPy, case: dict, x, y, z):  # noqa: ANN001
+def make_svgp(GPy, case: dict, x, y, z):
     from GPy.core.svgp import SVGP
 
     kernel = make_kernel(GPy, case)
@@ -73,7 +72,7 @@ def make_svgp(GPy, case: dict, x, y, z):  # noqa: ANN001
     return model
 
 
-def joint(model) -> None:  # noqa: ANN001
+def joint(model) -> None:
     model.parameters_changed()
     _ = model.log_likelihood()
     _ = model.objective_function_gradients()

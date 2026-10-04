@@ -26,7 +26,7 @@ def _python(module: str):
     return lambda path: run_python(f"real.{module}", path, FIT_FIELDS)
 
 
-RUNNERS: dict[str, "callable[[Path], Row]"] = {
+RUNNERS: dict[str, callable[[Path], Row]] = {
     "gprx": lambda path: run_gprx("fit", path, features="fit-counts"),
     "sklearn": _python("sklearn_fit"),
     "gpytorch": _python("gpytorch_fit"),
@@ -38,7 +38,7 @@ RUNNERS: dict[str, "callable[[Path], Row]"] = {
 
 
 #: Sparse models: only gprx, GPyTorch and GPy have one.
-SPARSE_RUNNERS: dict[str, "callable[[Path], Row]"] = {
+SPARSE_RUNNERS: dict[str, callable[[Path], Row]] = {
     "gprx": RUNNERS["gprx"],
     "gpytorch": _python("gpytorch_sparse_fit"),
     "gpy": _python("gpy_sparse_fit"),
@@ -48,5 +48,5 @@ SPARSE_RUNNERS: dict[str, "callable[[Path], Row]"] = {
 }
 
 
-def runners_for(model: str) -> dict[str, "callable[[Path], Row]"]:
+def runners_for(model: str) -> dict[str, callable[[Path], Row]]:
     return RUNNERS if model == "exact" else SPARSE_RUNNERS

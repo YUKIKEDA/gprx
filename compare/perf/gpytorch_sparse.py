@@ -14,6 +14,10 @@ import torch
 torch.set_default_dtype(torch.float64)
 torch.set_num_threads(max(1, os.cpu_count() or 1))
 
+from common.problems import unpack_column_major as unpack_rows
+from common.records import load_case, write_result
+from common.rss import peak_rss_bytes
+from common.timing import median, min_max, timed_reps, warmup_count
 from gpytorch.distributions import MultivariateNormal
 from gpytorch.kernels import InducingPointKernel, RBFKernel
 from gpytorch.likelihoods import GaussianLikelihood
@@ -21,11 +25,6 @@ from gpytorch.means import ZeroMean
 from gpytorch.mlls import ExactMarginalLogLikelihood, VariationalELBO
 from gpytorch.models import ApproximateGP, ExactGP
 from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
-
-from common.problems import unpack_column_major as unpack_rows
-from common.records import load_case, write_result
-from common.rss import peak_rss_bytes
-from common.timing import median, min_max, timed_reps, warmup_count
 
 DEVICE = torch.device("cpu")
 

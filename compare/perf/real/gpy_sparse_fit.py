@@ -13,7 +13,6 @@ from pathlib import Path
 
 import GPy
 import numpy as np
-
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase

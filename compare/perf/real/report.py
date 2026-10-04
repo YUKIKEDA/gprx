@@ -18,8 +18,8 @@ import sys
 from pathlib import Path
 
 from . import plot
-from .data import OUT
 from .curves import CURVES
+from .data import OUT
 from .libs import RUNNERS
 from .optimizers import OPTIMIZERS
 
@@ -57,13 +57,25 @@ def summarize(rows: list[dict]) -> list[dict]:
             "total": len(group),
             "notes": sorted({r["note"] for r in group if r.get("status") != "ok" and r.get("note")}),
         }
-        for key in ("rmse", "nlpd", "coverage95", "fit_s", "predict_s", "joint_evals", "nlml"):
+        for key in ("rmse", "nlpd", "coverage95", "fit_s", "predict_s", "joint_evals", "iterations", "nlml"):
             stats = mean_se([r[key] for r in ok if r.get(key) is not None])
             cell[key] = None if stats is None else {"mean": stats[0], "se": stats[1]}
+        per_eval = [
+            r["fit_s"] / r["joint_evals"] * 1e3
+            for r in ok
+            if r.get("fit_s") is not None and r.get("joint_evals")
+        ]
+        cell["ms_per_eval"] = statistics.median(per_eval) if per_eval else None
         peaks = [r["peak_rss_bytes"] for r in ok if r.get("peak_rss_bytes")]
         cell["peak_rss_mib"] = max(peaks) / 2**20 if peaks else None
         out.append(cell)
     return out
+
+
+def fmt_median(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.4g}"
 
 
 def fmt(stat: dict | None, digits: int = 4) -> str:
@@ -82,8 +94,8 @@ def tables(summary: list[dict]) -> str:
         lines += [
             f"#### {model} · {protocol}",
             "",
-            "| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | NLML | peak RSS [MiB] |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         order = {lib: i for i, lib in enumerate(LIB_ORDER)}
         for c in sorted(cells, key=lambda c: (c["dataset"], order.get(c["lib"], 99))):
@@ -91,7 +103,8 @@ def tables(summary: list[dict]) -> str:
             lines.append(
                 f"| {c['dataset']} | {c['lib']} | {c['ok']}/{c['total']} | {fmt(c['rmse'])} | "
                 f"{fmt(c['nlpd'])} | {fmt(c['coverage95'], 3)} | {fmt(c['fit_s'])} | "
-                f"{fmt(c['joint_evals'], 3)} | {fmt(c['nlml'])} | {rss} |"
+                f"{fmt(c['joint_evals'], 3)} | {fmt(c['iterations'], 3)} | {fmt_median(c['ms_per_eval'])} | "
+                f"{fmt(c['nlml'])} | {rss} |"
             )
         reasons = sorted({(c["lib"], n) for c in cells for n in c["notes"]})
         if reasons:

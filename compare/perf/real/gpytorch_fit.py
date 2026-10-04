@@ -8,6 +8,7 @@ tutorial uses (Adam, lr 0.1, 50 steps). ``matched`` hands the same objective
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -16,12 +17,11 @@ import gpytorch
 import linear_operator
 import numpy as np
 import torch
-from gpytorch.constraints import GreaterThan
-from scipy.optimize import minimize
-
 from common.records import load_case, write_result
 from common.rss import peak_rss_bytes
 from common.timeline import phase
+from gpytorch.constraints import GreaterThan
+from scipy.optimize import minimize
 
 from . import maunaloa_kernels
 from .metrics import case_metrics
@@ -32,6 +32,28 @@ torch.set_default_dtype(torch.float64)
 
 ADAM_LR = 0.1
 ADAM_STEPS = 50
+
+
+@contextlib.contextmanager
+def exact_cholesky(n: int):
+    """Factor every covariance of order ``n`` with Cholesky.
+
+    The default ``max_cholesky_size`` is 800. Above that, the marginal
+    likelihood, the solves, and the predictive cache switch to conjugate
+    gradients and Lanczos. sklearn, GPy, and gprx factor ``K`` with Cholesky
+    at every ``n`` this harness fits, so GPyTorch stays on that factorization.
+    """
+    cap = max(int(n), 1)
+    with (
+        gpytorch.settings.max_cholesky_size(cap),
+        gpytorch.settings.fast_pred_var(False),
+        gpytorch.settings.fast_computations(
+            covar_root_decomposition=False,
+            log_prob=False,
+            solves=False,
+        ),
+    ):
+        yield
 
 
 class ExactModel(gpytorch.models.ExactGP):
@@ -139,28 +161,30 @@ def run(case: dict) -> dict:
     y = torch.as_tensor(np.asarray(case["y"]), dtype=torch.float64)
     xs = torch.as_tensor(np.asarray(case["xs"]).reshape(d, m).T.copy(), dtype=torch.float64)
 
-    for _ in range(warmup_fits(n)):
-        phase("warmup")
+    # Train and test can each be the matrix that is factored.
+    with exact_cholesky(max(n, m)):
+        for _ in range(warmup_fits(n)):
+            phase("warmup")
+            model, likelihood = build(case, x, y)
+            optimize_lbfgsb_or_adam(case, model, likelihood, x, y)
+        phase("fit")
         model, likelihood = build(case, x, y)
-        optimize_lbfgsb_or_adam(case, model, likelihood, x, y)
-    phase("fit")
-    model, likelihood = build(case, x, y)
-    t0 = time.perf_counter()
-    info = optimize_lbfgsb_or_adam(case, model, likelihood, x, y)
-    fit_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        info = optimize_lbfgsb_or_adam(case, model, likelihood, x, y)
+        fit_s = time.perf_counter() - t0
 
-    model.train()
-    likelihood.train()
-    with torch.no_grad():
-        nlml = float(-gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)(model(x), y).item() * n)
-    model.eval()
-    likelihood.eval()
-    phase("predict")
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        pred = likelihood(model(xs))
-        mean, var = pred.mean.numpy(), pred.variance.numpy()
-    predict_s = time.perf_counter() - t0
+        model.train()
+        likelihood.train()
+        with torch.no_grad():
+            nlml = float(-gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)(model(x), y).item() * n)
+        model.eval()
+        likelihood.eval()
+        phase("predict")
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            pred = likelihood(model(xs))
+            mean, var = pred.mean.numpy(), pred.variance.numpy()
+        predict_s = time.perf_counter() - t0
 
     row = {
         "lib": "gpytorch",

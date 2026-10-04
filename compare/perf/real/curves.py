@@ -1,8 +1,9 @@
 """T0: one-dimensional data whose fit is checked by eye (B1-1).
 
-Snelson (200 points, the sparse-GP sanity check): the archive is fetched from
-the author's page, which not every network reaches; then ``SNELSON_ZIP`` may
-point at a local copy. The fetched file is pinned in ``checksums.json``.
+Snelson (200 points, the sparse-GP sanity check): the author's page no longer
+serves the archive, so it is fetched from the 2022-03-31 Internet Archive
+snapshot. ``SNELSON_ZIP`` may point at a local copy. The fetched file is
+pinned in ``checksums.json``.
 """
 
 from __future__ import annotations
@@ -19,7 +20,10 @@ import numpy as np
 
 from .data import CHECKSUMS, DATA, _pins, _sha256
 
-SNELSON_URL = "http://www.gatsby.ucl.ac.uk/~snelson/SPGP_dist.zip"
+SNELSON_URL = (
+    "https://web.archive.org/web/20220331220231id_/"
+    "http://www.gatsby.ucl.ac.uk/~snelson/SPGP_dist.zip"
+)
 SNELSON_REL = "snelson/SPGP_dist.zip"
 
 

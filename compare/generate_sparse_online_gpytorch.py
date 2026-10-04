@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from common.ops import apply_op, generate_ops
 from common.problems import (
     KMEANS_SEED,
@@ -18,7 +17,13 @@ from common.problems import (
     pack_column_major,
     unpack_column_major,
 )
-from generate_sparse_gpytorch import FORRESTER_XS, M, SPHERE_XS, make_kernel, titsias_sgpr
+from generate_sparse_gpytorch import (
+    FORRESTER_XS,
+    SPHERE_XS,
+    M,
+    make_kernel,
+    titsias_sgpr,
+)
 
 ROOT = Path(__file__).resolve().parent
 GOLDENS = ROOT / "goldens"
