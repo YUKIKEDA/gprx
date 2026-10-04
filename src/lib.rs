@@ -1,4 +1,4 @@
-//! Exact Gaussian process regression with L-BFGS hyperparameter fitting.
+//! Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP.
 //!
 //! [`Gpr`] is the trainer. [`Gpr::fit`] consumes [`Gpr<Lbfgs>`] and returns
 //! [`FittedGpr`]. [`Gpr::with_optimizer`] swaps in [`NelderMead`],

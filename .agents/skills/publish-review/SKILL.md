@@ -34,7 +34,7 @@ Read as someone who has the crate page and has not opened this repository's issu
 
 Fail a page when any of these is true:
 
-- A name, default, layout, error, version, MSRV, or command does not match the code
+- A sentence is false against the code or `Cargo.toml`. The same wording in the README, the Japanese README, the crate rustdoc, and `description` does not make it true (reader-docs Accuracy)
 - A comparison number has no committed source and the sentence does not say where it came from
 - The README is not in the order reader-docs requires, or the English and Japanese sections diverge
 - The README still contains the comparison tables or figures
@@ -42,7 +42,7 @@ Fail a page when any of these is true:
 - Public rustdoc fails `.cursor/rules/rust-docs.mdc`, including Examples and Errors. `missing_docs` passing does not clear this
 - The first example is not pasteable after the documented dependency, or it uses `unwrap`
 - Column-major layout, `fit` consuming the trainer, `GaussianLikelihood`, the 0.x break policy, or `internals` being outside the contract is missing before the first example
-- The README, the Japanese README, the crate-level rustdoc, and `description` contradict each other
+- The opening omits a default-feature model family (`Gpr`, `Sgpr`, `Svgp`), or a public item is described by a dependency the caller does not import
 - The README links relatively at a file that is not in the package, or embeds an image
 - The Japanese is a gloss of the English under the natural-japanese skill
 - A public item an external crate can name with default features is missing from the README Usage section, has no usage example there, or its rustdoc has no usage example (`.cursor/rules/reader-docs.mdc`, `.cursor/rules/rust-docs.mdc`). `internals` is outside that list. The saved-file schema stays in the persist-format doc

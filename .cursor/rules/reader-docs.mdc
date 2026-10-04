@@ -57,9 +57,18 @@ User commands such as `cargo run --example fit_predict` stay.
 
 ## Accuracy
 
-Names, defaults, layout, errors, the MSRV, and the version match the code and `Cargo.toml`. A command in the page is a real command. A number in the comparison doc matches a committed measurement, or the sentence names where it came from.
+Accuracy means each sentence is true. Check the sentence against the code and `Cargo.toml`. The same wording in `README.md`, `README.ja.md`, the crate-level rustdoc, and `description` is not a pass. A false sentence that all four repeat still fails.
 
-The English README, the Japanese README, the crate-level rustdoc, and `Cargo.toml` `description` do not contradict each other. `description` is one sentence, the same claim as the README opening, with no internal workflow words.
+Check these against that source:
+
+- What the crate is. The opening names every model family an external crate can construct with default features: `Gpr`, `Sgpr`, and `Svgp`. A sentence that presents one family as the crate fails.
+- Names, defaults, layout, errors, the MSRV, and the version.
+- A command is a command that runs.
+- A number in the comparison doc matches a committed measurement, or the sentence says where it came from.
+
+Describe a public item with the name the caller writes. A dependency the caller does not import, such as `argmin` or `faer`, is not that name. Name a dependency when the caller calls it, as with `rayon::ThreadPoolBuilder`, or when the comparison doc states which library was measured and which version.
+
+`description` is one sentence, the same claim as the README opening, and that claim is true. It has no internal workflow words.
 
 ## Japanese
 
