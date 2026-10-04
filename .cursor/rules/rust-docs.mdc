@@ -13,7 +13,8 @@ Sources: [rustdoc book](https://doc.rust-lang.org/stable/rustdoc/how-to-write-do
 - First line: one punctuated sentence, third-person singular (“Returns…”, not “Return…”). rustdoc uses it as the search summary.
 - Then: why/when, then sections. Common headings (plural `Examples` even for one): `# Examples`, `# Errors`, `# Panics`, `# Safety`.
 - `# Errors` on every public `Result`. `# Panics` only if it can panic (gprx library paths should not). `# Safety` on every `unsafe`.
-- Public user-facing types and methods need an example, or a link to one (C-EXAMPLE “within reason”). Getters that only return a field can skip a code block.
+- Document every item an external crate can name with default features. `internals` is outside that set.
+- Every documented public item has a usage example. The example is an `# Examples` code block, or a link to one on another public item that calls this item. A getter that only returns a field may use that link and skip its own code block. Do not drop the example because the item looks obvious.
 - Doc tests compile. Use `?`, not `unwrap`. Hide setup with `# ` lines. Fence with ` ```rust `.
 - Link types with `[`Gpr`]`. Do not restate the signature; rustdoc already shows it.
 - Do not document “this field is ignored when…”. If that sentence seems needed, the types are wrong (`.cursor/rules/types.mdc`).
