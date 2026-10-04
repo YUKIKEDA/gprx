@@ -289,32 +289,25 @@ impl<O, P> Gpr<O, P> {
         self.retype(optimizer).0
     }
 
-    /// Sets whether training distances are cached across kernel builds.
-    ///
-    /// See [`DistanceCachePolicy`]. [`Self::with_prefer_memory`] /
-    /// [`Self::with_prefer_speed`] set this together with the Cholesky buffer.
-    ///
-    /// See the example on [`Gpr`].
-    pub fn with_distance_cache_policy(mut self, policy: DistanceCachePolicy) -> Self {
+    // One field. Public callers set both through `with_prefer_speed` /
+    // `with_prefer_memory`, so this stays crate-private.
+    pub(crate) fn with_distance_cache_policy(mut self, policy: DistanceCachePolicy) -> Self {
         self.policies.distance_cache = policy;
         self
     }
 
-    /// Sets where the gradient matrix `W` lives.
-    ///
-    /// See [`CholeskyBuffer`].
-    ///
-    /// See the example on [`Gpr`].
-    pub fn with_cholesky_buffer(mut self, buffer: CholeskyBuffer) -> Self {
+    // One field. Public callers set both through `with_prefer_speed` /
+    // `with_prefer_memory`, so this stays crate-private.
+    pub(crate) fn with_cholesky_buffer(mut self, buffer: CholeskyBuffer) -> Self {
         self.policies.cholesky_buffer = buffer;
         self
     }
 
     /// Selects the memory pole: [`DistanceCachePolicy::Uncached`] and [`CholeskyBuffer::Reuse`].
     ///
-    /// Training distances are computed from `X` each kernel build, and `W`
-    /// overwrites `L` during a gradient. [`Self::with_prefer_speed`] restores
-    /// the default.
+    /// Replaces both policies. Training distances are computed from `X` each
+    /// kernel build, and `W` overwrites `L` during a gradient.
+    /// [`Self::with_prefer_speed`] replaces both with the default.
     ///
     /// # Examples
     ///
@@ -339,6 +332,8 @@ impl<O, P> Gpr<O, P> {
     }
 
     /// Selects the speed pole: [`DistanceCachePolicy::Cached`] and [`CholeskyBuffer::Retain`] (the default).
+    ///
+    /// Replaces both policies.
     ///
     /// # Examples
     ///

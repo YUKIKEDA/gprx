@@ -36,7 +36,7 @@ Same program: `cargo run --example fit_predict`.
 
 `X` and inducing inputs `Z` are column-major `f64`: feature 0 for every row, then feature 1. `n_rows` is the point count, `n_cols` the feature count. `y` has length `n_rows`. Empty input, a length that is not `n_rows * n_cols`, or `NaN` / `Inf` is `GprError`.
 
-There is no `n_jobs` setter. Distance fills use the process-wide Rayon pool. Set `RAYON_NUM_THREADS` before the process starts, or call `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first fit or predict. The pool can be initialized only once. One worker is sequential.
+There is no `n_jobs` setter. Distance fills use the process-wide Rayon pool. Set `RAYON_NUM_THREADS` before the process starts, or call `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first fit or predict. The pool can be initialized only once. One worker is sequential. Training Cholesky and the `W` n-RHS solve cap the linear-algebra backend at `min(pool, n / 64)`. Predict and covariance triangular solves also cap at `n · m / 16384` and `m / 12`. Kernel fills still use the full pool.
 
 `gprx::internals` (`bench-internals`, `insert-stages`) is outside semantic versioning. Do not depend on it.
 
@@ -89,9 +89,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 `neg_log_marginal_likelihood` is the objective at the current `θ`. `num_params`, `get_params`, and `set_params` are the flat log-`θ` vector: kernel parameters, then the likelihood parameter. `value_and_gradient_into` and `hessian_into` evaluate that objective. `set_params` updates `θ` and the factorization.
 
-`n`, `d`, `kernel`, `likelihood`, `x`, `y`, and `alpha` read the fitted model. `distance_cache_policy`, `cholesky_buffer`, `math`, and `jitter_policy` read the policies.
+`n`, `d`, `kernel`, `likelihood`, `x`, `y`, and `alpha` read the fitted model. `distance_cache_policy`, `cholesky_buffer`, `math`, and `jitter_policy` read the policies. Before `fit`, `Gpr` reads `kernel`, `likelihood`, `num_params`, `get_params`, and those four policy getters. `set_params` starts after `fit`. `FittedGpr::alpha` is a slice from the last factor. `OnlineGpr::alpha` returns `Result`: insert and delete leave `α` stale, and the first call after them solves it.
 
-`into_trainer` returns the unfitted `Gpr` with the current `θ`. `with_optimizer` on a fitted model only changes a later `refit`. `refit` on `FittedGpr<O: Optimizer>` searches again from the current `θ` on the stored data. `refit` on `FittedGpr<Fixed>` rebuilds `L` and `α` and does not search. Transforms are not fit again.
+`into_trainer` returns the unfitted `Gpr` with the current `θ`. `with_optimizer` on a fitted model only changes a later `refit`. `OnlineGpr::with_optimizer` does the same. `refit` on `FittedGpr<O: Optimizer>` searches again from the current `θ` on the stored data. `refit` on `FittedGpr<Fixed>` rebuilds `L` and `α` and does not search. Transforms are not fit again.
 
 `into_online` returns `OnlineGpr`. `insert(x_new, y_new)` appends one point and returns a `PointId`. `delete(id)` removes that point. The last remaining point cannot be deleted (`GprError::InsufficientData`, `min` 2). `PointId` has no public constructor. `into_online` assigns `0 .. n-1`. Later inserts increase and are never reused. `point_ids` is the current list. `InvalidPointId` means the id is not in the model. `into_trainer` on the online model returns `Gpr`. `refit` on `OnlineGpr` follows the same split: an `Optimizer` searches, and `Fixed` rebuilds the factor.
 
@@ -107,12 +107,10 @@ Before `fit`, on `Gpr`:
 | `with_input_transform(map)` | Default is identity. |
 | `with_target_transform(map)` | Default is identity. Use `StandardizeTarget::new()` when the mean is zero. |
 | `with_jitter_policy(policy)` | Default is `JitterPolicy::fixed(0.0)`. |
-| `with_distance_cache_policy` | `DistanceCachePolicy::Cached` (default) or `Uncached`. |
-| `with_cholesky_buffer` | `CholeskyBuffer::Retain` (default) or `Reuse`. |
-| `with_prefer_speed` | `Cached` and `Retain`. |
-| `with_prefer_memory` | `Uncached` and `Reuse`. |
+| `with_prefer_speed` | `Cached` and `Retain` (the default). Replaces both. |
+| `with_prefer_memory` | `Uncached` and `Reuse`. Replaces both. |
 
-`with_prefer_speed` and `with_prefer_memory` exist on `Gpr`. `Sgpr` and `Svgp` take `with_math` and `with_jitter_policy`. They do not take the distance-cache or Cholesky-buffer setters.
+`with_prefer_speed` and `with_prefer_memory` exist on `Gpr` and set the distance cache and the Cholesky buffer together. `Sgpr` and `Svgp` take `with_optimizer`, `with_precision`, `with_math`, `with_jitter_policy`, `with_input_transform`, and `with_target_transform`. `Sgpr` also takes `with_inducing`. Their `K_mm` jitter starts at `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`. Before `fit`, they read `kernel`, `likelihood`, `math`, `jitter_policy`, `num_params`, and `get_params`. `set_params` updates `θ`.
 
 ### Sparse: `Sgpr`, `FittedSgpr`, `OnlineSgpr`
 
@@ -144,7 +142,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `fit` and `factor` take `(x, n_rows, n_cols, y, z, n_inducing)`. `z` is column-major with `n_inducing` points and the same `n_cols`. `factor` does not move `θ` or `Z`. Free inducing appends column-major `Z` after kernel `θ` and likelihood `θ`. Each coordinate is limited to the training box, opened by 10% of that feature's range and at least `0.1`. Matérn `ν = 1/2` has no coordinate derivative for free `Z` (`GprError::CoordGradientUnsupported`).
 
-`FittedSgpr` has the same predict, covariance, sample, and leave-one-out methods as `FittedGpr`, plus `m` for the inducing count. `into_online` returns `OnlineSgpr`. `insert` / `delete` use `PointId`. `insert_inducing` / `delete_inducing` use `InducingId` (no public constructor, never reused). `inducing_ids` lists them. `InvalidInducingId` means the id is absent. `into_fitted` returns `FittedSgpr<_, FixedInducing, _>`. `save` writes the directory. There is no `save_with_factor` on the sparse models.
+`FittedSgpr` has the same predict, covariance, sample, leave-one-out, and objective methods as `FittedGpr` (`neg_log_marginal_likelihood`, `num_params`, `get_params`, `set_params`, `value_and_gradient_into`, `hessian_into`). It reads `n`, `m`, `d`, `kernel`, `likelihood`, `math`, `jitter_policy`, `x`, `y`, and `z` (inducing inputs, original coordinates). `into_online` returns `OnlineSgpr` with those readers, those objective methods, `point_ids`, and `inducing_ids`. `insert` / `delete` use `PointId`. `insert_inducing` / `delete_inducing` use `InducingId` (no public constructor, never reused). `InvalidInducingId` means the id is absent. `OnlineSgpr<O: Optimizer>::refit` searches again and keeps `Z` fixed. `OnlineSgpr<Fixed>` has no `refit`. `into_fitted` returns `FittedSgpr<_, FixedInducing, _>`. `save` writes the directory. Sparse models have no `save_with_factor`.
 
 ### Minibatch: `Svgp`, `FittedSvgp`
 
@@ -169,13 +167,15 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`FittedSvgp::neg_elbo` is the evidence lower bound. `value_and_gradient_into` is the full-data sum. The Adam loop scales the data term by `n / batch` and leaves the KL whole. Predict, covariance, sample, and `predict_into` match the other families. There is no leave-one-out and no online type. `save` writes the directory.
+`FittedSvgp::neg_elbo` is the evidence lower bound. `num_params`, `get_params`, `set_params`, and `value_and_gradient_into` are the full-data objective. There is no `hessian_into`. The Adam loop scales the data term by `n / batch` and leaves the KL whole. Predict, covariance, and sample match the other families: `predict`, `predict_with`, `predict_into`, `predict_with_into`, `predict_covariance`, `predict_covariance_with`, `sample`, `sample_with`. Readers are `n`, `m`, `d`, `kernel`, `likelihood`, `math`, `jitter_policy`, `x`, `y`, and `z`. There is no leave-one-out, no online type, and no `refit`. `save` writes the directory.
 
 `Adam::new` is learning rate `1e-3`, `β1 = 0.9`, `β2 = 0.999`, `ε = 1e-8`, batch 32, 100 epochs, seed 0. Setters: `with_learning_rate`, `with_beta1`, `with_beta2`, `with_epsilon`, `with_batch_size` (`NonZeroUsize`), `with_epochs` (`NonZeroU64`), `with_seed`. The rate, betas, and epsilon return `Result`.
 
 ### Kernels
 
-Build a `KernelSpec` with `KernelSpec::from(leaf)` or `KernelSpec::custom(term)`. `+` is a sum. `*` is a product. `*` binds tighter than `+`, so `c * k + k2` is a scaled kernel plus another kernel. `num_params`, `get_params`, and `set_params` are the flattened log-`θ` in depth-first leaf order. `parameter_bindings` maps each flat index to `(index, leaf_id, local_index)`. `compile` makes a `CompiledKernel<f64>`. `compile_as::<T>()` picks the storage scalar (`KernelScalar`, implemented for `f32` and `f64`).
+Build a `KernelSpec` with `KernelSpec::from(leaf)` or `KernelSpec::custom(term)`. `+` is a sum. `*` is a product. `*` binds tighter than `+`, so `c * k + k2` is a scaled kernel plus another kernel. `num_params`, `get_params`, and `set_params` are the flattened log-`θ` in depth-first leaf order. `parameter_bindings` returns `Vec<ParameterBinding>`. The fields are `index`, `leaf_id`, and `local_index`. `compile` makes a `CompiledKernel<f64>`. `compile_as::<T>()` picks the storage scalar (`KernelScalar`, implemented for `f32` and `f64`). `CompiledKernel` has the same `num_params`, `get_params`, and `set_params`.
+
+`KernelSpec` and `CompiledKernel` are non-exhaustive. Match either on `Rbf`, `RbfArd`, `Matern`, `MaternArd`, `Periodic`, `RationalQuadratic`, `RationalQuadraticArd`, `Constant`, `Linear`, `White`, `Custom`, `Sum`, or `Product`. On `KernelSpec`, `Sum` and `Product` are a pair of boxes. On `CompiledKernel`, they are flattened vectors.
 
 ```rust
 use gprx::kernel::{ConstantKernel, KernelSpec, RbfKernel};
@@ -206,11 +206,11 @@ Each built-in leaf stores positive parameters as `log`. `new` takes user units (
 
 Observation noise belongs in `GaussianLikelihood`. `WhiteKernel` is an extra kernel term. A large likelihood and a large white term count the noise twice.
 
-`lengthscale(dim)` on an ARD leaf returns one `ℓ_d`. `log_lengthscales` is the stored vector.
+Isotropic leaves read `lengthscale` and `log_lengthscale`. Matérn also reads `nu`. Periodic reads `period` and `log_period`. Rational quadratic reads `alpha` and `log_alpha`. Linear and white read `variance` and `log_variance`. Constant reads `constant` and `log_constant`. Constructors from the optimizer coordinate are `from_log_lengthscale`, `from_log_lengthscales`, `from_log` (periodic: log lengthscale and log period; rational quadratic: log lengthscale and log `α`), `from_log_variance`, and `from_log_constant`. A single `bounds` covers RBF, Matérn, constant, linear, and white. Periodic uses `lengthscale_bounds` and `period_bounds`; `with_bounds` takes both intervals. Rational quadratic uses `lengthscale_bounds` and `alpha_bounds`; `with_bounds` takes both. `lengthscale(dim)` on an ARD leaf returns one `ℓ_d`. `log_lengthscales` is the stored vector. `lengthscales()` returns `ArdLengthscales` (`new`, `from_log_lengthscales`, `with_bounds`, `lengthscale(dim)`, `log_lengthscales`, `num_params`, `get_params`, `set_params`). ARD `with_bounds` takes one interval for every `ℓ_d`. Rational-quadratic ARD `with_bounds` takes a lengthscale interval and an `α` interval.
 
-A leaf and a `CompiledKernel` evaluate with `apply`, `apply_cross`, `fill_diag`, `grad`, and `hess`. Some leaves also have `apply_points`, `grad_points`, `hess_points`, and `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. `apply` takes a `KernelMath`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial). `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
+A leaf and a `CompiledKernel` evaluate with `apply`, `apply_cross`, `fill_diag`, `grad`, and `hess`. Some leaves also have `apply_points`, `apply_cross_points`, `grad_points`, `hess_points`, and `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. `apply` takes a `KernelMath`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial). `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
 
-`KernelTerm` is the trait for a distance leaf: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist*` / `hess_wrt_sq_dist` for `FreeInducing`). `CustomKernel::new(term)` boxes it. `KernelSpec::custom` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`.
+`KernelTerm` is the trait for a distance leaf: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, `clone_box`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save a custom leaf. `CustomKernel::new(term)` boxes it. `KernelSpec::custom` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`.
 
 ### Likelihood
 
@@ -225,13 +225,15 @@ Pass an unfitted map to `with_input_transform` or `with_target_transform` before
 | `IdentityInput`, `IdentityTarget` | no change. `fit` returns the same map |
 | `StandardizeInput` | per-feature mean and standard deviation. `FittedStandardizeInput::mean` and `std` |
 | `StandardizeTarget` | one mean and standard deviation for `y`. `FittedStandardizeTarget::mean` and `std` |
-| `MinMaxInput` | per-feature map into a range. `new` is `[0, 1]`. `with_feature_range(lo, hi)`. Fitted: `min`, `max`, `feature_range` |
-| `MinMaxTarget` | the same for `y` |
+| `MinMaxInput` | per-feature map into a range. `new` is `[0, 1]`. `with_feature_range(lo, hi)`. `feature_range` reads it. Fits to `FittedMinMaxInput` (`min`, `max`, `feature_range`) |
+| `MinMaxTarget` | the same for `y`. Fits to `FittedMinMaxTarget` |
 | `Pipeline` | `Pipeline::new().then(step)`. `len`, `is_empty`. Fits to `FittedPipeline` |
 | `TargetPipeline` | the same for `y`, fits to `FittedTargetPipeline` |
 | `ColumnwiseInput` | `new().then(map)` assigns the next feature. Fits to `FittedColumnwiseInput` |
 
-`UnfittedTransform::fit` and `UnfittedTarget::fit` consume the map. `Transform` and `TargetTransform` are the fitted traits (apply and invert). A caller-defined map implements the unfitted trait, `clone_box`, `as_any`, and a `persist_id` when it should be saved.
+Concrete maps also have an inherent `fit`. Input maps take `(x, n_rows, n_cols)`. Target maps take `y`. The trait methods `UnfittedTransform::fit` and `UnfittedTarget::fit` take `Box<Self>`. A caller-defined map implements `clone_box` and `as_any`. Saving it also implements `persist_id` and `persist_state`.
+
+`Transform` is the fitted input trait: `apply` and `inverse_apply`, in place, column-major. `TargetTransform` is the fitted target trait: `transform`, `inverse_transform_mean`, `inverse_transform_variance`, and `inverse_transform_covariance` (the default scales every entry the same way as the variance).
 
 ### Optimizers
 
@@ -248,9 +250,9 @@ One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` rep
 
 `with_restarts(n, seed)` adds `n` extra log-uniform starts (`NonZeroU32`) and keeps the lowest value. The first start is the model's `θ`. `BoundaryPolicy::Clamp` (default) projects a proposal just inside the open interval. `BoundaryPolicy::Periodic` wraps to the other side.
 
-`Optimizer::minimize` returns `OptResult { params, value, iterations }`. `USES_CHANGE_INDICES` is `true` when the solver reports which coordinates changed. With `CholeskyBuffer::Retain`, a fit then rebuilds only the touched kernel leaves. Implement `Optimizer<P>` for a solver of your own. `P` is `Objective`, `Differentiable`, or `TwiceDifferentiable`. `IncrementalObjective::value_with_changes` rebuilds only the leaves those indices touch. Empty, duplicate, or out-of-range indices are `GprError`.
+`Optimizer::minimize` returns `OptResult { params, value, iterations }`. `USES_CHANGE_INDICES` defaults to `false`. `FastSimulatedAnnealing` sets it `true`, and a custom solver does the same when it reports which coordinates changed. With `CholeskyBuffer::Retain`, a fit then rebuilds only the touched kernel leaves. Implement `Optimizer<P>` for a solver of your own. `P` is `Objective`, `Differentiable`, or `TwiceDifferentiable`. `IncrementalObjective::value_with_changes` rebuilds only the leaves those indices touch. Empty, duplicate, or out-of-range indices are `GprError`.
 
-`Objective::value` is the scalar. `value_at_changes` lists every coordinate that differs from the previous evaluation on that objective. `fill_intervals` writes each parameter's open interval in user units. The built-in solvers stay inside those intervals. `Differentiable::value_and_gradient_into` and `TwiceDifferentiable` (Hessian) extend it.
+`Objective::num_params` is the length. `Objective::value` is the scalar. `value_at_changes` lists every coordinate that differs from the previous evaluation on that objective. `fill_intervals` writes each parameter's open interval in user units. The built-in solvers stay inside those intervals. `Differentiable` adds `gradient_into` and `value_and_gradient_into`. `TwiceDifferentiable` adds `hessian_into` and `value_gradient_hessian_into`.
 
 ### Precision, math, jitter
 
@@ -258,7 +260,7 @@ One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` rep
 
 `KernelExp::Accurate` and `FastApprox` are the runtime switch (`with_math`). `Accurate` and `FastApprox` in `gprx` are the corresponding `KernelMath` types for a direct `apply`.
 
-`JitterPolicy::fixed(j)` retries a failed Cholesky once with `j ≥ 0` on the diagonal (`FixedJitter`). `adaptive(initial, multiplier, max_retries, max_jitter)` grows the offset after the unregularized factor fails (`AdaptiveJitter`): `initial > 0`, `multiplier > 1`, `max_retries ≥ 1`, `max_jitter ≥ initial`. Exact models default to `fixed(0.0)`. Read the stored numbers with `jitter`, or `initial`, `multiplier`, `max_retries`, and `max_jitter`.
+`JitterPolicy::fixed(j)` retries a failed Cholesky once with `j ≥ 0` on the diagonal (`FixedJitter`). `adaptive(initial, multiplier, max_retries, max_jitter)` grows the offset after the unregularized factor fails (`AdaptiveJitter`): `initial > 0`, `multiplier > 1`, `max_retries ≥ 1`, `max_jitter ≥ initial`. Exact models default to `fixed(0.0)`. `Sgpr` and `Svgp` default to `adaptive(1e-8, 10.0, 5, 1e-3)` on `K_mm`. Read the stored numbers with `jitter`, or `initial`, `multiplier`, `max_retries`, and `max_jitter`.
 
 ### Parameters
 

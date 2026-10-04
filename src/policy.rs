@@ -20,8 +20,7 @@ use crate::error::GprError;
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
-///     .with_distance_cache_policy(DistanceCachePolicy::Uncached);
+/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?).with_prefer_memory();
 /// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Uncached);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
@@ -53,8 +52,7 @@ pub enum DistanceCachePolicy {
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
-///     .with_cholesky_buffer(CholeskyBuffer::Reuse);
+/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?).with_prefer_memory();
 /// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Reuse);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
