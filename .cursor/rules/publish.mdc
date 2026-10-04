@@ -9,18 +9,27 @@ Ready means a human runs `cargo publish` and no other step is left. Agents do no
 
 `just lint` and `just test` run on every change, publish or not. On the commit that will be published, record them locally. Cloud CI is not the completion condition while runners are limited.
 
+## Order
+
+One pull request says release preparation is complete: what is done, and what is not. A human merges it. That merge on `main` is the commit that will be published.
+
+Do not create the version tag or the GitHub Release before that merge.
+
+After the merge, run the checks below on that commit. Running them on an earlier commit, including one with the same tree, is not this check.
+
+When those checks have succeeded on that commit, create the annotated tag `v{version}` on it, then the GitHub Release on that tag. The human then runs `cargo publish`. Do not create the tag or the Release before the checks. Agents do not run `cargo publish` without `--dry-run`.
+
 ## Before `cargo publish`
 
-One commit is the published source. All of the following are true for that commit. A failure in the reader check blocks `cargo package` and `cargo publish --dry-run`.
+All of the following are true for the merge commit above. A failure in the reader check blocks `cargo package` and `cargo publish --dry-run`.
 
 - `Cargo.toml` `version` is the version to publish. `publish = false` is absent.
 - The publish-review skill has been run. No failure remains against `.cursor/rules/reader-docs.mdc` and `.cursor/rules/rust-docs.mdc`.
 - `cargo doc --no-deps` reports no broken links.
 - `cargo package` builds the package. `cargo package --list` matches the whitelist below.
 - `just lint` and `just test` succeeded on that commit.
-- An annotated tag `v{version}` points at that commit. A GitHub Release uses the same tag.
 - `cargo login` already succeeds.
-- `cargo publish --dry-run` exits 0 on a clean tree.
+- `cargo publish --dry-run` exits 0 on a clean tree of that commit.
 
 `homepage` is the GitHub repository. `documentation` is `https://docs.rs/gprx`. `[package.metadata.docs.rs]` builds default features, not `bench-internals` or `insert-stages`.
 
