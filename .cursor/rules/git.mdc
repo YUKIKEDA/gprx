@@ -42,6 +42,8 @@ c6f2091 まで hard reset して、force-with-lease で push して
 
 Commit only when that message asks to commit. Push only when it asks to push. An open PR is not consent. Do not commit or push as “the natural next step”.
 
+A branch with no Issue and no pull request is deleted (`CONTRIBUTING.md`). That sentence is not an order to delete one. `branch -D` still needs an imperative that names the operation and the ref.
+
 ## If a rewrite already ran
 
 The first line of the reply is the pre-rewrite SHA. Do not hide it.
