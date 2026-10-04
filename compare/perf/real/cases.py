@@ -106,7 +106,9 @@ def splits_of(dataset: str) -> range:
     return range(n_splits(DATASETS[dataset]))
 
 
-def write_curve_case(name: str, protocol: str) -> Path:
+def write_curve_case(
+    name: str, protocol: str, model: str = "exact", n_inducing: int = N_INDUCING
+) -> Path:
     """A T0 case: the curve's training points, then (when the data has them)
     held-out points that are scored, then a dense grid; every runner returns
     its predictions on all of ``xs`` (``return_predictions``). Standardized
@@ -135,12 +137,27 @@ def write_curve_case(name: str, protocol: str) -> Path:
                 amp(st["s3"]), st["l4"], st["alpha"], amp(st["s4"]), st["l5"], amp(st["noise"]),
             ],
         }
-    path = CASES / f"{name}_s0_{protocol}.json"
+    if model != "exact":
+        if n_inducing > int(curve.x_train.shape[0]):
+            raise ValueError(
+                f"{name} has {curve.x_train.shape[0]} rows; {n_inducing} inducing points do not fit"
+            )
+        z = inducing_points((curve.x_train - x_mean) / x_std, n_inducing)
+        extra = {
+            **extra,
+            "z": z.T.ravel().tolist(),
+            "n_inducing": int(z.shape[0]),
+            "adam_lr": ADAM_LR,
+            "adam_batch_size": ADAM_BATCH_SIZE,
+            "adam_epochs": ADAM_EPOCHS,
+        }
+    tag = "" if model == "exact" else f"_{model}"
+    path = CASES / f"{name}{tag}_s0_{protocol}.json"
     write_json(
         path,
         {
             **extra,
-            "model": "exact",
+            "model": model,
             "name": f"{name}_s0",
             "dataset": name,
             "split": 0,

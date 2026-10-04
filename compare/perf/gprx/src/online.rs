@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use gprx::{Fixed, GaussianLikelihood, Gpr};
 
-use crate::case::{Case, ResultRow};
+use crate::case::{Case, FrameDump, FrameStep, ResultRow};
 use crate::rss::peak_rss_bytes;
 use crate::shared::{point_at, prefix_colmajor, rbf_kernel};
 use crate::timing;
@@ -157,6 +157,46 @@ pub fn run_delete(case: &Case) -> Result<ResultRow, String> {
             "OnlineGpr::delete from n to 2; last remaining PointId each step; insert untimed"
                 .to_string(),
         ),
+    })
+}
+
+fn frame_step(online: &gprx::OnlineGpr<Fixed>, case: &Case, n: usize) -> Result<FrameStep, String> {
+    let pred = online
+        .predict(&case.xs, case.xs_n_rows, case.xs_n_cols)
+        .map_err(|e| e.to_string())?;
+    Ok(FrameStep {
+        n,
+        mean: pred.mean,
+        observation_variance: pred.variance,
+    })
+}
+
+/// Predictive mean and observation variance after each insert, from `start_n`
+/// through `n`. Hyperparameters stay at the case start. One pass, no timing.
+pub fn run_frames(case: &Case) -> Result<FrameDump, String> {
+    let start_n = case.start_n;
+    if case.n_rows < start_n || start_n < 2 {
+        return Err("start_n out of range".to_string());
+    }
+    let d = case.n_cols;
+    let x0 = prefix_colmajor(&case.x, case.n_rows, d, start_n);
+    let fitted = make_gpr(case)?
+        .factor(&x0, start_n, d, &case.y[..start_n])
+        .map_err(|(_, e)| e.to_string())?;
+    let mut online = fitted.into_online().map_err(|e| e.to_string())?;
+    let mut steps = Vec::with_capacity(case.n_rows - start_n + 1);
+    steps.push(frame_step(&online, case, start_n)?);
+    for index in start_n..case.n_rows {
+        let x_new = point_at(&case.x, case.n_rows, d, index);
+        online
+            .insert(&x_new, case.y[index])
+            .map_err(|e| e.to_string())?;
+        steps.push(frame_step(&online, case, index + 1)?);
+    }
+    Ok(FrameDump {
+        source: "gprx".to_string(),
+        name: case.name.clone(),
+        steps,
     })
 }
 

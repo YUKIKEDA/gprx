@@ -58,6 +58,10 @@ perf-sparse:
 perf-sparse-online:
     uv run --directory compare --group perf python -X utf8 -m perf.run_sparse_online
 
+# Snelson sparse curve and online-insert GIF. Manual. Does not write results.json.
+perf-visual:
+    uv run --directory compare --group perf python -X utf8 -m perf.real.visual
+
 # B1-1 real-dataset comparison. Manual: needs the network for the data. cargo test must not run this.
 # Example: just perf-real --datasets yacht,energy --splits 2 --protocol native
 # Example: just perf-real --datasets power_plant --from-split 4

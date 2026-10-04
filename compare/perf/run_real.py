@@ -179,7 +179,7 @@ def main(argv: list[str]) -> int:
         for split in splits:
             try:
                 path = (
-                    write_curve_case(dataset, protocol)
+                    write_curve_case(dataset, protocol, model, n_inducing)
                     if dataset in CURVES
                     else write_case(dataset, split, protocol, model, n_inducing)
                 )

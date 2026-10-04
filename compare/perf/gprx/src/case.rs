@@ -17,6 +17,9 @@ pub struct Case {
     pub lengthscales_init: Vec<f64>,
     pub noise_variance_init: f64,
     pub joint_evals: u64,
+    /// First snapshot of `online-frames`. The timing modes do not read it.
+    #[serde(default = "default_start_n")]
+    pub start_n: usize,
 }
 
 /// P4-12 Sparse cell. `y` is already population-standardized.
@@ -166,6 +169,27 @@ impl SparseOnlineResult {
             note: Some(note),
         }
     }
+}
+
+fn default_start_n() -> usize {
+    2
+}
+
+/// One predictive snapshot of `online-frames` (mean and observation variance
+/// on `xs`, in the case's `y` units).
+#[derive(Debug, Serialize)]
+pub struct FrameStep {
+    pub n: usize,
+    pub mean: Vec<f64>,
+    pub observation_variance: Vec<f64>,
+}
+
+/// Every snapshot from `start_n` through `n_rows`, one library.
+#[derive(Debug, Serialize)]
+pub struct FrameDump {
+    pub source: String,
+    pub name: String,
+    pub steps: Vec<FrameStep>,
 }
 
 /// B1-1 real-dataset cell. `x` / `xs` are column-major and standardized, `y`

@@ -4,6 +4,7 @@
 //! ```text
 //! gprx-perf exact CASE.json [--memory]
 //! gprx-perf online CASE.json [--stages | --delete]
+//! gprx-perf online-frames CASE.json
 //! gprx-perf sparse CASE.json
 //! gprx-perf fit CASE.json            (needs `--features fit-counts`)
 //! gprx-perf sparse-online CASE.json incremental|full
@@ -30,7 +31,7 @@ use serde::de::DeserializeOwned;
 
 use case::{Case, FitRow, RealCase, ResultRow, SparseCase, SparseOnlineCase, SparseOnlineResult};
 
-const USAGE: &str = "usage: gprx-perf exact|online|sparse|sparse-online|fit CASE.json [flags]\n  \
+const USAGE: &str = "usage: gprx-perf exact|online|online-frames|sparse|sparse-online|fit CASE.json [flags]\n  \
      exact [--memory]\n  online [--stages|--delete]\n  sparse-online incremental|full";
 
 fn read_case<T: DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -57,6 +58,12 @@ fn exact(path: &str, flags: &[String]) -> Result<ExitCode, String> {
     let lib = if memory { "gprx-memory" } else { "gprx" };
     let row = exact::run(&case, memory).unwrap_or_else(|e| ResultRow::na(lib, &case.name, e));
     Ok(print_row(&row))
+}
+
+fn online_frames(path: &str) -> Result<ExitCode, String> {
+    let case: Case = read_case(path)?;
+    let dump = online::run_frames(&case)?;
+    Ok(print_row(&dump))
 }
 
 fn online(path: &str, flags: &[String]) -> Result<ExitCode, String> {
@@ -106,6 +113,7 @@ fn main() -> ExitCode {
     let result = match mode.as_str() {
         "exact" => exact(path, flags),
         "online" => online(path, flags),
+        "online-frames" => online_frames(path),
         "sparse" => sparse(path),
         "fit" => fit(path),
         "sparse-online" => sparse_online(path, flags),
