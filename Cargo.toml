@@ -9,6 +9,17 @@ repository = "https://github.com/YUKIKEDA/gprx"
 readme = "README.md"
 keywords = ["gaussian-process", "gpr", "machine-learning"]
 categories = ["science", "mathematics"]
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "benches/**/*",
+    "compare/goldens/**/*",
+    "README.md",
+    "README.ja.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
 publish = false
 
 [lints.rust]
