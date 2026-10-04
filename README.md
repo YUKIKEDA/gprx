@@ -79,9 +79,9 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`predict` variance is observation (`latent + σn²`) on the original `y` scale. `predict_with` takes `PredictOptions`. `predict` allocates. `predict_into` and `predict_with_into` write into a `Prediction` and reuse `mean` / `variance` when the query length matches.
+`predict` variance is `VarianceKind::Observation` (`latent + σn²`) on the original `y` scale. `VarianceKind::Latent` drops `σn²`. `predict_with` takes `PredictOptions` (`variance_kind`). `predict` allocates. `predict_into` and `predict_with_into` write into a `Prediction` (`mean`, `variance`, `variance_kind`) and reuse `mean` / `variance` when the query length matches.
 
-`predict_covariance` returns `PredictiveCovariance`. `covariance` is column-major `m × m` (`col * m + row`). The diagonal matches `predict` for the same query and options. `predict_covariance_with` takes `PredictOptions`.
+`predict_covariance` returns `PredictiveCovariance` (`mean`, `covariance`, `variance_kind`). `covariance` is column-major `m × m` (`col * m + row`). The diagonal matches `predict` for the same query and options. `predict_covariance_with` takes `PredictOptions`.
 
 `sample(xs, n_rows, n_cols, n_draws, seed)` draws `μ + Lz` from that covariance. The result is column-major `m × n_draws`. `seed` starts gprx's Xoshiro256++ (the same sequence on every platform). `sample_with` takes `PredictOptions`.
 
@@ -107,10 +107,10 @@ Before `fit`, on `Gpr`:
 | `with_input_transform(map)` | Default is identity. |
 | `with_target_transform(map)` | Default is identity. Use `StandardizeTarget::new()` when the mean is zero. |
 | `with_jitter_policy(policy)` | Default is `JitterPolicy::fixed(0.0)`. |
-| `with_prefer_speed` | `Cached` and `Retain` (the default). Replaces both. |
-| `with_prefer_memory` | `Uncached` and `Reuse`. Replaces both. |
+| `with_prefer_speed` | `DistanceCachePolicy::Cached` and `CholeskyBuffer::Retain` (the defaults). Replaces both. |
+| `with_prefer_memory` | `DistanceCachePolicy::Uncached` and `CholeskyBuffer::Reuse`. Replaces both. |
 
-`with_prefer_speed` and `with_prefer_memory` exist on `Gpr` and set the distance cache and the Cholesky buffer together. `Sgpr` and `Svgp` take `with_optimizer`, `with_precision`, `with_math`, `with_jitter_policy`, `with_input_transform`, and `with_target_transform`. `Sgpr` also takes `with_inducing`. Their `K_mm` jitter starts at `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`. Before `fit`, they read `kernel`, `likelihood`, `math`, `jitter_policy`, `num_params`, and `get_params`. `set_params` updates `θ`.
+`with_prefer_speed` and `with_prefer_memory` exist on `Gpr` and set the distance cache and the Cholesky buffer together. `DistanceCachePolicy` (`Cached` is the default, `Uncached` recomputes) and `KernelExp` are non-exhaustive. `CholeskyBuffer` is `Retain` or `Reuse`. `Sgpr` and `Svgp` take `with_optimizer`, `with_precision`, `with_math`, `with_jitter_policy`, `with_input_transform`, and `with_target_transform`. `Sgpr` also takes `with_inducing`. Their `K_mm` jitter starts at `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`. Before `fit`, they read `kernel`, `likelihood`, `math`, `jitter_policy`, `num_params`, and `get_params`. `set_params` updates `θ`.
 
 ### Sparse: `Sgpr`, `FittedSgpr`, `OnlineSgpr`
 
@@ -173,7 +173,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Kernels
 
-Build a `KernelSpec` with `KernelSpec::from(leaf)` or `KernelSpec::custom(term)`. `+` is a sum. `*` is a product. `*` binds tighter than `+`, so `c * k + k2` is a scaled kernel plus another kernel. `num_params`, `get_params`, and `set_params` are the flattened log-`θ` in depth-first leaf order. `parameter_bindings` returns `Vec<ParameterBinding>`. The fields are `index`, `leaf_id`, and `local_index`. `compile` makes a `CompiledKernel<f64>`. `compile_as::<T>()` picks the storage scalar (`KernelScalar`, implemented for `f32` and `f64`). `CompiledKernel` has the same `num_params`, `get_params`, and `set_params`.
+Build a `KernelSpec` with `KernelSpec::from(leaf)` or `KernelSpec::custom(term)`. `+` is a sum. `*` is a product. `*` binds tighter than `+`, so `c * k + k2` is a scaled kernel plus another kernel. `num_params`, `get_params`, and `set_params` are the flattened log-`θ` in depth-first leaf order. `parameter_bindings` returns `Vec<ParameterBinding>`. The fields are `index`, `leaf_id`, and `local_index`. `compile` makes a `CompiledKernel<f64>`. `compile_as::<T>()` picks the storage scalar (`KernelScalar`, implemented for `f32` and `f64` only). The trait methods are `from_f64`, `to_f64`, `exp`, `ln`, `sqrt`, `abs`, `is_finite`, `powf`, `sin`, `cos`, `max`, and `min`. `CompiledKernel` has the same `num_params`, `get_params`, and `set_params`.
 
 `KernelSpec` and `CompiledKernel` are non-exhaustive. Match either on `Rbf`, `RbfArd`, `Matern`, `MaternArd`, `Periodic`, `RationalQuadratic`, `RationalQuadraticArd`, `Constant`, `Linear`, `White`, `Custom`, `Sum`, or `Product`. On `KernelSpec`, `Sum` and `Product` are a pair of boxes. On `CompiledKernel`, they are flattened vectors.
 
@@ -208,7 +208,7 @@ Observation noise belongs in `GaussianLikelihood`. `WhiteKernel` is an extra ker
 
 Isotropic leaves read `lengthscale` and `log_lengthscale`. Matérn also reads `nu`. Periodic reads `period` and `log_period`. Rational quadratic reads `alpha` and `log_alpha`. Linear and white read `variance` and `log_variance`. Constant reads `constant` and `log_constant`. Constructors from the optimizer coordinate are `from_log_lengthscale`, `from_log_lengthscales`, `from_log` (periodic: log lengthscale and log period; rational quadratic: log lengthscale and log `α`), `from_log_variance`, and `from_log_constant`. A single `bounds` covers RBF, Matérn, constant, linear, and white. Periodic uses `lengthscale_bounds` and `period_bounds`; `with_bounds` takes both intervals. Rational quadratic uses `lengthscale_bounds` and `alpha_bounds`; `with_bounds` takes both. `lengthscale(dim)` on an ARD leaf returns one `ℓ_d`. `log_lengthscales` is the stored vector. `lengthscales()` returns `ArdLengthscales` (`new`, `from_log_lengthscales`, `with_bounds`, `lengthscale(dim)`, `log_lengthscales`, `num_params`, `get_params`, `set_params`). ARD `with_bounds` takes one interval for every `ℓ_d`. Rational-quadratic ARD `with_bounds` takes a lengthscale interval and an `α` interval.
 
-A leaf and a `CompiledKernel` evaluate with `apply`, `apply_cross`, `fill_diag`, `grad`, and `hess`. Some leaves also have `apply_points`, `apply_cross_points`, `grad_points`, `hess_points`, and `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. `apply` takes a `KernelMath`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial). `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
+A leaf and a `CompiledKernel` evaluate with `apply`, `apply_cross`, `fill_diag`, `fill_diag_points`, `grad`, and `hess`. `fill_diag_points` writes `k(x, x)` from coordinates. A linear leaf diagonal needs that call. Some leaves also have `apply_points`, `apply_cross_points`, `grad_points`, `hess_points`, and `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. `apply` takes a `KernelMath`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial). `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
 
 `KernelTerm` is the trait for a distance leaf: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, `clone_box`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save a custom leaf. `CustomKernel::new(term)` boxes it. `KernelSpec::custom` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`.
 
@@ -260,11 +260,11 @@ One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` rep
 
 `KernelExp::Accurate` and `FastApprox` are the runtime switch (`with_math`). `Accurate` and `FastApprox` in `gprx` are the corresponding `KernelMath` types for a direct `apply`.
 
-`JitterPolicy::fixed(j)` retries a failed Cholesky once with `j ≥ 0` on the diagonal (`FixedJitter`). `adaptive(initial, multiplier, max_retries, max_jitter)` grows the offset after the unregularized factor fails (`AdaptiveJitter`): `initial > 0`, `multiplier > 1`, `max_retries ≥ 1`, `max_jitter ≥ initial`. Exact models default to `fixed(0.0)`. `Sgpr` and `Svgp` default to `adaptive(1e-8, 10.0, 5, 1e-3)` on `K_mm`. Read the stored numbers with `jitter`, or `initial`, `multiplier`, `max_retries`, and `max_jitter`.
+`JitterPolicy::fixed(j)` retries a failed Cholesky once with `j ≥ 0` on the diagonal (`JitterPolicy::Fixed`, `FixedJitter`). `adaptive(initial, multiplier, max_retries, max_jitter)` grows the offset after the unregularized factor fails (`JitterPolicy::Adaptive`, `AdaptiveJitter`): `initial > 0`, `multiplier > 1`, `max_retries ≥ 1`, `max_jitter ≥ initial`. Exact models default to `fixed(0.0)`. `Sgpr` and `Svgp` default to `adaptive(1e-8, 10.0, 5, 1e-3)` on `K_mm`. Read the stored numbers with `jitter`, or `initial`, `multiplier`, `max_retries`, and `max_jitter`. The enum is non-exhaustive.
 
 ### Parameters
 
-`Interval::new(lo, hi)` is a finite open interval, `lo < hi`. `lo`, `hi`, `contains`. `IntervalError::InvalidBounds` and `OutOfRange`. `GprError::InvalidInterval` wraps that error. `BoundedParam::new(value, interval)` stores a user-unit value strictly inside the interval. `value` reads it. Leaves and `GaussianLikelihood` hold a `BoundedParam` internally. Callers usually go through `with_bounds`.
+`Interval::new(lo, hi)` is a finite open interval, `lo < hi`. `lo`, `hi`, `contains`. `IntervalError::InvalidBounds` and `OutOfRange`. `GprError::InvalidInterval` wraps that error. `BoundedParam::new(value, interval)` stores a user-unit value strictly inside the interval. `default_positive(value)` uses `Interval::DEFAULT_POSITIVE`. `value` reads the value, `interval` the interval, `ln` is `log(value)`. `with_value` keeps the interval. `with_interval` keeps the value. Leaves and `GaussianLikelihood` hold a `BoundedParam` internally. Callers usually go through `with_bounds`.
 
 ### Save and load (`gprx::persist`)
 

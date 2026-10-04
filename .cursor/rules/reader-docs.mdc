@@ -27,6 +27,14 @@ Before the first example, state the points a caller otherwise gets wrong: `X` is
 
 The example uses `?`, not `unwrap`. It does not depend on a checkout of this repository.
 
+## Public API usage
+
+The Usage section states how to use every item an external crate can name with default features. That set is the public contract. `internals` is outside it.
+
+For each such item, name it and say how a caller constructs it, calls it, matches it, or implements it. Include a default that changes the result, and say which type a method belongs to when the families differ. English and Japanese carry the same names.
+
+Rustdoc keeps the signature, the Examples, and the Errors. The keys and tensors of a saved directory stay in the persist-format doc. The README links there. A name with no usage sentence fails the publish review.
+
 ## Links that survive packaging
 
 `docs/` is not in the published package. The README has no relative link to a file outside the package, and no image. Figures stay relative inside the comparison doc.

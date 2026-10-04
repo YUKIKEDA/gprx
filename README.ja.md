@@ -79,9 +79,9 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`predict` の分散は、元の `y` の尺度での観測分散（`latent + σn²`）。`predict_with` は `PredictOptions` を取る。`predict` はバッファを確保する。`predict_into` と `predict_with_into` は `Prediction` に書き、クエリ長が同じなら `mean` と `variance` を再利用する。
+`predict` の分散は、元の `y` の尺度での `VarianceKind::Observation`（`latent + σn²`）。`VarianceKind::Latent` は `σn²` を含まない。`predict_with` は `PredictOptions`（`variance_kind`）を取る。`predict` はバッファを確保する。`predict_into` と `predict_with_into` は `Prediction`（`mean`、`variance`、`variance_kind`）に書き、クエリ長が同じなら `mean` と `variance` を再利用する。
 
-`predict_covariance` は `PredictiveCovariance` を返す。`covariance` は列優先の `m × m`（`col * m + row`）。対角は、同じクエリとオプションの `predict` と一致する。`predict_covariance_with` は `PredictOptions` を取る。
+`predict_covariance` は `PredictiveCovariance`（`mean`、`covariance`、`variance_kind`）を返す。`covariance` は列優先の `m × m`（`col * m + row`）。対角は、同じクエリとオプションの `predict` と一致する。`predict_covariance_with` は `PredictOptions` を取る。
 
 `sample(xs, n_rows, n_cols, n_draws, seed)` は、その共分散から `μ + Lz` を引く。結果は列優先の `m × n_draws`。`seed` は gprx の Xoshiro256++ の開始状態で、どの環境でも同じ列になる。`sample_with` は `PredictOptions` を取る。
 
@@ -107,10 +107,10 @@ fn main() -> Result<(), gprx::GprError> {
 | `with_input_transform(map)` | 既定は恒等。 |
 | `with_target_transform(map)` | 既定は恒等。平均が零なら `StandardizeTarget::new()`。 |
 | `with_jitter_policy(policy)` | 既定は `JitterPolicy::fixed(0.0)`。 |
-| `with_prefer_speed` | `Cached` と `Retain`（既定）。両方を置く。 |
-| `with_prefer_memory` | `Uncached` と `Reuse`。両方を置く。 |
+| `with_prefer_speed` | `DistanceCachePolicy::Cached` と `CholeskyBuffer::Retain`（既定）。両方を置く。 |
+| `with_prefer_memory` | `DistanceCachePolicy::Uncached` と `CholeskyBuffer::Reuse`。両方を置く。 |
 
-`with_prefer_speed` と `with_prefer_memory` は `Gpr` にあり、距離キャッシュとコレスキーバッファを一緒に置く。`Sgpr` と `Svgp` は `with_optimizer`、`with_precision`、`with_math`、`with_jitter_policy`、`with_input_transform`、`with_target_transform` を取る。`Sgpr` はさらに `with_inducing` を取る。`K_mm` のジッタの初期値は `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`。`fit` の前に読むのは `kernel`、`likelihood`、`math`、`jitter_policy`、`num_params`、`get_params`。`set_params` は `θ` を更新する。
+`with_prefer_speed` と `with_prefer_memory` は `Gpr` にあり、距離キャッシュとコレスキーバッファを一緒に置く。`DistanceCachePolicy`（既定は `Cached`、`Uncached` は毎回計算し直す）と `KernelExp` は non-exhaustive。`CholeskyBuffer` は `Retain` か `Reuse`。`Sgpr` と `Svgp` は `with_optimizer`、`with_precision`、`with_math`、`with_jitter_policy`、`with_input_transform`、`with_target_transform` を取る。`Sgpr` はさらに `with_inducing` を取る。`K_mm` のジッタの初期値は `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`。`fit` の前に読むのは `kernel`、`likelihood`、`math`、`jitter_policy`、`num_params`、`get_params`。`set_params` は `θ` を更新する。
 
 ### 誘導点: `Sgpr`、`FittedSgpr`、`OnlineSgpr`
 
@@ -173,7 +173,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### カーネル
 
-`KernelSpec` は `KernelSpec::from(leaf)` か `KernelSpec::custom(term)` で作る。`+` は和、`*` は積。`*` は `+` より先に束縛するので、`c * k + k2` は定数倍したカーネルと別のカーネルの和になる。`num_params`、`get_params`、`set_params` は、葉を深さ優先で並べた log-`θ`。`parameter_bindings` は `Vec<ParameterBinding>` を返す。フィールドは `index`、`leaf_id`、`local_index`。`compile` は `CompiledKernel<f64>` を作る。`compile_as::<T>()` は保存のスカラーを選ぶ（`KernelScalar`。`f32` と `f64`）。`CompiledKernel` も `num_params`、`get_params`、`set_params` を持つ。
+`KernelSpec` は `KernelSpec::from(leaf)` か `KernelSpec::custom(term)` で作る。`+` は和、`*` は積。`*` は `+` より先に束縛するので、`c * k + k2` は定数倍したカーネルと別のカーネルの和になる。`num_params`、`get_params`、`set_params` は、葉を深さ優先で並べた log-`θ`。`parameter_bindings` は `Vec<ParameterBinding>` を返す。フィールドは `index`、`leaf_id`、`local_index`。`compile` は `CompiledKernel<f64>` を作る。`compile_as::<T>()` は保存のスカラーを選ぶ（`KernelScalar`。実装は `f32` と `f64` だけ）。トレイトのメソッドは `from_f64`、`to_f64`、`exp`、`ln`、`sqrt`、`abs`、`is_finite`、`powf`、`sin`、`cos`、`max`、`min`。`CompiledKernel` も `num_params`、`get_params`、`set_params` を持つ。
 
 `KernelSpec` と `CompiledKernel` は non-exhaustive。照合する名前は `Rbf`、`RbfArd`、`Matern`、`MaternArd`、`Periodic`、`RationalQuadratic`、`RationalQuadraticArd`、`Constant`、`Linear`、`White`、`Custom`、`Sum`、`Product`。`KernelSpec` の `Sum` と `Product` は箱が 2 つ。`CompiledKernel` では平坦なベクタになる。
 
@@ -208,7 +208,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 等方の葉は `lengthscale` と `log_lengthscale` を読む。Matérn はさらに `nu`。周期カーネルは `period` と `log_period`。有理二次は `alpha` と `log_alpha`。線形とホワイトは `variance` と `log_variance`。定数は `constant` と `log_constant`。最適化の座標から作るのは `from_log_lengthscale`、`from_log_lengthscales`、`from_log`（周期は log 長さ尺度と log 周期、有理二次は log 長さ尺度と log `α`）、`from_log_variance`、`from_log_constant`。`bounds` が 1 つの葉は RBF、Matérn、定数、線形、ホワイト。周期は `lengthscale_bounds` と `period_bounds` で、`with_bounds` は両方の区間を取る。有理二次は `lengthscale_bounds` と `alpha_bounds` で、`with_bounds` は両方を取る。ARD の葉の `lengthscale(dim)` は 1 つの `ℓ_d`。`log_lengthscales` は保存されたベクトル。`lengthscales()` は `ArdLengthscales` を返す（`new`、`from_log_lengthscales`、`with_bounds`、`lengthscale(dim)`、`log_lengthscales`、`num_params`、`get_params`、`set_params`）。ARD の `with_bounds` は、すべての `ℓ_d` に同じ区間を 1 つ渡す。有理二次 ARD の `with_bounds` は、長さ尺度の区間と `α` の区間を取る。
 
-葉と `CompiledKernel` は `apply`、`apply_cross`、`fill_diag`、`grad`、`hess` で評価する。葉によっては `apply_points`、`apply_cross_points`、`grad_points`、`hess_points`、`grad_wrt_coord_dim` もある。`Triangle::Lower`（コレスキー）、`Upper`、`Full` が、書く要素を選ぶ。`apply` は `KernelMath` を取る。`Accurate` は libm / SIMD の `exp`、`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は `f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` はこの選択を使わない。
+葉と `CompiledKernel` は `apply`、`apply_cross`、`fill_diag`、`fill_diag_points`、`grad`、`hess` で評価する。`fill_diag_points` は座標から対角 `k(x, x)` を書く。線形の葉の対角はこの呼び出しが要る。葉によっては `apply_points`、`apply_cross_points`、`grad_points`、`hess_points`、`grad_wrt_coord_dim` もある。`Triangle::Lower`（コレスキー）、`Upper`、`Full` が、書く要素を選ぶ。`apply` は `KernelMath` を取る。`Accurate` は libm / SIMD の `exp`、`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は `f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` はこの選択を使わない。
 
 `KernelTerm` は距離の葉のトレイト。`num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points`、`clone_box` と、疎なモデルが要る微分（`grad_cross` / `hess_cross`、自由な誘導点には `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta`）。自作の葉を保存するなら `persist_id` と `persist_state`。`CustomKernel::new(term)` が箱に入れ、`KernelSpec::custom` が木に入れる。疎なモデルが要る微分の無い葉は `CoordGradientUnsupported`。
 
@@ -231,7 +231,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `TargetPipeline` | `y` について同じ。`FittedTargetPipeline` に学習する |
 | `ColumnwiseInput` | `new().then(map)` が次の特徴を割り当てる。`FittedColumnwiseInput` に学習する |
 
-具象の写像にも inherent の `fit` がある。入力は `(x, n_rows, n_cols)`、目的変数は `y`。トレイトの `UnfittedTransform::fit` と `UnfittedTarget::fit` は `Box<Self>` を取る。自作の写像は `clone_box` と `as_any` を実装する。保存するなら `persist_id` と `persist_state` も。
+具象の写像にも、型自身の `fit` がある。入力は `(x, n_rows, n_cols)`、目的変数は `y`。トレイトの `UnfittedTransform::fit` と `UnfittedTarget::fit` は `Box<Self>` を取る。自作の写像は `clone_box` と `as_any` を実装する。保存するなら `persist_id` と `persist_state` も。
 
 `Transform` は学習後の入力トレイト。`apply` と `inverse_apply` が、列優先の配列をその場で書き換える。`TargetTransform` は学習後の目的変数トレイト。`transform`、`inverse_transform_mean`、`inverse_transform_variance`、`inverse_transform_covariance`（既定は分散と同じ倍率を全要素に掛ける）。
 
@@ -260,11 +260,11 @@ fn main() -> Result<(), gprx::GprError> {
 
 `KernelExp::Accurate` と `FastApprox` は実行時の切り替え（`with_math`）。クレート直下の `Accurate` と `FastApprox` は、直接 `apply` するときの `KernelMath`。
 
-`JitterPolicy::fixed(j)` は、失敗したコレスキーを対角の `j ≥ 0` で一度やり直す（`FixedJitter`）。`adaptive(initial, multiplier, max_retries, max_jitter)` は、正則化なしの因子が失敗したあとオフセットを増やす（`AdaptiveJitter`）。`initial > 0`、`multiplier > 1`、`max_retries ≥ 1`、`max_jitter ≥ initial`。全学習点の既定は `fixed(0.0)`。`Sgpr` と `Svgp` の `K_mm` の既定は `adaptive(1e-8, 10.0, 5, 1e-3)`。保存された数は `jitter`、または `initial`、`multiplier`、`max_retries`、`max_jitter` で読む。
+`JitterPolicy::fixed(j)` は、失敗したコレスキーを対角の `j ≥ 0` で一度やり直す（`JitterPolicy::Fixed`、`FixedJitter`）。`adaptive(initial, multiplier, max_retries, max_jitter)` は、正則化なしの因子が失敗したあとオフセットを増やす（`JitterPolicy::Adaptive`、`AdaptiveJitter`）。`initial > 0`、`multiplier > 1`、`max_retries ≥ 1`、`max_jitter ≥ initial`。全学習点の既定は `fixed(0.0)`。`Sgpr` と `Svgp` の `K_mm` の既定は `adaptive(1e-8, 10.0, 5, 1e-3)`。保存された数は `jitter`、または `initial`、`multiplier`、`max_retries`、`max_jitter` で読む。この列挙は non-exhaustive。
 
 ### パラメータ
 
-`Interval::new(lo, hi)` は有限の開区間で、`lo < hi`。`lo`、`hi`、`contains`。`IntervalError::InvalidBounds` と `OutOfRange`。`GprError::InvalidInterval` がそれを包む。`BoundedParam::new(value, interval)` は、区間の厳密な内側にある利用者単位の値を持つ。`value` が読む。葉と `GaussianLikelihood` は内部で `BoundedParam` を持つ。呼び出す側は通常 `with_bounds` を使う。
+`Interval::new(lo, hi)` は有限の開区間で、`lo < hi`。`lo`、`hi`、`contains`。`IntervalError::InvalidBounds` と `OutOfRange`。`GprError::InvalidInterval` がそれを包む。`BoundedParam::new(value, interval)` は、区間の厳密な内側にある利用者単位の値を持つ。`default_positive(value)` は `Interval::DEFAULT_POSITIVE` を使う。`value` が値、`interval` が区間、`ln` が `log(value)`。`with_value` は区間を保つ。`with_interval` は値を保つ。葉と `GaussianLikelihood` は内部で `BoundedParam` を持つ。呼び出す側は通常 `with_bounds` を使う。
 
 ### 保存と読み込み（`gprx::persist`）
 
