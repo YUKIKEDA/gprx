@@ -10,6 +10,11 @@
 //! values double-counts noise. This crate is not published to crates.io
 //! (`publish = false`).
 //!
+//! The 0.1.0 contract is the default-feature public API: [`Gpr`], [`Sgpr`],
+//! and [`Svgp`], online updates, and directory save/load. A 0.x minor may
+//! break that API. The MSRV is 1.85. The `internals` module
+//! (`bench-internals`, `insert-stages`) is outside semantic versioning.
+//!
 //! Distance fills and lower-triangle kernel writes use the process-wide
 //! Rayon pool (shared with faer). There is no parallel on/off flag and no
 //! `n_jobs` setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process
