@@ -1,6 +1,6 @@
 """From ``out/real/results.json`` (+ ``meta.json``) to what the repository
 keeps: ``docs/bench/summary.json`` (mean and standard error per cell, the
-machine and library versions, every optimizer), the SVG figures, and the
+machine and library versions, every optimizer), the PNG figures, and the
 Markdown tables between ``<!-- bench:begin -->`` and ``<!-- bench:end -->`` in
 both READMEs.
 
@@ -169,7 +169,7 @@ def machine_line(meta: dict, ja: bool = False) -> str:
 
 _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     # name -> ((en title, en body), (ja title, ja body))
-    "accuracy_matched.svg": (
+    "accuracy_matched.png": (
         (
             "Prediction error, Exact GP",
             ("Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. "
@@ -183,7 +183,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Snelson にはテスト点が無いので、その列は空。"),
         ),
     ),
-    "fit_time_matched.svg": (
+    "fit_time_matched.png": (
         (
             "Training time, Exact GP",
             ("Top is the seconds spent training, bottom is how many times the library "
@@ -196,7 +196,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "秒を比べるときは、下の回数が揃っているかを見る。"),
         ),
     ),
-    "accuracy_sgpr_matched.svg": (
+    "accuracy_sgpr_matched.png": (
         (
             "Prediction error, SGPR",
             "Same reading as the Exact GP error figure. 512 inducing points. RMSE on top, NLPD below.",
@@ -206,7 +206,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "読み方は、全学習点の予測誤差の図と同じ。上は RMSE、下は NLPD。",
         ),
     ),
-    "fit_time_sgpr_matched.svg": (
+    "fit_time_sgpr_matched.png": (
         (
             "Training time, SGPR",
             "Same reading as the Exact GP time figure. Seconds on top, likelihood-and-gradient counts below.",
@@ -216,7 +216,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "上は秒、下は尤度と勾配の計算回数。どちらも対数軸。",
         ),
     ),
-    "accuracy_svgp_matched.svg": (
+    "accuracy_svgp_matched.png": (
         (
             "Prediction error, SVGP",
             ("Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. "
@@ -228,7 +228,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "GPy にはこの学習が無い。上は RMSE、下は NLPD。"),
         ),
     ),
-    "fit_time_svgp_matched.svg": (
+    "fit_time_svgp_matched.png": (
         (
             "Training time, SVGP",
             "Seconds on top, Adam updates below. The update count matches, so the seconds are the speed.",
@@ -238,7 +238,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "上は秒、下は Adam の更新回数。回数は揃っているので、秒の差が速さの差になる。",
         ),
     ),
-    "rss_timeline_energy_exact_s0_matched.svg": (
+    "rss_timeline_energy_exact_s0_matched.png": (
         (
             "Memory over time, energy",
             ("The line is the resident memory of the whole process. "
@@ -251,7 +251,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。"),
         ),
     ),
-    "rss_timeline_kin40k_sgpr_s0_matched.svg": (
+    "rss_timeline_kin40k_sgpr_s0_matched.png": (
         (
             "Memory over time, kin40k",
             "Same reading as the energy memory figure. SGPR with 512 inducing points, split 0.",
@@ -261,7 +261,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "読み方は energy のメモリの図と同じ。分割は 0 番。",
         ),
     ),
-    "curve_maunaloa_matched.svg": (
+    "curve_maunaloa_matched.png": (
         (
             "Mauna Loa predictions",
             ("One panel per library. The line is the predictive mean, the band is the 95% interval, "
@@ -273,7 +273,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "塗った点は学習データ、抜き点はテストデータ。"),
         ),
     ),
-    "curve_snelson_matched.svg": (
+    "curve_snelson_matched.png": (
         (
             "Snelson predictions",
             ("One panel per library. The line is the predictive mean and the band is the 95% interval. "

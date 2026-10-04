@@ -56,7 +56,7 @@ Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench
 
 ## Real datasets (B1-1)
 
-`just perf-real` fits every library on the benchmark data of Gaussian-process papers, scores it (RMSE, NLPD, 95% coverage in the original units of `y`), and reports fit time, joint evaluation counts and peak RSS. `just perf-real-report` turns the raw output into `docs/bench/summary.json`, the SVG figures and the README tables. Manual. Not a CI gate. `just test` must not run this and needs no network.
+`just perf-real` fits every library on the benchmark data of Gaussian-process papers, scores it (RMSE, NLPD, 95% coverage in the original units of `y`), and reports fit time, joint evaluation counts and peak RSS. `just perf-real-report` turns the raw output into `docs/bench/summary.json`, the PNG figures and the README tables. Manual. Not a CI gate. `just test` must not run this and needs no network.
 
 ```text
 just perf-real-data                       # fetch every dataset once, pin the SHA-256 in real/checksums.json

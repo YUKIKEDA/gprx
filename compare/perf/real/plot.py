@@ -1,4 +1,4 @@
-"""SVG figures for the README from ``out/real/results.json`` and the RSS
+"""PNG figures for the README from ``out/real/results.json`` and the RSS
 timelines (``--timeline``).
 
 ```text
@@ -108,6 +108,7 @@ def _table(rows: list[dict], protocol: str, model: str = "exact") -> dict[str, d
 #: chart, the widest of the set, so that chart does not get narrower.
 FIG_W = 12.2
 FIG_H = 4.6
+FIG_DPI = 100
 
 
 def _dot_figure(n: int):
@@ -156,8 +157,8 @@ def accuracy(rows: list[dict], protocol: str, out: Path, model: str = "exact") -
     _dots(axes[0], table, datasets, libs, "rmse", "RMSE (lower is better)")
     _dots(axes[1], table, datasets, libs, "nlpd", "NLPD (lower is better)")
     _legend(fig, libs)
-    path = out / f"accuracy{_suffix(model)}_{protocol}.svg"
-    fig.savefig(path)
+    path = out / f"accuracy{_suffix(model)}_{protocol}.png"
+    fig.savefig(path, dpi=FIG_DPI)
     plt.close(fig)
     return path
 
@@ -172,8 +173,8 @@ def fit_time(rows: list[dict], protocol: str, out: Path, model: str = "exact") -
     _dots(axes[0], table, datasets, libs, "fit_s", "fit wall time [s], log", log=True)
     _dots(axes[1], table, datasets, libs, "joint_evals", "joint MLL+grad evaluations", log=True)
     _legend(fig, libs)
-    path = out / f"fit_time{_suffix(model)}_{protocol}.svg"
-    fig.savefig(path)
+    path = out / f"fit_time{_suffix(model)}_{protocol}.png"
+    fig.savefig(path, dpi=FIG_DPI)
     plt.close(fig)
     return path
 
@@ -209,8 +210,8 @@ def rss_timeline(case: str, out: Path, directory: Path) -> Path | None:
     ax.set_ylabel("RSS of the process tree [MiB]")
     ax.legend(frameon=False, labelcolor=INK_2, loc="upper left")
     fig.tight_layout()
-    path = out / f"rss_timeline_{case}.svg"
-    fig.savefig(path)
+    path = out / f"rss_timeline_{case}.png"
+    fig.savefig(path, dpi=FIG_DPI)
     plt.close(fig)
     return path
 
@@ -253,8 +254,8 @@ def curve(name: str, protocol: str, out: Path) -> Path | None:
                        linewidths=0.6, alpha=0.8)
         ax.set_title(LABEL[row["lib"]], fontsize=9, color=INK)
     fig.tight_layout()
-    path = out / f"curve_{name}_{protocol}.svg"
-    fig.savefig(path)
+    path = out / f"curve_{name}_{protocol}.png"
+    fig.savefig(path, dpi=FIG_DPI)
     plt.close(fig)
     return path
 

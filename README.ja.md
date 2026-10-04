@@ -610,61 +610,61 @@ song の誘導点モデルでは、gprx の NLPD が GPyTorch と GPy と違う�
 
 列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。点はライブラリ、縦棒は分割ごとのばらつき。Snelson にはテスト点が無いので、その列は空。
 
-![予測の誤差（全学習点）](docs/bench/accuracy_matched.svg)
+![予測の誤差（全学習点）](docs/bench/accuracy_matched.png)
 
 **学習の時間（全学習点）**
 
 上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。秒を比べるときは、下の回数が揃っているかを見る。
 
-![学習の時間（全学習点）](docs/bench/fit_time_matched.svg)
+![学習の時間（全学習点）](docs/bench/fit_time_matched.png)
 
 **予測の誤差（誘導点 512 個）**
 
 読み方は、全学習点の予測誤差の図と同じ。上は RMSE、下は NLPD。
 
-![予測の誤差（誘導点 512 個）](docs/bench/accuracy_sgpr_matched.svg)
+![予測の誤差（誘導点 512 個）](docs/bench/accuracy_sgpr_matched.png)
 
 **学習の時間（誘導点 512 個）**
 
 上は秒、下は尤度と勾配の計算回数。どちらも対数軸。
 
-![学習の時間（誘導点 512 個）](docs/bench/fit_time_sgpr_matched.svg)
+![学習の時間（誘導点 512 個）](docs/bench/fit_time_sgpr_matched.png)
 
 **予測の誤差（ミニバッチ）**
 
 Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。GPy にはこの学習が無い。上は RMSE、下は NLPD。
 
-![予測の誤差（ミニバッチ）](docs/bench/accuracy_svgp_matched.svg)
+![予測の誤差（ミニバッチ）](docs/bench/accuracy_svgp_matched.png)
 
 **学習の時間（ミニバッチ）**
 
 上は秒、下は Adam の更新回数。回数は揃っているので、秒の差が速さの差になる。
 
-![学習の時間（ミニバッチ）](docs/bench/fit_time_svgp_matched.svg)
+![学習の時間（ミニバッチ）](docs/bench/fit_time_svgp_matched.png)
 
 **メモリの推移（energy、全学習点）**
 
 線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。
 
-![メモリの推移（energy、全学習点）](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
+![メモリの推移（energy、全学習点）](docs/bench/rss_timeline_energy_exact_s0_matched.png)
 
 **メモリの推移（kin40k、誘導点 512 個）**
 
 読み方は energy のメモリの図と同じ。分割は 0 番。
 
-![メモリの推移（kin40k、誘導点 512 個）](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
+![メモリの推移（kin40k、誘導点 512 個）](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.png)
 
 **Mauna Loa の予測**
 
 1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。塗った点は学習データ、抜き点はテストデータ。
 
-![Mauna Loa の予測](docs/bench/curve_maunaloa_matched.svg)
+![Mauna Loa の予測](docs/bench/curve_maunaloa_matched.png)
 
 **Snelson の予測**
 
 1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。点は学習データ。テスト用の点は無い。
 
-![Snelson の予測](docs/bench/curve_snelson_matched.svg)
+![Snelson の予測](docs/bench/curve_snelson_matched.png)
 <!-- bench:end -->
 
 ### 再現

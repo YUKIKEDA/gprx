@@ -59,7 +59,7 @@ compare/                   one Python environment (pyproject.toml, uv.lock; grou
   perf/gprx/               one runner binary gprx-perf (exact / online / sparse / sparse-online)
 examples/fit_predict.rs
 docs/                      design, architecture, persist-format (each with a .ja.md), roadmap, this file, adr/
-docs/bench/                B1-1 summary.json and SVG figures. just perf-real-report writes them. Raw output stays in compare/perf/out/ and is not committed
+docs/bench/                B1-1 summary.json and PNG figures. just perf-real-report writes them. Raw output stays in compare/perf/out/ and is not committed
 ```
 
 `.dev/bench-log.md` is the local measurement log. It is not committed. Any other file an agent writes is deleted when that step no longer needs it (`.cursor/rules/scratch.mdc`). Decisions do not stay in `.dev/`.
