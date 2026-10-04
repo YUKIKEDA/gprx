@@ -63,11 +63,12 @@ just perf-real-data                       # fetch every dataset once, pin the SH
 just perf-real-check                      # fixed-θ agreement of all libraries (NLML, RMSE, NLPD to 1e-6)
 just perf-real --datasets yacht,energy --splits 2 --protocol native --timeline
 just perf-real --datasets kin40k --model sgpr --m 512 --protocol matched
+just perf-real --datasets power_plant --from-split 4          # continue from split 4; earlier cells stay in results.json
 just perf-real-report
 ```
 
 - Data: `yaringal/DropoutUncertaintyExps` (T1 and Protein, the Hernández-Lobato & Adams splits), `treforevans/uci_datasets` (Kin40k and T3, 10 splits of 90 / 10), the NOAA Mauna Loa monthly means through `datasets/co2-ppm`, and Snelson's archive (the author's page is gone; the harness fetches the 2022-03-31 Internet Archive snapshot, and `SNELSON_ZIP` may point at a local copy). Files land in `out/real/data/`; a checksum mismatch stops the run.
-- Cases: one JSON per (dataset, split, protocol, model) in `out/real/cases/`. `x`, `y` are standardized with the training statistics; metrics are converted back. One cell is one process: one split, one library.
+- Cases: one JSON per (dataset, split, protocol, model) in `out/real/cases/`. `x`, `y` are standardized with the training statistics; metrics are converted back. One cell is one process: one split, one library. `--from-split N` skips splits below N. Each finished cell is written to `results.json` before the next one starts, except a `--timeline` run, which does not record timings.
 - Protocols: `native` (each library's own optimizer), `matched` (scipy L-BFGS-B, 100 iterations, gradient tolerance √ε, history 10), `fixed` (no optimizer, for `perf-real-check`). The comparison run is `matched` only. `real/optimizers.py` records every optimizer with the source it was read from; `out/real/meta.json` records the machine and library versions.
 - Exact fits are Snelson, Mauna Loa, yacht, and energy: one fit stays under about 5 minutes. Concrete is the same size class as energy and is not in this comparison. Wine and every larger set run as `Sgpr` (`just perf-real-full`). kin8nm and protein match kin40k, and buzz matches song, so those three are not repeated. GPyTorch's exact cell factors `K` with Cholesky up to that `n`. The library default switches to conjugate gradients above 800 rows, which is a different objective from the other libraries.
 - Sparse models: `--model sgpr` (fixed inducing points, k-means with a fixed seed on at most 100 000 training rows) or `--model svgp` (Adam, one shared setting).

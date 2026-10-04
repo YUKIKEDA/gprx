@@ -1,12 +1,13 @@
 """B1-1: fit every library on the real datasets and print the tables.
 
 ```text
-python -m perf.run_real [--datasets yacht,energy] [--splits N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline] [--force-exact] [--model exact|sgpr|svgp] [--m 512]
+python -m perf.run_real [--datasets yacht,energy] [--splits N] [--from-split N] [--protocol native|matched] [--libs gprx,sklearn] [--timeline] [--force-exact] [--model exact|sgpr|svgp] [--m 512]
 python -m perf.run_real --reprint
 ```
 
 A cell is one process: one split of one dataset for one library. Results go
-to ``out/real/results.json``.
+to ``out/real/results.json`` after every cell, so a stopped run can be
+continued with ``--from-split``.
 """
 
 from __future__ import annotations
@@ -157,14 +158,22 @@ def main(argv: list[str]) -> int:
     runners = runners_for(model)
     libs = option(argv, "--libs", ",".join(RUNNERS)).split(",")
     limit = int(option(argv, "--splits", "0"))
+    first = int(option(argv, "--from-split", "0"))
     unknown = [d for d in datasets if d not in DATASETS and d not in CURVES] + [l for l in libs if l not in runners]
     if unknown:
         print(f"unknown: {unknown}", file=sys.stderr)
         return 2
     start(BANNER)
     rows: list[dict] = []
+
+    def keep(row: dict) -> None:
+        rows.append(row)
+        if "--timeline" not in argv:
+            write_json(RESULTS, merge_rows(RESULTS, rows))
+
     for dataset in datasets:
         splits = [0] if dataset in CURVES else list(splits_of(dataset))
+        splits = [s for s in splits if s >= first]
         if limit:
             splits = splits[:limit]
         for split in splits:
@@ -181,7 +190,7 @@ def main(argv: list[str]) -> int:
                 for lib in libs:
                     row = na_row(reason, FIT_FIELDS)
                     row.update(lib=lib, name=f"{dataset}_s{split}", protocol=protocol, model=model)
-                    rows.append(row)
+                    keep(row)
                 print(f"# {dataset}_s{split}: N/A {reason}", flush=True)
                 continue
             print(f"# {path.name}", flush=True)
@@ -196,7 +205,7 @@ def main(argv: list[str]) -> int:
                 if reason is not None:
                     row = na_row(reason, FIT_FIELDS)
                     row.update(lib=lib, name=f"{dataset}_s{split}", protocol=protocol, model=model)
-                    rows.append(row)
+                    keep(row)
                     print(f"  {lib}: N/A {reason}", flush=True)
                     continue
                 if "--timeline" in argv:
@@ -206,7 +215,7 @@ def main(argv: list[str]) -> int:
                 row.setdefault("lib", lib)
                 row.setdefault("name", f"{dataset}_s{split}")
                 row.setdefault("protocol", protocol)
-                rows.append(row)
+                keep(row)
                 print(
                     f"  {lib}: {row.get('status')} fit={fmt_s(row.get('fit_s'))} "
                     f"evals={row.get('joint_evals')} rmse={row.get('rmse')} nlpd={row.get('nlpd')}"
