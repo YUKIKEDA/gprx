@@ -326,61 +326,61 @@ The marker is the same library in every figure: a blue circle is gprx, an orange
 
 Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. A marker is a library and the bar is the standard error across splits. Snelson has no test points, so that column is empty.
 
-![Prediction error, Exact GP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_matched.svg)
+![Prediction error, Exact GP](docs/bench/accuracy_matched.svg)
 
 **Training time, Exact GP**
 
 Top is the seconds spent training, bottom is how many times the library evaluated the likelihood and its gradient together. Both axes are logarithmic. Compare the seconds only where the counts match.
 
-![Training time, Exact GP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_matched.svg)
+![Training time, Exact GP](docs/bench/fit_time_matched.svg)
 
 **Prediction error, SGPR**
 
 Same reading as the Exact GP error figure. 512 inducing points. RMSE on top, NLPD below.
 
-![Prediction error, SGPR](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_sgpr_matched.svg)
+![Prediction error, SGPR](docs/bench/accuracy_sgpr_matched.svg)
 
 **Training time, SGPR**
 
 Same reading as the Exact GP time figure. Seconds on top, likelihood-and-gradient counts below.
 
-![Training time, SGPR](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_sgpr_matched.svg)
+![Training time, SGPR](docs/bench/fit_time_sgpr_matched.svg)
 
 **Prediction error, SVGP**
 
 Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below.
 
-![Prediction error, SVGP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_svgp_matched.svg)
+![Prediction error, SVGP](docs/bench/accuracy_svgp_matched.svg)
 
 **Training time, SVGP**
 
 Seconds on top, Adam updates below. The update count matches, so the seconds are the speed.
 
-![Training time, SVGP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_svgp_matched.svg)
+![Training time, SVGP](docs/bench/fit_time_svgp_matched.svg)
 
 **Memory over time, energy**
 
 The line is the resident memory of the whole process. The horizontal axis is seconds since the process started. A dotted line, in that library's color, is when training or prediction starts. Split 0.
 
-![Memory over time, energy](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/rss_timeline_energy_exact_s0_matched.svg)
+![Memory over time, energy](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
 
 **Memory over time, kin40k**
 
 Same reading as the energy memory figure. SGPR with 512 inducing points, split 0.
 
-![Memory over time, kin40k](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
+![Memory over time, kin40k](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
 
 **Mauna Loa predictions**
 
 One panel per library. The line is the predictive mean, the band is the 95% interval, filled points are training data, and hollow points are held out.
 
-![Mauna Loa predictions](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/curve_maunaloa_matched.svg)
+![Mauna Loa predictions](docs/bench/curve_maunaloa_matched.svg)
 
 **Snelson predictions**
 
 One panel per library. The line is the predictive mean and the band is the 95% interval. The points are the training data. Nothing is held out.
 
-![Snelson predictions](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/curve_snelson_matched.svg)
+![Snelson predictions](docs/bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
 ### Reproduce
