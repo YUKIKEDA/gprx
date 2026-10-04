@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-C1-1 ([#419](https://github.com/YUKIKEDA/gprx/issues/419), publish rules and bring crates.io, MSRV, and coverage into scope) is done. Next are C1-2, C1-4, C1-5, and C1-6. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
+C1 ([#418](https://github.com/YUKIKEDA/gprx/issues/418), crates.io) is done. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
 
 ## Dependencies
 
@@ -222,7 +222,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | C1-4 | Task | Fix the files in the published package | [#422](https://github.com/YUKIKEDA/gprx/issues/422) | done |
 | C1-5 | Docs | Document the 0.1.0 contract in the README and crate docs | [#423](https://github.com/YUKIKEDA/gprx/issues/423) | done |
 | C1-6 | Task | Audit accidental pub items and rustdoc | [#424](https://github.com/YUKIKEDA/gprx/issues/424) | done |
-| C1-7 | Task | Remove `publish = false` | [#425](https://github.com/YUKIKEDA/gprx/issues/425) | open |
+| C1-7 | Task | Remove `publish = false` | [#425](https://github.com/YUKIKEDA/gprx/issues/425) | done |
 
 ## Intentionally out of scope
 

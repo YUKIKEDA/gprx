@@ -2,11 +2,11 @@
 
 # gprx
 
-Rust の Exact ガウス過程回帰。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を argmin の L-BFGS で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。このクレートは crates.io に**公開しない**（`Cargo.toml` の `publish = false`）。
+Rust の Exact ガウス過程回帰。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を argmin の L-BFGS で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。
 
 ## 状態
 
-**0.1.0** は、既定フィーチャの公開 API である。次の節に、外部クレートが呼べる型と、その呼び出し方を書いた。MSRV は 1.85（`Cargo.toml` の `rust-version`）。0.x はマイナー番号で公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）はセマンティックバージョニングの対象外であり、その節には入れない。依存は git か path。crates.io ではない。
+**0.1.0** は、既定フィーチャの公開 API である。次の節に、外部クレートが呼べる型と、その呼び出し方を書いた。MSRV は 1.85（`Cargo.toml` の `rust-version`）。0.x はマイナー番号で公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）はセマンティックバージョニングの対象外であり、その節には入れない。crates.io の `gprx = "0.1"` で依存できる。
 
 設計: [`docs/design.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md)。アーキテクチャ: [`docs/architecture.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.ja.md)。保存フォーマット: [`docs/persist-format.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md)。タスク: [`docs/roadmap.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/roadmap.md)。エージェント向け: [`AGENTS.md`](https://github.com/YUKIKEDA/gprx/blob/main/AGENTS.md)。他ライブラリとの壁時計とピーク RSS: [`compare/perf/`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/)（P2B-16 Exact は `just perf`。P4-12 Sparse は `just perf-sparse`。P4-14 Sparse オンラインは `just perf-sparse-online`。criterion ではない）。
 

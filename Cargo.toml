@@ -15,12 +15,11 @@ include = [
     "tests/**/*",
     "benches/**/*",
     "compare/goldens/**/*",
-    "README.md",
-    "README.ja.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
+    "/README.md",
+    "/README.ja.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
 ]
-publish = false
 
 [lints.rust]
 missing_docs = "deny"
