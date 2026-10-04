@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-C1 ([#418](https://github.com/YUKIKEDA/gprx/issues/418), crates.io) is done. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
+C1 ([#418](https://github.com/YUKIKEDA/gprx/issues/418), crates.io) is done. There is no open row.
 
 ## Dependencies
 
@@ -15,7 +15,6 @@ M0 → 1a → 1b → 2 → 2b → 3
                      → 4
                 after the phase-2 measurement → 5
 R1 → R2 → R3 → R4 → R5 → R6
-R4-1 → P5-5
 C1-1 → C1-2 → C1-3
 C1-1 → C1-4
 C1-1 → C1-5
@@ -160,7 +159,6 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | P5-1 | Spike | Mixed-precision residual (`PromoteStorage` vs `ReevaluateKernel`) | [#39](https://github.com/YUKIKEDA/gprx/issues/39) | done |
 | P5-2 | Feat | f32, f64, and mixed precision | [#40](https://github.com/YUKIKEDA/gprx/issues/40) | done |
 | P5-4 | Feat | Opt-in `FastApprox` | [#42](https://github.com/YUKIKEDA/gprx/issues/42) | done |
-| P5-5 | Task | Threshold for `DistanceCachePolicy::Auto` | [#43](https://github.com/YUKIKEDA/gprx/issues/43) | Set after Grill on #43 |
 
 ## R (codebase cleanup, parent [#226](https://github.com/YUKIKEDA/gprx/issues/226))
 
@@ -230,3 +228,4 @@ Adding or removing a bullet here is Grill → Issue (`.cursor/rules/workflow.mdc
 
 - A homemade L-BFGS / quasi-Newton (call an argmin solver)
 - Treating cloud CI as a completion condition while runners are limited
+- Automatic `DistanceCachePolicy` selection from `n`, `d`, and a memory budget (the caller chooses `Cached` or `Uncached`)
