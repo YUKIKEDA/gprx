@@ -2,11 +2,11 @@ English | [日本語](README.ja.md)
 
 # gprx
 
-Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, runs argmin L-BFGS on the negative log marginal likelihood, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load. The crate is **not** published to crates.io (`publish = false` in `Cargo.toml`).
+Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, runs argmin L-BFGS on the negative log marginal likelihood, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load.
 
 ## Status
 
-**0.1.0** is the default-feature public API. The next section names every type an external crate can call, and how to call it. The MSRV is 1.85 (`rust-version` in `Cargo.toml`). A 0.x minor may break the public API. `internals` (`bench-internals` and `insert-stages`) is outside semantic versioning and is not part of that section. Depend on git or a path, not crates.io.
+**0.1.0** is the default-feature public API. The next section names every type an external crate can call, and how to call it. The MSRV is 1.85 (`rust-version` in `Cargo.toml`). A 0.x minor may break the public API. `internals` (`bench-internals` and `insert-stages`) is outside semantic versioning and is not part of that section. Depend on crates.io with `gprx = "0.1"`.
 
 Design: [`docs/design.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.md). Architecture: [`docs/architecture.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.md). Saved format: [`docs/persist-format.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md). Tasks: [`docs/roadmap.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/roadmap.md). Agent rules: [`AGENTS.md`](https://github.com/YUKIKEDA/gprx/blob/main/AGENTS.md). Cross-library wall time and peak RSS: [`compare/perf/`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; not criterion).
 

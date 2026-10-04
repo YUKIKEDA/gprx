@@ -7,8 +7,6 @@ alwaysApply: true
 
 `cargo publish` is a human action. Agents do not run it.
 
-`publish = false` stays in `Cargo.toml` until the roadmap row that removes it has merged. No other change deletes that key.
-
 ## MSRV
 
 The MSRV is 1.85, the same value as `rust-version` in `Cargo.toml`. Edition 2024 does not build on an older compiler. CI runs `just lint` and `just test` on 1.85 and on stable.
@@ -46,6 +44,8 @@ There is no `CHANGELOG.md` at 0.1.0. The README states the 0.1.0 surface and the
 - `README.md` and `README.ja.md`
 - `LICENSE-MIT` and `LICENSE-APACHE`
 
+Root file names in `include` start with `/` (`/README.md`). A pattern without `/` also matches `compare/perf/README.md`.
+
 Do not package `compare/perf`, other Python under `compare/`, `.cursor/`, `.github/`, `docs/`, `rustfmt.toml`, or `clippy.toml`. Links from the README to development docs are absolute GitHub URLs.
 
-While `publish = false` is set, `cargo package` refuses to run. Review the whitelist in the change that adds it. Run `cargo package --list` in the change that removes the flag, and confirm the archive matches this list.
+`cargo package --list` matches this whitelist.

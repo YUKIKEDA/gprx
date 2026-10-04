@@ -7,10 +7,9 @@
 //! packed as feature 0 for all rows, then feature 1, and so on.
 //! Observation noise lives in [`GaussianLikelihood`].
 //! [`kernel::WhiteKernel`] is opt-in composition; using both at large
-//! values double-counts noise. This crate is not published to crates.io
-//! (`publish = false`).
+//! values double-counts noise.
 //!
-//! The 0.1.0 contract is the default-feature public API: [`Gpr`], [`Sgpr`],
+//! Depend on crates.io with `gprx = "0.1"`. The 0.1.0 contract is the default-feature public API: [`Gpr`], [`Sgpr`],
 //! and [`Svgp`], online updates, and directory save/load. A 0.x minor may
 //! break that API. The MSRV is 1.85. The `internals` module
 //! (`bench-internals`, `insert-stages`) is outside semantic versioning.
