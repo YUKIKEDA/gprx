@@ -172,28 +172,28 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "accuracy_matched.svg": (
         (
             "Prediction error, Exact GP",
-            "Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. "
+            ("Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. "
             "A marker is a library and the bar is the standard error across splits. "
-            "Snelson has no test points, so that column is empty.",
+            "Snelson has no test points, so that column is empty."),
         ),
         (
             "予測の誤差（全学習点）",
-            "列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。"
+            ("列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。"
             "点はライブラリ、縦棒は分割ごとのばらつき。"
-            "Snelson にはテスト点が無いので、その列は空。",
+            "Snelson にはテスト点が無いので、その列は空。"),
         ),
     ),
     "fit_time_matched.svg": (
         (
             "Training time, Exact GP",
-            "Top is the seconds spent training, bottom is how many times the library "
+            ("Top is the seconds spent training, bottom is how many times the library "
             "evaluated the likelihood and its gradient together. Both axes are logarithmic. "
-            "Compare the seconds only where the counts match.",
+            "Compare the seconds only where the counts match."),
         ),
         (
             "学習の時間（全学習点）",
-            "上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。"
-            "秒を比べるときは、下の回数が揃っているかを見る。",
+            ("上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。"
+            "秒を比べるときは、下の回数が揃っているかを見る。"),
         ),
     ),
     "accuracy_sgpr_matched.svg": (
@@ -219,13 +219,13 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "accuracy_svgp_matched.svg": (
         (
             "Prediction error, SVGP",
-            "Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. "
-            "GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below.",
+            ("Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. "
+            "GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below."),
         ),
         (
             "予測の誤差（ミニバッチ）",
-            "Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。"
-            "GPy にはこの学習が無い。上は RMSE、下は NLPD。",
+            ("Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。"
+            "GPy にはこの学習が無い。上は RMSE、下は NLPD。"),
         ),
     ),
     "fit_time_svgp_matched.svg": (
@@ -241,14 +241,14 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "rss_timeline_energy_exact_s0_matched.svg": (
         (
             "Memory over time, energy",
-            "The line is the resident memory of the whole process. "
+            ("The line is the resident memory of the whole process. "
             "The horizontal axis is seconds since the process started. "
-            "A dotted line, in that library's color, is when training or prediction starts. Split 0.",
+            "A dotted line, in that library's color, is when training or prediction starts. Split 0."),
         ),
         (
             "メモリの推移（energy、全学習点）",
-            "線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。"
-            "点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。",
+            ("線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。"
+            "点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。"),
         ),
     ),
     "rss_timeline_kin40k_sgpr_s0_matched.svg": (
@@ -264,20 +264,20 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "curve_maunaloa_matched.svg": (
         (
             "Mauna Loa predictions",
-            "One panel per library. The line is the predictive mean, the band is the 95% interval, "
-            "filled points are training data, and hollow points are held out.",
+            ("One panel per library. The line is the predictive mean, the band is the 95% interval, "
+            "filled points are training data, and hollow points are held out."),
         ),
         (
             "Mauna Loa の予測",
-            "1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。"
-            "塗った点は学習データ、抜き点はテストデータ。",
+            ("1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。"
+            "塗った点は学習データ、抜き点はテストデータ。"),
         ),
     ),
     "curve_snelson_matched.svg": (
         (
             "Snelson predictions",
-            "One panel per library. The line is the predictive mean and the band is the 95% interval. "
-            "The points are the training data. Nothing is held out.",
+            ("One panel per library. The line is the predictive mean and the band is the 95% interval. "
+            "The points are the training data. Nothing is held out."),
         ),
         (
             "Snelson の予測",
