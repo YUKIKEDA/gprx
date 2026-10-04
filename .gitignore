@@ -9,3 +9,7 @@
 
 ## Local scratch
 .dev/
+
+## Python
+__pycache__/
+*.py[cod]
