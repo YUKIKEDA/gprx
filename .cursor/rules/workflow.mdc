@@ -15,6 +15,7 @@ Human procedure: `CONTRIBUTING.md`. Current row: `docs/roadmap.md`. Do not name 
 - Writing pass/fail numbers, formats, or file layouts into the roadmap before Grill on that row finishes
 - Merging. A human merges
 - Adding or removing a roadmap row, or editing **Intentionally out of scope**, without Grill → Issue (`.cursor/rules/consent.mdc`)
+- Leaving a file you created after that step no longer needs it. Gitignore is not storage (`.cursor/rules/scratch.mdc`)
 - Ending the turn on a branch that has no Issue and no pull request. That branch is deleted. Push `{type}/{issue}-{slug}` and open the PR first. A human deletes it. This rule is not consent to `branch -D` (`.cursor/rules/git.mdc`)
 
 「進めなさい」は、Issue があるときの作業である。Issue 作成や範囲決定の代用ではない。履歴改変: `.cursor/rules/git.mdc`。
