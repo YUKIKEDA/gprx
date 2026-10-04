@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-C1-1 ([#419](https://github.com/YUKIKEDA/gprx/issues/419), publish rules and bring crates.io, MSRV, and coverage into scope) is the current row. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
+C1-1 ([#419](https://github.com/YUKIKEDA/gprx/issues/419), publish rules and bring crates.io, MSRV, and coverage into scope) is done. Next are C1-2, C1-4, C1-5, and C1-6. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
 
 ## Dependencies
 
@@ -216,7 +216,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| C1-1 | Task | Publish rules and bring crates.io, MSRV, and coverage into scope | [#419](https://github.com/YUKIKEDA/gprx/issues/419) | open |
+| C1-1 | Task | Publish rules and bring crates.io, MSRV, and coverage into scope | [#419](https://github.com/YUKIKEDA/gprx/issues/419) | done |
 | C1-2 | Task | Run CI on Rust 1.85 and stable | [#420](https://github.com/YUKIKEDA/gprx/issues/420) | open |
 | C1-3 | Task | Line-coverage floor on stable CI | [#421](https://github.com/YUKIKEDA/gprx/issues/421) | open |
 | C1-4 | Task | Fix the files in the published package | [#422](https://github.com/YUKIKEDA/gprx/issues/422) | open |
