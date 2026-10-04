@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "Flexible high-performance Gaussian process regression"
+description = "Exact Gaussian process regression"
 repository = "https://github.com/YUKIKEDA/gprx"
+homepage = "https://github.com/YUKIKEDA/gprx"
+documentation = "https://docs.rs/gprx"
 readme = "README.md"
 keywords = ["gaussian-process", "gpr", "machine-learning"]
 categories = ["science", "mathematics"]
@@ -20,6 +22,9 @@ include = [
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
 ]
+
+[package.metadata.docs.rs]
+all-features = false
 
 [lints.rust]
 missing_docs = "deny"
