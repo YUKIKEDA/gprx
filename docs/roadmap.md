@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-C1 ([#418](https://github.com/YUKIKEDA/gprx/issues/418), crates.io) is done. There is no open row.
+C2-1 ([#450](https://github.com/YUKIKEDA/gprx/issues/450), `cargo publish` is the only step left for 0.1.0) is open. It follows C1-7.
 
 ## Dependencies
 
@@ -24,9 +24,10 @@ C1-3 → C1-7
 C1-4 → C1-7
 C1-5 → C1-7
 C1-6 → C1-7
+C1-7 → C2-1
 ```
 
-Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done.
+Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done. C2-1 follows C1-7.
 
 ## M0
 
@@ -221,6 +222,12 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | C1-5 | Docs | Document the 0.1.0 contract in the README and crate docs | [#423](https://github.com/YUKIKEDA/gprx/issues/423) | done |
 | C1-6 | Task | Audit accidental pub items and rustdoc | [#424](https://github.com/YUKIKEDA/gprx/issues/424) | done |
 | C1-7 | Task | Remove `publish = false` | [#425](https://github.com/YUKIKEDA/gprx/issues/425) | done |
+
+## C2 (crates.io 0.1.0, [#450](https://github.com/YUKIKEDA/gprx/issues/450))
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| C2-1 | Task | Make `cargo publish` the only step left for 0.1.0 | [#450](https://github.com/YUKIKEDA/gprx/issues/450) | open |
 
 ## Intentionally out of scope
 

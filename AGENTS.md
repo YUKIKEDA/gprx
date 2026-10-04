@@ -30,7 +30,8 @@ Entry point for agents. Procedure: [CONTRIBUTING.md](CONTRIBUTING.md). Enforceme
 | `.cursor/rules/rust-docs.mdc` | rustdoc (`///`, Examples / Errors / Panics) |
 | `.cursor/rules/rust-hpc.mdc` | Allocation, layout, Rayon (numerical code) |
 | `.cursor/rules/bench.mdc` | Benchmarks and allocation counts. Measure before speeding up |
-| `.cursor/rules/publish.mdc` | crates.io gate: MSRV, coverage floor, package files, 0.x contract |
+| `.cursor/rules/publish.mdc` | crates.io gate: ready means only `cargo publish` remains |
+| `.cursor/rules/reader-docs.mdc` | README and comparison docs a stranger reads first |
 
 External sources: [API Guidelines](https://rust-lang.github.io/api-guidelines/), [rustdoc book](https://doc.rust-lang.org/stable/rustdoc/how-to-write-documentation.html).
 

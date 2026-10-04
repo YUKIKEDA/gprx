@@ -17,7 +17,9 @@ Sources: [rustdoc book](https://doc.rust-lang.org/stable/rustdoc/how-to-write-do
 - Doc tests compile. Use `?`, not `unwrap`. Hide setup with `# ` lines. Fence with ` ```rust `.
 - Link types with `[`Gpr`]`. Do not restate the signature; rustdoc already shows it.
 - Do not document “this field is ignored when…”. If that sentence seems needed, the types are wrong (`.cursor/rules/types.mdc`).
-- `missing_docs` deny on the lib crate (M0-1). `pub(crate)` items do not need rustdoc. `#[doc(hidden)]` for impls users cannot name (C-HIDDEN).
+- `missing_docs` deny on the lib crate (M0-1). `pub(crate)` items do not need rustdoc. `#[doc(hidden)]` for impls users cannot name (C-HIDDEN). A successful `missing_docs` build is not a reading of the text.
+- Public rustdoc matches the item: names, defaults, layout, and errors. `//!` and `///` on items an external crate can name do not require an issue number, a pull request number, a phase ID, a roadmap ID, `roadmap.md`, `AGENTS.md`, `.cursor/rules`, Grill, or a developer `just` recipe.
+- Those words belong in a `//` comment only when the next reader of that line cannot tell why it is there without the pointer. `docs/design.md`, `docs/roadmap.md`, and `docs/adr/` keep their IDs.
 - Crate-level `//!` in `lib.rs` (1b): one-line role, then a copy-paste fit→predict example.
 
 ```rust
