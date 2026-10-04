@@ -80,7 +80,7 @@ flowchart TB
 
 ## Comparison with other libraries
 
-gprx against scikit-learn, GPyTorch, GPy, libgp and friedrich on the regression benchmarks Gaussian-process papers use (row B1-1, [#298](https://github.com/YUKIKEDA/gprx/issues/298)). Correctness first, then accuracy, then scale. This is a report, not a gate: a cell where another library wins stays in the table.
+gprx is compared with scikit-learn, GPyTorch, GPy, libgp, and friedrich on the regression problems used in Gaussian-process papers ([#298](https://github.com/YUKIKEDA/gprx/issues/298)). The order is whether the arithmetic agrees, whether the predictions are good, and whether the model runs on large data. This is a report, not a pass/fail test. A row where another library is better stays in the table.
 
 | tier | data | what it shows | gprx model |
 | --- | --- | --- | --- |
@@ -89,16 +89,22 @@ gprx against scikit-learn, GPyTorch, GPy, libgp and friedrich on the regression 
 | T2 | Kin40k, Protein (5 splits) | mid-size scale | `Gpr` where `K` fits in memory, `Sgpr` / `Svgp` |
 | T3 | 3DRoad, Song, Buzz, HouseElectric (`treforevans/uci_datasets`, 10 splits of 90 / 10) | large scale | `Sgpr` / `Svgp` |
 
-Every model is an ARD RBF kernel with a Gaussian likelihood, inputs and targets standardized with the training statistics, and the same start (ℓ = 1, signal variance 1, noise variance 0.1). Metrics are RMSE, NLPD and the 95% interval coverage, in the original units of `y`, as mean ± standard error over the splits. Before any comparison, `just perf-real-check` fits nothing and evaluates every library at one fixed θ: NLML, RMSE and NLPD agree to 1e-6, so a difference in a fitted result is a difference in the optimizer, not in the objective. The same check for the sparse model (`just perf-real-check yacht 0 sgpr`) finds the collapsed bound equal in gprx, GPyTorch and GPy; GPyTorch predicts with its own low-rank test covariance, so its RMSE and NLPD differ by a fraction of a percent from the other two at the same θ and Z.
+Every model uses an RBF kernel with one length per input dimension, and Gaussian noise. Inputs and targets are shifted and scaled with the training mean and variance, and the start is the same (length 1, signal variance 1, noise variance 0.1).
+
+There are three scores. RMSE is the prediction error. NLPD is the log loss of the predictive distribution. The third is the fraction of test points that fall inside the 95% predictive interval. Units are the original units of `y`, written as the mean and standard error over the data splits.
+
+Before the comparison, every library is evaluated at one fixed set of hyperparameters, with no training (`just perf-real-check`). The negative log marginal likelihood, RMSE, and NLPD agree to 1e-6. A difference after training is a difference in the optimizer, not in the objective. The same check on the inducing-point model (`just perf-real-check yacht 0 sgpr`) finds the lower bound of the marginal likelihood equal in gprx, GPyTorch, and GPy. GPyTorch alone computes the test variance with its own low-rank formula, so at the same parameters and inducing points its RMSE and NLPD differ from the other two by less than one percent.
 
 ### Optimizers matter
 
-Run time depends on the optimizer as much as on the library, so every cell says which one ran and how many joint likelihood-and-gradient evaluations it used. Two protocols:
+Training time depends on the optimizer as much as on the matrix arithmetic. Each row records which setup trained the model, and how many times the likelihood and the gradient were computed together.
 
-- **native**: each library's own default optimizer, as shipped.
-- **matched**: the same scipy L-BFGS-B settings (100 iterations, gradient tolerance √ε, history 10) around each library's own objective and gradient; gprx's argmin L-BFGS already has these defaults. It is the same *algorithm*, not the same *implementation* (gprx runs argmin's L-BFGS with a More–Thuente line search). libgp offers only Rprop, so its matched cell is N/A. SVGP has no default Adam setting that suits n in the hundreds of thousands, so it runs one shared setting (Adam, learning rate 0.01, batch 1024, 3 epochs) in every library.
+There are two setups.
 
-A wall-time difference between cells with different evaluation counts is not a speed difference. Peak RSS is the peak of the process tree; the time line of the resident set is in the figure below.
+- The library default. Each library trains with the settings it ships with.
+- A shared setup. Each library keeps its own objective and gradient. The iteration limit is 100, the gradient tolerance is √ε, and the history length is 10. The programs are not the same. gprx uses argmin's L-BFGS with a More–Thuente line search, and those limits are already its default. scikit-learn, GPyTorch, and GPy pass the same limits to scipy's L-BFGS-B. libgp has only Rprop, which cannot take a gradient tolerance. The minibatch model has no default Adam setting that finishes on hundreds of thousands of points, so every library uses learning rate 0.01, batch size 1024, and three passes over the data.
+
+A difference in fit time is not a difference in speed when the evaluation counts differ. Peak memory is the high point of the resident set of the whole process. Memory over time is in the figures in the results.
 
 ### Interface
 
@@ -209,7 +215,7 @@ nlpd /= m;
 </details>
 <!-- snippets:end -->
 
-Two library details the harness had to work around: libgp's `predict` variance leaves out the noise, and its bulk `add_patterns(x, y)` reads rows of a column-major matrix with a stride, which is only correct when d = 1.
+libgp has two behaviors the comparison code avoids. The variance from `predict` leaves out the noise. The bulk `add_patterns(x, y)` reads a column-major matrix as rows, which is correct only when the dimension is 1.
 
 ### Features
 
@@ -231,12 +237,24 @@ Two library details the harness had to work around: libgp's `predict` variance l
 
 ### Results
 
-These tables are one matched run. Exact covers Snelson, Mauna Loa, yacht and energy. SGPR covers wine, power plant and naval (20 splits), kin40k (5 splits), and 3droad and song (1 split). SVGP covers kin40k, 3droad, song and houseelectric (1 split). Concrete, kin8nm, protein and buzz are the same regime as energy, kin40k and song, so this commit does not repeat them. HouseElectric SGPR is N/A because `K(X, Z)` does not fit in memory. 3droad and song SGPR come from the run log: the process stopped before it wrote the result file, so coverage, NLML and peak RSS are N/A on those two rows. On song SGPR, gprx stopped after 26 joint evaluations, and its NLPD does not match the other two libraries. On power plant, GPy's predictions diverged on some splits, so its RMSE and NLPD means are not a fit quality. gprx's runner does not report an iteration count; the joint-evaluation count is the one to use. `ms / eval` is the median of fit time divided by that count. A wall-time gap is a speed difference only when the counts match.
+The numbers in this section are one comparison, on one PC, with the same training setup in every library.
+
+Exact GP and SGPR (512 inducing points) use L-BFGS for at most 100 iterations. The minibatch model uses Adam, learning rate 0.01, 1024 points at a time, and three passes over the data. None of the libraries is trained with the optimizer settings it ships with.
+
+Exact GP is Snelson, Mauna Loa, yacht, and energy. SGPR is wine, power plant, and naval (20 splits), kin40k (5 splits), and 3droad and song (1 split). The minibatch model is kin40k, 3droad, song, and HouseElectric (1 split each).
+
+RMSE is the prediction error and NLPD is the log loss of the predictive distribution; lower is better. The 95% column is the fraction of test points inside that interval. Fit seconds are the timed training. Evaluations count a combined likelihood-and-gradient call. The iteration column is the optimizer's own count, and the gprx rows are blank. Milliseconds per evaluation are the median of fit time divided by the evaluation count. NLML is the negative log marginal likelihood at the end of training. Memory is the high point of the whole process tree's resident set.
+
+Treat a gap in fit seconds as a difference in speed only where the evaluation counts match.
+
+On song with inducing points, gprx's NLPD differs from GPyTorch and GPy. On power plant, GPy's predictions broke on some splits, so its RMSE and NLPD averages are not a measure of fit.
+
+The figures follow the tables. The sentence above each figure says what it shows.
 
 <!-- bench:begin -->
 Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs, 47.8 GiB, Windows-11-10.0.26200-SP0). scikit-learn 1.6.1, gpytorch 1.15.2, GPy 1.14.2, torch 2.14.0, scipy 1.18.1, argmin 0.11.0; libgp f4a2fb7d.
 
-| library | native optimizer | matched optimizer | search space | bounds |
+| library | default optimizer | shared optimizer | search space | bounds |
 | --- | --- | --- | --- | --- |
 | gprx | argmin 0.11 LBFGS + MoreThuente line search; history 10, max 100 iterations, gradient-norm tolerance sqrt(eps) | same call: the gprx default already equals the shared setting | logit of log θ inside each interval, so the search is unconstrained | (1e-5, 1e5) on ℓ, signal variance and noise variance |
 | sklearn | scipy minimize L-BFGS-B via optimizer='fmin_l_bfgs_b' with scipy defaults (maxiter 15000, ftol 2.2e-9, gtol 1e-5, maxcor 10, maxls 20) | scipy L-BFGS-B, maxiter 100, gtol sqrt(eps), ftol 0, maxcor 10; the library's own objective and gradient | log θ | (1e-5, 1e5) on ℓ, constant value and noise level (kernel defaults) |
@@ -245,9 +263,9 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | libgp | RProp (resilient backpropagation), 100 iterations, eps_stop 0, Delta0 0.1, Deltamin 1e-6, Deltamax 50, eta- 0.5, eta+ 1.2; keeps the best likelihood seen | N/A: libgp offers RProp and CG only, and RProp has no gradient tolerance | log ℓ, log sf, log sn (amplitude and std, not variances) | none |
 | friedrich | N/A: no ARD kernel | N/A: no ARD kernel | - | - |
 
-#### exact · matched
+#### Exact GP
 
-| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |
+| dataset | library | splits | RMSE | NLPD | 95% interval | fit [s] | evaluations | iterations | ms / evaluation | NLML | memory [MiB] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | energy | gprx | 20/20 | 0.4796 ± 0.014 | 0.6993 ± 0.033 | 0.923 ± 0.0067 | 1.283 ± 0.013 | 116 ± 0.58 | N/A | 10.94 | -1013 ± 2.5 | 47.3 |
 | energy | sklearn | 20/20 | 0.4773 ± 0.013 | 0.692 ± 0.029 | 0.924 ± 0.0077 | 10.26 ± 0.79 | 94.3 ± 7.1 | 53 ± 5.6 | 108.1 | -973.3 ± 6.1 | 225.1 |
@@ -266,16 +284,13 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | yacht | gpytorch | 20/20 | 0.4157 ± 0.056 | 0.2 ± 0.099 | 0.916 ± 0.013 | 0.4499 ± 0.03 | 108 ± 6.5 | 68 ± 5.9 | 3.835 | -451.2 ± 27 | 287.3 |
 | yacht | gpy | 20/20 | 0.3931 ± 0.055 | 0.1971 ± 0.1 | 0.91 ± 0.014 | 2.575 ± 0.14 | 120 ± 6 | 78.1 ± 4.7 | 21.12 | -460.6 ± 27 | 151.4 |
 
-#### sgpr · matched
+#### SGPR, 512 inducing points
 
-| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |
+| dataset | library | splits | RMSE | NLPD | 95% interval | fit [s] | evaluations | iterations | ms / evaluation | NLML | memory [MiB] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 3droad | gprx | 1/1 | 8.823 | 3.597 | N/A | 5230 | 788 | N/A | 6637 | N/A | N/A |
 | 3droad | gpytorch | 1/1 | 8.823 | 3.597 | N/A | 1694 | 129 | N/A | 1.314e+04 | N/A | N/A |
 | 3droad | gpy | 1/1 | 8.823 | 3.597 | N/A | 3970 | 135 | N/A | 2.941e+04 | N/A | N/A |
-| houseelectric | gprx | 0/1 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| houseelectric | gpytorch | 0/1 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| houseelectric | gpy | 0/1 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | kin40k | gprx | 5/5 | 0.2863 ± 0.0029 | 0.1634 ± 0.0083 | 0.964 ± 0.0028 | 273.4 ± 96 | 394 ± 1.3e+02 | N/A | 681.8 | 1.039e+04 ± 59 | 890.7 |
 | kin40k | gpytorch | 5/5 | 0.2865 ± 0.0028 | 0.1634 ± 0.0079 | 0.964 ± 0.0028 | 73.99 ± 4.9 | 86.4 ± 5.6 | 43 ± 2.3 | 854.9 | 1.039e+04 ± 59 | 1746.8 |
 | kin40k | gpy | 5/5 | 0.2863 ± 0.0029 | 0.1634 ± 0.0083 | 0.964 ± 0.0028 | 231.8 ± 42 | 88 ± 16 | 42.4 ± 2.8 | 2643 | 1.039e+04 ± 59 | 1820.1 |
@@ -292,13 +307,9 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | wine_red | gpytorch | 20/20 | 0.6276 ± 0.0082 | 0.9506 ± 0.014 | 0.939 ± 0.0047 | 6.03 ± 0.13 | 114 ± 0.82 | 100 | 51.29 | 1688 ± 2 | 376.5 |
 | wine_red | gpy | 20/20 | 0.6275 ± 0.0082 | 0.9504 ± 0.014 | 0.94 ± 0.0048 | 22.8 ± 1 | 112 ± 3.1 | 97.3 ± 2.7 | 196.3 | 1688 ± 2 | 299.8 |
 
-- N/A `gprx`: K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB
-- N/A `gpy`: K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB
-- N/A `gpytorch`: K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB
+#### SVGP
 
-#### svgp · matched
-
-| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |
+| dataset | library | splits | RMSE | NLPD | 95% interval | fit [s] | evaluations | iterations | ms / evaluation | NLML | memory [MiB] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 3droad | gprx | 1/1 | 11.18 | 3.834 | 0.948 | 34.49 | 1.15e+03 | N/A | 30.02 | N/A | 6236.7 |
 | 3droad | gpytorch | 1/1 | 11.16 | 3.832 | 0.944 | 42.93 | 1.15e+03 | 1.15e+03 | 37.36 | N/A | 1284.3 |
@@ -309,25 +320,76 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | song | gprx | 1/1 | 0.4669 | 0.6575 | 0.947 | 57.79 | 1.36e+03 | N/A | 42.53 | N/A | 8650.4 |
 | song | gpytorch | 1/1 | 0.4709 | 0.666 | 0.954 | 55.96 | 1.36e+03 | 1.36e+03 | 41.17 | N/A | 3769.8 |
 
-![accuracy_matched.svg](docs/bench/accuracy_matched.svg)
-![fit_time_matched.svg](docs/bench/fit_time_matched.svg)
-![accuracy_sgpr_matched.svg](docs/bench/accuracy_sgpr_matched.svg)
-![fit_time_sgpr_matched.svg](docs/bench/fit_time_sgpr_matched.svg)
-![accuracy_svgp_matched.svg](docs/bench/accuracy_svgp_matched.svg)
-![fit_time_svgp_matched.svg](docs/bench/fit_time_svgp_matched.svg)
-![rss_timeline_energy_exact_s0_matched.svg](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
-![rss_timeline_kin40k_sgpr_s0_matched.svg](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
-![curve_maunaloa_matched.svg](docs/bench/curve_maunaloa_matched.svg)
-![curve_snelson_matched.svg](docs/bench/curve_snelson_matched.svg)
+The marker is the same library in every figure: a blue circle is gprx, an orange square is scikit-learn, a green triangle is GPyTorch, and a yellow diamond is GPy.
+
+**Prediction error, Exact GP**
+
+Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. A marker is a library and the bar is the standard error across splits. Snelson has no test points, so that column is empty.
+
+![Prediction error, Exact GP](docs/bench/accuracy_matched.svg)
+
+**Training time, Exact GP**
+
+Top is the seconds spent training, bottom is how many times the library evaluated the likelihood and its gradient together. Both axes are logarithmic. Compare the seconds only where the counts match.
+
+![Training time, Exact GP](docs/bench/fit_time_matched.svg)
+
+**Prediction error, SGPR**
+
+Same reading as the Exact GP error figure. 512 inducing points. RMSE on top, NLPD below.
+
+![Prediction error, SGPR](docs/bench/accuracy_sgpr_matched.svg)
+
+**Training time, SGPR**
+
+Same reading as the Exact GP time figure. Seconds on top, likelihood-and-gradient counts below.
+
+![Training time, SGPR](docs/bench/fit_time_sgpr_matched.svg)
+
+**Prediction error, SVGP**
+
+Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below.
+
+![Prediction error, SVGP](docs/bench/accuracy_svgp_matched.svg)
+
+**Training time, SVGP**
+
+Seconds on top, Adam updates below. The update count matches, so the seconds are the speed.
+
+![Training time, SVGP](docs/bench/fit_time_svgp_matched.svg)
+
+**Memory over time, energy**
+
+The line is the resident memory of the whole process. The horizontal axis is seconds since the process started. A dotted line, in that library's color, is when training or prediction starts. Split 0.
+
+![Memory over time, energy](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
+
+**Memory over time, kin40k**
+
+Same reading as the energy memory figure. SGPR with 512 inducing points, split 0.
+
+![Memory over time, kin40k](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
+
+**Mauna Loa predictions**
+
+One panel per library. The line is the predictive mean, the band is the 95% interval, filled points are training data, and hollow points are held out.
+
+![Mauna Loa predictions](docs/bench/curve_maunaloa_matched.svg)
+
+**Snelson predictions**
+
+One panel per library. The line is the predictive mean and the band is the 95% interval. The points are the training data. Nothing is held out.
+
+![Snelson predictions](docs/bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
 ### Reproduce
 
 ```text
-just perf-real-full                                            # the matched run above, then this section
+just perf-real-full                                            # the comparison above, then this section
 ```
 
-`--timeline` also records the resident set of the process tree every 10 ms. The raw output stays in `compare/perf/out/real/` (not committed); `docs/bench/summary.json` keeps the per-cell statistics, the machine, the library versions and the optimizer settings. Details: [`compare/perf/README.md`](compare/perf/README.md).
+`--timeline` records the resident memory of the whole process every 10 ms. The raw output stays in `compare/perf/out/real/` and is not committed. `docs/bench/summary.json` holds the table numbers, the machine, the library versions, and the optimizer settings. Details: [`compare/perf/README.md`](compare/perf/README.md).
 
 ## License
 

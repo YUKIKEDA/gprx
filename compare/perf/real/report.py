@@ -86,17 +86,45 @@ def fmt(stat: dict | None, digits: int = 4) -> str:
     return f"{stat['mean']:.{digits}g} ± {stat['se']:.2g}"
 
 
-def tables(summary: list[dict]) -> str:
+_TITLES = {
+    "exact": ("Exact GP", "全学習点を使うモデル"),
+    "sgpr": ("SGPR, 512 inducing points", "誘導点 512 個のモデル"),
+    "svgp": ("SVGP", "ミニバッチのモデル"),
+}
+
+
+def _with_numbers(cells: list[dict]) -> list[dict]:
+    """Drop a dataset whose every library failed. A row of blanks is not a result."""
+    by_dataset: dict[str, list[dict]] = {}
+    for cell in cells:
+        by_dataset.setdefault(cell["dataset"], []).append(cell)
+    kept: list[dict] = []
+    for group in by_dataset.values():
+        if any(cell["ok"] for cell in group):
+            kept.extend(group)
+    return kept
+
+
+def tables(summary: list[dict], ja: bool = False) -> str:
     lines: list[str] = []
     groups = sorted({(c["model"], c["protocol"]) for c in summary})
-    for model, protocol in groups:
-        cells = [c for c in summary if (c["model"], c["protocol"]) == (model, protocol)]
-        lines += [
-            f"#### {model} · {protocol}",
-            "",
-            "| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-        ]
+    if ja:
+        header = (
+            "| データセット | ライブラリ | 測れた分割 | RMSE | NLPD | 95%区間 | 学習 [秒] | "
+            "評価回数 | 反復 | 1回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |"
+        )
+    else:
+        header = (
+            "| dataset | library | splits | RMSE | NLPD | 95% interval | fit [s] | "
+            "evaluations | iterations | ms / evaluation | NLML | memory [MiB] |"
+        )
+    rule = "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    for model, _protocol in groups:
+        cells = _with_numbers([c for c in summary if c["model"] == model])
+        if not cells:
+            continue
+        title = _TITLES.get(model, (model, model))[1 if ja else 0]
+        lines += [f"#### {title}", "", header, rule]
         order = {lib: i for i, lib in enumerate(LIB_ORDER)}
         for c in sorted(cells, key=lambda c: (c["dataset"], order.get(c["lib"], 99))):
             rss = "N/A" if c["peak_rss_mib"] is None else f"{c['peak_rss_mib']:.1f}"
@@ -106,27 +134,188 @@ def tables(summary: list[dict]) -> str:
                 f"{fmt(c['joint_evals'], 3)} | {fmt(c['iterations'], 3)} | {fmt_median(c['ms_per_eval'])} | "
                 f"{fmt(c['nlml'])} | {rss} |"
             )
-        reasons = sorted({(c["lib"], n) for c in cells for n in c["notes"]})
-        if reasons:
-            lines += [""] + [f"- N/A `{lib}`: {note}" for lib, note in reasons]
         lines.append("")
     return "\n".join(lines)
 
 
-def optimizer_table() -> str:
-    lines = [
-        "| library | native optimizer | matched optimizer | search space | bounds |",
-        "| --- | --- | --- | --- | --- |",
-    ]
+def optimizer_table(ja: bool = False) -> str:
+    if ja:
+        lines = [
+            "各マスは、その版のソースから書き写した設定。",
+            "",
+            "| ライブラリ | 既定の最適化 | 条件を揃えた最適化 | 探索する量 | 範囲 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    else:
+        lines = [
+            "| library | default optimizer | shared optimizer | search space | bounds |",
+            "| --- | --- | --- | --- | --- |",
+        ]
     for lib, o in OPTIMIZERS.items():
         lines.append(f"| {lib} | {o['native']} | {o['matched']} | {o['space']} | {o['bounds']} |")
     return "\n".join(lines)
 
 
-def machine_line(meta: dict) -> str:
+def machine_line(meta: dict, ja: bool = False) -> str:
     m, v = meta["machine"], meta["versions"]
     libs = ", ".join(f"{k} {v[k]}" for k in ("scikit-learn", "gpytorch", "GPy", "torch", "scipy", "argmin") if v.get(k))
+    if ja:
+        return (
+            f"測定した機械は {m['cpu']}（論理 CPU {m['logical_cpus']}、メモリ {m['memory_gib']} GiB、{m['os']}）。"
+            f"{libs}。libgp {v['libgp'][:8]}。"
+        )
     return f"Measured on {m['cpu']} ({m['logical_cpus']} logical CPUs, {m['memory_gib']} GiB, {m['os']}). {libs}; libgp {v['libgp'][:8]}."
+
+
+_CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
+    # name -> ((en title, en body), (ja title, ja body))
+    "accuracy_matched.svg": (
+        (
+            "Prediction error, Exact GP",
+            "Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. "
+            "A marker is a library and the bar is the standard error across splits. "
+            "Snelson has no test points, so that column is empty.",
+        ),
+        (
+            "予測の誤差（全学習点）",
+            "列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。"
+            "点はライブラリ、縦棒は分割ごとのばらつき。"
+            "Snelson にはテスト点が無いので、その列は空。",
+        ),
+    ),
+    "fit_time_matched.svg": (
+        (
+            "Training time, Exact GP",
+            "Top is the seconds spent training, bottom is how many times the library "
+            "evaluated the likelihood and its gradient together. Both axes are logarithmic. "
+            "Compare the seconds only where the counts match.",
+        ),
+        (
+            "学習の時間（全学習点）",
+            "上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。"
+            "秒を比べるときは、下の回数が揃っているかを見る。",
+        ),
+    ),
+    "accuracy_sgpr_matched.svg": (
+        (
+            "Prediction error, SGPR",
+            "Same reading as the Exact GP error figure. 512 inducing points. RMSE on top, NLPD below.",
+        ),
+        (
+            "予測の誤差（誘導点 512 個）",
+            "読み方は、全学習点の予測誤差の図と同じ。上は RMSE、下は NLPD。",
+        ),
+    ),
+    "fit_time_sgpr_matched.svg": (
+        (
+            "Training time, SGPR",
+            "Same reading as the Exact GP time figure. Seconds on top, likelihood-and-gradient counts below.",
+        ),
+        (
+            "学習の時間（誘導点 512 個）",
+            "上は秒、下は尤度と勾配の計算回数。どちらも対数軸。",
+        ),
+    ),
+    "accuracy_svgp_matched.svg": (
+        (
+            "Prediction error, SVGP",
+            "Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. "
+            "GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below.",
+        ),
+        (
+            "予測の誤差（ミニバッチ）",
+            "Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。"
+            "GPy にはこの学習が無い。上は RMSE、下は NLPD。",
+        ),
+    ),
+    "fit_time_svgp_matched.svg": (
+        (
+            "Training time, SVGP",
+            "Seconds on top, Adam updates below. The update count matches, so the seconds are the speed.",
+        ),
+        (
+            "学習の時間（ミニバッチ）",
+            "上は秒、下は Adam の更新回数。回数は揃っているので、秒の差が速さの差になる。",
+        ),
+    ),
+    "rss_timeline_energy_exact_s0_matched.svg": (
+        (
+            "Memory over time, energy",
+            "The line is the resident memory of the whole process. "
+            "The horizontal axis is seconds since the process started. "
+            "A dotted line, in that library's color, is when training or prediction starts. Split 0.",
+        ),
+        (
+            "メモリの推移（energy、全学習点）",
+            "線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。"
+            "点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。",
+        ),
+    ),
+    "rss_timeline_kin40k_sgpr_s0_matched.svg": (
+        (
+            "Memory over time, kin40k",
+            "Same reading as the energy memory figure. SGPR with 512 inducing points, split 0.",
+        ),
+        (
+            "メモリの推移（kin40k、誘導点 512 個）",
+            "読み方は energy のメモリの図と同じ。分割は 0 番。",
+        ),
+    ),
+    "curve_maunaloa_matched.svg": (
+        (
+            "Mauna Loa predictions",
+            "One panel per library. The line is the predictive mean, the band is the 95% interval, "
+            "filled points are training data, and hollow points are held out.",
+        ),
+        (
+            "Mauna Loa の予測",
+            "1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。"
+            "塗った点は学習データ、抜き点はテストデータ。",
+        ),
+    ),
+    "curve_snelson_matched.svg": (
+        (
+            "Snelson predictions",
+            "One panel per library. The line is the predictive mean and the band is the 95% interval. "
+            "The points are the training data. Nothing is held out.",
+        ),
+        (
+            "Snelson の予測",
+            "1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。点は学習データ。テスト用の点は無い。",
+        ),
+    ),
+}
+
+
+def figures_markdown(names: list[str], ja: bool = False) -> str:
+    intro = (
+        "点の色と形はどの図でも同じ。青丸が gprx、橙の四角が scikit-learn、緑の三角が GPyTorch、黄の菱形が GPy。"
+        if ja
+        else "The marker is the same library in every figure: a blue circle is gprx, an orange square is "
+        "scikit-learn, a green triangle is GPyTorch, and a yellow diamond is GPy."
+    )
+    blocks = [intro, ""]
+    for name in names:
+        pair = _CAPTIONS.get(name)
+        if pair is None:
+            blocks += [f"![{name}](docs/bench/{name})", ""]
+            continue
+        title, body = pair[1 if ja else 0]
+        blocks += [f"**{title}**", "", body, "", f"![{title}](docs/bench/{name})", ""]
+    return "\n".join(blocks).rstrip()
+
+
+def bench_body(meta: dict, summary: list[dict], figures: list[str], ja: bool = False) -> str:
+    return "\n".join(
+        [
+            machine_line(meta, ja),
+            "",
+            optimizer_table(ja),
+            "",
+            tables(summary, ja),
+            figures_markdown(figures, ja),
+        ]
+    )
 
 
 def splice(readme: Path, body: str, begin: str = BEGIN, end: str = END) -> bool:
@@ -189,19 +378,10 @@ def main(argv: list[str]) -> int:
                 path = None
             if path:
                 figures.append(path.name)
-    body = "\n".join(
-        [
-            machine_line(meta),
-            "",
-            optimizer_table(),
-            "",
-            tables(summary),
-            *[f"![{name}](docs/bench/{name})" for name in figures],
-        ]
-    )
     if "--no-readme" not in argv:
         for readme in READMES:
-            done = splice(readme, body) and splice(
+            ja = readme.name == "README.ja.md"
+            done = splice(readme, bench_body(meta, summary, figures, ja)) and splice(
                 readme, snippets_block(), "<!-- snippets:begin -->", "<!-- snippets:end -->"
             )
             print(readme.name, "updated" if done else "no markers, left as is")
