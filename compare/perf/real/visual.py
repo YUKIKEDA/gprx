@@ -214,7 +214,7 @@ def online_gif(
     # One palette for every frame, so the bands do not flicker.
     base = frames[0].quantize(colors=128, method=Image.Quantize.MEDIANCUT)
     rest = [frame.quantize(palette=base, dither=Image.Dither.NONE) for frame in frames[1:]]
-    base.save(path, save_all=True, append_images=rest, duration=300, loop=0, optimize=True)
+    base.save(path, save_all=True, append_images=rest, duration=600, loop=0, optimize=True)
     return path
 
 
