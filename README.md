@@ -2,13 +2,13 @@ English | [日本語](README.ja.md)
 
 # gprx
 
-Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, runs argmin L-BFGS on the negative log marginal likelihood, and returns `FittedGpr`. The crate is **not** published to crates.io (`publish = false` in `Cargo.toml`).
+Exact Gaussian process regression in Rust. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, runs argmin L-BFGS on the negative log marginal likelihood, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load. The crate is **not** published to crates.io (`publish = false` in `Cargo.toml`).
 
 ## Status
 
-Local **0.1.0** quality: `Gpr` / `FittedGpr`, kernels, `fit` / `predict` / `predict_into` / leave-one-out, English rustdoc, and `examples/`. Depend on git or a path, not crates.io.
+**0.1.0** is the default-feature public API: `Gpr`, `Sgpr`, and `Svgp`, online updates, and save/load, together with kernels, `fit` / `predict` / `predict_into` / leave-one-out, English rustdoc, and `examples/`. That sentence names families, not every type. The MSRV is 1.85 (`rust-version` in `Cargo.toml`). A 0.x minor may break the public API. `internals` (`bench-internals` and `insert-stages`) is outside semantic versioning. Depend on git or a path, not crates.io.
 
-Design: [`docs/design.md`](docs/design.md). Architecture: [`docs/architecture.md`](docs/architecture.md). Saved format: [`docs/persist-format.md`](docs/persist-format.md). Tasks: [`docs/roadmap.md`](docs/roadmap.md). Agent rules: [`AGENTS.md`](AGENTS.md). Cross-library wall time and peak RSS: [`compare/perf/`](compare/perf/) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; not criterion).
+Design: [`docs/design.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.md). Architecture: [`docs/architecture.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.md). Saved format: [`docs/persist-format.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md). Tasks: [`docs/roadmap.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/roadmap.md). Agent rules: [`AGENTS.md`](https://github.com/YUKIKEDA/gprx/blob/main/AGENTS.md). Cross-library wall time and peak RSS: [`compare/perf/`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/) (P2B-16 Exact `just perf`; P4-12 Sparse `just perf-sparse`; P4-14 Sparse online `just perf-sparse-online`; not criterion).
 
 ## Example
 
@@ -75,8 +75,8 @@ flowchart TB
     models -.->|"save, persist_err"| persist
 ```
 
-- [`docs/architecture.md`](docs/architecture.md): every module, what it is responsible for, which way its imports point, the public types by family, and where to change what.
-- [`docs/persist-format.md`](docs/persist-format.md): what `save` writes. The keys of `config.json`, the tensors of `model.safetensors` (names, shapes, dtypes, column-major layout), the JSON form of kernels and transforms, `Custom` restore, versions, and errors.
+- [`docs/architecture.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.md): every module, what it is responsible for, which way its imports point, the public types by family, and where to change what.
+- [`docs/persist-format.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md): what `save` writes. The keys of `config.json`, the tensors of `model.safetensors` (names, shapes, dtypes, column-major layout), the JSON form of kernels and transforms, `Custom` restore, versions, and errors.
 
 ## Comparison with other libraries
 
@@ -108,7 +108,7 @@ A difference in fit time is not a difference in speed when the evaluation counts
 
 ### Interface
 
-The same regression in each library: ARD RBF, learn the hyperparameters, predict the mean and the observation variance, score the NLPD. Runnable files: [`compare/perf/real/snippets/`](compare/perf/real/snippets/).
+The same regression in each library: ARD RBF, learn the hyperparameters, predict the mean and the observation variance, score the NLPD. Runnable files: [`compare/perf/real/snippets/`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/real/snippets/).
 
 <!-- snippets:begin -->
 <details><summary>gprx</summary>
@@ -326,61 +326,61 @@ The marker is the same library in every figure: a blue circle is gprx, an orange
 
 Each column is a dataset. Top is RMSE, bottom is NLPD; lower is better. A marker is a library and the bar is the standard error across splits. Snelson has no test points, so that column is empty.
 
-![Prediction error, Exact GP](docs/bench/accuracy_matched.svg)
+![Prediction error, Exact GP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_matched.svg)
 
 **Training time, Exact GP**
 
 Top is the seconds spent training, bottom is how many times the library evaluated the likelihood and its gradient together. Both axes are logarithmic. Compare the seconds only where the counts match.
 
-![Training time, Exact GP](docs/bench/fit_time_matched.svg)
+![Training time, Exact GP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_matched.svg)
 
 **Prediction error, SGPR**
 
 Same reading as the Exact GP error figure. 512 inducing points. RMSE on top, NLPD below.
 
-![Prediction error, SGPR](docs/bench/accuracy_sgpr_matched.svg)
+![Prediction error, SGPR](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_sgpr_matched.svg)
 
 **Training time, SGPR**
 
 Same reading as the Exact GP time figure. Seconds on top, likelihood-and-gradient counts below.
 
-![Training time, SGPR](docs/bench/fit_time_sgpr_matched.svg)
+![Training time, SGPR](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_sgpr_matched.svg)
 
 **Prediction error, SVGP**
 
 Adam, learning rate 0.01, batch 1024, three passes over the data, in both libraries. GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below.
 
-![Prediction error, SVGP](docs/bench/accuracy_svgp_matched.svg)
+![Prediction error, SVGP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_svgp_matched.svg)
 
 **Training time, SVGP**
 
 Seconds on top, Adam updates below. The update count matches, so the seconds are the speed.
 
-![Training time, SVGP](docs/bench/fit_time_svgp_matched.svg)
+![Training time, SVGP](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_svgp_matched.svg)
 
 **Memory over time, energy**
 
 The line is the resident memory of the whole process. The horizontal axis is seconds since the process started. A dotted line, in that library's color, is when training or prediction starts. Split 0.
 
-![Memory over time, energy](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
+![Memory over time, energy](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/rss_timeline_energy_exact_s0_matched.svg)
 
 **Memory over time, kin40k**
 
 Same reading as the energy memory figure. SGPR with 512 inducing points, split 0.
 
-![Memory over time, kin40k](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
+![Memory over time, kin40k](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
 
 **Mauna Loa predictions**
 
 One panel per library. The line is the predictive mean, the band is the 95% interval, filled points are training data, and hollow points are held out.
 
-![Mauna Loa predictions](docs/bench/curve_maunaloa_matched.svg)
+![Mauna Loa predictions](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/curve_maunaloa_matched.svg)
 
 **Snelson predictions**
 
 One panel per library. The line is the predictive mean and the band is the 95% interval. The points are the training data. Nothing is held out.
 
-![Snelson predictions](docs/bench/curve_snelson_matched.svg)
+![Snelson predictions](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
 ### Reproduce
@@ -389,7 +389,7 @@ One panel per library. The line is the predictive mean and the band is the 95% i
 just perf-real-full                                            # the comparison above, then this section
 ```
 
-`--timeline` records the resident memory of the whole process every 10 ms. The raw output stays in `compare/perf/out/real/` and is not committed. `docs/bench/summary.json` holds the table numbers, the machine, the library versions, and the optimizer settings. Details: [`compare/perf/README.md`](compare/perf/README.md).
+`--timeline` records the resident memory of the whole process every 10 ms. The raw output stays in `compare/perf/out/real/` and is not committed. `docs/bench/summary.json` holds the table numbers, the machine, the library versions, and the optimizer settings. Details: [`compare/perf/README.md`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/README.md).
 
 ## License
 
