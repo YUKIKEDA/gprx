@@ -26,6 +26,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is
     /// the wrong size, or the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn hess<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, T>,
@@ -102,6 +104,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// # Errors
     ///
     /// Same as [`Self::hess`], with coordinates in place of distances.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn hess_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,

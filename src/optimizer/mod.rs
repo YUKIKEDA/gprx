@@ -55,7 +55,9 @@ pub struct OptResult {
 ///
 /// A user optimizer implements this generically over the capability it
 /// needs. It can read the intervals and call a built-in optimizer on the
-/// same objective:
+/// same objective.
+///
+/// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};

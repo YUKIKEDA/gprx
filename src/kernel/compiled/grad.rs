@@ -25,6 +25,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, [`GprError::WorkspaceTooSmall`] if a product tree's `scratch` is
     /// the wrong size, or the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn grad<M: crate::math::KernelMath>(
         &self,
         dist: MatRef<'_, T>,
@@ -96,6 +98,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// [`GprError::WorkspaceTooSmall`] if a product tree's or custom leaf's
     /// `scratch` is the wrong size, or the same shape errors as
     /// [`Self::apply_points`].
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn grad_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
@@ -303,6 +307,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// Returns [`GprError::CoordGradientUnsupported`] when a leaf does not
     /// implement coordinate derivatives (including Product trees).
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn grad_wrt_coord_dim<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, T>,
