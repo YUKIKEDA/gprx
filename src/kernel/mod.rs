@@ -1,20 +1,19 @@
-//! Kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
+//! Describes kernel leaves and composition ([`KernelSpec`] / [`CompiledKernel`]).
 //!
 //! Built-in leaves are enum arms. User distance leaves implement [`KernelTerm`]
 //! and enter the tree as [`KernelSpec::Custom`].
 //!
 //! Isotropic RBF, Matérn, Periodic, and rational quadratic evaluate from a
-//! squared-Euclidean distance matrix (Periodic then takes the square root).
-//! ARD RBF, ARD Matérn, and ARD rational quadratic evaluate from coordinates
-//! via [`ArdLengthscales`] (`θ_d = log(ℓ_d)`). Callers pass faer views; this
-//! module does not re-export faer types.
+//! squared-Euclidean distance matrix (Periodic then takes the square root). ARD RBF, ARD
+//! Matérn, and ARD rational quadratic evaluate from coordinates via [`ArdLengthscales`]
+//! (`θ_d = log(ℓ_d)`). Callers pass column-major matrix views; this module does not
+//! re-export matrix-library types.
 //!
-//! Squared-Euclidean fills and [`Triangle::Lower`] writes run on Rayon's
-//! global pool. Isotropic RBF, ARD RBF, and the distance / `(Δx_d)²` row loops
-//! use `wide::f64x4` when the faer view is column-major with unit row stride.
-//! There is no parallel on/off flag; `RAYON_NUM_THREADS=1` is sequential. Limit
-//! threads with `RAYON_NUM_THREADS` or
-//! `rayon::ThreadPoolBuilder::build_global` before the first fill. Linear and
+//! Squared-Euclidean fills and [`Triangle::Lower`] writes run on the process-wide thread
+//! pool. Isotropic RBF, ARD RBF, and the distance / `(Δx_d)²` row loops use four-wide
+//! `f64` SIMD when the matrix view is column-major with unit row stride. There is no
+//! parallel on/off flag; `RAYON_NUM_THREADS=1` is sequential. Limit threads with
+//! `RAYON_NUM_THREADS` or the global thread-pool builder before the first fill. Linear and
 //! other points-mode leaves stay sequential. See the [crate-level parallelism
 //! notes](crate).
 
@@ -66,14 +65,26 @@ use dist::par_lower_cols;
 pub(crate) use dist::worker_count;
 use faer::{MatMut, MatRef};
 
-/// Which triangle of a symmetric kernel matrix to write.
+/// Records which triangle of a symmetric kernel matrix to write.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::Triangle;
+///
+/// assert_ne!(Triangle::Lower, Triangle::Upper);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Triangle {
-    /// Entries with `row >= col`. This is the default for Cholesky.
+    /// Marks entries with `row >= col`.
+    ///
+    /// This is the default for Cholesky.
     Lower,
-    /// Entries with `row <= col`.
+    /// Marks entries with `row <= col`.
     Upper,
-    /// Every entry. Upper and lower must match when `dist` is symmetric.
+    /// Marks every entry.
+    ///
+    /// Upper and lower must match when `dist` is symmetric.
     Full,
 }
 

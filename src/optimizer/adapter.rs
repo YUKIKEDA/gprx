@@ -1,6 +1,4 @@
-//! The argmin adapters every built-in argmin optimizer shares: one
-//! evaluation cache, one argmin problem, one run, one error mapping, and the
-//! comparison of runs.
+//! The argmin adapters every built-in argmin optimizer shares: one evaluation cache, one argmin problem, one run, one error mapping, and the comparison of runs.
 //!
 //! An optimizer picks how much an evaluation computes ([`ValueOnly`],
 //! [`WithGradient`], [`WithHessian`]); everything else is the same for

@@ -14,7 +14,7 @@ use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
-/// Periodic kernel: `k = exp( -2 sin²(π ‖x-x'‖ / p) / ℓ² )`.
+/// Evaluates the periodic kernel `k = exp( -2 sin²(π ‖x-x'‖ / p) / ℓ² )`.
 ///
 /// Optimizer parameters are `θ = [log(ℓ), log(p)]`. The input to `sin` is
 /// Euclidean distance, not squared Euclidean; `dist` still stores squared
@@ -47,6 +47,8 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if either value is not
     /// finite or not strictly positive.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn new(lengthscale: f64, period: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         validate_positive_finite(period, "period")?;
@@ -62,6 +64,8 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if a `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn from_log(log_lengthscale: f64, log_period: f64) -> Result<Self, GprError> {
         Ok(Self {
             lengthscale: BoundedParam::default_positive(
@@ -74,31 +78,43 @@ impl PeriodicKernel {
     }
 
     /// Returns `ℓ = exp(θ_0)`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn lengthscale(&self) -> f64 {
         self.lengthscale.value()
     }
 
     /// Returns `θ_0 = log(ℓ)`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn log_lengthscale(&self) -> f64 {
         self.lengthscale.ln()
     }
 
     /// Returns `p = exp(θ_1)`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn period(&self) -> f64 {
         self.period.value()
     }
 
     /// Returns `θ_1 = log(p)`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn log_period(&self) -> f64 {
         self.period.ln()
     }
 
     /// Returns the open interval on `ℓ`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn lengthscale_bounds(&self) -> Interval {
         self.lengthscale.interval()
     }
 
     /// Returns the open interval on `p`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn period_bounds(&self) -> Interval {
         self.period.interval()
     }
@@ -109,6 +125,8 @@ impl PeriodicKernel {
     ///
     /// Returns [`crate::IntervalError`] if a current value is not strictly
     /// inside the matching interval.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn with_bounds(
         self,
         lengthscale: Interval,
@@ -121,6 +139,8 @@ impl PeriodicKernel {
     }
 
     /// Returns the number of optimizer parameters (always 2).
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn num_params(&self) -> usize {
         2
     }
@@ -130,6 +150,8 @@ impl PeriodicKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 2.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_two_params(out.len())?;
         out[0] = self.lengthscale.ln();
@@ -137,12 +159,16 @@ impl PeriodicKernel {
         Ok(())
     }
 
-    /// Replaces `[log(ℓ), log(p)]`. Previous values are kept on error.
+    /// Replaces `[log(ℓ), log(p)]`.
+    ///
+    /// Previous values are kept on error.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 2,
     /// or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_two_params(params.len())?;
         let ell = validate_log_lengthscale(params[0])?.exp();
@@ -163,6 +189,8 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -202,6 +230,8 @@ impl PeriodicKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -221,16 +251,22 @@ impl PeriodicKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
 
-    /// Writes `∂K/∂θ` into `d_k`. Index 0 is `log(ℓ)`, index 1 is `log(p)`.
+    /// Writes `∂K/∂θ` into `d_k`.
+    ///
+    /// Index 0 is `log(ℓ)`, index 1 is `log(p)`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0 or
     /// 1, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -362,12 +398,16 @@ impl PeriodicKernel {
         })
     }
 
-    /// Writes `∂²K/∂θ_i ∂θ_j`. Index 0 is `log(ℓ)`, index 1 is `log(p)`.
+    /// Writes `∂²K/∂θ_i ∂θ_j`.
+    ///
+    /// Index 0 is `log(ℓ)`, index 1 is `log(p)`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`PeriodicKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,

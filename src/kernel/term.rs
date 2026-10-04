@@ -10,7 +10,7 @@ use crate::param::Interval;
 
 use super::Triangle;
 
-/// User-defined kernel leaf evaluated from a squared-distance matrix.
+/// Represents the user-defined kernel leaf evaluated from a squared-distance matrix.
 ///
 /// Built-in leaves stay as [`super::KernelSpec`] enum arms. Implement this
 /// trait and wrap with [`super::KernelSpec::custom`] to sit on Sum/Product.
@@ -186,6 +186,8 @@ use super::Triangle;
 /// ```
 pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// Returns the number of flattened log-`θ` parameters.
+    ///
+    /// See the example on [`KernelTerm`].
     fn num_params(&self) -> usize;
 
     /// Writes log-`θ` into `out`.
@@ -193,6 +195,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
+    ///
+    /// See the example on [`KernelTerm`].
     fn get_params(&self, out: &mut [f64]) -> Result<(), GprError>;
 
     /// Replaces log-`θ` from `params`.
@@ -201,6 +205,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, or [`GprError::InvalidHyperparameter`] if a value is rejected.
+    ///
+    /// See the example on [`KernelTerm`].
     fn set_params(&mut self, params: &[f64]) -> Result<(), GprError>;
 
     /// Writes the open interval on each user-unit parameter (`ℓ`, `c`, …).
@@ -208,6 +214,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
+    ///
+    /// See the example on [`KernelTerm`].
     fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError>;
 
     /// Writes `k` from squared distances into `out` for `uplo`.
@@ -216,6 +224,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// Returns [`GprError`] if shapes mismatch, a matrix is empty, or a
     /// distance is non-finite.
+    ///
+    /// See the example on [`KernelTerm`].
     fn apply(
         &self,
         dist: MatRef<'_, T>,
@@ -228,6 +238,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// # Errors
     ///
     /// Same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn apply_cross(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError>;
 
     /// Writes the stationary diagonal `k(x, x)` into `out`.
@@ -235,6 +247,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// # Errors
     ///
     /// Returns [`GprError`] if the leaf cannot fill `out`.
+    ///
+    /// See the example on [`KernelTerm`].
     fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError>;
 
     /// Writes `∂K/∂θ_{param_idx}` from squared distances into `d_k`.
@@ -243,6 +257,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn grad(
         &self,
         dist: MatRef<'_, T>,
@@ -259,6 +275,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn hess(
         &self,
         dist: MatRef<'_, T>,
@@ -276,6 +294,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// # Errors
     ///
     /// Same index and shape errors as [`Self::hess`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn hess_points(
         &self,
         x: MatRef<'_, T>,
@@ -285,8 +305,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         uplo: Triangle,
     ) -> Result<(), GprError>;
 
-    /// Writes `∂K/∂θ_{param_idx}` of a rectangular block from squared
-    /// distances (train × test) into `d_k`.
+    /// Writes `∂K/∂θ_{param_idx}` of a rectangular block from squared distances (train × test) into `d_k`.
     ///
     /// `Sgpr` and `Svgp` read `∂K(Z, X)/∂θ`. The default is
     /// [`GprError::CoordGradientUnsupported`].
@@ -296,6 +315,8 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     /// Returns [`GprError::CoordGradientUnsupported`] when this leaf has no
     /// rectangular derivative, [`GprError::IndexOutOfRange`] if `param_idx` is
     /// out of range, or the same shape errors as [`Self::apply_cross`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn grad_cross(
         &self,
         _dist: MatRef<'_, T>,
@@ -305,12 +326,15 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         Err(GprError::CoordGradientUnsupported)
     }
 
-    /// Writes `∂²K/∂θ_i ∂θ_j` of a rectangular block from squared distances
-    /// into `d2_k`. The default is [`GprError::CoordGradientUnsupported`].
+    /// Writes `∂²K/∂θ_i ∂θ_j` of a rectangular block from squared distances into `d2_k`.
+    ///
+    /// The default is [`GprError::CoordGradientUnsupported`].
     ///
     /// # Errors
     ///
     /// Same as [`Self::grad_cross`], with the pair `(i, j)`.
+    ///
+    /// See the example on [`KernelTerm`].
     fn hess_cross(
         &self,
         _dist: MatRef<'_, T>,
@@ -321,8 +345,7 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         Err(GprError::CoordGradientUnsupported)
     }
 
-    /// Writes `∂k/∂(d²)`, the derivative of the kernel with respect to the
-    /// squared distance, into `out` (same shape as `dist`).
+    /// Writes `∂k/∂(d²)`, the derivative of the kernel with respect to the squared distance, into `out` (same shape as `dist`).
     ///
     /// With this and [`Self::grad_wrt_sq_dist_theta`] and
     /// [`Self::hess_wrt_sq_dist`], `Sgpr<FreeInducing>` differentiates the
@@ -333,27 +356,35 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ///
     /// Returns [`GprError::CoordGradientUnsupported`] when this leaf has no
     /// such derivative, or the same shape errors as [`Self::apply_cross`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn grad_wrt_sq_dist(&self, _dist: MatRef<'_, T>, _out: MatMut<'_, T>) -> Result<(), GprError> {
         Err(GprError::CoordGradientUnsupported)
     }
 
-    /// Writes `∂²k/∂(d²)²` into `out`. The default is
-    /// [`GprError::CoordGradientUnsupported`].
+    /// Writes `∂²k/∂(d²)²` into `out`.
+    ///
+    /// The default is [`GprError::CoordGradientUnsupported`].
     ///
     /// # Errors
     ///
     /// Same as [`Self::grad_wrt_sq_dist`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn hess_wrt_sq_dist(&self, _dist: MatRef<'_, T>, _out: MatMut<'_, T>) -> Result<(), GprError> {
         Err(GprError::CoordGradientUnsupported)
     }
 
-    /// Writes `∂²k/∂θ_{param_idx} ∂(d²)` into `out`. The default is
-    /// [`GprError::CoordGradientUnsupported`].
+    /// Writes `∂²k/∂θ_{param_idx} ∂(d²)` into `out`.
+    ///
+    /// The default is [`GprError::CoordGradientUnsupported`].
     ///
     /// # Errors
     ///
     /// Same as [`Self::grad_wrt_sq_dist`], plus [`GprError::IndexOutOfRange`]
     /// if `param_idx` is out of range.
+    ///
+    /// See the example on [`KernelTerm`].
     fn grad_wrt_sq_dist_theta(
         &self,
         _dist: MatRef<'_, T>,
@@ -363,22 +394,32 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         Err(GprError::CoordGradientUnsupported)
     }
 
-    /// Clones this leaf into a new box. Used by [`super::KernelSpec::clone`].
+    /// Clones this leaf into a new box.
+    ///
+    /// Used by [`super::KernelSpec::clone`].
+    ///
+    /// See the example on [`KernelTerm`].
     fn clone_box(&self) -> Box<dyn KernelTerm<T>>;
 
-    /// Stable registry key for persist. Must not start with `gprx.`.
+    /// Returns the stable registry key for persist.
+    ///
+    /// Must not start with `gprx.`.
     ///
     /// Built-in leaves do not use this. The default empty string is rejected
     /// when saving a [`super::KernelSpec::Custom`] leaf.
+    ///
+    /// See the example on [`KernelTerm`].
     fn persist_id(&self) -> &'static str {
         ""
     }
 
-    /// JSON state paired with [`Self::persist_id`].
+    /// Returns the JSON state paired with [`Self::persist_id`].
     ///
     /// # Errors
     ///
     /// Returns [`GprError::PersistFailed`] when this leaf has no persist form.
+    ///
+    /// See the example on [`KernelTerm`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -420,12 +461,12 @@ where
     }
 }
 
-/// Wrapper stored as [`super::KernelSpec::Custom`] / [`super::CompiledKernel::Custom`].
+/// Represents the wrapper stored as [`super::KernelSpec::Custom`] / [`super::CompiledKernel::Custom`].
 ///
 /// The leaf implements the same operations at `f32` and `f64`. Cloning copies
 /// that leaf. [`PartialEq`] compares the leaf type and log-`θ` bits.
 ///
-/// See [`KernelTerm`] for construction.
+/// See the example on [`KernelTerm`].
 pub struct CustomKernel<T: KernelScalar = f64> {
     inner: Box<dyn DualLeaf>,
     _scalar: PhantomData<fn() -> T>,
@@ -435,6 +476,8 @@ impl CustomKernel<f64> {
     /// Boxes a user leaf that implements the same operations at `f32` and `f64`.
     ///
     /// One generic `impl<T: KernelScalar> KernelTerm<T>` meets this bound.
+    ///
+    /// See the example on [`CustomKernel`].
     pub fn new<K>(term: K) -> Self
     where
         K: KernelTerm<f64> + KernelTerm<f32> + Clone + Debug + Send + Sync + 'static,

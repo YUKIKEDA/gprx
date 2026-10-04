@@ -13,7 +13,7 @@ use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
-/// Isotropic rational quadratic: `k = (1 + ‖x-x'‖² / (2αℓ²))^(-α)`.
+/// Evaluates the isotropic rational quadratic `k = (1 + ‖x-x'‖² / (2αℓ²))^(-α)`.
 ///
 /// Optimizer parameters are `θ = [log(ℓ), log(α)]`. Amplitude is not stored
 /// here; compose with [`super::ConstantKernel`]. When every ARD lengthscale
@@ -45,6 +45,8 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if either value is not
     /// finite or not strictly positive.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn new(lengthscale: f64, alpha: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         validate_positive_finite(alpha, "alpha")?;
@@ -60,6 +62,8 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if a `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn from_log(log_lengthscale: f64, log_alpha: f64) -> Result<Self, GprError> {
         Ok(Self {
             lengthscale: BoundedParam::default_positive(
@@ -72,31 +76,43 @@ impl RationalQuadraticKernel {
     }
 
     /// Returns `ℓ = exp(θ_0)`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn lengthscale(&self) -> f64 {
         self.lengthscale.value()
     }
 
     /// Returns `θ_0 = log(ℓ)`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn log_lengthscale(&self) -> f64 {
         self.lengthscale.ln()
     }
 
     /// Returns `α = exp(θ_1)`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn alpha(&self) -> f64 {
         self.alpha.value()
     }
 
     /// Returns `θ_1 = log(α)`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn log_alpha(&self) -> f64 {
         self.alpha.ln()
     }
 
     /// Returns the open interval on `ℓ`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn lengthscale_bounds(&self) -> Interval {
         self.lengthscale.interval()
     }
 
     /// Returns the open interval on `α`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn alpha_bounds(&self) -> Interval {
         self.alpha.interval()
     }
@@ -107,6 +123,8 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`crate::IntervalError`] if a current value is not strictly
     /// inside the matching interval.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn with_bounds(
         self,
         lengthscale: Interval,
@@ -119,6 +137,8 @@ impl RationalQuadraticKernel {
     }
 
     /// Returns the number of optimizer parameters (always 2).
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn num_params(&self) -> usize {
         2
     }
@@ -128,6 +148,8 @@ impl RationalQuadraticKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 2.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         expect_two_params(out.len())?;
         out[0] = self.lengthscale.ln();
@@ -135,12 +157,16 @@ impl RationalQuadraticKernel {
         Ok(())
     }
 
-    /// Replaces `[log(ℓ), log(α)]`. Previous values are kept on error.
+    /// Replaces `[log(ℓ), log(α)]`.
+    ///
+    /// Previous values are kept on error.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 2,
     /// or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         expect_two_params(params.len())?;
         let ell = validate_log_lengthscale(params[0])?.exp();
@@ -161,6 +187,8 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -188,6 +216,8 @@ impl RationalQuadraticKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -199,16 +229,22 @@ impl RationalQuadraticKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
 
-    /// Writes `∂K/∂θ` into `d_k`. Index 0 is `log(ℓ)`, index 1 is `log(α)`.
+    /// Writes `∂K/∂θ` into `d_k`.
+    ///
+    /// Index 0 is `log(ℓ)`, index 1 is `log(α)`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0 or
     /// 1, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -320,12 +356,16 @@ impl RationalQuadraticKernel {
         })
     }
 
-    /// Writes `∂²K/∂θ_i ∂θ_j`. Index 0 is `log(ℓ)`, index 1 is `log(α)`.
+    /// Writes `∂²K/∂θ_i ∂θ_j`.
+    ///
+    /// Index 0 is `log(ℓ)`, index 1 is `log(α)`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RationalQuadraticKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,

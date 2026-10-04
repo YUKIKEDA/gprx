@@ -1,4 +1,4 @@
-//! Limited-memory BFGS via argmin.
+//! Searches hyperparameters with limited-memory BFGS.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -15,7 +15,9 @@ use super::adapter::{
 use super::logit::{log_theta_to_z, sample_log_uniform_z};
 use super::{OptResult, Optimizer, Restarts};
 
-/// Limited-memory BFGS via argmin.
+/// Searches hyperparameters with limited-memory BFGS.
+///
+/// See the example on [`Self::new`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lbfgs {
     max_iterations: u64,
@@ -39,8 +41,7 @@ impl Default for Lbfgs {
 }
 
 impl Lbfgs {
-    /// Builds L-BFGS with 100 iterations, gradient tolerance `sqrt(ε)`, and
-    /// history 10.
+    /// Builds L-BFGS with 100 iterations, gradient tolerance `sqrt(ε)`, and history 10.
     ///
     /// # Examples
     ///
@@ -61,18 +62,22 @@ impl Lbfgs {
         Self::default()
     }
 
-    /// Sets the iteration cap passed to argmin (default 100).
+    /// Sets the iteration cap (default 100).
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_max_iterations(mut self, max_iterations: u64) -> Self {
         self.max_iterations = max_iterations;
         self
     }
 
-    /// Sets the gradient-norm tolerance (`with_tolerance_grad`, default `sqrt(ε)`).
+    /// Sets the gradient-norm tolerance (default `sqrt(ε)`).
     ///
     /// # Errors
     ///
     /// Returns [`GprError::InvalidConfig`] if `tolerance` is not finite
     /// or is negative.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_tolerance(mut self, tolerance: f64) -> Result<Self, GprError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
             return Err(GprError::InvalidConfig {
@@ -84,6 +89,8 @@ impl Lbfgs {
     }
 
     /// Sets the L-BFGS history size `m` (default 10).
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_history_size(mut self, history_size: NonZeroUsize) -> Self {
         self.history_size = history_size;
         self
@@ -93,6 +100,8 @@ impl Lbfgs {
     ///
     /// The first start is the model `θ`. Failed extra starts are discarded.
     /// The default trainer has no restarts and no seed.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_restarts(mut self, n: NonZeroU32, seed: u64) -> Self {
         self.restarts = Some(Restarts { n, seed });
         self

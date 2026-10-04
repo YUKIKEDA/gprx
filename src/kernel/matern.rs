@@ -10,22 +10,32 @@ use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
-/// Smoothness `ν` for the closed-form Matérn kernels in Phase 1a.
+/// Selects the closed-form Matérn smoothness `ν` (`1/2`, `3/2`, or `5/2`).
 ///
 /// `ν` is not an optimizer parameter. Amplitude is not stored on the leaf;
 /// compose with [`super::ConstantKernel`] for a signal variance.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::MaternNu;
+///
+/// assert_eq!(MaternNu::ThreeHalves.value(), 1.5);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaternNu {
-    /// `ν = 1/2` (exponential).
+    /// Marks `ν = 1/2` (exponential).
     Half,
-    /// `ν = 3/2`.
+    /// Marks `ν = 3/2`.
     ThreeHalves,
-    /// `ν = 5/2`.
+    /// Marks `ν = 5/2`.
     FiveHalves,
 }
 
 impl MaternNu {
     /// Returns `ν` as `f64`.
+    ///
+    /// See the example on [`MaternNu`].
     pub fn value(self) -> f64 {
         match self {
             Self::Half => 0.5,
@@ -35,7 +45,7 @@ impl MaternNu {
     }
 }
 
-/// Isotropic Matérn: `k` is a function of `r = ‖x-x'‖ / ℓ`.
+/// Evaluates the isotropic Matérn, where `k` is a function of `r = ‖x-x'‖ / ℓ`.
 ///
 /// The optimizer parameter is `θ = log(ℓ)`. `dist` is the matrix of squared
 /// Euclidean distances. When every ARD lengthscale equals this `ℓ`, values
@@ -66,6 +76,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `lengthscale` is not
     /// finite or not strictly positive.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn new(lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         Ok(Self {
@@ -80,6 +92,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn from_log_lengthscale(log_lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
         Ok(Self {
             nu,
@@ -90,21 +104,29 @@ impl MaternKernel {
     }
 
     /// Returns the smoothness `ν`.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn nu(&self) -> MaternNu {
         self.nu
     }
 
     /// Returns `ℓ = exp(θ)`.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn lengthscale(&self) -> f64 {
         self.lengthscale.value()
     }
 
     /// Returns `θ = log(ℓ)`.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn log_lengthscale(&self) -> f64 {
         self.lengthscale.ln()
     }
 
     /// Returns the open interval on `ℓ`.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn bounds(&self) -> Interval {
         self.lengthscale.interval()
     }
@@ -115,6 +137,8 @@ impl MaternKernel {
     ///
     /// Returns [`crate::IntervalError`] if the current `ℓ` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         Ok(Self {
             nu: self.nu,
@@ -123,6 +147,8 @@ impl MaternKernel {
     }
 
     /// Returns the number of optimizer parameters (always 1).
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn num_params(&self) -> usize {
         1
     }
@@ -132,18 +158,24 @@ impl MaternKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "Matern parameter")?;
         out[0] = self.lengthscale.ln();
         Ok(())
     }
 
-    /// Replaces `θ` from a length-1 slice. `ν` is unchanged.
+    /// Replaces `θ` from a length-1 slice.
+    ///
+    /// `ν` is unchanged.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "Matern parameter")?;
         let log_lengthscale = validate_log_lengthscale(params[0])?;
@@ -160,6 +192,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -186,6 +220,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -205,6 +241,8 @@ impl MaternKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
@@ -217,6 +255,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -296,6 +336,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -347,6 +389,8 @@ impl MaternKernel {
     ///
     /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is `1/2`,
     /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
+    ///
+    /// See the example on [`MaternKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,

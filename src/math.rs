@@ -1,8 +1,8 @@
-//! Kernel `exp` for [`Accurate`] and [`FastApprox`].
+//! Defines kernel `exp` for [`Accurate`] and [`FastApprox`].
 //!
-//! [`Accurate`] is `f64::exp` / `f32::exp` / `wide::exp`. [`FastApprox`]
-//! evaluates one Taylor polynomial in the storage scalar. Hyperparameter
-//! `exp(θ)` does not use this module.
+//! [`Accurate`] is `f64::exp` / `f32::exp` / SIMD `exp`. [`FastApprox`] evaluates one
+//! Taylor polynomial in the storage scalar. Hyperparameter `exp(θ)` does not use this
+//! module.
 
 use wide::{CmpEq, CmpGt, CmpLe, CmpLt, f64x4, i64x4};
 
@@ -14,7 +14,9 @@ pub struct ExpJet<T> {
     pub d2: T,
 }
 
-/// Exact libm / SIMD `exp`. The omitted math-mode parameter.
+/// Uses the exact language `exp` and SIMD `exp`.
+///
+/// Callers select this mode by omitting an explicit math parameter.
 ///
 /// # Examples
 ///
@@ -26,7 +28,7 @@ pub struct ExpJet<T> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Accurate;
 
-/// Polynomial `exp` for kernel evaluation, including `fit`.
+/// Represents the polynomial `exp` for kernel evaluation, including `fit`.
 ///
 /// Coefficients are the degree-7 Taylor terms of `exp` after range reduction.
 /// f64 nonzero values stay within a relative `2^{-23}` of `f64::exp`. f32
@@ -43,7 +45,7 @@ pub struct Accurate;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FastApprox;
 
-/// Kernel `exp` mode: [`Accurate`] or [`FastApprox`].
+/// Represents the kernel `exp` mode: [`Accurate`] or [`FastApprox`].
 ///
 /// This is the `M` parameter of the [`crate::kernel::CompiledKernel`]
 /// evaluators. Models take the runtime [`crate::KernelExp`] instead
@@ -72,7 +74,7 @@ impl KernelMath for FastApprox {}
 /// `pub` in a private module: nameable only inside the crate, so
 /// [`KernelMath`] stays sealed.
 pub trait MathOps: Copy + Send + Sync + 'static {
-    /// `true` keeps the libm `exp` algebra. `false` differentiates the polynomial.
+    /// `true` keeps the language `exp` algebra. `false` differentiates the polynomial.
     const ACCURATE: bool;
 
     /// `exp(x)` in the compute scalar.
@@ -174,7 +176,7 @@ const LN2_HI: f64 = 6.931_471_803_691_238_164_90e-1;
 #[allow(clippy::excessive_precision)]
 const LN2_LO: f64 = 1.908_214_929_270_587_700_02e-10;
 
-/// `ln(2)` split used by fdlibm `expf`, exact `f32` values.
+/// Names the `ln(2)` split of the `f32` exponential, stored as exact `f32` values.
 const LN2_HI_F32: f32 = f32::from_bits(0x3f31_7180);
 const LN2_LO_F32: f32 = f32::from_bits(0x3717_f7d1);
 const LOG2_E_F32: f32 = f32::from_bits(0x3fb8_aa3b);

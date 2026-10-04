@@ -14,8 +14,7 @@ use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 use wide::f64x4;
 
-/// ARD rational quadratic: `k = (1 + r² / (2α))^(-α)` with
-/// `r² = Σ_d (x_d-x'_d)² / ℓ_d²`.
+/// Evaluates the ARD rational quadratic `k = (1 + r² / (2α))^(-α)` with `r² = Σ_d (x_d-x'_d)² / ℓ_d²`.
 ///
 /// Optimizer parameters are `[log(ℓ_1), …, log(ℓ_d), log(α)]` via
 /// [`ArdLengthscales`] plus a scalar `α`. When every `ℓ_d` equals a scalar `ℓ`
@@ -50,6 +49,8 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// value is invalid.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn new(lengthscales: &[f64], alpha: f64) -> Result<Self, GprError> {
         validate_positive_finite(alpha, "alpha")?;
         Ok(Self {
@@ -64,6 +65,8 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// `θ` is invalid.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn from_log_lengthscales(
         log_lengthscales: &[f64],
         log_alpha: f64,
@@ -77,16 +80,22 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Returns `α = exp(θ_α)`.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn alpha(&self) -> f64 {
         self.alpha.value()
     }
 
     /// Returns `θ_α = log(α)`.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn log_alpha(&self) -> f64 {
         self.alpha.ln()
     }
 
     /// Returns the open interval on `α`.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn alpha_bounds(&self) -> Interval {
         self.alpha.interval()
     }
@@ -97,6 +106,8 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`crate::IntervalError`] if a current value is not strictly
     /// inside the matching interval.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn with_bounds(
         self,
         lengthscale: Interval,
@@ -109,6 +120,8 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Returns the shared ARD lengthscale mouth.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn lengthscales(&self) -> &ArdLengthscales {
         &self.lengthscales
     }
@@ -125,16 +138,22 @@ impl RationalQuadraticArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.lengthscales.lengthscale(dim)
     }
 
     /// Returns `θ_d = log(ℓ_d)`.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn log_lengthscales(&self) -> &[f64] {
         self.lengthscales.log_lengthscales()
     }
 
     /// Returns the number of optimizer parameters (`d + 1`).
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn num_params(&self) -> usize {
         self.lengthscales.num_params() + 1
     }
@@ -144,6 +163,8 @@ impl RationalQuadraticArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if out.len() != d + 1 {
@@ -160,12 +181,16 @@ impl RationalQuadraticArdKernel {
         Ok(())
     }
 
-    /// Replaces `[log(ℓ_d)…, log(α)]`. Previous values are kept on error.
+    /// Replaces `[log(ℓ_d)…, log(α)]`.
+    ///
+    /// Previous values are kept on error.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let d = self.lengthscales.num_params();
         if params.len() != d + 1 {
@@ -194,6 +219,8 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -215,6 +242,8 @@ impl RationalQuadraticArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -231,17 +260,22 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
 
-    /// Writes `∂K/∂θ` into `d_k`. Indices `0..d` are `log(ℓ_d)`; index `d` is
-    /// `log(α)`.
+    /// Writes `∂K/∂θ` into `d_k`.
+    ///
+    /// Indices `0..d` are `log(ℓ_d)`; index `d` is `log(α)`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -293,13 +327,16 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    /// Writes `∂²K/∂θ_i ∂θ_j`. Indices `0..d` are `log(ℓ_d)`; index `d` is
-    /// `log(α)`.
+    /// Writes `∂²K/∂θ_i ∂θ_j`.
+    ///
+    /// Indices `0..d` are `log(ℓ_d)`; index `d` is `log(α)`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RationalQuadraticArdKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
