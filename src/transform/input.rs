@@ -5,7 +5,11 @@ use std::any::Any;
 use super::population_std;
 use crate::error::GprError;
 
-/// Unfitted input map. [`Self::fit`] consumes it and returns a [`Transform`].
+/// Represents the unfitted input map.
+///
+/// [`Self::fit`] consumes it and returns a [`Transform`].
+///
+/// See the example on [`StandardizeInput`].
 pub trait UnfittedTransform: Send + Sync {
     /// Estimates transform parameters from training features.
     ///
@@ -13,6 +17,8 @@ pub trait UnfittedTransform: Send + Sync {
     ///
     /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
     /// a non-finite value.
+    ///
+    /// See the example on [`UnfittedTransform`].
     fn fit(
         self: Box<Self>,
         x: &[f64],
@@ -20,24 +26,36 @@ pub trait UnfittedTransform: Send + Sync {
         n_cols: usize,
     ) -> Result<Box<dyn Transform>, GprError>;
 
-    /// Clones this map into a new box. Used by [`crate::Gpr`] clone.
+    /// Clones this map into a new box.
+    ///
+    /// Used by [`crate::Gpr`] clone.
+    ///
+    /// See the example on [`UnfittedTransform`].
     fn clone_box(&self) -> Box<dyn UnfittedTransform>;
 
-    /// Downcast handle used when encoding a built-in map for persist.
+    /// Returns the downcast handle used when encoding a built-in map for persist.
+    ///
+    /// See the example on [`UnfittedTransform`].
     fn as_any(&self) -> &dyn Any;
 
-    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    /// Returns the registry key for a caller-defined map.
+    ///
+    /// Built-ins return [`None`].
     ///
     /// The id must not start with `gprx.`.
+    ///
+    /// See the example on [`UnfittedTransform`].
     fn persist_id(&self) -> Option<&'static str> {
         None
     }
 
-    /// JSON state paired with [`Self::persist_id`].
+    /// Returns the JSON state paired with [`Self::persist_id`].
     ///
     /// # Errors
     ///
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    ///
+    /// See the example on [`UnfittedTransform`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -46,9 +64,13 @@ pub trait UnfittedTransform: Send + Sync {
     }
 }
 
-/// Fitted input map. [`Self::apply`] exists only here.
+/// Represents the fitted input map.
 ///
-/// `x` is column-major: column `j` occupies `x[j * n_rows .. (j + 1) * n_rows]`.
+/// [`Self::apply`] exists only here.
+///
+/// `x` is column-major: column `j` occupies `x[j * n_rows.. (j + 1) * n_rows]`.
+///
+/// See the example on [`StandardizeInput`].
 pub trait Transform: Send + Sync {
     /// Applies the fitted map to a feature matrix in place.
     ///
@@ -56,11 +78,11 @@ pub trait Transform: Send + Sync {
     ///
     /// Returns [`GprError::DimensionMismatch`] when `n_cols` differs from the
     /// fit, or [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`Transform`].
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 
-    /// Maps transformed features back to the original coordinates in place,
-    /// so that `inverse_apply` after [`Self::apply`] returns the input up to
-    /// rounding.
+    /// Maps transformed features back to the original coordinates in place, so that `inverse_apply` after [`Self::apply`] returns the input up to rounding.
     ///
     /// The sparse models report inducing points that the optimizer moved in
     /// transformed coordinates ([`crate::FreeInducing`]) through this map.
@@ -68,24 +90,38 @@ pub trait Transform: Send + Sync {
     /// # Errors
     ///
     /// Same as [`Self::apply`].
+    ///
+    /// See the example on [`Transform`].
     fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 
-    /// Clones this map into a new box. Used by [`crate::FittedGpr`] clone.
+    /// Clones this map into a new box.
+    ///
+    /// Used by [`crate::FittedGpr`] clone.
+    ///
+    /// See the example on [`Transform`].
     fn clone_box(&self) -> Box<dyn Transform>;
 
-    /// Downcast handle used when encoding a built-in map for persist.
+    /// Returns the downcast handle used when encoding a built-in map for persist.
+    ///
+    /// See the example on [`Transform`].
     fn as_any(&self) -> &dyn Any;
 
-    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    /// Returns the registry key for a caller-defined map.
+    ///
+    /// Built-ins return [`None`].
+    ///
+    /// See the example on [`Transform`].
     fn persist_id(&self) -> Option<&'static str> {
         None
     }
 
-    /// JSON state paired with [`Self::persist_id`].
+    /// Returns the JSON state paired with [`Self::persist_id`].
     ///
     /// # Errors
     ///
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    ///
+    /// See the example on [`Transform`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -127,6 +163,8 @@ impl IdentityInput {
     ///
     /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
     /// a non-finite value.
+    ///
+    /// See the example on [`IdentityInput`].
     pub fn fit(self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<Self, GprError> {
         require_pack(x, n_rows, n_cols)?;
         crate::data::require_finite(x)?;
@@ -193,8 +231,9 @@ impl Transform for IdentityInput {
     }
 }
 
-/// Unfitted per-column center-and-scale map. [`Self::fit`] returns
-/// [`FittedStandardizeInput`].
+/// Represents the unfitted per-column center-and-scale map.
+///
+/// [`Self::fit`] returns [`FittedStandardizeInput`].
 ///
 /// # Examples
 ///
@@ -214,6 +253,8 @@ pub struct StandardizeInput;
 
 impl StandardizeInput {
     /// Returns an unfitted transform.
+    ///
+    /// See the example on [`StandardizeInput`].
     pub fn new() -> Self {
         Self
     }
@@ -226,6 +267,8 @@ impl StandardizeInput {
     ///
     /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
     /// a non-finite value.
+    ///
+    /// See the example on [`StandardizeInput`].
     pub fn fit(
         self,
         x: &[f64],
@@ -266,7 +309,9 @@ impl UnfittedTransform for StandardizeInput {
     }
 }
 
-/// Fitted per-column center-and-scale map.
+/// Represents the fitted per-column center-and-scale map.
+///
+/// See the example on [`StandardizeInput`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FittedStandardizeInput {
     mean: Vec<f64>,
@@ -275,11 +320,15 @@ pub struct FittedStandardizeInput {
 
 impl FittedStandardizeInput {
     /// Returns per-column training means.
+    ///
+    /// See the example on [`FittedStandardizeInput`].
     pub fn mean(&self) -> &[f64] {
         &self.mean
     }
 
     /// Returns per-column training scales.
+    ///
+    /// See the example on [`FittedStandardizeInput`].
     pub fn std(&self) -> &[f64] {
         &self.std
     }
@@ -336,7 +385,7 @@ impl Transform for FittedStandardizeInput {
     }
 }
 
-/// Unfitted per-column min-max map onto a closed interval, default `[0, 1]`.
+/// Represents the unfitted per-column min-max map onto a closed interval, default `[0, 1]`.
 ///
 /// [`Self::fit`] returns [`FittedMinMaxInput`].
 ///
@@ -362,6 +411,8 @@ pub struct MinMaxInput {
 
 impl MinMaxInput {
     /// Returns an unfitted map onto `[0, 1]`.
+    ///
+    /// See the example on [`MinMaxInput`].
     pub fn new() -> Self {
         Self {
             range_lo: 0.0,
@@ -375,6 +426,8 @@ impl MinMaxInput {
     ///
     /// Returns [`GprError::InvalidConfig`] if `lo` or `hi` is not
     /// finite, or if `hi <= lo`.
+    ///
+    /// See the example on [`MinMaxInput`].
     pub fn with_feature_range(lo: f64, hi: f64) -> Result<Self, GprError> {
         require_feature_range(lo, hi)?;
         Ok(Self {
@@ -384,6 +437,8 @@ impl MinMaxInput {
     }
 
     /// Returns the output interval `[lo, hi]`.
+    ///
+    /// See the example on [`MinMaxInput`].
     pub fn feature_range(&self) -> (f64, f64) {
         (self.range_lo, self.range_hi)
     }
@@ -394,6 +449,8 @@ impl MinMaxInput {
     ///
     /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
     /// a non-finite value.
+    ///
+    /// See the example on [`MinMaxInput`].
     pub fn fit(
         self,
         x: &[f64],
@@ -454,10 +511,12 @@ impl UnfittedTransform for MinMaxInput {
     }
 }
 
-/// Fitted per-column min-max map.
+/// Represents the fitted per-column min-max map.
 ///
 /// `x' = lo + (hi - lo) * (x - min) / (max - min)`. A constant column uses
 /// denominator `1`, so every entry maps to `lo`.
+///
+/// See the example on [`MinMaxInput`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FittedMinMaxInput {
     data_min: Vec<f64>,
@@ -468,16 +527,22 @@ pub struct FittedMinMaxInput {
 
 impl FittedMinMaxInput {
     /// Returns the output interval `[lo, hi]`.
+    ///
+    /// See the example on [`FittedMinMaxInput`].
     pub fn feature_range(&self) -> (f64, f64) {
         (self.range_lo, self.range_hi)
     }
 
     /// Returns per-column training minima.
+    ///
+    /// See the example on [`FittedMinMaxInput`].
     pub fn min(&self) -> &[f64] {
         &self.data_min
     }
 
     /// Returns per-column training maxima.
+    ///
+    /// See the example on [`FittedMinMaxInput`].
     pub fn max(&self) -> &[f64] {
         &self.data_max
     }

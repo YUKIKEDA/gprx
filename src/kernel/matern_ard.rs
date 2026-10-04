@@ -12,7 +12,7 @@ use faer::{MatMut, MatRef};
 use std::marker::PhantomData;
 use wide::{CmpGt, f64x4};
 
-/// ARD Matérn: `k` is a function of `r = √(Σ_d (x_d-x'_d)² / ℓ_d²)`.
+/// Evaluates the ARD Matérn, where `k` is a function of `r = √(Σ_d (x_d-x'_d)² / ℓ_d²)`.
 ///
 /// Optimizer parameters are `θ_d = log(ℓ_d)` via [`ArdLengthscales`]. `ν` is
 /// not an optimizer parameter. When every `ℓ_d` equals a scalar `ℓ`, values
@@ -47,6 +47,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// lengthscale is invalid.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn new(lengthscales: &[f64], nu: MaternNu) -> Result<Self, GprError> {
         Ok(Self {
             nu,
@@ -60,6 +62,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// `θ_d` is invalid.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn from_log_lengthscales(log_lengthscales: &[f64], nu: MaternNu) -> Result<Self, GprError> {
         Ok(Self {
             nu,
@@ -68,11 +72,15 @@ impl MaternArdKernel {
     }
 
     /// Returns the smoothness `ν`.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn nu(&self) -> MaternNu {
         self.nu
     }
 
     /// Returns the shared ARD lengthscale mouth.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn lengthscales(&self) -> &ArdLengthscales {
         &self.lengthscales
     }
@@ -86,11 +94,15 @@ impl MaternArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.lengthscales.lengthscale(dim)
     }
 
     /// Returns `θ_d = log(ℓ_d)`.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn log_lengthscales(&self) -> &[f64] {
         self.lengthscales.log_lengthscales()
     }
@@ -101,6 +113,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`crate::IntervalError`] if any current `ℓ_d` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn with_bounds(
         self,
         interval: crate::param::Interval,
@@ -112,6 +126,8 @@ impl MaternArdKernel {
     }
 
     /// Returns the number of optimizer parameters (`d`).
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn num_params(&self) -> usize {
         self.lengthscales.num_params()
     }
@@ -121,17 +137,22 @@ impl MaternArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.lengthscales.get_params(out)
     }
 
-    /// Replaces `θ_d` from `params`. The previous values and `ν` are kept on
-    /// error.
+    /// Replaces `θ_d` from `params`.
+    ///
+    /// The previous values and `ν` are kept on error.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.lengthscales.set_params(params)
     }
@@ -145,6 +166,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -184,6 +207,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -218,6 +243,8 @@ impl MaternArdKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
@@ -230,6 +257,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -324,6 +353,8 @@ impl MaternArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`MaternArdKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,

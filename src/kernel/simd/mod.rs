@@ -1,5 +1,4 @@
-//! The `f64x4` lanes ([`wide::f64x4`]) of the kernel leaves, and the one
-//! set of lane helpers they share.
+//! Defines the four-wide `f64` SIMD lanes of the kernel leaves, and the lane helpers they share.
 //!
 //! - [`stationary`]: the isotropic RBF, Periodic, and rational quadratic
 //!   leaves from cached squared distances (square, every `uplo`, and the
@@ -20,7 +19,7 @@
 //! stride is not 1 makes it report that it did not run (`Ok(false)` /
 //! `false` / `Ok(None)`), and the caller runs its scalar loop, which also
 //! names the error of a value that is not finite. `wide`'s `exp`, `ln`,
-//! `sin`, and `cos` may differ from libm by a few ULP.
+//! `sin`, and `cos` may differ from the language math library by a few ULP.
 
 pub(crate) mod ard;
 pub(crate) mod dist;

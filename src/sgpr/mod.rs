@@ -18,6 +18,8 @@ pub use online::{InducingId, OnlineSgpr};
 /// Keeps inducing coordinates fixed during [`Sgpr::fit`].
 ///
 /// `Z` is an argument of `fit` / `factor` and is not a parameter.
+///
+/// See the example on [`Sgpr`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FixedInducing;
 
@@ -25,6 +27,8 @@ pub struct FixedInducing;
 ///
 /// Switch with [`Sgpr::with_inducing`]. Params append column-major `Z`
 /// after kernel and likelihood `θ`.
+///
+/// See the example on [`Sgpr`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FreeInducing;
 

@@ -15,13 +15,12 @@ use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
-/// Isotropic RBF: `k = exp( -‖x-x'‖² / (2ℓ²) )`.
+/// Evaluates the isotropic RBF `k = exp( -‖x-x'‖² / (2ℓ²) )`.
 ///
-/// The optimizer parameter is `θ = log(ℓ)`. Amplitude is not stored here;
-/// compose with [`super::ConstantKernel`] when a signal variance is needed.
-/// `dist` is the matrix of squared Euclidean distances. Column-major views
-/// with unit row stride use `wide::f64x4` for [`Self::apply`],
-/// [`Self::apply_cross`], and [`Self::grad`].
+/// The optimizer parameter is `θ = log(ℓ)`. Amplitude is not stored here; compose with
+/// [`super::ConstantKernel`] when a signal variance is needed. `dist` is the matrix of
+/// squared Euclidean distances. Column-major views with unit row stride use four-wide
+/// `f64` SIMD for [`Self::apply`], [`Self::apply_cross`], and [`Self::grad`].
 ///
 /// # Examples
 ///
@@ -46,6 +45,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `lengthscale` is not
     /// finite or not strictly positive.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn new(lengthscale: f64) -> Result<Self, GprError> {
         validate_lengthscale(lengthscale)?;
         Ok(Self {
@@ -59,6 +60,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn from_log_lengthscale(log_lengthscale: f64) -> Result<Self, GprError> {
         let log_lengthscale = validate_log_lengthscale(log_lengthscale)?;
         Ok(Self {
@@ -67,16 +70,22 @@ impl RbfKernel {
     }
 
     /// Returns `ℓ = exp(θ)`.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn lengthscale(&self) -> f64 {
         self.lengthscale.value()
     }
 
     /// Returns `θ = log(ℓ)`.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn log_lengthscale(&self) -> f64 {
         self.lengthscale.ln()
     }
 
     /// Returns the open interval on `ℓ`.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn bounds(&self) -> Interval {
         self.lengthscale.interval()
     }
@@ -87,6 +96,8 @@ impl RbfKernel {
     ///
     /// Returns [`crate::IntervalError`] if the current `ℓ` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         Ok(Self {
             lengthscale: self.lengthscale.with_interval(interval)?,
@@ -94,6 +105,8 @@ impl RbfKernel {
     }
 
     /// Returns the number of optimizer parameters (always 1).
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn num_params(&self) -> usize {
         1
     }
@@ -103,6 +116,8 @@ impl RbfKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "RBF parameter")?;
         out[0] = self.lengthscale.ln();
@@ -115,6 +130,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "RBF parameter")?;
         let log_lengthscale = validate_log_lengthscale(params[0])?;
@@ -131,6 +148,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched, or if `dist` contains a non-finite value.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -161,6 +180,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
     /// `dist` contains a non-finite value.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -182,6 +203,8 @@ impl RbfKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
@@ -194,6 +217,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -229,6 +254,8 @@ impl RbfKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -317,6 +344,8 @@ impl RbfKernel {
     /// the views are empty or `dim` is out of range, [`GprError::NonFiniteInput`]
     /// when a coordinate is not finite, or [`GprError::ShapeMismatch`]
     /// when `d_k` is the wrong shape.
+    ///
+    /// See the example on [`RbfKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,

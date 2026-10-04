@@ -54,7 +54,9 @@ impl<'a, T> MixedKernelViews<'a, T> {
     }
 }
 
-/// Compiled kernel. Built-ins are enum arms; Sum/Product are flattened lists.
+/// Represents the compiled kernel.
+///
+/// Built-ins are enum arms; Sum/Product are flattened lists.
 ///
 /// [`Self::apply`] and [`Self::grad`] take a scratch buffer of the same size
 /// as `out`. A lone RBF does not write it. Nested rest terms that are
@@ -78,31 +80,31 @@ impl<'a, T> MixedKernelViews<'a, T> {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum CompiledKernel<T: KernelScalar = f64> {
-    /// Isotropic RBF.
+    /// Marks an isotropic RBF.
     Rbf(RbfKernel),
-    /// ARD RBF (`θ_d = log(ℓ_d)`).
+    /// Marks an ARD RBF (`θ_d = log(ℓ_d)`).
     RbfArd(RbfArdKernel),
-    /// Isotropic Matérn (`ν = 1/2`, `3/2`, or `5/2`).
+    /// Marks an isotropic Matérn (`ν = 1/2`, `3/2`, or `5/2`).
     Matern(MaternKernel),
-    /// ARD Matérn (`θ_d = log(ℓ_d)`).
+    /// Marks an ARD Matérn (`θ_d = log(ℓ_d)`).
     MaternArd(MaternArdKernel),
-    /// Periodic (exp-sine-squared).
+    /// Marks a periodic (exp-sine-squared).
     Periodic(PeriodicKernel),
-    /// Isotropic rational quadratic (`θ = [log(ℓ), log(α)]`).
+    /// Marks an isotropic rational quadratic (`θ = [log(ℓ), log(α)]`).
     RationalQuadratic(RationalQuadraticKernel),
-    /// ARD rational quadratic (`θ_d = log(ℓ_d)`, then `log(α)`).
+    /// Marks an ARD rational quadratic (`θ_d = log(ℓ_d)`, then `log(α)`).
     RationalQuadraticArd(RationalQuadraticArdKernel),
-    /// Constant `k = c`.
+    /// Marks a constant `k = c`.
     Constant(ConstantKernel),
-    /// Linear `k = σ² xᵀ x'`.
+    /// Marks a linear `k = σ² xᵀ x'`.
     Linear(LinearKernel),
-    /// White nugget.
+    /// Marks a white nugget.
     White(WhiteKernel),
-    /// User-defined distance leaf ([`super::KernelTerm`]).
+    /// Marks a user-defined distance leaf ([`super::KernelTerm`]).
     Custom(CustomKernel<T>),
-    /// Flattened sum of compiled terms.
+    /// Marks a flattened sum of compiled terms.
     Sum(Vec<CompiledKernel<T>>),
-    /// Flattened Hadamard product of compiled terms.
+    /// Marks a flattened Hadamard product of compiled terms.
     Product(Vec<CompiledKernel<T>>),
 }
 
@@ -136,6 +138,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 
     /// Returns the number of flattened parameters.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn num_params(&self) -> usize {
         match self {
             Self::Rbf(leaf) => leaf.num_params(),
@@ -159,18 +163,24 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "kernel parameters")?;
         let mut offset = 0;
         self.write_params(out, &mut offset)
     }
 
-    /// Replaces flattened `θ`. All leaves are updated or none are.
+    /// Replaces flattened `θ`.
+    ///
+    /// All leaves are updated or none are.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length or a leaf rejects its slice.
+    ///
+    /// See the example on [`CompiledKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;
         let mut next = self.clone();

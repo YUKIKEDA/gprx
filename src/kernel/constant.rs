@@ -9,7 +9,7 @@ use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
-/// Constant kernel: `k = c` for every pair of points.
+/// Evaluates the constant kernel `k = c` for every pair of points.
 ///
 /// The optimizer parameter is `θ = log(c)`. Compose with a stationary leaf
 /// (for example [`super::RbfKernel`]) to set the signal variance. `dist` is
@@ -38,6 +38,8 @@ impl ConstantKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `constant` is not finite
     /// or not strictly positive.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn new(constant: f64) -> Result<Self, GprError> {
         validate_positive_finite(constant, "constant value")?;
         Ok(Self {
@@ -51,6 +53,8 @@ impl ConstantKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn from_log_constant(log_constant: f64) -> Result<Self, GprError> {
         let log_constant = validate_log_positive(log_constant, "constant value")?;
         Ok(Self {
@@ -59,16 +63,22 @@ impl ConstantKernel {
     }
 
     /// Returns `c = exp(θ)`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn constant(&self) -> f64 {
         self.constant.value()
     }
 
     /// Returns `θ = log(c)`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn log_constant(&self) -> f64 {
         self.constant.ln()
     }
 
     /// Returns the open interval on `c`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn bounds(&self) -> Interval {
         self.constant.interval()
     }
@@ -79,6 +89,8 @@ impl ConstantKernel {
     ///
     /// Returns [`crate::IntervalError`] if the current `c` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         Ok(Self {
             constant: self.constant.with_interval(interval)?,
@@ -86,6 +98,8 @@ impl ConstantKernel {
     }
 
     /// Returns the number of optimizer parameters (always 1).
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn num_params(&self) -> usize {
         1
     }
@@ -95,6 +109,8 @@ impl ConstantKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "constant parameter")?;
         out[0] = self.constant.ln();
@@ -107,6 +123,8 @@ impl ConstantKernel {
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "constant parameter")?;
         let log_constant = validate_log_positive(params[0], "constant value")?;
@@ -120,6 +138,8 @@ impl ConstantKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -135,6 +155,8 @@ impl ConstantKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if the matrices are empty or size mismatched.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -155,6 +177,8 @@ impl ConstantKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if `x` is empty or `out` is not `n×n`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn apply_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -170,6 +194,8 @@ impl ConstantKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if a matrix is empty or `out` is the wrong shape.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn apply_cross_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -187,6 +213,8 @@ impl ConstantKernel {
     }
 
     /// Writes the diagonal `k(x, x) = c` into `out`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(self.constant()));
     }
@@ -197,6 +225,8 @@ impl ConstantKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -209,11 +239,15 @@ impl ConstantKernel {
         self.write_square(d_k, uplo)
     }
 
-    /// Writes `∂K/∂θ` from coordinates. `x` is used only for shape.
+    /// Writes `∂K/∂θ` from coordinates.
+    ///
+    /// `x` is used only for shape.
     ///
     /// # Errors
     ///
     /// Same as [`Self::grad`], with `x` in place of `dist`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn grad_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -268,6 +302,8 @@ impl ConstantKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -281,11 +317,15 @@ impl ConstantKernel {
         self.write_square(d2_k, uplo)
     }
 
-    /// Writes `∂²K/∂θ²` from coordinates. `x` is used only for shape.
+    /// Writes `∂²K/∂θ²` from coordinates.
+    ///
+    /// `x` is used only for shape.
     ///
     /// # Errors
     ///
     /// Same as [`Self::hess`], with `x` in place of `dist`.
+    ///
+    /// See the example on [`ConstantKernel`].
     pub fn hess_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,

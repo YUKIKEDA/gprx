@@ -3,40 +3,50 @@
 use thiserror::Error;
 
 /// Stage at which a Cholesky factorization failed.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::CholeskyStage;
+///
+/// let stage = CholeskyStage::Predict;
+/// assert_eq!(format!("{stage:?}"), "Predict");
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum CholeskyStage {
-    /// Factorization during batch fit.
+    /// Marks a factorization during batch fit.
     Fit,
-    /// Factorization while forming a prediction.
+    /// Marks a factorization while forming a prediction.
     Predict,
-    /// Incremental insert on an online model.
+    /// Marks an incremental insert on an online model.
     OnlineInsert,
-    /// Incremental delete on an online model.
+    /// Marks an incremental delete on an online model.
     OnlineDelete,
 }
 /// The part of a save or load that failed ([`GprError::PersistFailed`]).
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::PersistErrorKind;
+///
+/// assert_eq!(PersistErrorKind::Io.to_string(), "io");
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum PersistErrorKind {
-    /// The file system: creating the directory, or reading, writing,
-    /// renaming, opening, or mapping a file.
+    /// Marks the file system: creating the directory, or reading, writing, renaming, opening, or mapping a file.
     Io,
-    /// `config.json` is not valid JSON, misses a key, or holds values that
-    /// disagree with each other (for example point ids and `n`).
+    /// `config.json` is not valid JSON, misses a key, or holds values that disagree with each other (for example point ids and `n`).
     Config,
-    /// `model.safetensors` is damaged: a missing tensor, a wrong dtype or
-    /// shape, a misaligned or out-of-range buffer, or values the model
-    /// cannot hold.
+    /// `model.safetensors` is damaged: a missing tensor, a wrong dtype or shape, a misaligned or out-of-range buffer, or values the model cannot hold.
     Tensor,
-    /// A `persist_id` is empty, uses the reserved prefix, or is registered
-    /// twice.
+    /// A `persist_id` is empty, uses the reserved prefix, or is registered twice.
     InvalidPersistId,
-    /// A custom kernel or transform has no persist form: it does not
-    /// implement `persist_id` or `persist_state`.
+    /// A custom kernel or transform has no persist form: it does not implement `persist_id` or `persist_state`.
     NotPersistable,
-    /// A saved custom kernel or transform names a `persist_id` the
-    /// [`crate::PersistRegistry`] passed to the load does not hold.
+    /// A saved custom kernel or transform names a `persist_id` the [`crate::PersistRegistry`] passed to the load does not hold.
     UnregisteredId,
     /// The directory holds another kind of model than the one being loaded.
     WrongModel,
@@ -56,7 +66,7 @@ impl std::fmt::Display for PersistErrorKind {
     }
 }
 
-/// Error type returned by gprx operations.
+/// Reports a recoverable failure from a gprx operation.
 ///
 /// Recoverable failures from user input (for example
 /// [`GprError::DimensionMismatch`]) and from the model or data (for example
@@ -88,17 +98,17 @@ pub enum GprError {
     /// Input feature dimension does not match the fitted model.
     #[error("input dimension mismatch: X.ncols()={x_dim}, expected {expected_dim}")]
     DimensionMismatch {
-        /// Number of columns in the provided `X`.
+        /// Holds the number of columns in the provided `X`.
         x_dim: usize,
-        /// Feature dimension expected by the model.
+        /// Holds the feature dimension expected by the model.
         expected_dim: usize,
     },
-    /// Too few observations for the requested operation.
+    /// Reports too few observations for the requested operation.
     #[error("insufficient data: n={n}, at least {min} points required")]
     InsufficientData {
-        /// Number of points provided.
+        /// Holds the number of points provided.
         n: usize,
-        /// Minimum number of points required.
+        /// Holds the minimum number of points required.
         min: usize,
     },
     /// An input array or matrix was empty.
@@ -125,71 +135,71 @@ pub enum GprError {
     /// A matrix that must be positive definite (or semidefinite) is not.
     #[error("matrix is not positive semidefinite")]
     NonPositiveDefiniteMatrix,
-    /// The kernel has no derivative a sparse model needs. Every built-in
-    /// kernel and every Sum / Product tree of them has all of them, except
-    /// Matérn with `ν = 1/2`, whose coordinate derivative (`FreeInducing`) is
-    /// undefined where two points coincide, as `Z ⊂ X` starts. A `Custom`
-    /// leaf has them only when it implements the corresponding `KernelTerm`
-    /// methods (`grad_cross` / `hess_cross` for `Sgpr` and `Svgp`,
-    /// `grad_wrt_sq_dist*` and `hess_wrt_sq_dist` for `FreeInducing`).
+    /// The kernel has no derivative a sparse model needs.
+    ///
+    /// Every built-in kernel and every Sum / Product tree of them has all of them, except
+    /// Matérn with `ν = 1/2`, whose coordinate derivative (`FreeInducing`) is undefined where
+    /// two points coincide, as `Z ⊂ X` starts. A `Custom` leaf has them only when it implements
+    /// the corresponding `KernelTerm` methods (`grad_cross` / `hess_cross` for `Sgpr` and
+    /// `Svgp`, `grad_wrt_sq_dist*` and `hess_wrt_sq_dist` for `FreeInducing`).
     #[error(
         "this kernel does not implement the derivative a sparse model needs \
          (Matern nu = 1/2 has no coordinate derivative for FreeInducing points; \
          a Custom leaf must implement the KernelTerm cross / squared-distance derivatives)"
     )]
     CoordGradientUnsupported,
-    /// The hyperparameter optimizer stopped without meeting its convergence test.
+    /// Marks the hyperparameter optimizer stopped without meeting its convergence test.
     #[error("optimizer did not converge after {iterations} iterations")]
     OptimizationNotConverged {
-        /// Number of optimizer iterations performed.
+        /// Holds the number of optimizer iterations performed.
         iterations: usize,
     },
     /// A kernel hyperparameter is outside its valid domain.
     #[error("invalid hyperparameter: {reason}")]
     InvalidHyperparameter {
-        /// Why the value is invalid.
+        /// Reports why the value is invalid.
         reason: String,
     },
     /// A matrix argument has the wrong number of rows or columns.
     #[error("shape mismatch: {reason}")]
     ShapeMismatch {
-        /// Which matrix and which shape was expected.
+        /// Records which matrix and which shape was expected.
         reason: String,
     },
     /// A slice argument has the wrong length.
     #[error("length mismatch: {reason}")]
     LengthMismatch {
-        /// Which slice and which length was expected.
+        /// Records which slice and which length was expected.
         reason: String,
     },
     /// A parameter, dimension, leaf, or change index is out of range.
     #[error("index out of range: {reason}")]
     IndexOutOfRange {
-        /// Which index and which range.
+        /// Records which index and which range.
         reason: String,
     },
     /// An optimizer, jitter policy, or transform setting is outside its domain.
     #[error("invalid configuration: {reason}")]
     InvalidConfig {
-        /// Which setting and why it is invalid.
+        /// Records which setting and why it is invalid.
         reason: String,
     },
     /// `n_rows × n_cols` (or another buffer size) overflows `usize`.
     #[error("size overflows usize")]
     SizeOverflow,
-    /// An [`crate::Interval`] or [`crate::BoundedParam`] could not be built.
+    /// Marks an [`crate::Interval`] or [`crate::BoundedParam`] could not be built.
     #[error(transparent)]
     InvalidInterval(#[from] crate::param::IntervalError),
     /// Observation-noise variance is outside its valid domain.
     #[error("invalid observation noise variance: {reason}")]
     InvalidNoiseVariance {
-        /// Why the value is invalid.
+        /// Reports why the value is invalid.
         reason: String,
     },
     /// The requested kernel operation is not implemented for this term.
     #[error("unsupported kernel operation: {reason}")]
     UnsupportedKernelOperation {
-        /// Why the operation is unsupported.
+        /// Reports why the operation is unsupported.
         reason: String,
     },
     /// A workspace buffer is smaller than the current problem size.
@@ -204,17 +214,17 @@ pub enum GprError {
     /// Saving or loading a fitted model failed.
     #[error("persist failed ({kind}): {reason}")]
     PersistFailed {
-        /// Which part of the save or load failed, for a caller to branch on.
+        /// Records which part of the save or load failed, for a caller to branch on.
         kind: PersistErrorKind,
-        /// Why the save or load could not finish, for a person to read.
+        /// Reports why the save or load could not finish, for a person to read.
         reason: String,
     },
     /// `config.json` `format_version` is not supported by this crate.
     #[error("unsupported persist format version {found}; this crate reads version {supported}")]
     UnsupportedPersistVersion {
-        /// Version written in the file.
+        /// Holds the version written in the file.
         found: u32,
-        /// Version this crate reads.
+        /// Holds the version this crate reads.
         supported: u32,
     },
 }

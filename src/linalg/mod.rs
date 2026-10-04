@@ -1,8 +1,8 @@
-//! Crate-private linear algebra shared by every model.
+//! Describes the crate-private linear algebra shared by every model.
 //!
-//! `f64` goes through faer's blocked, parallel routines. `f32` storage
-//! accumulates in `f64` where the model stores an `f32` factor; the choice is
-//! made per scalar by [`crate::kernel::KernelScalar`].
+//! `f64` goes through the linear-algebra backend's blocked, parallel routines. `f32`
+//! storage accumulates in `f64` where the model stores an `f32` factor; the choice is made
+//! per scalar by [`crate::kernel::KernelScalar`].
 
 mod chol;
 mod dense;

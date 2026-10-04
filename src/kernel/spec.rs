@@ -9,17 +9,32 @@ use crate::param::Interval;
 use std::ops::{Add, Mul};
 
 /// Maps a flat optimizer index to a leaf-local parameter.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::ParameterBinding;
+///
+/// let binding = ParameterBinding {
+///     index: 0,
+///     leaf_id: 1,
+///     local_index: 0,
+/// };
+/// assert_eq!(binding.leaf_id, 1);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ParameterBinding {
-    /// Index in the concatenated kernel parameter vector.
+    /// Holds the index in the concatenated kernel parameter vector.
     pub index: usize,
-    /// Leaf index in depth-first, left-to-right order.
+    /// Holds the leaf index in depth-first, left-to-right order.
     pub leaf_id: usize,
-    /// Parameter index inside that leaf.
+    /// Holds the parameter index inside that leaf.
     pub local_index: usize,
 }
 
-/// User-facing kernel expression. Parameters stay `f64` until compile.
+/// Represents the user-facing kernel expression.
+///
+/// Parameters stay `f64` until compile.
 ///
 /// Built-in leaves are stored directly. Sum and product nest until
 /// [`Self::compile`] flattens associative chains into [`super::CompiledKernel`].
@@ -39,31 +54,31 @@ pub struct ParameterBinding {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum KernelSpec {
-    /// Isotropic RBF leaf.
+    /// Marks an isotropic RBF leaf.
     Rbf(RbfKernel),
-    /// ARD RBF leaf (`θ_d = log(ℓ_d)`).
+    /// Marks an ARD RBF leaf (`θ_d = log(ℓ_d)`).
     RbfArd(RbfArdKernel),
-    /// Isotropic Matérn leaf (`ν = 1/2`, `3/2`, or `5/2`).
+    /// Marks an isotropic Matérn leaf (`ν = 1/2`, `3/2`, or `5/2`).
     Matern(MaternKernel),
-    /// ARD Matérn leaf (`θ_d = log(ℓ_d)`).
+    /// Marks an ARD Matérn leaf (`θ_d = log(ℓ_d)`).
     MaternArd(MaternArdKernel),
-    /// Periodic (exp-sine-squared) leaf.
+    /// Marks a periodic (exp-sine-squared) leaf.
     Periodic(PeriodicKernel),
-    /// Isotropic rational quadratic leaf.
+    /// Marks an isotropic rational quadratic leaf.
     RationalQuadratic(RationalQuadraticKernel),
-    /// ARD rational quadratic leaf (`θ_d = log(ℓ_d)`, then `log(α)`).
+    /// Marks an ARD rational quadratic leaf (`θ_d = log(ℓ_d)`, then `log(α)`).
     RationalQuadraticArd(RationalQuadraticArdKernel),
-    /// Constant leaf `k = c`.
+    /// Marks a constant leaf `k = c`.
     Constant(ConstantKernel),
-    /// Linear leaf `k = σ² xᵀ x'`.
+    /// Marks a linear leaf `k = σ² xᵀ x'`.
     Linear(LinearKernel),
-    /// White (nugget) leaf.
+    /// Marks a white (nugget) leaf.
     White(WhiteKernel),
-    /// User-defined distance leaf ([`super::KernelTerm`]).
+    /// Marks a user-defined distance leaf ([`super::KernelTerm`]).
     Custom(CustomKernel),
-    /// `k = k_left + k_right`.
+    /// Marks `k = k_left + k_right`.
     Sum(Box<KernelSpec>, Box<KernelSpec>),
-    /// `k = k_left * k_right` (Hadamard product).
+    /// Marks `k = k_left * k_right` (Hadamard product).
     Product(Box<KernelSpec>, Box<KernelSpec>),
 }
 
@@ -172,6 +187,8 @@ impl KernelSpec {
     }
 
     /// Returns the number of flattened kernel parameters.
+    ///
+    /// See the example on [`KernelSpec`].
     pub fn num_params(&self) -> usize {
         match self {
             Self::Rbf(leaf) => leaf.num_params(),
@@ -197,18 +214,24 @@ impl KernelSpec {
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`KernelSpec`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "kernel parameters")?;
         let mut offset = 0;
         self.write_params(out, &mut offset)
     }
 
-    /// Replaces flattened `θ`. All leaves are updated or none are.
+    /// Replaces flattened `θ`.
+    ///
+    /// All leaves are updated or none are.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length or a leaf rejects its slice.
+    ///
+    /// See the example on [`KernelSpec`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "kernel parameters")?;
         let mut next = self.clone();
@@ -240,6 +263,8 @@ impl KernelSpec {
     }
 
     /// Returns the mapping from flat indices to leaves.
+    ///
+    /// See the example on [`KernelSpec`].
     pub fn parameter_bindings(&self) -> Vec<ParameterBinding> {
         let mut out = Vec::new();
         let mut index = 0;
@@ -248,7 +273,9 @@ impl KernelSpec {
         out
     }
 
-    /// Compiles this tree. Associative sums and products become a single list.
+    /// Compiles this tree.
+    ///
+    /// Associative sums and products become a single list.
     ///
     /// Mixed operators keep their grouping: `(A + B) * C` is a product of a
     /// flattened sum and `C`.
@@ -275,6 +302,8 @@ impl KernelSpec {
     /// [`Self::compile`] is `T = f64`. `f32` and `f64` run the same operations.
     /// Parameters stay `f64`. There is no conversion between the two compiled
     /// types: each call builds the tree for the scalar you name.
+    ///
+    /// See the example on [`KernelSpec`].
     pub fn compile_as<T>(&self) -> crate::kernel::CompiledKernel<T>
     where
         T: crate::kernel::KernelScalar,

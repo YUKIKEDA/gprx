@@ -15,26 +15,36 @@ use super::persist_err;
 /// Rebuilds a [`CustomKernel`] from its persist JSON.
 ///
 /// The restored leaf implements the same operations at `f32` and `f64`.
+///
+/// See the example on [`crate::Gpr`].
 pub type KernelRestore =
     Arc<dyn Fn(&serde_json::Value) -> Result<CustomKernel, GprError> + Send + Sync>;
 
 /// Rebuilds an unfitted input map from its persist JSON.
+///
+/// See the example on [`crate::Gpr`].
 pub type UnfittedInputRestore =
     Arc<dyn Fn(&serde_json::Value) -> Result<Box<dyn UnfittedTransform>, GprError> + Send + Sync>;
 
 /// Rebuilds a fitted input map from its persist JSON.
+///
+/// See the example on [`crate::Gpr`].
 pub type FittedInputRestore =
     Arc<dyn Fn(&serde_json::Value) -> Result<Box<dyn Transform>, GprError> + Send + Sync>;
 
 /// Rebuilds an unfitted target map from its persist JSON.
+///
+/// See the example on [`crate::Gpr`].
 pub type UnfittedTargetRestore =
     Arc<dyn Fn(&serde_json::Value) -> Result<Box<dyn UnfittedTarget>, GprError> + Send + Sync>;
 
 /// Rebuilds a fitted target map from its persist JSON.
+///
+/// See the example on [`crate::Gpr`].
 pub type FittedTargetRestore =
     Arc<dyn Fn(&serde_json::Value) -> Result<Box<dyn TargetTransform>, GprError> + Send + Sync>;
 
-/// Explicit restore table for Custom kernels and caller-defined transforms.
+/// Represents the explicit restore table for Custom kernels and caller-defined transforms.
 ///
 /// Built-in leaves and maps use closed tags in `config.json` and are not
 /// registered here. [`Self::register_kernel`] rejects ids that start with
@@ -58,7 +68,11 @@ pub struct PersistRegistry {
 }
 
 impl PersistRegistry {
-    /// Returns an empty registry. Built-ins do not need registration.
+    /// Returns an empty registry.
+    ///
+    /// Built-ins do not need registration.
+    ///
+    /// See the example on [`PersistRegistry`].
     pub fn new() -> Self {
         Self::default()
     }
@@ -69,6 +83,8 @@ impl PersistRegistry {
     ///
     /// Returns [`GprError::PersistFailed`] if `persist_id` is empty, starts
     /// with `gprx.`, or is already registered.
+    ///
+    /// See the example on [`PersistRegistry`].
     pub fn register_kernel(
         &mut self,
         persist_id: impl Into<String>,
@@ -87,6 +103,8 @@ impl PersistRegistry {
     /// # Errors
     ///
     /// Same as [`Self::register_kernel`].
+    ///
+    /// See the example on [`PersistRegistry`].
     pub fn register_unfitted_input(
         &mut self,
         persist_id: impl Into<String>,
@@ -108,6 +126,8 @@ impl PersistRegistry {
     /// # Errors
     ///
     /// Same as [`Self::register_kernel`].
+    ///
+    /// See the example on [`PersistRegistry`].
     pub fn register_fitted_input(
         &mut self,
         persist_id: impl Into<String>,
@@ -129,6 +149,8 @@ impl PersistRegistry {
     /// # Errors
     ///
     /// Same as [`Self::register_kernel`].
+    ///
+    /// See the example on [`PersistRegistry`].
     pub fn register_unfitted_target(
         &mut self,
         persist_id: impl Into<String>,
@@ -150,6 +172,8 @@ impl PersistRegistry {
     /// # Errors
     ///
     /// Same as [`Self::register_kernel`].
+    ///
+    /// See the example on [`PersistRegistry`].
     pub fn register_fitted_target(
         &mut self,
         persist_id: impl Into<String>,

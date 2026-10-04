@@ -4,7 +4,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use crate::error::GprError;
 
-/// Mini-batch Adam used by [`crate::Svgp<Adam>::fit`].
+/// Represents the mini-batch Adam used by [`crate::Svgp<Adam>::fit`].
 ///
 /// Kingma defaults: step size `1e-3`, `β1 = 0.9`, `β2 = 0.999`, `ε = 1e-8`,
 /// batch size 32, 100 epochs, seed 0. Bias correction is always on. This type
@@ -61,6 +61,8 @@ impl Default for Adam {
 
 impl Adam {
     /// Builds Adam with Kingma defaults and seed 0.
+    ///
+    /// See the example on [`Adam`].
     pub fn new() -> Self {
         Self::default()
     }
@@ -71,6 +73,8 @@ impl Adam {
     ///
     /// Returns [`GprError::InvalidConfig`] if `learning_rate` is not
     /// finite or is not strictly positive.
+    ///
+    /// See the example on [`Adam`].
     pub fn with_learning_rate(mut self, learning_rate: f64) -> Result<Self, GprError> {
         if !learning_rate.is_finite() || learning_rate <= 0.0 {
             return Err(GprError::InvalidConfig {
@@ -86,6 +90,8 @@ impl Adam {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidConfig`] if `beta1` is not in `[0, 1)`.
+    ///
+    /// See the example on [`Adam`].
     pub fn with_beta1(mut self, beta1: f64) -> Result<Self, GprError> {
         if !beta1.is_finite() || !(0.0..1.0).contains(&beta1) {
             return Err(GprError::InvalidConfig {
@@ -101,6 +107,8 @@ impl Adam {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidConfig`] if `beta2` is not in `[0, 1)`.
+    ///
+    /// See the example on [`Adam`].
     pub fn with_beta2(mut self, beta2: f64) -> Result<Self, GprError> {
         if !beta2.is_finite() || !(0.0..1.0).contains(&beta2) {
             return Err(GprError::InvalidConfig {
@@ -117,6 +125,8 @@ impl Adam {
     ///
     /// Returns [`GprError::InvalidConfig`] if `epsilon` is not finite
     /// or is not strictly positive.
+    ///
+    /// See the example on [`Adam`].
     pub fn with_epsilon(mut self, epsilon: f64) -> Result<Self, GprError> {
         if !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(GprError::InvalidConfig {
@@ -127,19 +137,27 @@ impl Adam {
         Ok(self)
     }
 
-    /// Sets the mini-batch length (default 32). A value `≥ n` is one full batch.
+    /// Sets the mini-batch length (default 32).
+    ///
+    /// A value `≥ n` is one full batch.
+    ///
+    /// See the example on [`Adam`].
     pub fn with_batch_size(mut self, batch_size: NonZeroUsize) -> Self {
         self.batch_size = batch_size;
         self
     }
 
     /// Sets the number of passes over the data (default 100).
+    ///
+    /// See the example on [`Adam`].
     pub fn with_epochs(mut self, epochs: NonZeroU64) -> Self {
         self.epochs = epochs;
         self
     }
 
     /// Sets the shuffle seed used at the start of each epoch (default 0).
+    ///
+    /// See the example on [`Adam`].
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
