@@ -103,21 +103,41 @@ def _table(rows: list[dict], protocol: str, model: str = "exact") -> dict[str, d
     return out
 
 
+#: One panel is this wide and the figure is this tall, for every accuracy and
+#: fit-time chart. The width grows only with the column count, so two charts
+#: of the same datasets are the same size.
+PANEL_W = 1.9
+FIG_H = 4.6
+
+
+def _dot_figure(n: int):
+    fig, axes = plt.subplots(2, n, figsize=(PANEL_W * n + 0.8, FIG_H), squeeze=False)
+    # Fixed margins, not tight_layout: a longer y label must not move the panels.
+    fig.subplots_adjust(left=0.14, right=0.99, top=0.86, bottom=0.06, wspace=0.55, hspace=0.55)
+    return fig, axes
+
+
 def _dots(axes, table, datasets, libs, metric, ylabel, log=False) -> None:
     for ax, dataset in zip(axes, datasets):
         _style_axes(ax)
+        drawn = False
         for i, lib in enumerate(libs):
             cell = table.get(dataset, {}).get(lib, {}).get(metric)
             if cell is None:
                 continue
+            drawn = True
             color, marker = STYLE[lib]
             ax.errorbar(i, cell[0], yerr=cell[1], color=color, marker=marker, markersize=6,
                         markeredgecolor=SURFACE, markeredgewidth=1.2, linewidth=1.6, capsize=0)
-        if log:
+        if log and drawn:
             ax.set_yscale("log")
         ax.set_xlim(-0.6, len(libs) - 0.4)
         ax.set_xticks([])
         ax.set_title(dataset, fontsize=9, color=INK)
+        if not drawn:
+            ax.set_yticks([])
+            ax.text(0.5, 0.5, "no held-out points", transform=ax.transAxes,
+                    ha="center", va="center", color=INK_2, fontsize=8)
     axes[0].set_ylabel(ylabel)
 
 
@@ -127,16 +147,15 @@ def _suffix(model: str) -> str:
 
 def accuracy(rows: list[dict], protocol: str, out: Path, model: str = "exact") -> Path | None:
     table = _table(rows, protocol, model)
-    # A curve without held-out points (Snelson) has nothing to score.
-    datasets = sorted(d for d in table if any("rmse" in cell for cell in table[d].values()))
+    # Same columns as fit_time, including a curve with no held-out points.
+    datasets = sorted(table)
     if not datasets:
         return None
     libs = [l for l in STYLE if any(l in table[d] for d in datasets)]
-    fig, axes = plt.subplots(2, len(datasets), figsize=(max(1.9 * len(datasets) + 0.6, 6.6), 4.6), squeeze=False)
+    fig, axes = _dot_figure(len(datasets))
     _dots(axes[0], table, datasets, libs, "rmse", "RMSE (lower is better)")
     _dots(axes[1], table, datasets, libs, "nlpd", "NLPD (lower is better)")
     _legend(fig, libs)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
     path = out / f"accuracy{_suffix(model)}_{protocol}.svg"
     fig.savefig(path)
     plt.close(fig)
@@ -149,11 +168,10 @@ def fit_time(rows: list[dict], protocol: str, out: Path, model: str = "exact") -
     if not datasets:
         return None
     libs = [l for l in STYLE if any(l in table[d] for d in datasets)]
-    fig, axes = plt.subplots(2, len(datasets), figsize=(max(1.9 * len(datasets) + 0.6, 6.6), 4.6), squeeze=False)
+    fig, axes = _dot_figure(len(datasets))
     _dots(axes[0], table, datasets, libs, "fit_s", "fit wall time [s], log", log=True)
     _dots(axes[1], table, datasets, libs, "joint_evals", "joint MLL+grad evaluations", log=True)
     _legend(fig, libs)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
     path = out / f"fit_time{_suffix(model)}_{protocol}.svg"
     fig.savefig(path)
     plt.close(fig)
