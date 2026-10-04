@@ -176,7 +176,19 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Kernels
 
-Build a `KernelSpec` with `KernelSpec::from(leaf)` or `KernelSpec::custom(term)`. `+` is a sum. `*` is a product. `num_params`, `get_params`, and `set_params` are the flattened log-`θ` in depth-first leaf order. `parameter_bindings` maps each flat index to `(index, leaf_id, local_index)`. `compile` makes a `CompiledKernel<f64>`. `compile_as::<T>()` picks the storage scalar (`KernelScalar`, implemented for `f32` and `f64`).
+Build a `KernelSpec` with `KernelSpec::from(leaf)` or `KernelSpec::custom(term)`. `+` is a sum. `*` is a product. `*` binds tighter than `+`, so `c * k + k2` is a scaled kernel plus another kernel. `num_params`, `get_params`, and `set_params` are the flattened log-`θ` in depth-first leaf order. `parameter_bindings` maps each flat index to `(index, leaf_id, local_index)`. `compile` makes a `CompiledKernel<f64>`. `compile_as::<T>()` picks the storage scalar (`KernelScalar`, implemented for `f32` and `f64`).
+
+```rust
+use gprx::kernel::{ConstantKernel, KernelSpec, RbfKernel};
+
+fn main() -> Result<(), gprx::GprError> {
+    let scaled = KernelSpec::from(ConstantKernel::new(1.5)?)
+        * KernelSpec::from(RbfKernel::new(1.0)?);
+    let kernel = scaled + KernelSpec::from(RbfKernel::new(2.0)?);
+    assert_eq!(kernel.num_params(), 3);
+    Ok(())
+}
+```
 
 Each built-in leaf stores positive parameters as `log`. `new` takes user units (`ℓ`, variance, period, `α`). `from_log_*` takes the optimizer coordinate. `bounds` / `with_bounds` use an open `Interval` (default `(1e-5, 1e5)`, `Interval::DEFAULT_POSITIVE`). `with_bounds` returns `IntervalError` when the current value is outside.
 
