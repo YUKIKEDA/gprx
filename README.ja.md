@@ -2,13 +2,13 @@
 
 # gprx
 
-Rust の Exact ガウス過程回帰。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を argmin の L-BFGS で最小化して `FittedGpr` を返す。このクレートは crates.io に**公開しない**（`Cargo.toml` の `publish = false`）。
+Rust の Exact ガウス過程回帰。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を argmin の L-BFGS で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。このクレートは crates.io に**公開しない**（`Cargo.toml` の `publish = false`）。
 
 ## 状態
 
-手元の **0.1.0** 品質: `Gpr` / `FittedGpr`、カーネル、`fit` / `predict` / `predict_into` / leave-one-out、英語の rustdoc、`examples/`。依存は git か path。crates.io ではない。
+**0.1.0** は、既定フィーチャの公開 API である。`Gpr`、`Sgpr`、`Svgp`、オンライン更新、保存と読み込みに、カーネル、`fit` / `predict` / `predict_into` / leave-one-out、英語の rustdoc、`examples/` が含まれる。ここに書くのは族であり、型の一覧ではない。MSRV は 1.85（`Cargo.toml` の `rust-version`）。0.x はマイナー番号で公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）はセマンティックバージョニングの対象外である。依存は git か path。crates.io ではない。
 
-設計: [`docs/design.ja.md`](docs/design.ja.md)。アーキテクチャ: [`docs/architecture.ja.md`](docs/architecture.ja.md)。保存フォーマット: [`docs/persist-format.ja.md`](docs/persist-format.ja.md)。タスク: [`docs/roadmap.md`](docs/roadmap.md)。エージェント向け: [`AGENTS.md`](AGENTS.md)。他ライブラリとの壁時計とピーク RSS: [`compare/perf/`](compare/perf/)（P2B-16 Exact は `just perf`。P4-12 Sparse は `just perf-sparse`。P4-14 Sparse オンラインは `just perf-sparse-online`。criterion ではない）。
+設計: [`docs/design.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md)。アーキテクチャ: [`docs/architecture.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.ja.md)。保存フォーマット: [`docs/persist-format.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md)。タスク: [`docs/roadmap.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/roadmap.md)。エージェント向け: [`AGENTS.md`](https://github.com/YUKIKEDA/gprx/blob/main/AGENTS.md)。他ライブラリとの壁時計とピーク RSS: [`compare/perf/`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/)（P2B-16 Exact は `just perf`。P4-12 Sparse は `just perf-sparse`。P4-14 Sparse オンラインは `just perf-sparse-online`。criterion ではない）。
 
 ## 例
 
@@ -75,8 +75,8 @@ flowchart TB
     models -.->|"save, persist_err"| persist
 ```
 
-- [`docs/architecture.ja.md`](docs/architecture.ja.md): 全モジュールの責務、import の向き、族ごとの公開型、何を変えるときどこを見るか。
-- [`docs/persist-format.ja.md`](docs/persist-format.ja.md): `save` が書くもの。`config.json` のキー、`model.safetensors` のテンソル（名前、形、dtype、列優先の並び）、カーネルと変換の JSON の形、`Custom` の復元、版、エラー。
+- [`docs/architecture.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/architecture.ja.md): 全モジュールの責務、import の向き、族ごとの公開型、何を変えるときどこを見るか。
+- [`docs/persist-format.ja.md`](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md): `save` が書くもの。`config.json` のキー、`model.safetensors` のテンソル（名前、形、dtype、列優先の並び）、カーネルと変換の JSON の形、`Custom` の復元、版、エラー。
 
 ## 他ライブラリとの比較
 
@@ -108,7 +108,7 @@ GPR の論文で使われる回帰で、gprx を scikit-learn、GPyTorch、GPy�
 
 ### インターフェース
 
-同じ回帰を各ライブラリで書く。ARD RBF、ハイパーパラメータの学習、平均と観測分散の予測、NLPD の計算。実行できるファイル: [`compare/perf/real/snippets/`](compare/perf/real/snippets/)。
+同じ回帰を各ライブラリで書く。ARD RBF、ハイパーパラメータの学習、平均と観測分散の予測、NLPD の計算。実行できるファイル: [`compare/perf/real/snippets/`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/real/snippets/)。
 
 <!-- snippets:begin -->
 <details><summary>gprx</summary>
@@ -328,61 +328,61 @@ song の誘導点モデルでは、gprx の NLPD が GPyTorch と GPy と違う�
 
 列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。点はライブラリ、縦棒は分割ごとのばらつき。Snelson にはテスト点が無いので、その列は空。
 
-![予測の誤差（全学習点）](docs/bench/accuracy_matched.svg)
+![予測の誤差（全学習点）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_matched.svg)
 
 **学習の時間（全学習点）**
 
 上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。秒を比べるときは、下の回数が揃っているかを見る。
 
-![学習の時間（全学習点）](docs/bench/fit_time_matched.svg)
+![学習の時間（全学習点）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_matched.svg)
 
 **予測の誤差（誘導点 512 個）**
 
 読み方は、全学習点の予測誤差の図と同じ。上は RMSE、下は NLPD。
 
-![予測の誤差（誘導点 512 個）](docs/bench/accuracy_sgpr_matched.svg)
+![予測の誤差（誘導点 512 個）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_sgpr_matched.svg)
 
 **学習の時間（誘導点 512 個）**
 
 上は秒、下は尤度と勾配の計算回数。どちらも対数軸。
 
-![学習の時間（誘導点 512 個）](docs/bench/fit_time_sgpr_matched.svg)
+![学習の時間（誘導点 512 個）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_sgpr_matched.svg)
 
 **予測の誤差（ミニバッチ）**
 
 Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。GPy にはこの学習が無い。上は RMSE、下は NLPD。
 
-![予測の誤差（ミニバッチ）](docs/bench/accuracy_svgp_matched.svg)
+![予測の誤差（ミニバッチ）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/accuracy_svgp_matched.svg)
 
 **学習の時間（ミニバッチ）**
 
 上は秒、下は Adam の更新回数。回数は揃っているので、秒の差が速さの差になる。
 
-![学習の時間（ミニバッチ）](docs/bench/fit_time_svgp_matched.svg)
+![学習の時間（ミニバッチ）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/fit_time_svgp_matched.svg)
 
 **メモリの推移（energy、全学習点）**
 
 線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。
 
-![メモリの推移（energy、全学習点）](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
+![メモリの推移（energy、全学習点）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/rss_timeline_energy_exact_s0_matched.svg)
 
 **メモリの推移（kin40k、誘導点 512 個）**
 
 読み方は energy のメモリの図と同じ。分割は 0 番。
 
-![メモリの推移（kin40k、誘導点 512 個）](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
+![メモリの推移（kin40k、誘導点 512 個）](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
 
 **Mauna Loa の予測**
 
 1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。塗った点は学習データ、抜き点はテストデータ。
 
-![Mauna Loa の予測](docs/bench/curve_maunaloa_matched.svg)
+![Mauna Loa の予測](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/curve_maunaloa_matched.svg)
 
 **Snelson の予測**
 
 1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。点は学習データ。テスト用の点は無い。
 
-![Snelson の予測](docs/bench/curve_snelson_matched.svg)
+![Snelson の予測](https://raw.githubusercontent.com/YUKIKEDA/gprx/main/docs/bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
 ### 再現
@@ -391,7 +391,7 @@ Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と
 just perf-real-full                                            # 上の比較を取り、この節を作り直す
 ```
 
-`--timeline` をつけると、プロセス全体の常駐メモリを 10 ms ごとに記録する。生の出力は `compare/perf/out/real/` に残り、commit しない。`docs/bench/summary.json` には、表の数値、測定した機械、ライブラリの版、最適化の設定が入る。詳細: [`compare/perf/README.md`](compare/perf/README.md)。
+`--timeline` をつけると、プロセス全体の常駐メモリを 10 ms ごとに記録する。生の出力は `compare/perf/out/real/` に残り、commit しない。`docs/bench/summary.json` には、表の数値、測定した機械、ライブラリの版、最適化の設定が入る。詳細: [`compare/perf/README.md`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/README.md)。
 
 ## ライセンス
 
