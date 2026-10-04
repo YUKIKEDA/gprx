@@ -220,7 +220,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | C1-2 | Task | Run CI on Rust 1.85 and stable | [#420](https://github.com/YUKIKEDA/gprx/issues/420) | open |
 | C1-3 | Task | Line-coverage floor on stable CI | [#421](https://github.com/YUKIKEDA/gprx/issues/421) | open |
 | C1-4 | Task | Fix the files in the published package | [#422](https://github.com/YUKIKEDA/gprx/issues/422) | open |
-| C1-5 | Docs | Document the 0.1.0 contract in the README and crate docs | [#423](https://github.com/YUKIKEDA/gprx/issues/423) | open |
+| C1-5 | Docs | Document the 0.1.0 contract in the README and crate docs | [#423](https://github.com/YUKIKEDA/gprx/issues/423) | done |
 | C1-6 | Task | Audit accidental pub items and rustdoc | [#424](https://github.com/YUKIKEDA/gprx/issues/424) | open |
 | C1-7 | Task | Remove `publish = false` | [#425](https://github.com/YUKIKEDA/gprx/issues/425) | open |
 
