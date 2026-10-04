@@ -15,7 +15,7 @@ Run this on the commit that will be published, before `cargo package` and before
 
 - `.cursor/rules/reader-docs.mdc`
 - `.cursor/rules/rust-docs.mdc`
-- `.agents/skills/natural-japanese/SKILL.md` for `README.ja.md` and `docs/comparison.ja.md`
+- Japanese pages in `.cursor/rules/reader-docs.mdc` are inspected by Gemini with `.agents/skills/natural-japanese/SKILL.md` (score mode). The agent running this review does not score or rewrite them.
 
 Do not restate those files here. Judge the pages against them.
 
@@ -44,7 +44,7 @@ Fail a page when any of these is true:
 - Column-major layout, `fit` consuming the trainer, `GaussianLikelihood`, the 0.x break policy, or `internals` being outside the contract is missing before the first example
 - The opening omits a default-feature model family (`Gpr`, `Sgpr`, `Svgp`), or a public item is described by a dependency the caller does not import
 - The README links relatively at a file that is not in the package, or embeds an image
-- The Japanese is a gloss of the English under the natural-japanese skill
+- Gemini has not inspected a Japanese page in reader-docs, the agent that edited the page scored or rewrote that Japanese, or Gemini reports that the page is a gloss of the English
 - A public item an external crate can name with default features is missing from the README Usage section, has no usage example there, or its rustdoc has no usage example (`.cursor/rules/reader-docs.mdc`, `.cursor/rules/rust-docs.mdc`). `internals` is outside that list. The saved-file schema stays in the persist-format doc
 
 ## Report
