@@ -1,6 +1,6 @@
 ---
 description: Reader-facing README and comparison docs for gprx
-globs: "{README.md,README.ja.md,docs/comparison.md,docs/comparison.ja.md}"
+globs: "{README.md,README.ja.md,docs/comparison.md,docs/comparison.ja.md,docs/persist-format.ja.md,docs/architecture.ja.md}"
 alwaysApply: false
 ---
 
@@ -72,4 +72,13 @@ Describe a public item with the name the caller writes. A dependency the caller 
 
 ## Japanese
 
-Read `README.ja.md` and `docs/comparison.ja.md` with `.agents/skills/natural-japanese/SKILL.md`. Do not leave them as a gloss of the English.
+Gemini inspects the Japanese prose. The pages are:
+
+- `README.ja.md`
+- `docs/comparison.ja.md`
+- `docs/persist-format.ja.md`
+- `docs/architecture.ja.md`
+
+The procedure is `.agents/skills/natural-japanese/SKILL.md` in score mode (`references/diagnose.md`). Gemini does not rewrite the pages in that inspection.
+
+The agent that edited a page does not inspect, score, or rewrite that Japanese. A reading by that agent is not this check. Do not leave a page as a gloss of the English. Whether it is a gloss is a Gemini finding.
