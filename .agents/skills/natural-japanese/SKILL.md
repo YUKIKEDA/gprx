@@ -137,6 +137,10 @@ lint と台帳が収束しても、それは既知の表層パターンが消え
 
 完了したら、作業中に作った中間ファイル（台帳・lint の JSON・下書きのバックアップ等）をすべて削除する。ユーザーのプロジェクトに残してよいのは完成した文書と、ユーザーが明示的に望んだ場合の `style-profile.md` だけ。詳細は `references/revision-guide.md` の「作業ファイルの扱い」を参照。
 
+## gprx の日本語
+
+`README.ja.md`、`docs/comparison.ja.md`、`docs/persist-format.ja.md`、`docs/architecture.ja.md`、`docs/design.ja.md` を検査またはリライトするときは、`.cursor/rules/reader-docs.mdc` の Japanese vocabulary を追加の不合格にする。そこに挙げた裸の語が残っていれば、自然度が高くても不合格である。日常の意味が別の物である語を、頭の名詞なしに技術の意味で使わない。
+
 ## 参考例
 
 before/after の具体例は `references/examples.md` を参照。

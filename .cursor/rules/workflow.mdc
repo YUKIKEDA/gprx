@@ -28,7 +28,7 @@ Human procedure: `CONTRIBUTING.md`. Current row: `docs/roadmap.md`. Do not name 
 ## 品質ゲート
 
 - Identifiers, rustdoc, and `GprError` are English. Issues and commit subjects may be Japanese.
-- Japanese inspection of `README.ja.md`, `docs/comparison.ja.md`, `docs/persist-format.ja.md`, and `docs/architecture.ja.md` is Gemini, using `.agents/skills/natural-japanese/SKILL.md` in score mode. The agent that edited the page does not inspect, score, or rewrite that Japanese. Detail: `.cursor/rules/reader-docs.mdc`.
+- Japanese inspection of `README.ja.md`, `docs/comparison.ja.md`, `docs/persist-format.ja.md`, `docs/architecture.ja.md`, and `docs/design.ja.md` is Gemini, using `.agents/skills/natural-japanese/SKILL.md` in score mode. A bare word whose everyday meaning is a different object fails that inspection. The list is `.cursor/rules/reader-docs.mdc`. The agent that edited the page does not inspect, score, or rewrite that Japanese.
 - Names describe gprx / GPR concepts, not unrelated products or harnesses. Naming: `.cursor/rules/rust-api.mdc`.
 - Spike commits use `chore` or `test`.
 - Local gates (CI runners may be limited; do not treat cloud CI as the DoD):

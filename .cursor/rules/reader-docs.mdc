@@ -1,6 +1,6 @@
 ---
 description: Reader-facing README and comparison docs for gprx
-globs: "{README.md,README.ja.md,docs/comparison.md,docs/comparison.ja.md,docs/persist-format.ja.md,docs/architecture.ja.md}"
+globs: "{README.md,README.ja.md,docs/comparison.md,docs/comparison.ja.md,docs/persist-format.ja.md,docs/architecture.ja.md,docs/design.ja.md}"
 alwaysApply: false
 ---
 
@@ -81,4 +81,33 @@ Gemini inspects the Japanese prose. The pages are:
 
 The procedure is `.agents/skills/natural-japanese/SKILL.md` in score mode (`references/diagnose.md`). Gemini does not rewrite the pages in that inspection.
 
-The agent that edited a page does not inspect, score, or rewrite that Japanese. A reading by that agent is not this check. Do not leave a page as a gloss of the English. Whether it is a gloss is a Gemini finding.
+The agent that edited a page does not inspect, score, or rewrite that Japanese. A reading by that agent is not this check. Do not leave a page as a gloss of the English. Whether it is a gloss is a Gemini finding. `docs/design.ja.md` gets the same inspection.
+
+### Vocabulary
+
+A Japanese word whose everyday meaning is a different object is not a technical term. Keep the head noun. These bare words fail the inspection. The word after the arrow is the wording that stays.
+
+- 族 → モデル（`Gpr`、`Sgpr`、`Svgp`）
+- 潰し → 周辺化（collapsed）
+- ナゲット → 対角ノイズ
+- 速さ極 / メモリ極 → 速さ優先 / メモリ優先
+- 景観 → 目的関数の形
+- API の入口を指す 口 → 入口
+- 共有モジュールを指す 核 → 中核
+- データの範囲を指す 箱 → 範囲。図のマスは 枠。Rust の `Box` は `Box`
+- 単独の 葉 → カーネルの葉
+- `match` の 腕 → 分岐
+- 種つき → シードつき
+- 抜き点 → 白抜きの点
+- 下界 → 下限
+- 演算子の結合を指す 束縛 → 先に結合する。Rust の変数の束縛は 束縛のまま
+- 触る → 変える
+- 計算量を指す 費用 → 計算量。最適化のバリア値の費用は費用のまま
+- 行列の 塊 → ブロック
+- オブジェクトの寿命の 生きている → 使っているあいだ
+- 識別子の解決の 引き戻す → 対応づける
+- 探索の 歩く → 進む
+- 親ディレクトリを指す 親 → 親ディレクトリ
+- サンプルを出す 引く → 取り出す
+
+版、形、疎、因子、木、長方形、正方、最適化器、較正、焼きなまし、カーネル、尤度、コレスキー stay. They are ordinary in this field.

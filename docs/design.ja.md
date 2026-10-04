@@ -13,10 +13,10 @@
   → UnfittedTransform / Transform（X の前処理: MinMax、Standardize、列ごと、パイプライン）
   → UnfittedTarget / TargetTransform（y の標準化など。predict 時に平均・分散を逆変換）
   → GaussianLikelihood（観測ノイズ σn²。モデルパラメータとして独立に持つ）
-  → KernelSpec → CompiledKernel<T>（平らにした木。組み込みの葉は静的ディスパッチ）
+  → KernelSpec → CompiledKernel<T>（平らにした木。組み込みのカーネルの葉は静的ディスパッチ）
   → Gpr<O, P>（トレーナー: カーネル・尤度・変換・最適化器・方針）
        → GprObjective（NLML とその微分。fit / refit のあいだだけ）
-       → O: Optimizer<GprObjective>（既定 `Lbfgs`。argmin のソルバも自作 `O` も同じ口）
+       → O: Optimizer<GprObjective>（既定 `Lbfgs`。argmin のソルバも自作 `O` も同じ入口）
        → fit(self) → FittedGpr | (Gpr, GprError)。θ 固定は Gpr<Fixed>::factor
   → FittedGpr（LLT、α、X。predict / predict_into / 共分散 / sample / loo / refit / save）
        → OnlineGpr: `FittedGpr::into_online(self)` で LLT→LDLT。`insert` / `delete` はここだけ
@@ -153,7 +153,7 @@ pub struct ReevaluateKernel; // residual from the kernel re-evaluated in f64
 
 `KernelSpec`(宣言層)は精度に依存しない表現とし、パラメータは常に`f64`で保持する(ユーザーが書く・読む値は精度非依存であるべきため)。`CompiledKernel<T>`(実行層)は`PrecisionPolicy::Storage`ごとにコンパイルされ、内部計算は`T`で行う。
 
-最適化器は log-`θ` のフラットな `params: &[f64]` だけを見る。複合カーネルは、深さ優先・左から右の順で葉へ対応づける。
+最適化器は log-`θ` のフラットな `params: &[f64]` だけを見る。複合カーネルは、深さ優先・左から右の順でカーネルの葉へ対応づける。
 
 ```rust
 pub struct ParameterBinding {
@@ -238,13 +238,13 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
 
 `uplo` の既定は `Lower`。faer の `cholesky_in_place` は下三角しか読まないので、`Full` で埋めるとカーネル評価が約 2 倍になる。`CompiledKernel` も同じ操作（`apply`、`apply_cross`、`apply_points`、`apply_cross_points`、`fill_diag`、`fill_diag_points`、`grad`、`grad_points`、`grad_wrt_coord_dim`、`hess_wrt_coord_dims`、`hess_wrt_coord_mixed`、`hess_theta_coord_dim`、`hess`、`hess_points`）を持ち、どれも §8 の `KernelMath` についてジェネリック。
 
-葉のパラメータは f64 のまま。`compile()` は f64、`compile_as::<T>()` は同じ apply・勾配・ヘッセを f32 で与える。組み込みの葉はどれも `T: KernelScalar` についての実装 1 つで、`CompiledKernel<T>` のディスパッチも 1 つ。SIMD の経路は `src/kernel/simd/` にある（§8）。等方の RBF・Periodic・RQ のレーン（`simd/stationary.rs`。正方の Gram、RBF の `∂K/∂θ`・長方形・座標からの長方形の `∂K/∂θ`、Periodic / RQ の重み付き勾配）はどの格納でも通る。`f64` と `f32` は同じレーンを通り、`f32` は `f64` に広げて計算し、書くときに 1 回だけ丸める。式ごとに実装は 1 つになる。f64 の Accurate の等方 RBF で、列の長さが 4 の倍数でない端はスカラーの `exp` で計算する。このレーンでは `FastApprox` は、スカラーの経路が使う `f32` の多項式ではなく `f64` の多項式で計算する。ARD のレーン（`simd/rbf_ard.rs`、`simd/ard.rs`）へは、`T = f64` のときだけ `f64` のビューを返すスカラーのフックから入る。`f32` の ARD は同じ式のスカラー。ユーザー定義の葉は `impl<T: KernelScalar> KernelTerm<T>` 1 つ。`KernelScalar` は式に要る四則と `exp` / `ln` / `sqrt` / `powf` / `sin` / `cos` を持ち、ジェネリックな組み込みの葉をそこから呼べる。`CustomKernel::new` は `KernelTerm<f64> + KernelTerm<f32>` を要求し、ジェネリックな impl 1 つでそれを満たす。
+カーネルの葉のパラメータは f64 のまま。`compile()` は f64、`compile_as::<T>()` は同じ apply・勾配・ヘッセを f32 で与える。組み込みのカーネルの葉はどれも `T: KernelScalar` についての実装 1 つで、`CompiledKernel<T>` のディスパッチも 1 つ。SIMD の経路は `src/kernel/simd/` にある（§8）。等方の RBF・Periodic・RQ のレーン（`simd/stationary.rs`。正方の Gram、RBF の `∂K/∂θ`・長方形・座標からの長方形の `∂K/∂θ`、Periodic / RQ の重み付き勾配）はどの格納でも通る。`f64` と `f32` は同じレーンを通り、`f32` は `f64` に広げて計算し、書くときに 1 回だけ丸める。式ごとに実装は 1 つになる。f64 の Accurate の等方 RBF で、列の長さが 4 の倍数でない端はスカラーの `exp` で計算する。このレーンでは `FastApprox` は、スカラーの経路が使う `f32` の多項式ではなく `f64` の多項式で計算する。ARD のレーン（`simd/rbf_ard.rs`、`simd/ard.rs`）へは、`T = f64` のときだけ `f64` のビューを返すスカラーのフックから入る。`f32` の ARD は同じ式のスカラー。ユーザー定義のカーネルの葉は `impl<T: KernelScalar> KernelTerm<T>` 1 つ。`KernelScalar` は式に要る四則と `exp` / `ln` / `sqrt` / `powf` / `sin` / `cos` を持ち、ジェネリックな組み込みのカーネルの葉をそこから呼べる。`CustomKernel::new` は `KernelTerm<f64> + KernelTerm<f32>` を要求し、ジェネリックな impl 1 つでそれを満たす。
 
 モデルはコンパイル済みの木を `KernelSpec` の隣に持ち、ハイパラを書いたあとにコンパイルし直す。
 
 **Lengthscale**: 等方はスカラー `ℓ`（`θ=log(ℓ)`）。ARD は次元ごとの `ℓ_d`（`θ_d=log(ℓ_d)`、`ArdLengthscales`）で、RBF・Matérn・RQ にある。Periodic の lengthscale はスカラー。
 
-ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が等しいとき等方に一致する。`∂K/∂θ_d` には次元ごとの差が必要で、等方の二乗距離行列だけでは足りない。ARD の葉は座標か、§5.2 の生の `(Δx_d)²` キャッシュを読む。
+ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が等しいとき等方に一致する。`∂K/∂θ_d` には次元ごとの差が必要で、等方の二乗距離行列だけでは足りない。ARD のカーネルの葉は座標か、§5.2 の生の `(Δx_d)²` キャッシュを読む。
 
 ユーザー定義カーネル(`Custom`)はホットパスで新規アロケーションしないことを推奨するが、強制はしない(§2)。ユーザーカーネルには Workspace を渡さない。安全APIとunsafe高速APIの二系統は設けない。
 
@@ -275,7 +275,7 @@ struct DistCache<S> {
 }
 ```
 
-置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義の葉）と、次元ごとの生の `(Δx_d)²`（ARD の葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
+置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義のカーネルの葉）と、次元ごとの生の `(Δx_d)²`（ARD のカーネルの葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
 
 ほかの方針とのどの組み合わせも不正ではないので、方針は実行時の enum にする（§6.3）。`(n,n,d)` テンソルは `n²×d×sizeof(T)` バイト。`K` 自体が `n²×sizeof(T)`（n=5000、f64 で約 200MB）で、ARD キャッシュはその `d` 倍になる。方針は呼び出し側が `Cached` か `Uncached` を選ぶ。`n`・`d`・メモリ予算からの自動選択は意図的に対象外。
 
@@ -283,13 +283,13 @@ struct DistCache<S> {
 
 `KernelSpec::compile` は結合則の効く連鎖を平らにする。`(A+B)+C` は `Sum(vec![A, B, C])` になり、積も同様。和の中の積（とその逆）は入れ子のまま残る。
 
-コンパイル済みの木はそれぞれ座標モード（crate 内の `CoordMode`）を持つ。`Dist`（等方の葉が二乗距離を読む）、`Points`（ARD と Linear の葉が座標を読む）、`Either`（Constant と White は形だけ読む）、`Mixed`（Dist 葉と Points 葉の Sum / Product。例: `RBF + Linear`）。混ぜることは実行時エラーにも型での禁止にもしない。Dist 葉は距離、Points 葉は座標のまま評価する。
+コンパイル済みの木はそれぞれ座標モード（crate 内の `CoordMode`）を持つ。`Dist`（等方のカーネルの葉が二乗距離を読む）、`Points`（ARD と Linear のカーネルの葉が座標を読む）、`Either`（Constant と White は形だけ読む）、`Mixed`（Dist のカーネルの葉と Points のカーネルの葉の Sum / Product。例: `RBF + Linear`）。混ぜることは実行時エラーにも型での禁止にもしない。Dist のカーネルの葉は距離、Points のカーネルの葉は座標のまま評価する。
 
-評価は平らにしたリストをたどる。Sum は最初の項を `out` に書き、後の項を出力と同じ形の `scratch` 1 枚を通して足す。Product も同様に掛ける。項そのものが複数項の Sum / Product のときは、入れ子 1 段ごとに出力と同じ形のバッファがもう 1 枚要る（`CompiledKernel::nested_depth`）。fit と predict の経路はその段を Workspace から借りる（§7.1）。段数は仮定せず木から数える。`(A*B)*(C*D)` は積 1 つに平らになり、`A*(B+C*D)` は `B+C*D` と `C*D` に 1 段ずつ要る。組み込みの葉は `match` のアームで、`dyn KernelTerm` を呼ぶのは `Custom` だけ。
+評価は平らにしたリストをたどる。Sum は最初の項を `out` に書き、後の項を出力と同じ形の `scratch` 1 枚を通して足す。Product も同様に掛ける。項そのものが複数項の Sum / Product のときは、入れ子 1 段ごとに出力と同じ形のバッファがもう 1 枚要る（`CompiledKernel::nested_depth`）。fit と predict の経路はその段を Workspace から借りる（§7.1）。段数は仮定せず木から数える。`(A*B)*(C*D)` は積 1 つに平らになり、`A*(B+C*D)` は `B+C*D` と `C*D` に 1 段ずつ要る。組み込みのカーネルの葉は `match` のアームで、`dyn KernelTerm` を呼ぶのは `Custom` だけ。
 
 ### 5.4 部分更新(コーディネート型最適化器)対応
 
-fit が触られた葉だけを作り直すかどうかは型にしない。実行時に `O::USES_CHANGE_INDICES && cholesky_buffer == CholeskyBuffer::Retain` から決める。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
+fit が変えたカーネルの葉だけを作り直すかどうかは型にしない。実行時に `O::USES_CHANGE_INDICES && cholesky_buffer == CholeskyBuffer::Retain` から決める。Exact GPR では Cholesky が O(n³) のため、部分更新の恩恵はカーネル行列構築にだけ及ぶ。
 
 ```rust
 pub trait Optimizer<P: ?Sized> {
@@ -310,11 +310,11 @@ pub trait IncrementalObjective: Objective {
 }
 ```
 
-`indices` には、最適化器の受理済みの点からではなく、その目的関数で直前に評価した `params` から変わった座標をすべて並べる。棄却のあと FSA は戻した座標と新しい座標の両方を渡す。作り直す葉は index だけで決める。`GprObjective` はあわせて直前と新しい `θ` をビットで比べ（`f64::to_bits`）、`indices` に無い座標が変わっていたら、誤った値を黙って返さず `IndexOutOfRange` にする。空・重複・`i >= n_params` の index は境界で `GprError`。`ChangeSet` 型は無い。
+`indices` には、最適化器の受理済みの点からではなく、その目的関数で直前に評価した `params` から変わった座標をすべて並べる。棄却のあと FSA は戻した座標と新しい座標の両方を渡す。作り直すカーネルの葉は index だけで決める。`GprObjective` はあわせて直前と新しい `θ` をビットで比べ（`f64::to_bits`）、`indices` に無い座標が変わっていたら、誤った値を黙って返さず `IndexOutOfRange` にする。空・重複・`i >= n_params` の index は境界で `GprError`。`ChangeSet` 型は無い。
 
-`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` が葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。`CholeskyBuffer::Reuse` は常に全体を作り直す。`with_optimizer` / `refit` は新しい最適化器からフラグを決め直す。`Gpr<Fixed>::factor` は一発フル。`Lbfgs` / `NelderMead` / `TrustRegion` は既定の `false`。FSA の初回とリスタートは `value`、座標一歩は `value_at_changes`。
+`GprObjective` はどの最適化器・バッファでも `IncrementalObjective` を impl する。`value` / `value_at_changes` がカーネルの葉の経路を通るのは上のフラグが立つときだけで、それ以外は一括の値と勾配を計算する。`CholeskyBuffer::Reuse` は常に全体を作り直す。`with_optimizer` / `refit` は新しい最適化器からフラグを決め直す。`Gpr<Fixed>::factor` は一発フル。`Lbfgs` / `NelderMead` / `TrustRegion` は既定の `false`。FSA の初回とリスタートは `value`、座標一歩は `value_at_changes`。
 
-葉の作り直しはコンパイル済みの葉をキャッシュし、変更 index が触る葉だけ `apply` し直す。葉ごとの Gram（葉 `L` 個で `L · n²`）、dirty の印、直前の `θ` は、1 回の `fit` / `refit` のあいだ `GprObjective`（crate 内の `LeafCache`）が持ち、Workspace には置かない。木の結合と **Cholesky は毎回フル**。ハイパラの変更は `K` の低ランク更新ではなく、faer の `rank_r_update_clobber` もそのためには使わない。
+カーネルの葉の作り直しはコンパイル済みのカーネルの葉をキャッシュし、変更 index が変えるカーネルの葉だけ `apply` し直す。カーネルの葉ごとの Gram（カーネルの葉 `L` 個で `L · n²`）、dirty の印、直前の `θ` は、1 回の `fit` / `refit` のあいだ `GprObjective`（crate 内の `LeafCache`）が持ち、Workspace には置かない。木の結合と **Cholesky は毎回フル**。ハイパラの変更は `K` の低ランク更新ではなく、faer の `rank_r_update_clobber` もそのためには使わない。
 
 ### 5.5 前処理パイプライン
 
@@ -426,13 +426,13 @@ pub struct PredictOptions {
 
 ### 6.1 Sparse GPRの誘導点キャッシュ問題
 
-Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`Svgp<Adam>::fit` が同じ prior からミニバッチ Adam でカーネル `θ`・尤度 `θ`・whitened `q` を動かす。1 ステップは、自分の点の `A_b = L⁻¹ K(Z, X_b)`・`k_diag`・`∂K(Z, X_b)/∂θ` だけを作り、`K_mm` を分解し直すので、計算量は `O(b (m² + m d) + m³)` で、`n` に依存しない。カーネルの勾配は VFE と同じく逆向きに作る。`∂K_mm` と `∂K(Z, X_b)` への重みを 1 ステップに 1 回 `O(m² b)` で作り、各カーネルパラメータは `O(m² + m b)` の縮約にする（パラメータごとの解は行わない）。全 `n` 点の `A` と `k_diag` は、最初のステップの前と最後のステップの後に 1 回ずつ作る。勾配は、格納の精度によらず `f64` で計算する。`Adam` は `Optimizer` ではない。`FittedSvgp` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_elbo`、全データ `value_and_gradient_into` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する。公開型は `Sgpr` / `FittedSgpr`。既定は `Sgpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`Sgpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSgpr` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。White の葉を含まないカーネルでは、`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。`K(Z, X)` は `Z` と `X` の値によらず常に長方形の相互共分散なので、White の葉はそこに何も足さない（`K_mm` と `diag K(X, X)` には足す）。そのため境界は `Z` について連続で、`Z` と `X` のビット一致や行の順序に依らず、値・勾配・Hessian はすべて同じ VFE の式から出る。White の葉を含むと、`Z = X` の境界は Exact の尤度にならない（White は誘導点が説明しないノイズとして扱う）。k-means は置かない。外部照合は §12（5c、5d）、時間と RSS は §15。
+Sparse 近似は VFE。理由は [ADR 0002](adr/0002-sparse-vfe.md)。FITC は載らない。SVGP は別公開型（`Svgp` / `FittedSvgp`）。理由は [ADR 0006](adr/0006-sparse-svgp.md)。`Svgp<Fixed>::factor` が呼び出し側の `Z` で `K_mm` を LLT し、whitened の `q(u)` を prior（平均 0、`L = I`）で置く。`Svgp<Adam>::fit` が同じ prior からミニバッチ Adam でカーネル `θ`・尤度 `θ`・whitened `q` を動かす。1 ステップは、自分の点の `A_b = L⁻¹ K(Z, X_b)`・`k_diag`・`∂K(Z, X_b)/∂θ` だけを作り、`K_mm` を分解し直すので、計算量は `O(b (m² + m d) + m³)` で、`n` に依存しない。カーネルの勾配は VFE と同じく逆向きに作る。`∂K_mm` と `∂K(Z, X_b)` への重みを 1 ステップに 1 回 `O(m² b)` で作り、各カーネルパラメータは `O(m² + m b)` の縮約にする（パラメータごとの解は行わない）。全 `n` 点の `A` と `k_diag` は、最初のステップの前と最後のステップの後に 1 回ずつ作る。勾配は、格納の精度によらず `f64` で計算する。`Adam` は `Optimizer` ではない。`FittedSvgp` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_elbo`、全データ `value_and_gradient_into` を返す。最適 `q`（Titsias）では同じ `θ`・`X`・`Z` の `FittedSgpr` と一致する。公開型は `Sgpr` / `FittedSgpr`。既定は `Sgpr<Lbfgs, FixedInducing>`。`fit` がカーネルと尤度の `θ` を探し、`Sgpr<Fixed, I>::factor` が呼び出し側の誘導点 `Z` で `K_mm = k(Z, Z)` を LLT する。既定では `Z` は params に入らない。`with_inducing(FreeInducing)` の `fit` はカーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。`FittedSgpr` は対角の `predict` / `predict_with`（と `predict_into` / `predict_with_into`）、`neg_log_marginal_likelihood`（VFE の負の ELBO）、`value_and_gradient_into`、`hessian_into`（row-major `p×p`）を返す。White のカーネルの葉を含まないカーネルでは、`Z = X` のとき Exact の `Gpr<Fixed>::factor` と一致する。`K(Z, X)` は `Z` と `X` の値によらず常に長方形の相互共分散なので、White のカーネルの葉はそこに何も足さない（`K_mm` と `diag K(X, X)` には足す）。そのため境界は `Z` について連続で、`Z` と `X` のビット一致や行の順序に依らず、値・勾配・Hessian はすべて同じ VFE の式から出る。White のカーネルの葉を含むと、`Z = X` の境界は Exact の尤度にならない（White は誘導点が説明しないノイズとして扱う）。k-means は置かない。外部照合は §12（5c、5d）、時間と RSS は §15。
 
 `K(X,X)`対角は不変なので1回計算・流用。`K(X,Z)`, `K(Z,Z)`はZが動くたびに再計算が必要だが、m(誘導点数)が小さいためCholeskyのO(nm²)に対して無視できるコストであり、キャッシュ対象にせず毎回再計算する。joint の `K(X,X)` 勾配とヘッセは対角 `∂k(x_i, x_i)/∂θ` を `O(n)` で足す。`K(Z,Z)` と `K(Z,X)` の勾配は密行列のまま。
 
-誘導点座標の勾配は`grad_wrt_coord_dim`、Hessian は`hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim`(§5.1)で扱う。組み込みのすべての葉が持ち、Sum と Product の木が合成する（放射状の葉は `k = g(q)`、`q = Σ w_d Δ_d²` の `g'(q)`、`g''(q)` から 1 つの実装で、Product は各項の値・1 階・2 階への積の規則で）。`ν = 1/2` の Matérn は panic ではなく`GprError::CoordGradientUnsupported`を返す。2 点が一致するところで座標微分が定義できず、`Z ⊂ X` の初期化がそこから始まるため。`Custom` の葉は `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` で座標微分を、`grad_cross` / `hess_cross` で長方形の `∂K/∂θ` を与える。既定のまま残した葉は`CoordGradientUnsupported`を返す。既定の `FixedInducing` の `fit` はこの API を使わない。使うのは長方形の `∂K(Z, X)/∂θ` と `∂²K(Z, X)/∂θ∂θ`（`grad_cross_points` / `hess_cross_points`）で、組み込みのすべての葉と、その Sum / Product の木が持つ。そのため `Constant × RBF` の信号分散を、Exact と同じく `Sgpr` と `Svgp` で学習できる。`Custom` の葉は `KernelTerm::grad_cross` / `hess_cross` が要る（上記）。`FreeInducing` は同時最適化で次元一括で座標 API を呼ぶ。VFE の勾配は逆向きに作る。境界は `A = L⁻¹ K_mn` について `⟨G, dA⟩`（`G = B⁻¹A − (w rᵀ + A)/σ²`、`B = σ² I + A Aᵀ`、`w = B⁻¹ A y`、`r = y − Aᵀ w`）で動くので、重み `w_mn = L⁻ᵀ G`、`w_mm = −sym(L⁻ᵀ tril½(G Aᵀ) L⁻¹)`、`Σ diag K` に `1/(2σ²)` を `O(m² n)` で 1 回作る。各カーネルパラメータは自分の `∂K_mm`・`∂K_mn`・`∂ diag K` をそれと `O(m n)` で縮約し、誘導点の各座標 `z_p[dim]` は `p` の行と列だけを読む（次元ごとの座標微分から `O(m + n)`）。方向ごとの `O(m² n)` の解は行わない。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。
+誘導点座標の勾配は`grad_wrt_coord_dim`、Hessian は`hess_wrt_coord_dims` / `hess_wrt_coord_mixed` / `hess_theta_coord_dim`(§5.1)で扱う。組み込みのすべてのカーネルの葉が持ち、Sum と Product の木が合成する（放射状のカーネルの葉は `k = g(q)`、`q = Σ w_d Δ_d²` の `g'(q)`、`g''(q)` から 1 つの実装で、Product は各項の値・1 階・2 階への積の規則で）。`ν = 1/2` の Matérn は panic ではなく`GprError::CoordGradientUnsupported`を返す。2 点が一致するところで座標微分が定義できず、`Z ⊂ X` の初期化がそこから始まるため。`Custom` のカーネルの葉は `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` で座標微分を、`grad_cross` / `hess_cross` で長方形の `∂K/∂θ` を与える。既定のまま残したカーネルの葉は`CoordGradientUnsupported`を返す。既定の `FixedInducing` の `fit` はこの API を使わない。使うのは長方形の `∂K(Z, X)/∂θ` と `∂²K(Z, X)/∂θ∂θ`（`grad_cross_points` / `hess_cross_points`）で、組み込みのすべてのカーネルの葉と、その Sum / Product の木が持つ。そのため `Constant × RBF` の信号分散を、Exact と同じく `Sgpr` と `Svgp` で学習できる。`Custom` のカーネルの葉は `KernelTerm::grad_cross` / `hess_cross` が要る（上記）。`FreeInducing` は同時最適化で次元一括で座標 API を呼ぶ。VFE の勾配は逆向きに作る。境界は `A = L⁻¹ K_mn` について `⟨G, dA⟩`（`G = B⁻¹A − (w rᵀ + A)/σ²`、`B = σ² I + A Aᵀ`、`w = B⁻¹ A y`、`r = y − Aᵀ w`）で動くので、重み `w_mn = L⁻ᵀ G`、`w_mm = −sym(L⁻ᵀ tril½(G Aᵀ) L⁻¹)`、`Σ diag K` に `1/(2σ²)` を `O(m² n)` で 1 回作る。各カーネルパラメータは自分の `∂K_mm`・`∂K_mn`・`∂ diag K` をそれと `O(m n)` で縮約し、誘導点の各座標 `z_p[dim]` は `p` の行と列だけを読む（次元ごとの座標微分から `O(m + n)`）。方向ごとの `O(m² n)` の解は行わない。理由は [ADR 0003](adr/0003-sparse-z-joint.md)。
 
-**既定は呼び出し側が Z を渡し、最適化対象はカーネルハイパラとノイズのみとする。** 自由 Z は `FixedInducing` / `FreeInducing` で切り替え、カーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。区間は訓練 `X` の箱を少し開いて広げた生座標。L-BFGS 履歴の長さは `p = p_θ + m×d` で、増分は `history_size × m × d` 個の `f64`（`m` が小さいので VFE の `O(nm²)` に対して小さい）。交互は載らない。
+**既定は呼び出し側が Z を渡し、最適化対象はカーネルハイパラとノイズのみとする。** 自由 Z は `FixedInducing` / `FreeInducing` で切り替え、カーネル `θ`・尤度 `θ`・列優先 `Z` を同じ `Optimizer` が同時に動かす。区間は学習データの範囲を少し開いて広げた生座標。L-BFGS 履歴の長さは `p = p_θ + m×d` で、増分は `history_size × m × d` 個の `f64`（`m` が小さいので VFE の `O(nm²)` に対して小さい）。交互は載らない。
 
 オンラインは X と誘導点を増減できる。`FittedSgpr::into_online` が `OnlineSgpr<O>` を返す（誘導 typestate は無い）。`insert` / `delete` は ADR 0004 の rank-1 で VFE 因子を更新する。`insert_inducing` / `delete_inducing` は [ADR 0005](adr/0005-sparse-inducing-update.md)（insert は bordered LLT、delete は trailing cholupdate）。識別子は `InducingId`。座標は呼び出し側。`Z` は params に入らない。`set_params` と `refit` はフル再 assemble。
 
@@ -474,7 +474,7 @@ L(θ) = ½ yᵀ K⁻¹ y + ½ log|K| + (n/2) log(2π)
 4. `L Lᵀ α = y` を前進・後退代入で解く(O(n²))
 5. `L`から`K⁻¹`を計算する(三角ソルブで `L Lᵀ X = I`、O(n³)が1回)
 6. `W[i,j] ← α[i] α[j] - K⁻¹[i,j]`(対称なので下三角のみ)
-7. カーネルの全θ_iの `⟨W, ∂K/∂θ_i⟩_F` を、カーネルの木を 1 回たどって積算する（`CompiledKernel::weighted_grads`）。和は重みをそのまま各項へ渡す。積は因子 `c` へ重み `W ∘ ∏_{s≠c} K_s` を渡す。Constant の因子はスカラーで、重みを定数倍するだけ。その微分 `⟨W, K_積⟩` は別の因子の走査が返す値を使うので、定数以外の因子が 1 つの積（`C × RBF`）は Gram を作らない。定数以外の因子が 2 つ以上の積は、分解のときに残した因子の Gram（`CompiledKernel::eval_gram_keeping`。`weighted` の先頭のバッファ）を読む。残すと、走査ですべての因子を評価するより `n×n` のバッファが増えるときだけ、残さずに評価する（`CompiledKernel::kept_products`）。どの積が Gram を残し、それがバッファのどこにあるかは 1 か所（`CompiledKernel::keep_plan`）で決め、バッファ数の見積もり、分解の段、木の走査のすべてがそれを読む。分解の段はその `θ` で残した積の数を返し、勾配の走査はその値を受け取る。そのため、残した Gram を読むのは、それを書いた分解の直後だけになる。葉は自分の `∂K/∂θ_i` を使い回す `n×n` の枠へ書き、受け取った重みとの Frobenius 積を取る（パラメータごとに O(n²)）。距離をキャッシュした Periodic と RQ の葉は、組を 1 回たどって全部の積を直接足す。距離をキャッシュした `Accurate` の RBF の葉も、自分の Gram を渡されたときか `⟨W, K⟩` を求められたときは同じようにする。自分の Gram を渡されたときは、その値から `∂K` を作り（RBF は `k s / ℓ²`、Periodic は `Accurate` で `k`・`sin`・`cos` から、RQ は `k` と `ln u` から）、`exp` / `pow` を計算し直さない。Constant の葉は `c · Σ 重み`。積の因子をパラメータごとに評価し直すことはない。ノイズは`GaussianLikelihood::noise_grad_diag`(対角のみ)
+7. カーネルの全θ_iの `⟨W, ∂K/∂θ_i⟩_F` を、カーネルの木を 1 回たどって積算する（`CompiledKernel::weighted_grads`）。和は重みをそのまま各項へ渡す。積は因子 `c` へ重み `W ∘ ∏_{s≠c} K_s` を渡す。Constant の因子はスカラーで、重みを定数倍するだけ。その微分 `⟨W, K_積⟩` は別の因子の走査が返す値を使うので、定数以外の因子が 1 つの積（`C × RBF`）は Gram を作らない。定数以外の因子が 2 つ以上の積は、分解のときに残した因子の Gram（`CompiledKernel::eval_gram_keeping`。`weighted` の先頭のバッファ）を読む。残すと、走査ですべての因子を評価するより `n×n` のバッファが増えるときだけ、残さずに評価する（`CompiledKernel::kept_products`）。どの積が Gram を残し、それがバッファのどこにあるかは 1 か所（`CompiledKernel::keep_plan`）で決め、バッファ数の見積もり、分解の段、木の走査のすべてがそれを読む。分解の段はその `θ` で残した積の数を返し、勾配の走査はその値を受け取る。そのため、残した Gram を読むのは、それを書いた分解の直後だけになる。カーネルの葉は自分の `∂K/∂θ_i` を使い回す `n×n` の枠へ書き、受け取った重みとの Frobenius 積を取る（パラメータごとに O(n²)）。距離をキャッシュした Periodic と RQ のカーネルの葉は、組を 1 回たどって全部の積を直接足す。距離をキャッシュした `Accurate` の RBF のカーネルの葉も、自分の Gram を渡されたときか `⟨W, K⟩` を求められたときは同じようにする。自分の Gram を渡されたときは、その値から `∂K` を作り（RBF は `k s / ℓ²`、Periodic は `Accurate` で `k`・`sin`・`cos` から、RQ は `k` と `ln u` から）、`exp` / `pow` を計算し直さない。Constant のカーネルの葉は `c · Σ 重み`。積の因子をパラメータごとに評価し直すことはない。ノイズは`GaussianLikelihood::noise_grad_diag`(対角のみ)
 
 全体コストはO(n³ + p n²)。K⁻¹をパラメータごとに作り直さない。
 
@@ -486,23 +486,23 @@ Sgpr と Svgp のカーネルパラメータの勾配も、この走査を `K(Z,
 H_ij = -½ ⟨W, ∂²K/∂θ_i∂θ_j⟩ - ½ Tr(K⁻¹ K_i K⁻¹ K_j) + αᵀ K_i K⁻¹ K_j α
 ```
 
-`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開口で、`GprObjective` は `TwiceDifferentiable` へ転送する。一次の項は、ノイズ（`A_i = σn² I`）を含む各パラメータ `i` について 1 回ずつ計算する。`A = L Lᵀ` として、`S_i = L⁻¹ A_i L⁻ᵀ`（三角解 2 回）と `v_i = L⁻¹ A_i α` から `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F`、`αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j` を得るので、Hessian 全体は `O(p n³ + p² n²)`。`p` 枚の `S_i`（`p · n²`）、`v_i` を並べた `n × p`、長さ n のベクトル 1 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直す（`W` が `L` を上書きしたため）。
+`KernelTerm::hess` / `hess_points` が `(i, j)` 1 組の `∂²K` を書く。Custom・Sum/Product も解析。`FittedGpr::hessian_into` が公開の入口で、`GprObjective` は `TwiceDifferentiable` へ転送する。一次の項は、ノイズ（`A_i = σn² I`）を含む各パラメータ `i` について 1 回ずつ計算する。`A = L Lᵀ` として、`S_i = L⁻¹ A_i L⁻ᵀ`（三角解 2 回）と `v_i = L⁻¹ A_i α` から `Tr(A⁻¹ A_i A⁻¹ A_j) = ⟨S_i, S_j⟩_F`、`αᵀ A_i A⁻¹ A_j α = v_iᵀ v_j` を得るので、Hessian 全体は `O(p n³ + p² n²)`。`p` 枚の `S_i`（`p · n²`）、`v_i` を並べた `n × p`、長さ n のベクトル 1 本は `WorkspaceCore::hessian` に置く。最初の Hessian まで空で、以後は使い回すので、2 回目以降の Hessian は確保しない。`CholeskyBuffer::Reuse` は ⟨W, K_ij⟩ のあと Chol し直す（`W` が `L` を上書きしたため）。
 
 `value_and_gradient_into`はこの手順を一度で実行し、Lとαと`exp_buf`を尤度・勾配で共有する。デフォルト実装の`value`→`gradient_into`の二段呼びでは共有されない。
 
-既定の `CholeskyBuffer` は `Retain`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。公開のメモリ極（`with_prefer_memory`）が `CholeskyBuffer::Reuse` を、`DistanceCachePolicy::Uncached` と一緒に選ぶ。`Reuse` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にこの方針は書かない。`load` は `Retain`。
+既定の `CholeskyBuffer` は `Retain`。専用の `w_matrix` に `K⁻¹` → `W` を書き、`L` は `k_matrix` に残す。速さは変えない。公開のメモリ優先（`with_prefer_memory`）が `CholeskyBuffer::Reuse` を、`DistanceCachePolicy::Uncached` と一緒に選ぶ。`Reuse` は `K⁻¹` を `exp_buf` で解き、`W` を Cholesky 領域へ書く。最適化ループの途中では `L` を戻さない。`fit` の末と単独の `value_and_gradient_into` の末で Cholesky し直す。persist にこの方針は書かない。`load` は `Retain`。
 
 ### 6.3 Exact GPR (`Gpr` / `FittedGpr`)
 
 公開面はトレーナーと学習済みモデルを分ける。
 
-`Gpr<O = Lbfgs, P = DoublePrecision>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、実行時の方針 4 つを持つ：`DistanceCachePolicy { Cached, Uncached }`、`CholeskyBuffer { Retain, Reuse }`、`KernelExp { Accurate, FastApprox }`、`JitterPolicy`（§4.0）。どれも素の enum。不正な組み合わせが無いので型パラメータにしない。`Gpr::new` の既定は速さ極（`Cached` + `Retain`）で `Accurate`。外部クレートが距離キャッシュと Cholesky バッファを置く口は `with_prefer_memory` / `with_prefer_speed` だけである。呼ぶたびに両方を置き換える。メモリ極は `Uncached` + `Reuse`。`with_math` / `with_jitter_policy` はその方針を設定する。対距離を読まないカーネル（単独の Linear / Constant / White）は方針によらず距離キャッシュを確保しない。`from_points` は無い。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。方針は getter で読める。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, P>` を返す。固定ハイパラは `Gpr<Fixed>::factor`。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, P>` をエラーと一緒に返す。`fitted: bool` と `GprError::NotFitted` は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。`FittedGpr` の `L` / `α` / `X` / コンパイル済みカーネルは `Option` にしないので、欠けた部品に出会う呼び出しは無い。
+`Gpr<O = Lbfgs, P = DoublePrecision>` は `KernelSpec`・`GaussianLikelihood`・変換と、最適化器 `O`、実行時の方針 4 つを持つ：`DistanceCachePolicy { Cached, Uncached }`、`CholeskyBuffer { Retain, Reuse }`、`KernelExp { Accurate, FastApprox }`、`JitterPolicy`（§4.0）。どれも素の enum。不正な組み合わせが無いので型パラメータにしない。`Gpr::new` の既定は速さ優先（`Cached` + `Retain`）で `Accurate`。外部クレートが距離キャッシュと Cholesky バッファを置く入口は `with_prefer_memory` / `with_prefer_speed` だけである。呼ぶたびに両方を置き換える。メモリ優先は `Uncached` + `Reuse`。`with_math` / `with_jitter_policy` はその方針を設定する。対距離を読まないカーネル（単独の Linear / Constant / White）は方針によらず距離キャッシュを確保しない。`from_points` は無い。`FittedGpr` に `with_prefer_*` は無い（`into_trainer` → prefer → `refit`）。方針は getter で読める。型は crate ルートに残す。`Gpr<O: Optimizer>::fit(self, …)` が `O` でハイパラを動かし、成功時に `FittedGpr<O, P>` を返す。固定ハイパラは `Gpr<Fixed>::factor`。`optimize: bool` は置かない。失敗時は消費した `Gpr<O, P>` をエラーと一緒に返す。`fitted: bool` と `GprError::NotFitted` は置かない。未学習の `transform` / `apply` は型で起きない（`StandardizeTarget::fit(self)` が `FittedStandardizeTarget` を返す）。`FittedGpr` の `L` / `α` / `X` / コンパイル済みカーネルは `Option` にしないので、欠けた部品に出会う呼び出しは無い。
 
-`FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ生き、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
+`FittedGpr` は推論に必要な `L`・`α`・訓練 `X`・カーネル・尤度・変換を持つ。勾配用の `W`・`∂K`・argmin 状態は `fit` のあいだだけ残り、学習済み値には残さない。同一プロセスで `fit` の直後に `predict` する経路は少数派とみなす。学習済みモデルを渡すのが主経路なので、推論オブジェクトは `FittedGpr` である。
 
 `FittedGpr` と `OnlineGpr` は crate 内部の `GprCore`（kernel spec・コンパイル済みカーネル・尤度・変換・方針・訓練データ・`α`・クエリ用バッファ）を共有し、違うのは因子だけ。`FittedGpr` は LLT の置き場（crate 内の `LltStore`。`FitBuffers` か mmap の `L`）、`OnlineGpr` は LDLT の `LdltStore` と `PointId` の表を持つ。`StoredFactor { Llt, Ldlt }` が因子の見方で、`solve`、列への `L⁻¹`、ピボットごとの重み（`1` か `1/Dᵢ`）、`log|A|`、`diag(A⁻¹)` を持つ。predict・共分散・sample・LOO・NLML・予測用 `α` はこの見方について `GprCore` に1回だけ書く。ハイパラの書き込み（`set_params`・勾配・Hessian・`fit`・`refit`）はすべて借用の `ExactFit`（core + LLT の置き場）1つで動く。`OnlineGpr` は `L √D` を O(n²) で詰めた一時的な LLT の置き場を貸し、新しい因子を書き戻す。訓練データは複製せず、O(n³) は新しい `θ` が要る分解だけ。
 
-既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を argmin の別のソルバ（`NelderMead`、`TrustRegion`）、`FastSimulatedAnnealing`、または自作の最適化器に差し替える。葉の作り直しは §5.4 に従い、`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` は対角分散で、クエリ間共分散は `predict_covariance`（§6）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
+既定の `Gpr` は `Gpr<Lbfgs>`。`with_optimizer` が `O` を argmin の別のソルバ（`NelderMead`、`TrustRegion`）、`FastSimulatedAnnealing`、または自作の最適化器に差し替える。カーネルの葉の作り直しは §5.4 に従い、`with_recompute_strategy` は無い。`Gpr<Fixed>::factor` は分解だけ。`FittedGpr::predict` は対角分散で、クエリ間共分散は `predict_covariance`（§6）。`loo_predict` は GPML 5.4.2 の `L` と `α` から訓練点ごとの LOO を返す。ハイパラを変えて同じデータで分解し直すのは `FittedGpr::refit`（学習済みが持つ `O` のまま）。`with_optimizer` / `factor` / `into_trainer` / `refit` は方針を保つ。
 
 ```rust
 pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
@@ -589,7 +589,7 @@ struct GprObjective<'a, P: GpScalar = DoublePrecision> {
 - 入力のNaN/Infは`NonFiniteInput`
 - Cholesky失敗時は `Err((gpr, err))`。中途半端な `FittedGpr` は返さない
 
-既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を、詰めた下三角（`d · n(n+1)/2` 個）に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ極は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ極は既定のまま（`with_prefer_speed`、`Cached` + `Retain`）。呼ぶたびに両方の方針を置き換える。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
+既定の距離キャッシュ方針は `Cached`。`fit` 開始時に訓練点の二乗距離を一度埋め、以降のハイパライテレーションではカーネルだけを書き換える。等方は `n×n`。ARD は生の `(Δx_d)²` を、詰めた下三角（`d · n(n+1)/2` 個）に置く。`Uncached` はそれらのテンソルを Workspace に置かず、等方も ARD も `X` から距離を計算する。公開のメモリ優先は `with_prefer_memory`（`Uncached` + `Reuse`）。速さ優先は既定のまま（`with_prefer_speed`、`Cached` + `Retain`）。呼ぶたびに両方の方針を置き換える。キャッシュを確保するのはコンパイル済みカーネルが距離を読むときだけ。`RBF + White` と `Constant * RBF` は読む。単独の Linear / Constant / White は読まず、方針は保つが使わない。persist タグは `always` / `never`（タグが無ければ `Cached` で読む）。`LoadedGpr` は精度と分解の種類ごとに 1 つの variant（8 つ）。どちらもモデルの型パラメータだから。`predict` / `predict_with`（`f64` に広げる）、`n`、`d`、`is_online` は match せずにどの variant でも使える。variant を match するのは型つきのモデルが要るとき（`predict_into`、`insert`、`refit`）だけ。`load` は `Retain`。
 
 ### 6.4 Leave-one-out
 
@@ -602,7 +602,7 @@ Exact GPR の leave-one-out は、学習後の `L` と `α` から閉じた式�
 
 これは観測の `p(y_i | X, y_{-i}, θ)`。潜在 `f_i` の LOO 分散は `max(0, 1/Q_ii - σn²)`。`Q_ii` は下三角 `L` から `L⁻¹` の列ノルムで取る(`A⁻¹ = L^{-T} L^{-1}`)。コストは Cholesky と同オーダーの O(n³)、追加メモリは `n×n` の一時行列。
 
-`FittedGpr::loo_predict` は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White 葉は使わず、ノイズは `GaussianLikelihood` のみ。
+`FittedGpr::loo_predict` は学習点と同じ長さの `Prediction` を返す。既定は `VarianceKind::Observation`。平均・分散は `predict` と同じく `TargetTransform` で元スケールへ戻す。White カーネルの葉は使わず、ノイズは `GaussianLikelihood` のみ。
 
 sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_` に同じ GPML 式を適用して JSON に書く。Rust 側は sklearn が選んだ `θ` で `Gpr<Fixed>::factor` して照合する(最適化器差を LOO に混ぜない)。
 
@@ -613,7 +613,7 @@ sklearn に LOO API は無い。`just gen-goldens` は fit 後の `L_` / `alpha_
 潜在 σ_i² = k(x_i, x_i) - ‖a_i‖² + σn² h / (1 - h)
 ```
 
-三角解 `L_B⁻¹ A` を 1 回解けば、全体で `O(n m²)`。White の葉を含まないカーネルでは、`Z = X` で Exact の LOO になる。`f32` の格納は、予測と同じく VFE 系を `f64` で組み直す。SVGP は LOO を持たない（§6.1）。
+三角解 `L_B⁻¹ A` を 1 回解けば、全体で `O(n m²)`。White のカーネルの葉を含まないカーネルでは、`Z = X` で Exact の LOO になる。`f32` の格納は、予測と同じく VFE 系を `f64` で組み直す。SVGP は LOO を持たない（§6.1）。
 
 ## 7. Workspaceとメモリ管理
 
@@ -693,8 +693,8 @@ fit()終了 → FittedGpr が L, α, X を保持（Reuse はここで Chol し�
 
 ## 8. 並列化・SIMD、数学関数バックエンド
 
-- カーネル評価内側ループは `wide::f64x4` でベクトル化する。場所は `src/kernel/simd/` で、レーンの補助関数は 1 組（`simd/mod.rs`。読み込み、書き込み、有限性、列のスライス、`(x − x0)²`）。`simd/stationary.rs`: 等方 RBF の `apply` / `grad` / `apply_cross` と座標からの長方形の `grad`、等方の Periodic と RQ の正方の Gram（キャッシュした二乗距離から、どの `uplo` も）と 1 回の走査の重み付き勾配（`wide` の `sin_cos`・`ln`・`exp`。RQ の `u^{−α}` は `exp(−α ln u)`）。列の最後の半端なレーンは詰め物をして同じレーンの関数で計算する。ただし f64 の Accurate の等方 RBF の端は、スカラーの `exp` で計算する。`simd/rbf_ard.rs`: ARD RBF の `apply` / `grad` / 長方形の `apply` と `grad`。長方形の `⟨W, ∂K/∂θ_d⟩` は、全長さスケールを 1 回の `exp` から作り、`Σ (W ∘ k) (Δ_d)²` を 1 回の行列積で足す。Accurate の正方は `k` を 1 回作り、下三角から同じ積を足す。`simd/ard.rs`: ARD Matérn と ARD RQ の値と `θ` 微分（座標から、`(Δx_d)²` キャッシュから、長方形。4 行ぶんの `r²` を作ってから動径の式を `f64x4` で評価する）。`simd/dist.rs`: 二乗距離と `(Δx_d)²` の行ループ。ストライドが 1 でないビューと、有限でない値はスカラーに落とす（スカラーがエラーを名指しする）。`std::simd` は安定化まで使わない。等方の Matérn、Periodic / RQ の長方形・座標の経路、動径の葉の座標微分（`radial.rs`）はスカラーである。これらをベクトル化するのは速さの作業で、ベンチでそこがボトルネックだと示してから始める（`.cursor/rules/bench.mdc`）。
-- 距離行列・カーネル行列構築はRayonでブロック並列化。下三角は、面積がほぼ等しい列の塊に分ける（`lower_block_start`、`par_lower_blocks`）ので、最初の塊に仕事が集まらない。joint gradient の `n²` の書き込み（積の因子へ渡す重み、残した因子の Gram の積、畳み込みの三角の和と積）も同じ塊で並列に行う。和（葉の重み付き走査と Frobenius の和）は、先頭の列から順に 1 列ずつ足す（`par_lower_fold`）。列の一群をプールで評価してから列の順に畳み込む。これは逐次に足したときと同じ結合なので、和はスケジュールにもプールの大きさにも依らない。面積の塊をまとめて足すと結合が変わり、最適点の近くでは勾配がほぼ打ち消しで決まるので、その丸めが L-BFGS の進み方を変える
+- カーネル評価内側ループは `wide::f64x4` でベクトル化する。場所は `src/kernel/simd/` で、レーンの補助関数は 1 組（`simd/mod.rs`。読み込み、書き込み、有限性、列のスライス、`(x − x0)²`）。`simd/stationary.rs`: 等方 RBF の `apply` / `grad` / `apply_cross` と座標からの長方形の `grad`、等方の Periodic と RQ の正方の Gram（キャッシュした二乗距離から、どの `uplo` も）と 1 回の走査の重み付き勾配（`wide` の `sin_cos`・`ln`・`exp`。RQ の `u^{−α}` は `exp(−α ln u)`）。列の最後の半端なレーンは詰め物をして同じレーンの関数で計算する。ただし f64 の Accurate の等方 RBF の端は、スカラーの `exp` で計算する。`simd/rbf_ard.rs`: ARD RBF の `apply` / `grad` / 長方形の `apply` と `grad`。長方形の `⟨W, ∂K/∂θ_d⟩` は、全長さスケールを 1 回の `exp` から作り、`Σ (W ∘ k) (Δ_d)²` を 1 回の行列積で足す。Accurate の正方は `k` を 1 回作り、下三角から同じ積を足す。`simd/ard.rs`: ARD Matérn と ARD RQ の値と `θ` 微分（座標から、`(Δx_d)²` キャッシュから、長方形。4 行ぶんの `r²` を作ってから動径の式を `f64x4` で評価する）。`simd/dist.rs`: 二乗距離と `(Δx_d)²` の行ループ。ストライドが 1 でないビューと、有限でない値はスカラーに落とす（スカラーがエラーを名指しする）。`std::simd` は安定化まで使わない。等方の Matérn、Periodic / RQ の長方形・座標の経路、動径のカーネルの葉の座標微分（`radial.rs`）はスカラーである。これらをベクトル化するのは速さの作業で、ベンチでそこがボトルネックだと示してから始める（`.cursor/rules/bench.mdc`）。
+- 距離行列・カーネル行列構築はRayonでブロック並列化。下三角は、面積がほぼ等しい列ブロックに分ける（`lower_block_start`、`par_lower_blocks`）ので、最初のブロックに仕事が集まらない。joint gradient の `n²` の書き込み（積の因子へ渡す重み、残した因子の Gram の積、畳み込みの三角の和と積）も同じブロックで並列に行う。和（カーネルの葉の重み付き走査と Frobenius の和）は、先頭の列から順に 1 列ずつ足す（`par_lower_fold`）。列の一群をプールで評価してから列の順に畳み込む。これは逐次に足したときと同じ結合なので、和はスケジュールにもプールの大きさにも依らない。面積ブロックをまとめて足すと結合が変わり、最適点の近くでは勾配がほぼ打ち消しで決まるので、その丸めが L-BFGS の進み方を変える
 - faer自身もRayon並列化されるため、外側との二重並列化に注意。単一の`rayon::ThreadPool`を共有。faer の本数は `min(プール, n/64, n·k/16384, k/12)`（[ADR 0001](adr/0001-faer-parallel-degree.md)）。`k` は RHS 列。カーネル埋めはプール全部
 
 **カーネルの `exp` は最小限の API から始め、デフォルトは近似ではなく正確な実装にする**。カーネル行列の近似誤差は正定値性・Cholesky安定性・尤度・勾配・予測値すべてに波及するため。
@@ -742,7 +742,7 @@ pub struct OptResult {
 
 `init`はスライスにする(呼び出し側のVecを消費しない)。`GprObjective`は`value_and_gradient_into`をオーバーライドし、§6.2の手順でL・α・W・`exp_buf`を共有する。`GprObjective` は `TwiceDifferentiable` を impl し、`hessian_into` は `FittedGpr` へ転送する。`SgprObjective` は `Sgpr` 用の同じ crate 内アダプタ。区間は各パラメータの `Interval` から `Objective::fill_intervals` で取る（公開。ユーザーの Optimizer も読め、同じ目的関数で組み込みの最適化器を呼べる。既定は `Interval::DEFAULT_POSITIVE`）。
 
-トレーナーの境界は `O: for<'a> Optimizer<GprObjective<'a, P>>`。既定は `Lbfgs`。`Lbfgs` は `Differentiable`、`TrustRegion` は `TwiceDifferentiable`、`NelderMead` / `FastSimulatedAnnealing` は `Objective` だけを要る。argmin のアダプタは、ユーザー単位の区間を logit で写して argmin を制約なしのまま動かす（正の区間は対数一様、中点でヤコビアンが 1 になるよう縮尺）。`TrustRegion` は解析ヘッセも写す。`TrustRegion` は argmin の信頼領域法（部分問題は Steihaug）で、Hessian を使うソルバ。Hessian が非正定・特異でも、ステップが区間の外へ出ても、領域が縮むことで扱う。argmin の 3 つの最適化器は評価のキャッシュを 1 つ共有する（`src/optimizer/adapter.rs`）。評価できない点、または値・勾配・Hessian が有限でない点は、バリア値の費用と 0 の勾配・Hessian にする。線探索はそこから戻り、信頼領域は縮む。目的関数自身のエラーは型を保つ。それ以外のソルバの失敗は `OptimizationNotConverged`、ソルバを組むときに argmin が退ける設定は `InvalidConfig`。`FastSimulatedAnnealing` は gprx 自前の値だけのソルバ（Cauchy / Metropolis）で、logit は使わず受け取った log-`θ` を歩く。自作最適化器の例でもある。目的関数の型は crate 内なので、自作の最適化器は要る能力について `Optimizer<P>` をジェネリックに impl し（`impl<P: Objective> Optimizer<P> for Mine`）、`with_optimizer` で同じ型パラメータを差し替える。その隣に無視される別のソルバ設定は置かない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。`Adam` は `Svgp` のミニバッチのループで、`Optimizer` ではない。実行時の NotImplemented は置かない。
+トレーナーの境界は `O: for<'a> Optimizer<GprObjective<'a, P>>`。既定は `Lbfgs`。`Lbfgs` は `Differentiable`、`TrustRegion` は `TwiceDifferentiable`、`NelderMead` / `FastSimulatedAnnealing` は `Objective` だけを要る。argmin のアダプタは、ユーザー単位の区間を logit で写して argmin を制約なしのまま動かす（正の区間は対数一様、中点でヤコビアンが 1 になるよう縮尺）。`TrustRegion` は解析ヘッセも写す。`TrustRegion` は argmin の信頼領域法（部分問題は Steihaug）で、Hessian を使うソルバ。Hessian が非正定・特異でも、ステップが区間の外へ出ても、領域が縮むことで扱う。argmin の 3 つの最適化器は評価のキャッシュを 1 つ共有する（`src/optimizer/adapter.rs`）。評価できない点、または値・勾配・Hessian が有限でない点は、バリア値の費用と 0 の勾配・Hessian にする。線探索はそこから戻り、信頼領域は縮む。目的関数自身のエラーは型を保つ。それ以外のソルバの失敗は `OptimizationNotConverged`、ソルバを組むときに argmin が退ける設定は `InvalidConfig`。`FastSimulatedAnnealing` は gprx 自前の値だけのソルバ（Cauchy / Metropolis）で、logit は使わず受け取った log-`θ` の上を進む。自作最適化器の例でもある。目的関数の型は crate 内なので、自作の最適化器は要る能力について `Optimizer<P>` をジェネリックに impl し（`impl<P: Objective> Optimizer<P> for Mine`）、`with_optimizer` で同じ型パラメータを差し替える。その隣に無視される別のソルバ設定は置かない（`.cursor/rules/types.mdc`）。準ニュートンを gprx が自前実装しない。`Adam` は `Svgp` のミニバッチのループで、`Optimizer` ではない。実行時の NotImplemented は置かない。
 
 ## 10. エラー型 GprError
 
@@ -919,10 +919,10 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
    - ノイズパラメータ(`log_noise_variance`)の勾配比較。`∂K/∂θ = σn² I`であること
    - 悪条件行列での勾配安定性
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
-5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順はテスト内の種つき `rand` でランダム化する
+5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順はテスト内のシードつき `rand` でランダム化する
 5b. **オンライン insert の外部照合**: 同じ θ の libgp `add_pattern` と predict（平均・観測分散）および NLML を相対 `1e-8`。delete の外部 API は無い。`cargo test` はコミット済み JSON を読む（C++ を呼ばない）
-5c. **Sparse の外部照合**: 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch 潰し SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
-5d. **Sparse オンラインの外部照合**: 同じ初期 θ の `OnlineSgpr` の `insert` / `delete` / `insert_inducing` / `delete_inducing` を、各段階の GPyTorch 潰し SGPR（フル再組み立て）と相対 `1e-8`（平均・Observation・Latent・NLML）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
+5c. **Sparse の外部照合**: 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch の周辺化 SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
+5d. **Sparse オンラインの外部照合**: 同じ初期 θ の `OnlineSgpr` の `insert` / `delete` / `insert_inducing` / `delete_inducing` を、各段階の GPyTorch の周辺化 SGPR（フル再組み立て）と相対 `1e-8`（平均・Observation・Latent・NLML）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、収束しないケースでのf64フォールバック
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)。sklearn JSON は数値の第二照合であり、公開 API の契約ではない。アルゴリズムの正本は GPML / Rasmussen
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた関係)
@@ -962,20 +962,20 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 - criterion は `n = 256`。ライブラリ横断のハーネスは `n = 256 / 1024 / 4096`（Forrester）と `16×16 / 32×32 / 64×64`（球）
 - 等方: 1 次元 Forrester `f(x)=(6x-2)² sin(12x-4)`、`x ∈ [0, 1]`、RBF + `GaussianLikelihood` + `StandardizeTarget`。初期ハイパラ `ℓ = 1`、`σn² = 0.1`
 - ARD: 2 次元重み付き球 `f=(x/0.25)²+(y/1)²`、`[0, 1]²` の 16×16 格子。初期 `ℓ_d = 4`（`ℓ_d = 1` では線探索が初手で止まる）
-- `y` は上記の関数 + `N(0, 1)`（gprx の種つき乱数。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は `Uncached` で尾根を歩く）。独立な乱数系列にはしない（L-BFGS の評価回数が景観でぶれる）
+- `y` は上記の関数 + `N(0, 1)`（gprx のシードつき乱数。Forrester は seed `0`、ARD 球は seed `9`。seed `0` は `Uncached` で尾根に沿って進む）。独立な乱数系列にはしない（L-BFGS の評価回数が目的関数の形でぶれる）
 - `benches/exact.rs` の criterion グループ（存在する経路だけ）:
   1. `kernel_rbf` — K の下三角構築
   2. `cholesky_alpha` — `A` の LLT と `α`
   3. `mll_and_grad` — §6.2 の 1 評価
   4. `predict_100` / `predict_100_mixed` — テスト点 100。`DoublePrecision` と `MixedPrecision`
   5. `fit_lbfgs` — 最適化ループ全体。壁時計と一緒に L-BFGS の評価回数を残す。回数が違うときの差は速度差と読まない
-  6. `fit_fsa` — 葉 2 つの和での `FastSimulatedAnnealing`（§5.4 の葉の作り直しの経路）
+  6. `fit_fsa` — カーネルの葉 2 つの和での `FastSimulatedAnnealing`（§5.4 のカーネルの葉の作り直しの経路）
   7. `mll_and_grad_ard` / `fit_lbfgs_ard` — 重み付き球の ARD RBF。`Cached` と `Uncached`（ベンチ ID は `always` / `never`）。等方とは比べない。`fit_lbfgs_ard` も評価回数を残す
   8. `kernel_exp` / `kernel_exp_ard` — 距離を一度埋めたあとの `apply` と θ の `grad`。`FastApprox` と `Accurate`。`mll_and_grad` とは混ぜない
 
 ### 15.3 基準
 
-名前付きの criterion baseline と、それを取った機械は `.dev/bench-log.md`（ローカル。コミットしない）に残す。今の比較の基準は `phase-2`。ホットパス（`src/kernel/`、`workspace`、`gpr`、`objective`、`sgpr`、`svgp`、`precision`）に触る PR は、Verification にその基準との criterion 結果を貼る。速さと無関係ならその理由を書く。
+名前付きの criterion baseline と、それを取った機械は `.dev/bench-log.md`（ローカル。コミットしない）に残す。今の比較の基準は `phase-2`。ホットパス（`src/kernel/`、`workspace`、`gpr`、`objective`、`sgpr`、`svgp`、`precision`）を変える PR は、Verification にその基準との criterion 結果を貼る。速さと無関係ならその理由を書く。
 
 ### 15.4 指標
 

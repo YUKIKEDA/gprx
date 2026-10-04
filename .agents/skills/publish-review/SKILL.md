@@ -44,7 +44,7 @@ Fail a page when any of these is true:
 - Column-major layout, `fit` consuming the trainer, `GaussianLikelihood`, the 0.x break policy, or `internals` being outside the contract is missing before the first example
 - The opening omits a default-feature model family (`Gpr`, `Sgpr`, `Svgp`), or a public item is described by a dependency the caller does not import
 - The README links relatively at a file that is not in the package, or embeds an image
-- Gemini has not inspected a Japanese page in reader-docs, the agent that edited the page scored or rewrote that Japanese, or Gemini reports that the page is a gloss of the English
+- Gemini has not inspected a Japanese page in reader-docs, the agent that edited the page scored or rewrote that Japanese, Gemini reports that the page is a gloss of the English, or a bare word in reader-docs Japanese vocabulary remains
 - A public item an external crate can name with default features is missing from the README Usage section, has no usage example there, or its rustdoc has no usage example (`.cursor/rules/reader-docs.mdc`, `.cursor/rules/rust-docs.mdc`). `internals` is outside that list. The saved-file schema stays in the persist-format doc
 
 ## Report
