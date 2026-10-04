@@ -10,6 +10,11 @@ fmt:
 test:
     cargo test
 
+# Line coverage of src/ from the default-feature tests. Not part of `test`.
+# The floor is the integer part of the percent measured when this gate was added.
+coverage:
+    cargo llvm-cov --fail-under-lines 90
+
 # Regenerates compare/goldens/*.json via sklearn. cargo test must not run this.
 gen-goldens:
     uv run --directory compare python -X utf8 generate.py
