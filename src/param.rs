@@ -6,34 +6,46 @@ use crate::error::GprError;
 use crate::kernel::KernelSpec;
 use crate::likelihood::GaussianLikelihood;
 
-/// Why an [`Interval`] or [`BoundedParam`] could not be constructed.
+/// Reports why an [`Interval`] or [`BoundedParam`] could not be constructed.
 ///
 /// Invalid bounds are not [`crate::GprError::InvalidHyperparameter`], which
 /// is for a hyperparameter value outside its domain.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{Interval, IntervalError};
+///
+/// # fn main() -> Result<(), IntervalError> {
+/// let interval = Interval::new(0.0, 1.0)?;
+/// assert!(interval.lo() < interval.hi());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
 #[non_exhaustive]
 pub enum IntervalError {
     /// `lo` or `hi` is non-finite, or `lo >= hi`.
     #[error("interval bounds must be finite and satisfy lo < hi (got lo={lo}, hi={hi})")]
     InvalidBounds {
-        /// Requested lower endpoint.
+        /// Holds the requested lower endpoint.
         lo: f64,
-        /// Requested upper endpoint.
+        /// Holds the requested upper endpoint.
         hi: f64,
     },
     /// `value` is non-finite or not strictly inside `(lo, hi)`.
     #[error("value {value} is not strictly inside ({lo}, {hi})")]
     OutOfRange {
-        /// Requested parameter in user units.
+        /// Holds the requested parameter in user units.
         value: f64,
-        /// Lower endpoint of the open interval.
+        /// Holds the lower endpoint of the open interval.
         lo: f64,
-        /// Upper endpoint of the open interval.
+        /// Holds the upper endpoint of the open interval.
         hi: f64,
     },
 }
 
-/// Finite open interval `(lo, hi)` with `lo < hi`.
+/// Represents the finite open interval `(lo, hi)` with `lo < hi`.
 ///
 /// Fields are private so `±inf` and `lo >= hi` cannot be stored. Values live
 /// in user units (`ℓ`, `σn²`, constant `c`, …), not optimizer `log` space.
@@ -56,8 +68,7 @@ pub struct Interval {
 }
 
 impl Interval {
-    /// Default open interval `(1e-5, 1e5)` for positive kernel and likelihood
-    /// parameters (`ℓ`, `σn²`, constant `c`, …).
+    /// Names the default open interval `(1e-5, 1e5)` for positive kernel and likelihood parameters (`ℓ`, `σn²`, constant `c`, …).
     pub const DEFAULT_POSITIVE: Self = Self { lo: 1e-5, hi: 1e5 };
 
     /// Builds a finite open interval.
@@ -66,6 +77,8 @@ impl Interval {
     ///
     /// Returns [`IntervalError::InvalidBounds`] if a bound is non-finite or
     /// `lo >= hi`.
+    ///
+    /// See the example on [`Interval`].
     pub fn new(lo: f64, hi: f64) -> Result<Self, IntervalError> {
         if lo.is_finite() && hi.is_finite() && lo < hi {
             Ok(Self { lo, hi })
@@ -75,16 +88,22 @@ impl Interval {
     }
 
     /// Returns the exclusive lower endpoint.
+    ///
+    /// See the example on [`Interval`].
     pub fn lo(self) -> f64 {
         self.lo
     }
 
     /// Returns the exclusive upper endpoint.
+    ///
+    /// See the example on [`Interval`].
     pub fn hi(self) -> f64 {
         self.hi
     }
 
     /// Returns whether `value` is finite and strictly inside `(lo, hi)`.
+    ///
+    /// See the example on [`Interval`].
     pub fn contains(self, value: f64) -> bool {
         value.is_finite() && value > self.lo && value < self.hi
     }
@@ -123,6 +142,8 @@ impl BoundedParam {
     ///
     /// Returns [`IntervalError::OutOfRange`] if `value` is non-finite or not
     /// strictly inside `(lo, hi)`.
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn new(value: f64, interval: Interval) -> Result<Self, IntervalError> {
         if interval.contains(value) {
             Ok(Self { value, interval })
@@ -140,21 +161,29 @@ impl BoundedParam {
     /// # Errors
     ///
     /// Same as [`Self::new`].
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn default_positive(value: f64) -> Result<Self, IntervalError> {
         Self::new(value, Interval::DEFAULT_POSITIVE)
     }
 
     /// Returns the value in user units.
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn value(self) -> f64 {
         self.value
     }
 
     /// Returns the open interval this value belongs to.
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn interval(self) -> Interval {
         self.interval
     }
 
     /// Returns `log(value)` for the concatenated optimizer `θ`.
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn ln(self) -> f64 {
         self.value.ln()
     }
@@ -164,6 +193,8 @@ impl BoundedParam {
     /// # Errors
     ///
     /// Same as [`Self::new`].
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn with_value(self, value: f64) -> Result<Self, IntervalError> {
         Self::new(value, self.interval)
     }
@@ -173,6 +204,8 @@ impl BoundedParam {
     /// # Errors
     ///
     /// Same as [`Self::new`].
+    ///
+    /// See the example on [`BoundedParam`].
     pub fn with_interval(self, interval: Interval) -> Result<Self, IntervalError> {
         Self::new(self.value, interval)
     }

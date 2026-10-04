@@ -7,7 +7,9 @@ use super::{
 };
 use crate::error::GprError;
 
-/// Unfitted sequence of input maps. [`Self::fit`] returns [`FittedPipeline`].
+/// Represents the unfitted sequence of input maps.
+///
+/// [`Self::fit`] returns [`FittedPipeline`].
 ///
 /// Each later map is fitted on the output of the previous map. An empty
 /// pipeline is identity: [`Self::fit`] only checks packing and finiteness.
@@ -37,22 +39,30 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Returns an empty pipeline (identity until a map is appended).
+    ///
+    /// See the example on [`Pipeline`].
     pub fn new() -> Self {
         Self { steps: Vec::new() }
     }
 
     /// Appends a map applied after the maps already in this pipeline.
+    ///
+    /// See the example on [`Pipeline`].
     pub fn then(mut self, step: impl UnfittedTransform + 'static) -> Self {
         self.steps.push(Box::new(step));
         self
     }
 
     /// Returns the number of maps.
+    ///
+    /// See the example on [`Pipeline`].
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Returns whether this pipeline has no maps.
+    ///
+    /// See the example on [`Pipeline`].
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -72,6 +82,8 @@ impl Pipeline {
     /// Returns [`GprError`] from the first map that rejects `x`, or
     /// [`GprError::EmptyInput`] / [`GprError::NonFiniteInput`] when this
     /// pipeline is empty and `x` is empty, packed incorrectly, or non-finite.
+    ///
+    /// See the example on [`Pipeline`].
     pub fn fit(self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<FittedPipeline, GprError> {
         if self.steps.is_empty() {
             IdentityInput.fit(x, n_rows, n_cols)?;
@@ -129,20 +141,26 @@ impl UnfittedTransform for Pipeline {
     }
 }
 
-/// Fitted sequence of input maps.
+/// Represents the fitted sequence of input maps.
 ///
 /// [`Self::apply`] runs each map in the same order as [`Pipeline::then`].
+///
+/// See the example on [`Pipeline`].
 pub struct FittedPipeline {
     steps: Vec<Box<dyn Transform>>,
 }
 
 impl FittedPipeline {
     /// Returns the number of maps.
+    ///
+    /// See the example on [`FittedPipeline`].
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Returns whether this pipeline has no maps.
+    ///
+    /// See the example on [`FittedPipeline`].
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -202,7 +220,9 @@ impl Transform for FittedPipeline {
     }
 }
 
-/// Unfitted sequence of target maps. [`Self::fit`] returns [`FittedTargetPipeline`].
+/// Represents the unfitted sequence of target maps.
+///
+/// [`Self::fit`] returns [`FittedTargetPipeline`].
 ///
 /// Each later map is fitted on the output of the previous map. An empty
 /// pipeline is identity: [`Self::fit`] only checks that `y` is finite.
@@ -233,22 +253,30 @@ pub struct TargetPipeline {
 
 impl TargetPipeline {
     /// Returns an empty pipeline (identity until a map is appended).
+    ///
+    /// See the example on [`TargetPipeline`].
     pub fn new() -> Self {
         Self { steps: Vec::new() }
     }
 
     /// Appends a map applied after the maps already in this pipeline.
+    ///
+    /// See the example on [`TargetPipeline`].
     pub fn then(mut self, step: impl UnfittedTarget + 'static) -> Self {
         self.steps.push(Box::new(step));
         self
     }
 
     /// Returns the number of maps.
+    ///
+    /// See the example on [`TargetPipeline`].
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Returns whether this pipeline has no maps.
+    ///
+    /// See the example on [`TargetPipeline`].
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -268,6 +296,8 @@ impl TargetPipeline {
     /// Returns [`GprError`] from the first map that rejects `y`, or
     /// [`GprError::NonFiniteInput`] when this pipeline is empty and `y`
     /// contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`TargetPipeline`].
     pub fn fit(self, y: &[f64]) -> Result<FittedTargetPipeline, GprError> {
         if self.steps.is_empty() {
             IdentityTarget.fit(y)?;
@@ -320,22 +350,28 @@ impl UnfittedTarget for TargetPipeline {
     }
 }
 
-/// Fitted sequence of target maps.
+/// Represents the fitted sequence of target maps.
 ///
 /// Forward maps run in [`TargetPipeline::then`] order. Inverse mean and
 /// variance run in reverse, so a MinMax-then-Standardize stack undoes
 /// Standardize first.
+///
+/// See the example on [`TargetPipeline`].
 pub struct FittedTargetPipeline {
     steps: Vec<Box<dyn TargetTransform>>,
 }
 
 impl FittedTargetPipeline {
     /// Returns the number of maps.
+    ///
+    /// See the example on [`FittedTargetPipeline`].
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Returns whether this pipeline has no maps.
+    ///
+    /// See the example on [`FittedTargetPipeline`].
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }

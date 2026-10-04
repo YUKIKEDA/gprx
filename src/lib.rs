@@ -15,17 +15,14 @@
 //! break that API. The MSRV is 1.85. The `internals` module
 //! (`bench-internals`, `insert-stages`) is outside semantic versioning.
 //!
-//! Distance fills and lower-triangle kernel writes use the process-wide
-//! Rayon pool (shared with faer). There is no parallel on/off flag and no
-//! `n_jobs` setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process
-//! starts, or call
-//! `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before
-//! the first [`Gpr::fit`] / [`FittedGpr::predict`]. One worker
-//! (`RAYON_NUM_THREADS=1`) is sequential. The global pool can be
-//! initialized only once. Training Cholesky and the `W` n-RHS solve cap
-//! faer at `min(pool, n / 64)`. Predict / covariance triangular solves
-//! also cap at `n · m / 16384` and `m / 12` so a 1024×100 `L⁻¹ k_*`
-//! does not start 16 workers. Kernel fills still use the full pool.
+//! Distance fills and lower-triangle kernel writes use the process-wide thread pool (shared
+//! with the linear-algebra backend). There is no parallel on/off flag and no `n_jobs`
+//! setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process starts, or call the global
+//! thread-pool builder before the first [`Gpr::fit`] / [`FittedGpr::predict`]. One worker
+//! (`RAYON_NUM_THREADS=1`) is sequential. The global pool can be initialized only once.
+//! Training Cholesky and the `W` n-RHS solve cap the linear-algebra backend at `min(pool, n
+//! / 64)`. Predict / covariance triangular solves also cap at `n · m / 16384` and `m / 12`
+//! so a 1024×100 `L⁻¹ k_*` does not start 16 workers. Kernel fills still use the full pool.
 //!
 //! # Examples
 //!

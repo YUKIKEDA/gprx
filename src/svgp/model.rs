@@ -15,7 +15,7 @@ use crate::precision::{DoublePrecision, GpScalar};
 use super::factor::{assemble_fitted, run_adam_fit};
 use super::fitted::FittedSvgp;
 
-/// Trainer for stochastic variational GPR at a caller-supplied inducing set `Z`.
+/// Represents the trainer for stochastic variational GPR at a caller-supplied inducing set `Z`.
 ///
 /// [`Svgp<Fixed>::factor`] prepares `K_mm` and a whitened prior `q(u)`
 /// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`.
@@ -53,6 +53,8 @@ impl Svgp {
     /// Inducing coordinates are an argument of [`Svgp<Fixed>::factor`], not
     /// of this constructor. The whitened prior is allocated at `factor` from
     /// the inducing count.
+    ///
+    /// See the example on [`Svgp`].
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
             spec: SparseSpec::new(kernel, likelihood),
@@ -99,21 +101,31 @@ impl<O, P> Svgp<O, P> {
         self.retype(|_| optimizer)
     }
 
-    /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
+    /// Selects the storage precision.
+    ///
+    /// Omitting it leaves [`DoublePrecision`].
+    ///
+    /// See the example on [`Svgp`].
     pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, P2> {
         self.retype(|optimizer| optimizer)
     }
 
-    /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
+    /// Selects the kernel `exp`.
+    ///
+    /// Omitting it leaves [`KernelExp::Accurate`].
     ///
     /// `factor`, `fit`, and predict use the same polynomial. Hyperparameter
     /// `exp(θ)` is unchanged.
+    ///
+    /// See the example on [`Svgp`].
     pub fn with_math(mut self, math: KernelExp) -> Self {
         self.spec.math = math;
         self
     }
 
     /// Returns the kernel `exp` mode.
+    ///
+    /// See the example on [`Svgp`].
     pub fn math(&self) -> KernelExp {
         self.spec.math
     }
@@ -152,11 +164,15 @@ impl<O, P> Svgp<O, P> {
     }
 
     /// Returns the jitter retries for factoring `K_mm`.
+    ///
+    /// See the example on [`Svgp`].
     pub fn jitter_policy(&self) -> JitterPolicy {
         self.spec.jitter
     }
 
-    /// Replaces the input (`X`) transform. Omitting it leaves identity.
+    /// Replaces the input (`X`) transform.
+    ///
+    /// Omitting it leaves identity.
     ///
     /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
     /// every later query or inserted point go through it, so `Z` is passed
@@ -189,7 +205,9 @@ impl<O, P> Svgp<O, P> {
         self
     }
 
-    /// Replaces the target (`y`) transform. Omitting it leaves identity.
+    /// Replaces the target (`y`) transform.
+    ///
+    /// Omitting it leaves identity.
     ///
     /// The map is fitted on training `y`. Predictions are mapped back to the
     /// original scale. The negative marginal likelihood and its gradient are
@@ -222,11 +240,15 @@ impl<O, P> Svgp<O, P> {
     }
 
     /// Returns the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`Svgp`].
     pub fn kernel(&self) -> &KernelSpec {
         &self.spec.kernel
     }
 
     /// Returns the observation-noise model.
+    ///
+    /// See the example on [`Svgp`].
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.spec.likelihood
     }
@@ -234,6 +256,8 @@ impl<O, P> Svgp<O, P> {
     /// Returns the concatenated kernel and likelihood parameter count.
     ///
     /// Inducing coordinates and the variational posterior are not counted.
+    ///
+    /// See the example on [`Svgp`].
     pub fn num_params(&self) -> usize {
         self.spec.theta_len()
     }
@@ -244,6 +268,8 @@ impl<O, P> Svgp<O, P> {
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`Svgp`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.spec.read_theta(out)
     }
@@ -260,6 +286,8 @@ impl<O, P> Svgp<O, P> {
     /// length, or [`GprError::InvalidNoiseVariance`] if the likelihood `θ`
     /// is invalid. Kernel and likelihood `θ` are committed together only
     /// after both writes succeed.
+    ///
+    /// See the example on [`Svgp`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.spec.write_theta(params)
     }

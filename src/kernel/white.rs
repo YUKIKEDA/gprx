@@ -9,7 +9,7 @@ use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
-/// White (nugget) kernel: `σw²` on the training diagonal and zero elsewhere.
+/// Evaluates the white (nugget) kernel `σw²` on the training diagonal and zero elsewhere.
 ///
 /// The optimizer parameter is `θ = log(σw²)`. Cross-covariance is identically
 /// zero. Observation noise belongs in [`crate::GaussianLikelihood`]; do not
@@ -39,6 +39,8 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `variance` is not finite
     /// or not strictly positive.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn new(variance: f64) -> Result<Self, GprError> {
         validate_positive_finite(variance, "white kernel variance")?;
         Ok(Self {
@@ -52,6 +54,8 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
         let log_variance = validate_log_positive(log_variance, "white kernel variance")?;
         Ok(Self {
@@ -60,16 +64,22 @@ impl WhiteKernel {
     }
 
     /// Returns `σw² = exp(θ)`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn variance(&self) -> f64 {
         self.variance.value()
     }
 
     /// Returns `θ = log(σw²)`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn log_variance(&self) -> f64 {
         self.variance.ln()
     }
 
     /// Returns the open interval on `σw²`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn bounds(&self) -> Interval {
         self.variance.interval()
     }
@@ -80,6 +90,8 @@ impl WhiteKernel {
     ///
     /// Returns [`crate::IntervalError`] if the current `σw²` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         Ok(Self {
             variance: self.variance.with_interval(interval)?,
@@ -87,6 +99,8 @@ impl WhiteKernel {
     }
 
     /// Returns the number of optimizer parameters (always 1).
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn num_params(&self) -> usize {
         1
     }
@@ -96,6 +110,8 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "white parameter")?;
         out[0] = self.variance.ln();
@@ -108,6 +124,8 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "white parameter")?;
         let log_variance = validate_log_positive(params[0], "white kernel variance")?;
@@ -124,6 +142,8 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError`] if the matrices are empty, not square, or size
     /// mismatched.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -139,6 +159,8 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if the matrices are empty or size mismatched.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -158,6 +180,8 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if `x` is empty or `out` is not `n×n`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn apply_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -173,6 +197,8 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError`] if a matrix is empty or `out` is the wrong shape.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn apply_cross_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -189,6 +215,8 @@ impl WhiteKernel {
     }
 
     /// Writes the diagonal `k(x, x) = σw²` into `out`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(self.variance()));
     }
@@ -199,6 +227,8 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -211,11 +241,15 @@ impl WhiteKernel {
         self.write_square(d_k, uplo)
     }
 
-    /// Writes `∂K/∂θ` from coordinates. `x` is used only for shape.
+    /// Writes `∂K/∂θ` from coordinates.
+    ///
+    /// `x` is used only for shape.
     ///
     /// # Errors
     ///
     /// Same as [`Self::grad`], with `x` in place of `dist`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn grad_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -234,6 +268,8 @@ impl WhiteKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape errors as [`Self::apply`].
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -247,11 +283,15 @@ impl WhiteKernel {
         self.write_square(d2_k, uplo)
     }
 
-    /// Writes `∂²K/∂θ²` from coordinates. `x` is used only for shape.
+    /// Writes `∂²K/∂θ²` from coordinates.
+    ///
+    /// `x` is used only for shape.
     ///
     /// # Errors
     ///
     /// Same as [`Self::hess`], with `x` in place of `dist`.
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn hess_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -273,6 +313,8 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Same shape errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
+    ///
+    /// See the example on [`WhiteKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,

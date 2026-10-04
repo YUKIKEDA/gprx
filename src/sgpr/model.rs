@@ -17,7 +17,7 @@ use super::factor::assemble_fitted;
 use super::fitted::FittedSgpr;
 use super::{FixedInducing, FreeInducing, InducingLayout};
 
-/// Trainer for collapsed variational SGPR at a caller-supplied inducing set `Z`.
+/// Represents the trainer for collapsed variational SGPR at a caller-supplied inducing set `Z`.
 ///
 /// The default [`FixedInducing`] searches kernel and likelihood `θ` only.
 /// [`Self::with_inducing`]`(`[`FreeInducing`]`)` searches `θ` and `Z`
@@ -49,13 +49,14 @@ pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision> {
     pub(super) _precision: PhantomData<P>,
 }
 impl Sgpr {
-    /// Builds a trainer with identity transforms, the current kernel `θ`, and
-    /// [`Lbfgs`].
+    /// Builds a trainer with identity transforms, the current kernel `θ`, and [`Lbfgs`].
     ///
     /// Inducing coordinates are an argument of [`Sgpr::fit`] /
     /// [`Sgpr<Fixed>::factor`], not of this constructor. Call
     /// [`Self::with_optimizer`] to switch to [`Fixed`] or another
     /// [`Optimizer`].
+    ///
+    /// See the example on [`Sgpr`].
     pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
         Self {
             spec: SparseSpec::new(kernel, likelihood),
@@ -101,21 +102,31 @@ impl<O, I, P> Sgpr<O, I, P> {
         self.retype(|_| optimizer)
     }
 
-    /// Selects the storage precision. Omitting it leaves [`DoublePrecision`].
+    /// Selects the storage precision.
+    ///
+    /// Omitting it leaves [`DoublePrecision`].
+    ///
+    /// See the example on [`Sgpr`].
     pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, P2> {
         self.retype(|optimizer| optimizer)
     }
 
-    /// Selects the kernel `exp`. Omitting it leaves [`KernelExp::Accurate`].
+    /// Selects the kernel `exp`.
+    ///
+    /// Omitting it leaves [`KernelExp::Accurate`].
     ///
     /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
     /// unchanged.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn with_math(mut self, math: KernelExp) -> Self {
         self.spec.math = math;
         self
     }
 
     /// Returns the kernel `exp` mode.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn math(&self) -> KernelExp {
         self.spec.math
     }
@@ -155,11 +166,15 @@ impl<O, I, P> Sgpr<O, I, P> {
     }
 
     /// Returns the jitter retries for factoring `K_mm`.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn jitter_policy(&self) -> JitterPolicy {
         self.spec.jitter
     }
 
-    /// Replaces the input (`X`) transform. Omitting it leaves identity.
+    /// Replaces the input (`X`) transform.
+    ///
+    /// Omitting it leaves identity.
     ///
     /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
     /// every later query or inserted point go through it, so `Z` is passed
@@ -193,7 +208,9 @@ impl<O, I, P> Sgpr<O, I, P> {
         self
     }
 
-    /// Replaces the target (`y`) transform. Omitting it leaves identity.
+    /// Replaces the target (`y`) transform.
+    ///
+    /// Omitting it leaves identity.
     ///
     /// The map is fitted on training `y`. Predictions are mapped back to the
     /// original scale. The negative marginal likelihood and its gradient are
@@ -254,11 +271,15 @@ impl<O, I, P> Sgpr<O, I, P> {
     }
 
     /// Returns the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn kernel(&self) -> &KernelSpec {
         &self.spec.kernel
     }
 
     /// Returns the observation-noise model.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.spec.likelihood
     }
@@ -266,6 +287,8 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// Returns the concatenated kernel and likelihood parameter count.
     ///
     /// Inducing coordinates are not counted.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn num_params(&self) -> usize {
         self.spec.theta_len()
     }
@@ -276,6 +299,8 @@ impl<O, I, P> Sgpr<O, I, P> {
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.spec.read_theta(out)
     }
@@ -292,6 +317,8 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// length, or [`GprError::InvalidNoiseVariance`] if the likelihood `θ`
     /// is invalid. Kernel and likelihood `θ` are committed together only
     /// after both writes succeed.
+    ///
+    /// See the example on [`Sgpr`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.spec.write_theta(params)
     }

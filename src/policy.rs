@@ -3,7 +3,7 @@
 
 use crate::error::GprError;
 
-/// Whether [`crate::Gpr`] caches training distances between kernel builds.
+/// Records whether [`crate::Gpr`] caches training distances between kernel builds.
 ///
 /// [`Self::Cached`] (the default) fills the distances once per fit and reuses
 /// them while `X` is unchanged: isotropic fits store an `n×n`
@@ -30,14 +30,14 @@ use crate::error::GprError;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DistanceCachePolicy {
-    /// Fill once per fit and reuse (the speed pole).
+    /// Fills distances once per fit and reuses them (the speed pole).
     #[default]
     Cached,
-    /// Recompute from `X` on every kernel build (the memory pole).
+    /// Recomputes distances from `X` on every kernel build (the memory pole).
     Uncached,
 }
 
-/// Where the gradient matrix `W = ααᵀ - K⁻¹` lives during a fit.
+/// Records where the gradient matrix `W = ααᵀ - K⁻¹` lives during a fit.
 ///
 /// [`Self::Retain`] (the default) keeps a dedicated `n×n` `W`, so the
 /// Cholesky factor stays in place and optimizers that report changed
@@ -62,26 +62,33 @@ pub enum DistanceCachePolicy {
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CholeskyBuffer {
-    /// Keep a dedicated `W` (the speed pole).
+    /// Keeps a dedicated `W` (the speed pole).
     #[default]
     Retain,
-    /// Overwrite the factor with `W`, then refactor (the memory pole).
+    /// Overwrites the factor with `W`, then refactors (the memory pole).
     Reuse,
 }
 
-/// Which kernel `exp` [`crate::Gpr`] evaluates with.
+/// Records which kernel `exp` [`crate::Gpr`] evaluates with.
 ///
-/// [`Self::Accurate`] (the default) is libm / SIMD `exp`
-/// ([`crate::Accurate`]). [`Self::FastApprox`] is the polynomial
-/// ([`crate::FastApprox`]); fit and predict use the same one.
-/// Hyperparameter `exp(θ)` is unchanged.
+/// [`Self::Accurate`] (the default) is language `exp` and SIMD `exp` ([`crate::Accurate`]).
+/// [`Self::FastApprox`] is the polynomial ([`crate::FastApprox`]); fit and predict use the
+/// same one. Hyperparameter `exp(θ)` is unchanged.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::KernelExp;
+///
+/// assert_eq!(KernelExp::default(), KernelExp::Accurate);
+/// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum KernelExp {
-    /// Exact libm / SIMD `exp`.
+    /// Uses the exact language `exp` and SIMD `exp`.
     #[default]
     Accurate,
-    /// Degree-7 polynomial `exp`.
+    /// Marks a degree-7 polynomial `exp`.
     FastApprox,
 }
 
@@ -104,7 +111,7 @@ macro_rules! with_kernel_exp {
 }
 pub(crate) use with_kernel_exp;
 
-/// Numerical Cholesky stabilizer, distinct from observation noise.
+/// Represents the numerical Cholesky stabilizer, distinct from observation noise.
 ///
 /// The first factorization always tries `A = K + σn² I` with no extra
 /// diagonal. [`Self::Fixed`] retries once with that `j` if the first factor
@@ -148,13 +155,17 @@ pub enum JitterPolicy {
     Adaptive(AdaptiveJitter),
 }
 
-/// Non-negative diagonal offset for [`JitterPolicy::Fixed`].
+/// Represents the non-negative diagonal offset for [`JitterPolicy::Fixed`].
+///
+/// See the example on [`JitterPolicy`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FixedJitter {
     jitter: f64,
 }
 
-/// Growing diagonal offsets for [`JitterPolicy::Adaptive`].
+/// Represents the growing diagonal offsets for [`JitterPolicy::Adaptive`].
+///
+/// See the example on [`JitterPolicy`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptiveJitter {
     initial: f64,
@@ -186,6 +197,8 @@ impl JitterPolicy {
     ///
     /// Returns [`GprError::InvalidConfig`] if `jitter` is not finite
     /// or is negative.
+    ///
+    /// See the example on [`JitterPolicy`].
     pub fn fixed(jitter: f64) -> Result<Self, GprError> {
         if !jitter.is_finite() || jitter < 0.0 {
             return Err(GprError::InvalidConfig {
@@ -205,6 +218,8 @@ impl JitterPolicy {
     ///
     /// Returns [`GprError::InvalidConfig`] if a value is non-finite
     /// or outside that domain.
+    ///
+    /// See the example on [`JitterPolicy`].
     pub fn adaptive(
         initial: f64,
         multiplier: f64,
@@ -276,6 +291,8 @@ impl JitterPolicy {
 
 impl FixedJitter {
     /// Returns the retry offset `j`.
+    ///
+    /// See the example on [`FixedJitter`].
     pub fn jitter(&self) -> f64 {
         self.jitter
     }
@@ -283,21 +300,29 @@ impl FixedJitter {
 
 impl AdaptiveJitter {
     /// Returns the first retry offset.
+    ///
+    /// See the example on [`AdaptiveJitter`].
     pub fn initial(&self) -> f64 {
         self.initial
     }
 
     /// Returns the factor applied after each failed retry.
+    ///
+    /// See the example on [`AdaptiveJitter`].
     pub fn multiplier(&self) -> f64 {
         self.multiplier
     }
 
     /// Returns the maximum number of jittered attempts.
+    ///
+    /// See the example on [`AdaptiveJitter`].
     pub fn max_retries(&self) -> usize {
         self.max_retries
     }
 
     /// Returns the largest retry offset that may be tried.
+    ///
+    /// See the example on [`AdaptiveJitter`].
     pub fn max_jitter(&self) -> f64 {
         self.max_jitter
     }

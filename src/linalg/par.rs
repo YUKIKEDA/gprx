@@ -1,4 +1,4 @@
-//! faer worker caps shared by every factorization and solve.
+//! Describes the faer worker caps shared by every factorization and solve.
 
 use faer::Par;
 

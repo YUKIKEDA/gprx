@@ -23,7 +23,7 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fit_buffers};
 
-/// Fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
+/// Stores a fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
 ///
 /// [`Self::neg_log_marginal_likelihood`] is
 /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
@@ -163,8 +163,9 @@ where
         })
     }
 
-    /// Drops `L` / `α` / training data and returns a trainer with the current
-    /// kernel, likelihood, transforms, optimizer, and policies.
+    /// Drops `L` / `α` / training data and returns a trainer with the current kernel, likelihood, transforms, optimizer, and policies.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn into_trainer(self) -> Gpr<O, P> {
         self.core.into_trainer(self.optimizer)
     }
@@ -212,26 +213,36 @@ where
     }
 
     /// Returns the number of training points.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn n(&self) -> usize {
         self.core.n
     }
 
     /// Returns the feature dimension from the last successful fit.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn d(&self) -> usize {
         self.core.d
     }
 
     /// Returns the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn kernel(&self) -> &KernelSpec {
         &self.core.kernel
     }
 
     /// Returns the observation-noise model.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.core.likelihood
     }
 
     /// Returns `α = A⁻¹ y` from the last successful fit.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn alpha(&self) -> &[P::Refine] {
         &self.core.alpha
     }
@@ -241,6 +252,8 @@ where
     /// Same packing as [`Gpr::fit`] / [`Gpr<Fixed>::factor`]: `n` points by
     /// `d` features. Values are on the scale passed to fit, before the input
     /// transform.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn x(&self) -> &[f64] {
         &self.core.x_obs
     }
@@ -248,6 +261,8 @@ where
     /// Returns the original training targets.
     ///
     /// Values are on the scale passed to fit, before the target transform.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn y(&self) -> &[f64] {
         &self.core.y_obs
     }
@@ -301,6 +316,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::save`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
         persist::save_fitted(self, dir.as_ref(), true)
     }
@@ -359,21 +376,29 @@ where
     }
 
     /// Returns the distance-cache policy carried from the trainer.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn distance_cache_policy(&self) -> crate::DistanceCachePolicy {
         self.core.policies.distance_cache
     }
 
     /// Returns the Cholesky buffer policy carried from the trainer.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn cholesky_buffer(&self) -> crate::CholeskyBuffer {
         self.core.policies.cholesky_buffer
     }
 
     /// Returns the kernel `exp` used by fit and predict.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn math(&self) -> crate::KernelExp {
         self.core.policies.math
     }
 
     /// Returns the jitter retries used when `K + σn² I` fails to factor.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn jitter_policy(&self) -> crate::JitterPolicy {
         self.core.policies.jitter
     }
@@ -417,6 +442,10 @@ where
     /// `log|A| = 2 Σ log(L_ii)`. `y` is the target after the target
     /// transform.
     ///
+    /// # Errors
+    ///
+    /// The stored factor is already valid, so this returns [`Ok`] and does not return [`GprError`].
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -440,6 +469,8 @@ where
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn num_params(&self) -> usize {
         self.core.num_params()
     }
@@ -450,6 +481,8 @@ where
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.core.get_params(out)
     }
@@ -621,8 +654,7 @@ where
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
-    /// Writes [`Self::predict`] into `out`, reusing `mean` / `variance`
-    /// capacity when the query length matches.
+    /// Writes [`Self::predict`] into `out`, reusing `mean` / `variance` capacity when the query length matches.
     ///
     /// # Errors
     ///
@@ -664,6 +696,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn predict_with(
         &self,
         xs: &[f64],
@@ -684,12 +718,13 @@ where
         Ok(out)
     }
 
-    /// Writes [`Self::predict_with`] into `out`, reusing `mean` / `variance`
-    /// capacity when the query length matches.
+    /// Writes [`Self::predict_with`] into `out`, reusing `mean` / `variance` capacity when the query length matches.
     ///
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn predict_with_into(
         &mut self,
         xs: &[f64],
@@ -751,6 +786,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn predict_covariance_with(
         &self,
         xs: &[f64],
@@ -808,6 +845,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::sample`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn sample_with(
         &self,
         xs: &[f64],
@@ -829,8 +868,7 @@ where
         )
     }
 
-    /// Returns leave-one-out mean and observation variance at every training
-    /// point.
+    /// Returns leave-one-out mean and observation variance at every training point.
     ///
     /// Uses the GPML identities `μ_i = y_i - α_i / Q_ii` and
     /// `σ_i² = 1 / Q_ii` with `Q = A⁻¹` and `A = K + σn² I`. This is
@@ -871,6 +909,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn loo_predict_with(
         &self,
         options: PredictOptions,
@@ -893,6 +933,8 @@ where
     /// # Errors
     ///
     /// Same as [`Gpr::fit`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         let mut view = ExactFit {
             core: &mut self.core,
@@ -988,6 +1030,8 @@ where
     /// # Errors
     ///
     /// Same as [`Gpr<Fixed>::factor`].
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         self.fit_view().refactor()
     }

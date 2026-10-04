@@ -12,7 +12,15 @@ use crate::rng::{open_unit, seeded_rng};
 use super::adapter::keep_better;
 use super::{OptResult, Optimizer, Restarts};
 
-/// How a proposed coordinate is folded back into an open parameter interval.
+/// Describes how a proposed coordinate is folded back into an open parameter interval.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::BoundaryPolicy;
+///
+/// assert_eq!(BoundaryPolicy::default(), BoundaryPolicy::Clamp);
+/// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BoundaryPolicy {
@@ -23,7 +31,7 @@ pub enum BoundaryPolicy {
     Periodic,
 }
 
-/// Fast Simulated Annealing with a Cauchy generating distribution.
+/// Represents the fast Simulated Annealing with a Cauchy generating distribution.
 ///
 /// Walks the same vector [`Optimizer::minimize`] receives (log-`θ` for
 /// [`crate::Gpr`]). Positive user-unit [`Interval`]s map to
@@ -101,7 +109,11 @@ impl FastSimulatedAnnealing {
         Self::default()
     }
 
-    /// Sets the iteration cap (default 100). One iteration updates every coordinate.
+    /// Sets the iteration cap (default 100).
+    ///
+    /// One iteration updates every coordinate.
+    ///
+    /// See the example on [`FastSimulatedAnnealing`].
     pub fn with_max_iterations(mut self, max_iterations: u64) -> Self {
         self.max_iterations = max_iterations;
         self
@@ -115,6 +127,8 @@ impl FastSimulatedAnnealing {
     /// extra start anneals with its own random steps, derived from
     /// [`Self::with_seed`] and the restart number; the first start uses
     /// [`Self::with_seed`] itself.
+    ///
+    /// See the example on [`FastSimulatedAnnealing`].
     pub fn with_restarts(mut self, n: NonZeroU32, seed: u64) -> Self {
         self.restarts = Some(Restarts { n, seed });
         self
@@ -126,6 +140,8 @@ impl FastSimulatedAnnealing {
     ///
     /// Returns [`GprError::InvalidConfig`] if `temperature` is not
     /// finite or is not strictly positive.
+    ///
+    /// See the example on [`FastSimulatedAnnealing`].
     pub fn with_initial_temperature(mut self, temperature: f64) -> Result<Self, GprError> {
         if !temperature.is_finite() || temperature <= 0.0 {
             return Err(GprError::InvalidConfig {
@@ -142,6 +158,8 @@ impl FastSimulatedAnnealing {
     ///
     /// Returns [`GprError::InvalidConfig`] if `cooling_rate` is not
     /// finite or is not strictly positive.
+    ///
+    /// See the example on [`FastSimulatedAnnealing`].
     pub fn with_cooling_rate(mut self, cooling_rate: f64) -> Result<Self, GprError> {
         if !cooling_rate.is_finite() || cooling_rate <= 0.0 {
             return Err(GprError::InvalidConfig {
@@ -153,12 +171,16 @@ impl FastSimulatedAnnealing {
     }
 
     /// Sets the seed passed to gprx's seeded generator (Xoshiro256++, the same on every platform).
+    ///
+    /// See the example on [`FastSimulatedAnnealing`].
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
     }
 
     /// Sets how proposals that leave the open interval are folded back.
+    ///
+    /// See the example on [`FastSimulatedAnnealing`].
     pub fn with_boundary(mut self, boundary: BoundaryPolicy) -> Self {
         self.boundary = boundary;
         self

@@ -1,5 +1,4 @@
-//! Trust-region optimizer (argmin `TrustRegion` with the Steihaug subproblem):
-//! the solver that uses the analytic Hessian.
+//! Defines the trust-region optimizer that uses the analytic Hessian and the Steihaug subproblem.
 
 use std::num::NonZeroU32;
 
@@ -17,8 +16,9 @@ use super::adapter::{
 use super::logit::{log_theta_to_z, sample_log_uniform_z};
 use super::{OptResult, Optimizer, Restarts};
 
-/// Trust-region method with the Steihaug conjugate-gradient subproblem, via
-/// argmin. It uses the analytic Hessian ([`crate::TwiceDifferentiable`]).
+/// Searches hyperparameters with a trust-region method and the Steihaug conjugate-gradient subproblem.
+///
+/// It uses the analytic Hessian ([`crate::TwiceDifferentiable`]).
 ///
 /// The step is the minimizer of the quadratic model inside a ball whose
 /// radius grows and shrinks with how well the model predicted the decrease, so
@@ -26,6 +26,8 @@ use super::{OptResult, Optimizer, Restarts};
 /// handled by the method: the region shrinks. The Hessian lives in
 /// unconstrained logit coordinates. A run that hits the iteration cap returns
 /// its best point.
+///
+/// See the example on [`Self::new`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrustRegion {
     max_iterations: u64,
@@ -48,8 +50,7 @@ impl Default for TrustRegion {
 }
 
 impl TrustRegion {
-    /// Builds a trust-region optimizer with 100 iterations, gradient tolerance
-    /// `sqrt(ε)`, initial radius 1, and maximum radius 100 (logit coordinates).
+    /// Builds a trust-region optimizer with 100 iterations, gradient tolerance `sqrt(ε)`, initial radius 1, and maximum radius 100 (logit coordinates).
     ///
     /// # Examples
     ///
@@ -70,7 +71,9 @@ impl TrustRegion {
         Self::default()
     }
 
-    /// Sets the iteration cap passed to argmin (default 100).
+    /// Sets the iteration cap (default 100).
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_max_iterations(mut self, max_iterations: u64) -> Self {
         self.max_iterations = max_iterations;
         self
@@ -82,6 +85,8 @@ impl TrustRegion {
     ///
     /// Returns [`GprError::InvalidConfig`] if `tolerance` is not finite
     /// or is negative.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_tolerance(mut self, tolerance: f64) -> Result<Self, GprError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
             return Err(GprError::InvalidConfig {
@@ -98,6 +103,8 @@ impl TrustRegion {
     ///
     /// Returns [`GprError::InvalidConfig`] unless
     /// `0 < initial_radius <= max_radius` and both are finite.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_radii(mut self, initial_radius: f64, max_radius: f64) -> Result<Self, GprError> {
         let ok = initial_radius.is_finite()
             && max_radius.is_finite()
@@ -114,6 +121,8 @@ impl TrustRegion {
     }
 
     /// Adds `n` extra log-uniform starts (`n ≥ 1`) and keeps the lowest NLML.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_restarts(mut self, n: NonZeroU32, seed: u64) -> Self {
         self.restarts = Some(Restarts { n, seed });
         self

@@ -10,18 +10,17 @@ use crate::math::KernelMath;
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
 
-/// ARD RBF: `k = exp( -½ Σ_d (x_d - x'_d)² / ℓ_d² )`.
+/// Evaluates the ARD RBF `k = exp( -½ Σ_d (x_d - x'_d)² / ℓ_d² )`.
 ///
 /// Optimizer parameters are `θ_d = log(ℓ_d)` via [`ArdLengthscales`]. When every
 /// `ℓ_d` equals a scalar `ℓ`, values match isotropic [`super::RbfKernel`].
 /// `apply` / `grad` take the `n×d` coordinate matrix; a scalar squared-distance
 /// matrix is not enough for `∂K/∂θ_d`. Amplitude is not stored here.
 ///
-/// Cloning copies the lengthscale vectors. When
-/// [`crate::DistanceCachePolicy::Cached`] is set, [`crate::Gpr`] caches raw
-/// `(Δx_d)²` as `n × (n·d)` and evaluates from that tensor. Column-major
-/// views with unit row stride use `wide::f64x4` for [`Self::apply`] and
-/// [`Self::grad`].
+/// Cloning copies the lengthscale vectors. When [`crate::DistanceCachePolicy::Cached`] is
+/// set, [`crate::Gpr`] caches raw `(Δx_d)²` as `n × (n·d)` and evaluates from that tensor.
+/// Column-major views with unit row stride use four-wide `f64` SIMD for [`Self::apply`]
+/// and [`Self::grad`].
 ///
 /// # Examples
 ///
@@ -46,6 +45,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// lengthscale is invalid.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn new(lengthscales: &[f64]) -> Result<Self, GprError> {
         Ok(Self {
             lengthscales: ArdLengthscales::new(lengthscales)?,
@@ -58,6 +59,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// `θ_d` is invalid.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn from_log_lengthscales(log_lengthscales: &[f64]) -> Result<Self, GprError> {
         Ok(Self {
             lengthscales: ArdLengthscales::from_log_lengthscales(log_lengthscales)?,
@@ -65,6 +68,8 @@ impl RbfArdKernel {
     }
 
     /// Returns the shared ARD lengthscale mouth.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn lengthscales(&self) -> &ArdLengthscales {
         &self.lengthscales
     }
@@ -78,11 +83,15 @@ impl RbfArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.lengthscales.lengthscale(dim)
     }
 
     /// Returns `θ_d = log(ℓ_d)`.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn log_lengthscales(&self) -> &[f64] {
         self.lengthscales.log_lengthscales()
     }
@@ -93,6 +102,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`crate::IntervalError`] if any current `ℓ_d` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn with_bounds(
         self,
         interval: crate::param::Interval,
@@ -103,6 +114,8 @@ impl RbfArdKernel {
     }
 
     /// Returns the number of optimizer parameters (`d`).
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn num_params(&self) -> usize {
         self.lengthscales.num_params()
     }
@@ -112,16 +125,22 @@ impl RbfArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.lengthscales.get_params(out)
     }
 
-    /// Replaces `θ_d` from `params`. The previous values are kept on error.
+    /// Replaces `θ_d` from `params`.
+    ///
+    /// The previous values are kept on error.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.lengthscales.set_params(params)
     }
@@ -137,6 +156,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `d` does not match the
     /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -170,6 +191,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -198,6 +221,8 @@ impl RbfArdKernel {
     }
 
     /// Writes the stationary diagonal `k(x, x) = 1` into `out`.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn fill_diag<T: KernelScalar>(&self, out: &mut [T]) {
         out.fill(T::from_f64(1.0));
     }
@@ -210,6 +235,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -372,6 +399,8 @@ impl RbfArdKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is out of
     /// range, or the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -427,6 +456,8 @@ impl RbfArdKernel {
     ///
     /// Same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim), or
     /// [`GprError::IndexOutOfRange`] when `dim` does not match `ℓ_d`.
+    ///
+    /// See the example on [`RbfArdKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
         &self,
         x1: MatRef<'_, T>,

@@ -65,7 +65,7 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
     insert_stages::take()
 }
 
-/// Online Exact GPR after [`FittedGpr::into_online`]: LDLT factor, tail insert, and delete.
+/// Stores an online Exact GPR after [`FittedGpr::into_online`]: LDLT factor, tail insert, and delete.
 ///
 /// [`Self::insert`] appends one training point with a bordered LDLT update
 /// and returns a [`PointId`]. [`Self::delete`] removes one point by that
@@ -223,8 +223,9 @@ where
         }
     }
 
-    /// Drops the LDLT factor and returns a trainer with the current kernel,
-    /// likelihood, transforms, optimizer, and policies.
+    /// Drops the LDLT factor and returns a trainer with the current kernel, likelihood, transforms, optimizer, and policies.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn into_trainer(self) -> Gpr<O, P> {
         self.core.into_trainer(self.optimizer)
     }
@@ -232,6 +233,8 @@ where
     /// Replaces the optimizer used by a later [`Self::refit`].
     ///
     /// Same incremental-rebuild rule as [`FittedGpr::with_optimizer`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn with_optimizer<O2>(self, optimizer: O2) -> OnlineGpr<O2, P> {
         OnlineGpr {
             core: self.core,
@@ -243,21 +246,29 @@ where
     }
 
     /// Returns the number of training points.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn n(&self) -> usize {
         self.core.n
     }
 
     /// Returns the feature dimension.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn d(&self) -> usize {
         self.core.d
     }
 
     /// Returns the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn kernel(&self) -> &KernelSpec {
         &self.core.kernel
     }
 
     /// Returns the observation-noise model.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn likelihood(&self) -> &GaussianLikelihood {
         &self.core.likelihood
     }
@@ -270,16 +281,22 @@ where
     ///
     /// Returns [`GprError::CholeskyFailed`] if a [`crate::MixedPrecision`]
     /// model cannot build the `f64` fallback factor.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn alpha(&self) -> Result<&[P::Refine], GprError> {
         Ok(self.alphas()?.1)
     }
 
     /// Returns the original training features in column-major order.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn x(&self) -> &[f64] {
         &self.core.x_obs
     }
 
     /// Returns the original training targets.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn y(&self) -> &[f64] {
         &self.core.y_obs
     }
@@ -337,6 +354,8 @@ where
     }
 
     /// Returns training-point identifiers in workspace buffer order.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn point_ids(&self) -> &[PointId] {
         self.registry.ids()
     }
@@ -379,21 +398,29 @@ where
     }
 
     /// Returns the distance-cache policy carried from the trainer.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn distance_cache_policy(&self) -> crate::DistanceCachePolicy {
         self.core.policies.distance_cache
     }
 
     /// Returns the Cholesky buffer policy carried from the trainer.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn cholesky_buffer(&self) -> crate::CholeskyBuffer {
         self.core.policies.cholesky_buffer
     }
 
     /// Returns the kernel `exp` used by fit and predict.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn math(&self) -> crate::KernelExp {
         self.core.policies.math
     }
 
     /// Returns the jitter retries used when `K + σn² I` fails to factor.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn jitter_policy(&self) -> crate::JitterPolicy {
         self.core.policies.jitter
     }
@@ -434,6 +461,8 @@ where
     /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
     /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::CholeskyFailed`] if the new pivot `δ` is not positive.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
@@ -587,6 +616,8 @@ where
     ///
     /// Returns [`GprError::PersistFailed`] when the directory cannot be
     /// created or a Custom leaf / caller transform has no persist form.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
         persist::save_online(self, dir.as_ref(), false)
     }
@@ -596,6 +627,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::save`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
         persist::save_online(self, dir.as_ref(), true)
     }
@@ -607,6 +640,8 @@ where
     /// # Errors
     ///
     /// Returns [`GprError::CholeskyFailed`] if a stored `Dᵢ` is not positive.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
         let (factor_alpha, _) = self.alphas()?;
         Ok(self
@@ -615,6 +650,8 @@ where
     }
 
     /// Returns the concatenated kernel and likelihood parameter count.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn num_params(&self) -> usize {
         self.core.num_params()
     }
@@ -625,6 +662,8 @@ where
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.core.get_params(out)
     }
@@ -638,6 +677,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::set_params`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
             view.set_params(params)
@@ -650,6 +691,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::value_and_gradient_into`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn value_and_gradient_into(
         &mut self,
         params: &[f64],
@@ -666,6 +709,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::hessian_into`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
             view.hessian_into(params, out)
@@ -678,6 +723,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn predict(
         &self,
         xs: &[f64],
@@ -692,6 +739,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn predict_into(
         &mut self,
         xs: &[f64],
@@ -710,6 +759,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn predict_with(
         &self,
         xs: &[f64],
@@ -729,6 +780,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn predict_with_into(
         &mut self,
         xs: &[f64],
@@ -755,6 +808,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::predict_covariance`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn predict_covariance(
         &self,
         xs: &[f64],
@@ -769,6 +824,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict_covariance`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn predict_covariance_with(
         &self,
         xs: &[f64],
@@ -786,6 +843,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::sample`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn sample(
         &self,
         xs: &[f64],
@@ -802,6 +861,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::sample`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn sample_with(
         &self,
         xs: &[f64],
@@ -824,20 +885,24 @@ where
         )
     }
 
-    /// Leave-one-out predictive mean and variance on the training set.
+    /// Returns the leave-one-out predictive mean and variance on the training set.
     ///
     /// # Errors
     ///
     /// Same as [`FittedGpr::loo_predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
         self.loo_predict_with(PredictOptions::default())
     }
 
-    /// Leave-one-out prediction with an explicit variance kind.
+    /// Returns the leave-one-out prediction with an explicit variance kind.
     ///
     /// # Errors
     ///
     /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn loo_predict_with(
         &self,
         options: PredictOptions,
@@ -857,6 +922,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedGpr::refit`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         let optimizer = &self.optimizer;
         let result = with_llt_view(&mut self.core, &mut self.workspace, |view| {
@@ -875,6 +942,8 @@ where
     /// # Errors
     ///
     /// Same as [`Gpr<Fixed>::factor`].
+    ///
+    /// See the example on [`OnlineGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {
         let result = with_llt_view(&mut self.core, &mut self.workspace, |view| view.refactor());
         self.after_write(result)

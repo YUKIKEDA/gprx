@@ -38,6 +38,8 @@ impl ArdLengthscales {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
     /// value is not finite and strictly positive.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn new(lengthscales: &[f64]) -> Result<Self, GprError> {
         require_non_empty(lengthscales.len())?;
         let mut params = Vec::with_capacity(lengthscales.len());
@@ -54,6 +56,8 @@ impl ArdLengthscales {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty, a
     /// `θ_d` is not finite, or `exp(θ_d)` overflows or underflows to zero.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn from_log_lengthscales(log_lengthscales: &[f64]) -> Result<Self, GprError> {
         require_non_empty(log_lengthscales.len())?;
         let mut params = Vec::with_capacity(log_lengthscales.len());
@@ -88,6 +92,8 @@ impl ArdLengthscales {
     ///
     /// Returns [`crate::IntervalError`] if any current `ℓ_d` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         let mut params = Vec::with_capacity(self.params.len());
         for param in self.params {
@@ -116,11 +122,15 @@ impl ArdLengthscales {
     }
 
     /// Returns the number of optimizer parameters, equal to the feature dimension.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn num_params(&self) -> usize {
         self.log_lengthscales.len()
     }
 
     /// Returns `θ_d = log(ℓ_d)`.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn log_lengthscales(&self) -> &[f64] {
         &self.log_lengthscales
     }
@@ -135,6 +145,8 @@ impl ArdLengthscales {
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `dim` is out of range.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn lengthscale(&self, dim: usize) -> Result<f64, GprError> {
         self.params
             .get(dim)
@@ -152,18 +164,24 @@ impl ArdLengthscales {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "ARD lengthscale parameters")?;
         out.copy_from_slice(&self.log_lengthscales);
         Ok(())
     }
 
-    /// Replaces `θ_d` from `params`. The previous values are kept on error.
+    /// Replaces `θ_d` from `params`.
+    ///
+    /// The previous values are kept on error.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
+    ///
+    /// See the example on [`ArdLengthscales`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(
             params.len(),

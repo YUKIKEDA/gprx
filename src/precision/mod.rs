@@ -13,10 +13,16 @@ use crate::kernel::{KernelScalar, KernelSpec};
 use crate::transform::TargetTransform;
 
 /// Selects storage and residual-refinement scalar types for GP computations.
+///
+/// See the example on [`DoublePrecision`].
 pub trait PrecisionPolicy {
-    /// Scalar used for `K`, `L`, and other stored buffers.
+    /// Represents the scalar used for `K`, `L`, and other stored buffers.
+    ///
+    /// See the example on [`crate::Gpr`].
     type Storage: KernelScalar;
-    /// Scalar used when refining a solve against a higher-precision residual.
+    /// Represents the scalar used when refining a solve against a higher-precision residual.
+    ///
+    /// See the example on [`crate::Gpr`].
     type Refine: KernelScalar;
 }
 
@@ -102,18 +108,24 @@ mod residual_seal {
     }
 }
 
-/// How [`MixedPrecision`] builds the refinement residual `r = y − Aα`.
+/// Describes how [`MixedPrecision`] builds the refinement residual `r = y − Aα`.
 ///
 /// The only implementations are [`PromoteStorage`] and [`ReevaluateKernel`].
+///
+/// See the example on [`MixedPrecision`].
 pub trait ResidualFormula: residual_seal::Sealed + Copy + Send + Sync + 'static {}
 
-/// Residual `r = y − Aα` from the saved `f32` matrix promoted to `f64`.
+/// Represents the residual `r = y − Aα` from the saved `f32` matrix promoted to `f64`.
 ///
 /// This is the residual when [`MixedPrecision`] omits its type parameter.
+///
+/// See the example on [`crate::Gpr`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PromoteStorage;
 
-/// Residual `r = y − Aα` from a fresh `f64` kernel evaluation.
+/// Represents the residual `r = y − Aα` from a fresh `f64` kernel evaluation.
+///
+/// See the example on [`crate::Gpr`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReevaluateKernel;
 
@@ -549,8 +561,7 @@ fn f64_cross_means<M: crate::math::KernelMath>(
     Ok(())
 }
 
-/// A model precision: [`DoublePrecision`], [`SinglePrecision`], or a
-/// [`MixedPrecision`].
+/// Represents the A model precision: [`DoublePrecision`], [`SinglePrecision`], or a [`MixedPrecision`].
 ///
 /// This is the `P` parameter of `with_precision` on [`crate::Gpr`],
 /// [`crate::Sgpr`], and [`crate::Svgp`]. It is sealed: only those four
