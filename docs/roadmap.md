@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-B1-1 ([#298](https://github.com/YUKIKEDA/gprx/issues/298), real-dataset benchmark and library comparison in the README) is done. B1-6 is done. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
+C1-1 ([#419](https://github.com/YUKIKEDA/gprx/issues/419), publish rules and bring crates.io, MSRV, and coverage into scope) is the current row. P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43), threshold for `DistanceCachePolicy::Auto`) stays set after Grill. It follows R4-1.
 
 ## Dependencies
 
@@ -16,9 +16,18 @@ M0 → 1a → 1b → 2 → 2b → 3
                 after the phase-2 measurement → 5
 R1 → R2 → R3 → R4 → R5 → R6
 R4-1 → P5-5
+C1-1 → C1-2 → C1-3
+C1-1 → C1-4
+C1-1 → C1-5
+C1-1 → C1-6
+C1-2 → C1-7
+C1-3 → C1-7
+C1-4 → C1-7
+C1-5 → C1-7
+C1-6 → C1-7
 ```
 
-Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue.
+Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done.
 
 ## M0
 
@@ -203,10 +212,21 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | B1-5 | Bug | The Hessian solver (plain Newton) fails with different errors when a step leaves the bounds; the Hessian solver becomes `TrustRegion` | [#306](https://github.com/YUKIKEDA/gprx/issues/306) | done |
 | B1-6 | Task | Extend the path matrix to Exact, Svgp, and the online models | [#308](https://github.com/YUKIKEDA/gprx/issues/308) | done |
 
+## C1 (crates.io, parent [#418](https://github.com/YUKIKEDA/gprx/issues/418))
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| C1-1 | Task | Publish rules and bring crates.io, MSRV, and coverage into scope | [#419](https://github.com/YUKIKEDA/gprx/issues/419) | open |
+| C1-2 | Task | Run CI on Rust 1.85 and stable | [#420](https://github.com/YUKIKEDA/gprx/issues/420) | open |
+| C1-3 | Task | Line-coverage floor on stable CI | [#421](https://github.com/YUKIKEDA/gprx/issues/421) | open |
+| C1-4 | Task | Fix the files in the published package | [#422](https://github.com/YUKIKEDA/gprx/issues/422) | open |
+| C1-5 | Docs | Document the 0.1.0 contract in the README and crate docs | [#423](https://github.com/YUKIKEDA/gprx/issues/423) | open |
+| C1-6 | Task | Audit accidental pub items and rustdoc | [#424](https://github.com/YUKIKEDA/gprx/issues/424) | open |
+| C1-7 | Task | Remove `publish = false` | [#425](https://github.com/YUKIKEDA/gprx/issues/425) | open |
+
 ## Intentionally out of scope
 
 Adding or removing a bullet here is Grill → Issue (`.cursor/rules/workflow.mdc`). An agent does not add a row without that agreement.
 
 - A homemade L-BFGS / quasi-Newton (call an argmin solver)
 - Treating cloud CI as a completion condition while runners are limited
-- Publishing to crates.io, promising an MSRV, or requiring coverage
