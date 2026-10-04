@@ -385,6 +385,7 @@ dependencies = [
 perf = [
     { name = "gpy" },
     { name = "matplotlib" },
+    { name = "pillow" },
     { name = "psutil" },
 ]
 
@@ -401,6 +402,7 @@ requires-dist = [
 perf = [
     { name = "gpy", specifier = ">=1.13" },
     { name = "matplotlib", specifier = ">=3.8" },
+    { name = "pillow", specifier = ">=10.0" },
     { name = "psutil", specifier = ">=6.0" },
 ]
 

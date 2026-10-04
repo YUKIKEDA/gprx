@@ -303,10 +303,27 @@ gprx と GPyTorch を同一条件（Adam、学習率 0.01、バッチ 1024、デ
 ![Snelson の予測](bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
+### 1 次元の図
+
+2 つの図は Snelson の学習データ 200 点を使う。測定した機械は Intel64 Family 6 Model 191 Stepping 2, GenuineIntel（論理 CPU 16、メモリ 47.8 GiB、Windows-11-10.0.26200-SP0）。GPyTorch 1.15.2, GPy 1.14.2, torch 2.14.0, scipy 1.18.1, argmin 0.11.0; libgp f4a2fb7d。
+
+**Snelson のスパース GP**
+
+標準化した入力に対して k-means（シード 0）で選んだ 8 個の誘導点を固定して使う。最適化器は表と同じ条件を揃えた L-BFGS で、反復回数は最大 100 回。スパース GP を備えるライブラリごとに 1 枚（gprx `Sgpr`、GPyTorch、GPy）。線が予測の平均、帯が 95% 区間、点は学習データ。縦の目盛線はその誘導点の位置で、どの枠でも同じ。曲線は Snelson のテスト入力上で描いた。scikit-learn、libgp、friedrich にはスパース GP が無いため、この図には無い。尤度と勾配をまとめた計算回数は gprx が 64、GPyTorch が 45、GPy が 46。
+
+![Snelson のスパース GP](bench/curve_snelson_sgpr.svg)
+
+**Snelson の点の追加**
+
+同じ点を、入力が小さい順に足していく。標準化した入力と目的変数上で、長さスケールは 1、信号の分散は 1、ノイズの分散は 0.1。学習は行わない。各フレームは、その時点まで点を足したあとの事後分布である。アニメーションでは、Snelson のテスト入力から等間隔に選んだ 160 点上で計算した 24 個の事後分布を表示する。gprx は `OnlineGpr::insert`、libgp は `add_pattern`、GPyTorch は `get_fantasy_model` を使う。最後のフレームにおいて、標準化した目的変数での 3 つの予測平均の最大絶対差は 9.4e-14。GPy と scikit-learn には学習点を追加する操作が無い。friedrich はカーネルがこの比較の RBF と異なるため、この図には無い。
+
+![Snelson の点の追加](bench/online_snelson.gif)
+
 ### 再現
 
 ```text
 just perf-real-full                                            # 上の比較を取り、この節を作り直す
+just perf-visual                                               # 上の Snelson の 2 つの図を作る
 ```
 
 `--timeline` をつけると、プロセス全体の常駐メモリを 10 ms ごとに記録する。生の出力は `compare/perf/out/real/` に残り、コミットしない。`docs/bench/summary.json` には、表の数値、測定した機械、ライブラリの版、最適化の設定が入る。詳細: [`compare/perf/README.md`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/README.md)。

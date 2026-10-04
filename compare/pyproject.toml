@@ -17,6 +17,7 @@ perf = [
     "psutil>=6.0",
     "GPy>=1.13",
     "matplotlib>=3.8",
+    "pillow>=10.0",
 ]
 
 [tool.uv]

@@ -303,10 +303,27 @@ One panel per library. The line is the predictive mean and the band is the 95% i
 ![Snelson predictions](bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
+### One-dimensional figures
+
+These two figures use Snelson's 200 training points. Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs, 47.8 GiB, Windows-11-10.0.26200-SP0). GPyTorch 1.15.2, GPy 1.14.2, torch 2.14.0, scipy 1.18.1, argmin 0.11.0; libgp f4a2fb7d.
+
+**Snelson, sparse GP**
+
+Eight inducing inputs, from k-means (seed 0) on the standardized inputs, then held fixed. The optimizer is the same matched L-BFGS as the tables, at most 100 iterations. One panel per library that has a sparse GP: gprx `Sgpr`, GPyTorch, and GPy. The line is the predictive mean, the band is the 95% interval, and the dots are the training data. The vertical ticks are those inducing inputs, the same in every panel. The curve is drawn on Snelson's test inputs. scikit-learn, libgp, and friedrich have no sparse GP, so they are not in the figure. The combined likelihood-and-gradient counts were 64 for gprx, 45 for GPyTorch, and 46 for GPy.
+
+![Snelson, sparse GP](bench/curve_snelson_sgpr.svg)
+
+**Snelson, adding points**
+
+The same points, added from the smallest input to the largest. The lengthscale is 1, the signal variance is 1, and the noise variance is 0.1, on standardized inputs and targets. Nothing is trained. Each frame is the posterior with the points added so far. The animation shows 24 of those posteriors, drawn on 160 evenly spaced inputs from Snelson's test inputs. gprx uses `OnlineGpr::insert`, libgp uses `add_pattern`, and GPyTorch uses `get_fantasy_model`. On the last frame, the largest absolute gap among the three predictive means is 9.4e-14 on the standardized targets. GPy and scikit-learn have no operation that adds a training point. friedrich is not in the figure; its kernel is not this comparison's RBF.
+
+![Snelson, adding points](bench/online_snelson.gif)
+
 ### Reproduce
 
 ```text
 just perf-real-full                                            # the comparison above, then this section
+just perf-visual                                               # the two Snelson figures above
 ```
 
 `--timeline` records the resident memory of the whole process every 10 ms. The raw output stays in `compare/perf/out/real/` and is not committed. `docs/bench/summary.json` holds the table numbers, the machine, the library versions, and the optimizer settings. Details: [`compare/perf/README.md`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/README.md).

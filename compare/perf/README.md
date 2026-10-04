@@ -54,6 +54,13 @@ Results: `compare/perf/out/results.json`. Pass / fail is recorded in `.dev/bench
 
 `just perf-sparse-online` times `OnlineSgpr` `insert` / `delete` / `insert_inducing` / `delete_inducing` against self `Sgpr<Fixed>::factor` and GPyTorch Titsias assemble (no query). Same Forrester / sphere `n` as P2B-16, `m_max = 16` (k-means seed `0` at generation time), prefix `start_n = 32/128/512` and `start_m = 8`, raw `y`, CPU, no `fit`. The harness draws 32 ops (`ops_seed = 0`, RBF probe PD filter) and does not read P4-13 goldens. Prefix is untimed. Clock is one 32-op wall (discard 1 + median; reps follow P2B-16). Gate: incremental median smaller than self full and GPyTorch full (5% inconclusive). RSS is recorded only. Results: `compare/perf/out/sparse_online_results.json`. Pass / fail is recorded in `.dev/bench-log.md` (local, not committed). `just perf` / `just perf-online` / `just perf-sparse` stay Exact / online / batch Sparse. `cargo test` must not run this.
 
+## Snelson figures
+
+`just perf-visual` draws two figures into `docs/bench/` and does not write `out/real/results.json`.
+
+- `curve_snelson_sgpr.svg`: Snelson, `Sgpr` with 8 inducing points (k-means, seed 0, held fixed), matched L-BFGS, gprx / GPyTorch / GPy. Ticks on the horizontal axis are the inducing inputs.
+- `online_snelson.gif`: the same points added from the smallest input. Lengthscale 1, signal variance 1, noise variance 0.1, on standardized inputs and targets. Nothing is trained. gprx `OnlineGpr::insert`, libgp `add_pattern`, GPyTorch `get_fantasy_model`.
+
 ## Real datasets (B1-1)
 
 `just perf-real` fits every library on the benchmark data of Gaussian-process papers, scores it (RMSE, NLPD, 95% coverage in the original units of `y`), and reports fit time, joint evaluation counts and peak RSS. `just perf-real-report` turns the raw output into `docs/bench/summary.json`, the SVG figures and the README tables. Manual. Not a CI gate. `just test` must not run this and needs no network.
