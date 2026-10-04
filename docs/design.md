@@ -284,7 +284,7 @@ struct DistCache<S> {
 
 The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout keeps only the lower triangle (diagonal included) of each dimension, packed column by column: `d · n(n+1)/2` values, dimension `k` after the first `k · n(n+1)/2`, column `j` holding rows `j..n` contiguously. A reader of another triangle reads the pair `(j, i)` for `(i, j)`. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
 
-The policy is a runtime enum because no combination with the other policies is illegal (§6.3). An `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes; `K` itself is `n²×sizeof(T)` (about 200MB at n=5000, f64), and an ARD cache is `d` times that. Choosing the policy from `n`, `d`, and a memory budget is open (§14).
+The policy is a runtime enum because no combination with the other policies is illegal (§6.3). An `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes; `K` itself is `n²×sizeof(T)` (about 200MB at n=5000, f64), and an ARD cache is `d` times that. The caller chooses `Cached` or `Uncached`. Automatic selection from `n`, `d`, and a memory budget is intentionally out of scope.
 
 ### 5.3 Evaluating a composite kernel
 
@@ -948,7 +948,6 @@ Order and status are [roadmap.md](roadmap.md). Acceptance text stays on each Iss
 ## 14. Open items
 
 1. **Checking mixed-precision refinement parameters**: the §4.2 defaults have a theoretical basis, and they have not been checked on a real workload. That includes the accuracy gap between `PromoteStorage` and `ReevaluateKernel`, and `log|K|` plus the trace term when MixedPrecision is used during fit
-2. **Choosing the distance-cache policy automatically** (a `DistanceCachePolicy::Auto` from `n`, `d`, and a memory budget, §5.2): it needs a measurement that accounts for kernel kind, SIMD efficiency, and memory bandwidth. Tracked as P5-5 ([#43](https://github.com/YUKIKEDA/gprx/issues/43)); acceptance is set after Grill
 
 ## 15. Benchmark strategy
 
