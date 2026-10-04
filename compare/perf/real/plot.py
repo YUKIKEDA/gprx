@@ -103,15 +103,15 @@ def _table(rows: list[dict], protocol: str, model: str = "exact") -> dict[str, d
     return out
 
 
-#: One panel is this wide and the figure is this tall, for every accuracy and
-#: fit-time chart. The width grows only with the column count, so two charts
-#: of the same datasets are the same size.
-PANEL_W = 1.9
+#: Every README figure uses this canvas. More columns share the width; they do
+#: not change the file's aspect ratio. 12.2 in is the previous six-column
+#: chart, the widest of the set, so that chart does not get narrower.
+FIG_W = 12.2
 FIG_H = 4.6
 
 
 def _dot_figure(n: int):
-    fig, axes = plt.subplots(2, n, figsize=(PANEL_W * n + 0.8, FIG_H), squeeze=False)
+    fig, axes = plt.subplots(2, n, figsize=(FIG_W, FIG_H), squeeze=False)
     # Fixed margins, not tight_layout: a longer y label must not move the panels.
     fig.subplots_adjust(left=0.14, right=0.99, top=0.86, bottom=0.06, wspace=0.55, hspace=0.55)
     return fig, axes
@@ -193,7 +193,7 @@ def rss_timeline(case: str, out: Path, directory: Path) -> Path | None:
     files = {l: f for l, f in files.items() if f.is_file()}
     if not files:
         return None
-    fig, ax = plt.subplots(figsize=(7.2, 3.6))
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
     _style_axes(ax)
     for lib, file in files.items():
         data = json.loads(file.read_text(encoding="utf-8"))
@@ -239,7 +239,7 @@ def curve(name: str, protocol: str, out: Path) -> Path | None:
     rows = [r for r in rows if len(r["pred_mean"]) == expected]
     if not rows:
         return None
-    fig, axes = plt.subplots(1, len(rows), figsize=(max(2.6 * len(rows), 6.6), 3.0), squeeze=False, sharey=True)
+    fig, axes = plt.subplots(1, len(rows), figsize=(FIG_W, FIG_H), squeeze=False, sharey=True)
     for ax, row in zip(axes[0], rows):
         _style_axes(ax)
         color, _ = STYLE[row["lib"]]
