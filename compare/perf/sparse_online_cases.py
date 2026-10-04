@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
 from common.ops import (
     M_MAX,
     OPS_SEED,

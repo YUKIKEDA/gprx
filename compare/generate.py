@@ -35,6 +35,8 @@ from pathlib import Path
 
 import numpy as np
 import sklearn
+from common.problems import as_f64_list, forrester, pack_column_major, weighted_sphere
+from common.problems import column_major_view as unpack_column_major
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import (
     RBF,
@@ -44,9 +46,6 @@ from sklearn.gaussian_process.kernels import (
     RationalQuadratic,
     WhiteKernel,
 )
-
-from common.problems import as_f64_list, forrester, pack_column_major, weighted_sphere
-from common.problems import column_major_view as unpack_column_major
 
 ROOT = Path(__file__).resolve().parent
 GOLDENS = ROOT / "goldens"

@@ -65,10 +65,15 @@ def write_golden(case: dict, dest: Path, exe: Path) -> None:
     )
 
 
+def built_exe(target: str) -> Path:
+    built = ensure_libgp(target)
+    if isinstance(built, Path):
+        return built
+    raise RuntimeError(str(built.get("note", f"{target} build failed")))
+
+
 def main() -> int:
-    exe = ensure_libgp("libgp-online")
-    if isinstance(exe, dict):
-        raise RuntimeError(exe.get("note", "libgp-online build failed"))
+    exe = built_exe("libgp-online")
     cases = [
         (
             prefix_case(make_forrester(256), 32, [0.5], 1, "online_libgp_forrester"),
