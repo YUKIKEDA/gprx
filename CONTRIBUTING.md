@@ -1,6 +1,6 @@
 # Developing gprx
 
-Procedure for humans. Agent entry: [AGENTS.md](AGENTS.md). Enforcement: `.cursor/rules/`. Design: [docs/design.md](docs/design.md). Order and status: [docs/roadmap.md](docs/roadmap.md). Directories: [docs/conventions.md](docs/conventions.md). `.dev/` is local scratch and is not committed.
+Procedure for humans. Agent entry: [AGENTS.md](AGENTS.md). Enforcement: `.cursor/rules/`. Design: [docs/design.md](docs/design.md). Order and status: [docs/roadmap.md](docs/roadmap.md). Directories: [docs/conventions.md](docs/conventions.md). A file an agent creates is deleted when that step no longer needs it (`.cursor/rules/scratch.mdc`). `.dev/bench-log.md` is the local measurement log and is not committed.
 
 ## Order
 

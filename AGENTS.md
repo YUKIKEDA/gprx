@@ -23,6 +23,7 @@ Entry point for agents. Procedure: [CONTRIBUTING.md](CONTRIBUTING.md). Enforceme
 | `.cursor/rules/defer.mdc` | Do not ship an unplanned "temporary" or "not now" |
 | `.cursor/rules/scope.mdc` | Do not recommend a partial slice because it is smaller. If you split, plan the rest in the same decision |
 | `.cursor/rules/layout.mdc` | Single crate. Do not copy the public surface into a rule |
+| `.cursor/rules/scratch.mdc` | Delete a file you created once that step no longer needs it. Gitignore is not storage |
 | `.cursor/rules/rust.mdc` | Safety, Clippy, floating-point comparison |
 | `.cursor/rules/rust-api.mdc` | Naming, ownership, public API (API Guidelines) |
 | `.cursor/rules/types.mdc` | Illegal states are types. Do not ignore a field or reject a config at runtime |

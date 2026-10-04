@@ -1,0 +1,32 @@
+---
+description: Delete a file you created in the same turn it stops being needed. Gitignore is not storage
+alwaysApply: true
+---
+
+# Scratch files
+
+A file you create is deleted in the same turn it stops being an input to the current step. Do not wait for a later session. A gitignore entry is not a reason to keep it.
+
+## Delete
+
+- One-off scripts, compiler logs, Issue or PR drafts, stderr captures, and copies of results (`before-*`, `remeasure-*.log`, `profile_*.stderr`)
+- Anything you wrote under `target/`, `.dev/`, `compare/perf/out/`, or another ignored path that Cargo or the harness did not write
+
+## Leave in place
+
+These are not scratch. Do not delete them as cleanup, and do not put scripts, notes, or backups next to them:
+
+- Cargo output: `target/debug`, `target/release`, and the other compiler directories
+- Files the `compare/perf` runners write (`results.json`, `meta.json`, verdicts, `problems/`, `real/cases/`, `real/data/`)
+- `.dev/bench-log.md` only (`.cursor/rules/bench.mdc`)
+
+Do not delete a file the user created unless that message says to delete it.
+
+```text
+# BAD — ignored, so it stays
+target/fix_tests.py
+.dev/c1-issues/c1-6.md
+compare/perf/out/real/results.before-410-remeasure.json
+
+# GOOD — the edit is in the tree; the helper is gone before the turn ends
+```

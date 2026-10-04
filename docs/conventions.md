@@ -62,7 +62,7 @@ docs/                      design, architecture, persist-format (each with a .ja
 docs/bench/                B1-1 summary.json and SVG figures. just perf-real-report writes them. Raw output stays in compare/perf/out/ and is not committed
 ```
 
-`.dev/` is local scratch (measurement logs, reviews, drafts). It is not committed. Decisions do not stay there.
+`.dev/bench-log.md` is the local measurement log. It is not committed. Any other file an agent writes is deleted when that step no longer needs it (`.cursor/rules/scratch.mdc`). Decisions do not stay in `.dev/`.
 
 `Workspace`, `QueryWorkspace`, `LltStore`, `LdltStore`, and faer types are crate-private.
 
