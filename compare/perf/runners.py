@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -86,6 +87,11 @@ def ensure_libgp(target: str) -> Path | Row:
                 return candidate
     configure = ["-S", str(src), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release"]
     failed = _cmake(configure, "libgp cmake configure")
+    if failed is not None and build.is_dir():
+        # A cache that names a Visual Studio instance which is no longer
+        # installed fails every later configure. Drop it and try once more.
+        shutil.rmtree(build, ignore_errors=True)
+        failed = _cmake(configure, "libgp cmake configure")
     if failed is not None:
         return failed
     build_args = ["--build", str(build), "--config", "Release"]
