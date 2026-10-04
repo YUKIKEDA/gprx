@@ -2,6 +2,8 @@
 
 Manual. Not a CI gate. `just test` must not run this.
 
+Peak RSS is measured inside each runner: peak working set on Windows, `VmHWM` from `/proc/self/status` on Linux, `ru_maxrss` elsewhere. Linux `ru_maxrss` is not used, because `exec` carries the launching process's high-water mark into it, so every runner would report the harness's size.
+
 ```text
 uv run --directory compare --group perf python -X utf8 -m perf.run
 ```
