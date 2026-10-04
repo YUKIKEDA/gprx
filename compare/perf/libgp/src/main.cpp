@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -127,16 +128,35 @@ uint64_t peak_rss_bytes() {
         throw std::runtime_error("GetProcessMemoryInfo failed");
     }
     return static_cast<uint64_t>(counters.PeakWorkingSetSize);
+#elif defined(__linux__)
+    // Not ru_maxrss: exec folds the pre-exec (parent's) high-water mark into it.
+    // VmHWM belongs to the current address space, which exec replaces.
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.rfind("VmHWM:", 0) == 0) {
+            std::istringstream fields(line.substr(6));
+            uint64_t kib = 0;
+            std::string unit;
+            if (!(fields >> kib >> unit) || unit != "kB") {
+                throw std::runtime_error("cannot parse VmHWM: " + line);
+            }
+            return kib * 1024ULL;
+        }
+    }
+    throw std::runtime_error("VmHWM missing from /proc/self/status");
+#elif defined(__APPLE__)
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        throw std::runtime_error("getrusage failed");
+    }
+    return static_cast<uint64_t>(usage.ru_maxrss);
 #else
     rusage usage{};
     if (getrusage(RUSAGE_SELF, &usage) != 0) {
         throw std::runtime_error("getrusage failed");
     }
-#ifdef __APPLE__
-    return static_cast<uint64_t>(usage.ru_maxrss);
-#else
     return static_cast<uint64_t>(usage.ru_maxrss) * 1024ULL;
-#endif
 #endif
 }
 

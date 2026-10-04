@@ -1,4 +1,10 @@
-//! Peak working set (Windows) or ru_maxrss (Unix) for the current process.
+//! Peak resident set for the current process: peak working set (Windows),
+//! `VmHWM` (Linux), or `ru_maxrss` (other Unix).
+//!
+//! Linux `ru_maxrss` is not used. `exec` folds the high-water mark of the
+//! pre-exec address space, the parent's under fork or vfork, into it, so a
+//! runner launched from a large harness reports the harness's size. `VmHWM`
+//! belongs to the current address space, which `exec` replaces.
 
 #[cfg(windows)]
 pub fn peak_rss_bytes() -> Result<u64, String> {
@@ -60,7 +66,25 @@ pub fn peak_rss_bytes() -> Result<u64, String> {
         .map_err(|_| "peak working set does not fit u64".to_string())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+pub fn peak_rss_bytes() -> Result<u64, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("read /proc/self/status: {e}"))?;
+    let line = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .ok_or_else(|| "VmHWM missing from /proc/self/status".to_string())?;
+    let kib = line
+        .trim()
+        .strip_suffix("kB")
+        .ok_or_else(|| format!("VmHWM has no kB suffix: {line:?}"))?
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("parse VmHWM {line:?}: {e}"))?;
+    Ok(kib.saturating_mul(1024))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn peak_rss_bytes() -> Result<u64, String> {
     let mut usage = unsafe { core::mem::zeroed::<libc::rusage>() };
     // SAFETY: `usage` is a writable `rusage` and `RUSAGE_SELF` is a valid who.
@@ -68,13 +92,13 @@ pub fn peak_rss_bytes() -> Result<u64, String> {
     if rc != 0 {
         return Err("getrusage failed".to_string());
     }
-    let raw = usage.ru_maxrss;
+    let raw =
+        u64::try_from(usage.ru_maxrss).map_err(|_| "ru_maxrss does not fit u64".to_string())?;
+    // macOS reports bytes. The other BSDs report KiB.
     let bytes = if cfg!(target_os = "macos") {
-        u64::try_from(raw).map_err(|_| "ru_maxrss does not fit u64".to_string())?
+        raw
     } else {
-        u64::try_from(raw)
-            .map_err(|_| "ru_maxrss does not fit u64".to_string())?
-            .saturating_mul(1024)
+        raw.saturating_mul(1024)
     };
     Ok(bytes)
 }
