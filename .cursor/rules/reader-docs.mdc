@@ -29,11 +29,15 @@ The example uses `?`, not `unwrap`. It does not depend on a checkout of this rep
 
 ## Public API usage
 
-The Usage section states how to use every item an external crate can name with default features. That set is the public contract. `internals` is outside it.
+The public contract is every item an external crate can name with default features. `internals` is outside it.
 
-For each such item, name it and say how a caller constructs it, calls it, matches it, or implements it. Include a default that changes the result, and say which type a method belongs to when the families differ. English and Japanese carry the same names.
+Document every item in that set in the Usage section of `README.md` and of `README.ja.md`. Give every item a usage example in both files. A usage example is a `rust` code block that constructs the item, calls it, matches it, or implements it. A sentence that only names the item is not an example. One block may cover several items when each of those items appears in the block. English and Japanese use the same blocks.
 
-Rustdoc keeps the signature, the Examples, and the Errors. The keys and tensors of a saved directory stay in the persist-format doc. The README links there. A name with no usage sentence fails the publish review.
+When the families differ, say which type the method belongs to. When the item has a default that changes the result, include that default.
+
+Rustdoc on each item follows `.cursor/rules/rust-docs.mdc`: the item is documented, and it has a usage example. The keys and tensors of a saved directory stay in the persist-format doc. The README links there.
+
+A public item with no README entry, no usage example in the README, or no rustdoc example fails the publish review.
 
 ## Links that survive packaging
 

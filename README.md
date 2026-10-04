@@ -87,6 +87,48 @@ fn main() -> Result<(), gprx::GprError> {
 
 `loo_predict` is the GPML leave-one-out mean and variance at every training point, not a query at a new `x`. `loo_predict_with` takes `PredictOptions`.
 
+```rust
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
+
+fn main() -> Result<(), gprx::GprError> {
+    let mut fitted = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
+    let cov_latent = fitted.predict_covariance_with(
+        &[0.25, 0.75],
+        2,
+        1,
+        PredictOptions {
+            variance_kind: VarianceKind::Latent,
+        },
+    )?;
+    let draws = fitted.sample(&[0.25, 0.75], 2, 1, 2, 1)?;
+    let _draws_with = fitted.sample_with(&[0.25], 1, 1, PredictOptions::default(), 1, 2)?;
+    let loo = fitted.loo_predict()?;
+    let _loo_with = fitted.loo_predict_with(PredictOptions::default())?;
+    let nll = fitted.neg_log_marginal_likelihood()?;
+    let mut theta = vec![0.0; fitted.num_params()];
+    fitted.get_params(&mut theta)?;
+    let value = fitted.value_and_gradient_into(&theta, &mut theta.clone())?;
+    let mut hess = vec![0.0; fitted.num_params() * fitted.num_params()];
+    fitted.hessian_into(&theta, &mut hess)?;
+    fitted.set_params(&theta)?;
+    let _ = (
+        cov.covariance[0],
+        cov_latent.mean[0],
+        draws[0],
+        loo.mean[0],
+        nll,
+        value,
+    );
+    Ok(())
+}
+```
+
 `neg_log_marginal_likelihood` is the objective at the current `θ`. `num_params`, `get_params`, and `set_params` are the flat log-`θ` vector: kernel parameters, then the likelihood parameter. `value_and_gradient_into` and `hessian_into` evaluate that objective. `set_params` updates `θ` and the factorization.
 
 `n`, `d`, `kernel`, `likelihood`, `x`, `y`, and `alpha` read the fitted model. `distance_cache_policy`, `cholesky_buffer`, `math`, and `jitter_policy` read the policies. Before `fit`, `Gpr` reads `kernel`, `likelihood`, `num_params`, `get_params`, and those four policy getters. `set_params` starts after `fit`. `FittedGpr::alpha` is a slice from the last factor. `OnlineGpr::alpha` returns `Result`: insert and delete leave `α` stale, and the first call after them solves it.
@@ -94,6 +136,27 @@ fn main() -> Result<(), gprx::GprError> {
 `into_trainer` returns the unfitted `Gpr` with the current `θ`. `with_optimizer` on a fitted model only changes a later `refit`. `OnlineGpr::with_optimizer` does the same. `refit` on `FittedGpr<O: Optimizer>` searches again from the current `θ` on the stored data. `refit` on `FittedGpr<Fixed>` rebuilds `L` and `α` and does not search. Transforms are not fit again.
 
 `into_online` returns `OnlineGpr`. `insert(x_new, y_new)` appends one point and returns a `PointId`. `delete(id)` removes that point. The last remaining point cannot be deleted (`GprError::InsufficientData`, `min` 2). `PointId` has no public constructor. `into_online` assigns `0 .. n-1`. Later inserts increase and are never reused. `point_ids` is the current list. `InvalidPointId` means the id is not in the model. `into_trainer` on the online model returns `Gpr`. `refit` on `OnlineGpr` follows the same split: an `Optimizer` searches, and `Fixed` rebuilds the factor.
+
+```rust
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::{GaussianLikelihood, Gpr};
+
+fn main() -> Result<(), gprx::GprError> {
+    let fitted = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    let mut online = fitted.into_online()?;
+    let id = online.insert(&[0.5], 0.25)?;
+    assert!(online.point_ids().contains(&id));
+    let _ = online.alpha()?;
+    online.delete(id)?;
+    let trainer = online.into_trainer();
+    let _ = trainer.kernel();
+    Ok(())
+}
+```
 
 `save(dir)` writes `config.json` and `model.safetensors` without the factor. `save_with_factor` also writes column-major `L` and `α`.
 
@@ -112,6 +175,29 @@ Before `fit`, on `Gpr`:
 
 `with_prefer_speed` and `with_prefer_memory` exist on `Gpr` and set the distance cache and the Cholesky buffer together. `DistanceCachePolicy` (`Cached` is the default, `Uncached` recomputes) and `KernelExp` are non-exhaustive. `CholeskyBuffer` is `Retain` or `Reuse`. `Sgpr` and `Svgp` take `with_optimizer`, `with_precision`, `with_math`, `with_jitter_policy`, `with_input_transform`, and `with_target_transform`. `Sgpr` also takes `with_inducing`. Their `K_mm` jitter starts at `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`. Before `fit`, they read `kernel`, `likelihood`, `math`, `jitter_policy`, `num_params`, and `get_params`. `set_params` updates `θ`.
 
+```rust
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::transform::StandardizeTarget;
+use gprx::{DistanceCachePolicy, GaussianLikelihood, Gpr, JitterPolicy, KernelExp, SinglePrecision};
+
+fn main() -> Result<(), gprx::GprError> {
+    let gpr = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .with_precision::<SinglePrecision>()
+    .with_math(KernelExp::FastApprox)
+    .with_input_transform(gprx::transform::IdentityInput)
+    .with_target_transform(StandardizeTarget::new())
+    .with_jitter_policy(JitterPolicy::fixed(0.0)?)
+    .with_prefer_memory()
+    .with_prefer_speed();
+    assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Cached);
+    let _ = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    Ok(())
+}
+```
+
 ### Sparse: `Sgpr`, `FittedSgpr`, `OnlineSgpr`
 
 `Sgpr::new` is `Sgpr<Lbfgs, FixedInducing, DoublePrecision>`. Inducing points stay where you put them. `with_inducing(FreeInducing)` also searches `Z`.
@@ -127,13 +213,17 @@ fn main() -> Result<(), gprx::GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     let likelihood = GaussianLikelihood::new(0.1)?;
 
-    let fitted = Sgpr::new(kernel.clone(), likelihood.clone()).fit(x, 4, 1, y, z, 2)?;
+    let fitted = Sgpr::new(kernel.clone(), likelihood.clone())
+        .fit(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
     let _moved = Sgpr::new(kernel.clone(), likelihood.clone())
         .with_inducing(FreeInducing)
-        .fit(x, 4, 1, y, z, 2)?;
+        .fit(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
     let frozen = Sgpr::new(kernel, likelihood)
         .with_optimizer(Fixed)
-        .factor(x, 4, 1, y, z, 2)?;
+        .factor(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
     assert_eq!(fitted.neg_log_marginal_likelihood()?.is_finite(), true);
     let _ = frozen.m();
     Ok(())
@@ -158,10 +248,13 @@ fn main() -> Result<(), gprx::GprError> {
     let x = &[0.0, 1.0, 2.0, 3.0];
     let y = &[0.0, 1.0, 0.5, 0.25];
     let z = &[0.5, 2.5];
-    let factored = Svgp::new(kernel.clone(), likelihood.clone()).factor(x, 4, 1, y, z, 2)?;
+    let factored = Svgp::new(kernel.clone(), likelihood.clone())
+        .factor(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
     let trained = Svgp::new(kernel, likelihood)
         .with_optimizer(Adam::new())
-        .fit(x, 4, 1, y, z, 2)?;
+        .fit(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
     let _ = (factored.neg_elbo()?, trained.n());
     Ok(())
 }
@@ -170,6 +263,30 @@ fn main() -> Result<(), gprx::GprError> {
 `FittedSvgp::neg_elbo` is the evidence lower bound. `num_params`, `get_params`, `set_params`, and `value_and_gradient_into` are the full-data objective. There is no `hessian_into`. The Adam loop scales the data term by `n / batch` and leaves the KL whole. Predict, covariance, and sample match the other families: `predict`, `predict_with`, `predict_into`, `predict_with_into`, `predict_covariance`, `predict_covariance_with`, `sample`, `sample_with`. Readers are `n`, `m`, `d`, `kernel`, `likelihood`, `math`, `jitter_policy`, `x`, `y`, and `z`. There is no leave-one-out, no online type, and no `refit`. `save` writes the directory.
 
 `Adam::new` is learning rate `1e-3`, `β1 = 0.9`, `β2 = 0.999`, `ε = 1e-8`, batch 32, 100 epochs, seed 0. Setters: `with_learning_rate`, `with_beta1`, `with_beta2`, `with_epsilon`, `with_batch_size` (`NonZeroUsize`), `with_epochs` (`NonZeroU64`), `with_seed`. The rate, betas, and epsilon return `Result`.
+
+```rust
+use std::num::{NonZeroU64, NonZeroUsize};
+
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::{Adam, GaussianLikelihood, Svgp};
+
+fn main() -> Result<(), gprx::GprError> {
+    let adam = Adam::new()
+        .with_learning_rate(1e-3)?
+        .with_beta1(0.9)?
+        .with_beta2(0.999)?
+        .with_epsilon(1e-8)?
+        .with_batch_size(NonZeroUsize::MIN)
+        .with_epochs(NonZeroU64::MIN)
+        .with_seed(0);
+    let _ = Svgp::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .with_optimizer(adam);
+    Ok(())
+}
+```
 
 ### Kernels
 
@@ -212,9 +329,69 @@ A leaf and a `CompiledKernel` evaluate with `apply`, `apply_cross`, `fill_diag`,
 
 `KernelTerm` is the trait for a distance leaf: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, `clone_box`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save a custom leaf. `CustomKernel::new(term)` boxes it. `KernelSpec::custom` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`.
 
+```rust
+use gprx::kernel::{
+    ArdLengthscales, CompiledKernel, ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel,
+    MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
+    RbfArdKernel, RbfKernel, Triangle, WhiteKernel,
+};
+use gprx::Interval;
+
+fn main() -> Result<(), gprx::GprError> {
+    let rbf = RbfKernel::from_log_lengthscale(0.0)?;
+    let _ = (rbf.lengthscale(), rbf.log_lengthscale(), rbf.bounds());
+    let rbf = rbf.with_bounds(Interval::new(1e-3, 1e2)?)?;
+    let ard = RbfArdKernel::new(&[0.5, 2.0])?;
+    let _ = ard.lengthscale(0)?;
+    let scales: &ArdLengthscales = ard.lengthscales();
+    let _ = scales.log_lengthscales();
+    let matern = MaternKernel::new(1.0, MaternNu::FiveHalves)?;
+    let _ = matern.nu().value();
+    let _ = MaternArdKernel::new(&[1.0, 1.0], MaternNu::Half)?;
+    let periodic = PeriodicKernel::new(1.0, 0.5)?;
+    let _ = (periodic.period(), periodic.log_period());
+    let rq = RationalQuadraticKernel::new(1.0, 1.5)?;
+    let _ = (rq.alpha(), rq.log_alpha());
+    let _ = RationalQuadraticArdKernel::new(&[1.0], 1.5)?;
+    let constant = ConstantKernel::new(1.5)?;
+    let _ = (constant.constant(), constant.log_constant());
+    let linear = LinearKernel::new(0.2)?;
+    let _ = (linear.variance(), linear.log_variance());
+    let white = WhiteKernel::new(0.01)?;
+    let _ = white.log_variance();
+    let spec = KernelSpec::from(rbf) + KernelSpec::from(white);
+    let bindings = spec.parameter_bindings();
+    let _ = (bindings[0].index, bindings[0].leaf_id, bindings[0].local_index);
+    let compiled: CompiledKernel = spec.compile();
+    let compiled_f32 = spec.compile_as::<f32>();
+    let mut theta = vec![0.0; compiled.num_params()];
+    compiled.get_params(&mut theta)?;
+    let _ = (compiled_f32.num_params(), Triangle::Lower);
+    Ok(())
+}
+```
+
 ### Likelihood
 
 `GaussianLikelihood::new(noise_variance)` stores `σn²` as a log parameter. `from_log_noise_variance`, `noise_variance`, `log_noise_variance`, `bounds`, `with_bounds`, `num_params`, `get_params`, `set_params`. `add_noise_diag` adds `σn²` to a kernel diagonal. `noise_grad_diag` is the derivative of that diagonal with respect to one parameter. `InvalidNoiseVariance` is a noise value outside its domain.
+
+```rust
+use gprx::{GaussianLikelihood, Interval};
+
+fn main() -> Result<(), gprx::GprError> {
+    let like = GaussianLikelihood::from_log_noise_variance(0.1_f64.ln())?;
+    let _ = (like.noise_variance(), like.log_noise_variance(), like.bounds());
+    let like = like.with_bounds(Interval::new(1e-4, 10.0)?)?;
+    let mut diag = [1.0, 1.0];
+    like.add_noise_diag(&mut diag);
+    let mut grad = [0.0, 0.0];
+    like.noise_grad_diag(&mut grad, 0)?;
+    let mut theta = [0.0; 1];
+    like.get_params(&mut theta)?;
+    let _ = like.num_params();
+    Ok(())
+}
+```
 
 ### Transforms (`gprx::transform`)
 
@@ -235,6 +412,49 @@ Concrete maps also have an inherent `fit`. Input maps take `(x, n_rows, n_cols)`
 
 `Transform` is the fitted input trait: `apply` and `inverse_apply`, in place, column-major. `TargetTransform` is the fitted target trait: `transform`, `inverse_transform_mean`, `inverse_transform_variance`, and `inverse_transform_covariance` (the default scales every entry the same way as the variance).
 
+```rust
+use gprx::transform::{
+    ColumnwiseInput, IdentityInput, IdentityTarget, MinMaxInput, MinMaxTarget, Pipeline,
+    StandardizeInput, StandardizeTarget, TargetPipeline, TargetTransform, Transform,
+};
+
+fn main() -> Result<(), gprx::GprError> {
+    let x = [0.0, 2.0, 10.0, 30.0];
+    let input = StandardizeInput::new().fit(&x, 2, 2)?;
+    let _ = (input.mean(), input.std());
+    let mut applied = x;
+    input.apply(&mut applied, 2, 2)?;
+    input.inverse_apply(&mut applied, 2, 2)?;
+    let y = [0.0, 1.0, 3.0];
+    let target = StandardizeTarget::new().fit(&y)?;
+    let _ = (target.mean(), target.std());
+    let mut mean = [0.0];
+    target.inverse_transform_mean(&mut mean)?;
+    let mut variance = [1.0];
+    target.inverse_transform_variance(&mut variance)?;
+    let mut cov = [1.0];
+    target.inverse_transform_covariance(&mut cov)?;
+    let minmax = MinMaxInput::with_feature_range(0.0, 1.0)?.fit(&x, 2, 2)?;
+    let _ = minmax.feature_range();
+    let _ = MinMaxTarget::new().fit(&y)?;
+    let pipeline = Pipeline::new()
+        .then(IdentityInput)
+        .then(StandardizeInput::new());
+    assert!(!pipeline.is_empty());
+    let _ = pipeline.len();
+    let _ = pipeline.fit(&x, 2, 2)?;
+    let targets = TargetPipeline::new()
+        .then(IdentityTarget)
+        .then(StandardizeTarget::new());
+    let _ = targets.fit(&y)?;
+    let columns = ColumnwiseInput::new()
+        .then(StandardizeInput::new())
+        .then(IdentityInput);
+    let _ = columns.fit(&x, 2, 2)?;
+    Ok(())
+}
+```
+
 ### Optimizers
 
 One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` replaces it.
@@ -254,6 +474,48 @@ One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` rep
 
 `Objective::num_params` is the length. `Objective::value` is the scalar. `value_at_changes` lists every coordinate that differs from the previous evaluation on that objective. `fill_intervals` writes each parameter's open interval in user units. The built-in solvers stay inside those intervals. `Differentiable` adds `gradient_into` and `value_and_gradient_into`. `TwiceDifferentiable` adds `hessian_into` and `value_gradient_hessian_into`.
 
+```rust
+use std::num::{NonZeroU32, NonZeroUsize};
+
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::{
+    BoundaryPolicy, FastSimulatedAnnealing, Fixed, GaussianLikelihood, Gpr, Lbfgs, NelderMead,
+    TrustRegion,
+};
+
+fn main() -> Result<(), gprx::GprError> {
+    let lbfgs = Lbfgs::new()
+        .with_max_iterations(40)
+        .with_tolerance(1e-6)?
+        .with_history_size(NonZeroUsize::MIN)
+        .with_restarts(NonZeroU32::MIN, 1);
+    let nm = NelderMead::new()
+        .with_max_iterations(20)
+        .with_tolerance(1e-6)?;
+    let tr = TrustRegion::new()
+        .with_max_iterations(20)
+        .with_tolerance(1e-6)?
+        .with_radii(1.0, 10.0)?;
+    let fsa = FastSimulatedAnnealing::new()
+        .with_max_iterations(20)
+        .with_initial_temperature(1.0)?
+        .with_cooling_rate(0.95)?
+        .with_seed(1)
+        .with_boundary(BoundaryPolicy::Periodic);
+    let _clamp = BoundaryPolicy::Clamp;
+    let _ = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .with_optimizer(lbfgs)
+    .with_optimizer(nm)
+    .with_optimizer(tr)
+    .with_optimizer(fsa)
+    .with_optimizer(Fixed);
+    Ok(())
+}
+```
+
 ### Precision, math, jitter
 
 `DoublePrecision` stores and solves in `f64` (`PrecisionPolicy::Storage` and `Refine`). `SinglePrecision` uses `f32` and keeps that factorization. `MixedPrecision` defaults to `MixedPrecision<PromoteStorage>`. It factors in `f32` and refines the predict weights in `f64`. `MixedPrecision<ReevaluateKernel>` is the other `ResidualFormula`. `GpScalar` is the scalar bound used on the model type parameter. Select with `with_precision::<SinglePrecision>()`.
@@ -266,6 +528,22 @@ One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` rep
 
 `Interval::new(lo, hi)` is a finite open interval, `lo < hi`. `lo`, `hi`, `contains`. `IntervalError::InvalidBounds` and `OutOfRange`. `GprError::InvalidInterval` wraps that error. `BoundedParam::new(value, interval)` stores a user-unit value strictly inside the interval. `default_positive(value)` uses `Interval::DEFAULT_POSITIVE`. `value` reads the value, `interval` the interval, `ln` is `log(value)`. `with_value` keeps the interval. `with_interval` keeps the value. Leaves and `GaussianLikelihood` hold a `BoundedParam` internally. Callers usually go through `with_bounds`.
 
+```rust
+use gprx::{BoundedParam, Interval};
+
+fn main() -> Result<(), gprx::GprError> {
+    let interval = Interval::new(1e-3, 1e2)?;
+    assert!(interval.contains(1.0));
+    let _ = (interval.lo(), interval.hi(), Interval::DEFAULT_POSITIVE);
+    let param = BoundedParam::new(1.0, interval)?;
+    let _ = (param.value(), param.interval(), param.ln());
+    let param = param.with_value(2.0)?.with_interval(interval)?;
+    let _ = BoundedParam::default_positive(0.1)?;
+    let _ = param;
+    Ok(())
+}
+```
+
 ### Save and load (`gprx::persist`)
 
 `FORMAT_VERSION` is `1`. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
@@ -277,6 +555,89 @@ One optimizer is the type parameter. `Gpr::new` is `Lbfgs`. `with_optimizer` rep
 - `register_unfitted_target`, `register_fitted_target`
 
 The restore function types are `KernelRestore`, `UnfittedInputRestore`, `FittedInputRestore`, `UnfittedTargetRestore`, and `FittedTargetRestore`.
+
+```rust
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::persist::{
+    LoadedGpr, LoadedSgpr, LoadedSvgp, PersistRegistry, FORMAT_VERSION, RESERVED_PREFIX,
+};
+use gprx::{GaussianLikelihood, Gpr, Lbfgs, PersistErrorKind};
+
+fn main() -> Result<(), gprx::GprError> {
+    let fitted = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    let dir = std::env::temp_dir().join("gprx-readme-save");
+    let _ = std::fs::remove_dir_all(&dir);
+    fitted.save(&dir)?;
+    assert_eq!(FORMAT_VERSION, 1);
+    assert!(!"mine.kernel".starts_with(RESERVED_PREFIX));
+
+    let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
+    let pred = loaded.predict(&[0.5], 1, 1)?;
+    assert_eq!(loaded.n(), 2);
+    assert_eq!(loaded.d(), 1);
+    assert!(!loaded.is_online());
+    let LoadedGpr::Double(model) = loaded else {
+        return Err(gprx::GprError::PersistFailed {
+            kind: PersistErrorKind::WrongModel,
+            reason: "expected Double".into(),
+        });
+    };
+    let mut model = model.with_optimizer(Lbfgs::new());
+    model.refit()?;
+    let factor_dir = std::env::temp_dir().join("gprx-readme-factor");
+    let _ = std::fs::remove_dir_all(&factor_dir);
+    model.save_with_factor(&factor_dir)?;
+    let _ = pred.mean[0];
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&factor_dir);
+
+    let x = &[0.0, 1.0, 2.0, 3.0];
+    let y = &[0.0, 1.0, 0.5, 0.25];
+    let z = &[0.5, 2.5];
+    let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    let likelihood = GaussianLikelihood::new(0.1)?;
+    let sparse = gprx::Sgpr::new(kernel.clone(), likelihood.clone())
+        .fit(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
+    let sparse_dir = std::env::temp_dir().join("gprx-readme-sgpr");
+    let _ = std::fs::remove_dir_all(&sparse_dir);
+    sparse.save(&sparse_dir)?;
+    let loaded = LoadedSgpr::load(&sparse_dir, &PersistRegistry::new())?;
+    let _ = loaded.m();
+    let LoadedSgpr::Double(model) = loaded else {
+        return Err(gprx::GprError::PersistFailed {
+            kind: PersistErrorKind::WrongModel,
+            reason: "expected Double".into(),
+        });
+    };
+    let mut online = model.into_online();
+    let id = online.insert_inducing(&[1.5])?;
+    assert!(online.inducing_ids().contains(&id));
+    online.delete_inducing(id)?;
+    let _ = std::fs::remove_dir_all(&sparse_dir);
+
+    let svgp = gprx::Svgp::new(kernel, likelihood)
+        .factor(x, 4, 1, y, z, 2)
+        .map_err(|(_, e)| e)?;
+    let svgp_dir = std::env::temp_dir().join("gprx-readme-svgp");
+    let _ = std::fs::remove_dir_all(&svgp_dir);
+    svgp.save(&svgp_dir)?;
+    let loaded = LoadedSvgp::load(&svgp_dir, &PersistRegistry::new())?;
+    let LoadedSvgp::Double(model) = loaded else {
+        return Err(gprx::GprError::PersistFailed {
+            kind: PersistErrorKind::WrongModel,
+            reason: "expected Double".into(),
+        });
+    };
+    let _ = model.neg_elbo()?;
+    let _ = std::fs::remove_dir_all(&svgp_dir);
+    Ok(())
+}
+```
 
 `predict` and `predict_with` on a loaded model return `f64`, including when the file was `f32`. `n`, `d`, and (sparse) `m`. `is_online` is true for an `ldlt` exact or SGPR file. Match the variant for the typed model:
 
@@ -319,6 +680,40 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 | `UnsupportedPersistVersion { found, supported }` | `format_version` is not `FORMAT_VERSION` |
 
 `CholeskyStage` is `Fit`, `Predict`, `OnlineInsert`, `OnlineDelete`. `PersistErrorKind` is `Io`, `Config`, `Tensor`, `InvalidPersistId`, `NotPersistable`, `UnregisteredId`, `WrongModel`. Branch on `kind`. `reason` is for a person to read.
+
+```rust
+use gprx::{CholeskyStage, GprError, PersistErrorKind};
+
+fn main() -> Result<(), GprError> {
+    let err = GprError::DimensionMismatch {
+        x_dim: 2,
+        expected_dim: 1,
+    };
+    match err {
+        GprError::DimensionMismatch { x_dim, expected_dim } => {
+            let _ = (x_dim, expected_dim);
+        }
+        GprError::CholeskyFailed {
+            jitter,
+            matrix_size,
+            stage,
+        } => {
+            let _ = (jitter, matrix_size, stage);
+        }
+        GprError::PersistFailed { kind, reason } => {
+            let _ = (kind, reason);
+        }
+        GprError::UnsupportedPersistVersion { found, supported } => {
+            let _ = (found, supported);
+        }
+        other => {
+            let _ = other.to_string();
+        }
+    }
+    let _ = (CholeskyStage::Fit, PersistErrorKind::Io);
+    Ok(())
+}
+```
 
 ## Architecture and the saved format
 

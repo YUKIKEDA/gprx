@@ -45,7 +45,7 @@ Fail a page when any of these is true:
 - The README, the Japanese README, the crate-level rustdoc, and `description` contradict each other
 - The README links relatively at a file that is not in the package, or embeds an image
 - The Japanese is a gloss of the English under the natural-japanese skill
-- The Usage section omits how to use an item an external crate can name with default features: construct, call, match, or implement, and a default that changes the result. `internals` is outside that list. Say which type a method belongs to when the families differ. Signatures and Errors stay in rustdoc. The saved-file schema stays in the persist-format doc
+- A public item an external crate can name with default features is missing from the README Usage section, has no usage example there, or its rustdoc has no usage example (`.cursor/rules/reader-docs.mdc`, `.cursor/rules/rust-docs.mdc`). `internals` is outside that list. The saved-file schema stays in the persist-format doc
 
 ## Report
 
