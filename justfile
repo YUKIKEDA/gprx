@@ -75,23 +75,23 @@ perf-real-data:
 perf-real-report *args:
     uv run --directory compare --group perf python -X utf8 -m perf.real.report {{args}}
 
-# B1-1 the whole plan in order (hours; run it on the machine whose numbers go into the README).
-# T1: every split. T2: 5 splits. T3: 1 split. A timeline run writes RSS files only, not results.
+# B1-1 the comparison that the README tables come from (hours).
+# One optimizer (matched). Exact only where one fit stays under about 5 minutes:
+# Snelson, Mauna Loa, yacht, energy. Concrete is the same size class as energy
+# and is not repeated. Wine and larger sets are Sgpr. kin8nm and protein match
+# kin40k; buzz matches song; those three are not repeated. HouseElectric Sgpr
+# returns N/A when K(X, Z) does not fit. A timeline run writes RSS files only.
 perf-real-full:
     just perf-real-data
     just perf-real-smoke --data
     just perf-real-check yacht
     just perf-real-check maunaloa
-    just perf-real --datasets snelson,maunaloa --protocol native
-    just perf-real --datasets snelson,maunaloa --protocol matched
-    just perf-real --datasets yacht,energy,concrete,wine_red,power_plant,kin8nm,naval --protocol native
-    just perf-real --datasets yacht,energy,concrete,wine_red,power_plant,kin8nm,naval --protocol matched
-    just perf-real --datasets kin40k,protein --splits 5 --protocol native
-    just perf-real --datasets kin40k,protein --splits 5 --protocol matched
-    just perf-real --datasets kin40k,protein --splits 5 --model sgpr --protocol native --libs gprx,gpytorch,gpy
-    just perf-real --datasets kin40k,protein --splits 5 --model sgpr --protocol matched --libs gprx,gpytorch,gpy
-    just perf-real --datasets kin40k,protein,3droad,song,buzz,houseelectric --splits 1 --model svgp --protocol matched --libs gprx,gpytorch
-    just perf-real --datasets 3droad,song,buzz,houseelectric --splits 1 --model sgpr --protocol matched --libs gprx,gpytorch,gpy
-    just perf-real --datasets energy --splits 1 --protocol native --timeline
+    just perf-real --datasets snelson,maunaloa --protocol matched --libs gprx,sklearn,gpytorch,gpy
+    just perf-real --datasets yacht,energy --protocol matched --libs gprx,sklearn,gpytorch,gpy
+    just perf-real --datasets wine_red,power_plant,naval --model sgpr --protocol matched --libs gprx,gpytorch,gpy
+    just perf-real --datasets kin40k --splits 5 --model sgpr --protocol matched --libs gprx,gpytorch,gpy
+    just perf-real --datasets kin40k,3droad,song,houseelectric --splits 1 --model svgp --protocol matched --libs gprx,gpytorch
+    just perf-real --datasets 3droad,song,houseelectric --splits 1 --model sgpr --protocol matched --libs gprx,gpytorch,gpy
+    just perf-real --datasets energy --splits 1 --protocol matched --libs gprx,sklearn,gpytorch,gpy --timeline
     just perf-real --datasets kin40k --splits 1 --model sgpr --protocol matched --libs gprx,gpytorch,gpy --timeline
     just perf-real-report

@@ -1,0 +1,1769 @@
+{
+  "meta": {
+    "machine": {
+      "cpu": "Intel64 Family 6 Model 191 Stepping 2, GenuineIntel",
+      "logical_cpus": 16,
+      "memory_gib": 47.8,
+      "os": "Windows-11-10.0.26200-SP0"
+    },
+    "versions": {
+      "numpy": "2.5.3",
+      "scipy": "1.18.1",
+      "scikit-learn": "1.6.1",
+      "torch": "2.14.0",
+      "gpytorch": "1.15.2",
+      "GPy": "1.14.2",
+      "paramz": "0.10.0",
+      "argmin": "0.11.0",
+      "gprx": "path (this checkout)",
+      "libgp": "f4a2fb7d4e1de7de8f1555318f14750830913663"
+    },
+    "optimizers": {
+      "gprx": {
+        "native": "argmin 0.11 LBFGS + MoreThuente line search; history 10, max 100 iterations, gradient-norm tolerance sqrt(eps)",
+        "matched": "same call: the gprx default already equals the shared setting",
+        "space": "logit of log \u03b8 inside each interval, so the search is unconstrained",
+        "bounds": "(1e-5, 1e5) on \u2113, signal variance and noise variance",
+        "source": "src/optimizer/lbfgs.rs, src/optimizer/logit.rs"
+      },
+      "sklearn": {
+        "native": "scipy minimize L-BFGS-B via optimizer='fmin_l_bfgs_b' with scipy defaults (maxiter 15000, ftol 2.2e-9, gtol 1e-5, maxcor 10, maxls 20)",
+        "matched": "scipy L-BFGS-B, maxiter 100, gtol sqrt(eps), ftol 0, maxcor 10; the library's own objective and gradient",
+        "space": "log \u03b8",
+        "bounds": "(1e-5, 1e5) on \u2113, constant value and noise level (kernel defaults)",
+        "source": "sklearn/gaussian_process/_gpr.py _constrained_optimization"
+      },
+      "gpytorch": {
+        "native": "torch.optim.Adam, lr 0.1, 50 steps (the exact-GP tutorial setting; GPyTorch has no default optimizer)",
+        "matched": "scipy L-BFGS-B, maxiter 100, gtol sqrt(eps), ftol 0, maxcor 10; the library's own objective and gradient; gradient by autograd on -mll \u00d7 n",
+        "space": "raw parameters behind softplus",
+        "bounds": "noise \u2265 1e-5 (set here; GPyTorch's default is 1e-4); \u2113 and outputscale positive only",
+        "source": "compare/perf/real/gpytorch_fit.py"
+      },
+      "gpy": {
+        "native": "model.optimize(): paramz opt_lbfgsb = scipy fmin_l_bfgs_b with maxfun = maxiter = 1000, factr 1e7, pgtol 1e-5",
+        "matched": "scipy L-BFGS-B, maxiter 100, gtol sqrt(eps), ftol 0, maxcor 10; the library's own objective and gradient",
+        "space": "softplus (Logexp) of each parameter",
+        "bounds": "positive only, no upper bound",
+        "source": "paramz/optimization/optimization.py opt_lbfgsb, paramz/model.py optimize"
+      },
+      "libgp": {
+        "native": "RProp (resilient backpropagation), 100 iterations, eps_stop 0, Delta0 0.1, Deltamin 1e-6, Deltamax 50, eta- 0.5, eta+ 1.2; keeps the best likelihood seen",
+        "matched": "N/A: libgp offers RProp and CG only, and RProp has no gradient tolerance",
+        "space": "log \u2113, log sf, log sn (amplitude and std, not variances)",
+        "bounds": "none",
+        "source": "src/rprop.cc, include/rprop.h"
+      },
+      "friedrich": {
+        "native": "N/A: no ARD kernel",
+        "matched": "N/A: no ARD kernel",
+        "space": "-",
+        "bounds": "-",
+        "source": "-"
+      }
+    }
+  },
+  "cells": [
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "snelson",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": {
+        "mean": 0.0280184,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.0009147,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 23.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": 89.81025627398557,
+        "se": 0.0
+      },
+      "ms_per_eval": 1.218191304347826,
+      "peak_rss_mib": 11.46484375
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "snelson",
+      "lib": "sklearn",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": {
+        "mean": 0.32591470004990697,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.0014387000119313598,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 126.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 18.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": 89.81025627398523,
+        "se": 0.0
+      },
+      "ms_per_eval": 2.5866246035706904,
+      "peak_rss_mib": 109.76953125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "snelson",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": {
+        "mean": 0.1444146999856457,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.005368700018152595,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 55.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 20.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": 89.81025627398523,
+        "se": 0.0
+      },
+      "ms_per_eval": 2.625721817920831,
+      "peak_rss_mib": 282.3125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "snelson",
+      "lib": "gpy",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": {
+        "mean": 0.338247700012289,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.0015259999781847,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 50.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 19.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": 89.81025627398529,
+        "se": 0.0
+      },
+      "ms_per_eval": 6.76495400024578,
+      "peak_rss_mib": 142.3984375
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "maunaloa",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.749163597055475,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 4.83818185789748,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.35793357933579334,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 1.4837037,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.0724738,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 130.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": -1478.8836273016466,
+        "se": 0.0
+      },
+      "ms_per_eval": 11.413105384615385,
+      "peak_rss_mib": 70.59375
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "maunaloa",
+      "lib": "sklearn",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.494968543658691,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 4.856032878676236,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.36900369003690037,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 16.54089299996849,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.12667929998133332,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 120.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 100.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": -1478.866428597997,
+        "se": 0.0
+      },
+      "ms_per_eval": 137.84077499973742,
+      "peak_rss_mib": 176.52734375
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "maunaloa",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.648542851374836,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 4.980409357613112,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.33948339483394835,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 2.732626699958928,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.1598610000219196,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 118.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 100.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": -1478.8205116644338,
+        "se": 0.0
+      },
+      "ms_per_eval": 23.157853389482437,
+      "peak_rss_mib": 522.9453125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "maunaloa",
+      "lib": "gpy",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.717328148989516,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 5.071972809616315,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.33210332103321033,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 17.979857200058177,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.18909280002117157,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 116.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 100.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": -1478.7416136345316,
+        "se": 0.0
+      },
+      "ms_per_eval": 154.9987689660188,
+      "peak_rss_mib": 408.0078125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "yacht",
+      "lib": "gprx",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.7521931741654913,
+        "se": 0.08111451745814946
+      },
+      "nlpd": {
+        "mean": 1.0101287929047413,
+        "se": 0.13978087535922087
+      },
+      "coverage95": {
+        "mean": 0.9274193548387096,
+        "se": 0.009025889095762346
+      },
+      "fit_s": {
+        "mean": 0.82740741,
+        "se": 0.10655916764138669
+      },
+      "predict_s": {
+        "mean": 0.000241815,
+        "se": 1.143274216542351e-05
+      },
+      "joint_evals": {
+        "mean": 326.7,
+        "se": 50.61943146762182
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": -338.1512865045901,
+        "se": 20.337530197835704
+      },
+      "ms_per_eval": 2.6551748154326136,
+      "peak_rss_mib": 13.8828125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "yacht",
+      "lib": "sklearn",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.9359556728094235,
+        "se": 0.07372289312171913
+      },
+      "nlpd": {
+        "mean": 1.4108291624421387,
+        "se": 0.0592725560193452
+      },
+      "coverage95": {
+        "mean": 0.9451612903225806,
+        "se": 0.009390191381341144
+      },
+      "fit_s": {
+        "mean": 1.0926925650099293,
+        "se": 0.07891681741641311
+      },
+      "predict_s": {
+        "mean": 0.0007591299770865589,
+        "se": 4.29451292965128e-05
+      },
+      "joint_evals": {
+        "mean": 89.0,
+        "se": 5.335580666865751
+      },
+      "iterations": {
+        "mean": 44.55,
+        "se": 1.6148570084978844
+      },
+      "nlml": {
+        "mean": -270.22537002917994,
+        "se": 1.6600742648244466
+      },
+      "ms_per_eval": 11.580250229088856,
+      "peak_rss_mib": 124.43359375
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "yacht",
+      "lib": "gpytorch",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.41572088927230133,
+        "se": 0.05633881500845712
+      },
+      "nlpd": {
+        "mean": 0.19998745308510882,
+        "se": 0.09946039695840113
+      },
+      "coverage95": {
+        "mean": 0.9161290322580644,
+        "se": 0.012903225806451611
+      },
+      "fit_s": {
+        "mean": 0.44994036499992945,
+        "se": 0.03035816381137328
+      },
+      "predict_s": {
+        "mean": 0.0055225000076461585,
+        "se": 0.0002375033855349082
+      },
+      "joint_evals": {
+        "mean": 107.7,
+        "se": 6.4852464141797705
+      },
+      "iterations": {
+        "mean": 67.95,
+        "se": 5.933169473392783
+      },
+      "nlml": {
+        "mean": -451.19777725779585,
+        "se": 26.837690641641757
+      },
+      "ms_per_eval": 3.8354387344499195,
+      "peak_rss_mib": 287.3203125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "yacht",
+      "lib": "gpy",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.39305606034130935,
+        "se": 0.054847968498949067
+      },
+      "nlpd": {
+        "mean": 0.19707450087941414,
+        "se": 0.10485931193412916
+      },
+      "coverage95": {
+        "mean": 0.9096774193548386,
+        "se": 0.014350116542692998
+      },
+      "fit_s": {
+        "mean": 2.5747471850074364,
+        "se": 0.13903501350943068
+      },
+      "predict_s": {
+        "mean": 0.0007258250087033957,
+        "se": 5.5376632995384786e-05
+      },
+      "joint_evals": {
+        "mean": 119.6,
+        "se": 5.9579226333734105
+      },
+      "iterations": {
+        "mean": 78.1,
+        "se": 4.7455796606726
+      },
+      "nlml": {
+        "mean": -460.5642395940234,
+        "se": 27.07169788927509
+      },
+      "ms_per_eval": 21.124943519429458,
+      "peak_rss_mib": 151.4453125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "energy",
+      "lib": "gprx",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.4796372423680003,
+        "se": 0.013577327236549598
+      },
+      "nlpd": {
+        "mean": 0.6993293708894235,
+        "se": 0.032794653851991644
+      },
+      "coverage95": {
+        "mean": 0.9233766233766234,
+        "se": 0.006721889447694303
+      },
+      "fit_s": {
+        "mean": 1.2827092549999999,
+        "se": 0.012622353786713962
+      },
+      "predict_s": {
+        "mean": 0.001521655,
+        "se": 2.6072582367609642e-05
+      },
+      "joint_evals": {
+        "mean": 115.7,
+        "se": 0.5762857478351296
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": -1012.9713698748216,
+        "se": 2.4831039402207895
+      },
+      "ms_per_eval": 10.94264658119658,
+      "peak_rss_mib": 47.2578125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "energy",
+      "lib": "sklearn",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.4773040421972873,
+        "se": 0.0127310364180055
+      },
+      "nlpd": {
+        "mean": 0.6919695315963845,
+        "se": 0.029468702165911805
+      },
+      "coverage95": {
+        "mean": 0.924025974025974,
+        "se": 0.007727861457092796
+      },
+      "fit_s": {
+        "mean": 10.264100309979403,
+        "se": 0.7872697967172804
+      },
+      "predict_s": {
+        "mean": 0.0028834500117227435,
+        "se": 0.00028767547164550703
+      },
+      "joint_evals": {
+        "mean": 94.35,
+        "se": 7.121603530252528
+      },
+      "iterations": {
+        "mean": 53.05,
+        "se": 5.648229811188634
+      },
+      "nlml": {
+        "mean": -973.3236910204454,
+        "se": 6.079385947952985
+      },
+      "ms_per_eval": 108.1130374412098,
+      "peak_rss_mib": 225.0703125
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "energy",
+      "lib": "gpytorch",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.47728038251662613,
+        "se": 0.01245271687261193
+      },
+      "nlpd": {
+        "mean": 0.6894098528123882,
+        "se": 0.030577943850856746
+      },
+      "coverage95": {
+        "mean": 0.9207792207792208,
+        "se": 0.008154050244391246
+      },
+      "fit_s": {
+        "mean": 1.6139013200008776,
+        "se": 0.035777794108270145
+      },
+      "predict_s": {
+        "mean": 0.011193839996121824,
+        "se": 0.00018873472256453932
+      },
+      "joint_evals": {
+        "mean": 111.45,
+        "se": 1.8143796968139072
+      },
+      "iterations": {
+        "mean": 96.85,
+        "se": 1.5799317107161044
+      },
+      "nlml": {
+        "mean": -968.5120765383141,
+        "se": 7.39835313256781
+      },
+      "ms_per_eval": 14.202574830685336,
+      "peak_rss_mib": 316.16015625
+    },
+    {
+      "model": "exact",
+      "protocol": "matched",
+      "dataset": "energy",
+      "lib": "gpy",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.47556888450712276,
+        "se": 0.012575281662365665
+      },
+      "nlpd": {
+        "mean": 0.6859088550973208,
+        "se": 0.03070615649156281
+      },
+      "coverage95": {
+        "mean": 0.9233766233766234,
+        "se": 0.00753152467759684
+      },
+      "fit_s": {
+        "mean": 10.242018435004866,
+        "se": 0.22792811824140957
+      },
+      "predict_s": {
+        "mean": 0.002063725009793416,
+        "se": 7.124743386851232e-05
+      },
+      "joint_evals": {
+        "mean": 119.1,
+        "se": 2.676309320491069
+      },
+      "iterations": {
+        "mean": 99.2,
+        "se": 0.7999999999999999
+      },
+      "nlml": {
+        "mean": -971.9986916340182,
+        "se": 7.5705084249650065
+      },
+      "ms_per_eval": 85.44706338395233,
+      "peak_rss_mib": 245.91796875
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "wine_red",
+      "lib": "gprx",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.6279237023678254,
+        "se": 0.008175504450978697
+      },
+      "nlpd": {
+        "mean": 0.9510345856696286,
+        "se": 0.013664341393901219
+      },
+      "coverage95": {
+        "mean": 0.9393750000000001,
+        "se": 0.004800716092417881
+      },
+      "fit_s": {
+        "mean": 10.783538799999999,
+        "se": 2.939556885782444
+      },
+      "predict_s": {
+        "mean": 0.00244131,
+        "se": 5.6710256614329975e-05
+      },
+      "joint_evals": {
+        "mean": 225.55,
+        "se": 56.001479068813325
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": 1687.3231215215146,
+        "se": 1.9669894389081677
+      },
+      "ms_per_eval": 45.09456829268292,
+      "peak_rss_mib": 63.4609375
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "wine_red",
+      "lib": "gpytorch",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.6275881024968583,
+        "se": 0.008169810166731847
+      },
+      "nlpd": {
+        "mean": 0.950634853088937,
+        "se": 0.013675365082473776
+      },
+      "coverage95": {
+        "mean": 0.93875,
+        "se": 0.0047251775238163225
+      },
+      "fit_s": {
+        "mean": 6.029746495018481,
+        "se": 0.13481733814867328
+      },
+      "predict_s": {
+        "mean": 0.04283517501316965,
+        "se": 0.0010611611521585149
+      },
+      "joint_evals": {
+        "mean": 114.5,
+        "se": 0.8223842103747396
+      },
+      "iterations": {
+        "mean": 100.0,
+        "se": 0.0
+      },
+      "nlml": {
+        "mean": 1687.5048930996975,
+        "se": 1.9573230345151942
+      },
+      "ms_per_eval": 51.29435137169075,
+      "peak_rss_mib": 376.546875
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "wine_red",
+      "lib": "gpy",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 0.627462905433968,
+        "se": 0.008249402157260508
+      },
+      "nlpd": {
+        "mean": 0.9503723899931755,
+        "se": 0.013775525502396453
+      },
+      "coverage95": {
+        "mean": 0.9396875,
+        "se": 0.004783018033957001
+      },
+      "fit_s": {
+        "mean": 22.79823990999721,
+        "se": 1.0309871904263057
+      },
+      "predict_s": {
+        "mean": 0.002035864978097379,
+        "se": 5.2437389774688314e-05
+      },
+      "joint_evals": {
+        "mean": 111.75,
+        "se": 3.136269154668699
+      },
+      "iterations": {
+        "mean": 97.3,
+        "se": 2.6999999999999997
+      },
+      "nlml": {
+        "mean": 1687.5221192009951,
+        "se": 1.9511468849236635
+      },
+      "ms_per_eval": 196.33365179961498,
+      "peak_rss_mib": 299.83984375
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "power_plant",
+      "lib": "gprx",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 3.7749646546990427,
+        "se": 0.03949332328962162
+      },
+      "nlpd": {
+        "mean": 2.752370559499102,
+        "se": 0.01048753003632847
+      },
+      "coverage95": {
+        "mean": 0.9567398119122258,
+        "se": 0.0016016711565103579
+      },
+      "fit_s": {
+        "mean": 55.87500463,
+        "se": 8.603907809248845
+      },
+      "predict_s": {
+        "mean": 0.011376830000000001,
+        "se": 0.0015291541498677933
+      },
+      "joint_evals": {
+        "mean": 309.35,
+        "se": 46.41632397744297
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": -377.032954523493,
+        "se": 11.08048649772333
+      },
+      "ms_per_eval": 177.98643220197442,
+      "peak_rss_mib": 232.2734375
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "power_plant",
+      "lib": "gpytorch",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 3.776927002184487,
+        "se": 0.039648910665255374
+      },
+      "nlpd": {
+        "mean": 2.75271478605674,
+        "se": 0.010501827975890754
+      },
+      "coverage95": {
+        "mean": 0.9565830721003135,
+        "se": 0.00157284247580585
+      },
+      "fit_s": {
+        "mean": 18.937152800004696,
+        "se": 1.4226358665519494
+      },
+      "predict_s": {
+        "mean": 0.21826953001436777,
+        "se": 0.0079504331454883
+      },
+      "joint_evals": {
+        "mean": 82.8,
+        "se": 5.0469375810850305
+      },
+      "iterations": {
+        "mean": 33.55,
+        "se": 0.8689830717265834
+      },
+      "nlml": {
+        "mean": -377.03295466906394,
+        "se": 11.080486497864161
+      },
+      "ms_per_eval": 222.343229025817,
+      "peak_rss_mib": 652.02734375
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "power_plant",
+      "lib": "gpy",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 30965843976793.65,
+        "se": 30965843976789.88
+      },
+      "nlpd": {
+        "mean": 3.3115219441698843e+40,
+        "se": 3.3115219441698843e+40
+      },
+      "coverage95": {
+        "mean": 0.9582027168234065,
+        "se": 0.0025573042051632443
+      },
+      "fit_s": {
+        "mean": 54.57834626498516,
+        "se": 2.5326889738153686
+      },
+      "predict_s": {
+        "mean": 0.015616464987397194,
+        "se": 0.0002108546925204421
+      },
+      "joint_evals": {
+        "mean": 79.85,
+        "se": 3.495316415162619
+      },
+      "iterations": {
+        "mean": 33.6,
+        "se": 1.2657429688360486
+      },
+      "nlml": {
+        "mean": -7.044467232061347e+45,
+        "se": 7.044467232061347e+45
+      },
+      "ms_per_eval": 666.5935488837412,
+      "peak_rss_mib": 570.046875
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "naval",
+      "lib": "gprx",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 1.5818544940422143e-05,
+        "se": 1.0835182748910135e-07
+      },
+      "nlpd": {
+        "mean": -8.994441028896189,
+        "se": 0.0007621865745162213
+      },
+      "coverage95": {
+        "mean": 1.0,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 56.39383898,
+        "se": 8.799229381777886
+      },
+      "predict_s": {
+        "mean": 0.011745519999999999,
+        "se": 0.00039634228180622917
+      },
+      "joint_evals": {
+        "mean": 252.4,
+        "se": 38.046536601488725
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": -50842.2203950092,
+        "se": 1.4046959760207478
+      },
+      "ms_per_eval": 220.6552025020576,
+      "peak_rss_mib": 288.05859375
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "naval",
+      "lib": "gpytorch",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 1.7067166696514222e-05,
+        "se": 4.3550100619051936e-07
+      },
+      "nlpd": {
+        "mean": 3784.4863423812494,
+        "se": 590.5398806371522
+      },
+      "coverage95": {
+        "mean": 0.41865046102263204,
+        "se": 0.05178957362667763
+      },
+      "fit_s": {
+        "mean": 22.544688210001915,
+        "se": 1.342831693108958
+      },
+      "predict_s": {
+        "mean": 0.26415995000861586,
+        "se": 0.0024551007072175215
+      },
+      "joint_evals": {
+        "mean": 82.75,
+        "se": 5.012025013589029
+      },
+      "iterations": {
+        "mean": 37.9,
+        "se": 3.773801657131495
+      },
+      "nlml": {
+        "mean": -50750.96743476043,
+        "se": 20.170970533112374
+      },
+      "ms_per_eval": 272.67148617227747,
+      "peak_rss_mib": 745.1484375
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "naval",
+      "lib": "gpy",
+      "ok": 20,
+      "total": 20,
+      "notes": [],
+      "rmse": {
+        "mean": 1.5707386521794088e-05,
+        "se": 5.973361667186744e-07
+      },
+      "nlpd": {
+        "mean": -9.68148154353314,
+        "se": 0.00954141774586694
+      },
+      "coverage95": {
+        "mean": 0.9396060352053647,
+        "se": 0.0035983903282964178
+      },
+      "fit_s": {
+        "mean": 72.16804880999844,
+        "se": 5.3499104012628935
+      },
+      "predict_s": {
+        "mean": 0.020555070001864805,
+        "se": 0.0002648774090756893
+      },
+      "joint_evals": {
+        "mean": 71.5,
+        "se": 5.328424275820939
+      },
+      "iterations": {
+        "mean": 7.65,
+        "se": 0.987487508248772
+      },
+      "nlml": {
+        "mean": -56236.65900535583,
+        "se": 63.40254104533742
+      },
+      "ms_per_eval": 1020.7971441293444,
+      "peak_rss_mib": 675.921875
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "kin40k",
+      "lib": "gprx",
+      "ok": 5,
+      "total": 5,
+      "notes": [],
+      "rmse": {
+        "mean": 0.2862600093118543,
+        "se": 0.0029326129321567643
+      },
+      "nlpd": {
+        "mean": 0.16341790746178203,
+        "se": 0.008293656990975775
+      },
+      "coverage95": {
+        "mean": 0.9637499999999999,
+        "se": 0.0028284271247461888
+      },
+      "fit_s": {
+        "mean": 273.38757416,
+        "se": 96.39687709605792
+      },
+      "predict_s": {
+        "mean": 0.03337092,
+        "se": 0.0008103013040838578
+      },
+      "joint_evals": {
+        "mean": 393.6,
+        "se": 131.91231936403815
+      },
+      "iterations": null,
+      "nlml": {
+        "mean": 10394.83876307781,
+        "se": 59.37675422731423
+      },
+      "ms_per_eval": 681.7612134920636,
+      "peak_rss_mib": 890.67578125
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "kin40k",
+      "lib": "gpytorch",
+      "ok": 5,
+      "total": 5,
+      "notes": [],
+      "rmse": {
+        "mean": 0.2865428720247814,
+        "se": 0.0027819345398653276
+      },
+      "nlpd": {
+        "mean": 0.163367385828947,
+        "se": 0.007906527036261048
+      },
+      "coverage95": {
+        "mean": 0.9635,
+        "se": 0.0027748873851023044
+      },
+      "fit_s": {
+        "mean": 73.98636684003286,
+        "se": 4.854762882690269
+      },
+      "predict_s": {
+        "mean": 0.8224023200105876,
+        "se": 0.004461867693573631
+      },
+      "joint_evals": {
+        "mean": 86.4,
+        "se": 5.617828762075256
+      },
+      "iterations": {
+        "mean": 43.0,
+        "se": 2.2803508501982757
+      },
+      "nlml": {
+        "mean": 10394.838763194803,
+        "se": 59.37675422782044
+      },
+      "ms_per_eval": 854.944565333426,
+      "peak_rss_mib": 1746.84765625
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "kin40k",
+      "lib": "gpy",
+      "ok": 5,
+      "total": 5,
+      "notes": [],
+      "rmse": {
+        "mean": 0.28625999645624234,
+        "se": 0.0029326139075968403
+      },
+      "nlpd": {
+        "mean": 0.16341797180958012,
+        "se": 0.008293637177922615
+      },
+      "coverage95": {
+        "mean": 0.9637499999999999,
+        "se": 0.0028284271247461888
+      },
+      "fit_s": {
+        "mean": 231.78696098001674,
+        "se": 41.774726893686754
+      },
+      "predict_s": {
+        "mean": 0.06283212001435459,
+        "se": 0.0006905062857677504
+      },
+      "joint_evals": {
+        "mean": 88.0,
+        "se": 16.0
+      },
+      "iterations": {
+        "mean": 42.4,
+        "se": 2.8390139133156778
+      },
+      "nlml": {
+        "mean": 10394.85320155925,
+        "se": 59.376764601234576
+      },
+      "ms_per_eval": 2642.585001538436,
+      "peak_rss_mib": 1820.109375
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "kin40k",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.6086504219672804,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 0.90931245805569,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.921,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 3.180641,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.2620516,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 108.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 29.45037962962963,
+      "peak_rss_mib": 638.8359375
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "kin40k",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.5974697955496291,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 0.8711548013281756,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.93875,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 4.911836600047536,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.047906599938869476,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 108.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 108.0,
+        "se": 0.0
+      },
+      "nlml": null,
+      "ms_per_eval": 45.47996851895867,
+      "peak_rss_mib": 457.73046875
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "3droad",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 11.184966505773971,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 3.834172919421826,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.9483063904155264,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 34.489221,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 2.8811885999999998,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 1149.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 30.01672845953003,
+      "peak_rss_mib": 6236.6796875
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "3droad",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 11.16259331555274,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 3.8320546169530356,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.9438912778531515,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 42.92517190007493,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.48416390002239496,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 1149.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 1149.0,
+        "se": 0.0
+      },
+      "nlml": null,
+      "ms_per_eval": 37.3587222803089,
+      "peak_rss_mib": 1284.33984375
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "song",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.46687369465296974,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 0.6574559639042334,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.9469864555439128,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 57.7934588,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 3.4845744,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 1359.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 42.52645974981605,
+      "peak_rss_mib": 8650.4140625
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "song",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.4708522922605957,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 0.6660384169451967,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.9542438002095703,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 55.95505009999033,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 0.5901540999766439,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 1359.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 1359.0,
+        "se": 0.0
+      },
+      "nlml": null,
+      "ms_per_eval": 41.17369396614447,
+      "peak_rss_mib": 3769.80078125
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "houseelectric",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.056221565684519026,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": -1.4565119035355942,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.9462786930043723,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 176.4948244,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 13.203876,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 5406.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 32.64795123936367,
+      "peak_rss_mib": 29590.76171875
+    },
+    {
+      "model": "svgp",
+      "protocol": "matched",
+      "dataset": "houseelectric",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.05872348019110961,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": -1.4190983965730621,
+        "se": 0.0
+      },
+      "coverage95": {
+        "mean": 0.9453808166770769,
+        "se": 0.0
+      },
+      "fit_s": {
+        "mean": 202.9784089999739,
+        "se": 0.0
+      },
+      "predict_s": {
+        "mean": 2.0900240000337362,
+        "se": 0.0
+      },
+      "joint_evals": {
+        "mean": 5406.0,
+        "se": 0.0
+      },
+      "iterations": {
+        "mean": 5406.0,
+        "se": 0.0
+      },
+      "nlml": null,
+      "ms_per_eval": 37.54687550868922,
+      "peak_rss_mib": 5508.875
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "3droad",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.82251488266032,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 3.5968336509570347,
+        "se": 0.0
+      },
+      "coverage95": null,
+      "fit_s": {
+        "mean": 5230.243,
+        "se": 0.0
+      },
+      "predict_s": null,
+      "joint_evals": {
+        "mean": 788.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 6637.3642131979705,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "3droad",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.822675975891826,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 3.5967267791230095,
+        "se": 0.0
+      },
+      "coverage95": null,
+      "fit_s": {
+        "mean": 1694.481,
+        "se": 0.0
+      },
+      "predict_s": null,
+      "joint_evals": {
+        "mean": 129.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 13135.511627906977,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "3droad",
+      "lib": "gpy",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 8.822512990504187,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 3.596834447513418,
+        "se": 0.0
+      },
+      "coverage95": null,
+      "fit_s": {
+        "mean": 3970.226,
+        "se": 0.0
+      },
+      "predict_s": null,
+      "joint_evals": {
+        "mean": 135.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 29409.081481481484,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "song",
+      "lib": "gprx",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.574067486235308,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 6.121844839362918,
+        "se": 0.0
+      },
+      "coverage95": null,
+      "fit_s": {
+        "mean": 31.957,
+        "se": 0.0
+      },
+      "predict_s": null,
+      "joint_evals": {
+        "mean": 26.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 1229.1153846153845,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "song",
+      "lib": "gpytorch",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.5740674862467222,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 0.8639323070079091,
+        "se": 0.0
+      },
+      "coverage95": null,
+      "fit_s": {
+        "mean": 579.85,
+        "se": 0.0
+      },
+      "predict_s": null,
+      "joint_evals": {
+        "mean": 47.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 12337.234042553191,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "song",
+      "lib": "gpy",
+      "ok": 1,
+      "total": 1,
+      "notes": [],
+      "rmse": {
+        "mean": 0.5740674862484784,
+        "se": 0.0
+      },
+      "nlpd": {
+        "mean": 0.8639323070194641,
+        "se": 0.0
+      },
+      "coverage95": null,
+      "fit_s": {
+        "mean": 6354.67,
+        "se": 0.0
+      },
+      "predict_s": null,
+      "joint_evals": {
+        "mean": 47.0,
+        "se": 0.0
+      },
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": 135205.74468085106,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "houseelectric",
+      "lib": "gprx",
+      "ok": 0,
+      "total": 1,
+      "notes": [
+        "K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB"
+      ],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": null,
+      "predict_s": null,
+      "joint_evals": null,
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": null,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "houseelectric",
+      "lib": "gpytorch",
+      "ok": 0,
+      "total": 1,
+      "notes": [
+        "K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB"
+      ],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": null,
+      "predict_s": null,
+      "joint_evals": null,
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": null,
+      "peak_rss_mib": null
+    },
+    {
+      "model": "sgpr",
+      "protocol": "matched",
+      "dataset": "houseelectric",
+      "lib": "gpy",
+      "ok": 0,
+      "total": 1,
+      "notes": [
+        "K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB"
+      ],
+      "rmse": null,
+      "nlpd": null,
+      "coverage95": null,
+      "fit_s": null,
+      "predict_s": null,
+      "joint_evals": null,
+      "iterations": null,
+      "nlml": null,
+      "ms_per_eval": null,
+      "peak_rss_mib": null
+    }
+  ]
+}

@@ -22,9 +22,9 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
-from .data import OUT  # noqa: E402
+from .data import OUT
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-import json
-
 import numpy as np
-
 from common.harness import write_json
 
 from .data import DATASETS, OUT, load_split, n_splits
@@ -129,7 +127,7 @@ def write_curve_case(name: str, protocol: str) -> Path:
     extra: dict = {}
     if curve.kernel == "mauna_loa":
         st = MAUNA_LOA_START
-        amp = lambda v: (v / y_std) ** 2  # noqa: E731  ppm -> variance of the standardized y
+        amp = lambda v: (v / y_std) ** 2
         extra = {
             "kernel": curve.kernel,
             "theta_init": [

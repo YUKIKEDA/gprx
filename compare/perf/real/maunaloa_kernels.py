@@ -21,10 +21,12 @@ import math
 def sklearn_kernel(theta):
     from sklearn.gaussian_process.kernels import (
         RBF,
-        ConstantKernel as C,
         ExpSineSquared,
         RationalQuadratic,
         WhiteKernel,
+    )
+    from sklearn.gaussian_process.kernels import (
+        ConstantKernel as C,
     )
 
     s1, l1, s2, l2, l3, p, s3, l4, a, s4, l5, noise = theta

@@ -11,20 +11,27 @@ to ``out/real/results.json``.
 
 from __future__ import annotations
 
-import json
 import math
 import statistics
 import sys
 import urllib.error
 
 from common import harness
-from common.harness import fmt_rss, fmt_s, na_row, print_table, read_rows, start, write_json
+from common.harness import (
+    fmt_rss,
+    fmt_s,
+    na_row,
+    print_table,
+    read_rows,
+    start,
+    write_json,
+)
 
 from .real.cases import N_INDUCING, case_n_rows, splits_of, write_case, write_curve_case
 from .real.curves import CURVES
 from .real.data import DATASETS, OUT
 from .real.libs import FIT_FIELDS, RUNNERS, runners_for
-from .real.optimizers import OPTIMIZERS, meta
+from .real.optimizers import OPTIMIZERS, available_gib, meta, total_gib
 
 RESULTS = OUT / "results.json"
 
@@ -50,6 +57,10 @@ def mean_se(values: list[float]) -> str:
     return f"{mean:.4g} ± {statistics.stdev(values) / math.sqrt(len(values)):.2g}"
 
 
+def present(cells: list[dict], key: str) -> list[float]:
+    return [cell[key] for cell in cells if cell.get(key) is not None]
+
+
 def print_tables(rows: list[dict]) -> None:
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
@@ -61,21 +72,17 @@ def print_tables(rows: list[dict]) -> None:
             if proto != protocol:
                 continue
             ok = [c for c in cells if c.get("status") == "ok"]
-
-            def col(key: str) -> list[float]:
-                return [c[key] for c in ok if c.get(key) is not None]
-
             lines.append(
                 (
                     dataset,
                     lib,
                     f"{len(ok)}/{len(cells)}",
-                    mean_se(col("rmse")),
-                    mean_se(col("nlpd")),
-                    mean_se(col("coverage95")),
-                    mean_se(col("fit_s")) if ok else "N/A",
-                    mean_se(col("joint_evals")),
-                    mean_se(col("nlml")),
+                    mean_se(present(ok, "rmse")),
+                    mean_se(present(ok, "nlpd")),
+                    mean_se(present(ok, "coverage95")),
+                    mean_se(present(ok, "fit_s")) if ok else "N/A",
+                    mean_se(present(ok, "joint_evals")),
+                    mean_se(present(ok, "nlml")),
                     fmt_rss(max((c["peak_rss_bytes"] for c in ok), default=None)),
                 )
             )
@@ -96,16 +103,6 @@ def merge_rows(path, fresh: list[dict]) -> list[dict]:
     return list(kept.values())
 
 
-def available_gib() -> float | None:
-    try:
-        for line in open("/proc/meminfo", encoding="utf-8"):
-            if line.startswith("MemAvailable"):
-                return int(line.split()[1]) / (1024 * 1024)
-    except OSError:
-        pass
-    return None
-
-
 def exact_skip_reason(n_rows: int, force: bool) -> str | None:
     """Why an exact fit is not attempted: the kernel matrix and its factor
     (two n × n f64 matrices, a lower bound of what any library needs) do not
@@ -116,6 +113,28 @@ def exact_skip_reason(n_rows: int, force: bool) -> str | None:
     need = 2 * n_rows * n_rows * 8 / 2**30
     if need > 0.8 * have:
         return f"K and its factor need at least {need:.1f} GiB; {have:.1f} GiB available"
+    return None
+
+
+# GPyTorch's InducingPointKernel keeps several float64 (n × m) tensors
+# (the cross kernel, the distances, and the backward). Six copies stay under
+# this machine's RAM for song and 3droad, and cross it for houseelectric.
+SGPR_CROSS_COPIES = 6
+
+
+def sgpr_skip_reason(n_rows: int, n_inducing: int, force: bool) -> str | None:
+    """Why an SGPR fit is not attempted: several copies of K(X, Z) do not
+    fit in physical memory. ``--force-exact`` tries anyway."""
+    total = total_gib()
+    if force or total is None:
+        return None
+    one = n_rows * n_inducing * 8 / 2**30
+    need = SGPR_CROSS_COPIES * one
+    if need > 0.75 * total:
+        return (
+            f"K(X, Z) is {one:.1f} GiB; {SGPR_CROSS_COPIES} copies "
+            f"({need:.1f} GiB) do not fit in {total:.1f} GiB"
+        )
     return None
 
 
@@ -167,11 +186,13 @@ def main(argv: list[str]) -> int:
                 continue
             print(f"# {path.name}", flush=True)
             for lib in libs:
-                reason = (
-                    exact_skip_reason(case_n_rows(path), "--force-exact" in argv)
-                    if model == "exact" and protocol != "fixed" and DATASETS.get(dataset) and DATASETS[dataset].tier in ("T2", "T3")
-                    else None
-                )
+                force = "--force-exact" in argv
+                if model == "exact" and protocol != "fixed" and DATASETS.get(dataset) and DATASETS[dataset].tier in ("T2", "T3"):
+                    reason = exact_skip_reason(case_n_rows(path), force)
+                elif model == "sgpr":
+                    reason = sgpr_skip_reason(case_n_rows(path), n_inducing, force)
+                else:
+                    reason = None
                 if reason is not None:
                     row = na_row(reason, FIT_FIELDS)
                     row.update(lib=lib, name=f"{dataset}_s{split}", protocol=protocol, model=model)
