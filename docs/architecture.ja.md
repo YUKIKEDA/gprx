@@ -8,22 +8,22 @@
 
 ## 1. 全体像
 
-3 つのモデル族が、共通の部品の集まりを使う。各族には、学習前（trainer）、学習後（fitted）があり、一部の族にはオンライン版がある。モデル同士は import しない。共有するものは、その下の層に置く。
+3 つのモデルが、共通の部品の集まりを使う。各モデルには、学習前（trainer）、学習後（fitted）があり、一部のモデルにはオンライン版がある。モデル同士は import しない。共有するものは、その下の層に置く。
 
 ```mermaid
 flowchart TB
     api["<b>公開 API</b><br/>lib.rs の再エクスポート。pub mod は kernel, transform, persist"]
-    subgraph models["モデル — 族ごとに 1 ディレクトリ"]
+    subgraph models["モデル — モデルごとに 1 ディレクトリ"]
         direction LR
         gpr["<b>gpr</b><br/>Exact GPR"]
         sgpr["<b>sgpr</b><br/>Sparse GPR (VFE)"]
         svgp["<b>svgp</b><br/>SVGP (ミニバッチ)"]
     end
-    sparse["<b>sparse</b><br/>sgpr と svgp が共有する crate 内の核"]
+    sparse["<b>sparse</b><br/>sgpr と svgp が共有する crate 内の中核"]
     persist["<b>persist</b><br/>ディレクトリへの保存と読み込み"]
     subgraph services["モデルが組み合わせる部品"]
         direction LR
-        kernel["<b>kernel</b><br/>spec, compiled, 葉"]
+        kernel["<b>kernel</b><br/>spec, compiled, カーネルの葉"]
         likelihood["<b>likelihood</b>"]
         transform["<b>transform</b><br/>入力 / 目的変数の変換"]
         precision["<b>precision</b><br/>f32 / f64 / 混合"]
@@ -57,7 +57,7 @@ flowchart TB
 | `error` | 唯一のエラー型と、Cholesky の段の印 | 公開: `GprError`, `CholeskyStage` | `param` |
 | `param` | 区間つきの正のパラメータと、平らな `θ` の書き込み補助 | 公開: `Interval`, `BoundedParam`, `IntervalError` | `data`, `error`, `kernel`, `likelihood` |
 | `data` | 呼び出し側のデータの境界検査（形、有限、個数）と列優先の詰め込み | crate | `error`, `kernel` |
-| `rng` | サンプリングと焼きなましのための、種つきの小さな乱数 | crate: `SeededRng`（Xoshiro256++） | none |
+| `rng` | サンプリングと焼きなましのための、シードつきの小さな乱数 | crate: `SeededRng`（Xoshiro256++） | none |
 | `math` | カーネルの `exp` の実装（厳密 / 高速近似）。`KernelExp` の方針で選ぶ | 公開: `Accurate`, `FastApprox`, `KernelMath` | `kernel` |
 | `linalg` | Cholesky、LDLT、三角解、密行列の補助、faer のワーカー数の上限。モデルは自前で持たない | crate | `error`, `kernel` |
 | `policy` | 実行時の方針: 距離キャッシュ、Cholesky のバッファ、カーネルの `exp`、ジッター | 公開: `DistanceCachePolicy`, `CholeskyBuffer`, `KernelExp`, `JitterPolicy`, `FixedJitter`, `AdaptiveJitter` | `error`, `math` |
@@ -67,7 +67,7 @@ flowchart TB
 
 | Module | 責務 | 公開 / 主な型 | Imports |
 | --- | --- | --- | --- |
-| `kernel` | カーネルの言語: 組み込みの葉と `Custom` の木 `KernelSpec` を、静的ディスパッチの `CompiledKernel<T>` に平らにする。値、勾配、Hessian、座標微分。スカラーの trait `KernelScalar` | pub mod。`KernelSpec`, `CompiledKernel`, 葉（`RbfKernel`, `MaternKernel`, `PeriodicKernel`, …）, `KernelTerm`, `CustomKernel`, `KernelScalar` | `data`, `error`, `linalg`, `math`, `param` |
+| `kernel` | カーネルの言語: 組み込みのカーネルの葉と `Custom` の木 `KernelSpec` を、静的ディスパッチの `CompiledKernel<T>` に平らにする。値、勾配、Hessian、座標微分。スカラーの trait `KernelScalar` | pub mod。`KernelSpec`, `CompiledKernel`, カーネルの葉（`RbfKernel`, `MaternKernel`, `PeriodicKernel`, …）, `KernelTerm`, `CustomKernel`, `KernelScalar` | `data`, `error`, `linalg`, `math`, `param` |
 | `likelihood` | ガウスの観測ノイズ `σn²`。ジッターとは別の、独立したパラメータ | 公開: `GaussianLikelihood` | `data`, `error`, `param` |
 | `transform` | 入力の変換（identity、standardize、min-max、列ごと、pipeline）と目的変数の変換。それぞれ学習前と学習後の型を持つ。予測で平均と分散を戻す | pub mod: `Transform`, `UnfittedTransform`, `TargetTransform`, `UnfittedTarget`, `MinMaxInput`, `StandardizeTarget`, `Pipeline`, … | `data`, `error` |
 | `precision` | 格納と予測のスカラーを 1 つの方針にまとめる。混合精度の反復改善 | 公開: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
@@ -82,8 +82,8 @@ flowchart TB
 | --- | --- | --- | --- |
 | `gpr` | Exact GPR: `K + σn²I` の分解、fit / refit のための NLML とその微分、予測、共分散、標本、leave-one-out、LDLT の因子の上のオンライン insert / delete | 公開: `Gpr`, `FittedGpr`, `OnlineGpr` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `transform`, `workspace` |
 | `sparse` | `sgpr` と `svgp` が共有するもの: trainer の設定、学習データ、`Z`、カーネルと尤度にまたがる `θ` | crate: `SparseSpec`, `SparseCore` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `param`, `policy`, `precision`, `prediction`, `transform` |
-| `sgpr` | collapsed VFE の下界を使う Sparse GPR: 固定または自由な誘導点 `Z`、rank-1 のオンライン更新、点と誘導点の insert / delete、予測、共分散、標本、leave-one-out | 公開: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `sparse`, `transform` |
-| `svgp` | SVGP: whitened な `q(u)`、ELBO、1 ステップの費用が `n` に依らないミニバッチ Adam、予測、共分散、標本 | 公開: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `rng`, `sparse`, `transform` |
+| `sgpr` | collapsed VFE の下限を使う Sparse GPR: 固定または自由な誘導点 `Z`、rank-1 のオンライン更新、点と誘導点の insert / delete、予測、共分散、標本、leave-one-out | 公開: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `sparse`, `transform` |
+| `svgp` | SVGP: whitened な `q(u)`、ELBO、1 ステップの計算量が `n` に依らないミニバッチ Adam、予測、共分散、標本 | 公開: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `rng`, `sparse`, `transform` |
 | `persist` | モデル 1 つにつき 1 ディレクトリ: `config.json` と `model.safetensors`。`Custom` のカーネルと呼び出し側の変換の復元表 | pub mod: `LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`, `PersistRegistry`, `FORMAT_VERSION` | `error`, `gpr`, `kernel`, `optimizer`, `param`, `points`, `policy`, `precision`, `sgpr`, `sparse`, `svgp`, `transform` |
 | `internals` | ベンチマークと `compare/perf` のためのフック。`bench-internals` または `insert-stages` の feature のときだけ | pub mod、feature つき | `gpr`, `kernel`, `objective` |
 
@@ -137,7 +137,7 @@ flowchart TB
 
 コードベースで維持されている境界（`#[cfg(test)]` 以外の `use crate::…`）:
 
-1. **モデル同士は import しない。** `gpr`, `sgpr`, `svgp` の間に import は無い。共有するコードは 1 つ下の層に置く（2 つの Sparse 族には `sparse`、3 族すべてには部品）。
+1. **モデル同士は import しない。** `gpr`, `sgpr`, `svgp` の間に import は無い。共有するコードは 1 つ下の層に置く（2 つの Sparse モデルには `sparse`、3 つのモデルすべてには部品）。
 2. **モデルを import するのは `persist` だけ。** `persist/mod.rs`（Exact）と `persist/sparse.rs`（Sparse、SVGP）にある。具体的なモデルの型をすべて名指しする唯一の場所であり、そのため `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` が精度ごとに 1 つの variant を持てる。
 3. **逆向きにまたぐものは少ない。** モデルは `persist::save_*` を呼び、`gpr` はさらに `PersistedModel`（読み込んだ Exact モデルを組み直す部品）と `MappedTensors`（メモリマップした `L`）を使う。`gpr`、`sgpr`、`points` は、エラーを作るのに `persist_err` を使う。`persist` のそれ以外を、モデルは使わない。
 4. **`optimizer`、`objective`、`precision`、`transform` はモデルを import しない。** `optimizer` の単体テストは `Gpr` を作るが、テストのコードだけ。
@@ -148,11 +148,11 @@ flowchart TB
 - **基盤は互いを輪のように参照している。** `kernel/scalar.rs` が `f32` / `f64` のスカラー trait `KernelScalar` を定義し、`data`、`math`、`linalg` はそれについてジェネリックで、`kernel` はその 3 つを使う。`param` は `KernelSpec` と `GaussianLikelihood` の平らな `θ` を書くので両方を import し、`likelihood` は範囲のために `param` を import し返す。`error` は `param` の `IntervalError` を包む。これらは型と補助関数の参照で、実行時の呼び出しの循環ではない。
 - **`persist` とモデルは互いを参照している**（上の 2 と 3）。
 
-## 5. 族ごとの公開型
+## 5. モデルごとの公開型
 
-3 族は同じ typestate に従う。trainer、`fit`（または `factor`）、fitted の各状態を取り、fitted の値は最適化器の状態も `W` も持たない。学習と推論は別の型（[design §6](design.ja.md#6-gpmodel抽象化厳密疎の差し替え)）。
+3 つのモデルは同じ typestate に従う。trainer、`fit`（または `factor`）、fitted の各状態を取り、fitted の値は最適化器の状態も `W` も持たない。学習と推論は別の型（[design §6](design.ja.md#6-gpmodel抽象化厳密疎の差し替え)）。
 
-| 族 | Trainer | Fitted | Online | ディスクから読んだもの |
+| モデル | Trainer | Fitted | Online | ディスクから読んだもの |
 | --- | --- | --- | --- | --- |
 | Exact | `Gpr<O, P>` | `FittedGpr<O, P>` | `OnlineGpr<O, P>`（`insert`, `delete`） | `LoadedGpr`（8 variant） |
 | Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`） | `LoadedSgpr`（8 variant） |
@@ -199,18 +199,18 @@ flowchart LR
 | カーネルの葉 | `kernel/<leaf>.rs` と `kernel/compiled/` | `kernel/spec.rs`、`persist/kernel.rs`（新しい JSON のタグ）、design §5。下の手順 |
 | 全モデルの最適化器 | `optimizer/` | モデルは変更しない。新しい能力の trait が要るときだけ `objective.rs` |
 | Exact だけがすること（オンライン LDLT、`Gpr` の LOO） | `gpr/` | 因子は `linalg/ldlt.rs` |
-| 2 つの Sparse 族が共通にすること | `sparse/` | `sgpr/` と `svgp/` が呼ぶ |
+| 2 つの Sparse モデルが共通にすること | `sparse/` | `sgpr/` と `svgp/` が呼ぶ |
 | 精度の規則 | `precision/` | クロージャを渡すモデルの `factor/` |
 | 保存の配置 | `persist/` | [persist-format.ja.md](persist-format.ja.md)。古いファイルを読み誤りうるなら `FORMAT_VERSION` |
-| 新しいモデル族 | `gpr/` の隣の新しいディレクトリ | `persist/` に `Loaded*` を 1 つ。ほかのモデルを import してはいけない |
+| 新しいモデル | `gpr/` の隣の新しいディレクトリ | `persist/` に `Loaded*` を 1 つ。ほかのモデルを import してはいけない |
 
 ### 組み込みのカーネルの葉を足す
 
-葉は静的にディスパッチする。`KernelSpec` と `CompiledKernel` の各操作は葉ごとに 1 つの腕を持つ `match` で、全部で約 40 ある。そのため呼び出しはコンパイラがインライン化・ベクトル化できる直接の呼び出しになる（design §5）。代わりに、新しい葉を追加する際はそのすべてを変更する必要がある。答えが葉によって変わる `match` はすべての葉を名指しし、ワイルドカードを持たないので、腕が足りない場所はコンパイラが列挙する。残るワイルドカードは、どの葉にも正しい既定（速い経路が無いときに座標から計算する）か、葉と合成の区別だけ。葉を足す手順:
+カーネルの葉は静的にディスパッチする。`KernelSpec` と `CompiledKernel` の各操作はカーネルの葉ごとに 1 つの分岐を持つ `match` で、全部で約 40 ある。そのため呼び出しはコンパイラがインライン化・ベクトル化できる直接の呼び出しになる（design §5）。代わりに、新しいカーネルの葉を追加する際はそのすべてを変更する必要がある。答えがカーネルの葉によって変わる `match` はすべてのカーネルの葉を名指しし、ワイルドカードを持たないので、分岐が足りない場所はコンパイラが列挙する。残るワイルドカードは、どのカーネルの葉にも正しい既定（速い経路が無いときに座標から計算する）か、カーネルの葉と合成の区別だけ。カーネルの葉を足す手順:
 
 1. `kernel/<leaf>.rs`: パラメータ（`θ` とその `Interval`）、距離または座標からの値・`∂K/∂θ`・`∂²K/∂θ∂θ`（正方と長方形）、対角。`FreeInducing` で動かすなら座標微分（`grad_wrt_coord_dim` と混合の Hessian）。動かさないなら `CoordGradientUnsupported` を返す
-2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める腕
-3. `kernel/compiled/`: `CompiledKernel` の variant と、コンパイラが求める腕。すべての葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む
+2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める分岐
+3. `kernel/compiled/`: `CompiledKernel` の variant と、コンパイラが求める分岐。すべてのカーネルの葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む
 4. `persist/kernel.rs`: JSON のタグ。古い版の保存ファイルも読めること（persist-format.md）
-5. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互の塊、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す
+5. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互のブロック、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す
 6. design §5 と、`kernel/mod.rs`・`lib.rs` の公開の再エクスポート
