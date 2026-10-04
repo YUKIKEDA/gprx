@@ -1,4 +1,4 @@
-//! Input (`X`) and target (`y`) transforms.
+//! Transforms input (`X`) and target (`y`).
 //!
 //! Input maps: [`IdentityInput`], [`StandardizeInput`], [`MinMaxInput`].
 //! Target maps: [`IdentityTarget`], [`StandardizeTarget`], [`MinMaxTarget`].

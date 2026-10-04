@@ -28,11 +28,10 @@ use super::factor::{
 };
 use super::fitted::FittedSgpr;
 
-/// Stable identity of one inducing point on [`OnlineSgpr`].
+/// Represents the stable identity of one inducing point on [`OnlineSgpr`].
 ///
-/// [`crate::FittedSgpr::into_online`] assigns identifiers `0 .. m-1` in
-/// buffer order. Later [`OnlineSgpr::insert_inducing`] values increase
-/// monotonically and are never reused after
+/// [`crate::FittedSgpr::into_online`] assigns identifiers `0.. m-1` in buffer order. Later
+/// [`OnlineSgpr::insert_inducing`] values increase monotonically and are never reused after
 /// [`OnlineSgpr::delete_inducing`]. There is no public constructor.
 ///
 /// # Examples
@@ -83,7 +82,7 @@ impl RegistryId for InducingId {
 
 pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 
-/// Online collapsed variational SGPR after [`FittedSgpr::into_online`].
+/// Represents the online collapsed variational SGPR after [`FittedSgpr::into_online`].
 ///
 /// [`Self::insert`] appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
@@ -320,11 +319,15 @@ where
     sparse_core_accessors!(state.core);
 
     /// Returns training-point identifiers in buffer order.
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn point_ids(&self) -> &[PointId] {
         self.state.registry.ids()
     }
 
     /// Returns inducing-point identifiers in buffer order.
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn inducing_ids(&self) -> &[InducingId] {
         self.state.inducing.ids()
     }
@@ -332,6 +335,8 @@ where
     /// Returns the concatenated kernel and likelihood parameter count.
     ///
     /// Inducing coordinates are not counted.
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn num_params(&self) -> usize {
         self.state.core.theta_len()
     }
@@ -342,6 +347,8 @@ where
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         self.state.core.read_theta(out)
     }
@@ -355,6 +362,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::set_params`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError>
     where
         O: Clone,
@@ -365,14 +374,15 @@ where
         Ok(())
     }
 
-    /// Sets parameters, rebuilds the VFE system, and writes `∂L/∂θ` of the
-    /// negative ELBO.
+    /// Sets parameters, rebuilds the VFE system, and writes `∂L/∂θ` of the negative ELBO.
     ///
     /// `params` and `out` match [`Self::get_params`].
     ///
     /// # Errors
     ///
     /// Same as [`FittedSgpr::value_and_gradient_into`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn value_and_gradient_into(
         &mut self,
         params: &[f64],
@@ -392,6 +402,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::hessian_into`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>
     where
         O: Clone,
@@ -407,6 +419,8 @@ where
     /// # Errors
     ///
     /// The stored factors are already valid, so this returns `Ok`.
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn neg_log_marginal_likelihood(&self) -> Result<f64, GprError> {
         vfe_neg_log_marginal_likelihood(
             self.state.a.as_ref(),
@@ -426,6 +440,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::predict`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn predict(
         &self,
         xs: &[f64],
@@ -440,6 +456,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::predict_with`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn predict_with(
         &self,
         xs: &[f64],
@@ -519,6 +537,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::predict`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn predict_covariance_with(
         &self,
         xs: &[f64],
@@ -555,6 +575,8 @@ where
     /// [`CholeskyStage::Predict`](crate::CholeskyStage::Predict) if the
     /// posterior covariance cannot be factored after the retries of
     /// [`Self::jitter_policy`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn sample(
         &self,
         xs: &[f64],
@@ -571,6 +593,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::sample`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn sample_with(
         &self,
         xs: &[f64],
@@ -584,8 +608,7 @@ where
             .draw(n_draws, seed, self.state.core.jitter)
     }
 
-    /// Returns the leave-one-out mean and observation variance at every
-    /// training point.
+    /// Returns the leave-one-out mean and observation variance at every training point.
     ///
     /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
     /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
@@ -632,6 +655,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn loo_predict_with(
         &self,
         options: PredictOptions,
@@ -654,6 +679,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::predict`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn predict_into(
         &mut self,
         xs: &[f64],
@@ -672,6 +699,8 @@ where
     /// # Errors
     ///
     /// Same as [`FittedSgpr::predict`].
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn predict_with_into(
         &mut self,
         xs: &[f64],
@@ -720,6 +749,8 @@ where
     /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
     /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::EmptyInput`] if `d` is zero.
+    ///
+    /// See the example on [`OnlineSgpr`].
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.state.core.d {
             return Err(GprError::DimensionMismatch {
@@ -1217,8 +1248,7 @@ where
         crate::persist::save_online_sgpr(self, dir.as_ref())
     }
 
-    /// Converts this model back to a batch sparse GPR with fixed inducing
-    /// points.
+    /// Converts this model back to a batch sparse GPR with fixed inducing points.
     ///
     /// Point and inducing identifiers are discarded. Parameters stay
     /// kernel then likelihood `θ`. The snapshot `Z` is the current

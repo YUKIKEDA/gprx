@@ -1,4 +1,6 @@
-//! Nelder–Mead via argmin. Uses [`Objective::value`] only.
+//! Searches hyperparameters with Nelder–Mead.
+//!
+//! Uses [`Objective::value`] only.
 
 use std::num::NonZeroU32;
 
@@ -14,7 +16,11 @@ use super::adapter::{
 use super::logit::{log_theta_to_z, sample_log_uniform_z};
 use super::{OptResult, Optimizer, Restarts};
 
-/// Nelder–Mead via argmin. Uses [`Objective::value`] only.
+/// Searches hyperparameters with Nelder–Mead.
+///
+/// Uses [`Objective::value`] only.
+///
+/// See the example on [`Self::new`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NelderMead {
     max_iterations: u64,
@@ -53,7 +59,9 @@ impl NelderMead {
         Self::default()
     }
 
-    /// Sets the iteration cap passed to argmin (default 100).
+    /// Sets the iteration cap (default 100).
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_max_iterations(mut self, max_iterations: u64) -> Self {
         self.max_iterations = max_iterations;
         self
@@ -65,6 +73,8 @@ impl NelderMead {
     ///
     /// Returns [`GprError::InvalidConfig`] if `tolerance` is not finite
     /// or is negative.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_tolerance(mut self, tolerance: f64) -> Result<Self, GprError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
             return Err(GprError::InvalidConfig {
@@ -79,6 +89,8 @@ impl NelderMead {
     ///
     /// The first start is the model `θ`. Failed extra starts are discarded.
     /// The default trainer has no restarts and no seed.
+    ///
+    /// See the example on [`Self::new`].
     pub fn with_restarts(mut self, n: NonZeroU32, seed: u64) -> Self {
         self.restarts = Some(Restarts { n, seed });
         self

@@ -53,7 +53,7 @@ impl TensorFile {
         let path = dir.join(TENSOR_FILE);
         let file = File::open(&path)
             .map_err(|err| persist_err(PersistErrorKind::Io, format!("open {path:?}: {err}")))?;
-        // Safety: this map stays alive on `MappedTensors` and is not written
+        // SAFETY: this map stays alive on `MappedTensors` and is not written
         // through. gprx never writes into an existing `model.safetensors`:
         // a save renames a new file over the path (`atomic::write_atomic`),
         // so this mapping keeps the old file. Another program that truncates
@@ -128,7 +128,7 @@ impl MappedTensors {
             ));
         }
         let mapped = Self { mmap, l_offset, n };
-        // Safety of the read: the bounds and alignment are checked above.
+        // SAFETY: the bounds and alignment are checked above.
         let values = unsafe { f64_slice_unchecked(&mapped.mmap[l_offset..l_offset + nbytes]) };
         require_finite_tensor(values, TENSOR_L)?;
         Ok(mapped)
@@ -137,6 +137,8 @@ impl MappedTensors {
     pub(crate) fn l_view(&self) -> MatRef<'_, f64> {
         let nbytes = self.n * self.n * size_of::<f64>();
         let bytes = &self.mmap[self.l_offset..self.l_offset + nbytes];
+        // SAFETY: `from_mmap` checked this range for length and alignment, and the
+        // mapping stays live for `'self`.
         let data = unsafe { f64_slice_unchecked(bytes) };
         MatRef::from_column_major_slice(data, self.n, self.n)
     }
@@ -150,6 +152,7 @@ pub(super) struct FactorBytes<'a> {
 }
 
 pub(super) fn scalar_bytes<T>(values: &[T]) -> &[u8] {
+    // SAFETY: any `T` slice is a valid byte slice of `size_of_val` bytes.
     unsafe {
         std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
     }
@@ -371,6 +374,7 @@ fn offset_in_mmap(mmap: &Mmap, data: &[u8]) -> Result<usize, GprError> {
 }
 
 fn f64_as_bytes(values: &[f64]) -> &[u8] {
+    // SAFETY: an `f64` slice is a valid byte slice of `size_of_val` bytes.
     unsafe {
         std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
     }
@@ -389,6 +393,7 @@ fn scalar_slice<T: Copy>(bytes: &[u8]) -> Result<&[T], GprError> {
             "tensor length is not a multiple of the scalar size",
         ));
     }
+    // SAFETY: alignment and the length multiple were checked above.
     Ok(unsafe {
         std::slice::from_raw_parts(bytes.as_ptr().cast::<T>(), bytes.len() / size_of::<T>())
     })
@@ -398,7 +403,15 @@ fn f64_slice(bytes: &[u8]) -> Result<&[f64], GprError> {
     scalar_slice::<f64>(bytes)
 }
 
+/// Reinterprets `bytes` as `f64` values.
+///
+/// # Safety
+///
+/// `bytes` must be aligned for `f64` and its length must be a multiple of
+/// `size_of::<f64>()`. The caller keeps the underlying allocation alive for
+/// the returned slice.
 unsafe fn f64_slice_unchecked(bytes: &[u8]) -> &[f64] {
+    // SAFETY: the caller upholds alignment, length, and lifetime.
     unsafe {
         std::slice::from_raw_parts(bytes.as_ptr().cast::<f64>(), bytes.len() / size_of::<f64>())
     }

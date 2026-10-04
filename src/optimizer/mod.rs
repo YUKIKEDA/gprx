@@ -1,19 +1,16 @@
-//! argmin optimizer adapters and the [`Optimizer`] type slot.
+//! Adapts unconstrained solvers to the [`Optimizer`] type slot.
 //!
 //! Does not implement L-BFGS, Nelder–Mead, or a trust-region method. [`Lbfgs`],
-//! [`NelderMead`], and [`TrustRegion`] map user-unit [`crate::Interval`]
-//! through a logit so argmin stays unconstrained. Positive intervals
-//! (`lo > 0`) use a log-uniform logit, matching restart sampling. The
-//! unconstrained coordinate is scaled so the Jacobian is 1 at the interval
-//! midpoint. When a gradient solver asks for cost and gradient at the same
-//! point, one [`crate::Differentiable::value_and_gradient_into`] call fills
-//! both. [`TrustRegion`] also maps the analytic Hessian to logit coordinates.
-//! [`NelderMead`] evaluates [`crate::Objective::value`] only.
-//! [`Adam`] is a mini-batch loop for [`crate::Svgp`] and does not implement
-//! [`Optimizer`].
-//! [`FastSimulatedAnnealing`] is a homemade value-only solver that walks
-//! log-`θ` with Cauchy / Metropolis steps instead of a logit map. The first
-//! evaluation and each restart use [`crate::Objective::value`]; each
+//! [`NelderMead`], and [`TrustRegion`] map user-unit [`crate::Interval`] through a logit so
+//! the solver stays unconstrained. Positive intervals (`lo > 0`) use a log-uniform logit,
+//! matching restart sampling. The unconstrained coordinate is scaled so the Jacobian is 1
+//! at the interval midpoint. When a gradient solver asks for cost and gradient at the same
+//! point, one [`crate::Differentiable::value_and_gradient_into`] call fills both.
+//! [`TrustRegion`] also maps the analytic Hessian to logit coordinates. [`NelderMead`]
+//! evaluates [`crate::Objective::value`] only. [`Adam`] is a mini-batch loop for
+//! [`crate::Svgp`] and does not implement [`Optimizer`]. [`FastSimulatedAnnealing`] is a
+//! homemade value-only solver that walks log-`θ` with Cauchy / Metropolis steps instead of
+//! a logit map. The first evaluation and each restart use [`crate::Objective::value`]; each
 //! coordinate step uses [`crate::Objective::value_at_changes`].
 
 mod adam;
@@ -35,18 +32,20 @@ pub use trust_region::TrustRegion;
 
 use crate::error::GprError;
 
-/// Result of [`Optimizer::minimize`].
+/// Represents the result of [`Optimizer::minimize`].
+///
+/// See the example on [`Optimizer`].
 #[derive(Clone, Debug)]
 pub struct OptResult {
-    /// Parameters in the same space as `init` (log-`θ` for [`crate::Gpr`]).
+    /// Holds the parameters in the same space as `init` (log-`θ` for [`crate::Gpr`]).
     pub params: Vec<f64>,
-    /// Objective value at [`Self::params`].
+    /// Holds the objective value at [`Self::params`].
     pub value: f64,
-    /// Optimizer iterations performed.
+    /// Holds the optimizer iterations performed.
     pub iterations: u64,
 }
 
-/// Hyperparameter optimizer.
+/// Represents the hyperparameter optimizer.
 ///
 /// `P` is the objective this algorithm can minimize. [`Lbfgs`]
 /// requires [`crate::Differentiable`], [`TrustRegion`]
@@ -99,10 +98,11 @@ pub trait Optimizer<P: ?Sized> {
     ///
     /// Returns [`GprError`] when `init` is the wrong length, the objective
     /// fails, or the solver stops without a best parameter vector.
+    ///
+    /// See the example on [`Optimizer`].
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError>;
 
-    /// Whether this optimizer reports changed coordinates through
-    /// [`crate::Objective::value_at_changes`].
+    /// Records whether this optimizer reports changed coordinates through [`crate::Objective::value_at_changes`].
     ///
     /// When `true` and the trainer keeps a dedicated gradient buffer
     /// ([`crate::CholeskyBuffer::Retain`]), a fit rebuilds only the kernel
@@ -110,7 +110,11 @@ pub trait Optimizer<P: ?Sized> {
     const USES_CHANGE_INDICES: bool = false;
 }
 
-/// Fixed hyperparameters. [`crate::Gpr<Fixed>::factor`] only; not an [`Optimizer`].
+/// Represents the fixed hyperparameters.
+///
+/// [`crate::Gpr<Fixed>::factor`] only; not an [`Optimizer`].
+///
+/// See the example on [`crate::Gpr::factor`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Fixed;
 

@@ -14,14 +14,15 @@ use super::factor::{
     predict_svgp_into, q_param_len, svgp_neg_elbo, svgp_value_and_gradient, unpack_q,
 };
 
-/// Factored stochastic variational GPR at the `θ` used by [`crate::Svgp<Fixed>::factor`]
-/// or [`crate::Svgp<crate::Adam>::fit`].
+/// Represents the factored stochastic variational GPR at the `θ` used by [`crate::Svgp<Fixed>::factor`] or [`crate::Svgp<crate::Adam>::fit`].
 ///
 /// Stores the LLT of `K_mm = k(Z, Z)` and a whitened variational posterior
 /// `q(v) = N(m, L Lᵀ)` used by [`Self::predict`] and [`Self::neg_elbo`].
 /// Observation noise is not added to `K_mm`. Hyperparameters are kernel `θ`,
 /// likelihood `θ`, the whitened mean vector, then the packed column-major
 /// lower triangle of `L`.
+///
+/// See the example on [`Self::predict`].
 #[derive(Clone, Debug)]
 pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
     pub(super) core: SparseCore,
@@ -112,6 +113,8 @@ where
     ///
     /// Kernel `θ`, likelihood `θ`, the whitened mean (`m` scalars), then the
     /// packed lower triangle of `L` (`m(m + 1) / 2` scalars).
+    ///
+    /// See the example on [`Self::predict`].
     pub fn num_params(&self) -> usize {
         self.core.theta_len() + q_param_len(self.core.m)
     }
@@ -125,6 +128,8 @@ where
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`Self::predict`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         let n_theta = self.core.theta_len();
@@ -289,8 +294,7 @@ where
         ))
     }
 
-    /// Sets parameters, rebuilds `K_mm` / `q`, and writes `∂/∂θ` of the
-    /// full-data negative ELBO.
+    /// Sets parameters, rebuilds `K_mm` / `q`, and writes `∂/∂θ` of the full-data negative ELBO.
     ///
     /// `params` and `out` match [`Self::get_params`]. The returned value is
     /// the same as [`Self::neg_elbo`] after a successful call. Mini-batch
@@ -491,6 +495,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn predict_covariance_with(
         &self,
         xs: &[f64],
@@ -527,6 +533,8 @@ where
     /// [`CholeskyStage::Predict`](crate::CholeskyStage::Predict) if the
     /// posterior covariance cannot be factored after the retries of
     /// [`Self::jitter_policy`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn sample(
         &self,
         xs: &[f64],
@@ -543,6 +551,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::sample`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn sample_with(
         &self,
         xs: &[f64],
@@ -604,6 +614,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn predict_with_into(
         &mut self,
         xs: &[f64],

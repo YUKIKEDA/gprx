@@ -5,8 +5,11 @@ use std::any::Any;
 use super::population_std;
 use crate::error::GprError;
 
-/// Unfitted target map. [`Self::fit`] consumes it and returns a
-/// [`TargetTransform`].
+/// Represents the unfitted target map.
+///
+/// [`Self::fit`] consumes it and returns a [`TargetTransform`].
+///
+/// See the example on [`StandardizeTarget`].
 pub trait UnfittedTarget: Send + Sync {
     /// Estimates transform parameters from training targets.
     ///
@@ -14,24 +17,38 @@ pub trait UnfittedTarget: Send + Sync {
     ///
     /// Returns [`GprError`] when `y` is empty, non-finite, or otherwise invalid
     /// for this transform.
+    ///
+    /// See the example on [`UnfittedTarget`].
     fn fit(self: Box<Self>, y: &[f64]) -> Result<Box<dyn TargetTransform>, GprError>;
 
-    /// Clones this map into a new box. Used by [`crate::Gpr`] clone.
+    /// Clones this map into a new box.
+    ///
+    /// Used by [`crate::Gpr`] clone.
+    ///
+    /// See the example on [`UnfittedTarget`].
     fn clone_box(&self) -> Box<dyn UnfittedTarget>;
 
-    /// Downcast handle used when encoding a built-in map for persist.
+    /// Returns the downcast handle used when encoding a built-in map for persist.
+    ///
+    /// See the example on [`UnfittedTarget`].
     fn as_any(&self) -> &dyn Any;
 
-    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    /// Returns the registry key for a caller-defined map.
+    ///
+    /// Built-ins return [`None`].
+    ///
+    /// See the example on [`UnfittedTarget`].
     fn persist_id(&self) -> Option<&'static str> {
         None
     }
 
-    /// JSON state paired with [`Self::persist_id`].
+    /// Returns the JSON state paired with [`Self::persist_id`].
     ///
     /// # Errors
     ///
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    ///
+    /// See the example on [`UnfittedTarget`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -40,17 +57,21 @@ pub trait UnfittedTarget: Send + Sync {
     }
 }
 
-/// Fitted target map: forward and inverse maps exist only here.
+/// Represents the fitted target map: forward and inverse maps exist only here.
 ///
 /// [`StandardizeTarget`] is the usual unfitted choice when the mean function
 /// is zero. Variance undoes `y' = (y - μ) / s` as `Var(y) = s² Var(y')`.
 /// Covariance uses the same `s²` on every entry.
+///
+/// See the example on [`StandardizeTarget`].
 pub trait TargetTransform: Send + Sync {
     /// Applies the forward map to targets in place.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`TargetTransform`].
     fn transform(&self, y: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps latent or observation means from transformed space to `y` scale.
@@ -58,6 +79,8 @@ pub trait TargetTransform: Send + Sync {
     /// # Errors
     ///
     /// Returns [`GprError::NonFiniteInput`] when `mean` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`TargetTransform`].
     fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps predictive variances from transformed space to `y` scale.
@@ -67,6 +90,8 @@ pub trait TargetTransform: Send + Sync {
     /// # Errors
     ///
     /// Returns [`GprError::NonFiniteInput`] when `var` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`TargetTransform`].
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps a packed query–query covariance from transformed space to `y` scale.
@@ -78,26 +103,40 @@ pub trait TargetTransform: Send + Sync {
     /// # Errors
     ///
     /// Same as [`Self::inverse_transform_variance`].
+    ///
+    /// See the example on [`TargetTransform`].
     fn inverse_transform_covariance(&self, cov: &mut [f64]) -> Result<(), GprError> {
         self.inverse_transform_variance(cov)
     }
 
-    /// Clones this map into a new box. Used by [`crate::FittedGpr`] clone.
+    /// Clones this map into a new box.
+    ///
+    /// Used by [`crate::FittedGpr`] clone.
+    ///
+    /// See the example on [`TargetTransform`].
     fn clone_box(&self) -> Box<dyn TargetTransform>;
 
-    /// Downcast handle used when encoding a built-in map for persist.
+    /// Returns the downcast handle used when encoding a built-in map for persist.
+    ///
+    /// See the example on [`TargetTransform`].
     fn as_any(&self) -> &dyn Any;
 
-    /// Registry key for a caller-defined map. Built-ins return [`None`].
+    /// Returns the registry key for a caller-defined map.
+    ///
+    /// Built-ins return [`None`].
+    ///
+    /// See the example on [`TargetTransform`].
     fn persist_id(&self) -> Option<&'static str> {
         None
     }
 
-    /// JSON state paired with [`Self::persist_id`].
+    /// Returns the JSON state paired with [`Self::persist_id`].
     ///
     /// # Errors
     ///
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
+    ///
+    /// See the example on [`TargetTransform`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -133,6 +172,8 @@ impl IdentityTarget {
     /// # Errors
     ///
     /// Returns [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`IdentityTarget`].
     pub fn fit(self, y: &[f64]) -> Result<Self, GprError> {
         crate::data::require_finite(y)?;
         Ok(self)
@@ -175,8 +216,9 @@ impl TargetTransform for IdentityTarget {
     }
 }
 
-/// Unfitted center-and-scale map. [`Self::fit`] returns
-/// [`FittedStandardizeTarget`].
+/// Represents the unfitted center-and-scale map.
+///
+/// [`Self::fit`] returns [`FittedStandardizeTarget`].
 ///
 /// # Examples
 ///
@@ -197,6 +239,8 @@ pub struct StandardizeTarget;
 
 impl StandardizeTarget {
     /// Returns an unfitted transform.
+    ///
+    /// See the example on [`StandardizeTarget`].
     pub fn new() -> Self {
         Self
     }
@@ -210,6 +254,8 @@ impl StandardizeTarget {
     ///
     /// Returns [`GprError::EmptyInput`] when `y` is empty, or
     /// [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`StandardizeTarget`].
     pub fn fit(self, y: &[f64]) -> Result<FittedStandardizeTarget, GprError> {
         crate::data::require_nonempty(y.len())?;
         crate::data::require_finite(y)?;
@@ -236,7 +282,9 @@ impl UnfittedTarget for StandardizeTarget {
     }
 }
 
-/// Fitted center-and-scale map with training `μ` and `s`.
+/// Represents the fitted center-and-scale map with training `μ` and `s`.
+///
+/// See the example on [`StandardizeTarget`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FittedStandardizeTarget {
     mean: f64,
@@ -245,11 +293,15 @@ pub struct FittedStandardizeTarget {
 
 impl FittedStandardizeTarget {
     /// Returns the training mean.
+    ///
+    /// See the example on [`FittedStandardizeTarget`].
     pub fn mean(&self) -> f64 {
         self.mean
     }
 
     /// Returns the training scale `s`.
+    ///
+    /// See the example on [`FittedStandardizeTarget`].
     pub fn std(&self) -> f64 {
         self.std
     }
@@ -305,7 +357,7 @@ impl TargetTransform for FittedStandardizeTarget {
     }
 }
 
-/// Unfitted min-max map onto a closed interval, default `[0, 1]`.
+/// Represents the unfitted min-max map onto a closed interval, default `[0, 1]`.
 ///
 /// [`Self::fit`] returns [`FittedMinMaxTarget`].
 ///
@@ -331,6 +383,8 @@ pub struct MinMaxTarget {
 
 impl MinMaxTarget {
     /// Returns an unfitted map onto `[0, 1]`.
+    ///
+    /// See the example on [`MinMaxTarget`].
     pub fn new() -> Self {
         Self {
             range_lo: 0.0,
@@ -344,6 +398,8 @@ impl MinMaxTarget {
     ///
     /// Returns [`GprError::InvalidConfig`] if `lo` or `hi` is not
     /// finite, or if `hi <= lo`.
+    ///
+    /// See the example on [`MinMaxTarget`].
     pub fn with_feature_range(lo: f64, hi: f64) -> Result<Self, GprError> {
         require_feature_range(lo, hi)?;
         Ok(Self {
@@ -353,6 +409,8 @@ impl MinMaxTarget {
     }
 
     /// Returns the output interval `[lo, hi]`.
+    ///
+    /// See the example on [`MinMaxTarget`].
     pub fn feature_range(&self) -> (f64, f64) {
         (self.range_lo, self.range_hi)
     }
@@ -363,6 +421,8 @@ impl MinMaxTarget {
     ///
     /// Returns [`GprError::EmptyInput`] when `y` is empty, or
     /// [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
+    ///
+    /// See the example on [`MinMaxTarget`].
     pub fn fit(self, y: &[f64]) -> Result<FittedMinMaxTarget, GprError> {
         crate::data::require_nonempty(y.len())?;
         crate::data::require_finite(y)?;
@@ -405,12 +465,14 @@ impl UnfittedTarget for MinMaxTarget {
     }
 }
 
-/// Fitted min-max map with training extrema and the output interval.
+/// Represents the fitted min-max map with training extrema and the output interval.
 ///
 /// `y' = lo + (hi - lo) * (y - min) / (max - min)`. A constant `y` uses
 /// denominator `1`, so every entry maps to `lo` and the inverse is a shift
 /// by `min`. Variance undoes the affine map as `Var(y) = s² Var(y')` with
 /// `s = (max - min) / (hi - lo)`.
+///
+/// See the example on [`MinMaxTarget`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FittedMinMaxTarget {
     data_min: f64,
@@ -421,16 +483,22 @@ pub struct FittedMinMaxTarget {
 
 impl FittedMinMaxTarget {
     /// Returns the output interval `[lo, hi]`.
+    ///
+    /// See the example on [`FittedMinMaxTarget`].
     pub fn feature_range(&self) -> (f64, f64) {
         (self.range_lo, self.range_hi)
     }
 
     /// Returns the training minimum.
+    ///
+    /// See the example on [`FittedMinMaxTarget`].
     pub fn min(&self) -> f64 {
         self.data_min
     }
 
     /// Returns the training maximum.
+    ///
+    /// See the example on [`FittedMinMaxTarget`].
     pub fn max(&self) -> f64 {
         self.data_max
     }

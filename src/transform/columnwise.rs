@@ -21,7 +21,9 @@ fn require_column_count(n_cols: usize, expected: usize) -> Result<(), GprError> 
     }
 }
 
-/// Unfitted per-column input maps. [`Self::fit`] returns [`FittedColumnwiseInput`].
+/// Represents the unfitted per-column input maps.
+///
+/// [`Self::fit`] returns [`FittedColumnwiseInput`].
 ///
 /// The number of maps must equal the feature count `d`. A uniform column
 /// typically uses [`super::MinMaxInput`]; a near-normal column typically
@@ -51,23 +53,33 @@ pub struct ColumnwiseInput {
 }
 
 impl ColumnwiseInput {
-    /// Returns an empty column list. Append one map per feature with [`Self::then`].
+    /// Returns an empty column list.
+    ///
+    /// Append one map per feature with [`Self::then`].
+    ///
+    /// See the example on [`ColumnwiseInput`].
     pub fn new() -> Self {
         Self { maps: Vec::new() }
     }
 
     /// Appends the map for the next feature column.
+    ///
+    /// See the example on [`ColumnwiseInput`].
     pub fn then(mut self, map: impl UnfittedTransform + 'static) -> Self {
         self.maps.push(Box::new(map));
         self
     }
 
     /// Returns the number of column maps.
+    ///
+    /// See the example on [`ColumnwiseInput`].
     pub fn len(&self) -> usize {
         self.maps.len()
     }
 
     /// Returns whether this list has no column maps.
+    ///
+    /// See the example on [`ColumnwiseInput`].
     pub fn is_empty(&self) -> bool {
         self.maps.is_empty()
     }
@@ -86,6 +98,8 @@ impl ColumnwiseInput {
     ///
     /// Returns [`GprError::DimensionMismatch`] when the number of maps is not
     /// `n_cols`, or [`GprError`] from packing, finiteness, or a column map.
+    ///
+    /// See the example on [`ColumnwiseInput`].
     pub fn fit(
         self,
         x: &[f64],
@@ -146,20 +160,26 @@ impl UnfittedTransform for ColumnwiseInput {
     }
 }
 
-/// Fitted per-column input maps.
+/// Represents the fitted per-column input maps.
 ///
 /// [`Self::apply`] runs each map on its own column.
+///
+/// See the example on [`ColumnwiseInput`].
 pub struct FittedColumnwiseInput {
     maps: Vec<Box<dyn Transform>>,
 }
 
 impl FittedColumnwiseInput {
     /// Returns the number of column maps.
+    ///
+    /// See the example on [`FittedColumnwiseInput`].
     pub fn len(&self) -> usize {
         self.maps.len()
     }
 
     /// Returns whether this list has no column maps.
+    ///
+    /// See the example on [`FittedColumnwiseInput`].
     pub fn is_empty(&self) -> bool {
         self.maps.is_empty()
     }

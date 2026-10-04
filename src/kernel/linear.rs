@@ -6,7 +6,7 @@ use crate::kernel::KernelScalar;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 
-/// Linear kernel: `k = σ² xᵀ x'`.
+/// Evaluates the linear kernel `k = σ² xᵀ x'`.
 ///
 /// The optimizer parameter is `θ = log(σ²)`. This is not a lengthscale kernel
 /// and has no ARD form here. Add [`super::ConstantKernel`] for an intercept
@@ -35,6 +35,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `variance` is not finite
     /// or not strictly positive.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn new(variance: f64) -> Result<Self, GprError> {
         validate_positive_finite(variance, "linear variance")?;
         Ok(Self {
@@ -48,6 +50,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
     /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
         let log_variance = validate_log_positive(log_variance, "linear variance")?;
         Ok(Self {
@@ -56,16 +60,22 @@ impl LinearKernel {
     }
 
     /// Returns `σ² = exp(θ)`.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn variance(&self) -> f64 {
         self.variance.value()
     }
 
     /// Returns `θ = log(σ²)`.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn log_variance(&self) -> f64 {
         self.variance.ln()
     }
 
     /// Returns the open interval on `σ²`.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn bounds(&self) -> Interval {
         self.variance.interval()
     }
@@ -76,6 +86,8 @@ impl LinearKernel {
     ///
     /// Returns [`crate::IntervalError`] if the current `σ²` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         Ok(Self {
             variance: self.variance.with_interval(interval)?,
@@ -83,6 +95,8 @@ impl LinearKernel {
     }
 
     /// Returns the number of optimizer parameters (always 1).
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn num_params(&self) -> usize {
         1
     }
@@ -92,6 +106,8 @@ impl LinearKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "linear parameter")?;
         out[0] = self.variance.ln();
@@ -104,6 +120,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "linear parameter")?;
         let log_variance = validate_log_positive(params[0], "linear variance")?;
@@ -117,6 +135,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError`] if `x` is empty, `out` is not `n×n`, or a
     /// coordinate is non-finite.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn apply<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -136,6 +156,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
     /// `out` is the wrong shape, or a coordinate is non-finite.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn apply_cross<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -168,6 +190,8 @@ impl LinearKernel {
     /// Returns [`GprError::EmptyInput`] if `x` is empty,
     /// [`GprError::LengthMismatch`] if `out.len()` is not `x.nrows()`,
     /// or [`GprError::NonFiniteInput`] if a coordinate is non-finite.
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn fill_diag_points<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -196,6 +220,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn grad<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -260,6 +286,8 @@ impl LinearKernel {
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or
     /// the same shape / non-finite errors as [`Self::apply`].
+    ///
+    /// See the example on [`LinearKernel`].
     pub fn hess<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,

@@ -64,13 +64,39 @@ macro_rules! count_joint_call {
 }
 pub(crate) use {count_joint_call, count_value_call};
 
-/// Optimizer-facing scalar objective (`value` only).
+/// Represents the optimizer-facing scalar objective (`value` only).
 ///
 /// Default [`Differentiable::value_and_gradient_into`] is not on this trait.
 /// A solver that needs derivatives takes [`Differentiable`], not a runtime
 /// flag.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::Objective;
+///
+/// struct Zero;
+///
+/// impl Objective for Zero {
+///     fn num_params(&self) -> usize {
+///         0
+///     }
+///
+///     fn value(&mut self, _params: &[f64]) -> Result<f64, gprx::GprError> {
+///         Ok(0.0)
+///     }
+/// }
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let mut objective = Zero;
+/// assert_eq!(objective.value(&[])?, 0.0);
+/// # Ok(())
+/// # }
+/// ```
 pub trait Objective {
     /// Returns the concatenated parameter count.
+    ///
+    /// See the example on [`Objective`].
     fn num_params(&self) -> usize;
 
     /// Returns the objective at `params`.
@@ -79,6 +105,8 @@ pub trait Objective {
     ///
     /// Returns [`GprError`] when `params` is the wrong length or the model
     /// cannot evaluate at that point.
+    ///
+    /// See the example on [`Objective`].
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError>;
 
     /// Returns the objective after the coordinates in `indices` changed.
@@ -98,13 +126,14 @@ pub trait Objective {
     /// Same as [`Self::value`]. An incremental implementation also rejects
     /// an empty, duplicate, or out-of-range `indices`, and a step that
     /// changed a coordinate `indices` does not list.
+    ///
+    /// See the example on [`Objective`].
     fn value_at_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
         let _ = indices;
         self.value(params)
     }
 
-    /// Writes the [`Interval`] of each parameter, in user units, into `out`
-    /// (length [`Self::num_params`]).
+    /// Writes the [`Interval`] of each parameter, in user units, into `out` (length [`Self::num_params`]).
     ///
     /// The built-in optimizers search inside these intervals, so a user
     /// optimizer can read them too and call a built-in one on the same
@@ -116,6 +145,8 @@ pub trait Objective {
     ///
     /// Returns [`GprError::LengthMismatch`] when `out.len()` is not
     /// [`Self::num_params`].
+    ///
+    /// See the example on [`Objective`].
     fn fill_intervals(&self, out: &mut [Interval]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         out.fill(Interval::DEFAULT_POSITIVE);
@@ -123,16 +154,57 @@ pub trait Objective {
     }
 }
 
-/// First-order objective. Supertrait of [`Objective`].
+/// Represents the first-order objective.
+///
+/// Supertrait of [`Objective`].
 ///
 /// The GPR fit objective overrides [`Self::value_and_gradient_into`] so one
 /// Cholesky produces `L`, `α`, and `W`.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{Differentiable, Objective};
+///
+/// struct Zero;
+///
+/// impl Objective for Zero {
+///     fn num_params(&self) -> usize {
+///         1
+///     }
+///
+///     fn value(&mut self, _params: &[f64]) -> Result<f64, gprx::GprError> {
+///         Ok(0.0)
+///     }
+/// }
+///
+/// impl Differentiable for Zero {
+///     fn gradient_into(
+///         &mut self,
+///         _params: &[f64],
+///         out: &mut [f64],
+///     ) -> Result<(), gprx::GprError> {
+///         out.fill(0.0);
+///         Ok(())
+///     }
+/// }
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let mut objective = Zero;
+/// let mut grad = [1.0];
+/// objective.gradient_into(&[0.0], &mut grad)?;
+/// assert_eq!(grad, [0.0]);
+/// # Ok(())
+/// # }
+/// ```
 pub trait Differentiable: Objective {
     /// Writes `∂L/∂θ` into `out`.
     ///
     /// # Errors
     ///
     /// Same as [`Objective::value`], plus a length mismatch on `out`.
+    ///
+    /// See the example on [`Differentiable`].
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
 
     /// Returns the value and writes the gradient in one evaluation.
@@ -142,6 +214,8 @@ pub trait Differentiable: Objective {
     /// # Errors
     ///
     /// Same as [`Self::gradient_into`].
+    ///
+    /// See the example on [`Differentiable`].
     fn value_and_gradient_into(
         &mut self,
         params: &[f64],
@@ -153,10 +227,60 @@ pub trait Differentiable: Objective {
     }
 }
 
-/// Second-order objective. Supertrait of [`Differentiable`].
+/// Represents the second-order objective.
+///
+/// Supertrait of [`Differentiable`].
 ///
 /// The GPR fit objective implements this by forwarding to
 /// [`crate::FittedGpr::hessian_into`]. There is no runtime `NotImplemented`.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{Differentiable, Objective, TwiceDifferentiable};
+///
+/// struct Zero;
+///
+/// impl Objective for Zero {
+///     fn num_params(&self) -> usize {
+///         1
+///     }
+///
+///     fn value(&mut self, _params: &[f64]) -> Result<f64, gprx::GprError> {
+///         Ok(0.0)
+///     }
+/// }
+///
+/// impl Differentiable for Zero {
+///     fn gradient_into(
+///         &mut self,
+///         _params: &[f64],
+///         out: &mut [f64],
+///     ) -> Result<(), gprx::GprError> {
+///         out.fill(0.0);
+///         Ok(())
+///     }
+/// }
+///
+/// impl TwiceDifferentiable for Zero {
+///     fn hessian_into(
+///         &mut self,
+///         _params: &[f64],
+///         out: &mut [f64],
+///     ) -> Result<(), gprx::GprError> {
+///         out.fill(0.0);
+///         Ok(())
+///     }
+/// }
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let mut objective = Zero;
+/// let mut hess = [1.0];
+/// objective.hessian_into(&[0.0], &mut hess)?;
+/// assert_eq!(hess, [0.0]);
+/// # Ok(())
+/// # }
+/// ```
 pub trait TwiceDifferentiable: Differentiable {
     /// Writes the Hessian (row-major `n×n`) into `out`.
     ///
@@ -164,10 +288,11 @@ pub trait TwiceDifferentiable: Differentiable {
     ///
     /// Returns [`GprError`] when a slice length is wrong or the model cannot
     /// evaluate at `params`.
+    ///
+    /// See the example on [`TwiceDifferentiable`].
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
 
-    /// Returns the value at `params` and writes the gradient into `grad` and
-    /// the Hessian (row-major `n×n`) into `hess`.
+    /// Returns the value at `params` and writes the gradient into `grad` and the Hessian (row-major `n×n`) into `hess`.
     ///
     /// A second-order solver evaluates all three at each candidate. The
     /// default calls [`Differentiable::value_and_gradient_into`] then
@@ -178,6 +303,8 @@ pub trait TwiceDifferentiable: Differentiable {
     ///
     /// Same as [`Differentiable::value_and_gradient_into`] and
     /// [`Self::hessian_into`].
+    ///
+    /// See the example on [`TwiceDifferentiable`].
     fn value_gradient_hessian_into(
         &mut self,
         params: &[f64],
@@ -190,7 +317,7 @@ pub trait TwiceDifferentiable: Differentiable {
     }
 }
 
-/// Partial kernel rebuild from changed parameter indices.
+/// Represents the partial kernel rebuild from changed parameter indices.
 ///
 /// `indices` is every flat `θ` position that changed since the previous
 /// evaluation on this objective (see [`Objective::value_at_changes`]). Only
@@ -199,15 +326,50 @@ pub trait TwiceDifferentiable: Differentiable {
 /// an unlisted change, are a [`GprError`] at this boundary. Full rebuilds use
 /// [`Objective::value`]. The GPR fit objective implements this for every
 /// optimizer and buffer policy.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{IncrementalObjective, Objective};
+///
+/// struct Zero;
+///
+/// impl Objective for Zero {
+///     fn num_params(&self) -> usize {
+///         1
+///     }
+///
+///     fn value(&mut self, _params: &[f64]) -> Result<f64, gprx::GprError> {
+///         Ok(0.0)
+///     }
+/// }
+///
+/// impl IncrementalObjective for Zero {
+///     fn value_with_changes(
+///         &mut self,
+///         _params: &[f64],
+///         _indices: &[usize],
+///     ) -> Result<f64, gprx::GprError> {
+///         Ok(0.0)
+///     }
+/// }
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let mut objective = Zero;
+/// assert_eq!(objective.value_with_changes(&[0.0], &[0])?, 0.0);
+/// # Ok(())
+/// # }
+/// ```
 pub trait IncrementalObjective: Objective {
-    /// Returns the objective after rebuilding only the leaves that `indices`
-    /// touch.
+    /// Returns the objective after rebuilding only the leaves that `indices` touch.
     ///
     /// # Errors
     ///
     /// Returns [`GprError`] when `params` is the wrong length, `indices` is
     /// empty, contains a duplicate, contains `i >= n_params`, or leaves out a
     /// coordinate that changed, or when the model cannot evaluate.
+    ///
+    /// See the example on [`IncrementalObjective`].
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError>;
 }
 

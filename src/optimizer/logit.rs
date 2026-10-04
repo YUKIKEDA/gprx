@@ -1,4 +1,4 @@
-//! Logit map from user-unit [`Interval`] to unconstrained argmin coordinates.
+//! Describes the logit map from user-unit [`Interval`] to unconstrained argmin coordinates.
 
 use crate::rng::SeededRng;
 

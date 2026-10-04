@@ -1,5 +1,4 @@
-//! Reusable buffers for one batch GPR fit of size `n`, and query buffers
-//! for [`crate::FittedGpr::predict_into`].
+//! Describes the reusable buffers for one batch GPR fit of size `n`, and query buffers for [`crate::FittedGpr::predict_into`].
 //!
 //! Fit buffers are allocated once when fit starts. Later optimizer iterations
 //! overwrite the same storage. [`FitBuffers`] holds the shared core, the

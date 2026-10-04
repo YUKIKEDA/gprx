@@ -3,7 +3,7 @@
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 
-/// Gaussian likelihood with observation noise variance `σn²`.
+/// Represents the Gaussian likelihood with observation noise variance `σn²`.
 ///
 /// The optimizer parameter is `θ = log(σn²)`, so positivity is unconstrained.
 /// Differentiating the kernel matrix with respect to that parameter gives
@@ -38,6 +38,8 @@ impl GaussianLikelihood {
     ///
     /// Returns [`GprError::InvalidNoiseVariance`] if `noise_variance` is not
     /// finite or not strictly positive.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn new(noise_variance: f64) -> Result<Self, GprError> {
         if !noise_variance.is_finite() {
             return Err(invalid_noise("noise variance must be finite"));
@@ -57,6 +59,8 @@ impl GaussianLikelihood {
     /// Returns [`GprError::InvalidNoiseVariance`] if `θ` is not finite, if
     /// `exp(θ)` overflows to a non-finite variance, or if `exp(θ)` underflows
     /// to zero.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GprError> {
         let log_noise_variance = validate_log_noise_variance(log_noise_variance)?;
         Ok(Self {
@@ -65,16 +69,22 @@ impl GaussianLikelihood {
     }
 
     /// Returns `σn² = exp(θ)`.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn noise_variance(&self) -> f64 {
         self.noise_variance.value()
     }
 
     /// Returns `θ = log(σn²)`.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn log_noise_variance(&self) -> f64 {
         self.noise_variance.ln()
     }
 
     /// Returns the open interval on `σn²`.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn bounds(&self) -> Interval {
         self.noise_variance.interval()
     }
@@ -85,6 +95,8 @@ impl GaussianLikelihood {
     ///
     /// Returns [`crate::IntervalError`] if the current `σn²` is not strictly
     /// inside `interval`.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
         Ok(Self {
             noise_variance: self.noise_variance.with_interval(interval)?,
@@ -92,6 +104,8 @@ impl GaussianLikelihood {
     }
 
     /// Returns the number of optimizer parameters (always 1).
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn num_params(&self) -> usize {
         1
     }
@@ -101,6 +115,8 @@ impl GaussianLikelihood {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is not length 1.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), 1, "likelihood parameter")?;
         out[0] = self.noise_variance.ln();
@@ -113,6 +129,8 @@ impl GaussianLikelihood {
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
     /// or [`GprError::InvalidNoiseVariance`] if the new `θ` is invalid.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         crate::data::require_count(params.len(), 1, "likelihood parameter")?;
         let log_noise_variance = validate_log_noise_variance(params[0])?;
@@ -122,6 +140,8 @@ impl GaussianLikelihood {
     }
 
     /// Adds `σn²` to each entry of a kernel diagonal (implements `K += σn² I`).
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn add_noise_diag(&self, k_diag: &mut [f64]) {
         let noise = self.noise_variance();
         for entry in k_diag {
@@ -129,11 +149,15 @@ impl GaussianLikelihood {
         }
     }
 
-    /// Writes the diagonal of `∂K/∂θ_i`. For `i = 0` this is `σn²` in every entry.
+    /// Writes the diagonal of `∂K/∂θ_i`.
+    ///
+    /// For `i = 0` this is `σn²` in every entry.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0.
+    ///
+    /// See the example on [`GaussianLikelihood`].
     pub fn noise_grad_diag(&self, dk_diag: &mut [f64], param_idx: usize) -> Result<(), GprError> {
         if param_idx != 0 {
             return Err(GprError::IndexOutOfRange {

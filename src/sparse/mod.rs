@@ -470,8 +470,7 @@ macro_rules! sparse_core_accessors {
             &self.$($core).+.x_obs
         }
 
-        /// Returns the inducing features in column-major order, in the
-        /// original coordinates of `X`.
+        /// Returns the inducing features in column-major order, in the original coordinates of `X`.
         pub fn z(&self) -> &[f64] {
             &self.$($core).+.z_obs
         }

@@ -128,11 +128,11 @@ pub(crate) mod sealed {
     }
 }
 
-/// Scalar used when a [`super::CompiledKernel`] evaluates a kernel.
+/// Represents the scalar used when a [`super::CompiledKernel`] evaluates a kernel.
 ///
-/// Only `f32` and `f64` implement it. Parameters stay `f64`. The trait
-/// carries faer's field arithmetic plus the transcendental functions that
-/// kernel formulas need, so a leaf can be written once over `T`.
+/// Only `f32` and `f64` implement it. Parameters stay `f64`. The trait carries field
+/// arithmetic plus the transcendental functions that kernel formulas need, so a leaf can be
+/// written once over `T`.
 ///
 /// # Examples
 ///
@@ -150,39 +150,63 @@ pub trait KernelScalar:
     sealed::ScalarOps + faer_traits::RealField + Copy + fmt::Debug + Default + Send + Sync + 'static
 {
     /// Casts a stored `f64` parameter into this compute scalar.
+    ///
+    /// See the example on [`KernelScalar`].
     fn from_f64(value: f64) -> Self;
 
     /// Promotes a computed value back to `f64` for comparisons.
+    ///
+    /// See the example on [`KernelScalar`].
     fn to_f64(self) -> f64;
 
-    /// `eˣ`.
+    /// Returns the `eˣ`.
+    ///
+    /// See the example on [`KernelScalar`].
     fn exp(self) -> Self;
 
-    /// Natural logarithm.
+    /// Returns the natural logarithm.
+    ///
+    /// See the example on [`KernelScalar`].
     fn ln(self) -> Self;
 
-    /// Square root.
+    /// Returns the square root.
+    ///
+    /// See the example on [`KernelScalar`].
     fn sqrt(self) -> Self;
 
-    /// Absolute value.
+    /// Returns the absolute value.
+    ///
+    /// See the example on [`KernelScalar`].
     fn abs(self) -> Self;
 
-    /// Whether the value is neither infinite nor `NaN`.
+    /// Records whether the value is neither infinite nor `NaN`.
+    ///
+    /// See the example on [`KernelScalar`].
     fn is_finite(self) -> bool;
 
-    /// `selfᵉ` for a real exponent.
+    /// Returns the `selfᵉ` for a real exponent.
+    ///
+    /// See the example on [`KernelScalar`].
     fn powf(self, e: Self) -> Self;
 
-    /// Sine (radians).
+    /// Returns the sine (radians).
+    ///
+    /// See the example on [`KernelScalar`].
     fn sin(self) -> Self;
 
-    /// Cosine (radians).
+    /// Returns the cosine (radians).
+    ///
+    /// See the example on [`KernelScalar`].
     fn cos(self) -> Self;
 
-    /// The larger of two values (`NaN` loses).
+    /// Returns the larger of two values (`NaN` loses).
+    ///
+    /// See the example on [`KernelScalar`].
     fn max(self, other: Self) -> Self;
 
-    /// The smaller of two values (`NaN` loses).
+    /// Returns the smaller of two values (`NaN` loses).
+    ///
+    /// See the example on [`KernelScalar`].
     fn min(self, other: Self) -> Self;
 }
 

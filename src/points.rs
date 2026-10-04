@@ -7,12 +7,11 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::persist::persist_err;
 
-/// Stable identity of one training point on [`crate::OnlineGpr`].
+/// Represents the stable identity of one training point on [`crate::OnlineGpr`].
 ///
-/// [`crate::FittedGpr::into_online`] assigns identifiers `0 .. n-1` in buffer
-/// order. Later [`crate::OnlineGpr::insert`] values increase monotonically and
-/// are never reused after [`crate::OnlineGpr::delete`]. There is no public
-/// constructor.
+/// [`crate::FittedGpr::into_online`] assigns identifiers `0.. n-1` in buffer order. Later
+/// [`crate::OnlineGpr::insert`] values increase monotonically and are never reused after
+/// [`crate::OnlineGpr::delete`]. There is no public constructor.
 ///
 /// # Examples
 ///

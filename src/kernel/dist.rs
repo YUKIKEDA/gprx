@@ -1,4 +1,4 @@
-//! Pairwise squared-Euclidean distances, filled by Rayon column partitions.
+//! Describes the pairwise squared-Euclidean distances, filled by the process-wide thread pool column partitions.
 
 use super::KernelScalar;
 use super::simd::dist::{try_fill_ard_column, try_fill_cross_chunk, try_fill_lower_col};

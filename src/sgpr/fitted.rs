@@ -26,8 +26,7 @@ use super::model::Sgpr;
 use super::online::OnlineSgpr;
 use super::{FixedInducing, InducingLayout};
 
-/// Factored collapsed variational SGPR at the `θ` used by [`Sgpr::fit`] or
-/// [`Sgpr<Fixed>::factor`].
+/// Represents the factored collapsed variational SGPR at the `θ` used by [`Sgpr::fit`] or [`Sgpr<Fixed>::factor`].
 ///
 /// Stores the LLT of `K_mm = k(Z, Z)` and the VFE factors used by
 /// [`Self::predict`] and [`Self::neg_log_marginal_likelihood`]. Observation
@@ -35,6 +34,8 @@ use super::{FixedInducing, InducingLayout};
 /// likelihood `θ`. [`FreeInducing`](crate::FreeInducing) then appends column-major `Z`.
 /// [`Self::into_online`] yields [`OnlineSgpr`] for training-point and
 /// inducing-point updates.
+///
+/// See the example on [`Self::predict`].
 #[derive(Clone, Debug)]
 pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePrecision> {
     pub(super) core: SparseCore,
@@ -67,6 +68,8 @@ where
     ///
     /// Kernel `θ` then likelihood `θ`. [`FreeInducing`](crate::FreeInducing) also counts
     /// column-major `Z` (`m × d`).
+    ///
+    /// See the example on [`Self::predict`].
     pub fn num_params(&self) -> usize {
         self.core.theta_len() + I::z_params(self.core.m, self.core.d)
     }
@@ -77,6 +80,8 @@ where
     ///
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
+    ///
+    /// See the example on [`Self::predict`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         let n_theta = self.core.theta_len();
@@ -183,8 +188,7 @@ where
         Ok(())
     }
 
-    /// Sets parameters, rebuilds the VFE system, and writes `∂L/∂θ` of the
-    /// negative ELBO.
+    /// Sets parameters, rebuilds the VFE system, and writes `∂L/∂θ` of the negative ELBO.
     ///
     /// `params` and `out` match [`Self::get_params`]. When inducing points
     /// are fixed and `Z = X` the gradient matches
@@ -663,6 +667,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn predict_covariance_with(
         &self,
         xs: &[f64],
@@ -699,6 +705,8 @@ where
     /// [`CholeskyStage::Predict`](crate::CholeskyStage::Predict) if the
     /// posterior covariance cannot be factored after the retries of
     /// [`Self::jitter_policy`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn sample(
         &self,
         xs: &[f64],
@@ -715,6 +723,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::sample`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn sample_with(
         &self,
         xs: &[f64],
@@ -728,8 +738,7 @@ where
             .draw(n_draws, seed, self.core.jitter)
     }
 
-    /// Returns the leave-one-out mean and observation variance at every
-    /// training point.
+    /// Returns the leave-one-out mean and observation variance at every training point.
     ///
     /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
     /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
@@ -774,6 +783,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn loo_predict_with(
         &self,
         options: PredictOptions,
@@ -835,6 +846,8 @@ where
     /// # Errors
     ///
     /// Same as [`Self::predict`].
+    ///
+    /// See the example on [`Self::predict`].
     pub fn predict_with_into(
         &mut self,
         xs: &[f64],
