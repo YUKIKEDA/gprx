@@ -176,7 +176,19 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### カーネル
 
-`KernelSpec` は `KernelSpec::from(leaf)` か `KernelSpec::custom(term)` で作る。`+` は和、`*` は積。`num_params`、`get_params`、`set_params` は、葉を深さ優先で並べた log-`θ`。`parameter_bindings` は、各平坦添字を `(index, leaf_id, local_index)` に対応させる。`compile` は `CompiledKernel<f64>` を作る。`compile_as::<T>()` は保存のスカラーを選ぶ（`KernelScalar`。`f32` と `f64`）。
+`KernelSpec` は `KernelSpec::from(leaf)` か `KernelSpec::custom(term)` で作る。`+` は和、`*` は積。`*` は `+` より先に束縛するので、`c * k + k2` は定数倍したカーネルと別のカーネルの和になる。`num_params`、`get_params`、`set_params` は、葉を深さ優先で並べた log-`θ`。`parameter_bindings` は、各平坦添字を `(index, leaf_id, local_index)` に対応させる。`compile` は `CompiledKernel<f64>` を作る。`compile_as::<T>()` は保存のスカラーを選ぶ（`KernelScalar`。`f32` と `f64`）。
+
+```rust
+use gprx::kernel::{ConstantKernel, KernelSpec, RbfKernel};
+
+fn main() -> Result<(), gprx::GprError> {
+    let scaled = KernelSpec::from(ConstantKernel::new(1.5)?)
+        * KernelSpec::from(RbfKernel::new(1.0)?);
+    let kernel = scaled + KernelSpec::from(RbfKernel::new(2.0)?);
+    assert_eq!(kernel.num_params(), 3);
+    Ok(())
+}
+```
 
 組み込みの葉は正のパラメータを `log` で持つ。`new` は利用者の単位（`ℓ`、分散、周期、`α`）。`from_log_*` は最適化の座標。`bounds` / `with_bounds` は開区間 `Interval`（既定 `(1e-5, 1e5)`、`Interval::DEFAULT_POSITIVE`）。今の値が外なら `with_bounds` は `IntervalError`。
 
