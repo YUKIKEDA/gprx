@@ -8,7 +8,7 @@
 
 ## 1. 全体像
 
-3 つのモデル族が、共通の部品の集まりを使う。各族には、学習前（trainer）、学習後（fitted）、あるものにはオンライン版がある。モデル同士は import しない。共有するものは、その下の層に置く。
+3 つのモデル族が、共通の部品の集まりを使う。各族には、学習前（trainer）、学習後（fitted）があり、一部の族にはオンライン版がある。モデル同士は import しない。共有するものは、その下の層に置く。
 
 ```mermaid
 flowchart TB
@@ -44,11 +44,11 @@ flowchart TB
     models -.->|"save, persist_err"| persist
 ```
 
-実線は、層の向きに沿った import。破線は、層を両方向にまたぐ唯一の箇所で、`persist` がモデルを作り、モデルが保存のために `persist` を呼ぶ。何がまたぐかは 4 節に書く。
+実線は、層の向きに沿った import を表す。破線は、層を両方向にまたぐ唯一の箇所で、`persist` がモデルを作り、モデルが保存のために `persist` を呼ぶ。何がまたぐかは 4 節に書く。
 
 ## 2. モジュールと責務
 
-「公開」は `src/lib.rs` が出すもの（`pub mod` または `pub use`）。「crate」は crate 内だけ。「Imports」は、テスト以外で使う、ほかのトップレベルのモジュール。
+「公開」は `src/lib.rs` が出すもの（`pub mod` または `pub use`）を、「crate」は crate 内限定を指す。「Imports」は、テスト以外で使う、ほかのトップレベルのモジュールを示す。
 
 ### 基盤
 
@@ -117,7 +117,7 @@ flowchart TB
     points -.-> persist
 ```
 
-広く使われる 4 つの部品を、import するモジュール（図から外した矢印）:
+広く使われる 4 つの部品を import するモジュール（図から外した矢印）:
 
 | 部品 | import するモジュール |
 | --- | --- |
@@ -129,28 +129,28 @@ flowchart TB
 図から読めること:
 
 - **`optimizer` と `objective` はモデルを知らない。** ソルバーは `Objective` / `Differentiable` / `TwiceDifferentiable` の上に書かれ、各モデルが自分のアダプタ（`GprObjective`, `SgprObjective`）でそれを実装する。利用者の `Optimizer` も同じ枠に入る。
-- **`sgpr` と `svgp` は `sparse` でだけ出会う。** `gpr` は `sparse` を使わない。
+- **`sgpr` と `svgp` は `sparse` を通じてのみ結合する。** `gpr` は `sparse` を使わない。
 - **`precision` と `transform` はモデルを知らない。** モデルは、`f64` の参照値をクロージャで precision のコードに渡す。
 - **`kernel` が最も幅の広い部品。** 全モデルと `workspace` が使い、`persist` がその木を符号化する。
 
 ## 4. 境界と、その例外
 
-この commit で守られているもの（`#[cfg(test)]` 以外の `use crate::…`）:
+コードベースで維持されている境界（`#[cfg(test)]` 以外の `use crate::…`）:
 
 1. **モデル同士は import しない。** `gpr`, `sgpr`, `svgp` の間に import は無い。共有するコードは 1 つ下の層に置く（2 つの Sparse 族には `sparse`、3 族すべてには部品）。
-2. **モデルを import するのは `persist` だけ。** `persist/mod.rs`（Exact）と `persist/sparse.rs`（Sparse、SVGP）にある。具体的なモデルの型をすべて名指しする唯一の場所で、だから `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` が精度ごとに 1 つの variant を持てる。
+2. **モデルを import するのは `persist` だけ。** `persist/mod.rs`（Exact）と `persist/sparse.rs`（Sparse、SVGP）にある。具体的なモデルの型をすべて名指しする唯一の場所であり、そのため `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` が精度ごとに 1 つの variant を持てる。
 3. **逆向きにまたぐものは少ない。** モデルは `persist::save_*` を呼び、`gpr` はさらに `PersistedModel`（読み込んだ Exact モデルを組み直す部品）と `MappedTensors`（メモリマップした `L`）を使う。`gpr`、`sgpr`、`points` は、エラーを作るのに `persist_err` を使う。`persist` のそれ以外を、モデルは使わない。
 4. **`optimizer`、`objective`、`precision`、`transform` はモデルを import しない。** `optimizer` の単体テストは `Gpr` を作るが、テストのコードだけ。
 5. **`Workspace`、`QueryWorkspace`、`LltStore`、`LdltStore`、faer の型は crate 内だけ**（[layout の規則](../.cursor/rules/layout.mdc)）。
 
-きれいな層になっていないところ。そのままにしている:
+きれいな層になっていない例外と、その維持理由:
 
 - **基盤は互いを輪のように参照している。** `kernel/scalar.rs` が `f32` / `f64` のスカラー trait `KernelScalar` を定義し、`data`、`math`、`linalg` はそれについてジェネリックで、`kernel` はその 3 つを使う。`param` は `KernelSpec` と `GaussianLikelihood` の平らな `θ` を書くので両方を import し、`likelihood` は範囲のために `param` を import し返す。`error` は `param` の `IntervalError` を包む。これらは型と補助関数の参照で、実行時の呼び出しの循環ではない。
 - **`persist` とモデルは互いを参照している**（上の 2 と 3）。
 
 ## 5. 族ごとの公開型
 
-3 族は同じ typestate に従う。trainer、`fit`（または `factor`）、fitted の値。fitted の値は、最適化器の状態も `W` も持たない。学習と推論は別の型（[design §6](design.ja.md#6-gpmodel抽象化厳密疎の差し替え)）。
+3 族は同じ typestate に従う。trainer、`fit`（または `factor`）、fitted の各状態を取り、fitted の値は最適化器の状態も `W` も持たない。学習と推論は別の型（[design §6](design.ja.md#6-gpmodel抽象化厳密疎の差し替え)）。
 
 | 族 | Trainer | Fitted | Online | ディスクから読んだもの |
 | --- | --- | --- | --- | --- |
@@ -190,14 +190,14 @@ flowchart LR
 
 読み込んだモデルは予測できる状態で、`Fixed` を持つので、探索は保存しない。もう一度学習するには、型のついたモデルで `with_optimizer` を呼んでから `refit` する。各 `save` が書くものは [persist-format.ja.md](persist-format.ja.md)。
 
-1 回の呼び出しの中の順序は決まっている: 入力の変換 → 目的変数の変換 → `θ` でのカーネルと尤度 → 分解 → `α` → 予測。学習済みのモデルは、渡された `X` と `y`（変換前）を、学習済みの変換と一緒に持ち、クエリのたびにその変換をかけ直す（[design §2](design.ja.md#2-全体アーキテクチャ概要)、[§5.5](design.ja.md#55-前処理パイプライン)）。
+1 回の呼び出しにおける処理順序は固定されている: 入力の変換 → 目的変数の変換 → `θ` でのカーネルと尤度 → 分解 → `α` → 予測。学習済みのモデルは、渡された `X` と `y`（変換前）を、学習済みの変換と一緒に持ち、クエリのたびにその変換をかけ直す（[design §2](design.ja.md#2-全体アーキテクチャ概要)、[§5.5](design.ja.md#55-前処理パイプライン)）。
 
 ## 7. 何を変えるとき、どこを見るか
 
-| 変えたいもの | 見る場所 | 一緒に触るもの |
+| 変えたいもの | 見る場所 | 一緒に変更するもの |
 | --- | --- | --- |
 | カーネルの葉 | `kernel/<leaf>.rs` と `kernel/compiled/` | `kernel/spec.rs`、`persist/kernel.rs`（新しい JSON のタグ）、design §5。下の手順 |
-| 全モデルの最適化器 | `optimizer/` | モデルには触らない。新しい能力の trait が要るときだけ `objective.rs` |
+| 全モデルの最適化器 | `optimizer/` | モデルは変更しない。新しい能力の trait が要るときだけ `objective.rs` |
 | Exact だけがすること（オンライン LDLT、`Gpr` の LOO） | `gpr/` | 因子は `linalg/ldlt.rs` |
 | 2 つの Sparse 族が共通にすること | `sparse/` | `sgpr/` と `svgp/` が呼ぶ |
 | 精度の規則 | `precision/` | クロージャを渡すモデルの `factor/` |
@@ -206,7 +206,7 @@ flowchart LR
 
 ### 組み込みのカーネルの葉を足す
 
-葉は静的にディスパッチする。`KernelSpec` と `CompiledKernel` の各操作は葉ごとに 1 つの腕を持つ `match` で、全部で約 40 ある。そのため呼び出しはコンパイラがインライン化・ベクトル化できる直接の呼び出しになる（design §5）。代わりに、新しい葉はそのすべてに触る。答えが葉によって変わる `match` はすべての葉を名指しし、ワイルドカードを持たないので、腕が足りない場所はコンパイラが列挙する。残るワイルドカードは、どの葉にも正しい既定（速い経路が無いときに座標から計算する）か、葉と合成の区別だけ。葉を足す手順:
+葉は静的にディスパッチする。`KernelSpec` と `CompiledKernel` の各操作は葉ごとに 1 つの腕を持つ `match` で、全部で約 40 ある。そのため呼び出しはコンパイラがインライン化・ベクトル化できる直接の呼び出しになる（design §5）。代わりに、新しい葉を追加する際はそのすべてを変更する必要がある。答えが葉によって変わる `match` はすべての葉を名指しし、ワイルドカードを持たないので、腕が足りない場所はコンパイラが列挙する。残るワイルドカードは、どの葉にも正しい既定（速い経路が無いときに座標から計算する）か、葉と合成の区別だけ。葉を足す手順:
 
 1. `kernel/<leaf>.rs`: パラメータ（`θ` とその `Interval`）、距離または座標からの値・`∂K/∂θ`・`∂²K/∂θ∂θ`（正方と長方形）、対角。`FreeInducing` で動かすなら座標微分（`grad_wrt_coord_dim` と混合の Hessian）。動かさないなら `CoordGradientUnsupported` を返す
 2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める腕

@@ -40,7 +40,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 学習のコレスキーと、`W` の複数右辺は、線形代数側の並列度を `min(プール, n / 64)` で頭打ちにする。予測と共分散の三角解は、さらに `n · m / 16384` と `m / 12` でも頭打ちにする。カーネルを埋める処理は、プール全体を使う。
 
-`gprx::internals`（`bench-internals`、`insert-stages`）はセマンティックバージョニングの対象外である。依存しない。
+`gprx::internals`（`bench-internals`、`insert-stages`）はセマンティックバージョニングの対象外である。直接依存してはならない。
 
 ### 全学習点: `Gpr`、`FittedGpr`、`OnlineGpr`
 
@@ -133,7 +133,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `neg_log_marginal_likelihood` は、今の `θ` での目的関数。`num_params`、`get_params`、`set_params` が扱うのは log-`θ` のベクトルで、並びはカーネルのパラメータ、そのあとに尤度のパラメータ。`value_and_gradient_into` と `hessian_into` は、その目的関数を評価する。`set_params` は `θ` と因子を更新する。
 
-学習済みモデルの `n`、`d`、`kernel`、`likelihood`、`x`、`y`、`alpha` は、学習結果を読む。`distance_cache_policy`、`cholesky_buffer`、`math`、`jitter_policy` は方針を読む。`fit` の前の `Gpr` が読めるのは、`kernel`、`likelihood`、`num_params`、`get_params` と、この 4 つの方針。`set_params` は `fit` のあとから使える。`FittedGpr::alpha` は、直前の因子から得たスライス。`OnlineGpr::alpha` は `Result` を返す。挿入や削除の直後は `α` が古く、その後の最初の呼び出しで解く。
+学習済みモデルの `n`、`d`、`kernel`、`likelihood`、`x`、`y`、`alpha` からは学習結果を取得できる。`distance_cache_policy`、`cholesky_buffer`、`math`、`jitter_policy` は設定された方針を返す。`fit` の前の `Gpr` では、`kernel`、`likelihood`、`num_params`、`get_params` と、これら 4 つの方針を参照できる。`set_params` は `fit` のあとから使える。`FittedGpr::alpha` は、直前の因子から得たスライス。`OnlineGpr::alpha` は `Result` を返す。挿入や削除の直後は `α` が古く、その後の最初の呼び出しで解く。
 
 `into_trainer` は、今の `θ` を持った未学習の `Gpr` を返す。学習済みモデルの `with_optimizer` が変えるのは、その後の `refit` だけである。`OnlineGpr::with_optimizer` も同じ。`FittedGpr<O: Optimizer>` の `refit` は、保存したデータ上で今の `θ` から探索し直す。`FittedGpr<Fixed>` の `refit` は `L` と `α` を作り直し、探索しない。変換は再学習しない。
 
@@ -172,12 +172,12 @@ fn main() -> Result<(), gprx::GprError> {
 | `with_input_transform(map)` | 既定は恒等。 |
 | `with_target_transform(map)` | 既定は恒等。平均が零なら `StandardizeTarget::new()`。 |
 | `with_jitter_policy(policy)` | 既定は `JitterPolicy::fixed(0.0)`。 |
-| `with_prefer_speed` | `DistanceCachePolicy::Cached` と `CholeskyBuffer::Retain`（既定）。両方を置く。 |
-| `with_prefer_memory` | `DistanceCachePolicy::Uncached` と `CholeskyBuffer::Reuse`。両方を置く。 |
+| `with_prefer_speed` | `DistanceCachePolicy::Cached` と `CholeskyBuffer::Retain`（既定）。両方を設定する。 |
+| `with_prefer_memory` | `DistanceCachePolicy::Uncached` と `CholeskyBuffer::Reuse`。両方を設定する。 |
 
-`with_prefer_speed` と `with_prefer_memory` は `Gpr` にある。呼ぶたびに、距離キャッシュとコレスキーバッファの両方を置く。`DistanceCachePolicy` の既定は `Cached` で、`Uncached` は距離を毎回計算し直す。`DistanceCachePolicy` と `KernelExp` は non-exhaustive。`CholeskyBuffer` は `Retain` か `Reuse`。
+`with_prefer_speed` と `with_prefer_memory` は `Gpr` にある。呼ぶたびに、距離キャッシュとコレスキーバッファの両方を同時に設定する。`DistanceCachePolicy` の既定は `Cached` で、`Uncached` は距離を毎回計算し直す。`DistanceCachePolicy` と `KernelExp` は non-exhaustive。`CholeskyBuffer` は `Retain` か `Reuse`。
 
-`Sgpr` と `Svgp` が取るのは `with_optimizer`、`with_precision`、`with_math`、`with_jitter_policy`、`with_input_transform`、`with_target_transform`。`Sgpr` はさらに `with_inducing` を取る。`K_mm` のジッタの初期値は `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`。`fit` の前に読めるのは `kernel`、`likelihood`、`math`、`jitter_policy`、`num_params`、`get_params`。`set_params` は `θ` を更新する。
+`Sgpr` と `Svgp` が取るのは `with_optimizer`、`with_precision`、`with_math`、`with_jitter_policy`、`with_input_transform`、`with_target_transform`。`Sgpr` はさらに `with_inducing` を取る。`K_mm` のジッタの初期値は `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)`。`fit` の前には `kernel`、`likelihood`、`math`、`jitter_policy`、`num_params`、`get_params` を参照できる。`set_params` は `θ` を更新する。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -236,7 +236,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `fit` と `factor` の引数は `(x, n_rows, n_cols, y, z, n_inducing)`。`z` は `n_inducing` 点で、特徴数は `n_cols` と同じ列優先。`factor` は `θ` も `Z` も動かさない。自由な誘導点では、パラメータの並びがカーネルの `θ`、尤度の `θ`、列優先の `Z` になる。各座標の範囲は学習データの箱で、各特徴の幅の 10%、少なくとも `0.1` だけ広げる。Matérn の `ν = 1/2` には、自由な `Z` の座標微分がない（`GprError::CoordGradientUnsupported`）。
 
-`FittedSgpr` の予測、共分散、サンプル、leave-one-out は `FittedGpr` と同じ。目的関数も同じで、`neg_log_marginal_likelihood`、`num_params`、`get_params`、`set_params`、`value_and_gradient_into`、`hessian_into` がある。読めるのは `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z`。`z` は、元の座標の誘導点。
+`FittedSgpr` の予測、共分散、サンプル、leave-one-out は `FittedGpr` と同じ。目的関数も同じで、`neg_log_marginal_likelihood`、`num_params`、`get_params`、`set_params`、`value_and_gradient_into`、`hessian_into` がある。モデルからは `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` を取得できる。`z` は、元の座標の誘導点。
 
 `into_online` は `OnlineSgpr` を返す。読み取りと目的関数は `FittedSgpr` と同じで、`point_ids` と `inducing_ids` が加わる。`insert` と `delete` は `PointId`。`insert_inducing` と `delete_inducing` は `InducingId`。公開コンストラクタはなく、id は再利用しない。モデルに無い id は `InvalidInducingId`。`OnlineSgpr<O: Optimizer>` の `refit` は探索し直すが、`Z` は固定のまま。`OnlineSgpr<Fixed>` に `refit` はない。`into_fitted` は `FittedSgpr<_, FixedInducing, _>` を返す。`save` はディレクトリを書く。疎なモデルに `save_with_factor` はない。
 
@@ -268,7 +268,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FittedSvgp::neg_elbo` は証拠下界。`num_params`、`get_params`、`set_params`、`value_and_gradient_into` は、全データを使った目的関数。`hessian_into` はない。Adam のループはデータ項を `n / batch` 倍し、KL はそのまま。
 
-予測、共分散、サンプルのメソッドは他の族と同じ。名前は `predict`、`predict_with`、`predict_into`、`predict_with_into`、`predict_covariance`、`predict_covariance_with`、`sample`、`sample_with`。読めるのは `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z`。leave-one-out、オンライン型、`refit` はない。`save` はディレクトリを書く。
+予測、共分散、サンプルのメソッドは他の族と同じ。名前は `predict`、`predict_with`、`predict_into`、`predict_with_into`、`predict_covariance`、`predict_covariance_with`、`sample`、`sample_with`。アクセサとして `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` が提供される。leave-one-out、オンライン型、`refit` はない。`save` はディレクトリを書く。
 
 `Adam::new` は学習率 `1e-3`、`β1 = 0.9`、`β2 = 0.999`、`ε = 1e-8`、バッチ 32、100 エポック、シード 0。セッターは `with_learning_rate`、`with_beta1`、`with_beta2`、`with_epsilon`、`with_batch_size`（`NonZeroUsize`）、`with_epochs`（`NonZeroU64`）、`with_seed`。学習率、ベータ、イプシロンは `Result` を返す。
 
@@ -331,11 +331,11 @@ fn main() -> Result<(), gprx::GprError> {
 
 観測ノイズは `GaussianLikelihood` に置く。`WhiteKernel` は追加のカーネル項である。尤度とホワイト項をどちらも大きくすると、ノイズを二度数える。
 
-等方の葉が読めるのは `lengthscale` と `log_lengthscale`。Matérn はさらに `nu`。周期カーネルは `period` と `log_period`。有理二次は `alpha` と `log_alpha`。線形とホワイトは `variance` と `log_variance`。定数は `constant` と `log_constant`。
+等方の葉では `lengthscale` と `log_lengthscale` を取得できる。Matérn はさらに `nu` を備える。周期カーネルは `period` と `log_period`、有理二次は `alpha` と `log_alpha`、線形とホワイトは `variance` と `log_variance`、定数は `constant` と `log_constant` をそれぞれ持つ。
 
 最適化の座標から作るメソッドは、葉ごとに違う。`from_log_lengthscale` と `from_log_lengthscales` は長さ尺度。`from_log_variance` は分散、`from_log_constant` は定数。`from_log` は 2 つをまとめて受け取る。周期なら log 長さ尺度と log 周期、有理二次なら log 長さ尺度と log `α`。
 
-`bounds` が 1 つだけの葉は、RBF、Matérn、定数、線形、ホワイト。周期は `lengthscale_bounds` と `period_bounds` に分かれ、`with_bounds` は両方の区間を取る。有理二次は `lengthscale_bounds` と `alpha_bounds` に分かれ、`with_bounds` は両方を取る。
+`bounds` が 1 つだけの葉は、RBF、Matérn、定数、線形、ホワイトである。周期は `lengthscale_bounds` と `period_bounds` に分かれ、`with_bounds` は両方の区間を取る。有理二次は `lengthscale_bounds` と `alpha_bounds` に分かれ、`with_bounds` は両方を取る。
 
 ARD の `lengthscale(dim)` は、1 つの `ℓ_d` を返す。`log_lengthscales` は保存されたベクトル。`lengthscales()` は `ArdLengthscales` を返す。そのメソッドは `new`、`from_log_lengthscales`、`with_bounds`、`lengthscale(dim)`、`log_lengthscales`、`num_params`、`get_params`、`set_params`。ARD の `with_bounds` は、すべての `ℓ_d` に同じ区間を 1 つ渡す。有理二次 ARD の `with_bounds` は、長さ尺度の区間と `α` の区間を取る。
 
@@ -389,7 +389,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 尤度
 
-`GaussianLikelihood::new(noise_variance)` は、`σn²` を log パラメータで持つ。読めるのは `from_log_noise_variance`、`noise_variance`、`log_noise_variance`、`bounds`、`with_bounds`、`num_params`、`get_params`、`set_params`。`add_noise_diag` は、カーネル対角に `σn²` を足す。`noise_grad_diag` は、その対角の、1 パラメータについての微分。定義域の外のノイズは `InvalidNoiseVariance`。
+`GaussianLikelihood::new(noise_variance)` は、`σn²` を log パラメータで持つ。メソッドとして `from_log_noise_variance`、`noise_variance`、`log_noise_variance`、`bounds`、`with_bounds`、`num_params`、`get_params`、`set_params` を提供する。`add_noise_diag` は、カーネル対角に `σn²` を足す。`noise_grad_diag` は、その対角の、1 パラメータについての微分。定義域の外のノイズは `InvalidNoiseVariance`。
 
 ```rust
 use gprx::{GaussianLikelihood, Interval};
@@ -538,7 +538,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `KernelExp::Accurate` と `FastApprox` は、実行時の切り替えで、`with_math` に渡す。クレート直下の `Accurate` と `FastApprox` は、`apply` を直接呼ぶときの `KernelMath`。
 
-`JitterPolicy::fixed(j)` は、失敗したコレスキーを、対角の `j ≥ 0` で一度やり直す（`JitterPolicy::Fixed`、`FixedJitter`）。`adaptive(initial, multiplier, max_retries, max_jitter)` は、正則化なしの因子が失敗したあと、オフセットを増やす（`JitterPolicy::Adaptive`、`AdaptiveJitter`）。条件は `initial > 0`、`multiplier > 1`、`max_retries ≥ 1`、`max_jitter ≥ initial`。全学習点の既定は `fixed(0.0)`。`Sgpr` と `Svgp` の `K_mm` の既定は `adaptive(1e-8, 10.0, 5, 1e-3)`。保存された数は、`jitter`、または `initial`、`multiplier`、`max_retries`、`max_jitter` で読む。この列挙は non-exhaustive。
+`JitterPolicy::fixed(j)` は、失敗したコレスキーを、対角の `j ≥ 0` で一度やり直す（`JitterPolicy::Fixed`、`FixedJitter`）。`adaptive(initial, multiplier, max_retries, max_jitter)` は、正則化なしの因子が失敗したあと、オフセットを増やす（`JitterPolicy::Adaptive`、`AdaptiveJitter`）。条件は `initial > 0`、`multiplier > 1`、`max_retries ≥ 1`、`max_jitter ≥ initial`。全学習点の既定は `fixed(0.0)`。`Sgpr` と `Svgp` の `K_mm` の既定は `adaptive(1e-8, 10.0, 5, 1e-3)`。保存された値は、`jitter`、または `initial`、`multiplier`、`max_retries`、`max_jitter` から取得できる。この列挙は non-exhaustive である。
 
 ### パラメータ
 
@@ -564,7 +564,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FORMAT_VERSION` は `1`。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
 
-`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` がディレクトリを読む。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
+`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` はディレクトリからモデルを読み込む。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
 
 - `register_kernel`
 - `register_unfitted_input`、`register_fitted_input`
@@ -655,7 +655,7 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-読み込んだモデルの `predict` と `predict_with` は、ファイルが `f32` でも `f64` を返す。読めるのは `n`、`d`、疎なら `m`。`is_online` は、全学習点か SGPR の `ldlt` ファイルなら真。型の付いたモデルが欲しいときは、バリアントを照合する。
+読み込んだモデルの `predict` と `predict_with` は、ファイルが `f32` でも `f64` を返す。モデル情報として `n`、`d`（疎なら `m`）を参照できる。`is_online` は、全学習点か SGPR の `ldlt` ファイルなら真。型の付いたモデルが欲しいときは、バリアントを照合する。
 
 | 列挙 | バリアント |
 | --- | --- |
@@ -663,11 +663,11 @@ fn main() -> Result<(), gprx::GprError> {
 | `LoadedSgpr` | 同じ 8 つ。`Double` は `FittedSgpr<Fixed>`。オンラインは `OnlineSgpr<Fixed, _>` |
 | `LoadedSvgp` | `Double`、`Single`、`Mixed`、`Reevaluate`。オンラインはない |
 
-読み込んだ全学習点モデルは `Fixed` かつ `CholeskyBuffer::Retain`。ファイルにソルバは無い。照合したモデルで `with_optimizer` を呼び、`refit` すると、もう一度探索する。`save` で因子なしに書いたファイルは、読み込み時に因子を作る。`save_with_factor` は `L` をメモリマップのまま使う。
+読み込んだ全学習点モデルは `Fixed` かつ `CholeskyBuffer::Retain` となる。ファイルにソルバは含まれない。照合したモデルで `with_optimizer` を呼び、`refit` すると、もう一度探索する。`save` で因子なしに書いたファイルは、読み込み時に因子を作る。`save_with_factor` は `L` をメモリマップのまま使う。
 
 ### エラー
 
-`GprError` は non-exhaustive。表示文字列は英語。
+`GprError` は non-exhaustive である。表示文字列は英語となる。
 
 | バリアント | いつ |
 | --- | --- |
@@ -695,7 +695,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `PersistFailed { kind, reason }` | 保存か読み込みが失敗 |
 | `UnsupportedPersistVersion { found, supported }` | `format_version` が `FORMAT_VERSION` でない |
 
-`CholeskyStage` は `Fit`、`Predict`、`OnlineInsert`、`OnlineDelete`。`PersistErrorKind` は `Io`、`Config`、`Tensor`、`InvalidPersistId`、`NotPersistable`、`UnregisteredId`、`WrongModel`。分岐は `kind`。`reason` は人が読む文。
+`CholeskyStage` は `Fit`、`Predict`、`OnlineInsert`、`OnlineDelete`。`PersistErrorKind` は `Io`、`Config`、`Tensor`、`InvalidPersistId`、`NotPersistable`、`UnregisteredId`、`WrongModel`。分岐は `kind`。`reason` は人が読むための説明文である。
 
 ```rust
 use gprx::{CholeskyStage, GprError, PersistErrorKind};

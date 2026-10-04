@@ -150,7 +150,7 @@ enum は serde の外部タグで、名前は `snake_case`。フィールドの�
 
 ### 5.4 変換
 
-変換は 2 回保存する。`*_unfitted` は、fit の前に与えた設定。`*_transform` は、学習後の変換で、学習データから得た統計を持つ。**読み込みは、保存した学習後の変換を使い、もう一度当てはめない。** オンラインのモデルは、点が変わっても、最初の学習データで当てはめた変換を使い続けるため。
+変換は 2 回保存する。`*_unfitted` は、fit の前に与えた設定。`*_transform` は、学習後の変換で、学習データから得た統計を持つ。**読み込みは、保存した学習後の変換を使い、もう一度当てはめない。** オンラインのモデルは、点が変わっても、最初の学習データで当てはめた変換を使い続けるためである。
 
 入力、学習前（`x_unfitted`）:
 
@@ -177,7 +177,15 @@ enum は serde の外部タグで、名前は `snake_case`。フィールドの�
 
 ### 5.5 `custom`: 組み込みでないカーネルや変換
 
-`custom` の項目は、`persist_id` と `state`（その型が選んだ任意の JSON）を持つ。読み込みでは、`PersistRegistry` が `persist_id` を、その種類の復元関数に引き戻す。種類は、カーネル、学習前の入力の変換、学習後の入力の変換、学習前の目的変数の変換、学習後の目的変数の変換の 5 つ。`load` の前に登録する: `register_kernel`、`register_unfitted_input`、`register_fitted_input`、`register_unfitted_target`、`register_fitted_target`。
+`custom` の項目は、`persist_id` と `state`（その型が選んだ任意の JSON）を持つ。読み込みでは、`PersistRegistry` が `persist_id` を、その種類の復元関数に引き戻す。対象は次の 5 種類で、`load` の前に関数で登録する:
+
+| 復元対象 | 登録関数 |
+| --- | --- |
+| カーネル | `register_kernel` |
+| 学習前の入力の変換 | `register_unfitted_input` |
+| 学習後の入力の変換 | `register_fitted_input` |
+| 学習前の目的変数の変換 | `register_unfitted_target` |
+| 学習後の目的変数の変換 | `register_fitted_target` |
 
 - 組み込みのカーネルと変換は、上の閉じたタグを使い、登録しない。
 - `persist_id` は空でなく、`gprx.`（`RESERVED_PREFIX`）で始まってはならない。`save` と `register_*` のどちらも、`PersistFailed`（`kind: InvalidPersistId`）で断る。
@@ -228,8 +236,13 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 | 呼び出し | `has_factor` | テンソル | 読み込み |
 | --- | --- | --- | --- |
 | `save`（Exact） | `false` | `x`、`y` | 保存した `θ` で Gram 行列を作り、分解し（保存した `jitter` の方針で再試行する）、`α` を解く。`O(n³)` |
-| `save_with_factor`（Exact） | `true` | `x`、`y`、`l`、`alpha` | 分解を省く。`F64` の因子はメモリマップする（同じディレクトリへの gprx の保存は新しいファイルを rename で置くので、マップ中のファイルには触れない。モデルが生きている間、他のプログラムがファイルをその場で書き換えないこと。テンソルのバイト列は 8 バイトに揃っていること。揃っていなければ `PersistFailed`）。`F32` の因子はコピーして取り出す |
+| `save_with_factor`（Exact） | `true` | `x`、`y`、`l`、`alpha` | 分解を省く。`F64` の因子はメモリマップする（要件は下記）。`F32` の因子はコピーして取り出す |
 | `save`（`sgpr`、`online_sgpr`、`svgp`） | 書かない | 6.2 節 | 保存した学習後の変換を `x` にかけ、保存した `θ` と `z_train` で `K_mm` を分解し、VFE の系を組み直す（`sgpr`）。または `q` を検査して `A` と `k_diag` を組み直す（`svgp`） |
+
+`save_with_factor` で `F64` の因子をメモリマップする要件:
+- 同じディレクトリへの gprx の保存は新しいファイルを rename で置くので、マップ中のファイルには触れない。
+- モデルが生きている間、他のプログラムがファイルをその場で書き換えないこと。
+- テンソルのバイト列は 8 バイトに揃っていること。揃っていなければ `PersistFailed`。
 
 `ldlt` と `online_sgpr` では、保存した id を復元するので、次の `insert` は、`save` の前に返したはずの id を返す。
 
@@ -241,7 +254,14 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 
 | 状況 | エラー |
 | --- | --- |
-| ファイルを読み書きできない、JSON として不正、テンソルが無い、形か dtype が違う、テンソルが揃っていない、`model` に対してローダーが違う、`point_ids` の長さが違う、登録されていない、または予約された `persist_id`、`q` が不正 | `GprError::PersistFailed { kind, reason }`: `Io`（読み書き）、`Config`（JSON、キー、`point_ids`）、`Tensor`（テンソル、`q`）、`WrongModel`、`UnregisteredId`、`InvalidPersistId`、`NotPersistable` |
+| ファイルを読み書きできない | `GprError::PersistFailed { kind: Io, reason }` |
+| JSON として不正、キー、`point_ids` の長さが違う | `GprError::PersistFailed { kind: Config, reason }` |
+| テンソルが無い、形か dtype が違う、テンソルが揃っていない、`q` が不正 | `GprError::PersistFailed { kind: Tensor, reason }` |
+| `model` に対してローダーが違う | `GprError::PersistFailed { kind: WrongModel, reason }` |
+| 登録されていない `persist_id` | `GprError::PersistFailed { kind: UnregisteredId, reason }` |
+| 予約された `persist_id` | `GprError::PersistFailed { kind: InvalidPersistId, reason }` |
+| 同じ種類に同じ `persist_id` を 2 回登録した | `GprError::PersistFailed { kind: InvalidPersistId, reason }` |
+| `persist_id` を実装していない `custom` のカーネルや変換の保存 | `GprError::PersistFailed { kind: NotPersistable, reason }` |
 | `format_version` が `1` でない | `GprError::UnsupportedPersistVersion` |
 | `n`、`d`、（Sparse の）`m` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |
