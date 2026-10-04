@@ -80,7 +80,7 @@ flowchart TB
 
 ## 他ライブラリとの比較
 
-GPR の論文で使われる回帰ベンチマークで、gprx を scikit-learn、GPyTorch、GPy、libgp、friedrich と比べる（行 B1-1、[#298](https://github.com/YUKIKEDA/gprx/issues/298)）。順序は、正しさ、精度、規模。これは報告であってゲートではない。他のライブラリが勝つ cell もそのまま表に残す。
+GPR の論文で使われる回帰で、gprx を scikit-learn、GPyTorch、GPy、libgp、friedrich と比べる（[#298](https://github.com/YUKIKEDA/gprx/issues/298)）。見る順は、計算が合っているか、予測が良いか、大きいデータで回るか。これは報告であり、テストの合否ではない。他のライブラリの方が良い行も、表から消さない。
 
 | 段 | データ | 見るもの | gprx のモデル |
 | --- | --- | --- | --- |
@@ -89,16 +89,22 @@ GPR の論文で使われる回帰ベンチマークで、gprx を scikit-learn�
 | T2 | Kin40k、Protein（5 split） | 中規模のスケール | `K` がメモリに入る範囲は `Gpr`、それ以外と比較用に `Sgpr` / `Svgp` |
 | T3 | 3DRoad、Song、Buzz、HouseElectric（`treforevans/uci_datasets`。90 / 10 の 10 split） | 大規模のスケール | `Sgpr` / `Svgp` |
 
-どのモデルも、ARD RBF カーネルと Gaussian 尤度で、入力と目的変数は学習データの統計で標準化し、初期値も同じ（ℓ = 1、信号分散 1、ノイズ分散 0.1）。指標は RMSE、NLPD、95% 区間のカバレッジ。`y` の元の単位で、split にわたる平均 ± 標準誤差。比較の前に `just perf-real-check` が、学習せずに固定した 1 つの θ で全ライブラリを評価する。NLML、RMSE、NLPD が 1e-6 で一致するので、学習後の結果の差は、目的関数ではなく最適化器の差になる。疎なモデルの同じ確認（`just perf-real-check yacht 0 sgpr`）では、周辺尤度の下界は gprx、GPyTorch、GPy で一致する。GPyTorch は自前の低ランクのテスト共分散で予測するので、同じ θ と Z でも RMSE と NLPD が他の 2 つと 1% 未満ずれる。
+どのモデルも、入力の次元ごとに長さを持つ RBF カーネルと、ガウス分布のノイズを使う。入力と目的変数は学習データの平均と分散で揃え、初期値も同じ（長さ 1、信号の分散 1、ノイズの分散 0.1）。
+
+指標は 3 つ。予測のずれ（RMSE）、予測分布の対数損失（NLPD）、95% の予測区間がテスト点を覆った割合。単位は `y` のもとの単位で、データの分割ごとの平均と標準誤差を書く。
+
+比較の前に、学習せず、ハイパーパラメータを 1 組に固定して全ライブラリを評価する（`just perf-real-check`）。負の対数周辺尤度、RMSE、NLPD が 1e-6 で一致する。学習したあとの差は、目的関数の違いではなく、最適化の違いである。誘導点を使うモデルでも、周辺尤度の下界は gprx、GPyTorch、GPy で一致する（`just perf-real-check yacht 0 sgpr`）。GPyTorch だけは、テスト点の分散を自分の低ランクの式で出すので、同じパラメータと誘導点でも RMSE と NLPD が他の 2 つと 1% 未満ずれる。
 
 ### 最適化器が効く
 
-実行時間はライブラリと同じくらい最適化器に左右される。そのため、どの cell も、どの最適化器が走ったかと、尤度と勾配を一緒に評価した回数（joint 評価）を書く。プロトコルは 2 つ。
+学習にかかる時間は、行列の計算と同じくらい、最適化のやり方で変わる。各行には、どのやり方で学習したかと、尤度と勾配をまとめて計算した回数を書いてある。
 
-- **native**: 各ライブラリの標準の最適化器を、出荷時の設定のまま使う。
-- **matched**: 各ライブラリ自身の目的関数と勾配のまわりに、同じ scipy L-BFGS-B の設定（100 反復、勾配の許容値 √ε、履歴 10）を置く。gprx の argmin L-BFGS は、この設定が既に既定値。同じ**アルゴリズム**であって、同じ**実装**ではない（gprx は argmin の L-BFGS と More–Thuente の線探索）。libgp は Rprop しか持たないので、matched は N/A。SVGP は、n が数十万でも通る Adam の標準設定が無いので、全ライブラリで 1 つの設定（Adam、学習率 0.01、バッチ 1024、3 エポック）を使う。
+やり方は 2 つ。
 
-評価回数が違う cell の壁時計の差は、速度の差ではない。ピーク RSS はプロセスツリーのピーク。常駐メモリの時系列は下の図にある。
+- ライブラリの既定。そのライブラリが学習するときの設定のまま。
+- 条件を揃える。目的関数と勾配は各ライブラリ自身のものを使い、反復は最大 100 回、勾配の止まり具合は √ε、履歴は 10 で共通にする。プログラムまで同じではない。gprx は argmin の L-BFGS と More–Thuente の線探索で、この値が最初から既定になっている。scikit-learn、GPyTorch、GPy は scipy の L-BFGS-B に同じ上限を渡す。libgp は Rprop しかなく、勾配の止まり具合を指定できない。SVGP には、数十万点でも通る Adam の既定が無いので、学習率 0.01、バッチ 1024、データを 3 周、で固定した。
+
+評価の回数が違う行どうしで、かかった時間の差を速さとはみない。メモリのピークは、プロセス全体の常駐量の最大。時間に沿ったメモリは、結果の図にある。
 
 ### インターフェース
 
@@ -209,7 +215,7 @@ nlpd /= m;
 </details>
 <!-- snippets:end -->
 
-ハーネスが回避した libgp の 2 点: `predict` の分散はノイズを含まない。一括の `add_patterns(x, y)` は、列優先の行列の行をストライドつきで読むので、d = 1 のときだけ正しい。
+libgp には、比較のプログラムが避けている仕様が 2 つある。`predict` の分散はノイズを含まない。一括の `add_patterns(x, y)` は、列優先の行列を行として読むので、次元が 1 のときだけ正しい。
 
 ### 機能
 
@@ -231,24 +237,26 @@ nlpd /= m;
 
 ### 結果
 
-matched を 1 回だけ測った。
+この節の数値は、1 台の PC で、ライブラリを同じ学習条件にして比べた結果である。
 
-Exact は Snelson、Mauna Loa、yacht、energy。SGPR は wine と power plant と naval を 20 split、kin40k を 5 split、3droad と song を 1 split。SVGP は kin40k、3droad、song、houseelectric を 1 split ずつ。
+全学習点を使うモデルと、誘導点を 512 個に固定したモデルは、L-BFGS で最大 100 回まで反復する。ミニバッチのモデルは Adam で、学習率 0.01、一度に 1024 点、データを 3 周する。どのライブラリも、その製品が最初から使う最適化の設定では比べていない。
 
-測り直していない。concrete は energy と、kin8nm と protein は kin40k と、buzz は song と、入力の次元も学習点数も近い別データだからである。
+全学習点を使うのは Snelson、Mauna Loa、yacht、energy。誘導点 512 個は、wine、power plant、naval が 20 分割、kin40k が 5 分割、3droad と song が 1 分割。ミニバッチは kin40k、3droad、song、HouseElectric が 1 分割ずつ。
 
-HouseElectric の SGPR は入らない。`K(X, Z)` が 1 枚 7.0 GiB で、勾配が同じ大きさの行列を何枚も持つと 47.8 GiB の物理メモリを超えてページファイルに落ち、デスクトップが止まった。表では 3 ライブラリとも N/A。
+RMSE は予測のずれ、NLPD は予測分布の対数損失で、どちらも小さいほど良い。95% 区間の列は、テスト点がその区間に入った割合。学習の秒は時間を計った学習、評価回数は尤度と勾配をまとめて計算した回数である。反復の列は最適化器が数えた回数で、gprx は空欄。1 回あたりのミリ秒は、学習の秒を評価回数で割った中央値。負の対数周辺尤度は学習が終わったときの値、メモリはプロセス全体の常駐量の最大。
 
-3droad と song の SGPR は、結果ファイルを書く前にプロセスが止まった。ログに残っていた学習時間と joint 評価回数と RMSE と NLPD だけを載せた。カバレッジも NLML もピーク RSS も N/A。
+学習の秒を速さとして比べてよいのは、評価回数が同じ行だけ。
 
-song の gprx は 26 回で止まった。NLPD が他の 2 つと一致しない。power plant の GPy は一部の split で予測が発散した。その RMSE と NLPD の平均は当てはまりの良さではない。
+song の誘導点モデルでは、gprx の NLPD が GPyTorch と GPy と違う。power plant では GPy の予測が一部の分割で壊れていて、その RMSE と NLPD の平均は当てはまりの良さにならない。
 
-反復回数は無い。gprx の runner が返さない。速度は joint 評価回数で見る。`ms / eval` は学習時間をその回数で割った中央値で、回数が揃っているときだけ壁時計の差を速度の差とみなす。
+図は表のあとにある。各図の直前に、その図が何を描いているかを書いた。
 
 <!-- bench:begin -->
-Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs, 47.8 GiB, Windows-11-10.0.26200-SP0). scikit-learn 1.6.1, gpytorch 1.15.2, GPy 1.14.2, torch 2.14.0, scipy 1.18.1, argmin 0.11.0; libgp f4a2fb7d.
+測定した機械は Intel64 Family 6 Model 191 Stepping 2, GenuineIntel（論理 CPU 16、メモリ 47.8 GiB、Windows-11-10.0.26200-SP0）。scikit-learn 1.6.1, gpytorch 1.15.2, GPy 1.14.2, torch 2.14.0, scipy 1.18.1, argmin 0.11.0。libgp f4a2fb7d。
 
-| library | native optimizer | matched optimizer | search space | bounds |
+各マスは、その版のソースから書き写した設定。
+
+| ライブラリ | 既定の最適化 | 条件を揃えた最適化 | 探索する量 | 範囲 |
 | --- | --- | --- | --- | --- |
 | gprx | argmin 0.11 LBFGS + MoreThuente line search; history 10, max 100 iterations, gradient-norm tolerance sqrt(eps) | same call: the gprx default already equals the shared setting | logit of log θ inside each interval, so the search is unconstrained | (1e-5, 1e5) on ℓ, signal variance and noise variance |
 | sklearn | scipy minimize L-BFGS-B via optimizer='fmin_l_bfgs_b' with scipy defaults (maxiter 15000, ftol 2.2e-9, gtol 1e-5, maxcor 10, maxls 20) | scipy L-BFGS-B, maxiter 100, gtol sqrt(eps), ftol 0, maxcor 10; the library's own objective and gradient | log θ | (1e-5, 1e5) on ℓ, constant value and noise level (kernel defaults) |
@@ -257,9 +265,9 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | libgp | RProp (resilient backpropagation), 100 iterations, eps_stop 0, Delta0 0.1, Deltamin 1e-6, Deltamax 50, eta- 0.5, eta+ 1.2; keeps the best likelihood seen | N/A: libgp offers RProp and CG only, and RProp has no gradient tolerance | log ℓ, log sf, log sn (amplitude and std, not variances) | none |
 | friedrich | N/A: no ARD kernel | N/A: no ARD kernel | - | - |
 
-#### exact · matched
+#### 全学習点を使うモデル
 
-| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |
+| データセット | ライブラリ | 測れた分割 | RMSE | NLPD | 95%区間 | 学習 [秒] | 評価回数 | 反復 | 1回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | energy | gprx | 20/20 | 0.4796 ± 0.014 | 0.6993 ± 0.033 | 0.923 ± 0.0067 | 1.283 ± 0.013 | 116 ± 0.58 | N/A | 10.94 | -1013 ± 2.5 | 47.3 |
 | energy | sklearn | 20/20 | 0.4773 ± 0.013 | 0.692 ± 0.029 | 0.924 ± 0.0077 | 10.26 ± 0.79 | 94.3 ± 7.1 | 53 ± 5.6 | 108.1 | -973.3 ± 6.1 | 225.1 |
@@ -278,16 +286,13 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | yacht | gpytorch | 20/20 | 0.4157 ± 0.056 | 0.2 ± 0.099 | 0.916 ± 0.013 | 0.4499 ± 0.03 | 108 ± 6.5 | 68 ± 5.9 | 3.835 | -451.2 ± 27 | 287.3 |
 | yacht | gpy | 20/20 | 0.3931 ± 0.055 | 0.1971 ± 0.1 | 0.91 ± 0.014 | 2.575 ± 0.14 | 120 ± 6 | 78.1 ± 4.7 | 21.12 | -460.6 ± 27 | 151.4 |
 
-#### sgpr · matched
+#### 誘導点 512 個のモデル
 
-| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |
+| データセット | ライブラリ | 測れた分割 | RMSE | NLPD | 95%区間 | 学習 [秒] | 評価回数 | 反復 | 1回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 3droad | gprx | 1/1 | 8.823 | 3.597 | N/A | 5230 | 788 | N/A | 6637 | N/A | N/A |
 | 3droad | gpytorch | 1/1 | 8.823 | 3.597 | N/A | 1694 | 129 | N/A | 1.314e+04 | N/A | N/A |
 | 3droad | gpy | 1/1 | 8.823 | 3.597 | N/A | 3970 | 135 | N/A | 2.941e+04 | N/A | N/A |
-| houseelectric | gprx | 0/1 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| houseelectric | gpytorch | 0/1 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| houseelectric | gpy | 0/1 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | kin40k | gprx | 5/5 | 0.2863 ± 0.0029 | 0.1634 ± 0.0083 | 0.964 ± 0.0028 | 273.4 ± 96 | 394 ± 1.3e+02 | N/A | 681.8 | 1.039e+04 ± 59 | 890.7 |
 | kin40k | gpytorch | 5/5 | 0.2865 ± 0.0028 | 0.1634 ± 0.0079 | 0.964 ± 0.0028 | 73.99 ± 4.9 | 86.4 ± 5.6 | 43 ± 2.3 | 854.9 | 1.039e+04 ± 59 | 1746.8 |
 | kin40k | gpy | 5/5 | 0.2863 ± 0.0029 | 0.1634 ± 0.0083 | 0.964 ± 0.0028 | 231.8 ± 42 | 88 ± 16 | 42.4 ± 2.8 | 2643 | 1.039e+04 ± 59 | 1820.1 |
@@ -304,13 +309,9 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | wine_red | gpytorch | 20/20 | 0.6276 ± 0.0082 | 0.9506 ± 0.014 | 0.939 ± 0.0047 | 6.03 ± 0.13 | 114 ± 0.82 | 100 | 51.29 | 1688 ± 2 | 376.5 |
 | wine_red | gpy | 20/20 | 0.6275 ± 0.0082 | 0.9504 ± 0.014 | 0.94 ± 0.0048 | 22.8 ± 1 | 112 ± 3.1 | 97.3 ± 2.7 | 196.3 | 1688 ± 2 | 299.8 |
 
-- N/A `gprx`: K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB
-- N/A `gpy`: K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB
-- N/A `gpytorch`: K(X, Z) is 7.0 GiB; 6 copies (42.2 GiB) do not fit in 47.8 GiB
+#### ミニバッチのモデル
 
-#### svgp · matched
-
-| dataset | library | ok | RMSE | NLPD | 95% cover | fit [s] | joint evals | iterations | ms / eval | NLML | peak RSS [MiB] |
+| データセット | ライブラリ | 測れた分割 | RMSE | NLPD | 95%区間 | 学習 [秒] | 評価回数 | 反復 | 1回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 3droad | gprx | 1/1 | 11.18 | 3.834 | 0.948 | 34.49 | 1.15e+03 | N/A | 30.02 | N/A | 6236.7 |
 | 3droad | gpytorch | 1/1 | 11.16 | 3.832 | 0.944 | 42.93 | 1.15e+03 | 1.15e+03 | 37.36 | N/A | 1284.3 |
@@ -321,25 +322,76 @@ Measured on Intel64 Family 6 Model 191 Stepping 2, GenuineIntel (16 logical CPUs
 | song | gprx | 1/1 | 0.4669 | 0.6575 | 0.947 | 57.79 | 1.36e+03 | N/A | 42.53 | N/A | 8650.4 |
 | song | gpytorch | 1/1 | 0.4709 | 0.666 | 0.954 | 55.96 | 1.36e+03 | 1.36e+03 | 41.17 | N/A | 3769.8 |
 
-![accuracy_matched.svg](docs/bench/accuracy_matched.svg)
-![fit_time_matched.svg](docs/bench/fit_time_matched.svg)
-![accuracy_sgpr_matched.svg](docs/bench/accuracy_sgpr_matched.svg)
-![fit_time_sgpr_matched.svg](docs/bench/fit_time_sgpr_matched.svg)
-![accuracy_svgp_matched.svg](docs/bench/accuracy_svgp_matched.svg)
-![fit_time_svgp_matched.svg](docs/bench/fit_time_svgp_matched.svg)
-![rss_timeline_energy_exact_s0_matched.svg](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
-![rss_timeline_kin40k_sgpr_s0_matched.svg](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
-![curve_maunaloa_matched.svg](docs/bench/curve_maunaloa_matched.svg)
-![curve_snelson_matched.svg](docs/bench/curve_snelson_matched.svg)
+点の色と形はどの図でも同じ。青丸が gprx、橙の四角が scikit-learn、緑の三角が GPyTorch、黄の菱形が GPy。
+
+**予測の誤差（全学習点）**
+
+列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。点はライブラリ、縦棒は分割ごとのばらつき。Snelson にはテスト点が無いので、その列は空。
+
+![予測の誤差（全学習点）](docs/bench/accuracy_matched.svg)
+
+**学習の時間（全学習点）**
+
+上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。秒を比べるときは、下の回数が揃っているかを見る。
+
+![学習の時間（全学習点）](docs/bench/fit_time_matched.svg)
+
+**予測の誤差（誘導点 512 個）**
+
+読み方は、全学習点の予測誤差の図と同じ。上は RMSE、下は NLPD。
+
+![予測の誤差（誘導点 512 個）](docs/bench/accuracy_sgpr_matched.svg)
+
+**学習の時間（誘導点 512 個）**
+
+上は秒、下は尤度と勾配の計算回数。どちらも対数軸。
+
+![学習の時間（誘導点 512 個）](docs/bench/fit_time_sgpr_matched.svg)
+
+**予測の誤差（ミニバッチ）**
+
+Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。GPy にはこの学習が無い。上は RMSE、下は NLPD。
+
+![予測の誤差（ミニバッチ）](docs/bench/accuracy_svgp_matched.svg)
+
+**学習の時間（ミニバッチ）**
+
+上は秒、下は Adam の更新回数。回数は揃っているので、秒の差が速さの差になる。
+
+![学習の時間（ミニバッチ）](docs/bench/fit_time_svgp_matched.svg)
+
+**メモリの推移（energy、全学習点）**
+
+線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。
+
+![メモリの推移（energy、全学習点）](docs/bench/rss_timeline_energy_exact_s0_matched.svg)
+
+**メモリの推移（kin40k、誘導点 512 個）**
+
+読み方は energy のメモリの図と同じ。分割は 0 番。
+
+![メモリの推移（kin40k、誘導点 512 個）](docs/bench/rss_timeline_kin40k_sgpr_s0_matched.svg)
+
+**Mauna Loa の予測**
+
+1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。塗った点は学習データ、抜き点はテストデータ。
+
+![Mauna Loa の予測](docs/bench/curve_maunaloa_matched.svg)
+
+**Snelson の予測**
+
+1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。点は学習データ。テスト用の点は無い。
+
+![Snelson の予測](docs/bench/curve_snelson_matched.svg)
 <!-- bench:end -->
 
 ### 再現
 
 ```text
-just perf-real-full                                            # 上の matched の測定と、この節の生成
+just perf-real-full                                            # 上の比較を取り、この節を作り直す
 ```
 
-`--timeline` をつけると、プロセスツリーの常駐メモリを 10 ms ごとに記録する。生の出力は `compare/perf/out/real/` に残る（commit しない）。`docs/bench/summary.json` は、cell ごとの統計、測定機、ライブラリの版、最適化器の設定を持つ。詳細: [`compare/perf/README.md`](compare/perf/README.md)。
+`--timeline` をつけると、プロセス全体の常駐メモリを 10 ms ごとに記録する。生の出力は `compare/perf/out/real/` に残り、commit しない。`docs/bench/summary.json` には、表の数値、測定した機械、ライブラリの版、最適化の設定が入る。詳細: [`compare/perf/README.md`](compare/perf/README.md)。
 
 ## ライセンス
 
