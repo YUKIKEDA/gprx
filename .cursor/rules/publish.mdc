@@ -1,11 +1,30 @@
 ---
-description: crates.io publish gate, MSRV, coverage floor, and the 0.x contract
+description: crates.io publish gate, reader docs, MSRV, coverage floor, and the 0.x contract
 alwaysApply: true
 ---
 
 # Publish
 
-`cargo publish` is a human action. Agents do not run it.
+Ready means a human runs `cargo publish` and no other step is left. Agents do not run that command. Agents may run `cargo publish --dry-run`.
+
+`just lint` and `just test` run on every change, publish or not. On the commit that will be published, record them locally. Cloud CI is not the completion condition while runners are limited.
+
+## Before `cargo publish`
+
+One commit is the published source. All of the following are true for that commit. A failure in the reader check blocks `cargo package` and `cargo publish --dry-run`.
+
+- `Cargo.toml` `version` is the version to publish. `publish = false` is absent.
+- The publish-review skill has been run. No failure remains against `.cursor/rules/reader-docs.mdc` and `.cursor/rules/rust-docs.mdc`.
+- `cargo doc --no-deps` reports no broken links.
+- `cargo package` builds the package. `cargo package --list` matches the whitelist below.
+- `just lint` and `just test` succeeded on that commit.
+- An annotated tag `v{version}` points at that commit. A GitHub Release uses the same tag.
+- `cargo login` already succeeds.
+- `cargo publish --dry-run` exits 0 on a clean tree.
+
+`homepage` is the GitHub repository. `documentation` is `https://docs.rs/gprx`. `[package.metadata.docs.rs]` builds default features, not `bench-internals` or `insert-stages`.
+
+There is no `CHANGELOG.md` at 0.1.0. Add a changelog file in the change that publishes the next version.
 
 ## MSRV
 
@@ -29,8 +48,6 @@ A 0.x minor may break the public API. The README says so.
 The contract is every item an external crate can name with default features. `Sgpr` and `Svgp` are part of that surface. A `pub` item that no external crate can name is not part of the contract.
 
 `gprx::internals` (features `bench-internals` and `insert-stages`) is not part of the contract. Its rustdoc says so.
-
-There is no `CHANGELOG.md` at 0.1.0. The README states the 0.1.0 surface and the 0.x policy. Add a changelog file in the change that publishes the next version.
 
 ## Package files
 

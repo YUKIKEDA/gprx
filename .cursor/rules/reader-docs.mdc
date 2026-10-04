@@ -1,0 +1,54 @@
+---
+description: Reader-facing README and comparison docs for gprx
+globs: "{README.md,README.ja.md,docs/comparison.md,docs/comparison.ja.md}"
+alwaysApply: false
+---
+
+# Reader docs
+
+These are the pages a stranger reads before the source. `README.md` is the crates.io page. `README.ja.md` is its Japanese pair. `docs/comparison.md` and `docs/comparison.ja.md` hold the library comparison that used to sit in the README.
+
+`missing_docs` passing is not this check. An agent reads the pages against the items below before `cargo package` and `cargo publish --dry-run`. The procedure is `.agents/skills/publish-review/SKILL.md`.
+
+## README shape
+
+Order:
+
+1. What the crate does
+2. A `Cargo.toml` dependency block for the version being published
+3. One example a reader can paste after adding that dependency
+4. What a caller needs in order to make that call
+5. One link to the comparison doc
+6. License
+
+English and Japanese use the same sections. The comparison's tables, figures, and reproduce steps live in the comparison doc, not in the README.
+
+Before the first example, state the points a caller otherwise gets wrong: `X` is column-major, `fit` consumes the trainer, observation noise lives in `GaussianLikelihood`, a 0.x minor may break the public API, and `internals` is outside that contract.
+
+The example uses `?`, not `unwrap`. It does not depend on a checkout of this repository.
+
+## Links that survive packaging
+
+`docs/` is not in the published package. The README has no relative link to a file outside the package, and no image. Figures stay relative inside the comparison doc.
+
+The README's link to the comparison doc is one absolute GitHub URL, the same form as the links to `docs/design.md`. License links target `LICENSE-MIT` and `LICENSE-APACHE`, which are in the package.
+
+## Stranger context
+
+A reader of these pages does not need an issue number, a pull request number, a phase ID, a roadmap ID, `roadmap.md`, `AGENTS.md`, `.cursor/rules`, or Grill.
+
+Developer `just` recipes stay out of the README. The comparison doc may keep the `just` commands that regenerate its figures. It does not keep issue numbers or phase IDs.
+
+`docs/design.md`, `docs/roadmap.md`, and `docs/adr/` are the decision record. They keep their IDs.
+
+User commands such as `cargo run --example fit_predict` stay.
+
+## Accuracy
+
+Names, defaults, layout, errors, the MSRV, and the version match the code and `Cargo.toml`. A command in the page is a real command. A number in the comparison doc matches a committed measurement, or the sentence names where it came from.
+
+The English README, the Japanese README, the crate-level rustdoc, and `Cargo.toml` `description` do not contradict each other. `description` is one sentence, the same claim as the README opening, with no internal workflow words.
+
+## Japanese
+
+Read `README.ja.md` and `docs/comparison.ja.md` with `.agents/skills/natural-japanese/SKILL.md`. Do not leave them as a gloss of the English.
