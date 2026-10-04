@@ -8,14 +8,6 @@ from pathlib import Path
 import gpytorch
 import numpy as np
 import torch
-from gpytorch.distributions import MultivariateNormal
-from gpytorch.kernels import Kernel, MaternKernel, RBFKernel
-from gpytorch.likelihoods import GaussianLikelihood
-from gpytorch.means import ZeroMean
-from gpytorch.mlls import VariationalELBO
-from gpytorch.models import ApproximateGP
-from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
-
 from common.problems import (
     ELL_ARD,
     ELL_ISO,
@@ -27,6 +19,13 @@ from common.problems import (
     pack_column_major,
     unpack_column_major,
 )
+from gpytorch.distributions import MultivariateNormal
+from gpytorch.kernels import Kernel, MaternKernel, RBFKernel
+from gpytorch.likelihoods import GaussianLikelihood
+from gpytorch.means import ZeroMean
+from gpytorch.mlls import VariationalELBO
+from gpytorch.models import ApproximateGP
+from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
 
 ROOT = Path(__file__).resolve().parent
 GOLDENS = ROOT / "goldens"
@@ -47,7 +46,7 @@ class DiagWhiteKernel(Kernel):
         super().__init__()
         self.white_variance = float(variance)
 
-    def forward(self, x1, x2, diag=False, **kwargs):  # noqa: ANN001, ANN003
+    def forward(self, x1, x2, diag=False, **kwargs):
         if diag:
             return x1.new_full(x1.shape[:-1], self.white_variance)
         rows = x1.size(-2)

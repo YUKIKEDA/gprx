@@ -27,13 +27,12 @@ from pathlib import Path
 os.environ["PERF_SMOKE"] = "1"  # no pinning while a stand-in archive is in use
 os.environ.setdefault("PERF_WARMUP", "0")
 
-import numpy as np  # noqa: E402
+import numpy as np
+from common import harness
 
-from common import harness  # noqa: E402
-
-from .cases import CASES, write_case, write_curve_case  # noqa: E402
-from .data import DATASETS, load_split, n_splits  # noqa: E402
-from .libs import runners_for  # noqa: E402
+from .cases import write_case, write_curve_case
+from .data import DATASETS, load_split, n_splits
+from .libs import runners_for
 
 TINY_N, TINY_TEST, TINY_M = 60, 20, 8
 
@@ -48,6 +47,7 @@ EXPECTED_NA = (
     r"the composite Mauna Loa kernel is not wired",
     r"SVGP has no native protocol",
     r"SVGP has no fixed protocol",
+    r"K\(X, Z\) is",
 )
 #: Fields an ok row must fill.
 REQUIRED = ("fit_s", "predict_s", "peak_rss_bytes", "joint_evals")

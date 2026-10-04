@@ -16,9 +16,9 @@ from gpytorch.kernels import RBFKernel
 torch.set_default_dtype(torch.float64)
 torch.set_num_threads(max(1, os.cpu_count() or 1))
 
+from common.ops import apply_op
 from common.problems import unpack_column_major as unpack_rows
 from common.records import load_case, write_result
-from common.ops import apply_op
 from common.rss import peak_rss_bytes
 from common.timing import median, min_max, timed_reps, warmup_count
 

@@ -24,7 +24,13 @@ from common.harness import (
     within_band_or_better,
     write_json,
 )
-from common.problems import FORRESTER_NS, SPHERE_SIDES, make_forrester, make_sphere, write_cases
+from common.problems import (
+    FORRESTER_NS,
+    SPHERE_SIDES,
+    make_forrester,
+    make_sphere,
+    write_cases,
+)
 
 from .runners import OUT, run_gprx, run_libgp
 
