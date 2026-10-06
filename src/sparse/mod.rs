@@ -10,7 +10,9 @@ use faer::{Mat, MatMut, MatRef};
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
-use crate::kernel::{CompiledKernel, DiagAccum, GramInputs, KernelScalar, Triangle, WeightedWalk};
+use crate::kernel::{
+    CompiledKernel, CrossViews, DiagAccum, GramInputs, KernelScalar, Triangle, WeightedWalk,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::KernelExp;
@@ -604,7 +606,16 @@ impl<T: KernelScalar> KernelScratch<T> {
         let (rows, cols) = (out.nrows(), out.ncols());
         let dist = view(&mut self.dist, rows, cols);
         let scratch = view(&mut self.scratch, rows, cols);
-        compiled.eval_cross::<M>(x, xs, Some(dist), out, scratch, &mut self.nested, &mut [])
+        compiled.eval_cross_slots::<M>(
+            x,
+            xs,
+            None,
+            Some(dist),
+            out,
+            scratch,
+            &mut self.nested,
+            &mut [],
+        )
     }
 
     /// `K(x, xs)` (`n × q`) in a new matrix.
@@ -654,6 +665,7 @@ impl<T: KernelScalar> KernelScratch<T> {
                 x,
                 dist: dist_view,
                 ard: None,
+                slots: None,
             },
             scratch: view(scratch, m, m),
             nested,
@@ -693,9 +705,8 @@ impl<T: KernelScalar> KernelScratch<T> {
         }
         fit_exact(cross, nbuf, rows, cols);
         crate::kernel::ensure_nested_levels(nested, compiled, rows, cols);
-        compiled.weighted_cross_grads::<M>(
-            x1,
-            x2,
+        compiled.weighted_cross_grads_views::<M>(
+            CrossViews::points(x1, x2),
             weight,
             &mut partial[..n_params],
             &mut cross[..nbuf],

@@ -6,6 +6,7 @@ mod custom;
 mod fast_math;
 mod params;
 mod scalar;
+mod supplied;
 
 use super::{CompiledKernel, MixedKernelViews};
 use crate::kernel::{

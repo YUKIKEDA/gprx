@@ -258,6 +258,25 @@ ARD の二乗距離は `r² = Σ_d (x_d - x'_d)² / ℓ_d²`。全 `ℓ_d` が�
 
 `FreeInducing` の `Sgpr` は、その後ろに列優先の誘導点座標 `Z` を足す（§6.1）。
 
+**与えられた距離。** カーネルの葉は、座標の代わりに、呼び出し側が与えた二乗距離を読める（測地距離、グラフ距離、別の場所で計算した距離）。供給は *スロット* で表す: `ScalarDistance`（対ごとに `d²` を 1 つ）か `ArdDistance::new(d)`（次元ごとに `(Δ_k)²` を 1 つ、`d ≥ 1`）。`ScalarDistance::kernel` は RBF、Matérn、Periodic、RQ、`KernelTerm` を受ける（封印した `ScalarDistanceLeaf`）。`ArdDistance::kernel` は長さスケールの数が `d` の ARD の葉を受け（封印した `ArdDistanceLeaf`）、違えば `DimensionMismatch`。Constant、White、Linear は `KernelSpec` の葉のまま。同じスロットの葉は 1 つの供給を読む。スロットはプロセスで一意の id なので、`slots()` は深さ優先で最初に使った順に、各スロットを 1 回ずつ並べる。
+
+距離の式は独立した型 `DistanceKernel<C>` で、利用者が組める `KernelSpec` の腕ではない。座標のモデルに、評価できない木を渡させないため。`C` は `DistanceOnly` か `WithPoints` で、シグネチャを決める。
+
+| 演算 | 結果 |
+| --- | --- |
+| `DistanceKernel<A> ⊕ DistanceKernel<B>`（`+`、`*`） | `DistanceKernel<A ∨ B>`（`JoinPoints`） |
+| `DistanceKernel<C> ⊕ ConstantKernel` / `WhiteKernel`（順序は問わない） | `DistanceKernel<C>` |
+| `DistanceKernel<C> ⊕ KernelSpec`（順序は問わない） | `DistanceKernel<WithPoints>` |
+
+`Gpr::new` は封印した `ModelKernel`（`KernelSpec` か `DistanceKernel<C>`）を受け、Trainer と学習後のモデルの型パラメータ `K`（既定は `KernelSpec`）として持つ。座標だけのメソッド（`kernel()`、座標の `fit` / `predict`）は `K = KernelSpec` に、`d`、`x`、`with_input_transform` は `PointKernel`（`KernelSpec` と `DistanceKernel<WithPoints>`）に、`to_kernel`、`slots`、距離のシグネチャは `DistanceKernel<C>` に置く。内部では `KernelSpec<S>` と `CompiledKernel<T, S>` が封印した `Supply` の種類 `S` を取る。`NoSupply`（既定。座標の木で、値を持たないので crate の外から見えない `Supplied` の腕を作れない）か、`DistanceKernel` の供給の葉のどちらか。モデルは自分の `K` の木を持つ。座標だけの経路（木全体を 1 つの距離行列か 1 組の座標から評価する経路と、座標の微分）は `NoSupply` にだけあり、距離の木は葉ごとの混合経路を通る。この腕の葉は、スロットの形で型が分かれる（スカラーのスロットは RBF、Matérn、Periodic、RQ、自作の葉だけ、ARD のスロットは ARD の葉だけを持つ）。そのため、スロットに合わない葉は作れず、保存されたものは読み込みの解読で失敗する。その座標モードは `Mixed` で、評価器は呼び出しの供給のビュー（正方: 密な `n × n` か、詰めた ARD の下三角。長方形: 密なブロック）からスロットを引く。
+
+| モデル | `fit` / `factor` | `predict` 系 | 共分散 / `sample` |
+| --- | --- | --- | --- |
+| Exact、`DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
+| Exact、`WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+
+`OnlineGpr::insert(sources[, x_new], y_new)` はスロットごとに `n × 1` の列を 1 本受け、新しい対角はライブラリが 0 にする。`Sgpr` と `Svgp` は `KernelSpec` だけを受ける。
+
 ### 5.2 距離キャッシュとキャッシュポリシー
 
 訓練座標は fit 中に変わらないので、対距離は 1 回計算し、各 `θ` でカーネルを組み直すあいだ使い回す。
@@ -276,6 +295,8 @@ struct DistCache<S> {
 ```
 
 置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義のカーネルの葉）と、次元ごとの生の `(Δx_d)²`（ARD のカーネルの葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
+
+**与えられた学習の距離。** `DistanceKernel` のモデルは学習の `d²`（`TrainSources`）を持ち、格納の精度で置く: `f32` のモデルは格納するときに変換し、`f64` のモデルはムーブされた `Vec`（`from_vec`）をコピーせずに持つ。スカラーのスロットは密な列優先 `dist[i + j·n]`、ARD のスロットは上の `(Δx_d)²` キャッシュと同じく下三角に詰める。Exact の格納は先頭次元の容量を持ち、`insert` が倍々で広げる。供給は `from_vec` / `from_vecs`（ムーブ）、`from_slice` / `from_slices`（呼び出しでコピー）、`borrow`（`predict` はその場で読み、`fit` と `insert` はコピー）、`fill(&dyn DistanceFill)`（`fill(n_rows, n_cols, out)` が `out[i + j·n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く）。学習の fill は 1 回の学習で 1 回だけ呼び、表も 1 回だけ格納する。キャッシュの方針にはよらない。モデルは予測のために二乗距離を持ち続けるので、`Uncached` で fill を呼び直してもメモリは減らないからである。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側の値を読む。負の値、0 でない対角、食い違う鏡像の組は、表の最大値の `1e-6` 倍以内なら直し（`0.0` か組の平均）、超えれば `ShapeMismatch`。スロットが無い・重複する・知らないものは `LengthMismatch`。共分散と `sample` は、クエリの正方行列を 1 つの集合の Gram として読むので、`WhiteKernel` の項が対角を足す。
 
 ほかの方針とのどの組み合わせも不正ではないので、方針は実行時の enum にする（§6.3）。`(n,n,d)` テンソルは `n²×d×sizeof(T)` バイト。`K` 自体が `n²×sizeof(T)`（n=5000、f64 で約 200MB）で、ARD キャッシュはその `d` 倍になる。方針は呼び出し側が `Cached` か `Uncached` を選ぶ。`n`・`d`・メモリ予算からの自動選択は意図的に対象外。
 

@@ -284,9 +284,11 @@ fn widen<T: crate::kernel::KernelScalar>(pred: Prediction<T>) -> Prediction<f64>
     }
 }
 
-pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precision::DoublePrecision>
-{
-    pub kernel: KernelSpec,
+pub(crate) struct PersistedModel<
+    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+    K: crate::kernel::ModelKernel = KernelSpec,
+> {
+    pub kernel: crate::kernel::SpecOf<K>,
     pub likelihood: GaussianLikelihood,
     pub x_unfitted: Box<dyn UnfittedTransform>,
     pub y_unfitted: Box<dyn UnfittedTarget>,

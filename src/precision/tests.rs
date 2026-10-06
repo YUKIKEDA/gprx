@@ -72,6 +72,7 @@ struct Fresh {
     k64: crate::kernel::CompiledKernel<f64>,
     l: Mat<f32>,
     factor_alpha: Vec<f32>,
+    sources: crate::kernel::TrainSources<f32>,
 }
 
 fn fresh_factor(ell: f64, noise: f64, x: MatRef<'_, f64>, y: &[f64]) -> Fresh {
@@ -108,6 +109,7 @@ fn fresh_factor(ell: f64, noise: f64, x: MatRef<'_, f64>, y: &[f64]) -> Fresh {
         k64,
         l,
         factor_alpha,
+        sources: crate::kernel::TrainSources::empty(),
     }
 }
 
@@ -117,6 +119,8 @@ impl Fresh {
             kernel: &self.spec,
             compiled: &self.k32,
             x,
+            sources: &self.sources,
+            exact: None,
             y,
             noise,
             jitter: 0.0,
@@ -138,8 +142,8 @@ fn refine_fresh<R: ResidualFormula>(
 ) -> (Vec<f64>, Vec<f64>) {
     let fresh = fresh_factor(ell, noise, x, y);
     let sys = fresh.system(x, y, noise);
-    let alpha = refine_alpha::<crate::math::Accurate, R>(&sys).expect("refine");
-    let truth = f64_alpha::<crate::math::Accurate>(&fresh.k64, &sys, noise).expect("f64");
+    let alpha = refine_alpha::<crate::math::Accurate, R, _>(&sys).expect("refine");
+    let truth = f64_alpha::<crate::math::Accurate, _>(&fresh.k64, &sys, noise).expect("f64");
     (alpha, truth)
 }
 
@@ -251,10 +255,10 @@ fn time_forrester_1024() {
     let fresh = fresh_factor(1.0, 0.1, x.as_ref(), &y);
     let sys = fresh.system(x.as_ref(), &y, 0.1);
     median("promote", &|| {
-        refine_alpha::<crate::math::Accurate, PromoteStorage>(&sys).expect("promote");
+        refine_alpha::<crate::math::Accurate, PromoteStorage, _>(&sys).expect("promote");
     });
     median("reevaluate", &|| {
-        refine_alpha::<crate::math::Accurate, ReevaluateKernel>(&sys).expect("reevaluate");
+        refine_alpha::<crate::math::Accurate, ReevaluateKernel, _>(&sys).expect("reevaluate");
     });
 }
 

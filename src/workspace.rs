@@ -443,9 +443,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
+    /// Returns [`GprError::EmptyInput`] if `n` or `m` is zero. `d` is zero
+    /// for a model on supplied distances alone.
     pub(crate) fn ensure(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
-        if n == 0 || m == 0 || d == 0 {
+        if n == 0 || m == 0 {
             return Err(GprError::EmptyInput);
         }
         if self.query_k_star.nrows() == n
@@ -472,9 +473,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
+    /// Returns [`GprError::EmptyInput`] if `n` or `m` is zero.
     pub(crate) fn ensure_at_least(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
-        if n == 0 || m == 0 || d == 0 {
+        if n == 0 || m == 0 {
             return Err(GprError::EmptyInput);
         }
         let have_n = self.query_k_star.nrows();

@@ -1,9 +1,11 @@
-//! Prediction results and options of an Exact GPR.
+//! Prediction results and options of an Exact GPR, and the predict family
+//! every model of a [`DistanceKernel`](crate::kernel::DistanceKernel)
+//! shares ([`distance_predict`]).
 
 use faer::Mat;
 
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::KernelScalar;
+use crate::kernel::{DistanceSource, KernelScalar};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, mul_lower_vec};
 use crate::policy::JitterPolicy;
 
@@ -184,3 +186,299 @@ impl<T: KernelScalar> PredictiveCovariance<T> {
         Ok(out)
     }
 }
+
+/// The query coordinates of a distance model: none for a
+/// [`DistanceOnly`](crate::kernel::DistanceOnly) kernel, the column-major
+/// `m × n_cols` coordinates of the coordinate leaves for a
+/// [`WithPoints`](crate::kernel::WithPoints) kernel.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QueryPoints<'a> {
+    pub(crate) xs: &'a [f64],
+    pub(crate) n_cols: usize,
+}
+
+impl QueryPoints<'static> {
+    /// A kernel without coordinate leaves.
+    pub(crate) const NONE: Self = Self { xs: &[], n_cols: 0 };
+}
+
+/// The query of a fitted model whose kernel reads supplied distances. The
+/// public predict family [`distance_predict`] writes calls these, so every
+/// model checks and reads a query in one place.
+pub(crate) trait DistanceQuery {
+    /// The predict scalar.
+    type Refine;
+
+    /// Mean and variance at `m` queries: `cross` is one source per slot of
+    /// the `n × m` train × query squares.
+    fn query_distances(
+        &self,
+        cross: Vec<DistanceSource<'_>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<Self::Refine>, GprError>;
+
+    /// [`Self::query_distances`] into `out`, through the model's buffers.
+    fn query_distances_into(
+        &mut self,
+        cross: Vec<DistanceSource<'_>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+        out: &mut Prediction<Self::Refine>,
+    ) -> Result<(), GprError>;
+
+    /// Mean and query × query covariance: `square` is one source per slot
+    /// of the `m × m` query squares.
+    fn query_distance_covariance(
+        &self,
+        cross: Vec<DistanceSource<'_>>,
+        square: Vec<DistanceSource<'_>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<Self::Refine>, GprError>;
+
+    /// The jitter retries of a posterior draw.
+    fn draw_jitter(&self) -> JitterPolicy;
+}
+
+/// The public predict family of a model of a distance kernel:
+/// `predict`, `predict_into`, `predict_with`, `predict_with_into`,
+/// `predict_covariance`, `predict_covariance_with`, `sample`, and
+/// `sample_with`, over [`DistanceQuery`].
+///
+/// `refine` is the model's predict scalar. `args` are the coordinate arguments before the query count `m` and
+/// `tail` those after it (none for a `DistanceOnly` kernel); `points` is
+/// the [`QueryPoints`] they make. `reads` says how the model reads a
+/// table; `predict_doc` / `covariance_doc` end the docs of the `predict`
+/// and the covariance methods.
+macro_rules! distance_predict {
+    (
+        impl [$($gen:tt)*] $model:ty,
+        refine = $refine:ty,
+        args = ($($arg:ident: $ty:ty),*),
+        tail = ($($tail:ident: $tty:ty),*),
+        points = $points:expr,
+        reads = { $(#[$reads:meta])* },
+        predict_doc = { $(#[$pdoc:meta])* },
+        covariance_doc = { $(#[$cdoc:meta])* },
+    ) => {
+        impl<$($gen)*> $model {
+            /// Predicts at `m` queries with [`PredictOptions::default`]
+            /// (observation variance).
+            ///
+            /// `sources` holds one source per slot: the `n × m` squared
+            /// distances from the training samples to the queries.
+            $(#[$reads])*
+            ///
+            /// # Errors
+            ///
+            /// Returns [`GprError::EmptyInput`] if `m` is zero,
+            /// [`GprError::LengthMismatch`] if a table has the wrong length
+            /// or a slot has no source or two, [`GprError::NonFiniteInput`]
+            /// for a non-finite value, [`GprError::ShapeMismatch`] for a
+            /// negative value, and the query errors of the coordinate
+            /// model's `predict`.
+            ///
+            $(#[$pdoc])*
+            pub fn predict<'s>(
+                &self,
+                sources: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+            ) -> Result<Prediction<$refine>, GprError> {
+                self.predict_with(sources, $($arg,)* m, $($tail,)* PredictOptions::default())
+            }
+
+            /// Writes [`Self::predict`] into `out`, reusing its capacity.
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::predict`].
+            ///
+            $(#[$pdoc])*
+            pub fn predict_into<'s>(
+                &mut self,
+                sources: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+                out: &mut Prediction<$refine>,
+            ) -> Result<(), GprError> {
+                self.predict_with_into(sources, $($arg,)* m, $($tail,)* PredictOptions::default(), out)
+            }
+
+            /// Predicts with an explicit variance kind.
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::predict`].
+            ///
+            $(#[$pdoc])*
+            pub fn predict_with<'s>(
+                &self,
+                sources: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+                options: PredictOptions,
+            ) -> Result<Prediction<$refine>, GprError> {
+                $crate::prediction::DistanceQuery::query_distances(
+                    self,
+                    sources.into_iter().collect(),
+                    $points,
+                    m,
+                    options,
+                )
+            }
+
+            /// Writes [`Self::predict_with`] into `out`, reusing its capacity.
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::predict`].
+            ///
+            $(#[$pdoc])*
+            pub fn predict_with_into<'s>(
+                &mut self,
+                sources: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+                options: PredictOptions,
+                out: &mut Prediction<$refine>,
+            ) -> Result<(), GprError> {
+                $crate::prediction::DistanceQuery::query_distances_into(
+                    self,
+                    sources.into_iter().collect(),
+                    $points,
+                    m,
+                    options,
+                    out,
+                )
+            }
+
+            /// Returns the predictive mean and query–query covariance.
+            ///
+            /// `cross` holds the `n × m` squared distances from the training
+            /// samples to the queries; `square` the `m × m` ones between the
+            /// queries (zero diagonal, symmetric).
+            $(#[$reads])*
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::predict`], plus [`GprError::ShapeMismatch`] if
+            /// a query square's diagonal or symmetry is off past rounding
+            /// (see [`crate::kernel::ScalarDistance`]).
+            ///
+            $(#[$cdoc])*
+            pub fn predict_covariance<'s>(
+                &self,
+                cross: impl IntoIterator<Item = DistanceSource<'s>>,
+                square: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+            ) -> Result<PredictiveCovariance<$refine>, GprError> {
+                self.predict_covariance_with(
+                    cross,
+                    square,
+                    $($arg,)*
+                    m,
+                    $($tail,)*
+                    PredictOptions::default(),
+                )
+            }
+
+            /// Returns query–query covariance with an explicit variance kind.
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::predict_covariance`].
+            ///
+            $(#[$cdoc])*
+            pub fn predict_covariance_with<'s>(
+                &self,
+                cross: impl IntoIterator<Item = DistanceSource<'s>>,
+                square: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+                options: PredictOptions,
+            ) -> Result<PredictiveCovariance<$refine>, GprError> {
+                $crate::prediction::DistanceQuery::query_distance_covariance(
+                    self,
+                    cross.into_iter().collect(),
+                    square.into_iter().collect(),
+                    $points,
+                    m,
+                    options,
+                )
+            }
+
+            /// Draws posterior samples from [`Self::predict_covariance`].
+            ///
+            /// `seed` starts gprx's seeded generator, as in the coordinate
+            /// model's `sample`.
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::predict_covariance`], plus
+            /// [`GprError::CholeskyFailed`] if the posterior covariance does
+            /// not factor.
+            ///
+            $(#[$cdoc])*
+            #[allow(clippy::too_many_arguments)]
+            pub fn sample<'s>(
+                &self,
+                cross: impl IntoIterator<Item = DistanceSource<'s>>,
+                square: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+                n_draws: usize,
+                seed: u64,
+            ) -> Result<Vec<$refine>, GprError> {
+                self.sample_with(
+                    cross,
+                    square,
+                    $($arg,)*
+                    m,
+                    $($tail,)*
+                    PredictOptions::default(),
+                    n_draws,
+                    seed,
+                )
+            }
+
+            /// Draws posterior samples with an explicit variance kind.
+            ///
+            /// # Errors
+            ///
+            /// Same as [`Self::sample`].
+            ///
+            $(#[$cdoc])*
+            #[allow(clippy::too_many_arguments)]
+            pub fn sample_with<'s>(
+                &self,
+                cross: impl IntoIterator<Item = DistanceSource<'s>>,
+                square: impl IntoIterator<Item = DistanceSource<'s>>,
+                $($arg: $ty,)*
+                m: usize,
+                $($tail: $tty,)*
+                options: PredictOptions,
+                n_draws: usize,
+                seed: u64,
+            ) -> Result<Vec<$refine>, GprError> {
+                let jitter = $crate::prediction::DistanceQuery::draw_jitter(self);
+                self.predict_covariance_with(cross, square, $($arg,)* m, $($tail,)* options)?
+                    .draw(n_draws, seed, jitter)
+            }
+        }
+    };
+}
+
+pub(crate) use distance_predict;

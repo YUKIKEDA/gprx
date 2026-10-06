@@ -185,6 +185,18 @@ impl ConstantKernel {
         out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        require_columns(x)?;
+        self.apply_rows(x, out, uplo)
+    }
+
+    /// [`Self::apply_points`] without the column check: only the shape of the
+    /// rows is read, so a tree on supplied distances passes no columns.
+    pub(crate) fn apply_rows<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
         require_points_square(x, out.as_ref())?;
         self.write_square(out, uplo)
     }
@@ -197,6 +209,19 @@ impl ConstantKernel {
     ///
     /// See the example on [`ConstantKernel`].
     pub fn apply_cross_points<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        require_columns(x)?;
+        require_columns(xs)?;
+        self.apply_cross_rows(x, xs, out)
+    }
+
+    /// [`Self::apply_cross_points`] without the column check: only the shape of the
+    /// rows is read, so a tree on supplied distances passes no columns.
+    pub(crate) fn apply_cross_rows<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
@@ -255,6 +280,19 @@ impl ConstantKernel {
         param_idx: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
+        require_columns(x)?;
+        self.grad_rows(x, d_k, param_idx, uplo)
+    }
+
+    /// [`Self::grad_points`] without the column check: only the shape of the
+    /// rows is read, so a tree on supplied distances passes no columns.
+    pub(crate) fn grad_rows<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
         require_param_idx(param_idx)?;
         require_points_square(x, d_k.as_ref())?;
         self.write_square(d_k, uplo)
@@ -275,7 +313,7 @@ impl ConstantKernel {
         param_idx: usize,
     ) -> Result<(), GprError> {
         require_param_idx(param_idx)?;
-        self.apply_cross_points(x, xs, d_k)
+        self.apply_cross_rows(x, xs, d_k)
     }
 
     /// Writes the rectangular `∂²K(x, xs)/∂θ²` (`∂²k/∂θ² = c`).
@@ -293,7 +331,7 @@ impl ConstantKernel {
         j: usize,
     ) -> Result<(), GprError> {
         require_hess_idx(i, j)?;
-        self.apply_cross_points(x, xs, d2_k)
+        self.apply_cross_rows(x, xs, d2_k)
     }
 
     /// Writes `∂²K/∂θ²` for `θ = log(c)` into `d2_k` (`∂²k/∂θ² = c`).
@@ -327,6 +365,20 @@ impl ConstantKernel {
     ///
     /// See the example on [`ConstantKernel`].
     pub fn hess_points<T: KernelScalar>(
+        &self,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        require_columns(x)?;
+        self.hess_rows(x, d2_k, i, j, uplo)
+    }
+
+    /// [`Self::hess_points`] without the column check: only the shape of the
+    /// rows is read, so a tree on supplied distances passes no columns.
+    pub(crate) fn hess_rows<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         d2_k: MatMut<'_, T>,
@@ -373,7 +425,7 @@ fn require_points_square<T: KernelScalar>(
     x: MatRef<'_, T>,
     out: MatRef<'_, T>,
 ) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
+    if x.nrows() == 0 {
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
@@ -395,7 +447,7 @@ fn require_cross_points<T: KernelScalar>(
     xs: MatRef<'_, T>,
     out: MatRef<'_, T>,
 ) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 || xs.nrows() == 0 || xs.ncols() == 0 {
+    if x.nrows() == 0 || xs.nrows() == 0 {
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {
@@ -408,6 +460,14 @@ fn require_cross_points<T: KernelScalar>(
                 xs.nrows()
             ),
         });
+    }
+    Ok(())
+}
+
+/// Rejects coordinates without a column ([`GprError::EmptyInput`]).
+fn require_columns<T>(x: MatRef<'_, T>) -> Result<(), GprError> {
+    if x.ncols() == 0 {
+        return Err(GprError::EmptyInput);
     }
     Ok(())
 }

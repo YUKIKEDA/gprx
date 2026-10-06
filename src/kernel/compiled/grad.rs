@@ -1,13 +1,14 @@
 use super::apply::{combine_diag, mul_assign};
 use super::coord::{self, Dir};
 use super::{
-    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
-    require_scratch_shape, term_scratch,
+    CompiledKernel, CrossViews, LeafRef, MixedKernelViews, Nested, Term, ard_needs_coords,
+    mul_triangle, require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::kernel::dist::ArdSqDiff;
 use crate::kernel::radial;
+use crate::kernel::tree::Supply;
 use crate::kernel::{CustomKernel, Triangle, write_square_from_coords};
 use faer::{Mat, MatMut, MatRef};
 
@@ -49,23 +50,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
-        match self {
-            Self::Rbf(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
-            Self::RbfArd(_)
-            | Self::Linear(_)
-            | Self::MaternArd(_)
-            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
-            Self::Matern(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
-            Self::Periodic(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
-            Self::RationalQuadratic(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
-            Self::Constant(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
-            Self::White(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
-            Self::Custom(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
-            Self::Sum(terms) => {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.grad_dist::<M>(dist, d_k, param_idx, uplo),
+            Term::Supplied(never) => match *never {},
+            Term::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_with::<M>(dist, d_k, local, uplo, scratch, nested)
             }
-            Self::Product(terms) => {
+            Term::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
                 let (owner, local) = term_index_for_param(terms, param_idx)?;
                 product_with_owner(
@@ -108,6 +100,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         uplo: Triangle,
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        self.require_columns(x)?;
         let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
         self.grad_points_with::<M>(x, d_k, param_idx, uplo, scratch, &mut nested)
     }
@@ -122,26 +115,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
-        match self {
-            Self::Rbf(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
-            Self::Matern(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
-            Self::Periodic(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
-            Self::RationalQuadratic(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
-            Self::Custom(leaf) => {
-                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
-                grad_custom_from_coords(leaf, x, d_k, param_idx, uplo, scratch)
-            }
-            Self::RbfArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
-            Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
-            Self::MaternArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
-            Self::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
-            Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
-            Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
-            Self::Sum(terms) => {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.grad_points::<M>(x, d_k, param_idx, uplo, scratch),
+            Term::Supplied(never) => match *never {},
+            Term::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_points_with::<M>(x, d_k, local, uplo, scratch, nested)
             }
-            Self::Product(terms) => {
+            Term::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
                 let (owner, local) = term_index_for_param(terms, param_idx)?;
                 product_with_owner(
@@ -159,68 +140,6 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
-    /// Writes `∂k(x_i, x_i)/∂θ_{param_idx}` into `out[i]`.
-    ///
-    /// The off-diagonal Gram derivative is not formed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::EmptyInput`] if `x` is empty,
-    /// [`GprError::IndexOutOfRange`] if `param_idx` is out of range or
-    /// `out.len()` is not `x.nrows()`, or the leaf error for that diagonal entry.
-    pub(crate) fn grad_diag_points<M: crate::math::KernelMath>(
-        &self,
-        x: MatRef<'_, T>,
-        out: &mut [T],
-        param_idx: usize,
-    ) -> Result<(), GprError> {
-        match self {
-            Self::Linear(leaf) => {
-                require_diag_len(x, out)?;
-                let one = x.submatrix(0, 0, 1, x.ncols());
-                eval_cell(|cell| leaf.grad(one, cell, param_idx, Triangle::Lower))?;
-                leaf.fill_diag_points(x, out)
-            }
-            Self::Rbf(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_from_coords::<M, _>(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::Matern(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_from_coords::<M, _>(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::Periodic(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_from_coords::<M, _>(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::RationalQuadratic(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::Custom(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                let mut dist = [T::from_f64(0.0)];
-                let dist = MatMut::from_column_major_slice_mut(&mut dist, 1, 1);
-                grad_custom_from_coords(leaf, one, cell, param_idx, Triangle::Lower, dist)
-            }),
-            Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::MaternArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::RationalQuadraticArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::Constant(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_points(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_points(one, cell, param_idx, Triangle::Lower)
-            }),
-            Self::Sum(terms) => {
-                let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_diag_points::<M>(x, out, local)
-            }
-            Self::Product(terms) => product_grad_diag::<M, _>(terms, x, out, param_idx),
-        }
-    }
-
     // The cache and `x` views, output, index, triangle, scratch, and levels.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn grad_from_ard_cache<M: crate::math::KernelMath>(
@@ -233,70 +152,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
-        match self {
-            Self::RbfArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
-            Self::MaternArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
-            Self::RationalQuadraticArd(leaf) => leaf.grad_from_sq_diff(cache, d_k, param_idx, uplo),
-            Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
-            Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
-            Self::Sum(terms) => {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.grad_ard_cache::<M>(cache, x, d_k, param_idx, uplo, scratch),
+            Term::Supplied(never) => match *never {},
+            Term::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_from_ard_cache::<M>(cache, x, d_k, local, uplo, scratch, nested)
             }
-            _ => self.grad_points_with::<M>(x, d_k, param_idx, uplo, scratch, nested),
-        }
-    }
-
-    /// Writes `∂K/∂θ` from a distance matrix and coordinates, one mode per leaf.
-    pub(crate) fn grad_mixed<M: crate::math::KernelMath>(
-        &self,
-        views: MixedKernelViews<'_, T>,
-        d_k: MatMut<'_, T>,
-        param_idx: usize,
-        uplo: Triangle,
-        scratch: MatMut<'_, T>,
-        nested: &mut Nested<T>,
-    ) -> Result<(), GprError> {
-        match self {
-            Self::Rbf(_)
-            | Self::Matern(_)
-            | Self::Periodic(_)
-            | Self::RationalQuadratic(_)
-            | Self::Custom(_)
-            | Self::Constant(_)
-            | Self::White(_) => {
-                self.grad_with::<M>(views.dist, d_k, param_idx, uplo, scratch, nested)
-            }
-            Self::RbfArd(_)
-            | Self::Linear(_)
-            | Self::MaternArd(_)
-            | Self::RationalQuadraticArd(_) => {
-                if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
-                    self.grad_from_ard_cache::<M>(
-                        cache, views.x, d_k, param_idx, uplo, scratch, nested,
-                    )
-                } else {
-                    self.grad_points_with::<M>(views.x, d_k, param_idx, uplo, scratch, nested)
-                }
-            }
-            Self::Sum(terms) => {
-                let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_mixed::<M>(views, d_k, local, uplo, scratch, nested)
-            }
-            Self::Product(terms) => {
-                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
-                let (owner, local) = term_index_for_param(terms, param_idx)?;
-                product_with_owner(
-                    terms,
-                    owner,
-                    ProductBuffers::new(d_k, scratch, nested, uplo),
-                    |term, out, scratch, nested| {
-                        term.apply_mixed::<M>(views, out, uplo, scratch, nested)
-                    },
-                    |term, out, scratch, nested| {
-                        term.grad_mixed::<M>(views, out, local, uplo, scratch, nested)
-                    },
-                )
+            Term::Product(_) => {
+                self.grad_points_with::<M>(x, d_k, param_idx, uplo, scratch, nested)
             }
         }
     }
@@ -346,6 +210,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(_) => coord::zero_block(x1, x2, d_k, &[dim]),
             Self::Linear(leaf) => coord::linear_grad_dim(leaf, x1, x2, d_k, dim),
             Self::Custom(leaf) => coord::custom_grad_dim(leaf, x1, x2, d_k, dim),
+            Self::Supplied(never) => match *never {},
             Self::Sum(terms) => fold_coord_sum(terms, d_k.as_mut(), scratch, |term, dest| {
                 term.grad_wrt_coord_dim_with::<M>(x1, x2, dest, dim, Mat::new().as_mut())
             }),
@@ -393,6 +258,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Custom(leaf) => {
                 coord::custom_hess_dims(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
             }
+            Self::Supplied(never) => match *never {},
             Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
                 term.hess_wrt_coord_dims::<M>(x1, x2, dest, dim_a, dim_b, Mat::new().as_mut())
             }),
@@ -444,6 +310,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Custom(leaf) => {
                 coord::custom_hess_dims(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
             }
+            Self::Supplied(never) => match *never {},
             Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
                 term.hess_wrt_coord_mixed::<M>(x1, x2, dest, dim_x1, dim_x2, Mat::new().as_mut())
             }),
@@ -497,6 +364,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 coord::linear_grad_dim(leaf, x1, x2, d2_k, dim)
             }
             Self::Custom(leaf) => coord::custom_theta_dim(leaf, x1, x2, d2_k, param_idx, dim),
+            Self::Supplied(never) => match *never {},
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.hess_theta_coord_dim::<M>(x1, x2, d2_k, local, dim)
@@ -508,6 +376,109 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 d2_k,
                 (Dir::Theta(param_idx), Some(Dir::X2(dim))),
             ),
+        }
+    }
+}
+
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
+    /// Writes `∂k(x_i, x_i)/∂θ_{param_idx}` into `out[i]`.
+    ///
+    /// The off-diagonal Gram derivative is not formed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `x` is empty,
+    /// [`GprError::IndexOutOfRange`] if `param_idx` is out of range or
+    /// `out.len()` is not `x.nrows()`, or the leaf error for that diagonal entry.
+    pub(crate) fn grad_diag_points<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        out: &mut [T],
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Linear(leaf) => {
+                require_diag_len(x, out)?;
+                let one = x.submatrix(0, 0, 1, x.ncols());
+                eval_cell(|cell| leaf.grad(one, cell, param_idx, Triangle::Lower))?;
+                leaf.fill_diag_points(x, out)
+            }
+            Self::Rbf(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords::<M, _>(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Matern(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords::<M, _>(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Periodic(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords::<M, _>(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::RationalQuadratic(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_from_coords(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Custom(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                let mut dist = [T::from_f64(0.0)];
+                let dist = MatMut::from_column_major_slice_mut(&mut dist, 1, 1);
+                grad_custom_from_coords(leaf, one, cell, param_idx, Triangle::Lower, dist)
+            }),
+            Self::RbfArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::MaternArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_math::<M, _>(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::RationalQuadraticArd(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Constant(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_rows(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
+                leaf.grad_rows(one, cell, param_idx, Triangle::Lower)
+            }),
+            Self::Supplied(leaf) => {
+                require_count_diag(x, out)?;
+                S::compiled(leaf).grad_diag::<M>(out, param_idx)
+            }
+            Self::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_diag_points::<M>(x, out, local)
+            }
+            Self::Product(terms) => product_grad_diag::<M, _, _>(terms, x, out, param_idx),
+        }
+    }
+
+    /// Writes `∂K/∂θ` from a distance matrix and coordinates, one mode per leaf.
+    pub(crate) fn grad_mixed<M: crate::math::KernelMath>(
+        &self,
+        views: MixedKernelViews<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.grad_mixed::<M>(views, d_k, param_idx, uplo, scratch),
+            Term::Supplied(leaf) => S::compiled(leaf).grad::<M>(views.slots, d_k, param_idx, uplo),
+            Term::Sum(terms) => {
+                let (term, local) = term_for_param(terms, param_idx)?;
+                term.grad_mixed::<M>(views, d_k, local, uplo, scratch, nested)
+            }
+            Term::Product(terms) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
+                let (owner, local) = term_index_for_param(terms, param_idx)?;
+                product_with_owner(
+                    terms,
+                    owner,
+                    ProductBuffers::new(d_k, scratch, nested, uplo),
+                    |term, out, scratch, nested| {
+                        term.apply_mixed::<M>(views, out, uplo, scratch, nested)
+                    },
+                    |term, out, scratch, nested| {
+                        term.grad_mixed::<M>(views, out, local, uplo, scratch, nested)
+                    },
+                )
+            }
         }
     }
 
@@ -540,6 +511,20 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
+        self.grad_cross_views::<M>(CrossViews::points(x1, x2), d_k, param_idx, scratch, nested)
+    }
+
+    /// The rectangular `∂K/∂θ_{param_idx}` of the block `views` describes:
+    /// coordinate leaves from coordinates, supplied leaves from their block.
+    pub(crate) fn grad_cross_views<M: crate::math::KernelMath>(
+        &self,
+        views: CrossViews<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        let CrossViews { x1, x2, .. } = views;
         match self {
             Self::Rbf(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
             Self::Matern(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
@@ -550,17 +535,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
             Self::Linear(leaf) => leaf.grad_cross(x1, x2, d_k, param_idx),
             Self::Constant(leaf) => leaf.grad_cross_points(x1, x2, d_k, param_idx),
-            Self::White(leaf) => {
+            Self::White(_) => {
                 let _ = param_idx;
-                if x1.ncols() == 0 {
-                    return Err(GprError::EmptyInput);
-                }
-                leaf.grad_wrt_coord_dim(x1, x2, d_k, 0)
+                white_cross_zero(x1, x2, d_k)
             }
             Self::Custom(leaf) => coord::custom_cross_grad(leaf, x1, x2, d_k, param_idx),
+            Self::Supplied(leaf) => S::compiled(leaf).grad_cross::<M>(views.slots, d_k, param_idx),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_cross_points_with::<M>(x1, x2, d_k, local, scratch, nested)
+                term.grad_cross_views::<M>(views, d_k, local, scratch, nested)
             }
             Self::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
@@ -570,14 +553,146 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     owner,
                     ProductBuffers::rect(d_k, scratch, nested),
                     |term, out, scratch, nested| {
-                        term.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
+                        term.apply_cross_mixed::<M>(views, out, scratch, nested)
                     },
                     |term, out, scratch, nested| {
-                        term.grad_cross_points_with::<M>(x1, x2, out, local, scratch, nested)
+                        term.grad_cross_views::<M>(views, out, local, scratch, nested)
                     },
                 )
             }
         }
+    }
+}
+
+/// The leaf arms of the coordinate `∂K/∂θ` paths.
+impl<T: KernelScalar> LeafRef<'_, T> {
+    /// `∂k(dist)/∂θ_{param_idx}` for `uplo`.
+    fn grad_dist<M: crate::math::KernelMath>(
+        self,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
+            Self::Matern(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
+            Self::Periodic(leaf) => leaf.grad_math::<M, _>(dist, d_k, param_idx, uplo),
+            Self::RationalQuadratic(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::Custom(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+        }
+    }
+
+    /// `∂K/∂θ_{param_idx}` from coordinates. A custom leaf writes its
+    /// distances into `scratch` first.
+    fn grad_points<M: crate::math::KernelMath>(
+        self,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
+            Self::Matern(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
+            Self::Periodic(leaf) => leaf.grad_from_coords::<M, _>(x, d_k, param_idx, uplo),
+            Self::RationalQuadratic(leaf) => leaf.grad_from_coords(x, d_k, param_idx, uplo),
+            Self::Custom(leaf) => {
+                require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
+                grad_custom_from_coords(leaf, x, d_k, param_idx, uplo, scratch)
+            }
+            Self::RbfArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
+            Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
+            Self::MaternArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
+        }
+    }
+
+    /// `∂K/∂θ_{param_idx}` from the raw `(Δx_d)²` cache for an ARD leaf;
+    /// any other leaf from coordinates.
+    fn grad_ard_cache<M: crate::math::KernelMath>(
+        self,
+        cache: ArdSqDiff<'_, T>,
+        x: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::RbfArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
+            Self::MaternArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.grad_from_sq_diff(cache, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
+            _ => self.grad_points::<M>(x, d_k, param_idx, uplo, scratch),
+        }
+    }
+
+    /// `∂K/∂θ_{param_idx}` in the leaf's own mode (see `apply_mixed`).
+    fn grad_mixed<M: crate::math::KernelMath>(
+        self,
+        views: MixedKernelViews<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        if self.reads_dist() {
+            return match views.dist {
+                Some(dist) => self.grad_dist::<M>(dist, d_k, param_idx, uplo),
+                None => self.grad_points::<M>(views.x, d_k, param_idx, uplo, scratch),
+            };
+        }
+        match views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
+            Some(cache) => self.grad_ard_cache::<M>(cache, views.x, d_k, param_idx, uplo, scratch),
+            None => self.grad_points::<M>(views.x, d_k, param_idx, uplo, scratch),
+        }
+    }
+}
+
+/// The rectangular White block (and each of its derivatives): zero, since
+/// `K(x1, x2)` is always the cross covariance. Needs no coordinate column.
+pub(super) fn white_cross_zero<T: KernelScalar>(
+    x1: MatRef<'_, T>,
+    x2: MatRef<'_, T>,
+    mut d_k: MatMut<'_, T>,
+) -> Result<(), GprError> {
+    if x1.nrows() == 0 || x2.nrows() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if d_k.nrows() != x1.nrows() || d_k.ncols() != x2.nrows() {
+        return Err(GprError::ShapeMismatch {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                d_k.nrows(),
+                d_k.ncols(),
+                x1.nrows(),
+                x2.nrows()
+            ),
+        });
+    }
+    d_k.fill(T::from_f64(0.0));
+    Ok(())
+}
+
+/// `out` has one entry per row of `x`.
+fn require_count_diag<T>(x: MatRef<'_, T>, out: &[T]) -> Result<(), GprError> {
+    if out.len() == x.nrows() {
+        Ok(())
+    } else {
+        Err(GprError::LengthMismatch {
+            reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
+        })
     }
 }
 
@@ -620,17 +735,17 @@ fn grad_custom_from_coords<T: KernelScalar>(
     leaf.grad(scratch.as_ref(), d_k.as_mut(), param_idx, uplo)
 }
 
-fn term_for_param<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+fn term_for_param<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     param_idx: usize,
-) -> Result<(&CompiledKernel<T>, usize), GprError> {
+) -> Result<(&CompiledKernel<T, S>, usize), GprError> {
     let (index, local) = term_index_for_param(terms, param_idx)?;
     Ok((&terms[index], local))
 }
 
 /// The index of the term that owns `param_idx`, and the index within it.
-pub(super) fn term_index_for_param<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+pub(super) fn term_index_for_param<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     param_idx: usize,
 ) -> Result<(usize, usize), GprError> {
     let mut offset = 0;
@@ -704,18 +819,18 @@ impl<'a, 'n, T> ProductBuffers<'a, 'n, T> {
 /// Writes `deriv(terms[owner]) · ∏_{k ≠ owner} apply(terms[k])` into `out`.
 ///
 /// Each writer gets `(term, out, scratch, nested levels below it)`.
-pub(super) fn product_with_owner<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+pub(super) fn product_with_owner<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     owner: usize,
     buffers: ProductBuffers<'_, '_, T>,
     mut apply: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         MatMut<'_, T>,
         &mut Nested<T>,
     ) -> Result<(), GprError>,
     mut deriv: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         MatMut<'_, T>,
         &mut Nested<T>,
@@ -757,7 +872,8 @@ pub(super) fn require_diag_len<T: KernelScalar>(
     x: MatRef<'_, T>,
     out: &[T],
 ) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
+    // Columns may be zero: Constant, White, and supplied leaves read none.
+    if x.nrows() == 0 {
         return Err(GprError::EmptyInput);
     }
     if out.len() != x.nrows() {
@@ -788,8 +904,8 @@ pub(super) fn eval_cell<T: KernelScalar>(
     Ok(cell[0])
 }
 
-pub(super) fn scale_by_other_diags<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+pub(super) fn scale_by_other_diags<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     skip_a: usize,
     skip_b: Option<usize>,
     x: MatRef<'_, T>,
@@ -800,14 +916,14 @@ pub(super) fn scale_by_other_diags<T: KernelScalar>(
             continue;
         }
         combine_diag(out, mul_assign, |start, block| {
-            term.fill_diag_points(x.subrows(start, block.len()), block)
+            term.fill_diag_rows(x.subrows(start, block.len()), block)
         })?;
     }
     Ok(())
 }
 
-fn product_grad_diag<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+fn product_grad_diag<M: crate::math::KernelMath, T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     x: MatRef<'_, T>,
     out: &mut [T],
     param_idx: usize,

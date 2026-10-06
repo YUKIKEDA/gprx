@@ -371,6 +371,122 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+### Supplied distances (`ScalarDistance`, `ArdDistance`)
+
+A kernel leaf can read squared distances you supply instead of coordinates: a geodesic or graph distance, or a distance from another program. `ScalarDistance::new()` is a slot of one `d²` per pair; `kernel(leaf)` takes an `RbfKernel`, `MaternKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, or a `KernelTerm` (the `ScalarDistanceLeaf` bound). `ArdDistance::new(d)` is a slot of `d` blocks, one `(Δ_k)²` per dimension; `kernel(leaf)` takes `RbfArdKernel`, `MaternArdKernel`, or `RationalQuadraticArdKernel` (the `ArdDistanceLeaf` bound) and returns `DimensionMismatch` when the leaf's lengthscale count is not `d`. `ArdDistance::new(0)` is `EmptyInput`. Every leaf of one slot reads the same supply. `ConstantKernel`, `WhiteKernel`, and `LinearKernel` stay `KernelSpec` leaves.
+
+The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` is `WithPoints`. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use.
+
+`Gpr::new` takes any `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`). `with_input_transform` is on the `PointKernel` models only (`KernelSpec` and `DistanceKernel<WithPoints>`). Each slot gets one `DistanceSource` per call:
+
+| Source | Copy |
+| --- | --- |
+| `from_vec(d2)` / `from_vecs(blocks)` | moved into the model (an `f64` model keeps the buffer) |
+| `from_slice(d2)` / `from_slices(blocks)` | copied at the call |
+| `borrow(d2)` | read in place by `predict`; copied by `fit` and `insert` |
+| `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` writes `out[i + j * n_rows]`; an ARD fill writes its `d` blocks one after another |
+
+Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, up to rounding: within `1e-6` of the table's largest value, a negative value or a diagonal becomes `0.0` and a mirror pair `(i, j)`, `(j, i)` becomes its mean, so a table from `‖a‖² + ‖b‖² − 2a·b` or from a distance computed in each direction is accepted. Past that it is `ShapeMismatch`. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. A training fill is called once per fit, whatever the `DistanceCachePolicy`: the model keeps the squares it wrote. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave.
+
+| Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
+| --- | --- | --- | --- |
+| `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
+| `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+
+`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. `OnlineGpr::insert(sources, y_new)` (or `insert(sources, x_new, y_new)`) takes one `n × 1` column per slot to the current points; the library writes the new diagonal zero. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`.
+
+```rust
+use gprx::kernel::{
+    ArdDistance, ArdDistanceLeaf, ConstantKernel, DistanceFill, DistanceKernel, DistanceOnly,
+    DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, PointKernel, PointUse,
+    RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, WithPoints,
+};
+use gprx::{Fixed, GaussianLikelihood, Gpr};
+
+/// Squared distances of points 0, 1, 2, … on a line.
+struct Line;
+
+impl DistanceFill for Line {
+    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
+        for j in 0..n_cols {
+            for i in 0..n_rows {
+                out[i + j * n_rows] = (i as f64 - j as f64).powi(2);
+            }
+        }
+    }
+}
+
+fn scalar_leaf(leaf: impl ScalarDistanceLeaf, slot: ScalarDistance) -> DistanceKernel {
+    slot.kernel(leaf)
+}
+
+fn takes<K: ModelKernel>(_: &K) {}
+fn takes_points<K: PointKernel>(_: &K) {}
+fn joined<A: JoinPoints<B>, B: PointUse>(_: DistanceKernel<A>, _: DistanceKernel<B>) {}
+
+fn main() -> Result<(), gprx::GprError> {
+    let image = ScalarDistance::default();
+    let other = ScalarDistance::new();
+    let kernel = scalar_leaf(RbfKernel::new(1.0)?, image) * ConstantKernel::new(0.8)?;
+    assert_eq!(kernel.slots(), vec![DistanceSlot::Scalar(image)]);
+    let mut theta = vec![0.0; kernel.num_params()];
+    kernel.get_params(&mut theta)?;
+    let _ = kernel.parameter_bindings();
+    takes(&kernel);
+    joined(image.kernel(RbfKernel::new(1.0)?), other.kernel(RbfKernel::new(2.0)?));
+
+    // Four points 0, 1, 2, 3: d²[i + j·4] = (i − j)².
+    let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let fitted = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2.clone())], 4, &y)?;
+    // Two queries at 0.5 and 1.5.
+    let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+    let square = [0.0, 1.0, 1.0, 0.0];
+    let pred = fitted.predict([image.borrow(&cross)], 2)?;
+    let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&square)], 2)?;
+    assert_eq!((pred.mean.len(), cov.covariance.len()), (2, 4));
+    let by_fill = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.fill(&Line)], 4, &y)?;
+    let source: DistanceSource<'_> = image.from_slice(&cross);
+    assert_eq!(by_fill.predict([source], 2)?, pred);
+
+    let mut online = fitted.into_online()?;
+    online.insert([image.from_vec(vec![16.0, 9.0, 4.0, 1.0])], 0.1)?;
+
+    // ARD: one block per dimension, here two copies of the line.
+    let bands = ArdDistance::new(2)?;
+    assert_eq!(bands.dims(), 2);
+    let ard: DistanceKernel<DistanceOnly> = bands.kernel(RbfArdKernel::new(&[1.0, 2.0])?)?;
+    let blocks: [&[f64]; 2] = [&d2, &d2];
+    let fitted = Gpr::new(ard, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([bands.from_slices(&blocks)], 4, &y)?;
+    let cross_blocks: [&[f64]; 2] = [&cross, &cross];
+    let _ = fitted.predict([bands.borrow(&cross_blocks)], 2)?;
+    let _ = (bands.from_vecs(vec![d2.clone(), d2.clone()]), bands.fill(&Line));
+
+    // A distance leaf times a coordinate leaf.
+    let mixed: DistanceKernel<WithPoints> =
+        image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+    takes_points(&mixed);
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let fitted = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
+    assert_eq!((fitted.d(), fitted.x()), (1, &x[..]));
+    let _ = fitted.predict([image.borrow(&cross)], &[0.5, 1.5], 2, 1)?;
+    let _ = (fitted.to_kernel(), fitted.slots());
+    Ok(())
+}
+
+fn _ard_bound(leaf: impl ArdDistanceLeaf, slot: ArdDistance) -> Result<DistanceKernel, gprx::GprError> {
+    slot.kernel(leaf)
+}
+```
+
 ### Likelihood
 
 `GaussianLikelihood::new(noise_variance)` stores `σn²` as a log parameter. `from_log_noise_variance`, `noise_variance`, `log_noise_variance`, `bounds`, `with_bounds`, `num_params`, `get_params`, `set_params`. `add_noise_diag` adds `σn²` to a kernel diagonal. `noise_grad_diag` is the derivative of that diagonal with respect to one parameter. `InvalidNoiseVariance` is a noise value outside its domain.
