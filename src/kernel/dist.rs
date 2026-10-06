@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn par_lower_fold_matches_a_serial_column_sum() {
         fn term(col: usize) -> f64 {
-            if col % 2 == 0 {
+            if col.is_multiple_of(2) {
                 1.0e16
             } else {
                 -1.0e16 + col as f64

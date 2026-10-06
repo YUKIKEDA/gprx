@@ -759,11 +759,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
                 // The model holds the last θ the optimizer evaluated, which is
                 // not the result after restarts, a rejected annealing step, or
                 // a caller optimizer that searched past its best point.
-                if !self.holds_params(&opt.params)? {
-                    if let Err(err) = self.factor_at(&opt.params, Keep::Nothing) {
-                        self.revert_theta(kernel_before, likelihood_before);
-                        return Err(err);
-                    }
+                if !self.holds_params(&opt.params)?
+                    && let Err(err) = self.factor_at(&opt.params, Keep::Nothing)
+                {
+                    self.revert_theta(kernel_before, likelihood_before);
+                    return Err(err);
                 }
                 Ok(())
             }

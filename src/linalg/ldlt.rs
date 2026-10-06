@@ -72,8 +72,10 @@ fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     let mut acc = [f64x4::ZERO; 4];
     let body = a.len() - a.len() % STEP;
     for (ca, cb) in a[..body]
-        .chunks_exact(STEP)
-        .zip(b[..body].chunks_exact(STEP))
+        .as_chunks::<STEP>()
+        .0
+        .iter()
+        .zip(b[..body].as_chunks::<STEP>().0)
     {
         for (k, slot) in acc.iter_mut().enumerate() {
             let at = k * LANES;

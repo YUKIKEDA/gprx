@@ -493,10 +493,11 @@ impl<T: KernelScalar> CompiledKernel<T> {
         // every lengthscale and the sum is one matrix product. `FastApprox`
         // stays on the per-parameter loop: its derivative is the jet, not
         // `k` times the squared distance.
-        if M::ACCURATE && matches!(self, Self::RbfArd(_)) {
-            if let Some(value) = self.contract_ard_square::<M>(walk, weight, out, bufs, node)? {
-                return Ok(value);
-            }
+        if M::ACCURATE
+            && matches!(self, Self::RbfArd(_))
+            && let Some(value) = self.contract_ard_square::<M>(walk, weight, out, bufs, node)?
+        {
+            return Ok(value);
         }
         let Some(d_k) = bufs.first_mut() else {
             return Err(too_few_buffers());
