@@ -7,6 +7,7 @@ use super::{
 };
 use crate::error::GprError;
 use crate::kernel::dist::{ArdSqDiff, for_each_lower_col, lower_col};
+use crate::kernel::leaf_params::LeafParams;
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
@@ -158,10 +159,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
             KernelSpec::Custom(leaf) => Self::Custom(leaf.with_scalar()),
-            KernelSpec::Supplied(leaf) => Self::Supplied(SuppliedLeaf {
-                slot: leaf.slot,
-                leaf: Box::new(Self::from_spec(&leaf.leaf)),
-            }),
+            KernelSpec::Supplied(leaf) => Self::Supplied(SuppliedLeaf::compile(leaf)),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
                 flatten_sum(left, &mut terms);
@@ -193,7 +191,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
             Self::Custom(leaf) => leaf.num_params(),
-            Self::Supplied(leaf) => leaf.leaf.num_params(),
+            Self::Supplied(leaf) => leaf.leaf.leaf_num_params(),
             Self::Sum(terms) | Self::Product(terms) => terms.iter().map(Self::num_params).sum(),
         }
     }
@@ -333,7 +331,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         // its answer is chosen (docs/architecture.md, adding a leaf).
         match self {
             Self::Product(_) | Self::Custom(_) => true,
-            Self::Supplied(leaf) => leaf.leaf.needs_grad_scratch(),
+            Self::Supplied(leaf) => leaf.needs_grad_scratch(),
             Self::Sum(terms) => terms.iter().any(Self::needs_grad_scratch),
             Self::Rbf(_)
             | Self::RbfArd(_)
@@ -493,64 +491,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
 
     fn write_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
         match self {
-            Self::Rbf(leaf) => {
-                out[*offset] = leaf.log_lengthscale();
-                *offset += 1;
-                Ok(())
-            }
-            Self::RbfArd(leaf) => {
-                let n = leaf.num_params();
-                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
-                *offset += n;
-                Ok(())
-            }
-            Self::Matern(leaf) => {
-                out[*offset] = leaf.log_lengthscale();
-                *offset += 1;
-                Ok(())
-            }
-            Self::MaternArd(leaf) => {
-                let n = leaf.num_params();
-                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
-                *offset += n;
-                Ok(())
-            }
-            Self::Periodic(leaf) => {
-                out[*offset] = leaf.log_lengthscale();
-                out[*offset + 1] = leaf.log_period();
-                *offset += 2;
-                Ok(())
-            }
-            Self::RationalQuadratic(leaf) => {
-                out[*offset] = leaf.log_lengthscale();
-                out[*offset + 1] = leaf.log_alpha();
-                *offset += 2;
-                Ok(())
-            }
-            Self::RationalQuadraticArd(leaf) => {
-                let n = leaf.lengthscales().num_params();
-                out[*offset..*offset + n].copy_from_slice(leaf.log_lengthscales());
-                out[*offset + n] = leaf.log_alpha();
-                *offset += n + 1;
-                Ok(())
-            }
-            Self::Constant(leaf) => {
-                out[*offset] = leaf.log_constant();
-                *offset += 1;
-                Ok(())
-            }
-            Self::Linear(leaf) => {
-                out[*offset] = leaf.log_variance();
-                *offset += 1;
-                Ok(())
-            }
-            Self::White(leaf) => {
-                out[*offset] = leaf.log_variance();
-                *offset += 1;
-                Ok(())
-            }
-            Self::Custom(leaf) => leaf.write_params(out, offset),
-            Self::Supplied(leaf) => leaf.leaf.write_params(out, offset),
+            Self::Rbf(leaf) => leaf.write_leaf_params(out, offset),
+            Self::RbfArd(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Matern(leaf) => leaf.write_leaf_params(out, offset),
+            Self::MaternArd(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Periodic(leaf) => leaf.write_leaf_params(out, offset),
+            Self::RationalQuadratic(leaf) => leaf.write_leaf_params(out, offset),
+            Self::RationalQuadraticArd(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Constant(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Linear(leaf) => leaf.write_leaf_params(out, offset),
+            Self::White(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Custom(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Supplied(leaf) => leaf.leaf.write_leaf_params(out, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.write_params(out, offset)?;
@@ -562,68 +514,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
 
     fn apply_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GprError> {
         match self {
-            Self::Rbf(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::RbfArd(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::Matern(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::MaternArd(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::Periodic(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::RationalQuadratic(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::RationalQuadraticArd(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::Constant(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::Linear(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::White(leaf) => {
-                let n = leaf.num_params();
-                leaf.set_params(&params[*offset..*offset + n])?;
-                *offset += n;
-                Ok(())
-            }
-            Self::Custom(leaf) => leaf.apply_params(params, offset),
-            Self::Supplied(leaf) => leaf.leaf.apply_params(params, offset),
+            Self::Rbf(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::RbfArd(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Matern(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::MaternArd(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Periodic(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::RationalQuadratic(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::RationalQuadraticArd(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Constant(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Linear(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::White(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Custom(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Supplied(leaf) => leaf.leaf.apply_leaf_params(params, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.apply_params(params, offset)?;

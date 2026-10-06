@@ -371,7 +371,8 @@ macro_rules! distance_predict {
             /// # Errors
             ///
             /// Same as [`Self::predict`], plus [`GprError::ShapeMismatch`] if
-            /// a query square has a non-zero diagonal or is not symmetric.
+            /// a query square's diagonal or symmetry is off past rounding
+            /// (see [`crate::kernel::ScalarDistance`]).
             ///
             $(#[$cdoc])*
             pub fn predict_covariance<'s>(

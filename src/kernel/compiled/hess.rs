@@ -4,7 +4,7 @@ use super::grad::{
     ProductBuffers, broadcast_self_diag, eval_cell, mul_fold, product_with_owner, require_diag_len,
     scale_by_other_diags, term_index_for_param,
 };
-use super::supplied::{needs_supply, rect_slot, square_slot};
+use super::supplied::needs_supply;
 use super::{
     CompiledKernel, CrossViews, MixedKernelViews, Nested, ard_needs_coords, require_scratch_shape,
     term_scratch,
@@ -312,10 +312,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Some(dist) => self.hess_with::<M>(dist, d2_k, pair, uplo, scratch, nested),
                 None => self.hess_points_with::<M>(views.x, d2_k, pair, uplo, scratch, nested),
             },
-            Self::Supplied(leaf) => {
-                let slot = square_slot(views.slots, leaf.slot)?;
-                leaf.hess::<M>(slot, views.x, d2_k, pair, uplo, scratch)
-            }
+            Self::Supplied(leaf) => leaf.hess::<M>(views.slots, d2_k, pair, uplo),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
@@ -417,10 +414,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(leaf) => leaf.hess_cross_points(x1, x2, d2_k, i, j),
             Self::White(_) => super::grad::white_cross_zero(x1, x2, d2_k),
             Self::Custom(leaf) => coord::custom_cross_hess(leaf, x1, x2, d2_k, (i, j)),
-            Self::Supplied(leaf) => {
-                let slot = rect_slot(views.slots, leaf.slot)?;
-                leaf.hess_cross::<M>(slot, d2_k, (i, j))
-            }
+            Self::Supplied(leaf) => leaf.hess_cross::<M>(views.slots, d2_k, (i, j)),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,

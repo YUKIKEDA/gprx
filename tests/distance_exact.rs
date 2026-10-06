@@ -775,3 +775,56 @@ fn mixed_precision_refines_an_ard_slot_and_an_uncached_fill_fits_the_same() {
         1e-4,
     );
 }
+
+#[test]
+fn rounding_in_a_table_of_squared_distances_is_tidied() {
+    // `‖a‖² + ‖b‖² − 2ab` of points far from the origin: the diagonal is
+    // not exactly zero and some values come out slightly negative.
+    let shift = 1.0e3;
+    let c0: Vec<f64> = coord(0, N, 0.0).iter().map(|v| v + shift).collect();
+    let q0: Vec<f64> = coord(0, M, 0.5).iter().map(|v| v + shift).collect();
+    let expanded = |a: &[f64], b: &[f64], flip: bool| -> Vec<f64> {
+        let mut out = Vec::with_capacity(a.len() * b.len());
+        for bj in b {
+            for ai in a {
+                let (x, z) = if flip { (bj, ai) } else { (ai, bj) };
+                out.push(x * x + z * z - 2.0 * x * z);
+            }
+        }
+        out
+    };
+    let mut train = expanded(&c0, &c0, false);
+    // One mirror entry from the other direction, and one rounded below zero.
+    train[1] = expanded(&c0, &c0, true)[1];
+    train[N + 1] = -1.0e-12;
+    let cross: Vec<f64> = expanded(&c0, &q0, false)
+        .iter()
+        .map(|v| if v.abs() < 1.0e-9 { -1.0e-13 } else { *v })
+        .collect();
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(MaternKernel::new(1.1, MaternNu::ThreeHalves).expect("ell"));
+    let tidy = Gpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train)], N, &y)
+        .expect("rounded table");
+    let exact = Gpr::new(kernel, lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c0, &c0))], N, &y)
+        .expect("exact table");
+    let got = tidy.predict([image.borrow(&cross)], M).expect("predict");
+    let expect = exact
+        .predict([image.borrow(&sq(&c0, &q0))], M)
+        .expect("predict");
+    assert!(got.mean.iter().all(|v| v.is_finite()));
+    assert_slice_close(&got.mean, &expect.mean, 1e-6);
+    // Past the tolerance it is still an error.
+    let mut wrong = sq(&c0, &c0);
+    wrong[1] += 1.0e-3 * wrong.iter().fold(0.0f64, |a, v| a.max(*v));
+    assert!(matches!(
+        Gpr::new(image.kernel(RbfKernel::new(1.0).expect("ell")), lik())
+            .with_optimizer(Fixed)
+            .factor([image.from_vec(wrong)], N, &y),
+        Err((_, GprError::ShapeMismatch { .. }))
+    ));
+}

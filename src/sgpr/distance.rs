@@ -87,7 +87,8 @@ where
     /// [`GprError::IndexOutOfRange`] for an index `≥ n`,
     /// [`GprError::LengthMismatch`] if a table has the wrong length or a slot
     /// has no source or two, [`GprError::ShapeMismatch`] for a negative
-    /// value, a non-zero diagonal, or an asymmetric square, and the factor and search errors of
+    /// value, or a square whose diagonal or symmetry is off past rounding
+    /// (see [`crate::kernel::ScalarDistance`]), and the factor and search errors of
     /// the coordinate [`Sgpr::fit`].
     ///
     /// # Examples

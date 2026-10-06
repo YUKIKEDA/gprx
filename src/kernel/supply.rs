@@ -16,11 +16,13 @@ use std::ops::{Add, Mul};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::GprError;
+use crate::kernel::leaf_params::LeafParams;
 use crate::kernel::{
     ConstantKernel, CustomKernel, KernelSpec, KernelTerm, MaternArdKernel, MaternKernel,
     ParameterBinding, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
     RbfArdKernel, RbfKernel, WhiteKernel,
 };
+use crate::param::Interval;
 
 static NEXT_SLOT: AtomicU64 = AtomicU64::new(1);
 
@@ -54,12 +56,150 @@ impl SlotShape {
 /// A leaf of a [`DistanceKernel`] that reads the supply of one slot.
 ///
 /// Crate-private payload of the hidden [`KernelSpec`] variant. A coordinate
-/// [`KernelSpec`] never holds one.
+/// [`KernelSpec`] never holds one. The slot's shape is the leaf's: a scalar
+/// slot holds an isotropic or custom leaf, an ARD slot an ARD leaf.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuppliedSpec {
     pub(crate) slot: SlotId,
-    pub(crate) shape: SlotShape,
-    pub(crate) leaf: Box<KernelSpec>,
+    pub(crate) leaf: SuppliedLeafSpec,
+}
+
+impl SuppliedSpec {
+    /// What the slot supplies, from the leaf.
+    pub(crate) fn shape(&self) -> SlotShape {
+        match &self.leaf {
+            SuppliedLeafSpec::Scalar(_) => SlotShape::Scalar,
+            SuppliedLeafSpec::Ard(leaf) => SlotShape::Ard(leaf.dims()),
+        }
+    }
+}
+
+/// The leaf of a [`SuppliedSpec`], typed by the shape of its slot.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SuppliedLeafSpec {
+    Scalar(ScalarLeafSpec),
+    Ard(ArdLeafSpec),
+}
+
+/// A leaf on one `d²` per pair.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScalarLeafSpec {
+    Rbf(RbfKernel),
+    Matern(MaternKernel),
+    Periodic(PeriodicKernel),
+    RationalQuadratic(RationalQuadraticKernel),
+    Custom(CustomKernel),
+}
+
+/// A leaf on one `d²` per dimension per pair.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ArdLeafSpec {
+    Rbf(RbfArdKernel),
+    Matern(MaternArdKernel),
+    RationalQuadratic(RationalQuadraticArdKernel),
+}
+
+impl ScalarLeafSpec {
+    /// The same leaf as a coordinate [`KernelSpec`] (saving).
+    pub(crate) fn to_spec(&self) -> KernelSpec {
+        match self {
+            Self::Rbf(leaf) => KernelSpec::Rbf(*leaf),
+            Self::Matern(leaf) => KernelSpec::Matern(*leaf),
+            Self::Periodic(leaf) => KernelSpec::Periodic(*leaf),
+            Self::RationalQuadratic(leaf) => KernelSpec::RationalQuadratic(*leaf),
+            Self::Custom(leaf) => KernelSpec::Custom(leaf.clone()),
+        }
+    }
+
+    /// The scalar leaf `spec` is, if it is one (loading).
+    pub(crate) fn from_spec(spec: KernelSpec) -> Option<Self> {
+        match spec {
+            KernelSpec::Rbf(leaf) => Some(Self::Rbf(leaf)),
+            KernelSpec::Matern(leaf) => Some(Self::Matern(leaf)),
+            KernelSpec::Periodic(leaf) => Some(Self::Periodic(leaf)),
+            KernelSpec::RationalQuadratic(leaf) => Some(Self::RationalQuadratic(leaf)),
+            KernelSpec::Custom(leaf) => Some(Self::Custom(leaf)),
+            _ => None,
+        }
+    }
+}
+
+impl ArdLeafSpec {
+    /// Number of lengthscales, one per dimension of the slot.
+    pub(crate) fn dims(&self) -> usize {
+        match self {
+            Self::Rbf(leaf) => leaf.lengthscales().num_params(),
+            Self::Matern(leaf) => leaf.lengthscales().num_params(),
+            Self::RationalQuadratic(leaf) => leaf.lengthscales().num_params(),
+        }
+    }
+
+    /// The same leaf as a coordinate [`KernelSpec`] (saving).
+    pub(crate) fn to_spec(&self) -> KernelSpec {
+        match self {
+            Self::Rbf(leaf) => KernelSpec::RbfArd(leaf.clone()),
+            Self::Matern(leaf) => KernelSpec::MaternArd(leaf.clone()),
+            Self::RationalQuadratic(leaf) => KernelSpec::RationalQuadraticArd(leaf.clone()),
+        }
+    }
+
+    /// The ARD leaf `spec` is, if it is one (loading).
+    pub(crate) fn from_spec(spec: KernelSpec) -> Option<Self> {
+        match spec {
+            KernelSpec::RbfArd(leaf) => Some(Self::Rbf(leaf)),
+            KernelSpec::MaternArd(leaf) => Some(Self::Matern(leaf)),
+            KernelSpec::RationalQuadraticArd(leaf) => Some(Self::RationalQuadratic(leaf)),
+            _ => None,
+        }
+    }
+}
+
+impl SuppliedLeafSpec {
+    /// The same leaf as a coordinate [`KernelSpec`] (saving).
+    pub(crate) fn to_spec(&self) -> KernelSpec {
+        match self {
+            Self::Scalar(leaf) => leaf.to_spec(),
+            Self::Ard(leaf) => leaf.to_spec(),
+        }
+    }
+}
+
+/// Every variant of a typed leaf enum, with the leaf bound to `$leaf`.
+macro_rules! each_leaf {
+    ($value:expr, $leaf:ident => $body:expr) => {
+        match $value {
+            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Rbf($leaf)) => $body,
+            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Matern($leaf)) => $body,
+            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Periodic($leaf)) => $body,
+            SuppliedLeafSpec::Scalar(ScalarLeafSpec::RationalQuadratic($leaf)) => $body,
+            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Custom($leaf)) => $body,
+            SuppliedLeafSpec::Ard(ArdLeafSpec::Rbf($leaf)) => $body,
+            SuppliedLeafSpec::Ard(ArdLeafSpec::Matern($leaf)) => $body,
+            SuppliedLeafSpec::Ard(ArdLeafSpec::RationalQuadratic($leaf)) => $body,
+        }
+    };
+}
+
+impl LeafParams for SuppliedLeafSpec {
+    fn leaf_num_params(&self) -> usize {
+        each_leaf!(self, leaf => leaf.leaf_num_params())
+    }
+
+    fn write_leaf_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
+        each_leaf!(self, leaf => leaf.write_leaf_params(out, offset))
+    }
+
+    fn write_leaf_intervals(
+        &self,
+        out: &mut [Interval],
+        offset: &mut usize,
+    ) -> Result<(), GprError> {
+        each_leaf!(self, leaf => leaf.write_leaf_intervals(out, offset))
+    }
+
+    fn apply_leaf_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GprError> {
+        each_leaf!(self, leaf => leaf.apply_leaf_params(params, offset))
+    }
 }
 
 /// Names a supply of one squared distance per pair of samples.
@@ -71,12 +211,13 @@ pub struct SuppliedSpec {
 /// call), or [`Self::fill`] (a function writes it). A squared distance is
 /// `d²`, column-major: the pair `(i, j)` is at `i + j * n_rows`.
 ///
-/// Every `d²` must be finite and non-negative. A square of the pairs of one
-/// set (the training square, or the query square of a covariance) must have a diagonal of exactly `0.0` and be
-/// exactly symmetric: `(i, j)` and `(j, i)` hold the same `f64`. There is
-/// no tolerance; a model returns [`GprError::ShapeMismatch`] otherwise. A
-/// table that is symmetric only up to rounding (an average of two
-/// directions, say) is made exact by copying one triangle onto the other.
+/// Every `d²` must be finite and non-negative, and a square of the pairs of
+/// one set (the training square, or the query square of a covariance) must
+/// have a zero diagonal and be symmetric, up to what floating point leaves:
+/// within `1e-8` of the table's largest value, a model sets a negative value
+/// or a diagonal to `0.0` and each mirror pair `(i, j)`, `(j, i)` to its
+/// mean (a borrowed table is copied first). Past that it returns
+/// [`GprError::ShapeMismatch`]: the table is not one of squared distances.
 ///
 /// # Examples
 ///
@@ -133,8 +274,7 @@ impl ScalarDistance {
     pub fn kernel(&self, leaf: impl ScalarDistanceLeaf) -> DistanceKernel {
         DistanceKernel::leaf(SuppliedSpec {
             slot: self.slot,
-            shape: SlotShape::Scalar,
-            leaf: Box::new(leaf.into_spec()),
+            leaf: SuppliedLeafSpec::Scalar(leaf.into_leaf()),
         })
     }
 
@@ -270,8 +410,7 @@ impl ArdDistance {
         }
         Ok(DistanceKernel::leaf(SuppliedSpec {
             slot: self.slot,
-            shape: SlotShape::Ard(self.dims),
-            leaf: Box::new(leaf.into_spec()),
+            leaf: SuppliedLeafSpec::Ard(leaf.into_leaf()),
         }))
     }
 
@@ -379,10 +518,11 @@ mod sealed {
     use crate::kernel::KernelSpec;
 
     pub trait Leaf {
-        fn into_spec(self) -> KernelSpec;
+        fn into_leaf(self) -> super::ScalarLeafSpec;
     }
 
-    pub trait ArdLeaf: Leaf {
+    pub trait ArdLeaf {
+        fn into_leaf(self) -> super::ArdLeafSpec;
         fn lengthscale_count(&self) -> usize;
     }
 
@@ -419,8 +559,8 @@ pub trait ArdDistanceLeaf: sealed::ArdLeaf {}
 macro_rules! scalar_leaf {
     ($($leaf:ty => $variant:ident),*) => {$(
         impl sealed::Leaf for $leaf {
-            fn into_spec(self) -> KernelSpec {
-                KernelSpec::$variant(self)
+            fn into_leaf(self) -> ScalarLeafSpec {
+                ScalarLeafSpec::$variant(self)
             }
         }
         impl ScalarDistanceLeaf for $leaf {}
@@ -439,8 +579,8 @@ impl<K> sealed::Leaf for K
 where
     K: KernelTerm<f64> + KernelTerm<f32> + Clone + fmt::Debug + Send + Sync + 'static,
 {
-    fn into_spec(self) -> KernelSpec {
-        KernelSpec::custom(self)
+    fn into_leaf(self) -> ScalarLeafSpec {
+        ScalarLeafSpec::Custom(CustomKernel::new(self))
     }
 }
 
@@ -451,12 +591,10 @@ impl<K> ScalarDistanceLeaf for K where
 
 macro_rules! ard_leaf {
     ($($leaf:ty => $variant:ident),*) => {$(
-        impl sealed::Leaf for $leaf {
-            fn into_spec(self) -> KernelSpec {
-                KernelSpec::$variant(self)
-            }
-        }
         impl sealed::ArdLeaf for $leaf {
+            fn into_leaf(self) -> ArdLeafSpec {
+                ArdLeafSpec::$variant(self)
+            }
             fn lengthscale_count(&self) -> usize {
                 self.lengthscales().num_params()
             }
@@ -466,9 +604,9 @@ macro_rules! ard_leaf {
 }
 
 ard_leaf!(
-    RbfArdKernel => RbfArd,
-    MaternArdKernel => MaternArd,
-    RationalQuadraticArdKernel => RationalQuadraticArd
+    RbfArdKernel => Rbf,
+    MaternArdKernel => Matern,
+    RationalQuadraticArdKernel => RationalQuadratic
 );
 
 /// Marks a [`DistanceKernel`] whose leaves read only supplied distances
@@ -677,7 +815,7 @@ fn collect_slots(spec: &KernelSpec, out: &mut Vec<DistanceSlot>) {
     match spec {
         KernelSpec::Supplied(leaf) => {
             if !out.iter().any(|slot| slot.id() == leaf.slot) {
-                out.push(DistanceSlot::from_parts(leaf.slot, leaf.shape));
+                out.push(DistanceSlot::from_parts(leaf.slot, leaf.shape()));
             }
         }
         KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {

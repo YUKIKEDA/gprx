@@ -21,6 +21,7 @@ mod ard;
 mod compiled;
 mod constant;
 mod dist;
+mod leaf_params;
 mod lengthscale;
 mod linear;
 mod matern;
@@ -71,7 +72,8 @@ pub use supply::{
     ScalarDistanceLeaf, WithPoints,
 };
 pub(crate) use supply::{
-    ModelKernelParts, SlotId, SlotShape, SourceData, SuppliedSpec, reads_points, spec_slots,
+    ArdLeafSpec, ModelKernelParts, ScalarLeafSpec, SlotId, SlotShape, SourceData, SuppliedLeafSpec,
+    SuppliedSpec, reads_points, spec_slots,
 };
 pub use term::{CustomKernel, KernelTerm};
 pub use white::WhiteKernel;

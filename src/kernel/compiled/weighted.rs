@@ -22,7 +22,7 @@
 //! `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
-use super::supplied::{SquareSlot, square_slot};
+use super::supplied::{ScalarLeaf, SuppliedCompiled, SuppliedLeaf, scalar_square};
 use super::{CompiledKernel, CrossViews, add_triangle};
 use crate::error::GprError;
 use crate::kernel::dist::{for_each_lower_col, lower_fold_infallible};
@@ -464,41 +464,51 @@ impl<T: KernelScalar> CompiledKernel<T> {
         bufs: &mut [Mat<T>],
         node: Node<'_, T>,
     ) -> Result<f64, GprError> {
-        // A scalar supplied leaf is its own leaf on its slot's distances.
-        if let Self::Supplied(leaf) = self
-            && let Ok(SquareSlot::Scalar(dist)) = square_slot(walk.inputs.slots, leaf.slot)
-        {
-            let saved = walk.inputs;
-            walk.inputs.dist = Some(dist);
-            let result = leaf.leaf.walk_leaf::<M>(walk, weight, out, bufs, node);
-            walk.inputs = saved;
-            return result;
-        }
         // Leaves whose parameters share each entry's transcendental work:
-        // one pass, no `∂K` matrix.
-        match (self, walk.inputs.dist) {
-            (Self::Periodic(leaf), Some(dist)) => {
-                return leaf.weighted_grads_dist::<M, T>(dist, node.own, weight, out);
+        // one pass, no `∂K` matrix. A scalar supplied leaf takes the same
+        // paths on its slot's distances; anything else takes the `∂K` path
+        // below, which reads the slot itself.
+        let (leaf, dist) = match (self, walk.inputs.dist) {
+            (
+                Self::Supplied(SuppliedLeaf {
+                    slot,
+                    leaf: SuppliedCompiled::Scalar(leaf),
+                }),
+                _,
+            ) => match scalar_square(walk.inputs.slots, *slot) {
+                Ok(dist) => (FastLeaf::from_scalar(leaf), Some(dist)),
+                Err(_) => (FastLeaf::None, None),
+            },
+            (Self::Periodic(leaf), dist) => (FastLeaf::Periodic(leaf), dist),
+            (Self::RationalQuadratic(leaf), dist) => (FastLeaf::RationalQuadratic(leaf), dist),
+            (Self::Rbf(leaf), dist) => (FastLeaf::Rbf(leaf), dist),
+            _ => (FastLeaf::None, None),
+        };
+        if let Some(dist) = dist {
+            match leaf {
+                FastLeaf::Periodic(leaf) => {
+                    return leaf.weighted_grads_dist::<M, T>(dist, node.own, weight, out);
+                }
+                FastLeaf::RationalQuadratic(leaf) => {
+                    return leaf.weighted_grads_dist(dist, node.own, weight, out);
+                }
+                // From `k` when the leaf has it or must form it for `⟨V, K⟩`
+                // anyway; otherwise the `∂K` path below, one `exp` per entry too.
+                FastLeaf::Rbf(leaf) if M::ACCURATE && (node.own.is_some() || node.value) => {
+                    let k = match node.own {
+                        Some(k) => k,
+                        None => {
+                            let Some(gram) = bufs.first_mut() else {
+                                return Err(too_few_buffers());
+                            };
+                            leaf.apply_math::<M, _>(dist, gram.as_mut(), Triangle::Lower)?;
+                            gram.as_ref()
+                        }
+                    };
+                    return leaf.weighted_grads_from_gram(dist, k, weight, out);
+                }
+                FastLeaf::Rbf(_) | FastLeaf::None => {}
             }
-            (Self::RationalQuadratic(leaf), Some(dist)) => {
-                return leaf.weighted_grads_dist(dist, node.own, weight, out);
-            }
-            // From `k` when the leaf has it or must form it for `⟨V, K⟩`
-            // anyway; otherwise the `∂K` path below, one `exp` per entry too.
-            (Self::Rbf(leaf), Some(dist)) if M::ACCURATE && (node.own.is_some() || node.value) => {
-                let k = match node.own {
-                    Some(k) => k,
-                    None => {
-                        let Some(gram) = bufs.first_mut() else {
-                            return Err(too_few_buffers());
-                        };
-                        leaf.apply_math::<M, _>(dist, gram.as_mut(), Triangle::Lower)?;
-                        gram.as_ref()
-                    }
-                };
-                return leaf.weighted_grads_from_gram(dist, k, weight, out);
-            }
-            _ => {}
         }
         // Accurate ARD RBF: `∂k/∂θ_d = k · w_d (Δ_d)²`, so one Gram covers
         // every lengthscale and the sum is one matrix product. `FastApprox`
@@ -1185,6 +1195,25 @@ impl<T: KernelScalar> DiagAccum<T> {
 
 fn too_few_buffers() -> GprError {
     GprError::WorkspaceTooSmall
+}
+
+/// A leaf with a one-pass weighted walk on a distance matrix.
+enum FastLeaf<'k> {
+    Periodic(&'k crate::kernel::PeriodicKernel),
+    RationalQuadratic(&'k crate::kernel::RationalQuadraticKernel),
+    Rbf(&'k crate::kernel::RbfKernel),
+    None,
+}
+
+impl<'k> FastLeaf<'k> {
+    fn from_scalar<T: KernelScalar>(leaf: &'k ScalarLeaf<T>) -> Self {
+        match leaf {
+            ScalarLeaf::Periodic(leaf) => Self::Periodic(leaf),
+            ScalarLeaf::RationalQuadratic(leaf) => Self::RationalQuadratic(leaf),
+            ScalarLeaf::Rbf(leaf) => Self::Rbf(leaf),
+            ScalarLeaf::Matern(_) | ScalarLeaf::Custom(_) => Self::None,
+        }
+    }
 }
 
 #[cfg(test)]

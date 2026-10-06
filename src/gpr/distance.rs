@@ -103,8 +103,9 @@ where
     /// [`GprError::LengthMismatch`] if a table or `y` has the wrong length,
     /// a slot has no source or two, or a source names a slot the kernel does
     /// not read, [`GprError::NonFiniteInput`] for a non-finite value,
-    /// [`GprError::ShapeMismatch`] for a negative value or if a training
-    /// square has a non-zero diagonal or is not symmetric, and the errors
+    /// [`GprError::ShapeMismatch`] for a negative value, or a training
+    /// square whose diagonal or symmetry is off past rounding (see
+    /// [`crate::kernel::ScalarDistance`]), and the errors
     /// of the coordinate
     /// [`Gpr::fit`].
     ///

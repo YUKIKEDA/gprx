@@ -11,17 +11,22 @@
 
 use faer::{MatMut, MatRef};
 
-use super::CompiledKernel;
-use super::grad::eval_cell;
 use crate::error::GprError;
 use crate::kernel::dist::{ArdBlocks, ArdSqDiff};
-use crate::kernel::{KernelScalar, SlotId, Triangle};
+use crate::kernel::leaf_params::LeafParams;
+use crate::kernel::supply::{ArdLeafSpec, ScalarLeafSpec, SuppliedLeafSpec};
+use crate::kernel::{
+    CustomKernel, KernelScalar, MaternArdKernel, MaternKernel, PeriodicKernel,
+    RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, SlotId,
+    SuppliedSpec, Triangle,
+};
+use crate::param::Interval;
 
 /// A compiled leaf that reads the supplied `d²` of one slot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuppliedLeaf<T: KernelScalar> {
     pub(crate) slot: SlotId,
-    pub(crate) leaf: Box<CompiledKernel<T>>,
+    pub(crate) leaf: SuppliedCompiled<T>,
 }
 
 /// One slot's `d²` between the points of one set.
@@ -66,180 +71,291 @@ pub(super) fn needs_supply() -> GprError {
     }
 }
 
-pub(super) fn square_slot<'a, T>(
+/// The square supply of a scalar slot.
+pub(super) fn scalar_square<'a, T>(
     slots: Option<&'a dyn SquareSlots<T>>,
     slot: SlotId,
-) -> Result<SquareSlot<'a, T>, GprError> {
-    slots.and_then(|s| s.square(slot)).ok_or_else(missing)
+) -> Result<MatRef<'a, T>, GprError> {
+    match slots.and_then(|s| s.square(slot)) {
+        Some(SquareSlot::Scalar(dist)) => Ok(dist),
+        _ => Err(missing()),
+    }
 }
 
-pub(super) fn rect_slot<'a, T>(
+/// The square supply of an ARD slot.
+fn ard_square<'a, T>(
+    slots: Option<&'a dyn SquareSlots<T>>,
+    slot: SlotId,
+) -> Result<ArdSqDiff<'a, T>, GprError> {
+    match slots.and_then(|s| s.square(slot)) {
+        Some(SquareSlot::Ard(cache)) => Ok(cache),
+        _ => Err(missing()),
+    }
+}
+
+/// The rectangular supply of a scalar slot.
+fn scalar_rect<'a, T>(
     slots: Option<&'a dyn RectSlots<T>>,
     slot: SlotId,
-) -> Result<RectSlot<'a, T>, GprError> {
-    slots.and_then(|s| s.rect(slot)).ok_or_else(missing)
+) -> Result<MatRef<'a, T>, GprError> {
+    match slots.and_then(|s| s.rect(slot)) {
+        Some(RectSlot::Scalar(dist)) => Ok(dist),
+        _ => Err(missing()),
+    }
+}
+
+/// The rectangular supply of an ARD slot.
+fn ard_rect<'a, T>(
+    slots: Option<&'a dyn RectSlots<T>>,
+    slot: SlotId,
+) -> Result<ArdBlocks<'a, T>, GprError> {
+    match slots.and_then(|s| s.rect(slot)) {
+        Some(RectSlot::Ard(blocks)) => Ok(blocks),
+        _ => Err(missing()),
+    }
+}
+
+/// The compiled leaf of a [`SuppliedLeaf`], typed by its slot's shape.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SuppliedCompiled<T: KernelScalar> {
+    Scalar(ScalarLeaf<T>),
+    Ard(ArdLeaf),
+}
+
+/// A compiled leaf on one `d²` per pair.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ScalarLeaf<T: KernelScalar> {
+    Rbf(RbfKernel),
+    Matern(MaternKernel),
+    Periodic(PeriodicKernel),
+    RationalQuadratic(RationalQuadraticKernel),
+    Custom(CustomKernel<T>),
+}
+
+/// A compiled leaf on one `d²` per dimension per pair.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ArdLeaf {
+    Rbf(RbfArdKernel),
+    Matern(MaternArdKernel),
+    RationalQuadratic(RationalQuadraticArdKernel),
 }
 
 impl<T: KernelScalar> SuppliedLeaf<T> {
-    /// `K` for `uplo` from the square supply.
+    /// Compiles `spec` for the scalar `T`.
+    pub(super) fn compile(spec: &SuppliedSpec) -> Self {
+        let leaf = match &spec.leaf {
+            SuppliedLeafSpec::Scalar(leaf) => SuppliedCompiled::Scalar(match leaf {
+                ScalarLeafSpec::Rbf(k) => ScalarLeaf::Rbf(*k),
+                ScalarLeafSpec::Matern(k) => ScalarLeaf::Matern(*k),
+                ScalarLeafSpec::Periodic(k) => ScalarLeaf::Periodic(*k),
+                ScalarLeafSpec::RationalQuadratic(k) => ScalarLeaf::RationalQuadratic(*k),
+                ScalarLeafSpec::Custom(k) => ScalarLeaf::Custom(k.with_scalar()),
+            }),
+            SuppliedLeafSpec::Ard(leaf) => SuppliedCompiled::Ard(match leaf {
+                ArdLeafSpec::Rbf(k) => ArdLeaf::Rbf(k.clone()),
+                ArdLeafSpec::Matern(k) => ArdLeaf::Matern(k.clone()),
+                ArdLeafSpec::RationalQuadratic(k) => ArdLeaf::RationalQuadratic(k.clone()),
+            }),
+        };
+        Self {
+            slot: spec.slot,
+            leaf,
+        }
+    }
+
+    /// Whether `∂K/∂θ` reads an output-shaped scratch (a custom leaf).
+    pub(super) fn needs_grad_scratch(&self) -> bool {
+        matches!(self.leaf, SuppliedCompiled::Scalar(ScalarLeaf::Custom(_)))
+    }
+
+    /// `K` for `uplo` from the square supply of the slot.
     pub(super) fn apply<M: crate::math::KernelMath>(
         &self,
-        slot: SquareSlot<'_, T>,
-        x: MatRef<'_, T>,
+        slots: Option<&dyn SquareSlots<T>>,
         out: MatMut<'_, T>,
         uplo: Triangle,
-        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        match slot {
-            SquareSlot::Scalar(d) => self.leaf.apply_with::<M>(d, out, uplo, scratch, &mut []),
-            SquareSlot::Ard(c) => {
-                self.leaf
-                    .apply_from_ard_cache::<M>(c, x, out, uplo, scratch, &mut [])
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                let d = scalar_square(slots, self.slot)?;
+                match leaf {
+                    ScalarLeaf::Rbf(k) => k.apply_math::<M, _>(d, out, uplo),
+                    ScalarLeaf::Matern(k) => k.apply_math::<M, _>(d, out, uplo),
+                    ScalarLeaf::Periodic(k) => k.apply_math::<M, _>(d, out, uplo),
+                    ScalarLeaf::RationalQuadratic(k) => k.apply(d, out, uplo),
+                    ScalarLeaf::Custom(k) => k.apply(d, out, uplo),
+                }
+            }
+            SuppliedCompiled::Ard(leaf) => {
+                let c = ard_square(slots, self.slot)?;
+                match leaf {
+                    ArdLeaf::Rbf(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
+                    ArdLeaf::Matern(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
+                    ArdLeaf::RationalQuadratic(k) => k.apply_from_sq_diff(c, out, uplo),
+                }
             }
         }
     }
 
-    /// `∂K/∂θ_p` for `uplo` from the square supply.
+    /// `∂K/∂θ_p` for `uplo` from the square supply of the slot.
     pub(super) fn grad<M: crate::math::KernelMath>(
         &self,
-        slot: SquareSlot<'_, T>,
-        x: MatRef<'_, T>,
+        slots: Option<&dyn SquareSlots<T>>,
         d_k: MatMut<'_, T>,
-        param_idx: usize,
+        p: usize,
         uplo: Triangle,
-        scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
-        match slot {
-            SquareSlot::Scalar(d) => {
-                self.leaf
-                    .grad_with::<M>(d, d_k, param_idx, uplo, scratch, &mut [])
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                let d = scalar_square(slots, self.slot)?;
+                match leaf {
+                    ScalarLeaf::Rbf(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
+                    ScalarLeaf::Matern(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
+                    ScalarLeaf::Periodic(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
+                    ScalarLeaf::RationalQuadratic(k) => k.grad(d, d_k, p, uplo),
+                    ScalarLeaf::Custom(k) => k.grad(d, d_k, p, uplo),
+                }
             }
-            SquareSlot::Ard(c) => {
-                self.leaf
-                    .grad_from_ard_cache::<M>(c, x, d_k, param_idx, uplo, scratch, &mut [])
+            SuppliedCompiled::Ard(leaf) => {
+                let c = ard_square(slots, self.slot)?;
+                match leaf {
+                    ArdLeaf::Rbf(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
+                    ArdLeaf::Matern(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
+                    ArdLeaf::RationalQuadratic(k) => k.grad_from_sq_diff(c, d_k, p, uplo),
+                }
             }
         }
     }
 
-    /// `∂²K/∂θ_i ∂θ_j` for `uplo` from the square supply.
+    /// `∂²K/∂θ_i ∂θ_j` for `uplo` from the square supply of the slot.
     pub(super) fn hess<M: crate::math::KernelMath>(
         &self,
-        slot: SquareSlot<'_, T>,
-        x: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        pair: (usize, usize),
-        uplo: Triangle,
-        scratch: MatMut<'_, T>,
-    ) -> Result<(), GprError> {
-        match slot {
-            SquareSlot::Scalar(d) => {
-                self.leaf
-                    .hess_with::<M>(d, d2_k, pair, uplo, scratch, &mut [])
-            }
-            SquareSlot::Ard(c) => {
-                self.leaf
-                    .hess_from_ard_cache::<M>(c, x, d2_k, pair, uplo, scratch, &mut [])
-            }
-        }
-    }
-
-    /// The rectangular `K` from the rectangular supply.
-    pub(super) fn apply_cross<M: crate::math::KernelMath>(
-        &self,
-        slot: RectSlot<'_, T>,
-        out: MatMut<'_, T>,
-        scratch: MatMut<'_, T>,
-    ) -> Result<(), GprError> {
-        match slot {
-            RectSlot::Scalar(d) => self.leaf.apply_cross_with::<M>(d, out, scratch, &mut []),
-            RectSlot::Ard(b) => match self.leaf.as_ref() {
-                CompiledKernel::RbfArd(leaf) => leaf.apply_cross_from_blocks::<M, T>(b, out),
-                CompiledKernel::MaternArd(leaf) => leaf.apply_cross_from_blocks::<M, T>(b, out),
-                CompiledKernel::RationalQuadraticArd(leaf) => leaf.apply_cross_from_blocks(b, out),
-                _ => Err(not_ard()),
-            },
-        }
-    }
-
-    /// The rectangular `∂K/∂θ_p` from the rectangular supply.
-    pub(super) fn grad_cross<M: crate::math::KernelMath>(
-        &self,
-        slot: RectSlot<'_, T>,
-        d_k: MatMut<'_, T>,
-        param_idx: usize,
-    ) -> Result<(), GprError> {
-        match slot {
-            RectSlot::Scalar(d) => match self.leaf.as_ref() {
-                CompiledKernel::Rbf(leaf) => leaf.grad_cross_dist::<M, T>(d, d_k, param_idx),
-                CompiledKernel::Matern(leaf) => leaf.grad_cross_dist::<M, T>(d, d_k, param_idx),
-                CompiledKernel::Periodic(leaf) => leaf.grad_cross_dist::<M, T>(d, d_k, param_idx),
-                CompiledKernel::RationalQuadratic(leaf) => leaf.grad_cross_dist(d, d_k, param_idx),
-                CompiledKernel::Custom(leaf) => leaf.grad_cross(d, d_k, param_idx),
-                _ => Err(not_scalar()),
-            },
-            RectSlot::Ard(b) => match self.leaf.as_ref() {
-                CompiledKernel::RbfArd(leaf) => {
-                    leaf.grad_cross_from_blocks::<M, T>(b, d_k, param_idx)
-                }
-                CompiledKernel::MaternArd(leaf) => {
-                    leaf.grad_cross_from_blocks::<M, T>(b, d_k, param_idx)
-                }
-                CompiledKernel::RationalQuadraticArd(leaf) => {
-                    leaf.grad_cross_from_blocks(b, d_k, param_idx)
-                }
-                _ => Err(not_ard()),
-            },
-        }
-    }
-
-    /// The rectangular `∂²K/∂θ_i ∂θ_j` from the rectangular supply.
-    pub(super) fn hess_cross<M: crate::math::KernelMath>(
-        &self,
-        slot: RectSlot<'_, T>,
+        slots: Option<&dyn SquareSlots<T>>,
         d2_k: MatMut<'_, T>,
         (i, j): (usize, usize),
+        uplo: Triangle,
     ) -> Result<(), GprError> {
-        match slot {
-            RectSlot::Scalar(d) => match self.leaf.as_ref() {
-                CompiledKernel::Rbf(leaf) => leaf.hess_cross_dist::<M, T>(d, d2_k, i, j),
-                CompiledKernel::Matern(leaf) => leaf.hess_cross_dist::<M, T>(d, d2_k, i, j),
-                CompiledKernel::Periodic(leaf) => leaf.hess_cross_dist::<M, T>(d, d2_k, i, j),
-                CompiledKernel::RationalQuadratic(leaf) => leaf.hess_cross_dist(d, d2_k, i, j),
-                CompiledKernel::Custom(leaf) => leaf.hess_cross(d, d2_k, i, j),
-                _ => Err(not_scalar()),
-            },
-            RectSlot::Ard(b) => match self.leaf.as_ref() {
-                CompiledKernel::RbfArd(leaf) => leaf.hess_cross_from_blocks::<M, T>(b, d2_k, i, j),
-                CompiledKernel::MaternArd(leaf) => {
-                    leaf.hess_cross_from_blocks::<M, T>(b, d2_k, i, j)
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                let d = scalar_square(slots, self.slot)?;
+                match leaf {
+                    ScalarLeaf::Rbf(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
+                    ScalarLeaf::Matern(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
+                    ScalarLeaf::Periodic(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
+                    ScalarLeaf::RationalQuadratic(k) => k.hess(d, d2_k, i, j, uplo),
+                    ScalarLeaf::Custom(k) => k.hess(d, d2_k, i, j, uplo),
                 }
-                CompiledKernel::RationalQuadraticArd(leaf) => {
-                    leaf.hess_cross_from_blocks(b, d2_k, i, j)
+            }
+            SuppliedCompiled::Ard(leaf) => {
+                let c = ard_square(slots, self.slot)?;
+                match leaf {
+                    ArdLeaf::Rbf(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
+                    ArdLeaf::Matern(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
+                    ArdLeaf::RationalQuadratic(k) => k.hess_from_sq_diff(c, d2_k, i, j, uplo),
                 }
-                _ => Err(not_ard()),
-            },
+            }
+        }
+    }
+
+    /// The rectangular `K` from the rectangular supply of the slot.
+    pub(super) fn apply_cross<M: crate::math::KernelMath>(
+        &self,
+        slots: Option<&dyn RectSlots<T>>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                let d = scalar_rect(slots, self.slot)?;
+                match leaf {
+                    ScalarLeaf::Rbf(k) => k.apply_cross_math::<M, _>(d, out),
+                    ScalarLeaf::Matern(k) => k.apply_cross_math::<M, _>(d, out),
+                    ScalarLeaf::Periodic(k) => k.apply_cross_math::<M, _>(d, out),
+                    ScalarLeaf::RationalQuadratic(k) => k.apply_cross(d, out),
+                    ScalarLeaf::Custom(k) => k.apply_cross(d, out),
+                }
+            }
+            SuppliedCompiled::Ard(leaf) => {
+                let b = ard_rect(slots, self.slot)?;
+                ard_cross::<M, T>(leaf, b, out)
+            }
+        }
+    }
+
+    /// The rectangular `∂K/∂θ_p` from the rectangular supply of the slot.
+    pub(super) fn grad_cross<M: crate::math::KernelMath>(
+        &self,
+        slots: Option<&dyn RectSlots<T>>,
+        d_k: MatMut<'_, T>,
+        p: usize,
+    ) -> Result<(), GprError> {
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                let d = scalar_rect(slots, self.slot)?;
+                match leaf {
+                    ScalarLeaf::Rbf(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
+                    ScalarLeaf::Matern(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
+                    ScalarLeaf::Periodic(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
+                    ScalarLeaf::RationalQuadratic(k) => k.grad_cross_dist(d, d_k, p),
+                    ScalarLeaf::Custom(k) => k.grad_cross(d, d_k, p),
+                }
+            }
+            SuppliedCompiled::Ard(leaf) => {
+                let b = ard_rect(slots, self.slot)?;
+                ard_grad_cross::<M, T>(leaf, b, d_k, p)
+            }
+        }
+    }
+
+    /// The rectangular `∂²K/∂θ_i ∂θ_j` from the rectangular supply of the slot.
+    pub(super) fn hess_cross<M: crate::math::KernelMath>(
+        &self,
+        slots: Option<&dyn RectSlots<T>>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+    ) -> Result<(), GprError> {
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                let d = scalar_rect(slots, self.slot)?;
+                scalar_hess_cross::<M, T>(leaf, d, d2_k, pair)
+            }
+            SuppliedCompiled::Ard(leaf) => {
+                let b = ard_rect(slots, self.slot)?;
+                ard_hess_cross::<M, T>(leaf, b, d2_k, pair)
+            }
         }
     }
 
     /// `k(x, x)`: the leaf at `d² = 0`.
     pub(super) fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
-        self.leaf.fill_diag(out)
+        match &self.leaf {
+            SuppliedCompiled::Scalar(ScalarLeaf::Rbf(k)) => k.fill_diag(out),
+            SuppliedCompiled::Scalar(ScalarLeaf::Matern(k)) => k.fill_diag(out),
+            SuppliedCompiled::Scalar(ScalarLeaf::Periodic(k)) => k.fill_diag(out),
+            SuppliedCompiled::Scalar(ScalarLeaf::RationalQuadratic(k)) => k.fill_diag(out),
+            SuppliedCompiled::Scalar(ScalarLeaf::Custom(k)) => return k.fill_diag(out),
+            SuppliedCompiled::Ard(ArdLeaf::Rbf(k)) => k.fill_diag(out),
+            SuppliedCompiled::Ard(ArdLeaf::Matern(k)) => k.fill_diag(out),
+            SuppliedCompiled::Ard(ArdLeaf::RationalQuadratic(k)) => k.fill_diag(out),
+        }
+        Ok(())
     }
 
     /// `∂k(x, x)/∂θ_p` broadcast over `out`: the leaf at `d² = 0`.
     pub(super) fn grad_diag<M: crate::math::KernelMath>(
         &self,
         out: &mut [T],
-        param_idx: usize,
+        p: usize,
     ) -> Result<(), GprError> {
-        let value = match self.ard_dims() {
-            Some(dims) => self.ard_at_zero(dims, |leaf, slot, cell| {
-                leaf.grad_cross::<M>(slot, cell, param_idx)
-            })?,
-            None => self.scalar_at_zero(|leaf, slot, x, cell, scratch| {
-                leaf.grad::<M>(slot, x, cell, param_idx, Triangle::Lower, scratch)
-            })?,
-        };
+        let value = self.at_zero(
+            |leaf, d, cell| match leaf {
+                ScalarLeaf::Rbf(k) => k.grad_math::<M, _>(d, cell, p, Triangle::Lower),
+                ScalarLeaf::Matern(k) => k.grad_math::<M, _>(d, cell, p, Triangle::Lower),
+                ScalarLeaf::Periodic(k) => k.grad_math::<M, _>(d, cell, p, Triangle::Lower),
+                ScalarLeaf::RationalQuadratic(k) => k.grad(d, cell, p, Triangle::Lower),
+                ScalarLeaf::Custom(k) => k.grad(d, cell, p, Triangle::Lower),
+            },
+            |leaf, b, cell| ard_grad_cross::<M, T>(leaf, b, cell, p),
+        )?;
         out.fill(value);
         Ok(())
     }
@@ -248,83 +364,151 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     pub(super) fn hess_diag<M: crate::math::KernelMath>(
         &self,
         out: &mut [T],
-        pair: (usize, usize),
+        (i, j): (usize, usize),
     ) -> Result<(), GprError> {
-        let value = match self.ard_dims() {
-            Some(dims) => self.ard_at_zero(dims, |leaf, slot, cell| {
-                leaf.hess_cross::<M>(slot, cell, pair)
-            })?,
-            None => self.scalar_at_zero(|leaf, slot, x, cell, scratch| {
-                leaf.hess::<M>(slot, x, cell, pair, Triangle::Lower, scratch)
-            })?,
-        };
+        let value = self.at_zero(
+            |leaf, d, cell| match leaf {
+                ScalarLeaf::Rbf(k) => k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower),
+                ScalarLeaf::Matern(k) => k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower),
+                ScalarLeaf::Periodic(k) => k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower),
+                ScalarLeaf::RationalQuadratic(k) => k.hess(d, cell, i, j, Triangle::Lower),
+                ScalarLeaf::Custom(k) => k.hess(d, cell, i, j, Triangle::Lower),
+            },
+            |leaf, b, cell| ard_hess_cross::<M, T>(leaf, b, cell, (i, j)),
+        )?;
         out.fill(value);
         Ok(())
     }
 
-    /// Evaluates `eval` on one pair at zero distance of a scalar slot.
-    fn scalar_at_zero(
+    /// Evaluates the leaf on one pair at `d² = 0`: a scalar leaf on a
+    /// `1 × 1` square, an ARD leaf on one `1 × 1` block per dimension (only
+    /// the list of blocks is allocated).
+    fn at_zero(
         &self,
-        eval: impl FnOnce(
-            &Self,
-            SquareSlot<'_, T>,
-            MatRef<'_, T>,
-            MatMut<'_, T>,
-            MatMut<'_, T>,
-        ) -> Result<(), GprError>,
-    ) -> Result<T, GprError> {
-        let mut scratch = [T::from_f64(0.0)];
-        let scratch = MatMut::from_column_major_slice_mut(&mut scratch, 1, 1);
-        let zero = [T::from_f64(0.0)];
-        let dist = MatRef::from_column_major_slice(&zero, 1, 1);
-        let x = MatRef::from_column_major_slice(&[], 1, 0);
-        eval_cell(|cell| eval(self, SquareSlot::Scalar(dist), x, cell, scratch))
-    }
-
-    /// Evaluates `eval` on one pair at zero distance of an ARD slot of
-    /// `dims` dimensions: a `1 × 1` block per dimension, through the
-    /// rectangular path (only the list of `dims` blocks is allocated).
-    fn ard_at_zero(
-        &self,
-        dims: usize,
-        eval: impl FnOnce(&Self, RectSlot<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
+        scalar: impl FnOnce(&ScalarLeaf<T>, MatRef<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
+        ard: impl FnOnce(&ArdLeaf, ArdBlocks<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
     ) -> Result<T, GprError> {
         let zero = [T::from_f64(0.0)];
-        let blocks = vec![&zero[..]; dims];
         let mut cell = [T::from_f64(0.0)];
-        eval(
-            self,
-            RectSlot::Ard(ArdBlocks {
-                blocks: &blocks,
-                rows: 1,
-                cols: 1,
-                col0: 0,
-            }),
-            MatMut::from_column_major_slice_mut(&mut cell, 1, 1),
-        )?;
+        let out = MatMut::from_column_major_slice_mut(&mut cell, 1, 1);
+        match &self.leaf {
+            SuppliedCompiled::Scalar(leaf) => {
+                scalar(leaf, MatRef::from_column_major_slice(&zero, 1, 1), out)?;
+            }
+            SuppliedCompiled::Ard(leaf) => {
+                let blocks = vec![&zero[..]; leaf.dims()];
+                let b = ArdBlocks {
+                    blocks: &blocks,
+                    rows: 1,
+                    cols: 1,
+                    col0: 0,
+                };
+                ard(leaf, b, out)?;
+            }
+        }
         Ok(cell[0])
     }
+}
 
-    /// The dimension count of a wrapped ARD leaf.
-    fn ard_dims(&self) -> Option<usize> {
-        match self.leaf.as_ref() {
-            CompiledKernel::RbfArd(leaf) => Some(leaf.num_params()),
-            CompiledKernel::MaternArd(leaf) => Some(leaf.num_params()),
-            CompiledKernel::RationalQuadraticArd(leaf) => Some(leaf.lengthscales().num_params()),
-            _ => None,
+impl ArdLeaf {
+    /// Number of lengthscales, one per dimension of the slot.
+    fn dims(&self) -> usize {
+        match self {
+            Self::Rbf(k) => k.lengthscales().num_params(),
+            Self::Matern(k) => k.lengthscales().num_params(),
+            Self::RationalQuadratic(k) => k.lengthscales().num_params(),
         }
     }
 }
 
-fn not_ard() -> GprError {
-    GprError::UnsupportedKernelOperation {
-        reason: "an ARD distance slot needs an ARD leaf".to_owned(),
+fn ard_cross<M: crate::math::KernelMath, T: KernelScalar>(
+    leaf: &ArdLeaf,
+    b: ArdBlocks<'_, T>,
+    out: MatMut<'_, T>,
+) -> Result<(), GprError> {
+    match leaf {
+        ArdLeaf::Rbf(k) => k.apply_cross_from_blocks::<M, T>(b, out),
+        ArdLeaf::Matern(k) => k.apply_cross_from_blocks::<M, T>(b, out),
+        ArdLeaf::RationalQuadratic(k) => k.apply_cross_from_blocks(b, out),
     }
 }
 
-fn not_scalar() -> GprError {
-    GprError::UnsupportedKernelOperation {
-        reason: "a scalar distance slot needs an isotropic or custom leaf".to_owned(),
+fn ard_grad_cross<M: crate::math::KernelMath, T: KernelScalar>(
+    leaf: &ArdLeaf,
+    b: ArdBlocks<'_, T>,
+    d_k: MatMut<'_, T>,
+    p: usize,
+) -> Result<(), GprError> {
+    match leaf {
+        ArdLeaf::Rbf(k) => k.grad_cross_from_blocks::<M, T>(b, d_k, p),
+        ArdLeaf::Matern(k) => k.grad_cross_from_blocks::<M, T>(b, d_k, p),
+        ArdLeaf::RationalQuadratic(k) => k.grad_cross_from_blocks(b, d_k, p),
+    }
+}
+
+fn ard_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
+    leaf: &ArdLeaf,
+    b: ArdBlocks<'_, T>,
+    d2_k: MatMut<'_, T>,
+    (i, j): (usize, usize),
+) -> Result<(), GprError> {
+    match leaf {
+        ArdLeaf::Rbf(k) => k.hess_cross_from_blocks::<M, T>(b, d2_k, i, j),
+        ArdLeaf::Matern(k) => k.hess_cross_from_blocks::<M, T>(b, d2_k, i, j),
+        ArdLeaf::RationalQuadratic(k) => k.hess_cross_from_blocks(b, d2_k, i, j),
+    }
+}
+
+fn scalar_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
+    leaf: &ScalarLeaf<T>,
+    d: MatRef<'_, T>,
+    d2_k: MatMut<'_, T>,
+    (i, j): (usize, usize),
+) -> Result<(), GprError> {
+    match leaf {
+        ScalarLeaf::Rbf(k) => k.hess_cross_dist::<M, T>(d, d2_k, i, j),
+        ScalarLeaf::Matern(k) => k.hess_cross_dist::<M, T>(d, d2_k, i, j),
+        ScalarLeaf::Periodic(k) => k.hess_cross_dist::<M, T>(d, d2_k, i, j),
+        ScalarLeaf::RationalQuadratic(k) => k.hess_cross_dist(d, d2_k, i, j),
+        ScalarLeaf::Custom(k) => k.hess_cross(d, d2_k, i, j),
+    }
+}
+
+/// Every variant of a compiled supplied leaf, with the leaf bound to `$leaf`.
+macro_rules! each_compiled {
+    ($value:expr, $leaf:ident => $body:expr) => {
+        match $value {
+            SuppliedCompiled::Scalar(ScalarLeaf::Rbf($leaf)) => $body,
+            SuppliedCompiled::Scalar(ScalarLeaf::Matern($leaf)) => $body,
+            SuppliedCompiled::Scalar(ScalarLeaf::Periodic($leaf)) => $body,
+            SuppliedCompiled::Scalar(ScalarLeaf::RationalQuadratic($leaf)) => $body,
+            SuppliedCompiled::Scalar(ScalarLeaf::Custom($leaf)) => $body,
+            SuppliedCompiled::Ard(ArdLeaf::Rbf($leaf)) => $body,
+            SuppliedCompiled::Ard(ArdLeaf::Matern($leaf)) => $body,
+            SuppliedCompiled::Ard(ArdLeaf::RationalQuadratic($leaf)) => $body,
+        }
+    };
+}
+
+impl<T: KernelScalar> LeafParams for SuppliedCompiled<T> {
+    fn leaf_num_params(&self) -> usize {
+        each_compiled!(self, leaf => leaf.leaf_num_params())
+    }
+
+    fn write_leaf_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
+        each_compiled!(self, leaf => leaf.write_leaf_params(out, offset))
+    }
+
+    fn write_leaf_intervals(
+        &self,
+        out: &mut [Interval],
+        offset: &mut usize,
+    ) -> Result<(), GprError> {
+        each_compiled!(self, leaf => leaf.write_leaf_intervals(out, offset))
+    }
+
+    fn apply_leaf_params(&mut self, params: &[f64], offset: &mut usize) -> Result<(), GprError> {
+        each_compiled!(self, leaf => leaf.apply_leaf_params(params, offset))
     }
 }
 

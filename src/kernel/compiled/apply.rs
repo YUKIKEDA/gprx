@@ -1,4 +1,4 @@
-use super::supplied::{needs_supply, rect_slot, square_slot};
+use super::supplied::needs_supply;
 use super::{
     CompiledKernel, CrossViews, MixedKernelViews, Nested, add_triangle, ard_needs_coords,
     mul_triangle, require_scratch_shape, split_terms, term_scratch,
@@ -455,10 +455,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     self.apply_points_with::<M>(views.x, out, uplo, scratch, nested)
                 }
             }
-            Self::Supplied(leaf) => {
-                let slot = square_slot(views.slots, leaf.slot)?;
-                leaf.apply::<M>(slot, views.x, out, uplo, scratch)
-            }
+            Self::Supplied(leaf) => leaf.apply::<M>(views.slots, out, uplo),
             Self::Sum(terms) => fold_terms_mixed::<M, _>(
                 terms,
                 views,
@@ -509,10 +506,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadraticArd(_) => {
                 self.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
             }
-            Self::Supplied(leaf) => {
-                let slot = rect_slot(views.slots, leaf.slot)?;
-                leaf.apply_cross::<M>(slot, out, scratch)
-            }
+            Self::Supplied(leaf) => leaf.apply_cross::<M>(views.slots, out),
             Self::Sum(terms) => fold_rect_mixed::<M, _>(
                 terms,
                 views,

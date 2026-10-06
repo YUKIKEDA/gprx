@@ -1,6 +1,6 @@
 use super::apply::{combine_diag, mul_assign};
 use super::coord::{self, Dir};
-use super::supplied::{needs_supply, rect_slot, square_slot};
+use super::supplied::needs_supply;
 use super::{
     CompiledKernel, CrossViews, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
     require_scratch_shape, term_scratch,
@@ -275,10 +275,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Some(dist) => self.grad_with::<M>(dist, d_k, param_idx, uplo, scratch, nested),
                 None => self.grad_points_with::<M>(views.x, d_k, param_idx, uplo, scratch, nested),
             },
-            Self::Supplied(leaf) => {
-                let slot = square_slot(views.slots, leaf.slot)?;
-                leaf.grad::<M>(slot, views.x, d_k, param_idx, uplo, scratch)
-            }
+            Self::Supplied(leaf) => leaf.grad::<M>(views.slots, d_k, param_idx, uplo),
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
@@ -585,10 +582,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 white_cross_zero(x1, x2, d_k)
             }
             Self::Custom(leaf) => coord::custom_cross_grad(leaf, x1, x2, d_k, param_idx),
-            Self::Supplied(leaf) => {
-                let slot = rect_slot(views.slots, leaf.slot)?;
-                leaf.grad_cross::<M>(slot, d_k, param_idx)
-            }
+            Self::Supplied(leaf) => leaf.grad_cross::<M>(views.slots, d_k, param_idx),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_cross_views::<M>(views, d_k, local, scratch, nested)

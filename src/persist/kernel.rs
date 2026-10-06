@@ -6,9 +6,10 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::kernel::ArdLengthscales;
 use crate::kernel::{
-    ConstantKernel, CustomKernel, DistanceSlot, KernelSpec, LinearKernel, MaternArdKernel,
-    MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
-    RbfArdKernel, RbfKernel, SlotId, SlotShape, SuppliedSpec, WhiteKernel, spec_slots,
+    ArdLeafSpec, ConstantKernel, CustomKernel, DistanceSlot, KernelSpec, LinearKernel,
+    MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel,
+    RationalQuadraticKernel, RbfArdKernel, RbfKernel, ScalarLeafSpec, SlotId, SlotShape,
+    SuppliedLeafSpec, SuppliedSpec, WhiteKernel, spec_slots,
 };
 use crate::param::BoundedParam;
 
@@ -218,11 +219,11 @@ impl KernelJson {
                     })?;
                 Ok(Self::Distance {
                     slot,
-                    dims: match leaf.shape {
+                    dims: match leaf.shape() {
                         SlotShape::Scalar => None,
                         SlotShape::Ard(dims) => Some(dims),
                     },
-                    leaf: Box::new(Self::encode_in(&leaf.leaf, slots)?),
+                    leaf: Box::new(Self::encode_in(&leaf.leaf.to_spec(), slots)?),
                 })
             }
         }
@@ -314,44 +315,28 @@ impl KernelJson {
                     Some(dims) => SlotShape::Ard(dims),
                 };
                 let id = slots.get(slot, shape)?;
-                let leaf = leaf.decode(registry, slots)?;
-                check_distance_leaf(&leaf, shape)?;
-                Ok(KernelSpec::Supplied(SuppliedSpec {
-                    slot: id,
-                    shape,
-                    leaf: Box::new(leaf),
-                }))
+                let leaf = typed_leaf(leaf.decode(registry, slots)?, shape)?;
+                Ok(KernelSpec::Supplied(SuppliedSpec { slot: id, leaf }))
             }
         }
     }
 }
 
-/// A saved distance leaf is one a slot of `shape` accepts.
-fn check_distance_leaf(leaf: &KernelSpec, shape: SlotShape) -> Result<(), GprError> {
-    let ok = match (leaf, shape) {
-        (
-            KernelSpec::Rbf(_)
-            | KernelSpec::Matern(_)
-            | KernelSpec::Periodic(_)
-            | KernelSpec::RationalQuadratic(_)
-            | KernelSpec::Custom(_),
-            SlotShape::Scalar,
-        ) => true,
-        (KernelSpec::RbfArd(k), SlotShape::Ard(d)) => k.num_params() == d,
-        (KernelSpec::MaternArd(k), SlotShape::Ard(d)) => k.num_params() == d,
-        (KernelSpec::RationalQuadraticArd(k), SlotShape::Ard(d)) => {
-            k.lengthscales().num_params() == d
-        }
-        _ => false,
+/// A saved distance leaf as the leaf a slot of `shape` takes, or an error
+/// when the slot does not take it.
+fn typed_leaf(leaf: KernelSpec, shape: SlotShape) -> Result<SuppliedLeafSpec, GprError> {
+    let typed = match shape {
+        SlotShape::Scalar => ScalarLeafSpec::from_spec(leaf).map(SuppliedLeafSpec::Scalar),
+        SlotShape::Ard(d) => ArdLeafSpec::from_spec(leaf)
+            .filter(|leaf| leaf.dims() == d)
+            .map(SuppliedLeafSpec::Ard),
     };
-    if ok {
-        Ok(())
-    } else {
-        Err(persist_err(
+    typed.ok_or_else(|| {
+        persist_err(
             PersistErrorKind::Config,
             "a distance leaf does not match its slot",
-        ))
-    }
+        )
+    })
 }
 
 fn bounded_from_value(value: f64, interval: crate::Interval) -> Result<BoundedParam, GprError> {
@@ -396,4 +381,38 @@ fn encode_custom(kernel: &CustomKernel) -> Result<KernelJson, GprError> {
         persist_id: persist_id.to_owned(),
         state: kernel.persist_state()?,
     })
+}
+
+#[cfg(test)]
+mod distance_leaf_tests {
+    use super::typed_leaf;
+    use crate::error::{GprError, PersistErrorKind};
+    use crate::kernel::{KernelSpec, RbfArdKernel, RbfKernel, SlotShape, SuppliedLeafSpec};
+
+    fn config_error(result: Result<SuppliedLeafSpec, GprError>) -> bool {
+        matches!(
+            result,
+            Err(GprError::PersistFailed {
+                kind: PersistErrorKind::Config,
+                ..
+            })
+        )
+    }
+
+    #[test]
+    fn a_saved_leaf_must_fit_its_slot() {
+        let rbf = KernelSpec::from(RbfKernel::new(1.0).expect("ell"));
+        let ard = KernelSpec::from(RbfArdKernel::new(&[1.0, 2.0]).expect("ell"));
+        assert!(matches!(
+            typed_leaf(rbf.clone(), SlotShape::Scalar),
+            Ok(SuppliedLeafSpec::Scalar(_))
+        ));
+        assert!(matches!(
+            typed_leaf(ard.clone(), SlotShape::Ard(2)),
+            Ok(SuppliedLeafSpec::Ard(_))
+        ));
+        assert!(config_error(typed_leaf(ard.clone(), SlotShape::Scalar)));
+        assert!(config_error(typed_leaf(ard, SlotShape::Ard(3))));
+        assert!(config_error(typed_leaf(rbf, SlotShape::Ard(1))));
+    }
 }

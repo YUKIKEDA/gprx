@@ -273,7 +273,7 @@ Version 1 grows by addition while the crate is `0.x`: a new kernel variant (`dis
 | File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
 | `n` or (sparse) `m` is `0`; `d` is `0` for a kernel without a `distance` leaf; empty `lengthscales` | `GprError::EmptyInput` |
-| A saved training square with a negative value, a non-zero diagonal, or not symmetric | `GprError::ShapeMismatch` |
+| A saved training square with a negative value, a non-zero diagonal, or not symmetric, past rounding | `GprError::ShapeMismatch` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
 
 Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. The reader checks shapes and dtypes, that every stored tensor is finite (a `NaN` or `±∞` fails with `PersistFailed`), and, for `q`, finiteness and triangularity.

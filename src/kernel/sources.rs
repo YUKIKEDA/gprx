@@ -76,8 +76,9 @@ pub(crate) type Fills<'a> = Vec<(SlotId, &'a dyn DistanceFill)>;
 /// does not read, a slot without a source, two sources of one slot, or a
 /// block of the wrong length or count; [`GprError::EmptyInput`] when `rows`
 /// or `cols` is zero; [`GprError::NonFiniteInput`] for a non-finite value;
-/// [`GprError::ShapeMismatch`] for a negative value, or a square block with
-/// a non-zero diagonal or that is not symmetric.
+/// [`GprError::ShapeMismatch`] for a value, a diagonal, or a mirror pair
+/// past what rounding leaves ([`check_block`]). Within that, a block is
+/// tidied ([`tidy_block`]): a borrowed table is then copied.
 pub(crate) fn bind<'a>(
     slots: &[DistanceSlot],
     sources: impl IntoIterator<Item = DistanceSource<'a>>,
@@ -129,62 +130,96 @@ pub(crate) fn bind<'a>(
                 RawData::Packed(all)
             }
         };
-        let raw_slot = RawSlot {
+        let mut raw_slot = RawSlot {
             id: slot.id(),
             shape,
             data,
             rows,
             cols,
         };
-        check_slot(&raw_slot, blocks, len, kind)?;
+        check_slot(&mut raw_slot, blocks, len, kind)?;
         raw.push(raw_slot);
     }
     Ok((raw, fills))
 }
 
 fn check_slot(
-    slot: &RawSlot<'_>,
+    slot: &mut RawSlot<'_>,
     blocks: usize,
     len: usize,
     kind: BlockKind,
 ) -> Result<(), GprError> {
-    if let RawData::Blocks(tables) = &slot.data
-        && tables.len() != blocks
-    {
-        return Err(GprError::LengthMismatch {
-            reason: format!(
-                "expected {blocks} tables of squared distances, got {}",
-                tables.len()
-            ),
-        });
-    }
-    for k in 0..blocks {
-        let block = match &slot.data {
-            RawData::Blocks(tables) => &tables[k][..],
-            RawData::Packed(all) => &all[k * len..(k + 1) * len],
-        };
-        check_block(block, slot.rows, slot.cols, kind)?;
+    let (rows, cols) = (slot.rows, slot.cols);
+    match &mut slot.data {
+        RawData::Blocks(tables) => {
+            if tables.len() != blocks {
+                return Err(GprError::LengthMismatch {
+                    reason: format!(
+                        "expected {blocks} tables of squared distances, got {}",
+                        tables.len()
+                    ),
+                });
+            }
+            for table in tables.iter_mut() {
+                // A borrowed table is copied only when rounding needs a fix.
+                if check_block(table, rows, cols, kind)? {
+                    tidy_block(table.to_mut(), rows, cols, kind);
+                }
+            }
+        }
+        RawData::Packed(all) => {
+            for block in all.chunks_exact_mut(len.max(1)).take(blocks) {
+                if check_block(block, rows, cols, kind)? {
+                    tidy_block(block, rows, cols, kind);
+                }
+            }
+        }
     }
     Ok(())
 }
 
-/// Checks one `rows × cols` block of `d²`.
+/// Relative tolerance, against the largest `|d²|` of a block, for what
+/// floating point leaves in a table of squared distances: a diagonal that
+/// is not exactly zero, two mirror entries of a square that differ, or a
+/// slightly negative value. Within it the block is tidied; past it the
+/// table is not one of squared distances.
+const ROUNDING_TOL: f64 = 1e-8;
+
+/// The rounding tolerance of `block`.
+fn rounding_tol(block: &[f64]) -> f64 {
+    ROUNDING_TOL * block.iter().fold(0.0f64, |acc, v| acc.max(v.abs()))
+}
+
+/// Checks one `rows × cols` block of `d²` and returns whether rounding left
+/// something [`tidy_block`] fixes (within [`ROUNDING_TOL`]).
+///
+/// # Errors
+///
+/// Returns [`GprError::LengthMismatch`] for the wrong length,
+/// [`GprError::NonFiniteInput`] for a non-finite value, and
+/// [`GprError::ShapeMismatch`] for a value below `−tol`, a square that is
+/// not square, a diagonal past `tol`, or mirror entries further apart.
 pub(crate) fn check_block(
     block: &[f64],
     rows: usize,
     cols: usize,
     kind: BlockKind,
-) -> Result<(), GprError> {
+) -> Result<bool, GprError> {
     crate::data::require_count(block.len(), rows * cols, "squared distances")?;
     crate::data::require_finite(block)?;
-    if let Some(at) = block.iter().position(|&v| v < 0.0) {
-        return Err(GprError::ShapeMismatch {
-            reason: format!(
-                "squared distance ({}, {}) is negative",
-                at % rows.max(1),
-                at / rows.max(1)
-            ),
-        });
+    let tol = rounding_tol(block);
+    let mut tidy = false;
+    for (at, &v) in block.iter().enumerate() {
+        if v < -tol {
+            return Err(GprError::ShapeMismatch {
+                reason: format!(
+                    "squared distance ({}, {}) is negative",
+                    at % rows.max(1),
+                    at / rows.max(1)
+                ),
+            });
+        }
+        tidy |= v < 0.0;
     }
     if kind == BlockKind::Square {
         if rows != cols {
@@ -193,24 +228,44 @@ pub(crate) fn check_block(
             });
         }
         for j in 0..cols {
-            // Exact by contract (see `ScalarDistance`): no tolerance.
-            if block[j + j * rows].abs() > 0.0 {
+            let diag = block[j + j * rows];
+            if diag.abs() > tol {
                 return Err(GprError::ShapeMismatch {
-                    reason: format!("squared distance ({j}, {j}) is not exactly zero"),
+                    reason: format!("squared distance ({j}, {j}) is not zero"),
                 });
             }
+            tidy |= diag.abs() > 0.0;
             for i in (j + 1)..rows {
-                if (block[i + j * rows] - block[j + i * rows]).abs() > 0.0 {
+                let gap = (block[i + j * rows] - block[j + i * rows]).abs();
+                if gap > tol {
                     return Err(GprError::ShapeMismatch {
-                        reason: format!(
-                            "squared distances ({i}, {j}) and ({j}, {i}) differ; a square must be exactly symmetric"
-                        ),
+                        reason: format!("squared distances ({i}, {j}) and ({j}, {i}) differ"),
                     });
                 }
+                tidy |= gap > 0.0;
             }
         }
     }
-    Ok(())
+    Ok(tidy)
+}
+
+/// Fixes what [`check_block`] accepted as rounding: negative values to
+/// zero and, for a square, a zero diagonal and each mirror pair set to its
+/// mean.
+fn tidy_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
+    for v in block.iter_mut() {
+        *v = v.max(0.0);
+    }
+    if kind == BlockKind::Square {
+        for j in 0..cols {
+            block[j + j * rows] = 0.0;
+            for i in (j + 1)..rows {
+                let mean = 0.5 * (block[i + j * rows] + block[j + i * rows]);
+                block[i + j * rows] = mean;
+                block[j + i * rows] = mean;
+            }
+        }
+    }
 }
 
 /// The training `d²` of one slot, in the storage scalar.
@@ -342,8 +397,10 @@ impl<T: KernelScalar> TrainSources<T> {
             scratch.clear();
             scratch.resize(len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?, 0.0);
             filler.fill(n, n, &mut scratch);
-            for block in scratch.chunks_exact(len.max(1)) {
-                check_block(block, n, n, BlockKind::Square)?;
+            for block in scratch.chunks_exact_mut(len.max(1)) {
+                if check_block(block, n, n, BlockKind::Square)? {
+                    tidy_block(block, n, n, BlockKind::Square);
+                }
             }
             match &mut self.slots[at].1 {
                 TrainData::Scalar(square) => {

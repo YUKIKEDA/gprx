@@ -75,7 +75,8 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<DistanceOnly>> {
     /// [`GprError::IndexOutOfRange`] for an index `≥ n`,
     /// [`GprError::LengthMismatch`] if a table has the wrong length or a slot
     /// has no source or two, [`GprError::ShapeMismatch`] for a negative
-    /// value, a non-zero diagonal, or an asymmetric square, and [`GprError::CholeskyFailed`]
+    /// value, or a square whose diagonal or symmetry is off past rounding
+    /// (see [`crate::kernel::ScalarDistance`]), and [`GprError::CholeskyFailed`]
     /// when `K_mm` cannot be factored.
     ///
     /// # Examples
