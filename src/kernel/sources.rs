@@ -299,7 +299,8 @@ fn tidy_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
 pub enum TrainData<T> {
     /// Dense square, leading dimension `TrainSources::cap`.
     Scalar(Vec<T>),
-    /// Packed lower triangles of every dimension.
+    /// Packed lower triangles of every dimension, packed for order
+    /// `TrainSources::cap`.
     Ard(ArdSqDiffBuf<T>),
 }
 
@@ -307,7 +308,8 @@ pub enum TrainData<T> {
 #[derive(Clone, Debug)]
 pub struct TrainSources<T> {
     n: usize,
-    /// Leading dimension of the scalar squares (`≥ n`; online growth).
+    /// Leading dimension of the scalar squares and the order the ARD
+    /// triangles are packed for (`≥ n`; online growth).
     cap: usize,
     slots: Vec<(SlotId, TrainData<T>)>,
 }
@@ -325,9 +327,10 @@ pub struct Staged<T> {
 enum SlotChange<T> {
     /// A rebuilt slot.
     Replace(TrainData<T>),
-    /// The new column of a scalar square, written in place.
+    /// The new point's column, written in place: `n` values for a scalar
+    /// square, `d · n` (dimension after dimension) for ARD triangles.
     Column(Vec<T>),
-    /// Removes a point of a scalar square in place.
+    /// Removes a point in place.
     Remove(usize),
 }
 
@@ -430,10 +433,11 @@ impl<T: KernelScalar> TrainSources<T> {
                         SlotChange::Column(column)
                     }
                 }
-                TrainData::Ard(cache) => {
+                TrainData::Ard(cache) if grow => {
                     let old = cache.view();
-                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs(
+                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs_with_cap(
                         n + 1,
+                        new_cap,
                         old.d(),
                         |k, i, j| {
                             if i == n && j == n {
@@ -446,6 +450,11 @@ impl<T: KernelScalar> TrainSources<T> {
                         },
                     )?))
                 }
+                TrainData::Ard(cache) => SlotChange::Column(
+                    (0..cache.view().d())
+                        .flat_map(|k| col.block(k).iter().map(|&v| T::from_f64(v)))
+                        .collect(),
+                ),
             };
             changes.push(change);
         }
@@ -472,20 +481,9 @@ impl<T: KernelScalar> TrainSources<T> {
                 reason: format!("point index {index} is out of range for n={n}"),
             });
         }
-        let skip = |i: usize| if i >= index { i + 1 } else { i };
         let mut changes = Vec::with_capacity(self.slots.len());
-        for (_, data) in &self.slots {
-            changes.push(match data {
-                TrainData::Scalar(_) => SlotChange::Remove(index),
-                TrainData::Ard(cache) => {
-                    let old = cache.view();
-                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs(
-                        n - 1,
-                        old.d(),
-                        |k, i, j| old.get(k, skip(i), skip(j)),
-                    )?))
-                }
-            });
+        for _ in &self.slots {
+            changes.push(SlotChange::Remove(index));
         }
         Ok(Staged {
             n: n - 1,
@@ -505,8 +503,7 @@ impl<T: KernelScalar> TrainSources<T> {
     /// Applies a change staged on this store. Cannot fail.
     pub(crate) fn commit(&mut self, staged: Staged<T>) {
         let (n, cap) = (self.n, self.cap);
-        // Staged on this store: one change per slot, in slot order, and an
-        // in-place change only for a scalar slot.
+        // Staged on this store: one change per slot, in slot order.
         debug_assert!(staged.changes.is_empty() || staged.changes.len() == self.slots.len());
         for ((_, data), change) in self.slots.iter_mut().zip(staged.changes) {
             match (data, change) {
@@ -523,9 +520,10 @@ impl<T: KernelScalar> TrainSources<T> {
                         }
                     }
                 }
-                (TrainData::Ard(_), SlotChange::Column(_) | SlotChange::Remove(_)) => {
-                    debug_assert!(false, "an in-place change staged for an ARD slot");
+                (TrainData::Ard(cache), SlotChange::Column(column)) => {
+                    cache.push_point(|k, j| column[k * n + j]);
                 }
+                (TrainData::Ard(cache), SlotChange::Remove(index)) => cache.remove_point(index),
             }
         }
         self.n = staged.n;
@@ -1200,6 +1198,52 @@ mod tests {
         assert_eq!(store.dense_f64(), expected(4));
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected(3));
+    }
+
+    /// The ARD slot's first stored value, to see whether its buffer moved.
+    fn ard_ptr(store: &TrainSources<f64>, slots: &[DistanceSlot]) -> *const f64 {
+        let Some(SquareSlot::Ard(view)) = store.square(slots[2].id()) else {
+            panic!("ard slot");
+        };
+        view.column(0, 0).as_ptr()
+    }
+
+    #[test]
+    fn appends_within_capacity_write_in_place_and_a_middle_delete_shifts() {
+        let (slots, mut store) = store();
+        for n in 2..6 {
+            let staged = store.stage_append(column(&slots, n).raw()).expect("stage");
+            store.commit(staged);
+        }
+        // Capacity 2 doubled to 8: the next two appends stay in the buffer.
+        let ptr = ard_ptr(&store, &slots);
+        for n in 6..8 {
+            let staged = store.stage_append(column(&slots, n).raw()).expect("stage");
+            store.commit(staged);
+            assert_eq!(ard_ptr(&store, &slots), ptr);
+        }
+        assert_eq!(store.dense_f64(), expected(8));
+        // Points 0..8 sit at 0..8 on a line; delete point 3, then point 0.
+        let kept: Vec<f64> = [0.0, 1.0, 2.0, 4.0, 5.0, 6.0, 7.0].to_vec();
+        let staged = store.stage_delete(3).expect("stage");
+        store.commit(staged);
+        let sq = |scale: f64, at: &[f64]| -> Vec<f64> {
+            at.iter()
+                .flat_map(|&b| at.iter().map(move |&a| scale * (a - b).powi(2)))
+                .collect()
+        };
+        let want = |at: &[f64]| {
+            vec![
+                (SlotShape::Scalar, sq(1.0, at)),
+                (SlotShape::Scalar, sq(2.0, at)),
+                (SlotShape::Ard(2), [sq(4.0, at), sq(5.0, at)].concat()),
+            ]
+        };
+        assert_eq!(store.dense_f64(), want(&kept));
+        let staged = store.stage_delete(0).expect("stage");
+        store.commit(staged);
+        assert_eq!(store.dense_f64(), want(&kept[1..]));
+        assert_eq!(ard_ptr(&store, &slots), ptr);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use faer::{Mat, MatMut, Par};
 use gprx::internals::{
     apply_from_ard_cache, fill_ard_squared_diff, fill_pairwise_sq_euclidean, grad_from_ard_cache,
 };
-use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
+use gprx::kernel::{ArdDistance, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance, Triangle};
 use gprx::transform::StandardizeTarget;
 use gprx::{
     FastSimulatedAnnealing, FittedGpr, Fixed, GaussianLikelihood, Gpr, KernelExp, MixedPrecision,
@@ -568,6 +568,74 @@ fn fit_lbfgs_ard(c: &mut Criterion) {
     group.finish();
 }
 
+/// `OnlineGpr` on supplied distances: one insert and the delete of that
+/// point, at `n = 512` with spare capacity, for a scalar slot and an ARD slot
+/// of `d = 4` (#473). The pair keeps `n` fixed from iteration to iteration.
+fn online_distance_insert(c: &mut Criterion) {
+    const N_ONLINE: usize = 512;
+    const DIMS: usize = 4;
+    let point = |i: usize, k: usize| ((i * (k + 3)) % 97) as f64 / 31.0;
+    let block = |k: usize, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+        cols.flat_map(|j| {
+            rows.clone()
+                .map(move |i| (point(i, k) - point(j, k)).powi(2))
+        })
+        .collect::<Vec<f64>>()
+    };
+    let y: Vec<f64> = (0..=N_ONLINE + 1)
+        .map(|i| (i as f64 / 17.0).sin())
+        .collect();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let mut group = c.benchmark_group("online_distance_insert");
+    for ard in [false, true] {
+        let image = ScalarDistance::new();
+        let bands = ArdDistance::new(DIMS).expect("dims");
+        let source = |rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+            let blocks: Vec<Vec<f64>> = (0..DIMS)
+                .map(|k| block(k, rows.clone(), cols.clone()))
+                .collect();
+            if ard {
+                bands.from_vecs(blocks)
+            } else {
+                let sum = (0..blocks[0].len())
+                    .map(|at| blocks.iter().map(|b| b[at]).sum())
+                    .collect();
+                image.from_vec(sum)
+            }
+        };
+        let kernel = if ard {
+            bands
+                .kernel(RbfArdKernel::new(&[1.0; DIMS]).expect("ell"))
+                .expect("dims")
+        } else {
+            image.kernel(RbfKernel::new(1.0).expect("ell"))
+        };
+        let mut online = Gpr::new(kernel, lik())
+            .with_optimizer(Fixed)
+            .factor([source(0..N_ONLINE, 0..N_ONLINE)], N_ONLINE, &y[..N_ONLINE])
+            .expect("fit")
+            .into_online()
+            .expect("online");
+        // Grows the capacity; the benched pair then fits in it.
+        online
+            .insert([source(0..N_ONLINE, N_ONLINE..N_ONLINE + 1)], y[N_ONLINE])
+            .expect("warmup");
+        let n = N_ONLINE + 1;
+        let name = if ard { "ard" } else { "scalar" };
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || source(0..n, n..n + 1),
+                |column| {
+                    let id = online.insert([column], y[n]).expect("insert");
+                    online.delete(id).expect("delete");
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     exact,
     kernel_rbf,
@@ -580,6 +648,7 @@ criterion_group!(
     fit_lbfgs,
     fit_fsa,
     mll_and_grad_ard,
-    fit_lbfgs_ard
+    fit_lbfgs_ard,
+    online_distance_insert
 );
 criterion_main!(exact);

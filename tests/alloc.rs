@@ -821,3 +821,97 @@ fn svgp_distance_adam_epoch_allocs() {
         assert_alloc_cap(&format!("svgp_distance_adam_epoch_{label}"), per_epoch, cap);
     }
 }
+
+/// An `OnlineGpr` insert within capacity: an ARD slot writes the new
+/// point's `d · n` values in place, as a scalar slot writes its column, so
+/// it allocates what the scalar slot does plus that column, never a copy of
+/// the `d · n(n+1)/2` triangles (#473). `f64` and mixed precision, whose
+/// store keeps a second, `f64`, copy.
+#[test]
+fn online_distance_insert_within_capacity_allocs() {
+    let _guard = alloc_lock();
+    let (n, dims) = (128, 2);
+    let point = |i: usize| [(i % 16) as f64 / 8.0, (i / 16) as f64 / 8.0];
+    let per_dim = |dim: usize, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+        cols.flat_map(|j| {
+            rows.clone()
+                .map(move |i| (point(i)[dim] - point(j)[dim]).powi(2))
+        })
+        .collect::<Vec<f64>>()
+    };
+    let y: Vec<f64> = (0..n + 2).map(|i| (i as f64 / 8.0).sin()).collect();
+    let lik = || GaussianLikelihood::new(NOISE).expect("noise");
+    for mixed in [false, true] {
+        let mut counts = Vec::new();
+        for ard in [false, true] {
+            let image = ScalarDistance::new();
+            let bands = ArdDistance::new(dims).expect("dims");
+            let source = |rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+                let blocks: Vec<Vec<f64>> = (0..dims)
+                    .map(|k| per_dim(k, rows.clone(), cols.clone()))
+                    .collect();
+                if ard {
+                    bands.from_vecs(blocks)
+                } else {
+                    let sum = (0..blocks[0].len())
+                        .map(|at| blocks.iter().map(|b| b[at]).sum())
+                        .collect();
+                    image.from_vec(sum)
+                }
+            };
+            let kernel = if ard {
+                bands
+                    .kernel(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell"))
+                    .expect("dims")
+            } else {
+                image.kernel(RbfKernel::new(ELL).expect("ell"))
+            };
+            let count = |online: &mut dyn FnMut(usize) -> Result<(), GprError>| {
+                // The first insert doubles the capacity; the second fits.
+                online(n).expect("warmup");
+                let mut result = Ok(());
+                let (allocs, bytes) = {
+                    let mut allocs = 0;
+                    let bytes = bytes_in(|| {
+                        allocs = allocs_in(|| result = online(n + 1));
+                    });
+                    (allocs, bytes)
+                };
+                result.expect("counted");
+                (allocs, bytes)
+            };
+            let measured = if mixed {
+                let mut online = Gpr::new(kernel, lik())
+                    .with_optimizer(Fixed)
+                    .with_precision::<MixedPrecision<ReevaluateKernel>>()
+                    .factor([source(0..n, 0..n)], n, &y[..n])
+                    .expect("fit")
+                    .into_online()
+                    .expect("online");
+                count(&mut |k| online.insert([source(0..k, k..k + 1)], y[k]).map(drop))
+            } else {
+                let mut online = Gpr::new(kernel, lik())
+                    .with_optimizer(Fixed)
+                    .factor([source(0..n, 0..n)], n, &y[..n])
+                    .expect("fit")
+                    .into_online()
+                    .expect("online");
+                count(&mut |k| online.insert([source(0..k, k..k + 1)], y[k]).map(drop))
+            };
+            counts.push(measured);
+        }
+        let [(scalar_allocs, scalar_bytes), (ard_allocs, ard_bytes)] = counts[..] else {
+            panic!("two counts");
+        };
+        let label = if mixed { "mixed" } else { "f64" };
+        eprintln!(
+            "online_distance_insert_{label}: scalar {scalar_allocs} allocs / {scalar_bytes} B, ard {ard_allocs} allocs / {ard_bytes} B"
+        );
+        // The source the caller moves in holds `dims` blocks of `n + 1`
+        // values; the staged column holds them again in the storage scalar
+        // (twice under mixed precision).
+        let column = 3 * dims * (n + 1) * std::mem::size_of::<f64>();
+        assert!(ard_allocs <= scalar_allocs + 2 * dims, "{label}: allocs");
+        assert!(ard_bytes <= scalar_bytes + column, "{label}: bytes");
+    }
+}

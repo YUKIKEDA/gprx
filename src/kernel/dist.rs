@@ -306,11 +306,11 @@ fn packed_len(n: usize) -> Result<usize, GprError> {
         .ok_or(GprError::SizeOverflow)
 }
 
-/// Offset of column `col` in a column-packed lower triangle of order `n`.
+/// Offset of column `col` in a column-packed lower triangle of order `cap`.
 #[inline]
-fn packed_col_offset(n: usize, col: usize) -> usize {
-    // Columns 0..col hold n, n-1, …, n-col+1 entries.
-    col * (2 * n - col + 1) / 2
+fn packed_col_offset(cap: usize, col: usize) -> usize {
+    // Columns 0..col hold cap, cap-1, …, cap-col+1 entries.
+    col * (2 * cap - col + 1) / 2
 }
 
 /// Raw `(Δx_d)²` for every pair of rows of `x`, owned.
@@ -318,10 +318,16 @@ fn packed_col_offset(n: usize, col: usize) -> usize {
 /// Only the lower triangle (diagonal included) of each dimension is stored,
 /// column by column, so the cache holds `d · n(n+1)/2` values instead of
 /// `d · n²`. Read it through [`Self::view`].
+///
+/// The triangles are packed for an order `cap ≥ n`: column `j` has room for
+/// rows `j..cap` and holds rows `j..n`. A coordinate cache has `cap = n`.
+/// A store of supplied distances keeps spare room, so appending a point
+/// ([`Self::push_point`]) writes `d · (n + 1)` values in place.
 #[derive(Clone, Debug)]
 pub(crate) struct ArdSqDiffBuf<T> {
     data: Vec<T>,
     n: usize,
+    cap: usize,
     d: usize,
 }
 
@@ -339,7 +345,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             .ok_or(GprError::SizeOverflow)?;
         let mut data = vec![T::from_f64(0.0); len];
         T::write_ard(x, &mut data);
-        Ok(Self { data, n, d })
+        Ok(Self { data, n, cap: n, d })
     }
 
     /// Packs the lower triangles of `d` dense `n × n` blocks; `pair(k, i, j)`
@@ -353,18 +359,85 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         d: usize,
         pair: impl Fn(usize, usize, usize) -> T,
     ) -> Result<Self, GprError> {
-        let len = packed_len(n)?
+        Self::from_pairs_with_cap(n, n, d, pair)
+    }
+
+    /// [`Self::from_pairs`] packed for order `cap ≥ n`: the room for rows
+    /// `n..cap` of each column holds zeros.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · cap(cap+1)/2` overflows.
+    pub(crate) fn from_pairs_with_cap(
+        n: usize,
+        cap: usize,
+        d: usize,
+        pair: impl Fn(usize, usize, usize) -> T,
+    ) -> Result<Self, GprError> {
+        debug_assert!(cap >= n);
+        let len = packed_len(cap)?
             .checked_mul(d)
             .ok_or(GprError::SizeOverflow)?;
         let mut data = Vec::with_capacity(len);
         for k in 0..d {
-            for col in 0..n {
-                for row in col..n {
-                    data.push(pair(k, row, col));
+            for col in 0..cap {
+                for row in col..cap {
+                    data.push(if row < n {
+                        pair(k, row, col)
+                    } else {
+                        T::from_f64(0.0)
+                    });
                 }
             }
         }
-        Ok(Self { data, n, d })
+        Ok(Self { data, n, cap, d })
+    }
+
+    /// Appends point `n` in place: `pair(k, j)` is `(Δ_k)²` to point `j < n`;
+    /// the new diagonal is zero. Writes `d · (n + 1)` values.
+    ///
+    /// The caller grows the buffer first ([`Self::from_pairs_with_cap`])
+    /// when `n = cap`; here that is a no-op.
+    pub(crate) fn push_point(&mut self, pair: impl Fn(usize, usize) -> T) {
+        let (n, cap) = (self.n, self.cap);
+        if n >= cap {
+            debug_assert!(false, "push_point on a full ArdSqDiffBuf");
+            return;
+        }
+        let block = self.data.len().checked_div(self.d).unwrap_or(0);
+        for k in 0..self.d {
+            let base = k * block;
+            for j in 0..n {
+                self.data[base + packed_col_offset(cap, j) + (n - j)] = pair(k, j);
+            }
+            self.data[base + packed_col_offset(cap, n)] = T::from_f64(0.0);
+        }
+        self.n = n + 1;
+    }
+
+    /// Removes point `index < n` in place, keeping `cap`. Every pair after
+    /// it moves back by one row and column.
+    pub(crate) fn remove_point(&mut self, index: usize) {
+        let (n, cap) = (self.n, self.cap);
+        if index >= n {
+            debug_assert!(false, "remove_point out of range");
+            return;
+        }
+        let block = self.data.len().checked_div(self.d).unwrap_or(0);
+        let skip = |i: usize| if i >= index { i + 1 } else { i };
+        for k in 0..self.d {
+            let base = k * block;
+            // Column by column, rows in order: every read is at or past
+            // its write, so the walk reads values it has not overwritten.
+            for col in 0..n - 1 {
+                let (from_col, to) = (skip(col), base + packed_col_offset(cap, col));
+                let from = base + packed_col_offset(cap, from_col);
+                for row in col..n - 1 {
+                    self.data[to + (row - col)] = self.data[from + (skip(row) - from_col)];
+                }
+            }
+        }
+        self.n = n - 1;
     }
 
     /// `(points, dimensions)` the cache was filled for.
@@ -389,6 +462,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         ArdSqDiff {
             data: &self.data,
             n: self.n,
+            cap: self.cap,
             d: self.d,
             block: self.data.len().checked_div(self.d).unwrap_or(0),
         }
@@ -403,8 +477,10 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
 pub struct ArdSqDiff<'a, T> {
     data: &'a [T],
     n: usize,
+    /// The order the triangles are packed for (`≥ n`).
+    cap: usize,
     d: usize,
-    /// Entries per dimension, `n(n+1)/2`.
+    /// Entries per dimension, `cap(cap+1)/2`.
     block: usize,
 }
 
@@ -422,7 +498,7 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
     #[inline]
     pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
-        let start = dim * self.block + packed_col_offset(self.n, col);
+        let start = dim * self.block + packed_col_offset(self.cap, col);
         &self.data[start..start + (self.n - col)]
     }
 
@@ -438,6 +514,7 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         Some(ArdSqDiff {
             data: T::as_f64_slice(self.data)?,
             n: self.n,
+            cap: self.cap,
             d: self.d,
             block: self.block,
         })
