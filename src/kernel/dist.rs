@@ -342,6 +342,36 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         Ok(Self { data, n, d })
     }
 
+    /// Packs the lower triangles of `d` dense `n × n` blocks; `pair(k, i, j)`
+    /// is `(Δ_k)²` of the pair `(i, j)`, `i ≥ j`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    pub(crate) fn from_pairs(
+        n: usize,
+        d: usize,
+        pair: impl Fn(usize, usize, usize) -> T,
+    ) -> Result<Self, GprError> {
+        let len = packed_len(n)?
+            .checked_mul(d)
+            .ok_or(GprError::SizeOverflow)?;
+        let mut data = Vec::with_capacity(len);
+        for k in 0..d {
+            for col in 0..n {
+                for row in col..n {
+                    data.push(pair(k, row, col));
+                }
+            }
+        }
+        Ok(Self { data, n, d })
+    }
+
+    /// Number of points.
+    pub(crate) fn n(&self) -> usize {
+        self.n
+    }
+
     /// `(points, dimensions)` the cache was filled for.
     #[cfg(test)]
     pub(crate) fn shape(&self) -> (usize, usize) {
@@ -375,7 +405,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
 /// [`Self::get`] reads any pair, in either order. [`Self::column`] is the
 /// contiguous stored part of one column: rows `col..n`.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ArdSqDiff<'a, T> {
+pub struct ArdSqDiff<'a, T> {
     data: &'a [T],
     n: usize,
     d: usize,
@@ -416,6 +446,51 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
             d: self.d,
             block: self.block,
         })
+    }
+}
+
+/// Where the blocks of an [`ArdBlocks`] live.
+#[derive(Clone, Copy, Debug)]
+pub enum BlockList<'a, T> {
+    /// One borrowed slice per dimension.
+    Slices(&'a [&'a [T]]),
+    /// One owned buffer per dimension.
+    Owned(&'a [Vec<T>]),
+}
+
+/// Raw `(Δ_d)²` of a rectangular block (`rows × cols`), one dense
+/// column-major block per dimension: `(row, col)` of dimension `k` is
+/// `block(k)[row + col * rows]`.
+#[derive(Clone, Copy, Debug)]
+pub struct ArdBlocks<'a, T> {
+    pub(crate) blocks: BlockList<'a, T>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    /// First column of the stored blocks this view starts at.
+    pub(crate) col0: usize,
+}
+
+impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
+    /// Number of dimensions.
+    pub(crate) fn d(&self) -> usize {
+        match self.blocks {
+            BlockList::Slices(s) => s.len(),
+            BlockList::Owned(s) => s.len(),
+        }
+    }
+
+    /// The block of dimension `dim`.
+    pub(crate) fn block(&self, dim: usize) -> &'a [T] {
+        match self.blocks {
+            BlockList::Slices(s) => s[dim],
+            BlockList::Owned(s) => &s[dim],
+        }
+    }
+
+    /// `(Δ_dim)²` of the pair `(row, col)`.
+    #[inline]
+    pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
+        self.block(dim)[row + (col + self.col0) * self.rows]
     }
 }
 

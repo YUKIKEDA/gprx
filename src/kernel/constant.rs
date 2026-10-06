@@ -373,7 +373,8 @@ fn require_points_square<T: KernelScalar>(
     x: MatRef<'_, T>,
     out: MatRef<'_, T>,
 ) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
+    // Only the shape is read: a model on supplied distances has no columns.
+    if x.nrows() == 0 {
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != x.nrows() {
@@ -395,7 +396,8 @@ fn require_cross_points<T: KernelScalar>(
     xs: MatRef<'_, T>,
     out: MatRef<'_, T>,
 ) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 || xs.nrows() == 0 || xs.ncols() == 0 {
+    // Only the shape is read: a model on supplied distances has no columns.
+    if x.nrows() == 0 || xs.nrows() == 0 {
         return Err(GprError::EmptyInput);
     }
     if out.nrows() != x.nrows() || out.ncols() != xs.nrows() {

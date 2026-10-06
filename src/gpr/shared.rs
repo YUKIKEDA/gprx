@@ -11,7 +11,12 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
+use crate::kernel::{
+    BlockKind, CompiledKernel, DistanceSource, Fills, GramInputs, KernelScalar, KernelSpec,
+    ModelKernel, RectSlots, ScalarOps, SquareSlots, TrainSources, Triangle, bind_sources,
+    spec_slots,
+};
+use super::factor::TrainPoints;
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower, faer_par, faer_par_dims, inv_diag_from_chol_l, log_det_from_l,
@@ -63,6 +68,8 @@ pub(crate) struct GprCore<P: GpScalar> {
     pub(crate) alpha: Vec<P::Refine>,
     pub(crate) x_cast: <P::Storage as ScalarOps>::ColCast,
     pub(crate) y_cast: <P::Storage as ScalarOps>::RowCast,
+    /// Training squared distances of a distance model; empty otherwise.
+    pub(crate) sources: TrainSources<P::Storage>,
     pub(crate) n: usize,
     pub(crate) d: usize,
 }
@@ -87,10 +94,39 @@ impl<P: GpScalar> Clone for GprCore<P> {
             alpha: self.alpha.clone(),
             x_cast: self.x_cast.clone(),
             y_cast: self.y_cast.clone(),
+            sources: self.sources.clone(),
             n: self.n,
             d: self.d,
         }
     }
+}
+
+/// The training points of a core for a Gram evaluation: `x` (live `n × d`)
+/// in the storage scalar, and the training squares of a distance model.
+pub(crate) fn train_points<'a, P: GpScalar>(
+    x: &'a Mat<f64>,
+    (n, d): (usize, usize),
+    x_cast: &'a mut <P::Storage as ScalarOps>::ColCast,
+    sources: &'a TrainSources<P::Storage>,
+) -> TrainPoints<'a, P::Storage> {
+    TrainPoints {
+        x: P::Storage::storage_cols(x.as_ref().submatrix(0, 0, n, d), x_cast),
+        slots: (!sources.is_empty()).then_some(sources as &dyn SquareSlots<P::Storage>),
+    }
+}
+
+/// Binds the training squares of `kernel`'s slots, `n × n` each.
+pub(crate) fn bind_training<'a, T: KernelScalar>(
+    kernel: &KernelSpec,
+    sources: Vec<DistanceSource<'a>>,
+    n: usize,
+) -> Result<(TrainSources<T>, Fills<'a>), GprError> {
+    let slots = spec_slots(kernel);
+    if slots.is_empty() && sources.is_empty() {
+        return Ok((TrainSources::empty(), Vec::new()));
+    }
+    let (raw, fills) = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
+    Ok((TrainSources::from_raw(raw, n)?, fills))
 }
 
 impl<P: GpScalar> GprCore<P> {
@@ -100,7 +136,7 @@ impl<P: GpScalar> GprCore<P> {
     }
 
     /// Drops the training data and returns a trainer with `optimizer`.
-    pub(crate) fn into_trainer<O>(self, optimizer: O) -> Gpr<O, P> {
+    pub(crate) fn into_trainer<O, K: ModelKernel>(self, optimizer: O) -> Gpr<O, P, K> {
         Gpr::from_owned(
             self.kernel,
             self.likelihood,
@@ -158,6 +194,7 @@ impl<P: GpScalar> GprCore<P> {
             kernel: &self.kernel,
             compiled: &self.compiled,
             x: self.x_active(),
+            sources: &self.sources,
             y: &self.y_train,
             noise: self.likelihood.noise_variance(),
             jitter,
@@ -187,25 +224,28 @@ impl<P: GpScalar> GprCore<P> {
             .to_f64()
     }
 
-    fn require_query_dim(&self, n_cols: usize) -> Result<(), GprError> {
-        if n_cols != self.d {
+    /// Checks the query coordinates: `m × d` against the training `d`. A
+    /// model on supplied distances alone has `d = 0` and an empty `xs`.
+    fn check_query(&self, q: Query<'_, P::Storage>) -> Result<(), GprError> {
+        if q.n_cols != self.d {
             return Err(GprError::DimensionMismatch {
-                x_dim: n_cols,
+                x_dim: q.n_cols,
                 expected_dim: self.d,
             });
         }
-        Ok(())
+        if self.d == 0 {
+            crate::data::require_nonempty(q.m)?;
+            return crate::data::require_count(q.xs.len(), 0, "feature values");
+        }
+        validate_query(q.xs, q.m, q.n_cols)
     }
 
     /// Predicts into `out` through [`Self::query`], reusing its buffers.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn predict_with_into(
         &mut self,
         factor: StoredFactor<'_, P::Storage>,
         thread_scratch: &mut [Mat<P::Storage>],
-        xs: &[f64],
-        n_rows: usize,
-        n_cols: usize,
+        q: Query<'_, P::Storage>,
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
@@ -219,9 +259,7 @@ impl<P: GpScalar> GprCore<P> {
             },
             factor,
             &self.alpha,
-            xs,
-            n_rows,
-            n_cols,
+            q,
             options,
             out,
         );
@@ -231,14 +269,11 @@ impl<P: GpScalar> GprCore<P> {
     }
 
     /// Predicts into `out` with query buffers allocated for this call.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_prediction(
         &self,
         factor: StoredFactor<'_, P::Storage>,
         alpha: &[P::Refine],
-        xs: &[f64],
-        n_rows: usize,
-        n_cols: usize,
+        q: Query<'_, P::Storage>,
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
@@ -253,28 +288,23 @@ impl<P: GpScalar> GprCore<P> {
             },
             factor,
             alpha,
-            xs,
-            n_rows,
-            n_cols,
+            q,
             options,
             out,
         )
     }
 
     /// The one predict body: [`Self::fill_query`], then the moments.
-    #[allow(clippy::too_many_arguments)]
     fn predict_query(
         &self,
         buffers: QueryBuffers<'_, P>,
         factor: StoredFactor<'_, P::Storage>,
         alpha: &[P::Refine],
-        xs: &[f64],
-        n_rows: usize,
-        n_cols: usize,
+        q: Query<'_, P::Storage>,
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        let query = self.fill_query(buffers, xs, n_rows, n_cols)?;
+        let query = self.fill_query(buffers, q)?;
         let QueryWorkspace {
             query_xs,
             query_x,
@@ -282,15 +312,17 @@ impl<P: GpScalar> GprCore<P> {
             query_kss,
             ..
         } = query;
+        let m = q.m;
         write_moments::<P>(
             MomentInputs {
                 core: self.refs(alpha),
                 factor,
-                query_xs,
-                query_x: query_x.as_ref(),
-                k_star: query_k_star.as_mut(),
-                kss: query_kss,
-                n_cols,
+                query_xs: &query_xs[..m * q.n_cols],
+                query_x: query_x.as_ref().submatrix(0, 0, m, q.n_cols),
+                k_star: query_k_star.as_mut().submatrix_mut(0, 0, self.n, m),
+                kss: &mut query_kss[..m],
+                n_cols: q.n_cols,
+                cross64: q.cross64,
                 options,
             },
             out,
@@ -309,26 +341,25 @@ impl<P: GpScalar> GprCore<P> {
         }
     }
 
-    /// Checks and transforms `xs`, packs it into `query`, and writes
-    /// `K(X, xs)` (`n × m`) into `query.query_k_star`.
+    /// Checks and transforms the query coordinates, packs them into
+    /// `query`, and writes `K(X, xs)` (`n × m`) into `query.query_k_star`.
     fn fill_query<'q>(
         &self,
         buffers: QueryBuffers<'q, P>,
-        xs: &[f64],
-        n_rows: usize,
-        n_cols: usize,
+        q: Query<'_, P::Storage>,
     ) -> Result<&'q mut QueryWorkspace<P>, GprError> {
         let QueryBuffers {
             query,
             x_cast,
             thread_scratch,
         } = buffers;
-        self.require_query_dim(n_cols)?;
-        validate_query(xs, n_rows, n_cols)?;
-        query.ensure(self.n, n_rows, n_cols)?;
-        query.query_xs.copy_from_slice(xs);
-        self.x_transform
-            .apply(&mut query.query_xs, n_rows, n_cols)?;
+        self.check_query(q)?;
+        let (m, d) = (q.m, q.n_cols);
+        query.ensure(self.n, m, d)?;
+        query.query_xs.copy_from_slice(q.xs);
+        if d > 0 {
+            self.x_transform.apply(&mut query.query_xs, m, d)?;
+        }
         let x_train = P::Storage::storage_cols(self.x_active(), x_cast);
         let QueryWorkspace {
             query_xs,
@@ -339,10 +370,11 @@ impl<P: GpScalar> GprCore<P> {
             query_nested,
             ..
         } = &mut *query;
-        pack_storage(query_xs, n_rows, n_cols, query_x.as_mut());
-        with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross::<M>(
+        pack_storage(query_xs, m, d, query_x.as_mut());
+        with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross_slots::<M>(
             x_train,
             query_x.as_ref(),
+            q.cross,
             Some(query_dist.as_mut()),
             query_k_star.as_mut(),
             query_scratch.as_mut(),
@@ -352,18 +384,16 @@ impl<P: GpScalar> GprCore<P> {
         Ok(query)
     }
 
-    /// Predictive mean and query–query covariance at `xs`.
+    /// Predictive mean and query–query covariance at the query.
     pub(crate) fn write_covariance(
         &self,
         factor: StoredFactor<'_, P::Storage>,
         alpha: &[P::Refine],
-        xs: &[f64],
-        n_rows: usize,
-        n_cols: usize,
+        q: Query<'_, P::Storage>,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         let n = self.n;
-        let m = n_rows;
+        let m = q.m;
         let mut query = QueryWorkspace::new();
         let mut x_cast = P::Storage::empty_cols();
         let mut thread_scratch = empty_thread_scratch::<P::Storage>();
@@ -373,9 +403,7 @@ impl<P: GpScalar> GprCore<P> {
                 x_cast: &mut x_cast,
                 thread_scratch: &mut thread_scratch,
             },
-            xs,
-            n_rows,
-            n_cols,
+            q,
         )?;
         let QueryWorkspace {
             query_xs,
@@ -389,21 +417,35 @@ impl<P: GpScalar> GprCore<P> {
             k_star.as_ref(),
             self.x_active(),
             &query_xs,
-            n_cols,
+            q.n_cols,
+            q.cross64,
             alpha,
             &mut mean,
         ))?;
         factor.inv_l_in_place(k_star.as_mut());
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
-            query_x.as_ref(),
-            kss.as_mut(),
-            Triangle::Full,
-            kss_scratch.as_mut(),
-            &mut Vec::new(),
-            &mut thread_scratch,
-        ))?;
+        if self.sources.is_empty() {
+            with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
+                query_x.as_ref(),
+                kss.as_mut(),
+                Triangle::Full,
+                kss_scratch.as_mut(),
+                &mut Vec::new(),
+                &mut thread_scratch,
+            ))?;
+        } else {
+            with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross_slots::<M>(
+                query_x.as_ref(),
+                query_x.as_ref(),
+                q.square,
+                None,
+                kss.as_mut(),
+                kss_scratch.as_mut(),
+                &mut Vec::new(),
+                &mut thread_scratch,
+            ))?;
+        }
         let zero_s = P::Storage::from_f64(0.0);
         for col in 0..m {
             for row in 0..m {
@@ -449,20 +491,17 @@ impl<P: GpScalar> GprCore<P> {
         })
     }
 
-    /// Posterior draws at `xs` from [`Self::write_covariance`].
-    #[allow(clippy::too_many_arguments)]
+    /// Posterior draws at the query from [`Self::write_covariance`].
     pub(crate) fn sample_with(
         &self,
         factor: StoredFactor<'_, P::Storage>,
         alpha: &[P::Refine],
-        xs: &[f64],
-        n_rows: usize,
-        n_cols: usize,
+        q: Query<'_, P::Storage>,
         options: PredictOptions,
         n_draws: usize,
         seed: u64,
     ) -> Result<Vec<P::Refine>, GprError> {
-        self.write_covariance(factor, alpha, xs, n_rows, n_cols, options)?
+        self.write_covariance(factor, alpha, q, options)?
             .draw(n_draws, seed, self.policies.jitter)
     }
 
@@ -522,8 +561,12 @@ impl<P: GpScalar> GprCore<P> {
         let kernel = self.kernel.compile();
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch_k = Mat::<f64>::zeros(n, n);
+        let sources = self.sources.to_f64()?;
         with_kernel_exp!(self.policies.math, M => kernel.eval_gram::<M>(
-            GramInputs::points(self.x_active()),
+            GramInputs {
+                slots: (!sources.is_empty()).then_some(&sources as &dyn SquareSlots<f64>),
+                ..GramInputs::points(self.x_active())
+            },
             a.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),
@@ -595,6 +638,34 @@ impl<P: GpScalar> GprCore<P> {
     }
 }
 
+/// One predict's query: the coordinates (`m × n_cols`, column-major; no
+/// columns on a model of supplied distances alone) and, for a distance
+/// model, the train × query blocks (`cross`, and in `f64` for a refining
+/// precision) and the query × query blocks of a covariance (`square`).
+#[derive(Clone, Copy)]
+pub(crate) struct Query<'q, T> {
+    pub(crate) xs: &'q [f64],
+    pub(crate) m: usize,
+    pub(crate) n_cols: usize,
+    pub(crate) cross: Option<&'q dyn RectSlots<T>>,
+    pub(crate) cross64: Option<&'q dyn RectSlots<f64>>,
+    pub(crate) square: Option<&'q dyn RectSlots<T>>,
+}
+
+impl<'q, T> Query<'q, T> {
+    /// Coordinates only.
+    pub(crate) fn points(xs: &'q [f64], m: usize, n_cols: usize) -> Self {
+        Self {
+            xs,
+            m,
+            n_cols,
+            cross: None,
+            cross64: None,
+            square: None,
+        }
+    }
+}
+
 /// Query buffers a predict fills: the workspace, the cast cache for the
 /// training inputs, and per-thread kernel scratch.
 struct QueryBuffers<'a, P: GpScalar> {
@@ -624,6 +695,7 @@ struct MomentInputs<'a, P: GpScalar> {
     k_star: MatMut<'a, P::Storage>,
     kss: &'a mut [P::Storage],
     n_cols: usize,
+    cross64: Option<&'a dyn RectSlots<f64>>,
     options: PredictOptions,
 }
 
@@ -644,6 +716,7 @@ fn write_moments<P: GpScalar>(
         mut k_star,
         kss,
         n_cols,
+        cross64,
         options,
     } = inputs;
     let n = k_star.nrows();
@@ -661,6 +734,7 @@ fn write_moments<P: GpScalar>(
         core.x_train,
         query_xs,
         n_cols,
+        cross64,
         core.alpha,
         &mut out.mean,
     ))?;

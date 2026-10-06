@@ -72,6 +72,7 @@ struct Fresh {
     k64: crate::kernel::CompiledKernel<f64>,
     l: Mat<f32>,
     factor_alpha: Vec<f32>,
+    sources: crate::kernel::TrainSources<f32>,
 }
 
 fn fresh_factor(ell: f64, noise: f64, x: MatRef<'_, f64>, y: &[f64]) -> Fresh {
@@ -108,6 +109,7 @@ fn fresh_factor(ell: f64, noise: f64, x: MatRef<'_, f64>, y: &[f64]) -> Fresh {
         k64,
         l,
         factor_alpha,
+        sources: crate::kernel::TrainSources::empty(),
     }
 }
 
@@ -117,6 +119,7 @@ impl Fresh {
             kernel: &self.spec,
             compiled: &self.k32,
             x,
+            sources: &self.sources,
             y,
             noise,
             jitter: 0.0,

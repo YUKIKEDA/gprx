@@ -435,6 +435,41 @@ impl PeriodicKernel {
         })
     }
 
+    /// Rectangular `∂K/∂θ` from squared distances.
+    pub(crate) fn grad_cross_dist<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx > 1 {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("periodic kernel parameter index {param_idx} is out of range"),
+            });
+        }
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_dense(dist, d_k, |d| {
+            periodic_grad_from_sq_dist::<M, _>(d, ell, period, param_idx)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from squared distances.
+    pub(crate) fn hess_cross_dist<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_periodic_hess_idx(i, j)?;
+        let ell = T::from_f64(self.lengthscale());
+        let period = T::from_f64(self.period());
+        write_dense(dist, d2_k, |d| {
+            periodic_hess_from_sq_dist::<M, _>(d, ell, period, i, j)
+        })
+    }
+
     pub(crate) fn hess_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,

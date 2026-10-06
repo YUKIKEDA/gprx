@@ -1,7 +1,8 @@
 use super::apply::{combine_diag, mul_assign};
 use super::coord::{self, Dir};
+use super::supplied::{needs_supply, rect_slot, square_slot};
 use super::{
-    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
+    CompiledKernel, CrossViews, MixedKernelViews, Nested, ard_needs_coords, mul_triangle,
     require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
@@ -61,6 +62,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::White(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
             Self::Custom(leaf) => leaf.grad(dist, d_k, param_idx, uplo),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_with::<M>(dist, d_k, local, uplo, scratch, nested)
@@ -137,6 +139,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
             Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_points_with::<M>(x, d_k, local, uplo, scratch, nested)
@@ -213,6 +216,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
                 leaf.grad_points(one, cell, param_idx, Triangle::Lower)
             }),
+            Self::Supplied(leaf) => {
+                require_count_diag(x, out)?;
+                leaf.grad_diag::<M>(out, param_idx)
+            }
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_diag_points::<M>(x, out, local)
@@ -264,8 +271,13 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => {
-                self.grad_with::<M>(views.dist, d_k, param_idx, uplo, scratch, nested)
+            | Self::White(_) => match views.dist {
+                Some(dist) => self.grad_with::<M>(dist, d_k, param_idx, uplo, scratch, nested),
+                None => self.grad_points_with::<M>(views.x, d_k, param_idx, uplo, scratch, nested),
+            },
+            Self::Supplied(leaf) => {
+                let slot = square_slot(views.slots, leaf.slot)?;
+                leaf.grad::<M>(slot, views.x, d_k, param_idx, uplo, scratch)
             }
             Self::RbfArd(_)
             | Self::Linear(_)
@@ -346,6 +358,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(_) => coord::zero_block(x1, x2, d_k, &[dim]),
             Self::Linear(leaf) => coord::linear_grad_dim(leaf, x1, x2, d_k, dim),
             Self::Custom(leaf) => coord::custom_grad_dim(leaf, x1, x2, d_k, dim),
+            Self::Supplied(_) => Err(GprError::CoordGradientUnsupported),
             Self::Sum(terms) => fold_coord_sum(terms, d_k.as_mut(), scratch, |term, dest| {
                 term.grad_wrt_coord_dim_with::<M>(x1, x2, dest, dim, Mat::new().as_mut())
             }),
@@ -393,6 +406,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Custom(leaf) => {
                 coord::custom_hess_dims(leaf, x1, x2, d2_k, (dim_a, dim_b), false)
             }
+            Self::Supplied(_) => Err(GprError::CoordGradientUnsupported),
             Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
                 term.hess_wrt_coord_dims::<M>(x1, x2, dest, dim_a, dim_b, Mat::new().as_mut())
             }),
@@ -444,6 +458,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Custom(leaf) => {
                 coord::custom_hess_dims(leaf, x1, x2, d2_k, (dim_x1, dim_x2), true)
             }
+            Self::Supplied(_) => Err(GprError::CoordGradientUnsupported),
             Self::Sum(terms) => fold_coord_sum(terms, d2_k.as_mut(), scratch, |term, dest| {
                 term.hess_wrt_coord_mixed::<M>(x1, x2, dest, dim_x1, dim_x2, Mat::new().as_mut())
             }),
@@ -497,6 +512,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 coord::linear_grad_dim(leaf, x1, x2, d2_k, dim)
             }
             Self::Custom(leaf) => coord::custom_theta_dim(leaf, x1, x2, d2_k, param_idx, dim),
+            Self::Supplied(_) => Err(GprError::CoordGradientUnsupported),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.hess_theta_coord_dim::<M>(x1, x2, d2_k, local, dim)
@@ -540,6 +556,26 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
+        self.grad_cross_views::<M>(
+            CrossViews::points(x1, x2),
+            d_k,
+            param_idx,
+            scratch,
+            nested,
+        )
+    }
+
+    /// The rectangular `∂K/∂θ_{param_idx}` of the block `views` describes:
+    /// coordinate leaves from coordinates, supplied leaves from their block.
+    pub(crate) fn grad_cross_views<M: crate::math::KernelMath>(
+        &self,
+        views: CrossViews<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        let CrossViews { x1, x2, .. } = views;
         match self {
             Self::Rbf(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
             Self::Matern(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
@@ -550,17 +586,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
             Self::Linear(leaf) => leaf.grad_cross(x1, x2, d_k, param_idx),
             Self::Constant(leaf) => leaf.grad_cross_points(x1, x2, d_k, param_idx),
-            Self::White(leaf) => {
+            Self::White(_) => {
                 let _ = param_idx;
-                if x1.ncols() == 0 {
-                    return Err(GprError::EmptyInput);
-                }
-                leaf.grad_wrt_coord_dim(x1, x2, d_k, 0)
+                white_cross_zero(x1, x2, d_k)
             }
             Self::Custom(leaf) => coord::custom_cross_grad(leaf, x1, x2, d_k, param_idx),
+            Self::Supplied(leaf) => {
+                let slot = rect_slot(views.slots, leaf.slot)?;
+                leaf.grad_cross::<M>(slot, d_k, param_idx)
+            }
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
-                term.grad_cross_points_with::<M>(x1, x2, d_k, local, scratch, nested)
+                term.grad_cross_views::<M>(views, d_k, local, scratch, nested)
             }
             Self::Product(terms) => {
                 require_scratch_shape(d_k.as_ref(), scratch.as_ref())?;
@@ -570,14 +607,50 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     owner,
                     ProductBuffers::rect(d_k, scratch, nested),
                     |term, out, scratch, nested| {
-                        term.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
+                        term.apply_cross_mixed::<M>(views, out, scratch, nested)
                     },
                     |term, out, scratch, nested| {
-                        term.grad_cross_points_with::<M>(x1, x2, out, local, scratch, nested)
+                        term.grad_cross_views::<M>(views, out, local, scratch, nested)
                     },
                 )
             }
         }
+    }
+}
+
+/// The rectangular White block (and each of its derivatives): zero, since
+/// `K(x1, x2)` is always the cross covariance. Needs no coordinate column.
+pub(super) fn white_cross_zero<T: KernelScalar>(
+    x1: MatRef<'_, T>,
+    x2: MatRef<'_, T>,
+    mut d_k: MatMut<'_, T>,
+) -> Result<(), GprError> {
+    if x1.nrows() == 0 || x2.nrows() == 0 {
+        return Err(GprError::EmptyInput);
+    }
+    if d_k.nrows() != x1.nrows() || d_k.ncols() != x2.nrows() {
+        return Err(GprError::ShapeMismatch {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                d_k.nrows(),
+                d_k.ncols(),
+                x1.nrows(),
+                x2.nrows()
+            ),
+        });
+    }
+    d_k.fill(T::from_f64(0.0));
+    Ok(())
+}
+
+/// `out` has one entry per row of `x`.
+fn require_count_diag<T>(x: MatRef<'_, T>, out: &[T]) -> Result<(), GprError> {
+    if out.len() == x.nrows() {
+        Ok(())
+    } else {
+        Err(GprError::LengthMismatch {
+            reason: format!("expected {} diagonal entries, got {}", x.nrows(), out.len()),
+        })
     }
 }
 
@@ -757,7 +830,8 @@ pub(super) fn require_diag_len<T: KernelScalar>(
     x: MatRef<'_, T>,
     out: &[T],
 ) -> Result<(), GprError> {
-    if x.nrows() == 0 || x.ncols() == 0 {
+    // Columns may be zero: Constant, White, and supplied leaves read none.
+    if x.nrows() == 0 {
         return Err(GprError::EmptyInput);
     }
     if out.len() != x.nrows() {

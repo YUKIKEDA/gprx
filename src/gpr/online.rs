@@ -1,6 +1,7 @@
 //! Incremental tail insert and delete on a converted [`crate::FittedGpr`].
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::OnceLock;
 #[cfg(feature = "insert-stages")]
 use std::time::Instant;
@@ -12,7 +13,10 @@ use crate::error::PersistErrorKind;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{KernelScalar, KernelSpec};
+use crate::kernel::{
+    BlockKind, DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec,
+    ModelKernel, ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, spec_slots,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
@@ -22,6 +26,7 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
+use super::shared::Query;
 use super::{ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, Policies, fit_buffers};
 use crate::points::{PointId, PointRegistry};
 use crate::policy::with_kernel_exp;
@@ -98,12 +103,13 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
 /// # Ok(())
 /// # }
 /// ```
-pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
+pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision, K = KernelSpec> {
     pub(crate) core: GprCore<P>,
     pub(crate) optimizer: O,
     pub(crate) workspace: LdltStore<P::Storage>,
     pub(crate) registry: PointRegistry,
     pub(crate) alpha: AlphaState<P>,
+    pub(crate) _kernel: PhantomData<K>,
 }
 
 /// `α` for an online model. Insert and delete only mark it stale (libgp's
@@ -168,7 +174,7 @@ impl<P: GpScalar> AlphaState<P> {
     }
 }
 
-impl<O, P> Clone for OnlineGpr<O, P>
+impl<O, P, K> Clone for OnlineGpr<O, P, K>
 where
     O: Clone,
     P: GpScalar,
@@ -180,11 +186,12 @@ where
             workspace: self.workspace.clone(),
             registry: self.registry.clone(),
             alpha: self.alpha.clone(),
+            _kernel: PhantomData,
         }
     }
 }
 
-impl<O, P> fmt::Debug for OnlineGpr<O, P>
+impl<O, P, K> fmt::Debug for OnlineGpr<O, P, K>
 where
     O: fmt::Debug,
     P: GpScalar,
@@ -204,9 +211,10 @@ where
     }
 }
 
-impl<O, P> OnlineGpr<O, P>
+impl<O, P, K> OnlineGpr<O, P, K>
 where
     P: GpScalar,
+    K: ModelKernel,
 {
     pub(crate) fn from_core(
         core: GprCore<P>,
@@ -220,13 +228,14 @@ where
             workspace,
             registry,
             alpha: AlphaState::fresh(),
+            _kernel: PhantomData,
         }
     }
 
     /// Drops the LDLT factor and returns a trainer with the current kernel, likelihood, transforms, optimizer, and policies.
     ///
     /// See the example on [`OnlineGpr`].
-    pub fn into_trainer(self) -> Gpr<O, P> {
+    pub fn into_trainer(self) -> Gpr<O, P, K> {
         self.core.into_trainer(self.optimizer)
     }
 
@@ -235,13 +244,14 @@ where
     /// Same incremental-rebuild rule as [`FittedGpr::with_optimizer`].
     ///
     /// See the example on [`OnlineGpr`].
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> OnlineGpr<O2, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> OnlineGpr<O2, P, K> {
         OnlineGpr {
             core: self.core,
             optimizer,
             workspace: self.workspace,
             registry: self.registry,
             alpha: self.alpha,
+            _kernel: PhantomData,
         }
     }
 
@@ -250,20 +260,6 @@ where
     /// See the example on [`OnlineGpr`].
     pub fn n(&self) -> usize {
         self.core.n
-    }
-
-    /// Returns the feature dimension.
-    ///
-    /// See the example on [`OnlineGpr`].
-    pub fn d(&self) -> usize {
-        self.core.d
-    }
-
-    /// Returns the kernel whose hyperparameters this model owns.
-    ///
-    /// See the example on [`OnlineGpr`].
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.core.kernel
     }
 
     /// Returns the observation-noise model.
@@ -285,13 +281,6 @@ where
     /// See the example on [`OnlineGpr`].
     pub fn alpha(&self) -> Result<&[P::Refine], GprError> {
         Ok(self.alphas()?.1)
-    }
-
-    /// Returns the original training features in column-major order.
-    ///
-    /// See the example on [`OnlineGpr`].
-    pub fn x(&self) -> &[f64] {
-        &self.core.x_obs
     }
 
     /// Returns the original training targets.
@@ -425,6 +414,26 @@ where
         self.core.policies.jitter
     }
 
+    /// The kernel tree (with its distance leaves).
+    pub(crate) fn kernel_spec(&self) -> &KernelSpec {
+        &self.core.kernel
+    }
+
+    /// The feature count (`0` for a kernel of supplied distances alone).
+    pub(crate) fn feature_dim(&self) -> usize {
+        self.core.d
+    }
+
+    /// The training features on the caller's scale.
+    pub(crate) fn x_obs(&self) -> &[f64] {
+        &self.core.x_obs
+    }
+
+    /// The training squared distances (empty for a coordinate kernel).
+    pub(crate) fn sources(&self) -> &crate::kernel::TrainSources<P::Storage> {
+        &self.core.sources
+    }
+
     pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
         self.core.x_unfitted.as_ref()
     }
@@ -445,38 +454,32 @@ where
         self.workspace.ld()
     }
 
-    /// Appends one training point at the current `θ` with a bordered LDLT update.
-    ///
-    /// `x_new` has length [`Self::d`]. Transforms already stored on this model
-    /// are applied; they are not re-fit. Grows the online workspace when the
-    /// next row does not fit. `α` is not solved here. The first later read
-    /// solves it, and [`Self::alpha`] returns [`Result`]. The returned [`PointId`] is new and is never
-    /// reused after a later [`Self::delete`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
-    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
-    /// [`GprError::EmptyInput`] if the workspace cannot accept a row,
-    /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
-    /// loaded `next_point_id` near `u64::MAX` reaches this), or
-    /// [`GprError::CholeskyFailed`] if the new pivot `δ` is not positive.
-    ///
-    /// See the example on [`OnlineGpr`].
-    pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
+    /// Appends one point: coordinates `x_new`, the `n × 1` columns of
+    /// supplied distances to the live points, and the target.
+    pub(crate) fn insert_point(
+        &mut self,
+        x_new: &[f64],
+        sources: Vec<DistanceSource<'_>>,
+        y_new: f64,
+    ) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
                 expected_dim: self.core.d,
             });
         }
-        if self.core.d == 0 {
-            return Err(GprError::EmptyInput);
-        }
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
         self.registry.require_room()?;
+        let slots = spec_slots(&self.core.kernel);
+        let mut columns = QuerySources::<P::Storage>::bind(
+            &slots,
+            sources,
+            self.core.n,
+            1,
+            BlockKind::Rect,
+        )?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -487,9 +490,11 @@ where
             self.core.query.query_xs.resize(xs_len, 0.0);
         }
         self.core.query.query_xs[..xs_len].copy_from_slice(x_new);
-        self.core
-            .x_transform
-            .apply(&mut self.core.query.query_xs[..xs_len], 1, d)?;
+        if d > 0 {
+            self.core
+                .x_transform
+                .apply(&mut self.core.query.query_xs[..xs_len], 1, d)?;
+        }
         let mut y_trans = [y_new];
         self.core.y_transform.transform(&mut y_trans)?;
         {
@@ -512,9 +517,12 @@ where
                 d,
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
-            with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross::<M>(
+            let table = columns.table();
+            let cross = (!slots.is_empty()).then_some(&table as &dyn RectSlots<P::Storage>);
+            with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
+                cross,
                 Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
@@ -536,6 +544,7 @@ where
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
         self.workspace.append_border(k_new)?;
+        self.core.sources.append(columns.raw())?;
         #[cfg(feature = "insert-stages")]
         insert_stages::add_border(border_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -551,6 +560,24 @@ where
         #[cfg(feature = "insert-stages")]
         insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
         Ok(id)
+    }
+
+    /// Predicts `q` into `out` through the model's query buffers.
+    pub(crate) fn predict_query_into(
+        &mut self,
+        q: Query<'_, P::Storage>,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        self.refresh_alpha()?;
+        let ld = self.workspace.ld();
+        self.core
+            .predict_with_into(StoredFactor::Ldlt(ld), &mut [], q, options, out)
+    }
+
+    /// The predict `α` of the current points (solved once while stale).
+    pub(crate) fn predict_alpha(&self) -> Result<&[P::Refine], GprError> {
+        Ok(self.alphas()?.1)
     }
 
     /// Removes the training point identified by `id` and packs every buffer.
@@ -595,6 +622,7 @@ where
         }
         let index = self.registry.index_of(id)?;
         self.workspace.delete_index(index)?;
+        self.core.sources.delete(index)?;
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
         remove_point_mat_inplace(&mut self.core.x, self.core.n, index);
@@ -718,6 +746,63 @@ where
         self.after_write(result)
     }
 
+    /// Returns the leave-one-out predictive mean and variance on the training set.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`FittedGpr::loo_predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
+        self.loo_predict_with(PredictOptions::default())
+    }
+
+    /// Returns the leave-one-out prediction with an explicit variance kind.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`OnlineGpr`].
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let (_, alpha) = self.alphas()?;
+        self.core.loo_predict_with(self.factor(), alpha, options)
+    }
+}
+
+impl<O, P: GpScalar> OnlineGpr<O, P> {
+    /// Appends one training point at the current `θ` with a bordered LDLT update.
+    ///
+    /// `x_new` has length [`Self::d`]. Transforms already stored on this model
+    /// are applied; they are not re-fit. Grows the online workspace when the
+    /// next row does not fit. `α` is not solved here. The first later read
+    /// solves it, and [`Self::alpha`] returns [`Result`]. The returned [`PointId`] is new and is never
+    /// reused after a later [`Self::delete`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
+    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
+    /// [`GprError::EmptyInput`] if the workspace cannot accept a row,
+    /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
+    /// loaded `next_point_id` near `u64::MAX` reaches this), or
+    /// [`GprError::CholeskyFailed`] if the new pivot `δ` is not positive.
+    ///
+    /// See the example on [`OnlineGpr`].
+    pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
+        self.insert_point(x_new, Vec::new(), y_new)
+    }
+
+    /// Returns the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`OnlineGpr`].
+    pub fn kernel(&self) -> &KernelSpec {
+        &self.core.kernel
+    }
+
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
     /// # Errors
@@ -770,8 +855,13 @@ where
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
         let (_, alpha) = self.alphas()?;
-        self.core
-            .write_prediction(self.factor(), alpha, xs, n_rows, n_cols, options, &mut out)?;
+        self.core.write_prediction(
+            self.factor(),
+            alpha,
+            Query::points(xs, n_rows, n_cols),
+            options,
+            &mut out,
+        )?;
         Ok(out)
     }
 
@@ -790,17 +880,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        self.refresh_alpha()?;
-        let ld = self.workspace.ld();
-        self.core.predict_with_into(
-            StoredFactor::Ldlt(ld),
-            &mut [],
-            xs,
-            n_rows,
-            n_cols,
-            options,
-            out,
-        )
+        self.predict_query_into(Query::points(xs, n_rows, n_cols), options, out)
     }
 
     /// Returns the predictive mean and query–query covariance at `xs`.
@@ -834,8 +914,12 @@ where
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         let (_, alpha) = self.alphas()?;
-        self.core
-            .write_covariance(self.factor(), alpha, xs, n_rows, n_cols, options)
+        self.core.write_covariance(
+            self.factor(),
+            alpha,
+            Query::points(xs, n_rows, n_cols),
+            options,
+        )
     }
 
     /// Draws posterior samples at `xs`.
@@ -876,45 +960,51 @@ where
         self.core.sample_with(
             self.factor(),
             alpha,
-            xs,
-            n_rows,
-            n_cols,
+            Query::points(xs, n_rows, n_cols),
             options,
             n_draws,
             seed,
         )
     }
+}
 
-    /// Returns the leave-one-out predictive mean and variance on the training set.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`FittedGpr::loo_predict`].
+impl<O, P: GpScalar, K: PointKernel> OnlineGpr<O, P, K> {
+    /// Returns the feature dimension.
     ///
     /// See the example on [`OnlineGpr`].
-    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
-        self.loo_predict_with(PredictOptions::default())
+    pub fn d(&self) -> usize {
+        self.core.d
     }
 
-    /// Returns the leave-one-out prediction with an explicit variance kind.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::loo_predict`].
+    /// Returns the original training features in column-major order.
     ///
     /// See the example on [`OnlineGpr`].
-    pub fn loo_predict_with(
-        &self,
-        options: PredictOptions,
-    ) -> Result<Prediction<P::Refine>, GprError> {
-        let (_, alpha) = self.alphas()?;
-        self.core.loo_predict_with(self.factor(), alpha, options)
+    pub fn x(&self) -> &[f64] {
+        &self.core.x_obs
     }
 }
 
-impl<O, P> OnlineGpr<O, P>
+impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
+    /// Returns a copy of the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as ModelKernelParts>::from_spec(self.core.kernel.clone())
+    }
+
+    /// Returns the slots of the kernel, in the order of
+    /// [`DistanceKernel::slots`].
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn slots(&self) -> Vec<DistanceSlot> {
+        spec_slots(&self.core.kernel)
+    }
+}
+
+impl<O, P, K> OnlineGpr<O, P, K>
 where
     P: GpScalar,
+    K: ModelKernel,
     O: for<'a> Optimizer<GprObjective<'a, P>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
@@ -933,10 +1023,7 @@ where
     }
 }
 
-impl<P> OnlineGpr<Fixed, P>
-where
-    P: GpScalar,
-{
+impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
     /// Rebuilds the LDLT factor at the current `θ` without a search.
     ///
     /// # Errors
@@ -948,7 +1035,9 @@ where
         let result = with_llt_view(&mut self.core, &mut self.workspace, |view| view.refactor());
         self.after_write(result)
     }
+}
 
+impl<P: GpScalar> OnlineGpr<Fixed, P> {
     pub(crate) fn from_persisted(parts: PersistedModel<P>) -> Result<Self, GprError> {
         FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
     }
@@ -976,6 +1065,7 @@ where
     let result = f(&mut ExactFit {
         core: &mut *core,
         store: &mut store,
+        fills: &[],
     });
     match result {
         Ok(value) => {

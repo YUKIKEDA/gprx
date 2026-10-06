@@ -4,7 +4,7 @@
 //! `r² = Σ_d w_d Δ_d²` (`w_d = 1/ℓ_d²`). The shape checks, the `r²` sums from
 //! coordinates or from the `(Δx_d)²` cache, and the matrix loops live here.
 
-use super::dist::ArdSqDiff;
+use super::dist::{ArdBlocks, ArdSqDiff};
 use super::{KernelScalar, Triangle, write_square};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
@@ -127,6 +127,58 @@ pub(crate) fn r2_from_cache<T: KernelScalar>(
             Err(GprError::NonFiniteInput)
         }
     })
+}
+
+/// [`ArdR2`] of the pair `(row, col)` from rectangular `(Δ_d)²` blocks.
+///
+/// # Errors
+///
+/// Returns [`GprError::NonFiniteInput`] if a block value is not finite, or
+/// [`GprError::NonFiniteKernelValue`] if `r²` is not finite.
+#[inline]
+pub(crate) fn r2_from_blocks<T: KernelScalar>(
+    blocks: ArdBlocks<'_, T>,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+    pick: Pick,
+) -> Result<ArdR2<T>, GprError> {
+    sum_r2(inv_ell_sq, pick, |dim| {
+        let v = blocks.get(dim, row, col);
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(GprError::NonFiniteInput)
+        }
+    })
+}
+
+/// Writes every entry of the rectangular `out` from `(Δ_d)²` blocks.
+/// `pair(row, col)` is the value.
+pub(crate) fn write_from_blocks<T: KernelScalar>(
+    blocks: ArdBlocks<'_, T>,
+    out: MatMut<'_, T>,
+    d: usize,
+    pair: impl FnMut(usize, usize) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    if blocks.d() != d {
+        return Err(GprError::DimensionMismatch {
+            x_dim: blocks.d(),
+            expected_dim: d,
+        });
+    }
+    if out.nrows() != blocks.rows || out.ncols() != blocks.cols {
+        return Err(GprError::ShapeMismatch {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                out.nrows(),
+                out.ncols(),
+                blocks.rows,
+                blocks.cols
+            ),
+        });
+    }
+    super::write_rect(out, pair)
 }
 
 /// Rejects an empty `x` or one whose column count is not `expected_d`.

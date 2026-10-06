@@ -654,6 +654,7 @@ impl<T: KernelScalar> KernelScratch<T> {
                 x,
                 dist: dist_view,
                 ard: None,
+                slots: None,
             },
             scratch: view(scratch, m, m),
             nested,

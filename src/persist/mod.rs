@@ -406,13 +406,14 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
     write_config(dir, &json)
 }
 
-pub(crate) fn save_fitted<O, P>(
-    model: &FittedGpr<O, P>,
+pub(crate) fn save_fitted<O, P, K>(
+    model: &FittedGpr<O, P, K>,
     dir: &Path,
     with_factor: bool,
 ) -> Result<(), GprError>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     let factor = if with_factor {
         Some(pack_saved_factor(model.chol_l(), model.alpha())?)
@@ -423,11 +424,11 @@ where
         dir,
         ExactSave {
             n: model.n(),
-            d: model.d(),
+            d: model.feature_dim(),
             kind: P::persist_kind(),
             factor_kind: FactorKind::Llt,
             policies: model.policies(),
-            kernel: model.kernel(),
+            kernel: model.kernel_spec(),
             likelihood: model.likelihood(),
             factor_jitter: model.factor_jitter(),
             x_unfitted: model.x_unfitted(),
@@ -435,23 +436,24 @@ where
             x_transform: model.x_transform(),
             y_transform: model.y_transform(),
             point_ids: None,
-            x: model.x(),
+            x: model.x_obs(),
             y: model.y(),
             factor,
         },
     )
 }
 
-pub(crate) fn save_online<O, P>(
-    model: &OnlineGpr<O, P>,
+pub(crate) fn save_online<O, P, K>(
+    model: &OnlineGpr<O, P, K>,
     dir: &Path,
     with_factor: bool,
 ) -> Result<(), GprError>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     let factor = if with_factor {
-        Some(pack_saved_factor(model.ld_factor(), model.alpha()?)?)
+        Some(pack_saved_factor(model.ld_factor(), model.predict_alpha()?)?)
     } else {
         None
     };
@@ -459,11 +461,11 @@ where
         dir,
         ExactSave {
             n: model.n(),
-            d: model.d(),
+            d: model.feature_dim(),
             kind: P::persist_kind(),
             factor_kind: FactorKind::Ldlt,
             policies: model.policies(),
-            kernel: model.kernel(),
+            kernel: model.kernel_spec(),
             likelihood: model.likelihood(),
             factor_jitter: model.factor_jitter(),
             x_unfitted: model.x_unfitted(),
@@ -471,7 +473,7 @@ where
             x_transform: model.x_transform(),
             y_transform: model.y_transform(),
             point_ids: Some((model.persist_point_ids(), model.persist_next_point_id())),
-            x: model.x(),
+            x: model.x_obs(),
             y: model.y(),
             factor,
         },
@@ -621,7 +623,7 @@ where
         }
         FactorKind::Llt => None,
     };
-    let kernel = config.kernel.decode(registry)?;
+    let kernel = config.kernel.decode_points(registry)?;
     let likelihood = config.likelihood.decode()?;
     let policies = Policies {
         distance_cache: config

@@ -6,9 +6,9 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::kernel::ArdLengthscales;
 use crate::kernel::{
-    ConstantKernel, CustomKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel,
-    MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel,
-    RbfKernel, WhiteKernel,
+    ConstantKernel, CustomKernel, DistanceSlot, KernelSpec, LinearKernel, MaternArdKernel,
+    MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
+    RbfArdKernel, RbfKernel, SlotId, SlotShape, SuppliedSpec, WhiteKernel, spec_slots,
 };
 use crate::param::BoundedParam;
 
@@ -93,10 +93,51 @@ pub(super) enum KernelJson {
         left: Box<KernelJson>,
         right: Box<KernelJson>,
     },
+    /// A leaf on supplied squared distances: the slot's index in the order
+    /// of first appearance, its `d²` count per pair (`dims`, absent for a
+    /// scalar slot), and the leaf it evaluates.
+    Distance {
+        slot: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dims: Option<usize>,
+        leaf: Box<KernelJson>,
+    },
+}
+
+/// Fresh slots a decoded distance kernel gets, one per saved slot index.
+#[derive(Default)]
+pub(super) struct DecodedSlots {
+    slots: Vec<(SlotId, SlotShape)>,
+}
+
+impl DecodedSlots {
+    fn get(&mut self, index: usize, shape: SlotShape) -> Result<SlotId, GprError> {
+        match self.slots.get(index) {
+            Some(&(id, saved)) if saved == shape => Ok(id),
+            Some(_) => Err(persist_err(
+                PersistErrorKind::Config,
+                format!("distance slot {index} is saved with two shapes"),
+            )),
+            None if index == self.slots.len() => {
+                let id = SlotId::fresh();
+                self.slots.push((id, shape));
+                Ok(id)
+            }
+            None => Err(persist_err(
+                PersistErrorKind::Config,
+                format!("distance slot {index} appears before slot {}", self.slots.len()),
+            )),
+        }
+    }
 }
 
 impl KernelJson {
     pub(super) fn encode(spec: &KernelSpec) -> Result<Self, GprError> {
+        let slots = spec_slots(spec);
+        Self::encode_in(spec, &slots)
+    }
+
+    fn encode_in(spec: &KernelSpec, slots: &[DistanceSlot]) -> Result<Self, GprError> {
         match spec {
             KernelSpec::Rbf(k) => Ok(Self::Rbf {
                 lengthscale: BoundedJson::from_param(bounded_from_value(
@@ -147,17 +188,53 @@ impl KernelJson {
             }),
             KernelSpec::Custom(k) => encode_custom(k),
             KernelSpec::Sum(left, right) => Ok(Self::Sum {
-                left: Box::new(Self::encode(left)?),
-                right: Box::new(Self::encode(right)?),
+                left: Box::new(Self::encode_in(left, slots)?),
+                right: Box::new(Self::encode_in(right, slots)?),
             }),
             KernelSpec::Product(left, right) => Ok(Self::Product {
-                left: Box::new(Self::encode(left)?),
-                right: Box::new(Self::encode(right)?),
+                left: Box::new(Self::encode_in(left, slots)?),
+                right: Box::new(Self::encode_in(right, slots)?),
             }),
+            KernelSpec::Supplied(leaf) => {
+                let slot = slots
+                    .iter()
+                    .position(|s| s.id() == leaf.slot)
+                    .ok_or_else(|| {
+                        persist_err(PersistErrorKind::Config, "distance slot is not listed")
+                    })?;
+                Ok(Self::Distance {
+                    slot,
+                    dims: match leaf.shape {
+                        SlotShape::Scalar => None,
+                        SlotShape::Ard(dims) => Some(dims),
+                    },
+                    leaf: Box::new(Self::encode_in(&leaf.leaf, slots)?),
+                })
+            }
         }
     }
 
-    pub(super) fn decode(self, registry: &PersistRegistry) -> Result<KernelSpec, GprError> {
+    /// Decodes the kernel of a coordinate model. A saved distance kernel is
+    /// another model and is not read as this one.
+    pub(super) fn decode_points(self, registry: &PersistRegistry) -> Result<KernelSpec, GprError> {
+        let mut slots = DecodedSlots::default();
+        let spec = self.decode(registry, &mut slots)?;
+        if slots.slots.is_empty() {
+            Ok(spec)
+        } else {
+            Err(persist_err(
+                PersistErrorKind::WrongModel,
+                "the saved model reads supplied distances; load it as a distance model",
+            ))
+        }
+    }
+
+    /// Decodes a kernel; distance leaves get fresh slots in `slots`.
+    pub(super) fn decode(
+        self,
+        registry: &PersistRegistry,
+        slots: &mut DecodedSlots,
+    ) -> Result<KernelSpec, GprError> {
         match self {
             Self::Rbf { lengthscale } => {
                 let k = RbfKernel::new(lengthscale.value)?.with_bounds(lengthscale.interval()?)?;
@@ -210,14 +287,56 @@ impl KernelJson {
                 registry.restore_kernel(&persist_id, &state)?,
             )),
             Self::Sum { left, right } => Ok(KernelSpec::Sum(
-                Box::new(left.decode(registry)?),
-                Box::new(right.decode(registry)?),
+                Box::new(left.decode(registry, slots)?),
+                Box::new(right.decode(registry, slots)?),
             )),
             Self::Product { left, right } => Ok(KernelSpec::Product(
-                Box::new(left.decode(registry)?),
-                Box::new(right.decode(registry)?),
+                Box::new(left.decode(registry, slots)?),
+                Box::new(right.decode(registry, slots)?),
             )),
+            Self::Distance { slot, dims, leaf } => {
+                let shape = match dims {
+                    None => SlotShape::Scalar,
+                    Some(dims) => SlotShape::Ard(dims),
+                };
+                let id = slots.get(slot, shape)?;
+                let leaf = leaf.decode(registry, slots)?;
+                check_distance_leaf(&leaf, shape)?;
+                Ok(KernelSpec::Supplied(SuppliedSpec {
+                    slot: id,
+                    shape,
+                    leaf: Box::new(leaf),
+                }))
+            }
         }
+    }
+}
+
+/// A saved distance leaf is one a slot of `shape` accepts.
+fn check_distance_leaf(leaf: &KernelSpec, shape: SlotShape) -> Result<(), GprError> {
+    let ok = match (leaf, shape) {
+        (
+            KernelSpec::Rbf(_)
+            | KernelSpec::Matern(_)
+            | KernelSpec::Periodic(_)
+            | KernelSpec::RationalQuadratic(_)
+            | KernelSpec::Custom(_),
+            SlotShape::Scalar,
+        ) => true,
+        (KernelSpec::RbfArd(k), SlotShape::Ard(d)) => k.num_params() == d,
+        (KernelSpec::MaternArd(k), SlotShape::Ard(d)) => k.num_params() == d,
+        (KernelSpec::RationalQuadraticArd(k), SlotShape::Ard(d)) => {
+            k.lengthscales().num_params() == d
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(persist_err(
+            PersistErrorKind::Config,
+            "a distance leaf does not match its slot",
+        ))
     }
 }
 

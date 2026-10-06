@@ -1,7 +1,7 @@
 //! ARD rational quadratic kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::ArdSqDiff;
+use super::dist::{ArdBlocks, ArdSqDiff};
 use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::simd::ard::Profile;
@@ -306,6 +306,55 @@ impl RationalQuadraticArdKernel {
         let profile = RqProfile::value(self.alpha());
         ard::write_from_cache_simd(cache, out, d, uplo, w, None, &profile, |_, row, col| {
             rq_value(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?, alpha)
+        })
+    }
+
+    /// Rectangular `K` from `(Δ_d)²` blocks.
+    pub(crate) fn apply_cross_from_blocks<T: KernelScalar>(
+        &self,
+        blocks: ArdBlocks<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        let d = self.lengthscales.num_params();
+        ard::write_from_blocks(blocks, out, d, |row, col| {
+            rq_value(ard::r2_from_blocks(blocks, row, col, w, Pick::NONE)?, alpha)
+        })
+    }
+
+    /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
+    pub(crate) fn grad_cross_from_blocks<T: KernelScalar>(
+        &self,
+        blocks: ArdBlocks<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        ard::require_param(NAME, param_idx, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_blocks(blocks, d_k, d, |row, col| {
+            let t = ard::r2_from_blocks(blocks, row, col, w, Pick::one(param_idx))?;
+            rq_grad(t, alpha, param_idx == d)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
+    pub(crate) fn hess_cross_from_blocks<T: KernelScalar>(
+        &self,
+        blocks: ArdBlocks<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        ard::require_param_pair(NAME, i, j, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_blocks(blocks, d2_k, d, |row, col| {
+            let t = ard::r2_from_blocks(blocks, row, col, w, Pick::pair(i, j))?;
+            rq_hess(t, alpha, (i, j), d)
         })
     }
 

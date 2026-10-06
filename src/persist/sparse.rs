@@ -156,7 +156,7 @@ fn read_core(
 ) -> Result<SparseCore, GprError> {
     let (n, m, d) = (config.n, config.m, config.d);
     let spec = SparseSpec {
-        kernel: config.kernel.clone().decode(registry)?,
+        kernel: config.kernel.clone().decode_points(registry)?,
         likelihood: config.likelihood.decode()?,
         math: config.math.decode(),
         jitter: config.jitter.decode()?,

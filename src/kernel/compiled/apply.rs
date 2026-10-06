@@ -1,6 +1,7 @@
+use super::supplied::{needs_supply, rect_slot, square_slot};
 use super::{
-    CompiledKernel, MixedKernelViews, Nested, add_triangle, ard_needs_coords, mul_triangle,
-    require_scratch_shape, split_terms, term_scratch,
+    CompiledKernel, CrossViews, MixedKernelViews, Nested, add_triangle, ard_needs_coords,
+    mul_triangle, require_scratch_shape, split_terms, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
@@ -56,6 +57,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(leaf) => leaf.apply(dist, out, uplo),
             Self::White(leaf) => leaf.apply(dist, out, uplo),
             Self::Custom(leaf) => leaf.apply(dist, out, uplo),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => fold_terms::<M, _>(
                 terms,
                 dist,
@@ -120,6 +122,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(leaf) => leaf.apply_cross(dist, out),
             Self::White(leaf) => leaf.apply_cross(dist, out),
             Self::Custom(leaf) => leaf.apply_cross(dist, out),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => fold_rect::<M, _>(
                 terms,
                 dist,
@@ -191,6 +194,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.fill_diag(out),
+            Self::Supplied(leaf) => leaf.fill_diag(out),
             Self::Linear(_) => Err(GprError::UnsupportedKernelOperation {
                 reason: "linear kernel diagonal needs coordinates".to_owned(),
             }),
@@ -247,6 +251,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.fill_diag(out),
+            Self::Supplied(leaf) => leaf.fill_diag(out),
             Self::Linear(leaf) => leaf.fill_diag_points(x, out),
             Self::Sum(terms) => fold_diag_points(terms, x, out, add_assign),
             Self::Product(terms) => fold_diag_points(terms, x, out, mul_assign),
@@ -300,6 +305,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.apply(x, out, uplo),
             Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
             Self::White(leaf) => leaf.apply_points(x, out, uplo),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => fold_terms_points::<M, _>(
                 terms,
                 x,
@@ -367,6 +373,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.apply_cross(x, xs, out),
             Self::Constant(leaf) => leaf.apply_cross_points(x, xs, out),
             Self::White(leaf) => leaf.apply_cross_points(x, xs, out),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => fold_rect_points::<M, _>(
                 terms,
                 x,
@@ -434,7 +441,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.apply_with::<M>(views.dist, out, uplo, scratch, nested),
+            | Self::White(_) => match views.dist {
+                Some(dist) => self.apply_with::<M>(dist, out, uplo, scratch, nested),
+                None => self.apply_points_with::<M>(views.x, out, uplo, scratch, nested),
+            },
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
@@ -444,6 +454,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 } else {
                     self.apply_points_with::<M>(views.x, out, uplo, scratch, nested)
                 }
+            }
+            Self::Supplied(leaf) => {
+                let slot = square_slot(views.slots, leaf.slot)?;
+                leaf.apply::<M>(slot, views.x, out, uplo, scratch)
             }
             Self::Sum(terms) => fold_terms_mixed::<M, _>(
                 terms,
@@ -466,17 +480,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
-    /// Writes rectangular `k` from train–query distances and coordinates.
+    /// Writes rectangular `k` from the views of the block, one mode per
+    /// leaf: coordinate distances (or coordinates without them),
+    /// coordinates, or the supplied distances.
     pub(crate) fn apply_cross_mixed<M: crate::math::KernelMath>(
         &self,
-        dist: MatRef<'_, T>,
-        x: MatRef<'_, T>,
-        xs: MatRef<'_, T>,
+        views: CrossViews<'_, T>,
         mut out: MatMut<'_, T>,
         mut scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
+        let CrossViews { x1, x2, dist, .. } = views;
         match self {
             Self::Rbf(_)
             | Self::Matern(_)
@@ -484,18 +499,23 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.apply_cross_with::<M>(dist, out, scratch, nested),
+            | Self::White(_) => match dist {
+                Some(dist) => self.apply_cross_with::<M>(dist, out, scratch, nested),
+                None => self.apply_cross_points_with::<M>(x1, x2, out, scratch, nested),
+            },
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => {
-                self.apply_cross_points_with::<M>(x, xs, out, scratch, nested)
+                self.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
+            }
+            Self::Supplied(leaf) => {
+                let slot = rect_slot(views.slots, leaf.slot)?;
+                leaf.apply_cross::<M>(slot, out, scratch)
             }
             Self::Sum(terms) => fold_rect_mixed::<M, _>(
                 terms,
-                dist,
-                x,
-                xs,
+                views,
                 out.as_mut(),
                 scratch.as_mut(),
                 nested,
@@ -503,9 +523,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             ),
             Self::Product(terms) => fold_rect_mixed::<M, _>(
                 terms,
-                dist,
-                x,
-                xs,
+                views,
                 out.as_mut(),
                 scratch.as_mut(),
                 nested,
@@ -726,24 +744,20 @@ fn fold_rect_points<M: crate::math::KernelMath, T: KernelScalar>(
     Ok(())
 }
 
-// Terms, both views, output, scratch, levels, and the combine step.
-#[allow(clippy::too_many_arguments)]
 fn fold_rect_mixed<M: crate::math::KernelMath, T: KernelScalar>(
     terms: &[CompiledKernel<T>],
-    dist: MatRef<'_, T>,
-    x: MatRef<'_, T>,
-    xs: MatRef<'_, T>,
+    views: CrossViews<'_, T>,
     mut out: MatMut<'_, T>,
     mut scratch: MatMut<'_, T>,
     nested: &mut Nested<T>,
     combine: fn(MatMut<'_, T>, MatRef<'_, T>),
 ) -> Result<(), GprError> {
     let (first, rest) = split_terms(terms)?;
-    first.apply_cross_mixed::<M>(dist, x, xs, out.as_mut(), scratch.as_mut(), nested)?;
+    first.apply_cross_mixed::<M>(views, out.as_mut(), scratch.as_mut(), nested)?;
     let (rows, cols) = (out.nrows(), out.ncols());
     for term in rest {
         let (own, deeper) = term_scratch(term, rows, cols, out.as_mut(), &mut *nested)?;
-        term.apply_cross_mixed::<M>(dist, x, xs, scratch.as_mut(), own, deeper)?;
+        term.apply_cross_mixed::<M>(views, scratch.as_mut(), own, deeper)?;
         combine(out.as_mut(), scratch.as_ref());
     }
     Ok(())

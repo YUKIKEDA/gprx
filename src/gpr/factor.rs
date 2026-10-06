@@ -5,12 +5,20 @@ use rayon::prelude::*;
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::ArdSqDiffBuf;
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, SquareSlots, Triangle};
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
 
 use crate::policy::JitterPolicy;
+
+/// The training points of a Gram evaluation: the transformed coordinates
+/// in the storage scalar, and the training squares of a distance model.
+#[derive(Clone, Copy)]
+pub(crate) struct TrainPoints<'a, T> {
+    pub(crate) x: MatRef<'a, T>,
+    pub(crate) slots: Option<&'a dyn SquareSlots<T>>,
+}
 
 /// Writes the training Gram matrix.
 ///
@@ -19,7 +27,7 @@ use crate::policy::JitterPolicy;
 /// has no such tensors; isotropic and mixed trees compute distances from `X`.
 fn apply_train_kernel<T, W, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
+    x: TrainPoints<'_, T>,
     ws: &mut W,
 ) -> Result<(), GprError>
 where
@@ -41,7 +49,7 @@ where
 /// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
 pub(crate) fn apply_compiled_to<T, W, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
+    x: TrainPoints<'_, T>,
     ws: &mut W,
     dest: MatMut<'_, T>,
 ) -> Result<(), GprError>
@@ -63,7 +71,7 @@ where
 
 fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
+    x: TrainPoints<'_, T>,
     dist: Option<&mut crate::workspace::DistCache<T>>,
     dest: MatMut<'_, T>,
     scratch: MatMut<'_, T>,
@@ -78,12 +86,16 @@ fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
 /// returns the views for a Gram evaluation. Without caches, only `x`.
 pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
     compiled: &CompiledKernel<T>,
-    x: MatRef<'a, T>,
+    points: TrainPoints<'a, T>,
     dist: Option<&'a mut crate::workspace::DistCache<T>>,
     thread_scratch: &mut Vec<Mat<T>>,
 ) -> Result<GramInputs<'a, T>, GprError> {
+    let TrainPoints { x, slots } = points;
     let Some(d) = dist else {
-        return Ok(GramInputs::points(x));
+        return Ok(GramInputs {
+            slots,
+            ..GramInputs::points(x)
+        });
     };
     let reads_dist = compiled.reads_distances()?;
     if reads_dist && d.dist.is_none() {
@@ -111,6 +123,7 @@ pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
         } else {
             None
         },
+        slots,
     })
 }
 
@@ -135,7 +148,7 @@ pub(crate) struct FactorPolicy {
 
 pub(crate) fn factor_train_with_policy<T, W, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
+    x: TrainPoints<'_, T>,
     ws: &mut W,
     y: &[f64],
     noise: f64,
@@ -156,7 +169,7 @@ where
 /// `weighted` and `kernel_scratch` must already be `n×n`.
 pub(crate) fn factor_train_keeping_with_policy<T, W, M: crate::math::KernelMath>(
     compiled: &CompiledKernel<T>,
-    x: MatRef<'_, T>,
+    x: TrainPoints<'_, T>,
     ws: &mut W,
     y: &[f64],
     noise: f64,

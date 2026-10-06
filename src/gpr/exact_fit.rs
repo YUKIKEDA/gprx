@@ -5,7 +5,9 @@ use faer::{Mat, MatMut, MatRef};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle, WeightedWalk};
+use crate::kernel::{
+    CompiledKernel, DistanceFill, KernelScalar, KernelSpec, SlotId, Triangle, WeightedWalk,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{frobenius_lower, gemv_sym_lower, solve_lower};
 use crate::optimizer::{OptResult, Optimizer};
@@ -17,6 +19,7 @@ use super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_keeping_with_policy, factor_train_with_policy,
     factor_written_k_with_policy, fill_cached_inputs, neg_mll_from_factor,
 };
+use super::shared::train_points;
 use super::{FitBuffers, GprCore, LltStore, Policies};
 use crate::policy::{DistanceCachePolicy, with_kernel_exp};
 
@@ -50,6 +53,9 @@ pub(crate) fn fit_buffers<P: GpScalar>(
 pub(crate) struct ExactFit<'a, P: GpScalar> {
     pub(crate) core: &'a mut GprCore<P>,
     pub(crate) store: &'a mut LltStore<P>,
+    /// The fills of the training distances during a fit. Under
+    /// [`DistanceCachePolicy::Uncached`] every factor calls them again.
+    pub(crate) fills: &'a [(SlotId, &'a dyn DistanceFill)],
 }
 
 /// Per-leaf Gram matrices an incremental objective keeps during `fit` /
@@ -109,6 +115,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
         ExactFit {
             core: &mut *self.core,
             store: &mut *self.store,
+            fills: self.fills,
         }
     }
 
@@ -264,16 +271,20 @@ impl<P: GpScalar> ExactFit<'_, P> {
             Keep::FactorGrams => self.core.compiled.kept_products(),
         };
         self.store.release_mapped();
+        if self.core.policies.distance_cache == DistanceCachePolicy::Uncached
+            && !self.fills.is_empty()
+        {
+            self.core.sources.refill(self.fills)?;
+        }
         let n = self.core.n;
         if products > 0 {
             self.ensure_weighted(n, products)?;
         }
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let policy = FactorPolicy {
             jitter: self.core.policies.jitter,
@@ -421,12 +432,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let LeafCache { grams, dirty, .. } = cache;
         for (i, slot) in grams.iter_mut().enumerate() {
             if dirty[i] {
-                let x = P::Storage::storage_cols(
-                    self.core
-                        .x
-                        .as_ref()
-                        .submatrix(0, 0, self.core.n, self.core.d),
+                let x = train_points::<P>(
+                    &self.core.x,
+                    (self.core.n, self.core.d),
                     &mut self.core.x_cast,
+                    &self.core.sources,
                 );
                 with_kernel_exp!(self.core.policies.math, M => apply_compiled_to::<_, _, M>(
                     self.core.compiled.leaf_at(i)?,
@@ -610,12 +620,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
             );
             return Ok(());
         }
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
@@ -637,12 +646,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
     }
 
     fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
@@ -699,12 +707,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
         }
         let KeptGrams { products } = kept;
         self.ensure_weighted(n, products)?;
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let compiled = &self.core.compiled;
         let views = self.store.buffers.split_gradient();

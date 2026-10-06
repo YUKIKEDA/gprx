@@ -80,6 +80,9 @@ pub enum KernelSpec {
     Sum(Box<KernelSpec>, Box<KernelSpec>),
     /// Marks `k = k_left * k_right` (Hadamard product).
     Product(Box<KernelSpec>, Box<KernelSpec>),
+    /// A leaf of a [`super::DistanceKernel`]. Only a distance model holds one.
+    #[doc(hidden)]
+    Supplied(super::SuppliedSpec),
 }
 
 impl From<RbfKernel> for KernelSpec {
@@ -202,6 +205,7 @@ impl KernelSpec {
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
             Self::Custom(leaf) => leaf.num_params(),
+            Self::Supplied(leaf) => leaf.leaf.num_params(),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.num_params() + right.num_params()
             }
@@ -370,6 +374,7 @@ impl KernelSpec {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.write_params(out, offset),
+            Self::Supplied(leaf) => leaf.leaf.write_params(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_params(out, offset)?;
                 right.write_params(out, offset)
@@ -435,6 +440,7 @@ impl KernelSpec {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.write_intervals(out, offset),
+            Self::Supplied(leaf) => leaf.leaf.write_intervals(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_intervals(out, offset)?;
                 right.write_intervals(out, offset)
@@ -505,6 +511,7 @@ impl KernelSpec {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.apply_params(params, offset),
+            Self::Supplied(leaf) => leaf.leaf.apply_params(params, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.apply_params(params, offset)?;
                 right.apply_params(params, offset)
@@ -551,6 +558,9 @@ impl KernelSpec {
             }
             Self::Custom(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Supplied(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, leaf.leaf.num_params());
             }
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.collect_bindings(out, index, leaf_id);

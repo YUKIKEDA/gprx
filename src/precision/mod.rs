@@ -9,7 +9,7 @@
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
-use crate::kernel::{KernelScalar, KernelSpec};
+use crate::kernel::{ColRange, KernelScalar, KernelSpec, RectSlots};
 use crate::transform::TargetTransform;
 
 /// Selects storage and residual-refinement scalar types for GP computations.
@@ -176,6 +176,7 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
         x_train: MatRef<'_, f64>,
         x_query: &[f64],
         n_cols: usize,
+        cross64: Option<&dyn RectSlots<f64>>,
         alpha: &[Self::Refine],
         out: &mut [Self::Refine],
     ) -> Result<(), GprError>;
@@ -288,6 +289,7 @@ impl ModelPrecision for DoublePrecision {
         _x_train: MatRef<'_, f64>,
         _x_query: &[f64],
         _n_cols: usize,
+        _cross64: Option<&dyn RectSlots<f64>>,
         alpha: &[Self::Refine],
         out: &mut [Self::Refine],
     ) -> Result<(), GprError> {
@@ -370,6 +372,7 @@ impl ModelPrecision for SinglePrecision {
         _x_train: MatRef<'_, f64>,
         _x_query: &[f64],
         _n_cols: usize,
+        _cross64: Option<&dyn RectSlots<f64>>,
         alpha: &[Self::Refine],
         out: &mut [Self::Refine],
     ) -> Result<(), GprError> {
@@ -466,10 +469,11 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
         x_train: MatRef<'_, f64>,
         x_query: &[f64],
         n_cols: usize,
+        cross64: Option<&dyn RectSlots<f64>>,
         alpha: &[Self::Refine],
         out: &mut [Self::Refine],
     ) -> Result<(), GprError> {
-        f64_cross_means::<M>(kernel, x_train, x_query, n_cols, alpha, out)
+        f64_cross_means::<M>(kernel, x_train, x_query, n_cols, cross64, alpha, out)
     }
 
     fn inverse_mean_variance(
@@ -520,6 +524,7 @@ fn f64_cross_means<M: crate::math::KernelMath>(
     x_train: MatRef<'_, f64>,
     x_query: &[f64],
     n_cols: usize,
+    cross64: Option<&dyn RectSlots<f64>>,
     alpha: &[f64],
     out: &mut [f64],
 ) -> Result<(), GprError> {
@@ -540,9 +545,11 @@ fn f64_cross_means<M: crate::math::KernelMath>(
                 rows[(j, dim)] = x_query[dim * m + start + j];
             }
         }
-        kernel_f64.eval_cross::<M>(
+        let cols = cross64.map(|inner| ColRange { inner, start, len });
+        kernel_f64.eval_cross_slots::<M>(
             x_train,
             rows.as_ref().submatrix(0, 0, len, n_cols),
+            cols.as_ref().map(|c| c as &dyn RectSlots<f64>),
             Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
             k_block.as_mut().submatrix_mut(0, 0, n, len),
             scratch.as_mut().submatrix_mut(0, 0, n, len),

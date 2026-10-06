@@ -4,8 +4,10 @@ use super::grad::{
     ProductBuffers, broadcast_self_diag, eval_cell, mul_fold, product_with_owner, require_diag_len,
     scale_by_other_diags, term_index_for_param,
 };
+use super::supplied::{needs_supply, rect_slot, square_slot};
 use super::{
-    CompiledKernel, MixedKernelViews, Nested, ard_needs_coords, require_scratch_shape, term_scratch,
+    CompiledKernel, CrossViews, MixedKernelViews, Nested, ard_needs_coords, require_scratch_shape,
+    term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
@@ -64,6 +66,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
             Self::White(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
             Self::Custom(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
@@ -142,6 +145,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.hess(x, d2_k, i, j, uplo),
             Self::Constant(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
             Self::White(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
+            Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
@@ -225,6 +229,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
                 leaf.hess_points(one, cell, i, j, Triangle::Lower)
             }),
+            Self::Supplied(leaf) => {
+                require_diag_len(x, out)?;
+                leaf.hess_diag::<M>(out, (i, j))
+            }
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
@@ -300,7 +308,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::RationalQuadratic(_)
             | Self::Custom(_)
             | Self::Constant(_)
-            | Self::White(_) => self.hess_with::<M>(views.dist, d2_k, pair, uplo, scratch, nested),
+            | Self::White(_) => match views.dist {
+                Some(dist) => self.hess_with::<M>(dist, d2_k, pair, uplo, scratch, nested),
+                None => self.hess_points_with::<M>(views.x, d2_k, pair, uplo, scratch, nested),
+            },
+            Self::Supplied(leaf) => {
+                let slot = square_slot(views.slots, leaf.slot)?;
+                leaf.hess::<M>(slot, views.x, d2_k, pair, uplo, scratch)
+            }
             Self::RbfArd(_)
             | Self::Linear(_)
             | Self::MaternArd(_)
@@ -368,12 +383,26 @@ impl<T: KernelScalar> CompiledKernel<T> {
         &self,
         x1: MatRef<'_, T>,
         x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        self.hess_cross_views::<M>(CrossViews::points(x1, x2), d2_k, pair, scratch, nested)
+    }
+
+    /// The rectangular `∂²K/∂θ_i ∂θ_j` of the block `views` describes:
+    /// coordinate leaves from coordinates, supplied leaves from their block.
+    pub(crate) fn hess_cross_views<M: crate::math::KernelMath>(
+        &self,
+        views: CrossViews<'_, T>,
         mut d2_k: MatMut<'_, T>,
         pair: (usize, usize),
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         let (i, j) = pair;
+        let CrossViews { x1, x2, .. } = views;
         match self {
             Self::Rbf(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
             Self::Matern(leaf) => leaf.hess_cross_from_coords::<M, _>(x1, x2, d2_k, i, j),
@@ -384,27 +413,18 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RationalQuadraticArd(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
             Self::Linear(leaf) => leaf.hess_cross(x1, x2, d2_k, i, j),
             Self::Constant(leaf) => leaf.hess_cross_points(x1, x2, d2_k, i, j),
-            Self::White(leaf) => {
-                let _ = (i, j);
-                if x1.ncols() == 0 {
-                    return Err(GprError::EmptyInput);
-                }
-                leaf.grad_wrt_coord_dim(x1, x2, d2_k, 0)
-            }
+            Self::White(_) => super::grad::white_cross_zero(x1, x2, d2_k),
             Self::Custom(leaf) => coord::custom_cross_hess(leaf, x1, x2, d2_k, (i, j)),
+            Self::Supplied(leaf) => {
+                let slot = rect_slot(views.slots, leaf.slot)?;
+                leaf.hess_cross::<M>(slot, d2_k, (i, j))
+            }
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
                     local_i,
                     local_j,
-                } => term.hess_cross_points_with::<M>(
-                    x1,
-                    x2,
-                    d2_k,
-                    (local_i, local_j),
-                    scratch,
-                    nested,
-                ),
+                } => term.hess_cross_views::<M>(views, d2_k, (local_i, local_j), scratch, nested),
                 PairOwners::Distinct { .. } => {
                     for col in 0..d2_k.ncols() {
                         for row in 0..d2_k.nrows() {
@@ -422,13 +442,13 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     (i, j),
                     buffers,
                     |term, out, scratch, nested| {
-                        term.apply_cross_points_with::<M>(x1, x2, out, scratch, nested)
+                        term.apply_cross_mixed::<M>(views, out, scratch, nested)
                     },
                     |term, out, pair, scratch, nested| {
-                        term.hess_cross_points_with::<M>(x1, x2, out, pair, scratch, nested)
+                        term.hess_cross_views::<M>(views, out, pair, scratch, nested)
                     },
                     |term, out, param, scratch, nested| {
-                        term.grad_cross_points_with::<M>(x1, x2, out, param, scratch, nested)
+                        term.grad_cross_views::<M>(views, out, param, scratch, nested)
                     },
                 )
             }

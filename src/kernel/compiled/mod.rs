@@ -16,7 +16,11 @@ mod coord;
 mod grad;
 pub(crate) mod gram;
 mod hess;
+pub(crate) mod supplied;
 pub(crate) mod weighted;
+
+pub use supplied::SuppliedLeaf;
+use supplied::{RectSlots, SquareSlots};
 
 #[cfg(test)]
 mod leaf_table;
@@ -36,20 +40,47 @@ pub(crate) enum CoordMode {
     Mixed,
 }
 
-/// Distance matrix, coordinates, and optional ARD `(Δx_d)²` for a Mixed tree.
+/// Distance matrix, coordinates, optional ARD `(Δx_d)²`, and the supplied
+/// distances of a Mixed tree. Without `dist`, a distance leaf computes its
+/// distances from `x`.
 #[derive(Clone, Copy)]
 pub(crate) struct MixedKernelViews<'a, T = f64> {
-    pub(crate) dist: MatRef<'a, T>,
+    pub(crate) dist: Option<MatRef<'a, T>>,
     pub(crate) x: MatRef<'a, T>,
     pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
+    pub(crate) slots: Option<&'a dyn SquareSlots<T>>,
 }
 
 impl<'a, T> MixedKernelViews<'a, T> {
     pub(crate) fn new(dist: MatRef<'a, T>, x: MatRef<'a, T>) -> Self {
         Self {
-            dist,
+            dist: Some(dist),
             x,
             ard_cache: None,
+            slots: None,
+        }
+    }
+}
+
+/// The views of a rectangular block `K(x1, x2)`: coordinates, the
+/// coordinate distances when the caller filled them, and the supplied
+/// distances.
+#[derive(Clone, Copy)]
+pub(crate) struct CrossViews<'a, T = f64> {
+    pub(crate) x1: MatRef<'a, T>,
+    pub(crate) x2: MatRef<'a, T>,
+    pub(crate) dist: Option<MatRef<'a, T>>,
+    pub(crate) slots: Option<&'a dyn RectSlots<T>>,
+}
+
+impl<'a, T> CrossViews<'a, T> {
+    /// Coordinates only.
+    pub(crate) fn points(x1: MatRef<'a, T>, x2: MatRef<'a, T>) -> Self {
+        Self {
+            x1,
+            x2,
+            dist: None,
+            slots: None,
         }
     }
 }
@@ -106,6 +137,10 @@ pub enum CompiledKernel<T: KernelScalar = f64> {
     Sum(Vec<CompiledKernel<T>>),
     /// Marks a flattened Hadamard product of compiled terms.
     Product(Vec<CompiledKernel<T>>),
+    /// A leaf that reads supplied squared distances. Only a distance model
+    /// holds one.
+    #[doc(hidden)]
+    Supplied(SuppliedLeaf<T>),
 }
 
 impl<T: KernelScalar> CompiledKernel<T> {
@@ -122,6 +157,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
             KernelSpec::Custom(leaf) => Self::Custom(leaf.with_scalar()),
+            KernelSpec::Supplied(leaf) => Self::Supplied(SuppliedLeaf {
+                slot: leaf.slot,
+                leaf: Box::new(Self::from_spec(&leaf.leaf)),
+            }),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
                 flatten_sum(left, &mut terms);
@@ -153,6 +192,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
             Self::Custom(leaf) => leaf.num_params(),
+            Self::Supplied(leaf) => leaf.leaf.num_params(),
             Self::Sum(terms) | Self::Product(terms) => terms.iter().map(Self::num_params).sum(),
         }
     }
@@ -292,6 +332,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         // its answer is chosen (docs/architecture.md, adding a leaf).
         match self {
             Self::Product(_) | Self::Custom(_) => true,
+            Self::Supplied(leaf) => leaf.leaf.needs_grad_scratch(),
             Self::Sum(terms) => terms.iter().any(Self::needs_grad_scratch),
             Self::Rbf(_)
             | Self::RbfArd(_)
@@ -392,6 +433,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => Ok(CoordMode::Points),
             Self::Constant(_) | Self::White(_) => Ok(CoordMode::Either),
+            Self::Supplied(_) => Ok(CoordMode::Mixed),
             Self::Sum(terms) | Self::Product(terms) => {
                 let (first, rest) = split_terms(terms)?;
                 let mut mode = first.coord_mode()?;
@@ -415,7 +457,36 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::Constant(_)
             | Self::Linear(_)
             | Self::White(_)
-            | Self::Custom(_) => false,
+            | Self::Custom(_)
+            | Self::Supplied(_) => false,
+        }
+    }
+
+    /// Whether this tree holds a leaf that reads supplied distances.
+    pub(crate) fn has_supplied(&self) -> bool {
+        match self {
+            Self::Supplied(_) => true,
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::has_supplied),
+            _ => false,
+        }
+    }
+
+    /// Whether a leaf outside the supplied ones reads coordinate distances.
+    pub(crate) fn has_coord_dist_leaf(&self) -> bool {
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_) => true,
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::has_coord_dist_leaf),
+            Self::RbfArd(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_)
+            | Self::Supplied(_) => false,
         }
     }
 
@@ -478,6 +549,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.write_params(out, offset),
+            Self::Supplied(leaf) => leaf.leaf.write_params(out, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.write_params(out, offset)?;
@@ -550,6 +622,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Ok(())
             }
             Self::Custom(leaf) => leaf.apply_params(params, offset),
+            Self::Supplied(leaf) => leaf.leaf.apply_params(params, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.apply_params(params, offset)?;
@@ -591,7 +664,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::Constant(_)
             | Self::Linear(_)
             | Self::White(_)
-            | Self::Custom(_) => false,
+            | Self::Custom(_)
+            | Self::Supplied(_) => false,
             Self::Sum(terms) | Self::Product(terms) => {
                 terms.len() > 1 || terms.iter().any(Self::needs_internal_scratch)
             }

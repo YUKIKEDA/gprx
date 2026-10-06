@@ -33,13 +33,18 @@ mod rq;
 mod rq_ard;
 mod scalar;
 mod simd;
+mod sources;
 mod spec;
+mod supply;
 mod term;
 mod white;
 
 pub use compiled::CompiledKernel;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
+pub(crate) use compiled::supplied::{ColRange, RectSlots, RectTable, SquareSlots};
+pub(crate) use compiled::CrossViews;
+pub(crate) use sources::{BlockKind, Fills, QuerySources, RawSlot, TrainSources, bind as bind_sources};
 pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;
@@ -57,6 +62,14 @@ pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
 pub use spec::{KernelSpec, ParameterBinding};
+pub use supply::{
+    ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,
+    DistanceSource, JoinPoints, ModelKernel, PointKernel, PointUse, ScalarDistance, ScalarDistanceLeaf,
+    WithPoints,
+};
+pub(crate) use supply::{
+    ModelKernelParts, SlotId, SlotShape, SourceData, SuppliedSpec, remap_slots, spec_slots,
+};
 pub use term::{CustomKernel, KernelTerm};
 pub use white::WhiteKernel;
 

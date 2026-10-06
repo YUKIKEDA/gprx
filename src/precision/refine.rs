@@ -7,7 +7,10 @@ use faer::{Mat, MatMut, MatRef};
 
 use super::ResidualFormula;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
+use crate::kernel::{
+    CompiledKernel, GramInputs, KernelScalar, KernelSpec, RectSlots, ScalarOps, SquareSlots,
+    TrainSources, Triangle,
+};
 use crate::linalg::{cholesky_lower_owned, inf_norm, symmetrize_lower};
 
 /// Most corrections before falling back to the `f64` solve (§4.2).
@@ -117,6 +120,8 @@ pub struct TrainSystem<'a, T: KernelScalar> {
     pub compiled: &'a CompiledKernel<T>,
     /// Transformed training inputs (`n × d`).
     pub x: MatRef<'a, f64>,
+    /// Training squared distances of a distance model (empty otherwise).
+    pub sources: &'a TrainSources<T>,
     /// Transformed training targets.
     pub y: &'a [f64],
     pub noise: f64,
@@ -185,7 +190,7 @@ impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSyste
         if R::READS_STORAGE {
             Ok(row_sum_matvec(self.saved.as_ref(), w, self.sys.y, r))
         } else {
-            fresh_residual::<M>(&self.kernel_f64, self.sys.x, self.diag, w, self.sys.y, r)
+            fresh_residual::<M>(&self.kernel_f64, self.sys, self.diag, w, r)
         }
     }
 
@@ -237,7 +242,7 @@ fn meets_f64_system<M: crate::math::KernelMath>(
     tol: f64,
 ) -> Result<bool, GprError> {
     let mut resid = vec![0.0; alpha.len()];
-    let a_inf = fresh_residual::<M>(kernel_f64, sys.x, diag, alpha, sys.y, &mut resid)?;
+    let a_inf = fresh_residual::<M>(kernel_f64, sys, diag, alpha, &mut resid)?;
     let denom = a_inf * inf_norm(alpha) + inf_norm(sys.y);
     Ok(denom > 0.0 && inf_norm(&resid) / denom < tol)
 }
@@ -257,7 +262,10 @@ fn storage_system<M: crate::math::KernelMath>(
     let mut a = Mat::<f32>::zeros(n, n);
     let mut scratch = Mat::<f32>::zeros(n, n);
     sys.compiled.eval_gram::<M>(
-        GramInputs::points(x32.as_ref()),
+        GramInputs {
+            slots: (!sys.sources.is_empty()).then_some(sys.sources as &dyn SquareSlots<f32>),
+            ..GramInputs::points(x32.as_ref())
+        },
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),
@@ -299,12 +307,12 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
 /// `‖K + diag · I‖∞`.
 fn fresh_residual<M: crate::math::KernelMath>(
     kernel: &CompiledKernel<f64>,
-    x: MatRef<'_, f64>,
+    sys: &TrainSystem<'_, f32>,
     diag: f64,
     alpha: &[f64],
-    y: &[f64],
     r: &mut [f64],
 ) -> Result<f64, GprError> {
+    let (x, y) = (sys.x, sys.y);
     let n = y.len();
     let d = x.ncols();
     let block = COLUMN_BLOCK.min(n.max(1));
@@ -323,9 +331,12 @@ fn fresh_residual<M: crate::math::KernelMath>(
                 rows[(jj, dim)] = x[(start + jj, dim)];
             }
         }
-        kernel.eval_cross::<M>(
+        let cols = (!sys.sources.is_empty()).then(|| sys.sources.columns_f64(start..start + len));
+        let table = cols.as_ref().map(|cols| cols.table());
+        kernel.eval_cross_slots::<M>(
             x,
             rows.as_ref().submatrix(0, 0, len, d),
+            table.as_ref().map(|t| t as &dyn RectSlots<f64>),
             Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
             k_block.as_mut().submatrix_mut(0, 0, n, len),
             scratch.as_mut().submatrix_mut(0, 0, n, len),
@@ -363,8 +374,12 @@ pub(crate) fn f64_alpha<M: crate::math::KernelMath>(
     let n = y.len();
     let mut a = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
+    let sources = sys.sources.to_f64()?;
     kernel.eval_gram::<M>(
-        GramInputs::points(x),
+        GramInputs {
+            slots: (!sources.is_empty()).then_some(&sources as &dyn SquareSlots<f64>),
+            ..GramInputs::points(x)
+        },
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),
