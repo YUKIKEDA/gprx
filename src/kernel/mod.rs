@@ -44,7 +44,9 @@ pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
 pub(crate) use compiled::supplied::{ColRange, RectSlots, RectTable, SquareSlots};
 pub(crate) use compiled::CrossViews;
-pub(crate) use sources::{BlockKind, Fills, QuerySources, RawSlot, TrainSources, bind as bind_sources};
+pub(crate) use sources::{
+    BlockKind, Fills, GatheredRect, QuerySources, TrainSources, bind as bind_sources,
+};
 pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;

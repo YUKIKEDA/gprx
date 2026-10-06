@@ -5,8 +5,9 @@ use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, Scalar
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::ModelPrecision;
+use crate::kernel::{GatheredRect, TrainSources};
 use crate::sparse::{
-    F64System, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
+    F64System, QueryDist, cast_blocks, rect_slots, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
     reset_prediction, view,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -17,6 +18,8 @@ pub(crate) struct SvgpSystem<'a, P: ModelPrecision> {
     pub(crate) kernel: &'a KernelSpec,
     pub(crate) k_mm_jitter: JitterPolicy,
     pub(crate) z: &'a [f64],
+    /// The `Z × Z` squares of a distance kernel.
+    pub(crate) zz: Option<&'a TrainSources<f64>>,
     pub(crate) k_mm_l: MatRef<'a, P::Storage>,
     pub(crate) q_mean: &'a [f64],
     pub(crate) q_l: MatRef<'a, f64>,
@@ -36,6 +39,7 @@ impl<'a, P: ModelPrecision> SvgpSystem<'a, P> {
             kernel: &core.kernel,
             k_mm_jitter: core.jitter,
             z: &core.z_train,
+            zz: core.dist.as_ref().map(|dist| &dist.zz),
             k_mm_l,
             q_mean,
             q_l,
@@ -63,6 +67,7 @@ pub(crate) fn predict_svgp_into<P: ModelPrecision>(
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
+    qd: &QueryDist,
     options: PredictOptions,
     scratch: &mut PredictScratch<P::Storage>,
     out: &mut Prediction<P::Refine>,
@@ -72,7 +77,7 @@ pub(crate) fn predict_svgp_into<P: ModelPrecision>(
         .map_query_into(xs, n_rows, n_cols, &mut mapped)
         .and_then(|()| {
             with_kernel_exp!(core.math, M => svgp_predict_into::<M, P>(
-                sys, &mapped, n_rows, options, scratch, out
+                sys, &mapped, n_rows, qd, options, scratch, out
             ))
         });
     scratch.xs = mapped;
@@ -89,6 +94,7 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
     sys: &SvgpSystem<'_, P>,
     xs: &[f64],
     n_rows: usize,
+    qd: &QueryDist,
     options: PredictOptions,
     scratch: &mut PredictScratch<P::Storage>,
     out: &mut Prediction<P::Refine>,
@@ -106,8 +112,8 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
             bufs,
             k_mm_l,
             ..
-        } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter)?;
-        return svgp_latent::<M, f64>(compiled, bufs, sys, xs, n_rows, k_mm_l, &mut write);
+        } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter, sys.zz)?;
+        return svgp_latent::<M, f64>(compiled, bufs, sys, xs, n_rows, qd.zq.as_ref(), k_mm_l, &mut write);
     }
     let PredictScratch {
         plan,
@@ -115,7 +121,7 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
         ..
     } = scratch;
     let compiled = plan.get(sys.kernel);
-    svgp_latent::<M, P::Storage>(compiled, bufs, sys, xs, n_rows, sys.k_mm_l, &mut write)
+    svgp_latent::<M, P::Storage>(compiled, bufs, sys, xs, n_rows, qd.zq.as_ref(), sys.k_mm_l, &mut write)
 }
 
 /// For each query column: `a* = L_mm⁻¹ k(Z, x*)`, the mean `a*ᵀ q_mean`,
@@ -127,6 +133,7 @@ fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar>(
     sys: &SvgpSystem<'_, impl ModelPrecision>,
     xs: &[f64],
     n_rows: usize,
+    zq: Option<&GatheredRect<f64>>,
     k_mm_l: MatRef<'_, S>,
     write: &mut impl FnMut(usize, f64, f64),
 ) -> Result<(), GprError> {
@@ -143,7 +150,15 @@ fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar>(
     let z_mat = pack_into(z_buf, sys.z, m, d);
     let q_mat = pack_into(query, xs, n_rows, d);
     let mut a_star = view(k_sz, m, n_rows);
-    kernel.cross_into::<M>(compiled, z_mat.as_ref(), q_mat.as_ref(), a_star.as_mut())?;
+    let zq = cast_blocks::<S>(zq);
+    let zq = zq.as_ref().map(GatheredRect::table);
+    kernel.cross_into::<M>(
+        compiled,
+        z_mat.as_ref(),
+        q_mat.as_ref(),
+        rect_slots(&zq),
+        a_star.as_mut(),
+    )?;
     solve_lower(k_mm_l, a_star.as_mut());
     kss.clear();
     kss.resize(n_rows, zero);
@@ -183,6 +198,7 @@ pub(crate) fn predict_svgp_covariance<P: ModelPrecision>(
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
+    qd: &QueryDist,
     options: PredictOptions,
 ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
     let mut scratch = PredictScratch::<P::Storage>::default();
@@ -190,15 +206,15 @@ pub(crate) fn predict_svgp_covariance<P: ModelPrecision>(
     core.map_query_into(xs, n_rows, n_cols, &mut mapped)?;
     let mut pred = Prediction::default();
     with_kernel_exp!(core.math, M => {
-        svgp_predict_into::<M, P>(sys, &mapped, n_rows, options, &mut scratch, &mut pred)?;
+        svgp_predict_into::<M, P>(sys, &mapped, n_rows, qd, options, &mut scratch, &mut pred)?;
         if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
             let compiled = scratch.plan64.get(sys.kernel);
-            let latent = svgp_latent_covariance::<M, f64>(compiled, &mut scratch.f64, sys, n_rows)?;
+            let latent = svgp_latent_covariance::<M, f64>(compiled, &mut scratch.f64, sys, n_rows, qd.qq.as_ref())?;
             core.finish_covariance::<P, f64>(latent.as_ref(), pred)
         } else {
             let compiled = scratch.plan.get(sys.kernel);
             let latent =
-                svgp_latent_covariance::<M, P::Storage>(compiled, &mut scratch.storage, sys, n_rows)?;
+                svgp_latent_covariance::<M, P::Storage>(compiled, &mut scratch.storage, sys, n_rows, qd.qq.as_ref())?;
             core.finish_covariance::<P, P::Storage>(latent.as_ref(), pred)
         }
     })
@@ -211,6 +227,7 @@ fn svgp_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     bufs: &mut PredictBuffers<S>,
     sys: &SvgpSystem<'_, impl ModelPrecision>,
     q: usize,
+    qq: Option<&GatheredRect<f64>>,
 ) -> Result<Mat<S>, GprError> {
     let (m, d) = (sys.m, sys.d);
     let zero = S::from_f64(0.0);
@@ -222,12 +239,24 @@ fn svgp_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     } = bufs;
     let queries = view(query, q, d);
     let mut cov = Mat::<S>::zeros(q, q);
-    kernel.gram::<M>(
-        compiled,
-        GramInputs::points(queries.as_ref()),
-        cov.as_mut(),
-        Triangle::Full,
-    )?;
+    match cast_blocks::<S>(qq) {
+        Some(qq) => {
+            let table = Some(qq.table());
+            kernel.cross_into::<M>(
+                compiled,
+                queries.as_ref(),
+                queries.as_ref(),
+                rect_slots(&table),
+                cov.as_mut(),
+            )?;
+        }
+        None => kernel.gram::<M>(
+            compiled,
+            GramInputs::points(queries.as_ref()),
+            cov.as_mut(),
+            Triangle::Full,
+        )?,
+    }
     let a = k_sz.as_ref().submatrix(0, 0, m, q);
     let mut u = Mat::<S>::zeros(m, q);
     for col in 0..q {

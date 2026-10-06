@@ -493,6 +493,29 @@ impl<T: KernelScalar> TrainSources<T> {
         }
     }
 
+    /// The same squares at the scalar `U`.
+    pub(crate) fn cast<U: KernelScalar>(&self) -> Result<TrainSources<U>, GprError> {
+        let n = self.n;
+        let mut slots = Vec::with_capacity(self.slots.len());
+        for (id, data) in &self.slots {
+            let data = match data {
+                TrainData::Scalar(square) => TrainData::Scalar(
+                    (0..n * n)
+                        .map(|at| U::from_f64(square[at % n + (at / n) * self.cap].to_f64()))
+                        .collect(),
+                ),
+                TrainData::Ard(cache) => {
+                    let view = cache.view();
+                    TrainData::Ard(ArdSqDiffBuf::from_pairs(n, view.d(), |k, i, j| {
+                        U::from_f64(view.get(k, i, j).to_f64())
+                    })?)
+                }
+            };
+            slots.push((*id, data));
+        }
+        Ok(TrainSources { n, cap: n, slots })
+    }
+
     /// The training squares of the points `index` (a subset, in that order).
     pub(crate) fn subset(&self, index: &[usize]) -> Result<Self, GprError> {
         let m = index.len();
@@ -566,6 +589,25 @@ impl<T: KernelScalar> GatheredRect<T> {
         )
     }
 
+    /// The same blocks at the scalar `U`.
+    pub(crate) fn cast<U: KernelScalar>(&self) -> GatheredRect<U> {
+        GatheredRect {
+            rows: self.rows,
+            cols: self.cols,
+            slots: self
+                .slots
+                .iter()
+                .map(|(id, ard, blocks)| {
+                    let blocks = blocks
+                        .iter()
+                        .map(|block| block.iter().map(|v| U::from_f64(v.to_f64())).collect())
+                        .collect();
+                    (*id, *ard, blocks)
+                })
+                .collect(),
+        }
+    }
+
     /// Columns `cols` of these blocks (a minibatch).
     pub(crate) fn columns(&self, cols: &[usize]) -> Self {
         let rows = self.rows;
@@ -617,6 +659,30 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
             .map(|slot| (0..slot.shape.blocks()).map(|_| T::empty_rows()).collect())
             .collect();
         Ok(Self { raw, casts })
+    }
+
+    /// Rows `rows` of every block, in `f64` (a sparse model's inducing rows).
+    pub(crate) fn gather_rows(&self, rows: &[usize]) -> GatheredRect<f64> {
+        let cols = self.raw.first().map_or(0, |slot| slot.cols);
+        GatheredRect {
+            rows: rows.len(),
+            cols,
+            slots: self
+                .raw
+                .iter()
+                .map(|slot| {
+                    let blocks = (0..slot.shape.blocks())
+                        .map(|k| {
+                            let block = slot.block(k);
+                            (0..cols)
+                                .flat_map(|j| rows.iter().map(move |&i| block[i + j * slot.rows]))
+                                .collect()
+                        })
+                        .collect();
+                    (slot.id, matches!(slot.shape, SlotShape::Ard(_)), blocks)
+                })
+                .collect(),
+        }
     }
 
     /// The checked blocks, in slot order.

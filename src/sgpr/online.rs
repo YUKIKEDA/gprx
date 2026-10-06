@@ -1,5 +1,6 @@
 //! Online collapsed variational SGPR.
 
+use crate::sparse::QueryDist;
 use std::marker::PhantomData;
 
 use faer::Mat;
@@ -16,6 +17,7 @@ use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sgpr::SgprObjective;
 use crate::sparse::{
     KernelScratch, PredictScratch, SparseCore, SparseScratch, sparse_core_accessors,
+    sparse_kernel_accessor, sparse_point_accessors,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
@@ -187,6 +189,7 @@ where
             scratch: std::mem::take(&mut self.scratch),
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
+            _kernel: PhantomData,
             k_mm_l: self.state.k_mm_l.clone(),
             a: self.state.a.clone(),
             b_l: self.state.b_l.clone(),
@@ -277,6 +280,7 @@ where
                     &self.state.core.y_train,
                     &self.state.core.z_train,
                     self.state.core.m,
+                    self.state.core.dist.as_ref(),
                     &mut self.scratch.f64,
                     &mut KernelScratch::new(),
                 ))?
@@ -299,6 +303,7 @@ where
             self.state.core.n,
             self.state.core.m,
             self.state.core.d,
+            self.state.core.dist.as_ref(),
         ))?;
         Ok(())
     }
@@ -317,6 +322,8 @@ where
     }
 
     sparse_core_accessors!(state.core);
+    sparse_point_accessors!(state.core);
+    sparse_kernel_accessor!(state.core);
 
     /// Returns training-point identifiers in buffer order.
     ///
@@ -477,6 +484,7 @@ where
             xs,
             n_rows,
             n_cols,
+            &QueryDist::default(),
             options,
             &mut PredictScratch::default(),
             &mut out,
@@ -557,6 +565,7 @@ where
             xs,
             n_rows,
             n_cols,
+            &QueryDist::default(),
             options,
         )
     }
@@ -720,6 +729,7 @@ where
             xs,
             n_rows,
             n_cols,
+            &QueryDist::default(),
             options,
             &mut self.scratch.predict,
             out,
@@ -951,6 +961,7 @@ where
             &y_next,
             &self.state.core.z_train,
             self.state.core.m,
+            self.state.core.dist.as_ref(),
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
@@ -1080,6 +1091,7 @@ where
             &self.state.core.y_train,
             &z_train,
             m,
+            self.state.core.dist.as_ref(),
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
@@ -1287,6 +1299,7 @@ where
             scratch: self.scratch,
             optimizer: self.optimizer,
             inducing: PhantomData,
+            _kernel: PhantomData,
             k_mm_l: self.state.k_mm_l,
             a: self.state.a,
             b_l: self.state.b_l,

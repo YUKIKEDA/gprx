@@ -15,7 +15,10 @@ use crate::policy::JitterPolicy;
 use crate::precision::{F64Vfe, ModelPrecision};
 use crate::sgpr::FittedSgpr;
 use crate::sgpr::InducingLayout;
-use crate::sparse::{KernelScratch, SparseCore, SparseScratch};
+use crate::kernel::GatheredRect;
+use crate::sparse::{
+    KernelScratch, SparseCore, SparseDist, SparseScratch, rect_slots, square_slots, zx_at, zz_at,
+};
 use faer::{Mat, MatRef};
 use std::marker::PhantomData;
 
@@ -35,6 +38,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
     n: usize,
     m: usize,
     d: usize,
+    dist: Option<&SparseDist>,
 ) -> Result<Vec<P::Refine>, GprError> {
     let reference = || {
         let state = assemble_vfe::<M, f64>(
@@ -47,6 +51,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
             y,
             z,
             m,
+            dist,
             &mut KernelScratch::new(),
             &mut KernelScratch::new(),
         )?;
@@ -78,10 +83,10 @@ pub(crate) struct VfeState<T: KernelScalar> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P>(
+pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P, K>(
     core: SparseCore,
     optimizer: O,
-) -> Result<FittedSgpr<O, I, P>, GprError>
+) -> Result<FittedSgpr<O, I, P, K>, GprError>
 where
     P: ModelPrecision,
 {
@@ -96,6 +101,7 @@ where
         &core.y_train,
         &core.z_train,
         core.m,
+        core.dist.as_ref(),
         &mut scratch.storage,
         &mut scratch.f64,
     )?;
@@ -112,6 +118,7 @@ where
             &core.y_train,
             &core.z_train,
             core.m,
+            core.dist.as_ref(),
             &mut scratch.f64,
             &mut KernelScratch::new(),
         )?
@@ -133,6 +140,7 @@ where
             core.n,
             core.m,
             core.d,
+            core.dist.as_ref(),
         )?
     };
     Ok(FittedSgpr {
@@ -140,6 +148,7 @@ where
         scratch,
         optimizer,
         inducing: PhantomData,
+        _kernel: PhantomData,
         k_mm_l: state.k_mm_l,
         a: state.a,
         b_l: state.b_l,
@@ -161,14 +170,17 @@ pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
     y: &[f64],
     z: &[f64],
     n_inducing: usize,
+    dist: Option<&SparseDist>,
     ks: &mut KernelScratch<T>,
     ks64: &mut KernelScratch<f64>,
 ) -> Result<VfeState<T>, GprError>
 where
     T: KernelScalar,
 {
-    validate_training(x, n_rows, n_cols, y)?;
-    validate_inducing(z, n_inducing, n_cols)?;
+    if n_cols > 0 {
+        validate_training(x, n_rows, n_cols, y)?;
+        validate_inducing(z, n_inducing, n_cols)?;
+    }
     if T::ROUNDS_FROM_F64 {
         let state = assemble_vfe::<M, f64>(
             kernel,
@@ -180,6 +192,7 @@ where
             y,
             z,
             n_inducing,
+            dist,
             ks64,
             &mut KernelScratch::new(),
         )?;
@@ -195,10 +208,16 @@ where
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
     // A rounding scalar returned above, so `T` is evaluated as stored below.
+    let zz = zz_at::<T>(dist)?;
+    let zx = zx_at::<T>(dist);
+    let zx = zx.as_ref().map(GatheredRect::table);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M>(
         &compiled,
-        GramInputs::points(z_mat.as_ref()),
+        GramInputs {
+            slots: square_slots(&zz),
+            ..GramInputs::points(z_mat.as_ref())
+        },
         k_mm.as_mut(),
         Triangle::Lower,
     )?;
@@ -212,7 +231,7 @@ where
     // `K(Z, X)` is the rectangular cross covariance whatever the values of
     // `Z` and `X`: a White leaf adds nothing to it, so the objective does not
     // jump when a free `Z` leaves `X` (docs/design.md §5).
-    let mut a = ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref())?;
+    let mut a = ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref(), rect_slots(&zx))?;
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);
@@ -273,6 +292,7 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
     y: &[f64],
     z: &[f64],
     n_inducing: usize,
+    dist: Option<&SparseDist>,
     ks: &mut KernelScratch<T>,
     ks64: &mut KernelScratch<f64>,
 ) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {
@@ -287,6 +307,7 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
             y,
             z,
             n_inducing,
+            dist,
             ks64,
             &mut KernelScratch::new(),
         )?;
@@ -303,6 +324,7 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
         y,
         z,
         n_inducing,
+        dist,
         ks,
         ks64,
     )?;

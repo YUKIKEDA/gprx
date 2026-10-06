@@ -7,8 +7,9 @@ use crate::kernel::{GramInputs, ScalarOps};
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::{DoublePrecision, ModelPrecision};
+use crate::kernel::{GatheredRect, TrainSources};
 use crate::sparse::{
-    F64System, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
+    F64System, QueryDist, cast_blocks, rect_slots, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
     reset_prediction, view,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -19,6 +20,8 @@ pub(crate) struct VfeSystem<'a, P: ModelPrecision> {
     pub(crate) kernel: &'a KernelSpec,
     pub(crate) k_mm_jitter: JitterPolicy,
     pub(crate) z: &'a [f64],
+    /// The `Z × Z` squares of a distance kernel.
+    pub(crate) zz: Option<&'a TrainSources<f64>>,
     pub(crate) k_mm_l: MatRef<'a, P::Storage>,
     pub(crate) b_l: MatRef<'a, P::Storage>,
     pub(crate) predict_w: &'a [P::Refine],
@@ -38,6 +41,7 @@ impl<'a, P: ModelPrecision> VfeSystem<'a, P> {
             kernel: &core.kernel,
             k_mm_jitter: core.jitter,
             z: &core.z_train,
+            zz: core.dist.as_ref().map(|dist| &dist.zz),
             k_mm_l,
             b_l,
             predict_w,
@@ -65,6 +69,7 @@ pub(crate) fn predict_vfe_into<P: ModelPrecision>(
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
+    qd: &QueryDist,
     options: PredictOptions,
     scratch: &mut PredictScratch<P::Storage>,
     out: &mut Prediction<P::Refine>,
@@ -74,7 +79,7 @@ pub(crate) fn predict_vfe_into<P: ModelPrecision>(
         .map_query_into(xs, n_rows, n_cols, &mut mapped)
         .and_then(|()| {
             with_kernel_exp!(core.math, M => vfe_predict_into::<M, P>(
-                sys, &mapped, n_rows, options, scratch, out
+                sys, &mapped, n_rows, qd, options, scratch, out
             ))
         });
     scratch.xs = mapped;
@@ -91,6 +96,7 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
     sys: &VfeSystem<'_, P>,
     xs: &[f64],
     n_rows: usize,
+    qd: &QueryDist,
     options: PredictOptions,
     scratch: &mut PredictScratch<P::Storage>,
     out: &mut Prediction<P::Refine>,
@@ -105,7 +111,7 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
             k_mm_l,
             b_l64,
             w64,
-        } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter)?;
+        } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter, sys.zz)?;
         let mut b64 = view(b_l64, m, m);
         for col in 0..m {
             for row in 0..m {
@@ -123,6 +129,7 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
             d,
             xs,
             n_rows,
+            qd.zq.as_ref(),
             k_mm_l,
             b_l64.as_ref().submatrix(0, 0, m, m),
             sys.noise,
@@ -148,6 +155,7 @@ pub(crate) fn vfe_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
         d,
         xs,
         n_rows,
+        qd.zq.as_ref(),
         sys.k_mm_l,
         sys.b_l,
         sys.noise,
@@ -171,6 +179,7 @@ fn vfe_latent<M: crate::math::KernelMath, S: KernelScalar>(
     d: usize,
     xs: &[f64],
     n_rows: usize,
+    zq: Option<&GatheredRect<f64>>,
     k_mm_l: MatRef<'_, S>,
     b_l: MatRef<'_, S>,
     noise: f64,
@@ -189,7 +198,15 @@ fn vfe_latent<M: crate::math::KernelMath, S: KernelScalar>(
     let z_mat = pack_into(z_buf, z, m, d);
     let q_mat = pack_into(query, xs, n_rows, d);
     let mut a_star = view(k_sz, m, n_rows);
-    kernel.cross_into::<M>(compiled, z_mat.as_ref(), q_mat.as_ref(), a_star.as_mut())?;
+    let zq = cast_blocks::<S>(zq);
+    let zq = zq.as_ref().map(GatheredRect::table);
+    kernel.cross_into::<M>(
+        compiled,
+        z_mat.as_ref(),
+        q_mat.as_ref(),
+        rect_slots(&zq),
+        a_star.as_mut(),
+    )?;
     solve_lower(k_mm_l, a_star.as_mut());
     kss.clear();
     kss.resize(n_rows, lit::<S>(0.0));
@@ -233,6 +250,7 @@ pub(crate) fn predict_vfe_covariance<P: ModelPrecision>(
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
+    qd: &QueryDist,
     options: PredictOptions,
 ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
     let mut scratch = PredictScratch::<P::Storage>::default();
@@ -240,17 +258,17 @@ pub(crate) fn predict_vfe_covariance<P: ModelPrecision>(
     core.map_query_into(xs, n_rows, n_cols, &mut mapped)?;
     let mut pred = Prediction::default();
     with_kernel_exp!(core.math, M => {
-        vfe_predict_into::<M, P>(sys, &mapped, n_rows, options, &mut scratch, &mut pred)?;
+        vfe_predict_into::<M, P>(sys, &mapped, n_rows, qd, options, &mut scratch, &mut pred)?;
         if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
             let compiled = scratch.plan64.get(sys.kernel);
             let latent = vfe_latent_covariance::<M, f64>(
-                compiled, &mut scratch.f64, sys.m, sys.d, n_rows, sys.noise,
+                compiled, &mut scratch.f64, sys.m, sys.d, n_rows, sys.noise, qd.qq.as_ref(),
             )?;
             core.finish_covariance::<P, f64>(latent.as_ref(), pred)
         } else {
             let compiled = scratch.plan.get(sys.kernel);
             let latent = vfe_latent_covariance::<M, P::Storage>(
-                compiled, &mut scratch.storage, sys.m, sys.d, n_rows, sys.noise,
+                compiled, &mut scratch.storage, sys.m, sys.d, n_rows, sys.noise, qd.qq.as_ref(),
             )?;
             core.finish_covariance::<P, P::Storage>(latent.as_ref(), pred)
         }
@@ -266,6 +284,7 @@ fn vfe_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     d: usize,
     q: usize,
     noise: f64,
+    qq: Option<&GatheredRect<f64>>,
 ) -> Result<Mat<S>, GprError> {
     let PredictBuffers {
         kernel,
@@ -276,12 +295,24 @@ fn vfe_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     } = bufs;
     let queries = view(query, q, d);
     let mut cov = Mat::<S>::zeros(q, q);
-    kernel.gram::<M>(
-        compiled,
-        GramInputs::points(queries.as_ref()),
-        cov.as_mut(),
-        Triangle::Full,
-    )?;
+    match cast_blocks::<S>(qq) {
+        Some(qq) => {
+            let table = Some(qq.table());
+            kernel.cross_into::<M>(
+                compiled,
+                queries.as_ref(),
+                queries.as_ref(),
+                rect_slots(&table),
+                cov.as_mut(),
+            )?;
+        }
+        None => kernel.gram::<M>(
+            compiled,
+            GramInputs::points(queries.as_ref()),
+            cov.as_mut(),
+            Triangle::Full,
+        )?,
+    }
     let a_star = k_sz.as_ref().submatrix(0, 0, m, q);
     let s_star = solved.as_ref().submatrix(0, 0, m, q);
     let noise_s = lit::<S>(noise);

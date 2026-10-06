@@ -7,7 +7,8 @@ use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower};
 use crate::policy::JitterPolicy;
 use crate::precision::ModelPrecision;
-use crate::sparse::SparseCore;
+use crate::kernel::GatheredRect;
+use crate::sparse::{SparseCore, SparseDist, rect_slots, square_slots, zx_at, zz_at};
 use crate::sparse::{KernelScratch, SparseScratch};
 use crate::svgp::FittedSvgp;
 use faer::{Mat, MatRef};
@@ -21,10 +22,10 @@ pub(crate) struct SvgpState<T: KernelScalar> {
     pub(crate) k_diag: Vec<T>,
 }
 
-pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P>(
+pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P, K>(
     core: SparseCore,
     q: Option<(Vec<f64>, Mat<f64>)>,
-) -> Result<FittedSvgp<P>, GprError>
+) -> Result<FittedSvgp<P, K>, GprError>
 where
     P: ModelPrecision,
 {
@@ -40,9 +41,11 @@ where
         core.m,
         q,
         &mut scratch.storage,
+        core.dist.as_ref(),
     )?;
     Ok(FittedSvgp {
         core,
+        _kernel: std::marker::PhantomData,
         scratch,
         k_mm_l: state.k_mm_l,
         a: state.a,
@@ -64,14 +67,26 @@ pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
     n_inducing: usize,
     q: Option<(Vec<f64>, Mat<f64>)>,
     ks: &mut KernelScratch<T>,
+    dist: Option<&SparseDist>,
 ) -> Result<SvgpState<T>, GprError>
 where
     T: KernelScalar,
 {
-    validate_training(x, n_rows, n_cols, y)?;
-    let k_mm = assemble_kmm::<M, T>(kernel, k_mm_jitter, z, n_inducing, n_cols, ks)?;
-    let (a, k_diag) =
-        assemble_data_terms::<M, T>(kernel, x, n_rows, n_cols, z, n_inducing, k_mm.as_ref(), ks)?;
+    if n_cols > 0 {
+        validate_training(x, n_rows, n_cols, y)?;
+    }
+    let k_mm = assemble_kmm::<M, T>(kernel, k_mm_jitter, z, n_inducing, n_cols, ks, dist)?;
+    let (a, k_diag) = assemble_data_terms::<M, T>(
+        kernel,
+        x,
+        n_rows,
+        n_cols,
+        z,
+        n_inducing,
+        k_mm.as_ref(),
+        ks,
+        dist,
+    )?;
     let (q_mean, q_l) = match q {
         Some((mean, l)) => (mean, l),
         None => prior_q(n_inducing),
@@ -94,11 +109,15 @@ pub(crate) fn assemble_kmm<M: crate::math::KernelMath, T>(
     n_inducing: usize,
     n_cols: usize,
     ks: &mut KernelScratch<T>,
+    dist: Option<&SparseDist>,
 ) -> Result<Mat<T>, GprError>
 where
     T: KernelScalar,
 {
-    validate_inducing(z, n_inducing, n_cols)?;
+    if n_cols > 0 {
+        validate_inducing(z, n_inducing, n_cols)?;
+    }
+    let zz = zz_at::<T>(dist)?;
     let compiled = kernel.compile_as::<T>();
     let z64 = pack_points(z, n_inducing, n_cols);
     let mut z_cast = T::empty_cols();
@@ -106,7 +125,10 @@ where
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M>(
         &compiled,
-        GramInputs::points(z_mat),
+        GramInputs {
+            slots: square_slots(&zz),
+            ..GramInputs::points(z_mat)
+        },
         k_mm.as_mut(),
         Triangle::Lower,
     )?;
@@ -132,6 +154,7 @@ pub(crate) fn assemble_data_terms<M: crate::math::KernelMath, T>(
     n_inducing: usize,
     k_mm_l: MatRef<'_, T>,
     ks: &mut KernelScratch<T>,
+    dist: Option<&SparseDist>,
 ) -> Result<(Mat<T>, Vec<T>), GprError>
 where
     T: KernelScalar,
@@ -144,7 +167,9 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
-    let mut a = ks.cross::<M>(&compiled, z_mat, x_mat)?;
+    let zx = zx_at::<T>(dist);
+    let zx = zx.as_ref().map(GatheredRect::table);
+    let mut a = ks.cross::<M>(&compiled, z_mat, x_mat, rect_slots(&zx))?;
     solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];
     compiled.fill_diag_points(x_mat, &mut k_diag)?;

@@ -115,8 +115,8 @@ fn write_sparse<P: GpScalar>(
     super::write_config(dir, &json)
 }
 
-pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout, P: GpScalar>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout, P: GpScalar, K: crate::kernel::ModelKernel>(
+    model: &FittedSgpr<O, I, P, K>,
     dir: &Path,
 ) -> Result<(), GprError> {
     write_sparse::<P>(dir, model.core(), ModelJson::Sgpr, None, None)
@@ -135,7 +135,7 @@ pub(crate) fn save_online_sgpr<O, P: GpScalar>(
     write_sparse::<P>(dir, model.core(), ModelJson::OnlineSgpr, Some(ids), None)
 }
 
-pub(crate) fn save_svgp<P: GpScalar>(model: &FittedSvgp<P>, dir: &Path) -> Result<(), GprError> {
+pub(crate) fn save_svgp<P: GpScalar, K: crate::kernel::ModelKernel>(model: &FittedSvgp<P, K>, dir: &Path) -> Result<(), GprError> {
     write_sparse::<P>(dir, model.core(), ModelJson::Svgp, None, Some(model.q()))
 }
 

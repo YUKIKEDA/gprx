@@ -7,7 +7,7 @@ use crate::policy::{JitterPolicy, KernelExp, with_kernel_exp};
 use crate::sparse::{SparseCore, SparseSpec};
 use crate::transform::{UnfittedTarget, UnfittedTransform};
 
-use crate::kernel::KernelSpec;
+use crate::kernel::{DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Adam, Fixed};
 use crate::precision::{DoublePrecision, GpScalar};
@@ -41,13 +41,14 @@ use super::fitted::FittedSvgp;
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Svgp<O = Fixed, P = DoublePrecision> {
+pub struct Svgp<O = Fixed, P = DoublePrecision, K = KernelSpec> {
     pub(super) spec: SparseSpec,
     pub(super) optimizer: O,
     pub(super) _precision: PhantomData<P>,
+    pub(super) _kernel: PhantomData<K>,
 }
 
-impl Svgp {
+impl<K: ModelKernel> Svgp<Fixed, DoublePrecision, K> {
     /// Builds a trainer with the current kernel `θ` and [`Fixed`].
     ///
     /// Inducing coordinates are an argument of [`Svgp<Fixed>::factor`], not
@@ -55,23 +56,29 @@ impl Svgp {
     /// the inducing count.
     ///
     /// See the example on [`Svgp`].
-    pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
+    ///
+    /// A [`DistanceKernel`](crate::kernel::DistanceKernel) is read from
+    /// supplied squared distances; its `factor` and `fit` take the training
+    /// indices of the inducing points (see [`crate::kernel::ScalarDistance`]).
+    pub fn new(kernel: K, likelihood: GaussianLikelihood) -> Self {
         Self {
-            spec: SparseSpec::new(kernel, likelihood),
+            spec: SparseSpec::new(<K as ModelKernelParts>::into_spec(kernel), likelihood),
             optimizer: Fixed,
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 }
 
-impl<O, P> Svgp<O, P> {
+impl<O, P, K> Svgp<O, P, K> {
     /// The same settings under new type parameters, with `map` applied to
     /// the optimizer.
-    fn retype<O2, P2>(self, map: impl FnOnce(O) -> O2) -> Svgp<O2, P2> {
+    fn retype<O2, P2>(self, map: impl FnOnce(O) -> O2) -> Svgp<O2, P2, K> {
         Svgp {
             spec: self.spec,
             optimizer: map(self.optimizer),
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 
@@ -97,7 +104,7 @@ impl<O, P> Svgp<O, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Svgp<O2, P, K> {
         self.retype(|_| optimizer)
     }
 
@@ -106,7 +113,7 @@ impl<O, P> Svgp<O, P> {
     /// Omitting it leaves [`DoublePrecision`].
     ///
     /// See the example on [`Svgp`].
-    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, P2> {
+    pub fn with_precision<P2: GpScalar>(self) -> Svgp<O, P2, K> {
         self.retype(|optimizer| optimizer)
     }
 
@@ -170,40 +177,6 @@ impl<O, P> Svgp<O, P> {
         self.spec.jitter
     }
 
-    /// Replaces the input (`X`) transform.
-    ///
-    /// Omitting it leaves identity.
-    ///
-    /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
-    /// every later query or inserted point go through it, so `Z` is passed
-    /// in the same coordinates as `X`. [`crate::FreeInducing`] searches `Z`
-    /// in the transformed coordinates; the fitted model reports `Z` in the
-    /// original ones. A single map, a [`crate::transform::Pipeline`], or
-    /// [`crate::transform::ColumnwiseInput`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::transform::StandardizeInput;
-    /// use gprx::{GaussianLikelihood, Svgp};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Svgp::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_input_transform(StandardizeInput::new())
-    /// .factor(&[0.0, 10.0, 20.0, 30.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[5.0, 25.0], 2)
-    /// .map_err(|(_, e)| e)?;
-    /// assert_eq!(fitted.z(), &[5.0, 25.0]);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
-        self.spec.x_transform = Box::new(transform);
-        self
-    }
 
     /// Replaces the target (`y`) transform.
     ///
@@ -239,12 +212,6 @@ impl<O, P> Svgp<O, P> {
         self
     }
 
-    /// Returns the kernel whose hyperparameters this trainer owns.
-    ///
-    /// See the example on [`Svgp`].
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.spec.kernel
-    }
 
     /// Returns the observation-noise model.
     ///
@@ -290,6 +257,61 @@ impl<O, P> Svgp<O, P> {
     /// See the example on [`Svgp`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.spec.write_theta(params)
+    }
+}
+
+impl<O, P, K: PointKernel> Svgp<O, P, K> {
+    /// Replaces the input (`X`) transform.
+    ///
+    /// Omitting it leaves identity.
+    ///
+    /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
+    /// every later query or inserted point go through it, so `Z` is passed
+    /// in the same coordinates as `X`. [`crate::FreeInducing`] searches `Z`
+    /// in the transformed coordinates; the fitted model reports `Z` in the
+    /// original ones. A single map, a [`crate::transform::Pipeline`], or
+    /// [`crate::transform::ColumnwiseInput`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::transform::StandardizeInput;
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Svgp::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_input_transform(StandardizeInput::new())
+    /// .factor(&[0.0, 10.0, 20.0, 30.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[5.0, 25.0], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.z(), &[5.0, 25.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
+        self.spec.x_transform = Box::new(transform);
+        self
+    }
+}
+
+impl<O, P> Svgp<O, P> {
+    /// Returns the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`Svgp`].
+    pub fn kernel(&self) -> &KernelSpec {
+        &self.spec.kernel
+    }
+}
+
+impl<O, P, C: PointUse> Svgp<O, P, DistanceKernel<C>> {
+    /// Returns a copy of the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`crate::kernel::ScalarDistance`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as ModelKernelParts>::from_spec(self.spec.kernel.clone())
     }
 }
 
@@ -342,7 +364,7 @@ where
             Ok(core) => core,
             Err(err) => return Err((self, err)),
         };
-        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<M, _>(core, None)) {
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<M, _, _>(core, None)) {
             Ok(fitted) => Ok(fitted),
             Err(err) => Err((self, err)),
         }
@@ -402,10 +424,10 @@ where
             Ok(core) => core,
             Err(err) => return Err((self, err)),
         };
-        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<M, _>(core, None)) {
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<M, _, _>(core, None)) {
             Ok(mut fitted) => match with_kernel_exp!(
                 self.spec.math,
-                M => run_adam_fit::<M, _>(&mut fitted, &self.optimizer)
+                M => run_adam_fit::<M, _, _>(&mut fitted, &self.optimizer)
             ) {
                 Ok(()) => Ok(fitted),
                 Err(err) => Err((self, err)),

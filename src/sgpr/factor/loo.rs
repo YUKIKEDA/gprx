@@ -51,6 +51,7 @@ pub(crate) fn vfe_loo<P: ModelPrecision>(
             &core.y_train,
             &core.z_train,
             m,
+            core.dist.as_ref(),
             &mut KernelScratch::new(),
             &mut KernelScratch::new(),
         ))?;

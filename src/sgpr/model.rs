@@ -7,7 +7,7 @@ use crate::policy::{JitterPolicy, KernelExp, with_kernel_exp};
 use crate::sparse::{SparseCore, SparseSpec};
 use crate::transform::{UnfittedTarget, UnfittedTransform};
 
-use crate::kernel::KernelSpec;
+use crate::kernel::{DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::precision::{DoublePrecision, GpScalar};
@@ -42,13 +42,14 @@ use super::{FixedInducing, FreeInducing, InducingLayout};
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision> {
+pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision, K = KernelSpec> {
     pub(super) spec: SparseSpec,
     pub(super) optimizer: O,
     pub(super) inducing: PhantomData<I>,
     pub(super) _precision: PhantomData<P>,
+    pub(super) _kernel: PhantomData<K>,
 }
-impl Sgpr {
+impl<K: ModelKernel> Sgpr<Lbfgs, FixedInducing, DoublePrecision, K> {
     /// Builds a trainer with identity transforms, the current kernel `θ`, and [`Lbfgs`].
     ///
     /// Inducing coordinates are an argument of [`Sgpr::fit`] /
@@ -57,25 +58,31 @@ impl Sgpr {
     /// [`Optimizer`].
     ///
     /// See the example on [`Sgpr`].
-    pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
+    ///
+    /// A [`DistanceKernel`](crate::kernel::DistanceKernel) is read from
+    /// supplied squared distances; its fit takes the training indices of
+    /// the inducing points (see [`crate::kernel::ScalarDistance`]).
+    pub fn new(kernel: K, likelihood: GaussianLikelihood) -> Self {
         Self {
-            spec: SparseSpec::new(kernel, likelihood),
+            spec: SparseSpec::new(<K as ModelKernelParts>::into_spec(kernel), likelihood),
             optimizer: Lbfgs::new(),
             inducing: PhantomData,
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 }
 
-impl<O, I, P> Sgpr<O, I, P> {
+impl<O, I, P, K> Sgpr<O, I, P, K> {
     /// The same settings under new type parameters, with `map` applied to
     /// the optimizer.
-    fn retype<O2, I2, P2>(self, map: impl FnOnce(O) -> O2) -> Sgpr<O2, I2, P2> {
+    fn retype<O2, I2, P2>(self, map: impl FnOnce(O) -> O2) -> Sgpr<O2, I2, P2, K> {
         Sgpr {
             spec: self.spec,
             optimizer: map(self.optimizer),
             inducing: PhantomData,
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 
@@ -98,7 +105,7 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Sgpr<O2, I, P, K> {
         self.retype(|_| optimizer)
     }
 
@@ -107,7 +114,7 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// Omitting it leaves [`DoublePrecision`].
     ///
     /// See the example on [`Sgpr`].
-    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, P2> {
+    pub fn with_precision<P2: GpScalar>(self) -> Sgpr<O, I, P2, K> {
         self.retype(|optimizer| optimizer)
     }
 
@@ -172,41 +179,6 @@ impl<O, I, P> Sgpr<O, I, P> {
         self.spec.jitter
     }
 
-    /// Replaces the input (`X`) transform.
-    ///
-    /// Omitting it leaves identity.
-    ///
-    /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
-    /// every later query or inserted point go through it, so `Z` is passed
-    /// in the same coordinates as `X`. [`crate::FreeInducing`] searches `Z`
-    /// in the transformed coordinates; the fitted model reports `Z` in the
-    /// original ones. A single map, a [`crate::transform::Pipeline`], or
-    /// [`crate::transform::ColumnwiseInput`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::transform::StandardizeInput;
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_input_transform(StandardizeInput::new())
-    /// .with_optimizer(Fixed)
-    ///     .factor(&[0.0, 10.0, 20.0, 30.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[5.0, 25.0], 2)
-    /// .map_err(|(_, e)| e)?;
-    /// assert_eq!(fitted.z(), &[5.0, 25.0]);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
-        self.spec.x_transform = Box::new(transform);
-        self
-    }
 
     /// Replaces the target (`y`) transform.
     ///
@@ -243,39 +215,6 @@ impl<O, I, P> Sgpr<O, I, P> {
         self
     }
 
-    /// Replaces the inducing-point type parameter.
-    ///
-    /// [`FixedInducing`] (the default) keeps `Z` fixed. [`FreeInducing`]
-    /// appends column-major `Z` to the parameter vector and searches it with
-    /// kernel and likelihood `θ`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{FreeInducing, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-    /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let fitted = Sgpr::new(kernel, likelihood)
-    ///     .with_inducing(FreeInducing)
-    ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
-    ///     .map_err(|(_, e)| e)?;
-    /// assert_eq!(fitted.num_params(), 4);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, P> {
-        self.retype(|optimizer| optimizer)
-    }
-
-    /// Returns the kernel whose hyperparameters this trainer owns.
-    ///
-    /// See the example on [`Sgpr`].
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.spec.kernel
-    }
 
     /// Returns the observation-noise model.
     ///
@@ -321,6 +260,89 @@ impl<O, I, P> Sgpr<O, I, P> {
     /// See the example on [`Sgpr`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
         self.spec.write_theta(params)
+    }
+}
+
+impl<O, I, P, K: PointKernel> Sgpr<O, I, P, K> {
+    /// Replaces the input (`X`) transform.
+    ///
+    /// Omitting it leaves identity.
+    ///
+    /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
+    /// every later query or inserted point go through it, so `Z` is passed
+    /// in the same coordinates as `X`. [`crate::FreeInducing`] searches `Z`
+    /// in the transformed coordinates; the fitted model reports `Z` in the
+    /// original ones. A single map, a [`crate::transform::Pipeline`], or
+    /// [`crate::transform::ColumnwiseInput`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::transform::StandardizeInput;
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_input_transform(StandardizeInput::new())
+    /// .with_optimizer(Fixed)
+    ///     .factor(&[0.0, 10.0, 20.0, 30.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[5.0, 25.0], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.z(), &[5.0, 25.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
+        self.spec.x_transform = Box::new(transform);
+        self
+    }
+}
+
+impl<O, I, P> Sgpr<O, I, P> {
+    /// Replaces the inducing-point type parameter.
+    ///
+    /// [`FixedInducing`] (the default) keeps `Z` fixed. [`FreeInducing`]
+    /// appends column-major `Z` to the parameter vector and searches it with
+    /// kernel and likelihood `θ`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{FreeInducing, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let fitted = Sgpr::new(kernel, likelihood)
+    ///     .with_inducing(FreeInducing)
+    ///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.num_params(), 4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_inducing<I2>(self, _inducing: I2) -> Sgpr<O, I2, P> {
+        self.retype(|optimizer| optimizer)
+    }
+
+    /// Returns the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`Sgpr`].
+    pub fn kernel(&self) -> &KernelSpec {
+        &self.spec.kernel
+    }
+}
+
+impl<O, I, P, C: PointUse> Sgpr<O, I, P, DistanceKernel<C>> {
+    /// Returns a copy of the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`crate::kernel::ScalarDistance`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as ModelKernelParts>::from_spec(self.spec.kernel.clone())
     }
 }
 
@@ -376,7 +398,7 @@ where
             Ok(core) => core,
             Err(err) => return Err((self, err)),
         };
-        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _, _>(
             core,
             self.optimizer.clone(),
         )) {
@@ -439,7 +461,7 @@ where
             Ok(core) => core,
             Err(err) => return Err((self, err)),
         };
-        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _, _>(
             core,
             self.optimizer.clone(),
         )) {
@@ -504,7 +526,7 @@ where
             Ok(core) => core,
             Err(err) => return Err((self, err)),
         };
-        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _>(
+        match with_kernel_exp!(self.spec.math, M => assemble_fitted::<_, _, M, _, _>(
             core,
             Fixed,
         )) {

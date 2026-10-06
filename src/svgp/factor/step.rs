@@ -29,11 +29,13 @@ pub(crate) struct AdamStep<S: KernelScalar> {
     q_mean: Vec<f64>,
     q_l: Mat<f64>,
     ks: KernelScratch<S>,
+    /// The `Z × Z` squares of a distance kernel, at `S`.
+    zz: Option<crate::kernel::TrainSources<S>>,
     pub(crate) grad: GradBuffers,
 }
 
 impl<S: KernelScalar> AdamStep<S> {
-    pub(crate) fn new<P>(model: &FittedSvgp<P>) -> Self
+    pub(crate) fn new<P, K>(model: &FittedSvgp<P, K>) -> Self
     where
         P: GpScalar<Storage = S>,
     {
@@ -54,12 +56,13 @@ impl<S: KernelScalar> AdamStep<S> {
             q_mean: vec![0.0; m],
             q_l: Mat::zeros(m, m),
             ks: KernelScratch::new(),
+            zz: crate::sparse::zz_at::<S>(core.dist.as_ref()).unwrap_or_default(),
             grad: GradBuffers::default(),
         }
     }
 }
 
-impl<P> FittedSvgp<P>
+impl<P, K: crate::kernel::ModelKernel> FittedSvgp<P, K>
 where
     P: GpScalar,
 {
@@ -88,7 +91,10 @@ where
             step.compiled_storage.set_params_in_place(new_k, prev_k)?;
             step.ks.gram::<M>(
                 &step.compiled_storage,
-                GramInputs::points(step.z.as_ref()),
+                GramInputs {
+                    slots: crate::sparse::square_slots(&step.zz),
+                    ..GramInputs::points(step.z.as_ref())
+                },
                 step.k_mm.as_mut(),
                 Triangle::Lower,
             )?;

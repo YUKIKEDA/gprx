@@ -193,6 +193,7 @@ fn kernel_column(
         &compiled,
         z_mat.as_ref(),
         x_mat.as_ref(),
+        None,
     )
 }
 
@@ -1929,7 +1930,7 @@ fn failed_search_restores_the_model_from_its_parameters() {
     .spec;
     let core = crate::sparse::SparseCore::prepare(&spec, &x, 6, 1, &y, &z, 3).expect("core");
     let mut fitted =
-        assemble_fitted::<_, FixedInducing, crate::math::Accurate, crate::MixedPrecision>(
+        assemble_fitted::<_, FixedInducing, crate::math::Accurate, crate::MixedPrecision, crate::kernel::KernelSpec>(
             core,
             FailAfterMoving,
         )
