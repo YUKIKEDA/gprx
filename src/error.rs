@@ -220,14 +220,11 @@ pub enum GprError {
         reason: String,
     },
     /// `config.json` `format_version` is not supported by this crate.
-    #[error(
-        "unsupported persist format version {found}; this crate reads versions 1 to {supported}"
-    )]
+    #[error("unsupported persist format version {found}; this crate reads version {supported}")]
     UnsupportedPersistVersion {
         /// Holds the version written in the file.
         found: u32,
-        /// Holds the newest version this crate reads ([`crate::persist::FORMAT_VERSION`]);
-        /// it reads every version from 1 up to it.
+        /// Holds the version this crate reads.
         supported: u32,
     },
 }
@@ -274,7 +271,7 @@ mod tests {
                 supported: 1
             }
             .to_string(),
-            "unsupported persist format version 2; this crate reads versions 1 to 1"
+            "unsupported persist format version 2; this crate reads version 1"
         );
         let chol = GprError::CholeskyFailed {
             jitter: 1e-6,
