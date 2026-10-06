@@ -63,6 +63,10 @@ pub(super) fn read_sources(
     slots: &[DistanceSlot],
     n: usize,
 ) -> Result<Vec<DistanceSource<'static>>, GprError> {
+    // A coordinate kernel reads no squares, and its own checks see `n`.
+    if slots.is_empty() {
+        return Ok(Vec::new());
+    }
     // §8 of the format: `n = 0` is `EmptyInput`, before any tensor is cut.
     crate::data::require_nonempty(n)?;
     slots

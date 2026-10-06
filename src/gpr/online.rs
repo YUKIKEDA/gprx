@@ -1068,7 +1068,7 @@ where
     let result = f(&mut ExactFit {
         core: &mut *core,
         store: &mut store,
-        fills: &crate::gpr::NO_FILLS,
+        fills: &[],
     });
     match result {
         Ok(value) => {

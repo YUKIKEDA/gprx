@@ -705,3 +705,73 @@ fn a_negative_squared_distance_is_rejected() {
         Err(GprError::ShapeMismatch { .. })
     ));
 }
+
+/// Per-dimension squared differences of two one-dimensional sample sets,
+/// every dimension the same.
+struct Bands<'a> {
+    rows: &'a [f64],
+    cols: &'a [f64],
+    dims: usize,
+}
+
+impl DistanceFill for Bands<'_> {
+    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
+        let len = n_rows * n_cols;
+        for k in 0..self.dims {
+            Pairs {
+                rows: self.rows,
+                cols: self.cols,
+            }
+            .fill(n_rows, n_cols, &mut out[k * len..(k + 1) * len]);
+        }
+    }
+}
+
+#[test]
+fn mixed_precision_refines_an_ard_slot_and_an_uncached_fill_fits_the_same() {
+    use gprx::{MixedPrecision, ReevaluateKernel};
+    let c0 = coord(0, N, 0.0);
+    let q0 = coord(0, M, 0.5);
+    let y = targets();
+    let bands = ArdDistance::new(2).expect("dims");
+    let kernel = bands
+        .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
+        .expect("dims");
+    let train = Bands {
+        rows: &c0,
+        cols: &c0,
+        dims: 2,
+    };
+    let cross = Bands {
+        rows: &c0,
+        cols: &q0,
+        dims: 2,
+    };
+    let double = Gpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([bands.fill(&train)], N, &y)
+        .expect("f64");
+    let expect = double.predict([bands.fill(&cross)], M).expect("f64");
+    let mixed = Gpr::new(kernel.clone(), lik())
+        .with_precision::<MixedPrecision<ReevaluateKernel>>()
+        .with_optimizer(Fixed)
+        .factor([bands.fill(&train)], N, &y)
+        .expect("mixed");
+    let got = mixed.predict([bands.fill(&cross)], M).expect("mixed");
+    assert_slice_close(&got.mean, &expect.mean, 1e-10);
+    // A search that calls the fill again for every factor after the first
+    // lands where a search on the kept squares lands.
+    let cached = Gpr::new(kernel.clone(), lik())
+        .fit([bands.fill(&train)], N, &y)
+        .expect("cached");
+    let uncached = Gpr::new(kernel, lik())
+        .with_precision::<MixedPrecision<ReevaluateKernel>>()
+        .with_prefer_memory()
+        .fit([bands.fill(&train)], N, &y)
+        .expect("uncached");
+    assert_close(
+        uncached.neg_log_marginal_likelihood().expect("nlml"),
+        cached.neg_log_marginal_likelihood().expect("nlml"),
+        1e-4,
+    );
+}

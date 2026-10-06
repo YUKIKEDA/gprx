@@ -226,45 +226,44 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         self.leaf.fill_diag(out)
     }
 
-    /// `∂k(x, x)/∂θ_p` broadcast over `out`.
+    /// `∂k(x, x)/∂θ_p` broadcast over `out`: the leaf at `d² = 0`.
     pub(super) fn grad_diag<M: crate::math::KernelMath>(
         &self,
         out: &mut [T],
         param_idx: usize,
     ) -> Result<(), GprError> {
-        let value = if self.is_ard() {
-            self.require_param(param_idx)?;
-            T::from_f64(0.0)
-        } else {
-            self.at_zero(|leaf, slot, x, cell, scratch| {
+        let value = match self.ard_dims() {
+            Some(dims) => self.ard_at_zero(dims, |leaf, slot, cell| {
+                leaf.grad_cross::<M>(slot, cell, param_idx)
+            })?,
+            None => self.scalar_at_zero(|leaf, slot, x, cell, scratch| {
                 leaf.grad::<M>(slot, x, cell, param_idx, Triangle::Lower, scratch)
-            })?
+            })?,
         };
         out.fill(value);
         Ok(())
     }
 
-    /// `∂²k(x, x)/∂θ_i ∂θ_j` broadcast over `out`.
+    /// `∂²k(x, x)/∂θ_i ∂θ_j` broadcast over `out`: the leaf at `d² = 0`.
     pub(super) fn hess_diag<M: crate::math::KernelMath>(
         &self,
         out: &mut [T],
         pair: (usize, usize),
     ) -> Result<(), GprError> {
-        let value = if self.is_ard() {
-            self.require_param(pair.0)?;
-            self.require_param(pair.1)?;
-            T::from_f64(0.0)
-        } else {
-            self.at_zero(|leaf, slot, x, cell, scratch| {
+        let value = match self.ard_dims() {
+            Some(dims) => self.ard_at_zero(dims, |leaf, slot, cell| {
+                leaf.hess_cross::<M>(slot, cell, pair)
+            })?,
+            None => self.scalar_at_zero(|leaf, slot, x, cell, scratch| {
                 leaf.hess::<M>(slot, x, cell, pair, Triangle::Lower, scratch)
-            })?
+            })?,
         };
         out.fill(value);
         Ok(())
     }
 
     /// Evaluates `eval` on one pair at zero distance of a scalar slot.
-    fn at_zero(
+    fn scalar_at_zero(
         &self,
         eval: impl FnOnce(
             &Self,
@@ -282,26 +281,37 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         eval_cell(|cell| eval(self, SquareSlot::Scalar(dist), x, cell, scratch))
     }
 
-    /// Whether the wrapped leaf is an ARD leaf. Each one is `1` at `d² = 0`
-    /// whatever its parameters, so every derivative of `k(x, x)` is `0`.
-    fn is_ard(&self) -> bool {
-        matches!(
-            self.leaf.as_ref(),
-            CompiledKernel::RbfArd(_)
-                | CompiledKernel::MaternArd(_)
-                | CompiledKernel::RationalQuadraticArd(_)
-        )
+    /// Evaluates `eval` on one pair at zero distance of an ARD slot of
+    /// `dims` dimensions: a `1 × 1` block per dimension, through the
+    /// rectangular path (only the list of `dims` blocks is allocated).
+    fn ard_at_zero(
+        &self,
+        dims: usize,
+        eval: impl FnOnce(&Self, RectSlot<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
+    ) -> Result<T, GprError> {
+        let zero = [T::from_f64(0.0)];
+        let blocks = vec![&zero[..]; dims];
+        let mut cell = [T::from_f64(0.0)];
+        eval(
+            self,
+            RectSlot::Ard(ArdBlocks {
+                blocks: &blocks,
+                rows: 1,
+                cols: 1,
+                col0: 0,
+            }),
+            MatMut::from_column_major_slice_mut(&mut cell, 1, 1),
+        )?;
+        Ok(cell[0])
     }
 
-    /// Rejects a parameter index past the wrapped leaf's parameters.
-    fn require_param(&self, param_idx: usize) -> Result<(), GprError> {
-        let count = self.leaf.num_params();
-        if param_idx < count {
-            Ok(())
-        } else {
-            Err(GprError::IndexOutOfRange {
-                reason: format!("parameter index {param_idx} is out of range for {count}"),
-            })
+    /// The dimension count of a wrapped ARD leaf.
+    fn ard_dims(&self) -> Option<usize> {
+        match self.leaf.as_ref() {
+            CompiledKernel::RbfArd(leaf) => Some(leaf.num_params()),
+            CompiledKernel::MaternArd(leaf) => Some(leaf.num_params()),
+            CompiledKernel::RationalQuadraticArd(leaf) => Some(leaf.lengthscales().num_params()),
+            _ => None,
         }
     }
 }

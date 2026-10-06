@@ -495,7 +495,7 @@ where
         ExactFit {
             core: &mut self.core,
             store: &mut self.store,
-            fills: &crate::gpr::NO_FILLS,
+            fills: &[],
         }
     }
 
@@ -1060,7 +1060,7 @@ where
         let mut view = ExactFit {
             core: &mut self.core,
             store: &mut self.store,
-            fills: &crate::gpr::NO_FILLS,
+            fills: &[],
         };
         view.optimize(&self.optimizer)
     }

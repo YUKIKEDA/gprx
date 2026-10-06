@@ -363,34 +363,7 @@ impl SparseCore {
     ) -> Result<Self, GprError> {
         validate_training(x, n_rows, n_cols, y)?;
         validate_inducing(z, n_inducing, n_cols)?;
-        let x_transform = spec.x_transform.clone_box().fit(x, n_rows, n_cols)?;
-        let y_transform = spec.y_transform.clone_box().fit(y)?;
-        let mut x_train = x.to_vec();
-        x_transform.apply(&mut x_train, n_rows, n_cols)?;
-        let mut z_train = z.to_vec();
-        x_transform.apply(&mut z_train, n_inducing, n_cols)?;
-        let mut y_train = y.to_vec();
-        y_transform.transform(&mut y_train)?;
-        Ok(Self {
-            kernel: spec.kernel.clone(),
-            likelihood: spec.likelihood,
-            math: spec.math,
-            jitter: spec.jitter,
-            x_unfitted: spec.x_transform.clone_box(),
-            y_unfitted: spec.y_transform.clone_box(),
-            x_transform,
-            y_transform,
-            x_obs: x.to_vec(),
-            z_obs: z.to_vec(),
-            y_obs: y.to_vec(),
-            x_train,
-            z_train,
-            y_train,
-            dist: None,
-            n: n_rows,
-            m: n_inducing,
-            d: n_cols,
-        })
+        Self::assemble(spec, x, n_rows, n_cols, y, z, n_inducing, None)
     }
 
     /// [`Self::prepare`] for a kernel that reads supplied distances: the
@@ -421,6 +394,7 @@ impl SparseCore {
             crate::data::require_finite(y)?;
         }
         let dist = SparseDist::bind(&spec.kernel, sources, n_rows, inducing)?;
+        // `Z` is rows of the checked `x`: it needs no check of its own.
         let m = inducing.len();
         let mut z = vec![0.0; m * n_cols];
         for dim in 0..n_cols {
@@ -428,35 +402,61 @@ impl SparseCore {
                 z[p + dim * m] = x[i + dim * n_rows];
             }
         }
-        let mut core = if n_cols > 0 {
-            Self::prepare(spec, x, n_rows, n_cols, y, &z, m)?
-        } else {
-            let y_transform = spec.y_transform.clone_box().fit(y)?;
-            let mut y_train = y.to_vec();
-            y_transform.transform(&mut y_train)?;
-            Self {
-                kernel: spec.kernel.clone(),
-                likelihood: spec.likelihood,
-                math: spec.math,
-                jitter: spec.jitter,
-                x_unfitted: Box::new(IdentityInput),
-                y_unfitted: spec.y_transform.clone_box(),
-                x_transform: Box::new(IdentityInput),
-                y_transform,
-                x_obs: Vec::new(),
-                z_obs: Vec::new(),
-                y_obs: y.to_vec(),
-                x_train: Vec::new(),
-                z_train: Vec::new(),
-                y_train,
-                dist: None,
-                n: n_rows,
-                m,
-                d: 0,
-            }
-        };
-        core.dist = Some(dist);
-        Ok(core)
+        Self::assemble(spec, x, n_rows, n_cols, y, &z, m, Some(dist))
+    }
+
+    /// Fits the transforms on checked data and maps `X`, `Z`, and `y`
+    /// through them. A kernel without coordinate leaves (`n_cols = 0`) has
+    /// the identity input transform.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        spec: &SparseSpec,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+        z: &[f64],
+        n_inducing: usize,
+        dist: Option<SparseDist>,
+    ) -> Result<Self, GprError> {
+        let (x_unfitted, x_transform): (Box<dyn UnfittedTransform>, Box<dyn Transform>) =
+            if n_cols == 0 {
+                (Box::new(IdentityInput), Box::new(IdentityInput))
+            } else {
+                (
+                    spec.x_transform.clone_box(),
+                    spec.x_transform.clone_box().fit(x, n_rows, n_cols)?,
+                )
+            };
+        let y_transform = spec.y_transform.clone_box().fit(y)?;
+        let mut x_train = x.to_vec();
+        let mut z_train = z.to_vec();
+        if n_cols > 0 {
+            x_transform.apply(&mut x_train, n_rows, n_cols)?;
+            x_transform.apply(&mut z_train, n_inducing, n_cols)?;
+        }
+        let mut y_train = y.to_vec();
+        y_transform.transform(&mut y_train)?;
+        Ok(Self {
+            kernel: spec.kernel.clone(),
+            likelihood: spec.likelihood,
+            math: spec.math,
+            jitter: spec.jitter,
+            x_unfitted,
+            y_unfitted: spec.y_transform.clone_box(),
+            x_transform,
+            y_transform,
+            x_obs: x.to_vec(),
+            z_obs: z.to_vec(),
+            y_obs: y.to_vec(),
+            x_train,
+            z_train,
+            y_train,
+            dist,
+            n: n_rows,
+            m: n_inducing,
+            d: n_cols,
+        })
     }
 
     /// A fitted core read back from a persist directory. The fitted

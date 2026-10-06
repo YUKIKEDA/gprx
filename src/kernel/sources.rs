@@ -229,6 +229,9 @@ pub struct TrainSources<T> {
     /// Leading dimension of the scalar squares (`≥ n`; online growth).
     cap: usize,
     slots: Vec<(SlotId, TrainData<T>)>,
+    /// The squares are what a bind or a refill just wrote, and no factor has
+    /// read them yet ([`Self::take_unread`]).
+    unread: bool,
 }
 
 /// A change to a [`TrainSources`] computed by [`TrainSources::stage_append`]
@@ -273,6 +276,7 @@ impl<T: KernelScalar> TrainSources<T> {
             n: 0,
             cap: 0,
             slots: Vec::new(),
+            unread: false,
         }
     }
 
@@ -299,48 +303,91 @@ impl<T: KernelScalar> TrainSources<T> {
             };
             slots.push((id, data));
         }
-        Ok(Self { n, cap: n, slots })
+        Ok(Self {
+            n,
+            cap: n,
+            slots,
+            unread: true,
+        })
     }
 
-    /// Writes the training squares of `fills` again (each fill is called
-    /// once). Every fill is checked before any slot changes; the squares of
-    /// the other slots are packed to leading dimension `n`.
-    pub(crate) fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError> {
+    /// Writes the training squares of `fills` again, in place (each fill
+    /// is called once into one scratch buffer). Returns the slots it wrote.
+    /// The squares of the other slots are packed to leading dimension `n`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`] for a fill of a slot the store
+    /// does not hold, and the errors of [`check_block`] for what a fill wrote.
+    pub(crate) fn refill(
+        &mut self,
+        fills: &[(SlotId, &dyn DistanceFill)],
+    ) -> Result<Vec<usize>, GprError> {
         let n = self.n;
-        let mut fresh = Vec::with_capacity(fills.len());
+        let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
+        self.pack();
+        self.unread = false;
+        let mut scratch = Vec::new();
+        let mut written = Vec::with_capacity(fills.len());
         for (id, filler) in fills {
-            // The fills come from the bind that built this store.
             let Some(at) = self.slots.iter().position(|(slot, _)| slot == id) else {
-                debug_assert!(false, "a fill names a slot the store does not hold");
-                continue;
+                return Err(GprError::LengthMismatch {
+                    reason: "a fill names a distance slot the model does not read".to_owned(),
+                });
             };
-            let shape = match &self.slots[at].1 {
-                TrainData::Scalar(_) => SlotShape::Scalar,
-                TrainData::Ard(cache) => SlotShape::Ard(cache.view().d()),
+            let blocks = match &self.slots[at].1 {
+                TrainData::Scalar(_) => 1,
+                TrainData::Ard(cache) => cache.view().d(),
             };
-            let blocks = shape.blocks();
-            let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
-            let total = len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?;
-            let mut all = vec![0.0; total];
-            filler.fill(n, n, &mut all);
-            let raw = RawSlot {
-                id: *id,
-                shape,
-                data: RawData::Packed(all),
-                rows: n,
-                cols: n,
-            };
-            check_slot(&raw, blocks, len, BlockKind::Square)?;
-            let rebuilt = Self::from_raw(vec![raw], n)?;
-            if let Some((_, data)) = rebuilt.slots.into_iter().next() {
-                fresh.push((at, data));
+            scratch.clear();
+            scratch.resize(len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?, 0.0);
+            filler.fill(n, n, &mut scratch);
+            for block in scratch.chunks_exact(len.max(1)) {
+                check_block(block, n, n, BlockKind::Square)?;
+            }
+            match &mut self.slots[at].1 {
+                TrainData::Scalar(square) => {
+                    for (dst, &v) in square.iter_mut().zip(&scratch) {
+                        *dst = T::from_f64(v);
+                    }
+                }
+                TrainData::Ard(cache) => {
+                    cache.refill_pairs(|k, i, j| T::from_f64(scratch[k * len + i + j * n]));
+                }
+            }
+            written.push(at);
+        }
+        Ok(written)
+    }
+
+    /// Writes the slots `written` of `exact` (the same points, at `f64`)
+    /// into this store, in place.
+    fn copy_slots(&mut self, exact: &TrainSources<f64>, written: &[usize]) {
+        self.pack();
+        self.unread = false;
+        let n = self.n;
+        for &at in written {
+            match (&mut self.slots[at].1, &exact.slots[at].1) {
+                (TrainData::Scalar(square), TrainData::Scalar(from)) => {
+                    for j in 0..n {
+                        for i in 0..n {
+                            square[i + j * n] = T::from_f64(from[i + j * exact.cap]);
+                        }
+                    }
+                }
+                (TrainData::Ard(cache), TrainData::Ard(from)) => {
+                    let from = from.view();
+                    cache.refill_pairs(|k, i, j| T::from_f64(from.get(k, i, j)));
+                }
+                _ => debug_assert!(false, "the two stores of a model hold the same slots"),
             }
         }
-        self.pack();
-        for (at, data) in fresh {
-            self.slots[at].1 = data;
-        }
-        Ok(())
+    }
+
+    /// Whether the squares are what a bind wrote and no factor has read them
+    /// yet; a factor that reads them clears it.
+    pub(crate) fn take_unread(&mut self) -> bool {
+        std::mem::take(&mut self.unread)
     }
 
     /// Packs the scalar squares to leading dimension `n`.
@@ -532,7 +579,12 @@ impl<T: KernelScalar> TrainSources<T> {
             };
             slots.push((*id, data));
         }
-        Ok(TrainSources { n, cap: n, slots })
+        Ok(TrainSources {
+            n,
+            cap: n,
+            slots,
+            unread: false,
+        })
     }
 
     /// Each slot's blocks in `f64`, dense `n × n`, in slot order (saving).
@@ -597,46 +649,50 @@ impl<T: KernelScalar> TrainSources<T> {
         }
     }
 
-    /// The dense `n × n` blocks of each ARD slot (empty for a scalar slot),
-    /// in slot order, for [`Self::rect_table`].
-    pub(crate) fn dense_ard(&self) -> Vec<Vec<Vec<T>>> {
-        let n = self.n;
-        self.slots
-            .iter()
-            .map(|(_, data)| match data {
-                TrainData::Scalar(_) => Vec::new(),
-                TrainData::Ard(cache) => {
-                    let view = cache.view();
-                    (0..view.d())
-                        .map(|k| (0..n * n).map(|at| view.get(k, at % n, at / n)).collect())
-                        .collect()
+    /// The training columns `cols` (every row) as a rectangular table. A
+    /// scalar slot is read in place; an ARD slot's packed triangles are
+    /// unpacked into `ard`, whose buffers are reused from call to call.
+    pub(crate) fn column_table<'s>(
+        &'s self,
+        cols: std::ops::Range<usize>,
+        ard: &'s mut Vec<Vec<Vec<T>>>,
+    ) -> RectTable<'s, T> {
+        let (n, cap) = (self.n, self.cap.max(1));
+        let (start, len) = (cols.start, cols.len());
+        ard.resize_with(self.slots.len(), Vec::new);
+        for ((_, data), buffers) in self.slots.iter().zip(ard.iter_mut()) {
+            if let TrainData::Ard(cache) = data {
+                let view = cache.view();
+                buffers.resize_with(view.d(), Vec::new);
+                for (k, block) in buffers.iter_mut().enumerate() {
+                    block.clear();
+                    block.extend(
+                        (0..len)
+                            .flat_map(|jj| (0..n).map(move |i| (i, start + jj)))
+                            .map(|(i, j)| view.get(k, i, j)),
+                    );
                 }
-            })
-            .collect()
-    }
-
-    /// The squares as an `n × n` rectangular table: a scalar slot read in
-    /// place, an ARD slot from `dense` ([`Self::dense_ard`]).
-    pub(crate) fn rect_table<'s>(&'s self, dense: &'s [Vec<Vec<T>>]) -> RectTable<'s, T> {
-        let n = self.n;
+            }
+        }
+        let ard: &'s Vec<Vec<Vec<T>>> = ard;
         RectTable(
             self.slots
                 .iter()
-                .zip(dense)
+                .zip(ard)
                 .map(|((id, data), blocks)| {
                     let entry = match data {
                         TrainData::Scalar(square) => {
                             RectEntry::Scalar(MatRef::from_column_major_slice_with_stride(
-                                square,
+                                &square[start * cap..],
                                 n,
-                                n,
-                                self.cap.max(1),
+                                len,
+                                cap,
                             ))
                         }
                         TrainData::Ard(_) => RectEntry::Ard {
                             blocks: blocks.iter().map(Vec::as_slice).collect(),
                             rows: n,
-                            cols: n,
+                            cols: len,
                         },
                     };
                     (*id, entry)
@@ -665,7 +721,12 @@ impl<T: KernelScalar> TrainSources<T> {
             };
             slots.push((*id, data));
         }
-        Ok(TrainSources { n, cap: n, slots })
+        Ok(TrainSources {
+            n,
+            cap: n,
+            slots,
+            unread: false,
+        })
     }
 
     /// The training squares of the points `index` (a subset, in that order).
@@ -692,6 +753,7 @@ impl<T: KernelScalar> TrainSources<T> {
             n: m,
             cap: m,
             slots,
+            unread: false,
         })
     }
 }
@@ -719,6 +781,9 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
 
     /// [`TrainSources::refill`].
     fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError>;
+
+    /// [`TrainSources::take_unread`].
+    fn take_unread(&mut self) -> bool;
 
     /// [`TrainSources::stage_append`].
     fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Self::Staged, GprError>;
@@ -758,7 +823,11 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
     }
 
     fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError> {
-        Self::refill(self, fills)
+        Self::refill(self, fills).map(|_| ())
+    }
+
+    fn take_unread(&mut self) -> bool {
+        Self::take_unread(self)
     }
 
     fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Staged<S>, GprError> {
@@ -791,10 +860,9 @@ impl SourceStore<f32> for RefinedSources {
 
     fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError> {
         let exact = TrainSources::<f64>::from_raw(raw, n)?;
-        Ok(Self {
-            storage: exact.cast()?,
-            exact,
-        })
+        let mut storage = exact.cast()?;
+        storage.unread = true;
+        Ok(Self { storage, exact })
     }
 
     fn storage(&self) -> &TrainSources<f32> {
@@ -806,9 +874,15 @@ impl SourceStore<f32> for RefinedSources {
     }
 
     fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError> {
-        self.exact.refill(fills)?;
-        self.storage = self.exact.cast()?;
+        // Only the slots a fill wrote change, in place, in both stores.
+        let written = self.exact.refill(fills)?;
+        self.storage.copy_slots(&self.exact, &written);
         Ok(())
+    }
+
+    fn take_unread(&mut self) -> bool {
+        let storage = self.storage.take_unread();
+        self.exact.take_unread() && storage
     }
 
     fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Self::Staged, GprError> {
@@ -1136,6 +1210,60 @@ mod tests {
         assert_eq!(store.dense_f64(), expected(4));
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected(3));
+    }
+
+    #[test]
+    fn a_refill_writes_in_place_and_rejects_a_foreign_slot() {
+        let (slots, mut store) = store();
+        assert!(store.take_unread());
+        assert!(!store.take_unread());
+        let foreign = ScalarDistance::new();
+        let fill = Line(1.0);
+        assert!(matches!(
+            store.refill(&[(DistanceSlot::Scalar(foreign).id(), &fill)]),
+            Err(GprError::LengthMismatch { .. })
+        ));
+        let Some(SquareSlot::Scalar(before)) = store.square(slots[1].id()) else {
+            panic!("scalar slot");
+        };
+        let before = before.as_ptr();
+        let triple = Line(3.0);
+        let written = store.refill(&[(slots[1].id(), &triple)]).expect("refill");
+        assert_eq!(written, vec![1]);
+        let Some(SquareSlot::Scalar(after)) = store.square(slots[1].id()) else {
+            panic!("scalar slot");
+        };
+        assert_eq!(after.as_ptr(), before);
+        let mut want = expected(2);
+        want[1].1 = vec![line(3.0, 0..2, 0..2)];
+        assert_eq!(store.dense_f64(), want);
+        assert!(!store.take_unread());
+    }
+
+    #[test]
+    fn a_refined_store_refills_both_copies() {
+        let slots = vec![
+            DistanceSlot::Scalar(ScalarDistance::new()),
+            DistanceSlot::Ard(ArdDistance::new(2).expect("dims")),
+        ];
+        let sources = slots.iter().map(|slot| match *slot {
+            DistanceSlot::Scalar(s) => s.from_vec(line(1.0, 0..3, 0..3)),
+            DistanceSlot::Ard(a) => a.from_vecs(vec![line(4.0, 0..3, 0..3), line(5.0, 0..3, 0..3)]),
+        });
+        let (raw, _) = bind(&slots, sources, 3, 3, BlockKind::Square).expect("bind");
+        let mut store = RefinedSources::from_raw(raw, 3).expect("store");
+        assert!(SourceStore::take_unread(&mut store));
+        let fill = Line(0.1);
+        SourceStore::refill(&mut store, &[(slots[1].id(), &fill)]).expect("refill");
+        let exact = store.exact().expect("exact").dense_f64();
+        assert_eq!(exact[0].1, vec![line(1.0, 0..3, 0..3)]);
+        assert_eq!(exact[1].1, vec![line(0.1, 0..3, 0..3); 2]);
+        let storage = store.storage().dense_f64();
+        for ((_, got), (_, want)) in storage.iter().zip(&exact) {
+            for (g, w) in got.iter().flatten().zip(want.iter().flatten()) {
+                assert!((g - f64::from(*w as f32)).abs() <= 0.0);
+            }
+        }
     }
 
     #[test]

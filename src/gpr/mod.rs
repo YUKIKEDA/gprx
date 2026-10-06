@@ -14,7 +14,7 @@ mod trainer;
 mod tests;
 
 pub(crate) use crate::workspace::FitBuffers;
-pub(crate) use exact_fit::{ExactFit, LeafCache, NO_FILLS, TrainFills, fit_buffers};
+pub(crate) use exact_fit::{ExactFit, LeafCache, fit_buffers};
 pub(crate) use factor_store::{LdltStore, LltStore};
 pub use fitted::FittedGpr;
 pub(crate) use fitted::TrainInput;
