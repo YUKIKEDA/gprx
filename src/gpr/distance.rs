@@ -10,12 +10,14 @@
 use crate::error::GprError;
 use crate::gpr::GprObjective;
 use crate::kernel::{
-    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, QuerySources, RectSlots,
-    WithPoints,
+    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, PointUse, QuerySources,
+    RectSlots, WithPoints, spec_slots,
 };
 use crate::optimizer::{Fixed, Optimizer};
 use crate::points::PointId;
+use crate::policy::JitterPolicy;
 use crate::precision::GpScalar;
+use crate::prediction::{DistanceQuery, QueryPoints, distance_predict};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::shared::Query;
@@ -23,13 +25,11 @@ use super::{FittedGpr, Gpr, OnlineGpr, TrainInput};
 
 /// Binds the train × query blocks (`n × m`) and, for a covariance, the
 /// query × query squares (`m × m`), then runs `f` on the query.
-#[allow(clippy::too_many_arguments)]
 fn with_query<'s, P: GpScalar, R>(
     slots: &[DistanceSlot],
     n: usize,
-    xs: &[f64],
+    points: QueryPoints<'_>,
     m: usize,
-    n_cols: usize,
     cross: Vec<DistanceSource<'s>>,
     square: Option<Vec<DistanceSource<'s>>>,
     f: impl FnOnce(Query<'_, P::Storage>) -> Result<R, GprError>,
@@ -42,9 +42,9 @@ fn with_query<'s, P: GpScalar, R>(
     let (table, table64) = cross.tables();
     let square_table = square.as_mut().map(QuerySources::table);
     f(Query {
-        xs,
+        xs: points.xs,
         m,
-        n_cols,
+        n_cols: points.n_cols,
         cross: Some(&table),
         cross64: Some(&table64),
         square: square_table
@@ -245,301 +245,196 @@ fn with_points<'s: 'a, 'a>(
     }
 }
 
-/// The predict family of a distance model. `$points` are the coordinate
-/// arguments a [`WithPoints`] model adds (none for [`DistanceOnly`]).
-macro_rules! distance_predict {
-    (
-        model = $model:ident,
-        marker = $marker:ty,
-        args = ($($arg:ident: $ty:ty),*),
-        tail = ($($tail:ident: $tty:ty),*),
-        xs = $xs:expr,
-        n_cols = $n_cols:expr,
-        alpha = |$this:ident| $alpha:expr,
-        predict_doc = $predict_doc:literal,
-        covariance_doc = $cov_doc:literal,
-    ) => {
-        impl<O, P: GpScalar> $model<O, P, DistanceKernel<$marker>> {
-            /// Predicts at `m` queries with [`PredictOptions::default`]
-            /// (observation variance).
-            ///
-            /// `sources` holds one source per slot: the `n × m` squared
-            /// distances from the training samples to the queries. A table
-            /// is read in place for this call (an `f32` model reads it
-            /// through a cast); a fill writes scratch once.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`GprError::EmptyInput`] if `m` is zero,
-            /// [`GprError::LengthMismatch`] if a table has the wrong length
-            /// or a slot has no source or two, [`GprError::NonFiniteInput`]
-            /// for a non-finite value, and the query errors of the
-            /// coordinate model's `predict`.
-            ///
-            #[doc = $predict_doc]
-            pub fn predict<'s>(
-                &self,
-                sources: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
-                m: usize,
-                $($tail: $tty,)*
-            ) -> Result<Prediction<P::Refine>, GprError> {
-                self.predict_with(sources, $($arg,)* m, $($tail,)* PredictOptions::default())
-            }
+/// The [`DistanceQuery`] of an Exact model; `$alpha` reads its predict `α`.
+macro_rules! exact_query {
+    ($model:ident, alpha = |$this:ident| $alpha:expr) => {
+        impl<O, P: GpScalar, C: PointUse> DistanceQuery for $model<O, P, DistanceKernel<C>> {
+            type Refine = P::Refine;
 
-            /// Writes [`Self::predict`] into `out`, reusing its capacity.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::predict`].
-            ///
-            #[doc = $predict_doc]
-            pub fn predict_into<'s>(
-                &mut self,
-                sources: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
-                m: usize,
-                $($tail: $tty,)*
-                out: &mut Prediction<P::Refine>,
-            ) -> Result<(), GprError> {
-                self.predict_with_into(sources, $($arg,)* m, $($tail,)* PredictOptions::default(), out)
-            }
-
-            /// Predicts with an explicit variance kind.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::predict`].
-            ///
-            #[doc = $predict_doc]
-            pub fn predict_with<'s>(
+            fn query_distances(
                 &self,
-                sources: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
+                cross: Vec<DistanceSource<'_>>,
+                points: QueryPoints<'_>,
                 m: usize,
-                $($tail: $tty,)*
                 options: PredictOptions,
             ) -> Result<Prediction<P::Refine>, GprError> {
-                let slots = crate::kernel::spec_slots(&self.core.kernel);
+                let slots = spec_slots(&self.core.kernel);
                 let $this = self;
                 let alpha = $alpha?;
                 let mut out = Prediction::default();
-                with_query::<P, ()>(
-                    &slots,
-                    self.core.n,
-                    $xs,
-                    m,
-                    $n_cols,
-                    sources.into_iter().collect(),
-                    None,
-                    |q| {
-                        self.core
-                            .write_prediction(self.factor(), alpha, q, options, &mut out)
-                    },
-                )?;
+                with_query::<P, ()>(&slots, self.core.n, points, m, cross, None, |q| {
+                    self.core
+                        .write_prediction(self.factor(), alpha, q, options, &mut out)
+                })?;
                 Ok(out)
             }
 
-            /// Writes [`Self::predict_with`] into `out`, reusing its capacity.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::predict`].
-            ///
-            #[doc = $predict_doc]
-            pub fn predict_with_into<'s>(
+            fn query_distances_into(
                 &mut self,
-                sources: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
+                cross: Vec<DistanceSource<'_>>,
+                points: QueryPoints<'_>,
                 m: usize,
-                $($tail: $tty,)*
                 options: PredictOptions,
                 out: &mut Prediction<P::Refine>,
             ) -> Result<(), GprError> {
-                let slots = crate::kernel::spec_slots(&self.core.kernel);
+                let slots = spec_slots(&self.core.kernel);
                 let n = self.core.n;
-                with_query::<P, ()>(
-                    &slots,
-                    n,
-                    $xs,
-                    m,
-                    $n_cols,
-                    sources.into_iter().collect(),
-                    None,
-                    |q| self.predict_query_into(q, options, out),
-                )
+                with_query::<P, ()>(&slots, n, points, m, cross, None, |q| {
+                    self.predict_query_into(q, options, out)
+                })
             }
 
-            /// Returns the predictive mean and query–query covariance.
-            ///
-            /// `cross` holds the `n × m` squared distances from the training
-            /// samples to the queries; `square` the `m × m` ones between the
-            /// queries (zero diagonal, symmetric). Both are read in place for
-            /// this call.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::predict`], plus [`GprError::ShapeMismatch`] if
-            /// a query square has a non-zero diagonal or is not symmetric.
-            ///
-            #[doc = $cov_doc]
-            pub fn predict_covariance<'s>(
+            fn query_distance_covariance(
                 &self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                square: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
+                cross: Vec<DistanceSource<'_>>,
+                square: Vec<DistanceSource<'_>>,
+                points: QueryPoints<'_>,
                 m: usize,
-                $($tail: $tty,)*
-            ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-                self.predict_covariance_with(
-                    cross,
-                    square,
-                    $($arg,)*
-                    m,
-                    $($tail,)*
-                    PredictOptions::default(),
-                )
-            }
-
-            /// Returns query–query covariance with an explicit variance kind.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::predict_covariance`].
-            ///
-            #[doc = $cov_doc]
-            pub fn predict_covariance_with<'s>(
-                &self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                square: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
-                m: usize,
-                $($tail: $tty,)*
                 options: PredictOptions,
             ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-                let slots = crate::kernel::spec_slots(&self.core.kernel);
+                let slots = spec_slots(&self.core.kernel);
                 let $this = self;
                 let alpha = $alpha?;
-                with_query::<P, _>(
-                    &slots,
-                    self.core.n,
-                    $xs,
-                    m,
-                    $n_cols,
-                    cross.into_iter().collect(),
-                    Some(square.into_iter().collect()),
-                    |q| self.core.write_covariance(self.factor(), alpha, q, options),
-                )
+                with_query::<P, _>(&slots, self.core.n, points, m, cross, Some(square), |q| {
+                    self.core.write_covariance(self.factor(), alpha, q, options)
+                })
             }
 
-            /// Draws posterior samples from [`Self::predict_covariance`].
-            ///
-            /// `seed` starts gprx's seeded generator, as in the coordinate
-            /// model's `sample`.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::predict_covariance`], plus
-            /// [`GprError::CholeskyFailed`] if the posterior covariance does
-            /// not factor.
-            ///
-            #[doc = $cov_doc]
-            #[allow(clippy::too_many_arguments)]
-            pub fn sample<'s>(
-                &self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                square: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
-                m: usize,
-                $($tail: $tty,)*
-                n_draws: usize,
-                seed: u64,
-            ) -> Result<Vec<P::Refine>, GprError> {
-                self.sample_with(
-                    cross,
-                    square,
-                    $($arg,)*
-                    m,
-                    $($tail,)*
-                    PredictOptions::default(),
-                    n_draws,
-                    seed,
-                )
-            }
-
-            /// Draws posterior samples with an explicit variance kind.
-            ///
-            /// # Errors
-            ///
-            /// Same as [`Self::sample`].
-            ///
-            #[doc = $cov_doc]
-            #[allow(clippy::too_many_arguments)]
-            pub fn sample_with<'s>(
-                &self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                square: impl IntoIterator<Item = DistanceSource<'s>>,
-                $($arg: $ty,)*
-                m: usize,
-                $($tail: $tty,)*
-                options: PredictOptions,
-                n_draws: usize,
-                seed: u64,
-            ) -> Result<Vec<P::Refine>, GprError> {
-                self.predict_covariance_with(cross, square, $($arg,)* m, $($tail,)* options)?
-                    .draw(n_draws, seed, self.core.policies.jitter)
+            fn draw_jitter(&self) -> JitterPolicy {
+                self.core.policies.jitter
             }
         }
     };
 }
 
+exact_query!(
+    FittedGpr,
+    alpha = |model| Ok::<_, GprError>(&model.core.alpha[..])
+);
+exact_query!(OnlineGpr, alpha = |model| model.predict_alpha());
+
 distance_predict!(
-    model = FittedGpr,
-    marker = DistanceOnly,
+    impl [O, P: GpScalar] FittedGpr<O, P, DistanceKernel<DistanceOnly>>,
+    refine = P::Refine,
     args = (),
     tail = (),
-    xs = &[],
-    n_cols = 0,
-    alpha = |model| Ok::<_, GprError>(&model.core.alpha[..]),
-    predict_doc = "See the example on [`crate::kernel::ScalarDistance`].",
-    covariance_doc = "# Examples\n\n```rust\nuse gprx::kernel::{RbfKernel, ScalarDistance};\nuse gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction, VarianceKind};\n\n# fn main() -> Result<(), gprx::GprError> {\nlet image = ScalarDistance::new();\nlet mut fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)\n    .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])\n    .map_err(|(_, e)| e)?;\n// Two queries: train × query, then query × query.\nlet cross = [0.25, 0.25, 0.25, 2.25];\nlet query = [0.0, 1.0, 1.0, 0.0];\nlet latent = PredictOptions { variance_kind: VarianceKind::Latent };\nlet mut out = Prediction::default();\nfitted.predict_into([image.borrow(&cross)], 2, &mut out)?;\nfitted.predict_with_into([image.borrow(&cross)], 2, latent, &mut out)?;\nlet _ = fitted.predict_with([image.borrow(&cross)], 2, latent)?;\nlet cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;\nassert_eq!(cov.covariance.len(), 4);\nlet _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, latent)?;\nlet draws = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;\nassert_eq!(draws.len(), 6);\nlet _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, latent, 3, 7)?;\n# Ok(())\n# }\n```",
+    points = QueryPoints::NONE,
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// through a cast); a fill writes scratch once.
+    },
+    predict_doc = {
+        /// See the example on [`crate::kernel::ScalarDistance`].
+    },
+    covariance_doc = {
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction, VarianceKind};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let mut fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// // Two queries: train × query, then query × query.
+        /// let cross = [0.25, 0.25, 0.25, 2.25];
+        /// let query = [0.0, 1.0, 1.0, 0.0];
+        /// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], 2, latent, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], 2, latent)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;
+        /// assert_eq!(cov.covariance.len(), 4);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, latent)?;
+        /// let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;
+        /// assert_eq!(draws.len(), 6);
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, latent, 3, 7)?;
+        /// # Ok(())
+        /// # }
+        /// ```
+    },
 );
 
 distance_predict!(
-    model = FittedGpr,
-    marker = WithPoints,
+    impl [O, P: GpScalar] FittedGpr<O, P, DistanceKernel<WithPoints>>,
+    refine = P::Refine,
     args = (xs: &[f64]),
     tail = (n_cols: usize),
-    xs = xs,
-    n_cols = n_cols,
-    alpha = |model| Ok::<_, GprError>(&model.core.alpha[..]),
-    predict_doc = "See the example on [`Gpr::fit`] of a [`DistanceKernel<WithPoints>`].",
-    covariance_doc = "# Examples\n\n```rust\nuse gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};\nuse gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};\n\n# fn main() -> Result<(), gprx::GprError> {\nlet image = ScalarDistance::new();\nlet kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);\nlet mut fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)\n    .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])\n    .map_err(|(_, e)| e)?;\nlet (cross, query, xs) = ([0.25, 0.25, 0.25, 2.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);\nlet options = PredictOptions::default();\nlet mut out = Prediction::default();\nfitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;\nfitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;\nlet _ = fitted.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;\nlet cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;\nassert_eq!(cov.mean.len(), 2);\nlet _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;\nlet _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;\nlet _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;\n# Ok(())\n# }\n```",
+    points = QueryPoints { xs, n_cols },
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// through a cast); a fill writes scratch once.
+    },
+    predict_doc = {
+        /// See the example on [`Gpr::fit`] of a [`DistanceKernel<WithPoints>`].
+    },
+    covariance_doc = {
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+        /// let mut fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// let (cross, query, xs) = ([0.25, 0.25, 0.25, 2.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
+        /// let options = PredictOptions::default();
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;
+        /// assert_eq!(cov.mean.len(), 2);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
+        /// let _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
+        /// # Ok(())
+        /// # }
+        /// ```
+    },
 );
 
 distance_predict!(
-    model = OnlineGpr,
-    marker = DistanceOnly,
+    impl [O, P: GpScalar] OnlineGpr<O, P, DistanceKernel<DistanceOnly>>,
+    refine = P::Refine,
     args = (),
     tail = (),
-    xs = &[],
-    n_cols = 0,
-    alpha = |model| model.predict_alpha(),
-    predict_doc = "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].",
-    covariance_doc =
-        "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].",
+    points = QueryPoints::NONE,
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// through a cast); a fill writes scratch once.
+    },
+    predict_doc = {
+        /// See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].
+    },
+    covariance_doc = {
+        /// See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].
+    },
 );
 
 distance_predict!(
-    model = OnlineGpr,
-    marker = WithPoints,
+    impl [O, P: GpScalar] OnlineGpr<O, P, DistanceKernel<WithPoints>>,
+    refine = P::Refine,
     args = (xs: &[f64]),
     tail = (n_cols: usize),
-    xs = xs,
-    n_cols = n_cols,
-    alpha = |model| model.predict_alpha(),
-    predict_doc = "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<WithPoints>`].",
-    covariance_doc = "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<WithPoints>`].",
+    points = QueryPoints { xs, n_cols },
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// through a cast); a fill writes scratch once.
+    },
+    predict_doc = {
+        /// See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<WithPoints>`].
+    },
+    covariance_doc = {
+        /// See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<WithPoints>`].
+    },
 );
 
 impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {

@@ -120,6 +120,7 @@ impl Fresh {
             compiled: &self.k32,
             x,
             sources: &self.sources,
+            exact: None,
             y,
             noise,
             jitter: 0.0,

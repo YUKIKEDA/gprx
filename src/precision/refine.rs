@@ -3,6 +3,8 @@
 //! [`refine`] runs the loop on any [`RefineSystem`]: Exact `α` ([`ExactSystem`]),
 //! Sgpr weights, and the Svgp triangular solve. The stopping rules live here only.
 
+use std::borrow::Cow;
+
 use faer::{Mat, MatMut, MatRef};
 
 use super::ResidualFormula;
@@ -122,6 +124,9 @@ pub struct TrainSystem<'a, T: KernelScalar> {
     pub x: MatRef<'a, f64>,
     /// Training squared distances of a distance model (empty otherwise).
     pub sources: &'a TrainSources<T>,
+    /// The same squares at `f64` without rounding, when the model keeps
+    /// them ([`MixedPrecision`](super::MixedPrecision)).
+    pub exact: Option<&'a TrainSources<f64>>,
     /// Transformed training targets.
     pub y: &'a [f64],
     pub noise: f64,
@@ -331,7 +336,10 @@ fn fresh_residual<M: crate::math::KernelMath>(
                 rows[(jj, dim)] = x[(start + jj, dim)];
             }
         }
-        let cols = (!sys.sources.is_empty()).then(|| sys.sources.columns_f64(start..start + len));
+        let cols = (!sys.sources.is_empty()).then(|| match sys.exact {
+            Some(exact) => exact.columns_f64(start..start + len),
+            None => sys.sources.columns_f64(start..start + len),
+        });
         let table = cols.as_ref().map(|cols| cols.table());
         kernel.eval_cross_slots::<M>(
             x,
@@ -374,10 +382,14 @@ pub(crate) fn f64_alpha<M: crate::math::KernelMath>(
     let n = y.len();
     let mut a = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
-    let sources = sys.sources.to_f64()?;
+    let sources = match sys.exact {
+        Some(exact) => Cow::Borrowed(exact),
+        None => Cow::Owned(sys.sources.to_f64()?),
+    };
+    let sources = sources.as_ref();
     kernel.eval_gram::<M>(
         GramInputs {
-            slots: (!sources.is_empty()).then_some(&sources as &dyn SquareSlots<f64>),
+            slots: (!sources.is_empty()).then_some(sources as &dyn SquareSlots<f64>),
             ..GramInputs::points(x)
         },
         a.as_mut(),

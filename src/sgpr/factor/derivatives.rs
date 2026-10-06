@@ -302,13 +302,13 @@ where
     let adjoint = engine.adjoint();
     let n_kernel = model.core.kernel.num_params();
     let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
-    let zx = zx_at::<P::Storage>(model.core.dist.as_ref());
-    let zx = zx.as_ref().map(GatheredRect::table);
+    let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
+    let zx = zx.as_deref().map(GatheredRect::table);
     // One walk per matrix. The Hessian still forms each ∂K in `kernel_theta_var`.
     ks.write_square_contraction::<M>(
         &compiled,
         z,
-        square_slots(&zz),
+        square_slots(zz.as_deref()),
         adjoint.w_mm.as_ref(),
         &mut out[..n_kernel],
     )?;
@@ -400,8 +400,8 @@ where
     let n_kernel = model.core.kernel.num_params();
     let n_theta = n_kernel + model.core.likelihood.num_params();
     let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
-    let zx = zx_at::<P::Storage>(model.core.dist.as_ref());
-    let zx = zx.as_ref().map(GatheredRect::table);
+    let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
+    let zx = zx.as_deref().map(GatheredRect::table);
     let mut vars = Vec::with_capacity(
         n_theta
             + if include_z {
@@ -415,7 +415,7 @@ where
             &compiled,
             ks,
             (x, z),
-            (square_slots(&zz), rect_slots(&zx)),
+            (square_slots(zz.as_deref()), rect_slots(&zx)),
             model.core.n,
             i,
         )?);
@@ -562,13 +562,13 @@ where
     };
     if i < n_kernel && j < n_kernel {
         let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
-        let zx = zx_at::<P::Storage>(model.core.dist.as_ref());
-        let zx = zx.as_ref().map(GatheredRect::table);
+        let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
+        let zx = zx.as_deref().map(GatheredRect::table);
         return kernel_theta_second::<M, _>(
             &compiled,
             ks,
             (x, z),
-            (square_slots(&zz), rect_slots(&zx)),
+            (square_slots(zz.as_deref()), rect_slots(&zx)),
             n,
             (i, j),
         );

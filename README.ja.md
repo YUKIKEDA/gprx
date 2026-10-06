@@ -402,7 +402,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `borrow(d2)` | `predict` はその場で読む。`fit` と `insert` はコピー |
 | `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` が `out[i + j * n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く |
 
-表は列優先の `dist[i + j * n_rows]`。学習の正方行列（とクエリの正方行列）は対角が 0 で対称でなければならず、そうでなければ `ShapeMismatch`。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。`DistanceCachePolicy::Uncached` では、探索の分解のたびに学習の fill を呼び直し、モデルは最後の結果を持つ。
+表は列優先の `dist[i + j * n_rows]`。学習の正方行列（とクエリの正方行列）は、対角がちょうど `0.0` で、厳密に対称でなければならない（`(i, j)` と `(j, i)` が同じ `f64`。許容誤差は無い）。そうでなければ `ShapeMismatch`。丸めの範囲でだけ対称な表は、片方の三角をもう片方へ写せば厳密に対称になる。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。`DistanceCachePolicy::Uncached` では、探索の 2 回目以降の分解のたびに学習の fill を呼び直し、モデルは最後の結果を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。
 
 | モデル | `fit` / `factor` | `predict` 系 | 共分散と `sample` |
 | --- | --- | --- | --- |

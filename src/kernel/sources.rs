@@ -9,6 +9,7 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::fmt;
 
 use faer::MatRef;
 
@@ -19,7 +20,7 @@ use super::{ScalarOps, SourceData};
 use crate::error::GprError;
 
 /// A source's `d²`, checked: `shape.blocks()` dense blocks of `rows × cols`.
-pub(crate) struct RawSlot<'a> {
+pub struct RawSlot<'a> {
     pub(crate) id: SlotId,
     pub(crate) shape: SlotShape,
     data: RawData<'a>,
@@ -183,15 +184,18 @@ pub(crate) fn check_block(
             });
         }
         for j in 0..cols {
+            // Exact by contract (see `ScalarDistance`): no tolerance.
             if block[j + j * rows].abs() > 0.0 {
                 return Err(GprError::ShapeMismatch {
-                    reason: format!("squared distance ({j}, {j}) is not zero"),
+                    reason: format!("squared distance ({j}, {j}) is not exactly zero"),
                 });
             }
             for i in (j + 1)..rows {
                 if (block[i + j * rows] - block[j + i * rows]).abs() > 0.0 {
                     return Err(GprError::ShapeMismatch {
-                        reason: format!("squared distances ({i}, {j}) and ({j}, {i}) differ"),
+                        reason: format!(
+                            "squared distances ({i}, {j}) and ({j}, {i}) differ; a square must be exactly symmetric"
+                        ),
                     });
                 }
             }
@@ -228,6 +232,35 @@ pub struct TrainSources<T> {
     /// Leading dimension of the scalar squares (`≥ n`; online growth).
     cap: usize,
     slots: Vec<(SlotId, TrainData<T>)>,
+}
+
+/// A change to a [`TrainSources`] computed by [`TrainSources::stage_append`]
+/// or [`TrainSources::stage_delete`], applied by [`TrainSources::commit`].
+#[derive(Debug)]
+pub struct Staged<T> {
+    n: usize,
+    cap: usize,
+    changes: Vec<SlotChange<T>>,
+}
+
+#[derive(Debug)]
+enum SlotChange<T> {
+    /// A rebuilt slot.
+    Replace(TrainData<T>),
+    /// The new column of a scalar square, written in place.
+    Column(Vec<T>),
+    /// Removes a point of a scalar square in place.
+    Remove(usize),
+}
+
+/// Writes point `n`'s column and row (`column`, then a zero diagonal) into
+/// a square of leading dimension `cap`.
+fn write_column<T: KernelScalar>(square: &mut [T], cap: usize, n: usize, column: &[T]) {
+    for (i, &v) in column.iter().enumerate() {
+        square[i + n * cap] = v;
+        square[n + i * cap] = v;
+    }
+    square[n + n * cap] = T::from_f64(0.0);
 }
 
 impl<T: KernelScalar> Default for TrainSources<T> {
@@ -272,23 +305,24 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(Self { n, cap: n, slots })
     }
 
-    /// Writes the training squares of `fills` again (each fill is called once).
+    /// Writes the training squares of `fills` again (each fill is called
+    /// once). Every fill is checked before any slot changes; the squares of
+    /// the other slots are packed to leading dimension `n`.
     pub(crate) fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError> {
         let n = self.n;
+        let mut fresh = Vec::with_capacity(fills.len());
         for (id, filler) in fills {
             let Some(at) = self.slots.iter().position(|(slot, _)| slot == id) else {
                 continue;
             };
-            let blocks = match &self.slots[at].1 {
-                TrainData::Scalar(_) => 1,
-                TrainData::Ard(cache) => cache.view().d(),
+            let shape = match &self.slots[at].1 {
+                TrainData::Scalar(_) => SlotShape::Scalar,
+                TrainData::Ard(cache) => SlotShape::Ard(cache.view().d()),
             };
-            let shape = if blocks == 1 && matches!(self.slots[at].1, TrainData::Scalar(_)) {
-                SlotShape::Scalar
-            } else {
-                SlotShape::Ard(blocks)
-            };
-            let mut all = vec![0.0; n * n * blocks];
+            let blocks = shape.blocks();
+            let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
+            let total = len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?;
+            let mut all = vec![0.0; total];
             filler.fill(n, n, &mut all);
             let raw = RawSlot {
                 id: *id,
@@ -297,74 +331,110 @@ impl<T: KernelScalar> TrainSources<T> {
                 rows: n,
                 cols: n,
             };
-            check_slot(&raw, blocks, n * n, BlockKind::Square)?;
-            let fresh = Self::from_raw(vec![raw], n)?;
-            if let Some((_, data)) = fresh.slots.into_iter().next() {
-                self.slots[at].1 = data;
+            check_slot(&raw, blocks, len, BlockKind::Square)?;
+            let rebuilt = Self::from_raw(vec![raw], n)?;
+            if let Some((_, data)) = rebuilt.slots.into_iter().next() {
+                fresh.push((at, data));
             }
         }
-        self.cap = n;
+        self.pack();
+        for (at, data) in fresh {
+            self.slots[at].1 = data;
+        }
         Ok(())
     }
 
-    /// Appends one point: `cols` holds each slot's `n × 1` column to the
-    /// existing points, in slot order. The new diagonal is zero.
-    pub(crate) fn append(&mut self, cols: &[RawSlot<'_>]) -> Result<(), GprError> {
-        if self.slots.is_empty() {
-            return Ok(());
+    /// Packs the scalar squares to leading dimension `n`.
+    fn pack(&mut self) {
+        let (n, cap) = (self.n, self.cap);
+        if cap == n {
+            return;
         }
+        for (_, data) in &mut self.slots {
+            if let TrainData::Scalar(square) = data {
+                for j in 0..n {
+                    for i in 0..n {
+                        square[i + j * n] = square[i + j * cap];
+                    }
+                }
+                square.truncate(n * n);
+            }
+        }
+        self.cap = n;
+    }
+
+    /// Computes the append of one point without changing `self`: `cols`
+    /// holds each slot's `n × 1` column to the existing points, in slot
+    /// order. The new diagonal is zero. [`Self::commit`] applies it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when the grown store does not fit.
+    pub(crate) fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Staged<T>, GprError> {
         let n = self.n;
+        if self.slots.is_empty() {
+            return Ok(self.unchanged());
+        }
         let grow = self.cap < n + 1;
         let new_cap = if grow {
-            (n + 1).max(self.cap.max(1) * 2)
+            (n + 1).max(self.cap.max(1).saturating_mul(2))
         } else {
             self.cap
         };
-        for ((_, data), col) in self.slots.iter_mut().zip(cols) {
-            match data {
+        let mut changes = Vec::with_capacity(self.slots.len());
+        for ((_, data), col) in self.slots.iter().zip(cols) {
+            let change = match data {
                 TrainData::Scalar(square) => {
+                    let column: Vec<T> = col.block(0).iter().map(|&v| T::from_f64(v)).collect();
                     if grow {
-                        let mut wider = vec![T::from_f64(0.0); new_cap * new_cap];
+                        let len = new_cap.checked_mul(new_cap).ok_or(GprError::SizeOverflow)?;
+                        let mut wider = vec![T::from_f64(0.0); len];
                         for j in 0..n {
                             for i in 0..n {
                                 wider[i + j * new_cap] = square[i + j * self.cap];
                             }
                         }
-                        *square = wider;
+                        write_column(&mut wider, new_cap, n, &column);
+                        SlotChange::Replace(TrainData::Scalar(wider))
+                    } else {
+                        SlotChange::Column(column)
                     }
-                    let block = col.block(0);
-                    for (i, &value) in block.iter().enumerate() {
-                        let v = T::from_f64(value);
-                        square[i + n * new_cap] = v;
-                        square[n + i * new_cap] = v;
-                    }
-                    square[n + n * new_cap] = T::from_f64(0.0);
                 }
                 TrainData::Ard(cache) => {
                     let old = cache.view();
-                    let d = old.d();
-                    let next = ArdSqDiffBuf::from_pairs(n + 1, d, |k, i, j| {
-                        if i == n && j == n {
-                            T::from_f64(0.0)
-                        } else if i == n {
-                            T::from_f64(col.block(k)[j])
-                        } else {
-                            old.get(k, i, j)
-                        }
-                    })?;
-                    *cache = next;
+                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs(
+                        n + 1,
+                        old.d(),
+                        |k, i, j| {
+                            if i == n && j == n {
+                                T::from_f64(0.0)
+                            } else if i == n {
+                                T::from_f64(col.block(k)[j])
+                            } else {
+                                old.get(k, i, j)
+                            }
+                        },
+                    )?))
                 }
-            }
+            };
+            changes.push(change);
         }
-        self.cap = new_cap;
-        self.n = n + 1;
-        Ok(())
+        Ok(Staged {
+            n: n + 1,
+            cap: new_cap,
+            changes,
+        })
     }
 
-    /// Removes point `index`.
-    pub(crate) fn delete(&mut self, index: usize) -> Result<(), GprError> {
+    /// Computes the removal of point `index` without changing `self`.
+    /// [`Self::commit`] applies it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::IndexOutOfRange`] when `index ≥ n`.
+    pub(crate) fn stage_delete(&self, index: usize) -> Result<Staged<T>, GprError> {
         if self.slots.is_empty() {
-            return Ok(());
+            return Ok(self.unchanged());
         }
         let n = self.n;
         if index >= n {
@@ -373,25 +443,61 @@ impl<T: KernelScalar> TrainSources<T> {
             });
         }
         let skip = |i: usize| if i >= index { i + 1 } else { i };
-        for (_, data) in &mut self.slots {
-            match data {
-                TrainData::Scalar(square) => {
-                    for j in 0..n - 1 {
-                        for i in 0..n - 1 {
-                            square[i + j * self.cap] = square[skip(i) + skip(j) * self.cap];
+        let mut changes = Vec::with_capacity(self.slots.len());
+        for (_, data) in &self.slots {
+            changes.push(match data {
+                TrainData::Scalar(_) => SlotChange::Remove(index),
+                TrainData::Ard(cache) => {
+                    let old = cache.view();
+                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs(
+                        n - 1,
+                        old.d(),
+                        |k, i, j| old.get(k, skip(i), skip(j)),
+                    )?))
+                }
+            });
+        }
+        Ok(Staged {
+            n: n - 1,
+            cap: self.cap,
+            changes,
+        })
+    }
+
+    fn unchanged(&self) -> Staged<T> {
+        Staged {
+            n: self.n,
+            cap: self.cap,
+            changes: Vec::new(),
+        }
+    }
+
+    /// Applies a change staged on this store. Cannot fail.
+    pub(crate) fn commit(&mut self, staged: Staged<T>) {
+        let (n, cap) = (self.n, self.cap);
+        for ((_, data), change) in self.slots.iter_mut().zip(staged.changes) {
+            match change {
+                SlotChange::Replace(fresh) => *data = fresh,
+                SlotChange::Column(column) => {
+                    if let TrainData::Scalar(square) = data {
+                        write_column(square, cap, n, &column);
+                    }
+                }
+                SlotChange::Remove(index) => {
+                    if let TrainData::Scalar(square) = data {
+                        let skip = |i: usize| if i >= index { i + 1 } else { i };
+                        // Forward walk: every read is at or past its write.
+                        for j in 0..n - 1 {
+                            for i in 0..n - 1 {
+                                square[i + j * cap] = square[skip(i) + skip(j) * cap];
+                            }
                         }
                     }
                 }
-                TrainData::Ard(cache) => {
-                    let old = cache.view();
-                    *cache = ArdSqDiffBuf::from_pairs(n - 1, old.d(), |k, i, j| {
-                        old.get(k, skip(i), skip(j))
-                    })?;
-                }
             }
         }
-        self.n = n - 1;
-        Ok(())
+        self.n = staged.n;
+        self.cap = staged.cap;
     }
 
     /// The same squares in `f64`.
@@ -549,6 +655,141 @@ impl<T: KernelScalar> TrainSources<T> {
             cap: m,
             slots,
         })
+    }
+}
+
+/// The training `d²` a model of one precision keeps.
+///
+/// [`TrainSources`] in the storage scalar for a model that factors and
+/// predicts in it; [`RefinedSources`] for a model that also refines in
+/// `f64` and so keeps the caller's `f64` values next to the storage copy.
+pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'static {
+    /// A change computed before it is applied.
+    type Staged;
+
+    /// A coordinate model's: no slots.
+    fn empty() -> Self;
+
+    /// The store for the checked training squares `raw` of `n` points.
+    fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError>;
+
+    /// The squares in the storage scalar.
+    fn storage(&self) -> &TrainSources<S>;
+
+    /// The squares at `f64` without rounding, when the store keeps them.
+    fn exact(&self) -> Option<&TrainSources<f64>>;
+
+    /// [`TrainSources::refill`].
+    fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError>;
+
+    /// [`TrainSources::stage_append`].
+    fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Self::Staged, GprError>;
+
+    /// [`TrainSources::stage_delete`].
+    fn stage_delete(&self, index: usize) -> Result<Self::Staged, GprError>;
+
+    /// [`TrainSources::commit`].
+    fn commit(&mut self, staged: Self::Staged);
+
+    /// The squares at `f64`: [`Self::exact`], or the storage values widened.
+    fn to_f64(&self) -> Result<Cow<'_, TrainSources<f64>>, GprError> {
+        match self.exact() {
+            Some(exact) => Ok(Cow::Borrowed(exact)),
+            None => self.storage().to_f64().map(Cow::Owned),
+        }
+    }
+}
+
+impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
+    type Staged = Staged<S>;
+
+    fn empty() -> Self {
+        Self::empty()
+    }
+
+    fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError> {
+        Self::from_raw(raw, n)
+    }
+
+    fn storage(&self) -> &TrainSources<S> {
+        self
+    }
+
+    fn exact(&self) -> Option<&TrainSources<f64>> {
+        (self as &dyn Any).downcast_ref::<TrainSources<f64>>()
+    }
+
+    fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError> {
+        Self::refill(self, fills)
+    }
+
+    fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Staged<S>, GprError> {
+        Self::stage_append(self, cols)
+    }
+
+    fn stage_delete(&self, index: usize) -> Result<Staged<S>, GprError> {
+        Self::stage_delete(self, index)
+    }
+
+    fn commit(&mut self, staged: Staged<S>) {
+        Self::commit(self, staged);
+    }
+}
+
+/// The training `d²` of a model that factors in `f32` and refines in
+/// `f64`: the caller's values at `f64` and the `f32` copy the factor reads.
+#[derive(Clone, Debug, Default)]
+pub struct RefinedSources {
+    storage: TrainSources<f32>,
+    exact: TrainSources<f64>,
+}
+
+impl SourceStore<f32> for RefinedSources {
+    type Staged = (Staged<f32>, Staged<f64>);
+
+    fn empty() -> Self {
+        Self::default()
+    }
+
+    fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError> {
+        let exact = TrainSources::<f64>::from_raw(raw, n)?;
+        Ok(Self {
+            storage: exact.cast()?,
+            exact,
+        })
+    }
+
+    fn storage(&self) -> &TrainSources<f32> {
+        &self.storage
+    }
+
+    fn exact(&self) -> Option<&TrainSources<f64>> {
+        Some(&self.exact)
+    }
+
+    fn refill(&mut self, fills: &[(SlotId, &dyn DistanceFill)]) -> Result<(), GprError> {
+        self.exact.refill(fills)?;
+        self.storage = self.exact.cast()?;
+        Ok(())
+    }
+
+    fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Self::Staged, GprError> {
+        Ok((
+            self.storage.stage_append(cols)?,
+            self.exact.stage_append(cols)?,
+        ))
+    }
+
+    fn stage_delete(&self, index: usize) -> Result<Self::Staged, GprError> {
+        Ok((
+            self.storage.stage_delete(index)?,
+            self.exact.stage_delete(index)?,
+        ))
+    }
+
+    fn commit(&mut self, (storage, exact): Self::Staged) {
+        self.storage.commit(storage);
+        self.exact.commit(exact);
     }
 }
 
@@ -768,7 +1009,105 @@ fn storage_table<'s, T: KernelScalar>(
 mod tests {
     use super::*;
     use crate::kernel::compiled::supplied::RectSlot;
-    use crate::kernel::{RectSlots, ScalarDistance};
+    use crate::kernel::{ArdDistance, RectSlots, ScalarDistance};
+
+    /// `scale · (i − j)²` for points `0, 1, 2, …` on a line, every block.
+    struct Line(f64);
+
+    impl DistanceFill for Line {
+        fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
+            for (at, slot) in out.iter_mut().enumerate() {
+                let (i, j) = (at % n_rows, (at / n_rows) % n_cols);
+                *slot = self.0 * (i as f64 - j as f64).powi(2);
+            }
+        }
+    }
+
+    fn line(scale: f64, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>) -> Vec<f64> {
+        cols.flat_map(|j| {
+            rows.clone()
+                .map(move |i| scale * (i as f64 - j as f64).powi(2))
+        })
+        .collect()
+    }
+
+    /// Two scalar slots and one ARD slot of two points.
+    fn store() -> (Vec<DistanceSlot>, TrainSources<f64>) {
+        let slots = vec![
+            DistanceSlot::Scalar(ScalarDistance::new()),
+            DistanceSlot::Scalar(ScalarDistance::new()),
+            DistanceSlot::Ard(ArdDistance::new(2).expect("dims")),
+        ];
+        let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
+            DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..2, 0..2)),
+            DistanceSlot::Ard(a) => a.from_vecs(vec![line(4.0, 0..2, 0..2), line(5.0, 0..2, 0..2)]),
+        });
+        let (raw, _) = bind(&slots, sources, 2, 2, BlockKind::Square).expect("bind");
+        (slots, TrainSources::from_raw(raw, 2).expect("store"))
+    }
+
+    /// The column of the new point `n` to the points `0..n`.
+    fn column<'a>(slots: &[DistanceSlot], n: usize) -> QuerySources<'a, f64> {
+        let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
+            DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..n, n..n + 1)),
+            DistanceSlot::Ard(a) => {
+                a.from_vecs(vec![line(4.0, 0..n, n..n + 1), line(5.0, 0..n, n..n + 1)])
+            }
+        });
+        QuerySources::bind(slots, sources, n, 1, BlockKind::Rect).expect("column")
+    }
+
+    fn expected(n: usize) -> Vec<(SlotShape, Vec<Vec<f64>>)> {
+        vec![
+            (SlotShape::Scalar, vec![line(1.0, 0..n, 0..n)]),
+            (SlotShape::Scalar, vec![line(2.0, 0..n, 0..n)]),
+            (
+                SlotShape::Ard(2),
+                vec![line(4.0, 0..n, 0..n), line(5.0, 0..n, 0..n)],
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_staged_change_applies_only_on_commit() {
+        let (slots, mut store) = store();
+        let staged = store.stage_append(column(&slots, 2).raw()).expect("stage");
+        assert_eq!(store.n(), 2);
+        assert_eq!(store.dense_f64(), expected(2));
+        store.commit(staged);
+        assert_eq!(store.dense_f64(), expected(3));
+        let staged = store.stage_append(column(&slots, 3).raw()).expect("stage");
+        store.commit(staged);
+        assert_eq!(store.dense_f64(), expected(4));
+        assert!(store.stage_delete(4).is_err());
+        let staged = store.stage_delete(3).expect("stage");
+        assert_eq!(store.dense_f64(), expected(4));
+        store.commit(staged);
+        assert_eq!(store.dense_f64(), expected(3));
+    }
+
+    #[test]
+    fn a_refill_after_growth_keeps_every_slot_readable() {
+        let (slots, mut store) = store();
+        let staged = store.stage_append(column(&slots, 2).raw()).expect("stage");
+        store.commit(staged);
+        assert!(store.cap > store.n());
+        let fill = Line(1.0);
+        store.refill(&[(slots[0].id(), &fill)]).expect("refill");
+        assert_eq!(store.cap, store.n());
+        assert_eq!(store.dense_f64(), expected(3));
+        for (k, slot) in slots.iter().take(2).enumerate() {
+            let Some(SquareSlot::Scalar(view)) = store.square(slot.id()) else {
+                panic!("scalar slot");
+            };
+            for j in 0..3 {
+                for i in 0..3 {
+                    let want = (k as f64 + 1.0) * (i as f64 - j as f64).powi(2);
+                    assert!((view[(i, j)] - want).abs() <= 0.0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_borrowed_table_is_read_in_place_by_an_f64_model() {

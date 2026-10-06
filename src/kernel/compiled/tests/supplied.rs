@@ -480,3 +480,71 @@ fn f32_reads_the_supplied_ard_tables() {
         }
     }
 }
+
+#[test]
+fn ard_leaves_on_the_diagonal_match_the_gram_diagonal() {
+    let bands = ArdDistance::new(2).expect("dims");
+    let rq = RationalQuadraticArdKernel::new(&[0.7, 1.3], 0.8).expect("rq");
+    let spec = bands.kernel(rq).expect("dims") * ConstantKernel::new(1.5).expect("c")
+        + bands
+            .kernel(RbfArdKernel::new(&[0.9, 0.4]).expect("ell"))
+            .expect("dims");
+    let compiled = spec.spec().compile();
+    let n_params = compiled.num_params();
+    let train = mat_from_cols(&[coords(1, N, 0.0), coords(2, N, 0.0)]);
+    let cache = ArdSqDiffBuf::new(train.as_ref()).expect("cache");
+    let table = SquareTable(vec![(
+        crate::kernel::DistanceSlot::Ard(bands).id(),
+        SquareSlot::Ard(cache.view()),
+    )]);
+    let x = Mat::<f64>::zeros(N, 0);
+    let inputs = GramInputs {
+        slots: Some(&table),
+        ..GramInputs::points(x.as_ref())
+    };
+    let mut full = Mat::zeros(N, N);
+    let mut scratch = Mat::zeros(N, N);
+    let mut diag = vec![0.0; N];
+    for k in 0..n_params {
+        compiled
+            .grad_gram::<Accurate>(
+                inputs,
+                full.as_mut(),
+                k,
+                Triangle::Full,
+                scratch.as_mut(),
+                &mut Vec::new(),
+            )
+            .expect("grad");
+        compiled
+            .grad_diag_points::<Accurate>(x.as_ref(), &mut diag, k)
+            .expect("grad diag");
+        for (i, value) in diag.iter().enumerate() {
+            assert_close(*value, full[(i, i)], 1e-12);
+        }
+        for l in 0..n_params {
+            compiled
+                .hess_gram::<Accurate>(
+                    inputs,
+                    full.as_mut(),
+                    (k, l),
+                    Triangle::Full,
+                    scratch.as_mut(),
+                    &mut Vec::new(),
+                )
+                .expect("hess");
+            compiled
+                .hess_diag_points::<Accurate>(x.as_ref(), &mut diag, k, l)
+                .expect("hess diag");
+            for (i, value) in diag.iter().enumerate() {
+                assert_close(*value, full[(i, i)], 1e-12);
+            }
+        }
+    }
+    let past = n_params;
+    assert!(
+        compiled
+            .grad_diag_points::<Accurate>(x.as_ref(), &mut diag, past)
+            .is_err()
+    );
+}

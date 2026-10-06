@@ -72,7 +72,7 @@ flowchart TB
 | `transform` | 入力の変換（identity、standardize、min-max、列ごと、pipeline）と目的変数の変換。それぞれ学習前と学習後の型を持つ。予測で平均と分散を戻す | pub mod: `Transform`, `UnfittedTransform`, `TargetTransform`, `UnfittedTarget`, `MinMaxInput`, `StandardizeTarget`, `Pipeline`, … | `data`, `error` |
 | `precision` | 格納と予測のスカラーを 1 つの方針にまとめる。混合精度の反復改善 | 公開: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
 | `workspace` | 使い回すバッファ: Gram、`W`、距離キャッシュ、`exp` のバッファ、faer の scratch。クエリごとのバッファ | crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
-| `prediction` | 予測が返すものと、共分散からの事後標本の生成 | 公開: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
+| `prediction` | 予測が返すもの、共分散からの事後標本の生成、`DistanceKernel` のモデルが共有する予測メソッド | 公開: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind`。クレート内: `DistanceQuery`, `QueryPoints`, `distance_predict!` | `error`, `kernel`, `linalg`, `policy`, `rng` |
 | `objective` | モデルの学習の目的関数が実装する trait。ソルバーがモデルを知らなくて済む | 公開: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective` | `error`, `param` |
 | `optimizer` | その trait の上のソルバー: argmin のアダプタ、自前の焼きなまし、`Fixed` の印。SVGP 用の Adam（`Optimizer` ではない） | 公開: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 

@@ -109,9 +109,10 @@ impl<'a> TrainInput<'a> {
         }
     }
 
-    /// Checks the coordinates and targets.
-    fn validate(&self) -> Result<(), GprError> {
-        if self.n_cols > 0 {
+    /// Checks the coordinates and targets. A kernel that reads `points`
+    /// needs at least one feature column.
+    fn validate(&self, points: bool) -> Result<(), GprError> {
+        if points {
             return validate_training(self.x, self.n_rows, self.n_cols, self.y);
         }
         crate::data::require_nonempty(self.n_rows)?;
@@ -154,7 +155,7 @@ where
         gpr: Gpr<O, P, K>,
         input: TrainInput<'a>,
     ) -> Result<(Self, Fills<'a>), (Gpr<O, P, K>, GprError)> {
-        if let Err(err) = input.validate() {
+        if let Err(err) = input.validate(<K as ModelKernelParts>::POINTS) {
             return Err((gpr, err));
         }
         let TrainInput {
@@ -164,10 +165,11 @@ where
             y,
             sources,
         } = input;
-        let (sources, fills) = match bind_training::<P::Storage>(&gpr.kernel, sources, n_rows) {
-            Ok(bound) => bound,
-            Err(err) => return Err((gpr, err)),
-        };
+        let (sources, fills) =
+            match bind_training::<P::Storage, P::Sources>(&gpr.kernel, sources, n_rows) {
+                Ok(bound) => bound,
+                Err(err) => return Err((gpr, err)),
+            };
         let mut x_buf = x.to_vec();
         let x_fitted: Box<dyn Transform> = if n_cols == 0 {
             Box::new(IdentityInput)
@@ -459,7 +461,7 @@ where
     }
 
     /// The training squared distances (empty for a coordinate kernel).
-    pub(crate) fn sources(&self) -> &crate::kernel::TrainSources<P::Storage> {
+    pub(crate) fn sources(&self) -> &P::Sources {
         &self.core.sources
     }
 
@@ -493,6 +495,7 @@ where
             core: &mut self.core,
             store: &mut self.store,
             fills: &[],
+            bound: false,
         }
     }
 
@@ -1058,6 +1061,7 @@ where
             core: &mut self.core,
             store: &mut self.store,
             fills: &[],
+            bound: false,
         };
         view.optimize(&self.optimizer)
     }
@@ -1113,8 +1117,11 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let (sources, _) =
-            bind_training::<P::Storage>(&parts.kernel, std::mem::take(&mut parts.sources), n)?;
+        let (sources, _) = bind_training::<P::Storage, P::Sources>(
+            &parts.kernel,
+            std::mem::take(&mut parts.sources),
+            n,
+        )?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         let mut workspace = fit_buffers::<P>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;

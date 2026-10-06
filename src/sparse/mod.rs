@@ -4,9 +4,12 @@
 
 mod distance;
 
-pub(crate) use distance::sparse_distance_predict;
+pub(crate) use distance::sparse_query;
 
+use std::any::Any;
+use std::borrow::Cow;
 use std::fmt;
+use std::sync::OnceLock;
 
 use dyn_stack::MemBuffer;
 use faer::{Mat, MatMut, MatRef};
@@ -114,14 +117,23 @@ pub(crate) struct PersistedSparse {
 /// training squares it owns, the training points that are the inducing
 /// points, and the `Z × Z` and `Z × X` blocks gathered from the squares.
 ///
-/// Kept in `f64`, next to the `f64` training coordinates; a model casts
-/// them to its storage scalar for each evaluation.
+/// Kept in `f64`, next to the `f64` training coordinates. An `f32` model
+/// reads the `Z × Z` and `Z × X` blocks through a copy cast on first use.
 #[derive(Clone, Debug)]
 pub(crate) struct SparseDist {
     pub(crate) train: TrainSources<f64>,
     pub(crate) inducing: Vec<usize>,
     pub(crate) zz: TrainSources<f64>,
     pub(crate) zx: GatheredRect<f64>,
+    /// `zz` and `zx` at `f32`, cast once.
+    single: OnceLock<SingleBlocks>,
+}
+
+/// The `Z × Z` and `Z × X` blocks of a [`SparseDist`] at `f32`.
+#[derive(Clone, Debug)]
+struct SingleBlocks {
+    zz: TrainSources<f32>,
+    zx: GatheredRect<f32>,
 }
 
 impl SparseDist {
@@ -160,7 +172,21 @@ impl SparseDist {
             inducing,
             zz,
             zx,
+            single: OnceLock::new(),
         })
+    }
+
+    /// The blocks at `f32`, cast on the first call.
+    fn single(&self) -> Result<Option<&SingleBlocks>, GprError> {
+        if self.single.get().is_none() {
+            let blocks = SingleBlocks {
+                zz: self.zz.cast()?,
+                zx: self.zx.cast(),
+            };
+            // A racing call cast the same values.
+            let _ = self.single.set(blocks);
+        }
+        Ok(self.single.get())
     }
 }
 
@@ -173,30 +199,60 @@ pub(crate) struct QueryDist {
     pub(crate) qq: Option<GatheredRect<f64>>,
 }
 
-/// `blocks` at the scalar `T`, as a table.
+/// `value` as a `U` when `U` is its own type.
+fn same<V: Any, U: Any>(value: &V) -> Option<&U> {
+    (value as &dyn Any).downcast_ref::<U>()
+}
+
+/// `blocks` at the scalar `T`: borrowed at `f64`, a cast copy otherwise.
 pub(crate) fn cast_blocks<T: KernelScalar>(
     blocks: Option<&GatheredRect<f64>>,
-) -> Option<GatheredRect<T>> {
-    blocks.map(GatheredRect::cast::<T>)
+) -> Option<Cow<'_, GatheredRect<T>>> {
+    blocks.map(|blocks| match same(blocks) {
+        Some(blocks) => Cow::Borrowed(blocks),
+        None => Cow::Owned(blocks.cast::<T>()),
+    })
 }
 
-/// The `Z × Z` squares of `dist` at the scalar `T`.
+/// The `Z × Z` squares of `dist` at the scalar `T`, borrowed: the `f64`
+/// values, or the `f32` copy cast once.
 pub(crate) fn zz_at<T: KernelScalar>(
     dist: Option<&SparseDist>,
-) -> Result<Option<TrainSources<T>>, GprError> {
-    dist.map(|d| d.zz.cast::<T>()).transpose()
+) -> Result<Option<Cow<'_, TrainSources<T>>>, GprError> {
+    let Some(dist) = dist else {
+        return Ok(None);
+    };
+    if let Some(zz) = same(&dist.zz) {
+        return Ok(Some(Cow::Borrowed(zz)));
+    }
+    if let Some(zz) = dist.single()?.and_then(|single| same(&single.zz)) {
+        return Ok(Some(Cow::Borrowed(zz)));
+    }
+    dist.zz.cast::<T>().map(|zz| Some(Cow::Owned(zz)))
 }
 
-/// The `Z × X` blocks of `dist` at the scalar `T`.
-pub(crate) fn zx_at<T: KernelScalar>(dist: Option<&SparseDist>) -> Option<GatheredRect<T>> {
-    dist.map(|d| d.zx.cast::<T>())
+/// The `Z × X` blocks of `dist` at the scalar `T`, borrowed as
+/// [`zz_at`].
+pub(crate) fn zx_at<T: KernelScalar>(
+    dist: Option<&SparseDist>,
+) -> Result<Option<Cow<'_, GatheredRect<T>>>, GprError> {
+    let Some(dist) = dist else {
+        return Ok(None);
+    };
+    if let Some(zx) = same(&dist.zx) {
+        return Ok(Some(Cow::Borrowed(zx)));
+    }
+    if let Some(zx) = dist.single()?.and_then(|single| same(&single.zx)) {
+        return Ok(Some(Cow::Borrowed(zx)));
+    }
+    Ok(Some(Cow::Owned(dist.zx.cast::<T>())))
 }
 
 /// `squares` as the square tables of a kernel call.
 pub(crate) fn square_slots<T: KernelScalar>(
-    squares: &Option<TrainSources<T>>,
+    squares: Option<&TrainSources<T>>,
 ) -> Option<&dyn SquareSlots<T>> {
-    squares.as_ref().map(|s| s as &dyn SquareSlots<T>)
+    squares.map(|s| s as &dyn SquareSlots<T>)
 }
 
 /// `table` as the rectangular tables of a kernel call.
@@ -326,30 +382,29 @@ impl SparseCore {
     }
 
     /// [`Self::prepare`] for a kernel that reads supplied distances: the
-    /// training squares of every slot (`n × n`), the coordinates `x` of its
-    /// coordinate leaves (`n_cols` may be zero), and the training points
-    /// `inducing` that are the inducing points. `Z` is those rows of `x`.
+    /// training squares of every slot (`n × n`), the coordinates `(x,
+    /// n_cols)` of its coordinate leaves (`None` for a kernel without one;
+    /// `Some` needs `n_cols ≥ 1`), and the training points `inducing` that
+    /// are the inducing points. `Z` is those rows of `x`.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] for no inducing point,
     /// [`GprError::IndexOutOfRange`] for an index past `n`, the errors of
     /// binding the sources, and the input errors of [`Self::prepare`].
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_with_distances(
         spec: &SparseSpec,
-        x: &[f64],
+        points: Option<(&[f64], usize)>,
         n_rows: usize,
-        n_cols: usize,
         y: &[f64],
         sources: Vec<DistanceSource<'_>>,
         inducing: &[usize],
     ) -> Result<Self, GprError> {
-        if n_cols > 0 {
+        let (x, n_cols) = points.unwrap_or((&[], 0));
+        if points.is_some() {
             validate_training(x, n_rows, n_cols, y)?;
         } else {
             crate::data::require_nonempty(n_rows)?;
-            crate::data::require_count(x.len(), 0, "feature values")?;
             crate::data::require_count(y.len(), n_rows, "targets")?;
             crate::data::require_finite(y)?;
         }

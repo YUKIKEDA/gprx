@@ -35,7 +35,10 @@ pub(crate) struct AdamStep<S: KernelScalar> {
 }
 
 impl<S: KernelScalar> AdamStep<S> {
-    pub(crate) fn new<P, K>(model: &FittedSvgp<P, K>) -> Self
+    /// # Errors
+    ///
+    /// Returns the error of casting the `Z × Z` squares to `S`.
+    pub(crate) fn new<P, K>(model: &FittedSvgp<P, K>) -> Result<Self, GprError>
     where
         P: GpScalar<Storage = S>,
     {
@@ -44,7 +47,8 @@ impl<S: KernelScalar> AdamStep<S> {
         let z64 = pack_points(&core.z_train, m, core.d);
         let mut cast = S::empty_cols();
         let z = S::storage_cols(z64.as_ref(), &mut cast).to_owned();
-        Self {
+        let zz = crate::sparse::zz_at::<S>(core.dist.as_ref())?.map(std::borrow::Cow::into_owned);
+        Ok(Self {
             theta: vec![0.0; core.theta_len()],
             theta_prev: vec![0.0; core.theta_len()],
             compiled_storage: core.kernel.compile_as::<S>(),
@@ -56,9 +60,9 @@ impl<S: KernelScalar> AdamStep<S> {
             q_mean: vec![0.0; m],
             q_l: Mat::zeros(m, m),
             ks: KernelScratch::new(),
-            zz: crate::sparse::zz_at::<S>(core.dist.as_ref()).unwrap_or_default(),
+            zz,
             grad: GradBuffers::default(),
-        }
+        })
     }
 }
 
@@ -92,7 +96,7 @@ where
             step.ks.gram::<M>(
                 &step.compiled_storage,
                 GramInputs {
-                    slots: crate::sparse::square_slots(&step.zz),
+                    slots: crate::sparse::square_slots(step.zz.as_ref()),
                     ..GramInputs::points(step.z.as_ref())
                 },
                 step.k_mm.as_mut(),

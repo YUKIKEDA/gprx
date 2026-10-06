@@ -12,11 +12,11 @@ use crate::data::pack_storage;
 use crate::error::PersistErrorKind;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
-use crate::kernel::ScalarOps;
 use crate::kernel::{
     BlockKind, DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
     ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, spec_slots,
 };
+use crate::kernel::{ScalarOps, SourceStore};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
@@ -430,7 +430,7 @@ where
     }
 
     /// The training squared distances (empty for a coordinate kernel).
-    pub(crate) fn sources(&self) -> &crate::kernel::TrainSources<P::Storage> {
+    pub(crate) fn sources(&self) -> &P::Sources {
         &self.core.sources
     }
 
@@ -538,8 +538,10 @@ where
         insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
+        // Stage the squares first: the border is the last step that can fail.
+        let staged = self.core.sources.stage_append(columns.raw())?;
         self.workspace.append_border(k_new)?;
-        self.core.sources.append(columns.raw())?;
+        self.core.sources.commit(staged);
         #[cfg(feature = "insert-stages")]
         insert_stages::add_border(border_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -616,8 +618,9 @@ where
             });
         }
         let index = self.registry.index_of(id)?;
+        let staged = self.core.sources.stage_delete(index)?;
         self.workspace.delete_index(index)?;
-        self.core.sources.delete(index)?;
+        self.core.sources.commit(staged);
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
         remove_point_mat_inplace(&mut self.core.x, self.core.n, index);
@@ -1061,6 +1064,7 @@ where
         core: &mut *core,
         store: &mut store,
         fills: &[],
+        bound: false,
     });
     match result {
         Ok(value) => {

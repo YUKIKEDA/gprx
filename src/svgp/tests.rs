@@ -758,7 +758,7 @@ fn adam_step_update_matches_light_update() {
     let z = [0.2, 1.4, 2.6];
     let (mut light, params) = shifted_model(kernel, &x, 6, 1, &z);
     let mut stepped = light.clone();
-    let mut step = super::factor::AdamStep::new(&stepped);
+    let mut step = super::factor::AdamStep::new(&stepped).expect("step");
     let mut moved = params.clone();
     for k in 0..3 {
         moved[0] += 0.1 * (k as f64 + 1.0);

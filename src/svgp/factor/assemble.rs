@@ -126,7 +126,7 @@ where
     ks.gram::<M>(
         &compiled,
         GramInputs {
-            slots: square_slots(&zz),
+            slots: square_slots(zz.as_deref()),
             ..GramInputs::points(z_mat)
         },
         k_mm.as_mut(),
@@ -167,8 +167,8 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
-    let zx = zx_at::<T>(dist);
-    let zx = zx.as_ref().map(GatheredRect::table);
+    let zx = zx_at::<T>(dist)?;
+    let zx = zx.as_deref().map(GatheredRect::table);
     let mut a = ks.cross::<M>(&compiled, z_mat, x_mat, rect_slots(&zx))?;
     solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];

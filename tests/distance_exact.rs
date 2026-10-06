@@ -531,3 +531,91 @@ fn mixed_precision_refines_on_the_supplied_distances() {
     let loo = promote.loo_predict().expect("loo");
     assert_slice_close(&loo.mean, &double.loo_predict().expect("loo").mean, 1e-4);
 }
+
+/// [`Pairs`] that counts its calls.
+struct Counted<'a> {
+    pairs: Pairs<'a>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl DistanceFill for Counted<'_> {
+    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pairs.fill(n_rows, n_cols, out);
+    }
+}
+
+#[test]
+fn an_uncached_fit_calls_the_fill_once_per_factor_after_the_first() {
+    let c0 = coord(0, N, 0.0);
+    let image = ScalarDistance::new();
+    let fill = Counted {
+        pairs: Pairs {
+            rows: &c0,
+            cols: &c0,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0).expect("ell")), lik())
+        .with_prefer_memory()
+        .with_optimizer(Fixed)
+        .factor([image.fill(&fill)], N, &targets())
+        .expect("factor");
+    assert_eq!(
+        fitted.distance_cache_policy(),
+        DistanceCachePolicy::Uncached
+    );
+    // The bind writes the square the first factor reads; the second factor
+    // (it restores `L` over the reused `W` buffer) calls the fill again.
+    assert_eq!(fill.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_kernel_with_coordinate_leaves_needs_a_feature_column() {
+    let c0 = coord(0, N, 0.0);
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(1.0).expect("ell"))
+        * KernelSpec::from(RbfKernel::new(0.5).expect("ell"));
+    let fit = Gpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_slice(&sq(&c0, &c0))], N, &[], 0, &y);
+    assert!(matches!(fit, Err((_, GprError::EmptyInput))));
+    let fit = Gpr::new(kernel, lik()).fit([image.from_slice(&sq(&c0, &c0))], N, &[], 0, &y);
+    assert!(matches!(fit, Err((_, GprError::EmptyInput))));
+}
+
+#[test]
+fn mixed_precision_refines_on_the_f64_distances_it_was_given() {
+    use gprx::{MixedPrecision, PromoteStorage, ReevaluateKernel};
+    // `d²` near 1e4 with fine digits: rounding it to `f32` moves `K`.
+    let c0: Vec<f64> = coord(0, N, 0.0).iter().map(|v| 100.0 * v).collect();
+    let q0: Vec<f64> = coord(0, M, 0.5).iter().map(|v| 100.0 * v).collect();
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(60.0).expect("ell"));
+    let train = sq(&c0, &c0);
+    let cross = sq(&c0, &q0);
+    let double = Gpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_slice(&train)], N, &y)
+        .expect("f64");
+    let expect = double.predict([image.borrow(&cross)], M).expect("f64");
+    let promote = Gpr::new(kernel.clone(), lik())
+        .with_precision::<MixedPrecision<PromoteStorage>>()
+        .with_optimizer(Fixed)
+        .factor([image.from_slice(&train)], N, &y)
+        .expect("promote")
+        .predict([image.borrow(&cross)], M)
+        .expect("promote");
+    let reevaluate = Gpr::new(kernel, lik())
+        .with_precision::<MixedPrecision<ReevaluateKernel>>()
+        .with_optimizer(Fixed)
+        .factor([image.from_slice(&train)], N, &y)
+        .expect("reevaluate")
+        .predict([image.borrow(&cross)], M)
+        .expect("reevaluate");
+    assert_slice_close(&promote.mean, &expect.mean, 1e-10);
+    assert_slice_close(&reevaluate.mean, &expect.mean, 1e-10);
+}

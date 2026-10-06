@@ -393,3 +393,23 @@ fn sparse_inputs_are_checked() {
         "{err:?}"
     );
 }
+
+#[test]
+fn a_sparse_kernel_with_coordinate_leaves_needs_a_feature_column() {
+    let data = data();
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(0.9).expect("ell"))
+        * KernelSpec::from(RbfKernel::new(1.1).expect("ell"));
+    let err = Sgpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&data.train)], N, &[], 0, &y, &INDUCING)
+        .map(|_| ())
+        .map_err(|(_, e)| e);
+    assert!(matches!(err, Err(GprError::EmptyInput)), "{err:?}");
+    let err = Svgp::new(kernel, lik())
+        .factor([image.borrow(&data.train)], N, &[], 0, &y, &INDUCING)
+        .map(|_| ())
+        .map_err(|(_, e)| e);
+    assert!(matches!(err, Err(GprError::EmptyInput)), "{err:?}");
+}

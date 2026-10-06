@@ -9,12 +9,12 @@
 //! hands the wrapped leaf the view of its own slot in place of the
 //! coordinate distances.
 
-use faer::{Mat, MatMut, MatRef};
+use faer::{MatMut, MatRef};
 
 use super::CompiledKernel;
 use super::grad::eval_cell;
 use crate::error::GprError;
-use crate::kernel::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf};
+use crate::kernel::dist::{ArdBlocks, ArdSqDiff};
 use crate::kernel::{KernelScalar, SlotId, Triangle};
 
 /// A compiled leaf that reads the supplied `d²` of one slot.
@@ -232,9 +232,14 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         out: &mut [T],
         param_idx: usize,
     ) -> Result<(), GprError> {
-        let value = self.at_zero(|leaf, slot, x, cell, scratch| {
-            leaf.grad::<M>(slot, x, cell, param_idx, Triangle::Lower, scratch)
-        })?;
+        let value = if self.is_ard() {
+            self.require_param(param_idx)?;
+            T::from_f64(0.0)
+        } else {
+            self.at_zero(|leaf, slot, x, cell, scratch| {
+                leaf.grad::<M>(slot, x, cell, param_idx, Triangle::Lower, scratch)
+            })?
+        };
         out.fill(value);
         Ok(())
     }
@@ -245,14 +250,20 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         out: &mut [T],
         pair: (usize, usize),
     ) -> Result<(), GprError> {
-        let value = self.at_zero(|leaf, slot, x, cell, scratch| {
-            leaf.hess::<M>(slot, x, cell, pair, Triangle::Lower, scratch)
-        })?;
+        let value = if self.is_ard() {
+            self.require_param(pair.0)?;
+            self.require_param(pair.1)?;
+            T::from_f64(0.0)
+        } else {
+            self.at_zero(|leaf, slot, x, cell, scratch| {
+                leaf.hess::<M>(slot, x, cell, pair, Triangle::Lower, scratch)
+            })?
+        };
         out.fill(value);
         Ok(())
     }
 
-    /// Evaluates `eval` on one pair at zero distance.
+    /// Evaluates `eval` on one pair at zero distance of a scalar slot.
     fn at_zero(
         &self,
         eval: impl FnOnce(
@@ -265,33 +276,32 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<T, GprError> {
         let mut scratch = [T::from_f64(0.0)];
         let scratch = MatMut::from_column_major_slice_mut(&mut scratch, 1, 1);
-        if let Some(dims) = self.ard_dims() {
-            let x = Mat::<T>::zeros(1, dims);
-            let cache = ArdSqDiffBuf::new(x.as_ref())?;
-            eval_cell(|cell| {
-                eval(
-                    self,
-                    SquareSlot::Ard(cache.view()),
-                    x.as_ref(),
-                    cell,
-                    scratch,
-                )
-            })
-        } else {
-            let zero = [T::from_f64(0.0)];
-            let dist = MatRef::from_column_major_slice(&zero, 1, 1);
-            let x = Mat::<T>::zeros(1, 0);
-            eval_cell(|cell| eval(self, SquareSlot::Scalar(dist), x.as_ref(), cell, scratch))
-        }
+        let zero = [T::from_f64(0.0)];
+        let dist = MatRef::from_column_major_slice(&zero, 1, 1);
+        let x = MatRef::from_column_major_slice(&[], 1, 0);
+        eval_cell(|cell| eval(self, SquareSlot::Scalar(dist), x, cell, scratch))
     }
 
-    /// Lengthscale count of a wrapped ARD leaf.
-    fn ard_dims(&self) -> Option<usize> {
-        match self.leaf.as_ref() {
-            CompiledKernel::RbfArd(leaf) => Some(leaf.num_params()),
-            CompiledKernel::MaternArd(leaf) => Some(leaf.num_params()),
-            CompiledKernel::RationalQuadraticArd(leaf) => Some(leaf.lengthscales().num_params()),
-            _ => None,
+    /// Whether the wrapped leaf is an ARD leaf. Each one is `1` at `d² = 0`
+    /// whatever its parameters, so every derivative of `k(x, x)` is `0`.
+    fn is_ard(&self) -> bool {
+        matches!(
+            self.leaf.as_ref(),
+            CompiledKernel::RbfArd(_)
+                | CompiledKernel::MaternArd(_)
+                | CompiledKernel::RationalQuadraticArd(_)
+        )
+    }
+
+    /// Rejects a parameter index past the wrapped leaf's parameters.
+    fn require_param(&self, param_idx: usize) -> Result<(), GprError> {
+        let count = self.leaf.num_params();
+        if param_idx < count {
+            Ok(())
+        } else {
+            Err(GprError::IndexOutOfRange {
+                reason: format!("parameter index {param_idx} is out of range for {count}"),
+            })
         }
     }
 }

@@ -14,7 +14,7 @@ use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
     BlockKind, CompiledKernel, DistanceSource, Fills, GramInputs, KernelScalar, KernelSpec,
-    ModelKernel, RectSlots, ScalarOps, SquareSlots, TrainSources, Triangle, bind_sources,
+    ModelKernel, RectSlots, ScalarOps, SourceStore, SquareSlots, Triangle, bind_sources,
     spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
@@ -69,7 +69,7 @@ pub(crate) struct GprCore<P: GpScalar> {
     pub(crate) x_cast: <P::Storage as ScalarOps>::ColCast,
     pub(crate) y_cast: <P::Storage as ScalarOps>::RowCast,
     /// Training squared distances of a distance model; empty otherwise.
-    pub(crate) sources: TrainSources<P::Storage>,
+    pub(crate) sources: P::Sources,
     pub(crate) n: usize,
     pub(crate) d: usize,
 }
@@ -107,8 +107,9 @@ pub(crate) fn train_points<'a, P: GpScalar>(
     x: &'a Mat<f64>,
     (n, d): (usize, usize),
     x_cast: &'a mut <P::Storage as ScalarOps>::ColCast,
-    sources: &'a TrainSources<P::Storage>,
+    sources: &'a P::Sources,
 ) -> TrainPoints<'a, P::Storage> {
+    let sources = sources.storage();
     TrainPoints {
         x: P::Storage::storage_cols(x.as_ref().submatrix(0, 0, n, d), x_cast),
         slots: (!sources.is_empty()).then_some(sources as &dyn SquareSlots<P::Storage>),
@@ -116,17 +117,17 @@ pub(crate) fn train_points<'a, P: GpScalar>(
 }
 
 /// Binds the training squares of `kernel`'s slots, `n × n` each.
-pub(crate) fn bind_training<'a, T: KernelScalar>(
+pub(crate) fn bind_training<'a, S: KernelScalar, Store: SourceStore<S>>(
     kernel: &KernelSpec,
     sources: Vec<DistanceSource<'a>>,
     n: usize,
-) -> Result<(TrainSources<T>, Fills<'a>), GprError> {
+) -> Result<(Store, Fills<'a>), GprError> {
     let slots = spec_slots(kernel);
     if slots.is_empty() && sources.is_empty() {
-        return Ok((TrainSources::empty(), Vec::new()));
+        return Ok((Store::empty(), Vec::new()));
     }
     let (raw, fills) = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
-    Ok((TrainSources::from_raw(raw, n)?, fills))
+    Ok((Store::from_raw(raw, n)?, fills))
 }
 
 impl<P: GpScalar> GprCore<P> {
@@ -194,7 +195,8 @@ impl<P: GpScalar> GprCore<P> {
             kernel: &self.kernel,
             compiled: &self.compiled,
             x: self.x_active(),
-            sources: &self.sources,
+            sources: self.sources.storage(),
+            exact: self.sources.exact(),
             y: &self.y_train,
             noise: self.likelihood.noise_variance(),
             jitter,
@@ -425,7 +427,7 @@ impl<P: GpScalar> GprCore<P> {
         factor.inv_l_in_place(k_star.as_mut());
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        if self.sources.is_empty() {
+        if self.sources.storage().is_empty() {
             with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
                 query_x.as_ref(),
                 kss.as_mut(),
@@ -562,9 +564,10 @@ impl<P: GpScalar> GprCore<P> {
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch_k = Mat::<f64>::zeros(n, n);
         let sources = self.sources.to_f64()?;
+        let sources = sources.as_ref();
         with_kernel_exp!(self.policies.math, M => kernel.eval_gram::<M>(
             GramInputs {
-                slots: (!sources.is_empty()).then_some(&sources as &dyn SquareSlots<f64>),
+                slots: (!sources.is_empty()).then_some(sources as &dyn SquareSlots<f64>),
                 ..GramInputs::points(self.x_active())
             },
             a.as_mut(),

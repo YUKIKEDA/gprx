@@ -114,7 +114,7 @@ where
     let mut rng = seeded_rng(adam.seed());
     let mut timestep = 0_u64;
     let batch_size = adam.batch_size();
-    let mut step = AdamStep::new(model);
+    let mut step = AdamStep::new(model)?;
     for _ in 0..adam.epochs() {
         shuffle_indices(&mut order, &mut rng);
         let mut start = 0;

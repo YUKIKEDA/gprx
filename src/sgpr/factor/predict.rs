@@ -199,7 +199,7 @@ fn vfe_latent<M: crate::math::KernelMath, S: KernelScalar>(
     let q_mat = pack_into(query, xs, n_rows, d);
     let mut a_star = view(k_sz, m, n_rows);
     let zq = cast_blocks::<S>(zq);
-    let zq = zq.as_ref().map(GatheredRect::table);
+    let zq = zq.as_deref().map(GatheredRect::table);
     kernel.cross_into::<M>(
         compiled,
         z_mat.as_ref(),

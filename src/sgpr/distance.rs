@@ -5,11 +5,14 @@
 //! method is the one of the coordinate model.
 
 use crate::error::GprError;
-use crate::kernel::{DistanceKernel, DistanceOnly, DistanceSource, ModelKernel, WithPoints};
+use crate::kernel::{
+    DistanceKernel, DistanceOnly, DistanceSource, ModelKernel, PointUse, WithPoints,
+};
 use crate::optimizer::{Fixed, Optimizer};
 use crate::policy::with_kernel_exp;
 use crate::precision::GpScalar;
-use crate::sparse::{QueryDist, SparseCore, sparse_distance_predict};
+use crate::prediction::{QueryPoints, distance_predict};
+use crate::sparse::{QueryDist, SparseCore, sparse_query};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::assemble_fitted;
@@ -119,9 +122,8 @@ where
     ) -> Result<DistanceSgpr<O, P, DistanceOnly>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
-            &[],
+            None,
             n,
-            0,
             y,
             sources.into_iter().collect(),
             inducing,
@@ -165,9 +167,8 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<DistanceOnly>> {
     ) -> Result<DistanceSgpr<Fixed, P, DistanceOnly>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
-            &[],
+            None,
             n,
-            0,
             y,
             sources.into_iter().collect(),
             inducing,
@@ -226,9 +227,8 @@ where
     ) -> Result<DistanceSgpr<O, P, WithPoints>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
-            x,
+            Some((x, n_cols)),
             n,
-            n_cols,
             y,
             sources.into_iter().collect(),
             inducing,
@@ -275,9 +275,8 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<WithPoints>> {
     ) -> Result<DistanceSgpr<Fixed, P, WithPoints>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
-            x,
+            Some((x, n_cols)),
             n,
-            n_cols,
             y,
             sources.into_iter().collect(),
             inducing,
@@ -286,22 +285,95 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<WithPoints>> {
     }
 }
 
-sparse_distance_predict!(
+sparse_query!(impl [O, I: InducingLayout, P: GpScalar, C: PointUse] FittedSgpr<O, I, P, DistanceKernel<C>>);
+
+distance_predict!(
     impl [O, I: InducingLayout, P: GpScalar] FittedSgpr<O, I, P, DistanceKernel<DistanceOnly>>,
+    refine = P::Refine,
     args = (),
     tail = (),
-    xs = &[],
-    n_cols = 0,
-    predict_doc = "See the example on [`Sgpr::fit`] of a [`DistanceKernel<DistanceOnly>`].",
-    covariance_doc = "# Examples\n\n```rust\nuse gprx::kernel::{RbfKernel, ScalarDistance};\nuse gprx::{Fixed, GaussianLikelihood, PredictOptions, Prediction, Sgpr};\n\n# fn main() -> Result<(), gprx::GprError> {\nlet image = ScalarDistance::new();\nlet d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];\nlet mut fitted = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)\n    .with_optimizer(Fixed)\n    .factor([image.from_vec(d2)], 4, &[0.0, 1.0, 0.5, 0.25], &[0, 2])\n    .map_err(|(_, e)| e)?;\n// Queries at 0.5 and 1.5: train × query, then query × query.\nlet cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];\nlet query = [0.0, 1.0, 1.0, 0.0];\nlet options = PredictOptions::default();\nlet mut out = Prediction::default();\nfitted.predict_into([image.borrow(&cross)], 2, &mut out)?;\nfitted.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;\nlet _ = fitted.predict_with([image.borrow(&cross)], 2, options)?;\nlet cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;\nassert_eq!(cov.covariance.len(), 4);\nlet _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, options)?;\nlet draws = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;\nassert_eq!(draws.len(), 6);\nlet _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, options, 3, 7)?;\n# Ok(())\n# }\n```",
+    points = QueryPoints::NONE,
+    reads = {
+        /// The model keeps the rows of its inducing points for this call.
+    },
+    predict_doc = {
+        /// See the example on [`Sgpr::fit`] of a [`DistanceKernel<DistanceOnly>`].
+    },
+    covariance_doc = {
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{RbfKernel, ScalarDistance};
+        /// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Prediction, Sgpr};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+        /// let mut fitted = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        ///     .with_optimizer(Fixed)
+        ///     .factor([image.from_vec(d2)], 4, &[0.0, 1.0, 0.5, 0.25], &[0, 2])
+        ///     .map_err(|(_, e)| e)?;
+        /// // Queries at 0.5 and 1.5: train × query, then query × query.
+        /// let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+        /// let query = [0.0, 1.0, 1.0, 0.0];
+        /// let options = PredictOptions::default();
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], 2, options)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;
+        /// assert_eq!(cov.covariance.len(), 4);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, options)?;
+        /// let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;
+        /// assert_eq!(draws.len(), 6);
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, options, 3, 7)?;
+        /// # Ok(())
+        /// # }
+        /// ```
+    },
 );
 
-sparse_distance_predict!(
+distance_predict!(
     impl [O, I: InducingLayout, P: GpScalar] FittedSgpr<O, I, P, DistanceKernel<WithPoints>>,
+    refine = P::Refine,
     args = (xs: &[f64]),
     tail = (n_cols: usize),
-    xs = xs,
-    n_cols = n_cols,
-    predict_doc = "See the example on [`Sgpr::fit`] of a [`DistanceKernel<WithPoints>`].",
-    covariance_doc = "# Examples\n\n```rust\nuse gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};\nuse gprx::{Fixed, GaussianLikelihood, PredictOptions, Prediction, Sgpr};\n\n# fn main() -> Result<(), gprx::GprError> {\nlet image = ScalarDistance::new();\nlet kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);\nlet d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];\nlet mut fitted = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)\n    .with_optimizer(Fixed)\n    .factor([image.from_vec(d2)], 4, &[0.0, 1.0, 2.0, 3.0], 1, &[0.0, 1.0, 0.5, 0.25], &[0, 2])\n    .map_err(|(_, e)| e)?;\nlet cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];\nlet (query, xs) = ([0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);\nlet options = PredictOptions::default();\nlet mut out = Prediction::default();\nfitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;\nfitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;\nlet _ = fitted.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;\nlet cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;\nassert_eq!(cov.mean.len(), 2);\nlet _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;\nlet _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;\nlet _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;\n# Ok(())\n# }\n```",
+    points = QueryPoints { xs, n_cols },
+    reads = {
+        /// The model keeps the rows of its inducing points for this call.
+    },
+    predict_doc = {
+        /// See the example on [`Sgpr::fit`] of a [`DistanceKernel<WithPoints>`].
+    },
+    covariance_doc = {
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+        /// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Prediction, Sgpr};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+        /// let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+        /// let mut fitted = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        ///     .with_optimizer(Fixed)
+        ///     .factor([image.from_vec(d2)], 4, &[0.0, 1.0, 2.0, 3.0], 1, &[0.0, 1.0, 0.5, 0.25], &[0, 2])
+        ///     .map_err(|(_, e)| e)?;
+        /// let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+        /// let (query, xs) = ([0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
+        /// let options = PredictOptions::default();
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;
+        /// assert_eq!(cov.mean.len(), 2);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
+        /// let _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
+        /// # Ok(())
+        /// # }
+        /// ```
+    },
 );

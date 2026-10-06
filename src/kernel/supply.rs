@@ -71,6 +71,13 @@ pub struct SuppliedSpec {
 /// call), or [`Self::fill`] (a function writes it). A squared distance is
 /// `d²`, column-major: the pair `(i, j)` is at `i + j * n_rows`.
 ///
+/// A square of the pairs of one set (the training square, or the query
+/// square of a covariance) must have a diagonal of exactly `0.0` and be
+/// exactly symmetric: `(i, j)` and `(j, i)` hold the same `f64`. There is
+/// no tolerance; a model returns [`GprError::ShapeMismatch`] otherwise. A
+/// table that is symmetric only up to rounding (an average of two
+/// directions, say) is made exact by copying one triangle onto the other.
+///
 /// # Examples
 ///
 /// ```rust
@@ -164,8 +171,10 @@ impl ScalarDistance {
 
     /// Binds a function that writes this slot's `d²`.
     ///
-    /// A fit calls it once into the buffer the model keeps; a prediction
-    /// calls it once into scratch. See [`DistanceFill`].
+    /// A fit calls it once into the buffer the model keeps (under
+    /// [`crate::DistanceCachePolicy::Uncached`], once more for every
+    /// factor after the first); a prediction calls it once into scratch.
+    /// See [`DistanceFill`].
     ///
     /// See the example on [`DistanceFill`].
     pub fn fill<'a>(&self, filler: &'a dyn DistanceFill) -> DistanceSource<'a> {
@@ -188,7 +197,7 @@ impl ScalarDistance {
 /// `k`: `r² = Σ_k d_k² / ℓ_k²`. Bind the supply with [`Self::from_vecs`]
 /// (moves), [`Self::from_slices`] (copies), [`Self::borrow`] (reads in place
 /// for the call), or [`Self::fill`]. Each dimension is a column-major block
-/// of `d²`, laid out as for [`ScalarDistance`].
+/// of `d²`, laid out and checked as for [`ScalarDistance`].
 ///
 /// # Examples
 ///
@@ -383,6 +392,8 @@ mod sealed {
     }
 
     pub trait Model: Sized {
+        /// Whether the kernel has coordinate leaves that read `x`.
+        const POINTS: bool;
         fn into_spec(self) -> KernelSpec;
         fn from_spec(spec: KernelSpec) -> Self;
     }
@@ -748,6 +759,8 @@ distance_ops!(Mul, mul, Product);
 pub trait ModelKernel: sealed::Model + Clone + fmt::Debug + Send + Sync + 'static {}
 
 impl sealed::Model for KernelSpec {
+    const POINTS: bool = true;
+
     fn into_spec(self) -> KernelSpec {
         self
     }
@@ -760,6 +773,8 @@ impl sealed::Model for KernelSpec {
 impl ModelKernel for KernelSpec {}
 
 impl<C: PointUse> sealed::Model for DistanceKernel<C> {
+    const POINTS: bool = <C as sealed::Points>::POINTS;
+
     fn into_spec(self) -> KernelSpec {
         self.spec
     }
@@ -786,8 +801,10 @@ pub(crate) use sealed::Model as ModelKernelParts;
 /// Writes squared distances for one block of pairs.
 ///
 /// A fit calls [`Self::fill`] once for the training square and keeps what
-/// it wrote; a prediction calls it once into scratch for each block it
-/// needs; an insert calls it once for the new column. The caller knows which
+/// it wrote; under [`crate::DistanceCachePolicy::Uncached`] it calls it
+/// again into the same buffer for every factor after the first. A
+/// prediction calls it once into scratch for each block it needs; an
+/// insert calls it once for the new column. The caller knows which
 /// samples the rows and columns are: it binds a filler to a slot for one
 /// call with [`ScalarDistance::fill`] or [`ArdDistance::fill`].
 ///

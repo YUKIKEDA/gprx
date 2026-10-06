@@ -9,8 +9,8 @@ use safetensors::SafeTensors;
 use crate::error::{GprError, PersistErrorKind};
 use crate::gpr::{FittedGpr, OnlineGpr};
 use crate::kernel::{
-    DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, PointUse, SlotShape, TrainSources,
-    reads_points,
+    DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, PointUse, SlotShape, SourceStore,
+    TrainSources, reads_points,
 };
 use crate::optimizer::Fixed;
 use crate::precision::GpScalar;
@@ -30,10 +30,18 @@ fn name(k: usize) -> String {
     format!("d2.{k}")
 }
 
-/// The training squares of `sources` as tensors: `[n, n]` for a scalar
-/// slot, `[dims, n, n]` for an ARD slot. Widened to `f64`; an `f32` model
-/// reads them back exactly.
-pub(super) fn tensors<T: KernelScalar>(sources: &TrainSources<T>) -> Vec<OwnedTensor> {
+/// The training squares of `store` as tensors: `[n, n]` for a scalar
+/// slot, `[dims, n, n]` for an ARD slot. The `f64` values when the store
+/// keeps them; otherwise widened to `f64`, which an `f32` model reads back
+/// exactly.
+pub(super) fn tensors<S: KernelScalar, Store: SourceStore<S>>(store: &Store) -> Vec<OwnedTensor> {
+    match store.exact() {
+        Some(exact) => dense_tensors(exact),
+        None => dense_tensors(store.storage()),
+    }
+}
+
+fn dense_tensors<T: KernelScalar>(sources: &TrainSources<T>) -> Vec<OwnedTensor> {
     let n = sources.n();
     sources
         .dense_f64()

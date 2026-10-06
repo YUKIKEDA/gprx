@@ -386,7 +386,7 @@ The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `
 | `borrow(d2)` | read in place by `predict`; copied by `fit` and `insert` |
 | `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` writes `out[i + j * n_rows]`; an ARD fill writes its `d` blocks one after another |
 
-Tables are column-major `dist[i + j * n_rows]`. A training square (and a query square) must have a zero diagonal and be symmetric, else `ShapeMismatch`. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. With `DistanceCachePolicy::Uncached`, a training fill is called again for every factor of a search; the model keeps the last result.
+Tables are column-major `dist[i + j * n_rows]`. A training square (and a query square) must have a diagonal of exactly `0.0` and be exactly symmetric (`(i, j)` and `(j, i)` hold the same `f64`; there is no tolerance), else `ShapeMismatch`. Copy one triangle onto the other to make a table that is symmetric only up to rounding exact. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. With `DistanceCachePolicy::Uncached`, a training fill is called again for every factor of a search after the first; the model keeps the last result. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave.
 
 | Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
 | --- | --- | --- | --- |

@@ -209,13 +209,13 @@ where
     let y_s = T::storage_rows(y, &mut y_cast);
     // A rounding scalar returned above, so `T` is evaluated as stored below.
     let zz = zz_at::<T>(dist)?;
-    let zx = zx_at::<T>(dist);
-    let zx = zx.as_ref().map(GatheredRect::table);
+    let zx = zx_at::<T>(dist)?;
+    let zx = zx.as_deref().map(GatheredRect::table);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M>(
         &compiled,
         GramInputs {
-            slots: square_slots(&zz),
+            slots: square_slots(zz.as_deref()),
             ..GramInputs::points(z_mat.as_ref())
         },
         k_mm.as_mut(),

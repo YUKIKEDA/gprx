@@ -555,6 +555,7 @@ where
             core: &mut model.core,
             store: &mut model.store,
             fills: &fills,
+            bound: true,
         };
         match view.optimize(&model.optimizer) {
             Ok(()) => Ok(model),
@@ -575,6 +576,7 @@ impl<P: GpScalar, K: ModelKernel> Gpr<Fixed, P, K> {
             core: &mut model.core,
             store: &mut model.store,
             fills: &fills,
+            bound: true,
         };
         match view.refactor() {
             Ok(()) => Ok(model),

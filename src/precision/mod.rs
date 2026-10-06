@@ -9,7 +9,9 @@
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
-use crate::kernel::{ColRange, KernelScalar, KernelSpec, RectSlots};
+use crate::kernel::{
+    ColRange, KernelScalar, KernelSpec, RectSlots, RefinedSources, SourceStore, TrainSources,
+};
 use crate::transform::TargetTransform;
 
 /// Selects storage and residual-refinement scalar types for GP computations.
@@ -159,6 +161,9 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     /// `true` when predict weights are refined in `f64` from an `f32` factor.
     const REFINES_IN_F64: bool;
 
+    /// The training `d²` a distance model of this precision keeps.
+    type Sources: SourceStore<Self::Storage>;
+
     fn persist_kind() -> PersistKind;
 
     /// Exact: stores predict `α` from the stored factor (copy, or refine).
@@ -272,6 +277,7 @@ fn inverse_f64_mean_variance(
 
 impl ModelPrecision for DoublePrecision {
     const REFINES_IN_F64: bool = false;
+    type Sources = TrainSources<f64>;
 
     fn persist_kind() -> PersistKind {
         PersistKind::Double
@@ -355,6 +361,7 @@ impl ModelPrecision for DoublePrecision {
 
 impl ModelPrecision for SinglePrecision {
     const REFINES_IN_F64: bool = false;
+    type Sources = TrainSources<f32>;
 
     fn persist_kind() -> PersistKind {
         PersistKind::Single
@@ -448,6 +455,7 @@ impl ModelPrecision for SinglePrecision {
 
 impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
     const REFINES_IN_F64: bool = true;
+    type Sources = RefinedSources;
 
     fn persist_kind() -> PersistKind {
         if R::READS_STORAGE {
