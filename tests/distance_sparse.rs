@@ -447,3 +447,169 @@ fn a_sparse_white_term_adds_its_diagonal_to_the_query_covariance() {
     let expect = coords.predict_covariance(&data.xs, Q, 2).expect("cov");
     assert_slice_close(&got.covariance, &expect.covariance, TOL);
 }
+
+/// One source per slot of `slots`: a scalar slot reads `scalar`, an ARD slot
+/// reads `blocks` (the same two dimensions for every ARD slot).
+fn sources_for<'a>(
+    slots: &[gprx::kernel::DistanceSlot],
+    scalar: &'a [f64],
+    blocks: &'a [&'a [f64]],
+) -> Vec<gprx::kernel::DistanceSource<'a>> {
+    slots
+        .iter()
+        .map(|slot| match slot {
+            gprx::kernel::DistanceSlot::Scalar(s) => s.borrow(scalar),
+            gprx::kernel::DistanceSlot::Ard(a) => a.borrow(blocks),
+            _ => unreachable!("two slot kinds"),
+        })
+        .collect()
+}
+
+#[test]
+fn every_distance_leaf_matches_coordinates_in_a_sparse_model_and_round_trips() {
+    use gprx::kernel::{
+        DistanceKernel, DistanceOnly, MaternArdKernel, MaternNu, PeriodicKernel,
+        RationalQuadraticArdKernel, RationalQuadraticKernel,
+    };
+    use gprx::{DoublePrecision, FittedSgpr, FixedInducing, PersistRegistry};
+    let data = data();
+    let y = targets();
+    let (c0, c1) = (coord(0, N, 0.0), coord(1, N, 0.0));
+    let (q0, q1) = (coord(0, Q, 0.5), coord(1, Q, 0.5));
+    let periodic = PeriodicKernel::new(1.1, 2.5).expect("periodic");
+    let rq = RationalQuadraticKernel::new(0.9, 1.7).expect("rq");
+    let matern = MaternArdKernel::new(&[0.8, 1.3], MaternNu::ThreeHalves).expect("matern");
+    let rq_ard = RationalQuadraticArdKernel::new(&[1.2, 0.7], 0.9).expect("rq ard");
+    let coords_kernel = KernelSpec::from(periodic)
+        + KernelSpec::from(rq)
+        + KernelSpec::from(matern.clone()) * KernelSpec::from(rq_ard.clone());
+    let image = ScalarDistance::new();
+    let bands = ArdDistance::new(2).expect("dims");
+    let other = ArdDistance::new(2).expect("dims");
+    let dist_kernel = image.kernel(periodic)
+        + image.kernel(rq)
+        + bands.kernel(matern).expect("dims") * other.kernel(rq_ard).expect("dims");
+    let slots = dist_kernel.slots();
+    let train_blocks = [sq(&c0, &c0), sq(&c1, &c1)];
+    let train_refs: Vec<&[f64]> = train_blocks.iter().map(Vec::as_slice).collect();
+    let cross_blocks = [sq(&c0, &q0), sq(&c1, &q1)];
+    let cross_refs: Vec<&[f64]> = cross_blocks.iter().map(Vec::as_slice).collect();
+
+    let mut coords = Sgpr::new(coords_kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor(&data.x, N, 2, &y, &rows(&data.x, 2), INDUCING.len())
+        .expect("coords");
+    let mut dist = Sgpr::new(dist_kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor(
+            sources_for(&slots, &data.train, &train_refs),
+            N,
+            &y,
+            &INDUCING,
+        )
+        .expect("distances");
+    let n_params = coords.num_params();
+    let mut params = vec![0.0; n_params];
+    coords.get_params(&mut params).expect("params");
+    let (mut g_d, mut g_c) = (vec![0.0; n_params], vec![0.0; n_params]);
+    let v_d = dist
+        .value_and_gradient_into(&params, &mut g_d)
+        .expect("grad");
+    let v_c = coords
+        .value_and_gradient_into(&params, &mut g_c)
+        .expect("grad");
+    assert_close(v_d, v_c, TOL);
+    assert_slice_close(&g_d, &g_c, 1e-8);
+    let (mut h_d, mut h_c) = (
+        vec![0.0; n_params * n_params],
+        vec![0.0; n_params * n_params],
+    );
+    dist.hessian_into(&params, &mut h_d).expect("hess");
+    coords.hessian_into(&params, &mut h_c).expect("hess");
+    assert_slice_close(&h_d, &h_c, 1e-7);
+    let expect = coords.predict(&data.xs, Q, 2).expect("predict");
+    let got = dist
+        .predict(sources_for(&slots, &data.cross, &cross_refs), Q)
+        .expect("predict");
+    assert_pred(&got, &expect, 1e-8);
+
+    // The same leaves through save and load.
+    let dir = std::env::temp_dir().join(format!(
+        "gprx-distance-sparse-{}-leaves",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    dist.save(&dir).expect("save");
+    type Model = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<DistanceOnly>>;
+    let loaded = Model::load(&dir, &PersistRegistry::new()).expect("load");
+    let loaded_slots = loaded.slots();
+    let again = loaded
+        .predict(sources_for(&loaded_slots, &data.cross, &cross_refs), Q)
+        .expect("predict");
+    assert_pred(&again, &got, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A search over the same leaves, and SVGP's Adam steps through them.
+    let fitted = Sgpr::new(dist_kernel.clone(), lik())
+        .fit(
+            sources_for(&slots, &data.train, &train_refs),
+            N,
+            &y,
+            &INDUCING,
+        )
+        .expect("fit");
+    assert!(
+        fitted
+            .neg_log_marginal_likelihood()
+            .expect("nlml")
+            .is_finite()
+    );
+    let adam = Adam::new()
+        .with_batch_size(NonZeroUsize::new(4).expect("batch"))
+        .with_epochs(NonZeroU64::new(2).expect("epochs"))
+        .with_seed(3);
+    let svgp = Svgp::new(dist_kernel, lik())
+        .with_optimizer(adam)
+        .fit(
+            sources_for(&slots, &data.train, &train_refs),
+            N,
+            &y,
+            &INDUCING,
+        )
+        .expect("svgp");
+    let pred = svgp
+        .predict(sources_for(&slots, &data.cross, &cross_refs), Q)
+        .expect("predict");
+    assert!(pred.mean.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn sparse_fits_with_points_read_the_coordinates() {
+    let data = data();
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(0.9).expect("ell"))
+        * KernelSpec::from(RbfKernel::new(1.1).expect("ell"));
+    let c2 = coord(2, N, 0.0);
+    let q2 = coord(2, Q, 0.5);
+    let sgpr = Sgpr::new(kernel.clone(), lik())
+        .fit([image.borrow(&data.train)], N, &c2, 1, &y, &INDUCING)
+        .expect("sgpr");
+    assert_eq!(sgpr.inducing(), &INDUCING);
+    let pred = sgpr
+        .predict([image.borrow(&data.cross)], &q2, Q, 1)
+        .expect("predict");
+    assert!(pred.mean.iter().all(|v| v.is_finite()));
+    let adam = Adam::new()
+        .with_batch_size(NonZeroUsize::new(4).expect("batch"))
+        .with_epochs(NonZeroU64::new(2).expect("epochs"))
+        .with_seed(3);
+    let svgp = Svgp::new(kernel, lik())
+        .with_optimizer(adam)
+        .fit([image.borrow(&data.train)], N, &c2, 1, &y, &INDUCING)
+        .expect("svgp");
+    let pred = svgp
+        .predict([image.borrow(&data.cross)], &q2, Q, 1)
+        .expect("predict");
+    assert!(pred.mean.iter().all(|v| v.is_finite()));
+}

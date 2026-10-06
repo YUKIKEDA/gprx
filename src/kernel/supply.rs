@@ -920,4 +920,37 @@ mod tests {
             })
         ));
     }
+
+    struct Zeros;
+
+    impl DistanceFill for Zeros {
+        fn fill(&self, _n_rows: usize, _n_cols: usize, out: &mut [f64]) {
+            out.fill(0.0);
+        }
+    }
+
+    #[test]
+    fn sources_and_kernels_describe_themselves() {
+        let a = ScalarDistance::default();
+        let b = ArdDistance::new(2).expect("dims");
+        let (b0, b1) = ([0.0, 1.0], [0.0, 4.0]);
+        let shown = [
+            format!("{:?}", a.from_slice(&[0.0])),
+            format!("{:?}", b.from_slices(&[&b0, &b1])),
+            format!("{:?}", b.fill(&Zeros)),
+        ];
+        assert!(shown[0].contains("1 values"));
+        assert!(shown[1].contains("2 blocks"));
+        assert!(shown[2].contains("fill"));
+        let rbf = RbfKernel::new(1.0).expect("ell");
+        let k = a.kernel(rbf);
+        assert_eq!(k.clone(), k);
+        assert!(format!("{k:?}").starts_with("DistanceKernel"));
+        assert_eq!(k.parameter_bindings().len(), k.num_params());
+        // A coordinate kernel on the left makes a `WithPoints` kernel too.
+        let mixed: DistanceKernel<WithPoints> = KernelSpec::from(rbf) * k.clone();
+        assert_eq!(mixed.slots(), k.slots());
+        let summed: DistanceKernel<WithPoints> = KernelSpec::from(rbf) + k;
+        assert_eq!(summed.num_params(), 2);
+    }
 }
