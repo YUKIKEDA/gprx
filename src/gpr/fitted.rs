@@ -14,14 +14,14 @@ use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     DistanceKernel, DistanceSlot, DistanceSource, Fills, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, TrainSources, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, spec_slots,
 };
-use crate::transform::IdentityInput;
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::persist::{self, PersistedModel};
 use crate::precision::{DoublePrecision, GpScalar, StoredFactor};
+use crate::transform::IdentityInput;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -197,32 +197,32 @@ where
         };
         Ok((
             Self {
-            core: GprCore {
-                kernel: gpr.kernel,
-                compiled,
-                likelihood: gpr.likelihood,
-                x_unfitted: gpr.x_transform,
-                y_unfitted: gpr.y_transform,
-                x_transform: x_fitted,
-                y_transform: y_fitted,
-                policies: gpr.policies,
-                query: QueryWorkspace::new(),
-                x_obs: x.to_vec(),
-                y_obs: y.to_vec(),
-                x: pack_points(&x_buf, n_rows, n_cols),
-                y_train: y_buf,
-                factor_alpha: vec![P::Storage::from_f64(0.0); n_rows],
-                alpha: vec![P::Refine::from_f64(0.0); n_rows],
-                x_cast: P::Storage::empty_cols(),
-                y_cast: P::Storage::empty_rows(),
-                sources,
-                n: n_rows,
-                d: n_cols,
+                core: GprCore {
+                    kernel: gpr.kernel,
+                    compiled,
+                    likelihood: gpr.likelihood,
+                    x_unfitted: gpr.x_transform,
+                    y_unfitted: gpr.y_transform,
+                    x_transform: x_fitted,
+                    y_transform: y_fitted,
+                    policies: gpr.policies,
+                    query: QueryWorkspace::new(),
+                    x_obs: x.to_vec(),
+                    y_obs: y.to_vec(),
+                    x: pack_points(&x_buf, n_rows, n_cols),
+                    y_train: y_buf,
+                    factor_alpha: vec![P::Storage::from_f64(0.0); n_rows],
+                    alpha: vec![P::Refine::from_f64(0.0); n_rows],
+                    x_cast: P::Storage::empty_cols(),
+                    y_cast: P::Storage::empty_rows(),
+                    sources,
+                    n: n_rows,
+                    d: n_cols,
+                },
+                optimizer: gpr.optimizer,
+                store: LltStore::new(workspace),
+                _kernel: PhantomData,
             },
-            optimizer: gpr.optimizer,
-            store: LltStore::new(workspace),
-            _kernel: PhantomData,
-        },
             fills,
         ))
     }
@@ -1077,9 +1077,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         self.fit_view().refactor()
     }
 
-    pub(crate) fn into_online_preserving_factor(
-        self,
-    ) -> Result<OnlineGpr<Fixed, P, K>, GprError> {
+    pub(crate) fn into_online_preserving_factor(self) -> Result<OnlineGpr<Fixed, P, K>, GprError> {
         let n = self.core.n;
         let mut workspace = LdltStore::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
@@ -1090,7 +1088,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
     }
 }
 
-impl<P: GpScalar> FittedGpr<Fixed, P> {
+impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
     pub(crate) fn from_persisted(mut parts: PersistedModel<P>) -> Result<Self, GprError> {
         let n = parts.y_obs.len();
         if n == 0 {
@@ -1110,9 +1108,13 @@ impl<P: GpScalar> FittedGpr<Fixed, P> {
             ));
         }
         let mut x_buf = parts.x_obs.clone();
-        parts.x_transform.apply(&mut x_buf, n, d)?;
+        if d > 0 {
+            parts.x_transform.apply(&mut x_buf, n, d)?;
+        }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
+        let (sources, _) =
+            bind_training::<P::Storage>(&parts.kernel, std::mem::take(&mut parts.sources), n)?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         let mut workspace = fit_buffers::<P>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
@@ -1148,7 +1150,7 @@ impl<P: GpScalar> FittedGpr<Fixed, P> {
                 alpha: parts.alpha,
                 x_cast: P::Storage::empty_cols(),
                 y_cast: P::Storage::empty_rows(),
-                sources: TrainSources::empty(),
+                sources,
                 n,
                 d,
             },

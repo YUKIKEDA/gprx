@@ -377,7 +377,10 @@ mod sealed {
         fn lengthscale_count(&self) -> usize;
     }
 
-    pub trait Points {}
+    pub trait Points {
+        /// Whether the kernel has coordinate leaves that read `x`.
+        const POINTS: bool;
+    }
 
     pub trait Model: Sized {
         fn into_spec(self) -> KernelSpec;
@@ -479,8 +482,17 @@ pub struct WithPoints;
 /// See the example on [`DistanceKernel`].
 pub trait PointUse: sealed::Points + Send + Sync + 'static {}
 
-impl sealed::Points for DistanceOnly {}
-impl sealed::Points for WithPoints {}
+impl sealed::Points for DistanceOnly {
+    const POINTS: bool = false;
+}
+impl sealed::Points for WithPoints {
+    const POINTS: bool = true;
+}
+/// Whether a kernel of marker `C` has coordinate leaves that read `x`.
+pub(crate) fn reads_points<C: PointUse>() -> bool {
+    <C as sealed::Points>::POINTS
+}
+
 impl PointUse for DistanceOnly {}
 impl PointUse for WithPoints {}
 
@@ -637,6 +649,7 @@ impl<C: PointUse> DistanceKernel<C> {
         spec_slots(&self.spec)
     }
 
+    #[cfg(test)]
     pub(crate) fn spec(&self) -> &KernelSpec {
         &self.spec
     }
@@ -659,18 +672,6 @@ fn collect_slots(spec: &KernelSpec, out: &mut Vec<DistanceSlot>) {
         KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
             collect_slots(left, out);
             collect_slots(right, out);
-        }
-        _ => {}
-    }
-}
-
-/// Rewrites every slot id of `spec` through `map` (a loaded model's fresh ids).
-pub(crate) fn remap_slots(spec: &mut KernelSpec, map: &dyn Fn(SlotId) -> SlotId) {
-    match spec {
-        KernelSpec::Supplied(leaf) => leaf.slot = map(leaf.slot),
-        KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
-            remap_slots(left, map);
-            remap_slots(right, map);
         }
         _ => {}
     }
@@ -883,7 +884,10 @@ mod tests {
             * b.kernel(RbfArdKernel::new(&[1.0, 2.0]).expect("ell"))
                 .expect("dims")
             + a.kernel(MaternKernel::new(1.0, crate::kernel::MaternNu::FiveHalves).expect("ell"));
-        assert_eq!(k.slots(), vec![DistanceSlot::Scalar(a), DistanceSlot::Ard(b)]);
+        assert_eq!(
+            k.slots(),
+            vec![DistanceSlot::Scalar(a), DistanceSlot::Ard(b)]
+        );
         assert_eq!(k.num_params(), 4);
     }
 

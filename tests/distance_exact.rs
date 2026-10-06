@@ -46,6 +46,7 @@ fn targets() -> Vec<f64> {
     (0..N).map(|i| (i as f64 * 0.7).cos()).collect()
 }
 
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn lik() -> GaussianLikelihood {
     GaussianLikelihood::new(0.05).expect("noise")
 }
@@ -193,14 +194,11 @@ fn two_slots_read_their_own_supplies_and_one_slot_twice_reads_one() {
     let (q0, q1) = (coord(0, M, 0.5), coord(1, M, 0.5));
     let y = targets();
     let (a, b) = (ScalarDistance::new(), ScalarDistance::new());
-    let product = a.kernel(RbfKernel::new(0.7).expect("ell")) * b.kernel(RbfKernel::new(1.3).expect("ell"));
+    let product =
+        a.kernel(RbfKernel::new(0.7).expect("ell")) * b.kernel(RbfKernel::new(1.3).expect("ell"));
     let model = Gpr::new(product, lik())
         .with_optimizer(Fixed)
-        .factor(
-            [b.from_vec(sq(&c1, &c1)), a.from_vec(sq(&c0, &c0))],
-            N,
-            &y,
-        )
+        .factor([b.from_vec(sq(&c1, &c1)), a.from_vec(sq(&c0, &c0))], N, &y)
         .expect("product");
     let reference = Gpr::new(
         KernelSpec::from(RbfArdKernel::new(&[0.7, 1.3]).expect("ell")),
@@ -232,20 +230,22 @@ fn two_slots_read_their_own_supplies_and_one_slot_twice_reads_one() {
         .with_optimizer(Fixed)
         .factor([image.from_slice(&sq(&c0, &c0))], N, &y)
         .expect("sum");
-    let got = fitted.predict([image.borrow(&sq(&c0, &q0))], M).expect("predict");
+    let got = fitted
+        .predict([image.borrow(&sq(&c0, &q0))], M)
+        .expect("predict");
     let expect = reference.predict(&q0, M, 1).expect("predict");
     assert_pred(&got, &expect, TOL);
     // Two sources for one slot, a missing slot, or a foreign slot.
-    let twice = Gpr::new(
-        image.kernel(RbfKernel::new(1.0).expect("ell")),
-        lik(),
-    )
-    .with_optimizer(Fixed)
-    .factor(
-        [image.from_slice(&sq(&c0, &c0)), image.from_slice(&sq(&c0, &c0))],
-        N,
-        &y,
-    );
+    let twice = Gpr::new(image.kernel(RbfKernel::new(1.0).expect("ell")), lik())
+        .with_optimizer(Fixed)
+        .factor(
+            [
+                image.from_slice(&sq(&c0, &c0)),
+                image.from_slice(&sq(&c0, &c0)),
+            ],
+            N,
+            &y,
+        );
     assert!(matches!(twice, Err((_, GprError::LengthMismatch { .. }))));
     let foreign = ScalarDistance::new();
     let wrong = fitted.predict([foreign.borrow(&sq(&c0, &q0))], M);
@@ -288,19 +288,44 @@ fn a_fill_matches_the_same_table_and_squares_are_checked() {
             trainer = trainer.with_prefer_memory();
         }
         let fill = trainer
-            .fit([image.fill(&Pairs { rows: &c0, cols: &c0 })], N, &y)
+            .fit(
+                [image.fill(&Pairs {
+                    rows: &c0,
+                    cols: &c0,
+                })],
+                N,
+                &y,
+            )
             .expect("fill");
         if policy {
             assert_eq!(fill.distance_cache_policy(), DistanceCachePolicy::Uncached);
         }
         let by_fill = fill
-            .predict([image.fill(&Pairs { rows: &c0, cols: &q0 })], M)
+            .predict(
+                [image.fill(&Pairs {
+                    rows: &c0,
+                    cols: &q0,
+                })],
+                M,
+            )
             .expect("predict");
-        let by_table = fill.predict([image.borrow(&sq(&c0, &q0))], M).expect("predict");
+        let by_table = fill
+            .predict([image.borrow(&sq(&c0, &q0))], M)
+            .expect("predict");
         assert_pred(&by_fill, &by_table, 0.0);
     }
-    let a = table.predict([image.fill(&Pairs { rows: &c0, cols: &q0 })], M).expect("fill");
-    let b = table.predict([image.borrow(&sq(&c0, &q0))], M).expect("table");
+    let a = table
+        .predict(
+            [image.fill(&Pairs {
+                rows: &c0,
+                cols: &q0,
+            })],
+            M,
+        )
+        .expect("fill");
+    let b = table
+        .predict([image.borrow(&sq(&c0, &q0))], M)
+        .expect("table");
     assert_pred(&a, &b, 0.0);
     let mut bad = sq(&c0, &c0);
     bad[0] = 0.5;
@@ -338,7 +363,8 @@ fn online_inserts_match_a_fit_on_the_whole_matrix() {
     let q0 = coord(0, M, 0.5);
     let y_all: Vec<f64> = (0..N + 2).map(|i| (i as f64 * 0.7).cos()).collect();
     let image = ScalarDistance::new();
-    let kernel = ConstantKernel::new(1.5).expect("c") * image.kernel(RbfKernel::new(0.8).expect("ell"));
+    let kernel =
+        ConstantKernel::new(1.5).expect("c") * image.kernel(RbfKernel::new(0.8).expect("ell"));
     let first = &all[..N];
     let fitted = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
@@ -431,11 +457,16 @@ fn single_precision_converts_the_supplied_distances() {
     let image = ScalarDistance::new();
     let bands = ArdDistance::new(1).expect("dims");
     let kernel = image.kernel(RbfKernel::new(1.0).expect("ell"))
-        * bands.kernel(RbfArdKernel::new(&[2.0]).expect("ell")).expect("dims");
+        * bands
+            .kernel(RbfArdKernel::new(&[2.0]).expect("ell"))
+            .expect("dims");
     let double = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
         .factor(
-            [image.from_slice(&sq(&c0, &c0)), bands.from_vecs(vec![sq(&c0, &c0)])],
+            [
+                image.from_slice(&sq(&c0, &c0)),
+                bands.from_vecs(vec![sq(&c0, &c0)]),
+            ],
             N,
             &y,
         )
@@ -444,7 +475,10 @@ fn single_precision_converts_the_supplied_distances() {
         .with_precision::<SinglePrecision>()
         .with_optimizer(Fixed)
         .factor(
-            [image.from_slice(&sq(&c0, &c0)), bands.from_vecs(vec![sq(&c0, &c0)])],
+            [
+                image.from_slice(&sq(&c0, &c0)),
+                bands.from_vecs(vec![sq(&c0, &c0)]),
+            ],
             N,
             &y,
         )
@@ -488,7 +522,9 @@ fn mixed_precision_refines_on_the_supplied_distances() {
         .expect("reevaluate");
     for model_pred in [
         promote.predict([image.borrow(&cross)], M).expect("promote"),
-        reevaluate.predict([image.borrow(&cross)], M).expect("reevaluate"),
+        reevaluate
+            .predict([image.borrow(&cross)], M)
+            .expect("reevaluate"),
     ] {
         assert_slice_close(&model_pred.mean, &expect.mean, 1e-6);
     }

@@ -29,6 +29,17 @@ The `model` key of `config.json` says. An Exact file has no `model` key and read
 
 A directory read by the wrong loader is refused with `GprError::PersistFailed` (`kind: WrongModel`), and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too.
 
+A model of a `DistanceKernel` (a kernel with a `distance` leaf, §5.1) uses the same `model` values and adds its training squares (§6.5). The `Loaded*` loaders refuse it with `WrongModel`. It is read by the typed `load` of the model it was saved from:
+
+| `model` | Loaded by |
+| --- | --- |
+| `exact`, `factor_kind: "llt"` | `FittedGpr::<Fixed, P, DistanceKernel<C>>::load` |
+| `exact`, `factor_kind: "ldlt"` | `OnlineGpr::<Fixed, P, DistanceKernel<C>>::load` |
+| `sgpr` | `FittedSgpr::<Fixed, FixedInducing, P, DistanceKernel<C>>::load` |
+| `svgp` | `FittedSvgp::<P, DistanceKernel<C>>::load` |
+
+`P` must be the saved precision. `C` is `DistanceOnly` when `d` is `0` and `WithPoints` when it is not. Another `P` or `C`, the other `factor_kind`, or a kernel with no `distance` leaf is `WrongModel`. There is no `online_sgpr` of a distance kernel.
+
 ## 3. `config.json` of an Exact model
 
 A JSON object, written pretty-printed. Unknown keys are ignored on read. "Omitted" means the writer leaves the key out when the value is the default, and the reader supplies the default.
@@ -37,7 +48,7 @@ A JSON object, written pretty-printed. Unknown keys are ignored on read. "Omitte
 | --- | --- | --- | --- |
 | `format_version` | integer | required | `1`. Checked first (§8) |
 | `n` | integer | required | Number of training points. `0` is `EmptyInput` |
-| `d` | integer | required | Number of features. `0` is `EmptyInput` |
+| `d` | integer | required | Number of features. `0` is `EmptyInput`, except for a kernel with a `distance` leaf and no coordinate leaf (§5.1) |
 | `has_factor` | bool | required | Whether `l` and `alpha` are in the tensor file (§7) |
 | `factor_kind` | `"llt"` or `"ldlt"` | required | `llt` loads a `FittedGpr`; `ldlt` loads an `OnlineGpr` |
 | `precision` | `"double"`, `"single"`, `"mixed"` | omitted when `double` | Storage and predict scalars |
@@ -95,6 +106,7 @@ Floating-point numbers are written in the shortest form that reads back to the s
 | `jitter` | The policy for factoring `K_mm` (the sparse default is adaptive: `initial` 1e-8, `multiplier` 10, `max_retries` 5, `max_jitter` 1e-3) |
 | `has_factor`, `factor_kind`, `factor_jitter`, `distance_cache` | Not written. No factor is stored (§7) |
 | `inducing_ids`, `next_inducing_id` | Added, required for `online_sgpr`, absent otherwise. `point_ids` and `next_point_id` are also required for `online_sgpr` |
+| `inducing` | Added for a kernel with a `distance` leaf, absent otherwise: array of `m` training row indices, the inducing points in order. Indices must be `< n`; repeats are allowed |
 
 `precision`, `residual`, `math`, `kernel`, `likelihood`, and the four transform keys have the same form as in §3. An example (`svgp`, same kernel, transforms, and 2 inducing points), with only the keys that differ from §3 shown in full:
 
@@ -137,6 +149,9 @@ A bounded parameter is the object `{"value": v, "lo": lo, "hi": hi}`: the value 
 | `white` | `variance` (bounded) |
 | `sum`, `product` | `left`, `right`: each a kernel |
 | `custom` | `persist_id` (string), `state` (any JSON) |
+| `distance` | `slot` (integer), `dims` (integer, absent for a scalar slot), `leaf` (a kernel) |
+
+A `distance` leaf reads supplied squared distances instead of coordinates. `slot` numbers the supplies in order of first appearance in a depth-first, left-to-right walk: the first `distance` leaf has `slot` `0`, and a later leaf of a new supply has the next number. Leaves with the same `slot` read the same supply and must agree on `dims`. Without `dims` the slot holds one `d²` per pair and `leaf` is `rbf`, `matern`, `periodic`, `rational_quadratic`, or `custom`. With `dims` the slot holds one `(Δ_k)²` per dimension and `leaf` is `rbf_ard`, `matern_ard`, or `rational_quadratic_ard` with `dims` lengthscales. Another `leaf` is `Config`. On load each `slot` gets a new handle.
 
 The format sets no depth limit on `sum` and `product` (see §8). An empty `lengthscales` array is `EmptyInput`.
 
@@ -214,7 +229,7 @@ All tensors are `F64`, whatever the model's precision (the precision is in `conf
 
 ### 6.3 What is not stored
 
-No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. They are rebuilt on load. Only the Exact factor `l` and `alpha` can be stored (§7).
+No Gram matrix, no `W`, no distance cache (the supplied squares of §6.5 are input, not cache), no `A = L⁻¹ K_mn`, no VFE system. They are rebuilt on load. Only the Exact factor `l` and `alpha` can be stored (§7).
 
 ### 6.4 The layout of `l`
 
@@ -222,6 +237,16 @@ No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. 
 
 - `factor_kind: "llt"`: the Cholesky factor `L` of `K + σn² I + factor_jitter · I`, on and below the diagonal.
 - `factor_kind: "ldlt"`: below the diagonal the unit-lower `L` of an LDLT factorization (the implicit unit diagonal is not stored); on the diagonal, `D`. The rows are in the order of `point_ids`.
+
+### 6.5 Supplied distances
+
+A model of a kernel with `distance` leaves adds one `F64` tensor per slot, whatever its precision (an `f32` model's squares are widened, and read back exactly):
+
+| Tensor | Shape | Content |
+| --- | --- | --- |
+| `d2.<k>` | `[n, n]` for a scalar slot; `[dims, n, n]` for a slot with `dims` | The training squares of slot `k`, column-major per block: block `b`, pair `(i, j)` at `b·n² + j·n + i` |
+
+On load each square must have a zero diagonal and be symmetric (`ShapeMismatch`), as at fit. A distance-only model has `d = 0`: `x` is `[n, 0]`, and a sparse model's `z` and `z_train` are `[m, 0]`. With coordinate leaves `z` holds the rows `inducing` of `x`.
 
 ## 7. `save` and `save_with_factor`; what load rebuilds
 
@@ -233,6 +258,8 @@ No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. 
 
 For `ldlt` and `online_sgpr`, the saved ids are restored, so the next `insert` returns the id it would have returned before `save`.
 
+A model of a `distance` kernel writes `d2.<k>` (§6.5) with both calls, and load reads the squares into the model as a fit does: the Exact factor (stored or rebuilt) and the sparse `K_mm` and `K_mn` read them, a sparse model through the rows `inducing`. The tests compare the predictions of a saved-then-loaded distance model with the original exactly (`tests/distance_persist.rs`).
+
 On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positive diagonal; every tensor must have the shape and dtype the config implies. The tests compare predictions of a saved-then-loaded Sparse or SVGP model with the original bit for bit (`tests/sparse_persist.rs`).
 
 ## 8. Versions and errors
@@ -243,7 +270,8 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 | --- | --- |
 | File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
-| `n`, `d`, or (sparse) `m` is `0`; empty `lengthscales` | `GprError::EmptyInput` |
+| `n` or (sparse) `m` is `0`; `d` is `0` for a kernel without a `distance` leaf; empty `lengthscales` | `GprError::EmptyInput` |
+| A saved training square with a non-zero diagonal or not symmetric | `GprError::ShapeMismatch` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
 
 Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. The reader checks shapes and dtypes, that every stored tensor is finite (a `NaN` or `±∞` fails with `PersistFailed`), and, for `q`, finiteness and triangularity.

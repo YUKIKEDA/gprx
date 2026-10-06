@@ -51,6 +51,7 @@ pub(crate) struct MixedKernelViews<'a, T = f64> {
     pub(crate) slots: Option<&'a dyn SquareSlots<T>>,
 }
 
+#[cfg(test)]
 impl<'a, T> MixedKernelViews<'a, T> {
     pub(crate) fn new(dist: MatRef<'a, T>, x: MatRef<'a, T>) -> Self {
         Self {

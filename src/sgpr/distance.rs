@@ -15,6 +15,9 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use super::factor::assemble_fitted;
 use super::{FittedSgpr, FixedInducing, InducingLayout, Sgpr, SgprObjective};
 
+/// A fitted SGPR of a distance kernel of marker `C`.
+type DistanceSgpr<O, P, C> = FittedSgpr<O, FixedInducing, P, DistanceKernel<C>>;
+
 impl<O, P: GpScalar, K: ModelKernel> Sgpr<O, FixedInducing, P, K> {
     /// Assembles the VFE system of `core` and searches `θ`.
     #[allow(clippy::result_large_err)]
@@ -113,8 +116,7 @@ where
         n: usize,
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<O, FixedInducing, P, DistanceKernel<DistanceOnly>>, (Self, GprError)>
-    {
+    ) -> Result<DistanceSgpr<O, P, DistanceOnly>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
             &[],
@@ -160,8 +162,7 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<DistanceOnly>> {
         n: usize,
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<Fixed, FixedInducing, P, DistanceKernel<DistanceOnly>>, (Self, GprError)>
-    {
+    ) -> Result<DistanceSgpr<Fixed, P, DistanceOnly>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
             &[],
@@ -178,7 +179,8 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<DistanceOnly>> {
 impl<O, P> Sgpr<O, FixedInducing, P, DistanceKernel<WithPoints>>
 where
     P: GpScalar,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P, DistanceKernel<WithPoints>>>,
+    O: Clone
+        + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P, DistanceKernel<WithPoints>>>,
 {
     /// Factors the VFE system on supplied squared distances and the
     /// column-major `x` (`n × n_cols`) of the coordinate leaves, and searches
@@ -221,7 +223,7 @@ where
         n_cols: usize,
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<O, FixedInducing, P, DistanceKernel<WithPoints>>, (Self, GprError)> {
+    ) -> Result<DistanceSgpr<O, P, WithPoints>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
             x,
@@ -270,8 +272,7 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<WithPoints>> {
         n_cols: usize,
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<Fixed, FixedInducing, P, DistanceKernel<WithPoints>>, (Self, GprError)>
-    {
+    ) -> Result<DistanceSgpr<Fixed, P, WithPoints>, (Self, GprError)> {
         let core = SparseCore::prepare_with_distances(
             &self.spec,
             x,

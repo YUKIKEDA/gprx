@@ -47,9 +47,7 @@ impl RawSlot<'_> {
     /// Takes block 0 as an owned buffer (moved when the source owned it).
     fn into_first(self) -> Vec<f64> {
         match self.data {
-            RawData::Blocks(mut blocks) if !blocks.is_empty() => {
-                blocks.swap_remove(0).into_owned()
-            }
+            RawData::Blocks(mut blocks) if !blocks.is_empty() => blocks.swap_remove(0).into_owned(),
             RawData::Blocks(_) => Vec::new(),
             RawData::Packed(all) => all,
         }
@@ -143,7 +141,12 @@ pub(crate) fn bind<'a>(
     Ok((raw, fills))
 }
 
-fn check_slot(slot: &RawSlot<'_>, blocks: usize, len: usize, kind: BlockKind) -> Result<(), GprError> {
+fn check_slot(
+    slot: &RawSlot<'_>,
+    blocks: usize,
+    len: usize,
+    kind: BlockKind,
+) -> Result<(), GprError> {
     if let RawData::Blocks(tables) = &slot.data
         && tables.len() != blocks
     {
@@ -312,7 +315,11 @@ impl<T: KernelScalar> TrainSources<T> {
         }
         let n = self.n;
         let grow = self.cap < n + 1;
-        let new_cap = if grow { (n + 1).max(self.cap.max(1) * 2) } else { self.cap };
+        let new_cap = if grow {
+            (n + 1).max(self.cap.max(1) * 2)
+        } else {
+            self.cap
+        };
         for ((_, data), col) in self.slots.iter_mut().zip(cols) {
             match data {
                 TrainData::Scalar(square) => {
@@ -411,29 +418,30 @@ impl<T: KernelScalar> TrainSources<T> {
     }
 
     /// Each slot's blocks in `f64`, dense `n × n`, in slot order (saving).
-    pub(crate) fn dense_f64(&self) -> Vec<(SlotId, Vec<Vec<f64>>)> {
+    pub(crate) fn dense_f64(&self) -> Vec<(SlotShape, Vec<Vec<f64>>)> {
         let n = self.n;
         self.slots
             .iter()
-            .map(|(id, data)| {
-                let blocks = match data {
-                    TrainData::Scalar(square) => vec![
+            .map(|(_, data)| match data {
+                TrainData::Scalar(square) => (
+                    SlotShape::Scalar,
+                    vec![
                         (0..n * n)
                             .map(|at| square[at % n + (at / n) * self.cap].to_f64())
                             .collect(),
                     ],
-                    TrainData::Ard(cache) => {
-                        let view = cache.view();
-                        (0..view.d())
-                            .map(|k| {
-                                (0..n * n)
-                                    .map(|at| view.get(k, at % n, at / n).to_f64())
-                                    .collect()
-                            })
-                            .collect()
-                    }
-                };
-                (*id, blocks)
+                ),
+                TrainData::Ard(cache) => {
+                    let view = cache.view();
+                    let blocks = (0..view.d())
+                        .map(|k| {
+                            (0..n * n)
+                                .map(|at| view.get(k, at % n, at / n).to_f64())
+                                .collect()
+                        })
+                        .collect();
+                    (SlotShape::Ard(view.d()), blocks)
+                }
             })
             .collect()
     }
@@ -548,9 +556,14 @@ impl<T: KernelScalar> SquareSlots<T> for TrainSources<T> {
     fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>> {
         let (_, data) = self.slots.iter().find(|(id, _)| *id == slot)?;
         Some(match data {
-            TrainData::Scalar(square) => SquareSlot::Scalar(
-                MatRef::from_column_major_slice_with_stride(square, self.n, self.n, self.cap.max(1)),
-            ),
+            TrainData::Scalar(square) => {
+                SquareSlot::Scalar(MatRef::from_column_major_slice_with_stride(
+                    square,
+                    self.n,
+                    self.n,
+                    self.cap.max(1),
+                ))
+            }
             TrainData::Ard(cache) => SquareSlot::Ard(cache.view()),
         })
     }
@@ -690,12 +703,7 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
         &self.raw
     }
 
-    /// The blocks in `f64`, read in place.
-    pub(crate) fn table_f64(&self) -> RectTable<'_, f64> {
-        f64_table(&self.raw)
-    }
-
-    /// [`Self::table`] and [`Self::table_f64`] together.
+    /// [`Self::table`] and the same blocks in `f64`, read in place.
     pub(crate) fn tables(&mut self) -> (RectTable<'_, T>, RectTable<'_, f64>) {
         let Self { raw, casts } = self;
         (storage_table(raw, casts), f64_table(raw))
@@ -759,8 +767,8 @@ fn storage_table<'s, T: KernelScalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{RectSlots, ScalarDistance};
     use crate::kernel::compiled::supplied::RectSlot;
+    use crate::kernel::{RectSlots, ScalarDistance};
 
     #[test]
     fn a_borrowed_table_is_read_in_place_by_an_f64_model() {

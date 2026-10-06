@@ -1929,12 +1929,14 @@ fn failed_search_restores_the_model_from_its_parameters() {
     .with_precision::<crate::MixedPrecision>()
     .spec;
     let core = crate::sparse::SparseCore::prepare(&spec, &x, 6, 1, &y, &z, 3).expect("core");
-    let mut fitted =
-        assemble_fitted::<_, FixedInducing, crate::math::Accurate, crate::MixedPrecision, crate::kernel::KernelSpec>(
-            core,
-            FailAfterMoving,
-        )
-        .expect("assemble");
+    let mut fitted = assemble_fitted::<
+        _,
+        FixedInducing,
+        crate::math::Accurate,
+        crate::MixedPrecision,
+        crate::kernel::KernelSpec,
+    >(core, FailAfterMoving)
+    .expect("assemble");
     fitted.refresh_predict_w().expect("weights");
     let mut before = vec![0.0; fitted.num_params()];
     fitted.get_params(&mut before).expect("params");

@@ -2,6 +2,7 @@
 
 mod atomic;
 mod config;
+mod distance;
 mod kernel;
 mod registry;
 mod sparse;
@@ -300,6 +301,8 @@ pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precisio
     pub mapped: Option<MappedTensors>,
     /// Diagonal jitter the saved factor was built with.
     pub factor_jitter: f64,
+    /// The saved training squares of a distance kernel, one per slot.
+    pub sources: Vec<crate::kernel::DistanceSource<'static>>,
 }
 
 /// Writes `config.json` last, after the tensors it describes, so a save
@@ -359,6 +362,8 @@ struct ExactSave<'a> {
     x: &'a [f64],
     y: &'a [f64],
     factor: Option<PackedFactor>,
+    /// The training squares of a distance kernel (`d2.<k>`).
+    distances: Vec<distance::OwnedTensor>,
 }
 
 /// Writes the tensors, then `config.json`, of an Exact model.
@@ -402,7 +407,15 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         alpha_dtype: packed.alpha_dtype,
         alpha: packed.alpha.as_slice(),
     });
-    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs)?;
+    write_tensors(
+        dir,
+        save.x,
+        save.y,
+        save.n,
+        save.d,
+        factor_refs,
+        &save.distances,
+    )?;
     write_config(dir, &json)
 }
 
@@ -439,6 +452,7 @@ where
             x: model.x_obs(),
             y: model.y(),
             factor,
+            distances: distance::tensors(model.sources()),
         },
     )
 }
@@ -453,7 +467,10 @@ where
     K: crate::kernel::ModelKernel,
 {
     let factor = if with_factor {
-        Some(pack_saved_factor(model.ld_factor(), model.predict_alpha()?)?)
+        Some(pack_saved_factor(
+            model.ld_factor(),
+            model.predict_alpha()?,
+        )?)
     } else {
         None
     };
@@ -476,16 +493,18 @@ where
             x: model.x_obs(),
             y: model.y(),
             factor,
+            distances: distance::tensors(model.sources()),
         },
     )
 }
 
-fn apply_online_ids<O, P>(
-    online: &mut OnlineGpr<O, P>,
+fn apply_online_ids<O, P, K>(
+    online: &mut OnlineGpr<O, P, K>,
     ids: &Option<(Vec<u64>, u64)>,
 ) -> Result<(), GprError>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     let (ids, next_id) = ids
         .as_ref()
@@ -501,9 +520,11 @@ struct ExactTensors<P: crate::precision::GpScalar> {
     alpha: Option<Vec<P::Refine>>,
     owned_l: Option<faer::Mat<P::Storage>>,
     mapped: Option<MappedTensors>,
+    /// The saved training squares of the distance slots.
+    sources: Vec<crate::kernel::DistanceSource<'static>>,
 }
 
-/// Reads `x`, `y`, and the factor `α` / `L` in one open of the file.
+/// Reads `x`, `y`, the training squares of `slots`, and the factor `α` / `L` in one open of the file.
 ///
 /// An `f64` factor stays memory-mapped, so the file is mapped and the small
 /// tensors are copied out of the same map; otherwise it is read once.
@@ -512,6 +533,7 @@ fn read_exact_tensors<P: crate::precision::GpScalar>(
     n: usize,
     d: usize,
     has_factor: bool,
+    slots: &[crate::kernel::DistanceSlot],
 ) -> Result<ExactTensors<P>, GprError> {
     let storage = <P::Storage as ScalarOps>::DTYPE;
     let map_l = has_factor && storage == safetensors::Dtype::F64;
@@ -520,9 +542,10 @@ fn read_exact_tensors<P: crate::precision::GpScalar>(
     } else {
         tensors::TensorFile::read(dir)?
     };
-    let (x_obs, y_obs, alpha, owned_l) = {
+    let (x_obs, y_obs, alpha, owned_l, sources) = {
         let tensors = file.tensors()?;
         let (x_obs, y_obs) = read_xy(&tensors, n, d)?;
+        let sources = distance::read_sources(&tensors, slots, n)?;
         let alpha = if has_factor {
             Some(read_scalars::<P::Refine>(
                 &tensors,
@@ -538,7 +561,7 @@ fn read_exact_tensors<P: crate::precision::GpScalar>(
         } else {
             None
         };
-        (x_obs, y_obs, alpha, owned_l)
+        (x_obs, y_obs, alpha, owned_l, sources)
     };
     let mapped = if map_l {
         Some(file.into_mapped_l(n)?)
@@ -551,6 +574,7 @@ fn read_exact_tensors<P: crate::precision::GpScalar>(
         alpha,
         owned_l,
         mapped,
+        sources,
     })
 }
 
@@ -616,6 +640,84 @@ fn load_precision<P>(
 where
     P: crate::precision::GpScalar,
 {
+    match load_exact::<P, KernelSpec>(dir, registry, config, None)? {
+        ExactModel::Fitted(model) => Ok((variants.fitted)(*model)),
+        ExactModel::Online(model) => Ok((variants.online)(*model)),
+    }
+}
+
+/// The Exact model of a directory.
+pub(crate) enum ExactModel<P: crate::precision::GpScalar, K> {
+    Fitted(Box<FittedGpr<Fixed, P, K>>),
+    Online(Box<OnlineGpr<Fixed, P, K>>),
+}
+
+/// What a typed loader of a distance model asks for: whether its marker
+/// reads coordinates, and the loader to name for a coordinate save.
+#[derive(Clone, Copy)]
+pub(crate) struct DistanceLoad {
+    pub(crate) points: bool,
+    pub(crate) coordinate_loader: &'static str,
+}
+
+/// Decodes the saved kernel: a coordinate kernel when `distance` is `None`,
+/// else a distance kernel of the marker it names. Returns its slots.
+fn decode_kernel(
+    json: &KernelJson,
+    registry: &PersistRegistry,
+    d: usize,
+    distance: Option<DistanceLoad>,
+) -> Result<(KernelSpec, Vec<crate::kernel::DistanceSlot>), GprError> {
+    match distance {
+        None => Ok((json.clone().decode_points(registry)?, Vec::new())),
+        Some(load) => {
+            let mut slots = kernel::DecodedSlots::default();
+            let spec = json.clone().decode(registry, &mut slots)?;
+            let slots = crate::kernel::spec_slots(&spec);
+            distance::check_model(&slots, d, load.points, load.coordinate_loader)?;
+            Ok((spec, slots))
+        }
+    }
+}
+
+/// Reads an Exact directory as a model of kernel type `K`.
+pub(crate) fn load_exact_dir<P, K>(
+    dir: &Path,
+    registry: &PersistRegistry,
+    distance: DistanceLoad,
+) -> Result<ExactModel<P, K>, GprError>
+where
+    P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
+{
+    let config_path = dir.join(CONFIG_FILE);
+    let bytes = std::fs::read(&config_path)
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
+    config::parse_model(&bytes, &[config::ModelJson::Exact])?;
+    let config = config::parse_config(&bytes)?;
+    if config.persist_kind() != P::persist_kind() {
+        return Err(persist_err(
+            PersistErrorKind::WrongModel,
+            format!(
+                "the saved model has precision {:?}, not {:?}",
+                config.persist_kind(),
+                P::persist_kind()
+            ),
+        ));
+    }
+    load_exact::<P, K>(dir, registry, config, Some(distance))
+}
+
+fn load_exact<P, K>(
+    dir: &Path,
+    registry: &PersistRegistry,
+    config: ModelConfig,
+    distance: Option<DistanceLoad>,
+) -> Result<ExactModel<P, K>, GprError>
+where
+    P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
+{
     let ldlt_ids = match config.factor_kind {
         FactorKind::Ldlt => {
             let (ids, next_id) = config.online_ids()?;
@@ -623,7 +725,7 @@ where
         }
         FactorKind::Llt => None,
     };
-    let kernel = config.kernel.decode_points(registry)?;
+    let (kernel, slots) = decode_kernel(&config.kernel, registry, config.d, distance)?;
     let likelihood = config.likelihood.decode()?;
     let policies = Policies {
         distance_cache: config
@@ -644,7 +746,8 @@ where
         alpha,
         owned_l,
         mapped,
-    } = read_exact_tensors::<P>(dir, config.n, config.d, config.has_factor)?;
+        sources,
+    } = read_exact_tensors::<P>(dir, config.n, config.d, config.has_factor, &slots)?;
     if let Some(alpha) = alpha {
         let parts = PersistedModel {
             kernel,
@@ -660,27 +763,36 @@ where
             owned_l,
             mapped,
             factor_jitter: config.factor_jitter,
+            sources,
         };
         match config.factor_kind {
-            FactorKind::Llt => Ok((variants.fitted)(FittedGpr::from_persisted(parts)?)),
+            FactorKind::Llt => Ok(ExactModel::Fitted(Box::new(FittedGpr::from_persisted(
+                parts,
+            )?))),
             FactorKind::Ldlt => {
                 let mut online = OnlineGpr::from_persisted(parts)?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok((variants.online)(online))
+                Ok(ExactModel::Online(Box::new(online)))
             }
         }
     } else {
-        let fitted = crate::Gpr::<Fixed, P>::from_owned(
+        let fitted = crate::Gpr::<Fixed, P, K>::from_owned(
             kernel, likelihood, x_unfitted, y_unfitted, Fixed, policies,
         )
-        .factor(&x_obs, config.n, config.d, &y_obs)
+        .factor_input(crate::gpr::TrainInput {
+            x: &x_obs,
+            n_rows: config.n,
+            n_cols: config.d,
+            y: &y_obs,
+            sources,
+        })
         .map_err(|(_, err)| err)?;
         match config.factor_kind {
-            FactorKind::Llt => Ok((variants.fitted)(fitted)),
+            FactorKind::Llt => Ok(ExactModel::Fitted(Box::new(fitted))),
             FactorKind::Ldlt => {
                 let mut online = fitted.into_online()?;
                 apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok((variants.online)(online))
+                Ok(ExactModel::Online(Box::new(online)))
             }
         }
     }

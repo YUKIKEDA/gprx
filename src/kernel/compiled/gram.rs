@@ -138,14 +138,9 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 ),
                 None => self.grad_points_with::<M>(inputs.x, d_k, param_idx, uplo, scratch, nested),
             },
-            (CoordMode::Mixed, _) => self.grad_mixed::<M>(
-                inputs.mixed(ard),
-                d_k,
-                param_idx,
-                uplo,
-                scratch,
-                nested,
-            ),
+            (CoordMode::Mixed, _) => {
+                self.grad_mixed::<M>(inputs.mixed(ard), d_k, param_idx, uplo, scratch, nested)
+            }
             (_, None) => {
                 self.grad_points_with::<M>(inputs.x, d_k, param_idx, uplo, scratch, nested)
             }
@@ -173,24 +168,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     .hess_from_ard_cache::<M>(cache, inputs.x, d2_k, pair, uplo, scratch, nested),
                 None => self.hess_points_with::<M>(inputs.x, d2_k, pair, uplo, scratch, nested),
             },
-            (CoordMode::Mixed, _) => self.hess_mixed::<M>(
-                inputs.mixed(ard),
-                d2_k,
-                pair,
-                uplo,
-                scratch,
-                nested,
-            ),
+            (CoordMode::Mixed, _) => {
+                self.hess_mixed::<M>(inputs.mixed(ard), d2_k, pair, uplo, scratch, nested)
+            }
             (_, None) => self.hess_points_with::<M>(inputs.x, d2_k, pair, uplo, scratch, nested),
         }
     }
 
-    /// Writes the rectangular `K(x, xs)` into `out`.
-    ///
-    /// `dist` receives the train–query squared distances when the tree reads
-    /// them; `None` allocates that buffer for this call. `slots` holds the
-    /// supplied distances of the block for a distance model.
-    // Both views, the distance and output blocks, and three scratch kinds.
+    /// [`Self::eval_cross_slots`] of a coordinate tree.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_cross<M: crate::math::KernelMath>(
         &self,
@@ -205,7 +191,12 @@ impl<T: KernelScalar> CompiledKernel<T> {
         self.eval_cross_slots::<M>(x, xs, None, dist, out, scratch, nested, thread_scratch)
     }
 
-    /// [`Self::eval_cross`] with the supplied distances of the block.
+    /// Writes the rectangular `K(x, xs)` into `out`.
+    ///
+    /// `dist` receives the train–query squared distances when the tree reads
+    /// them; `None` allocates that buffer for this call. `slots` holds the
+    /// supplied distances of the block for a distance model.
+    // Both views, the supplies, the distance and output blocks, and three scratch kinds.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_cross_slots<M: crate::math::KernelMath>(
         &self,

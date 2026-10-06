@@ -22,7 +22,10 @@ impl QueryDist {
         q: usize,
     ) -> Result<Self, GprError> {
         crate::data::require_nonempty(q)?;
-        let inducing = core.dist.as_ref().map_or(&[][..], |dist| &dist.inducing[..]);
+        let inducing = core
+            .dist
+            .as_ref()
+            .map_or(&[][..], |dist| &dist.inducing[..]);
         let slots = spec_slots(&core.kernel);
         let zq = QuerySources::<f64>::bind(&slots, cross, core.n, q, BlockKind::Rect)?
             .gather_rows(inducing);
@@ -202,6 +205,7 @@ macro_rules! sparse_distance_predict {
             /// not factor.
             ///
             #[doc = $cov_doc]
+            #[allow(clippy::too_many_arguments)]
             pub fn sample<'s>(
                 &self,
                 cross: impl IntoIterator<Item = DistanceSource<'s>>,

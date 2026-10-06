@@ -10,8 +10,8 @@
 use crate::error::GprError;
 use crate::gpr::GprObjective;
 use crate::kernel::{
-    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, QuerySources,
-    RectSlots, WithPoints,
+    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, QuerySources, RectSlots,
+    WithPoints,
 };
 use crate::optimizer::{Fixed, Optimizer};
 use crate::points::PointId;
@@ -444,6 +444,7 @@ macro_rules! distance_predict {
             /// not factor.
             ///
             #[doc = $cov_doc]
+            #[allow(clippy::too_many_arguments)]
             pub fn sample<'s>(
                 &self,
                 cross: impl IntoIterator<Item = DistanceSource<'s>>,
@@ -525,7 +526,8 @@ distance_predict!(
     n_cols = 0,
     alpha = |model| model.predict_alpha(),
     predict_doc = "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].",
-    covariance_doc = "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].",
+    covariance_doc =
+        "See the example on [`OnlineGpr::insert`] of a [`DistanceKernel<DistanceOnly>`].",
 );
 
 distance_predict!(

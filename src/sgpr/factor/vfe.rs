@@ -3,6 +3,7 @@
 use super::lit;
 use crate::data::{pack_points, validate_inducing, validate_training};
 use crate::error::{CholeskyStage, GprError};
+use crate::kernel::GatheredRect;
 use crate::kernel::GramInputs;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
@@ -15,7 +16,6 @@ use crate::policy::JitterPolicy;
 use crate::precision::{F64Vfe, ModelPrecision};
 use crate::sgpr::FittedSgpr;
 use crate::sgpr::InducingLayout;
-use crate::kernel::GatheredRect;
 use crate::sparse::{
     KernelScratch, SparseCore, SparseDist, SparseScratch, rect_slots, square_slots, zx_at, zz_at,
 };

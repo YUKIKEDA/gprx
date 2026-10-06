@@ -566,7 +566,7 @@ where
 impl<P: GpScalar, K: ModelKernel> Gpr<Fixed, P, K> {
     /// [`Gpr::factor`] on any training input.
     #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
-    pub(super) fn factor_input(
+    pub(crate) fn factor_input(
         self,
         input: TrainInput<'_>,
     ) -> Result<FittedGpr<Fixed, P, K>, (Self, GprError)> {

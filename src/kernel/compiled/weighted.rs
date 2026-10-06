@@ -577,7 +577,6 @@ impl<T: KernelScalar> CompiledKernel<T> {
         };
         Ok(Some(value))
     }
-
     /// Writes `⟨weight, ∂K(x1, x2)/∂θ_p⟩_F` for every parameter into `out`.
     ///
     /// The rectangle is full, not a triangle. A product evaluates each
@@ -585,6 +584,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// [`Self::weighted_grads`] does for a square Gram. `out` is replaced.
     /// `bufs` holds [`Self::contraction_buffers`] matrices of `weight`'s shape.
     // The two point sets, the weight, the output, and three scratch kinds.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn weighted_cross_grads<M: crate::math::KernelMath>(
         &self,

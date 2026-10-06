@@ -170,6 +170,8 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     /// Exact: writes `k_*ᵀ α` for every query column into `out`.
     ///
     /// `x_query` is the transformed query, column-major `out.len() × n_cols`.
+    // The system, the query and its two supply views, the scratch, and `out`.
+    #[allow(clippy::too_many_arguments)]
     fn predict_means<M: crate::math::KernelMath>(
         kernel: &KernelSpec,
         k_storage: MatRef<'_, Self::Storage>,

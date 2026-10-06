@@ -265,6 +265,26 @@ The optimizer's parameter array is concatenated in this order:
 
 `Sgpr` with `FreeInducing` appends the column-major inducing coordinates `Z` after these (§6.1).
 
+**Supplied distances.** A leaf can read squared distances the caller supplies instead of coordinates (a geodesic, a graph distance, a distance computed elsewhere). The supply is a *slot*: `ScalarDistance` (one `d²` per pair) or `ArdDistance::new(d)` (one `(Δ_k)²` per dimension, `d ≥ 1`). `ScalarDistance::kernel` accepts RBF, Matérn, Periodic, RQ, or a `KernelTerm` (sealed `ScalarDistanceLeaf`); `ArdDistance::kernel` accepts the ARD leaves whose lengthscale count is `d` (sealed `ArdDistanceLeaf`), else `DimensionMismatch`. Constant, White, and Linear stay `KernelSpec` leaves. Leaves of the same slot read one supply: a slot is a process-unique id, so `slots()` lists each once, in depth-first order of first use.
+
+The distance expression is its own type, `DistanceKernel<C>`, not a `KernelSpec` arm a user can build: a coordinate model must not receive a tree it cannot evaluate. `C` is `DistanceOnly` or `WithPoints` and decides the signatures:
+
+| Operation | Result |
+| --- | --- |
+| `DistanceKernel<A> ⊕ DistanceKernel<B>` (`+`, `*`) | `DistanceKernel<A ∨ B>` (`JoinPoints`) |
+| `DistanceKernel<C> ⊕ ConstantKernel` / `WhiteKernel`, either order | `DistanceKernel<C>` |
+| `DistanceKernel<C> ⊕ KernelSpec`, either order | `DistanceKernel<WithPoints>` |
+
+`Gpr::new`, `Sgpr::new`, and `Svgp::new` take a sealed `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`), carried as a type parameter `K` of the trainer and the fitted model (default `KernelSpec`). Coordinate-only methods (`kernel()`, the coordinate `fit` / `predict`, `FreeInducing`, `with_inducing`) are on `K = KernelSpec`; `d`, `x`, `z`, and `with_input_transform` on `PointKernel` (`KernelSpec` and `DistanceKernel<WithPoints>`); `to_kernel`, `slots`, and the distance signatures on `DistanceKernel<C>`. Inside, the tree is still one `KernelSpec` with a crate-hidden `Supplied` arm, and `CompiledKernel` has the matching arm; its coordinate mode is `Mixed`, and the evaluator looks the slot up in the call's supply views (square: dense `n × n` or packed ARD lower triangles; rectangle: dense blocks).
+
+| Model | `fit` / `factor` | `predict` family | covariance / `sample` |
+| --- | --- | --- | --- |
+| Exact, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
+| Exact, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+| `Sgpr` / `Svgp` | as Exact, plus `inducing: &[usize]` | as Exact | as Exact |
+
+`OnlineGpr::insert(sources[, x_new], y_new)` takes one `n × 1` column per slot; the library writes the new diagonal zero. The sparse models name the inducing points by training index and support `FixedInducing` only (no coordinates to move). A distance `Sgpr` has no `into_online`: an inducing point is a training index, and `delete` would break that identity.
+
 ### 5.2 Distance cache and cache policy
 
 Training coordinates do not change during a fit, so the pairwise distances are computed once and reused while the kernel is rebuilt at each `θ`.
@@ -283,6 +303,8 @@ struct DistCache<S> {
 ```
 
 The stored intermediates are the squared Euclidean distance (isotropic RBF / Matérn / RQ / Periodic / a user leaf) and the raw per-dimension `(Δx_d)²` (ARD leaves). An `r²` that already includes `ℓ` is not stored. The ARD layout keeps only the lower triangle (diagonal included) of each dimension, packed column by column: `d · n(n+1)/2` values, dimension `k` after the first `k · n(n+1)/2`, column `j` holding rows `j..n` contiguously. A reader of another triangle reads the pair `(j, i)` for `(i, j)`. Both slots are filled on first use and only when the compiled kernel reads them: `RBF + White` and `Constant * RBF` fill `dist`; standalone Linear / Constant / White fill nothing, and their policy is kept but unused. A train × query or LOO cache does not exist.
+
+**Supplied training distances.** A model of a `DistanceKernel` owns its training `d²` (`TrainSources`), stored in the storage scalar: an `f32` model converts when it stores, an `f64` model keeps a moved `Vec` (`from_vec`) without a copy. A scalar slot is dense column-major `dist[i + j·n]`; an ARD slot is packed into lower triangles as the `(Δx_d)²` cache above. The exact store keeps a leading-dimension capacity so `insert` grows it by doubling. A source is `from_vec` / `from_vecs` (moved), `from_slice` / `from_slices` (copied at the call), `borrow` (read in place by `predict`, copied by `fit` and `insert`), or `fill(&dyn DistanceFill)` (`fill(n_rows, n_cols, out)` writes `out[i + j·n_rows]`, an ARD fill its `d` blocks one after another). Under `Uncached` a training fill is called again for each factor of a search, into the same store; a table is stored once whatever the policy. A training or query square with a non-zero diagonal or not symmetric is `ShapeMismatch`; a missing, duplicate, or unknown slot is `LengthMismatch`. Exact covariance and `sample` read the query square through the rectangle path. A sparse model keeps the training squares in `f64` next to its `f64` `X`, gathers the `Z × Z` and `Z × X` blocks of its inducing indices once, and casts them per evaluation; its predict gathers the inducing rows of the train × query block (`m × q`) and copies the query square, so the sparse predict does not read the caller's table in place.
 
 The policy is a runtime enum because no combination with the other policies is illegal (§6.3). An `(n,n,d)` tensor is `n²×d×sizeof(T)` bytes; `K` itself is `n²×sizeof(T)` (about 200MB at n=5000, f64), and an ARD cache is `d` times that. The caller chooses `Cached` or `Uncached`. Automatic selection from `n`, `d`, and a memory budget is intentionally out of scope.
 

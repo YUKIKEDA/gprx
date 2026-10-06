@@ -138,7 +138,7 @@ What the picture shows:
 Held at this commit (`use crate::…` outside `#[cfg(test)]`):
 
 1. **Models do not import one another.** `gpr`, `sgpr`, and `svgp` have no import among them. Shared code goes down a layer (`sparse` for the two sparse families; the building blocks for all three).
-2. **`persist` is the one module that imports models**, in `persist/mod.rs` (Exact) and `persist/sparse.rs` (Sparse, SVGP). It is the only place that names all the concrete model types, so `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` can hold one variant per precision.
+2. **`persist` is the one module that imports models**, in `persist/mod.rs` (Exact), `persist/sparse.rs` (Sparse, SVGP), and `persist/distance.rs` (the typed `load` of each model of a `DistanceKernel`). It is the only place that names all the concrete model types, so `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` can hold one variant per precision.
 3. **The crossing is narrow the other way.** Models call `persist::save_*`, and `gpr` also uses `PersistedModel` (the parts a loaded Exact model is rebuilt from) and `MappedTensors` (the memory-mapped `L`). `gpr`, `sgpr`, and `points` use `persist_err` to build the error. Nothing else of `persist` is used by a model.
 4. **`optimizer`, `objective`, `precision`, and `transform` do not import a model.** The unit tests of `optimizer` build a `Gpr`; that is test code only.
 5. **`Workspace`, `QueryWorkspace`, `LltStore`, `LdltStore`, and faer types are crate-private** ([layout rule](../.cursor/rules/layout.mdc)).
@@ -154,9 +154,9 @@ The three families follow the same typestate: a trainer, `fit` (or `factor`), a 
 
 | Family | Trainer | Fitted | Online | Loaded from disk |
 | --- | --- | --- | --- | --- |
-| Exact | `Gpr<O, P>` | `FittedGpr<O, P>` | `OnlineGpr<O, P>` (`insert`, `delete`) | `LoadedGpr` (8 variants) |
-| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants) |
-| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | none | `LoadedSvgp` (4 variants) |
+| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>` (`insert`, `delete`) | `LoadedGpr` (8 variants); a distance model: `FittedGpr::load`, `OnlineGpr::load` |
+| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`); coordinate kernels only | `LoadedSgpr` (8 variants); a distance model: `FittedSgpr::load` |
+| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | none | `LoadedSvgp` (4 variants); a distance model: `FittedSvgp::load` |
 
 The type parameters:
 
@@ -164,7 +164,8 @@ The type parameters:
 | --- | --- | --- |
 | `O` | The optimizer slot | `Lbfgs` (default for Exact and Sparse), `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, a user `Optimizer`; `Fixed` for `factor` only; `Adam` for `Svgp::fit` (`Svgp` defaults to `Fixed`) |
 | `P` | Precision, a compile-time choice | `DoublePrecision` (default), `SinglePrecision`, `MixedPrecision` (residual `PromoteStorage` or `ReevaluateKernel`) |
-| `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`) |
+| `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`; coordinate kernels only) |
+| `K` | What the kernel reads ([design §5.1](design.md#51-spec-versus-evaluator-and-precision-generics)) | `KernelSpec` (default; coordinates), `DistanceKernel<DistanceOnly>` (supplied distances only), `DistanceKernel<WithPoints>` (supplied distances and coordinates) |
 
 ## 6. How a model moves between states
 

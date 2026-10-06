@@ -14,9 +14,7 @@ use faer::{Mat, MatMut, MatRef};
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
 use crate::kernel::KernelSpec;
-use crate::kernel::{
-    BlockKind, DistanceSource, bind_sources, spec_slots,
-};
+use crate::kernel::{BlockKind, DistanceSource, bind_sources, spec_slots};
 use crate::kernel::{
     CompiledKernel, CrossViews, DiagAccum, GatheredRect, GramInputs, KernelScalar, RectSlots,
     RectTable, SquareSlots, TrainSources, Triangle, WeightedWalk,
@@ -127,6 +125,31 @@ pub(crate) struct SparseDist {
 }
 
 impl SparseDist {
+    /// Binds the `n × n` training squares `sources` of `kernel`'s slots and
+    /// gathers the blocks of the training points `inducing`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `inducing` is empty,
+    /// [`GprError::IndexOutOfRange`] for an index `≥ n`, and the errors of
+    /// binding the sources.
+    pub(crate) fn bind(
+        kernel: &KernelSpec,
+        sources: Vec<DistanceSource<'_>>,
+        n: usize,
+        inducing: &[usize],
+    ) -> Result<Self, GprError> {
+        crate::data::require_nonempty(inducing.len())?;
+        if let Some(&bad) = inducing.iter().find(|&&i| i >= n) {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("inducing index {bad} is out of range for n={n}"),
+            });
+        }
+        let slots = spec_slots(kernel);
+        let (raw, _) = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
+        Self::new(TrainSources::<f64>::from_raw(raw, n)?, inducing.to_vec())
+    }
+
     /// Gathers the blocks of the inducing points `inducing` from `train`.
     pub(crate) fn new(train: TrainSources<f64>, inducing: Vec<usize>) -> Result<Self, GprError> {
         let all: Vec<usize> = (0..train.n()).collect();
@@ -151,7 +174,9 @@ pub(crate) struct QueryDist {
 }
 
 /// `blocks` at the scalar `T`, as a table.
-pub(crate) fn cast_blocks<T: KernelScalar>(blocks: Option<&GatheredRect<f64>>) -> Option<GatheredRect<T>> {
+pub(crate) fn cast_blocks<T: KernelScalar>(
+    blocks: Option<&GatheredRect<f64>>,
+) -> Option<GatheredRect<T>> {
     blocks.map(GatheredRect::cast::<T>)
 }
 
@@ -328,15 +353,7 @@ impl SparseCore {
             crate::data::require_count(y.len(), n_rows, "targets")?;
             crate::data::require_finite(y)?;
         }
-        crate::data::require_nonempty(inducing.len())?;
-        if let Some(&bad) = inducing.iter().find(|&&i| i >= n_rows) {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("inducing index {bad} is out of range for n={n_rows}"),
-            });
-        }
-        let slots = spec_slots(&spec.kernel);
-        let (raw, _) = bind_sources(&slots, sources, n_rows, n_rows, BlockKind::Square)?;
-        let train = TrainSources::<f64>::from_raw(raw, n_rows)?;
+        let dist = SparseDist::bind(&spec.kernel, sources, n_rows, inducing)?;
         let m = inducing.len();
         let mut z = vec![0.0; m * n_cols];
         for dim in 0..n_cols {
@@ -371,7 +388,7 @@ impl SparseCore {
                 d: 0,
             }
         };
-        core.dist = Some(SparseDist::new(train, inducing.to_vec())?);
+        core.dist = Some(dist);
         Ok(core)
     }
 
@@ -398,11 +415,19 @@ impl SparseCore {
             m,
             d,
         } = parts;
-        validate_training(&x_obs, n, d, &y_obs)?;
-        validate_inducing(&z_obs, m, d)?;
-        validate_inducing(&z_train, m, d)?;
         let mut x_train = x_obs.clone();
-        x_transform.apply(&mut x_train, n, d)?;
+        if d > 0 {
+            validate_training(&x_obs, n, d, &y_obs)?;
+            validate_inducing(&z_obs, m, d)?;
+            validate_inducing(&z_train, m, d)?;
+            x_transform.apply(&mut x_train, n, d)?;
+        } else {
+            // A distance kernel without coordinate leaves.
+            crate::data::require_nonempty(n)?;
+            crate::data::require_nonempty(m)?;
+            crate::data::require_count(y_obs.len(), n, "targets")?;
+            crate::data::require_finite(&y_obs)?;
+        }
         let mut y_train = y_obs.clone();
         y_transform.transform(&mut y_train)?;
         Ok(Self {
@@ -668,11 +693,18 @@ macro_rules! sparse_kernel_accessor {
 macro_rules! sparse_distance_accessors {
     () => {
         /// Returns the training points that are the inducing points.
+        ///
+        /// See the distance `fit` examples of [`crate::Sgpr`] and [`crate::Svgp`].
         pub fn inducing(&self) -> &[usize] {
-            self.core.dist.as_ref().map_or(&[][..], |dist| &dist.inducing[..])
+            self.core
+                .dist
+                .as_ref()
+                .map_or(&[][..], |dist| &dist.inducing[..])
         }
 
         /// Returns a copy of the kernel whose hyperparameters this model owns.
+        ///
+        /// See the distance `fit` examples of [`crate::Sgpr`] and [`crate::Svgp`].
         pub fn to_kernel(&self) -> $crate::kernel::DistanceKernel<C> {
             <$crate::kernel::DistanceKernel<C> as $crate::kernel::ModelKernelParts>::from_spec(
                 self.core.kernel.clone(),
@@ -681,6 +713,8 @@ macro_rules! sparse_distance_accessors {
 
         /// Returns the slots of the kernel, in the order of
         /// [`DistanceKernel::slots`](crate::kernel::DistanceKernel::slots).
+        ///
+        /// See the distance `fit` examples of [`crate::Sgpr`] and [`crate::Svgp`].
         pub fn slots(&self) -> Vec<$crate::kernel::DistanceSlot> {
             $crate::kernel::spec_slots(&self.core.kernel)
         }

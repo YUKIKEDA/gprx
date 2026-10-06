@@ -3,14 +3,14 @@
 use super::lit;
 use crate::error::GprError;
 use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle};
+use crate::kernel::{GatheredRect, TrainSources};
 use crate::kernel::{GramInputs, ScalarOps};
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::{DoublePrecision, ModelPrecision};
-use crate::kernel::{GatheredRect, TrainSources};
 use crate::sparse::{
-    F64System, QueryDist, cast_blocks, rect_slots, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
-    reset_prediction, view,
+    F64System, PredictBuffers, PredictScratch, QueryDist, SparseCore, cast_blocks, pack_into,
+    predictive_variance, rect_slots, reset_prediction, view,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use faer::{Mat, MatRef};

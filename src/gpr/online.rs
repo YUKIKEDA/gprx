@@ -14,8 +14,8 @@ use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
-    BlockKind, DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec,
-    ModelKernel, ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, spec_slots,
+    BlockKind, DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
+    ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::Lbfgs;
@@ -473,13 +473,8 @@ where
         }
         self.registry.require_room()?;
         let slots = spec_slots(&self.core.kernel);
-        let mut columns = QuerySources::<P::Storage>::bind(
-            &slots,
-            sources,
-            self.core.n,
-            1,
-            BlockKind::Rect,
-        )?;
+        let mut columns =
+            QuerySources::<P::Storage>::bind(&slots, sources, self.core.n, 1, BlockKind::Rect)?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -1037,7 +1032,7 @@ impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
     }
 }
 
-impl<P: GpScalar> OnlineGpr<Fixed, P> {
+impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
     pub(crate) fn from_persisted(parts: PersistedModel<P>) -> Result<Self, GprError> {
         FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
     }

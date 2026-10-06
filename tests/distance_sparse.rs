@@ -7,7 +7,9 @@ mod common;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use common::{assert_close, assert_slice_close};
-use gprx::kernel::{ArdDistance, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance};
+use gprx::kernel::{
+    ArdDistance, ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
+};
 use gprx::{Adam, Fixed, GaussianLikelihood, GprError, Prediction, Sgpr, SinglePrecision, Svgp};
 
 const N: usize = 8;
@@ -50,6 +52,7 @@ fn targets() -> Vec<f64> {
     (0..N).map(|i| (i as f64 * 0.7).cos()).collect()
 }
 
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn lik() -> GaussianLikelihood {
     GaussianLikelihood::new(0.05).expect("noise")
 }
@@ -85,12 +88,14 @@ fn sgpr_on_supplied_distances_matches_coordinates_at_the_chosen_rows() {
     let data = data();
     let y = targets();
     let rbf = RbfKernel::new(0.9).expect("ell");
-    let mut coords = Sgpr::new(KernelSpec::from(rbf), lik())
+    let scale = ConstantKernel::new(0.8).expect("constant");
+    // A product: the derivatives go through the nested product buffers.
+    let mut coords = Sgpr::new(KernelSpec::from(scale) * KernelSpec::from(rbf), lik())
         .with_optimizer(Fixed)
         .factor(&data.x, N, 2, &y, &rows(&data.x, 2), INDUCING.len())
         .expect("coords");
     let image = ScalarDistance::new();
-    let mut dist = Sgpr::new(image.kernel(rbf), lik())
+    let mut dist = Sgpr::new(scale * image.kernel(rbf), lik())
         .with_optimizer(Fixed)
         .factor([image.from_vec(data.train.clone())], N, &y, &INDUCING)
         .expect("distances");
@@ -106,15 +111,23 @@ fn sgpr_on_supplied_distances_matches_coordinates_at_the_chosen_rows() {
     let mut params = vec![0.0; n_params];
     coords.get_params(&mut params).expect("params");
     let (mut g_d, mut g_c) = (vec![0.0; n_params], vec![0.0; n_params]);
-    dist.value_and_gradient_into(&params, &mut g_d).expect("grad");
-    coords.value_and_gradient_into(&params, &mut g_c).expect("grad");
+    dist.value_and_gradient_into(&params, &mut g_d)
+        .expect("grad");
+    coords
+        .value_and_gradient_into(&params, &mut g_c)
+        .expect("grad");
     assert_slice_close(&g_d, &g_c, TOL);
-    let (mut h_d, mut h_c) = (vec![0.0; n_params * n_params], vec![0.0; n_params * n_params]);
+    let (mut h_d, mut h_c) = (
+        vec![0.0; n_params * n_params],
+        vec![0.0; n_params * n_params],
+    );
     dist.hessian_into(&params, &mut h_d).expect("hess");
     coords.hessian_into(&params, &mut h_c).expect("hess");
     assert_slice_close(&h_d, &h_c, TOL);
 
-    let got = dist.predict([image.borrow(&data.cross)], Q).expect("predict");
+    let got = dist
+        .predict([image.borrow(&data.cross)], Q)
+        .expect("predict");
     let expect = coords.predict(&data.xs, Q, 2).expect("predict");
     assert_pred(&got, &expect, TOL);
     let mut into = Prediction::default();
@@ -127,7 +140,13 @@ fn sgpr_on_supplied_distances_matches_coordinates_at_the_chosen_rows() {
     let cov_ref = coords.predict_covariance(&data.xs, Q, 2).expect("cov");
     assert_slice_close(&cov.covariance, &cov_ref.covariance, TOL);
     let draws = dist
-        .sample([image.borrow(&data.cross)], [image.borrow(&data.query)], Q, 4, 11)
+        .sample(
+            [image.borrow(&data.cross)],
+            [image.borrow(&data.query)],
+            Q,
+            4,
+            11,
+        )
         .expect("sample");
     let draws_ref = coords.sample(&data.xs, Q, 2, 4, 11).expect("sample");
     assert_slice_close(&draws, &draws_ref, 1e-7);
@@ -209,7 +228,13 @@ fn sgpr_distance_rbf_times_coordinate_rbf_is_one_ard_rbf() {
     let xs = [q0.clone(), q1.clone()].concat();
     assert_pred(&got, &reference.predict(&xs, Q, 2).expect("predict"), TOL);
     let cov = model
-        .predict_covariance([image.borrow(&cross)], [image.borrow(&sq(&q0, &q0))], &q1, Q, 1)
+        .predict_covariance(
+            [image.borrow(&cross)],
+            [image.borrow(&sq(&q0, &q0))],
+            &q1,
+            Q,
+            1,
+        )
         .expect("cov");
     let cov_ref = reference.predict_covariance(&xs, Q, 2).expect("cov");
     assert_slice_close(&cov.covariance, &cov_ref.covariance, TOL);
@@ -236,10 +261,15 @@ fn svgp_on_supplied_distances_matches_coordinates_at_the_chosen_rows() {
     let mut params = vec![0.0; n_params];
     coords.get_params(&mut params).expect("params");
     let (mut g_d, mut g_c) = (vec![0.0; n_params], vec![0.0; n_params]);
-    dist.value_and_gradient_into(&params, &mut g_d).expect("grad");
-    coords.value_and_gradient_into(&params, &mut g_c).expect("grad");
+    dist.value_and_gradient_into(&params, &mut g_d)
+        .expect("grad");
+    coords
+        .value_and_gradient_into(&params, &mut g_c)
+        .expect("grad");
     assert_slice_close(&g_d, &g_c, TOL);
-    let got = dist.predict([image.borrow(&data.cross)], Q).expect("predict");
+    let got = dist
+        .predict([image.borrow(&data.cross)], Q)
+        .expect("predict");
     assert_pred(&got, &coords.predict(&data.xs, Q, 2).expect("predict"), TOL);
     let cov = dist
         .predict_covariance([image.borrow(&data.cross)], [image.borrow(&data.query)], Q)
@@ -306,7 +336,9 @@ fn single_precision_sgpr_reads_the_supplied_distances() {
         .with_precision::<SinglePrecision>()
         .factor([image.from_vec(data.train)], N, &y, &INDUCING)
         .expect("distances");
-    let got = dist.predict([image.borrow(&data.cross)], Q).expect("predict");
+    let got = dist
+        .predict([image.borrow(&data.cross)], Q)
+        .expect("predict");
     let expect = coords.predict(&data.xs, Q, 2).expect("predict");
     for (a, b) in got.mean.iter().zip(&expect.mean) {
         assert!((a - b).abs() < 1e-4, "{a} vs {b}");
@@ -324,7 +356,10 @@ fn sparse_inputs_are_checked() {
         .factor([image.borrow(&data.train)], N, &y, &[0, N])
         .map(|_| ())
         .map_err(|(_, e)| e);
-    assert!(matches!(err, Err(GprError::IndexOutOfRange { .. })), "{err:?}");
+    assert!(
+        matches!(err, Err(GprError::IndexOutOfRange { .. })),
+        "{err:?}"
+    );
     let err = Svgp::new(kernel.clone(), lik())
         .factor([image.borrow(&data.train)], N, &y, &[])
         .map(|_| ())
@@ -337,7 +372,10 @@ fn sparse_inputs_are_checked() {
         .factor([image.borrow(&skew)], N, &y, &INDUCING)
         .map(|_| ())
         .map_err(|(_, e)| e);
-    assert!(matches!(err, Err(GprError::ShapeMismatch { .. })), "{err:?}");
+    assert!(
+        matches!(err, Err(GprError::ShapeMismatch { .. })),
+        "{err:?}"
+    );
     let model = Sgpr::new(kernel, lik())
         .with_optimizer(Fixed)
         .factor([image.borrow(&data.train)], N, &y, &INDUCING)
@@ -345,7 +383,13 @@ fn sparse_inputs_are_checked() {
     let mut query = data.query.clone();
     query[0] = 0.1;
     let err = model.predict_covariance([image.borrow(&data.cross)], [image.borrow(&query)], Q);
-    assert!(matches!(err, Err(GprError::ShapeMismatch { .. })), "{err:?}");
+    assert!(
+        matches!(err, Err(GprError::ShapeMismatch { .. })),
+        "{err:?}"
+    );
     let err = model.predict([image.borrow(&data.cross[1..])], Q);
-    assert!(matches!(err, Err(GprError::LengthMismatch { .. })), "{err:?}");
+    assert!(
+        matches!(err, Err(GprError::LengthMismatch { .. })),
+        "{err:?}"
+    );
 }

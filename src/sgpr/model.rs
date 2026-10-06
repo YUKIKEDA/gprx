@@ -7,7 +7,9 @@ use crate::policy::{JitterPolicy, KernelExp, with_kernel_exp};
 use crate::sparse::{SparseCore, SparseSpec};
 use crate::transform::{UnfittedTarget, UnfittedTransform};
 
-use crate::kernel::{DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse};
+use crate::kernel::{
+    DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::precision::{DoublePrecision, GpScalar};
@@ -179,7 +181,6 @@ impl<O, I, P, K> Sgpr<O, I, P, K> {
         self.spec.jitter
     }
 
-
     /// Replaces the target (`y`) transform.
     ///
     /// Omitting it leaves identity.
@@ -214,7 +215,6 @@ impl<O, I, P, K> Sgpr<O, I, P, K> {
         self.spec.y_transform = Box::new(transform);
         self
     }
-
 
     /// Returns the observation-noise model.
     ///

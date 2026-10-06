@@ -2,14 +2,14 @@
 
 use crate::data::{pack_points, validate_inducing, validate_training};
 use crate::error::{CholeskyStage, GprError};
+use crate::kernel::GatheredRect;
 use crate::kernel::GramInputs;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower};
 use crate::policy::JitterPolicy;
 use crate::precision::ModelPrecision;
-use crate::kernel::GatheredRect;
-use crate::sparse::{SparseCore, SparseDist, rect_slots, square_slots, zx_at, zz_at};
 use crate::sparse::{KernelScratch, SparseScratch};
+use crate::sparse::{SparseCore, SparseDist, rect_slots, square_slots, zx_at, zz_at};
 use crate::svgp::FittedSvgp;
 use faer::{Mat, MatRef};
 

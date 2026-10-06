@@ -365,6 +365,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// Product trees need `scratch` the same shape as `d2_k` and distinct
     /// from it; leaves ignore it.
+    #[cfg(test)]
     pub(crate) fn hess_cross_points<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, T>,
@@ -379,6 +380,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 
     /// [`Self::hess_cross_points`] with caller-owned [`Nested`] levels.
+    #[cfg(test)]
     pub(crate) fn hess_cross_points_with<M: crate::math::KernelMath>(
         &self,
         x1: MatRef<'_, T>,

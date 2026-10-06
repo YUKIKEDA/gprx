@@ -474,7 +474,7 @@ where
         d_kmn.as_mut(),
         param_idx,
         ks.scratch(m, n),
-        &mut Vec::new(),
+        &mut compiled.nested_buffers(m, n),
     )?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.grad_diag_points::<M>(x, &mut diag, param_idx)?;
@@ -647,7 +647,7 @@ where
         d_kmn.as_mut(),
         (i, j),
         ks.scratch(m, n),
-        &mut Vec::new(),
+        &mut compiled.nested_buffers(m, n),
     )?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.hess_diag_points::<M>(x, &mut diag, i, j)?;

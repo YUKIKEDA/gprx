@@ -367,11 +367,6 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         Ok(Self { data, n, d })
     }
 
-    /// Number of points.
-    pub(crate) fn n(&self) -> usize {
-        self.n
-    }
-
     /// `(points, dimensions)` the cache was filled for.
     #[cfg(test)]
     pub(crate) fn shape(&self) -> (usize, usize) {
@@ -449,21 +444,13 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     }
 }
 
-/// Where the blocks of an [`ArdBlocks`] live.
-#[derive(Clone, Copy, Debug)]
-pub enum BlockList<'a, T> {
-    /// One borrowed slice per dimension.
-    Slices(&'a [&'a [T]]),
-    /// One owned buffer per dimension.
-    Owned(&'a [Vec<T>]),
-}
-
 /// Raw `(Δ_d)²` of a rectangular block (`rows × cols`), one dense
 /// column-major block per dimension: `(row, col)` of dimension `k` is
 /// `block(k)[row + col * rows]`.
 #[derive(Clone, Copy, Debug)]
 pub struct ArdBlocks<'a, T> {
-    pub(crate) blocks: BlockList<'a, T>,
+    /// One borrowed block per dimension.
+    pub(crate) blocks: &'a [&'a [T]],
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     /// First column of the stored blocks this view starts at.
@@ -473,18 +460,12 @@ pub struct ArdBlocks<'a, T> {
 impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
     /// Number of dimensions.
     pub(crate) fn d(&self) -> usize {
-        match self.blocks {
-            BlockList::Slices(s) => s.len(),
-            BlockList::Owned(s) => s.len(),
-        }
+        self.blocks.len()
     }
 
     /// The block of dimension `dim`.
     pub(crate) fn block(&self, dim: usize) -> &'a [T] {
-        match self.blocks {
-            BlockList::Slices(s) => s[dim],
-            BlockList::Owned(s) => &s[dim],
-        }
+        self.blocks[dim]
     }
 
     /// `(Δ_dim)²` of the pair `(row, col)`.

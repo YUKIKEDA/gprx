@@ -9,6 +9,7 @@ use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
 
+use super::factor::TrainPoints;
 use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
@@ -16,7 +17,6 @@ use crate::kernel::{
     ModelKernel, RectSlots, ScalarOps, SquareSlots, TrainSources, Triangle, bind_sources,
     spec_slots,
 };
-use super::factor::TrainPoints;
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower, faer_par, faer_par_dims, inv_diag_from_chol_l, log_det_from_l,

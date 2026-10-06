@@ -71,15 +71,21 @@ fn problem() -> Problem {
     let c3 = (coords(3, N, 0.0), coords(3, M, 0.5));
     let bands_train = mat_from_cols(&[c1.0.clone(), c2.0.clone()]);
     let cross_blocks = vec![
-        sq(&c1.0, &c1.1).col_iter().flat_map(|c| c.iter().copied().collect::<Vec<_>>()).collect(),
-        sq(&c2.0, &c2.1).col_iter().flat_map(|c| c.iter().copied().collect::<Vec<_>>()).collect(),
+        sq(&c1.0, &c1.1)
+            .col_iter()
+            .flat_map(|c| c.iter().copied().collect::<Vec<_>>())
+            .collect(),
+        sq(&c2.0, &c2.1)
+            .col_iter()
+            .flat_map(|c| c.iter().copied().collect::<Vec<_>>())
+            .collect(),
     ];
     Problem {
         image,
         bands,
         spec,
-        x: mat_from_cols(&[c3.0.clone()]),
-        xs: mat_from_cols(&[c3.1.clone()]),
+        x: mat_from_cols(std::slice::from_ref(&c3.0)),
+        xs: mat_from_cols(std::slice::from_ref(&c3.1)),
         train_sq: sq(&c0.0, &c0.0),
         cross_sq: sq(&c0.0, &c0.1),
         train_ard: ArdSqDiffBuf::new(bands_train.as_ref()).expect("cache"),
@@ -134,7 +140,13 @@ impl Problem {
         let mut out = Mat::zeros(N, N);
         let mut scratch = Mat::zeros(N, N);
         compiled
-            .eval_gram::<Accurate>(inputs, out.as_mut(), Triangle::Full, scratch.as_mut(), &mut Vec::new())
+            .eval_gram::<Accurate>(
+                inputs,
+                out.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+                &mut Vec::new(),
+            )
             .expect("gram");
         out
     }
@@ -172,8 +184,11 @@ fn coord_block(k: &CompiledKernel<f64>, a: MatRef<'_, f64>, b: MatRef<'_, f64>) 
 fn gram_and_cross_match_the_coordinate_leaves() {
     let p = problem();
     let compiled = p.spec.spec().compile();
-    let matern = KernelSpec::from(MaternKernel::new(1.1, MaternNu::FiveHalves).expect("ell")).compile();
-    let check = |got: &Mat<f64>, a: (MatRef<'_, f64>, MatRef<'_, f64>, MatRef<'_, f64>), b: (MatRef<'_, f64>, MatRef<'_, f64>, MatRef<'_, f64>)| {
+    let matern =
+        KernelSpec::from(MaternKernel::new(1.1, MaternNu::FiveHalves).expect("ell")).compile();
+    let check = |got: &Mat<f64>,
+                 a: (MatRef<'_, f64>, MatRef<'_, f64>, MatRef<'_, f64>),
+                 b: (MatRef<'_, f64>, MatRef<'_, f64>, MatRef<'_, f64>)| {
         let k_img = coord_block(&p.ref_image, a.0, b.0);
         let k_band = coord_block(&p.ref_bands, a.1, b.1);
         let k_pt = coord_block(&p.ref_points, a.2, b.2);
@@ -228,8 +243,15 @@ fn gradients_and_hessians_match_finite_differences() {
     let grad_at = |c: &CompiledKernel<f64>, k: usize| {
         let mut d_k = Mat::zeros(N, N);
         let mut scratch = Mat::zeros(N, N);
-        c.grad_gram::<Accurate>(inputs, d_k.as_mut(), k, Triangle::Full, scratch.as_mut(), &mut Vec::new())
-            .expect("grad");
+        c.grad_gram::<Accurate>(
+            inputs,
+            d_k.as_mut(),
+            k,
+            Triangle::Full,
+            scratch.as_mut(),
+            &mut Vec::new(),
+        )
+        .expect("grad");
         d_k
     };
     let grad_cross_at = |c: &CompiledKernel<f64>, k: usize| {
@@ -265,13 +287,26 @@ fn gradients_and_hessians_match_finite_differences() {
             let mut d2 = Mat::zeros(N, N);
             let mut scratch = Mat::zeros(N, N);
             compiled
-                .hess_gram::<Accurate>(inputs, d2.as_mut(), (k, l), Triangle::Full, scratch.as_mut(), &mut Vec::new())
+                .hess_gram::<Accurate>(
+                    inputs,
+                    d2.as_mut(),
+                    (k, l),
+                    Triangle::Full,
+                    scratch.as_mut(),
+                    &mut Vec::new(),
+                )
                 .expect("hess");
             let (gl_up, gl_down) = (grad_at(&c_up, l), grad_at(&c_down, l));
             let mut d2x = Mat::zeros(N, M);
             let mut scratch = Mat::zeros(N, M);
             compiled
-                .hess_cross_views::<Accurate>(views, d2x.as_mut(), (k, l), scratch.as_mut(), &mut [])
+                .hess_cross_views::<Accurate>(
+                    views,
+                    d2x.as_mut(),
+                    (k, l),
+                    scratch.as_mut(),
+                    &mut [],
+                )
                 .expect("hess cross");
             let (xl_up, xl_down) = (grad_cross_at(&c_up, l), grad_cross_at(&c_down, l));
             for j in 0..N {
@@ -359,7 +394,14 @@ fn weighted_walks_match_one_parameter_at_a_time() {
         let mut d_k = Mat::zeros(N, N);
         let mut s = Mat::zeros(N, N);
         compiled
-            .grad_gram::<Accurate>(inputs, d_k.as_mut(), k, Triangle::Full, s.as_mut(), &mut Vec::new())
+            .grad_gram::<Accurate>(
+                inputs,
+                d_k.as_mut(),
+                k,
+                Triangle::Full,
+                s.as_mut(),
+                &mut Vec::new(),
+            )
             .expect("grad");
         let mut expect = 0.0;
         let mut diag = 0.0;
@@ -391,16 +433,15 @@ fn weighted_walks_match_one_parameter_at_a_time() {
 #[test]
 fn f32_reads_the_supplied_ard_tables() {
     let p = problem();
-    let spec = p.bands.kernel(
-        RationalQuadraticArdKernel::new(&[0.7, 1.3], 1.5).expect("leaf"),
-    )
-    .expect("dims");
+    let spec = p
+        .bands
+        .kernel(RationalQuadraticArdKernel::new(&[0.7, 1.3], 1.5).expect("leaf"))
+        .expect("dims");
     let c64 = spec.spec().compile();
     let c32 = spec.spec().compile_as::<f32>();
-    let cache32 = ArdSqDiffBuf::new(
-        Mat::<f32>::from_fn(N, 2, |i, j| p.bands_x.0[(i, j)] as f32).as_ref(),
-    )
-    .expect("cache");
+    let cache32 =
+        ArdSqDiffBuf::new(Mat::<f32>::from_fn(N, 2, |i, j| p.bands_x.0[(i, j)] as f32).as_ref())
+            .expect("cache");
     let table32 = SquareTable(vec![(p.bands_slot(), SquareSlot::Ard(cache32.view()))]);
     let x32 = Mat::<f32>::zeros(N, 0);
     let inputs32 = GramInputs {
@@ -409,8 +450,14 @@ fn f32_reads_the_supplied_ard_tables() {
     };
     let mut out32 = Mat::<f32>::zeros(N, N);
     let mut s32 = Mat::<f32>::zeros(N, N);
-    c32.eval_gram::<Accurate>(inputs32, out32.as_mut(), Triangle::Full, s32.as_mut(), &mut Vec::new())
-        .expect("f32");
+    c32.eval_gram::<Accurate>(
+        inputs32,
+        out32.as_mut(),
+        Triangle::Full,
+        s32.as_mut(),
+        &mut Vec::new(),
+    )
+    .expect("f32");
     let table = p.square_table();
     let x = Mat::<f64>::zeros(N, 0);
     let inputs = GramInputs {
@@ -419,8 +466,14 @@ fn f32_reads_the_supplied_ard_tables() {
     };
     let mut out = Mat::zeros(N, N);
     let mut s = Mat::zeros(N, N);
-    c64.eval_gram::<Accurate>(inputs, out.as_mut(), Triangle::Full, s.as_mut(), &mut Vec::new())
-        .expect("f64");
+    c64.eval_gram::<Accurate>(
+        inputs,
+        out.as_mut(),
+        Triangle::Full,
+        s.as_mut(),
+        &mut Vec::new(),
+    )
+    .expect("f64");
     for j in 0..N {
         for i in 0..N {
             assert_close(f64::from(out32[(i, j)]), out[(i, j)], 1e-5);

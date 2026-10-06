@@ -125,13 +125,27 @@ impl DecodedSlots {
             }
             None => Err(persist_err(
                 PersistErrorKind::Config,
-                format!("distance slot {index} appears before slot {}", self.slots.len()),
+                format!(
+                    "distance slot {index} appears before slot {}",
+                    self.slots.len()
+                ),
             )),
         }
     }
 }
 
 impl KernelJson {
+    /// Whether the saved kernel has a leaf on supplied distances.
+    pub(super) fn reads_distances(&self) -> bool {
+        match self {
+            Self::Distance { .. } => true,
+            Self::Sum { left, right } | Self::Product { left, right } => {
+                left.reads_distances() || right.reads_distances()
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn encode(spec: &KernelSpec) -> Result<Self, GprError> {
         let slots = spec_slots(spec);
         Self::encode_in(spec, &slots)

@@ -556,13 +556,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
-        self.grad_cross_views::<M>(
-            CrossViews::points(x1, x2),
-            d_k,
-            param_idx,
-            scratch,
-            nested,
-        )
+        self.grad_cross_views::<M>(CrossViews::points(x1, x2), d_k, param_idx, scratch, nested)
     }
 
     /// The rectangular `∂K/∂θ_{param_idx}` of the block `views` describes:

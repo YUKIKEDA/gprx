@@ -2,13 +2,13 @@
 
 use crate::error::GprError;
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
+use crate::kernel::{GatheredRect, TrainSources};
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::ModelPrecision;
-use crate::kernel::{GatheredRect, TrainSources};
 use crate::sparse::{
-    F64System, QueryDist, cast_blocks, rect_slots, PredictBuffers, PredictScratch, SparseCore, pack_into, predictive_variance,
-    reset_prediction, view,
+    F64System, PredictBuffers, PredictScratch, QueryDist, SparseCore, cast_blocks, pack_into,
+    predictive_variance, rect_slots, reset_prediction, view,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use faer::{Mat, MatRef};
@@ -113,7 +113,16 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
             k_mm_l,
             ..
         } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter, sys.zz)?;
-        return svgp_latent::<M, f64>(compiled, bufs, sys, xs, n_rows, qd.zq.as_ref(), k_mm_l, &mut write);
+        return svgp_latent::<M, f64>(
+            compiled,
+            bufs,
+            sys,
+            xs,
+            n_rows,
+            qd.zq.as_ref(),
+            k_mm_l,
+            &mut write,
+        );
     }
     let PredictScratch {
         plan,
@@ -121,12 +130,22 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
         ..
     } = scratch;
     let compiled = plan.get(sys.kernel);
-    svgp_latent::<M, P::Storage>(compiled, bufs, sys, xs, n_rows, qd.zq.as_ref(), sys.k_mm_l, &mut write)
+    svgp_latent::<M, P::Storage>(
+        compiled,
+        bufs,
+        sys,
+        xs,
+        n_rows,
+        qd.zq.as_ref(),
+        sys.k_mm_l,
+        &mut write,
+    )
 }
 
 /// For each query column: `a* = L_mm⁻¹ k(Z, x*)`, the mean `a*ᵀ q_mean`,
 /// and the latent variance `k(x*, x*) − ‖a*‖² + ‖L_qᵀ a*‖²` clamped at zero,
 /// passed to `write(col, mean, latent)`, all in `S`.
+#[allow(clippy::too_many_arguments)]
 fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar>(
     compiled: &CompiledKernel<S>,
     bufs: &mut PredictBuffers<S>,

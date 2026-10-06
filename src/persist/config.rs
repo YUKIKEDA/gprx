@@ -397,6 +397,10 @@ pub(super) struct SparseConfig {
     pub inducing_ids: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub next_inducing_id: Option<u64>,
+    /// The training points that are the inducing points of a distance
+    /// kernel, in order.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub inducing: Option<Vec<usize>>,
 }
 
 impl SparseConfig {
@@ -419,7 +423,8 @@ pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError
             supported: FORMAT_VERSION,
         });
     }
-    if config.n == 0 || config.m == 0 || config.d == 0 {
+    // A distance kernel without coordinate leaves reads no features.
+    if config.n == 0 || config.m == 0 || (config.d == 0 && !config.kernel.reads_distances()) {
         return Err(GprError::EmptyInput);
     }
     Ok(config)
@@ -433,7 +438,7 @@ pub(super) fn parse_config(bytes: &[u8]) -> Result<ModelConfig, GprError> {
         )
     })?;
     config.validate_version()?;
-    if config.n == 0 || config.d == 0 {
+    if config.n == 0 || (config.d == 0 && !config.kernel.reads_distances()) {
         return Err(GprError::EmptyInput);
     }
     Ok(config)

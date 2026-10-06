@@ -14,7 +14,7 @@ use faer::{Mat, MatMut, MatRef};
 use super::CompiledKernel;
 use super::grad::eval_cell;
 use crate::error::GprError;
-use crate::kernel::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf, BlockList};
+use crate::kernel::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf};
 use crate::kernel::{KernelScalar, SlotId, Triangle};
 
 /// A compiled leaf that reads the supplied `d²` of one slot.
@@ -92,9 +92,10 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match slot {
             SquareSlot::Scalar(d) => self.leaf.apply_with::<M>(d, out, uplo, scratch, &mut []),
-            SquareSlot::Ard(c) => self
-                .leaf
-                .apply_from_ard_cache::<M>(c, x, out, uplo, scratch, &mut []),
+            SquareSlot::Ard(c) => {
+                self.leaf
+                    .apply_from_ard_cache::<M>(c, x, out, uplo, scratch, &mut [])
+            }
         }
     }
 
@@ -131,9 +132,10 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match slot {
-            SquareSlot::Scalar(d) => self
-                .leaf
-                .hess_with::<M>(d, d2_k, pair, uplo, scratch, &mut []),
+            SquareSlot::Scalar(d) => {
+                self.leaf
+                    .hess_with::<M>(d, d2_k, pair, uplo, scratch, &mut [])
+            }
             SquareSlot::Ard(c) => {
                 self.leaf
                     .hess_from_ard_cache::<M>(c, x, d2_k, pair, uplo, scratch, &mut [])
@@ -266,7 +268,15 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         if let Some(dims) = self.ard_dims() {
             let x = Mat::<T>::zeros(1, dims);
             let cache = ArdSqDiffBuf::new(x.as_ref())?;
-            eval_cell(|cell| eval(self, SquareSlot::Ard(cache.view()), x.as_ref(), cell, scratch))
+            eval_cell(|cell| {
+                eval(
+                    self,
+                    SquareSlot::Ard(cache.view()),
+                    x.as_ref(),
+                    cell,
+                    scratch,
+                )
+            })
         } else {
             let zero = [T::from_f64(0.0)];
             let dist = MatRef::from_column_major_slice(&zero, 1, 1);
@@ -299,11 +309,16 @@ fn not_scalar() -> GprError {
 }
 
 /// Square supplies of one call, looked up by slot.
+#[cfg(test)]
 pub(crate) struct SquareTable<'a, T>(pub(crate) Vec<(SlotId, SquareSlot<'a, T>)>);
 
+#[cfg(test)]
 impl<T: Sync + Copy> SquareSlots<T> for SquareTable<'_, T> {
     fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>> {
-        self.0.iter().find(|(id, _)| *id == slot).map(|(_, view)| *view)
+        self.0
+            .iter()
+            .find(|(id, _)| *id == slot)
+            .map(|(_, view)| *view)
     }
 }
 
@@ -328,7 +343,7 @@ impl<T: Sync + Copy> RectSlots<T> for RectTable<'_, T> {
         Some(match entry {
             RectEntry::Scalar(view) => RectSlot::Scalar(*view),
             RectEntry::Ard { blocks, rows, cols } => RectSlot::Ard(ArdBlocks {
-                blocks: BlockList::Slices(blocks),
+                blocks,
                 rows: *rows,
                 cols: *cols,
                 col0: 0,

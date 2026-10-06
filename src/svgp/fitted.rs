@@ -4,12 +4,12 @@ use crate::sparse::QueryDist;
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::kernel::{DistanceKernel, KernelSpec, ModelKernel, PointKernel, PointUse};
 use crate::policy::with_kernel_exp;
 use crate::sparse::{
     PredictScratch, SparseCore, SparseScratch, sparse_core_accessors, sparse_distance_accessors,
     sparse_kernel_accessor, sparse_point_accessors,
 };
-use crate::kernel::{DistanceKernel, KernelSpec, ModelKernel, PointKernel, PointUse};
 use std::marker::PhantomData;
 
 use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
@@ -422,7 +422,6 @@ where
         self.scratch = scratch;
         result
     }
-
 }
 
 impl<P: GpScalar> FittedSvgp<P> {
@@ -678,7 +677,17 @@ impl<P: GpScalar> FittedSvgp<P> {
     ) -> Result<(), GprError> {
         self.query_into(xs, n_rows, n_cols, &QueryDist::default(), options, out)
     }
+}
 
+impl<P: GpScalar, K: PointKernel> FittedSvgp<P, K> {
+    sparse_point_accessors!();
+}
+
+impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
+    sparse_distance_accessors!();
+}
+
+impl<P: GpScalar, K: ModelKernel> FittedSvgp<P, K> {
     /// The model of a persist directory: `K_mm` and `A` factored at the
     /// saved `θ` and `Z`, with the saved whitened `q(u)`.
     ///
@@ -690,17 +699,9 @@ impl<P: GpScalar> FittedSvgp<P> {
         q_mean: Vec<f64>,
         q_l: Mat<f64>,
     ) -> Result<Self, GprError> {
-        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<M, P, KernelSpec>(
+        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<M, P, K>(
             core,
             Some((q_mean, q_l))
         ))
     }
-}
-
-impl<P: GpScalar, K: PointKernel> FittedSvgp<P, K> {
-    sparse_point_accessors!();
-}
-
-impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
-    sparse_distance_accessors!();
 }
