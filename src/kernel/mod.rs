@@ -21,6 +21,7 @@ mod ard;
 mod compiled;
 mod constant;
 mod dist;
+mod leaf_params;
 mod lengthscale;
 mod linear;
 mod matern;
