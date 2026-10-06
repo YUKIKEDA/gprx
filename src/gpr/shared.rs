@@ -13,9 +13,9 @@ use super::factor::TrainPoints;
 use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    BlockKind, CompiledKernel, DistanceSlot, DistanceSource, Fills, GramInputs, KernelScalar,
-    KernelSpec, ModelKernel, RectSlots, ScalarOps, SourceStore, SquareSlots, Triangle,
-    bind_sources, spec_slots,
+    BlockKind, CompiledKernel, DistanceSlot, DistanceSource, GramInputs, KernelScalar, KernelSpec,
+    ModelKernel, RectSlots, ScalarOps, SourceStore, SquareSlots, Triangle, bind_sources,
+    spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
@@ -121,17 +121,17 @@ pub(crate) fn train_points<'a, P: GpScalar>(
 }
 
 /// Binds the training squares of `kernel`'s slots, `n × n` each.
-pub(crate) fn bind_training<'a, S: KernelScalar, Store: SourceStore<S>>(
+pub(crate) fn bind_training<S: KernelScalar, Store: SourceStore<S>>(
     kernel: &KernelSpec,
-    sources: Vec<DistanceSource<'a>>,
+    sources: Vec<DistanceSource<'_>>,
     n: usize,
-) -> Result<(Store, Fills<'a>), GprError> {
+) -> Result<Store, GprError> {
     let slots = spec_slots(kernel);
     if slots.is_empty() && sources.is_empty() {
-        return Ok((Store::empty(), Vec::new()));
+        return Ok(Store::empty());
     }
-    let (raw, fills) = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
-    Ok((Store::from_raw(raw, n)?, fills))
+    let raw = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
+    Store::from_raw(raw, n)
 }
 
 impl<P: GpScalar> GprCore<P> {

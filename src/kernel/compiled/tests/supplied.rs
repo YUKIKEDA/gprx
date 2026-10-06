@@ -548,3 +548,45 @@ fn ard_leaves_on_the_diagonal_match_the_gram_diagonal() {
             .is_err()
     );
 }
+
+#[test]
+fn a_coordinate_tree_needs_columns_and_a_distance_tree_does_not() {
+    use crate::error::GprError;
+    use crate::kernel::WhiteKernel;
+    let constant = ConstantKernel::new(1.5).expect("c");
+    let white = WhiteKernel::new(0.2).expect("white");
+    let x = Mat::<f64>::zeros(N, 0);
+    let mut out = Mat::<f64>::zeros(N, N);
+    let mut scratch = Mat::<f64>::zeros(N, N);
+    let mut diag = vec![0.0; N];
+    // The leaves and a coordinate tree keep their column check.
+    assert_eq!(
+        constant.apply_points(x.as_ref(), out.as_mut(), Triangle::Lower),
+        Err(GprError::EmptyInput)
+    );
+    assert_eq!(
+        white.apply_points(x.as_ref(), out.as_mut(), Triangle::Lower),
+        Err(GprError::EmptyInput)
+    );
+    let coords = (KernelSpec::from(constant) + KernelSpec::from(white)).compile();
+    assert_eq!(
+        coords.apply_points::<Accurate>(
+            x.as_ref(),
+            out.as_mut(),
+            Triangle::Lower,
+            scratch.as_mut()
+        ),
+        Err(GprError::EmptyInput)
+    );
+    assert_eq!(
+        coords.fill_diag_points(x.as_ref(), &mut diag),
+        Err(GprError::EmptyInput)
+    );
+    // A tree that reads supplied distances takes none.
+    let image = ScalarDistance::new();
+    let dist = (image.kernel(RbfKernel::new(1.0).expect("ell")) * constant + white)
+        .spec()
+        .compile();
+    dist.fill_diag_points(x.as_ref(), &mut diag).expect("diag");
+    assert_close(diag[0], 1.5 + 0.2, 1e-12);
+}

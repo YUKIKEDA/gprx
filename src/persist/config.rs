@@ -10,8 +10,8 @@ use crate::precision::PersistKind;
 use crate::{GaussianLikelihood, JitterPolicy};
 
 use super::kernel::KernelJson;
+use super::persist_err;
 use super::transform::{FittedInputJson, FittedTargetJson, UnfittedInputJson, UnfittedTargetJson};
-use super::{FORMAT_VERSION, persist_err};
 
 /// On-disk model metadata. Integer `format_version` is checked first.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,14 +56,7 @@ impl ModelConfig {
     }
 
     pub(super) fn validate_version(&self) -> Result<(), GprError> {
-        if self.format_version == FORMAT_VERSION {
-            Ok(())
-        } else {
-            Err(GprError::UnsupportedPersistVersion {
-                found: self.format_version,
-                supported: FORMAT_VERSION,
-            })
-        }
+        super::require_version(self.format_version)
     }
 
     pub(super) fn online_ids(&self) -> Result<(&[u64], u64), GprError> {
@@ -417,12 +410,7 @@ pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError
             format!("config.json is not valid JSON: {err}"),
         )
     })?;
-    if config.format_version != FORMAT_VERSION {
-        return Err(GprError::UnsupportedPersistVersion {
-            found: config.format_version,
-            supported: FORMAT_VERSION,
-        });
-    }
+    super::require_version(config.format_version)?;
     // A distance kernel without coordinate leaves reads no features.
     if config.n == 0 || config.m == 0 || (config.d == 0 && !config.kernel.reads_distances()) {
         return Err(GprError::EmptyInput);

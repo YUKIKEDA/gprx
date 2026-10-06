@@ -386,7 +386,7 @@ The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `
 | `borrow(d2)` | read in place by `predict`; copied by `fit` and `insert` |
 | `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` writes `out[i + j * n_rows]`; an ARD fill writes its `d` blocks one after another |
 
-Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, up to rounding: within `1e-8` of the table's largest value, a negative value or a diagonal becomes `0.0` and a mirror pair `(i, j)`, `(j, i)` becomes its mean, so a table from `‖a‖² + ‖b‖² − 2a·b` or from a distance computed in each direction is accepted. Past that it is `ShapeMismatch`. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. With `DistanceCachePolicy::Uncached`, a training fill is called again for every factor of a search after the first; the model keeps the last result. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave.
+Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, up to rounding: within `1e-6` of the table's largest value, a negative value or a diagonal becomes `0.0` and a mirror pair `(i, j)`, `(j, i)` becomes its mean, so a table from `‖a‖² + ‖b‖² − 2a·b` or from a distance computed in each direction is accepted. Past that it is `ShapeMismatch`. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. A training fill is called once per fit, whatever the `DistanceCachePolicy`: the model keeps the squares it wrote. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave.
 
 | Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
 | --- | --- | --- | --- |
@@ -667,7 +667,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Save and load (`gprx::persist`)
 
-`FORMAT_VERSION` is `1`. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
+`FORMAT_VERSION` is `2`. A coordinate model is written as version 1 and a `DistanceKernel` model as version 2; `load` reads both. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
 
 `LoadedGpr::load(dir, registry)`, `LoadedSgpr::load`, and `LoadedSvgp::load` read the directory. `PersistRegistry::new` is empty. Built-ins need no registration. Register a custom kernel or transform before load:
 
@@ -693,7 +693,7 @@ fn main() -> Result<(), gprx::GprError> {
     let dir = std::env::temp_dir().join("gprx-readme-save");
     let _ = std::fs::remove_dir_all(&dir);
     fitted.save(&dir)?;
-    assert_eq!(FORMAT_VERSION, 1);
+    assert_eq!(FORMAT_VERSION, 2);
     assert!(!"mine.kernel".starts_with(RESERVED_PREFIX));
 
     let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
@@ -848,7 +848,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `InvalidPointId` | `PointId` is not in the model |
 | `InvalidInducingId` | `InducingId` is not in the model |
 | `PersistFailed { kind, reason }` | save or load failed |
-| `UnsupportedPersistVersion { found, supported }` | `format_version` is not `FORMAT_VERSION` |
+| `UnsupportedPersistVersion { found, supported }` | `format_version` is not `1` to `FORMAT_VERSION` |
 
 `CholeskyStage` is `Fit`, `Predict`, `OnlineInsert`, `OnlineDelete`. `PersistErrorKind` is `Io`, `Config`, `Tensor`, `InvalidPersistId`, `NotPersistable`, `UnregisteredId`, `WrongModel`. Branch on `kind`. `reason` is for a person to read.
 

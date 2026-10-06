@@ -213,6 +213,13 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// See the example on [`CompiledKernel`].
     pub fn fill_diag_points(&self, x: MatRef<'_, T>, out: &mut [T]) -> Result<(), GprError> {
+        self.require_columns(x)?;
+        self.fill_diag_rows(x, out)
+    }
+
+    /// [`Self::fill_diag_points`] without the column check, for a subtree
+    /// of a tree that already passed it.
+    pub(crate) fn fill_diag_rows(&self, x: MatRef<'_, T>, out: &mut [T]) -> Result<(), GprError> {
         match self {
             Self::Rbf(leaf) => {
                 leaf.fill_diag(out);
@@ -279,6 +286,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         uplo: Triangle,
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        self.require_columns(x)?;
         let mut nested = self.nested_buffers(out.nrows(), out.ncols());
         self.apply_points_with::<M>(x, out, uplo, scratch, &mut nested)
     }
@@ -303,8 +311,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.apply(x, out, uplo),
             Self::MaternArd(leaf) => leaf.apply_math::<M, _>(x, out, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.apply(x, out, uplo),
-            Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
-            Self::White(leaf) => leaf.apply_points(x, out, uplo),
+            Self::Constant(leaf) => leaf.apply_rows(x, out, uplo),
+            Self::White(leaf) => leaf.apply_rows(x, out, uplo),
             Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => fold_terms_points::<M, _>(
                 terms,
@@ -344,6 +352,20 @@ impl<T: KernelScalar> CompiledKernel<T> {
         out: MatMut<'_, T>,
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        self.require_columns(x)?;
+        self.require_columns(xs)?;
+        self.apply_cross_rows::<M>(x, xs, out, scratch)
+    }
+
+    /// [`Self::apply_cross_points`] without the column check, for a subtree
+    /// of a tree that already passed it.
+    pub(crate) fn apply_cross_rows<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
         let mut nested = self.nested_buffers(out.nrows(), out.ncols());
         self.apply_cross_points_with::<M>(x, xs, out, scratch, &mut nested)
     }
@@ -371,8 +393,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.apply_cross(x, xs, out),
             Self::MaternArd(leaf) => leaf.apply_cross_math::<M, _>(x, xs, out),
             Self::RationalQuadraticArd(leaf) => leaf.apply_cross(x, xs, out),
-            Self::Constant(leaf) => leaf.apply_cross_points(x, xs, out),
-            Self::White(leaf) => leaf.apply_cross_points(x, xs, out),
+            Self::Constant(leaf) => leaf.apply_cross_rows(x, xs, out),
+            Self::White(leaf) => leaf.apply_cross_rows(x, xs, out),
             Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => fold_rect_points::<M, _>(
                 terms,
@@ -409,8 +431,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RbfArd(leaf) => leaf.apply_from_sq_diff::<M, _>(cache, out, uplo),
             Self::MaternArd(leaf) => leaf.apply_from_sq_diff::<M, _>(cache, out, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
-            Self::Constant(leaf) => leaf.apply_points(x, out, uplo),
-            Self::White(leaf) => leaf.apply_points(x, out, uplo),
+            Self::Constant(leaf) => leaf.apply_rows(x, out, uplo),
+            Self::White(leaf) => leaf.apply_rows(x, out, uplo),
             Self::Sum(terms) => fold_terms_ard_cache::<M, _>(
                 terms,
                 cache,
@@ -573,10 +595,10 @@ fn fold_diag_points<T: KernelScalar>(
         });
     }
     let (first, rest) = split_terms(terms)?;
-    first.fill_diag_points(x, out)?;
+    first.fill_diag_rows(x, out)?;
     for term in rest {
         combine_diag(out, combine, |start, block| {
-            term.fill_diag_points(x.subrows(start, block.len()), block)
+            term.fill_diag_rows(x.subrows(start, block.len()), block)
         })?;
     }
     Ok(())

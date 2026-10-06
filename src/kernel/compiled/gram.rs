@@ -250,7 +250,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     pub(crate) fn eval_diag(&self, x: MatRef<'_, T>, out: &mut [T]) -> Result<(), GprError> {
         match self.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => self.fill_diag(out),
-            CoordMode::Points | CoordMode::Mixed => self.fill_diag_points(x, out),
+            CoordMode::Points | CoordMode::Mixed => self.fill_diag_rows(x, out),
         }
     }
 

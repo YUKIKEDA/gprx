@@ -550,11 +550,10 @@ where
         self,
         input: TrainInput<'_>,
     ) -> Result<FittedGpr<O, P, K>, (Self, GprError)> {
-        let (mut model, fills) = FittedGpr::prepare(self, input)?;
+        let mut model = FittedGpr::prepare(self, input)?;
         let mut view = ExactFit {
             core: &mut model.core,
             store: &mut model.store,
-            fills: &fills,
         };
         match view.optimize(&model.optimizer) {
             Ok(()) => Ok(model),
@@ -570,11 +569,10 @@ impl<P: GpScalar, K: ModelKernel> Gpr<Fixed, P, K> {
         self,
         input: TrainInput<'_>,
     ) -> Result<FittedGpr<Fixed, P, K>, (Self, GprError)> {
-        let (mut model, fills) = FittedGpr::prepare(self, input)?;
+        let mut model = FittedGpr::prepare(self, input)?;
         let mut view = ExactFit {
             core: &mut model.core,
             store: &mut model.store,
-            fills: &fills,
         };
         match view.refactor() {
             Ok(()) => Ok(model),

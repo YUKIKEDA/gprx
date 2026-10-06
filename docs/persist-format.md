@@ -2,7 +2,7 @@ English | [日本語](persist-format.ja.md)
 
 # gprx persist format
 
-What `save` writes and `load` reads. `format_version` is 1. The code is `src/persist/`; how it fits in the crate is in [architecture.md](architecture.md); the one-paragraph summary is in [design §2](design.md#2-architecture).
+What `save` writes and `load` reads. `format_version` is 1 for a coordinate kernel and 2 for a `DistanceKernel` (§8). The code is `src/persist/`; how it fits in the crate is in [architecture.md](architecture.md); the one-paragraph summary is in [design §2](design.md#2-architecture).
 
 The examples in this file are real output of `save` (a fit of 8 points, then `save`), not hand-written.
 
@@ -46,7 +46,7 @@ A JSON object, written pretty-printed. Unknown keys are ignored on read. "Omitte
 
 | Key | Type | Presence | Meaning |
 | --- | --- | --- | --- |
-| `format_version` | integer | required | `1`. Checked first (§8) |
+| `format_version` | integer | required | `1` (coordinate kernel) or `2` (a kernel with a `distance` leaf). Checked first (§8) |
 | `n` | integer | required | Number of training points. `0` is `EmptyInput` |
 | `d` | integer | required | Number of features. `0` is `EmptyInput`, except for a kernel with a `distance` leaf and no coordinate leaf (§5.1) |
 | `has_factor` | bool | required | Whether `l` and `alpha` are in the tensor file (§7) |
@@ -264,14 +264,14 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 
 ## 8. Versions and errors
 
-`format_version` is the integer `1`, and `FORMAT_VERSION` is that constant. A file with another value is refused with `GprError::UnsupportedPersistVersion { found, supported }`. There is no migration. A key that is omitted reads as its default (§3): `model`, `precision`, `residual`, `math`, `factor_jitter`, and `distance_cache` work this way, so a file without them still loads. Keys the reader does not know are ignored.
+`format_version` is `1` for a model of a coordinate kernel and `2` for a model of a `DistanceKernel`; `FORMAT_VERSION` is `2`, the newest this crate writes and reads, and the reader accepts `1` and `2`. A file with another value is refused with `GprError::UnsupportedPersistVersion { found, supported }`. There is no migration. A key that is omitted reads as its default (§3): `model`, `precision`, `residual`, `math`, `factor_jitter`, and `distance_cache` work this way, so a file without them still loads. Keys the reader does not know are ignored.
 
-Version 1 grows by addition while the crate is `0.x`: a new kernel variant (`distance`) or a new tensor (`d2.<k>`) does not raise `format_version`. A gprx that predates an addition still refuses a file that needs it, with `PersistFailed` instead of `UnsupportedPersistVersion`: a distance model always has a `distance` kernel, which such a reader fails to decode (`Config`, unknown variant). It never reaches the `d2.<k>` tensors, so it cannot load a distance model as a coordinate model.
+Version 2 adds the `distance` kernel variant, the `d2.<k>` tensors, and the sparse `inducing` key. A coordinate model has none of them and stays version 1, so a gprx that predates version 2 still reads it; that gprx refuses a distance model with `UnsupportedPersistVersion { found: 2, supported: 1 }`.
 
 | Condition | Error |
 | --- | --- |
 | File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
-| `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
+| `format_version` is not `1` or `2` | `GprError::UnsupportedPersistVersion` |
 | `n` or (sparse) `m` is `0`; `d` is `0` for a kernel without a `distance` leaf; empty `lengthscales` | `GprError::EmptyInput` |
 | A saved training square with a negative value, a non-zero diagonal, or not symmetric, past rounding | `GprError::ShapeMismatch` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |

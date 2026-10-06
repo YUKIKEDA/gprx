@@ -31,9 +31,7 @@ use super::tensors::{TensorFile, read_f64, write_f64_tensors};
 use super::transform::{
     encode_fitted_input, encode_fitted_target, encode_unfitted_input, encode_unfitted_target,
 };
-use super::{
-    CONFIG_FILE, DistanceLoad, FORMAT_VERSION, PersistRegistry, decode_kernel, persist_err, widen,
-};
+use super::{CONFIG_FILE, DistanceLoad, PersistRegistry, decode_kernel, persist_err, widen};
 use safetensors::SafeTensors;
 
 const TENSOR_X: &str = "x";
@@ -70,8 +68,9 @@ fn write_sparse<P: GpScalar>(
         ),
         None => (None, None, None, None),
     };
+    let kernel = KernelJson::encode(&core.kernel)?;
     let config = SparseConfig {
-        format_version: FORMAT_VERSION,
+        format_version: super::format_version_for(&kernel),
         model,
         n: core.n,
         m: core.m,
@@ -79,7 +78,7 @@ fn write_sparse<P: GpScalar>(
         precision: PrecisionJson::from_persist(kind),
         residual: ResidualJson::from_persist(kind),
         math: MathJson::encode(core.math),
-        kernel: KernelJson::encode(&core.kernel)?,
+        kernel,
         likelihood: LikelihoodJson::encode(&core.likelihood),
         jitter: JitterJson::encode(core.jitter),
         x_unfitted: encode_unfitted_input(core.x_unfitted.as_ref())?,
@@ -390,7 +389,7 @@ impl LoadedSgpr {
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
-    /// is not [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
+    /// is not `1` to [`FORMAT_VERSION`](super::FORMAT_VERSION), or [`GprError::PersistFailed`] when the
     /// directory holds another model, or its JSON, tensors, or registry
     /// lookup is invalid. Factorization errors use the same variants as
     /// [`crate::Sgpr<Fixed>::factor`].

@@ -110,6 +110,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         uplo: Triangle,
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        self.require_columns(x)?;
         let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
         self.grad_points_with::<M>(x, d_k, param_idx, uplo, scratch, &mut nested)
     }
@@ -137,8 +138,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.grad(x, d_k, param_idx, uplo),
             Self::MaternArd(leaf) => leaf.grad_math::<M, _>(x, d_k, param_idx, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.grad(x, d_k, param_idx, uplo),
-            Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
-            Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
             Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
@@ -211,10 +212,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 leaf.grad(one, cell, param_idx, Triangle::Lower)
             }),
             Self::Constant(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_points(one, cell, param_idx, Triangle::Lower)
+                leaf.grad_rows(one, cell, param_idx, Triangle::Lower)
             }),
             Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.grad_points(one, cell, param_idx, Triangle::Lower)
+                leaf.grad_rows(one, cell, param_idx, Triangle::Lower)
             }),
             Self::Supplied(leaf) => {
                 require_count_diag(x, out)?;
@@ -244,8 +245,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RbfArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
             Self::MaternArd(leaf) => leaf.grad_from_sq_diff::<M, _>(cache, d_k, param_idx, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.grad_from_sq_diff(cache, d_k, param_idx, uplo),
-            Self::Constant(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
-            Self::White(leaf) => leaf.grad_points(x, d_k, param_idx, uplo),
+            Self::Constant(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
+            Self::White(leaf) => leaf.grad_rows(x, d_k, param_idx, uplo),
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_from_ard_cache::<M>(cache, x, d_k, local, uplo, scratch, nested)
@@ -862,7 +863,7 @@ pub(super) fn scale_by_other_diags<T: KernelScalar>(
             continue;
         }
         combine_diag(out, mul_assign, |start, block| {
-            term.fill_diag_points(x.subrows(start, block.len()), block)
+            term.fill_diag_rows(x.subrows(start, block.len()), block)
         })?;
     }
     Ok(())

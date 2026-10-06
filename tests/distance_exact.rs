@@ -547,7 +547,7 @@ impl DistanceFill for Counted<'_> {
 }
 
 #[test]
-fn an_uncached_fit_calls_the_fill_once_per_factor_after_the_first() {
+fn a_fit_calls_the_fill_once_whatever_the_cache_policy() {
     let c0 = coord(0, N, 0.0);
     let image = ScalarDistance::new();
     let fill = Counted {
@@ -566,9 +566,9 @@ fn an_uncached_fit_calls_the_fill_once_per_factor_after_the_first() {
         fitted.distance_cache_policy(),
         DistanceCachePolicy::Uncached
     );
-    // The bind writes the square the first factor reads; the second factor
-    // (it restores `L` over the reused `W` buffer) calls the fill again.
-    assert_eq!(fill.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    // The model keeps what the bind wrote, whatever the cache policy: the
+    // second factor (it restores `L` over the reused `W` buffer) reads it.
+    assert_eq!(fill.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -759,8 +759,7 @@ fn mixed_precision_refines_an_ard_slot_and_an_uncached_fill_fits_the_same() {
         .expect("mixed");
     let got = mixed.predict([bands.fill(&cross)], M).expect("mixed");
     assert_slice_close(&got.mean, &expect.mean, 1e-10);
-    // A search that calls the fill again for every factor after the first
-    // lands where a search on the kept squares lands.
+    // A search under the memory pole lands where the default search lands.
     let cached = Gpr::new(kernel.clone(), lik())
         .fit([bands.fill(&train)], N, &y)
         .expect("cached");

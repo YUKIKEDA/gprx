@@ -2,7 +2,7 @@
 
 # gprx の保存フォーマット
 
-`save` が書き、`load` が読むもの。`format_version` は 1。コードは `src/persist/`。クレートの中での位置づけは [architecture.ja.md](architecture.ja.md)。1 段落の要約は [design §2](design.ja.md#2-全体アーキテクチャ概要)。
+`save` が書き、`load` が読むもの。`format_version` は座標のカーネルなら 1、`DistanceKernel` なら 2（8 節）。コードは `src/persist/`。クレートの中での位置づけは [architecture.ja.md](architecture.ja.md)。1 段落の要約は [design §2](design.ja.md#2-全体アーキテクチャ概要)。
 
 この文書の例は、`save` の実際の出力（8 点で fit してから `save`）で、手で書いたものではない。
 
@@ -46,7 +46,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 
 | キー | 型 | 有無 | 意味 |
 | --- | --- | --- | --- |
-| `format_version` | 整数 | 必須 | `1`。最初に検査する（8 節） |
+| `format_version` | 整数 | 必須 | `1`（座標のカーネル）か `2`（`distance` の葉を持つカーネル）。最初に検査する（8 節） |
 | `n` | 整数 | 必須 | 学習点の数。`0` は `EmptyInput` |
 | `d` | 整数 | 必須 | 特徴の数。`0` は `EmptyInput`。ただし `distance` の葉を持ち、座標の葉を持たないカーネルは除く（5.1 節） |
 | `has_factor` | bool | 必須 | `l` と `alpha` がテンソルのファイルにあるか（7 節） |
@@ -277,9 +277,9 @@ Gram 行列、`W`、距離キャッシュ（6.5 節の与えられた二乗距�
 
 ## 8. 版とエラー
 
-`format_version` は整数の `1` で、`FORMAT_VERSION` がその定数。ほかの値のファイルは `GprError::UnsupportedPersistVersion { found, supported }` で断る。移行は無い。省略されたキーは既定として読む（3 節）: `model`、`precision`、`residual`、`math`、`factor_jitter`、`distance_cache` がそうで、これらの無いファイルも読める。読み手が知らないキーは無視する。
+`format_version` は、座標のカーネルのモデルなら `1`、`DistanceKernel` のモデルなら `2`。`FORMAT_VERSION` は `2` で、このクレートが書き読みする最新の版。読み手は `1` と `2` を受け付ける。ほかの値のファイルは `GprError::UnsupportedPersistVersion { found, supported }` で断る。移行は無い。省略されたキーは既定として読む（3 節）: `model`、`precision`、`residual`、`math`、`factor_jitter`、`distance_cache` がそうで、これらの無いファイルも読める。読み手が知らないキーは無視する。
 
-クレートが `0.x` のあいだ、版 1 は追加で広がる。新しいカーネルの variant（`distance`）や新しいテンソル（`d2.<k>`）を足しても `format_version` は上げない。追加より前の gprx は、その追加を要るファイルを `UnsupportedPersistVersion` ではなく `PersistFailed` で断る。距離のモデルは必ず `distance` のカーネルを持ち、そうした読み手はそれを読めない（`Config`、知らない variant）。`d2.<k>` のテンソルまで進まないので、距離のモデルを座標のモデルとして読むことは無い。
+版 2 は、カーネルの variant `distance`、テンソル `d2.<k>`、疎なモデルのキー `inducing` を足す。座標のモデルはどれも持たないので版 1 のままで、版 2 より前の gprx も読める。その gprx は距離のモデルを `UnsupportedPersistVersion { found: 2, supported: 1 }` で断る。
 
 | 状況 | エラー |
 | --- | --- |
@@ -291,7 +291,7 @@ Gram 行列、`W`、距離キャッシュ（6.5 節の与えられた二乗距�
 | 予約された `persist_id` | `GprError::PersistFailed { kind: InvalidPersistId, reason }` |
 | 同じ種類に同じ `persist_id` を 2 回登録した | `GprError::PersistFailed { kind: InvalidPersistId, reason }` |
 | `persist_id` を実装していない `custom` のカーネルや変換の保存 | `GprError::PersistFailed { kind: NotPersistable, reason }` |
-| `format_version` が `1` でない | `GprError::UnsupportedPersistVersion` |
+| `format_version` が `1` でも `2` でもない | `GprError::UnsupportedPersistVersion` |
 | `n` か（Sparse の）`m` が `0`、`distance` の葉の無いカーネルで `d` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
 | 保存した学習の正方行列に、丸めの範囲を超えて、負の値がある、対角が 0 でない、または対称でない | `GprError::ShapeMismatch` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |

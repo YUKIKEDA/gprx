@@ -42,8 +42,38 @@ pub use registry::{
     UnfittedTargetRestore,
 };
 
-/// Names the `config.json` `format_version` written and read by this crate.
-pub const FORMAT_VERSION: u32 = 1;
+/// Names the newest `config.json` `format_version` this crate writes and
+/// reads.
+///
+/// A model of a coordinate kernel is written as version 1, which earlier
+/// gprx also reads. A model of a [`crate::kernel::DistanceKernel`] is written
+/// as version 2, so earlier gprx refuses it with
+/// [`GprError::UnsupportedPersistVersion`]. This crate reads both.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The version a directory of a coordinate kernel is written as.
+const POINTS_FORMAT_VERSION: u32 = 1;
+
+/// The `format_version` to write for a model whose kernel is `kernel`.
+fn format_version_for(kernel: &kernel::KernelJson) -> u32 {
+    if kernel.reads_distances() {
+        FORMAT_VERSION
+    } else {
+        POINTS_FORMAT_VERSION
+    }
+}
+
+/// Rejects a `format_version` this crate does not read.
+fn require_version(found: u32) -> Result<(), GprError> {
+    if (POINTS_FORMAT_VERSION..=FORMAT_VERSION).contains(&found) {
+        Ok(())
+    } else {
+        Err(GprError::UnsupportedPersistVersion {
+            found,
+            supported: FORMAT_VERSION,
+        })
+    }
+}
 
 /// Names the prefix reserved for built-in persist tags.
 ///
@@ -132,7 +162,7 @@ impl LoadedGpr {
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
-    /// is not [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
+    /// is not `1` to [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
     /// directory, JSON, tensors, or registry lookup is invalid. Factorization
     /// errors from a file written without `L` use the same variants as
     /// [`crate::Gpr<Fixed>::factor`].
@@ -374,8 +404,9 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         Some((ids, next)) => (Some(ids), Some(next)),
         None => (None, None),
     };
+    let kernel = KernelJson::encode(save.kernel)?;
     let config = ModelConfig {
-        format_version: FORMAT_VERSION,
+        format_version: format_version_for(&kernel),
         n: save.n,
         d: save.d,
         has_factor: save.factor.is_some(),
@@ -383,7 +414,7 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         precision: PrecisionJson::from_persist(save.kind),
         residual: ResidualJson::from_persist(save.kind),
         math: MathJson::encode(save.policies.math),
-        kernel: KernelJson::encode(save.kernel)?,
+        kernel,
         likelihood: LikelihoodJson::encode(save.likelihood),
         jitter: JitterJson::encode(save.policies.jitter),
         factor_jitter: save.factor_jitter,
@@ -949,8 +980,8 @@ mod tests {
     }
 
     #[test]
-    fn format_version_is_one() {
-        assert_eq!(FORMAT_VERSION, 1);
+    fn format_version_is_two() {
+        assert_eq!(FORMAT_VERSION, 2);
         assert_eq!(RESERVED_PREFIX, "gprx.");
     }
 
@@ -1410,7 +1441,7 @@ mod tests {
         match LoadedGpr::load(&dir, &PersistRegistry::new()) {
             Err(GprError::UnsupportedPersistVersion {
                 found: 99,
-                supported: 1,
+                supported: 2,
             }) => {}
             other => panic!("unexpected {other:?}"),
         }

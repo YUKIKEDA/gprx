@@ -13,7 +13,7 @@ use crate::error::PersistErrorKind;
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
-    DistanceKernel, DistanceSlot, DistanceSource, Fills, KernelScalar, KernelSpec, ModelKernel,
+    DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
     ModelKernelParts, PointKernel, PointUse, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
@@ -148,13 +148,12 @@ where
     K: ModelKernel,
 {
     /// Checks `input`, fits the transforms, binds the training distances,
-    /// and allocates the fit buffers. The fills of the training distances
-    /// come back for a fit under [`crate::DistanceCachePolicy::Uncached`].
-    #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
-    pub(crate) fn prepare<'a>(
+    /// and allocates the fit buffers.
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
+    pub(crate) fn prepare(
         gpr: Gpr<O, P, K>,
-        input: TrainInput<'a>,
-    ) -> Result<(Self, Fills<'a>), (Gpr<O, P, K>, GprError)> {
+        input: TrainInput<'_>,
+    ) -> Result<Self, (Gpr<O, P, K>, GprError)> {
         if let Err(err) = input.validate(<K as ModelKernelParts>::POINTS) {
             return Err((gpr, err));
         }
@@ -165,11 +164,10 @@ where
             y,
             sources,
         } = input;
-        let (sources, fills) =
-            match bind_training::<P::Storage, P::Sources>(&gpr.kernel, sources, n_rows) {
-                Ok(bound) => bound,
-                Err(err) => return Err((gpr, err)),
-            };
+        let sources = match bind_training::<P::Storage, P::Sources>(&gpr.kernel, sources, n_rows) {
+            Ok(bound) => bound,
+            Err(err) => return Err((gpr, err)),
+        };
         let mut x_buf = x.to_vec();
         let x_fitted: Box<dyn Transform> = if n_cols == 0 {
             Box::new(IdentityInput)
@@ -197,37 +195,34 @@ where
             Ok(ws) => ws,
             Err(err) => return Err((gpr, err)),
         };
-        Ok((
-            Self {
-                core: GprCore {
-                    slots: spec_slots(&gpr.kernel),
-                    kernel: gpr.kernel,
-                    compiled,
-                    likelihood: gpr.likelihood,
-                    x_unfitted: gpr.x_transform,
-                    y_unfitted: gpr.y_transform,
-                    x_transform: x_fitted,
-                    y_transform: y_fitted,
-                    policies: gpr.policies,
-                    query: QueryWorkspace::new(),
-                    x_obs: x.to_vec(),
-                    y_obs: y.to_vec(),
-                    x: pack_points(&x_buf, n_rows, n_cols),
-                    y_train: y_buf,
-                    factor_alpha: vec![P::Storage::from_f64(0.0); n_rows],
-                    alpha: vec![P::Refine::from_f64(0.0); n_rows],
-                    x_cast: P::Storage::empty_cols(),
-                    y_cast: P::Storage::empty_rows(),
-                    sources,
-                    n: n_rows,
-                    d: n_cols,
-                },
-                optimizer: gpr.optimizer,
-                store: LltStore::new(workspace),
-                _kernel: PhantomData,
+        Ok(Self {
+            core: GprCore {
+                slots: spec_slots(&gpr.kernel),
+                kernel: gpr.kernel,
+                compiled,
+                likelihood: gpr.likelihood,
+                x_unfitted: gpr.x_transform,
+                y_unfitted: gpr.y_transform,
+                x_transform: x_fitted,
+                y_transform: y_fitted,
+                policies: gpr.policies,
+                query: QueryWorkspace::new(),
+                x_obs: x.to_vec(),
+                y_obs: y.to_vec(),
+                x: pack_points(&x_buf, n_rows, n_cols),
+                y_train: y_buf,
+                factor_alpha: vec![P::Storage::from_f64(0.0); n_rows],
+                alpha: vec![P::Refine::from_f64(0.0); n_rows],
+                x_cast: P::Storage::empty_cols(),
+                y_cast: P::Storage::empty_rows(),
+                sources,
+                n: n_rows,
+                d: n_cols,
             },
-            fills,
-        ))
+            optimizer: gpr.optimizer,
+            store: LltStore::new(workspace),
+            _kernel: PhantomData,
+        })
     }
 
     /// Drops `L` / `α` / training data and returns a trainer with the current kernel, likelihood, transforms, optimizer, and policies.
@@ -495,7 +490,6 @@ where
         ExactFit {
             core: &mut self.core,
             store: &mut self.store,
-            fills: &[],
         }
     }
 
@@ -1060,7 +1054,6 @@ where
         let mut view = ExactFit {
             core: &mut self.core,
             store: &mut self.store,
-            fills: &[],
         };
         view.optimize(&self.optimizer)
     }
@@ -1116,7 +1109,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let (sources, _) = bind_training::<P::Storage, P::Sources>(
+        let sources = bind_training::<P::Storage, P::Sources>(
             &parts.kernel,
             std::mem::take(&mut parts.sources),
             n,

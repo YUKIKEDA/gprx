@@ -4,10 +4,8 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
-use crate::kernel::{
-    CompiledKernel, DistanceFill, KernelScalar, KernelSpec, SlotId, Triangle, WeightedWalk,
-};
-use crate::kernel::{ScalarOps, SourceStore};
+use crate::kernel::ScalarOps;
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle, WeightedWalk};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{frobenius_lower, gemv_sym_lower, solve_lower};
 use crate::optimizer::{OptResult, Optimizer};
@@ -53,10 +51,6 @@ pub(crate) fn fit_buffers<P: GpScalar>(
 pub(crate) struct ExactFit<'a, P: GpScalar> {
     pub(crate) core: &'a mut GprCore<P>,
     pub(crate) store: &'a mut LltStore<P>,
-    /// The fills of the training distances during a fit. Under
-    /// [`DistanceCachePolicy::Uncached`] every factor after the first calls
-    /// them again.
-    pub(crate) fills: &'a [(SlotId, &'a dyn DistanceFill)],
 }
 
 /// Per-leaf Gram matrices an incremental objective keeps during `fit` /
@@ -116,7 +110,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
         ExactFit {
             core: &mut *self.core,
             store: &mut *self.store,
-            fills: self.fills,
         }
     }
 
@@ -272,14 +265,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
             Keep::FactorGrams => self.core.compiled.kept_products(),
         };
         self.store.release_mapped();
-        // The store knows whether a bind just wrote the squares; only a
-        // factor after the first one under `Uncached` calls the fills again.
-        if self.core.policies.distance_cache == DistanceCachePolicy::Uncached
-            && !self.fills.is_empty()
-            && !self.core.sources.take_unread()
-        {
-            self.core.sources.refill(self.fills)?;
-        }
         let n = self.core.n;
         if products > 0 {
             self.ensure_weighted(n, products)?;

@@ -402,7 +402,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `borrow(d2)` | `predict` はその場で読む。`fit` と `insert` はコピー |
 | `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` が `out[i + j * n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く |
 
-表は列優先の `dist[i + j * n_rows]`。値は負であってはならず、学習の正方行列（とクエリの正方行列）は対角が 0 で対称でなければならない。ただし丸めの範囲は許す。表の最大値の `1e-8` 倍以内なら、負の値と対角は `0.0` に、鏡像の組 `(i, j)`、`(j, i)` はその平均にそろえる。そのため `‖a‖² + ‖b‖² − 2a·b` で作った表や、向きごとに計算した距離の表も受け付ける。それを超えると `ShapeMismatch`。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。`DistanceCachePolicy::Uncached` では、探索の 2 回目以降の分解のたびに学習の fill を呼び直し、モデルは最後の結果を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。
+表は列優先の `dist[i + j * n_rows]`。値は負であってはならず、学習の正方行列（とクエリの正方行列）は対角が 0 で対称でなければならない。ただし丸めの範囲は許す。表の最大値の `1e-6` 倍以内なら、負の値と対角は `0.0` に、鏡像の組 `(i, j)`、`(j, i)` はその平均にそろえる。そのため `‖a‖² + ‖b‖² − 2a·b` で作った表や、向きごとに計算した距離の表も受け付ける。それを超えると `ShapeMismatch`。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。学習の fill は `DistanceCachePolicy` によらず、1 回の学習で 1 回だけ呼ぶ。モデルはそれが書いた二乗距離を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。
 
 | モデル | `fit` / `factor` | `predict` 系 | 共分散と `sample` |
 | --- | --- | --- | --- |
@@ -683,7 +683,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 保存と読み込み（`gprx::persist`）
 
-`FORMAT_VERSION` は `1`。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
+`FORMAT_VERSION` は `2`。座標のモデルは版 1、`DistanceKernel` のモデルは版 2 で書き、`load` はどちらも読む。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
 
 `LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` はディレクトリからモデルを読み込む。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
 
@@ -709,7 +709,7 @@ fn main() -> Result<(), gprx::GprError> {
     let dir = std::env::temp_dir().join("gprx-readme-save");
     let _ = std::fs::remove_dir_all(&dir);
     fitted.save(&dir)?;
-    assert_eq!(FORMAT_VERSION, 1);
+    assert_eq!(FORMAT_VERSION, 2);
     assert!(!"mine.kernel".starts_with(RESERVED_PREFIX));
 
     let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
@@ -864,7 +864,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `InvalidPointId` | `PointId` がモデルに無い |
 | `InvalidInducingId` | `InducingId` がモデルに無い |
 | `PersistFailed { kind, reason }` | 保存か読み込みが失敗 |
-| `UnsupportedPersistVersion { found, supported }` | `format_version` が `FORMAT_VERSION` でない |
+| `UnsupportedPersistVersion { found, supported }` | `format_version` が `1` から `FORMAT_VERSION` の範囲にない |
 
 `CholeskyStage` は `Fit`、`Predict`、`OnlineInsert`、`OnlineDelete`。`PersistErrorKind` は `Io`、`Config`、`Tensor`、`InvalidPersistId`、`NotPersistable`、`UnregisteredId`、`WrongModel`。分岐は `kind`。`reason` は人が読むための説明文である。
 

@@ -214,7 +214,7 @@ impl LeafParams for SuppliedLeafSpec {
 /// Every `d²` must be finite and non-negative, and a square of the pairs of
 /// one set (the training square, or the query square of a covariance) must
 /// have a zero diagonal and be symmetric, up to what floating point leaves:
-/// within `1e-8` of the table's largest value, a model sets a negative value
+/// within `1e-6` of the table's largest value, a model sets a negative value
 /// or a diagonal to `0.0` and each mirror pair `(i, j)`, `(j, i)` to its
 /// mean (a borrowed table is copied first). Past that it returns
 /// [`GprError::ShapeMismatch`]: the table is not one of squared distances.
@@ -311,9 +311,9 @@ impl ScalarDistance {
 
     /// Binds a function that writes this slot's `d²`.
     ///
-    /// A fit calls it once into the buffer the model keeps (under
-    /// [`crate::DistanceCachePolicy::Uncached`], once more for every
-    /// factor after the first); a prediction calls it once into scratch.
+    /// A fit calls it once into the buffer the model keeps, whatever the
+    /// [`crate::DistanceCachePolicy`]; a prediction calls it once into
+    /// scratch.
     /// See [`DistanceFill`].
     ///
     /// See the example on [`DistanceFill`].
@@ -939,10 +939,10 @@ pub(crate) use sealed::Model as ModelKernelParts;
 /// Writes squared distances for one block of pairs.
 ///
 /// A fit calls [`Self::fill`] once for the training square and keeps what
-/// it wrote; under [`crate::DistanceCachePolicy::Uncached`] it calls it
-/// again into the same buffer for every factor after the first. A
-/// prediction calls it once into scratch for each block it needs; an
-/// insert calls it once for the new column. The caller knows which
+/// it wrote, whatever the [`crate::DistanceCachePolicy`] (the model keeps
+/// the training squares for prediction anyway). A prediction calls it once
+/// into scratch for each block it needs; an insert calls it once for the
+/// new column. The caller knows which
 /// samples the rows and columns are: it binds a filler to a slot for one
 /// call with [`ScalarDistance::fill`] or [`ArdDistance::fill`].
 ///

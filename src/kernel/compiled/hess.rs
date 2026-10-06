@@ -118,6 +118,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         uplo: Triangle,
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
+        self.require_columns(x)?;
         let mut nested = self.nested_buffers(d2_k.nrows(), d2_k.ncols());
         self.hess_points_with::<M>(x, d2_k, (i, j), uplo, scratch, &mut nested)
     }
@@ -143,8 +144,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.hess(x, d2_k, i, j, uplo),
             Self::MaternArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.hess(x, d2_k, i, j, uplo),
-            Self::Constant(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
-            Self::White(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
+            Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
+            Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
             Self::Supplied(_) => Err(needs_supply()),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
@@ -224,10 +225,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 leaf.hess(one, cell, i, j, Triangle::Lower)
             }),
             Self::Constant(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.hess_points(one, cell, i, j, Triangle::Lower)
+                leaf.hess_rows(one, cell, i, j, Triangle::Lower)
             }),
             Self::White(leaf) => broadcast_self_diag(x, out, |one, cell| {
-                leaf.hess_points(one, cell, i, j, Triangle::Lower)
+                leaf.hess_rows(one, cell, i, j, Triangle::Lower)
             }),
             Self::Supplied(leaf) => {
                 require_diag_len(x, out)?;
@@ -266,8 +267,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::RbfArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
             Self::MaternArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
             Self::RationalQuadraticArd(leaf) => leaf.hess_from_sq_diff(cache, d2_k, i, j, uplo),
-            Self::Constant(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
-            Self::White(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
+            Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
+            Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,

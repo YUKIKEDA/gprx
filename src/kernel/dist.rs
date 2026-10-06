@@ -367,20 +367,6 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         Ok(Self { data, n, d })
     }
 
-    /// Overwrites the packed values in place with `pair(k, i, j)`, for the
-    /// same points and dimensions ([`Self::from_pairs`]).
-    pub(crate) fn refill_pairs(&mut self, pair: impl Fn(usize, usize, usize) -> T) {
-        let mut at = 0;
-        for k in 0..self.d {
-            for col in 0..self.n {
-                for row in col..self.n {
-                    self.data[at] = pair(k, row, col);
-                    at += 1;
-                }
-            }
-        }
-    }
-
     /// `(points, dimensions)` the cache was filled for.
     #[cfg(test)]
     pub(crate) fn shape(&self) -> (usize, usize) {

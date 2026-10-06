@@ -324,6 +324,25 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    /// Rejects coordinates without a column ([`GprError::EmptyInput`]) for a
+    /// tree that reads coordinates. A tree with a supplied-distance leaf may
+    /// take none: its other leaves read only the number of rows.
+    pub(crate) fn require_columns(&self, x: MatRef<'_, T>) -> Result<(), GprError> {
+        if x.ncols() == 0 && !self.reads_supplied() {
+            return Err(GprError::EmptyInput);
+        }
+        Ok(())
+    }
+
+    /// Whether a leaf of the tree reads supplied distances.
+    pub(crate) fn reads_supplied(&self) -> bool {
+        match self {
+            Self::Supplied(_) => true,
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::reads_supplied),
+            _ => false,
+        }
+    }
+
     /// Whether `∂K/∂θ` reads an output-shaped `scratch`: a product, or a
     /// custom leaf that may hold its distances there.
     pub(crate) fn needs_grad_scratch(&self) -> bool {

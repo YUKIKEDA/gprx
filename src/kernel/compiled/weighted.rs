@@ -924,7 +924,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 continue;
             }
             let start = saved + k * n;
-            t.fill_diag_points(x, &mut accum.flat[start..start + n])?;
+            t.fill_diag_rows(x, &mut accum.flat[start..start + n])?;
             k += 1;
         }
         *cursor = saved + n_varying * n;

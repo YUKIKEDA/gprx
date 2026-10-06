@@ -234,3 +234,40 @@ fn sparse_roundtrip_keeps_the_inducing_points() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_distance_model_is_written_as_version_two_and_a_coordinate_model_as_one() {
+    let version = |dir: &PathBuf| -> u64 {
+        let bytes = std::fs::read(dir.join("config.json")).expect("config");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"].as_u64().expect("version")
+    };
+    let c = coord(0, N, 0.0);
+    let image = ScalarDistance::new();
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    let dist = Gpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets())
+        .expect("distances");
+    let dir = temp_dir("version-dist");
+    dist.save(&dir).expect("save");
+    assert_eq!(version(&dir), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+    let coords = Gpr::new(KernelSpec::from(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor(&c, N, 1, &targets())
+        .expect("coords");
+    let dir = temp_dir("version-coords");
+    coords.save(&dir).expect("save");
+    assert_eq!(version(&dir), 1);
+    assert!(LoadedGpr::load(&dir, &reg()).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+    let sparse = Sgpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets(), &[1, 3])
+        .expect("sgpr");
+    let dir = temp_dir("version-sparse");
+    sparse.save(&dir).expect("save");
+    assert_eq!(version(&dir), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

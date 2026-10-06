@@ -1068,7 +1068,6 @@ where
     let result = f(&mut ExactFit {
         core: &mut *core,
         store: &mut store,
-        fills: &[],
     });
     match result {
         Ok(value) => {

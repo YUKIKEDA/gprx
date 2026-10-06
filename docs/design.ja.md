@@ -24,7 +24,7 @@
   → persist: モデルごとに 1 ディレクトリ（`config.json` + `model.safetensors`）（§6.3、§11）
 ```
 
-persist は 1 ディレクトリに書く。`format_version` は 1。Exact のモデルは `factor_kind` が必須で（`llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む）、保存した因子は mmap する。Sparse のモデルは `model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を足し、`LoadedSgpr` / `LoadedSvgp` で読む。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、読み込んだモデルは同じ値をビットで予測する。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）。読み込んだモデルの再学習は `with_optimizer` → `refit`。すべてのキーとテンソルは [persist-format.ja.md](persist-format.ja.md)。モジュールと依存の向きは [architecture.ja.md](architecture.ja.md)。
+persist は 1 ディレクトリに書く。`format_version` は座標のモデルなら 1、`DistanceKernel` のモデルなら 2。Exact のモデルは `factor_kind` が必須で（`llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む）、保存した因子は mmap する。Sparse のモデルは `model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を足し、`LoadedSgpr` / `LoadedSvgp` で読む。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、読み込んだモデルは同じ値をビットで予測する。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）。読み込んだモデルの再学習は `with_optimizer` → `refit`。すべてのキーとテンソルは [persist-format.ja.md](persist-format.ja.md)。モジュールと依存の向きは [architecture.ja.md](architecture.ja.md)。
 
 主要な設計原則:
 - **識別子は gprx / GPR の概念を名付ける**（カーネル、尤度、θ、分解、正パラメータの区間、…）。他製品・テストハーネス・無関係なドメインの名前は置かない
@@ -297,7 +297,7 @@ struct DistCache<S> {
 
 置く中間表現は、二乗ユークリッド距離（等方の RBF / Matérn / RQ / Periodic / ユーザー定義のカーネルの葉）と、次元ごとの生の `(Δx_d)²`（ARD のカーネルの葉）。ℓ 込みの `r²` は置かない。ARD のレイアウトは、次元ごとに下三角（対角を含む）だけを列ごとに詰めたもの。値は `d · n(n+1)/2` 個で、次元 `k` は先頭から `k · n(n+1)/2` 個の後、列 `j` は行 `j..n` を連続して持つ。他の三角形を読む側は、`(i, j)` の代わりに `(j, i)` を読む。どちらの枠も最初に使うときに、コンパイル済みカーネルがそれを読むときだけ埋める。`RBF + White` と `Constant * RBF` は `dist` を埋める。単独の Linear / Constant / White は何も埋めず、方針は保つが使わない。訓練×クエリや LOO のキャッシュは無い。
 
-**与えられた学習の距離。** `DistanceKernel` のモデルは学習の `d²`（`TrainSources`）を持ち、格納の精度で置く: `f32` のモデルは格納するときに変換し、`f64` のモデルはムーブされた `Vec`（`from_vec`）をコピーせずに持つ。スカラーのスロットは密な列優先 `dist[i + j·n]`、ARD のスロットは上の `(Δx_d)²` キャッシュと同じく下三角に詰める。Exact の格納は先頭次元の容量を持ち、`insert` が倍々で広げる。供給は `from_vec` / `from_vecs`（ムーブ）、`from_slice` / `from_slices`（呼び出しでコピー）、`borrow`（`predict` はその場で読み、`fit` と `insert` はコピー）、`fill(&dyn DistanceFill)`（`fill(n_rows, n_cols, out)` が `out[i + j·n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く）。`Uncached` では、探索の 2 回目以降の分解のたびに、学習の fill を同じ格納へその場で呼び直す。表は方針によらず 1 回だけ格納する。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側の値を読む。負の値、0 でない対角、食い違う鏡像の組は、表の最大値の `1e-8` 倍以内なら直し（`0.0` か組の平均）、超えれば `ShapeMismatch`。スロットが無い・重複する・知らないものは `LengthMismatch`。共分散と `sample` は、クエリの正方行列を 1 つの集合の Gram として読むので、`WhiteKernel` の項が対角を足す。Sparse のモデルは学習の二乗距離を `f64` の `X` の隣に `f64` で持ち、誘導点の添字の `Z × Z` と `Z × X` のブロックを 1 回集め、`f64` ではその場で、`f32` では最初に 1 度だけ変換した写しで読む。その予測は、学習 × クエリのブロックから誘導点の行（`m × q`）を集め、クエリの正方行列をコピーする。そのため Sparse の予測は呼び出し側の表をその場では読まない。
+**与えられた学習の距離。** `DistanceKernel` のモデルは学習の `d²`（`TrainSources`）を持ち、格納の精度で置く: `f32` のモデルは格納するときに変換し、`f64` のモデルはムーブされた `Vec`（`from_vec`）をコピーせずに持つ。スカラーのスロットは密な列優先 `dist[i + j·n]`、ARD のスロットは上の `(Δx_d)²` キャッシュと同じく下三角に詰める。Exact の格納は先頭次元の容量を持ち、`insert` が倍々で広げる。供給は `from_vec` / `from_vecs`（ムーブ）、`from_slice` / `from_slices`（呼び出しでコピー）、`borrow`（`predict` はその場で読み、`fit` と `insert` はコピー）、`fill(&dyn DistanceFill)`（`fill(n_rows, n_cols, out)` が `out[i + j·n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く）。学習の fill は 1 回の学習で 1 回だけ呼び、表も 1 回だけ格納する。キャッシュの方針にはよらない。モデルは予測のために二乗距離を持ち続けるので、`Uncached` で fill を呼び直してもメモリは減らないからである。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側の値を読む。負の値、0 でない対角、食い違う鏡像の組は、表の最大値の `1e-6` 倍以内なら直し（`0.0` か組の平均）、超えれば `ShapeMismatch`。スロットが無い・重複する・知らないものは `LengthMismatch`。共分散と `sample` は、クエリの正方行列を 1 つの集合の Gram として読むので、`WhiteKernel` の項が対角を足す。Sparse のモデルは学習の二乗距離を `f64` の `X` の隣に `f64` で持ち、誘導点の添字の `Z × Z` と `Z × X` のブロックを 1 回集め、`f64` ではその場で、`f32` では最初に 1 度だけ変換した写しで読む。その予測は、学習 × クエリのブロックから誘導点の行（`m × q`）を集め、クエリの正方行列をコピーする。そのため Sparse の予測は呼び出し側の表をその場では読まない。
 
 ほかの方針とのどの組み合わせも不正ではないので、方針は実行時の enum にする（§6.3）。`(n,n,d)` テンソルは `n²×d×sizeof(T)` バイト。`K` 自体が `n²×sizeof(T)`（n=5000、f64 で約 200MB）で、ARD キャッシュはその `d` 倍になる。方針は呼び出し側が `Cached` か `Uncached` を選ぶ。`n`・`d`・メモリ予算からの自動選択は意図的に対象外。
 
@@ -926,7 +926,7 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
 }
 ```
 
-`insert` / `delete` は現在のカーネル・ハイパラのまま LD を更新し、`α` に古い印を付ける。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。これらは一時的な LLT の置き場でバッチの fit を動かし（§6.3）、`PointId` とワークスペースの容量を保つ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private でオンラインのモデルが持つ。persist は `FORMAT_VERSION` 1 のまま `factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse のオンラインは `OnlineSgpr`（§6）。
+`insert` / `delete` は現在のカーネル・ハイパラのまま LD を更新し、`α` に古い印を付ける。ハイパラ再最適化は `OnlineGpr::refit` / `set_params` を明示したときだけ。これらは一時的な LLT の置き場でバッチの fit を動かし（§6.3）、`PointId` とワークスペースの容量を保つ。`into_online` は既存 `n` 点に `0 .. n-1` を付け、以降の `insert` は単調増加で再利用しない。`PointId` に公開コンストラクタは無い。`PointRegistry` は crate-private でオンラインのモデルが持つ。persist は座標のモデルを版 1 で書き、`factor_kind`（`llt` / `ldlt`）を必須にする。`llt` の load は `FittedGpr`。`ldlt` は `OnlineGpr` で、`point_ids` と `next_point_id` も必須。Sparse のオンラインは `OnlineSgpr`（§6）。
 
 ## 12. テスト計画
 

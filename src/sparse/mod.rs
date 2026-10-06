@@ -158,7 +158,7 @@ impl SparseDist {
             });
         }
         let slots = spec_slots(kernel);
-        let (raw, _) = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
+        let raw = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
         Self::new(TrainSources::<f64>::from_raw(raw, n)?, inducing.to_vec())
     }
 
