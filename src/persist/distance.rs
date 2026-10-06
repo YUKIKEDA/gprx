@@ -47,12 +47,12 @@ fn dense_tensors<T: KernelScalar>(sources: &TrainSources<T>) -> Vec<OwnedTensor>
         .dense_f64()
         .into_iter()
         .enumerate()
-        .map(|(k, (shape, blocks))| {
+        .map(|(k, (shape, values))| {
             let dims = match shape {
                 SlotShape::Ard(dims) => vec![dims, n, n],
                 SlotShape::Scalar => vec![n, n],
             };
-            (name(k), dims, blocks.concat())
+            (name(k), dims, values)
         })
         .collect()
 }
@@ -69,14 +69,27 @@ pub(super) fn read_sources(
     }
     // §8 of the format: `n = 0` is `EmptyInput`, before any tensor is cut.
     crate::data::require_nonempty(n)?;
+    // `n` is the config's: a value whose square overflows is no saved model.
+    let square = n.checked_mul(n).ok_or_else(|| {
+        persist_err(
+            PersistErrorKind::Config,
+            format!("n = {n} is too large for an n × n square"),
+        )
+    })?;
     slots
         .iter()
         .enumerate()
         .map(|(k, slot)| match slot {
             DistanceSlot::Ard(ard) => {
                 let dims = ard.dims();
+                dims.checked_mul(square).ok_or_else(|| {
+                    persist_err(
+                        PersistErrorKind::Config,
+                        format!("{dims} squares of n = {n} are too large"),
+                    )
+                })?;
                 let values = read_f64(tensors, &name(k), &[dims, n, n])?;
-                let blocks = values.chunks_exact(n * n).map(<[f64]>::to_vec).collect();
+                let blocks = values.chunks_exact(square).map(<[f64]>::to_vec).collect();
                 Ok(ard.from_vecs(blocks))
             }
             DistanceSlot::Scalar(scalar) => {
@@ -340,6 +353,7 @@ mod tests {
 
     use super::read_sources;
     use crate::error::GprError;
+    use crate::error::PersistErrorKind;
     use crate::kernel::{ArdDistance, DistanceSlot};
 
     #[test]
@@ -352,5 +366,27 @@ mod tests {
             read_sources(&tensors, &slots, 0).err(),
             Some(GprError::EmptyInput)
         );
+    }
+
+    #[test]
+    fn an_n_whose_square_overflows_is_a_config_error_before_any_tensor_is_cut() {
+        let bytes =
+            safetensors::serialize(Vec::<(String, TensorView<'_>)>::new(), None).expect("bytes");
+        let tensors = SafeTensors::deserialize(&bytes).expect("tensors");
+        let config = |result: Result<_, GprError>| {
+            matches!(
+                result,
+                Err(GprError::PersistFailed {
+                    kind: PersistErrorKind::Config,
+                    ..
+                })
+            )
+        };
+        let ard = [DistanceSlot::Ard(ArdDistance::new(2).expect("dims"))];
+        assert!(config(read_sources(&tensors, &ard, usize::MAX / 2)));
+        // `n²` fits but two of them do not.
+        let n = (1_usize << (usize::BITS / 2)) - 1;
+        assert!(n.checked_mul(n).is_some());
+        assert!(config(read_sources(&tensors, &ard, n)));
     }
 }

@@ -277,7 +277,7 @@ Gram 行列、`W`、距離キャッシュ（6.5 節の与えられた二乗距�
 
 ## 8. 版とエラー
 
-`format_version` は、座標のカーネルのモデルなら `1`、`DistanceKernel` のモデルなら `2`。`FORMAT_VERSION` は `2` で、このクレートが書き読みする最新の版。読み手は `1` と `2` を受け付ける。ほかの値のファイルは `GprError::UnsupportedPersistVersion { found, supported }` で断る。移行は無い。省略されたキーは既定として読む（3 節）: `model`、`precision`、`residual`、`math`、`factor_jitter`、`distance_cache` がそうで、これらの無いファイルも読める。読み手が知らないキーは無視する。
+`format_version` は、座標のカーネルのモデルなら `1`、`DistanceKernel` のモデルなら `2`。`FORMAT_VERSION` は `2` で、このクレートが書き読みする最新の版。読み手は `1` と `2` を受け付ける。ほかの値のファイルは `GprError::UnsupportedPersistVersion { found, supported }` で断る。版がカーネルの書かれる版と違うファイル（版 1 に `distance` の葉がある、または版 2 に `distance` の葉がない）は `PersistFailed { Config }` で断る。移行は無い。省略されたキーは既定として読む（3 節）: `model`、`precision`、`residual`、`math`、`factor_jitter`、`distance_cache` がそうで、これらの無いファイルも読める。読み手が知らないキーは無視する。
 
 版 2 は、カーネルの variant `distance`、テンソル `d2.<k>`、疎なモデルのキー `inducing` を足す。座標のモデルはどれも持たないので版 1 のままで、版 2 より前の gprx も読める。その gprx は距離のモデルを `UnsupportedPersistVersion { found: 2, supported: 1 }` で断る。
 

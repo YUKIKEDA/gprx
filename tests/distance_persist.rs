@@ -309,3 +309,61 @@ fn a_sparse_save_whose_z_is_not_the_inducing_rows_is_refused() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_format_version_that_does_not_match_the_kernel_is_refused() {
+    let set_version = |dir: &PathBuf, version: u64| {
+        let path = dir.join("config.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("config")).expect("json");
+        value["format_version"] = serde_json::json!(version);
+        std::fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("write");
+    };
+    let config = |result: Result<(), GprError>| {
+        assert!(
+            matches!(
+                result,
+                Err(GprError::PersistFailed {
+                    kind: PersistErrorKind::Config,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    };
+    let c = coord(0, N, 0.0);
+    let image = ScalarDistance::new();
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    // A distance kernel written as version 1 would pass an older reader.
+    let dist = Gpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets())
+        .expect("distances");
+    let dir = temp_dir("version-mismatch-dist");
+    dist.save(&dir).expect("save");
+    set_version(&dir, 1);
+    config(
+        FittedGpr::<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>::load(&dir, &reg())
+            .map(drop),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    // A coordinate kernel is never written as version 2, dense or sparse.
+    let coords = Gpr::new(KernelSpec::from(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor(&c, N, 1, &targets())
+        .expect("coords");
+    let dir = temp_dir("version-mismatch-coords");
+    coords.save(&dir).expect("save");
+    set_version(&dir, 2);
+    config(LoadedGpr::load(&dir, &reg()).map(drop));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sparse = Sgpr::new(KernelSpec::from(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor(&c, N, 1, &targets(), &c[..2], 2)
+        .expect("sgpr");
+    let dir = temp_dir("version-mismatch-sparse");
+    sparse.save(&dir).expect("save");
+    set_version(&dir, 2);
+    config(LoadedSgpr::load(&dir, &reg()).map(drop));
+    let _ = std::fs::remove_dir_all(&dir);
+}

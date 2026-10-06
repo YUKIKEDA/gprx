@@ -555,30 +555,27 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(TrainSources { n, cap: n, slots })
     }
 
-    /// Each slot's blocks in `f64`, dense `n × n`, in slot order (saving).
-    pub(crate) fn dense_f64(&self) -> Vec<(SlotShape, Vec<Vec<f64>>)> {
+    /// Each slot's blocks in `f64`, dense `n × n` and one after another in
+    /// one buffer, in slot order (saving).
+    pub(crate) fn dense_f64(&self) -> Vec<(SlotShape, Vec<f64>)> {
         let n = self.n;
         self.slots
             .iter()
             .map(|(_, data)| match data {
                 TrainData::Scalar(square) => (
                     SlotShape::Scalar,
-                    vec![
-                        (0..n * n)
-                            .map(|at| square[at % n + (at / n) * self.cap].to_f64())
-                            .collect(),
-                    ],
+                    (0..n * n)
+                        .map(|at| square[at % n + (at / n) * self.cap].to_f64())
+                        .collect(),
                 ),
                 TrainData::Ard(cache) => {
                     let view = cache.view();
-                    let blocks = (0..view.d())
-                        .map(|k| {
-                            (0..n * n)
-                                .map(|at| view.get(k, at % n, at / n).to_f64())
-                                .collect()
+                    let values = (0..view.d())
+                        .flat_map(|k| {
+                            (0..n * n).map(move |at| view.get(k, at % n, at / n).to_f64())
                         })
                         .collect();
-                    (SlotShape::Ard(view.d()), blocks)
+                    (SlotShape::Ard(view.d()), values)
                 }
             })
             .collect()
@@ -1176,13 +1173,13 @@ mod tests {
         QuerySources::bind(slots, sources, n, 1, BlockKind::Rect).expect("column")
     }
 
-    fn expected(n: usize) -> Vec<(SlotShape, Vec<Vec<f64>>)> {
+    fn expected(n: usize) -> Vec<(SlotShape, Vec<f64>)> {
         vec![
-            (SlotShape::Scalar, vec![line(1.0, 0..n, 0..n)]),
-            (SlotShape::Scalar, vec![line(2.0, 0..n, 0..n)]),
+            (SlotShape::Scalar, line(1.0, 0..n, 0..n)),
+            (SlotShape::Scalar, line(2.0, 0..n, 0..n)),
             (
                 SlotShape::Ard(2),
-                vec![line(4.0, 0..n, 0..n), line(5.0, 0..n, 0..n)],
+                [line(4.0, 0..n, 0..n), line(5.0, 0..n, 0..n)].concat(),
             ),
         ]
     }

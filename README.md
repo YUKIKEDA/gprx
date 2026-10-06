@@ -848,7 +848,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `InvalidPointId` | `PointId` is not in the model |
 | `InvalidInducingId` | `InducingId` is not in the model |
 | `PersistFailed { kind, reason }` | save or load failed |
-| `UnsupportedPersistVersion { found, supported }` | `format_version` is not `1` to `FORMAT_VERSION` |
+| `UnsupportedPersistVersion { found, supported }` | `format_version` is neither `1` nor `FORMAT_VERSION` (`supported`) |
 
 `CholeskyStage` is `Fit`, `Predict`, `OnlineInsert`, `OnlineDelete`. `PersistErrorKind` is `Io`, `Config`, `Tensor`, `InvalidPersistId`, `NotPersistable`, `UnregisteredId`, `WrongModel`. Branch on `kind`. `reason` is for a person to read.
 

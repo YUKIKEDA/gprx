@@ -56,7 +56,7 @@ impl ModelConfig {
     }
 
     pub(super) fn validate_version(&self) -> Result<(), GprError> {
-        super::require_version(self.format_version)
+        super::require_version(self.format_version, &self.kernel)
     }
 
     pub(super) fn online_ids(&self) -> Result<(&[u64], u64), GprError> {
@@ -410,7 +410,7 @@ pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError
             format!("config.json is not valid JSON: {err}"),
         )
     })?;
-    super::require_version(config.format_version)?;
+    super::require_version(config.format_version, &config.kernel)?;
     // A distance kernel without coordinate leaves reads no features.
     if config.n == 0 || config.m == 0 || (config.d == 0 && !config.kernel.reads_distances()) {
         return Err(GprError::EmptyInput);

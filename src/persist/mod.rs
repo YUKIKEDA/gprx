@@ -43,7 +43,7 @@ pub use registry::{
 };
 
 /// Names the newest `config.json` `format_version` this crate writes and
-/// reads.
+/// reads. It is not the version of every saved model.
 ///
 /// A model of a coordinate kernel is written as version 1, which earlier
 /// gprx also reads. A model of a [`crate::kernel::DistanceKernel`] is written
@@ -63,16 +63,25 @@ fn format_version_for(kernel: &kernel::KernelJson) -> u32 {
     }
 }
 
-/// Rejects a `format_version` this crate does not read.
-fn require_version(found: u32) -> Result<(), GprError> {
-    if (POINTS_FORMAT_VERSION..=FORMAT_VERSION).contains(&found) {
-        Ok(())
-    } else {
-        Err(GprError::UnsupportedPersistVersion {
+/// Rejects a `format_version` this crate does not read, and one that is
+/// not the version [`save`](crate::FittedGpr::save) writes for `kernel`: a
+/// distance kernel in a version 1 file would pass an older reader's check,
+/// and a coordinate kernel is never written as version 2.
+fn require_version(found: u32, kernel: &kernel::KernelJson) -> Result<(), GprError> {
+    if !(POINTS_FORMAT_VERSION..=FORMAT_VERSION).contains(&found) {
+        return Err(GprError::UnsupportedPersistVersion {
             found,
             supported: FORMAT_VERSION,
-        })
+        });
     }
+    let expected = format_version_for(kernel);
+    if found != expected {
+        return Err(persist_err(
+            PersistErrorKind::Config,
+            format!("format_version is {found}, but a model of this kernel is version {expected}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Names the prefix reserved for built-in persist tags.
@@ -162,8 +171,9 @@ impl LoadedGpr {
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
-    /// is not `1` to [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
-    /// directory, JSON, tensors, or registry lookup is invalid. Factorization
+    /// is neither `1` nor [`FORMAT_VERSION`], or [`GprError::PersistFailed`]
+    /// when the version is not the one the saved kernel is written with, or
+    /// the directory, JSON, tensors, or registry lookup is invalid. Factorization
     /// errors from a file written without `L` use the same variants as
     /// [`crate::Gpr<Fixed>::factor`].
     ///

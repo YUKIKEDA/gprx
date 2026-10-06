@@ -791,13 +791,18 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
     ///
     /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
-    /// [`GprError::EmptyInput`] if the workspace cannot accept a row,
+    /// [`GprError::EmptyInput`] if the model has no feature (`d = 0`) or the
+    /// workspace cannot accept a row,
     /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
     /// loaded `next_point_id` near `u64::MAX` reaches this), or
     /// [`GprError::CholeskyFailed`] if the new pivot `δ` is not positive.
     ///
     /// See the example on [`OnlineGpr`].
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
+        // A coordinate model reads at least one feature.
+        if self.core.d == 0 {
+            return Err(GprError::EmptyInput);
+        }
         self.insert_point(x_new, Vec::new(), y_new)
     }
 

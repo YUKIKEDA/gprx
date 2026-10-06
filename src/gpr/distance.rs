@@ -590,6 +590,10 @@ impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<WithPoints>> {
         x_new: &[f64],
         y_new: f64,
     ) -> Result<PointId, GprError> {
+        // The coordinate leaves read at least one feature.
+        if self.core.d == 0 {
+            return Err(GprError::EmptyInput);
+        }
         self.insert_point(x_new, sources.into_iter().collect(), y_new)
     }
 }

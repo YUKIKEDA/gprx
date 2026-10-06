@@ -416,9 +416,10 @@ impl LoadedSgpr {
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
-    /// is not `1` to [`FORMAT_VERSION`](super::FORMAT_VERSION), or [`GprError::PersistFailed`] when the
-    /// directory holds another model, or its JSON, tensors, or registry
-    /// lookup is invalid. Factorization errors use the same variants as
+    /// is neither `1` nor [`FORMAT_VERSION`](super::FORMAT_VERSION), or
+    /// [`GprError::PersistFailed`] when the version is not the one the saved
+    /// kernel is written with, the directory holds another model, or its
+    /// JSON, tensors, or registry lookup is invalid. Factorization errors use the same variants as
     /// [`crate::Sgpr<Fixed>::factor`].
     ///
     /// See the example on [`LoadedSgpr`].

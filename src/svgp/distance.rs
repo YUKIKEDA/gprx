@@ -67,7 +67,10 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<DistanceOnly>> {
     /// `sources` holds one `n × n` training square per slot (zero diagonal,
     /// symmetric); the model keeps a copy. `inducing` names the training
     /// points that are the inducing points: `K_mm` and `K_mn` read their
-    /// rows of the squares.
+    /// rows of the squares. Duplicates are allowed, as repeated rows of `Z`
+    /// are: they make `K_mm` singular, and the `K_mm` jitter retries
+    /// ([`Svgp::with_jitter_policy`], adaptive by default) add a diagonal
+    /// offset before the factor fails with [`GprError::CholeskyFailed`].
     ///
     /// # Errors
     ///

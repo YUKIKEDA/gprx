@@ -264,7 +264,7 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 
 ## 8. Versions and errors
 
-`format_version` is `1` for a model of a coordinate kernel and `2` for a model of a `DistanceKernel`; `FORMAT_VERSION` is `2`, the newest this crate writes and reads, and the reader accepts `1` and `2`. A file with another value is refused with `GprError::UnsupportedPersistVersion { found, supported }`. There is no migration. A key that is omitted reads as its default (§3): `model`, `precision`, `residual`, `math`, `factor_jitter`, and `distance_cache` work this way, so a file without them still loads. Keys the reader does not know are ignored.
+`format_version` is `1` for a model of a coordinate kernel and `2` for a model of a `DistanceKernel`; `FORMAT_VERSION` is `2`, the newest this crate writes and reads, and the reader accepts `1` and `2`. A file with another value is refused with `GprError::UnsupportedPersistVersion { found, supported }`. A file whose version is not the one its kernel is written with (a `distance` leaf in version 1, or a kernel without one in version 2) is refused with `PersistFailed { Config }`. There is no migration. A key that is omitted reads as its default (§3): `model`, `precision`, `residual`, `math`, `factor_jitter`, and `distance_cache` work this way, so a file without them still loads. Keys the reader does not know are ignored.
 
 Version 2 adds the `distance` kernel variant, the `d2.<k>` tensors, and the sparse `inducing` key. A coordinate model has none of them and stays version 1, so a gprx that predates version 2 still reads it; that gprx refuses a distance model with `UnsupportedPersistVersion { found: 2, supported: 1 }`.
 
