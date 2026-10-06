@@ -402,8 +402,7 @@ impl<T: KernelScalar> TrainSources<T> {
                 .any(|(col, (id, _))| col.id != *id)
         {
             return Err(GprError::LengthMismatch {
-                reason: "the new point's squared distances do not match the model's slots"
-                    .to_owned(),
+                reason: "internal: the bound columns are not the store's slots in order".to_owned(),
             });
         }
         let grow = self.cap < n + 1;
