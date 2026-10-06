@@ -466,11 +466,12 @@ fn sources_for<'a>(
 }
 
 #[test]
-fn every_distance_leaf_matches_coordinates_in_a_sparse_model() {
+fn every_distance_leaf_matches_coordinates_in_a_sparse_model_and_round_trips() {
     use gprx::kernel::{
-        MaternArdKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel,
-        RationalQuadraticKernel,
+        DistanceKernel, DistanceOnly, MaternArdKernel, MaternNu, PeriodicKernel,
+        RationalQuadraticArdKernel, RationalQuadraticKernel,
     };
+    use gprx::{DoublePrecision, FittedSgpr, FixedInducing, PersistRegistry};
     let data = data();
     let y = targets();
     let (c0, c1) = (coord(0, N, 0.0), coord(1, N, 0.0));
@@ -531,6 +532,22 @@ fn every_distance_leaf_matches_coordinates_in_a_sparse_model() {
         .predict(sources_for(&slots, &data.cross, &cross_refs), Q)
         .expect("predict");
     assert_pred(&got, &expect, 1e-8);
+
+    // The same leaves through save and load.
+    let dir = std::env::temp_dir().join(format!(
+        "gprx-distance-sparse-{}-leaves",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    dist.save(&dir).expect("save");
+    type Model = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<DistanceOnly>>;
+    let loaded = Model::load(&dir, &PersistRegistry::new()).expect("load");
+    let loaded_slots = loaded.slots();
+    let again = loaded
+        .predict(sources_for(&loaded_slots, &data.cross, &cross_refs), Q)
+        .expect("predict");
+    assert_pred(&again, &got, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
 
     // A search over the same leaves, and SVGP's Adam steps through them.
     let fitted = Sgpr::new(dist_kernel.clone(), lik())

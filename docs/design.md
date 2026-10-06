@@ -26,7 +26,7 @@ input X, y
   → persist: one directory (`config.json` + `model.safetensors`) per model (§6.3, §11)
 ```
 
-Persist writes one directory. `format_version` is 1. Exact models require `factor_kind` (`llt` loads as `FittedGpr`, `ldlt` as `OnlineGpr`), and a stored factor is memory-mapped. Sparse models add a `model` key (`sgpr` / `online_sgpr` / `svgp`; an Exact file has none) and load through `LoadedSgpr` / `LoadedSvgp`. Their tensors are the original `X` / `y` / `Z`, the transformed `Z`, and SVGP's `q(u)`; the factors are rebuilt, so a loaded model predicts the same values to the bit. `config.json` floats round-trip exactly (serde_json `float_roundtrip`). Retraining a loaded model is `with_optimizer` → `refit`. Every key and tensor: [persist-format.md](persist-format.md). Modules and how they depend on each other: [architecture.md](architecture.md).
+Persist writes one directory. `format_version` is 1 for a coordinate model and 2 for a `DistanceKernel` model. Exact models require `factor_kind` (`llt` loads as `FittedGpr`, `ldlt` as `OnlineGpr`), and a stored factor is memory-mapped. Sparse models add a `model` key (`sgpr` / `online_sgpr` / `svgp`; an Exact file has none) and load through `LoadedSgpr` / `LoadedSvgp`. Their tensors are the original `X` / `y` / `Z`, the transformed `Z`, and SVGP's `q(u)`; the factors are rebuilt, so a loaded model predicts the same values to the bit. `config.json` floats round-trip exactly (serde_json `float_roundtrip`). Retraining a loaded model is `with_optimizer` → `refit`. Every key and tensor: [persist-format.md](persist-format.md). Modules and how they depend on each other: [architecture.md](architecture.md).
 
 Principles:
 
@@ -934,7 +934,7 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
 }
 ```
 
-`insert` / `delete` update LD at the current kernel and hyperparameters and mark `α` stale. Hyperparameters are reoptimized only when `OnlineGpr::refit` / `set_params` is called explicitly. Those run the batch fit code on temporary LLT buffers (§6.3) and keep `PointId` values and workspace capacity. `into_online` assigns `0 .. n-1` to the existing `n` points. Later `insert` ids increase and are not reused. `PointId` has no public constructor. `PointRegistry` is crate-private and owned by the online model. persist keeps `FORMAT_VERSION` 1 and requires `factor_kind` (`llt` / `ldlt`). `load` of `llt` is `FittedGpr`. `ldlt` is `OnlineGpr`, and `point_ids` plus `next_point_id` are also required. Sparse online is `OnlineSgpr` (§6).
+`insert` / `delete` update LD at the current kernel and hyperparameters and mark `α` stale. Hyperparameters are reoptimized only when `OnlineGpr::refit` / `set_params` is called explicitly. Those run the batch fit code on temporary LLT buffers (§6.3) and keep `PointId` values and workspace capacity. `into_online` assigns `0 .. n-1` to the existing `n` points. Later `insert` ids increase and are not reused. `PointId` has no public constructor. `PointRegistry` is crate-private and owned by the online model. persist writes a coordinate model as version 1 and requires `factor_kind` (`llt` / `ldlt`). `load` of `llt` is `FittedGpr`. `ldlt` is `OnlineGpr`, and `point_ids` plus `next_point_id` are also required. Sparse online is `OnlineSgpr` (§6).
 
 ## 12. Test plan
 

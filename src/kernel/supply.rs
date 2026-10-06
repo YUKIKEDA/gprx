@@ -101,7 +101,30 @@ pub enum ArdLeafSpec {
     RationalQuadratic(RationalQuadraticArdKernel),
 }
 
-impl ScalarLeafSpec {}
+impl ScalarLeafSpec {
+    /// The same leaf as a coordinate [`KernelSpec`] (saving).
+    pub(crate) fn to_spec(&self) -> KernelSpec {
+        match self {
+            Self::Rbf(leaf) => KernelSpec::Rbf(*leaf),
+            Self::Matern(leaf) => KernelSpec::Matern(*leaf),
+            Self::Periodic(leaf) => KernelSpec::Periodic(*leaf),
+            Self::RationalQuadratic(leaf) => KernelSpec::RationalQuadratic(*leaf),
+            Self::Custom(leaf) => KernelSpec::Custom(leaf.clone()),
+        }
+    }
+
+    /// The scalar leaf `spec` is, if it is one (loading).
+    pub(crate) fn from_spec(spec: KernelSpec) -> Option<Self> {
+        match spec {
+            KernelSpec::Rbf(leaf) => Some(Self::Rbf(leaf)),
+            KernelSpec::Matern(leaf) => Some(Self::Matern(leaf)),
+            KernelSpec::Periodic(leaf) => Some(Self::Periodic(leaf)),
+            KernelSpec::RationalQuadratic(leaf) => Some(Self::RationalQuadratic(leaf)),
+            KernelSpec::Custom(leaf) => Some(Self::Custom(leaf)),
+            _ => None,
+        }
+    }
+}
 
 impl ArdLeafSpec {
     /// Number of lengthscales, one per dimension of the slot.
@@ -112,9 +135,36 @@ impl ArdLeafSpec {
             Self::RationalQuadratic(leaf) => leaf.lengthscales().num_params(),
         }
     }
+
+    /// The same leaf as a coordinate [`KernelSpec`] (saving).
+    pub(crate) fn to_spec(&self) -> KernelSpec {
+        match self {
+            Self::Rbf(leaf) => KernelSpec::RbfArd(leaf.clone()),
+            Self::Matern(leaf) => KernelSpec::MaternArd(leaf.clone()),
+            Self::RationalQuadratic(leaf) => KernelSpec::RationalQuadraticArd(leaf.clone()),
+        }
+    }
+
+    /// The ARD leaf `spec` is, if it is one (loading).
+    pub(crate) fn from_spec(spec: KernelSpec) -> Option<Self> {
+        match spec {
+            KernelSpec::RbfArd(leaf) => Some(Self::Rbf(leaf)),
+            KernelSpec::MaternArd(leaf) => Some(Self::Matern(leaf)),
+            KernelSpec::RationalQuadraticArd(leaf) => Some(Self::RationalQuadratic(leaf)),
+            _ => None,
+        }
+    }
 }
 
-impl SuppliedLeafSpec {}
+impl SuppliedLeafSpec {
+    /// The same leaf as a coordinate [`KernelSpec`] (saving).
+    pub(crate) fn to_spec(&self) -> KernelSpec {
+        match self {
+            Self::Scalar(leaf) => leaf.to_spec(),
+            Self::Ard(leaf) => leaf.to_spec(),
+        }
+    }
+}
 
 /// Every variant of a typed leaf enum, with the leaf bound to `$leaf`.
 macro_rules! each_leaf {
@@ -590,6 +640,10 @@ impl sealed::Points for DistanceOnly {
 }
 impl sealed::Points for WithPoints {
     const POINTS: bool = true;
+}
+/// Whether a kernel of marker `C` has coordinate leaves that read `x`.
+pub(crate) fn reads_points<C: PointUse>() -> bool {
+    <C as sealed::Points>::POINTS
 }
 
 impl PointUse for DistanceOnly {}

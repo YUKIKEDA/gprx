@@ -14,7 +14,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::{
     BlockKind, DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, SpecOf, spec_slots,
 };
 use crate::kernel::{ScalarOps, SourceStore};
 use crate::likelihood::GaussianLikelihood;
@@ -416,6 +416,26 @@ where
         self.core.policies.jitter
     }
 
+    /// The kernel tree (with its distance leaves).
+    pub(crate) fn kernel_spec(&self) -> &SpecOf<K> {
+        &self.core.kernel
+    }
+
+    /// The feature count (`0` for a kernel of supplied distances alone).
+    pub(crate) fn feature_dim(&self) -> usize {
+        self.core.d
+    }
+
+    /// The training features on the caller's scale.
+    pub(crate) fn x_obs(&self) -> &[f64] {
+        &self.core.x_obs
+    }
+
+    /// The training squared distances (empty for a coordinate kernel).
+    pub(crate) fn sources(&self) -> &P::Sources {
+        &self.core.sources
+    }
+
     pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
         self.core.x_unfitted.as_ref()
     }
@@ -619,6 +639,33 @@ where
         Ok(())
     }
 
+    /// Writes this model to `dir/config.json` and `dir/model.safetensors`.
+    ///
+    /// Omits the LDLT factor and `α`. [`crate::persist::LoadedGpr::load`]
+    /// rebuilds an [`OnlineGpr`] (`factor_kind` is `ldlt`) and restores
+    /// [`Self::point_ids`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// created or a Custom leaf / caller transform has no persist form.
+    ///
+    /// See the example on [`OnlineGpr`].
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_online(self, dir.as_ref(), false)
+    }
+
+    /// Writes this model including the packed LDLT factor and `α`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::save`].
+    ///
+    /// See the example on [`OnlineGpr`].
+    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_online(self, dir.as_ref(), true)
+    }
+
     /// Returns the negative log marginal likelihood from the stored LDLT factor.
     ///
     /// Uses `log|A| = Σ log(Dᵢ)` and the stored `α`.
@@ -728,35 +775,6 @@ where
     ) -> Result<Prediction<P::Refine>, GprError> {
         let (_, alpha) = self.alphas()?;
         self.core.loo_predict_with(self.factor(), alpha, options)
-    }
-}
-
-impl<O, P: GpScalar> OnlineGpr<O, P> {
-    /// Writes this model to `dir/config.json` and `dir/model.safetensors`.
-    ///
-    /// Omits the LDLT factor and `α`. [`crate::persist::LoadedGpr::load`]
-    /// rebuilds an [`OnlineGpr`] (`factor_kind` is `ldlt`) and restores
-    /// [`Self::point_ids`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when the directory cannot be
-    /// created or a Custom leaf / caller transform has no persist form.
-    ///
-    /// See the example on [`OnlineGpr`].
-    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        persist::save_online(self, dir.as_ref(), false)
-    }
-
-    /// Writes this model including the packed LDLT factor and `α`.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::save`].
-    ///
-    /// See the example on [`OnlineGpr`].
-    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        persist::save_online(self, dir.as_ref(), true)
     }
 }
 

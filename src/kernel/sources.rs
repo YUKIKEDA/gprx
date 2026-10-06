@@ -555,7 +555,6 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(TrainSources { n, cap: n, slots })
     }
 
-    #[cfg(test)]
     /// Each slot's blocks in `f64`, dense `n × n` and one after another in
     /// one buffer, in slot order (saving).
     pub(crate) fn dense_f64(&self) -> Vec<(SlotShape, Vec<f64>)> {

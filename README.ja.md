@@ -683,7 +683,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 保存と読み込み（`gprx::persist`）
 
-`FORMAT_VERSION` は `1`。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
+`FORMAT_VERSION` は `2`。座標のモデルは版 1、`DistanceKernel` のモデルは版 2 で書き、`load` はどちらも読む。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
 
 `LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` はディレクトリからモデルを読み込む。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
 
@@ -709,7 +709,7 @@ fn main() -> Result<(), gprx::GprError> {
     let dir = std::env::temp_dir().join("gprx-readme-save");
     let _ = std::fs::remove_dir_all(&dir);
     fitted.save(&dir)?;
-    assert_eq!(FORMAT_VERSION, 1);
+    assert_eq!(FORMAT_VERSION, 2);
     assert!(!"mine.kernel".starts_with(RESERVED_PREFIX));
 
     let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
@@ -786,6 +786,56 @@ fn main() -> Result<(), gprx::GprError> {
 
 読み込んだ全学習点モデルは `Fixed` かつ `CholeskyBuffer::Retain` となる。ファイルにソルバは含まれない。照合したモデルで `with_optimizer` を呼び、`refit` すると、もう一度探索する。`save` で因子なしに書いたファイルは、読み込み時に因子を作る。`save_with_factor` は `L` をメモリマップのまま使う。
 
+`DistanceKernel` のモデルは、学習の二乗距離も一緒に保存する。`Loaded*` の enum はそれを読まない。保存したときの精度と印で、モデルの型の `load` が読む: `FittedGpr::<Fixed, P, DistanceKernel<C>>::load`、`OnlineGpr::<Fixed, P, DistanceKernel<C>>::load`、`FittedSgpr::<Fixed, FixedInducing, P, DistanceKernel<C>>::load`、`FittedSvgp::<P, DistanceKernel<C>>::load`。座標の保存、別の精度、別の印、Exact の因子の種類の違いは、`PersistFailed`（`WrongModel`）。距離の保存を `Loaded*` のローダーに渡しても同じ。読み込んだカーネルには新しいスロットが付く。`slots()` で読み、それを予測の呼び出しに渡す。
+
+```rust
+use gprx::kernel::{DistanceKernel, DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
+use gprx::{
+    DoublePrecision, FittedGpr, FittedSgpr, FittedSvgp, Fixed, FixedInducing, GaussianLikelihood,
+    Gpr, OnlineGpr, PersistRegistry, Sgpr, Svgp,
+};
+
+type Exact = FittedGpr<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>;
+type Online = OnlineGpr<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>;
+type Sparse = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<DistanceOnly>>;
+type Minibatch = FittedSvgp<DoublePrecision, DistanceKernel<DistanceOnly>>;
+
+fn main() -> Result<(), gprx::GprError> {
+    let image = ScalarDistance::new();
+    let d2 = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5];
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2.clone())], 3, &y)?;
+    let dir = std::env::temp_dir().join("gprx-readme-distance");
+    let _ = std::fs::remove_dir_all(&dir);
+    fitted.save(&dir)?;
+    let loaded = Exact::load(&dir, &PersistRegistry::new())?;
+    let cross = [0.25, 0.25, 2.25];
+    if let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] {
+        assert_eq!(
+            loaded.predict([slot.borrow(&cross)], 1)?,
+            fitted.predict([image.borrow(&cross)], 1)?
+        );
+    }
+    fitted.into_online()?.save(&dir)?;
+    let _ = Online::load(&dir, &PersistRegistry::new())?;
+    let sgpr = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2.clone())], 3, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    sgpr.save(&dir)?;
+    assert_eq!(Sparse::load(&dir, &PersistRegistry::new())?.inducing(), &[0, 2]);
+    let svgp = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(d2)], 3, &y, &[1])
+        .map_err(|(_, e)| e)?;
+    svgp.save(&dir)?;
+    let _ = Minibatch::load(&dir, &PersistRegistry::new())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+```
+
 ### エラー
 
 `GprError` は non-exhaustive である。表示文字列は英語となる。
@@ -814,7 +864,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `InvalidPointId` | `PointId` がモデルに無い |
 | `InvalidInducingId` | `InducingId` がモデルに無い |
 | `PersistFailed { kind, reason }` | 保存か読み込みが失敗 |
-| `UnsupportedPersistVersion { found, supported }` | `format_version` が `FORMAT_VERSION` でない |
+| `UnsupportedPersistVersion { found, supported }` | `format_version` が `1` から `FORMAT_VERSION` の範囲にない |
 
 `CholeskyStage` は `Fit`、`Predict`、`OnlineInsert`、`OnlineDelete`。`PersistErrorKind` は `Io`、`Config`、`Tensor`、`InvalidPersistId`、`NotPersistable`、`UnregisteredId`、`WrongModel`。分岐は `kind`。`reason` は人が読むための説明文である。
 

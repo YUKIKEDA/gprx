@@ -14,7 +14,7 @@ use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, SpecOf, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
@@ -307,6 +307,61 @@ where
         &self.core.y_obs
     }
 
+    /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
+    ///
+    /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
+    /// by factorizing. The Cholesky buffer policy is not written; load
+    /// reconstructs [`crate::CholeskyBuffer::Retain`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// created or a Custom leaf / caller transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!(
+    ///     "gprx-doctest-save-{}",
+    ///     std::process::id()
+    /// ));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// fitted.save(&dir)?;
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_fitted(self, dir.as_ref(), false)
+    }
+
+    /// Writes this fitted model including the Cholesky factor `L` and `α`.
+    ///
+    /// `L` is stored column-major. Its dtype is `F64` when storage is `f64`
+    /// and `F32` when storage is `f32`. `α` uses the predict scalar: `F32`
+    /// for [`crate::SinglePrecision`], `F64` for [`crate::DoublePrecision`]
+    /// and [`crate::MixedPrecision`]. [`crate::persist::LoadedGpr::load`]
+    /// keeps an `f64` factor memory-mapped.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::save`].
+    ///
+    /// See the example on [`FittedGpr`].
+    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_fitted(self, dir.as_ref(), true)
+    }
+
     /// Replaces the optimizer used by a later [`Self::refit`].
     ///
     /// Does not write a solver into a persist directory. A model loaded as
@@ -387,6 +442,26 @@ where
     /// See the example on [`FittedGpr`].
     pub fn jitter_policy(&self) -> crate::JitterPolicy {
         self.core.policies.jitter
+    }
+
+    /// The kernel tree (with its distance leaves).
+    pub(crate) fn kernel_spec(&self) -> &SpecOf<K> {
+        &self.core.kernel
+    }
+
+    /// The feature count (`0` for a kernel of supplied distances alone).
+    pub(crate) fn feature_dim(&self) -> usize {
+        self.core.d
+    }
+
+    /// The training features on the caller's scale.
+    pub(crate) fn x_obs(&self) -> &[f64] {
+        &self.core.x_obs
+    }
+
+    /// The training squared distances (empty for a coordinate kernel).
+    pub(crate) fn sources(&self) -> &P::Sources {
+        &self.core.sources
     }
 
     pub(crate) fn x_unfitted(&self) -> &dyn UnfittedTransform {
@@ -679,63 +754,6 @@ where
     ) -> Result<Prediction<P::Refine>, GprError> {
         self.core
             .loo_predict_with(self.factor(), &self.core.alpha, options)
-    }
-}
-
-impl<O, P: GpScalar> FittedGpr<O, P> {
-    /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
-    ///
-    /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
-    /// by factorizing. The Cholesky buffer policy is not written; load
-    /// reconstructs [`crate::CholeskyBuffer::Retain`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when the directory cannot be
-    /// created or a Custom leaf / caller transform has no persist form.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Gpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
-    /// .map_err(|(_, e)| e)?;
-    /// let dir = std::env::temp_dir().join(format!(
-    ///     "gprx-doctest-save-{}",
-    ///     std::process::id()
-    /// ));
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// fitted.save(&dir)?;
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        persist::save_fitted(self, dir.as_ref(), false)
-    }
-
-    /// Writes this fitted model including the Cholesky factor `L` and `α`.
-    ///
-    /// `L` is stored column-major. Its dtype is `F64` when storage is `f64`
-    /// and `F32` when storage is `f32`. `α` uses the predict scalar: `F32`
-    /// for [`crate::SinglePrecision`], `F64` for [`crate::DoublePrecision`]
-    /// and [`crate::MixedPrecision`]. [`crate::persist::LoadedGpr::load`]
-    /// keeps an `f64` factor memory-mapped.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::save`].
-    ///
-    /// See the example on [`FittedGpr`].
-    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        persist::save_fitted(self, dir.as_ref(), true)
     }
 }
 
@@ -1094,7 +1112,11 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let sources = bind_training::<P::Storage, P::Sources, _>(&parts.kernel, Vec::new(), n)?;
+        let sources = bind_training::<P::Storage, P::Sources, _>(
+            &parts.kernel,
+            std::mem::take(&mut parts.sources),
+            n,
+        )?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         let mut workspace = fit_buffers::<P, _>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;

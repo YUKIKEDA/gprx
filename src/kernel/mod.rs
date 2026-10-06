@@ -73,7 +73,8 @@ pub use supply::{
     ScalarDistanceLeaf, WithPoints,
 };
 pub(crate) use supply::{
-    CompiledOf, ModelKernelParts, SlotId, SlotShape, SourceData, SpecOf, SuppliedSpec, spec_slots,
+    ArdLeafSpec, CompiledOf, ModelKernelParts, ScalarLeafSpec, SlotId, SlotShape, SourceData,
+    SpecOf, SuppliedLeafSpec, SuppliedSpec, reads_points, spec_slots,
 };
 pub use term::{CustomKernel, KernelTerm};
 pub use tree::{NoSupply, Supply};

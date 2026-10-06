@@ -178,6 +178,7 @@ pub(super) fn write_tensors(
     n: usize,
     d: usize,
     factor: Option<FactorBytes<'_>>,
+    extra: &[(String, Vec<usize>, Vec<f64>)],
 ) -> Result<(), GprError> {
     if x.len() != n * d {
         return Err(persist_err(
@@ -197,6 +198,14 @@ pub(super) fn write_tensors(
         .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("x tensor: {err}")))?;
     let y_view = TensorView::new(Dtype::F64, vec![n], y_bytes)
         .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("y tensor: {err}")))?;
+    let mut views: Vec<(&str, TensorView<'_>)> = vec![(TENSOR_X, x_view), (TENSOR_Y, y_view)];
+    for (name, shape, values) in extra {
+        let view =
+            TensorView::new(Dtype::F64, shape.clone(), f64_as_bytes(values)).map_err(|err| {
+                persist_err(PersistErrorKind::Tensor, format!("{name} tensor: {err}"))
+            })?;
+        views.push((name.as_str(), view));
+    }
     let bytes = if let Some(factor) = factor {
         let l_cells = match factor.l_dtype {
             Dtype::F32 => factor.l.len() / size_of::<f32>(),
@@ -234,17 +243,11 @@ pub(super) fn write_tensors(
             .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("L tensor: {err}")))?;
         let alpha_view = TensorView::new(factor.alpha_dtype, vec![n], factor.alpha)
             .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("alpha tensor: {err}")))?;
-        serialize(
-            [
-                (TENSOR_X, x_view),
-                (TENSOR_Y, y_view),
-                (TENSOR_L, l_view),
-                (TENSOR_ALPHA, alpha_view),
-            ],
-            None,
-        )
+        views.push((TENSOR_L, l_view));
+        views.push((TENSOR_ALPHA, alpha_view));
+        serialize(views, None)
     } else {
-        serialize([(TENSOR_X, x_view), (TENSOR_Y, y_view)], None)
+        serialize(views, None)
     }
     .map_err(|err| {
         persist_err(

@@ -667,7 +667,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Save and load (`gprx::persist`)
 
-`FORMAT_VERSION` is `1`. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
+`FORMAT_VERSION` is `2`. A coordinate model is written as version 1 and a `DistanceKernel` model as version 2; `load` reads both. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
 
 `LoadedGpr::load(dir, registry)`, `LoadedSgpr::load`, and `LoadedSvgp::load` read the directory. `PersistRegistry::new` is empty. Built-ins need no registration. Register a custom kernel or transform before load:
 
@@ -693,7 +693,7 @@ fn main() -> Result<(), gprx::GprError> {
     let dir = std::env::temp_dir().join("gprx-readme-save");
     let _ = std::fs::remove_dir_all(&dir);
     fitted.save(&dir)?;
-    assert_eq!(FORMAT_VERSION, 1);
+    assert_eq!(FORMAT_VERSION, 2);
     assert!(!"mine.kernel".starts_with(RESERVED_PREFIX));
 
     let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
@@ -770,6 +770,56 @@ fn main() -> Result<(), gprx::GprError> {
 
 A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not store a solver. Call `with_optimizer` on the matched model, then `refit`, to search again. A file written with `save` and no factor is factored on load. `save_with_factor` keeps `L` memory-mapped.
 
+A model of a `DistanceKernel` saves its training squares with the rest. The `Loaded*` enums do not read it; the typed `load` of the model does, at the precision and marker it was saved with: `FittedGpr::<Fixed, P, DistanceKernel<C>>::load`, `OnlineGpr::<Fixed, P, DistanceKernel<C>>::load`, `FittedSgpr::<Fixed, FixedInducing, P, DistanceKernel<C>>::load`, and `FittedSvgp::<P, DistanceKernel<C>>::load`. A coordinate save, another precision, the other marker, or the other Exact factor kind is `PersistFailed` with `WrongModel`, and so is a distance save given to a `Loaded*` loader. The loaded kernel has new slots: read them with `slots()` and supply those in the predict calls.
+
+```rust
+use gprx::kernel::{DistanceKernel, DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
+use gprx::{
+    DoublePrecision, FittedGpr, FittedSgpr, FittedSvgp, Fixed, FixedInducing, GaussianLikelihood,
+    Gpr, OnlineGpr, PersistRegistry, Sgpr, Svgp,
+};
+
+type Exact = FittedGpr<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>;
+type Online = OnlineGpr<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>;
+type Sparse = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<DistanceOnly>>;
+type Minibatch = FittedSvgp<DoublePrecision, DistanceKernel<DistanceOnly>>;
+
+fn main() -> Result<(), gprx::GprError> {
+    let image = ScalarDistance::new();
+    let d2 = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5];
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2.clone())], 3, &y)?;
+    let dir = std::env::temp_dir().join("gprx-readme-distance");
+    let _ = std::fs::remove_dir_all(&dir);
+    fitted.save(&dir)?;
+    let loaded = Exact::load(&dir, &PersistRegistry::new())?;
+    let cross = [0.25, 0.25, 2.25];
+    if let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] {
+        assert_eq!(
+            loaded.predict([slot.borrow(&cross)], 1)?,
+            fitted.predict([image.borrow(&cross)], 1)?
+        );
+    }
+    fitted.into_online()?.save(&dir)?;
+    let _ = Online::load(&dir, &PersistRegistry::new())?;
+    let sgpr = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2.clone())], 3, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    sgpr.save(&dir)?;
+    assert_eq!(Sparse::load(&dir, &PersistRegistry::new())?.inducing(), &[0, 2]);
+    let svgp = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(d2)], 3, &y, &[1])
+        .map_err(|(_, e)| e)?;
+    svgp.save(&dir)?;
+    let _ = Minibatch::load(&dir, &PersistRegistry::new())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+```
+
 ### Errors
 
 `GprError` is non-exhaustive. Display text is English.
@@ -798,7 +848,7 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 | `InvalidPointId` | `PointId` is not in the model |
 | `InvalidInducingId` | `InducingId` is not in the model |
 | `PersistFailed { kind, reason }` | save or load failed |
-| `UnsupportedPersistVersion { found, supported }` | `format_version` is not `FORMAT_VERSION` |
+| `UnsupportedPersistVersion { found, supported }` | `format_version` is neither `1` nor `FORMAT_VERSION` (`supported`) |
 
 `CholeskyStage` is `Fit`, `Predict`, `OnlineInsert`, `OnlineDelete`. `PersistErrorKind` is `Io`, `Config`, `Tensor`, `InvalidPersistId`, `NotPersistable`, `UnregisteredId`, `WrongModel`. Branch on `kind`. `reason` is for a person to read.
 

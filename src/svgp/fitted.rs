@@ -133,6 +133,44 @@ where
         )
     }
 
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
+    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
+    /// and `Z`, and `Z` in transformed coordinates, and the whitened `q(u)`. The factors are
+    /// not stored; [`crate::LoadedSvgp::load`] factors the system again at the saved `θ`
+    /// and `Z`. Caller-defined kernels and transforms need their
+    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
+    /// The optimizer and the inducing-point search are not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let model = Svgp::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-svgp-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// model.save(&dir)?;
+    /// let loaded = gprx::LoadedSvgp::load(&dir, &gprx::PersistRegistry::new())?;
+    /// assert_eq!(loaded.n(), model.n());
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_svgp(self, dir.as_ref())
+    }
+
     /// The training data, settings, and fitted transforms.
     pub(crate) fn core(&self) -> &SparseCore<K> {
         &self.core
@@ -383,46 +421,6 @@ where
         );
         self.scratch = scratch;
         result
-    }
-}
-
-impl<P: GpScalar> FittedSvgp<P> {
-    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
-    ///
-    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
-    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
-    /// and `Z`, and `Z` in transformed coordinates, and the whitened `q(u)`. The factors are
-    /// not stored; [`crate::LoadedSvgp::load`] factors the system again at the saved `θ`
-    /// and `Z`. Caller-defined kernels and transforms need their
-    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
-    /// The optimizer and the inducing-point search are not stored.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when the directory cannot be
-    /// written or a kernel or transform has no persist form.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Svgp};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let model = Svgp::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
-    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
-    ///     .map_err(|(_, e)| e)?;
-    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-svgp-{}", std::process::id()));
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// model.save(&dir)?;
-    /// let loaded = gprx::LoadedSvgp::load(&dir, &gprx::PersistRegistry::new())?;
-    /// assert_eq!(loaded.n(), model.n());
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        crate::persist::save_svgp(self, dir.as_ref())
     }
 }
 

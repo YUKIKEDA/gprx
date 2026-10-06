@@ -114,13 +114,14 @@ pub(crate) struct PersistedSparse<K: ModelKernel> {
 }
 
 /// The supplied distances of a sparse model whose kernel reads them: the
-/// training points that are the inducing points, and the `Z × Z` and
-/// `Z × X` blocks gathered from the training squares.
+/// training squares it owns, the training points that are the inducing
+/// points, and the `Z × Z` and `Z × X` blocks gathered from the squares.
 ///
 /// Kept in `f64`, next to the `f64` training coordinates. An `f32` model
 /// reads the `Z × Z` and `Z × X` blocks through a copy cast on first use.
 #[derive(Clone, Debug)]
 pub(crate) struct SparseDist {
+    pub(crate) train: TrainSources<f64>,
     pub(crate) inducing: Vec<usize>,
     pub(crate) zz: TrainSources<f64>,
     pub(crate) zx: GatheredRect<f64>,
@@ -167,6 +168,7 @@ impl SparseDist {
         let zz = train.subset(&inducing)?;
         let zx = train.gather(&inducing, &all);
         Ok(Self {
+            train,
             inducing,
             zz,
             zx,

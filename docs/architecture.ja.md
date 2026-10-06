@@ -138,7 +138,7 @@ flowchart TB
 コードベースで維持されている境界（`#[cfg(test)]` 以外の `use crate::…`）:
 
 1. **モデル同士は import しない。** `gpr`, `sgpr`, `svgp` の間に import は無い。共有するコードは 1 つ下の層に置く（2 つの Sparse モデルには `sparse`、3 つのモデルすべてには部品）。
-2. **モデルを import するのは `persist` だけ。** `persist/mod.rs`（Exact）と `persist/sparse.rs`（Sparse、SVGP）にある。具体的なモデルの型をすべて名指しする唯一の場所であり、そのため `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` が精度ごとに 1 つの variant を持てる。
+2. **モデルを import するのは `persist` だけ。** `persist/mod.rs`（Exact）、`persist/sparse.rs`（Sparse、SVGP）、`persist/distance.rs`（`DistanceKernel` の各モデルの型の `load`）にある。具体的なモデルの型をすべて名指しする唯一の場所であり、そのため `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` が精度ごとに 1 つの variant を持てる。
 3. **逆向きにまたぐものは少ない。** モデルは `persist::save_*` を呼び、`gpr` はさらに `PersistedModel`（読み込んだ Exact モデルを組み直す部品）と `MappedTensors`（メモリマップした `L`）を使う。`gpr`、`sgpr`、`points` は、エラーを作るのに `persist_err` を使う。`persist` のそれ以外を、モデルは使わない。
 4. **`optimizer`、`objective`、`precision`、`transform` はモデルを import しない。** `optimizer` の単体テストは `Gpr` を作るが、テストのコードだけ。
 5. **`Workspace`、`QueryWorkspace`、`LltStore`、`LdltStore`、faer の型は crate 内だけ**（[layout の規則](../.cursor/rules/layout.mdc)）。
@@ -154,9 +154,9 @@ flowchart TB
 
 | モデル | Trainer | Fitted | Online | ディスクから読んだもの |
 | --- | --- | --- | --- | --- |
-| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>`（`insert`, `delete`） | `LoadedGpr`（8 variant） |
-| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`）。座標のカーネルだけ | `LoadedSgpr`（8 variant） |
-| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | なし | `LoadedSvgp`（4 variant） |
+| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>`（`insert`, `delete`） | `LoadedGpr`（8 variant）。距離のモデル: `FittedGpr::load`、`OnlineGpr::load` |
+| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`）。座標のカーネルだけ | `LoadedSgpr`（8 variant）。距離のモデル: `FittedSgpr::load` |
+| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | なし | `LoadedSvgp`（4 variant）。距離のモデル: `FittedSvgp::load` |
 
 型パラメータ:
 
