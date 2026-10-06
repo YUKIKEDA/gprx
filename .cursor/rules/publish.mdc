@@ -28,7 +28,7 @@ There is no `CHANGELOG.md` at 0.1.0. Add a changelog file in the change that pub
 
 ## MSRV
 
-The MSRV is 1.85, the same value as `rust-version` in `Cargo.toml`. Edition 2024 does not build on an older compiler. CI runs `just lint` and `just test` on 1.85 and on stable.
+The MSRV is 1.88, the same value as `rust-version` in `Cargo.toml`. Edition 2024 does not build on an older compiler. CI runs `just lint` and `just test` on 1.88 and on stable. 1.88 is the oldest compiler with let chains, which the crate uses; argmin 0.11 needs 1.87 (`is_multiple_of`).
 
 ## Coverage
 
@@ -36,7 +36,7 @@ Line coverage is a gate on every pull request and on pushes to `main`.
 
 - Tool: `cargo-llvm-cov`, line coverage.
 - What is measured: lines in `src/` hit by `cargo test` with default features. Python, criterion, `bench-internals`, and `insert-stages` are outside the measurement.
-- Job: stable only. The 1.85 job does not run it.
+- Job: stable only. The 1.88 job does not run it.
 - Command: `just coverage`. `just test` stays `cargo test` and does not start coverage.
 - Floor: the integer part of the line-coverage percent measured when the gate is added. CI fails when a later run is under that integer. The integer is recorded on the coverage Issue and in the workflow. It is not written on the roadmap.
 - Raising the floor is a new Issue.

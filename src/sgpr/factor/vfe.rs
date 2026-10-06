@@ -339,7 +339,7 @@ pub(crate) fn fill_z_intervals(
     d: usize,
     out: &mut [Interval],
 ) -> Result<(), GprError> {
-    if d == 0 || out.len() % d != 0 {
+    if d == 0 || !out.len().is_multiple_of(d) {
         return Err(GprError::LengthMismatch {
             reason: "inducing interval length is not a multiple of d".to_owned(),
         });

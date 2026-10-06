@@ -271,3 +271,41 @@ fn a_distance_model_is_written_as_version_two_and_a_coordinate_model_as_one() {
     assert_eq!(version(&dir), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_sparse_save_whose_z_is_not_the_inducing_rows_is_refused() {
+    let (c0, c1) = (coord(0, N, 0.0), coord(1, N, 0.0));
+    let x: Vec<f64> = c0.iter().chain(&c1).copied().collect();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(0.9).expect("ell"))
+        * KernelSpec::from(RbfKernel::new(1.1).expect("ell"));
+    let sgpr = Sgpr::new(kernel, lik())
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sq(&c0, &c0))],
+            N,
+            &x,
+            2,
+            &targets(),
+            &[1, 3],
+        )
+        .expect("sgpr");
+    let dir = temp_dir("sgpr-inducing");
+    sgpr.save(&dir).expect("save");
+    type Model = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<WithPoints>>;
+    assert_eq!(Model::load(&dir, &reg()).expect("load").inducing(), &[1, 3]);
+    // Point `inducing` at other rows: `z` no longer matches them.
+    let path = dir.join("config.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("config")).expect("json");
+    value["inducing"] = serde_json::json!([0, 3]);
+    std::fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("write");
+    assert!(matches!(
+        Model::load(&dir, &reg()),
+        Err(GprError::PersistFailed {
+            kind: PersistErrorKind::Config,
+            ..
+        })
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}

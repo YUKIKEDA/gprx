@@ -110,7 +110,7 @@ impl MappedTensors {
         })?;
         validate_f64_shape(&tensor, &[n, n], TENSOR_L)?;
         let data = tensor.data();
-        if data.as_ptr() as usize % align_of::<f64>() != 0 {
+        if !(data.as_ptr() as usize).is_multiple_of(align_of::<f64>()) {
             return Err(persist_err(
                 PersistErrorKind::Tensor,
                 format!("tensor {TENSOR_L} is not aligned for f64"),
@@ -384,13 +384,13 @@ fn f64_as_bytes(values: &[f64]) -> &[u8] {
 }
 
 fn scalar_slice<T: Copy>(bytes: &[u8]) -> Result<&[T], GprError> {
-    if bytes.as_ptr() as usize % align_of::<T>() != 0 {
+    if !(bytes.as_ptr() as usize).is_multiple_of(align_of::<T>()) {
         return Err(persist_err(
             PersistErrorKind::Tensor,
             "tensor is not aligned",
         ));
     }
-    if bytes.len() % size_of::<T>() != 0 {
+    if !bytes.len().is_multiple_of(size_of::<T>()) {
         return Err(persist_err(
             PersistErrorKind::Tensor,
             "tensor length is not a multiple of the scalar size",

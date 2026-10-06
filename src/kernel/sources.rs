@@ -13,8 +13,10 @@ use std::fmt;
 
 use faer::MatRef;
 
-use super::compiled::supplied::{RectEntry, RectTable, SquareSlot, SquareSlots};
-use super::dist::ArdSqDiffBuf;
+use super::compiled::supplied::{
+    RectEntry, RectSlot, RectSlots, RectTable, SquareSlot, SquareSlots,
+};
+use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use super::{ScalarOps, SourceData};
 use crate::error::GprError;
@@ -230,18 +232,43 @@ pub(crate) fn check_block(
                 });
             }
             tidy |= diag.abs() > 0.0;
-            for i in (j + 1)..rows {
-                let gap = (block[i + j * rows] - block[j + i * rows]).abs();
-                if gap > tol {
-                    return Err(GprError::ShapeMismatch {
-                        reason: format!("squared distances ({i}, {j}) and ({j}, {i}) differ"),
-                    });
+        }
+        for_each_lower_pair(rows, |i, j| {
+            let gap = (block[i + j * rows] - block[j + i * rows]).abs();
+            if gap > tol {
+                return Err(GprError::ShapeMismatch {
+                    reason: format!("squared distances ({i}, {j}) and ({j}, {i}) differ"),
+                });
+            }
+            tidy |= gap > 0.0;
+            Ok(())
+        })?;
+    }
+    Ok(tidy)
+}
+
+/// Side of the square tiles [`for_each_lower_pair`] walks.
+const PAIR_TILE: usize = 64;
+
+/// Visits each pair `i > j` of an `n × n` column-major square tile by tile,
+/// so the mirror `(j, i)` (a row of the square) is read while its tile is
+/// still in cache, not one strided load per pair.
+fn for_each_lower_pair<E>(
+    n: usize,
+    mut visit: impl FnMut(usize, usize) -> Result<(), E>,
+) -> Result<(), E> {
+    for j0 in (0..n).step_by(PAIR_TILE) {
+        let j1 = (j0 + PAIR_TILE).min(n);
+        for i0 in (j0..n).step_by(PAIR_TILE) {
+            let i1 = (i0 + PAIR_TILE).min(n);
+            for j in j0..j1 {
+                for i in i0.max(j + 1)..i1 {
+                    visit(i, j)?;
                 }
-                tidy |= gap > 0.0;
             }
         }
     }
-    Ok(tidy)
+    Ok(())
 }
 
 /// Fixes what [`check_block`] accepted as rounding: negative values to
@@ -254,11 +281,15 @@ fn tidy_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
     if kind == BlockKind::Square {
         for j in 0..cols {
             block[j + j * rows] = 0.0;
-            for i in (j + 1)..rows {
-                let mean = 0.5 * (block[i + j * rows] + block[j + i * rows]);
-                block[i + j * rows] = mean;
-                block[j + i * rows] = mean;
-            }
+        }
+        let walked = for_each_lower_pair::<std::convert::Infallible>(rows, |i, j| {
+            let mean = 0.5 * (block[i + j * rows] + block[j + i * rows]);
+            block[i + j * rows] = mean;
+            block[j + i * rows] = mean;
+            Ok(())
+        });
+        if let Err(never) = walked {
+            match never {}
         }
     }
 }
@@ -838,6 +869,16 @@ pub(crate) struct GatheredRect<T> {
     slots: Vec<(SlotId, bool, Vec<Vec<T>>)>,
 }
 
+impl<T> Default for GatheredRect<T> {
+    fn default() -> Self {
+        Self {
+            rows: 0,
+            cols: 0,
+            slots: Vec::new(),
+        }
+    }
+}
+
 impl<T: KernelScalar> GatheredRect<T> {
     /// The blocks as a table.
     pub(crate) fn table(&self) -> RectTable<'_, T> {
@@ -881,28 +922,51 @@ impl<T: KernelScalar> GatheredRect<T> {
         }
     }
 
-    /// Columns `cols` of these blocks (a minibatch).
-    pub(crate) fn columns(&self, cols: &[usize]) -> Self {
+    /// Columns `cols` of these blocks (a minibatch) into `out`, reusing its
+    /// buffers: once `out` has held a batch this large, nothing allocates.
+    pub(crate) fn columns_into(&self, cols: &[usize], out: &mut Self) {
         let rows = self.rows;
-        Self {
-            rows,
-            cols: cols.len(),
-            slots: self
-                .slots
-                .iter()
-                .map(|(id, ard, blocks)| {
-                    let picked = blocks
-                        .iter()
-                        .map(|block| {
-                            cols.iter()
-                                .flat_map(|&j| block[j * rows..(j + 1) * rows].iter().copied())
-                                .collect()
-                        })
-                        .collect();
-                    (*id, *ard, picked)
-                })
-                .collect(),
+        out.rows = rows;
+        out.cols = cols.len();
+        out.slots.truncate(self.slots.len());
+        while out.slots.len() < self.slots.len() {
+            let (id, ard, _) = &self.slots[out.slots.len()];
+            out.slots.push((*id, *ard, Vec::new()));
         }
+        for ((id, ard, blocks), (out_id, out_ard, out_blocks)) in
+            self.slots.iter().zip(out.slots.iter_mut())
+        {
+            *out_id = *id;
+            *out_ard = *ard;
+            out_blocks.resize_with(blocks.len(), Vec::new);
+            for (block, picked) in blocks.iter().zip(out_blocks.iter_mut()) {
+                picked.clear();
+                for &j in cols {
+                    picked.extend_from_slice(&block[j * rows..(j + 1) * rows]);
+                }
+            }
+        }
+    }
+}
+
+/// The blocks read in place, without a [`RectTable`] built for the call.
+impl<T: KernelScalar> RectSlots<T> for GatheredRect<T> {
+    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
+        let (_, ard, blocks) = self.slots.iter().find(|(id, _, _)| *id == slot)?;
+        Some(if *ard {
+            RectSlot::Ard(ArdBlocks {
+                blocks: BlockList::Vecs(blocks),
+                rows: self.rows,
+                cols: self.cols,
+                col0: 0,
+            })
+        } else {
+            RectSlot::Scalar(MatRef::from_column_major_slice(
+                blocks.first()?,
+                self.rows,
+                self.cols,
+            ))
+        })
     }
 }
 
@@ -1050,6 +1114,41 @@ mod tests {
                 .map(move |i| scale * (i as f64 - j as f64).powi(2))
         })
         .collect()
+    }
+
+    #[test]
+    fn the_tiled_walk_visits_every_pair_below_the_diagonal_once() {
+        for n in [0, 1, 63, 64, 65, 150] {
+            let mut seen = vec![0_u8; n * n];
+            let walked = for_each_lower_pair::<()>(n, |i, j| {
+                seen[i + j * n] += 1;
+                Ok(())
+            });
+            assert!(walked.is_ok());
+            for j in 0..n {
+                for i in 0..n {
+                    assert_eq!(seen[i + j * n], u8::from(i > j), "n={n} ({i}, {j})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_mirror_pair_far_from_the_first_tile_is_checked_and_tidied() {
+        let n = 150;
+        let mut block = line(1.0, 0..n, 0..n);
+        // Past rounding in a tile off the diagonal: refused.
+        block[140 + 3 * n] += 1.0;
+        let refused = check_block(&block, n, n, BlockKind::Square);
+        assert!(
+            matches!(&refused, Err(GprError::ShapeMismatch { reason }) if reason.contains("(140, 3)")),
+            "{refused:?}"
+        );
+        // Within rounding: accepted, then set to the pair's mean.
+        block[140 + 3 * n] -= 1.0 - 1e-9;
+        assert_eq!(check_block(&block, n, n, BlockKind::Square), Ok(true));
+        tidy_block(&mut block, n, n, BlockKind::Square);
+        assert_eq!(block[140 + 3 * n].to_bits(), block[3 + 140 * n].to_bits());
     }
 
     /// Two scalar slots and one ARD slot of two points.

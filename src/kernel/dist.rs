@@ -449,23 +449,41 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
 /// `block(k)[row + col * rows]`.
 #[derive(Clone, Copy, Debug)]
 pub struct ArdBlocks<'a, T> {
-    /// One borrowed block per dimension.
-    pub(crate) blocks: &'a [&'a [T]],
+    /// One block per dimension.
+    pub(crate) blocks: BlockList<'a, T>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     /// First column of the stored blocks this view starts at.
     pub(crate) col0: usize,
 }
 
+/// The per-dimension blocks of an [`ArdBlocks`]: borrowed slices (a
+/// caller's blocks), or vectors a model keeps (read with no list built).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BlockList<'a, T> {
+    Slices(&'a [&'a [T]]),
+    Vecs(&'a [Vec<T>]),
+    /// One block for each of `dims` dimensions.
+    Repeat(&'a [T], usize),
+}
+
 impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
     /// Number of dimensions.
     pub(crate) fn d(&self) -> usize {
-        self.blocks.len()
+        match self.blocks {
+            BlockList::Slices(blocks) => blocks.len(),
+            BlockList::Vecs(blocks) => blocks.len(),
+            BlockList::Repeat(_, dims) => dims,
+        }
     }
 
     /// The block of dimension `dim`.
     pub(crate) fn block(&self, dim: usize) -> &'a [T] {
-        self.blocks[dim]
+        match self.blocks {
+            BlockList::Slices(blocks) => blocks[dim],
+            BlockList::Vecs(blocks) => &blocks[dim],
+            BlockList::Repeat(block, _) => block,
+        }
     }
 
     /// `(Δ_dim)²` of the pair `(row, col)`.
@@ -752,7 +770,7 @@ mod tests {
     #[test]
     fn par_lower_fold_matches_a_serial_column_sum() {
         fn term(col: usize) -> f64 {
-            if col % 2 == 0 {
+            if col.is_multiple_of(2) {
                 1.0e16
             } else {
                 -1.0e16 + col as f64

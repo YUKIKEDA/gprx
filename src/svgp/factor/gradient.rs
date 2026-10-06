@@ -16,7 +16,7 @@
 use super::assemble::q_param_len;
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
-use crate::kernel::{CompiledOf, ModelKernel};
+use crate::kernel::{CompiledOf, GatheredRect, ModelKernel, RectSlots};
 use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseScratch, view};
@@ -44,6 +44,8 @@ pub(crate) struct GradBuffers {
     w_mm: Mat<f64>,
     /// `tril½(G Aᵀ)` through `L⁻ᵀ` (`m × m`).
     half: Mat<f64>,
+    /// The batch's columns of the `Z × X` squares of a distance kernel.
+    zx: GatheredRect<f64>,
     ks: KernelScratch<f64>,
 }
 
@@ -64,6 +66,7 @@ impl Default for GradBuffers {
             w_mn: Mat::new(),
             w_mm: Mat::new(),
             half: Mat::new(),
+            zx: GatheredRect::default(),
             ks: KernelScratch::new(),
         }
     }
@@ -132,6 +135,7 @@ where
         w_mn,
         w_mm,
         half,
+        zx,
         ks,
     } = bufs;
     let mut k_mm_l = view(k_mm_l, m, m);
@@ -158,9 +162,14 @@ where
     let mut a = view(a, m, b);
     // `K(Z, X_b)` is the rectangular cross covariance even when `Z` equals
     // `X`: a White leaf adds nothing to it.
-    let zx = core.dist.as_ref().map(|dist| dist.zx.columns(batch));
-    let zx = zx.as_ref().map(crate::kernel::GatheredRect::table);
-    ks.cross_into::<M, _>(compiled, z, x, crate::sparse::rect_slots(&zx), a.as_mut())?;
+    let zx: Option<&dyn RectSlots<f64>> = match core.dist.as_ref() {
+        Some(dist) => {
+            dist.zx.columns_into(batch, zx);
+            Some(&*zx)
+        }
+        None => None,
+    };
+    ks.cross_into::<M, _>(compiled, z, x, zx, a.as_mut())?;
     solve_lower(k_mm_l, a.as_mut());
     let a = a.into_const();
     k_diag.resize(b, 0.0);
@@ -223,15 +232,7 @@ where
         .as_ref()
         .map(|dist| &dist.zz as &dyn crate::kernel::SquareSlots<f64>);
     ks.write_square_contraction::<M, _>(compiled, z, zz, w_mm, &mut out[..n_kernel])?;
-    ks.add_cross_contraction::<M, _>(
-        compiled,
-        z,
-        x,
-        crate::sparse::rect_slots(&zx),
-        w_mn,
-        1.0,
-        &mut out[..n_kernel],
-    )?;
+    ks.add_cross_contraction::<M, _>(compiled, z, x, zx, w_mn, 1.0, &mut out[..n_kernel])?;
     ks.add_diag_contraction::<M, _>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
     for slot in &mut out[..n_kernel] {
         *slot *= -scale;

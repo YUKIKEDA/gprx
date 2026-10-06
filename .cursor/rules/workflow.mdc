@@ -38,5 +38,5 @@ Human procedure: `CONTRIBUTING.md`. Current row: `docs/roadmap.md`. Do not name 
 - Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
 - Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in kernel composition. Adding both at large values double-counts noise; that is the caller's choice, not a crate ban.
 - Default trainer is `Gpr<Lbfgs>`. Other argmin solvers and user `Optimizer` replace the type parameter. `Gpr<Fixed>` is `factor` only. Do not write a custom L-BFGS / quasi-Newton in this crate. Config exclusivity: `.cursor/rules/types.mdc`.
-- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. MSRV is 1.85 (`rust-version`). The crates.io gate is `.cursor/rules/publish.mdc`. Agents may run `cargo publish --dry-run`. They do not run `cargo publish` without `--dry-run`.
+- License: MIT OR Apache-2.0. Edition 2024. faer 0.24.x. MSRV is 1.88 (`rust-version`). The crates.io gate is `.cursor/rules/publish.mdc`. Agents may run `cargo publish --dry-run`. They do not run `cargo publish` without `--dry-run`.
 - `just bench` = criterion. See `.cursor/rules/bench.mdc`. Speed work without a number is out of scope.

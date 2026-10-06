@@ -12,7 +12,7 @@
 use faer::{MatMut, MatRef};
 
 use crate::error::GprError;
-use crate::kernel::dist::{ArdBlocks, ArdSqDiff};
+use crate::kernel::dist::{ArdBlocks, ArdSqDiff, BlockList};
 use crate::kernel::leaf_params::LeafParams;
 use crate::kernel::supply::{ArdLeafSpec, ScalarLeafSpec, SuppliedLeafSpec};
 use crate::kernel::{
@@ -390,9 +390,8 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 scalar(leaf, MatRef::from_column_major_slice(&zero, 1, 1), out)?;
             }
             SuppliedCompiled::Ard(leaf) => {
-                let blocks = vec![&zero[..]; leaf.dims()];
                 let b = ArdBlocks {
-                    blocks: &blocks,
+                    blocks: BlockList::Repeat(&zero, leaf.dims()),
                     rows: 1,
                     cols: 1,
                     col0: 0,
@@ -541,7 +540,7 @@ impl<T: Sync + Copy> RectSlots<T> for RectTable<'_, T> {
         Some(match entry {
             RectEntry::Scalar(view) => RectSlot::Scalar(*view),
             RectEntry::Ard { blocks, rows, cols } => RectSlot::Ard(ArdBlocks {
-                blocks,
+                blocks: BlockList::Slices(blocks),
                 rows: *rows,
                 cols: *cols,
                 col0: 0,

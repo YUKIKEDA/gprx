@@ -1093,7 +1093,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         if n == 0 {
             return Err(GprError::EmptyInput);
         }
-        if parts.x_obs.len() % n != 0 {
+        if !parts.x_obs.len().is_multiple_of(n) {
             return Err(persist::persist_err(
                 PersistErrorKind::Tensor,
                 "persisted x length is not n * d",

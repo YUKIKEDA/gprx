@@ -214,10 +214,36 @@ fn read_core<K: ModelKernel>(
         m,
         d,
     })
-    .map(|mut core| {
+    .and_then(|mut core| {
+        if let Some(dist) = &dist {
+            require_inducing_rows(&core, &dist.inducing)?;
+        }
         core.dist = dist;
-        core
+        Ok(core)
     })
+}
+
+/// A distance model's inducing points are the training rows `inducing`:
+/// the saved `z` and `z_train` must be those rows of `x` and of `x`
+/// through the saved transform, to the bit. Otherwise the coordinate leaves
+/// would read other points than the supplied distances.
+fn require_inducing_rows<K: ModelKernel>(
+    core: &SparseCore<K>,
+    inducing: &[usize],
+) -> Result<(), GprError> {
+    let (n, m) = (core.n, core.m);
+    for dim in 0..core.d {
+        for (p, &i) in inducing.iter().enumerate() {
+            let same = |z: &[f64], x: &[f64]| z[p + dim * m].to_bits() == x[i + dim * n].to_bits();
+            if !same(&core.z_obs, &core.x_obs) || !same(&core.z_train, &core.x_train) {
+                return Err(persist_err(
+                    PersistErrorKind::Config,
+                    format!("inducing point {p} is not training row {i} of x"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The core of a sparse directory of model `model` read as a distance

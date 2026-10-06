@@ -246,7 +246,7 @@ A model of a kernel with `distance` leaves adds one `F64` tensor per slot, whate
 | --- | --- | --- |
 | `d2.<k>` | `[n, n]` for a scalar slot; `[dims, n, n]` for a slot with `dims` | The training squares of slot `k`, column-major per block: block `b`, pair `(i, j)` at `b·n² + j·n + i` |
 
-On load each square must have a zero diagonal and be symmetric (`ShapeMismatch`), as at fit. A distance-only model has `d = 0`: `x` is `[n, 0]`, and a sparse model's `z` and `z_train` are `[m, 0]`. With coordinate leaves `z` holds the rows `inducing` of `x`.
+On load each square must have a zero diagonal and be symmetric (`ShapeMismatch`), as at fit. A distance-only model has `d = 0`: `x` is `[n, 0]`, and a sparse model's `z` and `z_train` are `[m, 0]`. With coordinate leaves `z` holds the rows `inducing` of `x`, and `z_train` those rows through the saved input transform; load checks both to the bit and refuses a mismatch with `Config`.
 
 ## 7. `save` and `save_with_factor`; what load rebuilds
 
