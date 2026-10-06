@@ -279,6 +279,8 @@ Gram 行列、`W`、距離キャッシュ（6.5 節の与えられた二乗距�
 
 `format_version` は整数の `1` で、`FORMAT_VERSION` がその定数。ほかの値のファイルは `GprError::UnsupportedPersistVersion { found, supported }` で断る。移行は無い。省略されたキーは既定として読む（3 節）: `model`、`precision`、`residual`、`math`、`factor_jitter`、`distance_cache` がそうで、これらの無いファイルも読める。読み手が知らないキーは無視する。
 
+クレートが `0.x` のあいだ、版 1 は追加で広がる。新しいカーネルの variant（`distance`）や新しいテンソル（`d2.<k>`）を足しても `format_version` は上げない。追加より前の gprx は、その追加を要るファイルを `UnsupportedPersistVersion` ではなく `PersistFailed` で断る。距離のモデルは必ず `distance` のカーネルを持ち、そうした読み手はそれを読めない（`Config`、知らない variant）。`d2.<k>` のテンソルまで進まないので、距離のモデルを座標のモデルとして読むことは無い。
+
 | 状況 | エラー |
 | --- | --- |
 | ファイルを読み書きできない | `GprError::PersistFailed { kind: Io, reason }` |
@@ -291,7 +293,7 @@ Gram 行列、`W`、距離キャッシュ（6.5 節の与えられた二乗距�
 | `persist_id` を実装していない `custom` のカーネルや変換の保存 | `GprError::PersistFailed { kind: NotPersistable, reason }` |
 | `format_version` が `1` でない | `GprError::UnsupportedPersistVersion` |
 | `n` か（Sparse の）`m` が `0`、`distance` の葉の無いカーネルで `d` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
-| 保存した学習の正方行列の対角が 0 でない、または対称でない | `GprError::ShapeMismatch` |
+| 保存した学習の正方行列に負の値がある、対角が 0 でない、または対称でない | `GprError::ShapeMismatch` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |
 
 ディレクトリは、信頼できる入力として扱う。JSON パーサーの上限（配列とオブジェクトの入れ子 128 段）より深い `sum` / `product` / `pipeline` / `columnwise` の木は、デコードの前に `PersistFailed` になる。読み込みが検査するのは、形と dtype、保存したテンソルがすべて有限であること（`NaN` や `±∞` は `PersistFailed`）、および `q` の有限性と下三角であること。

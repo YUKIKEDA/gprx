@@ -76,8 +76,8 @@ pub(crate) type Fills<'a> = Vec<(SlotId, &'a dyn DistanceFill)>;
 /// does not read, a slot without a source, two sources of one slot, or a
 /// block of the wrong length or count; [`GprError::EmptyInput`] when `rows`
 /// or `cols` is zero; [`GprError::NonFiniteInput`] for a non-finite value;
-/// [`GprError::ShapeMismatch`] for a square block with a non-zero diagonal
-/// or that is not symmetric.
+/// [`GprError::ShapeMismatch`] for a negative value, or a square block with
+/// a non-zero diagonal or that is not symmetric.
 pub(crate) fn bind<'a>(
     slots: &[DistanceSlot],
     sources: impl IntoIterator<Item = DistanceSource<'a>>,
@@ -177,6 +177,15 @@ pub(crate) fn check_block(
 ) -> Result<(), GprError> {
     crate::data::require_count(block.len(), rows * cols, "squared distances")?;
     crate::data::require_finite(block)?;
+    if let Some(at) = block.iter().position(|&v| v < 0.0) {
+        return Err(GprError::ShapeMismatch {
+            reason: format!(
+                "squared distance ({}, {}) is negative",
+                at % rows.max(1),
+                at / rows.max(1)
+            ),
+        });
+    }
     if kind == BlockKind::Square {
         if rows != cols {
             return Err(GprError::ShapeMismatch {
@@ -202,18 +211,6 @@ pub(crate) fn check_block(
         }
     }
     Ok(())
-}
-
-/// `values` in the storage scalar; an `f64` model takes the buffer as is.
-fn into_storage<T: KernelScalar>(values: Vec<f64>) -> Vec<T> {
-    let mut slot = Some(values);
-    if let Some(same) = (&mut slot as &mut dyn Any).downcast_mut::<Option<Vec<T>>>()
-        && let Some(values) = same.take()
-    {
-        return values;
-    }
-    slot.map(|values| values.into_iter().map(T::from_f64).collect())
-        .unwrap_or_default()
 }
 
 /// The training `d²` of one slot, in the storage scalar.
@@ -295,7 +292,7 @@ impl<T: KernelScalar> TrainSources<T> {
         for slot in raw {
             let id = slot.id;
             let data = match slot.shape {
-                SlotShape::Scalar => TrainData::Scalar(into_storage(slot.into_first())),
+                SlotShape::Scalar => TrainData::Scalar(T::vec_from_f64(slot.into_first())),
                 SlotShape::Ard(d) => TrainData::Ard(ArdSqDiffBuf::from_pairs(n, d, |k, i, j| {
                     T::from_f64(slot.block(k)[i + j * n])
                 })?),
@@ -312,7 +309,9 @@ impl<T: KernelScalar> TrainSources<T> {
         let n = self.n;
         let mut fresh = Vec::with_capacity(fills.len());
         for (id, filler) in fills {
+            // The fills come from the bind that built this store.
             let Some(at) = self.slots.iter().position(|(slot, _)| slot == id) else {
+                debug_assert!(false, "a fill names a slot the store does not hold");
                 continue;
             };
             let shape = match &self.slots[at].1 {
@@ -374,6 +373,17 @@ impl<T: KernelScalar> TrainSources<T> {
         let n = self.n;
         if self.slots.is_empty() {
             return Ok(self.unchanged());
+        }
+        if cols.len() != self.slots.len()
+            || cols
+                .iter()
+                .zip(&self.slots)
+                .any(|(col, (id, _))| col.id != *id)
+        {
+            return Err(GprError::LengthMismatch {
+                reason: "the new point's squared distances do not match the model's slots"
+                    .to_owned(),
+            });
         }
         let grow = self.cap < n + 1;
         let new_cap = if grow {
@@ -475,24 +485,26 @@ impl<T: KernelScalar> TrainSources<T> {
     /// Applies a change staged on this store. Cannot fail.
     pub(crate) fn commit(&mut self, staged: Staged<T>) {
         let (n, cap) = (self.n, self.cap);
+        // Staged on this store: one change per slot, in slot order, and an
+        // in-place change only for a scalar slot.
+        debug_assert!(staged.changes.is_empty() || staged.changes.len() == self.slots.len());
         for ((_, data), change) in self.slots.iter_mut().zip(staged.changes) {
-            match change {
-                SlotChange::Replace(fresh) => *data = fresh,
-                SlotChange::Column(column) => {
-                    if let TrainData::Scalar(square) = data {
-                        write_column(square, cap, n, &column);
-                    }
+            match (data, change) {
+                (data, SlotChange::Replace(fresh)) => *data = fresh,
+                (TrainData::Scalar(square), SlotChange::Column(column)) => {
+                    write_column(square, cap, n, &column);
                 }
-                SlotChange::Remove(index) => {
-                    if let TrainData::Scalar(square) = data {
-                        let skip = |i: usize| if i >= index { i + 1 } else { i };
-                        // Forward walk: every read is at or past its write.
-                        for j in 0..n - 1 {
-                            for i in 0..n - 1 {
-                                square[i + j * cap] = square[skip(i) + skip(j) * cap];
-                            }
+                (TrainData::Scalar(square), SlotChange::Remove(index)) => {
+                    let skip = |i: usize| if i >= index { i + 1 } else { i };
+                    // Forward walk: every read is at or past its write.
+                    for j in 0..n - 1 {
+                        for i in 0..n - 1 {
+                            square[i + j * cap] = square[skip(i) + skip(j) * cap];
                         }
                     }
+                }
+                (TrainData::Ard(_), SlotChange::Column(_) | SlotChange::Remove(_)) => {
+                    debug_assert!(false, "an in-place change staged for an ARD slot");
                 }
             }
         }
@@ -585,26 +597,52 @@ impl<T: KernelScalar> TrainSources<T> {
         }
     }
 
-    /// [`Self::gather`] of the training columns `cols` (every row), in `f64`.
-    pub(crate) fn columns_f64(&self, cols: std::ops::Range<usize>) -> GatheredRect<f64> {
-        let rows: Vec<usize> = (0..self.n).collect();
-        let cols: Vec<usize> = cols.collect();
-        let gathered = self.gather(&rows, &cols);
-        GatheredRect {
-            rows: gathered.rows,
-            cols: gathered.cols,
-            slots: gathered
-                .slots
-                .into_iter()
-                .map(|(id, ard, blocks)| {
-                    let blocks = blocks
-                        .into_iter()
-                        .map(|block| block.into_iter().map(|v| v.to_f64()).collect())
-                        .collect();
-                    (id, ard, blocks)
+    /// The dense `n × n` blocks of each ARD slot (empty for a scalar slot),
+    /// in slot order, for [`Self::rect_table`].
+    pub(crate) fn dense_ard(&self) -> Vec<Vec<Vec<T>>> {
+        let n = self.n;
+        self.slots
+            .iter()
+            .map(|(_, data)| match data {
+                TrainData::Scalar(_) => Vec::new(),
+                TrainData::Ard(cache) => {
+                    let view = cache.view();
+                    (0..view.d())
+                        .map(|k| (0..n * n).map(|at| view.get(k, at % n, at / n)).collect())
+                        .collect()
+                }
+            })
+            .collect()
+    }
+
+    /// The squares as an `n × n` rectangular table: a scalar slot read in
+    /// place, an ARD slot from `dense` ([`Self::dense_ard`]).
+    pub(crate) fn rect_table<'s>(&'s self, dense: &'s [Vec<Vec<T>>]) -> RectTable<'s, T> {
+        let n = self.n;
+        RectTable(
+            self.slots
+                .iter()
+                .zip(dense)
+                .map(|((id, data), blocks)| {
+                    let entry = match data {
+                        TrainData::Scalar(square) => {
+                            RectEntry::Scalar(MatRef::from_column_major_slice_with_stride(
+                                square,
+                                n,
+                                n,
+                                self.cap.max(1),
+                            ))
+                        }
+                        TrainData::Ard(_) => RectEntry::Ard {
+                            blocks: blocks.iter().map(Vec::as_slice).collect(),
+                            rows: n,
+                            cols: n,
+                        },
+                    };
+                    (*id, entry)
                 })
                 .collect(),
-        }
+        )
     }
 
     /// The same squares at the scalar `U`.
@@ -944,10 +982,24 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
         &self.raw
     }
 
-    /// [`Self::table`] and the same blocks in `f64`, read in place.
-    pub(crate) fn tables(&mut self) -> (RectTable<'_, T>, RectTable<'_, f64>) {
+    /// [`Self::table`] and, when `with_f64`, the same blocks in `f64`, read
+    /// in place.
+    pub(crate) fn tables(
+        &mut self,
+        with_f64: bool,
+    ) -> (RectTable<'_, T>, Option<RectTable<'_, f64>>) {
         let Self { raw, casts } = self;
-        (storage_table(raw, casts), f64_table(raw))
+        (storage_table(raw, casts), with_f64.then(|| f64_table(raw)))
+    }
+
+    /// The checked `m × m` squares of a query as a store a Gram reads (a
+    /// copy in the storage scalar).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when an ARD square does not fit.
+    pub(crate) fn into_square(self, m: usize) -> Result<TrainSources<T>, GprError> {
+        TrainSources::from_raw(self.raw, m)
     }
 
     /// The blocks as a table of views in the storage scalar. An `f64`

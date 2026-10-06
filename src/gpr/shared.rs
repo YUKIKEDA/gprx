@@ -13,9 +13,9 @@ use super::factor::TrainPoints;
 use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    BlockKind, CompiledKernel, DistanceSource, Fills, GramInputs, KernelScalar, KernelSpec,
-    ModelKernel, RectSlots, ScalarOps, SourceStore, SquareSlots, Triangle, bind_sources,
-    spec_slots,
+    BlockKind, CompiledKernel, DistanceSlot, DistanceSource, Fills, GramInputs, KernelScalar,
+    KernelSpec, ModelKernel, RectSlots, ScalarOps, SourceStore, SquareSlots, Triangle,
+    bind_sources, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
@@ -70,6 +70,9 @@ pub(crate) struct GprCore<P: GpScalar> {
     pub(crate) y_cast: <P::Storage as ScalarOps>::RowCast,
     /// Training squared distances of a distance model; empty otherwise.
     pub(crate) sources: P::Sources,
+    /// The distance slots of `kernel`, in order (empty for a coordinate
+    /// kernel). Fixed with the kernel's tree.
+    pub(crate) slots: Vec<DistanceSlot>,
     pub(crate) n: usize,
     pub(crate) d: usize,
 }
@@ -95,6 +98,7 @@ impl<P: GpScalar> Clone for GprCore<P> {
             x_cast: self.x_cast.clone(),
             y_cast: self.y_cast.clone(),
             sources: self.sources.clone(),
+            slots: self.slots.clone(),
             n: self.n,
             d: self.d,
         }
@@ -427,26 +431,30 @@ impl<P: GpScalar> GprCore<P> {
         factor.inv_l_in_place(k_star.as_mut());
         let mut kss = Mat::<P::Storage>::zeros(m, m);
         let mut kss_scratch = Mat::<P::Storage>::zeros(m, m);
-        if self.sources.storage().is_empty() {
-            with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
-                query_x.as_ref(),
-                kss.as_mut(),
-                Triangle::Full,
-                kss_scratch.as_mut(),
-                &mut Vec::new(),
-                &mut thread_scratch,
-            ))?;
-        } else {
-            with_kernel_exp!(self.policies.math, M => self.compiled.eval_cross_slots::<M>(
-                query_x.as_ref(),
-                query_x.as_ref(),
-                q.square,
-                None,
-                kss.as_mut(),
-                kss_scratch.as_mut(),
-                &mut Vec::new(),
-                &mut thread_scratch,
-            ))?;
+        match q.square {
+            None => {
+                with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram_from_points::<M>(
+                    query_x.as_ref(),
+                    kss.as_mut(),
+                    Triangle::Full,
+                    kss_scratch.as_mut(),
+                    &mut Vec::new(),
+                    &mut thread_scratch,
+                ))?;
+            }
+            // One set: a `WhiteKernel` term adds its diagonal, as for points.
+            Some(square) => {
+                with_kernel_exp!(self.policies.math, M => self.compiled.eval_gram::<M>(
+                    GramInputs {
+                        slots: Some(square),
+                        ..GramInputs::points(query_x.as_ref())
+                    },
+                    kss.as_mut(),
+                    Triangle::Full,
+                    kss_scratch.as_mut(),
+                    &mut Vec::new(),
+                ))?;
+            }
         }
         let zero_s = P::Storage::from_f64(0.0);
         for col in 0..m {
@@ -652,7 +660,8 @@ pub(crate) struct Query<'q, T> {
     pub(crate) n_cols: usize,
     pub(crate) cross: Option<&'q dyn RectSlots<T>>,
     pub(crate) cross64: Option<&'q dyn RectSlots<f64>>,
-    pub(crate) square: Option<&'q dyn RectSlots<T>>,
+    /// The query × query squares, read as a Gram of one set.
+    pub(crate) square: Option<&'q dyn SquareSlots<T>>,
 }
 
 impl<'q, T> Query<'q, T> {

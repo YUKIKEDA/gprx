@@ -14,7 +14,7 @@ use crate::param::write_params;
 use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{IdentityInput, IdentityTarget, UnfittedTarget, UnfittedTransform};
 
-use super::{ExactFit, FittedGpr, Policies, TrainInput};
+use super::{ExactFit, FittedGpr, Policies, TrainFills, TrainInput};
 use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp};
 
 /// Trains an Exact GPR from a kernel, a likelihood, transforms, an optimizer, and a recompute strategy.
@@ -551,11 +551,11 @@ where
         input: TrainInput<'_>,
     ) -> Result<FittedGpr<O, P, K>, (Self, GprError)> {
         let (mut model, fills) = FittedGpr::prepare(self, input)?;
+        let fills = TrainFills::bound(fills);
         let mut view = ExactFit {
             core: &mut model.core,
             store: &mut model.store,
             fills: &fills,
-            bound: true,
         };
         match view.optimize(&model.optimizer) {
             Ok(()) => Ok(model),
@@ -572,11 +572,11 @@ impl<P: GpScalar, K: ModelKernel> Gpr<Fixed, P, K> {
         input: TrainInput<'_>,
     ) -> Result<FittedGpr<Fixed, P, K>, (Self, GprError)> {
         let (mut model, fills) = FittedGpr::prepare(self, input)?;
+        let fills = TrainFills::bound(fills);
         let mut view = ExactFit {
             core: &mut model.core,
             store: &mut model.store,
             fills: &fills,
-            bound: true,
         };
         match view.refactor() {
             Ok(()) => Ok(model),

@@ -10,8 +10,8 @@ use faer::{Mat, MatMut, MatRef};
 use super::ResidualFormula;
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, GramInputs, KernelScalar, KernelSpec, RectSlots, ScalarOps, SquareSlots,
-    TrainSources, Triangle,
+    ColRange, CompiledKernel, GramInputs, KernelScalar, KernelSpec, RectSlots, RectTable,
+    ScalarOps, SquareSlots, TrainSources, Triangle,
 };
 use crate::linalg::{cholesky_lower_owned, inf_norm, symmetrize_lower};
 
@@ -25,7 +25,9 @@ const STAGNATION_RATIO: f64 = 0.9;
 const STAGNATION_STEPS: usize = 2;
 
 /// Columns per `f64` kernel block in a residual. Bounds the scratch at
-/// `3 · n · 32` `f64`, so no `n×n` `f64` matrix is held.
+/// `3 · n · 32` `f64`, so no `n×n` `f64` kernel matrix is held. An ARD
+/// distance slot's training squares are unpacked to dense `n × n` blocks
+/// once per refinement, so a residual reads them in place.
 pub(crate) const COLUMN_BLOCK: usize = 32;
 
 /// A linear system `B w = b` with a low-precision factor of `B`.
@@ -151,6 +153,10 @@ pub(crate) struct ExactSystem<'s, 'a, M, R> {
     kernel_f64: CompiledKernel<f64>,
     saved: Mat<f32>,
     diag: f64,
+    /// The training squares at `f64`, and the dense blocks of their ARD
+    /// slots, read in column ranges by every residual.
+    exact: Cow<'a, TrainSources<f64>>,
+    ard: Vec<Vec<Vec<f64>>>,
     _marker: core::marker::PhantomData<(M, R)>,
 }
 
@@ -167,13 +173,22 @@ impl<'s, 'a, M: crate::math::KernelMath, R: ResidualFormula> ExactSystem<'s, 'a,
         } else {
             Mat::<f32>::zeros(0, 0)
         };
+        let exact = exact_sources(sys)?;
+        let ard = exact.dense_ard();
         Ok(Self {
             sys,
             kernel_f64: sys.kernel.compile(),
             saved,
             diag: sys.noise + sys.jitter,
+            exact,
+            ard,
             _marker: core::marker::PhantomData,
         })
+    }
+
+    /// The training squares as an `n × n` table, when the kernel reads any.
+    fn train_table(&self) -> Option<RectTable<'_, f64>> {
+        (!self.exact.is_empty()).then(|| self.exact.rect_table(&self.ard))
     }
 
     /// The factor's `α₀`, promoted to `f64`.
@@ -195,7 +210,15 @@ impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSyste
         if R::READS_STORAGE {
             Ok(row_sum_matvec(self.saved.as_ref(), w, self.sys.y, r))
         } else {
-            fresh_residual::<M>(&self.kernel_f64, self.sys, self.diag, w, r)
+            let table = self.train_table();
+            fresh_residual::<M>(
+                &self.kernel_f64,
+                self.sys,
+                slots_of(&table),
+                self.diag,
+                w,
+                r,
+            )
         }
     }
 
@@ -209,7 +232,15 @@ impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSyste
 
     fn accept(&self, w: &[f64], tol: f64) -> Result<bool, GprError> {
         if R::READS_STORAGE {
-            meets_f64_system::<M>(&self.kernel_f64, self.sys, self.diag, w, tol)
+            let table = self.train_table();
+            meets_f64_system::<M>(
+                &self.kernel_f64,
+                self.sys,
+                slots_of(&table),
+                self.diag,
+                w,
+                tol,
+            )
         } else {
             Ok(true)
         }
@@ -218,6 +249,19 @@ impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSyste
     fn fallback(&self) -> Result<Vec<f64>, GprError> {
         f64_alpha::<M>(&self.kernel_f64, self.sys, self.diag)
     }
+}
+
+/// The training squares of `sys` at `f64`: the exact values when the model
+/// keeps them, else the storage values widened.
+fn exact_sources<'a>(sys: &TrainSystem<'a, f32>) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
+    match sys.exact {
+        Some(exact) => Ok(Cow::Borrowed(exact)),
+        None => sys.sources.to_f64().map(Cow::Owned),
+    }
+}
+
+fn slots_of<'t>(table: &'t Option<RectTable<'_, f64>>) -> Option<&'t dyn RectSlots<f64>> {
+    table.as_ref().map(|t| t as &dyn RectSlots<f64>)
 }
 
 /// Refined predict `α` for [`MixedPrecision`](super::MixedPrecision).
@@ -242,12 +286,13 @@ pub(crate) fn refine_alpha<M: crate::math::KernelMath, R: ResidualFormula>(
 fn meets_f64_system<M: crate::math::KernelMath>(
     kernel_f64: &CompiledKernel<f64>,
     sys: &TrainSystem<'_, f32>,
+    train: Option<&dyn RectSlots<f64>>,
     diag: f64,
     alpha: &[f64],
     tol: f64,
 ) -> Result<bool, GprError> {
     let mut resid = vec![0.0; alpha.len()];
-    let a_inf = fresh_residual::<M>(kernel_f64, sys, diag, alpha, &mut resid)?;
+    let a_inf = fresh_residual::<M>(kernel_f64, sys, train, diag, alpha, &mut resid)?;
     let denom = a_inf * inf_norm(alpha) + inf_norm(sys.y);
     Ok(denom > 0.0 && inf_norm(&resid) / denom < tol)
 }
@@ -308,11 +353,13 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
 }
 
 /// `r = y − (K + diag · I) α` with `K` evaluated in `f64`, [`COLUMN_BLOCK`]
-/// training columns at a time, so no `n×n` `f64` matrix is held. Returns
-/// `‖K + diag · I‖∞`.
+/// training columns at a time, so no `n×n` `f64` kernel matrix is held.
+/// `train` is the `n × n` training squares of a distance kernel, read in
+/// column ranges in place. Returns `‖K + diag · I‖∞`.
 fn fresh_residual<M: crate::math::KernelMath>(
     kernel: &CompiledKernel<f64>,
     sys: &TrainSystem<'_, f32>,
+    train: Option<&dyn RectSlots<f64>>,
     diag: f64,
     alpha: &[f64],
     r: &mut [f64],
@@ -336,15 +383,11 @@ fn fresh_residual<M: crate::math::KernelMath>(
                 rows[(jj, dim)] = x[(start + jj, dim)];
             }
         }
-        let cols = (!sys.sources.is_empty()).then(|| match sys.exact {
-            Some(exact) => exact.columns_f64(start..start + len),
-            None => sys.sources.columns_f64(start..start + len),
-        });
-        let table = cols.as_ref().map(|cols| cols.table());
+        let cols = train.map(|inner| ColRange { inner, start, len });
         kernel.eval_cross_slots::<M>(
             x,
             rows.as_ref().submatrix(0, 0, len, d),
-            table.as_ref().map(|t| t as &dyn RectSlots<f64>),
+            cols.as_ref().map(|c| c as &dyn RectSlots<f64>),
             Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
             k_block.as_mut().submatrix_mut(0, 0, n, len),
             scratch.as_mut().submatrix_mut(0, 0, n, len),

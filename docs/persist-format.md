@@ -266,12 +266,14 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 
 `format_version` is the integer `1`, and `FORMAT_VERSION` is that constant. A file with another value is refused with `GprError::UnsupportedPersistVersion { found, supported }`. There is no migration. A key that is omitted reads as its default (§3): `model`, `precision`, `residual`, `math`, `factor_jitter`, and `distance_cache` work this way, so a file without them still loads. Keys the reader does not know are ignored.
 
+Version 1 grows by addition while the crate is `0.x`: a new kernel variant (`distance`) or a new tensor (`d2.<k>`) does not raise `format_version`. A gprx that predates an addition still refuses a file that needs it, with `PersistFailed` instead of `UnsupportedPersistVersion`: a distance model always has a `distance` kernel, which such a reader fails to decode (`Config`, unknown variant). It never reaches the `d2.<k>` tensors, so it cannot load a distance model as a coordinate model.
+
 | Condition | Error |
 | --- | --- |
 | File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
 | `n` or (sparse) `m` is `0`; `d` is `0` for a kernel without a `distance` leaf; empty `lengthscales` | `GprError::EmptyInput` |
-| A saved training square with a non-zero diagonal or not symmetric | `GprError::ShapeMismatch` |
+| A saved training square with a negative value, a non-zero diagonal, or not symmetric | `GprError::ShapeMismatch` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
 
 Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. The reader checks shapes and dtypes, that every stored tensor is finite (a `NaN` or `±∞` fails with `PersistFailed`), and, for `q`, finiteness and triangularity.

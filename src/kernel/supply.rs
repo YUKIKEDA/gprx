@@ -71,8 +71,8 @@ pub struct SuppliedSpec {
 /// call), or [`Self::fill`] (a function writes it). A squared distance is
 /// `d²`, column-major: the pair `(i, j)` is at `i + j * n_rows`.
 ///
-/// A square of the pairs of one set (the training square, or the query
-/// square of a covariance) must have a diagonal of exactly `0.0` and be
+/// Every `d²` must be finite and non-negative. A square of the pairs of one
+/// set (the training square, or the query square of a covariance) must have a diagonal of exactly `0.0` and be
 /// exactly symmetric: `(i, j)` and `(j, i)` hold the same `f64`. There is
 /// no tolerance; a model returns [`GprError::ShapeMismatch`] otherwise. A
 /// table that is symmetric only up to rounding (an average of two

@@ -196,7 +196,7 @@ impl SparseDist {
 #[derive(Default)]
 pub(crate) struct QueryDist {
     pub(crate) zq: Option<GatheredRect<f64>>,
-    pub(crate) qq: Option<GatheredRect<f64>>,
+    pub(crate) qq: Option<TrainSources<f64>>,
 }
 
 /// `value` as a `U` when `U` is its own type.
@@ -246,6 +246,18 @@ pub(crate) fn zx_at<T: KernelScalar>(
         return Ok(Some(Cow::Borrowed(zx)));
     }
     Ok(Some(Cow::Owned(dist.zx.cast::<T>())))
+}
+
+/// The query × query squares `qq` at the scalar `T`: borrowed at `f64`, a
+/// cast copy otherwise.
+pub(crate) fn squares_at<T: KernelScalar>(
+    qq: Option<&TrainSources<f64>>,
+) -> Result<Option<Cow<'_, TrainSources<T>>>, GprError> {
+    qq.map(|qq| match same(qq) {
+        Some(qq) => Ok(Cow::Borrowed(qq)),
+        None => qq.cast::<T>().map(Cow::Owned),
+    })
+    .transpose()
 }
 
 /// `squares` as the square tables of a kernel call.

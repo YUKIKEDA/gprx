@@ -278,8 +278,9 @@ macro_rules! distance_predict {
             /// Returns [`GprError::EmptyInput`] if `m` is zero,
             /// [`GprError::LengthMismatch`] if a table has the wrong length
             /// or a slot has no source or two, [`GprError::NonFiniteInput`]
-            /// for a non-finite value, and the query errors of the
-            /// coordinate model's `predict`.
+            /// for a non-finite value, [`GprError::ShapeMismatch`] for a
+            /// negative value, and the query errors of the coordinate
+            /// model's `predict`.
             ///
             $(#[$pdoc])*
             pub fn predict<'s>(

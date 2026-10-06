@@ -413,3 +413,37 @@ fn a_sparse_kernel_with_coordinate_leaves_needs_a_feature_column() {
         .map_err(|(_, e)| e);
     assert!(matches!(err, Err(GprError::EmptyInput)), "{err:?}");
 }
+
+#[test]
+fn a_sparse_white_term_adds_its_diagonal_to_the_query_covariance() {
+    use gprx::kernel::WhiteKernel;
+    let data = data();
+    let y = targets();
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    let white = WhiteKernel::new(0.3).expect("white");
+    let image = ScalarDistance::new();
+    let coords = Sgpr::new(KernelSpec::from(rbf) + KernelSpec::from(white), lik())
+        .with_optimizer(Fixed)
+        .factor(&data.x, N, 2, &y, &rows(&data.x, 2), INDUCING.len())
+        .expect("coords");
+    let dist = Sgpr::new(image.kernel(rbf) + white, lik())
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&data.train)], N, &y, &INDUCING)
+        .expect("distances");
+    let got = dist
+        .predict_covariance([image.borrow(&data.cross)], [image.borrow(&data.query)], Q)
+        .expect("cov");
+    let expect = coords.predict_covariance(&data.xs, Q, 2).expect("cov");
+    assert_slice_close(&got.covariance, &expect.covariance, TOL);
+    let coords = Svgp::new(KernelSpec::from(rbf) + KernelSpec::from(white), lik())
+        .factor(&data.x, N, 2, &y, &rows(&data.x, 2), INDUCING.len())
+        .expect("coords");
+    let dist = Svgp::new(image.kernel(rbf) + white, lik())
+        .factor([image.borrow(&data.train)], N, &y, &INDUCING)
+        .expect("distances");
+    let got = dist
+        .predict_covariance([image.borrow(&data.cross)], [image.borrow(&data.query)], Q)
+        .expect("cov");
+    let expect = coords.predict_covariance(&data.xs, Q, 2).expect("cov");
+    assert_slice_close(&got.covariance, &expect.covariance, TOL);
+}

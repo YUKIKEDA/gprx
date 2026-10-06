@@ -10,8 +10,8 @@
 use crate::error::GprError;
 use crate::gpr::GprObjective;
 use crate::kernel::{
-    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, PointUse, QuerySources,
-    RectSlots, WithPoints, spec_slots,
+    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar, PointUse,
+    QuerySources, RectSlots, SquareSlots, TrainSources, WithPoints,
 };
 use crate::optimizer::{Fixed, Optimizer};
 use crate::points::PointId;
@@ -23,8 +23,55 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use super::shared::Query;
 use super::{FittedGpr, Gpr, OnlineGpr, TrainInput};
 
-/// Binds the train × query blocks (`n × m`) and, for a covariance, the
-/// query × query squares (`m × m`), then runs `f` on the query.
+/// The checked blocks of one query: train × query (`n × m`) and, for a
+/// covariance, the query × query squares (`m × m`) as a store a Gram reads.
+struct BoundQuery<'s, T: KernelScalar> {
+    cross: QuerySources<'s, T>,
+    square: Option<TrainSources<T>>,
+}
+
+impl<'s, T: KernelScalar> BoundQuery<'s, T> {
+    fn bind(
+        slots: &[DistanceSlot],
+        n: usize,
+        m: usize,
+        cross: Vec<DistanceSource<'s>>,
+        square: Option<Vec<DistanceSource<'s>>>,
+    ) -> Result<Self, GprError> {
+        crate::data::require_nonempty(m)?;
+        let cross = QuerySources::<T>::bind(slots, cross, n, m, BlockKind::Rect)?;
+        // The query squares are one set: a Gram reads them, as it reads the
+        // training squares.
+        let square = square
+            .map(|square| {
+                QuerySources::<T>::bind(slots, square, m, m, BlockKind::Square)
+                    .and_then(|square| square.into_square(m))
+            })
+            .transpose()?;
+        Ok(Self { cross, square })
+    }
+
+    /// Runs `f` on the query; the `f64` tables only for a refining model.
+    fn run<R>(
+        &mut self,
+        points: QueryPoints<'_>,
+        m: usize,
+        refines: bool,
+        f: impl FnOnce(Query<'_, T>) -> Result<R, GprError>,
+    ) -> Result<R, GprError> {
+        let (table, table64) = self.cross.tables(refines);
+        f(Query {
+            xs: points.xs,
+            m,
+            n_cols: points.n_cols,
+            cross: Some(&table),
+            cross64: table64.as_ref().map(|t| t as &dyn RectSlots<f64>),
+            square: self.square.as_ref().map(|s| s as &dyn SquareSlots<T>),
+        })
+    }
+}
+
+/// [`BoundQuery::bind`], then [`BoundQuery::run`].
 fn with_query<'s, P: GpScalar, R>(
     slots: &[DistanceSlot],
     n: usize,
@@ -34,23 +81,7 @@ fn with_query<'s, P: GpScalar, R>(
     square: Option<Vec<DistanceSource<'s>>>,
     f: impl FnOnce(Query<'_, P::Storage>) -> Result<R, GprError>,
 ) -> Result<R, GprError> {
-    crate::data::require_nonempty(m)?;
-    let mut cross = QuerySources::<P::Storage>::bind(slots, cross, n, m, BlockKind::Rect)?;
-    let mut square = square
-        .map(|square| QuerySources::<P::Storage>::bind(slots, square, m, m, BlockKind::Square))
-        .transpose()?;
-    let (table, table64) = cross.tables();
-    let square_table = square.as_mut().map(QuerySources::table);
-    f(Query {
-        xs: points.xs,
-        m,
-        n_cols: points.n_cols,
-        cross: Some(&table),
-        cross64: Some(&table64),
-        square: square_table
-            .as_ref()
-            .map(|t| t as &dyn RectSlots<P::Storage>),
-    })
+    BoundQuery::<P::Storage>::bind(slots, n, m, cross, square)?.run(points, m, P::REFINES_IN_F64, f)
 }
 
 impl<O, P> Gpr<O, P, DistanceKernel<DistanceOnly>>
@@ -72,8 +103,9 @@ where
     /// [`GprError::LengthMismatch`] if a table or `y` has the wrong length,
     /// a slot has no source or two, or a source names a slot the kernel does
     /// not read, [`GprError::NonFiniteInput`] for a non-finite value,
-    /// [`GprError::ShapeMismatch`] if a training square has a non-zero
-    /// diagonal or is not symmetric, and the errors of the coordinate
+    /// [`GprError::ShapeMismatch`] for a negative value or if a training
+    /// square has a non-zero diagonal or is not symmetric, and the errors
+    /// of the coordinate
     /// [`Gpr::fit`].
     ///
     /// See the example on [`crate::kernel::ScalarDistance`].
@@ -258,11 +290,11 @@ macro_rules! exact_query {
                 m: usize,
                 options: PredictOptions,
             ) -> Result<Prediction<P::Refine>, GprError> {
-                let slots = spec_slots(&self.core.kernel);
+                let slots = &self.core.slots;
                 let $this = self;
                 let alpha = $alpha?;
                 let mut out = Prediction::default();
-                with_query::<P, ()>(&slots, self.core.n, points, m, cross, None, |q| {
+                with_query::<P, ()>(slots, self.core.n, points, m, cross, None, |q| {
                     self.core
                         .write_prediction(self.factor(), alpha, q, options, &mut out)
                 })?;
@@ -277,9 +309,9 @@ macro_rules! exact_query {
                 options: PredictOptions,
                 out: &mut Prediction<P::Refine>,
             ) -> Result<(), GprError> {
-                let slots = spec_slots(&self.core.kernel);
-                let n = self.core.n;
-                with_query::<P, ()>(&slots, n, points, m, cross, None, |q| {
+                let mut bound =
+                    BoundQuery::<P::Storage>::bind(&self.core.slots, self.core.n, m, cross, None)?;
+                bound.run(points, m, P::REFINES_IN_F64, |q| {
                     self.predict_query_into(q, options, out)
                 })
             }
@@ -292,10 +324,10 @@ macro_rules! exact_query {
                 m: usize,
                 options: PredictOptions,
             ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-                let slots = spec_slots(&self.core.kernel);
+                let slots = &self.core.slots;
                 let $this = self;
                 let alpha = $alpha?;
-                with_query::<P, _>(&slots, self.core.n, points, m, cross, Some(square), |q| {
+                with_query::<P, _>(slots, self.core.n, points, m, cross, Some(square), |q| {
                     self.core.write_covariance(self.factor(), alpha, q, options)
                 })
             }

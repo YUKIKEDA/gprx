@@ -63,6 +63,8 @@ pub(super) fn read_sources(
     slots: &[DistanceSlot],
     n: usize,
 ) -> Result<Vec<DistanceSource<'static>>, GprError> {
+    // §8 of the format: `n = 0` is `EmptyInput`, before any tensor is cut.
+    crate::data::require_nonempty(n)?;
     slots
         .iter()
         .enumerate()
@@ -324,5 +326,27 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
             )
         })?;
         Self::from_persisted(core, q_mean, q_l)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use safetensors::SafeTensors;
+    use safetensors::tensor::TensorView;
+
+    use super::read_sources;
+    use crate::error::GprError;
+    use crate::kernel::{ArdDistance, DistanceSlot};
+
+    #[test]
+    fn zero_points_is_empty_input_before_any_tensor_is_cut() {
+        let bytes =
+            safetensors::serialize(Vec::<(String, TensorView<'_>)>::new(), None).expect("bytes");
+        let tensors = SafeTensors::deserialize(&bytes).expect("tensors");
+        let slots = [DistanceSlot::Ard(ArdDistance::new(2).expect("dims"))];
+        assert_eq!(
+            read_sources(&tensors, &slots, 0).err(),
+            Some(GprError::EmptyInput)
+        );
     }
 }

@@ -200,6 +200,7 @@ where
         Ok((
             Self {
                 core: GprCore {
+                    slots: spec_slots(&gpr.kernel),
                     kernel: gpr.kernel,
                     compiled,
                     likelihood: gpr.likelihood,
@@ -494,8 +495,7 @@ where
         ExactFit {
             core: &mut self.core,
             store: &mut self.store,
-            fills: &[],
-            bound: false,
+            fills: &crate::gpr::NO_FILLS,
         }
     }
 
@@ -1060,8 +1060,7 @@ where
         let mut view = ExactFit {
             core: &mut self.core,
             store: &mut self.store,
-            fills: &[],
-            bound: false,
+            fills: &crate::gpr::NO_FILLS,
         };
         view.optimize(&self.optimizer)
     }
@@ -1140,6 +1139,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         )?;
         Ok(Self {
             core: GprCore {
+                slots: spec_slots(&parts.kernel),
                 kernel: parts.kernel,
                 compiled,
                 likelihood: parts.likelihood,

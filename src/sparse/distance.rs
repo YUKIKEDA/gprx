@@ -29,11 +29,11 @@ impl QueryDist {
         let slots = spec_slots(&core.kernel);
         let zq = QuerySources::<f64>::bind(&slots, cross, core.n, q, BlockKind::Rect)?
             .gather_rows(inducing);
+        // The query squares are one set: a Gram reads them.
         let qq = square
             .map(|square| {
-                let all: Vec<usize> = (0..q).collect();
                 QuerySources::<f64>::bind(&slots, square, q, q, BlockKind::Square)
-                    .map(|square| square.gather_rows(&all))
+                    .and_then(|square| square.into_square(q))
             })
             .transpose()?;
         Ok(Self { zq: Some(zq), qq })

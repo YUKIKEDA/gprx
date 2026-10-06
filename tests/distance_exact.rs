@@ -619,3 +619,89 @@ fn mixed_precision_refines_on_the_f64_distances_it_was_given() {
     assert_slice_close(&promote.mean, &expect.mean, 1e-10);
     assert_slice_close(&reevaluate.mean, &expect.mean, 1e-10);
 }
+
+#[test]
+fn a_white_term_adds_its_diagonal_to_the_query_covariance() {
+    use gprx::kernel::WhiteKernel;
+    let cols: Vec<Vec<f64>> = (0..2).map(|k| coord(k, N, 0.0)).collect();
+    let qcols: Vec<Vec<f64>> = (0..2).map(|k| coord(k, M, 0.5)).collect();
+    let x: Vec<f64> = cols.concat();
+    let xs: Vec<f64> = qcols.concat();
+    let y = targets();
+    let white = WhiteKernel::new(0.3).expect("white");
+    // A scalar slot.
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    let coords = Gpr::new(KernelSpec::from(rbf) + KernelSpec::from(white), lik())
+        .with_optimizer(Fixed)
+        .factor(&x, N, 2, &y)
+        .expect("coords");
+    let expect = coords.predict_covariance(&xs, M, 2).expect("cov");
+    let image = ScalarDistance::new();
+    let dist = Gpr::new(image.kernel(rbf) + white, lik())
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sum(&[sq(&cols[0], &cols[0]), sq(&cols[1], &cols[1])]))],
+            N,
+            &y,
+        )
+        .expect("distances");
+    let cross = sum(&[sq(&cols[0], &qcols[0]), sq(&cols[1], &qcols[1])]);
+    let query = sum(&[sq(&qcols[0], &qcols[0]), sq(&qcols[1], &qcols[1])]);
+    let got = dist
+        .predict_covariance([image.borrow(&cross)], [image.borrow(&query)], M)
+        .expect("cov");
+    assert_slice_close(&got.covariance, &expect.covariance, TOL);
+    // An ARD slot.
+    let ard = RbfArdKernel::new(&[0.8, 1.4]).expect("ell");
+    let coords = Gpr::new(
+        KernelSpec::from(ard.clone()) + KernelSpec::from(white),
+        lik(),
+    )
+    .with_optimizer(Fixed)
+    .factor(&x, N, 2, &y)
+    .expect("coords");
+    let expect = coords.predict_covariance(&xs, M, 2).expect("cov");
+    let bands = ArdDistance::new(2).expect("dims");
+    let dist = Gpr::new(bands.kernel(ard).expect("dims") + white, lik())
+        .with_optimizer(Fixed)
+        .factor(
+            [bands.from_vecs(cols.iter().map(|c| sq(c, c)).collect())],
+            N,
+            &y,
+        )
+        .expect("distances");
+    let cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
+    let query: Vec<Vec<f64>> = qcols.iter().map(|q| sq(q, q)).collect();
+    let cross: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+    let query: Vec<&[f64]> = query.iter().map(Vec::as_slice).collect();
+    let got = dist
+        .predict_covariance([bands.borrow(&cross)], [bands.borrow(&query)], M)
+        .expect("cov");
+    assert_slice_close(&got.covariance, &expect.covariance, TOL);
+}
+
+#[test]
+fn a_negative_squared_distance_is_rejected() {
+    let c0 = coord(0, N, 0.0);
+    let q0 = coord(0, M, 0.5);
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(1.0).expect("ell"));
+    let mut train = sq(&c0, &c0);
+    train[1] = -1.0;
+    train[N] = -1.0;
+    let fit = Gpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train)], N, &y);
+    assert!(matches!(fit, Err((_, GprError::ShapeMismatch { .. }))));
+    let fitted = Gpr::new(kernel, lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c0, &c0))], N, &y)
+        .expect("fit");
+    let mut cross = sq(&c0, &q0);
+    cross[0] = -0.5;
+    assert!(matches!(
+        fitted.predict([image.borrow(&cross)], M),
+        Err(GprError::ShapeMismatch { .. })
+    ));
+}

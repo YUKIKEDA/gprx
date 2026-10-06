@@ -472,9 +472,13 @@ where
             return Err(GprError::NonFiniteInput);
         }
         self.registry.require_room()?;
-        let slots = spec_slots(&self.core.kernel);
-        let mut columns =
-            QuerySources::<P::Storage>::bind(&slots, sources, self.core.n, 1, BlockKind::Rect)?;
+        let mut columns = QuerySources::<P::Storage>::bind(
+            &self.core.slots,
+            sources,
+            self.core.n,
+            1,
+            BlockKind::Rect,
+        )?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -513,7 +517,8 @@ where
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
             let table = columns.table();
-            let cross = (!slots.is_empty()).then_some(&table as &dyn RectSlots<P::Storage>);
+            let cross =
+                (!self.core.slots.is_empty()).then_some(&table as &dyn RectSlots<P::Storage>);
             with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
@@ -1063,8 +1068,7 @@ where
     let result = f(&mut ExactFit {
         core: &mut *core,
         store: &mut store,
-        fills: &[],
-        bound: false,
+        fills: &crate::gpr::NO_FILLS,
     });
     match result {
         Ok(value) => {

@@ -1,11 +1,13 @@
 //! [`ExactFit`]: every hyperparameter write, gradient, and Hessian of an Exact GPR.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use faer::{Mat, MatMut, MatRef};
 
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::{
-    CompiledKernel, DistanceFill, KernelScalar, KernelSpec, SlotId, Triangle, WeightedWalk,
+    CompiledKernel, DistanceFill, Fills, KernelScalar, KernelSpec, SlotId, Triangle, WeightedWalk,
 };
 use crate::kernel::{ScalarOps, SourceStore};
 use crate::likelihood::GaussianLikelihood;
@@ -56,10 +58,43 @@ pub(crate) struct ExactFit<'a, P: GpScalar> {
     /// The fills of the training distances during a fit. Under
     /// [`DistanceCachePolicy::Uncached`] every factor after the first calls
     /// them again.
-    pub(crate) fills: &'a [(SlotId, &'a dyn DistanceFill)],
-    /// The training squares hold what the fills wrote at bind, and no
-    /// factor has read them yet: the next factor does not call the fills.
-    pub(crate) bound: bool,
+    pub(crate) fills: &'a TrainFills<'a>,
+}
+
+/// The fills of one fit's training distances, shared by every reborrow of
+/// its [`ExactFit`].
+pub(crate) struct TrainFills<'a> {
+    fills: Fills<'a>,
+    /// The training squares hold what the fills wrote at bind, and no factor
+    /// has read them yet: the next factor does not call the fills.
+    bound: AtomicBool,
+}
+
+/// No fills: a factor outside a fit.
+pub(crate) static NO_FILLS: TrainFills<'static> = TrainFills {
+    fills: Vec::new(),
+    bound: AtomicBool::new(false),
+};
+
+impl<'a> TrainFills<'a> {
+    /// The fills of a bind that just wrote the training squares.
+    pub(crate) fn bound(fills: Fills<'a>) -> Self {
+        Self {
+            fills,
+            bound: AtomicBool::new(true),
+        }
+    }
+
+    /// The fills the next factor calls under
+    /// [`DistanceCachePolicy::Uncached`]: none for the first one after the
+    /// bind, which reads what the bind wrote.
+    fn refills(&self) -> &[(SlotId, &'a dyn DistanceFill)] {
+        if self.bound.swap(false, Ordering::Relaxed) {
+            &[]
+        } else {
+            &self.fills
+        }
+    }
 }
 
 /// Per-leaf Gram matrices an incremental objective keeps during `fit` /
@@ -120,7 +155,6 @@ impl<P: GpScalar> ExactFit<'_, P> {
             core: &mut *self.core,
             store: &mut *self.store,
             fills: self.fills,
-            bound: self.bound,
         }
     }
 
@@ -276,11 +310,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
             Keep::FactorGrams => self.core.compiled.kept_products(),
         };
         self.store.release_mapped();
-        if self.core.policies.distance_cache == DistanceCachePolicy::Uncached
-            && !self.fills.is_empty()
-            && !std::mem::take(&mut self.bound)
-        {
-            self.core.sources.refill(self.fills)?;
+        if self.core.policies.distance_cache == DistanceCachePolicy::Uncached {
+            let fills = self.fills.refills();
+            if !fills.is_empty() {
+                self.core.sources.refill(fills)?;
+            }
         }
         let n = self.core.n;
         if products > 0 {

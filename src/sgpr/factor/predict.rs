@@ -10,7 +10,7 @@ use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sparse::{
     F64System, PredictBuffers, PredictScratch, QueryDist, SparseCore, cast_blocks, pack_into,
-    predictive_variance, rect_slots, reset_prediction, view,
+    predictive_variance, rect_slots, reset_prediction, square_slots, squares_at, view,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use faer::{Mat, MatRef};
@@ -284,7 +284,7 @@ fn vfe_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     d: usize,
     q: usize,
     noise: f64,
-    qq: Option<&GatheredRect<f64>>,
+    qq: Option<&TrainSources<f64>>,
 ) -> Result<Mat<S>, GprError> {
     let PredictBuffers {
         kernel,
@@ -295,24 +295,17 @@ fn vfe_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     } = bufs;
     let queries = view(query, q, d);
     let mut cov = Mat::<S>::zeros(q, q);
-    match cast_blocks::<S>(qq) {
-        Some(qq) => {
-            let table = Some(qq.table());
-            kernel.cross_into::<M>(
-                compiled,
-                queries.as_ref(),
-                queries.as_ref(),
-                rect_slots(&table),
-                cov.as_mut(),
-            )?;
-        }
-        None => kernel.gram::<M>(
-            compiled,
-            GramInputs::points(queries.as_ref()),
-            cov.as_mut(),
-            Triangle::Full,
-        )?,
-    }
+    // One set: a `WhiteKernel` term adds its diagonal, as for points.
+    let qq = squares_at::<S>(qq)?;
+    kernel.gram::<M>(
+        compiled,
+        GramInputs {
+            slots: square_slots(qq.as_deref()),
+            ..GramInputs::points(queries.as_ref())
+        },
+        cov.as_mut(),
+        Triangle::Full,
+    )?;
     let a_star = k_sz.as_ref().submatrix(0, 0, m, q);
     let s_star = solved.as_ref().submatrix(0, 0, m, q);
     let noise_s = lit::<S>(noise);
