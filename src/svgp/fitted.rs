@@ -1,10 +1,16 @@
 //! Factored stochastic variational GPR.
 
+use crate::sparse::QueryDist;
 use faer::Mat;
 
 use crate::error::GprError;
+use crate::kernel::{DistanceKernel, KernelSpec, ModelKernel, PointKernel, PointUse};
 use crate::policy::with_kernel_exp;
-use crate::sparse::{PredictScratch, SparseCore, SparseScratch, sparse_core_accessors};
+use crate::sparse::{
+    PredictScratch, SparseCore, SparseScratch, sparse_core_accessors, sparse_distance_accessors,
+    sparse_kernel_accessor, sparse_point_accessors,
+};
+use std::marker::PhantomData;
 
 use crate::precision::{DoublePrecision, GpScalar, ModelPrecision};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -24,10 +30,11 @@ use super::factor::{
 ///
 /// See the example on [`Self::predict`].
 #[derive(Clone, Debug)]
-pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
-    pub(super) core: SparseCore,
+pub struct FittedSvgp<P: ModelPrecision = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) core: SparseCore<K>,
+    pub(super) _kernel: PhantomData<K>,
     /// Kernel scratch kept between `&mut self` calls.
-    pub(super) scratch: SparseScratch<P::Storage>,
+    pub(super) scratch: SparseScratch<P::Storage, K::Supply>,
     /// Lower `L_mm` from `K_mm = L_mm L_mmᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
@@ -38,69 +45,96 @@ pub struct FittedSvgp<P: ModelPrecision = DoublePrecision> {
     pub(super) k_diag: Vec<P::Storage>,
 }
 
-impl<P> FittedSvgp<P>
+impl<P, K: ModelKernel> FittedSvgp<P, K>
 where
     P: GpScalar,
 {
     sparse_core_accessors!();
 
-    /// The model of a persist directory: `K_mm` and `A` factored at the
-    /// saved `θ` and `Z`, with the saved whitened `q(u)`.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`crate::Svgp<crate::Fixed>::factor`].
-    pub(crate) fn from_persisted(
-        core: SparseCore,
-        q_mean: Vec<f64>,
-        q_l: Mat<f64>,
-    ) -> Result<Self, GprError> {
-        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<M, P>(
-            core,
-            Some((q_mean, q_l))
-        ))
+    /// The `predict_with` of a query with the supplied distances `qd`.
+    pub(crate) fn query(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        qd: &QueryDist,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let mut out = Prediction::default();
+        predict_svgp_into::<P, _>(
+            &self.core,
+            &SvgpSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                &self.q_mean,
+                self.q_l.as_ref(),
+            ),
+            xs,
+            n_rows,
+            n_cols,
+            qd,
+            options,
+            &mut PredictScratch::default(),
+            &mut out,
+        )?;
+        Ok(out)
     }
 
-    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
-    ///
-    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
-    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
-    /// and `Z`, and `Z` in transformed coordinates, and the whitened `q(u)`. The factors are
-    /// not stored; [`crate::LoadedSvgp::load`] factors the system again at the saved `θ`
-    /// and `Z`. Caller-defined kernels and transforms need their
-    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
-    /// The optimizer and the inducing-point search are not stored.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when the directory cannot be
-    /// written or a kernel or transform has no persist form.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Svgp};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let model = Svgp::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
-    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
-    ///     .map_err(|(_, e)| e)?;
-    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-svgp-{}", std::process::id()));
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// model.save(&dir)?;
-    /// let loaded = gprx::LoadedSvgp::load(&dir, &gprx::PersistRegistry::new())?;
-    /// assert_eq!(loaded.n(), model.n());
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        crate::persist::save_svgp(self, dir.as_ref())
+    /// The `predict_covariance_with` of a query with the supplied distances `qd`.
+    pub(crate) fn query_covariance(
+        &self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        qd: &QueryDist,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        predict_svgp_covariance::<P, _>(
+            &self.core,
+            &SvgpSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                &self.q_mean,
+                self.q_l.as_ref(),
+            ),
+            xs,
+            n_rows,
+            n_cols,
+            qd,
+            options,
+        )
+    }
+
+    /// The `predict_with_into` of a query with the supplied distances `qd`.
+    pub(crate) fn query_into(
+        &mut self,
+        xs: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        qd: &QueryDist,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        predict_svgp_into::<P, _>(
+            &self.core,
+            &SvgpSystem::new(
+                &self.core,
+                self.k_mm_l.as_ref(),
+                &self.q_mean,
+                self.q_l.as_ref(),
+            ),
+            xs,
+            n_rows,
+            n_cols,
+            qd,
+            options,
+            &mut self.scratch.predict,
+            out,
+        )
     }
 
     /// The training data, settings, and fitted transforms.
-    pub(crate) fn core(&self) -> &SparseCore {
+    pub(crate) fn core(&self) -> &SparseCore<K> {
         &self.core
     }
 
@@ -187,7 +221,7 @@ where
         }
         let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
         let q = unpack_q(&params[n_theta..], self.core.m)?;
-        let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage>(
+        let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage, _>(
             &kernel,
             self.core.jitter,
             &self.core.x_train,
@@ -198,6 +232,7 @@ where
             self.core.m,
             Some(q),
             &mut self.scratch.storage,
+            self.core.dist.as_ref(),
         ))?;
         self.core.kernel = kernel;
         self.core.likelihood = likelihood;
@@ -220,13 +255,14 @@ where
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
         let (q_mean, q_l) = unpack_q(&params[n_theta..], self.core.m)?;
-        let k_mm_l = with_kernel_exp!(self.core.math, M => assemble_kmm::<M, P::Storage>(
+        let k_mm_l = with_kernel_exp!(self.core.math, M => assemble_kmm::<M, P::Storage, _>(
             &kernel,
             self.core.jitter,
             &self.core.z_train,
             self.core.m,
             self.core.d,
             &mut self.scratch.storage,
+            self.core.dist.as_ref(),
         ))?;
         self.core.kernel = kernel;
         self.core.likelihood = likelihood;
@@ -239,7 +275,7 @@ where
     /// `A` and `k_diag` for every training point at the stored `θ`, `Z`, and
     /// `K_mm` factor (after [`Self::set_params_light`] steps).
     pub(crate) fn rebuild_data_terms(&mut self) -> Result<(), GprError> {
-        let (a, k_diag) = with_kernel_exp!(self.core.math, M => assemble_data_terms::<M, P::Storage>(
+        let (a, k_diag) = with_kernel_exp!(self.core.math, M => assemble_data_terms::<M, P::Storage, _>(
             &self.core.kernel,
             &self.core.x_train,
             self.core.n,
@@ -248,6 +284,7 @@ where
             self.core.m,
             self.k_mm_l.as_ref(),
             &mut self.scratch.storage,
+            self.core.dist.as_ref(),
         ))?;
         self.a = a;
         self.k_diag = k_diag;
@@ -342,11 +379,55 @@ where
         let mut scratch = std::mem::take(&mut self.scratch);
         let result = with_kernel_exp!(
             self.core.math,
-            M => svgp_value_and_gradient::<M, _>(self, out, &batch, &mut scratch)
+            M => svgp_value_and_gradient::<M, _, _>(self, out, &batch, &mut scratch)
         );
         self.scratch = scratch;
         result
     }
+}
+
+impl<P: GpScalar> FittedSvgp<P> {
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
+    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
+    /// and `Z`, and `Z` in transformed coordinates, and the whitened `q(u)`. The factors are
+    /// not stored; [`crate::LoadedSvgp::load`] factors the system again at the saved `θ`
+    /// and `Z`. Caller-defined kernels and transforms need their
+    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
+    /// The optimizer and the inducing-point search are not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let model = Svgp::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-svgp-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// model.save(&dir)?;
+    /// let loaded = gprx::LoadedSvgp::load(&dir, &gprx::PersistRegistry::new())?;
+    /// assert_eq!(loaded.n(), model.n());
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_svgp(self, dir.as_ref())
+    }
+}
+
+impl<P: GpScalar> FittedSvgp<P> {
+    sparse_kernel_accessor!();
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
@@ -426,23 +507,7 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        let mut out = Prediction::default();
-        predict_svgp_into::<P>(
-            &self.core,
-            &SvgpSystem::new(
-                &self.core,
-                self.k_mm_l.as_ref(),
-                &self.q_mean,
-                self.q_l.as_ref(),
-            ),
-            xs,
-            n_rows,
-            n_cols,
-            options,
-            &mut PredictScratch::default(),
-            &mut out,
-        )?;
-        Ok(out)
+        self.query(xs, n_rows, n_cols, &QueryDist::default(), options)
     }
 
     /// Returns the predictive mean and query–query covariance at `xs`.
@@ -504,19 +569,7 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        predict_svgp_covariance::<P>(
-            &self.core,
-            &SvgpSystem::new(
-                &self.core,
-                self.k_mm_l.as_ref(),
-                &self.q_mean,
-                self.q_l.as_ref(),
-            ),
-            xs,
-            n_rows,
-            n_cols,
-            options,
-        )
+        self.query_covariance(xs, n_rows, n_cols, &QueryDist::default(), options)
     }
 
     /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
@@ -624,20 +677,33 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        predict_svgp_into::<P>(
-            &self.core,
-            &SvgpSystem::new(
-                &self.core,
-                self.k_mm_l.as_ref(),
-                &self.q_mean,
-                self.q_l.as_ref(),
-            ),
-            xs,
-            n_rows,
-            n_cols,
-            options,
-            &mut self.scratch.predict,
-            out,
-        )
+        self.query_into(xs, n_rows, n_cols, &QueryDist::default(), options, out)
+    }
+}
+
+impl<P: GpScalar, K: PointKernel> FittedSvgp<P, K> {
+    sparse_point_accessors!();
+}
+
+impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
+    sparse_distance_accessors!();
+}
+
+impl<P: GpScalar, K: ModelKernel> FittedSvgp<P, K> {
+    /// The model of a persist directory: `K_mm` and `A` factored at the
+    /// saved `θ` and `Z`, with the saved whitened `q(u)`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`crate::Svgp<crate::Fixed>::factor`].
+    pub(crate) fn from_persisted(
+        core: SparseCore<K>,
+        q_mean: Vec<f64>,
+        q_l: Mat<f64>,
+    ) -> Result<Self, GprError> {
+        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<M, P, K>(
+            core,
+            Some((q_mean, q_l))
+        ))
     }
 }

@@ -458,10 +458,11 @@ pub struct ArdBlocks<'a, T> {
 }
 
 /// The per-dimension blocks of an [`ArdBlocks`]: borrowed slices (a
-/// caller's blocks), or one block repeated.
+/// caller's blocks), or vectors a model keeps (read with no list built).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BlockList<'a, T> {
     Slices(&'a [&'a [T]]),
+    Vecs(&'a [Vec<T>]),
     /// One block for each of `dims` dimensions.
     Repeat(&'a [T], usize),
 }
@@ -471,6 +472,7 @@ impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
     pub(crate) fn d(&self) -> usize {
         match self.blocks {
             BlockList::Slices(blocks) => blocks.len(),
+            BlockList::Vecs(blocks) => blocks.len(),
             BlockList::Repeat(_, dims) => dims,
         }
     }
@@ -479,6 +481,7 @@ impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
     pub(crate) fn block(&self, dim: usize) -> &'a [T] {
         match self.blocks {
             BlockList::Slices(blocks) => blocks[dim],
+            BlockList::Vecs(blocks) => &blocks[dim],
             BlockList::Repeat(block, _) => block,
         }
     }

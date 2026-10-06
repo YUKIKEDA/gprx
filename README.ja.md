@@ -393,7 +393,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。`DistanceKernel` と `KernelSpec` は `WithPoints`。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。
 
-`Gpr::new` は任意の `ModelKernel`（`KernelSpec` か `DistanceKernel<C>`）を受ける。`with_input_transform` は `PointKernel` のモデル（`KernelSpec` と `DistanceKernel<WithPoints>`）だけにある。各スロットは、呼び出しごとに `DistanceSource` を 1 つ受ける。
+`Gpr::new`、`Sgpr::new`、`Svgp::new` は任意の `ModelKernel`（`KernelSpec` か `DistanceKernel<C>`）を受ける。`with_input_transform` は `PointKernel` のモデル（`KernelSpec` と `DistanceKernel<WithPoints>`）だけにある。各スロットは、呼び出しごとに `DistanceSource` を 1 つ受ける。
 
 | 供給 | コピー |
 | --- | --- |
@@ -408,8 +408,9 @@ fn main() -> Result<(), gprx::GprError> {
 | --- | --- | --- | --- |
 | `Gpr`、`DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`、`WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+| `Sgpr` / `Svgp` | `Gpr` と同じに `inducing: &[usize]` を足す | `Gpr` と同じ | `Gpr` と同じ |
 
-`cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。`OnlineGpr::insert(sources, y_new)`（または `insert(sources, x_new, y_new)`）は、スロットごとに今の点への `n × 1` の列を 1 本受け、新しい対角はライブラリが 0 にする。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。
+`cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。`OnlineGpr::insert(sources, y_new)`（または `insert(sources, x_new, y_new)`）は、スロットごとに今の点への `n × 1` の列を 1 本受け、新しい対角はライブラリが 0 にする。`Sgpr` と `Svgp` は誘導点を学習の添字で指す（`FixedInducing` だけ）。`inducing()` がそれを返す。距離の `Sgpr` に `into_online` は無い。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d`、`x`、`z` は `WithPoints` にだけある。
 
 ```rust
 use gprx::kernel::{
@@ -417,7 +418,7 @@ use gprx::kernel::{
     DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, PointKernel, PointUse,
     RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, WithPoints,
 };
-use gprx::{Fixed, GaussianLikelihood, Gpr};
+use gprx::{Fixed, GaussianLikelihood, Gpr, Sgpr, Svgp};
 
 /// Squared distances of points 0, 1, 2, … on a line.
 struct Line;
@@ -484,17 +485,21 @@ fn main() -> Result<(), gprx::GprError> {
     let _ = fitted.predict([bands.borrow(&cross_blocks)], 2)?;
     let _ = (bands.from_vecs(vec![d2.clone(), d2.clone()]), bands.fill(&Line));
 
-    // A distance leaf times a coordinate leaf.
+    // A distance leaf times a coordinate leaf, and the sparse models.
     let mixed: DistanceKernel<WithPoints> =
         image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
     takes_points(&mixed);
     let x = [0.0, 1.0, 2.0, 3.0];
-    let fitted = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+    let sgpr = Sgpr::new(mixed.clone(), GaussianLikelihood::new(0.1)?)
         .with_optimizer(Fixed)
-        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
-    assert_eq!((fitted.d(), fitted.x()), (1, &x[..]));
-    let _ = fitted.predict([image.borrow(&cross)], &[0.5, 1.5], 2, 1)?;
-    let _ = (fitted.to_kernel(), fitted.slots());
+        .factor([image.from_vec(d2.clone())], 4, &x, 1, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    assert_eq!((sgpr.inducing(), sgpr.z()), (&[0, 2][..], &[0.0, 2.0][..]));
+    let _ = sgpr.predict([image.borrow(&cross)], &[0.5, 1.5], 2, 1)?;
+    let svgp = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(d2)], 4, &y, &[1, 3])
+        .map_err(|(_, e)| e)?;
+    let _ = (svgp.to_kernel(), svgp.slots());
     Ok(())
 }
 

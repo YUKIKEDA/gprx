@@ -155,8 +155,8 @@ The three families follow the same typestate: a trainer, `fit` (or `factor`), a 
 | Family | Trainer | Fitted | Online | Loaded from disk |
 | --- | --- | --- | --- | --- |
 | Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>` (`insert`, `delete`) | `LoadedGpr` (8 variants) |
-| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants) |
-| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | none | `LoadedSvgp` (4 variants) |
+| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`); coordinate kernels only | `LoadedSgpr` (8 variants) |
+| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | none | `LoadedSvgp` (4 variants) |
 
 The type parameters:
 
@@ -164,8 +164,8 @@ The type parameters:
 | --- | --- | --- |
 | `O` | The optimizer slot | `Lbfgs` (default for Exact and Sparse), `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, a user `Optimizer`; `Fixed` for `factor` only; `Adam` for `Svgp::fit` (`Svgp` defaults to `Fixed`) |
 | `P` | Precision, a compile-time choice | `DoublePrecision` (default), `SinglePrecision`, `MixedPrecision` (residual `PromoteStorage` or `ReevaluateKernel`) |
-| `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`) |
-| `K` | What an Exact kernel reads ([design §5.1](design.md#51-spec-versus-evaluator-and-precision-generics)) | `KernelSpec` (default; coordinates), `DistanceKernel<DistanceOnly>` (supplied distances only), `DistanceKernel<WithPoints>` (supplied distances and coordinates) |
+| `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`; coordinate kernels only) |
+| `K` | What the kernel reads ([design §5.1](design.md#51-spec-versus-evaluator-and-precision-generics)) | `KernelSpec` (default; coordinates), `DistanceKernel<DistanceOnly>` (supplied distances only), `DistanceKernel<WithPoints>` (supplied distances and coordinates) |
 
 ## 6. How a model moves between states
 

@@ -598,7 +598,7 @@ fn batch_value_and_grad(
     let mut out = vec![0.0; params.len()];
     let value = crate::policy::with_kernel_exp!(
         model.core.math,
-        M => super::factor::svgp_value_and_gradient::<M, _>(model, &mut out, batch, &mut scratch)
+        M => super::factor::svgp_value_and_gradient::<M, _, _>(model, &mut out, batch, &mut scratch)
     )
     .expect("gradient");
     model.scratch = scratch;
@@ -758,7 +758,7 @@ fn adam_step_update_matches_light_update() {
     let z = [0.2, 1.4, 2.6];
     let (mut light, params) = shifted_model(kernel, &x, 6, 1, &z);
     let mut stepped = light.clone();
-    let mut step = super::factor::AdamStep::new(&stepped);
+    let mut step = super::factor::AdamStep::new(&stepped).expect("step");
     let mut moved = params.clone();
     for k in 0..3 {
         moved[0] += 0.1 * (k as f64 + 1.0);

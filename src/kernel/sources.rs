@@ -13,8 +13,10 @@ use std::fmt;
 
 use faer::MatRef;
 
-use super::compiled::supplied::{RectEntry, RectTable, SquareSlot, SquareSlots};
-use super::dist::ArdSqDiffBuf;
+use super::compiled::supplied::{
+    RectEntry, RectSlot, RectSlots, RectTable, SquareSlot, SquareSlots,
+};
+use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use super::{ScalarOps, SourceData};
 use crate::error::GprError;
@@ -360,7 +362,6 @@ impl<T: KernelScalar> TrainSources<T> {
         self.slots.is_empty()
     }
 
-    #[cfg(test)]
     /// The training points the squares cover.
     pub(crate) fn n(&self) -> usize {
         self.n
@@ -581,6 +582,39 @@ impl<T: KernelScalar> TrainSources<T> {
             .collect()
     }
 
+    /// The `d²` of `rows × cols` training pairs, gathered per slot.
+    pub(crate) fn gather(&self, rows: &[usize], cols: &[usize]) -> GatheredRect<T> {
+        let slots = self
+            .slots
+            .iter()
+            .map(|(id, data)| {
+                let blocks = match data {
+                    TrainData::Scalar(square) => vec![
+                        cols.iter()
+                            .flat_map(|&j| rows.iter().map(move |&i| square[i + j * self.cap]))
+                            .collect(),
+                    ],
+                    TrainData::Ard(cache) => {
+                        let view = cache.view();
+                        (0..view.d())
+                            .map(|k| {
+                                cols.iter()
+                                    .flat_map(|&j| rows.iter().map(move |&i| view.get(k, i, j)))
+                                    .collect()
+                            })
+                            .collect()
+                    }
+                };
+                (*id, matches!(data, TrainData::Ard(_)), blocks)
+            })
+            .collect();
+        GatheredRect {
+            rows: rows.len(),
+            cols: cols.len(),
+            slots,
+        }
+    }
+
     /// The training columns `cols` (every row) as a rectangular table. A
     /// scalar slot is read in place; an ARD slot's packed triangles are
     /// unpacked into `ard`, whose buffers are reused from call to call.
@@ -654,6 +688,33 @@ impl<T: KernelScalar> TrainSources<T> {
             slots.push((*id, data));
         }
         Ok(TrainSources { n, cap: n, slots })
+    }
+
+    /// The training squares of the points `index` (a subset, in that order).
+    pub(crate) fn subset(&self, index: &[usize]) -> Result<Self, GprError> {
+        let m = index.len();
+        let mut slots = Vec::with_capacity(self.slots.len());
+        for (id, data) in &self.slots {
+            let data = match data {
+                TrainData::Scalar(square) => TrainData::Scalar(
+                    (0..m * m)
+                        .map(|at| square[index[at % m] + index[at / m] * self.cap])
+                        .collect(),
+                ),
+                TrainData::Ard(cache) => {
+                    let view = cache.view();
+                    TrainData::Ard(ArdSqDiffBuf::from_pairs(m, view.d(), |k, i, j| {
+                        view.get(k, index[i], index[j])
+                    })?)
+                }
+            };
+            slots.push((*id, data));
+        }
+        Ok(Self {
+            n: m,
+            cap: m,
+            slots,
+        })
     }
 }
 
@@ -796,6 +857,116 @@ impl<T: KernelScalar> SquareSlots<T> for TrainSources<T> {
     }
 }
 
+/// Training `d²` gathered into rectangular blocks (rows × cols), per slot:
+/// `(slot, is_ard, blocks)`.
+#[derive(Clone, Debug)]
+pub(crate) struct GatheredRect<T> {
+    rows: usize,
+    cols: usize,
+    slots: Vec<(SlotId, bool, Vec<Vec<T>>)>,
+}
+
+impl<T> Default for GatheredRect<T> {
+    fn default() -> Self {
+        Self {
+            rows: 0,
+            cols: 0,
+            slots: Vec::new(),
+        }
+    }
+}
+
+impl<T: KernelScalar> GatheredRect<T> {
+    /// The blocks as a table.
+    pub(crate) fn table(&self) -> RectTable<'_, T> {
+        RectTable(
+            self.slots
+                .iter()
+                .map(|(id, ard, blocks)| {
+                    let entry = if *ard {
+                        RectEntry::Ard {
+                            blocks: blocks.iter().map(Vec::as_slice).collect(),
+                            rows: self.rows,
+                            cols: self.cols,
+                        }
+                    } else {
+                        RectEntry::Scalar(MatRef::from_column_major_slice(
+                            &blocks[0], self.rows, self.cols,
+                        ))
+                    };
+                    (*id, entry)
+                })
+                .collect(),
+        )
+    }
+
+    /// The same blocks at the scalar `U`.
+    pub(crate) fn cast<U: KernelScalar>(&self) -> GatheredRect<U> {
+        GatheredRect {
+            rows: self.rows,
+            cols: self.cols,
+            slots: self
+                .slots
+                .iter()
+                .map(|(id, ard, blocks)| {
+                    let blocks = blocks
+                        .iter()
+                        .map(|block| block.iter().map(|v| U::from_f64(v.to_f64())).collect())
+                        .collect();
+                    (*id, *ard, blocks)
+                })
+                .collect(),
+        }
+    }
+
+    /// Columns `cols` of these blocks (a minibatch) into `out`, reusing its
+    /// buffers: once `out` has held a batch this large, nothing allocates.
+    pub(crate) fn columns_into(&self, cols: &[usize], out: &mut Self) {
+        let rows = self.rows;
+        out.rows = rows;
+        out.cols = cols.len();
+        out.slots.truncate(self.slots.len());
+        while out.slots.len() < self.slots.len() {
+            let (id, ard, _) = &self.slots[out.slots.len()];
+            out.slots.push((*id, *ard, Vec::new()));
+        }
+        for ((id, ard, blocks), (out_id, out_ard, out_blocks)) in
+            self.slots.iter().zip(out.slots.iter_mut())
+        {
+            *out_id = *id;
+            *out_ard = *ard;
+            out_blocks.resize_with(blocks.len(), Vec::new);
+            for (block, picked) in blocks.iter().zip(out_blocks.iter_mut()) {
+                picked.clear();
+                for &j in cols {
+                    picked.extend_from_slice(&block[j * rows..(j + 1) * rows]);
+                }
+            }
+        }
+    }
+}
+
+/// The blocks read in place, without a [`RectTable`] built for the call.
+impl<T: KernelScalar> RectSlots<T> for GatheredRect<T> {
+    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
+        let (_, ard, blocks) = self.slots.iter().find(|(id, _, _)| *id == slot)?;
+        Some(if *ard {
+            RectSlot::Ard(ArdBlocks {
+                blocks: BlockList::Vecs(blocks),
+                rows: self.rows,
+                cols: self.cols,
+                col0: 0,
+            })
+        } else {
+            RectSlot::Scalar(MatRef::from_column_major_slice(
+                blocks.first()?,
+                self.rows,
+                self.cols,
+            ))
+        })
+    }
+}
+
 /// The checked `d²` blocks of one prediction or insert, and the casts an
 /// `f32` model reads them through.
 pub(crate) struct QuerySources<'a, T: ScalarOps> {
@@ -822,6 +993,30 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
             .map(|slot| (0..slot.shape.blocks()).map(|_| T::empty_rows()).collect())
             .collect();
         Ok(Self { raw, casts })
+    }
+
+    /// Rows `rows` of every block, in `f64` (a sparse model's inducing rows).
+    pub(crate) fn gather_rows(&self, rows: &[usize]) -> GatheredRect<f64> {
+        let cols = self.raw.first().map_or(0, |slot| slot.cols);
+        GatheredRect {
+            rows: rows.len(),
+            cols,
+            slots: self
+                .raw
+                .iter()
+                .map(|slot| {
+                    let blocks = (0..slot.shape.blocks())
+                        .map(|k| {
+                            let block = slot.block(k);
+                            (0..cols)
+                                .flat_map(|j| rows.iter().map(move |&i| block[i + j * slot.rows]))
+                                .collect()
+                        })
+                        .collect();
+                    (slot.id, matches!(slot.shape, SlotShape::Ard(_)), blocks)
+                })
+                .collect(),
+        }
     }
 
     /// The checked blocks, in slot order.

@@ -4,15 +4,19 @@ use super::lit;
 use crate::data::pack_points;
 use crate::error::GprError;
 use crate::kernel::GramInputs;
+use crate::kernel::ModelKernel;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, CrossViews, KernelScalar, Triangle};
+use crate::kernel::Supply;
+use crate::kernel::{
+    CompiledKernel, CrossViews, GatheredRect, KernelScalar, RectSlots, SquareSlots, Triangle,
+};
 use crate::linalg::{
     copy_mat, dot, dot_ay, frobenius_dot, gemm, mat_add_mul, mat_sub_mul, mat_vec, quad_form,
     solve_llt, solve_lower, solve_lower_transpose,
 };
 use crate::precision::ModelPrecision;
 use crate::sgpr::FittedSgpr;
-use crate::sparse::KernelScratch;
+use crate::sparse::{KernelScratch, rect_slots, square_slots, zx_at, zz_at};
 use faer::{Accum, Mat, MatRef};
 
 pub(crate) struct KernelVar<T: KernelScalar> {
@@ -61,7 +65,7 @@ pub(crate) struct VfeEngine<'a, T: KernelScalar> {
 }
 
 impl<'a, T: KernelScalar> VfeEngine<'a, T> {
-    fn from_model<O, I, P>(model: &'a FittedSgpr<O, I, P>, y: &'a [T]) -> Self
+    fn from_model<O, I, P, K: ModelKernel>(model: &'a FittedSgpr<O, I, P, K>, y: &'a [T]) -> Self
     where
         P: ModelPrecision<Storage = T>,
     {
@@ -278,8 +282,8 @@ pub(crate) struct VfeTangent<T: KernelScalar> {
     pub(crate) d_noise: T,
 }
 
-pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+    model: &FittedSgpr<O, I, P, K>,
     out: &mut [f64],
     include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
@@ -289,7 +293,7 @@ where
 {
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.core.y_train, &mut y_cast);
-    let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
+    let engine = VfeEngine::<P::Storage>::from_model::<_, _, _, _>(model, y_s);
     let compiled = model.core.kernel.compile_as::<P::Storage>();
     let x64 = pack_points(&model.core.x_train, model.core.n, model.core.d);
     let z64 = pack_points(&model.core.z_train, model.core.m, model.core.d);
@@ -299,21 +303,31 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let adjoint = engine.adjoint();
     let n_kernel = model.core.kernel.num_params();
+    let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
+    let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
+    let zx = zx.as_deref().map(GatheredRect::table);
     // One walk per matrix. The Hessian still forms each ∂K in `kernel_theta_var`.
-    ks.write_square_contraction::<M>(&compiled, z, adjoint.w_mm.as_ref(), &mut out[..n_kernel])?;
-    ks.add_cross_contraction::<M>(
+    ks.write_square_contraction::<M, _>(
+        &compiled,
+        z,
+        square_slots(zz.as_deref()),
+        adjoint.w_mm.as_ref(),
+        &mut out[..n_kernel],
+    )?;
+    ks.add_cross_contraction::<M, _>(
         &compiled,
         z,
         x,
+        rect_slots(&zx),
         adjoint.w_mn.as_ref(),
         1.0,
         &mut out[..n_kernel],
     )?;
-    ks.add_diag_contraction::<M>(&compiled, x, adjoint.w_diag.to_f64(), &mut out[..n_kernel])?;
+    ks.add_diag_contraction::<M, _>(&compiled, x, adjoint.w_diag.to_f64(), &mut out[..n_kernel])?;
     out[n_kernel] = engine
         .directional_noise(model.core.likelihood.noise_variance())
         .to_f64();
-    if include_z {
+    if let Some(coords) = z_tree(include_z, &compiled) {
         let (m, n) = (model.core.m, model.core.n);
         let mut g_zz = Mat::zeros(m, m);
         let mut g_xz = Mat::zeros(n, m);
@@ -323,8 +337,8 @@ where
             // `∂k(zᵢ, z_p)/∂z_p[dim]` for every pair, once per dimension; the
             // coordinate `p` moves row and column `p` of `K_mm` and row `p`
             // of `K_mn`.
-            compiled.grad_wrt_coord_dim_with::<M>(z, z, g_zz.as_mut(), dim, ks.scratch(m, m))?;
-            compiled.grad_wrt_coord_dim_with::<M>(x, z, g_xz.as_mut(), dim, ks.scratch(n, m))?;
+            coords.grad_wrt_coord_dim_with::<M>(z, z, g_zz.as_mut(), dim, ks.scratch(m, m))?;
+            coords.grad_wrt_coord_dim_with::<M>(x, z, g_xz.as_mut(), dim, ks.scratch(n, m))?;
             for p in 0..m {
                 let mut sum = lit::<P::Storage>(0.0);
                 for i in 0..m {
@@ -341,8 +355,8 @@ where
     Ok(())
 }
 
-pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+    model: &FittedSgpr<O, I, P, K>,
     out: &mut [f64],
     include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
@@ -352,14 +366,14 @@ where
 {
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.core.y_train, &mut y_cast);
-    let engine = VfeEngine::<P::Storage>::from_model::<_, _, _>(model, y_s);
-    let vars = collect_first_vars::<M, _, _, _>(model, include_z, ks)?;
+    let engine = VfeEngine::<P::Storage>::from_model::<_, _, _, _>(model, y_s);
+    let vars = collect_first_vars::<M, _, _, _, _>(model, include_z, ks)?;
     let tangents: Vec<VfeTangent<P::Storage>> =
         vars.iter().map(|v| engine.first_tangent(v)).collect();
     let p = vars.len();
     for j in 0..p {
         for i in j..p {
-            let dd = second_var::<M, _, _, _>(model, i, j, include_z, ks)?;
+            let dd = second_var::<M, _, _, _, _>(model, i, j, include_z, ks)?;
             let hij = engine
                 .second_directional(&tangents[i], &tangents[j], &dd)
                 .to_f64();
@@ -370,8 +384,8 @@ where
     Ok(())
 }
 
-pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+    model: &FittedSgpr<O, I, P, K>,
     include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
 ) -> Result<Vec<KernelVar<P::Storage>>, GprError>
@@ -387,6 +401,9 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let n_kernel = model.core.kernel.num_params();
     let n_theta = n_kernel + model.core.likelihood.num_params();
+    let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
+    let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
+    let zx = zx.as_deref().map(GatheredRect::table);
     let mut vars = Vec::with_capacity(
         n_theta
             + if include_z {
@@ -396,11 +413,11 @@ where
             },
     );
     for i in 0..n_kernel {
-        vars.push(kernel_theta_var::<M, _>(
+        vars.push(kernel_theta_var::<M, _, _>(
             &compiled,
             ks,
-            x,
-            z,
+            (x, z),
+            (square_slots(zz.as_deref()), rect_slots(&zx)),
             model.core.n,
             i,
         )?);
@@ -410,10 +427,10 @@ where
         model.core.n,
         model.core.likelihood.noise_variance(),
     ));
-    if include_z {
+    if let Some(coords) = z_tree(include_z, &compiled) {
         for dim in 0..model.core.d {
             for p in 0..model.core.m {
-                vars.push(z_coord_var::<M, _>(&compiled, ks, x, z, p, dim)?);
+                vars.push(z_coord_var::<M, _>(coords, ks, x, z, p, dim)?);
             }
         }
     }
@@ -425,11 +442,11 @@ where
 /// The VFE Hessian forms these matrices because the factor tangent needs
 /// `∂K` itself. The first derivative does not: [`analytic_gradient`]
 /// contracts the adjoint in one walk per matrix.
-pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
-    compiled: &CompiledKernel<T>,
+pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T, U: Supply>(
+    compiled: &CompiledKernel<T, U>,
     ks: &mut KernelScratch<T>,
-    x: MatRef<'_, T>,
-    z: MatRef<'_, T>,
+    (x, z): (MatRef<'_, T>, MatRef<'_, T>),
+    (zz, zx): (Option<&dyn SquareSlots<T>>, Option<&dyn RectSlots<T>>),
     n: usize,
     param_idx: usize,
 ) -> Result<KernelVar<T>, GprError>
@@ -438,15 +455,29 @@ where
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
-    ks.grad::<M>(
+    ks.grad::<M, _>(
         compiled,
-        GramInputs::points(z),
+        GramInputs {
+            slots: zz,
+            ..GramInputs::points(z)
+        },
         d_kmm.as_mut(),
         param_idx,
         Triangle::Full,
     )?;
     let mut d_kmn = Mat::zeros(m, n);
-    compiled.grad_cross_points::<M>(z, x, d_kmn.as_mut(), param_idx, ks.scratch(m, n))?;
+    compiled.grad_cross_views::<M>(
+        CrossViews {
+            x1: z,
+            x2: x,
+            dist: None,
+            slots: zx,
+        },
+        d_kmn.as_mut(),
+        param_idx,
+        ks.scratch(m, n),
+        &mut compiled.nested_buffers(m, n),
+    )?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.grad_diag_points::<M>(x, &mut diag, param_idx)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
@@ -502,8 +533,8 @@ where
     })
 }
 
-pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+    model: &FittedSgpr<O, I, P, K>,
     i: usize,
     j: usize,
     include_z: bool,
@@ -523,8 +554,9 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let m = model.core.m;
     let n = model.core.n;
+    let coords = z_tree(include_z, &compiled);
     let z_index = |idx: usize| -> Option<(usize, usize)> {
-        if !include_z || idx < n_theta {
+        if coords.is_none() || idx < n_theta {
             None
         } else {
             let local = idx - n_theta;
@@ -532,7 +564,17 @@ where
         }
     };
     if i < n_kernel && j < n_kernel {
-        return kernel_theta_second::<M, _>(&compiled, ks, x, z, n, i, j);
+        let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
+        let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
+        let zx = zx.as_deref().map(GatheredRect::table);
+        return kernel_theta_second::<M, _, _>(
+            &compiled,
+            ks,
+            (x, z),
+            (square_slots(zz.as_deref()), rect_slots(&zx)),
+            n,
+            (i, j),
+        );
     }
     if i == n_kernel && j == n_kernel {
         return Ok(likelihood_var(m, n, model.core.likelihood.noise_variance()));
@@ -545,8 +587,8 @@ where
             d_noise: lit::<P::Storage>(0.0),
         });
     }
-    if let (Some((pi, ei)), Some((pj, ej))) = (z_index(i), z_index(j)) {
-        return z_z_second::<M, _>(&compiled, ks, x, z, pi, ei, pj, ej);
+    if let (Some(coords), Some((pi, ei)), Some((pj, ej))) = (coords, z_index(i), z_index(j)) {
+        return z_z_second::<M, _>(coords, ks, x, z, pi, ei, pj, ej);
     }
     let (theta, (p, e)) = if i < n_theta {
         (
@@ -571,33 +613,59 @@ where
             d_noise: lit::<P::Storage>(0.0),
         });
     }
-    theta_z_second::<M, _>(&compiled, x, z, theta, p, e)
+    let Some(coords) = coords else {
+        return Err(GprError::IndexOutOfRange {
+            reason: "expected a free inducing coordinate".to_owned(),
+        });
+    };
+    theta_z_second::<M, _>(coords, x, z, theta, p, e)
 }
 
-pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T>(
-    compiled: &CompiledKernel<T>,
+/// The tree whose inducing coordinates a learned-`Z` model differentiates:
+/// `compiled` when `include_z` and it is a coordinate tree. A model of a
+/// distance kernel takes only fixed inducing points, so it never asks.
+fn z_tree<T: KernelScalar, U: Supply>(
+    include_z: bool,
+    compiled: &CompiledKernel<T, U>,
+) -> Option<&CompiledKernel<T>> {
+    if include_z {
+        U::coordinates(compiled)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T, U: Supply>(
+    compiled: &CompiledKernel<T, U>,
     ks: &mut KernelScratch<T>,
-    x: MatRef<'_, T>,
-    z: MatRef<'_, T>,
+    (x, z): (MatRef<'_, T>, MatRef<'_, T>),
+    (zz, zx): (Option<&dyn SquareSlots<T>>, Option<&dyn RectSlots<T>>),
     n: usize,
-    i: usize,
-    j: usize,
+    (i, j): (usize, usize),
 ) -> Result<KernelVar<T>, GprError>
 where
     T: KernelScalar,
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
-    ks.hess::<M>(
+    ks.hess::<M, _>(
         compiled,
-        GramInputs::points(z),
+        GramInputs {
+            slots: zz,
+            ..GramInputs::points(z)
+        },
         d_kmm.as_mut(),
         (i, j),
         Triangle::Full,
     )?;
     let mut d_kmn = Mat::zeros(m, n);
     compiled.hess_cross_views::<M>(
-        CrossViews::points(z, x),
+        CrossViews {
+            x1: z,
+            x2: x,
+            dist: None,
+            slots: zx,
+        },
         d_kmn.as_mut(),
         (i, j),
         ks.scratch(m, n),
@@ -890,11 +958,11 @@ mod adjoint_tests {
         let zm = pack_points(&model.core.z_train, 3, 2);
         let mut ks = KernelScratch::new();
         for i in 0..model.core.kernel.num_params() {
-            let var = kernel_theta_var::<Accurate, f64>(
+            let var = kernel_theta_var::<Accurate, f64, _>(
                 &compiled,
                 &mut ks,
-                xm.as_ref(),
-                zm.as_ref(),
+                (xm.as_ref(), zm.as_ref()),
+                (None, None),
                 6,
                 i,
             )

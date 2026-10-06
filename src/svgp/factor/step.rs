@@ -4,7 +4,8 @@ use super::assemble::unpack_q_into;
 use super::gradient::GradBuffers;
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
+use crate::kernel::{CompiledOf, ModelKernel};
+use crate::kernel::{GramInputs, KernelScalar, Triangle};
 use crate::linalg::{cholesky_lower_with_backup, llt_scratch};
 use crate::precision::GpScalar;
 use crate::sparse::KernelScratch;
@@ -17,11 +18,11 @@ use faer::Mat;
 /// factor of `K_mm` and `q` (swapped with the model's on commit), and the
 /// gradient's [`GradBuffers`]. Built once per fit, so a step allocates
 /// nothing after the first one (see [`GradBuffers`] for the one exception).
-pub(crate) struct AdamStep<S: KernelScalar> {
+pub(crate) struct AdamStep<S: KernelScalar, K: ModelKernel> {
     theta: Vec<f64>,
     theta_prev: Vec<f64>,
-    compiled_storage: CompiledKernel<S>,
-    pub(crate) compiled: CompiledKernel<f64>,
+    compiled_storage: CompiledOf<S, K>,
+    pub(crate) compiled: CompiledOf<f64, K>,
     z: Mat<S>,
     k_mm: Mat<S>,
     backup: Mat<S>,
@@ -29,11 +30,16 @@ pub(crate) struct AdamStep<S: KernelScalar> {
     q_mean: Vec<f64>,
     q_l: Mat<f64>,
     ks: KernelScratch<S>,
+    /// The `Z × Z` squares of a distance kernel, at `S`.
+    zz: Option<crate::kernel::TrainSources<S>>,
     pub(crate) grad: GradBuffers,
 }
 
-impl<S: KernelScalar> AdamStep<S> {
-    pub(crate) fn new<P>(model: &FittedSvgp<P>) -> Self
+impl<S: KernelScalar, K: ModelKernel> AdamStep<S, K> {
+    /// # Errors
+    ///
+    /// Returns the error of casting the `Z × Z` squares to `S`.
+    pub(crate) fn new<P>(model: &FittedSvgp<P, K>) -> Result<Self, GprError>
     where
         P: GpScalar<Storage = S>,
     {
@@ -42,7 +48,8 @@ impl<S: KernelScalar> AdamStep<S> {
         let z64 = pack_points(&core.z_train, m, core.d);
         let mut cast = S::empty_cols();
         let z = S::storage_cols(z64.as_ref(), &mut cast).to_owned();
-        Self {
+        let zz = crate::sparse::zz_at::<S>(core.dist.as_ref())?.map(std::borrow::Cow::into_owned);
+        Ok(Self {
             theta: vec![0.0; core.theta_len()],
             theta_prev: vec![0.0; core.theta_len()],
             compiled_storage: core.kernel.compile_as::<S>(),
@@ -54,12 +61,13 @@ impl<S: KernelScalar> AdamStep<S> {
             q_mean: vec![0.0; m],
             q_l: Mat::zeros(m, m),
             ks: KernelScratch::new(),
+            zz,
             grad: GradBuffers::default(),
-        }
+        })
     }
 }
 
-impl<P> FittedSvgp<P>
+impl<P, K: crate::kernel::ModelKernel> FittedSvgp<P, K>
 where
     P: GpScalar,
 {
@@ -70,7 +78,7 @@ where
     pub(crate) fn set_params_step<M: crate::math::KernelMath>(
         &mut self,
         params: &[f64],
-        step: &mut AdamStep<P::Storage>,
+        step: &mut AdamStep<P::Storage, K>,
     ) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let core = &mut self.core;
@@ -86,9 +94,12 @@ where
         core.kernel.set_params_in_place(new_k, prev_k)?;
         let factored = (|| {
             step.compiled_storage.set_params_in_place(new_k, prev_k)?;
-            step.ks.gram::<M>(
+            step.ks.gram::<M, _>(
                 &step.compiled_storage,
-                GramInputs::points(step.z.as_ref()),
+                GramInputs {
+                    slots: crate::sparse::square_slots(step.zz.as_ref()),
+                    ..GramInputs::points(step.z.as_ref())
+                },
                 step.k_mm.as_mut(),
                 Triangle::Lower,
             )?;

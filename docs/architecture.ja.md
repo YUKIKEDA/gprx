@@ -155,8 +155,8 @@ flowchart TB
 | モデル | Trainer | Fitted | Online | ディスクから読んだもの |
 | --- | --- | --- | --- | --- |
 | Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>`（`insert`, `delete`） | `LoadedGpr`（8 variant） |
-| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`） | `LoadedSgpr`（8 variant） |
-| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | なし | `LoadedSvgp`（4 variant） |
+| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`）。座標のカーネルだけ | `LoadedSgpr`（8 variant） |
+| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | なし | `LoadedSvgp`（4 variant） |
 
 型パラメータ:
 
@@ -164,8 +164,8 @@ flowchart TB
 | --- | --- | --- |
 | `O` | 最適化器の枠 | `Lbfgs`（Exact と Sparse の既定）, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, 利用者の `Optimizer`。`factor` だけなら `Fixed`。`Svgp::fit` は `Adam`（`Svgp` の既定は `Fixed`） |
 | `P` | 精度。コンパイル時の選択 | `DoublePrecision`（既定）, `SinglePrecision`, `MixedPrecision`（残差は `PromoteStorage` か `ReevaluateKernel`） |
-| `I` | 誘導点 `Z` の置き場 | `FixedInducing`（既定。`Z` はパラメータに入らない）, `FreeInducing`（`Z` を `θ` と一緒に最適化する） |
-| `K` | Exact のカーネルが読むもの（[design §5.1](design.ja.md#51-仕様と評価器精度ジェネリクス)） | `KernelSpec`（既定。座標）, `DistanceKernel<DistanceOnly>`（与えられた距離だけ）, `DistanceKernel<WithPoints>`（与えられた距離と座標） |
+| `I` | 誘導点 `Z` の置き場 | `FixedInducing`（既定。`Z` はパラメータに入らない）, `FreeInducing`（`Z` を `θ` と一緒に最適化する。座標のカーネルだけ） |
+| `K` | カーネルが読むもの（[design §5.1](design.ja.md#51-仕様と評価器精度ジェネリクス)） | `KernelSpec`（既定。座標）, `DistanceKernel<DistanceOnly>`（与えられた距離だけ）, `DistanceKernel<WithPoints>`（与えられた距離と座標） |
 
 ## 6. モデルの状態の移り方
 

@@ -2,17 +2,26 @@
 //! [`crate::Svgp`]): the settings every trainer holds, the training data
 //! every fitted model holds, and the kernel + likelihood `θ` over both.
 
+mod distance;
+
+pub(crate) use distance::sparse_query;
+
+use std::any::Any;
+use std::borrow::Cow;
 use std::fmt;
+use std::sync::OnceLock;
 
 use dyn_stack::MemBuffer;
 use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
-use crate::kernel::KernelSpec;
+use crate::kernel::{BlockKind, DistanceSource, bind_sources, spec_slots};
 use crate::kernel::{
-    CompiledKernel, CrossViews, DiagAccum, GramInputs, KernelScalar, Triangle, WeightedWalk,
+    CompiledKernel, CrossViews, DiagAccum, GatheredRect, GramInputs, KernelScalar, RectSlots,
+    RectTable, SquareSlots, TrainSources, Triangle, WeightedWalk,
 };
+use crate::kernel::{KernelSpec, ModelKernel, SpecOf, Supply};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::KernelExp;
@@ -25,8 +34,8 @@ use crate::transform::{
 
 /// Kernel, likelihood, kernel `exp`, and the unfitted input / target
 /// transforms of an untrained sparse model.
-pub(crate) struct SparseSpec {
-    pub(crate) kernel: KernelSpec,
+pub(crate) struct SparseSpec<K: ModelKernel> {
+    pub(crate) kernel: SpecOf<K>,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) math: KernelExp,
     /// Retries for factoring `K_mm`.
@@ -35,7 +44,7 @@ pub(crate) struct SparseSpec {
     pub(crate) y_transform: Box<dyn UnfittedTarget>,
 }
 
-impl Clone for SparseSpec {
+impl<K: ModelKernel> Clone for SparseSpec<K> {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -48,7 +57,7 @@ impl Clone for SparseSpec {
     }
 }
 
-impl fmt::Debug for SparseSpec {
+impl<K: ModelKernel> fmt::Debug for SparseSpec<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SparseSpec")
             .field("kernel", &self.kernel)
@@ -59,8 +68,8 @@ impl fmt::Debug for SparseSpec {
     }
 }
 
-impl SparseSpec {
-    pub(crate) fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
+impl<K: ModelKernel> SparseSpec<K> {
+    pub(crate) fn new(kernel: SpecOf<K>, likelihood: GaussianLikelihood) -> Self {
         Self {
             kernel,
             likelihood,
@@ -91,8 +100,8 @@ impl SparseSpec {
 }
 
 /// The saved parts of a fitted sparse model ([`SparseCore::from_persisted`]).
-pub(crate) struct PersistedSparse {
-    pub(crate) spec: SparseSpec,
+pub(crate) struct PersistedSparse<K: ModelKernel> {
+    pub(crate) spec: SparseSpec<K>,
     pub(crate) x_transform: Box<dyn Transform>,
     pub(crate) y_transform: Box<dyn TargetTransform>,
     pub(crate) x_obs: Vec<f64>,
@@ -104,13 +113,172 @@ pub(crate) struct PersistedSparse {
     pub(crate) d: usize,
 }
 
+/// The supplied distances of a sparse model whose kernel reads them: the
+/// training points that are the inducing points, and the `Z × Z` and
+/// `Z × X` blocks gathered from the training squares.
+///
+/// Kept in `f64`, next to the `f64` training coordinates. An `f32` model
+/// reads the `Z × Z` and `Z × X` blocks through a copy cast on first use.
+#[derive(Clone, Debug)]
+pub(crate) struct SparseDist {
+    pub(crate) inducing: Vec<usize>,
+    pub(crate) zz: TrainSources<f64>,
+    pub(crate) zx: GatheredRect<f64>,
+    /// `zz` and `zx` at `f32`, cast once.
+    single: OnceLock<SingleBlocks>,
+}
+
+/// The `Z × Z` and `Z × X` blocks of a [`SparseDist`] at `f32`.
+#[derive(Clone, Debug)]
+struct SingleBlocks {
+    zz: TrainSources<f32>,
+    zx: GatheredRect<f32>,
+}
+
+impl SparseDist {
+    /// Binds the `n × n` training squares `sources` of `kernel`'s slots and
+    /// gathers the blocks of the training points `inducing`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `inducing` is empty,
+    /// [`GprError::IndexOutOfRange`] for an index `≥ n`, and the errors of
+    /// binding the sources.
+    pub(crate) fn bind<U: Supply>(
+        kernel: &KernelSpec<U>,
+        sources: Vec<DistanceSource<'_>>,
+        n: usize,
+        inducing: &[usize],
+    ) -> Result<Self, GprError> {
+        crate::data::require_nonempty(inducing.len())?;
+        if let Some(&bad) = inducing.iter().find(|&&i| i >= n) {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("inducing index {bad} is out of range for n={n}"),
+            });
+        }
+        let slots = spec_slots(kernel);
+        let raw = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
+        Self::new(TrainSources::<f64>::from_raw(raw, n)?, inducing.to_vec())
+    }
+
+    /// Gathers the blocks of the inducing points `inducing` from `train`.
+    pub(crate) fn new(train: TrainSources<f64>, inducing: Vec<usize>) -> Result<Self, GprError> {
+        let all: Vec<usize> = (0..train.n()).collect();
+        let zz = train.subset(&inducing)?;
+        let zx = train.gather(&inducing, &all);
+        Ok(Self {
+            inducing,
+            zz,
+            zx,
+            single: OnceLock::new(),
+        })
+    }
+
+    /// The blocks at `f32`, cast on the first call.
+    fn single(&self) -> Result<Option<&SingleBlocks>, GprError> {
+        if self.single.get().is_none() {
+            let blocks = SingleBlocks {
+                zz: self.zz.cast()?,
+                zx: self.zx.cast(),
+            };
+            // A racing call cast the same values.
+            let _ = self.single.set(blocks);
+        }
+        Ok(self.single.get())
+    }
+}
+
+/// The supplied distances of one sparse prediction: inducing × query
+/// (`m × q`, the inducing rows of the caller's train × query blocks) and,
+/// for a covariance, query × query (`q × q`). Empty for a coordinate kernel.
+#[derive(Default)]
+pub(crate) struct QueryDist {
+    pub(crate) zq: Option<GatheredRect<f64>>,
+    pub(crate) qq: Option<TrainSources<f64>>,
+}
+
+/// `value` as a `U` when `U` is its own type.
+fn same<V: Any, U: Any>(value: &V) -> Option<&U> {
+    (value as &dyn Any).downcast_ref::<U>()
+}
+
+/// `blocks` at the scalar `T`: borrowed at `f64`, a cast copy otherwise.
+pub(crate) fn cast_blocks<T: KernelScalar>(
+    blocks: Option<&GatheredRect<f64>>,
+) -> Option<Cow<'_, GatheredRect<T>>> {
+    blocks.map(|blocks| match same(blocks) {
+        Some(blocks) => Cow::Borrowed(blocks),
+        None => Cow::Owned(blocks.cast::<T>()),
+    })
+}
+
+/// The `Z × Z` squares of `dist` at the scalar `T`, borrowed: the `f64`
+/// values, or the `f32` copy cast once.
+pub(crate) fn zz_at<T: KernelScalar>(
+    dist: Option<&SparseDist>,
+) -> Result<Option<Cow<'_, TrainSources<T>>>, GprError> {
+    let Some(dist) = dist else {
+        return Ok(None);
+    };
+    if let Some(zz) = same(&dist.zz) {
+        return Ok(Some(Cow::Borrowed(zz)));
+    }
+    if let Some(zz) = dist.single()?.and_then(|single| same(&single.zz)) {
+        return Ok(Some(Cow::Borrowed(zz)));
+    }
+    dist.zz.cast::<T>().map(|zz| Some(Cow::Owned(zz)))
+}
+
+/// The `Z × X` blocks of `dist` at the scalar `T`, borrowed as
+/// [`zz_at`].
+pub(crate) fn zx_at<T: KernelScalar>(
+    dist: Option<&SparseDist>,
+) -> Result<Option<Cow<'_, GatheredRect<T>>>, GprError> {
+    let Some(dist) = dist else {
+        return Ok(None);
+    };
+    if let Some(zx) = same(&dist.zx) {
+        return Ok(Some(Cow::Borrowed(zx)));
+    }
+    if let Some(zx) = dist.single()?.and_then(|single| same(&single.zx)) {
+        return Ok(Some(Cow::Borrowed(zx)));
+    }
+    Ok(Some(Cow::Owned(dist.zx.cast::<T>())))
+}
+
+/// The query × query squares `qq` at the scalar `T`: borrowed at `f64`, a
+/// cast copy otherwise.
+pub(crate) fn squares_at<T: KernelScalar>(
+    qq: Option<&TrainSources<f64>>,
+) -> Result<Option<Cow<'_, TrainSources<T>>>, GprError> {
+    qq.map(|qq| match same(qq) {
+        Some(qq) => Ok(Cow::Borrowed(qq)),
+        None => qq.cast::<T>().map(Cow::Owned),
+    })
+    .transpose()
+}
+
+/// `squares` as the square tables of a kernel call.
+pub(crate) fn square_slots<T: KernelScalar>(
+    squares: Option<&TrainSources<T>>,
+) -> Option<&dyn SquareSlots<T>> {
+    squares.map(|s| s as &dyn SquareSlots<T>)
+}
+
+/// `table` as the rectangular tables of a kernel call.
+pub(crate) fn rect_slots<'a, T: KernelScalar>(
+    table: &'a Option<RectTable<'a, T>>,
+) -> Option<&'a dyn RectSlots<T>> {
+    table.as_ref().map(|t| t as &dyn RectSlots<T>)
+}
+
 /// Training data and settings of a fitted sparse model.
 ///
 /// `x_obs` / `z_obs` / `y_obs` are what the caller passed (column-major
 /// `n × d` and `m × d`). `x_train` / `z_train` / `y_train` are the same data through the
 /// fitted transforms; every factor, gradient, and prediction reads those.
-pub(crate) struct SparseCore {
-    pub(crate) kernel: KernelSpec,
+pub(crate) struct SparseCore<K: ModelKernel> {
+    pub(crate) kernel: SpecOf<K>,
     pub(crate) likelihood: GaussianLikelihood,
     pub(crate) math: KernelExp,
     /// Retries for factoring `K_mm`.
@@ -125,12 +293,14 @@ pub(crate) struct SparseCore {
     pub(crate) x_train: Vec<f64>,
     pub(crate) z_train: Vec<f64>,
     pub(crate) y_train: Vec<f64>,
+    /// The supplied distances of a distance kernel; `None` otherwise.
+    pub(crate) dist: Option<SparseDist>,
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
 }
 
-impl Clone for SparseCore {
+impl<K: ModelKernel> Clone for SparseCore<K> {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -147,6 +317,7 @@ impl Clone for SparseCore {
             x_train: self.x_train.clone(),
             z_train: self.z_train.clone(),
             y_train: self.y_train.clone(),
+            dist: self.dist.clone(),
             n: self.n,
             m: self.m,
             d: self.d,
@@ -154,7 +325,7 @@ impl Clone for SparseCore {
     }
 }
 
-impl fmt::Debug for SparseCore {
+impl<K: ModelKernel> fmt::Debug for SparseCore<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SparseCore")
             .field("kernel", &self.kernel)
@@ -168,7 +339,7 @@ impl fmt::Debug for SparseCore {
     }
 }
 
-impl SparseCore {
+impl<K: ModelKernel> SparseCore<K> {
     /// Checks the training data and the inducing points, fits the input
     /// transform on `X` and the target transform on `y`, and maps `X`, `Z`,
     /// and `y` through them.
@@ -180,7 +351,7 @@ impl SparseCore {
     /// or map.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
-        spec: &SparseSpec,
+        spec: &SparseSpec<K>,
         x: &[f64],
         n_rows: usize,
         n_cols: usize,
@@ -190,12 +361,78 @@ impl SparseCore {
     ) -> Result<Self, GprError> {
         validate_training(x, n_rows, n_cols, y)?;
         validate_inducing(z, n_inducing, n_cols)?;
-        let x_transform = spec.x_transform.clone_box().fit(x, n_rows, n_cols)?;
+        Self::assemble(spec, x, n_rows, n_cols, y, z, n_inducing, None)
+    }
+
+    /// [`Self::prepare`] for a kernel that reads supplied distances: the
+    /// training squares of every slot (`n × n`), the coordinates `(x,
+    /// n_cols)` of its coordinate leaves (`None` for a kernel without one;
+    /// `Some` needs `n_cols ≥ 1`), and the training points `inducing` that
+    /// are the inducing points. `Z` is those rows of `x`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] for no inducing point,
+    /// [`GprError::IndexOutOfRange`] for an index past `n`, the errors of
+    /// binding the sources, and the input errors of [`Self::prepare`].
+    pub(crate) fn prepare_with_distances(
+        spec: &SparseSpec<K>,
+        points: Option<(&[f64], usize)>,
+        n_rows: usize,
+        y: &[f64],
+        sources: Vec<DistanceSource<'_>>,
+        inducing: &[usize],
+    ) -> Result<Self, GprError> {
+        let (x, n_cols) = points.unwrap_or((&[], 0));
+        if points.is_some() {
+            validate_training(x, n_rows, n_cols, y)?;
+        } else {
+            crate::data::require_nonempty(n_rows)?;
+            crate::data::require_count(y.len(), n_rows, "targets")?;
+            crate::data::require_finite(y)?;
+        }
+        let dist = SparseDist::bind(&spec.kernel, sources, n_rows, inducing)?;
+        // `Z` is rows of the checked `x`: it needs no check of its own.
+        let m = inducing.len();
+        let mut z = vec![0.0; m * n_cols];
+        for dim in 0..n_cols {
+            for (p, &i) in inducing.iter().enumerate() {
+                z[p + dim * m] = x[i + dim * n_rows];
+            }
+        }
+        Self::assemble(spec, x, n_rows, n_cols, y, &z, m, Some(dist))
+    }
+
+    /// Fits the transforms on checked data and maps `X`, `Z`, and `y`
+    /// through them. A kernel without coordinate leaves (`n_cols = 0`) has
+    /// the identity input transform.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        spec: &SparseSpec<K>,
+        x: &[f64],
+        n_rows: usize,
+        n_cols: usize,
+        y: &[f64],
+        z: &[f64],
+        n_inducing: usize,
+        dist: Option<SparseDist>,
+    ) -> Result<Self, GprError> {
+        let (x_unfitted, x_transform): (Box<dyn UnfittedTransform>, Box<dyn Transform>) =
+            if n_cols == 0 {
+                (Box::new(IdentityInput), Box::new(IdentityInput))
+            } else {
+                (
+                    spec.x_transform.clone_box(),
+                    spec.x_transform.clone_box().fit(x, n_rows, n_cols)?,
+                )
+            };
         let y_transform = spec.y_transform.clone_box().fit(y)?;
         let mut x_train = x.to_vec();
-        x_transform.apply(&mut x_train, n_rows, n_cols)?;
         let mut z_train = z.to_vec();
-        x_transform.apply(&mut z_train, n_inducing, n_cols)?;
+        if n_cols > 0 {
+            x_transform.apply(&mut x_train, n_rows, n_cols)?;
+            x_transform.apply(&mut z_train, n_inducing, n_cols)?;
+        }
         let mut y_train = y.to_vec();
         y_transform.transform(&mut y_train)?;
         Ok(Self {
@@ -203,7 +440,7 @@ impl SparseCore {
             likelihood: spec.likelihood,
             math: spec.math,
             jitter: spec.jitter,
-            x_unfitted: spec.x_transform.clone_box(),
+            x_unfitted,
             y_unfitted: spec.y_transform.clone_box(),
             x_transform,
             y_transform,
@@ -213,6 +450,7 @@ impl SparseCore {
             x_train,
             z_train,
             y_train,
+            dist,
             n: n_rows,
             m: n_inducing,
             d: n_cols,
@@ -229,7 +467,7 @@ impl SparseCore {
     ///
     /// Returns the input errors of [`crate::data::validate_training`] and
     /// [`crate::data::validate_inducing`], or the error of a transform map.
-    pub(crate) fn from_persisted(parts: PersistedSparse) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(parts: PersistedSparse<K>) -> Result<Self, GprError> {
         let PersistedSparse {
             spec,
             x_transform,
@@ -242,11 +480,19 @@ impl SparseCore {
             m,
             d,
         } = parts;
-        validate_training(&x_obs, n, d, &y_obs)?;
-        validate_inducing(&z_obs, m, d)?;
-        validate_inducing(&z_train, m, d)?;
         let mut x_train = x_obs.clone();
-        x_transform.apply(&mut x_train, n, d)?;
+        if d > 0 {
+            validate_training(&x_obs, n, d, &y_obs)?;
+            validate_inducing(&z_obs, m, d)?;
+            validate_inducing(&z_train, m, d)?;
+            x_transform.apply(&mut x_train, n, d)?;
+        } else {
+            // A distance kernel without coordinate leaves.
+            crate::data::require_nonempty(n)?;
+            crate::data::require_nonempty(m)?;
+            crate::data::require_count(y_obs.len(), n, "targets")?;
+            crate::data::require_finite(&y_obs)?;
+        }
         let mut y_train = y_obs.clone();
         y_transform.transform(&mut y_train)?;
         Ok(Self {
@@ -264,6 +510,7 @@ impl SparseCore {
             x_train,
             z_train,
             y_train,
+            dist: None,
             n,
             m,
             d,
@@ -284,7 +531,7 @@ impl SparseCore {
     pub(crate) fn stage_theta(
         &self,
         params: &[f64],
-    ) -> Result<(KernelSpec, GaussianLikelihood), GprError> {
+    ) -> Result<(SpecOf<K>, GaussianLikelihood), GprError> {
         stage_theta(&self.kernel, &self.likelihood, params)
     }
 
@@ -336,6 +583,12 @@ impl SparseCore {
                 x_dim: n_cols,
                 expected_dim: self.d,
             });
+        }
+        if self.d == 0 {
+            crate::data::require_nonempty(n_rows)?;
+            crate::data::require_count(xs.len(), 0, "feature values")?;
+            out.clear();
+            return Ok(());
         }
         validate_query(xs, n_rows, n_cols)?;
         out.clear();
@@ -393,7 +646,7 @@ impl SparseCore {
     }
 
     /// The trainer settings this model was fitted with.
-    pub(crate) fn spec(&self) -> SparseSpec {
+    pub(crate) fn spec(&self) -> SparseSpec<K> {
         SparseSpec {
             kernel: self.kernel.clone(),
             likelihood: self.likelihood,
@@ -405,15 +658,15 @@ impl SparseCore {
     }
 }
 
-fn theta_len(kernel: &KernelSpec, likelihood: &GaussianLikelihood) -> usize {
+fn theta_len<U: Supply>(kernel: &KernelSpec<U>, likelihood: &GaussianLikelihood) -> usize {
     kernel.num_params() + likelihood.num_params()
 }
 
-fn stage_theta(
-    kernel: &KernelSpec,
+fn stage_theta<U: Supply>(
+    kernel: &KernelSpec<U>,
     likelihood: &GaussianLikelihood,
     params: &[f64],
-) -> Result<(KernelSpec, GaussianLikelihood), GprError> {
+) -> Result<(KernelSpec<U>, GaussianLikelihood), GprError> {
     let n_kernel = kernel.num_params();
     let n_theta = theta_len(kernel, likelihood);
     crate::data::require_count(params.len(), n_theta, "parameters")?;
@@ -442,16 +695,6 @@ macro_rules! sparse_core_accessors {
             self.$($core).+.m
         }
 
-        /// Returns the feature dimension.
-        pub fn d(&self) -> usize {
-            self.$($core).+.d
-        }
-
-        /// Returns the kernel whose hyperparameters this model owns.
-        pub fn kernel(&self) -> &$crate::kernel::KernelSpec {
-            &self.$($core).+.kernel
-        }
-
         /// Returns the observation-noise model.
         pub fn likelihood(&self) -> &$crate::GaussianLikelihood {
             &self.$($core).+.likelihood
@@ -467,6 +710,25 @@ macro_rules! sparse_core_accessors {
             self.$($core).+.math
         }
 
+        /// Returns the original training targets.
+        pub fn y(&self) -> &[f64] {
+            &self.$($core).+.y_obs
+        }
+    };
+}
+
+/// The accessors of a sparse model whose kernel reads coordinates (see
+/// [`sparse_core_accessors`]).
+macro_rules! sparse_point_accessors {
+    () => {
+        $crate::sparse::sparse_point_accessors!(core);
+    };
+    ($($core:ident).+) => {
+        /// Returns the feature dimension.
+        pub fn d(&self) -> usize {
+            self.$($core).+.d
+        }
+
         /// Returns the original training features in column-major order.
         pub fn x(&self) -> &[f64] {
             &self.$($core).+.x_obs
@@ -476,15 +738,58 @@ macro_rules! sparse_core_accessors {
         pub fn z(&self) -> &[f64] {
             &self.$($core).+.z_obs
         }
+    };
+}
 
-        /// Returns the original training targets.
-        pub fn y(&self) -> &[f64] {
-            &self.$($core).+.y_obs
+/// The kernel accessor of a sparse model of a coordinate [`KernelSpec`].
+macro_rules! sparse_kernel_accessor {
+    () => {
+        $crate::sparse::sparse_kernel_accessor!(core);
+    };
+    ($($core:ident).+) => {
+        /// Returns the kernel whose hyperparameters this model owns.
+        pub fn kernel(&self) -> &$crate::kernel::KernelSpec {
+            &self.$($core).+.kernel
         }
     };
 }
 
-pub(crate) use sparse_core_accessors;
+/// The accessors of a sparse model of a [`crate::kernel::DistanceKernel`].
+macro_rules! sparse_distance_accessors {
+    () => {
+        /// Returns the training points that are the inducing points.
+        ///
+        /// See the distance `fit` examples of [`crate::Sgpr`] and [`crate::Svgp`].
+        pub fn inducing(&self) -> &[usize] {
+            self.core
+                .dist
+                .as_ref()
+                .map_or(&[][..], |dist| &dist.inducing[..])
+        }
+
+        /// Returns a copy of the kernel whose hyperparameters this model owns.
+        ///
+        /// See the distance `fit` examples of [`crate::Sgpr`] and [`crate::Svgp`].
+        pub fn to_kernel(&self) -> $crate::kernel::DistanceKernel<C> {
+            <$crate::kernel::DistanceKernel<C> as $crate::kernel::ModelKernelParts>::from_spec(
+                self.core.kernel.clone(),
+            )
+        }
+
+        /// Returns the slots of the kernel, in the order of
+        /// [`DistanceKernel::slots`](crate::kernel::DistanceKernel::slots).
+        ///
+        /// See the distance `fit` examples of [`crate::Sgpr`] and [`crate::Svgp`].
+        pub fn slots(&self) -> Vec<$crate::kernel::DistanceSlot> {
+            $crate::kernel::spec_slots(&self.core.kernel)
+        }
+    };
+}
+
+pub(crate) use {
+    sparse_core_accessors, sparse_distance_accessors, sparse_kernel_accessor,
+    sparse_point_accessors,
+};
 
 /// Default retries for factoring `K_mm = k(Z, Z)`:
 /// `adaptive(1e-8, 10, 5, 1e-3)`. Observation noise is not on `K_mm`
@@ -558,9 +863,9 @@ impl<T: KernelScalar> KernelScratch<T> {
     }
 
     /// `K` for `uplo` into `out`.
-    pub(crate) fn gram<M: crate::math::KernelMath>(
+    pub(crate) fn gram<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         inputs: GramInputs<'_, T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
@@ -570,9 +875,9 @@ impl<T: KernelScalar> KernelScratch<T> {
     }
 
     /// `∂K/∂θ_{param_idx}` for `uplo` into `d_k`.
-    pub(crate) fn grad<M: crate::math::KernelMath>(
+    pub(crate) fn grad<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         inputs: GramInputs<'_, T>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
@@ -583,9 +888,9 @@ impl<T: KernelScalar> KernelScratch<T> {
     }
 
     /// `∂²K/∂θ_i ∂θ_j` for `uplo` into `d2_k`.
-    pub(crate) fn hess<M: crate::math::KernelMath>(
+    pub(crate) fn hess<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         inputs: GramInputs<'_, T>,
         d2_k: MatMut<'_, T>,
         pair: (usize, usize),
@@ -595,12 +900,14 @@ impl<T: KernelScalar> KernelScratch<T> {
         compiled.hess_gram::<M>(inputs, d2_k, pair, uplo, scratch, &mut self.nested)
     }
 
-    /// `K(x, xs)` (`n × q`) into `out`.
-    pub(crate) fn cross_into<M: crate::math::KernelMath>(
+    /// `K(x, xs)` (`n × q`) into `out`. `slots` holds the supplied
+    /// distances of the block for a distance kernel.
+    pub(crate) fn cross_into<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
+        slots: Option<&dyn RectSlots<T>>,
         out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         let (rows, cols) = (out.nrows(), out.ncols());
@@ -609,7 +916,7 @@ impl<T: KernelScalar> KernelScratch<T> {
         compiled.eval_cross_slots::<M>(
             x,
             xs,
-            None,
+            slots,
             Some(dist),
             out,
             scratch,
@@ -619,14 +926,15 @@ impl<T: KernelScalar> KernelScratch<T> {
     }
 
     /// `K(x, xs)` (`n × q`) in a new matrix.
-    pub(crate) fn cross<M: crate::math::KernelMath>(
+    pub(crate) fn cross<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
+        slots: Option<&dyn RectSlots<T>>,
     ) -> Result<Mat<T>, GprError> {
         let mut out = Mat::zeros(x.nrows(), xs.nrows());
-        self.cross_into::<M>(compiled, x, xs, out.as_mut())?;
+        self.cross_into::<M, _>(compiled, x, xs, slots, out.as_mut())?;
         Ok(out)
     }
 
@@ -634,10 +942,11 @@ impl<T: KernelScalar> KernelScratch<T> {
     ///
     /// One walk, keeping no Grams. `out` is replaced. Squared distances are
     /// filled when the tree reads them; ARD leaves fall back to `x`.
-    pub(crate) fn write_square_contraction<M: crate::math::KernelMath>(
+    pub(crate) fn write_square_contraction<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         x: MatRef<'_, T>,
+        slots: Option<&dyn SquareSlots<T>>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
     ) -> Result<(), GprError> {
@@ -665,7 +974,7 @@ impl<T: KernelScalar> KernelScratch<T> {
                 x,
                 dist: dist_view,
                 ard: None,
-                slots: None,
+                slots,
             },
             scratch: view(scratch, m, m),
             nested,
@@ -680,11 +989,14 @@ impl<T: KernelScalar> KernelScratch<T> {
     ///
     /// One walk of the full rectangle. A product evaluates each non-constant
     /// factor once.
-    pub(crate) fn add_cross_contraction<M: crate::math::KernelMath>(
+    // The kernel, the block, its supplied distances, the weight, and the sum.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_cross_contraction<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         x1: MatRef<'_, T>,
         x2: MatRef<'_, T>,
+        slots: Option<&dyn RectSlots<T>>,
         weight: MatRef<'_, T>,
         coeff: f64,
         out: &mut [f64],
@@ -706,7 +1018,12 @@ impl<T: KernelScalar> KernelScratch<T> {
         fit_exact(cross, nbuf, rows, cols);
         crate::kernel::ensure_nested_levels(nested, compiled, rows, cols);
         compiled.weighted_cross_grads_views::<M>(
-            CrossViews::points(x1, x2),
+            CrossViews {
+                x1,
+                x2,
+                dist: None,
+                slots,
+            },
             weight,
             &mut partial[..n_params],
             &mut cross[..nbuf],
@@ -723,9 +1040,9 @@ impl<T: KernelScalar> KernelScratch<T> {
     /// Adds `coeff · Σ_i ∂k(x_i, x_i)/∂θ` for every kernel parameter.
     ///
     /// One walk. A product reads each non-constant factor's diagonal once.
-    pub(crate) fn add_diag_contraction<M: crate::math::KernelMath>(
+    pub(crate) fn add_diag_contraction<M: crate::math::KernelMath, U: Supply>(
         &mut self,
-        compiled: &CompiledKernel<T>,
+        compiled: &CompiledKernel<T, U>,
         x: MatRef<'_, T>,
         coeff: f64,
         out: &mut [f64],
@@ -773,11 +1090,13 @@ pub(crate) fn view<T: KernelScalar>(buf: &mut Mat<T>, rows: usize, cols: usize) 
 }
 
 /// A compiled kernel at `S`, rebuilt only when the kernel changes.
-pub(crate) struct KernelPlan<S: KernelScalar>(Option<(KernelSpec, CompiledKernel<S>)>);
+pub(crate) struct KernelPlan<S: KernelScalar, U: Supply>(
+    Option<(KernelSpec<U>, CompiledKernel<S, U>)>,
+);
 
-impl<S: KernelScalar> KernelPlan<S> {
+impl<S: KernelScalar, U: Supply> KernelPlan<S, U> {
     /// The plan of `kernel`, compiled unless the kept one is already for it.
-    pub(crate) fn get(&mut self, kernel: &KernelSpec) -> &CompiledKernel<S> {
+    pub(crate) fn get(&mut self, kernel: &KernelSpec<U>) -> &CompiledKernel<S, U> {
         if !matches!(&self.0, Some((spec, _)) if spec == kernel) {
             self.0 = None;
         }
@@ -831,12 +1150,12 @@ pub(crate) fn pack_into<'a, S: KernelScalar>(
 /// through the input transform, the storage-scalar buffers, and the `f64`
 /// ones a rounding storage predicts through (`K_mm` factored in `f64`, `B`
 /// and the weights promoted).
-pub(crate) struct PredictScratch<S: KernelScalar> {
+pub(crate) struct PredictScratch<S: KernelScalar, U: Supply> {
     pub(crate) xs: Vec<f64>,
     pub(crate) inverse: InverseBuffers,
-    pub(crate) plan: KernelPlan<S>,
+    pub(crate) plan: KernelPlan<S, U>,
     pub(crate) storage: PredictBuffers<S>,
-    pub(crate) plan64: KernelPlan<f64>,
+    pub(crate) plan64: KernelPlan<f64, U>,
     pub(crate) f64: PredictBuffers<f64>,
     pub(crate) k_mm64: Mat<f64>,
     pub(crate) k_mm64_backup: Mat<f64>,
@@ -845,7 +1164,7 @@ pub(crate) struct PredictScratch<S: KernelScalar> {
     pub(crate) w64: Vec<f64>,
 }
 
-impl<S: KernelScalar> Default for PredictScratch<S> {
+impl<S: KernelScalar, U: Supply> Default for PredictScratch<S, U> {
     fn default() -> Self {
         Self {
             xs: Vec::new(),
@@ -864,19 +1183,19 @@ impl<S: KernelScalar> Default for PredictScratch<S> {
 }
 
 /// A clone starts with empty buffers.
-impl<S: KernelScalar> Clone for PredictScratch<S> {
+impl<S: KernelScalar, U: Supply> Clone for PredictScratch<S, U> {
     fn clone(&self) -> Self {
         Self::default()
     }
 }
 
-impl<S: KernelScalar> fmt::Debug for PredictScratch<S> {
+impl<S: KernelScalar, U: Supply> fmt::Debug for PredictScratch<S, U> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PredictScratch").finish_non_exhaustive()
     }
 }
 
-impl<S: KernelScalar> PredictScratch<S> {
+impl<S: KernelScalar, U: Supply> PredictScratch<S, U> {
     /// faer scratch for an `m × m` `f64` LLT, reused while `m` is unchanged.
     pub(crate) fn llt64(llt: &mut Option<(usize, MemBuffer)>, m: usize) -> &mut MemBuffer {
         if matches!(llt, Some((size, _)) if *size != m) {
@@ -897,12 +1216,13 @@ impl<S: KernelScalar> PredictScratch<S> {
     /// [`GprError::CholeskyFailed`] when `K_mm` does not factor in `f64`.
     pub(crate) fn f64_system<M: crate::math::KernelMath>(
         &mut self,
-        kernel: &KernelSpec,
+        kernel: &KernelSpec<U>,
         z: &[f64],
         m: usize,
         d: usize,
         jitter: JitterPolicy,
-    ) -> Result<F64System<'_>, GprError> {
+        zz: Option<&TrainSources<f64>>,
+    ) -> Result<F64System<'_, U>, GprError> {
         let Self {
             plan64,
             f64: bufs,
@@ -918,9 +1238,12 @@ impl<S: KernelScalar> PredictScratch<S> {
             *k_mm64 = Mat::zeros(m, m);
         }
         let z64 = pack_into(&mut bufs.z, z, m, d);
-        bufs.kernel.gram::<M>(
+        bufs.kernel.gram::<M, _>(
             compiled,
-            GramInputs::points(z64.as_ref()),
+            GramInputs {
+                slots: zz.map(|zz| zz as &dyn SquareSlots<f64>),
+                ..GramInputs::points(z64.as_ref())
+            },
             k_mm64.as_mut(),
             Triangle::Lower,
         )?;
@@ -944,8 +1267,8 @@ impl<S: KernelScalar> PredictScratch<S> {
 /// The `f64` system of [`PredictScratch::f64_system`], with the buffers a
 /// model promotes its own factors into (`B`'s factor and the weights of a VFE
 /// prediction).
-pub(crate) struct F64System<'a> {
-    pub(crate) compiled: &'a CompiledKernel<f64>,
+pub(crate) struct F64System<'a, U: Supply> {
+    pub(crate) compiled: &'a CompiledKernel<f64, U>,
     pub(crate) bufs: &'a mut PredictBuffers<f64>,
     pub(crate) k_mm_l: MatRef<'a, f64>,
     pub(crate) b_l64: &'a mut Mat<f64>,
@@ -977,12 +1300,23 @@ pub(crate) fn predictive_variance(latent: f64, noise: f64, kind: crate::Variance
 /// Kernel scratch a fitted sparse model keeps between its `&mut self` calls
 /// (`set_params`, gradient, Hessian, online updates): one for the storage
 /// scalar `S`, one for the `f64` assembly a rounding precision starts from.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SparseScratch<S: KernelScalar> {
+#[derive(Clone, Debug)]
+pub(crate) struct SparseScratch<S: KernelScalar, U: Supply> {
     pub(crate) storage: KernelScratch<S>,
     pub(crate) f64: KernelScratch<f64>,
     /// One point through the input transform (online inserts).
     pub(crate) point: Vec<f64>,
     /// Buffers of `predict_into`.
-    pub(crate) predict: PredictScratch<S>,
+    pub(crate) predict: PredictScratch<S, U>,
+}
+
+impl<S: KernelScalar, U: Supply> Default for SparseScratch<S, U> {
+    fn default() -> Self {
+        Self {
+            storage: KernelScratch::default(),
+            f64: KernelScratch::default(),
+            point: Vec::new(),
+            predict: PredictScratch::default(),
+        }
+    }
 }

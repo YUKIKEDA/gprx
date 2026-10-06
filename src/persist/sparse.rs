@@ -8,6 +8,7 @@
 //! whitened `q(u)`. The factors are not stored: load factors the system
 //! again at the saved `θ` and `Z`.
 
+use crate::kernel::KernelSpec;
 use std::path::Path;
 
 use faer::Mat;
@@ -51,7 +52,7 @@ struct OnlineIds {
 
 fn write_sparse<P: GpScalar>(
     dir: &Path,
-    core: &SparseCore,
+    core: &SparseCore<KernelSpec>,
     model: ModelJson,
     ids: Option<OnlineIds>,
     q: Option<(&[f64], faer::MatRef<'_, f64>)>,
@@ -153,7 +154,7 @@ fn read_core(
     tensors: &SafeTensors<'_>,
     config: &SparseConfig,
     registry: &PersistRegistry,
-) -> Result<SparseCore, GprError> {
+) -> Result<SparseCore<KernelSpec>, GprError> {
     let (n, m, d) = (config.n, config.m, config.d);
     let spec = SparseSpec {
         kernel: config.kernel.clone().decode(registry)?,
@@ -585,7 +586,7 @@ impl LoadedSvgp {
 
 /// Reads of a loaded sparse model that do not depend on its precision.
 trait SparseView {
-    fn core(&self) -> &SparseCore;
+    fn core(&self) -> &SparseCore<KernelSpec>;
     fn predict_f64(
         &self,
         xs: &[f64],
@@ -596,7 +597,7 @@ trait SparseView {
 }
 
 impl<P: GpScalar> SparseView for FittedSgpr<Fixed, FixedInducing, P> {
-    fn core(&self) -> &SparseCore {
+    fn core(&self) -> &SparseCore<KernelSpec> {
         FittedSgpr::core(self)
     }
 
@@ -612,7 +613,7 @@ impl<P: GpScalar> SparseView for FittedSgpr<Fixed, FixedInducing, P> {
 }
 
 impl<P: GpScalar> SparseView for OnlineSgpr<Fixed, P> {
-    fn core(&self) -> &SparseCore {
+    fn core(&self) -> &SparseCore<KernelSpec> {
         OnlineSgpr::core(self)
     }
 
@@ -628,7 +629,7 @@ impl<P: GpScalar> SparseView for OnlineSgpr<Fixed, P> {
 }
 
 impl<P: GpScalar> SparseView for FittedSvgp<P> {
-    fn core(&self) -> &SparseCore {
+    fn core(&self) -> &SparseCore<KernelSpec> {
         FittedSvgp::core(self)
     }
 

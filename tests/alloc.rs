@@ -10,7 +10,9 @@
 mod common;
 use common::rng::{open_unit, seeded_rng};
 use gprx::Adam;
-use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
+use gprx::kernel::{
+    ArdDistance, ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
+};
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, KernelExp,
     MixedPrecision, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
@@ -748,5 +750,74 @@ fn svgp_adam_epoch_allocs() {
             .min()
             .unwrap_or(usize::MAX);
         assert_alloc_cap(&format!("svgp_adam_epoch_{label}"), per_epoch, *cap);
+    }
+}
+
+/// Allocations one more Adam epoch adds to a distance `Svgp::fit` (64
+/// points, batches of 8), by slot: the batch's columns of the `Z × X`
+/// squares go into a buffer the fit keeps. Do not raise without an Issue.
+const MAX_SVGP_DISTANCE_ADAM_EPOCH_ALLOCS: [(&str, usize); 2] = [("scalar", 0), ("ard", 0)];
+
+#[test]
+fn svgp_distance_adam_epoch_allocs() {
+    let _guard = alloc_lock();
+    let n = 64;
+    let coords: Vec<[f64; 2]> = (0..n)
+        .map(|i| [(i % 8) as f64 / 4.0, (i / 8) as f64 / 4.0])
+        .collect();
+    let per_dim = |dim: usize| -> Vec<f64> {
+        let mut block = vec![0.0; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                let diff = coords[i][dim] - coords[j][dim];
+                block[i + j * n] = diff * diff;
+            }
+        }
+        block
+    };
+    let blocks = [per_dim(0), per_dim(1)];
+    let scalar: Vec<f64> = blocks[0]
+        .iter()
+        .zip(&blocks[1])
+        .map(|(a, b)| a + b)
+        .collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 / 8.0).sin()).collect();
+    let inducing: Vec<usize> = (0..8).map(|i| i * 8 + i % 8).collect();
+    let adam = |epochs: u64| {
+        Adam::new()
+            .with_batch_size(NonZeroUsize::new(8).expect("8"))
+            .with_epochs(NonZeroU64::new(epochs).expect("epochs"))
+    };
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    for (label, cap) in MAX_SVGP_DISTANCE_ADAM_EPOCH_ALLOCS {
+        let fit = |epochs: u64| {
+            allocs_in(|| {
+                let fitted = if label == "scalar" {
+                    let image = ScalarDistance::new();
+                    Svgp::new(image.kernel(RbfKernel::new(ELL).expect("ell")), lik())
+                        .with_optimizer(adam(epochs))
+                        .fit([image.from_vec(scalar.clone())], n, &y, &inducing)
+                        .map_err(|(_, e)| e)
+                        .expect("fit")
+                } else {
+                    let bands = ArdDistance::new(2).expect("dims");
+                    let kernel = bands
+                        .kernel(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell"))
+                        .expect("dims");
+                    Svgp::new(kernel, lik())
+                        .with_optimizer(adam(epochs))
+                        .fit([bands.from_vecs(blocks.to_vec())], n, &y, &inducing)
+                        .map_err(|(_, e)| e)
+                        .expect("fit")
+                };
+                std::hint::black_box(fitted);
+            })
+        };
+        fit(1);
+        let per_epoch = (0..3)
+            .map(|_| fit(3).saturating_sub(fit(1)) / 2)
+            .min()
+            .unwrap_or(usize::MAX);
+        assert_alloc_cap(&format!("svgp_distance_adam_epoch_{label}"), per_epoch, cap);
     }
 }

@@ -377,7 +377,7 @@ A kernel leaf can read squared distances you supply instead of coordinates: a ge
 
 The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` is `WithPoints`. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use.
 
-`Gpr::new` takes any `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`). `with_input_transform` is on the `PointKernel` models only (`KernelSpec` and `DistanceKernel<WithPoints>`). Each slot gets one `DistanceSource` per call:
+`Gpr::new`, `Sgpr::new`, and `Svgp::new` take any `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`). `with_input_transform` is on the `PointKernel` models only (`KernelSpec` and `DistanceKernel<WithPoints>`). Each slot gets one `DistanceSource` per call:
 
 | Source | Copy |
 | --- | --- |
@@ -392,8 +392,9 @@ Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative
 | --- | --- | --- | --- |
 | `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+| `Sgpr` / `Svgp` | as `Gpr`, plus `inducing: &[usize]` | as `Gpr` | as `Gpr` |
 
-`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. `OnlineGpr::insert(sources, y_new)` (or `insert(sources, x_new, y_new)`) takes one `n × 1` column per slot to the current points; the library writes the new diagonal zero. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`.
+`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. `OnlineGpr::insert(sources, y_new)` (or `insert(sources, x_new, y_new)`) takes one `n × 1` column per slot to the current points; the library writes the new diagonal zero. `Sgpr` and `Svgp` name their inducing points by training index (`FixedInducing` only); `inducing()` returns them. A distance `Sgpr` has no `into_online`. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d`, `x`, and `z` exist only for `WithPoints`.
 
 ```rust
 use gprx::kernel::{
@@ -401,7 +402,7 @@ use gprx::kernel::{
     DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, PointKernel, PointUse,
     RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, WithPoints,
 };
-use gprx::{Fixed, GaussianLikelihood, Gpr};
+use gprx::{Fixed, GaussianLikelihood, Gpr, Sgpr, Svgp};
 
 /// Squared distances of points 0, 1, 2, … on a line.
 struct Line;
@@ -468,17 +469,21 @@ fn main() -> Result<(), gprx::GprError> {
     let _ = fitted.predict([bands.borrow(&cross_blocks)], 2)?;
     let _ = (bands.from_vecs(vec![d2.clone(), d2.clone()]), bands.fill(&Line));
 
-    // A distance leaf times a coordinate leaf.
+    // A distance leaf times a coordinate leaf, and the sparse models.
     let mixed: DistanceKernel<WithPoints> =
         image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
     takes_points(&mixed);
     let x = [0.0, 1.0, 2.0, 3.0];
-    let fitted = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+    let sgpr = Sgpr::new(mixed.clone(), GaussianLikelihood::new(0.1)?)
         .with_optimizer(Fixed)
-        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
-    assert_eq!((fitted.d(), fitted.x()), (1, &x[..]));
-    let _ = fitted.predict([image.borrow(&cross)], &[0.5, 1.5], 2, 1)?;
-    let _ = (fitted.to_kernel(), fitted.slots());
+        .factor([image.from_vec(d2.clone())], 4, &x, 1, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    assert_eq!((sgpr.inducing(), sgpr.z()), (&[0, 2][..], &[0.0, 2.0][..]));
+    let _ = sgpr.predict([image.borrow(&cross)], &[0.5, 1.5], 2, 1)?;
+    let svgp = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(d2)], 4, &y, &[1, 3])
+        .map_err(|(_, e)| e)?;
+    let _ = (svgp.to_kernel(), svgp.slots());
     Ok(())
 }
 

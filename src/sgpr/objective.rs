@@ -1,6 +1,7 @@
 //! [`SgprObjective`]: the negative VFE bound as an optimizer objective.
 
 use crate::error::GprError;
+use crate::kernel::ModelKernel;
 use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 
@@ -16,22 +17,24 @@ pub struct SgprObjective<
     O,
     I = crate::FixedInducing,
     P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+    K: ModelKernel = crate::kernel::KernelSpec,
 > {
-    model: &'a mut FittedSgpr<O, I, P>,
+    model: &'a mut FittedSgpr<O, I, P, K>,
 }
 
-impl<'a, O, I, P> SgprObjective<'a, O, I, P>
+impl<'a, O, I, P, K: ModelKernel> SgprObjective<'a, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
-    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, P>) -> Self {
+    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, P, K>) -> Self {
         Self { model }
     }
 }
 
-impl<O, I: InducingLayout, P> Objective for SgprObjective<'_, O, I, P>
+impl<O, I: InducingLayout, P, K> Objective for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
@@ -51,9 +54,10 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P> Differentiable for SgprObjective<'_, O, I, P>
+impl<O, I: InducingLayout, P, K> Differentiable for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         crate::objective::count_joint_call!();
@@ -70,9 +74,10 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P> TwiceDifferentiable for SgprObjective<'_, O, I, P>
+impl<O, I: InducingLayout, P, K> TwiceDifferentiable for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into(params, out)
