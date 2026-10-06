@@ -15,7 +15,8 @@
 
 use super::assemble::q_param_len;
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, KernelScalar};
+use crate::kernel::KernelScalar;
+use crate::kernel::{CompiledOf, ModelKernel};
 use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseScratch, view};
@@ -76,11 +77,11 @@ impl Default for GradBuffers {
 /// `k_diag`, which a mini-batch fit leaves stale until it ends. Compiles the
 /// kernel and sizes new buffers for this call; the Adam loop keeps both with
 /// [`svgp_value_and_gradient_with`].
-pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P, K>(
+pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P, K: ModelKernel>(
     model: &FittedSvgp<P, K>,
     out: &mut [f64],
     batch: &[usize],
-    scratch: &mut SparseScratch<P::Storage>,
+    scratch: &mut SparseScratch<P::Storage, K::Supply>,
 ) -> Result<f64, GprError>
 where
     P: ModelPrecision,
@@ -97,11 +98,11 @@ where
 
 /// [`svgp_value_and_gradient`] with the kernel compiled at the model's `θ`
 /// (`compiled`) and the buffers of earlier calls.
-pub(crate) fn svgp_value_and_gradient_with<M: crate::math::KernelMath, P, K>(
+pub(crate) fn svgp_value_and_gradient_with<M: crate::math::KernelMath, P, K: ModelKernel>(
     model: &FittedSvgp<P, K>,
     out: &mut [f64],
     batch: &[usize],
-    compiled: &CompiledKernel<f64>,
+    compiled: &CompiledOf<f64, K>,
     bufs: &mut GradBuffers,
 ) -> Result<f64, GprError>
 where
@@ -159,11 +160,11 @@ where
     // `X`: a White leaf adds nothing to it.
     let zx = core.dist.as_ref().map(|dist| dist.zx.columns(batch));
     let zx = zx.as_ref().map(crate::kernel::GatheredRect::table);
-    ks.cross_into::<M>(compiled, z, x, crate::sparse::rect_slots(&zx), a.as_mut())?;
+    ks.cross_into::<M, _>(compiled, z, x, crate::sparse::rect_slots(&zx), a.as_mut())?;
     solve_lower(k_mm_l, a.as_mut());
     let a = a.into_const();
     k_diag.resize(b, 0.0);
-    compiled.fill_diag_points(x, k_diag)?;
+    compiled.fill_diag_rows(x, k_diag)?;
     out.fill(0.0);
     let noise = core.likelihood.noise_variance();
     let inv_noise = 1.0 / noise;
@@ -221,8 +222,8 @@ where
         .dist
         .as_ref()
         .map(|dist| &dist.zz as &dyn crate::kernel::SquareSlots<f64>);
-    ks.write_square_contraction::<M>(compiled, z, zz, w_mm, &mut out[..n_kernel])?;
-    ks.add_cross_contraction::<M>(
+    ks.write_square_contraction::<M, _>(compiled, z, zz, w_mm, &mut out[..n_kernel])?;
+    ks.add_cross_contraction::<M, _>(
         compiled,
         z,
         x,
@@ -231,7 +232,7 @@ where
         1.0,
         &mut out[..n_kernel],
     )?;
-    ks.add_diag_contraction::<M>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
+    ks.add_diag_contraction::<M, _>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
     for slot in &mut out[..n_kernel] {
         *slot *= -scale;
     }

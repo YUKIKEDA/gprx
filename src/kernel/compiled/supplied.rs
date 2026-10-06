@@ -65,12 +65,6 @@ fn missing() -> GprError {
     }
 }
 
-pub(super) fn needs_supply() -> GprError {
-    GprError::UnsupportedKernelOperation {
-        reason: "a distance leaf reads supplied squared distances, not coordinates".to_owned(),
-    }
-}
-
 /// The square supply of a scalar slot.
 pub(super) fn scalar_square<'a, T>(
     slots: Option<&'a dyn SquareSlots<T>>,
@@ -142,7 +136,7 @@ pub(crate) enum ArdLeaf {
 
 impl<T: KernelScalar> SuppliedLeaf<T> {
     /// Compiles `spec` for the scalar `T`.
-    pub(super) fn compile(spec: &SuppliedSpec) -> Self {
+    pub(crate) fn compile(spec: &SuppliedSpec) -> Self {
         let leaf = match &spec.leaf {
             SuppliedLeafSpec::Scalar(leaf) => SuppliedCompiled::Scalar(match leaf {
                 ScalarLeafSpec::Rbf(k) => ScalarLeaf::Rbf(*k),

@@ -43,8 +43,8 @@ use super::fitted::FittedSvgp;
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Svgp<O = Fixed, P = DoublePrecision, K = KernelSpec> {
-    pub(super) spec: SparseSpec,
+pub struct Svgp<O = Fixed, P = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) spec: SparseSpec<K>,
     pub(super) optimizer: O,
     pub(super) _precision: PhantomData<P>,
     pub(super) _kernel: PhantomData<K>,
@@ -72,7 +72,7 @@ impl<K: ModelKernel> Svgp<Fixed, DoublePrecision, K> {
     }
 }
 
-impl<O, P, K> Svgp<O, P, K> {
+impl<O, P, K: ModelKernel> Svgp<O, P, K> {
     /// The same settings under new type parameters, with `map` applied to
     /// the optimizer.
     fn retype<O2, P2>(self, map: impl FnOnce(O) -> O2) -> Svgp<O2, P2, K> {

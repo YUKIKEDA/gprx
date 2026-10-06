@@ -189,7 +189,7 @@ fn kernel_column(
     let compiled = kernel.compile();
     let z_mat = pack_points(z, m, d);
     let x_mat = pack_points(x_pt, 1, d);
-    crate::sparse::KernelScratch::new().cross::<crate::math::Accurate>(
+    crate::sparse::KernelScratch::new().cross::<crate::math::Accurate, _>(
         &compiled,
         z_mat.as_ref(),
         x_mat.as_ref(),

@@ -44,8 +44,8 @@ use super::{FixedInducing, FreeInducing, InducingLayout};
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision, K = KernelSpec> {
-    pub(super) spec: SparseSpec,
+pub struct Sgpr<O = Lbfgs, I = FixedInducing, P = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) spec: SparseSpec<K>,
     pub(super) optimizer: O,
     pub(super) inducing: PhantomData<I>,
     pub(super) _precision: PhantomData<P>,
@@ -75,7 +75,7 @@ impl<K: ModelKernel> Sgpr<Lbfgs, FixedInducing, DoublePrecision, K> {
     }
 }
 
-impl<O, I, P, K> Sgpr<O, I, P, K> {
+impl<O, I, P, K: ModelKernel> Sgpr<O, I, P, K> {
     /// The same settings under new type parameters, with `map` applied to
     /// the optimizer.
     fn retype<O2, I2, P2>(self, map: impl FnOnce(O) -> O2) -> Sgpr<O2, I2, P2, K> {

@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::ArdSqDiffBuf;
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, SquareSlots, Triangle};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, SquareSlots, Supply, Triangle};
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
@@ -25,8 +25,8 @@ pub(crate) struct TrainPoints<'a, T> {
 /// [`crate::DistanceCachePolicy::Cached`] fills `dist_cache` (and ARD
 /// `ard_sq_diff`) once and reuses them. [`crate::DistanceCachePolicy::Uncached`]
 /// has no such tensors; isotropic and mixed trees compute distances from `X`.
-fn apply_train_kernel<T, W, M: crate::math::KernelMath>(
-    compiled: &CompiledKernel<T>,
+fn apply_train_kernel<T, W, M: crate::math::KernelMath, S: Supply>(
+    compiled: &CompiledKernel<T, S>,
     x: TrainPoints<'_, T>,
     ws: &mut W,
 ) -> Result<(), GprError>
@@ -35,7 +35,7 @@ where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
     let (core, dist) = ws.split_fit();
-    apply_compiled_views::<T, M>(
+    apply_compiled_views::<T, M, _>(
         compiled,
         x,
         dist,
@@ -47,8 +47,8 @@ where
 }
 
 /// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
-pub(crate) fn apply_compiled_to<T, W, M: crate::math::KernelMath>(
-    compiled: &CompiledKernel<T>,
+pub(crate) fn apply_compiled_to<T, W, M: crate::math::KernelMath, S: Supply>(
+    compiled: &CompiledKernel<T, S>,
     x: TrainPoints<'_, T>,
     ws: &mut W,
     dest: MatMut<'_, T>,
@@ -58,7 +58,7 @@ where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
     let (core, dist) = ws.split_fit();
-    apply_compiled_views::<T, M>(
+    apply_compiled_views::<T, M, _>(
         compiled,
         x,
         dist,
@@ -69,8 +69,8 @@ where
     )
 }
 
-fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
-    compiled: &CompiledKernel<T>,
+fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath, S: Supply>(
+    compiled: &CompiledKernel<T, S>,
     x: TrainPoints<'_, T>,
     dist: Option<&mut crate::workspace::DistCache<T>>,
     dest: MatMut<'_, T>,
@@ -84,8 +84,8 @@ fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath>(
 
 /// Fills the training distance caches the tree reads (once per `X`) and
 /// returns the views for a Gram evaluation. Without caches, only `x`.
-pub(crate) fn fill_cached_inputs<'a, T: KernelScalar>(
-    compiled: &CompiledKernel<T>,
+pub(crate) fn fill_cached_inputs<'a, T: KernelScalar, S: Supply>(
+    compiled: &CompiledKernel<T, S>,
     points: TrainPoints<'a, T>,
     dist: Option<&'a mut crate::workspace::DistCache<T>>,
     thread_scratch: &mut Vec<Mat<T>>,
@@ -146,8 +146,8 @@ pub(crate) struct FactorPolicy {
     pub(crate) stage: CholeskyStage,
 }
 
-pub(crate) fn factor_train_with_policy<T, W, M: crate::math::KernelMath>(
-    compiled: &CompiledKernel<T>,
+pub(crate) fn factor_train_with_policy<T, W, M: crate::math::KernelMath, S: Supply>(
+    compiled: &CompiledKernel<T, S>,
     x: TrainPoints<'_, T>,
     ws: &mut W,
     y: &[f64],
@@ -159,7 +159,7 @@ where
     W: FitWorkspace<Policy: PrecisionPolicy<Storage = T>>,
 {
     factor_written_k_with_policy(ws, y, noise, policy, |ws| {
-        apply_train_kernel::<T, W, M>(compiled, x, ws)
+        apply_train_kernel::<T, W, M, _>(compiled, x, ws)
     })
 }
 
@@ -167,8 +167,8 @@ where
 /// of the first `products` products stay in the leading
 /// [`CompiledKernel::kept_buffers`] of `weighted` for the gradient walk.
 /// `weighted` and `kernel_scratch` must already be `n×n`.
-pub(crate) fn factor_train_keeping_with_policy<T, W, M: crate::math::KernelMath>(
-    compiled: &CompiledKernel<T>,
+pub(crate) fn factor_train_keeping_with_policy<T, W, M: crate::math::KernelMath, S: Supply>(
+    compiled: &CompiledKernel<T, S>,
     x: TrainPoints<'_, T>,
     ws: &mut W,
     y: &[f64],

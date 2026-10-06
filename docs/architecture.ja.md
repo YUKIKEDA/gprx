@@ -211,7 +211,7 @@ flowchart LR
 
 1. `kernel/<leaf>.rs`: パラメータ（`θ` とその `Interval`）、距離または座標からの値・`∂K/∂θ`・`∂²K/∂θ∂θ`（正方と長方形）、対角。`FreeInducing` で動かすなら座標微分（`grad_wrt_coord_dim` と混合の Hessian）。動かさないなら `CoordGradientUnsupported` を返す
 2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める分岐
-3. `kernel/compiled/`: `CompiledKernel` の variant と、コンパイラが求める分岐。すべてのカーネルの葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む
+3. `kernel/compiled/`: `CompiledKernel` の variant、それに対応する `LeafRef` の variant（`term`）、コンパイラが求める分岐。すべてのカーネルの葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む。座標の経路の葉の分岐は `LeafRef` のメソッドで、座標の木と葉ごとの混合経路が共有する
 4. `persist/kernel.rs`: JSON のタグ。古い版の保存ファイルも読めること（persist-format.md）
 5. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互のブロック、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す
 6. design §5 と、`kernel/mod.rs`・`lib.rs` の公開の再エクスポート

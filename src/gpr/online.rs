@@ -14,7 +14,7 @@ use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::{
     BlockKind, DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, QuerySources, RectSlots, SpecOf, spec_slots,
 };
 use crate::kernel::{ScalarOps, SourceStore};
 use crate::likelihood::GaussianLikelihood;
@@ -103,8 +103,8 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
 /// # Ok(())
 /// # }
 /// ```
-pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision, K = KernelSpec> {
-    pub(crate) core: GprCore<P>,
+pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(crate) core: GprCore<P, K>,
     pub(crate) optimizer: O,
     pub(crate) workspace: LdltStore<P::Storage>,
     pub(crate) registry: PointRegistry,
@@ -178,6 +178,7 @@ impl<O, P, K> Clone for OnlineGpr<O, P, K>
 where
     O: Clone,
     P: GpScalar,
+    K: ModelKernel,
 {
     fn clone(&self) -> Self {
         Self {
@@ -195,6 +196,7 @@ impl<O, P, K> fmt::Debug for OnlineGpr<O, P, K>
 where
     O: fmt::Debug,
     P: GpScalar,
+    K: ModelKernel,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnlineGpr")
@@ -217,7 +219,7 @@ where
     K: ModelKernel,
 {
     pub(crate) fn from_core(
-        core: GprCore<P>,
+        core: GprCore<P, K>,
         optimizer: O,
         workspace: LdltStore<P::Storage>,
     ) -> Self {
@@ -415,7 +417,7 @@ where
     }
 
     /// The kernel tree (with its distance leaves).
-    pub(crate) fn kernel_spec(&self) -> &KernelSpec {
+    pub(crate) fn kernel_spec(&self) -> &SpecOf<K> {
         &self.core.kernel
     }
 
@@ -1008,7 +1010,7 @@ impl<O, P, K> OnlineGpr<O, P, K>
 where
     P: GpScalar,
     K: ModelKernel,
-    O: for<'a> Optimizer<GprObjective<'a, P>>,
+    O: for<'a> Optimizer<GprObjective<'a, P, K>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///
@@ -1041,7 +1043,7 @@ impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
 }
 
 impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
-    pub(crate) fn from_persisted(parts: PersistedModel<P>) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(parts: PersistedModel<P, K>) -> Result<Self, GprError> {
         FittedGpr::from_persisted(parts)?.into_online_preserving_factor()
     }
 }
@@ -1051,16 +1053,17 @@ impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
 ///
 /// `L_llt = L √D`. On failure the LDLT, `α`, and `θ` stay as they were: the
 /// fit code restores `θ`, and the `α` it may have rebuilt is put back here.
-fn with_llt_view<P, R>(
-    core: &mut GprCore<P>,
+fn with_llt_view<P, K, R>(
+    core: &mut GprCore<P, K>,
     online: &mut LdltStore<P::Storage>,
-    f: impl FnOnce(&mut ExactFit<'_, P>) -> Result<R, GprError>,
+    f: impl FnOnce(&mut ExactFit<'_, P, K>) -> Result<R, GprError>,
 ) -> Result<R, GprError>
 where
     P: GpScalar,
+    K: ModelKernel,
 {
     let n = core.n;
-    let mut store = LltStore::new(fit_buffers::<P>(n, core.policies, &core.compiled)?);
+    let mut store = LltStore::new(fit_buffers::<P, _>(n, core.policies, &core.compiled)?);
     online.fill_llt_into(store.buffers.core_mut().k_matrix.as_mut(), n);
     store.buffers.core_mut().factor_jitter = online.factor_jitter;
     let factor_alpha = core.factor_alpha.clone();

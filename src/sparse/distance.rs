@@ -2,7 +2,7 @@
 //! a sparse model of a [`DistanceKernel`](crate::kernel::DistanceKernel).
 
 use crate::error::GprError;
-use crate::kernel::{BlockKind, DistanceSource, QuerySources, spec_slots};
+use crate::kernel::{BlockKind, DistanceSource, ModelKernel, QuerySources, spec_slots};
 
 use super::{QueryDist, SparseCore};
 
@@ -15,8 +15,8 @@ impl QueryDist {
     ///
     /// Returns [`GprError::EmptyInput`] if `q` is zero, and the errors of
     /// binding the sources.
-    pub(crate) fn bind<'s>(
-        core: &SparseCore,
+    pub(crate) fn bind<'s, K: ModelKernel>(
+        core: &SparseCore<K>,
         cross: Vec<DistanceSource<'s>>,
         square: Option<Vec<DistanceSource<'s>>>,
         q: usize,
@@ -96,12 +96,12 @@ pub(crate) use sparse_query;
 mod tests {
     use std::borrow::Cow;
 
-    use crate::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+    use crate::kernel::{KernelSpec, RbfKernel, ScalarDistance, SuppliedSpec};
     use crate::sparse::{SparseDist, cast_blocks, zx_at, zz_at};
 
     fn dist() -> SparseDist {
         let image = ScalarDistance::new();
-        let kernel: KernelSpec = image
+        let kernel: KernelSpec<SuppliedSpec> = image
             .kernel(RbfKernel::new(1.0).expect("ell"))
             .spec()
             .clone();

@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use crate::error::GprError;
 use crate::gpr::GprObjective;
 use crate::kernel::{
-    DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse,
+    DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse, SpecOf,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
@@ -57,8 +57,8 @@ use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp
 /// # Ok(())
 /// # }
 /// ```
-pub struct Gpr<O = Lbfgs, P = DoublePrecision, K = KernelSpec> {
-    pub(super) kernel: KernelSpec,
+pub struct Gpr<O = Lbfgs, P = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) kernel: SpecOf<K>,
     pub(super) likelihood: GaussianLikelihood,
     pub(super) x_transform: Box<dyn UnfittedTransform>,
     pub(super) y_transform: Box<dyn UnfittedTarget>,
@@ -68,7 +68,7 @@ pub struct Gpr<O = Lbfgs, P = DoublePrecision, K = KernelSpec> {
     pub(super) _kernel: PhantomData<K>,
 }
 
-impl<O, P, K> fmt::Debug for Gpr<O, P, K>
+impl<O, P, K: ModelKernel> fmt::Debug for Gpr<O, P, K>
 where
     O: fmt::Debug,
 {
@@ -85,7 +85,7 @@ where
     }
 }
 
-impl<O: Clone, P, K> Clone for Gpr<O, P, K> {
+impl<O: Clone, P, K: ModelKernel> Clone for Gpr<O, P, K> {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -204,7 +204,7 @@ impl<O, P, K: ModelKernel> Gpr<O, P, K> {
     }
 
     pub(crate) fn from_owned(
-        kernel: KernelSpec,
+        kernel: SpecOf<K>,
         likelihood: GaussianLikelihood,
         x_transform: Box<dyn UnfittedTransform>,
         y_transform: Box<dyn UnfittedTarget>,
@@ -542,7 +542,7 @@ impl<O, P, K> Gpr<O, P, K>
 where
     P: GpScalar,
     K: ModelKernel,
-    O: for<'a> Optimizer<GprObjective<'a, P>>,
+    O: for<'a> Optimizer<GprObjective<'a, P, K>>,
 {
     /// [`Gpr::fit`] on any training input.
     #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
@@ -582,7 +582,7 @@ impl<P: GpScalar, K: ModelKernel> Gpr<Fixed, P, K> {
 }
 
 /// Drops the trainer and keeps the error so `?` works in `Result<_, GprError>`.
-impl<O, P, K> From<(Gpr<O, P, K>, GprError)> for GprError {
+impl<O, P, K: ModelKernel> From<(Gpr<O, P, K>, GprError)> for GprError {
     fn from((_, err): (Gpr<O, P, K>, GprError)) -> Self {
         err
     }

@@ -26,6 +26,7 @@ use super::supplied::{ScalarLeaf, SuppliedCompiled, SuppliedLeaf, scalar_square}
 use super::{CompiledKernel, CrossViews, add_triangle};
 use crate::error::GprError;
 use crate::kernel::dist::{for_each_lower_col, lower_fold_infallible};
+use crate::kernel::tree::Supply;
 use crate::kernel::{KernelScalar, Triangle};
 use faer::{Mat, MatMut, MatRef};
 use std::ops::Range;
@@ -45,7 +46,7 @@ pub(crate) struct WeightedWalk<'a, 'b, T> {
     pub(crate) fold: &'b mut Vec<f64>,
 }
 
-impl<T: KernelScalar> CompiledKernel<T> {
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Factors of this product that are not [`Self::Constant`].
     fn varying_factors(terms: &[Self]) -> usize {
         terms
@@ -469,15 +470,15 @@ impl<T: KernelScalar> CompiledKernel<T> {
         // paths on its slot's distances; anything else takes the `∂K` path
         // below, which reads the slot itself.
         let (leaf, dist) = match (self, walk.inputs.dist) {
-            (
-                Self::Supplied(SuppliedLeaf {
+            (Self::Supplied(supplied), _) => match S::compiled(supplied) {
+                SuppliedLeaf {
                     slot,
                     leaf: SuppliedCompiled::Scalar(leaf),
-                }),
-                _,
-            ) => match scalar_square(walk.inputs.slots, *slot) {
-                Ok(dist) => (FastLeaf::from_scalar(leaf), Some(dist)),
-                Err(_) => (FastLeaf::None, None),
+                } => match scalar_square(walk.inputs.slots, *slot) {
+                    Ok(dist) => (FastLeaf::from_scalar(leaf), Some(dist)),
+                    Err(_) => (FastLeaf::None, None),
+                },
+                SuppliedLeaf { .. } => (FastLeaf::None, None),
             },
             (Self::Periodic(leaf), dist) => (FastLeaf::Periodic(leaf), dist),
             (Self::RationalQuadratic(leaf), dist) => (FastLeaf::RationalQuadratic(leaf), dist),

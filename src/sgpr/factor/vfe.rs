@@ -5,6 +5,8 @@ use crate::data::{pack_points, validate_inducing, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GatheredRect;
 use crate::kernel::GramInputs;
+use crate::kernel::ModelKernel;
+use crate::kernel::Supply;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
@@ -25,8 +27,8 @@ use std::marker::PhantomData;
 /// Predict weights after a factor or an online update. See
 /// [`ModelPrecision::publish_weights`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision>(
-    kernel: &KernelSpec,
+pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
@@ -41,7 +43,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
     dist: Option<&SparseDist>,
 ) -> Result<Vec<P::Refine>, GprError> {
     let reference = || {
-        let state = assemble_vfe::<M, f64>(
+        let state = assemble_vfe::<M, f64, _>(
             kernel,
             k_mm_jitter,
             noise_likelihood(noise)?,
@@ -83,15 +85,15 @@ pub(crate) struct VfeState<T: KernelScalar> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P, K>(
-    core: SparseCore,
+pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P, K: ModelKernel>(
+    core: SparseCore<K>,
     optimizer: O,
 ) -> Result<FittedSgpr<O, I, P, K>, GprError>
 where
     P: ModelPrecision,
 {
-    let mut scratch = SparseScratch::<P::Storage>::default();
-    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage>(
+    let mut scratch = SparseScratch::<P::Storage, _>::default();
+    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage, _>(
         &core.kernel,
         core.jitter,
         core.likelihood,
@@ -108,7 +110,7 @@ where
     let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, w64) {
         w64.into_iter().map(P::Refine::from_f64).collect()
     } else if P::REFINES_IN_F64 {
-        assemble_vfe::<M, f64>(
+        assemble_vfe::<M, f64, _>(
             &core.kernel,
             core.jitter,
             core.likelihood,
@@ -127,7 +129,7 @@ where
         .map(P::Refine::from_f64)
         .collect()
     } else {
-        publish_sgpr_weights::<M, P>(
+        publish_sgpr_weights::<M, P, _>(
             &core.kernel,
             core.jitter,
             state.a.as_ref(),
@@ -160,8 +162,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
     x: &[f64],
@@ -182,7 +184,7 @@ where
         validate_inducing(z, n_inducing, n_cols)?;
     }
     if T::ROUNDS_FROM_F64 {
-        let state = assemble_vfe::<M, f64>(
+        let state = assemble_vfe::<M, f64, _>(
             kernel,
             k_mm_jitter,
             likelihood,
@@ -212,7 +214,7 @@ where
     let zx = zx_at::<T>(dist)?;
     let zx = zx.as_deref().map(GatheredRect::table);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
-    ks.gram::<M>(
+    ks.gram::<M, _>(
         &compiled,
         GramInputs {
             slots: square_slots(zz.as_deref()),
@@ -231,7 +233,7 @@ where
     // `K(Z, X)` is the rectangular cross covariance whatever the values of
     // `Z` and `X`: a White leaf adds nothing to it, so the objective does not
     // jump when a free `Z` leaves `X` (docs/design.md §5).
-    let mut a = ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref(), rect_slots(&zx))?;
+    let mut a = ks.cross::<M, _>(&compiled, z_mat.as_ref(), x_mat.as_ref(), rect_slots(&zx))?;
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);
@@ -243,7 +245,7 @@ where
         CholeskyStage::Fit,
     )?;
     let mut k_diag = vec![lit::<T>(0.0); n_rows];
-    compiled.fill_diag_points(x_mat.as_ref(), &mut k_diag)?;
+    compiled.fill_diag_rows(x_mat.as_ref(), &mut k_diag)?;
     let k_diag_sum = k_diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
     let a_frobenius2 = frobenius2(a.as_ref());
     let mut ay = Mat::zeros(n_inducing, 1);
@@ -282,8 +284,8 @@ fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
 /// weights. Taking them from the same `f64` assembly saves assembling the
 /// whole system a second time. A scalar that is not rounded returns `None`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
     x: &[f64],
@@ -297,7 +299,7 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
     ks64: &mut KernelScratch<f64>,
 ) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {
     if T::ROUNDS_FROM_F64 {
-        let state = assemble_vfe::<M, f64>(
+        let state = assemble_vfe::<M, f64, _>(
             kernel,
             k_mm_jitter,
             likelihood,
@@ -314,7 +316,7 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
         let rounded = round_vfe(&state);
         return Ok((rounded, Some(state.w)));
     }
-    let state = assemble_vfe::<M, T>(
+    let state = assemble_vfe::<M, T, _>(
         kernel,
         k_mm_jitter,
         likelihood,

@@ -22,6 +22,7 @@ use crate::kernel::{
     ParameterBinding, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
     RbfArdKernel, RbfKernel, WhiteKernel,
 };
+use crate::kernel::{NoSupply, Supply};
 use crate::param::Interval;
 
 static NEXT_SLOT: AtomicU64 = AtomicU64::new(1);
@@ -55,9 +56,10 @@ impl SlotShape {
 
 /// A leaf of a [`DistanceKernel`] that reads the supply of one slot.
 ///
-/// Crate-private payload of the hidden [`KernelSpec`] variant. A coordinate
-/// [`KernelSpec`] never holds one. The slot's shape is the leaf's: a scalar
-/// slot holds an isotropic or custom leaf, an ARD slot an ARD leaf.
+/// Crate-private payload of the hidden [`KernelSpec`] variant, in a tree of
+/// this [`Supply`] kind. A coordinate tree ([`NoSupply`]) cannot hold one.
+/// The slot's shape is the leaf's: a scalar slot holds an isotropic or
+/// custom leaf, an ARD slot an ARD leaf.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuppliedSpec {
     pub(crate) slot: SlotId,
@@ -534,8 +536,10 @@ mod sealed {
     pub trait Model: Sized {
         /// Whether the kernel has coordinate leaves that read `x`.
         const POINTS: bool;
-        fn into_spec(self) -> KernelSpec;
-        fn from_spec(spec: KernelSpec) -> Self;
+        /// What the tree holds besides coordinate leaves.
+        type Supply: crate::kernel::Supply;
+        fn into_spec(self) -> KernelSpec<Self::Supply>;
+        fn from_spec(spec: KernelSpec<Self::Supply>) -> Self;
     }
 }
 
@@ -699,7 +703,7 @@ impl JoinPoints<WithPoints> for WithPoints {
 /// # }
 /// ```
 pub struct DistanceKernel<C: PointUse = DistanceOnly> {
-    spec: KernelSpec,
+    spec: KernelSpec<SuppliedSpec>,
     _points: PhantomData<C>,
 }
 
@@ -730,7 +734,7 @@ impl DistanceKernel {
 }
 
 impl<C: PointUse> DistanceKernel<C> {
-    pub(crate) fn from_spec(spec: KernelSpec) -> Self {
+    pub(crate) fn from_spec(spec: KernelSpec<SuppliedSpec>) -> Self {
         Self {
             spec,
             _points: PhantomData,
@@ -799,21 +803,23 @@ impl<C: PointUse> DistanceKernel<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn spec(&self) -> &KernelSpec {
+    pub(crate) fn spec(&self) -> &KernelSpec<SuppliedSpec> {
         &self.spec
     }
 }
 
-/// The slots of `spec` in depth-first order of first appearance.
-pub(crate) fn spec_slots(spec: &KernelSpec) -> Vec<DistanceSlot> {
+/// The slots of `spec` in depth-first order of first appearance; none for
+/// a coordinate tree.
+pub(crate) fn spec_slots<S: Supply>(spec: &KernelSpec<S>) -> Vec<DistanceSlot> {
     let mut out = Vec::new();
     collect_slots(spec, &mut out);
     out
 }
 
-fn collect_slots(spec: &KernelSpec, out: &mut Vec<DistanceSlot>) {
+fn collect_slots<S: Supply>(spec: &KernelSpec<S>, out: &mut Vec<DistanceSlot>) {
     match spec {
         KernelSpec::Supplied(leaf) => {
+            let leaf = S::spec(leaf);
             if !out.iter().any(|slot| slot.id() == leaf.slot) {
                 out.push(DistanceSlot::from_parts(leaf.slot, leaf.shape()));
             }
@@ -847,7 +853,10 @@ macro_rules! distance_ops {
             type Output = DistanceKernel<WithPoints>;
 
             fn $method(self, rhs: KernelSpec) -> Self::Output {
-                DistanceKernel::from_spec(KernelSpec::$variant(Box::new(self.spec), Box::new(rhs)))
+                DistanceKernel::from_spec(KernelSpec::$variant(
+                    Box::new(self.spec),
+                    Box::new(rhs.widen()),
+                ))
             }
         }
 
@@ -855,7 +864,10 @@ macro_rules! distance_ops {
             type Output = DistanceKernel<WithPoints>;
 
             fn $method(self, rhs: DistanceKernel<C>) -> Self::Output {
-                DistanceKernel::from_spec(KernelSpec::$variant(Box::new(self), Box::new(rhs.spec)))
+                DistanceKernel::from_spec(KernelSpec::$variant(
+                    Box::new(self.widen()),
+                    Box::new(rhs.spec),
+                ))
             }
         }
 
@@ -869,7 +881,7 @@ macro_rules! distance_ops {
             fn $method(self, rhs: $leaf) -> Self::Output {
                 DistanceKernel::from_spec(KernelSpec::$variant(
                     Box::new(self.spec),
-                    Box::new(KernelSpec::from(rhs)),
+                    Box::new(KernelSpec::from(rhs).widen()),
                 ))
             }
         }
@@ -879,7 +891,7 @@ macro_rules! distance_ops {
 
             fn $method(self, rhs: DistanceKernel<C>) -> Self::Output {
                 DistanceKernel::from_spec(KernelSpec::$variant(
-                    Box::new(KernelSpec::from(self)),
+                    Box::new(KernelSpec::from(self).widen()),
                     Box::new(rhs.spec),
                 ))
             }
@@ -898,6 +910,7 @@ pub trait ModelKernel: sealed::Model + Clone + fmt::Debug + Send + Sync + 'stati
 
 impl sealed::Model for KernelSpec {
     const POINTS: bool = true;
+    type Supply = NoSupply;
 
     fn into_spec(self) -> KernelSpec {
         self
@@ -912,12 +925,13 @@ impl ModelKernel for KernelSpec {}
 
 impl<C: PointUse> sealed::Model for DistanceKernel<C> {
     const POINTS: bool = <C as sealed::Points>::POINTS;
+    type Supply = SuppliedSpec;
 
-    fn into_spec(self) -> KernelSpec {
+    fn into_spec(self) -> KernelSpec<SuppliedSpec> {
         self.spec
     }
 
-    fn from_spec(spec: KernelSpec) -> Self {
+    fn from_spec(spec: KernelSpec<SuppliedSpec>) -> Self {
         Self::from_spec(spec)
     }
 }
@@ -935,6 +949,12 @@ impl PointKernel for KernelSpec {}
 impl PointKernel for DistanceKernel<WithPoints> {}
 
 pub(crate) use sealed::Model as ModelKernelParts;
+
+/// The declared tree of model kernel `K`.
+pub(crate) type SpecOf<K> = KernelSpec<<K as sealed::Model>::Supply>;
+
+/// The compiled tree of model kernel `K` for compute scalar `T`.
+pub(crate) type CompiledOf<T, K> = crate::kernel::CompiledKernel<T, <K as sealed::Model>::Supply>;
 
 /// Writes squared distances for one block of pairs.
 ///

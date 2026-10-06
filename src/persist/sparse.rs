@@ -8,6 +8,7 @@
 //! whitened `q(u)`. The factors are not stored: load factors the system
 //! again at the saved `θ` and `Z`.
 
+use crate::kernel::{KernelSpec, ModelKernel};
 use std::path::Path;
 
 use faer::Mat;
@@ -49,9 +50,9 @@ struct OnlineIds {
     next_inducing: u64,
 }
 
-fn write_sparse<P: GpScalar>(
+fn write_sparse<P: GpScalar, K: ModelKernel>(
     dir: &Path,
-    core: &SparseCore,
+    core: &SparseCore<K>,
     model: ModelJson,
     ids: Option<OnlineIds>,
     q: Option<(&[f64], faer::MatRef<'_, f64>)>,
@@ -134,7 +135,7 @@ pub(crate) fn save_sgpr<
     model: &FittedSgpr<O, I, P, K>,
     dir: &Path,
 ) -> Result<(), GprError> {
-    write_sparse::<P>(dir, model.core(), ModelJson::Sgpr, None, None)
+    write_sparse::<P, _>(dir, model.core(), ModelJson::Sgpr, None, None)
 }
 
 pub(crate) fn save_online_sgpr<O, P: GpScalar>(
@@ -147,14 +148,14 @@ pub(crate) fn save_online_sgpr<O, P: GpScalar>(
         inducing: model.inducing_registry().raw_ids(),
         next_inducing: model.inducing_registry().next_id(),
     };
-    write_sparse::<P>(dir, model.core(), ModelJson::OnlineSgpr, Some(ids), None)
+    write_sparse::<P, _>(dir, model.core(), ModelJson::OnlineSgpr, Some(ids), None)
 }
 
 pub(crate) fn save_svgp<P: GpScalar, K: crate::kernel::ModelKernel>(
     model: &FittedSvgp<P, K>,
     dir: &Path,
 ) -> Result<(), GprError> {
-    write_sparse::<P>(dir, model.core(), ModelJson::Svgp, None, Some(model.q()))
+    write_sparse::<P, _>(dir, model.core(), ModelJson::Svgp, None, Some(model.q()))
 }
 
 fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprError> {
@@ -167,12 +168,12 @@ fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprEr
 
 /// The core of a sparse persist directory, with the fitted transforms
 /// read back from the config.
-fn read_core(
+fn read_core<K: ModelKernel>(
     tensors: &SafeTensors<'_>,
     config: &SparseConfig,
     registry: &PersistRegistry,
     distance: Option<DistanceLoad>,
-) -> Result<SparseCore, GprError> {
+) -> Result<SparseCore<K>, GprError> {
     let (n, m, d) = (config.n, config.m, config.d);
     let (kernel, slots) = decode_kernel(&config.kernel, registry, d, distance)?;
     let dist = if slots.is_empty() {
@@ -221,12 +222,12 @@ fn read_core(
 
 /// The core of a sparse directory of model `model` read as a distance
 /// model of precision `P`, with the saved `q(u)` of an SVGP directory.
-pub(super) fn load_sparse_dir<P: GpScalar>(
+pub(super) fn load_sparse_dir<P: GpScalar, K: ModelKernel>(
     dir: &Path,
     registry: &PersistRegistry,
     model: ModelJson,
     distance: DistanceLoad,
-) -> Result<(Option<SavedQ>, SparseCore), GprError> {
+) -> Result<(Option<SavedQ>, SparseCore<K>), GprError> {
     let config = read_config(dir, &[model])?;
     if config.persist_kind() != P::persist_kind() {
         return Err(persist_err(
@@ -661,7 +662,7 @@ impl LoadedSvgp {
 
 /// Reads of a loaded sparse model that do not depend on its precision.
 trait SparseView {
-    fn core(&self) -> &SparseCore;
+    fn core(&self) -> &SparseCore<KernelSpec>;
     fn predict_f64(
         &self,
         xs: &[f64],
@@ -672,7 +673,7 @@ trait SparseView {
 }
 
 impl<P: GpScalar> SparseView for FittedSgpr<Fixed, FixedInducing, P> {
-    fn core(&self) -> &SparseCore {
+    fn core(&self) -> &SparseCore<KernelSpec> {
         FittedSgpr::core(self)
     }
 
@@ -688,7 +689,7 @@ impl<P: GpScalar> SparseView for FittedSgpr<Fixed, FixedInducing, P> {
 }
 
 impl<P: GpScalar> SparseView for OnlineSgpr<Fixed, P> {
-    fn core(&self) -> &SparseCore {
+    fn core(&self) -> &SparseCore<KernelSpec> {
         OnlineSgpr::core(self)
     }
 
@@ -704,7 +705,7 @@ impl<P: GpScalar> SparseView for OnlineSgpr<Fixed, P> {
 }
 
 impl<P: GpScalar> SparseView for FittedSvgp<P> {
-    fn core(&self) -> &SparseCore {
+    fn core(&self) -> &SparseCore<KernelSpec> {
         FittedSvgp::core(self)
     }
 

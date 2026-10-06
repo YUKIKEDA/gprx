@@ -87,7 +87,7 @@ fn with_query<'s, P: GpScalar, R>(
 impl<O, P> Gpr<O, P, DistanceKernel<DistanceOnly>>
 where
     P: GpScalar,
-    O: for<'a> Optimizer<GprObjective<'a, P>>,
+    O: for<'a> Optimizer<GprObjective<'a, P, DistanceKernel<DistanceOnly>>>,
 {
     /// Factors `A = K + σn² I` on the supplied training distances and
     /// updates `θ` with `O`.
@@ -160,7 +160,7 @@ impl<P: GpScalar> Gpr<Fixed, P, DistanceKernel<DistanceOnly>> {
 impl<O, P> Gpr<O, P, DistanceKernel<WithPoints>>
 where
     P: GpScalar,
-    O: for<'a> Optimizer<GprObjective<'a, P>>,
+    O: for<'a> Optimizer<GprObjective<'a, P, DistanceKernel<WithPoints>>>,
 {
     /// Factors `A = K + σn² I` on the supplied training distances and the
     /// coordinates `x`, and updates `θ` with `O`.

@@ -10,7 +10,8 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::error::GprError;
 use crate::kernel::{
-    ColRange, KernelScalar, KernelSpec, RectSlots, RefinedSources, SourceStore, TrainSources,
+    ColRange, KernelScalar, KernelSpec, RectSlots, RefinedSources, SourceStore, Supply,
+    TrainSources,
 };
 use crate::transform::TargetTransform;
 
@@ -167,8 +168,8 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     fn persist_kind() -> PersistKind;
 
     /// Exact: stores predict `α` from the stored factor (copy, or refine).
-    fn publish_predict_alpha<M: crate::math::KernelMath>(
-        sys: &TrainSystem<'_, Self::Storage>,
+    fn publish_predict_alpha<M: crate::math::KernelMath, S: Supply>(
+        sys: &TrainSystem<'_, Self::Storage, S>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError>;
 
@@ -177,8 +178,8 @@ pub trait ModelPrecision: PrecisionPolicy + Copy + Send + Sync + 'static {
     /// `x_query` is the transformed query, column-major `out.len() × n_cols`.
     // The system, the query and its two supply views, the scratch, and `out`.
     #[allow(clippy::too_many_arguments)]
-    fn predict_means<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
+    fn predict_means<M: crate::math::KernelMath, S: Supply>(
+        kernel: &KernelSpec<S>,
         k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
         x_query: &[f64],
@@ -283,16 +284,16 @@ impl ModelPrecision for DoublePrecision {
         PersistKind::Double
     }
 
-    fn publish_predict_alpha<M: crate::math::KernelMath>(
-        sys: &TrainSystem<'_, Self::Storage>,
+    fn publish_predict_alpha<M: crate::math::KernelMath, S: Supply>(
+        sys: &TrainSystem<'_, Self::Storage, S>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError> {
         copy_to_refine::<Self>(sys.factor_alpha, alpha);
         Ok(())
     }
 
-    fn predict_means<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
+    fn predict_means<M: crate::math::KernelMath, S: Supply>(
+        _kernel: &KernelSpec<S>,
         k_storage: MatRef<'_, Self::Storage>,
         _x_train: MatRef<'_, f64>,
         _x_query: &[f64],
@@ -367,16 +368,16 @@ impl ModelPrecision for SinglePrecision {
         PersistKind::Single
     }
 
-    fn publish_predict_alpha<M: crate::math::KernelMath>(
-        sys: &TrainSystem<'_, Self::Storage>,
+    fn publish_predict_alpha<M: crate::math::KernelMath, S: Supply>(
+        sys: &TrainSystem<'_, Self::Storage, S>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError> {
         copy_to_refine::<Self>(sys.factor_alpha, alpha);
         Ok(())
     }
 
-    fn predict_means<M: crate::math::KernelMath>(
-        _kernel: &KernelSpec,
+    fn predict_means<M: crate::math::KernelMath, S: Supply>(
+        _kernel: &KernelSpec<S>,
         k_storage: MatRef<'_, Self::Storage>,
         _x_train: MatRef<'_, f64>,
         _x_query: &[f64],
@@ -465,16 +466,16 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
         }
     }
 
-    fn publish_predict_alpha<M: crate::math::KernelMath>(
-        sys: &TrainSystem<'_, Self::Storage>,
+    fn publish_predict_alpha<M: crate::math::KernelMath, S: Supply>(
+        sys: &TrainSystem<'_, Self::Storage, S>,
         alpha: &mut Vec<Self::Refine>,
     ) -> Result<(), GprError> {
-        *alpha = refine::refine_alpha::<M, R>(sys)?;
+        *alpha = refine::refine_alpha::<M, R, _>(sys)?;
         Ok(())
     }
 
-    fn predict_means<M: crate::math::KernelMath>(
-        kernel: &KernelSpec,
+    fn predict_means<M: crate::math::KernelMath, S: Supply>(
+        kernel: &KernelSpec<S>,
         _k_storage: MatRef<'_, Self::Storage>,
         x_train: MatRef<'_, f64>,
         x_query: &[f64],
@@ -483,7 +484,7 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
         alpha: &[Self::Refine],
         out: &mut [Self::Refine],
     ) -> Result<(), GprError> {
-        f64_cross_means::<M>(kernel, x_train, x_query, n_cols, cross64, alpha, out)
+        f64_cross_means::<M, _>(kernel, x_train, x_query, n_cols, cross64, alpha, out)
     }
 
     fn inverse_mean_variance(
@@ -529,8 +530,8 @@ impl<R: ResidualFormula> ModelPrecision for MixedPrecision<R> {
 
 /// `k_*ᵀ α` with `k_*` evaluated in `f64`: one compile, then blocks of
 /// [`COLUMN_BLOCK`] query columns.
-fn f64_cross_means<M: crate::math::KernelMath>(
-    kernel: &KernelSpec,
+fn f64_cross_means<M: crate::math::KernelMath, S: Supply>(
+    kernel: &KernelSpec<S>,
     x_train: MatRef<'_, f64>,
     x_query: &[f64],
     n_cols: usize,

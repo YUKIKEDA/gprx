@@ -4,7 +4,9 @@ use super::lit;
 use crate::data::pack_points;
 use crate::error::GprError;
 use crate::kernel::GramInputs;
+use crate::kernel::ModelKernel;
 use crate::kernel::ScalarOps;
+use crate::kernel::Supply;
 use crate::kernel::{
     CompiledKernel, CrossViews, GatheredRect, KernelScalar, RectSlots, SquareSlots, Triangle,
 };
@@ -63,7 +65,7 @@ pub(crate) struct VfeEngine<'a, T: KernelScalar> {
 }
 
 impl<'a, T: KernelScalar> VfeEngine<'a, T> {
-    fn from_model<O, I, P, K>(model: &'a FittedSgpr<O, I, P, K>, y: &'a [T]) -> Self
+    fn from_model<O, I, P, K: ModelKernel>(model: &'a FittedSgpr<O, I, P, K>, y: &'a [T]) -> Self
     where
         P: ModelPrecision<Storage = T>,
     {
@@ -280,7 +282,7 @@ pub(crate) struct VfeTangent<T: KernelScalar> {
     pub(crate) d_noise: T,
 }
 
-pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P, K>(
+pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
     model: &FittedSgpr<O, I, P, K>,
     out: &mut [f64],
     include_z: bool,
@@ -305,14 +307,14 @@ where
     let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
     let zx = zx.as_deref().map(GatheredRect::table);
     // One walk per matrix. The Hessian still forms each ∂K in `kernel_theta_var`.
-    ks.write_square_contraction::<M>(
+    ks.write_square_contraction::<M, _>(
         &compiled,
         z,
         square_slots(zz.as_deref()),
         adjoint.w_mm.as_ref(),
         &mut out[..n_kernel],
     )?;
-    ks.add_cross_contraction::<M>(
+    ks.add_cross_contraction::<M, _>(
         &compiled,
         z,
         x,
@@ -321,11 +323,11 @@ where
         1.0,
         &mut out[..n_kernel],
     )?;
-    ks.add_diag_contraction::<M>(&compiled, x, adjoint.w_diag.to_f64(), &mut out[..n_kernel])?;
+    ks.add_diag_contraction::<M, _>(&compiled, x, adjoint.w_diag.to_f64(), &mut out[..n_kernel])?;
     out[n_kernel] = engine
         .directional_noise(model.core.likelihood.noise_variance())
         .to_f64();
-    if include_z {
+    if let Some(coords) = z_tree(include_z, &compiled) {
         let (m, n) = (model.core.m, model.core.n);
         let mut g_zz = Mat::zeros(m, m);
         let mut g_xz = Mat::zeros(n, m);
@@ -335,8 +337,8 @@ where
             // `∂k(zᵢ, z_p)/∂z_p[dim]` for every pair, once per dimension; the
             // coordinate `p` moves row and column `p` of `K_mm` and row `p`
             // of `K_mn`.
-            compiled.grad_wrt_coord_dim_with::<M>(z, z, g_zz.as_mut(), dim, ks.scratch(m, m))?;
-            compiled.grad_wrt_coord_dim_with::<M>(x, z, g_xz.as_mut(), dim, ks.scratch(n, m))?;
+            coords.grad_wrt_coord_dim_with::<M>(z, z, g_zz.as_mut(), dim, ks.scratch(m, m))?;
+            coords.grad_wrt_coord_dim_with::<M>(x, z, g_xz.as_mut(), dim, ks.scratch(n, m))?;
             for p in 0..m {
                 let mut sum = lit::<P::Storage>(0.0);
                 for i in 0..m {
@@ -353,7 +355,7 @@ where
     Ok(())
 }
 
-pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P, K>(
+pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
     model: &FittedSgpr<O, I, P, K>,
     out: &mut [f64],
     include_z: bool,
@@ -382,7 +384,7 @@ where
     Ok(())
 }
 
-pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P, K>(
+pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
     model: &FittedSgpr<O, I, P, K>,
     include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
@@ -411,7 +413,7 @@ where
             },
     );
     for i in 0..n_kernel {
-        vars.push(kernel_theta_var::<M, _>(
+        vars.push(kernel_theta_var::<M, _, _>(
             &compiled,
             ks,
             (x, z),
@@ -425,10 +427,10 @@ where
         model.core.n,
         model.core.likelihood.noise_variance(),
     ));
-    if include_z {
+    if let Some(coords) = z_tree(include_z, &compiled) {
         for dim in 0..model.core.d {
             for p in 0..model.core.m {
-                vars.push(z_coord_var::<M, _>(&compiled, ks, x, z, p, dim)?);
+                vars.push(z_coord_var::<M, _>(coords, ks, x, z, p, dim)?);
             }
         }
     }
@@ -440,8 +442,8 @@ where
 /// The VFE Hessian forms these matrices because the factor tangent needs
 /// `∂K` itself. The first derivative does not: [`analytic_gradient`]
 /// contracts the adjoint in one walk per matrix.
-pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T>(
-    compiled: &CompiledKernel<T>,
+pub(crate) fn kernel_theta_var<M: crate::math::KernelMath, T, U: Supply>(
+    compiled: &CompiledKernel<T, U>,
     ks: &mut KernelScratch<T>,
     (x, z): (MatRef<'_, T>, MatRef<'_, T>),
     (zz, zx): (Option<&dyn SquareSlots<T>>, Option<&dyn RectSlots<T>>),
@@ -453,7 +455,7 @@ where
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
-    ks.grad::<M>(
+    ks.grad::<M, _>(
         compiled,
         GramInputs {
             slots: zz,
@@ -531,7 +533,7 @@ where
     })
 }
 
-pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P, K>(
+pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
     model: &FittedSgpr<O, I, P, K>,
     i: usize,
     j: usize,
@@ -552,8 +554,9 @@ where
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
     let m = model.core.m;
     let n = model.core.n;
+    let coords = z_tree(include_z, &compiled);
     let z_index = |idx: usize| -> Option<(usize, usize)> {
-        if !include_z || idx < n_theta {
+        if coords.is_none() || idx < n_theta {
             None
         } else {
             let local = idx - n_theta;
@@ -564,7 +567,7 @@ where
         let zz = zz_at::<P::Storage>(model.core.dist.as_ref())?;
         let zx = zx_at::<P::Storage>(model.core.dist.as_ref())?;
         let zx = zx.as_deref().map(GatheredRect::table);
-        return kernel_theta_second::<M, _>(
+        return kernel_theta_second::<M, _, _>(
             &compiled,
             ks,
             (x, z),
@@ -584,8 +587,8 @@ where
             d_noise: lit::<P::Storage>(0.0),
         });
     }
-    if let (Some((pi, ei)), Some((pj, ej))) = (z_index(i), z_index(j)) {
-        return z_z_second::<M, _>(&compiled, ks, x, z, pi, ei, pj, ej);
+    if let (Some(coords), Some((pi, ei)), Some((pj, ej))) = (coords, z_index(i), z_index(j)) {
+        return z_z_second::<M, _>(coords, ks, x, z, pi, ei, pj, ej);
     }
     let (theta, (p, e)) = if i < n_theta {
         (
@@ -610,11 +613,30 @@ where
             d_noise: lit::<P::Storage>(0.0),
         });
     }
-    theta_z_second::<M, _>(&compiled, x, z, theta, p, e)
+    let Some(coords) = coords else {
+        return Err(GprError::IndexOutOfRange {
+            reason: "expected a free inducing coordinate".to_owned(),
+        });
+    };
+    theta_z_second::<M, _>(coords, x, z, theta, p, e)
 }
 
-pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T>(
-    compiled: &CompiledKernel<T>,
+/// The tree whose inducing coordinates a learned-`Z` model differentiates:
+/// `compiled` when `include_z` and it is a coordinate tree. A model of a
+/// distance kernel takes only fixed inducing points, so it never asks.
+fn z_tree<T: KernelScalar, U: Supply>(
+    include_z: bool,
+    compiled: &CompiledKernel<T, U>,
+) -> Option<&CompiledKernel<T>> {
+    if include_z {
+        U::coordinates(compiled)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn kernel_theta_second<M: crate::math::KernelMath, T, U: Supply>(
+    compiled: &CompiledKernel<T, U>,
     ks: &mut KernelScratch<T>,
     (x, z): (MatRef<'_, T>, MatRef<'_, T>),
     (zz, zx): (Option<&dyn SquareSlots<T>>, Option<&dyn RectSlots<T>>),
@@ -626,7 +648,7 @@ where
 {
     let m = z.nrows();
     let mut d_kmm = Mat::zeros(m, m);
-    ks.hess::<M>(
+    ks.hess::<M, _>(
         compiled,
         GramInputs {
             slots: zz,
@@ -936,7 +958,7 @@ mod adjoint_tests {
         let zm = pack_points(&model.core.z_train, 3, 2);
         let mut ks = KernelScratch::new();
         for i in 0..model.core.kernel.num_params() {
-            let var = kernel_theta_var::<Accurate, f64>(
+            let var = kernel_theta_var::<Accurate, f64, _>(
                 &compiled,
                 &mut ks,
                 (xm.as_ref(), zm.as_ref()),

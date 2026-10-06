@@ -4,14 +4,14 @@ use super::grad::{
     ProductBuffers, broadcast_self_diag, eval_cell, mul_fold, product_with_owner, require_diag_len,
     scale_by_other_diags, term_index_for_param,
 };
-use super::supplied::needs_supply;
 use super::{
-    CompiledKernel, CrossViews, MixedKernelViews, Nested, ard_needs_coords, require_scratch_shape,
-    term_scratch,
+    CompiledKernel, CrossViews, LeafRef, MixedKernelViews, Nested, Term, ard_needs_coords,
+    require_scratch_shape, term_scratch,
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::kernel::dist::ArdSqDiff;
+use crate::kernel::tree::Supply;
 use crate::kernel::{Triangle, visit_triangle};
 use faer::{MatMut, MatRef};
 
@@ -54,20 +54,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         let (i, j) = pair;
-        match self {
-            Self::Rbf(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
-            Self::RbfArd(_)
-            | Self::Linear(_)
-            | Self::MaternArd(_)
-            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
-            Self::Matern(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
-            Self::Periodic(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
-            Self::RationalQuadratic(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
-            Self::Constant(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
-            Self::White(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
-            Self::Custom(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
-            Self::Supplied(_) => Err(needs_supply()),
-            Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.hess_dist::<M>(dist, d2_k, pair, uplo),
+            Term::Supplied(never) => match *never {},
+            Term::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
                     local_i,
@@ -78,7 +68,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     Ok(())
                 }
             },
-            Self::Product(terms) => {
+            Term::Product(terms) => {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
                 let buffers = ProductBuffers::new(d2_k, scratch, nested, uplo);
                 product_hess(
@@ -134,20 +124,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         let (i, j) = pair;
-        match self {
-            Self::Rbf(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
-            Self::Matern(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
-            Self::Periodic(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
-            Self::RationalQuadratic(leaf) => leaf.hess_from_coords(x, d2_k, i, j, uplo),
-            Self::Custom(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
-            Self::RbfArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
-            Self::Linear(leaf) => leaf.hess(x, d2_k, i, j, uplo),
-            Self::MaternArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
-            Self::RationalQuadraticArd(leaf) => leaf.hess(x, d2_k, i, j, uplo),
-            Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
-            Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
-            Self::Supplied(_) => Err(needs_supply()),
-            Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.hess_points::<M>(x, d2_k, pair, uplo),
+            Term::Supplied(never) => match *never {},
+            Term::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
                     local_i,
@@ -158,7 +138,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     Ok(())
                 }
             },
-            Self::Product(terms) => {
+            Term::Product(terms) => {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
                 let buffers = ProductBuffers::new(d2_k, scratch, nested, uplo);
                 product_hess(
@@ -179,6 +159,47 @@ impl<T: KernelScalar> CompiledKernel<T> {
         }
     }
 
+    // The cache and `x` views, output, pair, triangle, scratch, and levels.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn hess_from_ard_cache<M: crate::math::KernelMath>(
+        &self,
+        cache: ArdSqDiff<'_, T>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        uplo: Triangle,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        let (i, j) = pair;
+        match self.term() {
+            Term::Leaf(leaf) => leaf.hess_ard_cache::<M>(cache, x, d2_k, pair, uplo),
+            Term::Supplied(never) => match *never {},
+            Term::Sum(terms) => match owners_for_pair(terms, i, j)? {
+                PairOwners::Same {
+                    term,
+                    local_i,
+                    local_j,
+                } => term.hess_from_ard_cache::<M>(
+                    cache,
+                    x,
+                    d2_k,
+                    (local_i, local_j),
+                    uplo,
+                    scratch,
+                    nested,
+                ),
+                PairOwners::Distinct { .. } => {
+                    zero_triangle(d2_k, uplo);
+                    Ok(())
+                }
+            },
+            Term::Product(_) => self.hess_points_with::<M>(x, d2_k, pair, uplo, scratch, nested),
+        }
+    }
+}
+
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes `∂²k(x_r, x_r)/∂θ_i ∂θ_j` into `out[r]`.
     ///
     /// The off-diagonal Gram Hessian is not formed.
@@ -232,7 +253,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             }),
             Self::Supplied(leaf) => {
                 require_diag_len(x, out)?;
-                leaf.hess_diag::<M>(out, (i, j))
+                S::compiled(leaf).hess_diag::<M>(out, (i, j))
             }
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
@@ -246,49 +267,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     Ok(())
                 }
             },
-            Self::Product(terms) => product_hess_diag::<M, _>(terms, x, out, i, j),
-        }
-    }
-
-    // The cache and `x` views, output, pair, triangle, scratch, and levels.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn hess_from_ard_cache<M: crate::math::KernelMath>(
-        &self,
-        cache: ArdSqDiff<'_, T>,
-        x: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        pair: (usize, usize),
-        uplo: Triangle,
-        scratch: MatMut<'_, T>,
-        nested: &mut Nested<T>,
-    ) -> Result<(), GprError> {
-        let (i, j) = pair;
-        match self {
-            Self::RbfArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
-            Self::MaternArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
-            Self::RationalQuadraticArd(leaf) => leaf.hess_from_sq_diff(cache, d2_k, i, j, uplo),
-            Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
-            Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
-            Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
-                PairOwners::Same {
-                    term,
-                    local_i,
-                    local_j,
-                } => term.hess_from_ard_cache::<M>(
-                    cache,
-                    x,
-                    d2_k,
-                    (local_i, local_j),
-                    uplo,
-                    scratch,
-                    nested,
-                ),
-                PairOwners::Distinct { .. } => {
-                    zero_triangle(d2_k, uplo);
-                    Ok(())
-                }
-            },
-            _ => self.hess_points_with::<M>(x, d2_k, pair, uplo, scratch, nested),
+            Self::Product(terms) => product_hess_diag::<M, _, _>(terms, x, out, i, j),
         }
     }
 
@@ -302,29 +281,10 @@ impl<T: KernelScalar> CompiledKernel<T> {
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         let (i, j) = pair;
-        match self {
-            Self::Rbf(_)
-            | Self::Matern(_)
-            | Self::Periodic(_)
-            | Self::RationalQuadratic(_)
-            | Self::Custom(_)
-            | Self::Constant(_)
-            | Self::White(_) => match views.dist {
-                Some(dist) => self.hess_with::<M>(dist, d2_k, pair, uplo, scratch, nested),
-                None => self.hess_points_with::<M>(views.x, d2_k, pair, uplo, scratch, nested),
-            },
-            Self::Supplied(leaf) => leaf.hess::<M>(views.slots, d2_k, pair, uplo),
-            Self::RbfArd(_)
-            | Self::Linear(_)
-            | Self::MaternArd(_)
-            | Self::RationalQuadraticArd(_) => {
-                if let Some(cache) = views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
-                    self.hess_from_ard_cache::<M>(cache, views.x, d2_k, pair, uplo, scratch, nested)
-                } else {
-                    self.hess_points_with::<M>(views.x, d2_k, pair, uplo, scratch, nested)
-                }
-            }
-            Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
+        match self.term() {
+            Term::Leaf(leaf) => leaf.hess_mixed::<M>(views, d2_k, pair, uplo),
+            Term::Supplied(leaf) => S::compiled(leaf).hess::<M>(views.slots, d2_k, pair, uplo),
+            Term::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
                     local_i,
@@ -335,7 +295,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     Ok(())
                 }
             },
-            Self::Product(terms) => {
+            Term::Product(terms) => {
                 require_scratch_shape(d2_k.as_ref(), scratch.as_ref())?;
                 let buffers = ProductBuffers::new(d2_k, scratch, nested, uplo);
                 product_hess(
@@ -415,7 +375,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Constant(leaf) => leaf.hess_cross_points(x1, x2, d2_k, i, j),
             Self::White(_) => super::grad::white_cross_zero(x1, x2, d2_k),
             Self::Custom(leaf) => coord::custom_cross_hess(leaf, x1, x2, d2_k, (i, j)),
-            Self::Supplied(leaf) => leaf.hess_cross::<M>(views.slots, d2_k, (i, j)),
+            Self::Supplied(leaf) => S::compiled(leaf).hess_cross::<M>(views.slots, d2_k, (i, j)),
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
@@ -453,9 +413,97 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 }
 
-enum PairOwners<'a, T: KernelScalar> {
+/// The leaf arms of the coordinate `∂²K/∂θ_i ∂θ_j` paths.
+impl<T: KernelScalar> LeafRef<'_, T> {
+    fn hess_dist<M: crate::math::KernelMath>(
+        self,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        (i, j): (usize, usize),
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
+            Self::RbfArd(_)
+            | Self::Linear(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_) => Err(ard_needs_coords()),
+            Self::Matern(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
+            Self::Periodic(leaf) => leaf.hess_math::<M, _>(dist, d2_k, i, j, uplo),
+            Self::RationalQuadratic(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
+            Self::Constant(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
+            Self::White(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
+            Self::Custom(leaf) => leaf.hess(dist, d2_k, i, j, uplo),
+        }
+    }
+
+    fn hess_points<M: crate::math::KernelMath>(
+        self,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        (i, j): (usize, usize),
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        match self {
+            Self::Rbf(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
+            Self::Matern(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
+            Self::Periodic(leaf) => leaf.hess_from_coords::<M, _>(x, d2_k, i, j, uplo),
+            Self::RationalQuadratic(leaf) => leaf.hess_from_coords(x, d2_k, i, j, uplo),
+            Self::Custom(leaf) => leaf.hess_points(x, d2_k, i, j, uplo),
+            Self::RbfArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
+            Self::Linear(leaf) => leaf.hess(x, d2_k, i, j, uplo),
+            Self::MaternArd(leaf) => leaf.hess_math::<M, _>(x, d2_k, i, j, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.hess(x, d2_k, i, j, uplo),
+            Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
+            Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
+        }
+    }
+
+    /// From the raw `(Δx_d)²` cache for an ARD leaf; any other leaf from
+    /// coordinates.
+    fn hess_ard_cache<M: crate::math::KernelMath>(
+        self,
+        cache: ArdSqDiff<'_, T>,
+        x: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        let (i, j) = pair;
+        match self {
+            Self::RbfArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
+            Self::MaternArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.hess_from_sq_diff(cache, d2_k, i, j, uplo),
+            Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
+            Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
+            _ => self.hess_points::<M>(x, d2_k, pair, uplo),
+        }
+    }
+
+    /// In the leaf's own mode (see `apply_mixed`).
+    fn hess_mixed<M: crate::math::KernelMath>(
+        self,
+        views: MixedKernelViews<'_, T>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        if self.reads_dist() {
+            return match views.dist {
+                Some(dist) => self.hess_dist::<M>(dist, d2_k, pair, uplo),
+                None => self.hess_points::<M>(views.x, d2_k, pair, uplo),
+            };
+        }
+        match views.ard_cache.filter(|_| self.needs_ard_sq_diff()) {
+            Some(cache) => self.hess_ard_cache::<M>(cache, views.x, d2_k, pair, uplo),
+            None => self.hess_points::<M>(views.x, d2_k, pair, uplo),
+        }
+    }
+}
+
+enum PairOwners<'a, T: KernelScalar, S: Supply> {
     Same {
-        term: &'a CompiledKernel<T>,
+        term: &'a CompiledKernel<T, S>,
         local_i: usize,
         local_j: usize,
     },
@@ -467,11 +515,11 @@ enum PairOwners<'a, T: KernelScalar> {
     },
 }
 
-fn owners_for_pair<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+fn owners_for_pair<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     i: usize,
     j: usize,
-) -> Result<PairOwners<'_, T>, GprError> {
+) -> Result<PairOwners<'_, T, S>, GprError> {
     let (owner_i, local_i) = term_index_for_param(terms, i)?;
     let (owner_j, local_j) = term_index_for_param(terms, j)?;
     if owner_i == owner_j {
@@ -512,8 +560,8 @@ fn custom_hess_diag<T: KernelScalar>(
     Ok(())
 }
 
-fn product_hess_diag<M: crate::math::KernelMath, T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+fn product_hess_diag<M: crate::math::KernelMath, T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     x: MatRef<'_, T>,
     out: &mut [T],
     i: usize,
@@ -545,25 +593,25 @@ fn product_hess_diag<M: crate::math::KernelMath, T: KernelScalar>(
 
 /// `∂²/∂θ_i ∂θ_j` of a product: one term's Hessian, or two terms' gradients,
 /// times the other terms. The writers get `(term, out, …, scratch, nested)`.
-fn product_hess<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+fn product_hess<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     pair: (usize, usize),
     buffers: ProductBuffers<'_, '_, T>,
     apply: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         MatMut<'_, T>,
         &mut Nested<T>,
     ) -> Result<(), GprError>,
     mut hess: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         (usize, usize),
         MatMut<'_, T>,
         &mut Nested<T>,
     ) -> Result<(), GprError>,
     grad: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         usize,
         MatMut<'_, T>,
@@ -601,19 +649,19 @@ fn product_hess<T: KernelScalar>(
 }
 
 /// `∂K_a/∂θ_i · ∂K_b/∂θ_j · ∏_{k ∉ {a, b}} K_k` for owners `(a, i)` and `(b, j)`.
-fn product_cross_leaf<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
+fn product_cross_leaf<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
     (owner_i, local_i): (usize, usize),
     (owner_j, local_j): (usize, usize),
     buffers: ProductBuffers<'_, '_, T>,
     mut apply: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         MatMut<'_, T>,
         &mut Nested<T>,
     ) -> Result<(), GprError>,
     mut grad: impl FnMut(
-        &CompiledKernel<T>,
+        &CompiledKernel<T, S>,
         MatMut<'_, T>,
         usize,
         MatMut<'_, T>,

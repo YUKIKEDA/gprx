@@ -4,7 +4,8 @@ use super::assemble::unpack_q_into;
 use super::gradient::GradBuffers;
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
+use crate::kernel::{CompiledOf, ModelKernel};
+use crate::kernel::{GramInputs, KernelScalar, Triangle};
 use crate::linalg::{cholesky_lower_with_backup, llt_scratch};
 use crate::precision::GpScalar;
 use crate::sparse::KernelScratch;
@@ -17,11 +18,11 @@ use faer::Mat;
 /// factor of `K_mm` and `q` (swapped with the model's on commit), and the
 /// gradient's [`GradBuffers`]. Built once per fit, so a step allocates
 /// nothing after the first one (see [`GradBuffers`] for the one exception).
-pub(crate) struct AdamStep<S: KernelScalar> {
+pub(crate) struct AdamStep<S: KernelScalar, K: ModelKernel> {
     theta: Vec<f64>,
     theta_prev: Vec<f64>,
-    compiled_storage: CompiledKernel<S>,
-    pub(crate) compiled: CompiledKernel<f64>,
+    compiled_storage: CompiledOf<S, K>,
+    pub(crate) compiled: CompiledOf<f64, K>,
     z: Mat<S>,
     k_mm: Mat<S>,
     backup: Mat<S>,
@@ -34,11 +35,11 @@ pub(crate) struct AdamStep<S: KernelScalar> {
     pub(crate) grad: GradBuffers,
 }
 
-impl<S: KernelScalar> AdamStep<S> {
+impl<S: KernelScalar, K: ModelKernel> AdamStep<S, K> {
     /// # Errors
     ///
     /// Returns the error of casting the `Z × Z` squares to `S`.
-    pub(crate) fn new<P, K>(model: &FittedSvgp<P, K>) -> Result<Self, GprError>
+    pub(crate) fn new<P>(model: &FittedSvgp<P, K>) -> Result<Self, GprError>
     where
         P: GpScalar<Storage = S>,
     {
@@ -77,7 +78,7 @@ where
     pub(crate) fn set_params_step<M: crate::math::KernelMath>(
         &mut self,
         params: &[f64],
-        step: &mut AdamStep<P::Storage>,
+        step: &mut AdamStep<P::Storage, K>,
     ) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let core = &mut self.core;
@@ -93,7 +94,7 @@ where
         core.kernel.set_params_in_place(new_k, prev_k)?;
         let factored = (|| {
             step.compiled_storage.set_params_in_place(new_k, prev_k)?;
-            step.ks.gram::<M>(
+            step.ks.gram::<M, _>(
                 &step.compiled_storage,
                 GramInputs {
                     slots: crate::sparse::square_slots(step.zz.as_ref()),

@@ -4,6 +4,8 @@ use crate::data::{pack_points, validate_inducing, validate_training};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::GatheredRect;
 use crate::kernel::GramInputs;
+use crate::kernel::ModelKernel;
+use crate::kernel::Supply;
 use crate::kernel::{KernelScalar, KernelSpec, Triangle};
 use crate::linalg::{cholesky_lower_with_retries, llt_scratch, solve_lower};
 use crate::policy::JitterPolicy;
@@ -22,15 +24,15 @@ pub(crate) struct SvgpState<T: KernelScalar> {
     pub(crate) k_diag: Vec<T>,
 }
 
-pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P, K>(
-    core: SparseCore,
+pub(crate) fn assemble_fitted<M: crate::math::KernelMath, P, K: ModelKernel>(
+    core: SparseCore<K>,
     q: Option<(Vec<f64>, Mat<f64>)>,
 ) -> Result<FittedSvgp<P, K>, GprError>
 where
     P: ModelPrecision,
 {
-    let mut scratch = SparseScratch::<P::Storage>::default();
-    let state = assemble_svgp::<M, P::Storage>(
+    let mut scratch = SparseScratch::<P::Storage, _>::default();
+    let state = assemble_svgp::<M, P::Storage, _>(
         &core.kernel,
         core.jitter,
         &core.x_train,
@@ -56,8 +58,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     x: &[f64],
     n_rows: usize,
@@ -75,8 +77,8 @@ where
     if n_cols > 0 {
         validate_training(x, n_rows, n_cols, y)?;
     }
-    let k_mm = assemble_kmm::<M, T>(kernel, k_mm_jitter, z, n_inducing, n_cols, ks, dist)?;
-    let (a, k_diag) = assemble_data_terms::<M, T>(
+    let k_mm = assemble_kmm::<M, T, _>(kernel, k_mm_jitter, z, n_inducing, n_cols, ks, dist)?;
+    let (a, k_diag) = assemble_data_terms::<M, T, _>(
         kernel,
         x,
         n_rows,
@@ -102,8 +104,8 @@ where
 
 /// The lower factor `L_mm` of `K_mm = k(Z, Z)`, retried by `k_mm_jitter`. It
 /// does not depend on the training data.
-pub(crate) fn assemble_kmm<M: crate::math::KernelMath, T>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_kmm<M: crate::math::KernelMath, T, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     z: &[f64],
     n_inducing: usize,
@@ -123,7 +125,7 @@ where
     let mut z_cast = T::empty_cols();
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
-    ks.gram::<M>(
+    ks.gram::<M, _>(
         &compiled,
         GramInputs {
             slots: square_slots(zz.as_deref()),
@@ -145,8 +147,8 @@ where
 /// `A = L_mm⁻¹ K(Z, X)` (`m × n`) and `k(x_i, x_i)` for every training
 /// point: the part of the assembly that costs `O(n)`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_data_terms<M: crate::math::KernelMath, T>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_data_terms<M: crate::math::KernelMath, T, U: Supply>(
+    kernel: &KernelSpec<U>,
     x: &[f64],
     n_rows: usize,
     n_cols: usize,
@@ -169,10 +171,10 @@ where
     // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
     let zx = zx_at::<T>(dist)?;
     let zx = zx.as_deref().map(GatheredRect::table);
-    let mut a = ks.cross::<M>(&compiled, z_mat, x_mat, rect_slots(&zx))?;
+    let mut a = ks.cross::<M, _>(&compiled, z_mat, x_mat, rect_slots(&zx))?;
     solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); n_rows];
-    compiled.fill_diag_points(x_mat, &mut k_diag)?;
+    compiled.fill_diag_rows(x_mat, &mut k_diag)?;
     Ok((a, k_diag))
 }
 

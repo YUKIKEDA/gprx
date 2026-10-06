@@ -30,11 +30,11 @@ use super::factor::{
 ///
 /// See the example on [`Self::predict`].
 #[derive(Clone, Debug)]
-pub struct FittedSvgp<P: ModelPrecision = DoublePrecision, K = KernelSpec> {
-    pub(super) core: SparseCore,
+pub struct FittedSvgp<P: ModelPrecision = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) core: SparseCore<K>,
     pub(super) _kernel: PhantomData<K>,
     /// Kernel scratch kept between `&mut self` calls.
-    pub(super) scratch: SparseScratch<P::Storage>,
+    pub(super) scratch: SparseScratch<P::Storage, K::Supply>,
     /// Lower `L_mm` from `K_mm = L_mm L_mmᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
@@ -61,7 +61,7 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
-        predict_svgp_into::<P>(
+        predict_svgp_into::<P, _>(
             &self.core,
             &SvgpSystem::new(
                 &self.core,
@@ -89,7 +89,7 @@ where
         qd: &QueryDist,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        predict_svgp_covariance::<P>(
+        predict_svgp_covariance::<P, _>(
             &self.core,
             &SvgpSystem::new(
                 &self.core,
@@ -115,7 +115,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        predict_svgp_into::<P>(
+        predict_svgp_into::<P, _>(
             &self.core,
             &SvgpSystem::new(
                 &self.core,
@@ -172,7 +172,7 @@ where
     }
 
     /// The training data, settings, and fitted transforms.
-    pub(crate) fn core(&self) -> &SparseCore {
+    pub(crate) fn core(&self) -> &SparseCore<K> {
         &self.core
     }
 
@@ -259,7 +259,7 @@ where
         }
         let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
         let q = unpack_q(&params[n_theta..], self.core.m)?;
-        let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage>(
+        let state = with_kernel_exp!(self.core.math, M => assemble_svgp::<M, P::Storage, _>(
             &kernel,
             self.core.jitter,
             &self.core.x_train,
@@ -293,7 +293,7 @@ where
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let (kernel, likelihood) = self.core.stage_theta(&params[..n_theta])?;
         let (q_mean, q_l) = unpack_q(&params[n_theta..], self.core.m)?;
-        let k_mm_l = with_kernel_exp!(self.core.math, M => assemble_kmm::<M, P::Storage>(
+        let k_mm_l = with_kernel_exp!(self.core.math, M => assemble_kmm::<M, P::Storage, _>(
             &kernel,
             self.core.jitter,
             &self.core.z_train,
@@ -313,7 +313,7 @@ where
     /// `A` and `k_diag` for every training point at the stored `θ`, `Z`, and
     /// `K_mm` factor (after [`Self::set_params_light`] steps).
     pub(crate) fn rebuild_data_terms(&mut self) -> Result<(), GprError> {
-        let (a, k_diag) = with_kernel_exp!(self.core.math, M => assemble_data_terms::<M, P::Storage>(
+        let (a, k_diag) = with_kernel_exp!(self.core.math, M => assemble_data_terms::<M, P::Storage, _>(
             &self.core.kernel,
             &self.core.x_train,
             self.core.n,
@@ -695,7 +695,7 @@ impl<P: GpScalar, K: ModelKernel> FittedSvgp<P, K> {
     ///
     /// Same as [`crate::Svgp<crate::Fixed>::factor`].
     pub(crate) fn from_persisted(
-        core: SparseCore,
+        core: SparseCore<K>,
         q_mean: Vec<f64>,
         q_l: Mat<f64>,
     ) -> Result<Self, GprError> {

@@ -142,8 +142,8 @@ fn refine_fresh<R: ResidualFormula>(
 ) -> (Vec<f64>, Vec<f64>) {
     let fresh = fresh_factor(ell, noise, x, y);
     let sys = fresh.system(x, y, noise);
-    let alpha = refine_alpha::<crate::math::Accurate, R>(&sys).expect("refine");
-    let truth = f64_alpha::<crate::math::Accurate>(&fresh.k64, &sys, noise).expect("f64");
+    let alpha = refine_alpha::<crate::math::Accurate, R, _>(&sys).expect("refine");
+    let truth = f64_alpha::<crate::math::Accurate, _>(&fresh.k64, &sys, noise).expect("f64");
     (alpha, truth)
 }
 
@@ -255,10 +255,10 @@ fn time_forrester_1024() {
     let fresh = fresh_factor(1.0, 0.1, x.as_ref(), &y);
     let sys = fresh.system(x.as_ref(), &y, 0.1);
     median("promote", &|| {
-        refine_alpha::<crate::math::Accurate, PromoteStorage>(&sys).expect("promote");
+        refine_alpha::<crate::math::Accurate, PromoteStorage, _>(&sys).expect("promote");
     });
     median("reevaluate", &|| {
-        refine_alpha::<crate::math::Accurate, ReevaluateKernel>(&sys).expect("reevaluate");
+        refine_alpha::<crate::math::Accurate, ReevaluateKernel, _>(&sys).expect("reevaluate");
     });
 }
 

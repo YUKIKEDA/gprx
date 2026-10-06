@@ -38,6 +38,7 @@ mod sources;
 mod spec;
 mod supply;
 mod term;
+mod tree;
 mod white;
 
 pub use compiled::CompiledKernel;
@@ -72,10 +73,11 @@ pub use supply::{
     ScalarDistanceLeaf, WithPoints,
 };
 pub(crate) use supply::{
-    ArdLeafSpec, ModelKernelParts, ScalarLeafSpec, SlotId, SlotShape, SourceData, SuppliedLeafSpec,
-    SuppliedSpec, reads_points, spec_slots,
+    ArdLeafSpec, CompiledOf, ModelKernelParts, ScalarLeafSpec, SlotId, SlotShape, SourceData,
+    SpecOf, SuppliedLeafSpec, SuppliedSpec, reads_points, spec_slots,
 };
 pub use term::{CustomKernel, KernelTerm};
+pub use tree::{NoSupply, Supply};
 pub use white::WhiteKernel;
 
 use crate::error::GprError;

@@ -8,6 +8,7 @@
 //! `k(x_i, x_i) − ‖a_i‖² + σn² h / (1 − h)`. One triangular solve
 //! `L_B⁻¹ A` makes the whole pass `O(n m²)`.
 
+use crate::kernel::ModelKernel;
 use faer::{Mat, MatRef};
 
 use crate::data::pack_points;
@@ -32,8 +33,8 @@ use super::assemble_vfe;
 ///
 /// Returns [`GprError::NonPositiveDefiniteMatrix`] when `1 − h` is not
 /// positive and finite for some point, or the error of the `f64` assembly.
-pub(crate) fn vfe_loo<P: ModelPrecision>(
-    core: &SparseCore,
+pub(crate) fn vfe_loo<P: ModelPrecision, K: ModelKernel>(
+    core: &SparseCore<K>,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
     w: &[P::Storage],
@@ -41,7 +42,7 @@ pub(crate) fn vfe_loo<P: ModelPrecision>(
 ) -> Result<Prediction<P::Refine>, GprError> {
     let (n, m, d) = (core.n, core.m, core.d);
     let (a64, b_l64, w64) = if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let state = with_kernel_exp!(core.math, M => assemble_vfe::<M, f64>(
+        let state = with_kernel_exp!(core.math, M => assemble_vfe::<M, f64, _>(
             &core.kernel,
             core.jitter,
             core.likelihood,
@@ -69,7 +70,7 @@ pub(crate) fn vfe_loo<P: ModelPrecision>(
     let mut k_diag = vec![0.0; n];
     core.kernel
         .compile()
-        .fill_diag_points(x.as_ref(), &mut k_diag)?;
+        .fill_diag_rows(x.as_ref(), &mut k_diag)?;
     let noise = core.likelihood.noise_variance();
     let zero = P::Refine::from_f64(0.0);
     let mut out = Prediction {

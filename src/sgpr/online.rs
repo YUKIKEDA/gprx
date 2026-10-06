@@ -1,5 +1,6 @@
 //! Online collapsed variational SGPR.
 
+use crate::kernel::{KernelSpec, NoSupply};
 use crate::sparse::QueryDist;
 use std::marker::PhantomData;
 
@@ -129,7 +130,7 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
     /// copies and restores it as one value.
     pub(super) state: OnlineState<P>,
     /// Kernel scratch kept between `&mut self` calls.
-    pub(super) scratch: SparseScratch<P::Storage>,
+    pub(super) scratch: SparseScratch<P::Storage, NoSupply>,
     optimizer: O,
 }
 
@@ -137,7 +138,7 @@ pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
 /// here is undone by [`OnlineSgpr::atomically`] with the rest.
 #[derive(Clone, Debug)]
 pub(super) struct OnlineState<P: ModelPrecision> {
-    pub(super) core: SparseCore,
+    pub(super) core: SparseCore<KernelSpec>,
     k_mm_l: Mat<P::Storage>,
     a: Mat<P::Storage>,
     b_l: Mat<P::Storage>,
@@ -270,7 +271,7 @@ where
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
             self.state.predict_w =
-                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64>(
+                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64, _>(
                     &self.state.core.kernel,
                     self.state.core.jitter,
                     self.state.core.likelihood,
@@ -290,7 +291,7 @@ where
                 .collect();
             return Ok(());
         }
-        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P>(
+        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P, _>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.a.as_ref(),
@@ -473,7 +474,7 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, _>(
             &self.state.core,
             &VfeSystem::new(
                 &self.state.core,
@@ -554,7 +555,7 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        predict_vfe_covariance::<P>(
+        predict_vfe_covariance::<P, _>(
             &self.state.core,
             &VfeSystem::new(
                 &self.state.core,
@@ -670,7 +671,7 @@ where
         &self,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_loo::<P>(
+        vfe_loo::<P, _>(
             &self.state.core,
             self.state.a.as_ref(),
             self.state.b_l.as_ref(),
@@ -718,7 +719,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, _>(
             &self.state.core,
             &VfeSystem::new(
                 &self.state.core,
@@ -951,7 +952,7 @@ where
         x_obs_next: Vec<f64>,
         y_obs_next: Vec<f64>,
     ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage>(
+        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage, _>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.core.likelihood,
@@ -1081,7 +1082,7 @@ where
         z_obs: Vec<f64>,
         m: usize,
     ) -> Result<(), GprError> {
-        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage>(
+        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, _>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.core.likelihood,
@@ -1177,7 +1178,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn core(&self) -> &SparseCore {
+    pub(crate) fn core(&self) -> &SparseCore<KernelSpec> {
         &self.state.core
     }
 

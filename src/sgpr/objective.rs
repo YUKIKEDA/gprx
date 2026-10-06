@@ -1,6 +1,7 @@
 //! [`SgprObjective`]: the negative VFE bound as an optimizer objective.
 
 use crate::error::GprError;
+use crate::kernel::ModelKernel;
 use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 
@@ -16,12 +17,12 @@ pub struct SgprObjective<
     O,
     I = crate::FixedInducing,
     P: crate::precision::GpScalar = crate::precision::DoublePrecision,
-    K = crate::kernel::KernelSpec,
+    K: ModelKernel = crate::kernel::KernelSpec,
 > {
     model: &'a mut FittedSgpr<O, I, P, K>,
 }
 
-impl<'a, O, I, P, K> SgprObjective<'a, O, I, P, K>
+impl<'a, O, I, P, K: ModelKernel> SgprObjective<'a, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {

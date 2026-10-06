@@ -8,8 +8,8 @@ use crate::kernel::compiled::weighted::{DiagAccum, WeightedWalk};
 use crate::kernel::dist::ArdSqDiffBuf;
 use crate::kernel::{
     ArdDistance, CompiledKernel, ConstantKernel, DistanceKernel, KernelSpec, MaternKernel,
-    MaternNu, RationalQuadraticArdKernel, RbfArdKernel, RbfKernel, ScalarDistance, Triangle,
-    WithPoints,
+    MaternNu, RationalQuadraticArdKernel, RbfArdKernel, RbfKernel, ScalarDistance, SuppliedSpec,
+    Triangle, WithPoints,
 };
 use crate::math::Accurate;
 use crate::test_check::assert_close;
@@ -131,7 +131,7 @@ impl Problem {
         crate::kernel::DistanceSlot::Ard(self.bands).id()
     }
 
-    fn gram(&self, compiled: &CompiledKernel<f64>) -> Mat<f64> {
+    fn gram(&self, compiled: &CompiledKernel<f64, SuppliedSpec>) -> Mat<f64> {
         let table = self.square_table();
         let inputs = GramInputs {
             slots: Some(&table),
@@ -151,7 +151,7 @@ impl Problem {
         out
     }
 
-    fn cross(&self, compiled: &CompiledKernel<f64>) -> Mat<f64> {
+    fn cross(&self, compiled: &CompiledKernel<f64, SuppliedSpec>) -> Mat<f64> {
         let table = self.rect_table();
         let mut out = Mat::zeros(N, M);
         let mut scratch = Mat::zeros(N, M);
@@ -214,7 +214,10 @@ fn gram_and_cross_match_the_coordinate_leaves() {
     );
 }
 
-fn with_theta(spec: &DistanceKernel<WithPoints>, theta: &[f64]) -> CompiledKernel<f64> {
+fn with_theta(
+    spec: &DistanceKernel<WithPoints>,
+    theta: &[f64],
+) -> CompiledKernel<f64, SuppliedSpec> {
     let mut spec = spec.clone();
     spec.set_params(theta).expect("theta");
     spec.spec().compile()
@@ -240,7 +243,7 @@ fn gradients_and_hessians_match_finite_differences() {
         dist: None,
         slots: Some(&rect),
     };
-    let grad_at = |c: &CompiledKernel<f64>, k: usize| {
+    let grad_at = |c: &CompiledKernel<f64, SuppliedSpec>, k: usize| {
         let mut d_k = Mat::zeros(N, N);
         let mut scratch = Mat::zeros(N, N);
         c.grad_gram::<Accurate>(
@@ -254,7 +257,7 @@ fn gradients_and_hessians_match_finite_differences() {
         .expect("grad");
         d_k
     };
-    let grad_cross_at = |c: &CompiledKernel<f64>, k: usize| {
+    let grad_cross_at = |c: &CompiledKernel<f64, SuppliedSpec>, k: usize| {
         let mut d_k = Mat::zeros(N, M);
         let mut scratch = Mat::zeros(N, M);
         c.grad_cross_views::<Accurate>(views, d_k.as_mut(), k, scratch.as_mut(), &mut [])
@@ -587,6 +590,6 @@ fn a_coordinate_tree_needs_columns_and_a_distance_tree_does_not() {
     let dist = (image.kernel(RbfKernel::new(1.0).expect("ell")) * constant + white)
         .spec()
         .compile();
-    dist.fill_diag_points(x.as_ref(), &mut diag).expect("diag");
+    dist.fill_diag_rows(x.as_ref(), &mut diag).expect("diag");
     assert_close(diag[0], 1.5 + 0.2, 1e-12);
 }

@@ -23,7 +23,7 @@ impl<P: GpScalar, K: ModelKernel> Svgp<Fixed, P, K> {
     #[allow(clippy::result_large_err)]
     fn assemble(
         self,
-        core: Result<SparseCore, GprError>,
+        core: Result<SparseCore<K>, GprError>,
     ) -> Result<FittedSvgp<P, K>, (Self, GprError)> {
         let core = match core {
             Ok(core) => core,
@@ -41,7 +41,7 @@ impl<P: GpScalar, K: ModelKernel> Svgp<Adam, P, K> {
     #[allow(clippy::result_large_err)]
     fn train(
         self,
-        core: Result<SparseCore, GprError>,
+        core: Result<SparseCore<K>, GprError>,
     ) -> Result<FittedSvgp<P, K>, (Self, GprError)> {
         let core = match core {
             Ok(core) => core,

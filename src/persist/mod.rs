@@ -14,7 +14,7 @@ use std::path::Path;
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::gpr::{FittedGpr, OnlineGpr, Policies};
-use crate::kernel::KernelSpec;
+use crate::kernel::{KernelSpec, Supply};
 use crate::optimizer::Fixed;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::{GaussianLikelihood, PredictOptions, Prediction};
@@ -315,9 +315,11 @@ fn widen<T: crate::kernel::KernelScalar>(pred: Prediction<T>) -> Prediction<f64>
     }
 }
 
-pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precision::DoublePrecision>
-{
-    pub kernel: KernelSpec,
+pub(crate) struct PersistedModel<
+    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+    K: crate::kernel::ModelKernel = KernelSpec,
+> {
+    pub kernel: crate::kernel::SpecOf<K>,
     pub likelihood: GaussianLikelihood,
     pub x_unfitted: Box<dyn UnfittedTransform>,
     pub y_unfitted: Box<dyn UnfittedTarget>,
@@ -375,13 +377,13 @@ where
 
 /// What an Exact save writes, read from either Exact model. The two models
 /// differ only in the factor kind, the point ids, and where the factor lives.
-struct ExactSave<'a> {
+struct ExactSave<'a, S: Supply> {
     n: usize,
     d: usize,
     kind: PersistKind,
     factor_kind: FactorKind,
     policies: Policies,
-    kernel: &'a KernelSpec,
+    kernel: &'a KernelSpec<S>,
     likelihood: &'a GaussianLikelihood,
     factor_jitter: f64,
     x_unfitted: &'a dyn UnfittedTransform,
@@ -397,7 +399,7 @@ struct ExactSave<'a> {
 }
 
 /// Writes the tensors, then `config.json`, of an Exact model.
-fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
+fn save_exact<S: Supply>(dir: &Path, save: ExactSave<'_, S>) -> Result<(), GprError> {
     std::fs::create_dir_all(dir)
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {dir:?}: {err}")))?;
     let (point_ids, next_point_id) = match save.point_ids {
@@ -678,7 +680,7 @@ where
 }
 
 /// The Exact model of a directory.
-pub(crate) enum ExactModel<P: crate::precision::GpScalar, K> {
+pub(crate) enum ExactModel<P: crate::precision::GpScalar, K: crate::kernel::ModelKernel> {
     Fitted(Box<FittedGpr<Fixed, P, K>>),
     Online(Box<OnlineGpr<Fixed, P, K>>),
 }
@@ -693,22 +695,19 @@ pub(crate) struct DistanceLoad {
 
 /// Decodes the saved kernel: a coordinate kernel when `distance` is `None`,
 /// else a distance kernel of the marker it names. Returns its slots.
-fn decode_kernel(
+fn decode_kernel<S: Supply>(
     json: &KernelJson,
     registry: &PersistRegistry,
     d: usize,
     distance: Option<DistanceLoad>,
-) -> Result<(KernelSpec, Vec<crate::kernel::DistanceSlot>), GprError> {
-    match distance {
-        None => Ok((json.clone().decode_points(registry)?, Vec::new())),
-        Some(load) => {
-            let mut slots = kernel::DecodedSlots::default();
-            let spec = json.clone().decode(registry, &mut slots)?;
-            let slots = crate::kernel::spec_slots(&spec);
-            distance::check_model(&slots, d, load.points, load.coordinate_loader)?;
-            Ok((spec, slots))
-        }
+) -> Result<(KernelSpec<S>, Vec<crate::kernel::DistanceSlot>), GprError> {
+    let mut slots = kernel::DecodedSlots::default();
+    let spec = json.clone().decode::<S>(registry, &mut slots)?;
+    let slots = crate::kernel::spec_slots(&spec);
+    if let Some(load) = distance {
+        distance::check_model(&slots, d, load.points, load.coordinate_loader)?;
     }
+    Ok((spec, slots))
 }
 
 /// Reads an Exact directory as a model of kernel type `K`.

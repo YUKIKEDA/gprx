@@ -14,7 +14,7 @@ use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, SpecOf, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
@@ -65,8 +65,8 @@ use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fi
 /// # Ok(())
 /// # }
 /// ```
-pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision, K = KernelSpec> {
-    pub(super) core: GprCore<P>,
+pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) core: GprCore<P, K>,
     pub(super) optimizer: O,
     pub(super) store: LltStore<P>,
     pub(super) _kernel: PhantomData<K>,
@@ -76,6 +76,7 @@ impl<O, P, K> Clone for FittedGpr<O, P, K>
 where
     O: Clone,
     P: GpScalar,
+    K: ModelKernel,
 {
     fn clone(&self) -> Self {
         Self {
@@ -126,6 +127,7 @@ impl<O, P, K> fmt::Debug for FittedGpr<O, P, K>
 where
     O: fmt::Debug,
     P: GpScalar,
+    K: ModelKernel,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FittedGpr")
@@ -164,7 +166,8 @@ where
             y,
             sources,
         } = input;
-        let sources = match bind_training::<P::Storage, P::Sources>(&gpr.kernel, sources, n_rows) {
+        let sources = match bind_training::<P::Storage, P::Sources, _>(&gpr.kernel, sources, n_rows)
+        {
             Ok(bound) => bound,
             Err(err) => return Err((gpr, err)),
         };
@@ -191,7 +194,7 @@ where
             return Err((gpr, err));
         }
         let compiled = gpr.kernel.compile_as::<P::Storage>();
-        let workspace = match fit_buffers::<P>(n_rows, gpr.policies, &compiled) {
+        let workspace = match fit_buffers::<P, _>(n_rows, gpr.policies, &compiled) {
             Ok(ws) => ws,
             Err(err) => return Err((gpr, err)),
         };
@@ -442,7 +445,7 @@ where
     }
 
     /// The kernel tree (with its distance leaves).
-    pub(crate) fn kernel_spec(&self) -> &KernelSpec {
+    pub(crate) fn kernel_spec(&self) -> &SpecOf<K> {
         &self.core.kernel
     }
 
@@ -486,7 +489,7 @@ where
     }
 
     /// Lends the core and the LLT buffers to the fit code.
-    pub(crate) fn fit_view(&mut self) -> ExactFit<'_, P> {
+    pub(crate) fn fit_view(&mut self) -> ExactFit<'_, P, K> {
         ExactFit {
             core: &mut self.core,
             store: &mut self.store,
@@ -609,7 +612,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn objective(&mut self) -> GprObjective<'_, P> {
+    pub(crate) fn objective(&mut self) -> GprObjective<'_, P, K> {
         GprObjective::new(self.fit_view())
     }
 
@@ -1038,7 +1041,7 @@ impl<O, P, K> FittedGpr<O, P, K>
 where
     P: GpScalar,
     K: ModelKernel,
-    O: for<'a> Optimizer<GprObjective<'a, P>>,
+    O: for<'a> Optimizer<GprObjective<'a, P, K>>,
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
     ///
@@ -1085,7 +1088,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
 }
 
 impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
-    pub(crate) fn from_persisted(mut parts: PersistedModel<P>) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(mut parts: PersistedModel<P, K>) -> Result<Self, GprError> {
         let n = parts.y_obs.len();
         if n == 0 {
             return Err(GprError::EmptyInput);
@@ -1109,13 +1112,13 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let sources = bind_training::<P::Storage, P::Sources>(
+        let sources = bind_training::<P::Storage, P::Sources, _>(
             &parts.kernel,
             std::mem::take(&mut parts.sources),
             n,
         )?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
-        let mut workspace = fit_buffers::<P>(n, parts.policies, &compiled)?;
+        let mut workspace = fit_buffers::<P, _>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
         if let Some(l) = parts.owned_l.take() {
             let mut dest = workspace.core_mut().k_matrix.as_mut();

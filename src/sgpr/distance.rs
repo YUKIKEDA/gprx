@@ -26,7 +26,7 @@ impl<O, P: GpScalar, K: ModelKernel> Sgpr<O, FixedInducing, P, K> {
     #[allow(clippy::result_large_err)]
     fn search(
         self,
-        core: Result<SparseCore, GprError>,
+        core: Result<SparseCore<K>, GprError>,
     ) -> Result<FittedSgpr<O, FixedInducing, P, K>, (Self, GprError)>
     where
         O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P, K>>,
@@ -53,7 +53,7 @@ impl<P: GpScalar, K: ModelKernel> Sgpr<Fixed, FixedInducing, P, K> {
     #[allow(clippy::result_large_err)]
     fn assemble(
         self,
-        core: Result<SparseCore, GprError>,
+        core: Result<SparseCore<K>, GprError>,
     ) -> Result<FittedSgpr<Fixed, FixedInducing, P, K>, (Self, GprError)> {
         let core = match core {
             Ok(core) => core,

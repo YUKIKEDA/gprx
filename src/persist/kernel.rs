@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::kernel::ArdLengthscales;
+use crate::kernel::Supply;
 use crate::kernel::{
     ArdLeafSpec, ConstantKernel, CustomKernel, DistanceSlot, KernelSpec, LinearKernel,
     MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel,
@@ -147,12 +148,15 @@ impl KernelJson {
         }
     }
 
-    pub(super) fn encode(spec: &KernelSpec) -> Result<Self, GprError> {
+    pub(super) fn encode<S: Supply>(spec: &KernelSpec<S>) -> Result<Self, GprError> {
         let slots = spec_slots(spec);
         Self::encode_in(spec, &slots)
     }
 
-    fn encode_in(spec: &KernelSpec, slots: &[DistanceSlot]) -> Result<Self, GprError> {
+    fn encode_in<S: Supply>(
+        spec: &KernelSpec<S>,
+        slots: &[DistanceSlot],
+    ) -> Result<Self, GprError> {
         match spec {
             KernelSpec::Rbf(k) => Ok(Self::Rbf {
                 lengthscale: BoundedJson::from_param(bounded_from_value(
@@ -211,6 +215,7 @@ impl KernelJson {
                 right: Box::new(Self::encode_in(right, slots)?),
             }),
             KernelSpec::Supplied(leaf) => {
+                let leaf = S::spec(leaf);
                 let slot = slots
                     .iter()
                     .position(|s| s.id() == leaf.slot)
@@ -229,78 +234,66 @@ impl KernelJson {
         }
     }
 
-    /// Decodes the kernel of a coordinate model. A saved distance kernel is
-    /// another model and is not read as this one.
-    pub(super) fn decode_points(self, registry: &PersistRegistry) -> Result<KernelSpec, GprError> {
-        let mut slots = DecodedSlots::default();
-        let spec = self.decode(registry, &mut slots)?;
-        if slots.slots.is_empty() {
-            Ok(spec)
-        } else {
-            Err(persist_err(
-                PersistErrorKind::WrongModel,
-                "the saved model reads supplied distances; load it as a distance model",
-            ))
-        }
-    }
-
-    /// Decodes a kernel; distance leaves get fresh slots in `slots`.
-    pub(super) fn decode(
+    /// Decodes a kernel into a tree of kind `S`; distance leaves get fresh
+    /// slots in `slots`. A saved distance leaf in a coordinate tree is
+    /// another model ([`PersistErrorKind::WrongModel`]).
+    pub(super) fn decode<S: Supply>(
         self,
         registry: &PersistRegistry,
         slots: &mut DecodedSlots,
-    ) -> Result<KernelSpec, GprError> {
+    ) -> Result<KernelSpec<S>, GprError> {
         match self {
             Self::Rbf { lengthscale } => {
                 let k = RbfKernel::new(lengthscale.value)?.with_bounds(lengthscale.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
-            Self::RbfArd { lengthscales } => Ok(KernelSpec::from(RbfArdKernel::from_ard(
-                decode_ard(lengthscales)?,
-            ))),
+            Self::RbfArd { lengthscales } => {
+                Ok(leaf(RbfArdKernel::from_ard(decode_ard(lengthscales)?)))
+            }
             Self::Matern { lengthscale, nu } => {
                 let k = MaternKernel::new(lengthscale.value, nu.decode())?
                     .with_bounds(lengthscale.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
-            Self::MaternArd { lengthscales, nu } => Ok(KernelSpec::from(
-                MaternArdKernel::from_ard(decode_ard(lengthscales)?, nu.decode()),
-            )),
+            Self::MaternArd { lengthscales, nu } => Ok(leaf(MaternArdKernel::from_ard(
+                decode_ard(lengthscales)?,
+                nu.decode(),
+            ))),
             Self::Periodic {
                 lengthscale,
                 period,
             } => {
                 let k = PeriodicKernel::new(lengthscale.value, period.value)?
                     .with_bounds(lengthscale.interval()?, period.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
             Self::RationalQuadratic { lengthscale, alpha } => {
                 let k = RationalQuadraticKernel::new(lengthscale.value, alpha.value)?
                     .with_bounds(lengthscale.interval()?, alpha.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
             Self::RationalQuadraticArd {
                 lengthscales,
                 alpha,
-            } => Ok(KernelSpec::from(RationalQuadraticArdKernel::from_ard(
+            } => Ok(leaf(RationalQuadraticArdKernel::from_ard(
                 decode_ard(lengthscales)?,
                 BoundedParam::new(alpha.value, alpha.interval()?)?,
             ))),
             Self::Constant { constant } => {
                 let k = ConstantKernel::new(constant.value)?.with_bounds(constant.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
             Self::Linear { variance } => {
                 let k = LinearKernel::new(variance.value)?.with_bounds(variance.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
             Self::White { variance } => {
                 let k = WhiteKernel::new(variance.value)?.with_bounds(variance.interval()?)?;
-                Ok(KernelSpec::from(k))
+                Ok(leaf(k))
             }
-            Self::Custom { persist_id, state } => Ok(KernelSpec::from(
-                registry.restore_kernel(&persist_id, &state)?,
-            )),
+            Self::Custom { persist_id, state } => {
+                Ok(leaf(registry.restore_kernel(&persist_id, &state)?))
+            }
             Self::Sum { left, right } => Ok(KernelSpec::Sum(
                 Box::new(left.decode(registry, slots)?),
                 Box::new(right.decode(registry, slots)?),
@@ -316,10 +309,22 @@ impl KernelJson {
                 };
                 let id = slots.get(slot, shape)?;
                 let leaf = typed_leaf(leaf.decode(registry, slots)?, shape)?;
-                Ok(KernelSpec::Supplied(SuppliedSpec { slot: id, leaf }))
+                S::from_spec(SuppliedSpec { slot: id, leaf })
+                    .map(KernelSpec::Supplied)
+                    .ok_or_else(|| {
+                        persist_err(
+                            PersistErrorKind::WrongModel,
+                            "the saved model reads supplied distances; load it as a distance model",
+                        )
+                    })
             }
         }
     }
+}
+
+/// A coordinate leaf in a tree of kind `S`.
+fn leaf<S: Supply>(leaf: impl Into<KernelSpec>) -> KernelSpec<S> {
+    leaf.into().widen()
 }
 
 /// A saved distance leaf as the leaf a slot of `shape` takes, or an error

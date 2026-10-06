@@ -211,7 +211,7 @@ Leaves are dispatched statically: every operation on `KernelSpec` and `CompiledK
 
 1. `kernel/<leaf>.rs`: the parameters (`θ` and their `Interval`s), and the value, `∂K/∂θ`, and `∂²K/∂θ∂θ` from distances or coordinates, square and rectangular, and the diagonal. The coordinate derivatives (`grad_wrt_coord_dim` and the mixed Hessians) if `FreeInducing` should move it; otherwise it returns `CoordGradientUnsupported`.
 2. `kernel/spec.rs`: the `KernelSpec` variant, its `From`, and the arms the compiler asks for.
-3. `kernel/compiled/`: the `CompiledKernel` variant and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf.
+3. `kernel/compiled/`: the `CompiledKernel` variant, its `LeafRef` variant (`term`), and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf. The leaf arms of the coordinate paths are methods of `LeafRef`, shared by a coordinate tree and the per-leaf mixed path.
 4. `persist/kernel.rs`: its JSON tag; a saved file from an older version must still read (persist-format.md).
 5. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load.
 6. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.

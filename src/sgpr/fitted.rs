@@ -45,12 +45,12 @@ pub struct FittedSgpr<
     O = Lbfgs,
     I = FixedInducing,
     P: ModelPrecision = DoublePrecision,
-    K = KernelSpec,
+    K: ModelKernel = KernelSpec,
 > {
-    pub(super) core: SparseCore,
+    pub(super) core: SparseCore<K>,
     pub(super) _kernel: PhantomData<K>,
     /// Kernel scratch kept between `&mut self` calls.
-    pub(super) scratch: SparseScratch<P::Storage>,
+    pub(super) scratch: SparseScratch<P::Storage, K::Supply>,
     pub(super) optimizer: O,
     pub(super) inducing: PhantomData<I>,
     /// Lower `L` from `K_mm = L Lᵀ`.
@@ -84,7 +84,7 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, _>(
             &self.core,
             &VfeSystem::new(
                 &self.core,
@@ -112,7 +112,7 @@ where
         qd: &QueryDist,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        predict_vfe_covariance::<P>(
+        predict_vfe_covariance::<P, _>(
             &self.core,
             &VfeSystem::new(
                 &self.core,
@@ -138,7 +138,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, _>(
             &self.core,
             &VfeSystem::new(
                 &self.core,
@@ -244,7 +244,7 @@ where
         } else {
             self.core.z_obs.clone()
         };
-        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _>(
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _, _>(
             &kernel,
             self.core.jitter,
             likelihood,
@@ -430,7 +430,7 @@ where
     }
 
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
-        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
+        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P, _>(
             &self.core.kernel,
             self.core.jitter,
             self.a.as_ref(),
@@ -465,7 +465,7 @@ where
     }
 
     /// The training data, settings, and fitted transforms.
-    pub(crate) fn core(&self) -> &SparseCore {
+    pub(crate) fn core(&self) -> &SparseCore<K> {
         &self.core
     }
 
@@ -625,7 +625,7 @@ where
         &self,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_loo::<P>(
+        vfe_loo::<P, _>(
             &self.core,
             self.a.as_ref(),
             self.b_l.as_ref(),
@@ -953,7 +953,7 @@ impl<P: crate::precision::GpScalar, K: ModelKernel> FittedSgpr<Fixed, FixedInduc
     /// # Errors
     ///
     /// Same as [`Sgpr<Fixed>::factor`].
-    pub(crate) fn from_persisted(core: SparseCore) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(core: SparseCore<K>) -> Result<Self, GprError> {
         with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<Fixed, FixedInducing, M, P, K>(
             core, Fixed
         ))

@@ -10,8 +10,8 @@ use faer::{Mat, MatMut, MatRef};
 use super::ResidualFormula;
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, GramInputs, KernelScalar, KernelSpec, RectSlots, ScalarOps, SquareSlots,
-    TrainSources, Triangle,
+    CompiledKernel, GramInputs, KernelScalar, KernelSpec, NoSupply, RectSlots, ScalarOps,
+    SquareSlots, Supply, TrainSources, Triangle,
 };
 use crate::linalg::{cholesky_lower_owned, inf_norm, symmetrize_lower};
 
@@ -118,9 +118,9 @@ impl<T: KernelScalar> StoredFactor<'_, T> {
 /// The training system `A + (σn² + j) I` that the stored factor solves.
 ///
 /// `j` is the jitter the last factorization added (`0` without a retry).
-pub struct TrainSystem<'a, T: KernelScalar> {
-    pub kernel: &'a KernelSpec,
-    pub compiled: &'a CompiledKernel<T>,
+pub struct TrainSystem<'a, T: KernelScalar, S: Supply = NoSupply> {
+    pub kernel: &'a KernelSpec<S>,
+    pub compiled: &'a CompiledKernel<T, S>,
     /// Transformed training inputs (`n × d`).
     pub x: MatRef<'a, f64>,
     /// Training squared distances of a distance model (empty otherwise).
@@ -147,24 +147,26 @@ pub struct TrainSystem<'a, T: KernelScalar> {
 /// stored `f32` matrix and checks a converged `α` once against the `f64`
 /// system; [`ReevaluateKernel`](super::ReevaluateKernel) forms it from a fresh
 /// `f64` kernel. The fallback is the `f64` Cholesky solution of the same system.
-pub(crate) struct ExactSystem<'s, 'a, M, R> {
-    sys: &'s TrainSystem<'a, f32>,
-    kernel_f64: CompiledKernel<f64>,
+pub(crate) struct ExactSystem<'s, 'a, M, R, S: Supply> {
+    sys: &'s TrainSystem<'a, f32, S>,
+    kernel_f64: CompiledKernel<f64, S>,
     saved: Mat<f32>,
     diag: f64,
     _marker: core::marker::PhantomData<(M, R)>,
 }
 
-impl<'s, 'a, M: crate::math::KernelMath, R: ResidualFormula> ExactSystem<'s, 'a, M, R> {
+impl<'s, 'a, M: crate::math::KernelMath, R: ResidualFormula, S: Supply>
+    ExactSystem<'s, 'a, M, R, S>
+{
     /// Builds the system. [`PromoteStorage`](super::PromoteStorage) rebuilds
     /// the `f32` matrix once here.
-    pub(crate) fn new(sys: &'s TrainSystem<'a, f32>) -> Result<Self, GprError> {
+    pub(crate) fn new(sys: &'s TrainSystem<'a, f32, S>) -> Result<Self, GprError> {
         let n = sys.x.nrows();
         if n == 0 || sys.y.len() != n || sys.factor_alpha.len() != n {
             return Err(GprError::EmptyInput);
         }
         let saved = if R::READS_STORAGE {
-            storage_system::<M>(sys)?
+            storage_system::<M, _>(sys)?
         } else {
             Mat::<f32>::zeros(0, 0)
         };
@@ -187,7 +189,9 @@ impl<'s, 'a, M: crate::math::KernelMath, R: ResidualFormula> ExactSystem<'s, 'a,
     }
 }
 
-impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSystem<'_, '_, M, R> {
+impl<M: crate::math::KernelMath, R: ResidualFormula, S: Supply> RefineSystem
+    for ExactSystem<'_, '_, M, R, S>
+{
     fn rhs(&self) -> &[f64] {
         self.sys.y
     }
@@ -196,7 +200,7 @@ impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSyste
         if R::READS_STORAGE {
             Ok(row_sum_matvec(self.saved.as_ref(), w, self.sys.y, r))
         } else {
-            fresh_residual::<M>(&self.kernel_f64, self.sys, self.diag, w, r)
+            fresh_residual::<M, _>(&self.kernel_f64, self.sys, self.diag, w, r)
         }
     }
 
@@ -210,20 +214,22 @@ impl<M: crate::math::KernelMath, R: ResidualFormula> RefineSystem for ExactSyste
 
     fn accept(&self, w: &[f64], tol: f64) -> Result<bool, GprError> {
         if R::READS_STORAGE {
-            meets_f64_system::<M>(&self.kernel_f64, self.sys, self.diag, w, tol)
+            meets_f64_system::<M, _>(&self.kernel_f64, self.sys, self.diag, w, tol)
         } else {
             Ok(true)
         }
     }
 
     fn fallback(&self) -> Result<Vec<f64>, GprError> {
-        f64_alpha::<M>(&self.kernel_f64, self.sys, self.diag)
+        f64_alpha::<M, _>(&self.kernel_f64, self.sys, self.diag)
     }
 }
 
 /// The training squares of `sys` at `f64`: the exact values when the model
 /// keeps them, else the storage values widened.
-fn exact_sources<'a>(sys: &TrainSystem<'a, f32>) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
+fn exact_sources<'a, S: Supply>(
+    sys: &TrainSystem<'a, f32, S>,
+) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
     match sys.exact {
         Some(exact) => Ok(Cow::Borrowed(exact)),
         None => sys.sources.to_f64().map(Cow::Owned),
@@ -236,10 +242,10 @@ fn exact_sources<'a>(sys: &TrainSystem<'a, f32>) -> Result<Cow<'a, TrainSources<
 ///
 /// Returns the kernel's shape errors, or [`GprError::CholeskyFailed`] at
 /// `sys.stage` when the fallback `f64` factor is not positive definite.
-pub(crate) fn refine_alpha<M: crate::math::KernelMath, R: ResidualFormula>(
-    sys: &TrainSystem<'_, f32>,
+pub(crate) fn refine_alpha<M: crate::math::KernelMath, R: ResidualFormula, S: Supply>(
+    sys: &TrainSystem<'_, f32, S>,
 ) -> Result<Vec<f64>, GprError> {
-    let system = ExactSystem::<M, R>::new(sys)?;
+    let system = ExactSystem::<M, R, S>::new(sys)?;
     let start = system.start();
     refine(&system, start)
 }
@@ -249,22 +255,22 @@ pub(crate) fn refine_alpha<M: crate::math::KernelMath, R: ResidualFormula>(
 /// [`PromoteStorage`] converges to the solution of the rounded `f32` system.
 /// When `κ(A) u_f32` is large that solution is far from the `f64` one, so the
 /// converged `α` is checked once against `K_f64 + diag · I` before it is kept.
-fn meets_f64_system<M: crate::math::KernelMath>(
-    kernel_f64: &CompiledKernel<f64>,
-    sys: &TrainSystem<'_, f32>,
+fn meets_f64_system<M: crate::math::KernelMath, S: Supply>(
+    kernel_f64: &CompiledKernel<f64, S>,
+    sys: &TrainSystem<'_, f32, S>,
     diag: f64,
     alpha: &[f64],
     tol: f64,
 ) -> Result<bool, GprError> {
     let mut resid = vec![0.0; alpha.len()];
-    let a_inf = fresh_residual::<M>(kernel_f64, sys, diag, alpha, &mut resid)?;
+    let a_inf = fresh_residual::<M, _>(kernel_f64, sys, diag, alpha, &mut resid)?;
     let denom = a_inf * inf_norm(alpha) + inf_norm(sys.y);
     Ok(denom > 0.0 && inf_norm(&resid) / denom < tol)
 }
 
 /// The `f32` training matrix `A + σn² I + j I`, full, as fit assembled it.
-fn storage_system<M: crate::math::KernelMath>(
-    sys: &TrainSystem<'_, f32>,
+fn storage_system<M: crate::math::KernelMath, S: Supply>(
+    sys: &TrainSystem<'_, f32, S>,
 ) -> Result<Mat<f32>, GprError> {
     let x = sys.x;
     let n = x.nrows();
@@ -322,9 +328,9 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
 /// training squares of a distance kernel are read in the same column
 /// ranges: a scalar slot in place, an ARD slot unpacked into one reused
 /// `n × COLUMN_BLOCK` buffer per dimension. Returns `‖K + diag · I‖∞`.
-fn fresh_residual<M: crate::math::KernelMath>(
-    kernel: &CompiledKernel<f64>,
-    sys: &TrainSystem<'_, f32>,
+fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
+    kernel: &CompiledKernel<f64, S>,
+    sys: &TrainSystem<'_, f32, S>,
     diag: f64,
     alpha: &[f64],
     r: &mut [f64],
@@ -382,9 +388,9 @@ fn fresh_residual<M: crate::math::KernelMath>(
 }
 
 /// `f64` Cholesky solution of `(A + diag · I) α = y`, retrying with `sys.policy`.
-pub(crate) fn f64_alpha<M: crate::math::KernelMath>(
-    kernel: &CompiledKernel<f64>,
-    sys: &TrainSystem<'_, f32>,
+pub(crate) fn f64_alpha<M: crate::math::KernelMath, S: Supply>(
+    kernel: &CompiledKernel<f64, S>,
+    sys: &TrainSystem<'_, f32, S>,
     diag: f64,
 ) -> Result<Vec<f64>, GprError> {
     let x = sys.x;

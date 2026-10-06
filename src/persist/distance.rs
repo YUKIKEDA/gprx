@@ -274,7 +274,7 @@ impl<P: GpScalar, C: PointUse> FittedSgpr<Fixed, FixedInducing, P, DistanceKerne
     /// # }
     /// ```
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
-        let (_, core) = load_sparse_dir::<P>(
+        let (_, core) = load_sparse_dir::<P, _>(
             dir.as_ref(),
             registry,
             ModelJson::Sgpr,
@@ -322,7 +322,7 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let (q, core) =
-            load_sparse_dir::<P>(dir, registry, ModelJson::Svgp, load_of::<C>("LoadedSvgp"))?;
+            load_sparse_dir::<P, _>(dir, registry, ModelJson::Svgp, load_of::<C>("LoadedSvgp"))?;
         let (q_mean, q_l) = q.ok_or_else(|| {
             persist_err(
                 PersistErrorKind::Tensor,
