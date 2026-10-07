@@ -142,6 +142,24 @@ fn ard_on_supplied_squared_differences_matches_coordinates() {
         coords.neg_log_marginal_likelihood().expect("nlml"),
         TOL,
     );
+    // The gradient (one contraction over the packed `(Δ_d)²`) and the
+    // Hessian of the NLML agree, at `θ` and away from it.
+    let (mut coords, mut dist) = (coords, dist);
+    let p = coords.num_params();
+    let mut theta = vec![0.0; p];
+    coords.get_params(&mut theta).expect("theta");
+    for shift in [0.0, 0.3] {
+        let at: Vec<f64> = theta.iter().map(|t| t + shift).collect();
+        let (mut gc, mut gd) = (vec![0.0; p], vec![0.0; p]);
+        let vc = coords.value_and_gradient_into(&at, &mut gc).expect("grad");
+        let vd = dist.value_and_gradient_into(&at, &mut gd).expect("grad");
+        assert_close(vd, vc, 1e-10);
+        assert_slice_close(&gd, &gc, 1e-9);
+        let (mut hc, mut hd) = (vec![0.0; p * p], vec![0.0; p * p]);
+        coords.hessian_into(&at, &mut hc).expect("hess");
+        dist.hessian_into(&at, &mut hd).expect("hess");
+        assert_slice_close(&hd, &hc, 1e-8);
+    }
 }
 
 #[test]

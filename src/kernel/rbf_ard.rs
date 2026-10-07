@@ -347,6 +347,80 @@ impl RbfArdKernel {
         lanes::fold_square_lengthscales(x64, s, w, row_sum, prod, out)
     }
 
+    /// Writes `⟨weight, ∂K/∂θ_d⟩_F` for every lengthscale into `out`, from
+    /// the Gram `k` and the packed `(Δ_d)²` of a supplied ARD slot, as
+    /// [`Self::contract_square`] does from coordinates. With
+    /// `∂k/∂θ_d = k · w_d (Δ_d)²`, `S = weight ∘ k` is packed once into `fold`
+    /// in the cache's layout (the lower triangle, column by column), so each
+    /// lengthscale is one contiguous dot product: `2 w_d ⟨S, (Δ_d)²⟩` over
+    /// the strict lower triangle (the diagonal `(Δ_d)²` is zero).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`] when `out` is not one entry per
+    /// lengthscale, and [`GprError::ShapeMismatch`] when `weight`, `k`, or
+    /// the cache is not of the same `n` points.
+    pub(crate) fn contract_square_from_sq_diff<T: KernelScalar>(
+        &self,
+        weight: MatRef<'_, T>,
+        k: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
+        out: &mut [f64],
+        fold: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let d = w.len();
+        if out.len() != d {
+            return Err(GprError::LengthMismatch {
+                reason: format!("gradient has {} entries, expected {d}", out.len()),
+            });
+        }
+        let n = cache.n();
+        require_ard_sq_diff_shape(cache, n, d)?;
+        for (name, m) in [("weight", weight), ("k", k)] {
+            if m.nrows() != n || m.ncols() != n {
+                return Err(GprError::ShapeMismatch {
+                    reason: format!("{name} is {}x{}, expected {n}x{n}", m.nrows(), m.ncols()),
+                });
+            }
+        }
+        let len = n
+            .checked_add(1)
+            .and_then(|n1| n.checked_mul(n1))
+            .map(|cells| cells / 2)
+            .ok_or(GprError::SizeOverflow)?;
+        if fold.len() < len {
+            fold.resize(len, 0.0);
+        }
+        let s = &mut fold[..len];
+        let mut at = 0;
+        for col in 0..n {
+            for row in col..n {
+                s[at] = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
+                at += 1;
+            }
+        }
+        for (dim, slot) in out.iter_mut().enumerate() {
+            let block = cache.block(dim);
+            // Four running sums, folded in a fixed order.
+            let mut acc = [0.0f64; 4];
+            let chunks = s.chunks_exact(4).zip(block.chunks_exact(4));
+            for (a, b) in chunks {
+                for lane in 0..4 {
+                    acc[lane] += a[lane] * b[lane].to_f64();
+                }
+            }
+            let tail = len - len % 4;
+            let rest: f64 = s[tail..]
+                .iter()
+                .zip(&block[tail..])
+                .map(|(a, b)| a * b.to_f64())
+                .sum();
+            *slot = 2.0 * w[dim] * (((acc[0] + acc[1]) + (acc[2] + acc[3])) + rest);
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,

@@ -22,7 +22,9 @@
 //! `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
-use super::supplied::{ScalarLeaf, SuppliedCompiled, SuppliedLeaf, scalar_square};
+use super::supplied::{
+    ArdLeaf, ScalarLeaf, SuppliedCompiled, SuppliedLeaf, ard_square, scalar_square,
+};
 use super::{CompiledKernel, CrossViews, add_triangle};
 use crate::error::GprError;
 use crate::kernel::dist::{for_each_lower_col, lower_fold_infallible};
@@ -510,6 +512,33 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
                 }
                 FastLeaf::Rbf(_) | FastLeaf::None => {}
             }
+        }
+        // An accurate ARD RBF on a supplied slot: the same one Gram, then
+        // every lengthscale from the slot's packed `(Δ_d)²`.
+        if M::ACCURATE
+            && let Self::Supplied(supplied) = self
+            && let SuppliedLeaf {
+                slot,
+                leaf: SuppliedCompiled::Ard(ArdLeaf::Rbf(rbf)),
+            } = S::compiled(supplied)
+            && let Ok(cache) = ard_square(walk.inputs.slots, *slot)
+        {
+            let k = match node.own {
+                Some(k) => k,
+                None => {
+                    let Some(gram) = bufs.first_mut() else {
+                        return Err(too_few_buffers());
+                    };
+                    rbf.apply_from_sq_diff::<M, T>(cache, gram.as_mut(), Triangle::Lower)?;
+                    gram.as_ref()
+                }
+            };
+            rbf.contract_square_from_sq_diff(weight, k, cache, out, walk.fold)?;
+            return Ok(if node.own.is_some() || node.value {
+                lower_dot(weight, k)
+            } else {
+                0.0
+            });
         }
         // Accurate ARD RBF: `∂k/∂θ_d = k · w_d (Δ_d)²`, so one Gram covers
         // every lengthscale and the sum is one matrix product. `FastApprox`

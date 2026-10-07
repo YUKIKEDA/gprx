@@ -488,6 +488,13 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         &self.data[start..start + (self.n - col)]
     }
 
+    /// Every stored value of dimension `dim`: the lower triangle, column by
+    /// column (column `col` holds rows `col..n`).
+    #[inline]
+    pub(crate) fn block(&self, dim: usize) -> &'a [T] {
+        &self.data[dim * self.block..(dim + 1) * self.block]
+    }
+
     /// `(x_row,dim − x_col,dim)²` for any pair.
     #[inline]
     pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {

@@ -77,7 +77,7 @@ pub(super) fn scalar_square<'a, T>(
 }
 
 /// The square supply of an ARD slot.
-fn ard_square<'a, T>(
+pub(super) fn ard_square<'a, T>(
     slots: Option<&'a dyn SquareSlots<T>>,
     slot: SlotId,
 ) -> Result<ArdSqDiff<'a, T>, GprError> {
