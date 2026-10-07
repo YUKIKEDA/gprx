@@ -916,3 +916,138 @@ fn an_invalid_ard_query_value_is_reported_where_it_is() {
         }
     }
 }
+
+/// Predicts `sources` into `out` on `model` and checks every value against
+/// `expect` (the first `m` queries of it).
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn predict_into_matches<P: gprx::GpScalar>(
+    model: &mut gprx::FittedGpr<Fixed, P, gprx::kernel::DistanceKernel>,
+    source: gprx::kernel::DistanceSource<'_>,
+    m: usize,
+    out: &mut Prediction<P::Refine>,
+    expect: &Prediction<P::Refine>,
+    tol: f64,
+) where
+    P::Refine: gprx::kernel::KernelScalar,
+{
+    use gprx::kernel::KernelScalar;
+    model.predict_into([source], m, out).expect("predict");
+    assert_eq!(out.mean.len(), m);
+    for i in 0..m {
+        assert_close(out.mean[i].to_f64(), expect.mean[i].to_f64(), tol);
+        assert_close(out.variance[i].to_f64(), expect.variance[i].to_f64(), tol);
+    }
+}
+
+/// One model predicts into one `out` from every kind of source, at two
+/// query counts, in any order: the buffers it keeps between calls hold no
+/// state. A borrowed table that a repair changes is copied, not written.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn every_source_kind_predicts_alike<P: gprx::GpScalar>(tol: f64)
+where
+    P::Refine: gprx::kernel::KernelScalar,
+{
+    let c0 = coord(0, N, 0.0);
+    let q0 = coord(0, M, 0.5);
+    let y = targets();
+    let cross = sq(&c0, &q0);
+    // Rounding a repair takes back: one value slightly negative.
+    let mut rounded = cross.clone();
+    let at = 1 + N;
+    rounded[at] = -1e-14;
+    let mut repaired = cross.clone();
+    repaired[at] = 0.0;
+    let pairs = Pairs {
+        rows: &c0,
+        cols: &q0,
+    };
+    // Scalar slot.
+    let image = ScalarDistance::new();
+    let mut scalar = Gpr::new(image.kernel(RbfKernel::new(1.1).expect("ell")), lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c0, &c0))], N, &y)
+        .map_err(|(_, e)| e)
+        .expect("scalar");
+    let expect = scalar
+        .predict([image.from_slice(&cross)], M)
+        .expect("expect");
+    let fixed = scalar
+        .predict([image.from_slice(&repaired)], M)
+        .expect("repaired");
+    let mut out = Prediction::default();
+    for _ in 0..2 {
+        predict_into_matches(&mut scalar, image.borrow(&cross), M, &mut out, &expect, tol);
+        predict_into_matches(&mut scalar, image.fill(&pairs), M, &mut out, &expect, tol);
+        predict_into_matches(
+            &mut scalar,
+            image.borrow(&cross[..N]),
+            1,
+            &mut out,
+            &expect,
+            tol,
+        );
+        predict_into_matches(
+            &mut scalar,
+            image.from_vec(cross.clone()),
+            M,
+            &mut out,
+            &expect,
+            tol,
+        );
+        let tidy = image.borrow(&rounded).tidy(1e-6).expect("tol");
+        predict_into_matches(&mut scalar, tidy, M, &mut out, &fixed, tol);
+    }
+    assert!(rounded[at] < 0.0, "a borrowed table is not written");
+    // ARD slot: two dimensions with the same differences.
+    let bands = ArdDistance::new(2).expect("dims");
+    let mut ard = Gpr::new(
+        bands
+            .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
+            .expect("dims"),
+        lik(),
+    )
+    .with_precision::<P>()
+    .with_optimizer(Fixed)
+    .factor([bands.from_vecs(vec![sq(&c0, &c0); 2])], N, &y)
+    .map_err(|(_, e)| e)
+    .expect("ard");
+    let expect = ard
+        .predict([bands.from_vecs(vec![cross.clone(); 2])], M)
+        .expect("expect");
+    let fixed = ard
+        .predict([bands.from_vecs(vec![repaired.clone(), cross.clone()])], M)
+        .expect("repaired");
+    let fill = Bands {
+        rows: &c0,
+        cols: &q0,
+        dims: 2,
+    };
+    let both: [&[f64]; 2] = [&cross, &cross];
+    let first: [&[f64]; 2] = [&cross[..N], &cross[..N]];
+    let tidied: [&[f64]; 2] = [&rounded, &cross];
+    for _ in 0..2 {
+        predict_into_matches(&mut ard, bands.borrow(&both), M, &mut out, &expect, tol);
+        predict_into_matches(&mut ard, bands.fill(&fill), M, &mut out, &expect, tol);
+        predict_into_matches(&mut ard, bands.borrow(&first), 1, &mut out, &expect, tol);
+        predict_into_matches(
+            &mut ard,
+            bands.from_slices(&both),
+            M,
+            &mut out,
+            &expect,
+            tol,
+        );
+        let tidy = bands.borrow(&tidied).tidy(1e-6).expect("tol");
+        predict_into_matches(&mut ard, tidy, M, &mut out, &fixed, tol);
+    }
+    assert!(rounded[at] < 0.0, "a borrowed table is not written");
+}
+
+#[test]
+fn every_source_kind_predicts_alike_at_each_precision() {
+    use gprx::{DoublePrecision, MixedPrecision, ReevaluateKernel};
+    every_source_kind_predicts_alike::<DoublePrecision>(1e-12);
+    every_source_kind_predicts_alike::<SinglePrecision>(1e-5);
+    every_source_kind_predicts_alike::<MixedPrecision<ReevaluateKernel>>(1e-12);
+}
