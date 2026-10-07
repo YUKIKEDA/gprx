@@ -391,7 +391,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 カーネルの葉は、座標の代わりに、与えた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::new(d)` は `d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロット。`kernel(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、葉の長さスケールの数が `d` でなければ `DimensionMismatch` を返す。`ArdDistance::new(0)` は `EmptyInput`。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
 
-結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。`DistanceKernel` と `KernelSpec` は `WithPoints`。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。
+結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。`DistanceKernel` と `KernelSpec` は `WithPoints`。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
 
 `Gpr::new`、`Sgpr::new`、`Svgp::new` は任意の `ModelKernel`（`KernelSpec` か `DistanceKernel<C>`）を受ける。`with_input_transform` は `PointKernel` のモデル（`KernelSpec` と `DistanceKernel<WithPoints>`）だけにある。各スロットは、呼び出しごとに `DistanceSource` を 1 つ受ける。
 
@@ -399,7 +399,7 @@ fn main() -> Result<(), gprx::GprError> {
 | --- | --- |
 | `from_vec(d2)` / `from_vecs(blocks)` | モデルへムーブ（`f64` のモデルはバッファをそのまま持つ） |
 | `from_slice(d2)` / `from_slices(blocks)` | 呼び出しでコピー |
-| `borrow(d2)` | `predict` はその場で読む。`fit` と `insert` はコピー |
+| `borrow(d2)` | `f64` のモデルの `predict` は、表を直す必要が無ければ（下記）その場で読む。`f32` のモデルは変換する。`fit` と `insert` はコピー |
 | `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` が `out[i + j * n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く |
 
 表は列優先の `dist[i + j * n_rows]`。値は負であってはならず、学習の正方行列（とクエリの正方行列）は対角が 0 で対称でなければならない。ただし丸めの範囲は許す。表の最大値の `1e-6` 倍以内なら、負の値と対角は `0.0` に、鏡像の組 `(i, j)`、`(j, i)` はその平均にそろえる。そのため `‖a‖² + ‖b‖² − 2a·b` で作った表や、向きごとに計算した距離の表も受け付ける。それを超えると `ShapeMismatch`。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。学習の fill は `DistanceCachePolicy` によらず、1 回の学習で 1 回だけ呼ぶ。モデルはそれが書いた二乗距離を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。
@@ -415,8 +415,8 @@ fn main() -> Result<(), gprx::GprError> {
 ```rust
 use gprx::kernel::{
     ArdDistance, ArdDistanceLeaf, ConstantKernel, DistanceFill, DistanceKernel, DistanceOnly,
-    DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, PointKernel, PointUse,
-    RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, WithPoints,
+    DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, NoSupply, PointKernel,
+    PointUse, RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, Supply, WithPoints,
 };
 use gprx::{Fixed, GaussianLikelihood, Gpr, Sgpr, Svgp};
 
@@ -438,10 +438,14 @@ fn scalar_leaf(leaf: impl ScalarDistanceLeaf, slot: ScalarDistance) -> DistanceK
 }
 
 fn takes<K: ModelKernel>(_: &K) {}
+fn supply_of<S: Supply>(_: &KernelSpec<S>) {}
 fn takes_points<K: PointKernel>(_: &K) {}
 fn joined<A: JoinPoints<B>, B: PointUse>(_: DistanceKernel<A>, _: DistanceKernel<B>) {}
 
 fn main() -> Result<(), gprx::GprError> {
+    // A coordinate tree is `KernelSpec<NoSupply>`, the default.
+    let coords: KernelSpec<NoSupply> = KernelSpec::from(RbfKernel::new(1.0)?);
+    supply_of(&coords);
     let image = ScalarDistance::default();
     let other = ScalarDistance::new();
     let kernel = scalar_leaf(RbfKernel::new(1.0)?, image) * ConstantKernel::new(0.8)?;

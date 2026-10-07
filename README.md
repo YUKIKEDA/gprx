@@ -375,7 +375,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 A kernel leaf can read squared distances you supply instead of coordinates: a geodesic or graph distance, or a distance from another program. `ScalarDistance::new()` is a slot of one `d²` per pair; `kernel(leaf)` takes an `RbfKernel`, `MaternKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, or a `KernelTerm` (the `ScalarDistanceLeaf` bound). `ArdDistance::new(d)` is a slot of `d` blocks, one `(Δ_k)²` per dimension; `kernel(leaf)` takes `RbfArdKernel`, `MaternArdKernel`, or `RationalQuadraticArdKernel` (the `ArdDistanceLeaf` bound) and returns `DimensionMismatch` when the leaf's lengthscale count is not `d`. `ArdDistance::new(0)` is `EmptyInput`. Every leaf of one slot reads the same supply. `ConstantKernel`, `WhiteKernel`, and `LinearKernel` stay `KernelSpec` leaves.
 
-The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` is `WithPoints`. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use.
+The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` is `WithPoints`. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use. `KernelSpec<S>` and `CompiledKernel<T, S>` take a sealed `Supply` kind `S` as their last type parameter. The default, `NoSupply`, is a coordinate tree: it has no value, so `KernelSpec` and `CompiledKernel<T>` name the same types as before, and only a `DistanceKernel` holds the other kind.
 
 `Gpr::new`, `Sgpr::new`, and `Svgp::new` take any `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`). `with_input_transform` is on the `PointKernel` models only (`KernelSpec` and `DistanceKernel<WithPoints>`). Each slot gets one `DistanceSource` per call:
 
@@ -383,7 +383,7 @@ The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `
 | --- | --- |
 | `from_vec(d2)` / `from_vecs(blocks)` | moved into the model (an `f64` model keeps the buffer) |
 | `from_slice(d2)` / `from_slices(blocks)` | copied at the call |
-| `borrow(d2)` | read in place by `predict`; copied by `fit` and `insert` |
+| `borrow(d2)` | read in place by the `predict` of an `f64` model when the table needs no tidying (below); converted by an `f32` model, and copied by `fit` and `insert` |
 | `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` writes `out[i + j * n_rows]`; an ARD fill writes its `d` blocks one after another |
 
 Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, up to rounding: within `1e-6` of the table's largest value, a negative value or a diagonal becomes `0.0` and a mirror pair `(i, j)`, `(j, i)` becomes its mean, so a table from `‖a‖² + ‖b‖² − 2a·b` or from a distance computed in each direction is accepted. Past that it is `ShapeMismatch`. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. A training fill is called once per fit, whatever the `DistanceCachePolicy`: the model keeps the squares it wrote. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave.
@@ -399,8 +399,8 @@ Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative
 ```rust
 use gprx::kernel::{
     ArdDistance, ArdDistanceLeaf, ConstantKernel, DistanceFill, DistanceKernel, DistanceOnly,
-    DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, PointKernel, PointUse,
-    RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, WithPoints,
+    DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, NoSupply, PointKernel,
+    PointUse, RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, Supply, WithPoints,
 };
 use gprx::{Fixed, GaussianLikelihood, Gpr, Sgpr, Svgp};
 
@@ -422,10 +422,14 @@ fn scalar_leaf(leaf: impl ScalarDistanceLeaf, slot: ScalarDistance) -> DistanceK
 }
 
 fn takes<K: ModelKernel>(_: &K) {}
+fn supply_of<S: Supply>(_: &KernelSpec<S>) {}
 fn takes_points<K: PointKernel>(_: &K) {}
 fn joined<A: JoinPoints<B>, B: PointUse>(_: DistanceKernel<A>, _: DistanceKernel<B>) {}
 
 fn main() -> Result<(), gprx::GprError> {
+    // A coordinate tree is `KernelSpec<NoSupply>`, the default.
+    let coords: KernelSpec<NoSupply> = KernelSpec::from(RbfKernel::new(1.0)?);
+    supply_of(&coords);
     let image = ScalarDistance::default();
     let other = ScalarDistance::new();
     let kernel = scalar_leaf(RbfKernel::new(1.0)?, image) * ConstantKernel::new(0.8)?;
