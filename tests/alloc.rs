@@ -932,7 +932,22 @@ fn online_distance_insert_within_capacity_allocs() {
         // values; the staged column holds them again in the storage scalar
         // (twice under mixed precision).
         let column = 3 * dims * (n + 1) * std::mem::size_of::<f64>();
+        // Per dimension, at most one more block in the source and one in the
+        // staged change than the scalar slot's one each.
         assert!(ard_allocs <= scalar_allocs + 2 * dims, "{label}: allocs");
         assert!(ard_bytes <= scalar_bytes + column, "{label}: bytes");
+        // The measured counts as a ratchet, the source the closure builds
+        // included.
+        let (allocs_cap, bytes_cap) = if mixed { (22, 18_000) } else { (15, 20_000) };
+        assert_alloc_cap(
+            &format!("online_distance_insert_ard_{label}"),
+            ard_allocs,
+            allocs_cap,
+        );
+        assert_alloc_cap(
+            &format!("online_distance_insert_ard_{label}_bytes"),
+            ard_bytes,
+            bytes_cap,
+        );
     }
 }

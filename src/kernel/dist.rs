@@ -397,7 +397,9 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     /// the new diagonal is zero. Writes `d · (n + 1)` values.
     ///
     /// The caller grows the buffer first ([`Self::from_pairs_with_cap`])
-    /// when `n = cap`; here that is a no-op.
+    /// when `n = cap`: `TrainSources::stage_append` does, so a full buffer
+    /// here is a crate bug. A debug build panics; a release build writes
+    /// nothing rather than out of bounds.
     pub(crate) fn push_point(&mut self, pair: impl Fn(usize, usize) -> T) {
         let (n, cap) = (self.n, self.cap);
         if n >= cap {
@@ -417,6 +419,10 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
 
     /// Removes point `index < n` in place, keeping `cap`. Every pair after
     /// it moves back by one row and column.
+    ///
+    /// `TrainSources::stage_delete` checks `index < n` first, so an index
+    /// past it here is a crate bug: a debug build panics, a release build
+    /// writes nothing.
     pub(crate) fn remove_point(&mut self, index: usize) {
         let (n, cap) = (self.n, self.cap);
         if index >= n {
@@ -750,6 +756,61 @@ mod tests {
         par_lower_fold, worker_count,
     };
     use faer::Mat;
+
+    /// Appends and deletes (first, middle, last) on a buffer with spare room,
+    /// growing it by doubling as `TrainSources` does, and compares every pair
+    /// with a buffer packed from scratch after each step.
+    fn append_and_delete_match_a_rebuild<T: crate::kernel::KernelScalar>() {
+        let d = 2;
+        let at = |p: f64, k: usize| p * (1.0 + k as f64);
+        let pair = |points: &[f64], k: usize, i: usize, j: usize| {
+            T::from_f64((at(points[i], k) - at(points[j], k)).powi(2))
+        };
+        let mut points = vec![0.3];
+        let mut buf =
+            ArdSqDiffBuf::<T>::from_pairs(1, d, |k, i, j| pair(&points, k, i, j)).expect("buf");
+        let mut state = 7_u64;
+        for step in 0..40 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let n = points.len();
+            if n > 1 && (state >> 33).is_multiple_of(3) {
+                let index = [0, n / 2, n - 1][step % 3];
+                buf.remove_point(index);
+                points.remove(index);
+            } else {
+                let p = (state >> 40) as f64 / (1_u64 << 24) as f64;
+                if buf.n == buf.cap {
+                    let old = buf.view();
+                    buf =
+                        ArdSqDiffBuf::from_pairs_with_cap(n, 2 * n, d, |k, i, j| old.get(k, i, j))
+                            .expect("grow");
+                }
+                points.push(p);
+                buf.push_point(|k, j| pair(&points, k, n, j));
+            }
+            let view = buf.view();
+            assert_eq!(view.n(), points.len(), "step {step}");
+            for k in 0..d {
+                for j in 0..points.len() {
+                    for i in 0..points.len() {
+                        assert_eq!(
+                            view.get(k, i, j).to_f64().to_bits(),
+                            pair(&points, k, i, j).to_f64().to_bits(),
+                            "step {step}, dim {k}, pair ({i}, {j})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn append_and_delete_match_a_rebuild_in_f64_and_f32() {
+        append_and_delete_match_a_rebuild::<f64>();
+        append_and_delete_match_a_rebuild::<f32>();
+    }
 
     fn sequential_sq(x: faer::MatRef<'_, f64>) -> Mat<f64> {
         let n = x.nrows();

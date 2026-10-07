@@ -406,10 +406,11 @@ impl<T: KernelScalar> TrainSources<T> {
             || cols
                 .iter()
                 .zip(&self.slots)
-                .any(|(col, (id, _))| col.id != *id)
+                .any(|(col, (id, _))| col.id != *id || col.rows != n || col.cols != 1)
         {
-            // The caller binds the columns against the store's own slots,
-            // so this is a crate bug, not the caller's data.
+            // The caller binds one `n × 1` column per slot of the store, in
+            // slot order, so this is a crate bug, not the caller's data. It is
+            // checked here because `commit` cannot fail.
             debug_assert!(
                 false,
                 "the bound columns are not the store's slots in order"
