@@ -1,12 +1,14 @@
 //! Declaration-layer kernel tree: leaves, sums, and products.
 
-use super::leaf_params::LeafParams;
 use crate::error::GprError;
 use crate::kernel::{
     ConstantKernel, CustomKernel, LinearKernel, MaternArdKernel, MaternKernel, PeriodicKernel,
     RationalQuadraticArdKernel, RationalQuadraticKernel, RbfArdKernel, RbfKernel, WhiteKernel,
 };
 use crate::param::Interval;
+
+use super::leaf_params::LeafParams;
+use super::tree::{NoSupply, Supply};
 use std::ops::{Add, Mul};
 
 /// Maps a flat optimizer index to a leaf-local parameter.
@@ -39,6 +41,7 @@ pub struct ParameterBinding {
 ///
 /// Built-in leaves are stored directly. Sum and product nest until
 /// [`Self::compile`] flattens associative chains into [`super::CompiledKernel`].
+/// `S` is [`NoSupply`] for every tree a caller builds: a coordinate tree.
 ///
 /// # Examples
 ///
@@ -54,7 +57,7 @@ pub struct ParameterBinding {
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum KernelSpec {
+pub enum KernelSpec<S: Supply = NoSupply> {
     /// Marks an isotropic RBF leaf.
     Rbf(RbfKernel),
     /// Marks an ARD RBF leaf (`θ_d = log(ℓ_d)`).
@@ -78,9 +81,13 @@ pub enum KernelSpec {
     /// Marks a user-defined distance leaf ([`super::KernelTerm`]).
     Custom(CustomKernel),
     /// Marks `k = k_left + k_right`.
-    Sum(Box<KernelSpec>, Box<KernelSpec>),
+    Sum(Box<KernelSpec<S>>, Box<KernelSpec<S>>),
     /// Marks `k = k_left * k_right` (Hadamard product).
-    Product(Box<KernelSpec>, Box<KernelSpec>),
+    Product(Box<KernelSpec<S>>, Box<KernelSpec<S>>),
+    /// A leaf of a [`super::DistanceKernel`]. A coordinate tree
+    /// ([`NoSupply`]) cannot hold one.
+    #[doc(hidden)]
+    Supplied(S),
 }
 
 impl From<RbfKernel> for KernelSpec {
@@ -149,7 +156,7 @@ impl From<CustomKernel> for KernelSpec {
     }
 }
 
-impl Add for KernelSpec {
+impl<S: Supply> Add for KernelSpec<S> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self {
@@ -157,7 +164,7 @@ impl Add for KernelSpec {
     }
 }
 
-impl Mul for KernelSpec {
+impl<S: Supply> Mul for KernelSpec<S> {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self {
@@ -187,6 +194,32 @@ impl KernelSpec {
         Self::Custom(CustomKernel::new(term))
     }
 
+    /// This coordinate tree in a tree of kind `S`.
+    pub(crate) fn widen<S: Supply>(self) -> KernelSpec<S> {
+        match self {
+            Self::Rbf(leaf) => KernelSpec::Rbf(leaf),
+            Self::RbfArd(leaf) => KernelSpec::RbfArd(leaf),
+            Self::Matern(leaf) => KernelSpec::Matern(leaf),
+            Self::MaternArd(leaf) => KernelSpec::MaternArd(leaf),
+            Self::Periodic(leaf) => KernelSpec::Periodic(leaf),
+            Self::RationalQuadratic(leaf) => KernelSpec::RationalQuadratic(leaf),
+            Self::RationalQuadraticArd(leaf) => KernelSpec::RationalQuadraticArd(leaf),
+            Self::Constant(leaf) => KernelSpec::Constant(leaf),
+            Self::Linear(leaf) => KernelSpec::Linear(leaf),
+            Self::White(leaf) => KernelSpec::White(leaf),
+            Self::Custom(leaf) => KernelSpec::Custom(leaf),
+            Self::Sum(left, right) => {
+                KernelSpec::Sum(Box::new(left.widen()), Box::new(right.widen()))
+            }
+            Self::Product(left, right) => {
+                KernelSpec::Product(Box::new(left.widen()), Box::new(right.widen()))
+            }
+            Self::Supplied(never) => match never {},
+        }
+    }
+}
+
+impl<S: Supply> KernelSpec<S> {
     /// Returns the number of flattened kernel parameters.
     ///
     /// See the example on [`KernelSpec`].
@@ -203,6 +236,7 @@ impl KernelSpec {
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
             Self::Custom(leaf) => leaf.num_params(),
+            Self::Supplied(leaf) => S::spec(leaf).leaf.leaf_num_params(),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.num_params() + right.num_params()
             }
@@ -294,8 +328,8 @@ impl KernelSpec {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn compile(&self) -> crate::kernel::CompiledKernel<f64> {
-        crate::kernel::CompiledKernel::<f64>::from_spec(self)
+    pub fn compile(&self) -> crate::kernel::CompiledKernel<f64, S> {
+        crate::kernel::CompiledKernel::<f64, S>::from_spec(self)
     }
 
     /// Compiles this tree for compute scalar `T`.
@@ -305,11 +339,11 @@ impl KernelSpec {
     /// types: each call builds the tree for the scalar you name.
     ///
     /// See the example on [`KernelSpec`].
-    pub fn compile_as<T>(&self) -> crate::kernel::CompiledKernel<T>
+    pub fn compile_as<T>(&self) -> crate::kernel::CompiledKernel<T, S>
     where
         T: crate::kernel::KernelScalar,
     {
-        crate::kernel::CompiledKernel::<T>::from_spec(self)
+        crate::kernel::CompiledKernel::<T, S>::from_spec(self)
     }
 
     fn write_params(&self, out: &mut [f64], offset: &mut usize) -> Result<(), GprError> {
@@ -325,6 +359,7 @@ impl KernelSpec {
             Self::Linear(leaf) => leaf.write_leaf_params(out, offset),
             Self::White(leaf) => leaf.write_leaf_params(out, offset),
             Self::Custom(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Supplied(leaf) => S::spec(leaf).leaf.write_leaf_params(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_params(out, offset)?;
                 right.write_params(out, offset)
@@ -349,6 +384,7 @@ impl KernelSpec {
             Self::Linear(leaf) => leaf.write_leaf_intervals(out, offset),
             Self::White(leaf) => leaf.write_leaf_intervals(out, offset),
             Self::Custom(leaf) => leaf.write_leaf_intervals(out, offset),
+            Self::Supplied(leaf) => S::spec(leaf).leaf.write_leaf_intervals(out, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.write_intervals(out, offset)?;
                 right.write_intervals(out, offset)
@@ -369,6 +405,7 @@ impl KernelSpec {
             Self::Linear(leaf) => leaf.apply_leaf_params(params, offset),
             Self::White(leaf) => leaf.apply_leaf_params(params, offset),
             Self::Custom(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Supplied(leaf) => S::spec_mut(leaf).leaf.apply_leaf_params(params, offset),
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.apply_params(params, offset)?;
                 right.apply_params(params, offset)
@@ -415,6 +452,9 @@ impl KernelSpec {
             }
             Self::Custom(leaf) => {
                 push_leaf_bindings(out, index, leaf_id, leaf.num_params());
+            }
+            Self::Supplied(leaf) => {
+                push_leaf_bindings(out, index, leaf_id, S::spec(leaf).leaf.leaf_num_params());
             }
             Self::Sum(left, right) | Self::Product(left, right) => {
                 left.collect_bindings(out, index, leaf_id);

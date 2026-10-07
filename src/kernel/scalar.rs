@@ -60,6 +60,9 @@ pub(crate) mod sealed {
 
         fn empty_cols() -> Self::ColCast;
 
+        /// `values` as this scalar. `f64` takes the buffer as is.
+        fn vec_from_f64(values: Vec<f64>) -> Vec<Self>;
+
         /// Views `y` as this scalar. `f64` returns `y`. `f32` fills `cast`.
         fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self];
 
@@ -325,6 +328,10 @@ impl sealed::ScalarOps for f64 {
 
     fn empty_cols() -> Self::ColCast {}
 
+    fn vec_from_f64(values: Vec<f64>) -> Vec<Self> {
+        values
+    }
+
     fn storage_rows<'a>(y: &'a [f64], _cast: &'a mut Self::RowCast) -> &'a [Self] {
         y
     }
@@ -454,6 +461,10 @@ impl sealed::ScalarOps for f32 {
 
     fn empty_cols() -> Self::ColCast {
         Mat::zeros(0, 0)
+    }
+
+    fn vec_from_f64(values: Vec<f64>) -> Vec<Self> {
+        values.into_iter().map(|v| v as f32).collect()
     }
 
     fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self] {

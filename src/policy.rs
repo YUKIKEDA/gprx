@@ -10,7 +10,9 @@ use crate::error::GprError;
 /// squared-Euclidean matrix, ARD fits also store raw `(Δx_d)²` as
 /// `n × (n·d)`. [`Self::Uncached`] recomputes them from `X` on every kernel
 /// build. A kernel that does not read distances (standalone Linear,
-/// Constant, White) never allocates the cache.
+/// Constant, White) never allocates the cache. Squared distances the caller
+/// supplies are not a cache: a model keeps them whatever the policy, and a
+/// fill is called once per fit.
 ///
 /// # Examples
 ///

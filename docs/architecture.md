@@ -72,7 +72,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `transform` | Input maps (identity, standardize, min-max, per column, pipeline) and target maps, each as an unfitted and a fitted type; inverts mean and variance at predict | Public mod: `Transform`, `UnfittedTransform`, `TargetTransform`, `UnfittedTarget`, `MinMaxInput`, `StandardizeTarget`, `Pipeline`, … | `data`, `error` |
 | `precision` | Storage and predict scalars as one policy; mixed-precision refinement | Public: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
 | `workspace` | Reusable buffers: Gram, `W`, distance cache, `exp` buffer, faer scratch; the per-query buffers | Crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
-| `prediction` | What a predict call returns, and drawing posterior samples from a covariance | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
+| `prediction` | What a predict call returns, drawing posterior samples from a covariance, and the predict methods every model of a `DistanceKernel` shares | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind`. Crate: `DistanceQuery`, `QueryPoints`, `distance_predict!` | `error`, `kernel`, `linalg`, `policy`, `rng` |
 | `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective` | `error`, `param` |
 | `optimizer` | Solvers over those traits: argmin adapters, the homemade annealing, and the `Fixed` marker; Adam for SVGP (not an `Optimizer`) | Public: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
@@ -154,7 +154,7 @@ The three families follow the same typestate: a trainer, `fit` (or `factor`), a 
 
 | Family | Trainer | Fitted | Online | Loaded from disk |
 | --- | --- | --- | --- | --- |
-| Exact | `Gpr<O, P>` | `FittedGpr<O, P>` | `OnlineGpr<O, P>` (`insert`, `delete`) | `LoadedGpr` (8 variants) |
+| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>` (`insert`, `delete`) | `LoadedGpr` (8 variants) |
 | Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants) |
 | SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | none | `LoadedSvgp` (4 variants) |
 
@@ -165,6 +165,7 @@ The type parameters:
 | `O` | The optimizer slot | `Lbfgs` (default for Exact and Sparse), `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, a user `Optimizer`; `Fixed` for `factor` only; `Adam` for `Svgp::fit` (`Svgp` defaults to `Fixed`) |
 | `P` | Precision, a compile-time choice | `DoublePrecision` (default), `SinglePrecision`, `MixedPrecision` (residual `PromoteStorage` or `ReevaluateKernel`) |
 | `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`) |
+| `K` | What an Exact kernel reads ([design §5.1](design.md#51-spec-versus-evaluator-and-precision-generics)) | `KernelSpec` (default; coordinates), `DistanceKernel<DistanceOnly>` (supplied distances only), `DistanceKernel<WithPoints>` (supplied distances and coordinates) |
 
 ## 6. How a model moves between states
 
@@ -210,7 +211,7 @@ Leaves are dispatched statically: every operation on `KernelSpec` and `CompiledK
 
 1. `kernel/<leaf>.rs`: the parameters (`θ` and their `Interval`s), and the value, `∂K/∂θ`, and `∂²K/∂θ∂θ` from distances or coordinates, square and rectangular, and the diagonal. The coordinate derivatives (`grad_wrt_coord_dim` and the mixed Hessians) if `FreeInducing` should move it; otherwise it returns `CoordGradientUnsupported`.
 2. `kernel/spec.rs`: the `KernelSpec` variant, its `From`, and the arms the compiler asks for.
-3. `kernel/compiled/`: the `CompiledKernel` variant and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf.
+3. `kernel/compiled/`: the `CompiledKernel` variant, its `LeafRef` variant (`term`), and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf. The leaf arms of the coordinate paths are methods of `LeafRef`, shared by a coordinate tree and the per-leaf mixed path.
 4. `persist/kernel.rs`: its JSON tag; a saved file from an older version must still read (persist-format.md).
 5. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load.
 6. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.

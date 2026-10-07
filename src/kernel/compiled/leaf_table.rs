@@ -46,7 +46,10 @@ fn leaf_index(spec: &KernelSpec) -> Option<usize> {
         KernelSpec::Constant(_) => Some(7),
         KernelSpec::Linear(_) => Some(8),
         KernelSpec::White(_) => Some(9),
-        KernelSpec::Custom(_) | KernelSpec::Sum(..) | KernelSpec::Product(..) => None,
+        KernelSpec::Custom(_)
+        | KernelSpec::Supplied(_)
+        | KernelSpec::Sum(..)
+        | KernelSpec::Product(..) => None,
     }
 }
 
@@ -155,6 +158,7 @@ fn every_builtin_leaf_runs_every_core_operation() {
                     x: x.as_ref(),
                     dist: Some(dist.as_ref()),
                     ard: None,
+                    slots: None,
                 },
                 from_dist.as_mut(),
                 Triangle::Lower,

@@ -1,6 +1,7 @@
 //! [`FittedGpr`]: the fitted Exact GPR and its public API.
 
 use std::fmt;
+use std::marker::PhantomData;
 
 use dyn_stack::MemBuffer;
 use faer::linalg::cholesky::llt;
@@ -11,16 +12,21 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{KernelScalar, KernelSpec};
+use crate::kernel::{
+    DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
+    ModelKernelParts, PointKernel, PointUse, spec_slots,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::persist::{self, PersistedModel};
 use crate::precision::{DoublePrecision, GpScalar, StoredFactor};
+use crate::transform::IdentityInput;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
+use super::shared::{Query, bind_training};
 use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fit_buffers};
 
 /// Stores a fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
@@ -59,30 +65,69 @@ use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fi
 /// # Ok(())
 /// # }
 /// ```
-pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
-    pub(super) core: GprCore<P>,
+pub struct FittedGpr<O = Lbfgs, P: GpScalar = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) core: GprCore<P, K>,
     pub(super) optimizer: O,
     pub(super) store: LltStore<P>,
+    pub(super) _kernel: PhantomData<K>,
 }
 
-impl<O, P> Clone for FittedGpr<O, P>
+impl<O, P, K> Clone for FittedGpr<O, P, K>
 where
     O: Clone,
     P: GpScalar,
+    K: ModelKernel,
 {
     fn clone(&self) -> Self {
         Self {
             core: self.core.clone(),
             optimizer: self.optimizer.clone(),
             store: self.store.clone(),
+            _kernel: PhantomData,
         }
     }
 }
 
-impl<O, P> fmt::Debug for FittedGpr<O, P>
+/// The training data of one fit: coordinates (`n_rows × n_cols`,
+/// column-major; no columns for a kernel of supplied distances alone),
+/// targets, and the sources of a distance kernel.
+pub(crate) struct TrainInput<'a> {
+    pub(crate) x: &'a [f64],
+    pub(crate) n_rows: usize,
+    pub(crate) n_cols: usize,
+    pub(crate) y: &'a [f64],
+    pub(crate) sources: Vec<DistanceSource<'a>>,
+}
+
+impl<'a> TrainInput<'a> {
+    pub(crate) fn points(x: &'a [f64], n_rows: usize, n_cols: usize, y: &'a [f64]) -> Self {
+        Self {
+            x,
+            n_rows,
+            n_cols,
+            y,
+            sources: Vec::new(),
+        }
+    }
+
+    /// Checks the coordinates and targets. A kernel that reads `points`
+    /// needs at least one feature column.
+    fn validate(&self, points: bool) -> Result<(), GprError> {
+        if points {
+            return validate_training(self.x, self.n_rows, self.n_cols, self.y);
+        }
+        crate::data::require_nonempty(self.n_rows)?;
+        crate::data::require_count(self.x.len(), 0, "feature values")?;
+        crate::data::require_count(self.y.len(), self.n_rows, "targets")?;
+        crate::data::require_finite(self.y)
+    }
+}
+
+impl<O, P, K> fmt::Debug for FittedGpr<O, P, K>
 where
     O: fmt::Debug,
     P: GpScalar,
+    K: ModelKernel,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FittedGpr")
@@ -99,28 +144,45 @@ where
     }
 }
 
-impl<O, P> FittedGpr<O, P>
+impl<O, P, K> FittedGpr<O, P, K>
 where
     P: GpScalar,
+    K: ModelKernel,
 {
-    #[allow(clippy::result_large_err, clippy::type_complexity)] // failure returns the trainer so the caller can retry
+    /// Checks `input`, fits the transforms, binds the training distances,
+    /// and allocates the fit buffers.
     #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
     pub(crate) fn prepare(
-        gpr: Gpr<O, P>,
-        x: &[f64],
-        n_rows: usize,
-        n_cols: usize,
-        y: &[f64],
-    ) -> Result<Self, (Gpr<O, P>, GprError)> {
-        if let Err(err) = validate_training(x, n_rows, n_cols, y) {
+        gpr: Gpr<O, P, K>,
+        input: TrainInput<'_>,
+    ) -> Result<Self, (Gpr<O, P, K>, GprError)> {
+        if let Err(err) = input.validate(<K as ModelKernelParts>::POINTS) {
             return Err((gpr, err));
         }
-        let mut x_buf = x.to_vec();
-        let x_fitted = match gpr.x_transform.clone_box().fit(&x_buf, n_rows, n_cols) {
-            Ok(t) => t,
+        let TrainInput {
+            x,
+            n_rows,
+            n_cols,
+            y,
+            sources,
+        } = input;
+        let sources = match bind_training::<P::Storage, P::Sources, _>(&gpr.kernel, sources, n_rows)
+        {
+            Ok(bound) => bound,
             Err(err) => return Err((gpr, err)),
         };
-        if let Err(err) = x_fitted.apply(&mut x_buf, n_rows, n_cols) {
+        let mut x_buf = x.to_vec();
+        let x_fitted: Box<dyn Transform> = if n_cols == 0 {
+            Box::new(IdentityInput)
+        } else {
+            match gpr.x_transform.clone_box().fit(&x_buf, n_rows, n_cols) {
+                Ok(t) => t,
+                Err(err) => return Err((gpr, err)),
+            }
+        };
+        if n_cols > 0
+            && let Err(err) = x_fitted.apply(&mut x_buf, n_rows, n_cols)
+        {
             return Err((gpr, err));
         }
         let mut y_buf = y.to_vec();
@@ -132,12 +194,13 @@ where
             return Err((gpr, err));
         }
         let compiled = gpr.kernel.compile_as::<P::Storage>();
-        let workspace = match fit_buffers::<P>(n_rows, gpr.policies, &compiled) {
+        let workspace = match fit_buffers::<P, _>(n_rows, gpr.policies, &compiled) {
             Ok(ws) => ws,
             Err(err) => return Err((gpr, err)),
         };
         Ok(Self {
             core: GprCore {
+                slots: spec_slots(&gpr.kernel),
                 kernel: gpr.kernel,
                 compiled,
                 likelihood: gpr.likelihood,
@@ -155,61 +218,21 @@ where
                 alpha: vec![P::Refine::from_f64(0.0); n_rows],
                 x_cast: P::Storage::empty_cols(),
                 y_cast: P::Storage::empty_rows(),
+                sources,
                 n: n_rows,
                 d: n_cols,
             },
             optimizer: gpr.optimizer,
             store: LltStore::new(workspace),
+            _kernel: PhantomData,
         })
     }
 
     /// Drops `L` / `α` / training data and returns a trainer with the current kernel, likelihood, transforms, optimizer, and policies.
     ///
     /// See the example on [`FittedGpr`].
-    pub fn into_trainer(self) -> Gpr<O, P> {
+    pub fn into_trainer(self) -> Gpr<O, P, K> {
         self.core.into_trainer(self.optimizer)
-    }
-
-    /// Converts this LLT factorization into an [`OnlineGpr`] for tail inserts.
-    ///
-    /// Writes `D[j] = L_jj²` and `L_ldlt[i,j] = L_llt[i,j] / L_jj`, then
-    /// rebuilds `A = K + σn² I` on the online workspace. [`OnlineGpr::insert`]
-    /// updates that LDLT in place.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::EmptyInput`] if `n` is zero, or
-    /// [`GprError::CholeskyFailed`] if a diagonal of `L` is not positive.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
-    /// .map_err(|(_, e)| e)?;
-    /// let mut online = fitted.into_online()?;
-    /// online.insert(&[1.5], 0.5)?;
-    /// let pred = online.predict(&[0.5], 1, 1)?;
-    /// assert_eq!(pred.mean.len(), 1);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn into_online(self) -> Result<OnlineGpr<O, P>, GprError> {
-        let n = self.core.n;
-        let mut workspace = LdltStore::from_active(n)?;
-        workspace.fill_ld_from_llt(self.chol_l(), n)?;
-        workspace.factor_jitter = self.store.buffers.core().factor_jitter;
-        LdltStore::set_f64_prefix(&mut workspace.y, &self.core.y_train);
-        LdltStore::set_vector_prefix(&mut workspace.alpha, &self.core.factor_alpha);
-        Ok(OnlineGpr::from_core(self.core, self.optimizer, workspace))
     }
 
     /// Returns the number of training points.
@@ -217,20 +240,6 @@ where
     /// See the example on [`FittedGpr`].
     pub fn n(&self) -> usize {
         self.core.n
-    }
-
-    /// Returns the feature dimension from the last successful fit.
-    ///
-    /// See the example on [`FittedGpr`].
-    pub fn d(&self) -> usize {
-        self.core.d
-    }
-
-    /// Returns the kernel whose hyperparameters this model owns.
-    ///
-    /// See the example on [`FittedGpr`].
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.core.kernel
     }
 
     /// Returns the observation-noise model.
@@ -247,17 +256,6 @@ where
         &self.core.alpha
     }
 
-    /// Returns the original training features in column-major order.
-    ///
-    /// Same packing as [`Gpr::fit`] / [`Gpr<Fixed>::factor`]: `n` points by
-    /// `d` features. Values are on the scale passed to fit, before the input
-    /// transform.
-    ///
-    /// See the example on [`FittedGpr`].
-    pub fn x(&self) -> &[f64] {
-        &self.core.x_obs
-    }
-
     /// Returns the original training targets.
     ///
     /// Values are on the scale passed to fit, before the target transform.
@@ -265,61 +263,6 @@ where
     /// See the example on [`FittedGpr`].
     pub fn y(&self) -> &[f64] {
         &self.core.y_obs
-    }
-
-    /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
-    ///
-    /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
-    /// by factorizing. The Cholesky buffer policy is not written; load
-    /// reconstructs [`crate::CholeskyBuffer::Retain`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when the directory cannot be
-    /// created or a Custom leaf / caller transform has no persist form.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{GaussianLikelihood, Gpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Gpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
-    /// .map_err(|(_, e)| e)?;
-    /// let dir = std::env::temp_dir().join(format!(
-    ///     "gprx-doctest-save-{}",
-    ///     std::process::id()
-    /// ));
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// fitted.save(&dir)?;
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        persist::save_fitted(self, dir.as_ref(), false)
-    }
-
-    /// Writes this fitted model including the Cholesky factor `L` and `α`.
-    ///
-    /// `L` is stored column-major. Its dtype is `F64` when storage is `f64`
-    /// and `F32` when storage is `f32`. `α` uses the predict scalar: `F32`
-    /// for [`crate::SinglePrecision`], `F64` for [`crate::DoublePrecision`]
-    /// and [`crate::MixedPrecision`]. [`crate::persist::LoadedGpr::load`]
-    /// keeps an `f64` factor memory-mapped.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::save`].
-    ///
-    /// See the example on [`FittedGpr`].
-    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        persist::save_fitted(self, dir.as_ref(), true)
     }
 
     /// Replaces the optimizer used by a later [`Self::refit`].
@@ -358,11 +301,12 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> FittedGpr<O2, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> FittedGpr<O2, P, K> {
         FittedGpr {
             core: self.core,
             optimizer,
             store: self.store,
+            _kernel: PhantomData,
         }
     }
 
@@ -428,11 +372,23 @@ where
     }
 
     /// Lends the core and the LLT buffers to the fit code.
-    pub(crate) fn fit_view(&mut self) -> ExactFit<'_, P> {
+    pub(crate) fn fit_view(&mut self) -> ExactFit<'_, P, K> {
         ExactFit {
             core: &mut self.core,
             store: &mut self.store,
         }
+    }
+
+    /// Predicts `q` into `out` through the model's query buffers.
+    pub(crate) fn predict_query_into(
+        &mut self,
+        q: Query<'_, P::Storage>,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        let (l, thread_scratch) = self.store.l_and_thread_scratch();
+        self.core
+            .predict_with_into(StoredFactor::Llt(l), thread_scratch, q, options, out)
     }
 
     /// Returns the negative log marginal likelihood of the last successful fit.
@@ -539,7 +495,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn objective(&mut self) -> GprObjective<'_, P> {
+    pub(crate) fn objective(&mut self) -> GprObjective<'_, P, K> {
         GprObjective::new(self.fit_view())
     }
 
@@ -632,6 +588,165 @@ where
         self.fit_view().hessian_into(params, out)
     }
 
+    /// Returns leave-one-out mean and observation variance at every training point.
+    ///
+    /// Uses the GPML identities `μ_i = y_i - α_i / Q_ii` and
+    /// `σ_i² = 1 / Q_ii` with `Q = A⁻¹` and `A = K + σn² I`. This is
+    /// `p(y_i | X, y_{-i}, θ)`, not a query at a new `x*`. Mean and
+    /// variance are inverse-transformed like [`Self::predict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a diagonal of `A⁻¹`
+    /// is not positive and finite.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Gpr, GaussianLikelihood};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
+    /// let likelihood = GaussianLikelihood::new(0.1)?;
+    /// let gpr = Gpr::new(kernel, likelihood);
+    /// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+    /// let loo = fitted.loo_predict()?;
+    /// assert_eq!(loo.mean.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
+        self.loo_predict_with(PredictOptions::default())
+    }
+
+    /// Returns leave-one-out mean and variance with an explicit variance kind.
+    ///
+    /// Observation variance is `1 / Q_ii`. Latent variance is
+    /// `max(0, 1 / Q_ii - σn²)` in the transformed space, then both mean
+    /// and variance are mapped back by the target transform.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`FittedGpr`].
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        self.core
+            .loo_predict_with(self.factor(), &self.core.alpha, options)
+    }
+}
+
+impl<O, P: GpScalar> FittedGpr<O, P> {
+    /// Converts this LLT factorization into an [`OnlineGpr`] for tail inserts.
+    ///
+    /// Writes `D[j] = L_jj²` and `L_ldlt[i,j] = L_llt[i,j] / L_jj`, then
+    /// rebuilds `A = K + σn² I` on the online workspace. [`OnlineGpr::insert`]
+    /// updates that LDLT in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] if `n` is zero, or
+    /// [`GprError::CholeskyFailed`] if a diagonal of `L` is not positive.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online()?;
+    /// online.insert(&[1.5], 0.5)?;
+    /// let pred = online.predict(&[0.5], 1, 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn into_online(self) -> Result<OnlineGpr<O, P>, GprError> {
+        let n = self.core.n;
+        let mut workspace = LdltStore::from_active(n)?;
+        workspace.fill_ld_from_llt(self.chol_l(), n)?;
+        workspace.factor_jitter = self.store.buffers.core().factor_jitter;
+        LdltStore::set_f64_prefix(&mut workspace.y, &self.core.y_train);
+        LdltStore::set_vector_prefix(&mut workspace.alpha, &self.core.factor_alpha);
+        Ok(OnlineGpr::from_core(self.core, self.optimizer, workspace))
+    }
+
+    /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
+    ///
+    /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
+    /// by factorizing. The Cholesky buffer policy is not written; load
+    /// reconstructs [`crate::CholeskyBuffer::Retain`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// created or a Custom leaf / caller transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Gpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    /// .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!(
+    ///     "gprx-doctest-save-{}",
+    ///     std::process::id()
+    /// ));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// fitted.save(&dir)?;
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_fitted(self, dir.as_ref(), false)
+    }
+
+    /// Writes this fitted model including the Cholesky factor `L` and `α`.
+    ///
+    /// `L` is stored column-major. Its dtype is `F64` when storage is `f64`
+    /// and `F32` when storage is `f32`. `α` uses the predict scalar: `F32`
+    /// for [`crate::SinglePrecision`], `F64` for [`crate::DoublePrecision`]
+    /// and [`crate::MixedPrecision`]. [`crate::persist::LoadedGpr::load`]
+    /// keeps an `f64` factor memory-mapped.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::save`].
+    ///
+    /// See the example on [`FittedGpr`].
+    pub fn save_with_factor(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        persist::save_fitted(self, dir.as_ref(), true)
+    }
+}
+
+impl<O, P: GpScalar> FittedGpr<O, P> {
+    /// Returns the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`FittedGpr`].
+    pub fn kernel(&self) -> &KernelSpec {
+        &self.core.kernel
+    }
+
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
     /// `xs` is column-major with `n_rows` query points and `n_cols` features.
@@ -709,9 +824,7 @@ where
         self.core.write_prediction(
             self.factor(),
             &self.core.alpha,
-            xs,
-            n_rows,
-            n_cols,
+            Query::points(xs, n_rows, n_cols),
             options,
             &mut out,
         )?;
@@ -733,10 +846,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        let (l, thread_scratch) = self.store.l_and_thread_scratch();
-        let factor = StoredFactor::Llt(l);
-        self.core
-            .predict_with_into(factor, thread_scratch, xs, n_rows, n_cols, options, out)
+        self.predict_query_into(Query::points(xs, n_rows, n_cols), options, out)
     }
 
     /// Returns the predictive mean and query–query covariance at `xs`.
@@ -795,8 +905,12 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        self.core
-            .write_covariance(self.factor(), &self.core.alpha, xs, n_rows, n_cols, options)
+        self.core.write_covariance(
+            self.factor(),
+            &self.core.alpha,
+            Query::points(xs, n_rows, n_cols),
+            options,
+        )
     }
 
     /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
@@ -859,71 +973,57 @@ where
         self.core.sample_with(
             self.factor(),
             &self.core.alpha,
-            xs,
-            n_rows,
-            n_cols,
+            Query::points(xs, n_rows, n_cols),
             options,
             n_draws,
             seed,
         )
     }
+}
 
-    /// Returns leave-one-out mean and observation variance at every training point.
-    ///
-    /// Uses the GPML identities `μ_i = y_i - α_i / Q_ii` and
-    /// `σ_i² = 1 / Q_ii` with `Q = A⁻¹` and `A = K + σn² I`. This is
-    /// `p(y_i | X, y_{-i}, θ)`, not a query at a new `x*`. Mean and
-    /// variance are inverse-transformed like [`Self::predict`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a diagonal of `A⁻¹`
-    /// is not positive and finite.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Gpr, GaussianLikelihood};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-    /// let likelihood = GaussianLikelihood::new(0.1)?;
-    /// let gpr = Gpr::new(kernel, likelihood);
-    /// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
-    /// let loo = fitted.loo_predict()?;
-    /// assert_eq!(loo.mean.len(), 2);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
-        self.loo_predict_with(PredictOptions::default())
-    }
-
-    /// Returns leave-one-out mean and variance with an explicit variance kind.
-    ///
-    /// Observation variance is `1 / Q_ii`. Latent variance is
-    /// `max(0, 1 / Q_ii - σn²)` in the transformed space, then both mean
-    /// and variance are mapped back by the target transform.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::loo_predict`].
+impl<O, P: GpScalar, K: PointKernel> FittedGpr<O, P, K> {
+    /// Returns the feature dimension from the last successful fit.
     ///
     /// See the example on [`FittedGpr`].
-    pub fn loo_predict_with(
-        &self,
-        options: PredictOptions,
-    ) -> Result<Prediction<P::Refine>, GprError> {
-        self.core
-            .loo_predict_with(self.factor(), &self.core.alpha, options)
+    pub fn d(&self) -> usize {
+        self.core.d
+    }
+
+    /// Returns the original training features in column-major order.
+    ///
+    /// Same packing as [`Gpr::fit`] / [`Gpr<Fixed>::factor`]: `n` points by
+    /// `d` features. Values are on the scale passed to fit, before the input
+    /// transform.
+    ///
+    /// See the example on [`FittedGpr`].
+    pub fn x(&self) -> &[f64] {
+        &self.core.x_obs
     }
 }
 
-impl<O, P> FittedGpr<O, P>
+impl<O, P: GpScalar, C: PointUse> FittedGpr<O, P, DistanceKernel<C>> {
+    /// Returns a copy of the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as ModelKernelParts>::from_spec(self.core.kernel.clone())
+    }
+
+    /// Returns the slots of the kernel, in the order of
+    /// [`DistanceKernel::slots`]. A model loaded from disk has slots of its
+    /// own; bind its supplies to these.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn slots(&self) -> Vec<DistanceSlot> {
+        spec_slots(&self.core.kernel)
+    }
+}
+
+impl<O, P, K> FittedGpr<O, P, K>
 where
     P: GpScalar,
-    O: for<'a> Optimizer<GprObjective<'a, P>>,
+    K: ModelKernel,
+    O: for<'a> Optimizer<GprObjective<'a, P, K>>,
 {
     /// Re-runs the stored optimizer on the stored training data from the current `θ`.
     ///
@@ -944,11 +1044,21 @@ where
     }
 }
 
-impl<P> FittedGpr<Fixed, P>
-where
-    P: GpScalar,
-{
-    pub(crate) fn into_online_preserving_factor(self) -> Result<OnlineGpr<Fixed, P>, GprError> {
+impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
+    /// Rebuilds `L` and `α` at the current `θ` without a search.
+    ///
+    /// Transforms are not re-fit. `n` and `d` stay the same.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Gpr<Fixed>::factor`].
+    ///
+    /// See the example on [`FittedGpr`].
+    pub fn refit(&mut self) -> Result<(), GprError> {
+        self.fit_view().refactor()
+    }
+
+    pub(crate) fn into_online_preserving_factor(self) -> Result<OnlineGpr<Fixed, P, K>, GprError> {
         let n = self.core.n;
         let mut workspace = LdltStore::<P::Storage>::from_active(n)?;
         workspace.copy_ld_from(self.chol_l(), n)?;
@@ -957,8 +1067,10 @@ where
         LdltStore::set_vector_prefix(&mut workspace.alpha, &self.core.factor_alpha);
         Ok(OnlineGpr::from_core(self.core, self.optimizer, workspace))
     }
+}
 
-    pub(crate) fn from_persisted(mut parts: PersistedModel<P>) -> Result<Self, GprError> {
+impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
+    pub(crate) fn from_persisted(mut parts: PersistedModel<P, K>) -> Result<Self, GprError> {
         let n = parts.y_obs.len();
         if n == 0 {
             return Err(GprError::EmptyInput);
@@ -977,11 +1089,14 @@ where
             ));
         }
         let mut x_buf = parts.x_obs.clone();
-        parts.x_transform.apply(&mut x_buf, n, d)?;
+        if d > 0 {
+            parts.x_transform.apply(&mut x_buf, n, d)?;
+        }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
+        let sources = bind_training::<P::Storage, P::Sources, _>(&parts.kernel, Vec::new(), n)?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
-        let mut workspace = fit_buffers::<P>(n, parts.policies, &compiled)?;
+        let mut workspace = fit_buffers::<P, _>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
         if let Some(l) = parts.owned_l.take() {
             let mut dest = workspace.core_mut().k_matrix.as_mut();
@@ -998,6 +1113,7 @@ where
         )?;
         Ok(Self {
             core: GprCore {
+                slots: spec_slots(&parts.kernel),
                 kernel: parts.kernel,
                 compiled,
                 likelihood: parts.likelihood,
@@ -1015,25 +1131,14 @@ where
                 alpha: parts.alpha,
                 x_cast: P::Storage::empty_cols(),
                 y_cast: P::Storage::empty_rows(),
+                sources,
                 n,
                 d,
             },
             optimizer: Fixed,
             store: LltStore::with_mapped(workspace, parts.mapped),
+            _kernel: PhantomData,
         })
-    }
-
-    /// Rebuilds `L` and `α` at the current `θ` without a search.
-    ///
-    /// Transforms are not re-fit. `n` and `d` stay the same.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Gpr<Fixed>::factor`].
-    ///
-    /// See the example on [`FittedGpr`].
-    pub fn refit(&mut self) -> Result<(), GprError> {
-        self.fit_view().refactor()
     }
 }
 

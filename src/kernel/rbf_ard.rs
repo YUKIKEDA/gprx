@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
+use super::dist::{ArdBlocks, ArdSqDiff, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -363,6 +363,56 @@ impl RbfArdKernel {
         }
         write_square(out, uplo, |row, col| {
             rbf_value::<M, T>(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?)
+        })
+    }
+
+    /// Rectangular `K` from `(Δ_d)²` blocks.
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+        &self,
+        blocks: ArdBlocks<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_blocks(blocks, out, self.num_params(), |row, col| {
+            rbf_value::<M, T>(ard::r2_from_blocks(blocks, row, col, w, Pick::NONE)?)
+        })
+    }
+
+    /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+        &self,
+        blocks: ArdBlocks<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_blocks(blocks, d_k, self.num_params(), |row, col| {
+            rbf_grad::<M, T>(ard::r2_from_blocks(
+                blocks,
+                row,
+                col,
+                w,
+                Pick::one(param_idx),
+            )?)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+        &self,
+        blocks: ArdBlocks<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_blocks(blocks, d2_k, self.num_params(), |row, col| {
+            rbf_hess::<M, T>(
+                ard::r2_from_blocks(blocks, row, col, w, Pick::pair(i, j))?,
+                i == j,
+            )
         })
     }
 

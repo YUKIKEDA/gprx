@@ -150,6 +150,7 @@ impl KernelJson {
                 left: Box::new(Self::encode(left)?),
                 right: Box::new(Self::encode(right)?),
             }),
+            KernelSpec::Supplied(never) => match *never {},
             KernelSpec::Product(left, right) => Ok(Self::Product {
                 left: Box::new(Self::encode(left)?),
                 right: Box::new(Self::encode(right)?),

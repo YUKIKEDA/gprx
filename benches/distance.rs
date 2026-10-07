@@ -10,7 +10,10 @@
 #![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel};
+use gprx::kernel::{
+    ArdDistance, DistanceKernel, DistanceSource, KernelSpec, RbfArdKernel, RbfKernel,
+    ScalarDistance,
+};
 use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, OnlineGpr, Prediction, Sgpr, Svgp};
 
 #[path = "../tests/common/problems.rs"]
@@ -148,5 +151,130 @@ fn sparse(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(distance, exact, sparse);
+/// The baseline problem as supplied distances: per-dimension `(Δ_k)²`
+/// blocks (column-major), training square and train × query.
+struct Supplied {
+    train: Vec<Vec<f64>>,
+    cross: Vec<Vec<f64>>,
+    /// `Σ_k` of the blocks: the squared Euclidean distance.
+    train_sum: Vec<f64>,
+    cross_sum: Vec<f64>,
+}
+
+fn supplied(p: &DistanceBaseline) -> Supplied {
+    let block = |a: &[f64], ra: usize, b: &[f64], rb: usize, k: usize| -> Vec<f64> {
+        (0..rb)
+            .flat_map(|j| (0..ra).map(move |i| (a[i + k * ra] - b[j + k * rb]).powi(2)))
+            .collect()
+    };
+    let train: Vec<Vec<f64>> = (0..p.d).map(|k| block(&p.x, p.n, &p.x, p.n, k)).collect();
+    let cross: Vec<Vec<f64>> = (0..p.d).map(|k| block(&p.x, p.n, &p.xq, p.q, k)).collect();
+    let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
+        (0..blocks[0].len())
+            .map(|at| blocks.iter().map(|b| b[at]).sum())
+            .collect()
+    };
+    Supplied {
+        train_sum: sum(&train),
+        cross_sum: sum(&cross),
+        train,
+        cross,
+    }
+}
+
+/// The same two kernels as [`kernels`] on one supplied-distance slot.
+enum Slot {
+    Scalar(ScalarDistance),
+    Ard(ArdDistance),
+}
+
+fn distance_kernels(d: usize) -> [(&'static str, Slot, DistanceKernel); 2] {
+    let image = ScalarDistance::new();
+    let bands = ArdDistance::new(d).expect("dims");
+    [
+        (
+            "rbf",
+            Slot::Scalar(image),
+            image.kernel(RbfKernel::new(0.5).expect("ell")),
+        ),
+        (
+            "rbf_ard",
+            Slot::Ard(bands),
+            bands
+                .kernel(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell"))
+                .expect("dims"),
+        ),
+    ]
+}
+
+impl Slot {
+    /// The training square, borrowed (a fit copies it into the model).
+    fn train<'a>(&self, s: &'a Supplied, refs: &'a [&'a [f64]]) -> DistanceSource<'a> {
+        match self {
+            Self::Scalar(slot) => slot.borrow(&s.train_sum),
+            Self::Ard(slot) => slot.borrow(refs),
+        }
+    }
+
+    /// The train × query block, borrowed.
+    fn cross<'a>(&self, s: &'a Supplied, refs: &'a [&'a [f64]]) -> DistanceSource<'a> {
+        match self {
+            Self::Scalar(slot) => slot.borrow(&s.cross_sum),
+            Self::Ard(slot) => slot.borrow(refs),
+        }
+    }
+}
+
+/// The exact operations of `exact` on supplied distances, as `dist_*`.
+fn exact_supplied(c: &mut Criterion) {
+    let p = distance_baseline();
+    let s = supplied(&p);
+    let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
+    let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let mut group = c.benchmark_group("distance_baseline");
+    group.sample_size(20);
+    for (name, slot, kernel) in distance_kernels(p.d) {
+        let fit = || {
+            Gpr::new(kernel.clone(), lik())
+                .with_optimizer(Fixed)
+                .factor([slot.train(&s, &train_refs)], p.n, &p.y)
+                .expect("factor")
+        };
+        group.bench_function(format!("{name}/dist_factor"), |b| {
+            b.iter(fit);
+        });
+        let mut model = fit();
+        let mut theta = vec![0.0; model.num_params()];
+        model.get_params(&mut theta).expect("theta");
+        let mut grad = vec![0.0; theta.len()];
+        group.bench_function(format!("{name}/dist_mll_and_grad"), |b| {
+            b.iter(|| {
+                model
+                    .value_and_gradient_into(&theta, &mut grad)
+                    .expect("mll")
+            });
+        });
+        let mut pred = Prediction::default();
+        group.bench_function(format!("{name}/dist_predict_into"), |b| {
+            b.iter(|| {
+                model
+                    .predict_into([slot.cross(&s, &cross_refs)], p.q, &mut pred)
+                    .expect("predict")
+            });
+        });
+        group.bench_function(format!("{name}/dist_refit"), |b| {
+            b.iter(|| model.refit().expect("refit"));
+        });
+    }
+    // The coordinate refit of a `FittedGpr`, beside `dist_refit`.
+    for (name, kernel) in kernels() {
+        let mut model = fitted(&p, &kernel);
+        group.bench_function(format!("{name}/refit"), |b| {
+            b.iter(|| model.refit().expect("refit"));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(distance, exact, sparse, exact_supplied);
 criterion_main!(distance);

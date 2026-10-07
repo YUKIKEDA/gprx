@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use crate::error::GprError;
-use crate::kernel::KernelSpec;
+use crate::kernel::{KernelSpec, Supply};
 use crate::likelihood::GaussianLikelihood;
 
 /// Reports why an [`Interval`] or [`BoundedParam`] could not be constructed.
@@ -213,8 +213,8 @@ impl BoundedParam {
 
 /// Writes kernel `θ` then likelihood `θ` into `out`, the layout every model's
 /// optimizer sees.
-pub(crate) fn write_params(
-    kernel: &KernelSpec,
+pub(crate) fn write_params<S: Supply>(
+    kernel: &KernelSpec<S>,
     likelihood: &GaussianLikelihood,
     out: &mut [f64],
 ) -> Result<(), GprError> {

@@ -5,7 +5,9 @@ use faer::{Mat, MatMut, MatRef};
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Triangle, WeightedWalk};
+use crate::kernel::{
+    CompiledKernel, KernelScalar, ModelKernel, SpecOf, Supply, Triangle, WeightedWalk,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{frobenius_lower, gemv_sym_lower, solve_lower};
 use crate::optimizer::{OptResult, Optimizer};
@@ -17,6 +19,7 @@ use super::factor::{
     FactorPolicy, apply_compiled_to, factor_train_keeping_with_policy, factor_train_with_policy,
     factor_written_k_with_policy, fill_cached_inputs, neg_mll_from_factor,
 };
+use super::shared::train_points;
 use super::{FitBuffers, GprCore, LltStore, Policies};
 use crate::policy::{DistanceCachePolicy, with_kernel_exp};
 
@@ -29,10 +32,10 @@ fn uses_change_indices<Obj, O: Optimizer<Obj>>(_obj: &Obj) -> bool {
 ///
 /// A kernel that reads neither pairwise distances nor the ARD `(Δx_d)²`
 /// tensor gets no distance cache, whatever the policy says.
-pub(crate) fn fit_buffers<P: GpScalar>(
+pub(crate) fn fit_buffers<P: GpScalar, S: Supply>(
     n: usize,
     policies: Policies,
-    compiled: &CompiledKernel<P::Storage>,
+    compiled: &CompiledKernel<P::Storage, S>,
 ) -> Result<FitBuffers<P>, GprError> {
     let cache = if compiled.reads_distances()? || compiled.needs_ard_sq_diff() {
         policies.distance_cache
@@ -47,8 +50,8 @@ pub(crate) fn fit_buffers<P: GpScalar>(
 /// Every hyperparameter write (`set_params`, gradient, Hessian, `fit`,
 /// `refit`) runs here. [`FittedGpr`] lends its own buffers.
 /// [`OnlineGpr`] lends temporary ones filled from its LDLT.
-pub(crate) struct ExactFit<'a, P: GpScalar> {
-    pub(crate) core: &'a mut GprCore<P>,
+pub(crate) struct ExactFit<'a, P: GpScalar, K: ModelKernel> {
+    pub(crate) core: &'a mut GprCore<P, K>,
     pub(crate) store: &'a mut LltStore<P>,
 }
 
@@ -104,8 +107,8 @@ impl<S: KernelScalar> LeafCache<S> {
     }
 }
 
-impl<P: GpScalar> ExactFit<'_, P> {
-    pub(crate) fn reborrow(&mut self) -> ExactFit<'_, P> {
+impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
+    pub(crate) fn reborrow(&mut self) -> ExactFit<'_, P, K> {
         ExactFit {
             core: &mut *self.core,
             store: &mut *self.store,
@@ -123,7 +126,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
     /// Runs `optimizer` from the current `θ`, then leaves `L` / `α` at the result.
     pub(crate) fn optimize<O>(&mut self, optimizer: &O) -> Result<(), GprError>
     where
-        O: for<'b> Optimizer<GprObjective<'b, P>>,
+        O: for<'b> Optimizer<GprObjective<'b, P, K>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -268,12 +271,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
         if products > 0 {
             self.ensure_weighted(n, products)?;
         }
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let policy = FactorPolicy {
             jitter: self.core.policies.jitter,
@@ -284,11 +286,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let buffers = &mut self.store.buffers;
         let y = &self.core.y_train;
         if products == 0 {
-            with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M>(
+            with_kernel_exp!(self.core.policies.math, M => factor_train_with_policy::<_, _, M, _>(
                 compiled, x, buffers, y, noise, policy,
             ))?;
         } else {
-            with_kernel_exp!(self.core.policies.math, M => factor_train_keeping_with_policy::<_, _, M>(
+            with_kernel_exp!(self.core.policies.math, M => factor_train_keeping_with_policy::<_, _, M, _>(
                 compiled, x, buffers, y, noise, policy, products,
             ))?;
         }
@@ -421,14 +423,13 @@ impl<P: GpScalar> ExactFit<'_, P> {
         let LeafCache { grams, dirty, .. } = cache;
         for (i, slot) in grams.iter_mut().enumerate() {
             if dirty[i] {
-                let x = P::Storage::storage_cols(
-                    self.core
-                        .x
-                        .as_ref()
-                        .submatrix(0, 0, self.core.n, self.core.d),
+                let x = train_points::<P>(
+                    &self.core.x,
+                    (self.core.n, self.core.d),
                     &mut self.core.x_cast,
+                    &self.core.sources,
                 );
-                with_kernel_exp!(self.core.policies.math, M => apply_compiled_to::<_, _, M>(
+                with_kernel_exp!(self.core.policies.math, M => apply_compiled_to::<_, _, M, _>(
                     self.core.compiled.leaf_at(i)?,
                     x,
                     &mut self.store.buffers,
@@ -610,12 +611,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
             );
             return Ok(());
         }
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
@@ -637,12 +637,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
     }
 
     fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
@@ -699,12 +698,11 @@ impl<P: GpScalar> ExactFit<'_, P> {
         }
         let KeptGrams { products } = kept;
         self.ensure_weighted(n, products)?;
-        let x = P::Storage::storage_cols(
-            self.core
-                .x
-                .as_ref()
-                .submatrix(0, 0, self.core.n, self.core.d),
+        let x = train_points::<P>(
+            &self.core.x,
+            (self.core.n, self.core.d),
             &mut self.core.x_cast,
+            &self.core.sources,
         );
         let compiled = &self.core.compiled;
         let views = self.store.buffers.split_gradient();
@@ -744,7 +742,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
 
     pub(crate) fn commit_or_revert_optimize(
         &mut self,
-        kernel_before: KernelSpec,
+        kernel_before: SpecOf<K>,
         likelihood_before: GaussianLikelihood,
         result: Result<OptResult, GprError>,
     ) -> Result<(), GprError> {
@@ -785,7 +783,7 @@ impl<P: GpScalar> ExactFit<'_, P> {
             .all(|(a, b)| a.to_bits() == b.to_bits()))
     }
 
-    fn revert_theta(&mut self, kernel: KernelSpec, likelihood: GaussianLikelihood) {
+    fn revert_theta(&mut self, kernel: SpecOf<K>, likelihood: GaussianLikelihood) {
         self.core.kernel = kernel;
         self.core.likelihood = likelihood;
         self.core.compiled = self.core.kernel.compile_as::<P::Storage>();
