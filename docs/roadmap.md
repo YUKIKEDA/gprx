@@ -238,7 +238,7 @@ Requirements: design §5.6. Every row meets them and pastes its benches.
 | --- | --- | --- | --- | --- |
 | D1-1 | Docs | Requirements for supplied distances (design §5.6) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
 | D1-2 | Task | Benches and allocation checks against the coordinate path, before the implementation | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
-| D1-3 | Feat | `DistanceKernel`, sources, the strict table check, and the exact models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |
+| D1-3 | Feat | `DistanceKernel`, sources, the strict table check, and the exact models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
 | D1-4 | Feat | Online insert and delete on supplied distances (deferred compaction, ARD in place) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | Set after Grill on #473 |
 | D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |
 | D1-6 | Feat | Save and load of distance models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |

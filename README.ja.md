@@ -399,17 +399,17 @@ fn main() -> Result<(), gprx::GprError> {
 | --- | --- |
 | `from_vec(d2)` / `from_vecs(blocks)` | モデルへムーブ（`f64` のモデルはバッファをそのまま持つ） |
 | `from_slice(d2)` / `from_slices(blocks)` | 呼び出しでコピー |
-| `borrow(d2)` | `f64` のモデルの `predict` は、表を直す必要が無ければ（下記）その場で読む。`f32` のモデルは変換する。`fit` と `insert` はコピー |
-| `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` が `out[i + j * n_rows]` を書く。ARD の fill は `d` 個のブロックを続けて書く |
+| `borrow(d2)` / `borrow(blocks)` | `f64` のモデルの `predict` はその場で読む。`f32` のモデルは 1 回だけ型変換する。`fit` はコピーする（ARD の正方行列は詰めた三角へ直接） |
+| `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` が `rows` の各行 `i` の `d²(i, col)` を書く。ARD の fill は `d` 本の列を続けて書く。正方行列では各列の `col..n` 行だけを求める |
 
-表は列優先の `dist[i + j * n_rows]`。値は負であってはならず、学習の正方行列（とクエリの正方行列）は対角が 0 で対称でなければならない。ただし丸めの範囲は許す。表の最大値の `1e-6` 倍以内なら、負の値と対角は `0.0` に、鏡像の組 `(i, j)`、`(j, i)` はその平均にそろえる。そのため `‖a‖² + ‖b‖² − 2a·b` で作った表や、向きごとに計算した距離の表も受け付ける。それを超えると `ShapeMismatch`。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。学習の fill は `DistanceCachePolicy` によらず、1 回の学習で 1 回だけ呼ぶ。モデルはそれが書いた二乗距離を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。
+表は列優先の `dist[i + j * n_rows]`。値はすべて有限で負でなく、学習の正方行列（とクエリの正方行列）は対角がちょうど 0 で、ちょうど対称でなければならない。そうでなければ、最初に外れた値の位置で `InvalidDistance { row, col, reason }` を返す。丸めで少しずれた表（`‖a‖² + ‖b‖² − 2a·b` で作った表）は、その供給が求めたときだけ受け付ける。`source.tidy(rel_tol)` は、表の最大値の `rel_tol` 倍以内の負の値と対角を `0.0` に、その範囲の鏡像の組を平均にそろえ、それを超えるものは拒む（直す借用の表は書き換えずにコピーする）。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。学習の fill は `DistanceCachePolicy` によらず、1 回の学習で 1 回だけ呼ぶ。モデルはそれが書いた二乗距離を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。`predict_into` はモデルが持つバッファの上で供給を束ねるので、同じ形の呼び出しを一度したあとは確保しない。
 
 | モデル | `fit` / `factor` | `predict` 系 | 共分散と `sample` |
 | --- | --- | --- | --- |
 | `Gpr`、`DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`、`WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
-`cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。`OnlineGpr::insert(sources, y_new)`（または `insert(sources, x_new, y_new)`）は、スロットごとに今の点への `n × 1` の列を 1 本受け、新しい対角はライブラリが 0 にする。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。
+`cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は今は座標のモデルにだけある。与えた距離でのオンラインの追加と削除は次の行（#473）。
 
 ```rust
 use gprx::kernel::{
@@ -423,11 +423,9 @@ use gprx::{Fixed, GaussianLikelihood, Gpr};
 struct Line;
 
 impl DistanceFill for Line {
-    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
-        for j in 0..n_cols {
-            for i in 0..n_rows {
-                out[i + j * n_rows] = (i as f64 - j as f64).powi(2);
-            }
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        for (slot, i) in out.iter_mut().zip(rows) {
+            *slot = (i as f64 - col as f64).powi(2);
         }
     }
 }
@@ -472,9 +470,10 @@ fn main() -> Result<(), gprx::GprError> {
         .factor([image.fill(&Line)], 4, &y)?;
     let source: DistanceSource<'_> = image.from_slice(&cross);
     assert_eq!(by_fill.predict([source], 2)?, pred);
-
-    let mut online = fitted.into_online()?;
-    online.insert([image.from_vec(vec![16.0, 9.0, 4.0, 1.0])], 0.1)?;
+    // A table the Gram trick rounded: repaired on request, refused without.
+    let rounded = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, -1e-15];
+    assert!(fitted.predict([image.borrow(&rounded)], 2).is_err());
+    let _ = fitted.predict([image.borrow(&rounded).tidy(1e-12)?], 2)?;
 
     // ARD: one block per dimension, here two copies of the line.
     let bands = ArdDistance::new(2)?;
@@ -802,6 +801,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `OptimizationNotConverged { iterations }` | ソルバが判定の前に止まった |
 | `InvalidHyperparameter { reason }` | カーネルパラメータが定義域の外 |
 | `ShapeMismatch { reason }` | 行列の形が違う |
+| `InvalidDistance { row, col, reason }` | 与えた二乗距離の `(row, col)` が有限でない、負、または正方行列の対角が 0 でない・対称でない |
 | `LengthMismatch { reason }` | スライスの長さが違う |
 | `IndexOutOfRange { reason }` | パラメータ、カーネルの葉、次元の添字 |
 | `InvalidConfig { reason }` | 最適化、ジッタ、変換の設定 |

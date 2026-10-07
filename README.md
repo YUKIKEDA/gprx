@@ -383,17 +383,17 @@ The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `
 | --- | --- |
 | `from_vec(d2)` / `from_vecs(blocks)` | moved into the model (an `f64` model keeps the buffer) |
 | `from_slice(d2)` / `from_slices(blocks)` | copied at the call |
-| `borrow(d2)` | read in place by the `predict` of an `f64` model when the table needs no tidying (below); converted by an `f32` model, and copied by `fit` and `insert` |
-| `fill(&filler)` | `DistanceFill::fill(n_rows, n_cols, out)` writes `out[i + j * n_rows]`; an ARD fill writes its `d` blocks one after another |
+| `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model, and copied by `fit` (an ARD square straight into its packed triangles) |
+| `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` writes `d²(i, col)` for each row `i` of `rows`; an ARD fill writes its `d` runs one after another. A square asks only for the rows `col..n` of each column |
 
-Tables are column-major `dist[i + j * n_rows]`. Every value must be non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, up to rounding: within `1e-6` of the table's largest value, a negative value or a diagonal becomes `0.0` and a mirror pair `(i, j)`, `(j, i)` becomes its mean, so a table from `‖a‖² + ‖b‖² − 2a·b` or from a distance computed in each direction is accepted. Past that it is `ShapeMismatch`. A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. A training fill is called once per fit, whatever the `DistanceCachePolicy`: the model keeps the squares it wrote. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave.
+Tables are column-major `dist[i + j * n_rows]`. Every value must be finite and non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, exactly. Otherwise the call returns `InvalidDistance { row, col, reason }` at the first value that is not. A table that rounding leaves slightly off (one from `‖a‖² + ‖b‖² − 2a·b`) is accepted when its source asks for it: `source.tidy(rel_tol)` sets a negative value or a diagonal within `rel_tol` times the table's largest value to `0.0` and a mirror pair within it to its mean, and refuses anything past it (a borrowed table that the repair changes is copied, not written). A slot with no source, two sources, or a source of a slot the kernel does not have is `LengthMismatch`. A training fill is called once per fit, whatever the `DistanceCachePolicy`: the model keeps the squares it wrote. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave. `predict_into` binds the sources on buffers the model keeps, so a call allocates nothing once a call of the same shape has run.
 
 | Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
 | --- | --- | --- | --- |
 | `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
-`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. `OnlineGpr::insert(sources, y_new)` (or `insert(sources, x_new, y_new)`) takes one `n × 1` column per slot to the current points; the library writes the new diagonal zero. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`.
+`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` is on coordinate models only for now: online insert and delete on supplied distances are the next row (#473).
 
 ```rust
 use gprx::kernel::{
@@ -407,11 +407,9 @@ use gprx::{Fixed, GaussianLikelihood, Gpr};
 struct Line;
 
 impl DistanceFill for Line {
-    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
-        for j in 0..n_cols {
-            for i in 0..n_rows {
-                out[i + j * n_rows] = (i as f64 - j as f64).powi(2);
-            }
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        for (slot, i) in out.iter_mut().zip(rows) {
+            *slot = (i as f64 - col as f64).powi(2);
         }
     }
 }
@@ -456,9 +454,10 @@ fn main() -> Result<(), gprx::GprError> {
         .factor([image.fill(&Line)], 4, &y)?;
     let source: DistanceSource<'_> = image.from_slice(&cross);
     assert_eq!(by_fill.predict([source], 2)?, pred);
-
-    let mut online = fitted.into_online()?;
-    online.insert([image.from_vec(vec![16.0, 9.0, 4.0, 1.0])], 0.1)?;
+    // A table the Gram trick rounded: repaired on request, refused without.
+    let rounded = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, -1e-15];
+    assert!(fitted.predict([image.borrow(&rounded)], 2).is_err());
+    let _ = fitted.predict([image.borrow(&rounded).tidy(1e-12)?], 2)?;
 
     // ARD: one block per dimension, here two copies of the line.
     let bands = ArdDistance::new(2)?;
@@ -786,6 +785,7 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 | `OptimizationNotConverged { iterations }` | the solver stopped short of its test |
 | `InvalidHyperparameter { reason }` | a kernel parameter is outside its domain |
 | `ShapeMismatch { reason }` | a matrix has the wrong shape |
+| `InvalidDistance { row, col, reason }` | a supplied squared distance at `(row, col)` is not finite, is negative, or breaks a square's zero diagonal or symmetry |
 | `LengthMismatch { reason }` | a slice has the wrong length |
 | `IndexOutOfRange { reason }` | a parameter, leaf, or dimension index |
 | `InvalidConfig { reason }` | an optimizer, jitter, or transform setting |
