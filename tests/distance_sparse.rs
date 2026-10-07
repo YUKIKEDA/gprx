@@ -596,3 +596,37 @@ fn sparse_fits_with_points_read_the_coordinates() {
         .expect("predict");
     assert!(pred.mean.iter().all(|v| v.is_finite()));
 }
+
+/// Repeated inducing indices are allowed, as repeated rows of `Z` are: the
+/// `K_mm` jitter retries make the singular `K_mm` factor.
+#[test]
+fn repeated_inducing_indices_are_allowed() {
+    let data = data();
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(0.9).expect("ell"));
+    let repeated = [0, 0, 3];
+    let sgpr = Sgpr::new(kernel.clone(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&data.train)], N, &y, &repeated)
+        .map_err(|(_, e)| e)
+        .expect("sgpr");
+    assert_eq!(sgpr.inducing(), &repeated);
+    let svgp = Svgp::new(kernel, lik())
+        .factor([image.borrow(&data.train)], N, &y, &repeated)
+        .map_err(|(_, e)| e)
+        .expect("svgp");
+    for pred in [
+        sgpr.predict([image.borrow(&data.cross)], Q)
+            .expect("predict"),
+        svgp.predict([image.borrow(&data.cross)], Q)
+            .expect("predict"),
+    ] {
+        assert!(
+            pred.mean
+                .iter()
+                .chain(&pred.variance)
+                .all(|v| v.is_finite())
+        );
+    }
+}
