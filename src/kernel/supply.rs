@@ -278,6 +278,7 @@ impl ScalarDistance {
             slot: self.slot,
             shape: SlotShape::Scalar,
             data,
+            tidy: Tidy::Exact,
         }
     }
 }
@@ -370,7 +371,7 @@ impl ArdDistance {
     ///
     /// See the example on [`ArdDistance`].
     pub fn from_vecs(&self, d2: Vec<Vec<f64>>) -> DistanceSource<'static> {
-        self.source(SourceData::Blocks(d2.into_iter().map(Cow::Owned).collect()))
+        self.source(SourceData::Blocks(d2))
     }
 
     /// Binds copies of `d2`, one table per dimension, to this slot.
@@ -389,7 +390,7 @@ impl ArdDistance {
     /// ```
     pub fn from_slices(&self, d2: &[&[f64]]) -> DistanceSource<'static> {
         self.source(SourceData::Blocks(
-            d2.iter().map(|block| Cow::Owned(block.to_vec())).collect(),
+            d2.iter().map(|block| block.to_vec()).collect(),
         ))
     }
 
@@ -397,10 +398,8 @@ impl ArdDistance {
     /// the tables in place; a fit or an insert copies them into the model.
     ///
     /// See the example on [`ArdDistance`].
-    pub fn borrow<'a>(&self, d2: &[&'a [f64]]) -> DistanceSource<'a> {
-        self.source(SourceData::Blocks(
-            d2.iter().map(|block| Cow::Borrowed(*block)).collect(),
-        ))
+    pub fn borrow<'a>(&self, d2: &'a [&'a [f64]]) -> DistanceSource<'a> {
+        self.source(SourceData::Slices(d2))
     }
 
     /// Binds a function that writes this slot's `d²`, every dimension in
@@ -416,6 +415,7 @@ impl ArdDistance {
             slot: self.slot,
             shape: SlotShape::Ard(self.dims),
             data,
+            tidy: Tidy::Exact,
         }
     }
 }
@@ -902,21 +902,25 @@ pub(crate) type SpecOf<K> = KernelSpec<<K as sealed::Model>::Supply>;
 /// The compiled tree of model kernel `K` for compute scalar `T`.
 pub(crate) type CompiledOf<T, K> = crate::kernel::CompiledKernel<T, <K as sealed::Model>::Supply>;
 
-/// Writes squared distances for one block of pairs.
+/// Writes squared distances one column of pairs at a time.
 ///
-/// A fit calls [`Self::fill`] once for the training square and keeps what
-/// it wrote, whatever the [`crate::DistanceCachePolicy`] (the model keeps
-/// the training squares for prediction anyway). A prediction calls it once
-/// into scratch for each block it needs; an insert calls it once for the
-/// new column. The caller knows which
-/// samples the rows and columns are: it binds a filler to a slot for one
-/// call with [`ScalarDistance::fill`] or [`ArdDistance::fill`].
+/// The crate asks for the columns it needs, into a buffer it reuses, so a
+/// fill never makes the crate hold a dense table it would not keep. For a
+/// training square it asks, for each column `col`, only the rows
+/// `col..n` (the lower triangle, diagonal included): the square is
+/// symmetric by construction. For a block of two sets (train × query) it
+/// asks every row. A fit calls it once per column and keeps what it wrote,
+/// whatever the [`crate::DistanceCachePolicy`]; a prediction calls it into
+/// scratch. The caller knows which samples the rows and columns are: it
+/// binds a filler to a slot for one call with [`ScalarDistance::fill`] or
+/// [`ArdDistance::fill`].
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{DistanceFill, RbfKernel, ScalarDistance};
 /// use gprx::{GaussianLikelihood, Gpr};
+/// use std::ops::Range;
 ///
 /// /// Squared distances between two sets of one-dimensional samples.
 /// struct Pairs<'a> {
@@ -925,12 +929,10 @@ pub(crate) type CompiledOf<T, K> = crate::kernel::CompiledKernel<T, <K as sealed
 /// }
 ///
 /// impl DistanceFill for Pairs<'_> {
-///     fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
-///         for j in 0..n_cols {
-///             for i in 0..n_rows {
-///                 let diff = self.rows[i] - self.cols[j];
-///                 out[i + j * n_rows] = diff * diff;
-///             }
+///     fn fill_column(&self, col: usize, rows: Range<usize>, out: &mut [f64]) {
+///         for (slot, i) in out.iter_mut().zip(rows) {
+///             let diff = self.rows[i] - self.cols[col];
+///             *slot = diff * diff;
 ///         }
 ///     }
 /// }
@@ -948,11 +950,10 @@ pub(crate) type CompiledOf<T, K> = crate::kernel::CompiledKernel<T, <K as sealed
 /// # }
 /// ```
 pub trait DistanceFill: Send + Sync {
-    /// Writes `d²` of the `n_rows × n_cols` block into `out`, column-major:
-    /// the pair `(i, j)` at `i + j * n_rows`. A slot of
-    /// [`ArdDistance::dims`] `d` writes `d` such blocks one after another;
-    /// block `k` starts at `k * n_rows * n_cols`.
-    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]);
+    /// Writes `d²(i, col)` for each row `i` of `rows` into `out`, in row
+    /// order. A slot of [`ArdDistance::dims`] `d` writes `d` runs one after
+    /// another: dimension `k` at `k * rows.len()`.
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]);
 }
 
 /// Binds a supply of squared distances to one slot for one call.
@@ -965,6 +966,61 @@ pub struct DistanceSource<'a> {
     pub(crate) slot: SlotId,
     pub(crate) shape: SlotShape,
     pub(crate) data: SourceData<'a>,
+    pub(crate) tidy: Tidy,
+}
+
+impl DistanceSource<'_> {
+    /// Repairs what rounding leaves in this source's tables, within
+    /// `rel_tol` times the largest value of each table: a negative value or
+    /// a non-zero diagonal becomes `0.0`, and two mirror entries of a
+    /// square that differ become their mean. Past it the table is refused.
+    ///
+    /// Without it, a table must be exact: finite, non-negative, and, for a
+    /// square, a zero diagonal and equal mirror entries. Ask for the repair
+    /// when the table is built in a way that rounds (`‖a‖² + ‖b‖² − 2a·b`);
+    /// a table computed pair by pair needs none. A repaired table that was
+    /// borrowed is copied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidConfig`] when `rel_tol` is negative or not
+    /// finite.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// // The mirror entries differ in the last digit.
+    /// let train = [0.0, 1.0, 1.0 + 1e-15, 0.0];
+    /// let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .fit([image.borrow(&train).tidy(1e-12)?], 2, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.n(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn tidy(mut self, rel_tol: f64) -> Result<Self, GprError> {
+        if !(rel_tol.is_finite() && rel_tol >= 0.0) {
+            return Err(GprError::InvalidConfig {
+                reason: format!("tidy tolerance must be finite and non-negative, got {rel_tol}"),
+            });
+        }
+        self.tidy = Tidy::Within(rel_tol);
+        Ok(self)
+    }
+}
+
+/// How the crate checks the tables of one source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Tidy {
+    /// Exactly: finite, non-negative, a zero diagonal, equal mirror entries.
+    Exact,
+    /// Repaired within this tolerance, relative to the largest value.
+    Within(f64),
 }
 
 impl fmt::Debug for DistanceSource<'_> {
@@ -972,6 +1028,7 @@ impl fmt::Debug for DistanceSource<'_> {
         let data = match &self.data {
             SourceData::Values(v) => format!("{} values", v.len()),
             SourceData::Blocks(b) => format!("{} blocks", b.len()),
+            SourceData::Slices(b) => format!("{} borrowed blocks", b.len()),
             SourceData::Fill(_) => "fill".to_owned(),
         };
         f.debug_struct("DistanceSource")
@@ -986,8 +1043,10 @@ impl fmt::Debug for DistanceSource<'_> {
 pub(crate) enum SourceData<'a> {
     /// One table (scalar slot).
     Values(Cow<'a, [f64]>),
-    /// One table per dimension (ARD slot).
-    Blocks(Vec<Cow<'a, [f64]>>),
+    /// One owned table per dimension (ARD slot).
+    Blocks(Vec<Vec<f64>>),
+    /// One borrowed table per dimension (ARD slot).
+    Slices(&'a [&'a [f64]]),
     /// A function that writes the tables.
     Fill(&'a dyn DistanceFill),
 }
@@ -1028,7 +1087,7 @@ mod tests {
     struct Zeros;
 
     impl DistanceFill for Zeros {
-        fn fill(&self, _n_rows: usize, _n_cols: usize, out: &mut [f64]) {
+        fn fill_column(&self, _col: usize, _rows: std::ops::Range<usize>, out: &mut [f64]) {
             out.fill(0.0);
         }
     }

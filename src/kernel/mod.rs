@@ -62,9 +62,7 @@ pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
-pub(crate) use sources::{
-    BlockKind, QuerySources, RefinedSources, SourceStore, TrainSources, bind as bind_sources,
-};
+pub(crate) use sources::{BlockKind, QuerySources, RefinedSources, SourceStore, TrainSources};
 pub use spec::{KernelSpec, ParameterBinding};
 pub use supply::{
     ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,
@@ -72,7 +70,8 @@ pub use supply::{
     ScalarDistanceLeaf, WithPoints,
 };
 pub(crate) use supply::{
-    CompiledOf, ModelKernelParts, SlotId, SlotShape, SourceData, SpecOf, SuppliedSpec, spec_slots,
+    CompiledOf, ModelKernelParts, SlotId, SlotShape, SourceData, SpecOf, SuppliedSpec, Tidy,
+    spec_slots,
 };
 pub use term::{CustomKernel, KernelTerm};
 pub use tree::{NoSupply, Supply};

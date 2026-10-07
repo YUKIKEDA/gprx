@@ -166,6 +166,19 @@ pub enum GprError {
         /// Records which matrix and which shape was expected.
         reason: String,
     },
+    /// A supplied squared distance is not finite, is negative, is a
+    /// non-zero diagonal, or differs from its mirror entry, past what the
+    /// source's repair (if any) allows. `row` and `col` locate the pair in
+    /// its table.
+    #[error("invalid squared distance at ({row}, {col}): {reason}")]
+    InvalidDistance {
+        /// Holds the row of the pair in its table.
+        row: usize,
+        /// Holds the column of the pair in its table.
+        col: usize,
+        /// Holds what is wrong with it.
+        reason: String,
+    },
     /// A slice argument has the wrong length.
     #[error("length mismatch: {reason}")]
     LengthMismatch {

@@ -12,11 +12,12 @@ use std::borrow::Cow;
 use std::fmt;
 
 use faer::MatRef;
+use rayon::prelude::*;
 
 use super::compiled::supplied::{RectEntry, RectTable, SquareSlot, SquareSlots};
 use super::dist::ArdSqDiffBuf;
+use super::{DistanceFill, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
-use super::{ScalarOps, SourceData};
 use crate::error::GprError;
 
 /// A source's `d²`, checked: `shape.blocks()` dense blocks of `rows × cols`.
@@ -29,8 +30,12 @@ pub struct RawSlot<'a> {
 }
 
 enum RawData<'a> {
-    /// One table per block.
-    Blocks(Vec<Cow<'a, [f64]>>),
+    /// One table (a scalar slot).
+    Values(Cow<'a, [f64]>),
+    /// One owned table per block.
+    Blocks(Vec<Vec<f64>>),
+    /// One borrowed table per block.
+    Slices(&'a [&'a [f64]]),
     /// Every block in one buffer, one after another (a fill).
     Packed(Vec<f64>),
 }
@@ -40,7 +45,9 @@ impl RawSlot<'_> {
     pub(crate) fn block(&self, k: usize) -> &[f64] {
         let len = self.rows * self.cols;
         match &self.data {
+            RawData::Values(values) => values,
             RawData::Blocks(blocks) => &blocks[k],
+            RawData::Slices(blocks) => blocks[k],
             RawData::Packed(all) => &all[k * len..(k + 1) * len],
         }
     }
@@ -48,13 +55,15 @@ impl RawSlot<'_> {
     /// Takes block 0 as an owned buffer (moved when the source owned it).
     fn into_first(self) -> Vec<f64> {
         match self.data {
-            RawData::Blocks(mut blocks) if !blocks.is_empty() => blocks.swap_remove(0).into_owned(),
-            RawData::Blocks(_) => {
+            RawData::Values(values) => values.into_owned(),
+            RawData::Blocks(mut blocks) if !blocks.is_empty() => blocks.swap_remove(0),
+            RawData::Slices(blocks) if !blocks.is_empty() => blocks[0].to_vec(),
+            RawData::Packed(all) => all,
+            RawData::Blocks(_) | RawData::Slices(_) => {
                 // `bind` gives every slot at least one block.
                 debug_assert!(false, "a slot bound with no block");
                 Vec::new()
             }
-            RawData::Packed(all) => all,
         }
     }
 }
@@ -68,28 +77,17 @@ pub(crate) enum BlockKind {
     Rect,
 }
 
-/// Binds `sources` to `slots` (the kernel's slots, in order) and checks
-/// each block of `rows × cols`. The result follows the order of `slots`.
+/// The source of each of `slots` (the kernel's slots, in order), taken
+/// from `sources` in any order.
 ///
 /// # Errors
 ///
 /// Returns [`GprError::LengthMismatch`] for a source of a slot the kernel
-/// does not read, a slot without a source, two sources of one slot, or a
-/// block of the wrong length or count; [`GprError::EmptyInput`] when `rows`
-/// or `cols` is zero; [`GprError::NonFiniteInput`] for a non-finite value;
-/// [`GprError::ShapeMismatch`] for a value, a diagonal, or a mirror pair
-/// past what rounding leaves ([`check_block`]). Within that, a block is
-/// tidied ([`tidy_block`]): a borrowed table is then copied.
-pub(crate) fn bind<'a>(
+/// does not read, a slot without a source, or two sources of one slot.
+fn by_slot<'a>(
     slots: &[DistanceSlot],
     sources: impl IntoIterator<Item = DistanceSource<'a>>,
-    rows: usize,
-    cols: usize,
-    kind: BlockKind,
-) -> Result<Vec<RawSlot<'a>>, GprError> {
-    crate::data::require_nonempty(rows)?;
-    crate::data::require_nonempty(cols)?;
-    let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+) -> Result<Vec<DistanceSource<'a>>, GprError> {
     let mut bound: Vec<Option<DistanceSource<'a>>> = slots.iter().map(|_| None).collect();
     for source in sources {
         let Some(at) = slots.iter().position(|slot| slot.id() == source.slot) else {
@@ -105,28 +103,58 @@ pub(crate) fn bind<'a>(
         }
         bound[at] = Some(source);
     }
-    let mut raw = Vec::with_capacity(slots.len());
-    for (slot, source) in slots.iter().zip(bound) {
-        let Some(source) = source else {
-            return Err(GprError::LengthMismatch {
+    bound
+        .into_iter()
+        .map(|source| {
+            source.ok_or_else(|| GprError::LengthMismatch {
                 reason: "a distance slot of the kernel has no source".to_owned(),
-            });
-        };
+            })
+        })
+        .collect()
+}
+
+/// Binds `sources` to `slots` (the kernel's slots, in order) and checks
+/// each block of `rows × cols`. The result follows the order of `slots`.
+///
+/// # Errors
+///
+/// Returns [`GprError::LengthMismatch`] for a source of a slot the kernel
+/// does not read, a slot without a source, two sources of one slot, or a
+/// block of the wrong length or count; [`GprError::EmptyInput`] when `rows`
+/// or `cols` is zero; [`GprError::InvalidDistance`] for a value the
+/// source's check refuses ([`check_block`]). A borrowed table that its
+/// source's repair changes is copied.
+pub(crate) fn bind<'a>(
+    slots: &[DistanceSlot],
+    sources: impl IntoIterator<Item = DistanceSource<'a>>,
+    rows: usize,
+    cols: usize,
+    kind: BlockKind,
+) -> Result<Vec<RawSlot<'a>>, GprError> {
+    crate::data::require_nonempty(rows)?;
+    crate::data::require_nonempty(cols)?;
+    let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+    if kind == BlockKind::Square && rows != cols {
+        return Err(GprError::ShapeMismatch {
+            reason: format!("a square of squared distances is {rows}x{cols}"),
+        });
+    }
+    let mut raw = Vec::with_capacity(slots.len());
+    for (slot, source) in slots.iter().zip(by_slot(slots, sources)?) {
         let shape = slot.shape();
         let blocks = shape.blocks();
+        let tidy = source.tidy;
         let data = match source.data {
-            SourceData::Values(values) if blocks == 1 => RawData::Blocks(vec![values]),
+            SourceData::Values(values) if blocks == 1 => RawData::Values(values),
             SourceData::Blocks(tables) => RawData::Blocks(tables),
+            SourceData::Slices(tables) => RawData::Slices(tables),
             SourceData::Values(_) => {
                 return Err(GprError::LengthMismatch {
                     reason: format!("expected {blocks} tables of squared distances, got 1"),
                 });
             }
             SourceData::Fill(filler) => {
-                let total = len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?;
-                let mut all = vec![0.0; total];
-                filler.fill(rows, cols, &mut all);
-                RawData::Packed(all)
+                RawData::Packed(fill_dense(filler, rows, cols, blocks, kind)?)
             }
         };
         let mut raw_slot = RawSlot {
@@ -136,10 +164,42 @@ pub(crate) fn bind<'a>(
             rows,
             cols,
         };
-        check_slot(&mut raw_slot, blocks, len, kind)?;
+        check_slot(&mut raw_slot, blocks, len, kind, tidy)?;
         raw.push(raw_slot);
     }
     Ok(raw)
+}
+
+/// The `blocks` dense `rows × cols` blocks a fill writes, one after
+/// another. A square asks only the lower triangle and mirrors it.
+fn fill_dense(
+    filler: &dyn DistanceFill,
+    rows: usize,
+    cols: usize,
+    blocks: usize,
+    kind: BlockKind,
+) -> Result<Vec<f64>, GprError> {
+    let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+    let total = len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?;
+    let mut all = vec![0.0; total];
+    let mut column = vec![0.0; rows.checked_mul(blocks).ok_or(GprError::SizeOverflow)?];
+    for col in 0..cols {
+        let first = if kind == BlockKind::Square { col } else { 0 };
+        let run = rows - first;
+        let column = &mut column[..run * blocks];
+        filler.fill_column(col, first..rows, column);
+        for k in 0..blocks {
+            let src = &column[k * run..(k + 1) * run];
+            let block = &mut all[k * len..(k + 1) * len];
+            block[col * rows + first..(col + 1) * rows].copy_from_slice(src);
+            if kind == BlockKind::Square {
+                for (i, &v) in (first..rows).zip(src) {
+                    block[col + i * rows] = v;
+                }
+            }
+        }
+    }
+    Ok(all)
 }
 
 fn check_slot(
@@ -147,106 +207,290 @@ fn check_slot(
     blocks: usize,
     len: usize,
     kind: BlockKind,
+    tidy: Tidy,
 ) -> Result<(), GprError> {
     let (rows, cols) = (slot.rows, slot.cols);
-    match &mut slot.data {
-        RawData::Blocks(tables) => {
-            if tables.len() != blocks {
-                return Err(GprError::LengthMismatch {
-                    reason: format!(
-                        "expected {blocks} tables of squared distances, got {}",
-                        tables.len()
-                    ),
-                });
-            }
-            for table in tables.iter_mut() {
-                // A borrowed table is copied only when rounding needs a fix.
-                if check_block(table, rows, cols, kind)? {
-                    tidy_block(table.to_mut(), rows, cols, kind);
+    let count = match &slot.data {
+        RawData::Values(_) => 1,
+        RawData::Blocks(tables) => tables.len(),
+        RawData::Slices(tables) => tables.len(),
+        RawData::Packed(_) => blocks,
+    };
+    if count != blocks {
+        return Err(GprError::LengthMismatch {
+            reason: format!("expected {blocks} tables of squared distances, got {count}"),
+        });
+    }
+    for k in 0..blocks {
+        crate::data::require_count(slot.block(k).len(), len, "squared distances")?;
+        if check_block(slot.block(k), rows, cols, kind, tidy)? {
+            // A borrowed table is copied only when its repair changes it.
+            let block: &mut [f64] = match &mut slot.data {
+                RawData::Values(values) => values.to_mut(),
+                RawData::Blocks(tables) => &mut tables[k],
+                RawData::Slices(tables) => {
+                    let owned: Vec<Vec<f64>> = tables.iter().map(|t| t.to_vec()).collect();
+                    slot.data = RawData::Blocks(owned);
+                    let RawData::Blocks(tables) = &mut slot.data else {
+                        return Err(GprError::LengthMismatch {
+                            reason: "internal: a copied table was lost".to_owned(),
+                        });
+                    };
+                    &mut tables[k]
                 }
-            }
-        }
-        RawData::Packed(all) => {
-            for block in all.chunks_exact_mut(len.max(1)).take(blocks) {
-                if check_block(block, rows, cols, kind)? {
-                    tidy_block(block, rows, cols, kind);
-                }
-            }
+                RawData::Packed(all) => &mut all[k * len..(k + 1) * len],
+            };
+            repair_block(block, rows, cols, kind);
         }
     }
     Ok(())
 }
 
-/// Relative tolerance, against the largest `|d²|` of a block, for what
-/// floating point leaves in a table of squared distances: a diagonal that
-/// is not exactly zero, two mirror entries of a square that differ, or a
-/// slightly negative value. Within it the block is tidied; past it the
-/// table is not one of squared distances.
-const ROUNDING_TOL: f64 = 1e-6;
-
-/// The rounding tolerance of `block`.
-fn rounding_tol(block: &[f64]) -> f64 {
-    ROUNDING_TOL * block.iter().fold(0.0f64, |acc, v| acc.max(v.abs()))
+/// An invalid pair `(row, col)` of a table.
+fn invalid(row: usize, col: usize, reason: impl Into<String>) -> GprError {
+    GprError::InvalidDistance {
+        row,
+        col,
+        reason: reason.into(),
+    }
 }
 
-/// Checks one `rows × cols` block of `d²` and returns whether rounding left
-/// something [`tidy_block`] fixes (within [`ROUNDING_TOL`]).
+/// Whether `v` is a valid squared distance: finite and non-negative.
+/// Both bounds are tested without a branch (`&`, not `contains`), so a fold
+/// of it stays vectorized.
+#[inline]
+#[allow(clippy::manual_range_contains)]
+fn valid(v: f64) -> bool {
+    (v >= 0.0) & (v <= f64::MAX)
+}
+
+/// Whether two supplied values are the same number: their difference is
+/// exactly zero, which for finite values holds only when they are equal
+/// (`0.0` and `-0.0` included). A `NaN` is never the same as anything.
+#[inline]
+fn same(a: f64, b: f64) -> bool {
+    a - b == 0.0
+}
+
+/// The first value of a `rows`-row block that is not [`valid`].
+fn first_invalid(block: &[f64], rows: usize) -> GprError {
+    let rows = rows.max(1);
+    let at = block.iter().position(|&v| !valid(v)).unwrap_or(0);
+    let v = block.get(at).copied().unwrap_or(0.0);
+    let reason = if v.is_finite() {
+        format!("{v} is negative")
+    } else {
+        format!("{v} is not finite")
+    };
+    invalid(at % rows, at / rows, reason)
+}
+
+/// Checks one `rows × cols` block of `d²` against its source's check, and
+/// returns whether [`repair_block`] has values to fix.
+///
+/// [`Tidy::Exact`] asks every value to be finite and non-negative and, for
+/// a square, a zero diagonal and equal mirror entries, and never repairs.
+/// [`Tidy::Within`] allows a negative value, a non-zero diagonal, and a
+/// mirror gap up to its tolerance times the largest value of the block,
+/// and reports them for repair.
 ///
 /// # Errors
 ///
-/// Returns [`GprError::LengthMismatch`] for the wrong length,
-/// [`GprError::NonFiniteInput`] for a non-finite value, and
-/// [`GprError::ShapeMismatch`] for a value below `−tol`, a square that is
-/// not square, a diagonal past `tol`, or mirror entries further apart.
+/// Returns [`GprError::InvalidDistance`] for the first violation past what
+/// the check allows.
 pub(crate) fn check_block(
     block: &[f64],
     rows: usize,
     cols: usize,
     kind: BlockKind,
+    tidy: Tidy,
 ) -> Result<bool, GprError> {
-    crate::data::require_count(block.len(), rows * cols, "squared distances")?;
-    crate::data::require_finite(block)?;
-    let tol = rounding_tol(block);
-    let mut tidy = false;
-    for (at, &v) in block.iter().enumerate() {
-        if v < -tol {
-            return Err(GprError::ShapeMismatch {
-                reason: format!(
-                    "squared distance ({}, {}) is negative",
-                    at % rows.max(1),
-                    at / rows.max(1)
-                ),
-            });
-        }
-        tidy |= v < 0.0;
+    match tidy {
+        Tidy::Exact => exact_block(block, rows, cols, kind).map(|()| false),
+        Tidy::Within(rel) => within_block(block, rows, cols, kind, rel),
+    }
+}
+
+/// [`check_block`] for [`Tidy::Exact`]. The values are folded without a
+/// branch; a violation is located only once the fold has found one.
+fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Result<(), GprError> {
+    if !block.iter().fold(true, |ok, &v| ok & valid(v)) {
+        return Err(first_invalid(block, rows));
     }
     if kind == BlockKind::Square {
-        if rows != cols {
-            return Err(GprError::ShapeMismatch {
-                reason: format!("a square of squared distances is {rows}x{cols}"),
-            });
+        for j in 0..cols {
+            let diag = block[j + j * rows];
+            if diag != 0.0 {
+                return Err(invalid(j, j, format!("the diagonal is {diag}, not zero")));
+            }
         }
+        let bands: Vec<usize> = (0..rows).step_by(BAND).collect();
+        let symmetric = bands
+            .into_par_iter()
+            .all(|j0| check_band(block, rows, j0, (j0 + BAND).min(rows), |_| {}));
+        if !symmetric {
+            let mut found = Ok(());
+            let _ = for_each_lower_pair(rows, |i, j| {
+                let (a, b) = (block[i + j * rows], block[j + i * rows]);
+                if !same(a, b) {
+                    found = Err(invalid(
+                        i,
+                        j,
+                        format!("{a} differs from its mirror ({j}, {i}), {b}"),
+                    ));
+                    return Err(());
+                }
+                Ok(())
+            });
+            found?;
+        }
+    }
+    Ok(())
+}
+
+/// Columns of one band of [`check_band`]: the mirror of the band is read
+/// one row at a time, `BAND` contiguous values (a cache line of `f64`).
+const BAND: usize = 8;
+
+/// Checks the columns `j0..j1` (`j1 − j0 ≤` [`BAND`]) of the `n × n`
+/// square `block` exactly, below and on the diagonal, and hands each lower
+/// run (rows `j..n` of column `j`) to `run`: values finite and
+/// non-negative, a zero diagonal, and each entry equal to its mirror. The
+/// band's mirror is read row by row, contiguous, while its `BAND` columns
+/// are streamed, so no pair is a lone strided load.
+fn check_band(block: &[f64], n: usize, j0: usize, j1: usize, mut run: impl FnMut(&[f64])) -> bool {
+    let mut ok = true;
+    for j in j0..j1 {
+        let lower = &block[j * n + j..(j + 1) * n];
+        ok &= lower.iter().fold(lower[0] == 0.0, |ok, &v| ok & valid(v));
+        run(lower);
+        for i in j + 1..j1 {
+            ok &= same(block[i + j * n], block[j + i * n]);
+        }
+    }
+    if j1 - j0 == BAND {
+        let cols: [&[f64]; BAND] = std::array::from_fn(|c| &block[(j0 + c) * n..(j0 + c + 1) * n]);
+        for i in j1..n {
+            let row = &block[i * n + j0..i * n + j1];
+            ok &= (0..BAND).fold(true, |ok, c| ok & same(cols[c][i], row[c]));
+        }
+    } else {
+        for j in j0..j1 {
+            for i in j1..n {
+                ok &= same(block[i + j * n], block[j + i * n]);
+            }
+        }
+    }
+    ok
+}
+
+/// Checks the `d` dense `n × n` training squares of an ARD slot exactly
+/// (`block(k)` is dimension `k`) and packs their lower triangles, reading
+/// each square once, band by band ([`check_band`]) on the Rayon pool, as
+/// the coordinate path fills its `(Δx_d)²` cache. A band's columns are one
+/// contiguous range of the packed triangle. A violation is located with
+/// [`exact_block`].
+///
+/// # Errors
+///
+/// Returns [`GprError::InvalidDistance`] for the first violation and
+/// [`GprError::SizeOverflow`] when the packed size does not fit.
+fn pack_exact_ard<'b, T: KernelScalar>(
+    n: usize,
+    d: usize,
+    block: impl Fn(usize) -> &'b [f64] + Sync,
+) -> Result<ArdSqDiffBuf<T>, GprError> {
+    let per_dim = n
+        .checked_add(1)
+        .and_then(|n1| n.checked_mul(n1))
+        .map(|cells| cells / 2)
+        .ok_or(GprError::SizeOverflow)?;
+    let len = per_dim.checked_mul(d).ok_or(GprError::SizeOverflow)?;
+    let mut data = vec![T::from_f64(0.0); len];
+    let mut bands: Vec<(usize, usize, usize, &mut [T])> = Vec::new();
+    let mut rest = data.as_mut_slice();
+    for k in 0..d {
+        for j0 in (0..n).step_by(BAND) {
+            let j1 = (j0 + BAND).min(n);
+            let size = (j0..j1).map(|j| n - j).sum();
+            let (head, tail) = rest.split_at_mut(size);
+            bands.push((k, j0, j1, head));
+            rest = tail;
+        }
+    }
+    let ok = bands.into_par_iter().all(|(k, j0, j1, dest)| {
+        let mut at = 0;
+        check_band(block(k), n, j0, j1, |lower| {
+            for (slot, &v) in dest[at..at + lower.len()].iter_mut().zip(lower) {
+                *slot = T::from_f64(v);
+            }
+            at += lower.len();
+        })
+    });
+    if !ok {
+        for k in 0..d {
+            exact_block(block(k), n, n, BlockKind::Square)?;
+        }
+        return Err(invalid(0, 0, "a band of the square failed its check"));
+    }
+    Ok(ArdSqDiffBuf::from_packed(data, n, d))
+}
+
+/// [`check_block`] for [`Tidy::Within`].
+fn within_block(
+    block: &[f64],
+    rows: usize,
+    cols: usize,
+    kind: BlockKind,
+    rel: f64,
+) -> Result<bool, GprError> {
+    if !block.iter().fold(true, |ok, &v| ok & v.is_finite()) {
+        let at = block.iter().position(|v| !v.is_finite()).unwrap_or(0);
+        let rows = rows.max(1);
+        return Err(invalid(at % rows, at / rows, "is not finite"));
+    }
+    let tol = rel * block.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+    let mut repair = false;
+    for (at, &v) in block.iter().enumerate() {
+        if v < -tol {
+            let rows = rows.max(1);
+            return Err(invalid(
+                at % rows,
+                at / rows,
+                format!("{v} is negative past the tolerance {tol}"),
+            ));
+        }
+        repair |= v < 0.0;
+    }
+    if kind == BlockKind::Square {
         for j in 0..cols {
             let diag = block[j + j * rows];
             if diag.abs() > tol {
-                return Err(GprError::ShapeMismatch {
-                    reason: format!("squared distance ({j}, {j}) is not zero"),
-                });
+                return Err(invalid(
+                    j,
+                    j,
+                    format!("the diagonal is {diag}, past the tolerance {tol}"),
+                ));
             }
-            tidy |= diag.abs() > 0.0;
+            repair |= diag != 0.0;
         }
         for_each_lower_pair(rows, |i, j| {
-            let gap = (block[i + j * rows] - block[j + i * rows]).abs();
+            let (a, b) = (block[i + j * rows], block[j + i * rows]);
+            let gap = (a - b).abs();
             if gap > tol {
-                return Err(GprError::ShapeMismatch {
-                    reason: format!("squared distances ({i}, {j}) and ({j}, {i}) differ"),
-                });
+                return Err(invalid(
+                    i,
+                    j,
+                    format!(
+                        "{a} differs from its mirror ({j}, {i}), {b}, past the tolerance {tol}"
+                    ),
+                ));
             }
-            tidy |= gap > 0.0;
+            repair |= gap > 0.0;
             Ok(())
         })?;
     }
-    Ok(tidy)
+    Ok(repair)
 }
 
 /// Side of the square tiles [`for_each_lower_pair`] walks.
@@ -273,10 +517,9 @@ fn for_each_lower_pair<E>(
     Ok(())
 }
 
-/// Fixes what [`check_block`] accepted as rounding: negative values to
-/// zero and, for a square, a zero diagonal and each mirror pair set to its
-/// mean.
-fn tidy_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
+/// Fixes what [`within_block`] accepted: negative values to zero and, for a
+/// square, a zero diagonal and each mirror pair set to its mean.
+fn repair_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
     for v in block.iter_mut() {
         *v = v.max(0.0);
     }
@@ -294,6 +537,182 @@ fn tidy_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
             match never {}
         }
     }
+}
+
+/// What a fill of a training square has met, for [`Tidy::Within`]: the
+/// largest value, and the worst negative value and diagonal with their
+/// pairs. Judged once the whole triangle is in, against its largest value.
+#[derive(Default)]
+struct FillRounding {
+    max: f64,
+    negative: Option<(f64, usize, usize)>,
+    diagonal: Option<(f64, usize, usize)>,
+}
+
+impl FillRounding {
+    /// Notes `v` at `(row, col)` and returns what is stored: `v`, or `0.0`
+    /// for a negative value or a diagonal.
+    fn note(&mut self, v: f64, row: usize, col: usize) -> f64 {
+        self.max = self.max.max(v.abs());
+        if row == col {
+            if self.diagonal.is_none_or(|(worst, _, _)| v.abs() > worst) && v != 0.0 {
+                self.diagonal = Some((v.abs(), row, col));
+            }
+            return 0.0;
+        }
+        if v < 0.0 {
+            if self.negative.is_none_or(|(worst, _, _)| -v > worst) {
+                self.negative = Some((-v, row, col));
+            }
+            return 0.0;
+        }
+        v
+    }
+
+    fn judge(&self, rel: f64) -> Result<(), GprError> {
+        let tol = rel * self.max;
+        if let Some((v, row, col)) = self.negative.filter(|(v, _, _)| *v > tol) {
+            return Err(invalid(
+                row,
+                col,
+                format!("{} is negative past the tolerance {tol}", -v),
+            ));
+        }
+        if let Some((v, row, col)) = self.diagonal.filter(|(v, _, _)| *v > tol) {
+            return Err(invalid(
+                row,
+                col,
+                format!("the diagonal is {v} in size, past the tolerance {tol}"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn tables_mismatch(expected: usize, got: usize) -> GprError {
+    GprError::LengthMismatch {
+        reason: format!("expected {expected} tables of squared distances, got {got}"),
+    }
+}
+
+fn require_tables(got: usize, expected: usize) -> Result<(), GprError> {
+    if got == expected {
+        Ok(())
+    } else {
+        Err(tables_mismatch(expected, got))
+    }
+}
+
+/// A scalar training square of `n` points from a fill: the lower triangle,
+/// column by column, mirrored into the dense square.
+fn fill_scalar_square(
+    filler: &dyn DistanceFill,
+    n: usize,
+    tidy: Tidy,
+) -> Result<Vec<f64>, GprError> {
+    let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
+    let mut square = vec![0.0; len];
+    let mut run = vec![0.0; n];
+    let mut rounding = FillRounding::default();
+    for col in 0..n {
+        let run = &mut run[..n - col];
+        filler.fill_column(col, col..n, run);
+        let column = &mut square[col * n + col..(col + 1) * n];
+        fill_run(run, col, tidy, &mut rounding, |at, v| column[at] = v)?;
+    }
+    if let Tidy::Within(rel) = tidy {
+        rounding.judge(rel)?;
+    }
+    for col in 0..n {
+        for row in col + 1..n {
+            square[col + row * n] = square[row + col * n];
+        }
+    }
+    Ok(square)
+}
+
+/// An ARD training square of `n` points and `d` dimensions from a fill:
+/// each column run of the lower triangle goes straight into its packed
+/// place through one reused `d · n` buffer.
+fn fill_ard_square<T: KernelScalar>(
+    filler: &dyn DistanceFill,
+    n: usize,
+    d: usize,
+    tidy: Tidy,
+) -> Result<ArdSqDiffBuf<T>, GprError> {
+    let mut packed = ArdSqDiffBuf::<T>::zeros(n, d)?;
+    let mut buffer = vec![0.0; n.checked_mul(d).ok_or(GprError::SizeOverflow)?];
+    let mut rounding: Vec<FillRounding> = (0..d).map(|_| FillRounding::default()).collect();
+    for col in 0..n {
+        let len = n - col;
+        let runs = &mut buffer[..len * d];
+        filler.fill_column(col, col..n, runs);
+        for (k, rounding) in rounding.iter_mut().enumerate() {
+            let column = packed.column_mut(k, col);
+            fill_run(
+                &runs[k * len..(k + 1) * len],
+                col,
+                tidy,
+                rounding,
+                |at, v| {
+                    column[at] = T::from_f64(v);
+                },
+            )?;
+        }
+    }
+    if let Tidy::Within(rel) = tidy {
+        for rounding in &rounding {
+            rounding.judge(rel)?;
+        }
+    }
+    Ok(packed)
+}
+
+/// Checks one column run of a training square a fill wrote (rows
+/// `col..n`): [`Tidy::Exact`] refuses at once; [`Tidy::Within`] notes into
+/// `rounding` and stores the repaired values in `out`.
+fn fill_run(
+    run: &[f64],
+    col: usize,
+    tidy: Tidy,
+    rounding: &mut FillRounding,
+    mut store: impl FnMut(usize, f64),
+) -> Result<(), GprError> {
+    match tidy {
+        Tidy::Exact => {
+            if !run.iter().fold(true, |ok, &v| ok & valid(v)) {
+                let at = run.iter().position(|&v| !valid(v)).unwrap_or(0);
+                let v = run[at];
+                let reason = if v.is_finite() {
+                    format!("{v} is negative")
+                } else {
+                    format!("{v} is not finite")
+                };
+                return Err(invalid(col + at, col, reason));
+            }
+            if let Some(&diag) = run.first()
+                && diag != 0.0
+            {
+                return Err(invalid(
+                    col,
+                    col,
+                    format!("the diagonal is {diag}, not zero"),
+                ));
+            }
+            for (at, &v) in run.iter().enumerate() {
+                store(at, v);
+            }
+        }
+        Tidy::Within(_) => {
+            if let Some(at) = run.iter().position(|v| !v.is_finite()) {
+                return Err(invalid(col + at, col, "is not finite"));
+            }
+            for (at, &v) in run.iter().enumerate() {
+                store(at, rounding.note(v, col + at, col));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The training `d²` of one slot, in the storage scalar.
@@ -377,13 +796,105 @@ impl<T: KernelScalar> TrainSources<T> {
             let id = slot.id;
             let data = match slot.shape {
                 SlotShape::Scalar => TrainData::Scalar(T::vec_from_f64(slot.into_first())),
-                SlotShape::Ard(d) => TrainData::Ard(ArdSqDiffBuf::from_pairs(n, d, |k, i, j| {
-                    T::from_f64(slot.block(k)[i + j * n])
-                })?),
+                SlotShape::Ard(d) => {
+                    TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, |k| slot.block(k))?)
+                }
             };
             slots.push((id, data));
         }
         Ok(Self { n, cap: n, slots })
+    }
+
+    /// The store of the `n × n` training squares of `slots` (the kernel's
+    /// slots, in order) from `sources`, checked as each source asks
+    /// ([`check_block`]). A scalar table the caller moved in is kept without
+    /// a copy (`f64`); an ARD table is packed into its lower triangles one
+    /// column run at a time; a fill writes the lower triangle column by
+    /// column into the store, so no dense `d · n²` buffer is made.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`bind`] for a square.
+    pub(crate) fn bind<'a>(
+        slots: &[DistanceSlot],
+        sources: impl IntoIterator<Item = DistanceSource<'a>>,
+        n: usize,
+    ) -> Result<Self, GprError> {
+        crate::data::require_nonempty(n)?;
+        let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
+        let mut out = Vec::with_capacity(slots.len());
+        for (slot, source) in slots.iter().zip(by_slot(slots, sources)?) {
+            let tidy = source.tidy;
+            let blocks = slot.shape().blocks();
+            let data = match (slot.shape(), source.data) {
+                (SlotShape::Scalar, SourceData::Values(values)) => {
+                    crate::data::require_count(values.len(), len, "squared distances")?;
+                    let mut values = values;
+                    if check_block(&values, n, n, BlockKind::Square, tidy)? {
+                        repair_block(values.to_mut(), n, n, BlockKind::Square);
+                    }
+                    TrainData::Scalar(T::vec_from_f64(values.into_owned()))
+                }
+                (SlotShape::Scalar, SourceData::Fill(filler)) => {
+                    TrainData::Scalar(T::vec_from_f64(fill_scalar_square(filler, n, tidy)?))
+                }
+                (SlotShape::Ard(d), SourceData::Blocks(tables)) if tidy == Tidy::Exact => {
+                    require_tables(tables.len(), d)?;
+                    for table in &tables {
+                        crate::data::require_count(table.len(), len, "squared distances")?;
+                    }
+                    TrainData::Ard(pack_exact_ard(n, d, |k| &tables[k])?)
+                }
+                (SlotShape::Ard(d), SourceData::Slices(tables)) if tidy == Tidy::Exact => {
+                    require_tables(tables.len(), d)?;
+                    for table in tables {
+                        crate::data::require_count(table.len(), len, "squared distances")?;
+                    }
+                    TrainData::Ard(pack_exact_ard(n, d, |k| tables[k])?)
+                }
+                (SlotShape::Ard(d), SourceData::Blocks(mut tables)) => {
+                    require_tables(tables.len(), d)?;
+                    for table in &mut tables {
+                        crate::data::require_count(table.len(), len, "squared distances")?;
+                        if check_block(table, n, n, BlockKind::Square, tidy)? {
+                            repair_block(table, n, n, BlockKind::Square);
+                        }
+                    }
+                    TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, |k| &tables[k])?)
+                }
+                (SlotShape::Ard(d), SourceData::Slices(tables)) => {
+                    require_tables(tables.len(), d)?;
+                    let mut repaired: Vec<Option<Vec<f64>>> = (0..d).map(|_| None).collect();
+                    for (k, table) in tables.iter().enumerate() {
+                        crate::data::require_count(table.len(), len, "squared distances")?;
+                        if check_block(table, n, n, BlockKind::Square, tidy)? {
+                            let mut copy = table.to_vec();
+                            repair_block(&mut copy, n, n, BlockKind::Square);
+                            repaired[k] = Some(copy);
+                        }
+                    }
+                    TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, |k| {
+                        repaired[k].as_deref().unwrap_or(tables[k])
+                    })?)
+                }
+                (SlotShape::Ard(d), SourceData::Fill(filler)) => {
+                    TrainData::Ard(fill_ard_square(filler, n, d, tidy)?)
+                }
+                (_, SourceData::Values(_)) => return Err(tables_mismatch(blocks, 1)),
+                (_, SourceData::Blocks(tables)) => {
+                    return Err(tables_mismatch(blocks, tables.len()));
+                }
+                (_, SourceData::Slices(tables)) => {
+                    return Err(tables_mismatch(blocks, tables.len()));
+                }
+            };
+            out.push((slot.id(), data));
+        }
+        Ok(Self {
+            n,
+            cap: n,
+            slots: out,
+        })
     }
 
     /// Computes the append of one point without changing `self`: `cols`
@@ -679,8 +1190,12 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     /// A coordinate model's: no slots.
     fn empty() -> Self;
 
-    /// The store for the checked training squares `raw` of `n` points.
-    fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError>;
+    /// [`TrainSources::bind`].
+    fn bind<'a>(
+        slots: &[DistanceSlot],
+        sources: impl IntoIterator<Item = DistanceSource<'a>>,
+        n: usize,
+    ) -> Result<Self, GprError>;
 
     /// The squares in the storage scalar.
     fn storage(&self) -> &TrainSources<S>;
@@ -713,8 +1228,12 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
         Self::empty()
     }
 
-    fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError> {
-        Self::from_raw(raw, n)
+    fn bind<'a>(
+        slots: &[DistanceSlot],
+        sources: impl IntoIterator<Item = DistanceSource<'a>>,
+        n: usize,
+    ) -> Result<Self, GprError> {
+        Self::bind(slots, sources, n)
     }
 
     fn storage(&self) -> &TrainSources<S> {
@@ -753,8 +1272,12 @@ impl SourceStore<f32> for RefinedSources {
         Self::default()
     }
 
-    fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError> {
-        let exact = TrainSources::<f64>::from_raw(raw, n)?;
+    fn bind<'a>(
+        slots: &[DistanceSlot],
+        sources: impl IntoIterator<Item = DistanceSource<'a>>,
+        n: usize,
+    ) -> Result<Self, GprError> {
+        let exact = TrainSources::<f64>::bind(slots, sources, n)?;
         Ok(Self {
             storage: exact.cast()?,
             exact,
@@ -946,21 +1469,46 @@ mod tests {
     }
 
     #[test]
-    fn a_mirror_pair_far_from_the_first_tile_is_checked_and_tidied() {
+    fn a_mirror_pair_far_from_the_first_tile_is_checked_and_repaired() {
         let n = 150;
         let mut block = line(1.0, 0..n, 0..n);
-        // Past rounding in a tile off the diagonal: refused.
-        block[140 + 3 * n] += 1.0;
-        let refused = check_block(&block, n, n, BlockKind::Square);
+        assert_eq!(
+            check_block(&block, n, n, BlockKind::Square, Tidy::Exact),
+            Ok(false)
+        );
+        // Any gap is refused by the exact check, at the pair in a tile off
+        // the diagonal.
+        block[140 + 3 * n] += 1e-9;
+        let refused = check_block(&block, n, n, BlockKind::Square, Tidy::Exact);
         assert!(
-            matches!(&refused, Err(GprError::ShapeMismatch { reason }) if reason.contains("(140, 3)")),
+            matches!(
+                &refused,
+                Err(GprError::InvalidDistance {
+                    row: 140,
+                    col: 3,
+                    ..
+                })
+            ),
             "{refused:?}"
         );
-        // Within rounding: accepted, then set to the pair's mean.
-        block[140 + 3 * n] -= 1.0 - 1e-9;
-        assert_eq!(check_block(&block, n, n, BlockKind::Square), Ok(true));
-        tidy_block(&mut block, n, n, BlockKind::Square);
+        // Within a repair's tolerance it is set to the pair's mean.
+        let within = Tidy::Within(1e-6);
+        assert_eq!(
+            check_block(&block, n, n, BlockKind::Square, within),
+            Ok(true)
+        );
+        repair_block(&mut block, n, n, BlockKind::Square);
         assert_eq!(block[140 + 3 * n].to_bits(), block[3 + 140 * n].to_bits());
+        // Past it, refused.
+        block[140 + 3 * n] += 1.0;
+        assert!(matches!(
+            check_block(&block, n, n, BlockKind::Square, within),
+            Err(GprError::InvalidDistance {
+                row: 140,
+                col: 3,
+                ..
+            })
+        ));
     }
 
     /// Two scalar slots and one ARD slot of two points.

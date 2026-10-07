@@ -261,12 +261,10 @@ struct Pairs<'a> {
 }
 
 impl DistanceFill for Pairs<'_> {
-    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
-        for j in 0..n_cols {
-            for i in 0..n_rows {
-                let diff = self.rows[i] - self.cols[j];
-                out[i + j * n_rows] = diff * diff;
-            }
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        for (slot, i) in out.iter_mut().zip(rows) {
+            let diff = self.rows[i] - self.cols[col];
+            *slot = diff * diff;
         }
     }
 }
@@ -332,19 +330,25 @@ fn a_fill_matches_the_same_table_and_squares_are_checked() {
     let diag = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
         .factor([image.from_vec(bad)], N, &y);
-    assert!(matches!(diag, Err((_, GprError::ShapeMismatch { .. }))));
+    assert!(matches!(
+        diag,
+        Err((_, GprError::InvalidDistance { row: 0, col: 0, .. }))
+    ));
     let mut bad = sq(&c0, &c0);
     bad[1] += 0.25;
     let asym = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
         .factor([image.from_vec(bad)], N, &y);
-    assert!(matches!(asym, Err((_, GprError::ShapeMismatch { .. }))));
+    assert!(matches!(
+        asym,
+        Err((_, GprError::InvalidDistance { row: 1, col: 0, .. }))
+    ));
     let mut nan = sq(&c0, &q0);
     nan[2] = f64::NAN;
-    assert_eq!(
-        table.predict([image.borrow(&nan)], M).err(),
-        Some(GprError::NonFiniteInput)
-    );
+    assert!(matches!(
+        table.predict([image.borrow(&nan)], M),
+        Err(GprError::InvalidDistance { row: 2, col: 0, .. })
+    ));
     assert!(matches!(
         table.predict([image.borrow(&nan[..4])], M),
         Err(GprError::LengthMismatch { .. })
@@ -353,7 +357,7 @@ fn a_fill_matches_the_same_table_and_squares_are_checked() {
     query[1] += 1.0;
     assert!(matches!(
         table.predict_covariance([image.borrow(&sq(&c0, &q0))], [image.borrow(&query)], M),
-        Err(GprError::ShapeMismatch { .. })
+        Err(GprError::InvalidDistance { row: 1, col: 0, .. })
     ));
 }
 
@@ -487,10 +491,10 @@ struct Counted<'a> {
 }
 
 impl DistanceFill for Counted<'_> {
-    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.pairs.fill(n_rows, n_cols, out);
+        self.pairs.fill_column(col, rows, out);
     }
 }
 
@@ -514,9 +518,10 @@ fn a_fit_calls_the_fill_once_whatever_the_cache_policy() {
         fitted.distance_cache_policy(),
         DistanceCachePolicy::Uncached
     );
-    // The model keeps what the bind wrote, whatever the cache policy: the
-    // second factor (it restores `L` over the reused `W` buffer) reads it.
-    assert_eq!(fill.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // Each column once: the model keeps what the fill wrote, whatever the
+    // cache policy, and the second factor (it restores `L` over the reused
+    // `W` buffer) reads it.
+    assert_eq!(fill.calls.load(std::sync::atomic::Ordering::Relaxed), N);
 }
 
 #[test]
@@ -641,7 +646,10 @@ fn a_negative_squared_distance_is_rejected() {
     let fit = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
         .factor([image.from_vec(train)], N, &y);
-    assert!(matches!(fit, Err((_, GprError::ShapeMismatch { .. }))));
+    assert!(matches!(
+        fit,
+        Err((_, GprError::InvalidDistance { row: 1, col: 0, .. }))
+    ));
     let fitted = Gpr::new(kernel, lik())
         .with_optimizer(Fixed)
         .factor([image.from_vec(sq(&c0, &c0))], N, &y)
@@ -650,7 +658,7 @@ fn a_negative_squared_distance_is_rejected() {
     cross[0] = -0.5;
     assert!(matches!(
         fitted.predict([image.borrow(&cross)], M),
-        Err(GprError::ShapeMismatch { .. })
+        Err(GprError::InvalidDistance { row: 0, col: 0, .. })
     ));
 }
 
@@ -663,14 +671,14 @@ struct Bands<'a> {
 }
 
 impl DistanceFill for Bands<'_> {
-    fn fill(&self, n_rows: usize, n_cols: usize, out: &mut [f64]) {
-        let len = n_rows * n_cols;
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        let len = rows.len();
         for k in 0..self.dims {
             Pairs {
                 rows: self.rows,
                 cols: self.cols,
             }
-            .fill(n_rows, n_cols, &mut out[k * len..(k + 1) * len]);
+            .fill_column(col, rows.clone(), &mut out[k * len..(k + 1) * len]);
         }
     }
 }
@@ -724,7 +732,7 @@ fn mixed_precision_refines_an_ard_slot_and_an_uncached_fill_fits_the_same() {
 }
 
 #[test]
-fn rounding_in_a_table_of_squared_distances_is_tidied() {
+fn rounding_is_refused_exactly_and_repaired_on_request() {
     // `‖a‖² + ‖b‖² − 2ab` of points far from the origin: the diagonal is
     // not exactly zero and some values come out slightly negative.
     let shift = 1.0e3;
@@ -751,15 +759,24 @@ fn rounding_in_a_table_of_squared_distances_is_tidied() {
     let y = targets();
     let image = ScalarDistance::new();
     let kernel = image.kernel(MaternKernel::new(1.1, MaternNu::ThreeHalves).expect("ell"));
+    // Without a repair, the rounded table is refused.
+    assert!(matches!(
+        Gpr::new(kernel.clone(), lik())
+            .with_optimizer(Fixed)
+            .factor([image.borrow(&train)], N, &y),
+        Err((_, GprError::InvalidDistance { .. }))
+    ));
     let tidy = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
-        .factor([image.from_vec(train)], N, &y)
+        .factor([image.from_vec(train).tidy(1e-6).expect("tol")], N, &y)
         .expect("rounded table");
     let exact = Gpr::new(kernel, lik())
         .with_optimizer(Fixed)
         .factor([image.from_vec(sq(&c0, &c0))], N, &y)
         .expect("exact table");
-    let got = tidy.predict([image.borrow(&cross)], M).expect("predict");
+    let got = tidy
+        .predict([image.borrow(&cross).tidy(1e-6).expect("tol")], M)
+        .expect("predict");
     let expect = exact
         .predict([image.borrow(&sq(&c0, &q0))], M)
         .expect("predict");
@@ -771,7 +788,13 @@ fn rounding_in_a_table_of_squared_distances_is_tidied() {
     assert!(matches!(
         Gpr::new(image.kernel(RbfKernel::new(1.0).expect("ell")), lik())
             .with_optimizer(Fixed)
-            .factor([image.from_vec(wrong)], N, &y),
-        Err((_, GprError::ShapeMismatch { .. }))
+            .factor([image.from_vec(wrong).tidy(1e-6).expect("tol")], N, &y),
+        Err((_, GprError::InvalidDistance { row: 1, col: 0, .. }))
     ));
+    // A tolerance is finite and non-negative.
+    assert!(matches!(
+        image.borrow(&cross).tidy(-1.0),
+        Err(GprError::InvalidConfig { .. })
+    ));
+    assert!(image.borrow(&cross).tidy(f64::NAN).is_err());
 }

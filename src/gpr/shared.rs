@@ -13,9 +13,9 @@ use super::factor::TrainPoints;
 use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    BlockKind, CompiledKernel, CompiledOf, DistanceSlot, DistanceSource, GramInputs, KernelScalar,
-    KernelSpec, ModelKernel, RectSlots, ScalarOps, SourceStore, SpecOf, SquareSlots, Supply,
-    Triangle, bind_sources, spec_slots,
+    CompiledKernel, CompiledOf, DistanceSlot, DistanceSource, GramInputs, KernelScalar, KernelSpec,
+    ModelKernel, RectSlots, ScalarOps, SourceStore, SpecOf, SquareSlots, Supply, Triangle,
+    spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
@@ -130,8 +130,7 @@ pub(crate) fn bind_training<T: KernelScalar, Store: SourceStore<T>, S: Supply>(
     if slots.is_empty() && sources.is_empty() {
         return Ok(Store::empty());
     }
-    let raw = bind_sources(&slots, sources, n, n, BlockKind::Square)?;
-    Store::from_raw(raw, n)
+    Store::bind(&slots, sources, n)
 }
 
 impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {

@@ -367,6 +367,68 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         Ok(Self { data, n, d })
     }
 
+    /// Packs the lower triangles of `d` dense, column-major `n × n` blocks
+    /// (`block(k)` is dimension `k`), one contiguous run per column.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    pub(crate) fn from_dense<'b>(
+        n: usize,
+        d: usize,
+        block: impl Fn(usize) -> &'b [f64],
+    ) -> Result<Self, GprError> {
+        let len = packed_len(n)?
+            .checked_mul(d)
+            .ok_or(GprError::SizeOverflow)?;
+        let mut data = Vec::with_capacity(len);
+        for k in 0..d {
+            let block = block(k);
+            for col in 0..n {
+                data.extend(
+                    block[col * n + col..(col + 1) * n]
+                        .iter()
+                        .map(|&v| T::from_f64(v)),
+                );
+            }
+        }
+        Ok(Self { data, n, d })
+    }
+
+    /// A cache of `n` points and `d` dimensions from its packed values:
+    /// dimension after dimension, each the lower triangle column by column.
+    pub(crate) fn from_packed(data: Vec<T>, n: usize, d: usize) -> Self {
+        debug_assert_eq!(
+            Some(data.len()),
+            packed_len(n).ok().and_then(|l| l.checked_mul(d))
+        );
+        Self { data, n, d }
+    }
+
+    /// A cache of `n` points and `d` dimensions holding zeros, to be
+    /// written column by column through [`Self::column_mut`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    pub(crate) fn zeros(n: usize, d: usize) -> Result<Self, GprError> {
+        let len = packed_len(n)?
+            .checked_mul(d)
+            .ok_or(GprError::SizeOverflow)?;
+        Ok(Self {
+            data: vec![T::from_f64(0.0); len],
+            n,
+            d,
+        })
+    }
+
+    /// The stored rows `col..n` of column `col` of dimension `dim`.
+    pub(crate) fn column_mut(&mut self, dim: usize, col: usize) -> &mut [T] {
+        let block = self.data.len().checked_div(self.d).unwrap_or(0);
+        let start = dim * block + packed_col_offset(self.n, col);
+        &mut self.data[start..start + (self.n - col)]
+    }
+
     /// `(points, dimensions)` the cache was filled for.
     #[cfg(test)]
     pub(crate) fn shape(&self) -> (usize, usize) {
