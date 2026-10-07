@@ -976,7 +976,7 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 
 | 系統 | 道具 | いつ回す | 見るもの |
 |---|---|---|---|
-| 時間 | criterion、`benches/exact.rs` | `just bench`（ローカル）。既定 CI では回さない（ノイズ） | 壁時計。グループを分けて測る |
+| 時間 | criterion、`benches/exact.rs`、`benches/distance.rs` | `just bench`（ローカル）。既定 CI では回さない（ノイズ） | 壁時計。グループを分けて測る |
 | 確保 | `tests/alloc.rs` | `just test`（必須） | Workspace 確保**後**の新規確保回数。上限は ratchet（減ることはあっても、Issue なしに増えない） |
 | ライブラリ横断の時間と RSS | `compare/perf/` | `just perf`、`perf-online`、`perf-online-stages`、`perf-online-delete`、`perf-sparse`、`perf-sparse-online`（手動、CI なし） | gprx と sklearn / libgp / friedrich（Exact）、libgp（オンライン insert）、GPyTorch / GPy（Sparse）、GPyTorch（Sparse オンライン）。正しさのゲートは置かない |
 
@@ -1003,6 +1003,8 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 ### 15.3 基準
 
 名前付きの criterion baseline と、それを取った機械は `.dev/bench-log.md`（ローカル。コミットしない）に残す。今の比較の基準は `phase-2`。ホットパス（`src/kernel/`、`workspace`、`gpr`、`objective`、`sgpr`、`svgp`、`precision`）を変える PR は、Verification にその基準との criterion 結果を貼る。速さと無関係ならその理由を書く。
+
+与えられた距離（5.6 節）には専用の基準 `d1-coords` がある。行が距離の場合を足す前に、座標の経路で `cargo bench --bench distance -- --save-baseline d1-coords` を回して取る。D1 の各行は、距離の場合を `benches/distance.rs` に足し、同じ機械で測った `d1-coords` と並べて貼る（`--baseline d1-coords`）。`tests/alloc.rs` は、同じ問題での座標の経路の確保数を持つ（`DISTANCE_BASELINE_ALLOCS`）。距離の場合は、同じ操作のその数を超えてはならない。
 
 ### 15.4 指標
 

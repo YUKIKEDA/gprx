@@ -984,7 +984,7 @@ Order and status are [roadmap.md](roadmap.md). Acceptance text stays on each Iss
 
 | Track | Tool | When | What is read |
 |---|---|---|---|
-| Time | criterion, `benches/exact.rs` | `just bench` (local). Not in default CI (noise) | Wall time. Groups are measured separately |
+| Time | criterion, `benches/exact.rs`, `benches/distance.rs` | `just bench` (local). Not in default CI (noise) | Wall time. Groups are measured separately |
 | Allocations | `tests/alloc.rs` | `just test` (required) | New allocations **after** Workspace setup. The cap is a ratchet (it may fall, and it does not rise without an Issue) |
 | Cross-library time and RSS | `compare/perf/` | `just perf`, `perf-online`, `perf-online-stages`, `perf-online-delete`, `perf-sparse`, `perf-sparse-online` (manual, not CI) | gprx against sklearn / libgp / friedrich (Exact), libgp (online insert), GPyTorch / GPy (sparse), GPyTorch (sparse online). No correctness gate |
 
@@ -1011,6 +1011,8 @@ The input has to be the same every time, or a faster run cannot be told from a d
 ### 15.3 Baselines
 
 Named criterion baselines and the machine they ran on are recorded in `.dev/bench-log.md` (local, not committed). The current comparison baseline is `phase-2`. A PR that touches a hot path (`src/kernel/`, `workspace`, `gpr`, `objective`, `sgpr`, `svgp`, `precision`) pastes criterion against that baseline in Verification. If the change cannot affect speed, say why.
+
+Supplied distances (§5.6) have their own baseline, `d1-coords`: `cargo bench --bench distance -- --save-baseline d1-coords` on the coordinate path, before a row adds its distance cases. Each D1 row adds its cases to `benches/distance.rs` and pastes them beside `d1-coords` (`--baseline d1-coords`), measured on the same machine. `tests/alloc.rs` keeps the coordinate path's allocations on the same problem (`DISTANCE_BASELINE_ALLOCS`); a distance case must not exceed the count of its operation.
 
 ### 15.4 Metrics
 

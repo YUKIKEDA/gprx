@@ -70,3 +70,7 @@ stats_alloc = "0.1.10"
 name = "exact"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "distance"
+harness = false

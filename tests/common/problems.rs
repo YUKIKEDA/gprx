@@ -54,3 +54,60 @@ pub fn sphere_xy(side: usize, seed: u64, noise_std: f64) -> (Vec<f64>, Vec<f64>)
         .collect();
     (x, y)
 }
+
+/// The fixed problem of the supplied-distance baseline (design §5.6, §15):
+/// `n` training points, `q` queries, and the first `m` training points as
+/// inducing points, uniform on `[0, 1]^d`. Matrices are column-major.
+pub struct DistanceBaseline {
+    pub n: usize,
+    pub d: usize,
+    pub q: usize,
+    pub m: usize,
+    /// `n × d` training coordinates.
+    pub x: Vec<f64>,
+    /// `n` targets: `Σ_k sin(2π x_k)` plus `0.1 · N(0, 1)`.
+    pub y: Vec<f64>,
+    /// `q × d` query coordinates.
+    pub xq: Vec<f64>,
+    /// `m × d` inducing coordinates (rows `0..m` of `x`).
+    pub z: Vec<f64>,
+    /// One more point (`1 × d`) and its target, for online inserts.
+    pub x_new: Vec<f64>,
+    pub y_new: f64,
+}
+
+/// [`DistanceBaseline`] at `n = 512`, `d = 4`, `q = 100`, `m = 64`, seed 0.
+pub fn distance_baseline() -> DistanceBaseline {
+    let (n, d, q, m) = (512, 4, 100, 64);
+    let mut rng = seeded_rng(0);
+    // Column-major `rows × d`: dimension `k` is entries `k * rows .. (k + 1) * rows`.
+    let mut points = |rows: usize| -> Vec<f64> { (0..rows * d).map(|_| rng.unit()).collect() };
+    let x = points(n + 1);
+    let xq = points(q);
+    let target = |x: &[f64], rows: usize, i: usize| -> f64 {
+        (0..d)
+            .map(|k| (2.0 * std::f64::consts::PI * x[i + k * rows]).sin())
+            .sum()
+    };
+    let mut noise = seeded_rng(1);
+    let y_all: Vec<f64> = (0..=n)
+        .map(|i| target(&x, n + 1, i) + 0.1 * unit_normal(&mut noise))
+        .collect();
+    let rows_of = |x: &[f64], rows: usize, range: std::ops::Range<usize>| -> Vec<f64> {
+        (0..d)
+            .flat_map(|k| range.clone().map(move |i| x[i + k * rows]))
+            .collect()
+    };
+    DistanceBaseline {
+        n,
+        d,
+        q,
+        m,
+        x: rows_of(&x, n + 1, 0..n),
+        y: y_all[..n].to_vec(),
+        xq,
+        z: rows_of(&x, n + 1, 0..m),
+        x_new: rows_of(&x, n + 1, n..n + 1),
+        y_new: y_all[n],
+    }
+}

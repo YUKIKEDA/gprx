@@ -750,3 +750,163 @@ fn svgp_adam_epoch_allocs() {
         assert_alloc_cap(&format!("svgp_adam_epoch_{label}"), per_epoch, *cap);
     }
 }
+
+/// Allocations of the coordinate path on the supplied-distance baseline
+/// problem (`common::problems::distance_baseline`, design §5.6), by kernel
+/// and operation. Each operation runs once on a warmed model, except
+/// `factor` and `sgpr_factor`, which count one whole call. A model on
+/// supplied distances must not allocate more than these (D1-3 onwards).
+/// Do not raise without an Issue.
+const DISTANCE_BASELINE_ALLOCS: [(&str, usize); 22] = [
+    ("rbf/factor", 17),
+    ("rbf/mll_and_grad", 3),
+    ("rbf/predict_into", 0),
+    ("rbf/online_insert", 4),
+    ("rbf/online_delete_first", 1),
+    ("rbf/online_delete_middle", 1),
+    ("rbf/online_delete_last", 1),
+    ("rbf/online_refit", 12),
+    ("rbf/sgpr_factor", 22),
+    ("rbf/sgpr_predict_into", 0),
+    ("rbf/svgp_predict_into", 0),
+    ("rbf_ard/factor", 24),
+    ("rbf_ard/mll_and_grad", 3),
+    ("rbf_ard/predict_into", 0),
+    ("rbf_ard/online_insert", 4),
+    ("rbf_ard/online_delete_first", 1),
+    ("rbf_ard/online_delete_middle", 1),
+    ("rbf_ard/online_delete_last", 1),
+    ("rbf_ard/online_refit", 13),
+    ("rbf_ard/sgpr_factor", 31),
+    ("rbf_ard/sgpr_predict_into", 0),
+    ("rbf_ard/svgp_predict_into", 0),
+];
+
+/// The coordinate path's allocations on the baseline problem, in the order
+/// of [`DISTANCE_BASELINE_ALLOCS`].
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn distance_baseline_allocs() -> Vec<(String, usize)> {
+    let p = common::problems::distance_baseline();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let kernels = [
+        ("rbf", KernelSpec::from(RbfKernel::new(0.5).expect("ell"))),
+        (
+            "rbf_ard",
+            KernelSpec::from(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell")),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (name, kernel) in kernels {
+        let fit = || {
+            Gpr::new(kernel.clone(), lik())
+                .with_optimizer(Fixed)
+                .factor(&p.x, p.n, p.d, &p.y)
+                .expect("factor")
+        };
+        let _warm = fit();
+        let mut model = None;
+        out.push((format!("{name}/factor"), allocs_in(|| model = Some(fit()))));
+        let mut model = model.expect("model");
+        let mut theta = vec![0.0; model.num_params()];
+        model.get_params(&mut theta).expect("theta");
+        let mut grad = vec![0.0; theta.len()];
+        model
+            .value_and_gradient_into(&theta, &mut grad)
+            .expect("warmup");
+        out.push((
+            format!("{name}/mll_and_grad"),
+            allocs_in(|| {
+                model
+                    .value_and_gradient_into(&theta, &mut grad)
+                    .expect("counted");
+            }),
+        ));
+        let mut pred = Prediction::default();
+        model
+            .predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/predict_into"),
+            allocs_in(|| {
+                model
+                    .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+        // Room for one more point, as the bench.
+        let mut base = model.into_online().expect("online");
+        let id = base.insert(&p.x_new, p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        let mut online = base.clone();
+        out.push((
+            format!("{name}/online_insert"),
+            allocs_in(|| {
+                online.insert(&p.x_new, p.y_new).expect("counted");
+            }),
+        ));
+        for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
+            let mut online = base.clone();
+            let id = online.point_ids()[index];
+            out.push((
+                format!("{name}/online_delete_{label}"),
+                allocs_in(|| online.delete(id).expect("counted")),
+            ));
+        }
+        let mut online = base.clone();
+        out.push((
+            format!("{name}/online_refit"),
+            allocs_in(|| online.refit().expect("counted")),
+        ));
+        let sgpr = || {
+            Sgpr::new(kernel.clone(), lik())
+                .with_optimizer(Fixed)
+                .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+                .map_err(|(_, e)| e)
+                .expect("sgpr")
+        };
+        let _warm = sgpr();
+        let mut sparse = None;
+        out.push((
+            format!("{name}/sgpr_factor"),
+            allocs_in(|| sparse = Some(sgpr())),
+        ));
+        let mut sparse = sparse.expect("sgpr");
+        sparse
+            .predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/sgpr_predict_into"),
+            allocs_in(|| {
+                sparse
+                    .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+        let mut svgp = Svgp::new(kernel.clone(), lik())
+            .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+            .map_err(|(_, e)| e)
+            .expect("svgp");
+        svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/svgp_predict_into"),
+            allocs_in(|| {
+                svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+    }
+    out
+}
+
+#[test]
+fn distance_baseline_coordinate_allocs() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    let measured = distance_baseline_allocs();
+    assert_eq!(measured.len(), DISTANCE_BASELINE_ALLOCS.len());
+    for ((label, count), (expected, cap)) in measured.iter().zip(DISTANCE_BASELINE_ALLOCS) {
+        assert_eq!(label, expected);
+        assert_alloc_cap(&format!("distance_baseline/{label}"), *count, cap);
+    }
+}

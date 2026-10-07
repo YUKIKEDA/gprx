@@ -24,6 +24,7 @@ use gprx::{
 };
 
 #[path = "../tests/common/problems.rs"]
+#[allow(dead_code)]
 mod problems;
 #[path = "../src/rng.rs"]
 #[allow(dead_code)]
