@@ -370,6 +370,33 @@ The default `Gpr` is Identity on both sides. When the mean function is zero, `St
 
 `Sgpr` / `Svgp` take the same transforms with the same identity default. The inducing points `Z` are passed in the coordinates of `X` and go through the fitted input map with `X`. Queries and points inserted into `OnlineSgpr` go through the maps fitted at training. `FreeInducing` searches `Z` in the mapped coordinates. The fitted model reports `Z` in the original coordinates through `Transform::inverse_apply`.
 
+### 5.6 Supplied squared distances: requirements (#470)
+
+A kernel leaf may read squared distances the caller supplies (a geodesic, a graph distance, a distance computed elsewhere) instead of coordinates. This section fixes the requirements before the implementation. The first attempt (#476–#479, closed) was made to work first and measured afterwards, and its distance paths cost more than the coordinate paths; these requirements and their checks come first so that does not happen again.
+
+**Performance.** The baseline is a coordinate model with the same `n`, `d`, kernel, and precision, with `DistanceCachePolicy::Cached`: a model that computes its distances from `X` and keeps them. Supplying the distances removes work; it must never add any. For every operation, a distance model's time and allocations must not exceed the baseline's.
+
+| Operation | Requirement |
+| --- | --- |
+| `fit` / `factor` | Time and allocation count no more than the baseline. Peak memory the crate owns no more than the baseline's distance cache: dense `n²` for a scalar slot, packed `d · n(n+1)/2` for an ARD slot (§5.2). The caller's own tables are not counted; an ARD `fill` writes column chunks into a reused buffer packed straight into the triangles, never a dense `d · n²` buffer |
+| `mll`, gradient, Hessian at one `θ` (an optimizer step) | No allocation once the workspace exists, as the baseline. Time no more than the baseline |
+| `predict_into` (Exact, Online, Sgpr, Svgp) | No allocation after a warmup call with the same shapes. Time no more than the baseline. Sources are taken without collecting them into a new `Vec`; a sparse model gathers the inducing rows into a reused buffer |
+| `insert` within capacity | Allocations and time no more than the baseline's insert. The new point's column is written in place (`n` values, `d · n` for ARD) |
+| `delete` | Allocations and time no more than the baseline's delete. The stored squares are not shifted: the deleted index is recorded, and the store is compacted once, the next time the whole square is read (`refit`, `set_params`, save). That compaction is `O(d · n²)`, the same as the baseline rebuilding its cache |
+| `refit` / `set_params` | Time no more than the baseline, the compaction included |
+| `borrow` | An `f64` model reads a borrowed table in place, without a copy |
+
+**Acceptance checks, written before the implementation.** `benches/` puts each operation above side by side: coordinates, a scalar slot, an ARD slot, at the same problem. Every PR of the implementation pastes the numbers before and after. `tests/alloc.rs` asserts, per operation, that the distance path allocates no more than the coordinate path (a relative check) and fixes the measured count (an absolute ratchet). A PR that misses a requirement does not merge.
+
+**Validation of a table.** A training square must be symmetric with a zero diagonal, and every value must be finite and non-negative. A table is not repaired silently. From the table alone, rounding cannot be told apart from a wrong table: the error of `‖a‖² + ‖b‖² − 2a·b` is `ε · (‖x_i‖² + ‖x_j‖²)`, set by how far the points are from the origin, not by the distances, so no tolerance read off the table separates the two, and a silent repair would also accept a directed distance or a transposed table. A table computed pair by pair (`(a − b)²` in both orders) is exactly symmetric with a zero diagonal and passes as it is.
+
+- By default the check is exact. A violation is an error naming the worst pair and its values.
+- A caller who builds the table in a way that rounds (the Gram trick) opts in to repair, with a tolerance it chooses, on that source. Within the tolerance a negative value or a diagonal becomes `0.0` and a mirror pair becomes its mean; past it the table is refused.
+- An invalid value is its own error variant (row, column, reason), not `ShapeMismatch`, which stays for shapes. A missing, duplicate, or unknown slot stays `LengthMismatch`.
+- The check reads the table once, `O(n²)` per square, whatever the policy.
+
+**Kept from the first attempt, after measuring.** The type layer (`DistanceKernel<C>`, the sealed `Supply` kind on `KernelSpec<S>` / `CompiledKernel<T, S>`, `ModelKernel`) and the save format are reused if the benches above show they meet the requirements.
+
 ## 6. GP model: swapping exact and sparse
 
 Training and inference are different types. An unfitted `predict` is not on the public API. sklearn's same-object `fit` / `predict` is a numerical-check target, not the public contract. The fit objective borrows the model only during `fit` / `refit` and is not kept on the fitted value.
