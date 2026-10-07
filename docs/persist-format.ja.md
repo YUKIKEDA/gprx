@@ -106,7 +106,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 | `jitter` | `K_mm` を分解するときの方針（Sparse の既定は adaptive: `initial` 1e-8、`multiplier` 10、`max_retries` 5、`max_jitter` 1e-3） |
 | `has_factor`、`factor_kind`、`factor_jitter`、`distance_cache` | 書かない。因子は保存しない（7 節） |
 | `inducing_ids`、`next_inducing_id` | 追加。`online_sgpr` では必須、それ以外は無し。`online_sgpr` では `point_ids` と `next_point_id` も必須 |
-| `inducing` | `distance` の葉を持つカーネルで追加、それ以外は無し: 学習の行の添字 `m` 個の配列。誘導点を順に並べる。添字は `n` 未満。重複してよい |
+| `inducing` | `distance` の葉を持つカーネルで追加、それ以外は無し: 学習の行の添字 `m` 個の配列。誘導点を順に並べる。添字は `n` 未満。重複してよい。キーが無い、長さが `m` でない、添字が `n` 以上、`z` / `z_train` が `x` のその行とビット単位で合わない（6.5 節）場合は `PersistFailed { Config }`。`distance` の葉を持たないカーネルの config にこのキーがある場合も同じ |
 
 `precision`、`residual`、`math`、`kernel`、`likelihood`、4 つの変換のキーは、3 節と同じ形。例（`svgp`、同じカーネルと変換、誘導点 2 つ）:
 
@@ -284,7 +284,7 @@ Gram 行列、`W`、距離キャッシュ（6.5 節の与えられた二乗距�
 | 状況 | エラー |
 | --- | --- |
 | ファイルを読み書きできない | `GprError::PersistFailed { kind: Io, reason }` |
-| JSON として不正、キー、`point_ids` の長さが違う | `GprError::PersistFailed { kind: Config, reason }` |
+| JSON として不正、キー、`point_ids` の長さが違う、疎モデルの `inducing` が無い・長さが違う・範囲外・`distance` の葉の無いカーネルにある | `GprError::PersistFailed { kind: Config, reason }` |
 | テンソルが無い、形か dtype が違う、テンソルが揃っていない、`q` が不正 | `GprError::PersistFailed { kind: Tensor, reason }` |
 | `model` に対してローダーが違う | `GprError::PersistFailed { kind: WrongModel, reason }` |
 | 登録されていない `persist_id` | `GprError::PersistFailed { kind: UnregisteredId, reason }` |

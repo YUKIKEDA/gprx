@@ -106,7 +106,7 @@ Floating-point numbers are written in the shortest form that reads back to the s
 | `jitter` | The policy for factoring `K_mm` (the sparse default is adaptive: `initial` 1e-8, `multiplier` 10, `max_retries` 5, `max_jitter` 1e-3) |
 | `has_factor`, `factor_kind`, `factor_jitter`, `distance_cache` | Not written. No factor is stored (§7) |
 | `inducing_ids`, `next_inducing_id` | Added, required for `online_sgpr`, absent otherwise. `point_ids` and `next_point_id` are also required for `online_sgpr` |
-| `inducing` | Added for a kernel with a `distance` leaf, absent otherwise: array of `m` training row indices, the inducing points in order. Indices must be `< n`; repeats are allowed |
+| `inducing` | Added for a kernel with a `distance` leaf, absent otherwise: array of `m` training row indices, the inducing points in order. Indices must be `< n`; repeats are allowed. A missing key, a length other than `m`, an index `≥ n`, or `z` / `z_train` that are not those rows of `x` (to the bit, §6.5) is `PersistFailed { Config }`; so is the key in the config of a kernel without a `distance` leaf |
 
 `precision`, `residual`, `math`, `kernel`, `likelihood`, and the four transform keys have the same form as in §3. An example (`svgp`, same kernel, transforms, and 2 inducing points), with only the keys that differ from §3 shown in full:
 
@@ -270,7 +270,7 @@ Version 2 adds the `distance` kernel variant, the `d2.<k>` tensors, and the spar
 
 | Condition | Error |
 | --- | --- |
-| File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
+| File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; a sparse `inducing` that is missing, of the wrong length, out of range, or present for a kernel without a `distance` leaf; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`, `inducing`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` or `2` | `GprError::UnsupportedPersistVersion` |
 | `n` or (sparse) `m` is `0`; `d` is `0` for a kernel without a `distance` leaf; empty `lengthscales` | `GprError::EmptyInput` |
 | A saved training square with a negative value, a non-zero diagonal, or not symmetric, past rounding | `GprError::ShapeMismatch` |

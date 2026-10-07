@@ -177,6 +177,12 @@ fn read_core<K: ModelKernel>(
     let (n, m, d) = (config.n, config.m, config.d);
     let (kernel, slots) = decode_kernel(&config.kernel, registry, d, distance)?;
     let dist = if slots.is_empty() {
+        if config.inducing.is_some() {
+            return Err(persist_err(
+                PersistErrorKind::Config,
+                "a coordinate model's config has inducing",
+            ));
+        }
         None
     } else {
         let inducing = config.inducing.as_deref().ok_or_else(|| {
@@ -189,6 +195,12 @@ fn read_core<K: ModelKernel>(
             return Err(persist_err(
                 PersistErrorKind::Config,
                 format!("inducing has {} indices, expected m = {m}", inducing.len()),
+            ));
+        }
+        if let Some(&bad) = inducing.iter().find(|&&i| i >= n) {
+            return Err(persist_err(
+                PersistErrorKind::Config,
+                format!("inducing index {bad} is out of range for n = {n}"),
             ));
         }
         let sources = super::distance::read_sources(tensors, &slots, n)?;

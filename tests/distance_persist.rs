@@ -367,3 +367,276 @@ fn a_format_version_that_does_not_match_the_kernel_is_refused() {
     config(LoadedSgpr::load(&dir, &reg()).map(drop));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Rewrites `config.json` in `dir` through `edit`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn edit_config(dir: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = dir.join("config.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("config")).expect("json");
+    edit(&mut value);
+    std::fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("write");
+}
+
+/// How a test damages the `d2.0` tensor of a saved directory.
+enum Damage {
+    /// Rewrites the `n × n` values.
+    Values(fn(&mut [f64], usize)),
+    /// Stores the values as `F32`.
+    Single,
+    /// Stores them with another shape.
+    Shape(fn(usize) -> Vec<usize>),
+    /// Drops the tensor.
+    Missing,
+}
+
+/// Rewrites `model.safetensors` in `dir`, damaging `d2.0` as `damage` says.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn damage_d2(dir: &std::path::Path, damage: &Damage) {
+    use safetensors::tensor::{Dtype, TensorView};
+    let path = dir.join("model.safetensors");
+    let bytes = std::fs::read(&path).expect("tensors");
+    let file = safetensors::SafeTensors::deserialize(&bytes).expect("parse");
+    let mut owned: Vec<(String, Dtype, Vec<usize>, Vec<u8>)> = Vec::new();
+    for (name, view) in file.tensors() {
+        let (mut dtype, mut shape, mut data) =
+            (view.dtype(), view.shape().to_vec(), view.data().to_vec());
+        if name == "d2.0" {
+            let n = shape[0];
+            match damage {
+                Damage::Missing => continue,
+                Damage::Values(edit) => {
+                    let mut values: Vec<f64> = data
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|b| f64::from_le_bytes(*b))
+                        .collect();
+                    edit(&mut values, n);
+                    data = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                }
+                Damage::Single => {
+                    dtype = Dtype::F32;
+                    data = data
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .flat_map(|b| (f64::from_le_bytes(*b) as f32).to_le_bytes())
+                        .collect();
+                }
+                Damage::Shape(reshape) => shape = reshape(n),
+            }
+        }
+        owned.push((name, dtype, shape, data));
+    }
+    let views: Vec<(String, TensorView<'_>)> = owned
+        .iter()
+        .map(|(name, dtype, shape, data)| {
+            (
+                name.clone(),
+                TensorView::new(*dtype, shape.clone(), data).expect("view"),
+            )
+        })
+        .collect();
+    std::fs::write(&path, safetensors::serialize(views, None).expect("write")).expect("write");
+}
+
+fn persist_kind<T: std::fmt::Debug>(result: Result<T, GprError>, kind: PersistErrorKind) {
+    assert!(
+        matches!(&result, Err(GprError::PersistFailed { kind: k, .. }) if *k == kind),
+        "expected {kind:?}, got {result:?}"
+    );
+}
+
+fn shape_mismatch<T: std::fmt::Debug>(result: Result<T, GprError>) {
+    assert!(
+        matches!(result, Err(GprError::ShapeMismatch { .. })),
+        "{result:?}"
+    );
+}
+
+/// Every way `d2.0` can be damaged, and what loading it returns.
+fn d2_damages() -> Vec<(&'static str, Damage, Option<PersistErrorKind>)> {
+    vec![
+        (
+            "nan",
+            Damage::Values(|v, n| v[1 + 2 * n] = f64::NAN),
+            Some(PersistErrorKind::Tensor),
+        ),
+        (
+            "asymmetric",
+            Damage::Values(|v, n| v[1 + 2 * n] += 1.0),
+            None,
+        ),
+        ("diagonal", Damage::Values(|v, n| v[2 + 2 * n] = 1.0), None),
+        (
+            "negative",
+            Damage::Values(|v, n| {
+                v[1 + 2 * n] = -1.0;
+                v[2 + n] = -1.0;
+            }),
+            None,
+        ),
+        ("f32", Damage::Single, Some(PersistErrorKind::Tensor)),
+        (
+            "flat",
+            Damage::Shape(|n| vec![n * n]),
+            Some(PersistErrorKind::Tensor),
+        ),
+        (
+            "batched",
+            Damage::Shape(|n| vec![1, n, n]),
+            Some(PersistErrorKind::Tensor),
+        ),
+        ("missing", Damage::Missing, Some(PersistErrorKind::Tensor)),
+    ]
+}
+
+#[test]
+fn a_damaged_d2_tensor_is_refused_by_exact_and_sparse_loads() {
+    type Exact = FittedGpr<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>;
+    type Sparse = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<DistanceOnly>>;
+    let c = coord(0, N, 0.0);
+    let image = ScalarDistance::new();
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    let exact = Gpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets())
+        .expect("exact");
+    let sparse = Sgpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets(), &[1, 3])
+        .expect("sparse");
+    for (label, damage, kind) in d2_damages() {
+        let check = |result: Result<(), GprError>| match kind {
+            Some(kind) => persist_kind(result, kind),
+            None => shape_mismatch(result),
+        };
+        for with_factor in [false, true] {
+            let dir = temp_dir(&format!("d2-exact-{label}-{with_factor}"));
+            if with_factor {
+                exact.save_with_factor(&dir).expect("save");
+            } else {
+                exact.save(&dir).expect("save");
+            }
+            damage_d2(&dir, &damage);
+            check(Exact::load(&dir, &reg()).map(drop));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        let dir = temp_dir(&format!("d2-sparse-{label}"));
+        sparse.save(&dir).expect("save");
+        damage_d2(&dir, &damage);
+        check(Sparse::load(&dir, &reg()).map(drop));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_damaged_config_of_a_distance_model_is_refused() {
+    type Exact = FittedGpr<Fixed, DoublePrecision, DistanceKernel<DistanceOnly>>;
+    type Sparse = FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<DistanceOnly>>;
+    let c = coord(0, N, 0.0);
+    let image = ScalarDistance::new();
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    let exact = Gpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets())
+        .expect("exact");
+    let sparse = Sgpr::new(image.kernel(rbf), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c, &c))], N, &targets(), &[1, 3])
+        .expect("sparse");
+    let exact_with = |label: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        let dir = temp_dir(&format!("config-exact-{label}"));
+        exact.save(&dir).expect("save");
+        edit_config(&dir, edit);
+        let result = Exact::load(&dir, &reg()).map(drop);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    };
+    let sparse_with = |label: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        let dir = temp_dir(&format!("config-sparse-{label}"));
+        sparse.save(&dir).expect("save");
+        edit_config(&dir, edit);
+        let result = Sparse::load(&dir, &reg()).map(drop);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    };
+    // `n` that is not the saved tensors' (one more, and far past them).
+    for n in [N as u64 + 1, 1 << 32, u64::MAX / 2] {
+        assert!(exact_with("n", &|v| v["n"] = serde_json::json!(n)).is_err());
+        assert!(sparse_with("n", &|v| v["n"] = serde_json::json!(n)).is_err());
+    }
+    // A slot index that skips slot 0.
+    fn renumber(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(slot) = map.get_mut("slot") {
+                    *slot = serde_json::json!(1);
+                }
+                map.values_mut().for_each(renumber);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(renumber),
+            _ => {}
+        }
+    }
+    persist_kind(
+        exact_with("slot", &|v| renumber(&mut v["kernel"])),
+        PersistErrorKind::Config,
+    );
+    persist_kind(
+        sparse_with("slot", &|v| renumber(&mut v["kernel"])),
+        PersistErrorKind::Config,
+    );
+    // A sparse distance save written as version 1.
+    persist_kind(
+        sparse_with("version", &|v| v["format_version"] = serde_json::json!(1)),
+        PersistErrorKind::Config,
+    );
+    // `inducing` out of range, of the wrong length, or missing.
+    for (label, inducing) in [
+        ("inducing-range", serde_json::json!([1, 99])),
+        ("inducing-huge", serde_json::json!([1, u64::MAX])),
+        ("inducing-length", serde_json::json!([1, 3, 4])),
+        ("inducing-missing", serde_json::Value::Null),
+    ] {
+        persist_kind(
+            sparse_with(label, &|v| {
+                if inducing.is_null() {
+                    v.as_object_mut().expect("object").remove("inducing");
+                } else {
+                    v["inducing"] = inducing.clone();
+                }
+            }),
+            PersistErrorKind::Config,
+        );
+    }
+    // A save with coordinate leaves read as a distance-only model.
+    let (c0, c1) = (coord(0, N, 0.0), coord(1, N, 0.0));
+    let mixed = Gpr::new(
+        image.kernel(rbf) * KernelSpec::from(RbfKernel::new(1.1).expect("ell")),
+        lik(),
+    )
+    .with_optimizer(Fixed)
+    .factor([image.from_vec(sq(&c0, &c0))], N, &c1, 1, &targets())
+    .expect("mixed");
+    let dir = temp_dir("config-points");
+    mixed.save(&dir).expect("save");
+    wrong_model(Exact::load(&dir, &reg()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_coordinate_sparse_save_with_inducing_is_refused() {
+    let c = coord(0, N, 0.0);
+    let sparse = Sgpr::new(KernelSpec::from(RbfKernel::new(0.9).expect("ell")), lik())
+        .with_optimizer(Fixed)
+        .factor(&c, N, 1, &targets(), &c[..2], 2)
+        .expect("sgpr");
+    let dir = temp_dir("coords-inducing");
+    sparse.save(&dir).expect("save");
+    assert!(LoadedSgpr::load(&dir, &reg()).is_ok());
+    edit_config(&dir, |v| v["inducing"] = serde_json::json!([0, 1]));
+    persist_kind(LoadedSgpr::load(&dir, &reg()), PersistErrorKind::Config);
+    let _ = std::fs::remove_dir_all(&dir);
+}
