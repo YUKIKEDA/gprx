@@ -217,6 +217,12 @@ fn sparse_roundtrip_keeps_the_inducing_points() {
     );
     wrong_model(LoadedSgpr::load(&dir, &reg()));
     wrong_model(FittedSvgp::<DoublePrecision, DistanceKernel<DistanceOnly>>::load(&dir, &reg()));
+    wrong_model(FittedSgpr::<
+        Fixed,
+        FixedInducing,
+        SinglePrecision,
+        DistanceKernel<DistanceOnly>,
+    >::load(&dir, &reg()));
     let _ = std::fs::remove_dir_all(&dir);
 
     let svgp = Svgp::new(image.kernel(rbf), lik())
