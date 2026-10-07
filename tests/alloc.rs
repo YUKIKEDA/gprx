@@ -745,8 +745,9 @@ fn svgp_adam_epoch_allocs() {
         // Warm the thread pool, then take the least of a few differences: the
         // counter sees the whole process, not only this fit.
         fit(1);
+        // Rounded up: one allocation over the two extra epochs still counts.
         let per_epoch = (0..3)
-            .map(|_| fit(3).saturating_sub(fit(1)) / 2)
+            .map(|_| fit(3).saturating_sub(fit(1)).div_ceil(2))
             .min()
             .unwrap_or(usize::MAX);
         assert_alloc_cap(&format!("svgp_adam_epoch_{label}"), per_epoch, *cap);
@@ -756,7 +757,8 @@ fn svgp_adam_epoch_allocs() {
 /// Allocations one more Adam epoch adds to a distance `Svgp::fit` (64
 /// points, batches of 8), by slot: the batch's columns of the `Z × X`
 /// squares go into a buffer the fit keeps. Do not raise without an Issue.
-const MAX_SVGP_DISTANCE_ADAM_EPOCH_ALLOCS: [(&str, usize); 2] = [("scalar", 0), ("ard", 0)];
+const MAX_SVGP_DISTANCE_ADAM_EPOCH_ALLOCS: [(&str, usize); 3] =
+    [("scalar", 0), ("ard", 0), ("scalar_f32", 0)];
 
 #[test]
 fn svgp_distance_adam_epoch_allocs() {
@@ -792,30 +794,49 @@ fn svgp_distance_adam_epoch_allocs() {
     for (label, cap) in MAX_SVGP_DISTANCE_ADAM_EPOCH_ALLOCS {
         let fit = |epochs: u64| {
             allocs_in(|| {
-                let fitted = if label == "scalar" {
-                    let image = ScalarDistance::new();
-                    Svgp::new(image.kernel(RbfKernel::new(ELL).expect("ell")), lik())
-                        .with_optimizer(adam(epochs))
-                        .fit([image.from_vec(scalar.clone())], n, &y, &inducing)
-                        .map_err(|(_, e)| e)
-                        .expect("fit")
-                } else {
-                    let bands = ArdDistance::new(2).expect("dims");
-                    let kernel = bands
-                        .kernel(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell"))
-                        .expect("dims");
-                    Svgp::new(kernel, lik())
-                        .with_optimizer(adam(epochs))
-                        .fit([bands.from_vecs(blocks.to_vec())], n, &y, &inducing)
-                        .map_err(|(_, e)| e)
-                        .expect("fit")
+                let image = ScalarDistance::new();
+                let rbf = || image.kernel(RbfKernel::new(ELL).expect("ell"));
+                match label {
+                    "scalar" => std::hint::black_box(
+                        Svgp::new(rbf(), lik())
+                            .with_optimizer(adam(epochs))
+                            .fit([image.from_vec(scalar.clone())], n, &y, &inducing)
+                            .map_err(|(_, e)| e)
+                            .expect("fit"),
+                    )
+                    .n(),
+                    // `f32` storage: the Adam step reads the `Z × Z` and
+                    // `Z × X` blocks through their one cast copy.
+                    "scalar_f32" => std::hint::black_box(
+                        Svgp::new(rbf(), lik())
+                            .with_optimizer(adam(epochs))
+                            .with_precision::<SinglePrecision>()
+                            .fit([image.from_vec(scalar.clone())], n, &y, &inducing)
+                            .map_err(|(_, e)| e)
+                            .expect("fit"),
+                    )
+                    .n(),
+                    _ => {
+                        let bands = ArdDistance::new(2).expect("dims");
+                        let kernel = bands
+                            .kernel(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell"))
+                            .expect("dims");
+                        std::hint::black_box(
+                            Svgp::new(kernel, lik())
+                                .with_optimizer(adam(epochs))
+                                .fit([bands.from_vecs(blocks.to_vec())], n, &y, &inducing)
+                                .map_err(|(_, e)| e)
+                                .expect("fit"),
+                        )
+                        .n()
+                    }
                 };
-                std::hint::black_box(fitted);
             })
         };
         fit(1);
+        // Rounded up: one allocation over the two extra epochs still counts.
         let per_epoch = (0..3)
-            .map(|_| fit(3).saturating_sub(fit(1)) / 2)
+            .map(|_| fit(3).saturating_sub(fit(1)).div_ceil(2))
             .min()
             .unwrap_or(usize::MAX);
         assert_alloc_cap(&format!("svgp_distance_adam_epoch_{label}"), per_epoch, cap);

@@ -76,9 +76,10 @@ where
     /// kernel and likelihood `θ`.
     ///
     /// `sources` holds one `n × n` training square per slot (zero diagonal,
-    /// symmetric); the model keeps a copy. `inducing` names the training
-    /// points that are the inducing points: `K_mm` and `K_mn` read their
-    /// rows of the squares. Duplicates are allowed, as repeated rows of `Z`
+    /// symmetric). `inducing` names the training points that are the
+    /// inducing points: `K_mm` and `K_mn` read their rows of the squares.
+    /// The model keeps only those rows (`m × m` and `m × n`); the `n × n`
+    /// squares are bound for the call and dropped. Duplicates are allowed, as repeated rows of `Z`
     /// are: they make `K_mm` singular, and the `K_mm` jitter retries
     /// ([`Sgpr::with_jitter_policy`], adaptive by default) add a diagonal
     /// offset before the factor fails with [`GprError::CholeskyFailed`].
