@@ -211,18 +211,18 @@ pub(crate) trait DistanceQuery {
 
     /// Mean and variance at `m` queries: `cross` is one source per slot of
     /// the `n × m` train × query squares.
-    fn query_distances(
+    fn query_distances<'s>(
         &self,
-        cross: Vec<DistanceSource<'_>>,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
         points: QueryPoints<'_>,
         m: usize,
         options: PredictOptions,
     ) -> Result<Prediction<Self::Refine>, GprError>;
 
     /// [`Self::query_distances`] into `out`, through the model's buffers.
-    fn query_distances_into(
+    fn query_distances_into<'s>(
         &mut self,
-        cross: Vec<DistanceSource<'_>>,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
         points: QueryPoints<'_>,
         m: usize,
         options: PredictOptions,
@@ -231,10 +231,10 @@ pub(crate) trait DistanceQuery {
 
     /// Mean and query × query covariance: `square` is one source per slot
     /// of the `m × m` query squares.
-    fn query_distance_covariance(
+    fn query_distance_covariance<'s>(
         &self,
-        cross: Vec<DistanceSource<'_>>,
-        square: Vec<DistanceSource<'_>>,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        square: impl IntoIterator<Item = DistanceSource<'s>>,
         points: QueryPoints<'_>,
         m: usize,
         options: PredictOptions,
@@ -277,10 +277,10 @@ macro_rules! distance_predict {
             ///
             /// Returns [`GprError::EmptyInput`] if `m` is zero,
             /// [`GprError::LengthMismatch`] if a table has the wrong length
-            /// or a slot has no source or two, [`GprError::NonFiniteInput`]
-            /// for a non-finite value, [`GprError::ShapeMismatch`] for a
-            /// negative value, and the query errors of the coordinate
-            /// model's `predict`.
+            /// or a slot has no source or two,
+            /// [`GprError::InvalidDistance`] for a value that is not finite or
+            /// is negative (see [`crate::kernel::DistanceSource::tidy`]), and
+            /// the query errors of the coordinate model's `predict`.
             ///
             $(#[$pdoc])*
             pub fn predict<'s>(
@@ -328,7 +328,7 @@ macro_rules! distance_predict {
             ) -> Result<Prediction<$refine>, GprError> {
                 $crate::prediction::DistanceQuery::query_distances(
                     self,
-                    sources.into_iter().collect(),
+                    sources,
                     $points,
                     m,
                     options,
@@ -353,7 +353,7 @@ macro_rules! distance_predict {
             ) -> Result<(), GprError> {
                 $crate::prediction::DistanceQuery::query_distances_into(
                     self,
-                    sources.into_iter().collect(),
+                    sources,
                     $points,
                     m,
                     options,
@@ -370,9 +370,9 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict`], plus [`GprError::ShapeMismatch`] if
-            /// a query square's diagonal or symmetry is off past rounding
-            /// (see [`crate::kernel::ScalarDistance`]).
+            /// Same as [`Self::predict`], plus [`GprError::InvalidDistance`]
+            /// if a query square's diagonal is not zero or it is not
+            /// symmetric (see [`crate::kernel::DistanceSource::tidy`]).
             ///
             $(#[$cdoc])*
             pub fn predict_covariance<'s>(
@@ -411,8 +411,8 @@ macro_rules! distance_predict {
             ) -> Result<PredictiveCovariance<$refine>, GprError> {
                 $crate::prediction::DistanceQuery::query_distance_covariance(
                     self,
-                    cross.into_iter().collect(),
-                    square.into_iter().collect(),
+                    cross,
+                    square,
                     $points,
                     m,
                     options,

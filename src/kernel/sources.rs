@@ -14,19 +14,23 @@ use std::fmt;
 use faer::MatRef;
 use rayon::prelude::*;
 
-use super::compiled::supplied::{RectEntry, RectTable, SquareSlot, SquareSlots};
-use super::dist::ArdSqDiffBuf;
+use super::compiled::supplied::{RectSlot, RectSlots, SquareSlot, SquareSlots};
+use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use super::{DistanceFill, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use crate::error::GprError;
 
 /// A source's `d²`, checked: `shape.blocks()` dense blocks of `rows × cols`.
-pub struct RawSlot<'a> {
+pub(crate) struct RawSlot<'a> {
     pub(crate) id: SlotId,
     pub(crate) shape: SlotShape,
     data: RawData<'a>,
     rows: usize,
     cols: usize,
+    /// Where the blocks start in [`QueryScratch`]'s casts (an `f32` model).
+    cast_at: usize,
+    /// Whether the values are left to be checked as they are read.
+    unchecked: bool,
 }
 
 enum RawData<'a> {
@@ -36,34 +40,21 @@ enum RawData<'a> {
     Blocks(Vec<Vec<f64>>),
     /// One borrowed table per block.
     Slices(&'a [&'a [f64]]),
-    /// Every block in one buffer, one after another (a fill).
-    Packed(Vec<f64>),
+    /// Every block in [`QueryScratch`]'s written values from this offset,
+    /// one after another: what a fill wrote, or a repaired copy.
+    Written(usize),
 }
 
 impl RawSlot<'_> {
-    /// Block `k` (`rows × cols`, column-major).
-    pub(crate) fn block(&self, k: usize) -> &[f64] {
+    /// Block `k` (`rows × cols`, column-major); `written` is the call's
+    /// [`QueryScratch`] values.
+    pub(crate) fn block<'b>(&'b self, k: usize, written: &'b [f64]) -> &'b [f64] {
         let len = self.rows * self.cols;
         match &self.data {
             RawData::Values(values) => values,
-            RawData::Blocks(blocks) => &blocks[k],
-            RawData::Slices(blocks) => blocks[k],
-            RawData::Packed(all) => &all[k * len..(k + 1) * len],
-        }
-    }
-
-    /// Takes block 0 as an owned buffer (moved when the source owned it).
-    fn into_first(self) -> Vec<f64> {
-        match self.data {
-            RawData::Values(values) => values.into_owned(),
-            RawData::Blocks(mut blocks) if !blocks.is_empty() => blocks.swap_remove(0),
-            RawData::Slices(blocks) if !blocks.is_empty() => blocks[0].to_vec(),
-            RawData::Packed(all) => all,
-            RawData::Blocks(_) | RawData::Slices(_) => {
-                // `bind` gives every slot at least one block.
-                debug_assert!(false, "a slot bound with no block");
-                Vec::new()
-            }
+            RawData::Blocks(blocks) => blocks.get(k).map_or(&[], Vec::as_slice),
+            RawData::Slices(blocks) => blocks.get(k).copied().unwrap_or(&[]),
+            RawData::Written(at) => written.get(at + k * len..at + (k + 1) * len).unwrap_or(&[]),
         }
     }
 }
@@ -77,173 +68,38 @@ pub(crate) enum BlockKind {
     Rect,
 }
 
-/// The source of each of `slots` (the kernel's slots, in order), taken
-/// from `sources` in any order.
+/// The slot of `slots` (the kernel's) that `source` is for; `bound` are
+/// the slots that already have a source.
 ///
 /// # Errors
 ///
 /// Returns [`GprError::LengthMismatch`] for a source of a slot the kernel
-/// does not read, a slot without a source, or two sources of one slot.
-fn by_slot<'a>(
-    slots: &[DistanceSlot],
-    sources: impl IntoIterator<Item = DistanceSource<'a>>,
-) -> Result<Vec<DistanceSource<'a>>, GprError> {
-    let mut bound: Vec<Option<DistanceSource<'a>>> = slots.iter().map(|_| None).collect();
-    for source in sources {
-        let Some(at) = slots.iter().position(|slot| slot.id() == source.slot) else {
-            return Err(GprError::LengthMismatch {
-                reason: "squared distances were supplied for a slot the kernel does not read"
-                    .to_owned(),
-            });
-        };
-        if bound[at].is_some() {
-            return Err(GprError::LengthMismatch {
-                reason: "two sources were supplied for one distance slot".to_owned(),
-            });
-        }
-        bound[at] = Some(source);
-    }
-    bound
-        .into_iter()
-        .map(|source| {
-            source.ok_or_else(|| GprError::LengthMismatch {
-                reason: "a distance slot of the kernel has no source".to_owned(),
-            })
-        })
-        .collect()
-}
-
-/// Binds `sources` to `slots` (the kernel's slots, in order) and checks
-/// each block of `rows × cols`. The result follows the order of `slots`.
-///
-/// # Errors
-///
-/// Returns [`GprError::LengthMismatch`] for a source of a slot the kernel
-/// does not read, a slot without a source, two sources of one slot, or a
-/// block of the wrong length or count; [`GprError::EmptyInput`] when `rows`
-/// or `cols` is zero; [`GprError::InvalidDistance`] for a value the
-/// source's check refuses ([`check_block`]). A borrowed table that its
-/// source's repair changes is copied.
-pub(crate) fn bind<'a>(
-    slots: &[DistanceSlot],
-    sources: impl IntoIterator<Item = DistanceSource<'a>>,
-    rows: usize,
-    cols: usize,
-    kind: BlockKind,
-) -> Result<Vec<RawSlot<'a>>, GprError> {
-    crate::data::require_nonempty(rows)?;
-    crate::data::require_nonempty(cols)?;
-    let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
-    if kind == BlockKind::Square && rows != cols {
-        return Err(GprError::ShapeMismatch {
-            reason: format!("a square of squared distances is {rows}x{cols}"),
-        });
-    }
-    let mut raw = Vec::with_capacity(slots.len());
-    for (slot, source) in slots.iter().zip(by_slot(slots, sources)?) {
-        let shape = slot.shape();
-        let blocks = shape.blocks();
-        let tidy = source.tidy;
-        let data = match source.data {
-            SourceData::Values(values) if blocks == 1 => RawData::Values(values),
-            SourceData::Blocks(tables) => RawData::Blocks(tables),
-            SourceData::Slices(tables) => RawData::Slices(tables),
-            SourceData::Values(_) => {
-                return Err(GprError::LengthMismatch {
-                    reason: format!("expected {blocks} tables of squared distances, got 1"),
-                });
-            }
-            SourceData::Fill(filler) => {
-                RawData::Packed(fill_dense(filler, rows, cols, blocks, kind)?)
-            }
-        };
-        let mut raw_slot = RawSlot {
-            id: slot.id(),
-            shape,
-            data,
-            rows,
-            cols,
-        };
-        check_slot(&mut raw_slot, blocks, len, kind, tidy)?;
-        raw.push(raw_slot);
-    }
-    Ok(raw)
-}
-
-/// The `blocks` dense `rows × cols` blocks a fill writes, one after
-/// another. A square asks only the lower triangle and mirrors it.
-fn fill_dense(
-    filler: &dyn DistanceFill,
-    rows: usize,
-    cols: usize,
-    blocks: usize,
-    kind: BlockKind,
-) -> Result<Vec<f64>, GprError> {
-    let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
-    let total = len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?;
-    let mut all = vec![0.0; total];
-    let mut column = vec![0.0; rows.checked_mul(blocks).ok_or(GprError::SizeOverflow)?];
-    for col in 0..cols {
-        let first = if kind == BlockKind::Square { col } else { 0 };
-        let run = rows - first;
-        let column = &mut column[..run * blocks];
-        filler.fill_column(col, first..rows, column);
-        for k in 0..blocks {
-            let src = &column[k * run..(k + 1) * run];
-            let block = &mut all[k * len..(k + 1) * len];
-            block[col * rows + first..(col + 1) * rows].copy_from_slice(src);
-            if kind == BlockKind::Square {
-                for (i, &v) in (first..rows).zip(src) {
-                    block[col + i * rows] = v;
-                }
-            }
-        }
-    }
-    Ok(all)
-}
-
-fn check_slot(
-    slot: &mut RawSlot<'_>,
-    blocks: usize,
-    len: usize,
-    kind: BlockKind,
-    tidy: Tidy,
-) -> Result<(), GprError> {
-    let (rows, cols) = (slot.rows, slot.cols);
-    let count = match &slot.data {
-        RawData::Values(_) => 1,
-        RawData::Blocks(tables) => tables.len(),
-        RawData::Slices(tables) => tables.len(),
-        RawData::Packed(_) => blocks,
-    };
-    if count != blocks {
+/// does not read, or a second source of one slot.
+fn slot_of<'k>(
+    slots: &'k [DistanceSlot],
+    source: &DistanceSource<'_>,
+    mut bound: impl Iterator<Item = SlotId>,
+) -> Result<&'k DistanceSlot, GprError> {
+    let Some(slot) = slots.iter().find(|slot| slot.id() == source.slot) else {
         return Err(GprError::LengthMismatch {
-            reason: format!("expected {blocks} tables of squared distances, got {count}"),
+            reason: "squared distances were supplied for a slot the kernel does not read"
+                .to_owned(),
+        });
+    };
+    if bound.any(|id| id == source.slot) {
+        return Err(GprError::LengthMismatch {
+            reason: "two sources were supplied for one distance slot".to_owned(),
         });
     }
-    for k in 0..blocks {
-        crate::data::require_count(slot.block(k).len(), len, "squared distances")?;
-        if check_block(slot.block(k), rows, cols, kind, tidy)? {
-            // A borrowed table is copied only when its repair changes it.
-            let block: &mut [f64] = match &mut slot.data {
-                RawData::Values(values) => values.to_mut(),
-                RawData::Blocks(tables) => &mut tables[k],
-                RawData::Slices(tables) => {
-                    let owned: Vec<Vec<f64>> = tables.iter().map(|t| t.to_vec()).collect();
-                    slot.data = RawData::Blocks(owned);
-                    let RawData::Blocks(tables) = &mut slot.data else {
-                        return Err(GprError::LengthMismatch {
-                            reason: "internal: a copied table was lost".to_owned(),
-                        });
-                    };
-                    &mut tables[k]
-                }
-                RawData::Packed(all) => &mut all[k * len..(k + 1) * len],
-            };
-            repair_block(block, rows, cols, kind);
-        }
+    Ok(slot)
+}
+
+/// A slot of the kernel was given no source (every source names a distinct
+/// slot of the kernel, and fewer sources than slots arrived).
+fn no_source() -> GprError {
+    GprError::LengthMismatch {
+        reason: "a distance slot of the kernel has no source".to_owned(),
     }
-    Ok(())
 }
 
 /// An invalid pair `(row, col)` of a table.
@@ -260,7 +116,7 @@ fn invalid(row: usize, col: usize, reason: impl Into<String>) -> GprError {
 /// of it stays vectorized.
 #[inline]
 #[allow(clippy::manual_range_contains)]
-fn valid(v: f64) -> bool {
+pub(crate) fn valid(v: f64) -> bool {
     (v >= 0.0) & (v <= f64::MAX)
 }
 
@@ -274,15 +130,26 @@ fn same(a: f64, b: f64) -> bool {
 
 /// The first value of a `rows`-row block that is not [`valid`].
 fn first_invalid(block: &[f64], rows: usize) -> GprError {
+    first_invalid_from(block, rows, 0)
+}
+
+/// [`first_invalid`] of a block whose first column is column `col0` of
+/// the caller's table.
+pub(crate) fn first_invalid_from(block: &[f64], rows: usize, col0: usize) -> GprError {
     let rows = rows.max(1);
     let at = block.iter().position(|&v| !valid(v)).unwrap_or(0);
     let v = block.get(at).copied().unwrap_or(0.0);
+    invalid_value(v, at % rows, col0 + at / rows)
+}
+
+/// The error of a value `v` at `(row, col)` that is not [`valid`].
+pub(crate) fn invalid_value(v: f64, row: usize, col: usize) -> GprError {
     let reason = if v.is_finite() {
         format!("{v} is negative")
     } else {
         format!("{v} is not finite")
     };
-    invalid(at % rows, at / rows, reason)
+    invalid(row, col, reason)
 }
 
 /// Checks one `rows × cols` block of `d²` against its source's check, and
@@ -314,7 +181,7 @@ pub(crate) fn check_block(
 /// [`check_block`] for [`Tidy::Exact`]. The values are folded without a
 /// branch; a violation is located only once the fold has found one.
 fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Result<(), GprError> {
-    if !block.iter().fold(true, |ok, &v| ok & valid(v)) {
+    if !super::simd::all_valid_distances(block) {
         return Err(first_invalid(block, rows));
     }
     if kind == BlockKind::Square {
@@ -324,10 +191,10 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
                 return Err(invalid(j, j, format!("the diagonal is {diag}, not zero")));
             }
         }
-        let bands: Vec<usize> = (0..rows).step_by(BAND).collect();
-        let symmetric = bands
-            .into_par_iter()
-            .all(|j0| check_band(block, rows, j0, (j0 + BAND).min(rows), |_| {}));
+        let symmetric = (0..rows.div_ceil(BAND)).into_par_iter().all(|band| {
+            let j0 = band * BAND;
+            check_band(block, rows, j0, (j0 + BAND).min(rows), |_| {})
+        });
         if !symmetric {
             let mut found = Ok(());
             let _ = for_each_lower_pair(rows, |i, j| {
@@ -407,26 +274,10 @@ fn pack_exact_ard<'b, T: KernelScalar>(
         .ok_or(GprError::SizeOverflow)?;
     let len = per_dim.checked_mul(d).ok_or(GprError::SizeOverflow)?;
     let mut data = vec![T::from_f64(0.0); len];
-    let mut bands: Vec<(usize, usize, usize, &mut [T])> = Vec::new();
-    let mut rest = data.as_mut_slice();
-    for k in 0..d {
-        for j0 in (0..n).step_by(BAND) {
-            let j1 = (j0 + BAND).min(n);
-            let size = (j0..j1).map(|j| n - j).sum();
-            let (head, tail) = rest.split_at_mut(size);
-            bands.push((k, j0, j1, head));
-            rest = tail;
-        }
-    }
-    let ok = bands.into_par_iter().all(|(k, j0, j1, dest)| {
-        let mut at = 0;
-        check_band(block(k), n, j0, j1, |lower| {
-            for (slot, &v) in dest[at..at + lower.len()].iter_mut().zip(lower) {
-                *slot = T::from_f64(v);
-            }
-            at += lower.len();
-        })
-    });
+    let ok = data
+        .par_chunks_mut(per_dim.max(1))
+        .enumerate()
+        .all(|(k, dest)| pack_bands(block(k), n, 0..n.div_ceil(BAND), dest));
     if !ok {
         for k in 0..d {
             exact_block(block(k), n, n, BlockKind::Square)?;
@@ -434,6 +285,37 @@ fn pack_exact_ard<'b, T: KernelScalar>(
         return Err(invalid(0, 0, "a band of the square failed its check"));
     }
     Ok(ArdSqDiffBuf::from_packed(data, n, d))
+}
+
+/// Checks and packs the bands `bands` of one square into `dest` (their
+/// columns of the packed triangle, in order), halving the range on the
+/// Rayon pool down to one band, so no list of bands is made.
+fn pack_bands<T: KernelScalar>(
+    block: &[f64],
+    n: usize,
+    bands: std::ops::Range<usize>,
+    dest: &mut [T],
+) -> bool {
+    let (j0, j1) = (bands.start * BAND, (bands.end * BAND).min(n));
+    if bands.len() <= 1 {
+        let mut at = 0;
+        return j0 >= j1
+            || check_band(block, n, j0, j1, |lower| {
+                for (slot, &v) in dest[at..at + lower.len()].iter_mut().zip(lower) {
+                    *slot = T::from_f64(v);
+                }
+                at += lower.len();
+            });
+    }
+    let mid = bands.start + bands.len() / 2;
+    // Columns `j0..mid · BAND` hold `n − j` values each.
+    let split = (j0..mid * BAND).map(|j| n - j).sum();
+    let (head, tail) = dest.split_at_mut(split);
+    let (a, b) = rayon::join(
+        || pack_bands(block, n, bands.start..mid, head),
+        || pack_bands(block, n, mid..bands.end, tail),
+    );
+    a & b
 }
 
 /// [`check_block`] for [`Tidy::Within`].
@@ -733,6 +615,38 @@ pub struct TrainSources<T> {
     slots: Vec<(SlotId, TrainData<T>)>,
 }
 
+/// Columns `start..start + len` of a [`TrainSources`], every row, as
+/// rectangular blocks ([`TrainSources::columns`]).
+pub(crate) struct TrainColumns<'s, T> {
+    store: &'s TrainSources<T>,
+    start: usize,
+    len: usize,
+}
+
+impl<T: KernelScalar> RectSlots<T> for TrainColumns<'_, T> {
+    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
+        let store = self.store;
+        let (_, data) = store.slots.iter().find(|(id, _)| *id == slot)?;
+        let (n, cap) = (store.n, store.cap.max(1));
+        Some(match data {
+            TrainData::Scalar(square) => {
+                RectSlot::Scalar(MatRef::from_column_major_slice_with_stride(
+                    square.get(self.start * cap..)?,
+                    n,
+                    self.len,
+                    cap,
+                ))
+            }
+            TrainData::Ard(cache) => RectSlot::Ard(ArdBlocks {
+                blocks: BlockList::Triangles(cache.view()),
+                rows: n,
+                cols: self.len,
+                col0: self.start,
+            }),
+        })
+    }
+}
+
 /// A change to a [`TrainSources`] computed by [`TrainSources::stage_append`]
 /// or [`TrainSources::stage_delete`], applied by [`TrainSources::commit`].
 #[derive(Debug)]
@@ -789,18 +703,18 @@ impl<T: KernelScalar> TrainSources<T> {
         self.n
     }
 
-    /// The store for the checked training squares `raw` of `n` points.
-    pub(crate) fn from_raw(raw: Vec<RawSlot<'_>>, n: usize) -> Result<Self, GprError> {
-        let mut slots = Vec::with_capacity(raw.len());
-        for slot in raw {
-            let id = slot.id;
+    /// The store for the checked squares `blocks` of `n` points (a copy).
+    pub(crate) fn from_blocks(blocks: BoundBlocks<'_>, n: usize) -> Result<Self, GprError> {
+        let mut slots = Vec::with_capacity(blocks.raw.len());
+        for slot in blocks.raw {
+            let block = |k: usize| slot.block(k, blocks.written);
             let data = match slot.shape {
-                SlotShape::Scalar => TrainData::Scalar(T::vec_from_f64(slot.into_first())),
-                SlotShape::Ard(d) => {
-                    TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, |k| slot.block(k))?)
+                SlotShape::Scalar => {
+                    TrainData::Scalar(block(0).iter().map(|&v| T::from_f64(v)).collect())
                 }
+                SlotShape::Ard(d) => TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, block)?),
             };
-            slots.push((id, data));
+            slots.push((slot.id, data));
         }
         Ok(Self { n, cap: n, slots })
     }
@@ -822,8 +736,9 @@ impl<T: KernelScalar> TrainSources<T> {
     ) -> Result<Self, GprError> {
         crate::data::require_nonempty(n)?;
         let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
-        let mut out = Vec::with_capacity(slots.len());
-        for (slot, source) in slots.iter().zip(by_slot(slots, sources)?) {
+        let mut out: Vec<(SlotId, TrainData<T>)> = Vec::with_capacity(slots.len());
+        for source in sources {
+            let slot = slot_of(slots, &source, out.iter().map(|(id, _)| *id))?;
             let tidy = source.tidy;
             let blocks = slot.shape().blocks();
             let data = match (slot.shape(), source.data) {
@@ -890,6 +805,9 @@ impl<T: KernelScalar> TrainSources<T> {
             };
             out.push((slot.id(), data));
         }
+        if out.len() != slots.len() {
+            return Err(no_source());
+        }
         Ok(Self {
             n,
             cap: n,
@@ -904,25 +822,17 @@ impl<T: KernelScalar> TrainSources<T> {
     /// # Errors
     ///
     /// Returns [`GprError::SizeOverflow`] when the grown store does not fit.
-    pub(crate) fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Staged<T>, GprError> {
+    pub(crate) fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Staged<T>, GprError> {
         let n = self.n;
         if self.slots.is_empty() {
             return Ok(self.unchanged());
         }
-        if cols.len() != self.slots.len()
-            || cols
-                .iter()
-                .zip(&self.slots)
-                .any(|(col, (id, _))| col.id != *id)
-        {
+        if !cols.covers(self.slots.iter().map(|(id, _)| *id)) {
             // The caller binds the columns against the store's own slots,
             // so this is a crate bug, not the caller's data.
-            debug_assert!(
-                false,
-                "the bound columns are not the store's slots in order"
-            );
+            debug_assert!(false, "the bound columns miss a slot of the store");
             return Err(GprError::LengthMismatch {
-                reason: "internal: the bound columns are not the store's slots in order".to_owned(),
+                reason: "internal: the bound columns miss a slot of the store".to_owned(),
             });
         }
         let grow = self.cap < n + 1;
@@ -932,10 +842,11 @@ impl<T: KernelScalar> TrainSources<T> {
             self.cap
         };
         let mut changes = Vec::with_capacity(self.slots.len());
-        for ((_, data), col) in self.slots.iter().zip(cols) {
+        for (id, data) in &self.slots {
+            let col = |k: usize| cols.block(*id, k);
             let change = match data {
                 TrainData::Scalar(square) => {
-                    let column: Vec<T> = col.block(0).iter().map(|&v| T::from_f64(v)).collect();
+                    let column: Vec<T> = col(0).iter().map(|&v| T::from_f64(v)).collect();
                     if grow {
                         let len = new_cap.checked_mul(new_cap).ok_or(GprError::SizeOverflow)?;
                         let mut wider = vec![T::from_f64(0.0); len];
@@ -959,7 +870,7 @@ impl<T: KernelScalar> TrainSources<T> {
                             if i == n && j == n {
                                 T::from_f64(0.0)
                             } else if i == n {
-                                T::from_f64(col.block(k)[j])
+                                T::from_f64(col(k)[j])
                             } else {
                                 old.get(k, i, j)
                             }
@@ -1102,56 +1013,15 @@ impl<T: KernelScalar> TrainSources<T> {
             .collect()
     }
 
-    /// The training columns `cols` (every row) as a rectangular table. A
-    /// scalar slot is read in place; an ARD slot's packed triangles are
-    /// unpacked into `ard`, whose buffers are reused from call to call.
-    pub(crate) fn column_table<'s>(
-        &'s self,
-        cols: std::ops::Range<usize>,
-        ard: &'s mut Vec<Vec<Vec<T>>>,
-    ) -> RectTable<'s, T> {
-        let (n, cap) = (self.n, self.cap.max(1));
-        let (start, len) = (cols.start, cols.len());
-        ard.resize_with(self.slots.len(), Vec::new);
-        for ((_, data), buffers) in self.slots.iter().zip(ard.iter_mut()) {
-            if let TrainData::Ard(cache) = data {
-                let view = cache.view();
-                buffers.resize_with(view.d(), Vec::new);
-                for (k, block) in buffers.iter_mut().enumerate() {
-                    block.clear();
-                    block.extend(
-                        (0..len)
-                            .flat_map(|jj| (0..n).map(move |i| (i, start + jj)))
-                            .map(|(i, j)| view.get(k, i, j)),
-                    );
-                }
-            }
+    /// The training columns `cols` (every row) as rectangular blocks, read
+    /// in place: a scalar slot through its leading dimension, an ARD slot
+    /// from its packed triangles.
+    pub(crate) fn columns(&self, cols: std::ops::Range<usize>) -> TrainColumns<'_, T> {
+        TrainColumns {
+            store: self,
+            start: cols.start,
+            len: cols.len(),
         }
-        let ard: &'s Vec<Vec<Vec<T>>> = ard;
-        RectTable(
-            self.slots
-                .iter()
-                .zip(ard)
-                .map(|((id, data), blocks)| {
-                    let entry = match data {
-                        TrainData::Scalar(square) => {
-                            RectEntry::Scalar(MatRef::from_column_major_slice_with_stride(
-                                &square[start * cap..],
-                                n,
-                                len,
-                                cap,
-                            ))
-                        }
-                        TrainData::Ard(_) => RectEntry::Ard {
-                            blocks: blocks.iter().map(Vec::as_slice).collect(),
-                            rows: n,
-                            cols: len,
-                        },
-                    };
-                    (*id, entry)
-                })
-                .collect(),
-        )
     }
 
     /// The same squares at the scalar `U`.
@@ -1204,7 +1074,7 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     fn exact(&self) -> Option<&TrainSources<f64>>;
 
     /// [`TrainSources::stage_append`].
-    fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Self::Staged, GprError>;
+    fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Self::Staged, GprError>;
 
     /// [`TrainSources::stage_delete`].
     fn stage_delete(&self, index: usize) -> Result<Self::Staged, GprError>;
@@ -1244,7 +1114,7 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
         (self as &dyn Any).downcast_ref::<TrainSources<f64>>()
     }
 
-    fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Staged<S>, GprError> {
+    fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Staged<S>, GprError> {
         Self::stage_append(self, cols)
     }
 
@@ -1292,7 +1162,7 @@ impl SourceStore<f32> for RefinedSources {
         Some(&self.exact)
     }
 
-    fn stage_append(&self, cols: &[RawSlot<'_>]) -> Result<Self::Staged, GprError> {
+    fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Self::Staged, GprError> {
         Ok((
             self.storage.stage_append(cols)?,
             self.exact.stage_append(cols)?,
@@ -1329,47 +1199,193 @@ impl<T: KernelScalar> SquareSlots<T> for TrainSources<T> {
     }
 }
 
-/// The checked `d²` blocks of one prediction or insert, and the casts an
-/// `f32` model reads them through.
-pub(crate) struct QuerySources<'a, T: ScalarOps> {
+/// Buffers of [`QuerySources`] kept by a model from call to call: the bound
+/// slots (empty between calls), what a fill or a repair writes, and the
+/// casts an `f32` model reads. A call that fits the capacity of an earlier
+/// one allocates nothing.
+pub(crate) struct QueryScratch<T> {
+    raw: Vec<RawSlot<'static>>,
+    written: Vec<f64>,
+    column: Vec<f64>,
+    cast: Vec<T>,
+}
+
+impl<T> QueryScratch<T> {
+    /// No buffers yet.
+    pub(crate) const fn new() -> Self {
+        Self {
+            raw: Vec::new(),
+            written: Vec::new(),
+            column: Vec::new(),
+            cast: Vec::new(),
+        }
+    }
+}
+
+impl<T> Default for QueryScratch<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A clone starts without buffers: they hold no state between calls.
+impl<T> Clone for QueryScratch<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<T> fmt::Debug for QueryScratch<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryScratch")
+            .field("written", &self.written.capacity())
+            .field("cast", &self.cast.capacity())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The empty `raw` of another borrow, on the same allocation: an in-place
+/// collect of an empty `Vec` into one of the same layout keeps its buffer.
+// `filter_map` changes the element's lifetime, which `filter` cannot.
+#[allow(clippy::unnecessary_filter_map)]
+fn recycle<'x, 'y>(mut raw: Vec<RawSlot<'x>>) -> Vec<RawSlot<'y>> {
+    raw.clear();
+    raw.into_iter().filter_map(|_| None).collect()
+}
+
+/// Whether `T` reads `f64` tables in place.
+fn reads_in_place<T: ScalarOps>() -> bool {
+    T::from_f64_slice(&[]).is_some()
+}
+
+/// The checked `d²` blocks of one prediction or insert, bound on a model's
+/// [`QueryScratch`]: a caller's table is read in place (an `f64` model) or
+/// through one cast (`f32`), and a fill or a repair writes the scratch.
+pub(crate) struct QuerySources<'a, T: KernelScalar> {
+    /// One entry per slot of the kernel, in the order the caller gave them.
     raw: Vec<RawSlot<'a>>,
-    casts: Vec<Vec<T::RowCast>>,
+    scratch: &'a mut QueryScratch<T>,
+}
+
+impl<T: KernelScalar> Drop for QuerySources<'_, T> {
+    fn drop(&mut self) {
+        self.scratch.raw = recycle(std::mem::take(&mut self.raw));
+    }
 }
 
 impl<'a, T: KernelScalar> QuerySources<'a, T> {
-    /// Binds and checks the blocks of `rows × cols` pairs.
+    /// Binds `sources` to `slots` (the kernel's slots) and checks each
+    /// block of `rows × cols` as its source asks ([`check_block`]).
     ///
     /// # Errors
     ///
-    /// The errors of [`bind`].
-    pub(crate) fn bind(
+    /// Returns [`GprError::LengthMismatch`] for a source of a slot the
+    /// kernel does not read, a slot without a source, two sources of one
+    /// slot, or a block of the wrong length or count;
+    /// [`GprError::EmptyInput`] when `rows` or `cols` is zero;
+    /// [`GprError::InvalidDistance`] for a value the source's check refuses.
+    pub(crate) fn bind<'s: 'a>(
         slots: &[DistanceSlot],
-        sources: impl IntoIterator<Item = DistanceSource<'a>>,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
         rows: usize,
         cols: usize,
         kind: BlockKind,
+        scratch: &'a mut QueryScratch<T>,
     ) -> Result<Self, GprError> {
-        let raw = bind(slots, sources, rows, cols, kind)?;
-        let casts = raw
-            .iter()
-            .map(|slot| (0..slot.shape.blocks()).map(|_| T::empty_rows()).collect())
-            .collect();
-        Ok(Self { raw, casts })
+        crate::data::require_nonempty(rows)?;
+        crate::data::require_nonempty(cols)?;
+        let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+        if kind == BlockKind::Square && rows != cols {
+            return Err(GprError::ShapeMismatch {
+                reason: format!("a square of squared distances is {rows}x{cols}"),
+            });
+        }
+        let raw = recycle(std::mem::take(&mut scratch.raw));
+        let mut this = Self { raw, scratch };
+        this.scratch.written.clear();
+        for source in sources {
+            let slot = slot_of(slots, &source, this.raw.iter().map(|raw| raw.id))?;
+            let shape = slot.shape();
+            let blocks = shape.blocks();
+            let tidy = source.tidy;
+            let QueryScratch {
+                written, column, ..
+            } = &mut *this.scratch;
+            let data = match source.data {
+                SourceData::Values(values) if blocks == 1 => RawData::Values(values),
+                SourceData::Blocks(tables) => RawData::Blocks(tables),
+                SourceData::Slices(tables) => RawData::Slices(tables),
+                SourceData::Values(_) => {
+                    return Err(GprError::LengthMismatch {
+                        reason: format!("expected {blocks} tables of squared distances, got 1"),
+                    });
+                }
+                SourceData::Fill(filler) => {
+                    let at = written.len();
+                    fill_dense(filler, (rows, cols), blocks, kind, written, column)?;
+                    RawData::Written(at)
+                }
+            };
+            let mut raw_slot = RawSlot {
+                id: slot.id(),
+                shape,
+                data,
+                rows,
+                cols,
+                cast_at: 0,
+                unchecked: false,
+            };
+            // An ARD block of pairs of two sets is checked as it is read:
+            // an `f64` model's by the kernel ([`crate::kernel::ard::r2_from_blocks`]
+            // and the ARD RBF lanes), any other's by the cast below. One
+            // pass over the caller's values either way.
+            let read_checked = kind == BlockKind::Rect
+                && tidy == Tidy::Exact
+                && matches!(shape, SlotShape::Ard(_));
+            if read_checked {
+                check_counts(&raw_slot, blocks, len, written)?;
+                raw_slot.unchecked = true;
+            } else {
+                check_slot(&mut raw_slot, blocks, len, kind, tidy, written)?;
+            }
+            this.raw.push(raw_slot);
+        }
+        if this.raw.len() != slots.len() {
+            return Err(no_source());
+        }
+        if !reads_in_place::<T>() {
+            let Self { raw, scratch } = &mut this;
+            let QueryScratch { written, cast, .. } = &mut **scratch;
+            cast.clear();
+            for slot in raw.iter_mut() {
+                slot.cast_at = cast.len();
+                for k in 0..slot.shape.blocks() {
+                    let block = slot.block(k, written);
+                    // An unchecked block is checked a tile at a time as it
+                    // is cast, while the tile is in cache.
+                    for tile in block.chunks(CAST_TILE) {
+                        if slot.unchecked && !super::simd::all_valid_distances(tile) {
+                            return Err(first_invalid_from(block, slot.rows, 0));
+                        }
+                        cast.extend(tile.iter().map(|&v| T::from_f64(v)));
+                    }
+                }
+            }
+        }
+        Ok(this)
     }
 
-    /// The checked blocks, in slot order.
-    pub(crate) fn raw(&self) -> &[RawSlot<'a>] {
-        &self.raw
+    /// The checked blocks, by slot.
+    pub(crate) fn blocks(&self) -> BoundBlocks<'_> {
+        BoundBlocks {
+            raw: &self.raw,
+            written: &self.scratch.written,
+        }
     }
 
-    /// [`Self::table`] and, when `with_f64`, the same blocks in `f64`, read
-    /// in place.
-    pub(crate) fn tables(
-        &mut self,
-        with_f64: bool,
-    ) -> (RectTable<'_, T>, Option<RectTable<'_, f64>>) {
-        let Self { raw, casts } = self;
-        (storage_table(raw, casts), with_f64.then(|| f64_table(raw)))
+    /// The same blocks in `f64`, read in place.
+    pub(crate) fn f64_view(&self) -> F64Blocks<'_> {
+        F64Blocks(self.blocks())
     }
 
     /// The checked `m × m` squares of a query as a store a Gram reads (a
@@ -1378,70 +1394,196 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     /// # Errors
     ///
     /// Returns [`GprError::SizeOverflow`] when an ARD square does not fit.
-    pub(crate) fn into_square(self, m: usize) -> Result<TrainSources<T>, GprError> {
-        TrainSources::from_raw(self.raw, m)
-    }
-
-    /// The blocks as a table of views in the storage scalar. An `f64`
-    /// model reads the caller's tables in place.
-    pub(crate) fn table(&mut self) -> RectTable<'_, T> {
-        storage_table(&self.raw, &mut self.casts)
+    pub(crate) fn to_square(&self, m: usize) -> Result<TrainSources<T>, GprError> {
+        TrainSources::from_blocks(self.blocks(), m)
     }
 }
 
-fn f64_table<'s>(raw: &'s [RawSlot<'_>]) -> RectTable<'s, f64> {
-    RectTable(
-        raw.iter()
-            .map(|slot| {
-                let entry = match slot.shape {
-                    SlotShape::Scalar => RectEntry::Scalar(MatRef::from_column_major_slice(
-                        slot.block(0),
-                        slot.rows,
-                        slot.cols,
-                    )),
-                    SlotShape::Ard(d) => RectEntry::Ard {
-                        blocks: (0..d).map(|k| slot.block(k)).collect(),
-                        rows: slot.rows,
-                        cols: slot.cols,
-                    },
-                };
-                (slot.id, entry)
-            })
-            .collect(),
-    )
+impl<T: KernelScalar> RectSlots<T> for QuerySources<'_, T> {
+    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
+        rect_view(self.blocks(), &self.scratch.cast, slot)
+    }
 }
 
-fn storage_table<'s, T: KernelScalar>(
-    raw: &'s [RawSlot<'_>],
-    casts: &'s mut [Vec<T::RowCast>],
-) -> RectTable<'s, T> {
-    let mut entries = Vec::with_capacity(raw.len());
-    for (slot, casts) in raw.iter().zip(casts.iter_mut()) {
-        let (rows, cols) = (slot.rows, slot.cols);
-        let mut views = Vec::with_capacity(casts.len());
-        for (k, cast) in casts.iter_mut().enumerate() {
-            views.push(T::storage_rows(slot.block(k), cast));
-        }
-        let entry = match slot.shape {
-            SlotShape::Scalar => {
-                RectEntry::Scalar(MatRef::from_column_major_slice(views[0], rows, cols))
+/// The checked blocks of a [`QuerySources`], looked up by slot.
+#[derive(Clone, Copy)]
+pub struct BoundBlocks<'v> {
+    raw: &'v [RawSlot<'v>],
+    written: &'v [f64],
+}
+
+impl<'v> BoundBlocks<'v> {
+    /// The blocks of `slot`.
+    fn find(&self, slot: SlotId) -> Option<&'v RawSlot<'v>> {
+        self.raw.iter().find(|raw| raw.id == slot)
+    }
+
+    /// Block `k` of `slot`, or an empty slice when the slot is not bound.
+    pub(crate) fn block(&self, slot: SlotId, k: usize) -> &'v [f64] {
+        self.find(slot)
+            .map_or(&[], |raw| raw.block(k, self.written))
+    }
+
+    /// Whether every slot of `ids` is bound.
+    pub(crate) fn covers(&self, mut ids: impl Iterator<Item = SlotId>) -> bool {
+        ids.all(|id| self.find(id).is_some())
+    }
+}
+
+/// [`BoundBlocks`] read as `f64` in place.
+pub(crate) struct F64Blocks<'v>(BoundBlocks<'v>);
+
+impl RectSlots<f64> for F64Blocks<'_> {
+    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, f64>> {
+        rect_view(self.0, &[], slot)
+    }
+}
+
+/// The blocks of `slot` as the scalar `U`: in place when `U` is `f64`,
+/// else from `cast` (what [`QuerySources::bind`] cast).
+fn rect_view<'v, U: KernelScalar>(
+    blocks: BoundBlocks<'v>,
+    cast: &'v [U],
+    slot: SlotId,
+) -> Option<RectSlot<'v, U>> {
+    let raw = blocks.find(slot)?;
+    let (rows, cols) = (raw.rows, raw.cols);
+    let len = rows * cols;
+    let dims = raw.shape.blocks();
+    let list = if reads_in_place::<U>() {
+        match &raw.data {
+            RawData::Values(values) => BlockList::Packed(U::from_f64_slice(values)?, len, 1),
+            RawData::Blocks(tables) => BlockList::Vecs(U::from_f64_vecs(tables)?),
+            RawData::Slices(tables) => BlockList::Slices(U::from_f64_slices(tables)?),
+            RawData::Written(at) => {
+                BlockList::Packed(U::from_f64_slice(blocks.written.get(*at..)?)?, len, dims)
             }
-            SlotShape::Ard(_) => RectEntry::Ard {
-                blocks: views,
-                rows,
-                cols,
-            },
-        };
-        entries.push((slot.id, entry));
+        }
+    } else {
+        BlockList::Packed(cast.get(raw.cast_at..)?, len, dims)
+    };
+    let ard = ArdBlocks {
+        blocks: list,
+        rows,
+        cols,
+        col0: 0,
+    };
+    Some(match raw.shape {
+        SlotShape::Scalar => RectSlot::Scalar(MatRef::from_column_major_slice(
+            ard.block(0).get(..len)?,
+            rows,
+            cols,
+        )),
+        SlotShape::Ard(_) => RectSlot::Ard(ard),
+    })
+}
+
+/// Appends the `blocks` dense `rows × cols` blocks a fill writes to `all`,
+/// one after another. A square asks only the lower triangle and mirrors
+/// it. `column` is scratch for one column of every block.
+fn fill_dense(
+    filler: &dyn DistanceFill,
+    (rows, cols): (usize, usize),
+    blocks: usize,
+    kind: BlockKind,
+    all: &mut Vec<f64>,
+    column: &mut Vec<f64>,
+) -> Result<(), GprError> {
+    let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+    let total = len.checked_mul(blocks).ok_or(GprError::SizeOverflow)?;
+    let at = all.len();
+    all.resize(at.checked_add(total).ok_or(GprError::SizeOverflow)?, 0.0);
+    let all = &mut all[at..];
+    column.clear();
+    column.resize(rows.checked_mul(blocks).ok_or(GprError::SizeOverflow)?, 0.0);
+    for col in 0..cols {
+        let first = if kind == BlockKind::Square { col } else { 0 };
+        let run = rows - first;
+        let column = &mut column[..run * blocks];
+        filler.fill_column(col, first..rows, column);
+        for k in 0..blocks {
+            let src = &column[k * run..(k + 1) * run];
+            let block = &mut all[k * len..(k + 1) * len];
+            block[col * rows + first..(col + 1) * rows].copy_from_slice(src);
+            if kind == BlockKind::Square {
+                for (i, &v) in (first..rows).zip(src) {
+                    block[col + i * rows] = v;
+                }
+            }
+        }
     }
-    RectTable(entries)
+    Ok(())
+}
+
+/// Checks that `slot` has `blocks` blocks of `len` values each.
+fn check_counts(
+    slot: &RawSlot<'_>,
+    blocks: usize,
+    len: usize,
+    written: &[f64],
+) -> Result<(), GprError> {
+    let count = match &slot.data {
+        RawData::Values(_) => 1,
+        RawData::Blocks(tables) => tables.len(),
+        RawData::Slices(tables) => tables.len(),
+        RawData::Written(_) => blocks,
+    };
+    if count != blocks {
+        return Err(GprError::LengthMismatch {
+            reason: format!("expected {blocks} tables of squared distances, got {count}"),
+        });
+    }
+    for k in 0..blocks {
+        crate::data::require_count(slot.block(k, written).len(), len, "squared distances")?;
+    }
+    Ok(())
+}
+
+/// Values per tile of the cast of [`QuerySources::bind`]: checked and cast
+/// while in cache.
+const CAST_TILE: usize = 4096;
+
+/// Checks the `blocks` blocks of `slot` (`len` values each) as `tidy`
+/// asks. A repair changes an owned table in place; a borrowed one is first
+/// copied into `written`.
+fn check_slot(
+    slot: &mut RawSlot<'_>,
+    blocks: usize,
+    len: usize,
+    kind: BlockKind,
+    tidy: Tidy,
+    written: &mut Vec<f64>,
+) -> Result<(), GprError> {
+    let (rows, cols) = (slot.rows, slot.cols);
+    // Every length first: a repaired copy packs the blocks one after another.
+    check_counts(slot, blocks, len, written)?;
+    for k in 0..blocks {
+        if !check_block(slot.block(k, written), rows, cols, kind, tidy)? {
+            continue;
+        }
+        // A borrowed table is copied only when its repair changes it.
+        if let RawData::Values(Cow::Borrowed(_)) | RawData::Slices(_) = slot.data {
+            let at = written.len();
+            for j in 0..blocks {
+                written.extend_from_slice(slot.block(j, &[]));
+            }
+            slot.data = RawData::Written(at);
+        }
+        let block: &mut [f64] = match &mut slot.data {
+            RawData::Values(values) => values.to_mut(),
+            RawData::Blocks(tables) => &mut tables[k],
+            RawData::Slices(_) => &mut [],
+            RawData::Written(at) => &mut written[*at + k * len..*at + (k + 1) * len],
+        };
+        repair_block(block, rows, cols, kind);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::compiled::supplied::RectSlot;
-    use crate::kernel::{ArdDistance, RectSlots, ScalarDistance};
+    use crate::kernel::{ArdDistance, ScalarDistance};
 
     fn line(scale: f64, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>) -> Vec<f64> {
         cols.flat_map(|j| {
@@ -1522,19 +1664,23 @@ mod tests {
             DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..2, 0..2)),
             DistanceSlot::Ard(a) => a.from_vecs(vec![line(4.0, 0..2, 0..2), line(5.0, 0..2, 0..2)]),
         });
-        let raw = bind(&slots, sources, 2, 2, BlockKind::Square).expect("bind");
-        (slots, TrainSources::from_raw(raw, 2).expect("store"))
+        let store = TrainSources::bind(&slots, sources, 2).expect("store");
+        (slots, store)
     }
 
     /// The column of the new point `n` to the points `0..n`.
-    fn column<'a>(slots: &[DistanceSlot], n: usize) -> QuerySources<'a, f64> {
+    fn column<'a>(
+        slots: &[DistanceSlot],
+        n: usize,
+        scratch: &'a mut QueryScratch<f64>,
+    ) -> QuerySources<'a, f64> {
         let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
             DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..n, n..n + 1)),
             DistanceSlot::Ard(a) => {
                 a.from_vecs(vec![line(4.0, 0..n, n..n + 1), line(5.0, 0..n, n..n + 1)])
             }
         });
-        QuerySources::bind(slots, sources, n, 1, BlockKind::Rect).expect("column")
+        QuerySources::bind(slots, sources, n, 1, BlockKind::Rect, scratch).expect("column")
     }
 
     fn expected(n: usize) -> Vec<(SlotShape, Vec<f64>)> {
@@ -1551,12 +1697,17 @@ mod tests {
     #[test]
     fn a_staged_change_applies_only_on_commit() {
         let (slots, mut store) = store();
-        let staged = store.stage_append(column(&slots, 2).raw()).expect("stage");
+        let mut scratch = QueryScratch::new();
+        let staged = store
+            .stage_append(column(&slots, 2, &mut scratch).blocks())
+            .expect("stage");
         assert_eq!(store.n(), 2);
         assert_eq!(store.dense_f64(), expected(2));
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected(3));
-        let staged = store.stage_append(column(&slots, 3).raw()).expect("stage");
+        let staged = store
+            .stage_append(column(&slots, 3, &mut scratch).blocks())
+            .expect("stage");
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected(4));
         assert!(store.stage_delete(4).is_err());
@@ -1581,25 +1732,31 @@ mod tests {
     }
 
     /// The column of a new point at `p` to the points at `at`.
-    fn column_at<'a>(slots: &[DistanceSlot], at: &[f64], p: f64) -> QuerySources<'a, f64> {
+    fn column_at<'a>(
+        slots: &[DistanceSlot],
+        at: &[f64],
+        p: f64,
+        scratch: &'a mut QueryScratch<f64>,
+    ) -> QuerySources<'a, f64> {
         let col =
             |scale: f64| -> Vec<f64> { at.iter().map(|&a| scale * (a - p).powi(2)).collect() };
         let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
             DistanceSlot::Scalar(s) => s.from_vec(col(k as f64 + 1.0)),
             DistanceSlot::Ard(a) => a.from_vecs(vec![col(4.0), col(5.0)]),
         });
-        QuerySources::bind(slots, sources, at.len(), 1, BlockKind::Rect).expect("column")
+        QuerySources::bind(slots, sources, at.len(), 1, BlockKind::Rect, scratch).expect("column")
     }
 
     #[test]
     fn deleting_the_first_a_middle_or_the_last_point_then_appending_matches_a_rebuild() {
         for index in [0, 2, 4] {
             let (slots, mut store) = store();
+            let mut scratch = QueryScratch::new();
             let mut at = vec![0.0, 1.0];
             // Five points: the leading dimension grows past `n`.
             for p in [2.0, 3.0, 4.0] {
                 let staged = store
-                    .stage_append(column_at(&slots, &at, p).raw())
+                    .stage_append(column_at(&slots, &at, p, &mut scratch).blocks())
                     .expect("stage");
                 store.commit(staged);
                 at.push(p);
@@ -1611,7 +1768,7 @@ mod tests {
             // Appending writes over the rows the delete left behind.
             for p in [7.5, 9.0] {
                 let staged = store
-                    .stage_append(column_at(&slots, &at, p).raw())
+                    .stage_append(column_at(&slots, &at, p, &mut scratch).blocks())
                     .expect("stage");
                 store.commit(staged);
                 at.push(p);
@@ -1623,11 +1780,12 @@ mod tests {
     #[test]
     fn deleting_down_to_one_point_then_appending_matches_a_rebuild() {
         let (slots, mut store) = store();
+        let mut scratch = QueryScratch::new();
         let staged = store.stage_delete(0).expect("stage");
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected_at(&[1.0]));
         let staged = store
-            .stage_append(column_at(&slots, &[1.0], 3.0).raw())
+            .stage_append(column_at(&slots, &[1.0], 3.0, &mut scratch).blocks())
             .expect("stage");
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected_at(&[1.0, 3.0]));
@@ -1638,11 +1796,17 @@ mod tests {
         let image = ScalarDistance::new();
         let cross = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
         let slots = [DistanceSlot::Scalar(image)];
-        let mut bound =
-            QuerySources::<f64>::bind(&slots, [image.borrow(&cross)], 3, 2, BlockKind::Rect)
-                .expect("bind");
-        let table = bound.table();
-        let Some(RectSlot::Scalar(view)) = table.rect(slots[0].id()) else {
+        let mut scratch = QueryScratch::new();
+        let bound = QuerySources::<f64>::bind(
+            &slots,
+            [image.borrow(&cross)],
+            3,
+            2,
+            BlockKind::Rect,
+            &mut scratch,
+        )
+        .expect("bind");
+        let Some(RectSlot::Scalar(view)) = bound.rect(slots[0].id()) else {
             panic!("scalar slot");
         };
         assert_eq!(view.as_ptr(), cross.as_ptr());
@@ -1654,8 +1818,7 @@ mod tests {
         let train = vec![0.0, 1.0, 1.0, 0.0];
         let ptr = train.as_ptr();
         let slots = [DistanceSlot::Scalar(image)];
-        let raw = bind(&slots, [image.from_vec(train)], 2, 2, BlockKind::Square).expect("bind");
-        let store = TrainSources::<f64>::from_raw(raw, 2).expect("store");
+        let store = TrainSources::<f64>::bind(&slots, [image.from_vec(train)], 2).expect("store");
         let Some(SquareSlot::Scalar(view)) = store.square(slots[0].id()) else {
             panic!("scalar slot");
         };

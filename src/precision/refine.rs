@@ -325,9 +325,9 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
 
 /// `r = y − (K + diag · I) α` with `K` evaluated in `f64`, [`COLUMN_BLOCK`]
 /// training columns at a time, so no `n×n` `f64` matrix is held. The
-/// training squares of a distance kernel are read in the same column
-/// ranges: a scalar slot in place, an ARD slot unpacked into one reused
-/// `n × COLUMN_BLOCK` buffer per dimension. Returns `‖K + diag · I‖∞`.
+/// training squares of a distance kernel are read in place in the same
+/// column ranges ([`crate::kernel::TrainSources::columns`]). Returns
+/// `‖K + diag · I‖∞`.
 fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
     kernel: &CompiledKernel<f64, S>,
     sys: &TrainSystem<'_, f32, S>,
@@ -347,7 +347,6 @@ fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
     let mut row_abs = vec![0.0f64; n];
     let mut sum = vec![0.0f64; n];
     let exact = exact_sources(sys)?;
-    let mut ard = Vec::new();
     let mut start = 0;
     while start < n {
         let len = block.min(n - start);
@@ -356,7 +355,7 @@ fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
                 rows[(jj, dim)] = x[(start + jj, dim)];
             }
         }
-        let cols = (!exact.is_empty()).then(|| exact.column_table(start..start + len, &mut ard));
+        let cols = (!exact.is_empty()).then(|| exact.columns(start..start + len));
         kernel.eval_cross_slots::<M>(
             x,
             rows.as_ref().submatrix(0, 0, len, d),

@@ -56,6 +56,16 @@ pub(crate) mod sealed {
         /// [`Self::as_f64_slice`] for a mutable slice.
         fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]>;
 
+        /// `f64` values as this scalar when it is `f64`: a supplied table
+        /// is read in place.
+        fn from_f64_slice(values: &[f64]) -> Option<&[Self]>;
+
+        /// [`Self::from_f64_slice`] for a list of borrowed tables.
+        fn from_f64_slices<'a>(values: &'a [&'a [f64]]) -> Option<&'a [&'a [Self]]>;
+
+        /// [`Self::from_f64_slice`] for a list of owned tables.
+        fn from_f64_vecs(values: &[Vec<f64>]) -> Option<&[Vec<Self>]>;
+
         fn empty_rows() -> Self::RowCast;
 
         fn empty_cols() -> Self::ColCast;
@@ -320,6 +330,18 @@ impl sealed::ScalarOps for f64 {
         Some(values)
     }
 
+    fn from_f64_slice(values: &[f64]) -> Option<&[Self]> {
+        Some(values)
+    }
+
+    fn from_f64_slices<'a>(values: &'a [&'a [f64]]) -> Option<&'a [&'a [Self]]> {
+        Some(values)
+    }
+
+    fn from_f64_vecs(values: &[Vec<f64>]) -> Option<&[Vec<Self>]> {
+        Some(values)
+    }
+
     fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]> {
         Some(values)
     }
@@ -448,6 +470,18 @@ impl sealed::ScalarOps for f32 {
     }
 
     fn as_f64_slice(_values: &[Self]) -> Option<&[f64]> {
+        None
+    }
+
+    fn from_f64_slice(_values: &[f64]) -> Option<&[Self]> {
+        None
+    }
+
+    fn from_f64_slices<'a>(_values: &'a [&'a [f64]]) -> Option<&'a [&'a [Self]]> {
+        None
+    }
+
+    fn from_f64_vecs(_values: &[Vec<f64>]) -> Option<&[Vec<Self>]> {
         None
     }
 

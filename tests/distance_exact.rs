@@ -816,3 +816,103 @@ fn rounding_is_refused_exactly_and_repaired_on_request() {
     ));
     assert!(image.borrow(&cross).tidy(f64::NAN).is_err());
 }
+
+/// Fits an ARD distance model of the slot `bands` at `P` on two dimensions and predicts on
+/// cross blocks that hold `bad` at `(row, col)` of dimension `dim`: every
+/// predict entry point reports it there.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn ard_query_value_is_reported<P: gprx::GpScalar>(
+    (bands, kernel): (ArdDistance, gprx::kernel::DistanceKernel),
+    bad: f64,
+    (dim, row, col): (usize, usize, usize),
+) {
+    let cols: Vec<Vec<f64>> = (0..2).map(|k| coord(k, N, 0.0)).collect();
+    let qcols: Vec<Vec<f64>> = (0..2).map(|k| coord(k, M, 0.5)).collect();
+    let train: Vec<Vec<f64>> = cols.iter().map(|c| sq(c, c)).collect();
+    let mut cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
+    let mut fitted = Gpr::new(kernel, lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor([bands.from_vecs(train)], N, &targets())
+        .map_err(|(_, e)| e)
+        .expect("fit");
+    let square: Vec<Vec<f64>> = qcols.iter().map(|q| sq(q, q)).collect();
+    let square_refs: Vec<&[f64]> = square.iter().map(Vec::as_slice).collect();
+    // A valid table predicts, then the same model refuses the bad one.
+    let refs: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+    fitted.predict([bands.borrow(&refs)], M).expect("valid");
+    cross[dim][row + col * N] = bad;
+    let refs: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+    let at = |result: Result<(), GprError>, call: &str| {
+        assert!(
+            matches!(
+                result,
+                Err(GprError::InvalidDistance { row: r, col: c, .. }) if (r, c) == (row, col)
+            ),
+            "{call} of {bad} at {:?}: {result:?}",
+            (row, col)
+        );
+    };
+    at(
+        fitted.predict([bands.borrow(&refs)], M).map(drop),
+        "predict",
+    );
+    let mut out = Prediction::default();
+    at(
+        fitted.predict_into([bands.borrow(&refs)], M, &mut out),
+        "predict_into",
+    );
+    at(
+        fitted
+            .predict_covariance([bands.borrow(&refs)], [bands.borrow(&square_refs)], M)
+            .map(drop),
+        "predict_covariance",
+    );
+    // The model is unchanged: the valid table predicts again.
+    cross[dim][row + col * N] = 0.25;
+    let refs: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+    fitted
+        .predict_into([bands.borrow(&refs)], M, &mut out)
+        .expect("valid again");
+}
+
+/// A prediction block of an ARD slot is checked as the kernel reads it
+/// (one pass over the caller's values), in place for `f64` and as it is
+/// cast otherwise: a negative, `NaN`, or infinite value is reported at its
+/// place in the caller's table, by every ARD leaf and precision.
+#[test]
+fn an_invalid_ard_query_value_is_reported_where_it_is() {
+    use gprx::kernel::{MaternArdKernel, RationalQuadraticArdKernel};
+    use gprx::{DoublePrecision, MixedPrecision, ReevaluateKernel};
+    let bands = ArdDistance::new(2).expect("dims");
+    let kernels = || {
+        [
+            bands
+                .kernel(RbfArdKernel::new(&[0.8, 1.4]).expect("ell"))
+                .expect("dims"),
+            bands
+                .kernel(MaternArdKernel::new(&[0.8, 1.4], MaternNu::FiveHalves).expect("ell"))
+                .expect("dims"),
+            bands
+                .kernel(RationalQuadraticArdKernel::new(&[0.8, 1.4], 1.5).expect("ell"))
+                .expect("dims"),
+        ]
+    };
+    for bad in [-0.5, f64::NAN, f64::INFINITY] {
+        for place in [(0, 0, 0), (1, 4, 2), (0, N - 1, M - 1)] {
+            for kernel in kernels() {
+                ard_query_value_is_reported::<DoublePrecision>((bands, kernel), bad, place);
+            }
+            for kernel in kernels() {
+                ard_query_value_is_reported::<SinglePrecision>((bands, kernel), bad, place);
+            }
+            for kernel in kernels() {
+                ard_query_value_is_reported::<MixedPrecision<ReevaluateKernel>>(
+                    (bands, kernel),
+                    bad,
+                    place,
+                );
+            }
+        }
+    }
+}

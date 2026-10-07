@@ -36,6 +36,48 @@ pub(crate) const LANES: usize = 4;
 
 pub(crate) use crate::math::f64x4_all_finite as all_finite;
 
+/// Whether every value is a valid squared distance: finite and not
+/// negative. Eight lanes keep two sums without a branch: `v · 0`, which
+/// stays `0` unless a value is `NaN` or infinite, and the least value,
+/// which stays `≥ 0` (`-0.0` included) unless one is negative. The loop is
+/// compiled for the widest SIMD the CPU has (`pulp`'s dispatch, as faer's
+/// kernels are), since it reads every supplied value of a call.
+pub(crate) fn all_valid_distances(values: &[f64]) -> bool {
+    faer_traits::pulp::Arch::new().dispatch(ValidLanes(values))
+}
+
+/// [`valid_lanes`] as a `pulp` op: its body is inlined into the function
+/// `pulp` compiles for the CPU's features.
+struct ValidLanes<'a>(&'a [f64]);
+
+impl faer_traits::pulp::WithSimd for ValidLanes<'_> {
+    type Output = bool;
+
+    #[inline(always)]
+    fn with_simd<S: faer_traits::pulp::Simd>(self, _simd: S) -> bool {
+        valid_lanes(self.0)
+    }
+}
+
+#[inline(always)]
+fn valid_lanes(values: &[f64]) -> bool {
+    let mut zero = [0.0f64; 8];
+    let mut least = [0.0f64; 8];
+    let (chunks, rest) = values.as_chunks::<8>();
+    for chunk in chunks {
+        for ((z, l), &v) in zero.iter_mut().zip(&mut least).zip(chunk) {
+            *z += v * 0.0;
+            *l = if v < *l { v } else { *l };
+        }
+    }
+    let rest = rest
+        .iter()
+        .fold(true, |ok, &v| ok & super::sources::valid(v));
+    let sum: f64 = zero.iter().sum();
+    let min = least.iter().fold(0.0f64, |m, &l| if l < m { l } else { m });
+    rest & (sum == 0.0) & (min >= 0.0)
+}
+
 /// Column `col` of `mat` as a slice, when `mat` is column-major.
 #[inline(always)]
 pub(crate) fn col_slice<T>(mat: MatRef<'_, T>, col: usize) -> Option<&[T]> {

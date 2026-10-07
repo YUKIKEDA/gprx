@@ -130,10 +130,14 @@ pub(crate) fn r2_from_cache<T: KernelScalar>(
 }
 
 /// [`ArdR2`] of the pair `(row, col)` from rectangular `(Δ_d)²` blocks.
+/// Each value is checked as it is read: an `f64` model's prediction blocks
+/// are checked here, not when they are bound
+/// ([`crate::kernel::QuerySources::bind`]).
 ///
 /// # Errors
 ///
-/// Returns [`GprError::NonFiniteInput`] if a block value is not finite, or
+/// Returns [`GprError::InvalidDistance`] if a block value is not finite or
+/// is negative (at its place in the caller's table), or
 /// [`GprError::NonFiniteKernelValue`] if `r²` is not finite.
 #[inline]
 pub(crate) fn r2_from_blocks<T: KernelScalar>(
@@ -145,10 +149,14 @@ pub(crate) fn r2_from_blocks<T: KernelScalar>(
 ) -> Result<ArdR2<T>, GprError> {
     sum_r2(inv_ell_sq, pick, |dim| {
         let v = blocks.get(dim, row, col);
-        if v.is_finite() {
+        if super::sources::valid(v.to_f64()) {
             Ok(v)
         } else {
-            Err(GprError::NonFiniteInput)
+            Err(super::sources::invalid_value(
+                v.to_f64(),
+                row,
+                col + blocks.col0,
+            ))
         }
     })
 }
@@ -160,6 +168,16 @@ pub(crate) fn write_from_blocks<T: KernelScalar>(
     out: MatMut<'_, T>,
     d: usize,
     pair: impl FnMut(usize, usize) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    require_blocks(blocks, out.as_ref(), d)?;
+    super::write_rect(out, pair)
+}
+
+/// Checks that `blocks` has `d` dimensions and the shape of `out`.
+pub(crate) fn require_blocks<T: KernelScalar>(
+    blocks: ArdBlocks<'_, T>,
+    out: MatRef<'_, T>,
+    d: usize,
 ) -> Result<(), GprError> {
     if blocks.d() != d {
         return Err(GprError::DimensionMismatch {
@@ -178,7 +196,7 @@ pub(crate) fn write_from_blocks<T: KernelScalar>(
             ),
         });
     }
-    super::write_rect(out, pair)
+    Ok(())
 }
 
 /// Rejects an empty `x` or one whose column count is not `expected_d`.

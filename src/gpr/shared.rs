@@ -14,8 +14,8 @@ use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
     CompiledKernel, CompiledOf, DistanceSlot, DistanceSource, GramInputs, KernelScalar, KernelSpec,
-    ModelKernel, RectSlots, ScalarOps, SourceStore, SpecOf, SquareSlots, Supply, Triangle,
-    spec_slots,
+    ModelKernel, QueryScratch, RectSlots, ScalarOps, SourceStore, SpecOf, SquareSlots, Supply,
+    Triangle,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
@@ -73,6 +73,8 @@ pub(crate) struct GprCore<P: GpScalar, K: ModelKernel> {
     /// The distance slots of `kernel`, in order (empty for a coordinate
     /// kernel). Fixed with the kernel's tree.
     pub(crate) slots: Vec<DistanceSlot>,
+    /// Buffers a prediction on supplied distances binds its blocks on.
+    pub(crate) query_sources: QueryScratch<P::Storage>,
     pub(crate) n: usize,
     pub(crate) d: usize,
 }
@@ -99,6 +101,7 @@ impl<P: GpScalar, K: ModelKernel> Clone for GprCore<P, K> {
             y_cast: self.y_cast.clone(),
             sources: self.sources.clone(),
             slots: self.slots.clone(),
+            query_sources: self.query_sources.clone(),
             n: self.n,
             d: self.d,
         }
@@ -120,17 +123,16 @@ pub(crate) fn train_points<'a, P: GpScalar>(
     }
 }
 
-/// Binds the training squares of `kernel`'s slots, `n × n` each.
-pub(crate) fn bind_training<T: KernelScalar, Store: SourceStore<T>, S: Supply>(
-    kernel: &KernelSpec<S>,
+/// Binds the training squares of `slots` (the kernel's), `n × n` each.
+pub(crate) fn bind_training<T: KernelScalar, Store: SourceStore<T>>(
+    slots: &[DistanceSlot],
     sources: Vec<DistanceSource<'_>>,
     n: usize,
 ) -> Result<Store, GprError> {
-    let slots = spec_slots(kernel);
     if slots.is_empty() && sources.is_empty() {
         return Ok(Store::empty());
     }
-    Store::bind(&slots, sources, n)
+    Store::bind(slots, sources, n)
 }
 
 impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {

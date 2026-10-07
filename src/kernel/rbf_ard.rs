@@ -404,7 +404,7 @@ impl RbfArdKernel {
             let block = cache.block(dim);
             // Four running sums, folded in a fixed order.
             let mut acc = [0.0f64; 4];
-            let chunks = s.chunks_exact(4).zip(block.chunks_exact(4));
+            let chunks = s.as_chunks::<4>().0.iter().zip(block.as_chunks::<4>().0);
             for (a, b) in chunks {
                 for lane in 0..4 {
                     acc[lane] += a[lane] * b[lane].to_f64();
@@ -444,9 +444,20 @@ impl RbfArdKernel {
     pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar>(
         &self,
         blocks: ArdBlocks<'_, T>,
-        out: MatMut<'_, T>,
+        mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
+        ard::require_blocks(blocks, out.as_ref(), self.num_params())?;
+        if let Some(of) = T::as_f64_mut(out.rb_mut())
+            && lanes::try_apply_cross_from_blocks::<M>(
+                |dim| T::as_f64_slice(blocks.block(dim)),
+                blocks.col0,
+                of,
+                w,
+            )?
+        {
+            return Ok(());
+        }
         ard::write_from_blocks(blocks, out, self.num_params(), |row, col| {
             rbf_value::<M, T>(ard::r2_from_blocks(blocks, row, col, w, Pick::NONE)?)
         })

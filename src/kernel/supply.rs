@@ -165,11 +165,10 @@ impl LeafParams for SuppliedLeafSpec {
 ///
 /// Every `d²` must be finite and non-negative, and a square of the pairs of
 /// one set (the training square, or the query square of a covariance) must
-/// have a zero diagonal and be symmetric, up to what floating point leaves:
-/// within `1e-6` of the table's largest value, a model sets a negative value
-/// or a diagonal to `0.0` and each mirror pair `(i, j)`, `(j, i)` to its
-/// mean (a borrowed table is copied first). Past that it returns
-/// [`GprError::ShapeMismatch`]: the table is not one of squared distances.
+/// have a zero diagonal and be symmetric, exactly; otherwise the model
+/// returns [`GprError::InvalidDistance`] at the first value that is not.
+/// [`DistanceSource::tidy`] repairs what rounding leaves, within a
+/// tolerance the caller names.
 ///
 /// # Examples
 ///

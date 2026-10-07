@@ -14,7 +14,7 @@ use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, QueryScratch, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
@@ -166,8 +166,8 @@ where
             y,
             sources,
         } = input;
-        let sources = match bind_training::<P::Storage, P::Sources, _>(&gpr.kernel, sources, n_rows)
-        {
+        let slots = spec_slots(&gpr.kernel);
+        let sources = match bind_training::<P::Storage, P::Sources>(&slots, sources, n_rows) {
             Ok(bound) => bound,
             Err(err) => return Err((gpr, err)),
         };
@@ -200,7 +200,7 @@ where
         };
         Ok(Self {
             core: GprCore {
-                slots: spec_slots(&gpr.kernel),
+                slots,
                 kernel: gpr.kernel,
                 compiled,
                 likelihood: gpr.likelihood,
@@ -210,6 +210,7 @@ where
                 y_transform: y_fitted,
                 policies: gpr.policies,
                 query: QueryWorkspace::new(),
+                query_sources: QueryScratch::new(),
                 x_obs: x.to_vec(),
                 y_obs: y.to_vec(),
                 x: pack_points(&x_buf, n_rows, n_cols),
@@ -1094,7 +1095,8 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
-        let sources = bind_training::<P::Storage, P::Sources, _>(&parts.kernel, Vec::new(), n)?;
+        let slots = spec_slots(&parts.kernel);
+        let sources = bind_training::<P::Storage, P::Sources>(&slots, Vec::new(), n)?;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         let mut workspace = fit_buffers::<P, _>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
@@ -1113,7 +1115,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         )?;
         Ok(Self {
             core: GprCore {
-                slots: spec_slots(&parts.kernel),
+                slots,
                 kernel: parts.kernel,
                 compiled,
                 likelihood: parts.likelihood,
@@ -1123,6 +1125,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
                 y_transform: parts.y_transform,
                 policies: parts.policies,
                 query: QueryWorkspace::new(),
+                query_sources: QueryScratch::new(),
                 x_obs: parts.x_obs,
                 y_obs: parts.y_obs,
                 x: pack_points(&x_buf, n, d),

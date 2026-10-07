@@ -9,11 +9,12 @@
 //! `col..n`.
 
 use super::{
-    LANES, add_squared_diff_scaled, all_finite, col_slice_checked, col_slice_mut_checked,
-    finite_slice, load4, rows_checked, store4, unit_row_stride,
+    LANES, add_squared_diff_scaled, all_finite, all_valid_distances, col_slice_checked,
+    col_slice_mut_checked, finite_slice, load4, rows_checked, store4, unit_row_stride,
 };
 use crate::error::GprError;
 use crate::kernel::dist::{ArdSqDiff, col_chunk, par_lower_cols, worker_count};
+use crate::kernel::sources::first_invalid_from;
 use crate::kernel::{Triangle, finite_dist};
 use crate::math::KernelMath;
 use faer::linalg::matmul::matmul;
@@ -64,6 +65,130 @@ pub(crate) fn try_apply_cross<M: KernelMath>(
     Ok(true)
 }
 
+/// Writes rectangular ARD RBF `k` from raw `(Δ_d)²` blocks when `out` is
+/// column-major. `block(dim)` is dimension `dim`'s column-major block with
+/// `out.nrows()` rows; `out` column `j` reads block column `col0 + j`.
+///
+/// The blocks of an `f64` model are not checked when bound: each value is
+/// checked as it is read here. Up to [`FUSED_DIMS`] dimensions, the loop
+/// is software-pipelined over columns: one pass writes `exp(−r²/2)` of
+/// column `j` while it reads, checks, and sums column `j + 1` into `r²`,
+/// so the reads of the caller's values overlap the `exp` of the column
+/// before.
+///
+/// # Errors
+///
+/// Returns [`GprError::InvalidDistance`] for a value that is not finite or
+/// is negative, at its place in the caller's table, and
+/// [`GprError::NonFiniteKernelValue`] when an `r²` overflows.
+pub(crate) fn try_apply_cross_from_blocks<'b, M: KernelMath>(
+    block: impl Fn(usize) -> Option<&'b [f64]> + Sync,
+    col0: usize,
+    mut out: MatMut<'_, f64>,
+    inv_ell_sq: &[f64],
+) -> Result<bool, GprError> {
+    let n = out.nrows();
+    let m = out.ncols();
+    let d = inv_ell_sq.len();
+    if !unit_row_stride(out.as_ref()) {
+        return Ok(false);
+    }
+    let end = (col0 + m) * n;
+    for dim in 0..d {
+        match block(dim) {
+            Some(b) if b.len() >= end => {}
+            _ => return Ok(false),
+        }
+    }
+    // Column `query` of dimension `dim`.
+    let run = |dim: usize, query: usize| -> Result<&'b [f64], GprError> {
+        let start = (col0 + query) * n;
+        Ok(&block(dim).ok_or_else(changed_scalar)?[start..start + n])
+    };
+    // The first invalid value of column `query`.
+    let invalid = |query: usize| -> GprError {
+        for dim in 0..d {
+            match run(dim, query) {
+                Ok(src) if !all_valid_distances(src) => {
+                    return first_invalid_from(src, n, col0 + query);
+                }
+                Ok(_) => {}
+                Err(e) => return e,
+            }
+        }
+        GprError::NonFiniteInput
+    };
+    let runs = |query: usize, dims: &mut [&'b [f64]; FUSED_DIMS]| -> Result<(), GprError> {
+        for (dim, slot) in dims.iter_mut().enumerate().take(d) {
+            *slot = run(dim, query)?;
+        }
+        Ok(())
+    };
+    let chunk = |start: usize, mut part: MatMut<'_, f64>| -> Result<(), GprError> {
+        let len = part.ncols();
+        if len == 0 {
+            return Ok(());
+        }
+        if d > FUSED_DIMS {
+            for local in 0..len {
+                let query = start + local;
+                let dest = col_slice_mut_checked(part.rb_mut(), local)?;
+                dest.fill(0.0);
+                for (dim, &w) in inv_ell_sq.iter().enumerate() {
+                    let src = run(dim, query)?;
+                    if !all_valid_distances(src) {
+                        return Err(first_invalid_from(src, n, col0 + query));
+                    }
+                    scale_add_checked(src, w, dest);
+                }
+                exp_half_in_place::<M>(dest)?;
+            }
+            return Ok(());
+        }
+        let mut dims: [&'b [f64]; FUSED_DIMS] = [&[]; FUSED_DIMS];
+        runs(start, &mut dims)?;
+        if !weighted_sum(
+            &dims[..d],
+            inv_ell_sq,
+            col_slice_mut_checked(part.rb_mut(), 0)?,
+        ) {
+            return Err(invalid(start));
+        }
+        for local in 0..len {
+            let finite = if local + 1 < len {
+                runs(start + local + 1, &mut dims)?;
+                let (left, right) = part.rb_mut().split_at_col_mut(local + 1);
+                let (valid, finite) = exp_half_then_sum::<M>(
+                    col_slice_mut_checked(left, local)?,
+                    &dims[..d],
+                    inv_ell_sq,
+                    col_slice_mut_checked(right, 0)?,
+                );
+                if !valid {
+                    return Err(invalid(start + local + 1));
+                }
+                finite
+            } else {
+                exp_half_finite::<M>(col_slice_mut_checked(part.rb_mut(), local)?)
+            };
+            if !finite {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+        }
+        Ok(())
+    };
+    if m == 1 {
+        chunk(0, out)?;
+        return Ok(true);
+    }
+    let n_parts = worker_count();
+    out.rb_mut()
+        .par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, part)| chunk(col_chunk(m, chunk_idx, n_parts).0, part))?;
+    Ok(true)
+}
+
 /// Offset of row `row_start` in the cached column `col`, which stores rows
 /// `col..n` only. Rows above the diagonal are not cached.
 fn cached_rows_offset(row_start: usize, col: usize) -> Result<usize, GprError> {
@@ -92,6 +217,145 @@ fn scale_add(src: &[f64], scale: f64, acc: &mut [f64]) -> Result<(), GprError> {
         i += 1;
     }
     Ok(())
+}
+
+/// Dimensions up to which [`try_apply_cross_from_blocks`] keeps the column
+/// runs of every dimension at hand and pipelines its columns.
+const FUSED_DIMS: usize = 16;
+
+fn changed_scalar() -> GprError {
+    GprError::UnsupportedKernelOperation {
+        reason: "an ARD block changed scalar type".to_owned(),
+    }
+}
+
+/// The validity of the supplied values one pass reads: `v · 0` stays `0`
+/// unless a value is `NaN` or infinite, and the least value stays `≥ 0`
+/// unless one is negative.
+struct Validity {
+    nonfinite: f64x4,
+    least: f64x4,
+}
+
+impl Validity {
+    fn new() -> Self {
+        Self {
+            nonfinite: f64x4::ZERO,
+            least: f64x4::ZERO,
+        }
+    }
+
+    #[inline(always)]
+    fn read(&mut self, v: f64x4) -> f64x4 {
+        self.nonfinite += v * f64x4::ZERO;
+        self.least = self.least.fast_min(v);
+        v
+    }
+
+    fn valid(&self) -> bool {
+        self.nonfinite.reduce_add() == 0.0 && self.least.to_array().iter().all(|&l| l >= 0.0)
+    }
+}
+
+/// `dest = Σ_d w_d src_d` (`r²`) of supplied values; whether every value
+/// read is valid (finite, not negative).
+fn weighted_sum(srcs: &[&[f64]], w: &[f64], dest: &mut [f64]) -> bool {
+    let mut validity = Validity::new();
+    let mut i = 0;
+    while i + LANES <= dest.len() {
+        let mut r2 = f64x4::ZERO;
+        for (src, &wd) in srcs.iter().zip(w) {
+            r2 += validity.read(load4(src, i)) * f64x4::splat(wd);
+        }
+        store4(dest, i, r2);
+        i += LANES;
+    }
+    let mut valid = validity.valid();
+    while i < dest.len() {
+        dest[i] = 0.0;
+        for (src, &wd) in srcs.iter().zip(w) {
+            valid &= super::super::sources::valid(src[i]);
+            dest[i] += src[i] * wd;
+        }
+        i += 1;
+    }
+    valid
+}
+
+/// `cur = exp(−cur / 2)` and `next = Σ_d w_d src_d` in one pass, so the
+/// reads of `srcs` overlap the `exp`. Returns whether every value of `srcs`
+/// is valid and whether every `cur` was finite.
+fn exp_half_then_sum<M: KernelMath>(
+    cur: &mut [f64],
+    srcs: &[&[f64]],
+    w: &[f64],
+    next: &mut [f64],
+) -> (bool, bool) {
+    let half = f64x4::splat(-0.5);
+    let mut validity = Validity::new();
+    // `r² · 0` stays `0` unless an `r²` is infinite.
+    let mut overflow = f64x4::ZERO;
+    let mut i = 0;
+    while i + LANES <= cur.len() {
+        let mut r2 = f64x4::ZERO;
+        for (src, &wd) in srcs.iter().zip(w) {
+            r2 += validity.read(load4(src, i)) * f64x4::splat(wd);
+        }
+        store4(next, i, r2);
+        let c = load4(cur, i);
+        overflow += c * f64x4::ZERO;
+        store4(cur, i, M::exp_f64x4(c * half));
+        i += LANES;
+    }
+    let mut valid = validity.valid();
+    let mut tail = 0.0;
+    while i < cur.len() {
+        next[i] = 0.0;
+        for (src, &wd) in srcs.iter().zip(w) {
+            valid &= super::super::sources::valid(src[i]);
+            next[i] += src[i] * wd;
+        }
+        tail += cur[i] * 0.0;
+        cur[i] = M::exp(-cur[i] * 0.5);
+        i += 1;
+    }
+    (valid, overflow.reduce_add() + tail == 0.0)
+}
+
+/// `cur = exp(−cur / 2)`; whether every `cur` was finite.
+fn exp_half_finite<M: KernelMath>(cur: &mut [f64]) -> bool {
+    let half = f64x4::splat(-0.5);
+    let mut overflow = f64x4::ZERO;
+    let mut i = 0;
+    while i + LANES <= cur.len() {
+        let c = load4(cur, i);
+        overflow += c * f64x4::ZERO;
+        store4(cur, i, M::exp_f64x4(c * half));
+        i += LANES;
+    }
+    let mut tail = 0.0;
+    while i < cur.len() {
+        tail += cur[i] * 0.0;
+        cur[i] = M::exp(-cur[i] * 0.5);
+        i += 1;
+    }
+    overflow.reduce_add() + tail == 0.0
+}
+
+/// `acc += scale · src` for values already checked (finite, not
+/// negative): supplied blocks. The sum is checked by the `exp` pass.
+fn scale_add_checked(src: &[f64], scale: f64, acc: &mut [f64]) {
+    debug_assert_eq!(src.len(), acc.len());
+    let sv = f64x4::splat(scale);
+    let mut i = 0;
+    while i + LANES <= src.len() {
+        store4(acc, i, load4(acc, i) + load4(src, i) * sv);
+        i += LANES;
+    }
+    while i < src.len() {
+        acc[i] += src[i] * scale;
+        i += 1;
+    }
 }
 
 /// `buf = exp(−buf / 2)`, checking that `buf` is finite.

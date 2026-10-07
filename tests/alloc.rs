@@ -10,7 +10,10 @@
 mod common;
 use common::rng::{open_unit, seeded_rng};
 use gprx::Adam;
-use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
+use gprx::kernel::{
+    ArdDistance, ConstantKernel, DistanceSource, KernelSpec, RbfArdKernel, RbfKernel,
+    ScalarDistance,
+};
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, KernelExp,
     MixedPrecision, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
@@ -909,4 +912,184 @@ fn distance_baseline_coordinate_allocs() {
         assert_eq!(label, expected);
         assert_alloc_cap(&format!("distance_baseline/{label}"), *count, cap);
     }
+}
+
+/// One supplied-distance slot of the baseline problem, as the bench's.
+enum BaselineSlot {
+    Scalar(ScalarDistance),
+    Ard(ArdDistance),
+}
+
+impl BaselineSlot {
+    fn borrow<'a>(&self, sum: &'a [f64], refs: &'a [&'a [f64]]) -> DistanceSource<'a> {
+        match self {
+            Self::Scalar(slot) => slot.borrow(sum),
+            Self::Ard(slot) => slot.borrow(refs),
+        }
+    }
+}
+
+/// The operations of [`DISTANCE_BASELINE_ALLOCS`] a model on supplied
+/// distances has at D1-3, measured as the coordinate ones are, at `P`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
+    let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let image = ScalarDistance::new();
+    let bands = ArdDistance::new(p.d).expect("dims");
+    let kernels = [
+        (
+            "rbf",
+            BaselineSlot::Scalar(image),
+            image.kernel(RbfKernel::new(0.5).expect("ell")),
+        ),
+        (
+            "rbf_ard",
+            BaselineSlot::Ard(bands),
+            bands
+                .kernel(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell"))
+                .expect("dims"),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (name, slot, kernel) in kernels {
+        let fit = || {
+            Gpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([slot.borrow(&s.train_sum, &train_refs)], p.n, &p.y)
+                .map_err(|(_, e)| e)
+                .expect("factor")
+        };
+        let _warm = fit();
+        let mut model = None;
+        out.push((format!("{name}/factor"), allocs_in(|| model = Some(fit()))));
+        let mut model = model.expect("model");
+        let mut theta = vec![0.0; model.num_params()];
+        model.get_params(&mut theta).expect("theta");
+        let mut grad = vec![0.0; theta.len()];
+        model
+            .value_and_gradient_into(&theta, &mut grad)
+            .expect("warmup");
+        out.push((
+            format!("{name}/mll_and_grad"),
+            allocs_in(|| {
+                model
+                    .value_and_gradient_into(&theta, &mut grad)
+                    .expect("counted");
+            }),
+        ));
+        let mut pred = Prediction::default();
+        let cross = || slot.borrow(&s.cross_sum, &cross_refs);
+        model
+            .predict_into([cross()], p.q, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/predict_into"),
+            allocs_in(|| {
+                model
+                    .predict_into([cross()], p.q, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+    }
+    out
+}
+
+/// [`supplied_allocs`] on the coordinate path at `P`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
+    let p = common::problems::distance_baseline();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let kernels = [
+        ("rbf", KernelSpec::from(RbfKernel::new(0.5).expect("ell"))),
+        (
+            "rbf_ard",
+            KernelSpec::from(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell")),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (name, kernel) in kernels {
+        let fit = || {
+            Gpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor(&p.x, p.n, p.d, &p.y)
+                .map_err(|(_, e)| e)
+                .expect("factor")
+        };
+        let _warm = fit();
+        let mut model = None;
+        out.push((format!("{name}/factor"), allocs_in(|| model = Some(fit()))));
+        let mut model = model.expect("model");
+        let mut theta = vec![0.0; model.num_params()];
+        model.get_params(&mut theta).expect("theta");
+        let mut grad = vec![0.0; theta.len()];
+        model
+            .value_and_gradient_into(&theta, &mut grad)
+            .expect("warmup");
+        out.push((
+            format!("{name}/mll_and_grad"),
+            allocs_in(|| {
+                model
+                    .value_and_gradient_into(&theta, &mut grad)
+                    .expect("counted");
+            }),
+        ));
+        let mut pred = Prediction::default();
+        model
+            .predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/predict_into"),
+            allocs_in(|| {
+                model
+                    .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+    }
+    out
+}
+
+/// A model on supplied distances allocates no more than the coordinate
+/// path on the baseline problem at the same precision (design §5.6): a
+/// borrowed table is read in place, so `predict_into` of an `f64` model
+/// allocates nothing, as the coordinate one.
+#[test]
+fn supplied_distances_allocate_no_more_than_coordinates() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    let mut over = Vec::new();
+    for (precision, supplied, coordinate) in [
+        (
+            "f64",
+            supplied_allocs::<DoublePrecision>(),
+            coordinate_allocs::<DoublePrecision>(),
+        ),
+        (
+            "f32",
+            supplied_allocs::<SinglePrecision>(),
+            coordinate_allocs::<SinglePrecision>(),
+        ),
+        (
+            "mixed",
+            supplied_allocs::<MixedPrecision<ReevaluateKernel>>(),
+            coordinate_allocs::<MixedPrecision<ReevaluateKernel>>(),
+        ),
+    ] {
+        assert_eq!(supplied.len(), coordinate.len());
+        for ((label, count), (expected, cap)) in supplied.into_iter().zip(coordinate) {
+            assert_eq!(label, expected);
+            let label = format!("supplied/{precision}/{label}");
+            eprintln!("{label}: allocations={count} cap={cap}");
+            if count > cap {
+                over.push(label);
+            }
+        }
+    }
+    assert!(over.is_empty(), "over the coordinate path: {over:?}");
 }

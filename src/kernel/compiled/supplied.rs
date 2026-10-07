@@ -519,36 +519,6 @@ impl<T: Sync + Copy> SquareSlots<T> for SquareTable<'_, T> {
     }
 }
 
-/// One rectangular supply of a [`RectTable`].
-pub(crate) enum RectEntry<'a, T> {
-    /// Dense `rows × cols`.
-    Scalar(MatRef<'a, T>),
-    /// One dense `rows × cols` block per dimension.
-    Ard {
-        blocks: Vec<&'a [T]>,
-        rows: usize,
-        cols: usize,
-    },
-}
-
-/// Rectangular supplies of one call, looked up by slot.
-pub(crate) struct RectTable<'a, T>(pub(crate) Vec<(SlotId, RectEntry<'a, T>)>);
-
-impl<T: Sync + Copy> RectSlots<T> for RectTable<'_, T> {
-    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
-        let (_, entry) = self.0.iter().find(|(id, _)| *id == slot)?;
-        Some(match entry {
-            RectEntry::Scalar(view) => RectSlot::Scalar(*view),
-            RectEntry::Ard { blocks, rows, cols } => RectSlot::Ard(ArdBlocks {
-                blocks: BlockList::Slices(blocks),
-                rows: *rows,
-                cols: *cols,
-                col0: 0,
-            }),
-        })
-    }
-}
-
 /// Columns `start..start + len` of every block of `inner`.
 pub(crate) struct ColRange<'a, T> {
     pub(crate) inner: &'a dyn RectSlots<T>,

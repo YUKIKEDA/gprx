@@ -526,13 +526,21 @@ pub struct ArdBlocks<'a, T> {
     pub(crate) col0: usize,
 }
 
-/// The per-dimension blocks of an [`ArdBlocks`]: borrowed slices (a
-/// caller's blocks), or one block repeated.
+/// The per-dimension blocks of an [`ArdBlocks`]: a caller's borrowed or
+/// moved blocks, blocks packed one after another (a fill, a repair, or a
+/// cast), or one block repeated.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BlockList<'a, T> {
     Slices(&'a [&'a [T]]),
+    /// Owned blocks a caller moved in.
+    Vecs(&'a [Vec<T>]),
+    /// `dims` blocks of `len` values each, one after another.
+    Packed(&'a [T], usize, usize),
     /// One block for each of `dims` dimensions.
     Repeat(&'a [T], usize),
+    /// The packed training triangles: pair `(row, col)` of the square,
+    /// read in either order. No dense block exists.
+    Triangles(ArdSqDiff<'a, T>),
 }
 
 impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
@@ -540,22 +548,31 @@ impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
     pub(crate) fn d(&self) -> usize {
         match self.blocks {
             BlockList::Slices(blocks) => blocks.len(),
-            BlockList::Repeat(_, dims) => dims,
+            BlockList::Vecs(blocks) => blocks.len(),
+            BlockList::Packed(_, _, dims) | BlockList::Repeat(_, dims) => dims,
+            BlockList::Triangles(cache) => cache.d(),
         }
     }
 
-    /// The block of dimension `dim`.
+    /// The dense block of dimension `dim` (`rows` rows per column), or an
+    /// empty slice when the blocks are packed triangles.
     pub(crate) fn block(&self, dim: usize) -> &'a [T] {
         match self.blocks {
             BlockList::Slices(blocks) => blocks[dim],
+            BlockList::Vecs(blocks) => &blocks[dim],
+            BlockList::Packed(all, len, _) => &all[dim * len..(dim + 1) * len],
             BlockList::Repeat(block, _) => block,
+            BlockList::Triangles(_) => &[],
         }
     }
 
     /// `(Δ_dim)²` of the pair `(row, col)`.
     #[inline]
     pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
-        self.block(dim)[row + (col + self.col0) * self.rows]
+        match self.blocks {
+            BlockList::Triangles(cache) => cache.get(dim, row, col + self.col0),
+            _ => self.block(dim)[row + (col + self.col0) * self.rows],
+        }
     }
 }
 

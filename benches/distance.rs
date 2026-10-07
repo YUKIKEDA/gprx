@@ -23,7 +23,7 @@ mod problems;
 #[allow(dead_code)]
 mod rng;
 
-use problems::{DistanceBaseline, distance_baseline};
+use problems::{DistanceBaseline, Supplied, distance_baseline};
 
 fn lik() -> GaussianLikelihood {
     GaussianLikelihood::new(0.1).expect("noise")
@@ -151,37 +151,6 @@ fn sparse(c: &mut Criterion) {
     group.finish();
 }
 
-/// The baseline problem as supplied distances: per-dimension `(Δ_k)²`
-/// blocks (column-major), training square and train × query.
-struct Supplied {
-    train: Vec<Vec<f64>>,
-    cross: Vec<Vec<f64>>,
-    /// `Σ_k` of the blocks: the squared Euclidean distance.
-    train_sum: Vec<f64>,
-    cross_sum: Vec<f64>,
-}
-
-fn supplied(p: &DistanceBaseline) -> Supplied {
-    let block = |a: &[f64], ra: usize, b: &[f64], rb: usize, k: usize| -> Vec<f64> {
-        (0..rb)
-            .flat_map(|j| (0..ra).map(move |i| (a[i + k * ra] - b[j + k * rb]).powi(2)))
-            .collect()
-    };
-    let train: Vec<Vec<f64>> = (0..p.d).map(|k| block(&p.x, p.n, &p.x, p.n, k)).collect();
-    let cross: Vec<Vec<f64>> = (0..p.d).map(|k| block(&p.x, p.n, &p.xq, p.q, k)).collect();
-    let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
-        (0..blocks[0].len())
-            .map(|at| blocks.iter().map(|b| b[at]).sum())
-            .collect()
-    };
-    Supplied {
-        train_sum: sum(&train),
-        cross_sum: sum(&cross),
-        train,
-        cross,
-    }
-}
-
 /// The same two kernels as [`kernels`] on one supplied-distance slot.
 enum Slot {
     Scalar(ScalarDistance),
@@ -228,7 +197,7 @@ impl Slot {
 /// The exact operations of `exact` on supplied distances, as `dist_*`.
 fn exact_supplied(c: &mut Criterion) {
     let p = distance_baseline();
-    let s = supplied(&p);
+    let s = p.supplied();
     let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
     let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
     let mut group = c.benchmark_group("distance_baseline");

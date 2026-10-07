@@ -3,9 +3,9 @@
 
 use crate::kernel::compiled::CrossViews;
 use crate::kernel::compiled::gram::GramInputs;
-use crate::kernel::compiled::supplied::{RectEntry, RectTable, SquareSlot, SquareTable};
+use crate::kernel::compiled::supplied::{RectSlot, RectSlots, SquareSlot, SquareTable};
 use crate::kernel::compiled::weighted::{DiagAccum, WeightedWalk};
-use crate::kernel::dist::ArdSqDiffBuf;
+use crate::kernel::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use crate::kernel::{
     ArdDistance, CompiledKernel, ConstantKernel, DistanceKernel, KernelSpec, MaternArdKernel,
     MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
@@ -14,6 +14,18 @@ use crate::kernel::{
 use crate::math::Accurate;
 use crate::test_check::assert_close;
 use faer::{Mat, MatRef};
+
+/// Rectangular supplies looked up by slot.
+struct RectTable<'a>(Vec<(crate::kernel::SlotId, RectSlot<'a, f64>)>);
+
+impl RectSlots<f64> for RectTable<'_> {
+    fn rect(&self, slot: crate::kernel::SlotId) -> Option<RectSlot<'_, f64>> {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == slot)
+            .map(|(_, rect)| *rect)
+    }
+}
 
 const N: usize = 5;
 const M: usize = 3;
@@ -109,16 +121,17 @@ impl Problem {
         ])
     }
 
-    fn rect_table(&self) -> RectTable<'_, f64> {
+    fn rect_table(&self) -> RectTable<'_> {
         RectTable(vec![
-            (self.image_slot(), RectEntry::Scalar(self.cross_sq.as_ref())),
+            (self.image_slot(), RectSlot::Scalar(self.cross_sq.as_ref())),
             (
                 self.bands_slot(),
-                RectEntry::Ard {
-                    blocks: self.cross_blocks.iter().map(Vec::as_slice).collect(),
+                RectSlot::Ard(ArdBlocks {
+                    blocks: BlockList::Vecs(&self.cross_blocks),
                     rows: N,
                     cols: M,
-                },
+                    col0: 0,
+                }),
             ),
         ])
     }

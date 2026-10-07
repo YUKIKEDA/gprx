@@ -454,12 +454,16 @@ where
             return Err(GprError::NonFiniteInput);
         }
         self.registry.require_room()?;
-        let mut columns = QuerySources::<P::Storage>::bind(
+        // The model's buffers, taken for the call (an error leaves them
+        // empty: they hold no state).
+        let mut scratch = std::mem::take(&mut self.core.query_sources);
+        let columns = QuerySources::<P::Storage>::bind(
             &self.core.slots,
             sources,
             self.core.n,
             1,
             BlockKind::Rect,
+            &mut scratch,
         )?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
@@ -498,9 +502,8 @@ where
                 d,
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
-            let table = columns.table();
             let cross =
-                (!self.core.slots.is_empty()).then_some(&table as &dyn RectSlots<P::Storage>);
+                (!self.core.slots.is_empty()).then_some(&columns as &dyn RectSlots<P::Storage>);
             with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
@@ -526,7 +529,9 @@ where
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
         // Stage the squares first: the border is the last step that can fail.
-        let staged = self.core.sources.stage_append(columns.raw())?;
+        let staged = self.core.sources.stage_append(columns.blocks())?;
+        drop(columns);
+        self.core.query_sources = scratch;
         self.workspace.append_border(k_new)?;
         self.core.sources.commit(staged);
         #[cfg(feature = "insert-stages")]
