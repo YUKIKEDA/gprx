@@ -51,7 +51,11 @@ impl RawSlot<'_> {
     fn into_first(self) -> Vec<f64> {
         match self.data {
             RawData::Blocks(mut blocks) if !blocks.is_empty() => blocks.swap_remove(0).into_owned(),
-            RawData::Blocks(_) => Vec::new(),
+            RawData::Blocks(_) => {
+                // `bind` gives every slot at least one block.
+                debug_assert!(false, "a slot bound with no block");
+                Vec::new()
+            }
             RawData::Packed(all) => all,
         }
     }
@@ -401,6 +405,12 @@ impl<T: KernelScalar> TrainSources<T> {
                 .zip(&self.slots)
                 .any(|(col, (id, _))| col.id != *id)
         {
+            // The caller binds the columns against the store's own slots,
+            // so this is a crate bug, not the caller's data.
+            debug_assert!(
+                false,
+                "the bound columns are not the store's slots in order"
+            );
             return Err(GprError::LengthMismatch {
                 reason: "internal: the bound columns are not the store's slots in order".to_owned(),
             });
@@ -1201,6 +1211,73 @@ mod tests {
         assert_eq!(store.dense_f64(), expected(4));
         store.commit(staged);
         assert_eq!(store.dense_f64(), expected(3));
+    }
+
+    /// Every slot's `d²` of the points at `at` on the line, as `expected`.
+    fn expected_at(at: &[f64]) -> Vec<(SlotShape, Vec<f64>)> {
+        let sq = |scale: f64| -> Vec<f64> {
+            at.iter()
+                .flat_map(|&b| at.iter().map(move |&a| scale * (a - b).powi(2)))
+                .collect()
+        };
+        vec![
+            (SlotShape::Scalar, sq(1.0)),
+            (SlotShape::Scalar, sq(2.0)),
+            (SlotShape::Ard(2), [sq(4.0), sq(5.0)].concat()),
+        ]
+    }
+
+    /// The column of a new point at `p` to the points at `at`.
+    fn column_at<'a>(slots: &[DistanceSlot], at: &[f64], p: f64) -> QuerySources<'a, f64> {
+        let col =
+            |scale: f64| -> Vec<f64> { at.iter().map(|&a| scale * (a - p).powi(2)).collect() };
+        let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
+            DistanceSlot::Scalar(s) => s.from_vec(col(k as f64 + 1.0)),
+            DistanceSlot::Ard(a) => a.from_vecs(vec![col(4.0), col(5.0)]),
+        });
+        QuerySources::bind(slots, sources, at.len(), 1, BlockKind::Rect).expect("column")
+    }
+
+    #[test]
+    fn deleting_the_first_a_middle_or_the_last_point_then_appending_matches_a_rebuild() {
+        for index in [0, 2, 4] {
+            let (slots, mut store) = store();
+            let mut at = vec![0.0, 1.0];
+            // Five points: the leading dimension grows past `n`.
+            for p in [2.0, 3.0, 4.0] {
+                let staged = store
+                    .stage_append(column_at(&slots, &at, p).raw())
+                    .expect("stage");
+                store.commit(staged);
+                at.push(p);
+            }
+            let staged = store.stage_delete(index).expect("stage");
+            store.commit(staged);
+            at.remove(index);
+            assert_eq!(store.dense_f64(), expected_at(&at), "delete {index}");
+            // Appending writes over the rows the delete left behind.
+            for p in [7.5, 9.0] {
+                let staged = store
+                    .stage_append(column_at(&slots, &at, p).raw())
+                    .expect("stage");
+                store.commit(staged);
+                at.push(p);
+                assert_eq!(store.dense_f64(), expected_at(&at), "append after {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_down_to_one_point_then_appending_matches_a_rebuild() {
+        let (slots, mut store) = store();
+        let staged = store.stage_delete(0).expect("stage");
+        store.commit(staged);
+        assert_eq!(store.dense_f64(), expected_at(&[1.0]));
+        let staged = store
+            .stage_append(column_at(&slots, &[1.0], 3.0).raw())
+            .expect("stage");
+        store.commit(staged);
+        assert_eq!(store.dense_f64(), expected_at(&[1.0, 3.0]));
     }
 
     #[test]

@@ -883,3 +883,81 @@ fn a_mixed_online_insert_and_the_into_predicts_match_a_fit_on_the_whole_matrix()
         .expect("online into");
     assert_pred(&out, &expect, 1e-10);
 }
+
+/// An ARD slot times a scalar slot, inserted point by point and then with a
+/// middle point deleted, against a fit on the remaining points: `f64`, `f32`,
+/// and mixed precision.
+#[test]
+fn online_ard_insert_and_a_middle_delete_match_a_fit_on_the_rest() {
+    fn check<P: gprx::GpScalar>(tol: f64)
+    where
+        P::Refine: Into<f64>,
+    {
+        let total = N + 2;
+        let (c0, c1, c2) = (
+            coord(0, total, 0.0),
+            coord(1, total, 0.0),
+            coord(2, total, 0.0),
+        );
+        let (q0, q1, q2) = (coord(0, M, 0.5), coord(1, M, 0.5), coord(2, M, 0.5));
+        let y: Vec<f64> = (0..total).map(|i| (i as f64 * 0.7).cos()).collect();
+        let image = ScalarDistance::new();
+        let bands = ArdDistance::new(2).expect("dims");
+        let kernel = image.kernel(RbfKernel::new(1.1).expect("ell"))
+            * bands
+                .kernel(RbfArdKernel::new(&[0.7, 1.3]).expect("ell"))
+                .expect("dims");
+        let pick = |c: &[f64], rows: &[usize]| -> Vec<f64> { rows.iter().map(|&i| c[i]).collect() };
+        let sources = |rows: &[usize], cols: &[usize]| {
+            let (a0, a1, a2) = (pick(&c0, rows), pick(&c1, rows), pick(&c2, rows));
+            let (b0, b1, b2) = (pick(&c0, cols), pick(&c1, cols), pick(&c2, cols));
+            [
+                image.from_vec(sq(&a0, &b0)),
+                bands.from_vecs(vec![sq(&a1, &b1), sq(&a2, &b2)]),
+            ]
+        };
+        let first: Vec<usize> = (0..N).collect();
+        let mut online = Gpr::new(kernel.clone(), lik())
+            .with_optimizer(Fixed)
+            .with_precision::<P>()
+            .factor(sources(&first, &first), N, &y[..N])
+            .expect("fit")
+            .into_online()
+            .expect("online");
+        let mut kept = first;
+        for (k, &y_k) in y.iter().enumerate().skip(N) {
+            online.insert(sources(&kept, &[k]), y_k).expect("insert");
+            kept.push(k);
+        }
+        let middle = 2;
+        let id = online.point_ids()[middle];
+        online.delete(id).expect("delete");
+        kept.remove(middle);
+        let y_kept: Vec<f64> = kept.iter().map(|&i| y[i]).collect();
+        let rest = Gpr::new(kernel, lik())
+            .with_optimizer(Fixed)
+            .with_precision::<P>()
+            .factor(sources(&kept, &kept), kept.len(), &y_kept)
+            .expect("rest");
+        let queries = |rows: &[usize]| {
+            let (a0, a1, a2) = (pick(&c0, rows), pick(&c1, rows), pick(&c2, rows));
+            [
+                image.from_vec(sq(&a0, &q0)),
+                bands.from_vecs(vec![sq(&a1, &q1), sq(&a2, &q2)]),
+            ]
+        };
+        online.refit().expect("refit");
+        let got = online.predict(queries(&kept), M).expect("online");
+        let expect = rest.predict(queries(&kept), M).expect("rest");
+        for (a, b) in got.mean.iter().zip(&expect.mean) {
+            assert_close((*a).into(), (*b).into(), tol);
+        }
+        for (a, b) in got.variance.iter().zip(&expect.variance) {
+            assert_close((*a).into(), (*b).into(), tol);
+        }
+    }
+    check::<gprx::DoublePrecision>(1e-10);
+    check::<SinglePrecision>(1e-3);
+    // The factor is stored in `f32`: the online and the fresh factor round differently.
+    check::<gprx::MixedPrecision<gprx::ReevaluateKernel>>(1e-5);
+}
