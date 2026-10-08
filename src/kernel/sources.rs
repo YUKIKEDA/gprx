@@ -1396,21 +1396,39 @@ fn check_slot(
         if !check_block(slot.block(k, written), rows, cols, kind, tidy)? {
             continue;
         }
-        // A borrowed table is copied only when its repair changes it.
-        if let RawData::Values(Cow::Borrowed(_)) | RawData::Slices(_) = slot.data {
-            let at = written.len();
-            for j in 0..blocks {
-                written.extend_from_slice(slot.block(j, &[]));
+        // An owned table is repaired in place. A borrowed one is copied
+        // only when its repair changes it: every block of the slot, one
+        // after another, so the slot reads them all from `written`.
+        let at = match &mut slot.data {
+            RawData::Values(Cow::Owned(values)) => {
+                repair_block(values, rows, cols, kind);
+                continue;
             }
-            slot.data = RawData::Written(at);
-        }
-        let block: &mut [f64] = match &mut slot.data {
-            RawData::Values(values) => values.to_mut(),
-            RawData::Blocks(tables) => &mut tables[k],
-            RawData::Slices(_) => &mut [],
-            RawData::Written(at) => &mut written[*at + k * len..*at + (k + 1) * len],
+            RawData::Blocks(tables) => {
+                repair_block(&mut tables[k], rows, cols, kind);
+                continue;
+            }
+            RawData::Written(at) => *at,
+            RawData::Values(Cow::Borrowed(values)) => {
+                let at = written.len();
+                written.extend_from_slice(values);
+                at
+            }
+            RawData::Slices(tables) => {
+                let at = written.len();
+                for table in tables.iter() {
+                    written.extend_from_slice(table);
+                }
+                at
+            }
         };
-        repair_block(block, rows, cols, kind);
+        slot.data = RawData::Written(at);
+        repair_block(
+            &mut written[at + k * len..at + (k + 1) * len],
+            rows,
+            cols,
+            kind,
+        );
     }
     Ok(())
 }
