@@ -1663,10 +1663,7 @@ mod tests {
         )
         .expect("bind");
         let view = bound.f64_view();
-        assert!(matches!(
-            view.rect(slots[0].id()),
-            Some(RectSlot::Ard(ArdRect::Checked(_)))
-        ));
+        assert!(matches!(view.ard(0), Ok(ArdRect::Checked(_))));
     }
 
     #[test]
