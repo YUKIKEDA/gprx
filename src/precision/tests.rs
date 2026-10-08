@@ -28,7 +28,7 @@ fn mixed_precision_stores_f32_and_refines_f64() {
     assert_send_sync::<super::MixedPrecision<super::ReevaluateKernel>>();
 }
 
-use super::refine::{f64_alpha, refine_alpha};
+use super::refine::{exact_sources, f64_alpha, refine_alpha};
 use super::{PromoteStorage, ReevaluateKernel, ResidualFormula, StoredFactor, TrainSystem};
 use crate::error::CholeskyStage;
 use crate::kernel::ScalarOps;
@@ -143,7 +143,9 @@ fn refine_fresh<R: ResidualFormula>(
     let fresh = fresh_factor(ell, noise, x, y);
     let sys = fresh.system(x, y, noise);
     let alpha = refine_alpha::<crate::math::Accurate, R, _>(&sys).expect("refine");
-    let truth = f64_alpha::<crate::math::Accurate, _>(&fresh.k64, &sys, noise).expect("f64");
+    let exact = exact_sources(&sys).expect("exact");
+    let truth =
+        f64_alpha::<crate::math::Accurate, _>(&fresh.k64, &sys, &exact, noise).expect("f64");
     (alpha, truth)
 }
 

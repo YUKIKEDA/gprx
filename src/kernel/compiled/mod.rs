@@ -721,6 +721,18 @@ fn term_scratch<'a, T: KernelScalar, S: Supply>(
     Ok((level.as_mut().submatrix_mut(0, 0, rows, cols), deeper))
 }
 
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
+    /// [`CompiledKernel::require_columns`] for a coordinate tree; a tree of
+    /// supplied distances may read no coordinates. The leaves read only the
+    /// rows of `x` (Constant and White), so the entry points check here.
+    pub(crate) fn require_tree_columns(&self, x: MatRef<'_, T>) -> Result<(), GprError> {
+        match S::coordinates(self) {
+            Some(tree) => tree.require_columns(x),
+            None => Ok(()),
+        }
+    }
+}
+
 impl<T: KernelScalar> CompiledKernel<T> {
     /// Rejects coordinates without a column ([`GprError::EmptyInput`]): a
     /// coordinate tree reads at least one.

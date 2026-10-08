@@ -453,9 +453,16 @@ fn repair_block(block: &mut [f64], rows: usize, cols: usize, kind: BlockKind) {
             block[j + j * rows] = 0.0;
         }
         let walked = for_each_lower_pair::<std::convert::Infallible>(rows, |i, j| {
-            let mean = 0.5 * (block[i + j * rows] + block[j + i * rows]);
-            block[i + j * rows] = mean;
-            block[j + i * rows] = mean;
+            let (a, b) = (block[i + j * rows], block[j + i * rows]);
+            // Only a pair that differs is rewritten, and its mean is taken
+            // as `a + (b − a) / 2`, which stays finite for finite values
+            // past `f64::MAX / 2`, where `(a + b) / 2` overflows.
+            let diff = b - a;
+            if diff != 0.0 {
+                let mean = a + 0.5 * diff;
+                block[i + j * rows] = mean;
+                block[j + i * rows] = mean;
+            }
             Ok(())
         });
         if let Err(never) = walked {
@@ -1495,6 +1502,20 @@ mod tests {
                 .map(move |i| scale * (i as f64 - j as f64).powi(2))
         })
         .collect()
+    }
+
+    /// A repair keeps huge equal pairs as they are and averages a huge
+    /// unequal pair without overflowing to infinity.
+    #[test]
+    fn a_repair_of_huge_values_stays_finite() {
+        let big = 1.0e308;
+        let mut block = vec![0.0, big, -1.0e-300, big, 0.0, big, 0.0, 0.9 * big, 0.0];
+        repair_block(&mut block, 3, 3, BlockKind::Square);
+        assert!(block.iter().all(|v| v.is_finite()));
+        assert_eq!(block[1].to_bits(), big.to_bits());
+        assert_eq!(block[2].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(block[5].to_bits(), block[7].to_bits());
+        assert!(block[5] > 0.9 * big && block[5] < big);
     }
 
     #[test]

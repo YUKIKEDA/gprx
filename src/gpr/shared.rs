@@ -24,7 +24,7 @@ use crate::linalg::{
 use crate::param::write_params;
 use crate::precision::{GpScalar, InverseBuffers, StoredFactor, TrainSystem};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::workspace::{QueryWorkspace, empty_thread_scratch};
+use crate::workspace::{QueryCols, QueryWorkspace, empty_thread_scratch};
 use crate::{PredictOptions, Prediction, PredictiveCovariance, VarianceKind};
 
 use super::Gpr;
@@ -361,7 +361,7 @@ impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {
         } = buffers;
         self.check_query(q)?;
         let (m, d) = (q.m, q.n_cols);
-        query.ensure(self.n, m, d)?;
+        query.ensure(self.n, m, QueryCols::of(K::POINTS, d))?;
         query.query_xs.copy_from_slice(q.xs);
         if d > 0 {
             self.x_transform.apply(&mut query.query_xs, m, d)?;

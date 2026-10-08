@@ -107,6 +107,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         scratch: MatMut<'_, T>,
         nested: &mut Vec<Mat<T>>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(inputs.x)?;
         ensure_nested(nested, self.nested_depth(), out.nrows(), out.ncols());
         let ard = self.ard_view(inputs.ard);
         match S::coordinates(self) {
@@ -153,6 +154,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         scratch: MatMut<'_, T>,
         nested: &mut Vec<Mat<T>>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(inputs.x)?;
         ensure_nested(nested, self.nested_depth(), d_k.nrows(), d_k.ncols());
         let ard = self.ard_view(inputs.ard);
         match S::coordinates(self) {
@@ -179,6 +181,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         scratch: MatMut<'_, T>,
         nested: &mut Vec<Mat<T>>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(inputs.x)?;
         ensure_nested(nested, self.nested_depth(), d2_k.nrows(), d2_k.ncols());
         let ard = self.ard_view(inputs.ard);
         match S::coordinates(self) {
@@ -207,6 +210,8 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         nested: &mut Vec<Mat<T>>,
         thread_scratch: &mut [Mat<T>],
     ) -> Result<(), GprError> {
+        self.require_tree_columns(x)?;
+        self.require_tree_columns(xs)?;
         ensure_nested(nested, self.nested_depth(), out.nrows(), out.ncols());
         // A coordinate tree's single mode, if it has one; `None` for a tree
         // that picks a mode per leaf.
@@ -254,6 +259,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
 
     /// Writes the diagonal `k(x_i, x_i)` into `out`.
     pub(crate) fn eval_diag(&self, x: MatRef<'_, T>, out: &mut [T]) -> Result<(), GprError> {
+        self.require_tree_columns(x)?;
         match self.coord_mode()? {
             CoordMode::Dist | CoordMode::Either => self.fill_diag(out),
             CoordMode::Points | CoordMode::Mixed => self.fill_diag_rows(x, out),

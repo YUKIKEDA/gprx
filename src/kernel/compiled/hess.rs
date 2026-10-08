@@ -329,6 +329,8 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(views.x1)?;
+        self.require_tree_columns(views.x2)?;
         let (i, j) = pair;
         let CrossViews { x1, x2, .. } = views;
         match self {
@@ -340,7 +342,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
             Self::RationalQuadratic(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
             Self::RationalQuadraticArd(leaf) => leaf.hess_cross_from_coords(x1, x2, d2_k, i, j),
             Self::Linear(leaf) => leaf.hess_cross(x1, x2, d2_k, i, j),
-            Self::Constant(leaf) => leaf.hess_cross_points(x1, x2, d2_k, i, j),
+            Self::Constant(leaf) => leaf.hess_cross_rows(x1, x2, d2_k, i, j),
             Self::White(_) => super::grad::white_cross_zero(x1, x2, d2_k),
             Self::Custom(leaf) => coord::custom_cross_hess(leaf, x1, x2, d2_k, (i, j)),
             Self::Supplied(leaf) => {
