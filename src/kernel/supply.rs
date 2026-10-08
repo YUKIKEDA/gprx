@@ -225,8 +225,10 @@ impl ScalarDistance {
         })
     }
 
-    /// Binds an owned table of `d²` to this slot. The model takes the
-    /// buffer without a copy.
+    /// Binds an owned table of `d²` to this slot. An `f64` model keeps the
+    /// buffer as its store, without a copy; an `f32` model casts it into a
+    /// buffer of its own, and a `MixedPrecision` model keeps it and adds
+    /// that cast.
     ///
     /// See the example on [`ScalarDistance`].
     pub fn from_vec(&self, d2: Vec<f64>) -> DistanceSource<'static> {
@@ -370,15 +372,17 @@ impl ArdDistance {
     /// An `f64` model checks the tables and keeps them as they are, so a
     /// fit copies nothing; it then holds `d · n²` values for the slot
     /// rather than the `d · n(n+1)/2` of the packed lower triangles it
-    /// makes from [`Self::borrow`] or [`Self::from_slices`]. An `f32`
-    /// model packs them.
+    /// makes from [`Self::borrow`] (or when `tidy` repairs a table). An
+    /// `f32` model packs them.
     ///
     /// See the example on [`ArdDistance`].
     pub fn from_vecs(&self, d2: Vec<Vec<f64>>) -> DistanceSource<'static> {
         self.source(SourceData::Blocks(d2))
     }
 
-    /// Binds copies of `d2`, one table per dimension, to this slot.
+    /// Binds copies of `d2`, one table per dimension, to this slot: the
+    /// copies are then handled as [`Self::from_vecs`], so an `f64` model
+    /// keeps `d · n²` values. [`Self::borrow`] fits without the copy.
     ///
     /// # Examples
     ///
