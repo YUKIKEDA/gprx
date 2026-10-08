@@ -16,7 +16,7 @@ use rayon::prelude::*;
 
 use super::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareSlots};
 use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList, Checked};
-use super::{DistanceFill, ScalarOps, SourceData, Tidy};
+use super::{ArdData, DistanceFill, ScalarData, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use crate::error::GprError;
 
@@ -531,6 +531,57 @@ fn require_tables(got: usize, expected: usize) -> Result<(), GprError> {
     }
 }
 
+/// The packed training triangles of an ARD slot of `d` dimensions from its
+/// `n × n` tables, checked as `tidy` asks.
+fn train_ard<T: KernelScalar>(
+    data: ArdData<'_>,
+    n: usize,
+    d: usize,
+    tidy: Tidy,
+) -> Result<ArdSqDiffBuf<T>, GprError> {
+    let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
+    match data {
+        ArdData::Blocks(tables) if tidy == Tidy::Exact => {
+            require_tables(tables.len(), d)?;
+            for table in &tables {
+                crate::data::require_count(table.len(), len, "squared distances")?;
+            }
+            pack_exact_ard(n, d, |k| &tables[k])
+        }
+        ArdData::Slices(tables) if tidy == Tidy::Exact => {
+            require_tables(tables.len(), d)?;
+            for table in tables {
+                crate::data::require_count(table.len(), len, "squared distances")?;
+            }
+            pack_exact_ard(n, d, |k| tables[k])
+        }
+        ArdData::Blocks(mut tables) => {
+            require_tables(tables.len(), d)?;
+            for table in &mut tables {
+                crate::data::require_count(table.len(), len, "squared distances")?;
+                if check_block(table, n, n, BlockKind::Square, tidy)? {
+                    repair_block(table, n, n, BlockKind::Square);
+                }
+            }
+            ArdSqDiffBuf::from_dense(n, d, |k| &tables[k])
+        }
+        ArdData::Slices(tables) => {
+            require_tables(tables.len(), d)?;
+            let mut repaired: Vec<Option<Vec<f64>>> = (0..d).map(|_| None).collect();
+            for (k, table) in tables.iter().enumerate() {
+                crate::data::require_count(table.len(), len, "squared distances")?;
+                if check_block(table, n, n, BlockKind::Square, tidy)? {
+                    let mut copy = table.to_vec();
+                    repair_block(&mut copy, n, n, BlockKind::Square);
+                    repaired[k] = Some(copy);
+                }
+            }
+            ArdSqDiffBuf::from_dense(n, d, |k| repaired[k].as_deref().unwrap_or(tables[k]))
+        }
+        ArdData::Fill(filler) => fill_ard_square(filler, n, d, tidy),
+    }
+}
+
 /// A scalar training square of `n` points from a fill: the lower triangle,
 /// column by column, mirrored into the dense square.
 fn fill_scalar_square(
@@ -657,15 +708,6 @@ fn fill_run(
     Ok(())
 }
 
-/// The training `d²` of one slot, in the storage scalar.
-#[derive(Clone, Debug)]
-pub enum TrainData<T> {
-    /// Dense square, leading dimension `TrainSources::cap`.
-    Scalar(Vec<T>),
-    /// Packed lower triangles of every dimension.
-    Ard(ArdSqDiffBuf<T>),
-}
-
 /// The training `d²` a model owns, one entry per slot of its kernel, by
 /// shape in the kernel's slot order: entry `at` of a shape is the slot a
 /// compiled leaf numbers `at` ([`super::compiled::supplied::SupplyOrder`]).
@@ -756,72 +798,20 @@ impl<T: KernelScalar> TrainSources<T> {
             let bound = scalar.iter().map(|(id, _)| *id);
             let slot = slot_of(slots, &source, bound.chain(ard.iter().map(|(id, _)| *id)))?;
             let tidy = source.tidy;
-            let blocks = slot.shape().blocks();
-            let data = match (slot.shape(), source.data) {
-                (SlotShape::Scalar, SourceData::Values(values)) => {
+            let id = slot.id();
+            match source.data {
+                SourceData::Scalar(ScalarData::Values(values)) => {
                     crate::data::require_count(values.len(), len, "squared distances")?;
                     let mut values = values;
                     if check_block(&values, n, n, BlockKind::Square, tidy)? {
                         repair_block(values.to_mut(), n, n, BlockKind::Square);
                     }
-                    TrainData::Scalar(T::vec_from_f64(values.into_owned()))
+                    scalar.push((id, T::vec_from_f64(values.into_owned())));
                 }
-                (SlotShape::Scalar, SourceData::Fill(filler)) => {
-                    TrainData::Scalar(T::vec_from_f64(fill_scalar_square(filler, n, tidy)?))
+                SourceData::Scalar(ScalarData::Fill(filler)) => {
+                    scalar.push((id, T::vec_from_f64(fill_scalar_square(filler, n, tidy)?)));
                 }
-                (SlotShape::Ard(d), SourceData::Blocks(tables)) if tidy == Tidy::Exact => {
-                    require_tables(tables.len(), d)?;
-                    for table in &tables {
-                        crate::data::require_count(table.len(), len, "squared distances")?;
-                    }
-                    TrainData::Ard(pack_exact_ard(n, d, |k| &tables[k])?)
-                }
-                (SlotShape::Ard(d), SourceData::Slices(tables)) if tidy == Tidy::Exact => {
-                    require_tables(tables.len(), d)?;
-                    for table in tables {
-                        crate::data::require_count(table.len(), len, "squared distances")?;
-                    }
-                    TrainData::Ard(pack_exact_ard(n, d, |k| tables[k])?)
-                }
-                (SlotShape::Ard(d), SourceData::Blocks(mut tables)) => {
-                    require_tables(tables.len(), d)?;
-                    for table in &mut tables {
-                        crate::data::require_count(table.len(), len, "squared distances")?;
-                        if check_block(table, n, n, BlockKind::Square, tidy)? {
-                            repair_block(table, n, n, BlockKind::Square);
-                        }
-                    }
-                    TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, |k| &tables[k])?)
-                }
-                (SlotShape::Ard(d), SourceData::Slices(tables)) => {
-                    require_tables(tables.len(), d)?;
-                    let mut repaired: Vec<Option<Vec<f64>>> = (0..d).map(|_| None).collect();
-                    for (k, table) in tables.iter().enumerate() {
-                        crate::data::require_count(table.len(), len, "squared distances")?;
-                        if check_block(table, n, n, BlockKind::Square, tidy)? {
-                            let mut copy = table.to_vec();
-                            repair_block(&mut copy, n, n, BlockKind::Square);
-                            repaired[k] = Some(copy);
-                        }
-                    }
-                    TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, |k| {
-                        repaired[k].as_deref().unwrap_or(tables[k])
-                    })?)
-                }
-                (SlotShape::Ard(d), SourceData::Fill(filler)) => {
-                    TrainData::Ard(fill_ard_square(filler, n, d, tidy)?)
-                }
-                (_, SourceData::Values(_)) => return Err(tables_mismatch(blocks, 1)),
-                (_, SourceData::Blocks(tables)) => {
-                    return Err(tables_mismatch(blocks, tables.len()));
-                }
-                (_, SourceData::Slices(tables)) => {
-                    return Err(tables_mismatch(blocks, tables.len()));
-                }
-            };
-            match data {
-                TrainData::Scalar(square) => scalar.push((slot.id(), square)),
-                TrainData::Ard(cache) => ard.push((slot.id(), cache)),
+                SourceData::Ard(d, data) => ard.push((id, train_ard(data, n, d, tidy)?)),
             }
         }
         if scalar.len() + ard.len() != slots.len() {
@@ -1199,15 +1189,11 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
                 written, column, ..
             } = &mut *this.scratch;
             let data = match source.data {
-                SourceData::Values(values) if blocks == 1 => RawData::Values(values),
-                SourceData::Blocks(tables) => RawData::Blocks(tables),
-                SourceData::Slices(tables) => RawData::Slices(tables),
-                SourceData::Values(_) => {
-                    return Err(GprError::LengthMismatch {
-                        reason: format!("expected {blocks} tables of squared distances, got 1"),
-                    });
-                }
-                SourceData::Fill(filler) => {
+                SourceData::Scalar(ScalarData::Values(values)) => RawData::Values(values),
+                SourceData::Ard(_, ArdData::Blocks(tables)) => RawData::Blocks(tables),
+                SourceData::Ard(_, ArdData::Slices(tables)) => RawData::Slices(tables),
+                SourceData::Scalar(ScalarData::Fill(filler))
+                | SourceData::Ard(_, ArdData::Fill(filler)) => {
                     let at = written.len();
                     fill_dense(filler, (rows, cols), blocks, kind, written, column)?;
                     RawData::Written(at)

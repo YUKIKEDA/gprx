@@ -230,7 +230,7 @@ impl ScalarDistance {
     ///
     /// See the example on [`ScalarDistance`].
     pub fn from_vec(&self, d2: Vec<f64>) -> DistanceSource<'static> {
-        self.source(SourceData::Values(Cow::Owned(d2)))
+        self.source(ScalarData::Values(Cow::Owned(d2)))
     }
 
     /// Binds a copy of `d2` to this slot.
@@ -245,7 +245,7 @@ impl ScalarDistance {
     /// let _source = image.from_slice(&train);
     /// ```
     pub fn from_slice(&self, d2: &[f64]) -> DistanceSource<'static> {
-        self.source(SourceData::Values(Cow::Owned(d2.to_vec())))
+        self.source(ScalarData::Values(Cow::Owned(d2.to_vec())))
     }
 
     /// Binds `d2` to this slot for one call. Prediction reads it in place;
@@ -253,7 +253,7 @@ impl ScalarDistance {
     ///
     /// See the example on [`ScalarDistance`].
     pub fn borrow<'a>(&self, d2: &'a [f64]) -> DistanceSource<'a> {
-        self.source(SourceData::Values(Cow::Borrowed(d2)))
+        self.source(ScalarData::Values(Cow::Borrowed(d2)))
     }
 
     /// Binds a function that writes this slot's `d²`.
@@ -265,14 +265,13 @@ impl ScalarDistance {
     ///
     /// See the example on [`DistanceFill`].
     pub fn fill<'a>(&self, filler: &'a dyn DistanceFill) -> DistanceSource<'a> {
-        self.source(SourceData::Fill(filler))
+        self.source(ScalarData::Fill(filler))
     }
 
-    fn source<'a>(&self, data: SourceData<'a>) -> DistanceSource<'a> {
+    fn source<'a>(&self, data: ScalarData<'a>) -> DistanceSource<'a> {
         DistanceSource {
             slot: self.slot,
-            shape: SlotShape::Scalar,
-            data,
+            data: SourceData::Scalar(data),
             tidy: Tidy::Exact,
         }
     }
@@ -366,7 +365,7 @@ impl ArdDistance {
     ///
     /// See the example on [`ArdDistance`].
     pub fn from_vecs(&self, d2: Vec<Vec<f64>>) -> DistanceSource<'static> {
-        self.source(SourceData::Blocks(d2))
+        self.source(ArdData::Blocks(d2))
     }
 
     /// Binds copies of `d2`, one table per dimension, to this slot.
@@ -384,7 +383,7 @@ impl ArdDistance {
     /// # }
     /// ```
     pub fn from_slices(&self, d2: &[&[f64]]) -> DistanceSource<'static> {
-        self.source(SourceData::Blocks(
+        self.source(ArdData::Blocks(
             d2.iter().map(|block| block.to_vec()).collect(),
         ))
     }
@@ -394,7 +393,7 @@ impl ArdDistance {
     ///
     /// See the example on [`ArdDistance`].
     pub fn borrow<'a>(&self, d2: &'a [&'a [f64]]) -> DistanceSource<'a> {
-        self.source(SourceData::Slices(d2))
+        self.source(ArdData::Slices(d2))
     }
 
     /// Binds a function that writes this slot's `d²`, every dimension in
@@ -402,14 +401,13 @@ impl ArdDistance {
     ///
     /// See the example on [`DistanceFill`].
     pub fn fill<'a>(&self, filler: &'a dyn DistanceFill) -> DistanceSource<'a> {
-        self.source(SourceData::Fill(filler))
+        self.source(ArdData::Fill(filler))
     }
 
-    fn source<'a>(&self, data: SourceData<'a>) -> DistanceSource<'a> {
+    fn source<'a>(&self, data: ArdData<'a>) -> DistanceSource<'a> {
         DistanceSource {
             slot: self.slot,
-            shape: SlotShape::Ard(self.dims),
-            data,
+            data: SourceData::Ard(self.dims, data),
             tidy: Tidy::Exact,
         }
     }
@@ -1002,7 +1000,6 @@ pub trait DistanceFill: Send + Sync {
 /// See the example on [`ScalarDistance`].
 pub struct DistanceSource<'a> {
     pub(crate) slot: SlotId,
-    pub(crate) shape: SlotShape,
     pub(crate) data: SourceData<'a>,
     pub(crate) tidy: Tidy,
 }
@@ -1066,29 +1063,56 @@ pub(crate) enum Tidy {
 impl fmt::Debug for DistanceSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let data = match &self.data {
-            SourceData::Values(v) => format!("{} values", v.len()),
-            SourceData::Blocks(b) => format!("{} blocks", b.len()),
-            SourceData::Slices(b) => format!("{} borrowed blocks", b.len()),
-            SourceData::Fill(_) => "fill".to_owned(),
+            SourceData::Scalar(ScalarData::Values(v)) => format!("{} values", v.len()),
+            SourceData::Ard(_, ArdData::Blocks(b)) => format!("{} blocks", b.len()),
+            SourceData::Ard(_, ArdData::Slices(b)) => format!("{} borrowed blocks", b.len()),
+            SourceData::Scalar(ScalarData::Fill(_)) | SourceData::Ard(_, ArdData::Fill(_)) => {
+                "fill".to_owned()
+            }
         };
         f.debug_struct("DistanceSource")
             .field("slot", &self.slot)
-            .field("shape", &self.shape)
+            .field("shape", &self.data.shape())
             .field("data", &data)
             .finish()
     }
 }
 
-/// The data of a [`DistanceSource`].
+/// The data of a [`DistanceSource`], typed by the shape of its slot: a
+/// scalar slot's source holds one table, an ARD slot's one per dimension.
 pub(crate) enum SourceData<'a> {
-    /// One table (scalar slot).
+    /// A scalar slot's.
+    Scalar(ScalarData<'a>),
+    /// An ARD slot's with its number of dimensions.
+    Ard(usize, ArdData<'a>),
+}
+
+/// The data of a scalar slot's source.
+pub(crate) enum ScalarData<'a> {
+    /// One table.
     Values(Cow<'a, [f64]>),
-    /// One owned table per dimension (ARD slot).
-    Blocks(Vec<Vec<f64>>),
-    /// One borrowed table per dimension (ARD slot).
-    Slices(&'a [&'a [f64]]),
-    /// A function that writes the tables.
+    /// A function that writes it.
     Fill(&'a dyn DistanceFill),
+}
+
+/// The data of an ARD slot's source.
+pub(crate) enum ArdData<'a> {
+    /// One owned table per dimension.
+    Blocks(Vec<Vec<f64>>),
+    /// One borrowed table per dimension.
+    Slices(&'a [&'a [f64]]),
+    /// A function that writes them.
+    Fill(&'a dyn DistanceFill),
+}
+
+impl SourceData<'_> {
+    /// The shape of the slot the data is for.
+    pub(crate) fn shape(&self) -> SlotShape {
+        match self {
+            Self::Scalar(_) => SlotShape::Scalar,
+            Self::Ard(dims, _) => SlotShape::Ard(*dims),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -63,14 +63,14 @@ pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
 pub(crate) use sources::{QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources};
 pub use spec::{KernelSpec, ParameterBinding};
+pub(crate) use supply::{
+    ArdData, CompiledOf, ModelKernelParts, ScalarData, SlotId, SlotShape, SourceData, SpecOf,
+    SuppliedSpec, Tidy, spec_slots,
+};
 pub use supply::{
     ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,
     DistanceSource, JoinPoints, ModelKernel, PointKernel, PointUse, ScalarDistance,
     ScalarDistanceLeaf, WithPoints,
-};
-pub(crate) use supply::{
-    CompiledOf, ModelKernelParts, SlotId, SlotShape, SourceData, SpecOf, SuppliedSpec, Tidy,
-    spec_slots,
 };
 pub use term::{CustomKernel, KernelTerm};
 pub(crate) use tree::sealed::Supply as SupplyViews;

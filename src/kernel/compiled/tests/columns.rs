@@ -54,7 +54,7 @@ fn every_entry_point_refuses_coordinates_without_a_column() {
     empty(k.eval_cross_slots::<Accurate>(
         x.as_ref(),
         x.as_ref(),
-        None,
+        (),
         None,
         out.as_mut(),
         scratch.as_mut(),
