@@ -450,7 +450,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes `∂K/∂θ` from a distance matrix and coordinates, one mode per leaf.
     pub(crate) fn grad_mixed<M: crate::math::KernelMath>(
         &self,
-        views: MixedKernelViews<'_, T>,
+        views: MixedKernelViews<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -458,8 +458,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         match self.term() {
-            Term::Leaf(leaf) => leaf.grad_mixed::<M>(views, d_k, param_idx, uplo, scratch),
-            Term::Supplied(leaf) => S::compiled(leaf).grad::<M>(views.slots, d_k, param_idx, uplo),
+            Term::Leaf(leaf) => leaf.grad_mixed::<M, _>(views, d_k, param_idx, uplo, scratch),
+            Term::Supplied(leaf) => {
+                let (leaf, slots) = S::square_leaf(leaf, views.slots);
+                leaf.grad::<M>(slots, d_k, param_idx, uplo)
+            }
             Term::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_mixed::<M>(views, d_k, local, uplo, scratch, nested)
@@ -482,43 +485,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         }
     }
 
-    /// `∂K(x1, x2)/∂θ_{param_idx}` of a rectangular block
-    /// (`x1.nrows() × x2.nrows()`) from coordinates: every built-in leaf, and
-    /// Sum / Product trees of them. A `Custom` leaf has no rectangular
-    /// derivative and returns [`GprError::CoordGradientUnsupported`].
-    ///
-    /// Product trees need `scratch` the same shape as `d_k` and distinct from
-    /// it; leaves ignore it.
-    pub(crate) fn grad_cross_points<M: crate::math::KernelMath>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d_k: MatMut<'_, T>,
-        param_idx: usize,
-        scratch: MatMut<'_, T>,
-    ) -> Result<(), GprError> {
-        let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
-        self.grad_cross_points_with::<M>(x1, x2, d_k, param_idx, scratch, &mut nested)
-    }
-
-    /// [`Self::grad_cross_points`] with caller-owned [`Nested`] levels.
-    pub(crate) fn grad_cross_points_with<M: crate::math::KernelMath>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d_k: MatMut<'_, T>,
-        param_idx: usize,
-        scratch: MatMut<'_, T>,
-        nested: &mut Nested<T>,
-    ) -> Result<(), GprError> {
-        self.grad_cross_views::<M>(CrossViews::points(x1, x2), d_k, param_idx, scratch, nested)
-    }
-
     /// The rectangular `∂K/∂θ_{param_idx}` of the block `views` describes:
     /// coordinate leaves from coordinates, supplied leaves from their block.
     pub(crate) fn grad_cross_views<M: crate::math::KernelMath>(
         &self,
-        views: CrossViews<'_, T>,
+        views: CrossViews<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         scratch: MatMut<'_, T>,
@@ -540,7 +511,10 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
                 white_cross_zero(x1, x2, d_k)
             }
             Self::Custom(leaf) => coord::custom_cross_grad(leaf, x1, x2, d_k, param_idx),
-            Self::Supplied(leaf) => S::compiled(leaf).grad_cross::<M>(views.slots, d_k, param_idx),
+            Self::Supplied(leaf) => {
+                let (leaf, slots) = S::rect_leaf(leaf, views.slots);
+                leaf.grad_cross::<M>(slots, d_k, param_idx)
+            }
             Self::Sum(terms) => {
                 let (term, local) = term_for_param(terms, param_idx)?;
                 term.grad_cross_views::<M>(views, d_k, local, scratch, nested)
@@ -639,9 +613,9 @@ impl<T: KernelScalar> LeafRef<'_, T> {
     }
 
     /// `∂K/∂θ_{param_idx}` in the leaf's own mode (see `apply_mixed`).
-    fn grad_mixed<M: crate::math::KernelMath>(
+    fn grad_mixed<M: crate::math::KernelMath, S: Supply>(
         self,
-        views: MixedKernelViews<'_, T>,
+        views: MixedKernelViews<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -931,4 +905,39 @@ fn product_grad_diag<M: crate::math::KernelMath, T: KernelScalar, S: Supply>(
     let (owner, local) = term_index_for_param(terms, param_idx)?;
     terms[owner].grad_diag_points::<M>(x, out, local)?;
     scale_by_other_diags(terms, owner, None, x, out)
+}
+
+/// Coordinate entry points of a coordinate tree.
+impl<T: KernelScalar> CompiledKernel<T> {
+    /// `∂K(x1, x2)/∂θ_{param_idx}` of a rectangular block
+    /// (`x1.nrows() × x2.nrows()`) from coordinates: every built-in leaf, and
+    /// Sum / Product trees of them. A `Custom` leaf has no rectangular
+    /// derivative and returns [`GprError::CoordGradientUnsupported`].
+    ///
+    /// Product trees need `scratch` the same shape as `d_k` and distinct from
+    /// it; leaves ignore it.
+    pub(crate) fn grad_cross_points<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d_k.nrows(), d_k.ncols());
+        self.grad_cross_points_with::<M>(x1, x2, d_k, param_idx, scratch, &mut nested)
+    }
+
+    /// [`Self::grad_cross_points`] with caller-owned [`Nested`] levels.
+    pub(crate) fn grad_cross_points_with<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        self.grad_cross_views::<M>(CrossViews::points(x1, x2), d_k, param_idx, scratch, nested)
+    }
 }

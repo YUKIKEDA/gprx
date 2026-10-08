@@ -14,7 +14,7 @@ use std::fmt;
 use faer::MatRef;
 use rayon::prelude::*;
 
-use super::compiled::supplied::{ArdRect, RectSlot, RectSlots, SquareSlot, SquareSlots};
+use super::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareSlots};
 use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList, Checked};
 use super::{DistanceFill, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
@@ -92,6 +92,15 @@ fn slot_of<'k>(
         });
     }
     Ok(slot)
+}
+
+/// Where `id` sorts among the bound supplies: its place in `slots` (the
+/// kernel's, in the order its compiled leaves number them per shape).
+fn slot_rank(slots: &[DistanceSlot], id: SlotId) -> usize {
+    slots
+        .iter()
+        .position(|slot| slot.id() == id)
+        .unwrap_or(slots.len())
 }
 
 /// A slot of the kernel was given no source (every source names a distinct
@@ -650,13 +659,18 @@ pub enum TrainData<T> {
     Ard(ArdSqDiffBuf<T>),
 }
 
-/// The training `d²` a model owns, one entry per slot of its kernel.
+/// The training `d²` a model owns, one entry per slot of its kernel, by
+/// shape in the kernel's slot order: entry `at` of a shape is the slot a
+/// compiled leaf numbers `at` ([`super::compiled::supplied::SupplyOrder`]).
 #[derive(Clone, Debug)]
 pub struct TrainSources<T> {
     n: usize,
     /// Leading dimension of the scalar squares (`≥ n`; online growth).
     cap: usize,
-    slots: Vec<(SlotId, TrainData<T>)>,
+    /// Dense squares of the scalar slots.
+    scalar: Vec<(SlotId, Vec<T>)>,
+    /// Packed lower triangles of the ARD slots.
+    ard: Vec<(SlotId, ArdSqDiffBuf<T>)>,
 }
 
 /// Columns `start..start + len` of a [`TrainSources`], every row, as
@@ -668,26 +682,26 @@ pub(crate) struct TrainColumns<'s, T> {
 }
 
 impl<T: KernelScalar> RectSlots<T> for TrainColumns<'_, T> {
-    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
+    fn scalar(&self, at: usize) -> MatRef<'_, T> {
         let store = self.store;
-        let (_, data) = store.slots.iter().find(|(id, _)| *id == slot)?;
-        let (n, cap) = (store.n, store.cap.max(1));
-        Some(match data {
-            TrainData::Scalar(square) => {
-                RectSlot::Scalar(MatRef::from_column_major_slice_with_stride(
-                    square.get(self.start * cap..)?,
-                    n,
-                    self.len,
-                    cap,
-                ))
-            }
-            TrainData::Ard(cache) => RectSlot::Ard(ArdRect::Checked(ArdBlocks::new(
-                BlockList::Triangles(cache.view()),
-                n,
-                self.len,
-                self.start,
-            ))),
-        })
+        let cap = store.cap.max(1);
+        let square = &store.scalar[at].1;
+        MatRef::from_column_major_slice_with_stride(
+            &square[self.start * cap..],
+            store.n,
+            self.len,
+            cap,
+        )
+    }
+
+    fn ard(&self, at: usize) -> ArdRect<'_, T> {
+        let store = self.store;
+        ArdRect::Checked(ArdBlocks::new(
+            BlockList::Triangles(store.ard[at].1.view()),
+            store.n,
+            self.len,
+            self.start,
+        ))
     }
 }
 
@@ -703,13 +717,9 @@ impl<T: KernelScalar> TrainSources<T> {
         Self {
             n: 0,
             cap: 0,
-            slots: Vec::new(),
+            scalar: Vec::new(),
+            ard: Vec::new(),
         }
-    }
-
-    /// Whether the kernel reads any supplied distances.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.slots.is_empty()
     }
 
     /// The store of the `n × n` training squares of `slots` (the kernel's
@@ -729,9 +739,15 @@ impl<T: KernelScalar> TrainSources<T> {
     ) -> Result<Self, GprError> {
         crate::data::require_nonempty(n)?;
         let len = n.checked_mul(n).ok_or(GprError::SizeOverflow)?;
-        let mut out: Vec<(SlotId, TrainData<T>)> = Vec::with_capacity(slots.len());
+        let ards = slots
+            .iter()
+            .filter(|slot| matches!(slot.shape(), SlotShape::Ard(_)))
+            .count();
+        let mut scalar = Vec::with_capacity(slots.len() - ards);
+        let mut ard = Vec::with_capacity(ards);
         for source in sources {
-            let slot = slot_of(slots, &source, out.iter().map(|(id, _)| *id))?;
+            let bound = scalar.iter().map(|(id, _)| *id);
+            let slot = slot_of(slots, &source, bound.chain(ard.iter().map(|(id, _)| *id)))?;
             let tidy = source.tidy;
             let blocks = slot.shape().blocks();
             let data = match (slot.shape(), source.data) {
@@ -796,15 +812,21 @@ impl<T: KernelScalar> TrainSources<T> {
                     return Err(tables_mismatch(blocks, tables.len()));
                 }
             };
-            out.push((slot.id(), data));
+            match data {
+                TrainData::Scalar(square) => scalar.push((slot.id(), square)),
+                TrainData::Ard(cache) => ard.push((slot.id(), cache)),
+            }
         }
-        if out.len() != slots.len() {
+        if scalar.len() + ard.len() != slots.len() {
             return Err(no_source());
         }
+        scalar.sort_unstable_by_key(|(id, _)| slot_rank(slots, *id));
+        ard.sort_unstable_by_key(|(id, _)| slot_rank(slots, *id));
         let store = Self {
             n,
             cap: n,
-            slots: out,
+            scalar,
+            ard,
         };
         store.require_in_range()?;
         Ok(store)
@@ -823,25 +845,21 @@ impl<T: KernelScalar> TrainSources<T> {
             return Ok(());
         }
         let (n, cap) = (self.n, self.cap.max(1));
-        for (_, data) in &self.slots {
-            match data {
-                TrainData::Scalar(square) => {
-                    for j in 0..n {
-                        let column = &square[j * cap..j * cap + n];
-                        if let Some(i) = column.iter().position(|v| !v.is_finite()) {
-                            return Err(out_of_range(i, j));
-                        }
-                    }
+        for (_, square) in &self.scalar {
+            for j in 0..n {
+                let column = &square[j * cap..j * cap + n];
+                if let Some(i) = column.iter().position(|v| !v.is_finite()) {
+                    return Err(out_of_range(i, j));
                 }
-                TrainData::Ard(cache) => {
-                    let view = cache.view();
-                    for dim in 0..view.d() {
-                        for j in 0..n {
-                            let run = view.column(dim, j);
-                            if let Some(k) = run.iter().position(|v| !v.is_finite()) {
-                                return Err(out_of_range(j + k, j));
-                            }
-                        }
+            }
+        }
+        for (_, cache) in &self.ard {
+            let view = cache.view();
+            for dim in 0..view.d() {
+                for j in 0..n {
+                    let run = view.column(dim, j);
+                    if let Some(k) = run.iter().position(|v| !v.is_finite()) {
+                        return Err(out_of_range(j + k, j));
                     }
                 }
             }
@@ -856,29 +874,25 @@ impl<T: KernelScalar> TrainSources<T> {
 
     #[cfg(test)]
     /// Each slot's blocks in `f64`, dense `n × n` and one after another in
-    /// one buffer, in slot order (saving).
+    /// one buffer: the scalar slots, then the ARD slots, each in slot order.
     pub(crate) fn dense_f64(&self) -> Vec<(SlotShape, Vec<f64>)> {
         let n = self.n;
-        self.slots
-            .iter()
-            .map(|(_, data)| match data {
-                TrainData::Scalar(square) => (
-                    SlotShape::Scalar,
-                    (0..n * n)
-                        .map(|at| square[at % n + (at / n) * self.cap].to_f64())
-                        .collect(),
-                ),
-                TrainData::Ard(cache) => {
-                    let view = cache.view();
-                    let values = (0..view.d())
-                        .flat_map(|k| {
-                            (0..n * n).map(move |at| view.get(k, at % n, at / n).to_f64())
-                        })
-                        .collect();
-                    (SlotShape::Ard(view.d()), values)
-                }
-            })
-            .collect()
+        let scalar = self.scalar.iter().map(|(_, square)| {
+            (
+                SlotShape::Scalar,
+                (0..n * n)
+                    .map(|at| square[at % n + (at / n) * self.cap].to_f64())
+                    .collect(),
+            )
+        });
+        let ard = self.ard.iter().map(|(_, cache)| {
+            let view = cache.view();
+            let values = (0..view.d())
+                .flat_map(|k| (0..n * n).map(move |at| view.get(k, at % n, at / n).to_f64()))
+                .collect();
+            (SlotShape::Ard(view.d()), values)
+        });
+        scalar.chain(ard).collect()
     }
 
     /// The training columns `cols` (every row) as rectangular blocks, read
@@ -898,21 +912,28 @@ impl<T: KernelScalar> TrainSources<T> {
     pub(crate) fn cast<U: KernelScalar>(&self) -> Result<TrainSources<U>, GprError> {
         let (n, cap) = (self.n, self.cap.max(1));
         let cast = |v: T| U::from_f64(v.to_f64());
-        let mut slots = Vec::with_capacity(self.slots.len());
-        for (id, data) in &self.slots {
-            let data = match data {
-                TrainData::Scalar(square) => {
-                    let mut out = Vec::with_capacity(n * n);
-                    for j in 0..n {
-                        out.extend(square[j * cap..j * cap + n].iter().map(|&v| cast(v)));
-                    }
-                    TrainData::Scalar(out)
+        let scalar = self
+            .scalar
+            .iter()
+            .map(|(id, square)| {
+                let mut out = Vec::with_capacity(n * n);
+                for j in 0..n {
+                    out.extend(square[j * cap..j * cap + n].iter().map(|&v| cast(v)));
                 }
-                TrainData::Ard(cache) => TrainData::Ard(cache.map(cast)),
-            };
-            slots.push((*id, data));
-        }
-        let store = TrainSources { n, cap: n, slots };
+                (*id, out)
+            })
+            .collect();
+        let ard = self
+            .ard
+            .iter()
+            .map(|(id, cache)| (*id, cache.map(cast)))
+            .collect();
+        let store = TrainSources {
+            n,
+            cap: n,
+            scalar,
+            ard,
+        };
         store.require_in_range()?;
         Ok(store)
     }
@@ -1006,19 +1027,17 @@ impl SourceStore<f32> for RefinedSources {
 }
 
 impl<T: KernelScalar> SquareSlots<T> for TrainSources<T> {
-    fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>> {
-        let (_, data) = self.slots.iter().find(|(id, _)| *id == slot)?;
-        Some(match data {
-            TrainData::Scalar(square) => {
-                SquareSlot::Scalar(MatRef::from_column_major_slice_with_stride(
-                    square,
-                    self.n,
-                    self.n,
-                    self.cap.max(1),
-                ))
-            }
-            TrainData::Ard(cache) => SquareSlot::Ard(cache.view()),
-        })
+    fn scalar(&self, at: usize) -> MatRef<'_, T> {
+        MatRef::from_column_major_slice_with_stride(
+            &self.scalar[at].1,
+            self.n,
+            self.n,
+            self.cap.max(1),
+        )
+    }
+
+    fn ard(&self, at: usize) -> ArdSquare<'_, T> {
+        ArdSquare::Packed(self.ard[at].1.view())
     }
 }
 
@@ -1085,10 +1104,19 @@ fn reads_in_place<T: ScalarOps>() -> bool {
 /// [`QueryScratch`]: a caller's table is read in place (an `f64` model) or
 /// through one cast (`f32`), and a fill or a repair writes the scratch.
 pub(crate) struct QuerySources<'a, T: KernelScalar> {
-    /// One entry per slot of the kernel, in the order the caller gave them.
+    /// One entry per slot of the kernel: the scalar slots, then the ARD
+    /// slots, each in the kernel's slot order (entry `at` of a shape is the
+    /// slot a compiled leaf numbers `at`).
     raw: Vec<RawSlot<'a>>,
+    /// Number of scalar slots: where the ARD slots start in `raw`.
+    scalars: usize,
     scratch: &'a mut QueryScratch<T>,
 }
+
+/// The query squares of a covariance, bound by [`QuerySources::bind_square`]
+/// and so checked in full: a Gram of one set reads them where they were
+/// bound, in place for an `f64` model, from the one cast otherwise.
+pub(crate) struct QuerySquares<'a, T: KernelScalar>(QuerySources<'a, T>);
 
 impl<T: KernelScalar> Drop for QuerySources<'_, T> {
     fn drop(&mut self) {
@@ -1107,7 +1135,32 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     /// slot, or a block of the wrong length or count;
     /// [`GprError::EmptyInput`] when `rows` or `cols` is zero;
     /// [`GprError::InvalidDistance`] for a value the source's check refuses.
-    pub(crate) fn bind<'s: 'a>(
+    pub(crate) fn bind_rect<'s: 'a>(
+        slots: &[DistanceSlot],
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        (rows, cols): (usize, usize),
+        scratch: &'a mut QueryScratch<T>,
+    ) -> Result<Self, GprError> {
+        Self::bind(slots, sources, rows, cols, BlockKind::Rect, scratch)
+    }
+
+    /// Binds the `n × n` squares of one set, as [`Self::bind_rect`] binds
+    /// blocks, checking each in full ([`BlockKind::Square`]).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::bind_rect`], and [`GprError::InvalidDistance`]
+    /// for a square whose diagonal is not zero or that is not symmetric.
+    pub(crate) fn bind_square<'s: 'a>(
+        slots: &[DistanceSlot],
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        n: usize,
+        scratch: &'a mut QueryScratch<T>,
+    ) -> Result<QuerySquares<'a, T>, GprError> {
+        Self::bind(slots, sources, n, n, BlockKind::Square, scratch).map(QuerySquares)
+    }
+
+    fn bind<'s: 'a>(
         slots: &[DistanceSlot],
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         rows: usize,
@@ -1124,7 +1177,11 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
             });
         }
         let raw = recycle(std::mem::take(&mut scratch.raw));
-        let mut this = Self { raw, scratch };
+        let mut this = Self {
+            raw,
+            scalars: 0,
+            scratch,
+        };
         this.scratch.written.clear();
         for source in sources {
             let slot = slot_of(slots, &source, this.raw.iter().map(|raw| raw.id))?;
@@ -1176,8 +1233,17 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
         if this.raw.len() != slots.len() {
             return Err(no_source());
         }
+        this.raw.sort_unstable_by_key(|raw| {
+            let ard = matches!(raw.shape, SlotShape::Ard(_));
+            (ard, slot_rank(slots, raw.id))
+        });
+        this.scalars = this
+            .raw
+            .iter()
+            .filter(|raw| raw.shape == SlotShape::Scalar)
+            .count();
         if !reads_in_place::<T>() {
-            let Self { raw, scratch } = &mut this;
+            let Self { raw, scratch, .. } = &mut this;
             let QueryScratch { written, cast, .. } = &mut **scratch;
             cast.clear();
             for slot in raw.iter_mut() {
@@ -1203,10 +1269,11 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
         Ok(this)
     }
 
-    /// The checked blocks, by slot.
-    pub(crate) fn blocks(&self) -> BoundBlocks<'_> {
+    /// The checked blocks, by shape in slot order.
+    fn blocks(&self) -> BoundBlocks<'_> {
         BoundBlocks {
             raw: &self.raw,
+            scalars: self.scalars,
             written: &self.scratch.written,
         }
     }
@@ -1218,37 +1285,63 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
 }
 
 impl<T: KernelScalar> RectSlots<T> for QuerySources<'_, T> {
-    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
-        rect_view(self.blocks(), &self.scratch.cast, slot)
+    fn scalar(&self, at: usize) -> MatRef<'_, T> {
+        self.blocks().scalar(&self.scratch.cast, at)
+    }
+
+    fn ard(&self, at: usize) -> ArdRect<'_, T> {
+        self.blocks().ard(&self.scratch.cast, at)
     }
 }
 
-/// The query squares of a covariance (bound as [`BlockKind::Square`], so
-/// checked in full when bound) read where they were bound: in place for an
-/// `f64` model, from the one cast otherwise. A scalar slot is its dense
-/// square; an ARD slot its dense blocks.
-impl<T: KernelScalar> SquareSlots<T> for QuerySources<'_, T> {
-    fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>> {
-        Some(match rect_view(self.blocks(), &self.scratch.cast, slot)? {
-            RectSlot::Scalar(view) => SquareSlot::Scalar(view),
-            RectSlot::Ard(ArdRect::Checked(blocks)) => SquareSlot::ArdDense(blocks),
-            // A square is never left to be checked as it is read.
-            RectSlot::Ard(ArdRect::Unchecked(_)) => return None,
-        })
+/// A scalar slot is its dense square; an ARD slot its dense blocks, which
+/// [`QuerySources::bind_square`] checked in full.
+impl<T: KernelScalar> SquareSlots<T> for QuerySquares<'_, T> {
+    fn scalar(&self, at: usize) -> MatRef<'_, T> {
+        self.0.blocks().scalar(&self.0.scratch.cast, at)
+    }
+
+    fn ard(&self, at: usize) -> ArdSquare<'_, T> {
+        let sources = &self.0;
+        let raw = &sources.raw[sources.scalars + at];
+        let (list, _) = block_list(sources.blocks(), &sources.scratch.cast, raw);
+        ArdSquare::Dense(ArdBlocks::new(list, raw.rows, raw.cols, 0))
     }
 }
 
-/// The checked blocks of a [`QuerySources`], looked up by slot.
+/// The checked blocks of a [`QuerySources`]: the scalar slots, then the
+/// ARD slots, each in slot order.
 #[derive(Clone, Copy)]
-pub struct BoundBlocks<'v> {
+struct BoundBlocks<'v> {
     raw: &'v [RawSlot<'v>],
+    scalars: usize,
     written: &'v [f64],
 }
 
 impl<'v> BoundBlocks<'v> {
-    /// The blocks of `slot`.
-    fn find(&self, slot: SlotId) -> Option<&'v RawSlot<'v>> {
-        self.raw.iter().find(|raw| raw.id == slot)
+    /// Scalar slot `at` as the scalar `U`.
+    fn scalar<U: KernelScalar>(self, cast: &'v [U], at: usize) -> MatRef<'v, U> {
+        let raw = &self.raw[at];
+        let (list, _) = block_list(self, cast, raw);
+        let checked = ArdBlocks::<U, Checked>::new(list, raw.rows, raw.cols, 0);
+        MatRef::from_column_major_slice(
+            &checked.block(0)[..raw.rows * raw.cols],
+            raw.rows,
+            raw.cols,
+        )
+    }
+
+    /// ARD slot `at` as the scalar `U`. A caller's block read in place
+    /// and not checked when bound is checked as the kernel reads it; a
+    /// cast checked it already.
+    fn ard<U: KernelScalar>(self, cast: &'v [U], at: usize) -> ArdRect<'v, U> {
+        let raw = &self.raw[self.scalars + at];
+        let (list, in_place) = block_list(self, cast, raw);
+        if raw.unchecked && in_place {
+            ArdRect::Unchecked(ArdBlocks::new(list, raw.rows, raw.cols, 0))
+        } else {
+            ArdRect::Checked(ArdBlocks::new(list, raw.rows, raw.cols, 0))
+        }
     }
 }
 
@@ -1256,48 +1349,37 @@ impl<'v> BoundBlocks<'v> {
 pub(crate) struct F64Blocks<'v>(BoundBlocks<'v>);
 
 impl RectSlots<f64> for F64Blocks<'_> {
-    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, f64>> {
-        rect_view(self.0, &[], slot)
+    fn scalar(&self, at: usize) -> MatRef<'_, f64> {
+        self.0.scalar(&[], at)
+    }
+
+    fn ard(&self, at: usize) -> ArdRect<'_, f64> {
+        self.0.ard(&[], at)
     }
 }
 
-/// The blocks of `slot` as the scalar `U`: in place when `U` is `f64`,
-/// else from `cast` (what [`QuerySources::bind`] cast).
-fn rect_view<'v, U: KernelScalar>(
+/// The blocks of `raw` as the scalar `U`, and whether they are read in
+/// place: in place when `U` is `f64`, else from `cast` (what
+/// [`QuerySources::bind`] cast).
+fn block_list<'v, U: KernelScalar>(
     blocks: BoundBlocks<'v>,
     cast: &'v [U],
-    slot: SlotId,
-) -> Option<RectSlot<'v, U>> {
-    let raw = blocks.find(slot)?;
-    let (rows, cols) = (raw.rows, raw.cols);
-    let len = rows * cols;
+    raw: &'v RawSlot<'v>,
+) -> (BlockList<'v, U>, bool) {
+    let len = raw.rows * raw.cols;
     let dims = raw.shape.blocks();
-    let list = if reads_in_place::<U>() {
-        match &raw.data {
-            RawData::Values(values) => BlockList::Packed(U::from_f64_slice(values)?, len, 1),
-            RawData::Blocks(tables) => BlockList::Vecs(U::from_f64_vecs(tables)?),
-            RawData::Slices(tables) => BlockList::Slices(U::from_f64_slices(tables)?),
-            RawData::Written(at) => {
-                BlockList::Packed(U::from_f64_slice(blocks.written.get(*at..)?)?, len, dims)
-            }
+    let in_place = match &raw.data {
+        RawData::Values(values) => U::from_f64_slice(values).map(|v| BlockList::Packed(v, len, 1)),
+        RawData::Blocks(tables) => U::from_f64_vecs(tables).map(BlockList::Vecs),
+        RawData::Slices(tables) => U::from_f64_slices(tables).map(BlockList::Slices),
+        RawData::Written(at) => {
+            U::from_f64_slice(&blocks.written[*at..]).map(|v| BlockList::Packed(v, len, dims))
         }
-    } else {
-        BlockList::Packed(cast.get(raw.cast_at..)?, len, dims)
     };
-    let checked = ArdBlocks::<U, Checked>::new(list, rows, cols, 0);
-    Some(match raw.shape {
-        SlotShape::Scalar => RectSlot::Scalar(MatRef::from_column_major_slice(
-            checked.block(0).get(..len)?,
-            rows,
-            cols,
-        )),
-        // A caller's block read in place and not checked when bound is
-        // checked as the kernel reads it; a cast checked it already.
-        SlotShape::Ard(_) if raw.unchecked && reads_in_place::<U>() => {
-            RectSlot::Ard(ArdRect::Unchecked(ArdBlocks::new(list, rows, cols, 0)))
-        }
-        SlotShape::Ard(_) => RectSlot::Ard(ArdRect::Checked(checked)),
-    })
+    match in_place {
+        Some(list) => (list, true),
+        None => (BlockList::Packed(&cast[raw.cast_at..], len, dims), false),
+    }
 }
 
 /// Appends the `blocks` dense `rows × cols` blocks a fill writes to `all`,
@@ -1482,15 +1564,8 @@ mod tests {
         let slots = [DistanceSlot::Scalar(image)];
         let mut scratch = QueryScratch::<f32>::new();
         let cross = [0.5, 1.0, 1.5, 2.0];
-        let bound = QuerySources::bind(
-            &slots,
-            [image.borrow(&cross)],
-            2,
-            2,
-            BlockKind::Rect,
-            &mut scratch,
-        )
-        .expect("bind");
+        let bound = QuerySources::bind_rect(&slots, [image.borrow(&cross)], (2, 2), &mut scratch)
+            .expect("bind");
         drop(bound);
         assert!(scratch.cast.capacity() >= 4);
         assert!(format!("{scratch:?}").starts_with("QueryScratch"));
@@ -1522,24 +1597,69 @@ mod tests {
         );
     }
 
+    /// Sources in any order land at the number a compiled leaf reads: by
+    /// shape, in the kernel's slot order.
+    #[test]
+    fn sources_bind_by_shape_in_the_kernels_slot_order() {
+        let (s1, s2) = (ScalarDistance::new(), ScalarDistance::new());
+        let a = ArdDistance::new(2).expect("dims");
+        let slots = [
+            DistanceSlot::Scalar(s1),
+            DistanceSlot::Ard(a),
+            DistanceSlot::Scalar(s2),
+        ];
+        let first = |sources: &dyn SquareSlots<f64>| sources.scalar(0)[(1, 0)];
+        use crate::test_check::assert_close;
+        let store = TrainSources::<f64>::bind(
+            &slots,
+            [
+                s2.from_vec(line(2.0, 0..3, 0..3)),
+                a.from_vecs(vec![line(4.0, 0..3, 0..3), line(5.0, 0..3, 0..3)]),
+                s1.from_vec(line(1.0, 0..3, 0..3)),
+            ],
+            3,
+        )
+        .expect("store");
+        assert_close(first(&store), 1.0, 0.0);
+        assert_close(store.scalar(1)[(1, 0)], 2.0, 0.0);
+        let ArdSquare::Packed(triangles) = store.ard(0) else {
+            panic!("packed");
+        };
+        assert_close(triangles.get(1, 1, 0), 5.0, 0.0);
+        let cross = [line(10.0, 0..3, 0..2), line(20.0, 0..3, 0..2)];
+        let bands = [line(40.0, 0..3, 0..2), line(50.0, 0..3, 0..2)];
+        let band_refs: Vec<&[f64]> = bands.iter().map(Vec::as_slice).collect();
+        let mut scratch = QueryScratch::new();
+        let bound = QuerySources::<f64>::bind_rect(
+            &slots,
+            [
+                a.borrow(&band_refs),
+                s2.borrow(&cross[1]),
+                s1.borrow(&cross[0]),
+            ],
+            (3, 2),
+            &mut scratch,
+        )
+        .expect("bind");
+        assert_close(bound.scalar(0)[(1, 0)], 10.0, 0.0);
+        assert_close(bound.scalar(1)[(1, 0)], 20.0, 0.0);
+        let ArdRect::Unchecked(blocks) = bound.ard(0) else {
+            panic!("read in place");
+        };
+        let column = blocks.column(1, 0).expect("checked").expect("dense");
+        assert_close(column[1], 50.0, 0.0);
+    }
+
     #[test]
     fn a_borrowed_table_is_read_in_place_by_an_f64_model() {
         let image = ScalarDistance::new();
         let cross = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
         let slots = [DistanceSlot::Scalar(image)];
         let mut scratch = QueryScratch::new();
-        let bound = QuerySources::<f64>::bind(
-            &slots,
-            [image.borrow(&cross)],
-            3,
-            2,
-            BlockKind::Rect,
-            &mut scratch,
-        )
-        .expect("bind");
-        let Some(RectSlot::Scalar(view)) = bound.rect(slots[0].id()) else {
-            panic!("scalar slot");
-        };
+        let bound =
+            QuerySources::<f64>::bind_rect(&slots, [image.borrow(&cross)], (3, 2), &mut scratch)
+                .expect("bind");
+        let view = bound.scalar(0);
         assert_eq!(view.as_ptr(), cross.as_ptr());
     }
 
@@ -1550,9 +1670,7 @@ mod tests {
         let ptr = train.as_ptr();
         let slots = [DistanceSlot::Scalar(image)];
         let store = TrainSources::<f64>::bind(&slots, [image.from_vec(train)], 2).expect("store");
-        let Some(SquareSlot::Scalar(view)) = store.square(slots[0].id()) else {
-            panic!("scalar slot");
-        };
+        let view = store.scalar(0);
         assert_eq!(view.as_ptr(), ptr);
     }
 }

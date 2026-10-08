@@ -271,7 +271,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
         if products > 0 {
             self.ensure_weighted(n, products)?;
         }
-        let x = train_points::<P>(
+        let x = train_points::<P, _>(
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
@@ -423,7 +423,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
         let LeafCache { grams, dirty, .. } = cache;
         for (i, slot) in grams.iter_mut().enumerate() {
             if dirty[i] {
-                let x = train_points::<P>(
+                let x = train_points::<P, _>(
                     &self.core.x,
                     (self.core.n, self.core.d),
                     &mut self.core.x_cast,
@@ -611,7 +611,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
             );
             return Ok(());
         }
-        let x = train_points::<P>(
+        let x = train_points::<P, _>(
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
@@ -637,7 +637,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
     }
 
     fn write_first_deriv(&mut self, idx: usize) -> Result<(), GprError> {
-        let x = train_points::<P>(
+        let x = train_points::<P, _>(
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
@@ -698,7 +698,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
         }
         let KeptGrams { products } = kept;
         self.ensure_weighted(n, products)?;
-        let x = train_points::<P>(
+        let x = train_points::<P, _>(
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,

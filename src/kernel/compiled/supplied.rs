@@ -26,28 +26,29 @@ use crate::param::Interval;
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuppliedLeaf<T: KernelScalar> {
     pub(crate) slot: SlotId,
+    /// The slot's number among the slots of its shape in the tree
+    /// ([`SupplyOrder`]): where every supply of the tree keeps it.
+    pub(crate) at: usize,
     pub(crate) leaf: SuppliedCompiled<T>,
 }
 
-/// One slot's `d²` between the points of one set.
-#[derive(Clone, Copy, Debug)]
-pub enum SquareSlot<'a, T> {
-    /// Dense symmetric `n × n`.
-    Scalar(MatRef<'a, T>),
-    /// Packed lower triangles, one per dimension.
-    Ard(ArdSqDiff<'a, T>),
-    /// Dense checked `n × n` blocks, one per dimension: a query square read
-    /// where it was bound, without packing it.
-    ArdDense(ArdBlocks<'a, T, Checked>),
+/// The numbers of the slots of a tree being compiled: per shape, in
+/// depth-first order of first appearance, the order of
+/// [`crate::kernel::DistanceSlot`]s a tree lists, split by shape. Every
+/// supply keeps its slots in it. Numbering reads the tree and allocates
+/// nothing.
+pub struct SupplyOrder<'a> {
+    pub(crate) number: &'a dyn Fn(SlotId) -> usize,
 }
 
-/// One slot's `d²` between the points of two sets.
+/// The square supply of an ARD slot: packed lower triangles (the training
+/// store), or dense checked blocks (a query square read where it was bound).
 #[derive(Clone, Copy, Debug)]
-pub enum RectSlot<'a, T> {
-    /// Dense `rows × cols`.
-    Scalar(MatRef<'a, T>),
-    /// One dense `rows × cols` block per dimension.
-    Ard(ArdRect<'a, T>),
+pub enum ArdSquare<'a, T> {
+    /// Packed lower triangles, one per dimension.
+    Packed(ArdSqDiff<'a, T>),
+    /// Dense checked `n × n` blocks, one per dimension.
+    Dense(ArdBlocks<'a, T, Checked>),
 }
 
 /// The blocks of an ARD slot, checked when bound or to be checked as they
@@ -71,84 +72,26 @@ impl<T: KernelScalar> ArdRect<'_, T> {
     }
 }
 
-/// The square supplies of every slot of a tree.
+/// The `d²` of every slot of a tree between the points of one set, by the
+/// slot's number in its shape ([`SuppliedLeaf::at`]). A supply holds every
+/// slot of the tree it was bound for, so a lookup cannot miss.
 pub trait SquareSlots<T>: Sync {
-    /// The supply of `slot`, or `None` when this set does not hold it.
-    fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>>;
+    /// The dense symmetric `n × n` square of scalar slot `at`.
+    fn scalar(&self, at: usize) -> MatRef<'_, T>;
+
+    /// The square of ARD slot `at`.
+    fn ard(&self, at: usize) -> ArdSquare<'_, T>;
 }
 
-/// The rectangular supplies of every slot of a tree.
+/// The `d²` of every slot of a tree between the points of two sets, by the
+/// slot's number in its shape ([`SuppliedLeaf::at`]). A supply holds every
+/// slot of the tree it was bound for, so a lookup cannot miss.
 pub trait RectSlots<T>: Sync {
-    /// The supply of `slot`, or `None` when this set does not hold it.
-    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>>;
-}
+    /// The dense `rows × cols` block of scalar slot `at`.
+    fn scalar(&self, at: usize) -> MatRef<'_, T>;
 
-fn missing() -> GprError {
-    GprError::UnsupportedKernelOperation {
-        reason: "a distance leaf has no supplied squared distances here".to_owned(),
-    }
-}
-
-/// The square supply of a scalar slot.
-pub(super) fn scalar_square<'a, T>(
-    slots: Option<&'a dyn SquareSlots<T>>,
-    slot: SlotId,
-) -> Result<MatRef<'a, T>, GprError> {
-    match slots.and_then(|s| s.square(slot)) {
-        Some(SquareSlot::Scalar(dist)) => Ok(dist),
-        _ => Err(missing()),
-    }
-}
-
-/// The packed square supply of an ARD slot (the training triangles).
-pub(super) fn ard_square<'a, T>(
-    slots: Option<&'a dyn SquareSlots<T>>,
-    slot: SlotId,
-) -> Result<ArdSqDiff<'a, T>, GprError> {
-    match slots.and_then(|s| s.square(slot)) {
-        Some(SquareSlot::Ard(cache)) => Ok(cache),
-        _ => Err(missing()),
-    }
-}
-
-/// The square supply of an ARD slot: packed triangles, or dense blocks read
-/// as a rectangle of one set.
-enum ArdSquare<'a, T> {
-    Packed(ArdSqDiff<'a, T>),
-    Dense(ArdBlocks<'a, T, Checked>),
-}
-
-fn ard_square_any<'a, T>(
-    slots: Option<&'a dyn SquareSlots<T>>,
-    slot: SlotId,
-) -> Result<ArdSquare<'a, T>, GprError> {
-    match slots.and_then(|s| s.square(slot)) {
-        Some(SquareSlot::Ard(cache)) => Ok(ArdSquare::Packed(cache)),
-        Some(SquareSlot::ArdDense(blocks)) => Ok(ArdSquare::Dense(blocks)),
-        _ => Err(missing()),
-    }
-}
-
-/// The rectangular supply of a scalar slot.
-fn scalar_rect<'a, T>(
-    slots: Option<&'a dyn RectSlots<T>>,
-    slot: SlotId,
-) -> Result<MatRef<'a, T>, GprError> {
-    match slots.and_then(|s| s.rect(slot)) {
-        Some(RectSlot::Scalar(dist)) => Ok(dist),
-        _ => Err(missing()),
-    }
-}
-
-/// The rectangular supply of an ARD slot.
-fn ard_rect<'a, T>(
-    slots: Option<&'a dyn RectSlots<T>>,
-    slot: SlotId,
-) -> Result<ArdRect<'a, T>, GprError> {
-    match slots.and_then(|s| s.rect(slot)) {
-        Some(RectSlot::Ard(blocks)) => Ok(blocks),
-        _ => Err(missing()),
-    }
+    /// One dense `rows × cols` block per dimension of ARD slot `at`.
+    fn ard(&self, at: usize) -> ArdRect<'_, T>;
 }
 
 /// The compiled leaf of a [`SuppliedLeaf`], typed by its slot's shape.
@@ -177,8 +120,8 @@ pub(crate) enum ArdLeaf {
 }
 
 impl<T: KernelScalar> SuppliedLeaf<T> {
-    /// Compiles `spec` for the scalar `T`.
-    pub(crate) fn compile(spec: &SuppliedSpec) -> Self {
+    /// Compiles `spec` for the scalar `T`, numbering its slot in `order`.
+    pub(crate) fn compile(spec: &SuppliedSpec, order: &SupplyOrder<'_>) -> Self {
         let leaf = match &spec.leaf {
             SuppliedLeafSpec::Scalar(leaf) => SuppliedCompiled::Scalar(match leaf {
                 ScalarLeafSpec::Rbf(k) => ScalarLeaf::Rbf(*k),
@@ -193,8 +136,10 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 ArdLeafSpec::RationalQuadratic(k) => ArdLeaf::RationalQuadratic(k.clone()),
             }),
         };
+        let at = (order.number)(spec.slot);
         Self {
             slot: spec.slot,
+            at,
             leaf,
         }
     }
@@ -207,13 +152,13 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     /// `K` for `uplo` from the square supply of the slot.
     pub(super) fn apply<M: crate::math::KernelMath>(
         &self,
-        slots: Option<&dyn SquareSlots<T>>,
+        slots: &dyn SquareSlots<T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = scalar_square(slots, self.slot)?;
+                let d = slots.scalar(self.at);
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.apply_math::<M, _>(d, out, uplo),
                     ScalarLeaf::Matern(k) => k.apply_math::<M, _>(d, out, uplo),
@@ -222,7 +167,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.apply(d, out, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => match ard_square_any(slots, self.slot)? {
+            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at) {
                 ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
                     ArdLeaf::Matern(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
@@ -237,14 +182,14 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     /// `∂K/∂θ_p` for `uplo` from the square supply of the slot.
     pub(super) fn grad<M: crate::math::KernelMath>(
         &self,
-        slots: Option<&dyn SquareSlots<T>>,
+        slots: &dyn SquareSlots<T>,
         d_k: MatMut<'_, T>,
         p: usize,
         uplo: Triangle,
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = scalar_square(slots, self.slot)?;
+                let d = slots.scalar(self.at);
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
                     ScalarLeaf::Matern(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
@@ -253,7 +198,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.grad(d, d_k, p, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => match ard_square_any(slots, self.slot)? {
+            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at) {
                 ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
                     ArdLeaf::Matern(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
@@ -267,14 +212,14 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     /// `∂²K/∂θ_i ∂θ_j` for `uplo` from the square supply of the slot.
     pub(super) fn hess<M: crate::math::KernelMath>(
         &self,
-        slots: Option<&dyn SquareSlots<T>>,
+        slots: &dyn SquareSlots<T>,
         d2_k: MatMut<'_, T>,
         (i, j): (usize, usize),
         uplo: Triangle,
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = scalar_square(slots, self.slot)?;
+                let d = slots.scalar(self.at);
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
                     ScalarLeaf::Matern(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
@@ -283,7 +228,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.hess(d, d2_k, i, j, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => match ard_square_any(slots, self.slot)? {
+            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at) {
                 ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
                     ArdLeaf::Matern(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
@@ -299,12 +244,12 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     /// The rectangular `K` from the rectangular supply of the slot.
     pub(super) fn apply_cross<M: crate::math::KernelMath>(
         &self,
-        slots: Option<&dyn RectSlots<T>>,
+        slots: &dyn RectSlots<T>,
         out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = scalar_rect(slots, self.slot)?;
+                let d = slots.scalar(self.at);
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.apply_cross_math::<M, _>(d, out),
                     ScalarLeaf::Matern(k) => k.apply_cross_math::<M, _>(d, out),
@@ -314,7 +259,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 }
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = ard_rect(slots, self.slot)?;
+                let b = slots.ard(self.at);
                 ard_cross::<M, T>(leaf, b, out)
             }
         }
@@ -323,13 +268,13 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     /// The rectangular `∂K/∂θ_p` from the rectangular supply of the slot.
     pub(super) fn grad_cross<M: crate::math::KernelMath>(
         &self,
-        slots: Option<&dyn RectSlots<T>>,
+        slots: &dyn RectSlots<T>,
         d_k: MatMut<'_, T>,
         p: usize,
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = scalar_rect(slots, self.slot)?;
+                let d = slots.scalar(self.at);
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
                     ScalarLeaf::Matern(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
@@ -339,7 +284,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 }
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = ard_rect(slots, self.slot)?;
+                let b = slots.ard(self.at);
                 ard_grad_cross::<M, T>(leaf, b, d_k, p)
             }
         }
@@ -348,17 +293,17 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     /// The rectangular `∂²K/∂θ_i ∂θ_j` from the rectangular supply of the slot.
     pub(super) fn hess_cross<M: crate::math::KernelMath>(
         &self,
-        slots: Option<&dyn RectSlots<T>>,
+        slots: &dyn RectSlots<T>,
         d2_k: MatMut<'_, T>,
         pair: (usize, usize),
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = scalar_rect(slots, self.slot)?;
+                let d = slots.scalar(self.at);
                 scalar_hess_cross::<M, T>(leaf, d, d2_k, pair)
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = ard_rect(slots, self.slot)?;
+                let b = slots.ard(self.at);
                 ard_hess_cross::<M, T>(leaf, b, d2_k, pair)
             }
         }
@@ -560,17 +505,21 @@ impl<T: KernelScalar> LeafParams for SuppliedCompiled<T> {
     }
 }
 
-/// Square supplies of one call, looked up by slot.
+/// Square supplies of one call, by shape in slot order.
 #[cfg(test)]
-pub(crate) struct SquareTable<'a, T>(pub(crate) Vec<(SlotId, SquareSlot<'a, T>)>);
+pub(crate) struct SquareTable<'a, T> {
+    pub(crate) scalar: Vec<MatRef<'a, T>>,
+    pub(crate) ard: Vec<ArdSquare<'a, T>>,
+}
 
 #[cfg(test)]
 impl<T: Sync + Copy> SquareSlots<T> for SquareTable<'_, T> {
-    fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>> {
-        self.0
-            .iter()
-            .find(|(id, _)| *id == slot)
-            .map(|(_, view)| *view)
+    fn scalar(&self, at: usize) -> MatRef<'_, T> {
+        self.scalar[at]
+    }
+
+    fn ard(&self, at: usize) -> ArdSquare<'_, T> {
+        self.ard[at]
     }
 }
 
@@ -582,10 +531,11 @@ pub(crate) struct ColRange<'a, T> {
 }
 
 impl<T: KernelScalar> RectSlots<T> for ColRange<'_, T> {
-    fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
-        Some(match self.inner.rect(slot)? {
-            RectSlot::Scalar(view) => RectSlot::Scalar(view.subcols(self.start, self.len)),
-            RectSlot::Ard(blocks) => RectSlot::Ard(blocks.subcols(self.start, self.len)),
-        })
+    fn scalar(&self, at: usize) -> MatRef<'_, T> {
+        self.inner.scalar(at).subcols(self.start, self.len)
+    }
+
+    fn ard(&self, at: usize) -> ArdRect<'_, T> {
+        self.inner.ard(at).subcols(self.start, self.len)
     }
 }

@@ -21,7 +21,7 @@ mod hess;
 pub(crate) mod supplied;
 pub(crate) mod weighted;
 
-use supplied::{RectSlots, SquareSlots};
+use supplied::SupplyOrder;
 
 #[cfg(test)]
 mod leaf_table;
@@ -42,47 +42,62 @@ pub(crate) enum CoordMode {
 }
 
 /// Distance matrix, coordinates, optional ARD `(Δx_d)²`, and the supplied
-/// distances of a Mixed tree. Without `dist`, a distance leaf computes its
-/// distances from `x`.
-#[derive(Clone, Copy)]
-pub(crate) struct MixedKernelViews<'a, T = f64> {
+/// distances of a Mixed tree (nothing for a coordinate tree, `S` =
+/// [`NoSupply`]). Without `dist`, a distance leaf computes its distances
+/// from `x`.
+pub(crate) struct MixedKernelViews<'a, T: KernelScalar, S: Supply = NoSupply> {
     pub(crate) dist: Option<MatRef<'a, T>>,
     pub(crate) x: MatRef<'a, T>,
     pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
-    pub(crate) slots: Option<&'a dyn SquareSlots<T>>,
+    pub(crate) slots: S::Squares<'a, T>,
 }
 
+impl<T: KernelScalar, S: Supply> Clone for MixedKernelViews<'_, T, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: KernelScalar, S: Supply> Copy for MixedKernelViews<'_, T, S> {}
+
 #[cfg(test)]
-impl<'a, T> MixedKernelViews<'a, T> {
+impl<'a, T: KernelScalar> MixedKernelViews<'a, T> {
     pub(crate) fn new(dist: MatRef<'a, T>, x: MatRef<'a, T>) -> Self {
         Self {
             dist: Some(dist),
             x,
             ard_cache: None,
-            slots: None,
+            slots: (),
         }
     }
 }
 
 /// The views of a rectangular block `K(x1, x2)`: coordinates, the
 /// coordinate distances when the caller filled them, and the supplied
-/// distances.
-#[derive(Clone, Copy)]
-pub(crate) struct CrossViews<'a, T = f64> {
+/// distances (nothing for a coordinate tree).
+pub(crate) struct CrossViews<'a, T: KernelScalar, S: Supply = NoSupply> {
     pub(crate) x1: MatRef<'a, T>,
     pub(crate) x2: MatRef<'a, T>,
     pub(crate) dist: Option<MatRef<'a, T>>,
-    pub(crate) slots: Option<&'a dyn RectSlots<T>>,
+    pub(crate) slots: S::Rects<'a, T>,
 }
 
-impl<'a, T> CrossViews<'a, T> {
+impl<T: KernelScalar, S: Supply> Clone for CrossViews<'_, T, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: KernelScalar, S: Supply> Copy for CrossViews<'_, T, S> {}
+
+impl<'a, T: KernelScalar> CrossViews<'a, T> {
     /// Coordinates only.
     pub(crate) fn points(x1: MatRef<'a, T>, x2: MatRef<'a, T>) -> Self {
         Self {
             x1,
             x2,
             dist: None,
-            slots: None,
+            slots: (),
         }
     }
 }
@@ -196,6 +211,12 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     }
 
     pub(crate) fn from_spec(spec: &KernelSpec<S>) -> Self {
+        let number = |slot| crate::kernel::supply::slot_number(spec, slot);
+        Self::from_spec_in(spec, &SupplyOrder { number: &number })
+    }
+
+    /// Compiles `spec`, numbering its supplied slots in `order`.
+    fn from_spec_in(spec: &KernelSpec<S>, order: &SupplyOrder<'_>) -> Self {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
             KernelSpec::RbfArd(leaf) => Self::RbfArd(leaf.clone()),
@@ -208,17 +229,17 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
             KernelSpec::Custom(leaf) => Self::Custom(leaf.with_scalar()),
-            KernelSpec::Supplied(leaf) => Self::Supplied(S::compile(leaf)),
+            KernelSpec::Supplied(leaf) => Self::Supplied(S::compile(leaf, order)),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
-                flatten_sum(left, &mut terms);
-                flatten_sum(right, &mut terms);
+                flatten_sum(left, &mut terms, order);
+                flatten_sum(right, &mut terms, order);
                 Self::Sum(terms)
             }
             KernelSpec::Product(left, right) => {
                 let mut terms = Vec::new();
-                flatten_product(left, &mut terms);
-                flatten_product(right, &mut terms);
+                flatten_product(left, &mut terms, order);
+                flatten_product(right, &mut terms, order);
                 Self::Product(terms)
             }
         }
@@ -619,26 +640,28 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
 fn flatten_sum<T: KernelScalar, S: Supply>(
     spec: &KernelSpec<S>,
     out: &mut Vec<CompiledKernel<T, S>>,
+    order: &SupplyOrder<'_>,
 ) {
     match spec {
         KernelSpec::Sum(left, right) => {
-            flatten_sum(left, out);
-            flatten_sum(right, out);
+            flatten_sum(left, out, order);
+            flatten_sum(right, out, order);
         }
-        other => out.push(CompiledKernel::<T, S>::from_spec(other)),
+        other => out.push(CompiledKernel::<T, S>::from_spec_in(other, order)),
     }
 }
 
 fn flatten_product<T: KernelScalar, S: Supply>(
     spec: &KernelSpec<S>,
     out: &mut Vec<CompiledKernel<T, S>>,
+    order: &SupplyOrder<'_>,
 ) {
     match spec {
         KernelSpec::Product(left, right) => {
-            flatten_product(left, out);
-            flatten_product(right, out);
+            flatten_product(left, out, order);
+            flatten_product(right, out, order);
         }
-        other => out.push(CompiledKernel::<T, S>::from_spec(other)),
+        other => out.push(CompiledKernel::<T, S>::from_spec_in(other, order)),
     }
 }
 

@@ -45,7 +45,6 @@ pub use compiled::CompiledKernel;
 pub(crate) use compiled::CrossViews;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
-pub(crate) use compiled::supplied::{ColRange, RectSlots, SquareSlots};
 pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;
@@ -62,9 +61,7 @@ pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
-pub(crate) use sources::{
-    BlockKind, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
-};
+pub(crate) use sources::{QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources};
 pub use spec::{KernelSpec, ParameterBinding};
 pub use supply::{
     ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,
@@ -76,6 +73,7 @@ pub(crate) use supply::{
     spec_slots,
 };
 pub use term::{CustomKernel, KernelTerm};
+pub(crate) use tree::sealed::Supply as SupplyViews;
 pub use tree::{NoSupply, Supply};
 pub use white::WhiteKernel;
 

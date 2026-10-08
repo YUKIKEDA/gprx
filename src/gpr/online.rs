@@ -433,102 +433,10 @@ where
         self.workspace.ld()
     }
 
-    /// Appends one point of a coordinate kernel: coordinates `x_new` and
-    /// the target.
-    pub(crate) fn insert_point(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
-        if x_new.len() != self.core.d {
-            return Err(GprError::DimensionMismatch {
-                x_dim: x_new.len(),
-                expected_dim: self.core.d,
-            });
-        }
-        if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
-            return Err(GprError::NonFiniteInput);
-        }
-        self.registry.require_room()?;
-        #[cfg(feature = "insert-stages")]
-        let kernel_start = Instant::now();
-        let n = self.core.n;
-        let d = self.core.d;
-        self.core.query.ensure_at_least(n, 1, d)?;
-        let xs_len = d;
-        if self.core.query.query_xs.len() < xs_len {
-            self.core.query.query_xs.resize(xs_len, 0.0);
-        }
-        self.core.query.query_xs[..xs_len].copy_from_slice(x_new);
-        if d > 0 {
-            self.core
-                .x_transform
-                .apply(&mut self.core.query.query_xs[..xs_len], 1, d)?;
-        }
-        let mut y_trans = [y_new];
-        self.core.y_transform.transform(&mut y_trans)?;
-        {
-            let x_train = P::Storage::storage_cols(
-                self.core.x.as_ref().submatrix(0, 0, n, d),
-                &mut self.core.x_cast,
-            );
-            let dest = MatMut::from_column_major_slice_mut(&mut self.workspace.v_buf[..n], n, 1);
-            let QueryWorkspace {
-                query_xs,
-                query_x,
-                query_dist,
-                query_scratch,
-                query_nested,
-                ..
-            } = &mut self.core.query;
-            pack_storage(
-                &query_xs[..xs_len],
-                1,
-                d,
-                query_x.as_mut().submatrix_mut(0, 0, 1, d),
-            );
-            with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
-                x_train,
-                query_x.as_ref().submatrix(0, 0, 1, d),
-                None,
-                Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
-                dest,
-                query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
-                query_nested,
-                &mut [],
-            ))?;
-        }
-        let mut kss = [P::Storage::from_f64(0.0)];
-        self.core.compiled.eval_diag(
-            self.core.query.query_x.as_ref().submatrix(0, 0, 1, d),
-            &mut kss,
-        )?;
-        let k_new = kss[0]
-            + P::Storage::from_f64(
-                self.core.likelihood.noise_variance() + self.workspace.factor_jitter,
-            );
-        #[cfg(feature = "insert-stages")]
-        insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
-        #[cfg(feature = "insert-stages")]
-        let border_start = Instant::now();
-        self.workspace.append_border(k_new)?;
-        #[cfg(feature = "insert-stages")]
-        insert_stages::add_border(border_start.elapsed().as_secs_f64());
-        #[cfg(feature = "insert-stages")]
-        let rest_start = Instant::now();
-        append_colmajor(&mut self.core.x_obs, n, d, x_new);
-        self.core.y_obs.push(y_new);
-        append_point_mat_inplace(&mut self.core.x, n, &self.core.query.query_xs[..xs_len]);
-        self.core.y_train.push(y_trans[0]);
-        self.core.n += 1;
-        LdltStore::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
-        self.alpha.mark_stale(CholeskyStage::OnlineInsert);
-        let id = self.registry.insert();
-        #[cfg(feature = "insert-stages")]
-        insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
-        Ok(id)
-    }
-
     /// Predicts `q` into `out` through the model's query buffers.
     pub(crate) fn predict_query_into(
         &mut self,
-        q: Query<'_, P::Storage>,
+        q: Query<'_, P::Storage, K::Supply>,
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
@@ -733,6 +641,98 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
 }
 
 impl<O, P: GpScalar> OnlineGpr<O, P> {
+    /// Appends one point of a coordinate kernel: coordinates `x_new` and
+    /// the target.
+    pub(crate) fn insert_point(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
+        if x_new.len() != self.core.d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: x_new.len(),
+                expected_dim: self.core.d,
+            });
+        }
+        if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        self.registry.require_room()?;
+        #[cfg(feature = "insert-stages")]
+        let kernel_start = Instant::now();
+        let n = self.core.n;
+        let d = self.core.d;
+        self.core.query.ensure_at_least(n, 1, d)?;
+        let xs_len = d;
+        if self.core.query.query_xs.len() < xs_len {
+            self.core.query.query_xs.resize(xs_len, 0.0);
+        }
+        self.core.query.query_xs[..xs_len].copy_from_slice(x_new);
+        if d > 0 {
+            self.core
+                .x_transform
+                .apply(&mut self.core.query.query_xs[..xs_len], 1, d)?;
+        }
+        let mut y_trans = [y_new];
+        self.core.y_transform.transform(&mut y_trans)?;
+        {
+            let x_train = P::Storage::storage_cols(
+                self.core.x.as_ref().submatrix(0, 0, n, d),
+                &mut self.core.x_cast,
+            );
+            let dest = MatMut::from_column_major_slice_mut(&mut self.workspace.v_buf[..n], n, 1);
+            let QueryWorkspace {
+                query_xs,
+                query_x,
+                query_dist,
+                query_scratch,
+                query_nested,
+                ..
+            } = &mut self.core.query;
+            pack_storage(
+                &query_xs[..xs_len],
+                1,
+                d,
+                query_x.as_mut().submatrix_mut(0, 0, 1, d),
+            );
+            with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
+                x_train,
+                query_x.as_ref().submatrix(0, 0, 1, d),
+                (),
+                Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
+                dest,
+                query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
+                query_nested,
+                &mut [],
+            ))?;
+        }
+        let mut kss = [P::Storage::from_f64(0.0)];
+        self.core.compiled.eval_diag(
+            self.core.query.query_x.as_ref().submatrix(0, 0, 1, d),
+            &mut kss,
+        )?;
+        let k_new = kss[0]
+            + P::Storage::from_f64(
+                self.core.likelihood.noise_variance() + self.workspace.factor_jitter,
+            );
+        #[cfg(feature = "insert-stages")]
+        insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
+        #[cfg(feature = "insert-stages")]
+        let border_start = Instant::now();
+        self.workspace.append_border(k_new)?;
+        #[cfg(feature = "insert-stages")]
+        insert_stages::add_border(border_start.elapsed().as_secs_f64());
+        #[cfg(feature = "insert-stages")]
+        let rest_start = Instant::now();
+        append_colmajor(&mut self.core.x_obs, n, d, x_new);
+        self.core.y_obs.push(y_new);
+        append_point_mat_inplace(&mut self.core.x, n, &self.core.query.query_xs[..xs_len]);
+        self.core.y_train.push(y_trans[0]);
+        self.core.n += 1;
+        LdltStore::set_f64_prefix(&mut self.workspace.y, &self.core.y_train);
+        self.alpha.mark_stale(CholeskyStage::OnlineInsert);
+        let id = self.registry.insert();
+        #[cfg(feature = "insert-stages")]
+        insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
+        Ok(id)
+    }
+
     /// Appends one training point at the current `θ` with a bordered LDLT update.
     ///
     /// `x_new` has length [`Self::d`]. Transforms already stored on this model
@@ -882,6 +882,7 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
             self.factor(),
             alpha,
             Query::points(xs, n_rows, n_cols),
+            (),
             options,
         )
     }

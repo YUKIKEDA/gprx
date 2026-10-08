@@ -383,7 +383,7 @@ where
     /// Predicts `q` into `out` through the model's query buffers.
     pub(crate) fn predict_query_into(
         &mut self,
-        q: Query<'_, P::Storage>,
+        q: Query<'_, P::Storage, K::Supply>,
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
@@ -910,6 +910,7 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
             self.factor(),
             &self.core.alpha,
             Query::points(xs, n_rows, n_cols),
+            (),
             options,
         )
     }

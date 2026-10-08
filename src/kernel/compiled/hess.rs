@@ -273,7 +273,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
 
     pub(crate) fn hess_mixed<M: crate::math::KernelMath>(
         &self,
-        views: MixedKernelViews<'_, T>,
+        views: MixedKernelViews<'_, T, S>,
         mut d2_k: MatMut<'_, T>,
         pair: (usize, usize),
         uplo: Triangle,
@@ -282,8 +282,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     ) -> Result<(), GprError> {
         let (i, j) = pair;
         match self.term() {
-            Term::Leaf(leaf) => leaf.hess_mixed::<M>(views, d2_k, pair, uplo),
-            Term::Supplied(leaf) => S::compiled(leaf).hess::<M>(views.slots, d2_k, pair, uplo),
+            Term::Leaf(leaf) => leaf.hess_mixed::<M, _>(views, d2_k, pair, uplo),
+            Term::Supplied(leaf) => {
+                let (leaf, slots) = S::square_leaf(leaf, views.slots);
+                leaf.hess::<M>(slots, d2_k, pair, uplo)
+            }
             Term::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
@@ -316,46 +319,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         }
     }
 
-    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block
-    /// (`x1.nrows() × x2.nrows()`) from coordinates: every built-in leaf, and
-    /// Sum / Product trees of them. A `Custom` leaf has no rectangular
-    /// derivative and returns [`GprError::CoordGradientUnsupported`].
-    ///
-    /// Product trees need `scratch` the same shape as `d2_k` and distinct
-    /// from it; leaves ignore it.
-    #[cfg(test)]
-    pub(crate) fn hess_cross_points<M: crate::math::KernelMath>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        i: usize,
-        j: usize,
-        scratch: MatMut<'_, T>,
-    ) -> Result<(), GprError> {
-        let mut nested = self.nested_buffers(d2_k.nrows(), d2_k.ncols());
-        self.hess_cross_points_with::<M>(x1, x2, d2_k, (i, j), scratch, &mut nested)
-    }
-
-    /// [`Self::hess_cross_points`] with caller-owned [`Nested`] levels.
-    #[cfg(test)]
-    pub(crate) fn hess_cross_points_with<M: crate::math::KernelMath>(
-        &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
-        d2_k: MatMut<'_, T>,
-        pair: (usize, usize),
-        scratch: MatMut<'_, T>,
-        nested: &mut Nested<T>,
-    ) -> Result<(), GprError> {
-        self.hess_cross_views::<M>(CrossViews::points(x1, x2), d2_k, pair, scratch, nested)
-    }
-
     /// The rectangular `∂²K/∂θ_i ∂θ_j` of the block `views` describes:
     /// coordinate leaves from coordinates, supplied leaves from their block.
     pub(crate) fn hess_cross_views<M: crate::math::KernelMath>(
         &self,
-        views: CrossViews<'_, T>,
+        views: CrossViews<'_, T, S>,
         mut d2_k: MatMut<'_, T>,
         pair: (usize, usize),
         scratch: MatMut<'_, T>,
@@ -375,7 +343,10 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
             Self::Constant(leaf) => leaf.hess_cross_points(x1, x2, d2_k, i, j),
             Self::White(_) => super::grad::white_cross_zero(x1, x2, d2_k),
             Self::Custom(leaf) => coord::custom_cross_hess(leaf, x1, x2, d2_k, (i, j)),
-            Self::Supplied(leaf) => S::compiled(leaf).hess_cross::<M>(views.slots, d2_k, (i, j)),
+            Self::Supplied(leaf) => {
+                let (leaf, slots) = S::rect_leaf(leaf, views.slots);
+                leaf.hess_cross::<M>(slots, d2_k, (i, j))
+            }
             Self::Sum(terms) => match owners_for_pair(terms, i, j)? {
                 PairOwners::Same {
                     term,
@@ -481,9 +452,9 @@ impl<T: KernelScalar> LeafRef<'_, T> {
     }
 
     /// In the leaf's own mode (see `apply_mixed`).
-    fn hess_mixed<M: crate::math::KernelMath>(
+    fn hess_mixed<M: crate::math::KernelMath, S: Supply>(
         self,
-        views: MixedKernelViews<'_, T>,
+        views: MixedKernelViews<'_, T, S>,
         d2_k: MatMut<'_, T>,
         pair: (usize, usize),
         uplo: Triangle,
@@ -708,4 +679,42 @@ fn product_cross_leaf<T: KernelScalar, S: Supply>(
     grad(term_j, scratch.as_mut(), local_j, own, deeper)?;
     mul_fold(out.as_mut(), scratch.as_ref(), fold);
     Ok(())
+}
+
+/// Coordinate entry points of a coordinate tree.
+impl<T: KernelScalar> CompiledKernel<T> {
+    /// `∂²K(x1, x2)/∂θ_i ∂θ_j` of a rectangular block
+    /// (`x1.nrows() × x2.nrows()`) from coordinates: every built-in leaf, and
+    /// Sum / Product trees of them. A `Custom` leaf has no rectangular
+    /// derivative and returns [`GprError::CoordGradientUnsupported`].
+    ///
+    /// Product trees need `scratch` the same shape as `d2_k` and distinct
+    /// from it; leaves ignore it.
+    #[cfg(test)]
+    pub(crate) fn hess_cross_points<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+        scratch: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let mut nested = self.nested_buffers(d2_k.nrows(), d2_k.ncols());
+        self.hess_cross_points_with::<M>(x1, x2, d2_k, (i, j), scratch, &mut nested)
+    }
+
+    /// [`Self::hess_cross_points`] with caller-owned [`Nested`] levels.
+    #[cfg(test)]
+    pub(crate) fn hess_cross_points_with<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        pair: (usize, usize),
+        scratch: MatMut<'_, T>,
+        nested: &mut Nested<T>,
+    ) -> Result<(), GprError> {
+        self.hess_cross_views::<M>(CrossViews::points(x1, x2), d2_k, pair, scratch, nested)
+    }
 }

@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::ArdSqDiffBuf;
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, SquareSlots, Supply, Triangle};
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Supply, Triangle};
 use crate::linalg::{add_to_diag, cholesky_and_solve, log_det_from_l, retry_with_jitter};
 use crate::precision::PrecisionPolicy;
 use crate::workspace::FitWorkspace;
@@ -14,11 +14,18 @@ use crate::policy::JitterPolicy;
 
 /// The training points of a Gram evaluation: the transformed coordinates
 /// in the storage scalar, and the training squares of a distance model.
-#[derive(Clone, Copy)]
-pub(crate) struct TrainPoints<'a, T> {
+pub(crate) struct TrainPoints<'a, T: KernelScalar, S: Supply> {
     pub(crate) x: MatRef<'a, T>,
-    pub(crate) slots: Option<&'a dyn SquareSlots<T>>,
+    pub(crate) slots: S::Squares<'a, T>,
 }
+
+impl<T: KernelScalar, S: Supply> Clone for TrainPoints<'_, T, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: KernelScalar, S: Supply> Copy for TrainPoints<'_, T, S> {}
 
 /// Writes the training Gram matrix.
 ///
@@ -27,7 +34,7 @@ pub(crate) struct TrainPoints<'a, T> {
 /// has no such tensors; isotropic and mixed trees compute distances from `X`.
 fn apply_train_kernel<T, W, M: crate::math::KernelMath, S: Supply>(
     compiled: &CompiledKernel<T, S>,
-    x: TrainPoints<'_, T>,
+    x: TrainPoints<'_, T, S>,
     ws: &mut W,
 ) -> Result<(), GprError>
 where
@@ -49,7 +56,7 @@ where
 /// Writes a compiled tree (or a single leaf) into `dest` from the fit views.
 pub(crate) fn apply_compiled_to<T, W, M: crate::math::KernelMath, S: Supply>(
     compiled: &CompiledKernel<T, S>,
-    x: TrainPoints<'_, T>,
+    x: TrainPoints<'_, T, S>,
     ws: &mut W,
     dest: MatMut<'_, T>,
 ) -> Result<(), GprError>
@@ -71,7 +78,7 @@ where
 
 fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath, S: Supply>(
     compiled: &CompiledKernel<T, S>,
-    x: TrainPoints<'_, T>,
+    x: TrainPoints<'_, T, S>,
     dist: Option<&mut crate::workspace::DistCache<T>>,
     dest: MatMut<'_, T>,
     scratch: MatMut<'_, T>,
@@ -84,18 +91,16 @@ fn apply_compiled_views<T: KernelScalar, M: crate::math::KernelMath, S: Supply>(
 
 /// Fills the training distance caches the tree reads (once per `X`) and
 /// returns the views for a Gram evaluation. Without caches, only `x`.
-pub(crate) fn fill_cached_inputs<'a, T: KernelScalar, S: Supply>(
+pub(crate) fn fill_cached_inputs<'p: 'a, 'a, T: KernelScalar, S: Supply>(
     compiled: &CompiledKernel<T, S>,
-    points: TrainPoints<'a, T>,
+    points: TrainPoints<'p, T, S>,
     dist: Option<&'a mut crate::workspace::DistCache<T>>,
     thread_scratch: &mut Vec<Mat<T>>,
-) -> Result<GramInputs<'a, T>, GprError> {
+) -> Result<GramInputs<'a, T, S>, GprError> {
     let TrainPoints { x, slots } = points;
+    let slots = S::shorter_squares(slots);
     let Some(d) = dist else {
-        return Ok(GramInputs {
-            slots,
-            ..GramInputs::points(x)
-        });
+        return Ok(GramInputs::supplied(x, slots));
     };
     let reads_dist = compiled.reads_distances()?;
     if reads_dist && d.dist.is_none() {
@@ -148,7 +153,7 @@ pub(crate) struct FactorPolicy {
 
 pub(crate) fn factor_train_with_policy<T, W, M: crate::math::KernelMath, S: Supply>(
     compiled: &CompiledKernel<T, S>,
-    x: TrainPoints<'_, T>,
+    x: TrainPoints<'_, T, S>,
     ws: &mut W,
     y: &[f64],
     noise: f64,
@@ -169,7 +174,7 @@ where
 /// `weighted` and `kernel_scratch` must already be `n×n`.
 pub(crate) fn factor_train_keeping_with_policy<T, W, M: crate::math::KernelMath, S: Supply>(
     compiled: &CompiledKernel<T, S>,
-    x: TrainPoints<'_, T>,
+    x: TrainPoints<'_, T, S>,
     ws: &mut W,
     y: &[f64],
     noise: f64,

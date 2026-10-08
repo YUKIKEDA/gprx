@@ -6,41 +6,73 @@ use faer::{Mat, MatMut, MatRef};
 use crate::error::GprError;
 use crate::kernel::{KernelScalar, Triangle};
 
-use super::supplied::{RectSlots, SquareSlots};
 use super::{CompiledKernel, CoordMode, CrossViews, MixedKernelViews, Nested, ensure_nested};
-use crate::kernel::tree::Supply;
+use crate::kernel::tree::{NoSupply, Supply};
 
 /// Views that a square (training) Gram evaluation can read.
 ///
 /// `x` is always present. `dist` is the filled squared-Euclidean matrix and
 /// `ard` the filled raw `(Δx_d)²` cache, when the caller keeps them. A kernel
 /// reads what its leaves need and falls back to `x` for the rest. `slots`
-/// holds the supplied distances of a distance model.
-#[derive(Clone, Copy)]
-pub(crate) struct GramInputs<'a, T> {
+/// holds the supplied distances of a distance tree; a coordinate tree
+/// (`S` = [`NoSupply`]) has none.
+pub(crate) struct GramInputs<'a, T: KernelScalar, S: Supply = NoSupply> {
     pub(crate) x: MatRef<'a, T>,
     pub(crate) dist: Option<MatRef<'a, T>>,
     pub(crate) ard: Option<ArdSqDiff<'a, T>>,
-    pub(crate) slots: Option<&'a dyn SquareSlots<T>>,
+    pub(crate) slots: S::Squares<'a, T>,
 }
 
-impl<'a, T> GramInputs<'a, T> {
+impl<T: KernelScalar, S: Supply> Clone for GramInputs<'_, T, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: KernelScalar, S: Supply> Copy for GramInputs<'_, T, S> {}
+
+impl<'a, T: KernelScalar> GramInputs<'a, T> {
     /// Coordinates only. Distance leaves compute `‖x_i − x_j‖²` per pair.
     pub(crate) fn points(x: MatRef<'a, T>) -> Self {
         Self {
             x,
             dist: None,
             ard: None,
-            slots: None,
+            slots: (),
+        }
+    }
+}
+
+impl<'a, T: KernelScalar, S: Supply> GramInputs<'a, T, S> {
+    /// Coordinates and `slots`.
+    pub(crate) fn supplied(x: MatRef<'a, T>, slots: S::Squares<'a, T>) -> Self {
+        Self {
+            x,
+            dist: None,
+            ard: None,
+            slots,
         }
     }
 
-    fn mixed(self, ard: Option<ArdSqDiff<'a, T>>) -> MixedKernelViews<'a, T> {
+    /// The coordinate views, for a coordinate tree.
+    fn coords(self) -> GramInputs<'a, T> {
+        GramInputs {
+            x: self.x,
+            dist: self.dist,
+            ard: self.ard,
+            slots: (),
+        }
+    }
+
+    fn mixed<'b>(self, ard: Option<ArdSqDiff<'b, T>>) -> MixedKernelViews<'b, T, S>
+    where
+        'a: 'b,
+    {
         MixedKernelViews {
             dist: self.dist,
             x: self.x,
             ard_cache: ard,
-            slots: self.slots,
+            slots: S::shorter_squares(self.slots),
         }
     }
 }
@@ -69,7 +101,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes `K` for `uplo` from whichever views `inputs` holds.
     pub(crate) fn eval_gram<M: crate::math::KernelMath>(
         &self,
-        inputs: GramInputs<'_, T>,
+        inputs: GramInputs<'_, T, S>,
         out: MatMut<'_, T>,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
@@ -78,16 +110,19 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         ensure_nested(nested, self.nested_depth(), out.nrows(), out.ncols());
         let ard = self.ard_view(inputs.ard);
         match S::coordinates(self) {
-            Some(tree) => tree.coord_gram::<M>(inputs, ard, out, uplo, scratch, nested),
+            Some(tree) => tree.coord_gram::<M>(inputs.coords(), ard, out, uplo, scratch, nested),
             None => self.apply_mixed::<M>(inputs.mixed(ard), out, uplo, scratch, nested),
         }
     }
 
-    /// Writes `K` for `uplo` from coordinates, filling a temporary distance
-    /// matrix first when the tree reads one.
+    /// Writes `K` for `uplo` from coordinates and `slots`, filling a
+    /// temporary distance matrix first when the tree reads one.
+    // The views, the output, and three scratch kinds.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_gram_from_points<M: crate::math::KernelMath>(
         &self,
         x: MatRef<'_, T>,
+        slots: S::Squares<'_, T>,
         out: MatMut<'_, T>,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
@@ -95,16 +130,15 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         thread_scratch: &mut [Mat<T>],
     ) -> Result<(), GprError> {
         if !self.reads_distances()? {
-            return self.eval_gram::<M>(GramInputs::points(x), out, uplo, scratch, nested);
+            let inputs = GramInputs::supplied(x, S::shorter_squares(slots));
+            return self.eval_gram::<M>(inputs, out, uplo, scratch, nested);
         }
         let m = x.nrows();
         let mut dist = Mat::<T>::zeros(m, m);
         T::write_squared(x, dist.as_mut(), thread_scratch);
         let inputs = GramInputs {
-            x,
             dist: Some(dist.as_ref()),
-            ard: None,
-            slots: None,
+            ..GramInputs::supplied(x, S::shorter_squares(slots))
         };
         self.eval_gram::<M>(inputs, out, uplo, scratch, nested)
     }
@@ -112,7 +146,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes `∂K/∂θ_{param_idx}` for `uplo`.
     pub(crate) fn grad_gram<M: crate::math::KernelMath>(
         &self,
-        inputs: GramInputs<'_, T>,
+        inputs: GramInputs<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
         uplo: Triangle,
@@ -122,9 +156,15 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         ensure_nested(nested, self.nested_depth(), d_k.nrows(), d_k.ncols());
         let ard = self.ard_view(inputs.ard);
         match S::coordinates(self) {
-            Some(tree) => {
-                tree.coord_grad_gram::<M>(inputs, ard, d_k, param_idx, uplo, scratch, nested)
-            }
+            Some(tree) => tree.coord_grad_gram::<M>(
+                inputs.coords(),
+                ard,
+                d_k,
+                param_idx,
+                uplo,
+                scratch,
+                nested,
+            ),
             None => self.grad_mixed::<M>(inputs.mixed(ard), d_k, param_idx, uplo, scratch, nested),
         }
     }
@@ -132,7 +172,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes `∂²K/∂θ_i ∂θ_j` for `uplo`.
     pub(crate) fn hess_gram<M: crate::math::KernelMath>(
         &self,
-        inputs: GramInputs<'_, T>,
+        inputs: GramInputs<'_, T, S>,
         d2_k: MatMut<'_, T>,
         pair: (usize, usize),
         uplo: Triangle,
@@ -142,25 +182,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         ensure_nested(nested, self.nested_depth(), d2_k.nrows(), d2_k.ncols());
         let ard = self.ard_view(inputs.ard);
         match S::coordinates(self) {
-            Some(tree) => tree.coord_hess_gram::<M>(inputs, ard, d2_k, pair, uplo, scratch, nested),
+            Some(tree) => {
+                tree.coord_hess_gram::<M>(inputs.coords(), ard, d2_k, pair, uplo, scratch, nested)
+            }
             None => self.hess_mixed::<M>(inputs.mixed(ard), d2_k, pair, uplo, scratch, nested),
         }
-    }
-
-    /// [`Self::eval_cross_slots`] of a coordinate tree.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn eval_cross<M: crate::math::KernelMath>(
-        &self,
-        x: MatRef<'_, T>,
-        xs: MatRef<'_, T>,
-        dist: Option<MatMut<'_, T>>,
-        out: MatMut<'_, T>,
-        scratch: MatMut<'_, T>,
-        nested: &mut Vec<Mat<T>>,
-        thread_scratch: &mut [Mat<T>],
-    ) -> Result<(), GprError> {
-        self.eval_cross_slots::<M>(x, xs, None, dist, out, scratch, nested, thread_scratch)
     }
 
     /// Writes the rectangular `K(x, xs)` into `out`.
@@ -174,7 +200,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         &self,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
-        slots: Option<&dyn RectSlots<T>>,
+        slots: S::Rects<'_, T>,
         dist: Option<MatMut<'_, T>>,
         out: MatMut<'_, T>,
         scratch: MatMut<'_, T>,
@@ -199,7 +225,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
                 x1: x,
                 x2: xs,
                 dist: None,
-                slots,
+                slots: S::shorter_rects(slots),
             };
             return self.apply_cross_mixed::<M>(views, out, scratch, nested);
         }
@@ -219,7 +245,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
                     x1: x,
                     x2: xs,
                     dist: Some(dist.as_ref()),
-                    slots,
+                    slots: S::shorter_rects(slots),
                 };
                 self.apply_cross_mixed::<M>(views, out, scratch, nested)
             }
@@ -247,6 +273,22 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
 /// The whole-tree paths of a coordinate tree, from its mode and the views
 /// at hand.
 impl<T: KernelScalar> CompiledKernel<T> {
+    /// [`Self::eval_cross_slots`] of a coordinate tree.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn eval_cross<M: crate::math::KernelMath>(
+        &self,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        dist: Option<MatMut<'_, T>>,
+        out: MatMut<'_, T>,
+        scratch: MatMut<'_, T>,
+        nested: &mut Vec<Mat<T>>,
+        thread_scratch: &mut [Mat<T>],
+    ) -> Result<(), GprError> {
+        self.eval_cross_slots::<M>(x, xs, (), dist, out, scratch, nested, thread_scratch)
+    }
+
     fn coord_gram<M: crate::math::KernelMath>(
         &self,
         inputs: GramInputs<'_, T>,

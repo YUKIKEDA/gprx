@@ -10,8 +10,8 @@ use faer::{Mat, MatMut, MatRef};
 use super::ResidualFormula;
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, GramInputs, KernelScalar, KernelSpec, NoSupply, RectSlots, ScalarOps,
-    SquareSlots, Supply, TrainSources, Triangle,
+    CompiledKernel, GramInputs, KernelScalar, KernelSpec, NoSupply, ScalarOps, Supply,
+    TrainSources, Triangle,
 };
 use crate::linalg::{cholesky_lower_owned, inf_norm, symmetrize_lower};
 
@@ -283,10 +283,7 @@ fn storage_system<M: crate::math::KernelMath, S: Supply>(
     let mut a = Mat::<f32>::zeros(n, n);
     let mut scratch = Mat::<f32>::zeros(n, n);
     sys.compiled.eval_gram::<M>(
-        GramInputs {
-            slots: (!sys.sources.is_empty()).then_some(sys.sources as &dyn SquareSlots<f32>),
-            ..GramInputs::points(x32.as_ref())
-        },
+        GramInputs::supplied(x32.as_ref(), S::squares(sys.sources)),
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),
@@ -355,11 +352,11 @@ fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
                 rows[(jj, dim)] = x[(start + jj, dim)];
             }
         }
-        let cols = (!exact.is_empty()).then(|| exact.columns(start..start + len));
+        let cols = exact.columns(start..start + len);
         kernel.eval_cross_slots::<M>(
             x,
             rows.as_ref().submatrix(0, 0, len, d),
-            cols.as_ref().map(|c| c as &dyn RectSlots<f64>),
+            S::rects(&cols),
             Some(dist.as_mut().submatrix_mut(0, 0, n, len)),
             k_block.as_mut().submatrix_mut(0, 0, n, len),
             scratch.as_mut().submatrix_mut(0, 0, n, len),
@@ -403,10 +400,7 @@ pub(crate) fn f64_alpha<M: crate::math::KernelMath, S: Supply>(
     };
     let sources = sources.as_ref();
     kernel.eval_gram::<M>(
-        GramInputs {
-            slots: (!sources.is_empty()).then_some(sources as &dyn SquareSlots<f64>),
-            ..GramInputs::points(x)
-        },
+        GramInputs::supplied(x, S::squares(sources)),
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),

@@ -405,7 +405,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes `K` from a distance matrix and coordinates, one mode per leaf.
     pub(crate) fn apply_mixed<M: crate::math::KernelMath>(
         &self,
-        views: MixedKernelViews<'_, T>,
+        views: MixedKernelViews<'_, T, S>,
         mut out: MatMut<'_, T>,
         uplo: Triangle,
         mut scratch: MatMut<'_, T>,
@@ -413,8 +413,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self.term() {
-            Term::Leaf(leaf) => leaf.apply_mixed::<M>(views, out, uplo, scratch),
-            Term::Supplied(leaf) => S::compiled(leaf).apply::<M>(views.slots, out, uplo),
+            Term::Leaf(leaf) => leaf.apply_mixed::<M, _>(views, out, uplo, scratch),
+            Term::Supplied(leaf) => {
+                let (leaf, slots) = S::square_leaf(leaf, views.slots);
+                leaf.apply::<M>(slots, out, uplo)
+            }
             Term::Sum(terms) => fold_terms_mixed::<M, _, _>(
                 terms,
                 views,
@@ -441,15 +444,18 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// coordinates, or the supplied distances.
     pub(crate) fn apply_cross_mixed<M: crate::math::KernelMath>(
         &self,
-        views: CrossViews<'_, T>,
+        views: CrossViews<'_, T, S>,
         mut out: MatMut<'_, T>,
         mut scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
         require_scratch_shape(out.as_ref(), scratch.as_ref())?;
         match self.term() {
-            Term::Leaf(leaf) => leaf.apply_cross_mixed::<M>(views, out, scratch),
-            Term::Supplied(leaf) => S::compiled(leaf).apply_cross::<M>(views.slots, out),
+            Term::Leaf(leaf) => leaf.apply_cross_mixed::<M, _>(views, out, scratch),
+            Term::Supplied(leaf) => {
+                let (leaf, slots) = S::rect_leaf(leaf, views.slots);
+                leaf.apply_cross::<M>(slots, out)
+            }
             Term::Sum(terms) => fold_rect_mixed::<M, _, _>(
                 terms,
                 views,
@@ -614,9 +620,9 @@ impl<T: KernelScalar> LeafRef<'_, T> {
 
     /// `k` in the leaf's own mode: from `views.dist` when it reads one and
     /// it is there, the ARD cache when it reads that, else coordinates.
-    fn apply_mixed<M: crate::math::KernelMath>(
+    fn apply_mixed<M: crate::math::KernelMath, S: Supply>(
         self,
-        views: MixedKernelViews<'_, T>,
+        views: MixedKernelViews<'_, T, S>,
         out: MatMut<'_, T>,
         uplo: Triangle,
         scratch: MatMut<'_, T>,
@@ -634,9 +640,9 @@ impl<T: KernelScalar> LeafRef<'_, T> {
     }
 
     /// Rectangular `k` in the leaf's own mode.
-    fn apply_cross_mixed<M: crate::math::KernelMath>(
+    fn apply_cross_mixed<M: crate::math::KernelMath, S: Supply>(
         self,
-        views: CrossViews<'_, T>,
+        views: CrossViews<'_, T, S>,
         out: MatMut<'_, T>,
         scratch: MatMut<'_, T>,
     ) -> Result<(), GprError> {
@@ -785,7 +791,7 @@ fn fold_terms_ard_cache<M: crate::math::KernelMath, T: KernelScalar>(
 
 fn fold_terms_mixed<M: crate::math::KernelMath, T: KernelScalar, S: Supply>(
     terms: &[CompiledKernel<T, S>],
-    views: MixedKernelViews<'_, T>,
+    views: MixedKernelViews<'_, T, S>,
     mut out: MatMut<'_, T>,
     uplo: Triangle,
     mut scratch: MatMut<'_, T>,
@@ -860,7 +866,7 @@ fn fold_rect_points<M: crate::math::KernelMath, T: KernelScalar>(
 
 fn fold_rect_mixed<M: crate::math::KernelMath, T: KernelScalar, S: Supply>(
     terms: &[CompiledKernel<T, S>],
-    views: CrossViews<'_, T>,
+    views: CrossViews<'_, T, S>,
     mut out: MatMut<'_, T>,
     mut scratch: MatMut<'_, T>,
     nested: &mut Nested<T>,

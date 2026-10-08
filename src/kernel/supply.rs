@@ -773,6 +773,50 @@ fn collect_slots<S: Supply>(spec: &KernelSpec<S>, out: &mut Vec<DistanceSlot>) {
     }
 }
 
+/// The number of `slot` among the slots of its shape in `root`: how many
+/// distinct slots of that shape first appear before it, depth first. The
+/// order of [`spec_slots`] split by shape; a walk of the tree, no buffer.
+pub(crate) fn slot_number<S: Supply>(root: &KernelSpec<S>, slot: SlotId) -> usize {
+    let ard = |leaf: &SuppliedSpec| matches!(leaf.shape(), SlotShape::Ard(_));
+    let Some(shape) = find_leaf(root, &mut 0, &mut |_, leaf| {
+        (leaf.slot == slot).then(|| ard(leaf))
+    }) else {
+        return 0;
+    };
+    let mut count = 0;
+    find_leaf(root, &mut 0, &mut |at, leaf| {
+        if leaf.slot == slot {
+            return Some(());
+        }
+        let first = find_leaf(root, &mut 0, &mut |k, l| (l.slot == leaf.slot).then_some(k));
+        if ard(leaf) == shape && first == Some(at) {
+            count += 1;
+        }
+        None
+    });
+    count
+}
+
+/// The first `Some` of `f(position, leaf)` over the supplied leaves of
+/// `spec`, depth first; `pos` counts the leaves visited.
+fn find_leaf<S: Supply, R>(
+    spec: &KernelSpec<S>,
+    pos: &mut usize,
+    f: &mut impl FnMut(usize, &SuppliedSpec) -> Option<R>,
+) -> Option<R> {
+    match spec {
+        KernelSpec::Supplied(leaf) => {
+            let at = *pos;
+            *pos += 1;
+            f(at, S::spec(leaf))
+        }
+        KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
+            find_leaf(left, pos, f).or_else(|| find_leaf(right, pos, f))
+        }
+        _ => None,
+    }
+}
+
 macro_rules! distance_ops {
     ($trait:ident, $method:ident, $variant:ident) => {
         impl<C1, C2> $trait<DistanceKernel<C2>> for DistanceKernel<C1>

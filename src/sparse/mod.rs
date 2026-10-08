@@ -609,7 +609,7 @@ impl<T: KernelScalar> KernelScratch<T> {
         compiled.eval_cross_slots::<M>(
             x,
             xs,
-            None,
+            (),
             Some(dist),
             out,
             scratch,
@@ -665,7 +665,7 @@ impl<T: KernelScalar> KernelScratch<T> {
                 x,
                 dist: dist_view,
                 ard: None,
-                slots: None,
+                slots: (),
             },
             scratch: view(scratch, m, m),
             nested,

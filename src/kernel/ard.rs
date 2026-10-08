@@ -132,7 +132,7 @@ pub(crate) fn r2_from_cache<T: KernelScalar>(
 /// [`ArdR2`] of the pair `(row, col)` from rectangular `(Δ_d)²` blocks.
 /// Each value is checked as it is read: an `f64` model's prediction blocks
 /// are checked here, not when they are bound
-/// ([`crate::kernel::QuerySources::bind`]).
+/// ([`crate::kernel::QuerySources::bind_rect`]).
 ///
 /// # Errors
 ///

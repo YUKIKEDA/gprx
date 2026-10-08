@@ -158,7 +158,7 @@ fn every_builtin_leaf_runs_every_core_operation() {
                     x: x.as_ref(),
                     dist: Some(dist.as_ref()),
                     ard: None,
-                    slots: None,
+                    slots: (),
                 },
                 from_dist.as_mut(),
                 Triangle::Lower,

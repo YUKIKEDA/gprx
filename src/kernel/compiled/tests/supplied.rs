@@ -3,7 +3,7 @@
 
 use crate::kernel::compiled::CrossViews;
 use crate::kernel::compiled::gram::GramInputs;
-use crate::kernel::compiled::supplied::{ArdRect, RectSlot, RectSlots, SquareSlot, SquareTable};
+use crate::kernel::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareTable};
 use crate::kernel::compiled::weighted::{DiagAccum, WeightedWalk};
 use crate::kernel::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use crate::kernel::{
@@ -15,15 +15,19 @@ use crate::math::Accurate;
 use crate::test_check::assert_close;
 use faer::{Mat, MatRef};
 
-/// Rectangular supplies looked up by slot.
-struct RectTable<'a>(Vec<(crate::kernel::SlotId, RectSlot<'a, f64>)>);
+/// Rectangular supplies by shape in slot order.
+struct RectTable<'a> {
+    scalar: Vec<MatRef<'a, f64>>,
+    ard: Vec<ArdRect<'a, f64>>,
+}
 
 impl RectSlots<f64> for RectTable<'_> {
-    fn rect(&self, slot: crate::kernel::SlotId) -> Option<RectSlot<'_, f64>> {
-        self.0
-            .iter()
-            .find(|(id, _)| *id == slot)
-            .map(|(_, rect)| *rect)
+    fn scalar(&self, at: usize) -> MatRef<'_, f64> {
+        self.scalar[at]
+    }
+
+    fn ard(&self, at: usize) -> ArdRect<'_, f64> {
+        self.ard[at]
     }
 }
 
@@ -112,44 +116,27 @@ fn problem() -> Problem {
 
 impl Problem {
     fn square_table(&self) -> SquareTable<'_, f64> {
-        SquareTable(vec![
-            (
-                self.image_slot(),
-                SquareSlot::Scalar(self.train_sq.as_ref()),
-            ),
-            (self.bands_slot(), SquareSlot::Ard(self.train_ard.view())),
-        ])
+        SquareTable {
+            scalar: vec![self.train_sq.as_ref()],
+            ard: vec![ArdSquare::Packed(self.train_ard.view())],
+        }
     }
 
     fn rect_table(&self) -> RectTable<'_> {
-        RectTable(vec![
-            (self.image_slot(), RectSlot::Scalar(self.cross_sq.as_ref())),
-            (
-                self.bands_slot(),
-                RectSlot::Ard(ArdRect::Checked(ArdBlocks::new(
-                    BlockList::Vecs(&self.cross_blocks),
-                    N,
-                    M,
-                    0,
-                ))),
-            ),
-        ])
-    }
-
-    fn image_slot(&self) -> crate::kernel::SlotId {
-        crate::kernel::DistanceSlot::Scalar(self.image).id()
-    }
-
-    fn bands_slot(&self) -> crate::kernel::SlotId {
-        crate::kernel::DistanceSlot::Ard(self.bands).id()
+        RectTable {
+            scalar: vec![self.cross_sq.as_ref()],
+            ard: vec![ArdRect::Checked(ArdBlocks::new(
+                BlockList::Vecs(&self.cross_blocks),
+                N,
+                M,
+                0,
+            ))],
+        }
     }
 
     fn gram(&self, compiled: &CompiledKernel<f64, SuppliedSpec>) -> Mat<f64> {
         let table = self.square_table();
-        let inputs = GramInputs {
-            slots: Some(&table),
-            ..GramInputs::points(self.x.as_ref())
-        };
+        let inputs = GramInputs::<_, SuppliedSpec>::supplied(self.x.as_ref(), &table);
         let mut out = Mat::zeros(N, N);
         let mut scratch = Mat::zeros(N, N);
         compiled
@@ -172,7 +159,7 @@ impl Problem {
             .eval_cross_slots::<Accurate>(
                 self.x.as_ref(),
                 self.xs.as_ref(),
-                Some(&table),
+                &table,
                 None,
                 out.as_mut(),
                 scratch.as_mut(),
@@ -271,15 +258,12 @@ fn check_derivatives(p: &Problem, spec: &DistanceKernel<WithPoints>) {
     let h = 1e-6;
     let table = p.square_table();
     let rect = p.rect_table();
-    let inputs = GramInputs {
-        slots: Some(&table),
-        ..GramInputs::points(p.x.as_ref())
-    };
+    let inputs = GramInputs::<_, SuppliedSpec>::supplied(p.x.as_ref(), &table);
     let views = CrossViews {
         x1: p.x.as_ref(),
         x2: p.xs.as_ref(),
         dist: None,
-        slots: Some(&rect),
+        slots: &rect as &dyn RectSlots<f64>,
     };
     let grad_at = |c: &CompiledKernel<f64, SuppliedSpec>, k: usize| {
         let mut d_k = Mat::zeros(N, N);
@@ -381,10 +365,7 @@ fn weighted_walks_match_one_parameter_at_a_time() {
     let n_params = compiled.num_params();
     let table = p.square_table();
     let rect = p.rect_table();
-    let inputs = GramInputs {
-        slots: Some(&table),
-        ..GramInputs::points(p.x.as_ref())
-    };
+    let inputs = GramInputs::<_, SuppliedSpec>::supplied(p.x.as_ref(), &table);
     let weight = Mat::from_fn(N, N, |i, j| ((i + j) as f64 * 0.3).cos());
     let mut scratch = Mat::zeros(N, N);
     let mut nested = Vec::new();
@@ -409,7 +390,7 @@ fn weighted_walks_match_one_parameter_at_a_time() {
         x1: p.x.as_ref(),
         x2: p.xs.as_ref(),
         dist: None,
-        slots: Some(&rect),
+        slots: &rect as &dyn RectSlots<f64>,
     };
     let mut rect_bufs: Vec<Mat<f64>> = (0..compiled.contraction_buffers())
         .map(|_| Mat::zeros(N, M))
@@ -483,12 +464,12 @@ fn f32_reads_the_supplied_ard_tables() {
     let cache32 =
         ArdSqDiffBuf::new(Mat::<f32>::from_fn(N, 2, |i, j| p.bands_x.0[(i, j)] as f32).as_ref())
             .expect("cache");
-    let table32 = SquareTable(vec![(p.bands_slot(), SquareSlot::Ard(cache32.view()))]);
-    let x32 = Mat::<f32>::zeros(N, 0);
-    let inputs32 = GramInputs {
-        slots: Some(&table32),
-        ..GramInputs::points(x32.as_ref())
+    let table32 = SquareTable {
+        scalar: Vec::new(),
+        ard: vec![ArdSquare::Packed(cache32.view())],
     };
+    let x32 = Mat::<f32>::zeros(N, 0);
+    let inputs32 = GramInputs::<_, SuppliedSpec>::supplied(x32.as_ref(), &table32);
     let mut out32 = Mat::<f32>::zeros(N, N);
     let mut s32 = Mat::<f32>::zeros(N, N);
     c32.eval_gram::<Accurate>(
@@ -501,10 +482,7 @@ fn f32_reads_the_supplied_ard_tables() {
     .expect("f32");
     let table = p.square_table();
     let x = Mat::<f64>::zeros(N, 0);
-    let inputs = GramInputs {
-        slots: Some(&table),
-        ..GramInputs::points(x.as_ref())
-    };
+    let inputs = GramInputs::<_, SuppliedSpec>::supplied(x.as_ref(), &table);
     let mut out = Mat::zeros(N, N);
     let mut s = Mat::zeros(N, N);
     c64.eval_gram::<Accurate>(
@@ -534,15 +512,12 @@ fn ard_leaves_on_the_diagonal_match_the_gram_diagonal() {
     let n_params = compiled.num_params();
     let train = mat_from_cols(&[coords(1, N, 0.0), coords(2, N, 0.0)]);
     let cache = ArdSqDiffBuf::new(train.as_ref()).expect("cache");
-    let table = SquareTable(vec![(
-        crate::kernel::DistanceSlot::Ard(bands).id(),
-        SquareSlot::Ard(cache.view()),
-    )]);
-    let x = Mat::<f64>::zeros(N, 0);
-    let inputs = GramInputs {
-        slots: Some(&table),
-        ..GramInputs::points(x.as_ref())
+    let table = SquareTable {
+        scalar: Vec::new(),
+        ard: vec![ArdSquare::Packed(cache.view())],
     };
+    let x = Mat::<f64>::zeros(N, 0);
+    let inputs = GramInputs::<_, SuppliedSpec>::supplied(x.as_ref(), &table);
     let mut full = Mat::zeros(N, N);
     let mut scratch = Mat::zeros(N, N);
     let mut diag = vec![0.0; N];
@@ -630,4 +605,40 @@ fn a_coordinate_tree_needs_columns_and_a_distance_tree_does_not() {
         .compile();
     dist.fill_diag_rows(x.as_ref(), &mut diag).expect("diag");
     assert_close(diag[0], 1.5 + 0.2, 1e-12);
+}
+
+/// The slot numbers of the supplied leaves of `k`, depth first.
+fn leaf_numbers(k: &CompiledKernel<f64, SuppliedSpec>, out: &mut Vec<usize>) {
+    match k {
+        CompiledKernel::Supplied(leaf) => out.push(leaf.at),
+        CompiledKernel::Sum(terms) | CompiledKernel::Product(terms) => {
+            for t in terms {
+                leaf_numbers(t, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A compiled leaf numbers its slot among the slots of its shape in the
+/// order the tree lists them, the order every supply keeps.
+#[test]
+fn compiled_leaves_number_their_slots_per_shape_in_slot_order() {
+    let (s1, s2) = (ScalarDistance::new(), ScalarDistance::new());
+    let a = ArdDistance::new(2).expect("dims");
+    let rbf = RbfKernel::new(0.8).expect("ell");
+    let ard = a
+        .kernel(RbfArdKernel::new(&[0.7, 1.3]).expect("ell"))
+        .expect("dims");
+    let spec = s2.kernel(rbf) + ard * s1.kernel(rbf) + s2.kernel(rbf);
+    let listed: Vec<_> = spec.slots().iter().map(|slot| slot.id()).collect();
+    let expected = [
+        crate::kernel::DistanceSlot::Scalar(s2).id(),
+        crate::kernel::DistanceSlot::Ard(a).id(),
+        crate::kernel::DistanceSlot::Scalar(s1).id(),
+    ];
+    assert_eq!(listed, expected);
+    let mut numbers = Vec::new();
+    leaf_numbers(&spec.spec().compile(), &mut numbers);
+    assert_eq!(numbers, [0, 0, 1, 0]);
 }
