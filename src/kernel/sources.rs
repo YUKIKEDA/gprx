@@ -103,14 +103,14 @@ fn no_source() -> GprError {
     }
 }
 
-/// A band of a square failed its check, yet the scan that locates a
-/// violation found none (the two checks disagree). The table is refused;
-/// `(0, 0)` stands for an unknown place, as the reason says.
-fn unlocated() -> GprError {
+/// A check of a table failed, yet the scan that locates a violation found
+/// none (the two checks disagree). The table is refused; `(0, 0)` stands
+/// for an unknown place, as the reason says.
+pub(crate) fn unlocated() -> GprError {
     invalid(
         0,
         0,
-        "a band of the square failed its check, but no pair could be located \
+        "the table failed its check, but no value could be located \
          (the position (0, 0) is a placeholder)",
     )
 }
@@ -1224,6 +1224,9 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
                         }
                     }
                 }
+                // The cast checked every value: an `f64` view of the
+                // caller's block (the refinement's) reads it as checked.
+                slot.unchecked = false;
             }
         }
         Ok(this)
@@ -1553,6 +1556,32 @@ mod tests {
         assert!(scratch.cast.capacity() >= 4);
         assert!(format!("{scratch:?}").starts_with("QueryScratch"));
         assert_eq!(scratch.clone().cast.capacity(), 0);
+    }
+
+    /// An `f32` model checks an ARD block as it casts it, so the `f64`
+    /// view of the caller's block (the refinement's) reads it as checked,
+    /// not again.
+    #[test]
+    fn a_cast_ard_block_is_read_as_checked_in_f64() {
+        let bands = ArdDistance::new(2).expect("dims");
+        let slots = [DistanceSlot::Ard(bands)];
+        let (b0, b1) = ([0.5, 1.0, 1.5, 2.0], [0.25, 0.5, 0.75, 1.0]);
+        let tables: [&[f64]; 2] = [&b0, &b1];
+        let mut scratch = QueryScratch::<f32>::new();
+        let bound = QuerySources::bind(
+            &slots,
+            [bands.borrow(&tables)],
+            2,
+            2,
+            BlockKind::Rect,
+            &mut scratch,
+        )
+        .expect("bind");
+        let view = bound.f64_view();
+        assert!(matches!(
+            view.rect(slots[0].id()),
+            Some(RectSlot::Ard(ArdRect::Checked(_)))
+        ));
     }
 
     #[test]

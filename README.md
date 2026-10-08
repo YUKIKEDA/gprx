@@ -381,8 +381,8 @@ The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `
 
 | Source | Copy |
 | --- | --- |
-| `from_vec(d2)` / `from_vecs(blocks)` | moved into the model (an `f64` model keeps the buffers as they are, so the fit copies nothing; an ARD slot then holds `d · n²` values instead of its packed `d · n(n+1)/2`) |
-| `from_slice(d2)` / `from_slices(blocks)` | copied at the call |
+| `from_vec(d2)` / `from_vecs(blocks)` | moved into the call. An `f64` model keeps the tables as its store, so the fit copies nothing, and an ARD slot then holds `d · n²` values instead of its packed `d · n(n+1)/2` (an ARD table that `tidy` repairs is packed instead). An `f32` model casts them into a buffer of its own, packed for ARD; a `MixedPrecision` model keeps the `f64` tables and adds that cast |
+| `from_slice(d2)` / `from_slices(blocks)` | copied at the call, then handled as `from_vec` / `from_vecs`: an `f64` model keeps the copy (`d · n²` for an ARD slot). `borrow` fits without that copy |
 | `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model, and copied by `fit` (an ARD square straight into its packed triangles) |
 | `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` writes `d²(i, col)` for each row `i` of `rows`; an ARD fill writes its `d` runs one after another. A square asks only for the rows `col..n` of each column |
 
@@ -393,7 +393,7 @@ Tables are column-major `dist[i + j * n_rows]`. Every value must be finite and n
 | `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
-`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` is on coordinate models only for now: online insert and delete on supplied distances are the next row (#473).
+`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` is on coordinate models only: a model of supplied distances has no online insert or delete.
 
 ```rust
 use gprx::kernel::{
