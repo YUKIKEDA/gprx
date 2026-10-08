@@ -1,6 +1,6 @@
-//! Exact GPR on supplied squared distances: the `fit`, `factor`, predict,
-//! and `insert` of [`Gpr`], [`FittedGpr`], and [`OnlineGpr`] for a
-//! [`DistanceKernel`].
+//! Exact GPR on supplied squared distances: the `fit`, `factor`, and
+//! predict of [`Gpr`] and [`FittedGpr`] for a [`DistanceKernel`]. Online
+//! insert and delete on supplied distances are not here yet (#473).
 //!
 //! A [`DistanceKernel<DistanceOnly>`] model takes no coordinates; a
 //! [`DistanceKernel<WithPoints>`] model takes the column-major `x` of its
@@ -10,8 +10,8 @@
 use crate::error::GprError;
 use crate::gpr::GprObjective;
 use crate::kernel::{
-    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, PointUse, QueryScratch,
-    QuerySources, RectSlots, SquareSlots, WithPoints,
+    BlockKind, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar, PointUse,
+    QueryScratch, QuerySources, RectSlots, SquareSlots, TrainSources, WithPoints,
 };
 use crate::optimizer::{Fixed, Optimizer};
 use crate::policy::JitterPolicy;
@@ -20,51 +20,61 @@ use crate::prediction::{DistanceQuery, QueryPoints, distance_predict};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::shared::Query;
-use super::{FittedGpr, Gpr, OnlineGpr, TrainInput};
+use super::{FittedGpr, Gpr, TrainInput};
 
-/// Binds the `n × m` train × query blocks of `cross` on `scratch` and,
-/// for a covariance, the `m × m` query squares of `square` as a store a
-/// Gram reads; then runs `f` on the query. The `f64` view of the blocks is
-/// made only for a refining model.
-#[allow(clippy::too_many_arguments)] // one query: slots, sizes, sources, scratch, body
-fn with_query<'s, P: GpScalar, R>(
+/// The checked blocks of one query: the `n × m` train × query blocks, and
+/// for a covariance the `m × m` query squares as a store a Gram reads.
+struct BoundQuery<'a, T: KernelScalar> {
+    cross: QuerySources<'a, T>,
+    square: Option<TrainSources<T>>,
+}
+
+/// Binds the blocks of `cross` on `scratch` and, for a covariance, the
+/// query squares of `square`. The result borrows `scratch` and the caller's
+/// tables, not `slots`, so the model can be borrowed again to run it.
+fn bind_query<'a, 's: 'a, T: KernelScalar>(
     slots: &[DistanceSlot],
-    n: usize,
-    points: QueryPoints<'_>,
-    m: usize,
+    (n, m): (usize, usize),
     cross: impl IntoIterator<Item = DistanceSource<'s>>,
     square: Option<Vec<DistanceSource<'s>>>,
-    scratch: &mut QueryScratch<P::Storage>,
-    f: impl FnOnce(Query<'_, P::Storage>) -> Result<R, GprError>,
-) -> Result<R, GprError> {
+    scratch: &'a mut QueryScratch<T>,
+) -> Result<BoundQuery<'a, T>, GprError> {
     crate::data::require_nonempty(m)?;
-    let cross = QuerySources::<P::Storage>::bind(slots, cross, n, m, BlockKind::Rect, scratch)?;
+    let cross = QuerySources::<T>::bind(slots, cross, n, m, BlockKind::Rect, scratch)?;
     // The query squares are one set: a Gram reads them, as it reads the
     // training squares.
     let square = match square {
         Some(square) => {
             let mut local = QueryScratch::new();
-            let bound = QuerySources::<P::Storage>::bind(
-                slots,
-                square,
-                m,
-                m,
-                BlockKind::Square,
-                &mut local,
-            )?;
+            let bound =
+                QuerySources::<T>::bind(slots, square, m, m, BlockKind::Square, &mut local)?;
             Some(bound.to_square(m)?)
         }
         None => None,
     };
-    let cross64 = P::REFINES_IN_F64.then(|| cross.f64_view());
-    f(Query {
-        xs: points.xs,
-        m,
-        n_cols: points.n_cols,
-        cross: Some(&cross),
-        cross64: cross64.as_ref().map(|t| t as &dyn RectSlots<f64>),
-        square: square.as_ref().map(|s| s as &dyn SquareSlots<P::Storage>),
-    })
+    Ok(BoundQuery { cross, square })
+}
+
+impl<T: KernelScalar> BoundQuery<'_, T> {
+    /// Runs `f` on the query; the `f64` view of the blocks only when
+    /// `refines`.
+    fn run<R>(
+        &self,
+        points: QueryPoints<'_>,
+        m: usize,
+        refines: bool,
+        f: impl FnOnce(Query<'_, T>) -> Result<R, GprError>,
+    ) -> Result<R, GprError> {
+        let cross64 = refines.then(|| self.cross.f64_view());
+        f(Query {
+            xs: points.xs,
+            m,
+            n_cols: points.n_cols,
+            cross: Some(&self.cross),
+            cross64: cross64.as_ref().map(|t| t as &dyn RectSlots<f64>),
+            square: self.square.as_ref().map(|s| s as &dyn SquareSlots<T>),
+        })
+    }
 }
 
 impl<O, P> Gpr<O, P, DistanceKernel<DistanceOnly>>
@@ -278,14 +288,10 @@ macro_rules! exact_query {
                 let alpha = $alpha?;
                 let mut out = Prediction::default();
                 let mut scratch = QueryScratch::new();
-                with_query::<P, ()>(
-                    slots,
-                    self.core.n,
+                bind_query(slots, (self.core.n, m), cross, None, &mut scratch)?.run(
                     points,
                     m,
-                    cross,
-                    None,
-                    &mut scratch,
+                    P::REFINES_IN_F64,
                     |q| {
                         self.core
                             .write_prediction(self.factor(), alpha, q, options, &mut out)
@@ -303,15 +309,21 @@ macro_rules! exact_query {
                 out: &mut Prediction<P::Refine>,
             ) -> Result<(), GprError> {
                 // The model's buffers, taken for the call: the blocks borrow
-                // them while the predict borrows the model.
+                // them while the predict borrows the model. They hold no
+                // state, so a panic that loses them loses only capacity.
                 let mut scratch = std::mem::take(&mut self.core.query_sources);
-                let n = self.core.n;
-                let slots = std::mem::take(&mut self.core.slots);
-                let result =
-                    with_query::<P, ()>(&slots, n, points, m, cross, None, &mut scratch, |q| {
+                let result = bind_query(
+                    &self.core.slots,
+                    (self.core.n, m),
+                    cross,
+                    None,
+                    &mut scratch,
+                )
+                .and_then(|bound| {
+                    bound.run(points, m, P::REFINES_IN_F64, |q| {
                         self.predict_query_into(q, options, out)
-                    });
-                self.core.slots = slots;
+                    })
+                });
                 self.core.query_sources = scratch;
                 result
             }
@@ -329,14 +341,10 @@ macro_rules! exact_query {
                 let alpha = $alpha?;
                 let square = Some(square.into_iter().collect());
                 let mut scratch = QueryScratch::new();
-                with_query::<P, _>(
-                    slots,
-                    self.core.n,
+                bind_query(slots, (self.core.n, m), cross, square, &mut scratch)?.run(
                     points,
                     m,
-                    cross,
-                    square,
-                    &mut scratch,
+                    P::REFINES_IN_F64,
                     |q| self.core.write_covariance(self.factor(), alpha, q, options),
                 )
             }
@@ -352,7 +360,6 @@ exact_query!(
     FittedGpr,
     alpha = |model| Ok::<_, GprError>(&model.core.alpha[..])
 );
-exact_query!(OnlineGpr, alpha = |model| model.predict_alpha());
 
 distance_predict!(
     impl [O, P: GpScalar] FittedGpr<O, P, DistanceKernel<DistanceOnly>>,

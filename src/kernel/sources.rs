@@ -1,6 +1,6 @@
 //! The supplied squared distances a model reads: binding and checking the
 //! caller's sources, the training `d²` a model owns, and the per-call blocks
-//! of a prediction or an insert.
+//! of a prediction.
 //!
 //! A source arrives as `f64`. The training store keeps it in the model's
 //! storage scalar: a scalar slot as a dense square, an ARD slot as the
@@ -142,6 +142,22 @@ pub(crate) fn first_invalid_from(block: &[f64], rows: usize, col0: usize) -> Gpr
     invalid_value(v, at % rows, col0 + at / rows)
 }
 
+/// The error of a value at `(row, col)` that is finite in `f64` but past
+/// the range of the model's narrower storage scalar.
+fn out_of_range(row: usize, col: usize) -> GprError {
+    invalid(row, col, "is past the range of the model's storage scalar")
+}
+
+/// The error of a negative value `v` at `(row, col)` past a repair's
+/// tolerance `tol`.
+fn negative_past(v: f64, tol: f64, row: usize, col: usize) -> GprError {
+    invalid(
+        row,
+        col,
+        format!("{v} is negative past the tolerance {tol}"),
+    )
+}
+
 /// The error of a value `v` at `(row, col)` that is not [`valid`].
 pub(crate) fn invalid_value(v: f64, row: usize, col: usize) -> GprError {
     let reason = if v.is_finite() {
@@ -181,39 +197,58 @@ pub(crate) fn check_block(
 /// [`check_block`] for [`Tidy::Exact`]. The values are folded without a
 /// branch; a violation is located only once the fold has found one.
 fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Result<(), GprError> {
+    if kind == BlockKind::Rect {
+        return if super::simd::all_valid_distances(block) {
+            Ok(())
+        } else {
+            Err(first_invalid(block, rows))
+        };
+    }
+    // A square: [`check_band`] reads each value once and checks the lower
+    // triangle's values, the diagonal, and each mirror, so an invalid value
+    // above the diagonal fails its mirror. The violation is located only
+    // once a band has failed.
+    let bands = rows.div_ceil(BAND);
+    let band = |band: usize| {
+        let j0 = band * BAND;
+        check_band(block, rows, j0, (j0 + BAND).min(rows), |_| {})
+    };
+    let ok = if rows < PAR_ROWS {
+        (0..bands).all(band)
+    } else {
+        (0..bands).into_par_iter().all(band)
+    };
+    if ok {
+        return Ok(());
+    }
     if !super::simd::all_valid_distances(block) {
         return Err(first_invalid(block, rows));
     }
-    if kind == BlockKind::Square {
-        for j in 0..cols {
-            let diag = block[j + j * rows];
-            if diag != 0.0 {
-                return Err(invalid(j, j, format!("the diagonal is {diag}, not zero")));
-            }
-        }
-        let symmetric = (0..rows.div_ceil(BAND)).into_par_iter().all(|band| {
-            let j0 = band * BAND;
-            check_band(block, rows, j0, (j0 + BAND).min(rows), |_| {})
-        });
-        if !symmetric {
-            let mut found = Ok(());
-            let _ = for_each_lower_pair(rows, |i, j| {
-                let (a, b) = (block[i + j * rows], block[j + i * rows]);
-                if !same(a, b) {
-                    found = Err(invalid(
-                        i,
-                        j,
-                        format!("{a} differs from its mirror ({j}, {i}), {b}"),
-                    ));
-                    return Err(());
-                }
-                Ok(())
-            });
-            found?;
+    for j in 0..cols {
+        let diag = block[j + j * rows];
+        if diag != 0.0 {
+            return Err(invalid(j, j, format!("the diagonal is {diag}, not zero")));
         }
     }
-    Ok(())
+    let mut found = Ok(());
+    let _ = for_each_lower_pair(rows, |i, j| {
+        let (a, b) = (block[i + j * rows], block[j + i * rows]);
+        if !same(a, b) {
+            found = Err(invalid(
+                i,
+                j,
+                format!("{a} differs from its mirror ({j}, {i}), {b}"),
+            ));
+            return Err(());
+        }
+        Ok(())
+    });
+    found
 }
+
+/// Rows below which a square is checked on the calling thread: smaller
+/// squares cost less than handing their bands to the pool.
+const PAR_ROWS: usize = 256;
 
 /// Columns of one band of [`check_band`]: the mirror of the band is read
 /// one row at a time, `BAND` contiguous values (a cache line of `f64`).
@@ -329,18 +364,14 @@ fn within_block(
     if !block.iter().fold(true, |ok, &v| ok & v.is_finite()) {
         let at = block.iter().position(|v| !v.is_finite()).unwrap_or(0);
         let rows = rows.max(1);
-        return Err(invalid(at % rows, at / rows, "is not finite"));
+        return Err(invalid_value(block[at], at % rows, at / rows));
     }
     let tol = rel * block.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
     let mut repair = false;
     for (at, &v) in block.iter().enumerate() {
         if v < -tol {
             let rows = rows.max(1);
-            return Err(invalid(
-                at % rows,
-                at / rows,
-                format!("{v} is negative past the tolerance {tol}"),
-            ));
+            return Err(negative_past(v, tol, at % rows, at / rows));
         }
         repair |= v < 0.0;
     }
@@ -454,11 +485,7 @@ impl FillRounding {
     fn judge(&self, rel: f64) -> Result<(), GprError> {
         let tol = rel * self.max;
         if let Some((v, row, col)) = self.negative.filter(|(v, _, _)| *v > tol) {
-            return Err(invalid(
-                row,
-                col,
-                format!("{} is negative past the tolerance {tol}", -v),
-            ));
+            return Err(negative_past(-v, tol, row, col));
         }
         if let Some((v, row, col)) = self.diagonal.filter(|(v, _, _)| *v > tol) {
             return Err(invalid(
@@ -564,13 +591,7 @@ fn fill_run(
         Tidy::Exact => {
             if !run.iter().fold(true, |ok, &v| ok & valid(v)) {
                 let at = run.iter().position(|&v| !valid(v)).unwrap_or(0);
-                let v = run[at];
-                let reason = if v.is_finite() {
-                    format!("{v} is negative")
-                } else {
-                    format!("{v} is not finite")
-                };
-                return Err(invalid(col + at, col, reason));
+                return Err(invalid_value(run[at], col + at, col));
             }
             if let Some(&diag) = run.first()
                 && diag != 0.0
@@ -587,7 +608,7 @@ fn fill_run(
         }
         Tidy::Within(_) => {
             if let Some(at) = run.iter().position(|v| !v.is_finite()) {
-                return Err(invalid(col + at, col, "is not finite"));
+                return Err(invalid_value(run[at], col + at, col));
             }
             for (at, &v) in run.iter().enumerate() {
                 store(at, rounding.note(v, col + at, col));
@@ -647,35 +668,6 @@ impl<T: KernelScalar> RectSlots<T> for TrainColumns<'_, T> {
     }
 }
 
-/// A change to a [`TrainSources`] computed by [`TrainSources::stage_append`]
-/// or [`TrainSources::stage_delete`], applied by [`TrainSources::commit`].
-#[derive(Debug)]
-pub struct Staged<T> {
-    n: usize,
-    cap: usize,
-    changes: Vec<SlotChange<T>>,
-}
-
-#[derive(Debug)]
-enum SlotChange<T> {
-    /// A rebuilt slot.
-    Replace(TrainData<T>),
-    /// The new column of a scalar square, written in place.
-    Column(Vec<T>),
-    /// Removes a point of a scalar square in place.
-    Remove(usize),
-}
-
-/// Writes point `n`'s column and row (`column`, then a zero diagonal) into
-/// a square of leading dimension `cap`.
-fn write_column<T: KernelScalar>(square: &mut [T], cap: usize, n: usize, column: &[T]) {
-    for (i, &v) in column.iter().enumerate() {
-        square[i + n * cap] = v;
-        square[n + i * cap] = v;
-    }
-    square[n + n * cap] = T::from_f64(0.0);
-}
-
 impl<T: KernelScalar> Default for TrainSources<T> {
     fn default() -> Self {
         Self::empty()
@@ -697,12 +689,6 @@ impl<T: KernelScalar> TrainSources<T> {
         self.slots.is_empty()
     }
 
-    #[cfg(test)]
-    /// The training points the squares cover.
-    pub(crate) fn n(&self) -> usize {
-        self.n
-    }
-
     /// The store for the checked squares `blocks` of `n` points (a copy).
     pub(crate) fn from_blocks(blocks: BoundBlocks<'_>, n: usize) -> Result<Self, GprError> {
         let mut slots = Vec::with_capacity(blocks.raw.len());
@@ -716,7 +702,9 @@ impl<T: KernelScalar> TrainSources<T> {
             };
             slots.push((slot.id, data));
         }
-        Ok(Self { n, cap: n, slots })
+        let store = Self { n, cap: n, slots };
+        store.require_in_range()?;
+        Ok(store)
     }
 
     /// The store of the `n × n` training squares of `slots` (the kernel's
@@ -808,159 +796,52 @@ impl<T: KernelScalar> TrainSources<T> {
         if out.len() != slots.len() {
             return Err(no_source());
         }
-        Ok(Self {
+        let store = Self {
             n,
             cap: n,
             slots: out,
-        })
-    }
-
-    /// Computes the append of one point without changing `self`: `cols`
-    /// holds each slot's `n × 1` column to the existing points, in slot
-    /// order. The new diagonal is zero. [`Self::commit`] applies it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::SizeOverflow`] when the grown store does not fit.
-    pub(crate) fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Staged<T>, GprError> {
-        let n = self.n;
-        if self.slots.is_empty() {
-            return Ok(self.unchanged());
-        }
-        if !cols.covers(self.slots.iter().map(|(id, _)| *id)) {
-            // The caller binds the columns against the store's own slots,
-            // so this is a crate bug, not the caller's data.
-            debug_assert!(false, "the bound columns miss a slot of the store");
-            return Err(GprError::LengthMismatch {
-                reason: "internal: the bound columns miss a slot of the store".to_owned(),
-            });
-        }
-        let grow = self.cap < n + 1;
-        let new_cap = if grow {
-            (n + 1).max(self.cap.max(1).saturating_mul(2))
-        } else {
-            self.cap
         };
-        let mut changes = Vec::with_capacity(self.slots.len());
-        for (id, data) in &self.slots {
-            let col = |k: usize| cols.block(*id, k);
-            let change = match data {
-                TrainData::Scalar(square) => {
-                    let column: Vec<T> = col(0).iter().map(|&v| T::from_f64(v)).collect();
-                    if grow {
-                        let len = new_cap.checked_mul(new_cap).ok_or(GprError::SizeOverflow)?;
-                        let mut wider = vec![T::from_f64(0.0); len];
-                        for j in 0..n {
-                            for i in 0..n {
-                                wider[i + j * new_cap] = square[i + j * self.cap];
-                            }
-                        }
-                        write_column(&mut wider, new_cap, n, &column);
-                        SlotChange::Replace(TrainData::Scalar(wider))
-                    } else {
-                        SlotChange::Column(column)
-                    }
-                }
-                TrainData::Ard(cache) => {
-                    let old = cache.view();
-                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs(
-                        n + 1,
-                        old.d(),
-                        |k, i, j| {
-                            if i == n && j == n {
-                                T::from_f64(0.0)
-                            } else if i == n {
-                                T::from_f64(col(k)[j])
-                            } else {
-                                old.get(k, i, j)
-                            }
-                        },
-                    )?))
-                }
-            };
-            changes.push(change);
-        }
-        Ok(Staged {
-            n: n + 1,
-            cap: new_cap,
-            changes,
-        })
+        store.require_in_range()?;
+        Ok(store)
     }
 
-    /// Computes the removal of point `index` without changing `self`.
-    /// [`Self::commit`] applies it.
+    /// Checks that the store holds every value in its scalar: an `f64` value
+    /// past the range of a narrower storage scalar rounds to infinity when
+    /// it is cast. Nothing to check for an `f64` store.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::IndexOutOfRange`] when `index ≥ n`.
-    pub(crate) fn stage_delete(&self, index: usize) -> Result<Staged<T>, GprError> {
-        if self.slots.is_empty() {
-            return Ok(self.unchanged());
+    /// Returns [`GprError::InvalidDistance`] at the first value that did
+    /// not fit.
+    fn require_in_range(&self) -> Result<(), GprError> {
+        if reads_in_place::<T>() {
+            return Ok(());
         }
-        let n = self.n;
-        if index >= n {
-            return Err(GprError::IndexOutOfRange {
-                reason: format!("point index {index} is out of range for n={n}"),
-            });
-        }
-        let skip = |i: usize| if i >= index { i + 1 } else { i };
-        let mut changes = Vec::with_capacity(self.slots.len());
+        let (n, cap) = (self.n, self.cap.max(1));
         for (_, data) in &self.slots {
-            changes.push(match data {
-                TrainData::Scalar(_) => SlotChange::Remove(index),
-                TrainData::Ard(cache) => {
-                    let old = cache.view();
-                    SlotChange::Replace(TrainData::Ard(ArdSqDiffBuf::from_pairs(
-                        n - 1,
-                        old.d(),
-                        |k, i, j| old.get(k, skip(i), skip(j)),
-                    )?))
-                }
-            });
-        }
-        Ok(Staged {
-            n: n - 1,
-            cap: self.cap,
-            changes,
-        })
-    }
-
-    fn unchanged(&self) -> Staged<T> {
-        Staged {
-            n: self.n,
-            cap: self.cap,
-            changes: Vec::new(),
-        }
-    }
-
-    /// Applies a change staged on this store. Cannot fail.
-    pub(crate) fn commit(&mut self, staged: Staged<T>) {
-        let (n, cap) = (self.n, self.cap);
-        // Staged on this store: one change per slot, in slot order, and an
-        // in-place change only for a scalar slot.
-        debug_assert!(staged.changes.is_empty() || staged.changes.len() == self.slots.len());
-        for ((_, data), change) in self.slots.iter_mut().zip(staged.changes) {
-            match (data, change) {
-                (data, SlotChange::Replace(fresh)) => *data = fresh,
-                (TrainData::Scalar(square), SlotChange::Column(column)) => {
-                    write_column(square, cap, n, &column);
-                }
-                (TrainData::Scalar(square), SlotChange::Remove(index)) => {
-                    let skip = |i: usize| if i >= index { i + 1 } else { i };
-                    // Forward walk: every read is at or past its write.
-                    for j in 0..n - 1 {
-                        for i in 0..n - 1 {
-                            square[i + j * cap] = square[skip(i) + skip(j) * cap];
+            match data {
+                TrainData::Scalar(square) => {
+                    for j in 0..n {
+                        let column = &square[j * cap..j * cap + n];
+                        if let Some(i) = column.iter().position(|v| !v.is_finite()) {
+                            return Err(out_of_range(i, j));
                         }
                     }
                 }
-                (TrainData::Ard(_), SlotChange::Column(_) | SlotChange::Remove(_)) => {
-                    debug_assert!(false, "an in-place change staged for an ARD slot");
+                TrainData::Ard(cache) => {
+                    let view = cache.view();
+                    for dim in 0..view.d() {
+                        for j in 0..n {
+                            let run = view.column(dim, j);
+                            if let Some(k) = run.iter().position(|v| !v.is_finite()) {
+                                return Err(out_of_range(j + k, j));
+                            }
+                        }
+                    }
                 }
             }
         }
-        self.n = staged.n;
-        self.cap = staged.cap;
+        Ok(())
     }
 
     /// The same squares in `f64`.
@@ -1044,7 +925,9 @@ impl<T: KernelScalar> TrainSources<T> {
             };
             slots.push((*id, data));
         }
-        Ok(TrainSources { n, cap: n, slots })
+        let store = TrainSources { n, cap: n, slots };
+        store.require_in_range()?;
+        Ok(store)
     }
 }
 
@@ -1054,9 +937,6 @@ impl<T: KernelScalar> TrainSources<T> {
 /// predicts in it; [`RefinedSources`] for a model that also refines in
 /// `f64` and so keeps the caller's `f64` values next to the storage copy.
 pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'static {
-    /// A change computed before it is applied.
-    type Staged;
-
     /// A coordinate model's: no slots.
     fn empty() -> Self;
 
@@ -1073,15 +953,6 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     /// The squares at `f64` without rounding, when the store keeps them.
     fn exact(&self) -> Option<&TrainSources<f64>>;
 
-    /// [`TrainSources::stage_append`].
-    fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Self::Staged, GprError>;
-
-    /// [`TrainSources::stage_delete`].
-    fn stage_delete(&self, index: usize) -> Result<Self::Staged, GprError>;
-
-    /// [`TrainSources::commit`].
-    fn commit(&mut self, staged: Self::Staged);
-
     /// The squares at `f64`: [`Self::exact`], or the storage values widened.
     fn to_f64(&self) -> Result<Cow<'_, TrainSources<f64>>, GprError> {
         match self.exact() {
@@ -1092,8 +963,6 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
 }
 
 impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
-    type Staged = Staged<S>;
-
     fn empty() -> Self {
         Self::empty()
     }
@@ -1113,18 +982,6 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
     fn exact(&self) -> Option<&TrainSources<f64>> {
         (self as &dyn Any).downcast_ref::<TrainSources<f64>>()
     }
-
-    fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Staged<S>, GprError> {
-        Self::stage_append(self, cols)
-    }
-
-    fn stage_delete(&self, index: usize) -> Result<Staged<S>, GprError> {
-        Self::stage_delete(self, index)
-    }
-
-    fn commit(&mut self, staged: Staged<S>) {
-        Self::commit(self, staged);
-    }
 }
 
 /// The training `d²` of a model that factors in `f32` and refines in
@@ -1136,8 +993,6 @@ pub struct RefinedSources {
 }
 
 impl SourceStore<f32> for RefinedSources {
-    type Staged = (Staged<f32>, Staged<f64>);
-
     fn empty() -> Self {
         Self::default()
     }
@@ -1160,25 +1015,6 @@ impl SourceStore<f32> for RefinedSources {
 
     fn exact(&self) -> Option<&TrainSources<f64>> {
         Some(&self.exact)
-    }
-
-    fn stage_append(&self, cols: BoundBlocks<'_>) -> Result<Self::Staged, GprError> {
-        Ok((
-            self.storage.stage_append(cols)?,
-            self.exact.stage_append(cols)?,
-        ))
-    }
-
-    fn stage_delete(&self, index: usize) -> Result<Self::Staged, GprError> {
-        Ok((
-            self.storage.stage_delete(index)?,
-            self.exact.stage_delete(index)?,
-        ))
-    }
-
-    fn commit(&mut self, (storage, exact): Self::Staged) {
-        self.storage.commit(storage);
-        self.exact.commit(exact);
     }
 }
 
@@ -1258,7 +1094,7 @@ fn reads_in_place<T: ScalarOps>() -> bool {
     T::from_f64_slice(&[]).is_some()
 }
 
-/// The checked `d²` blocks of one prediction or insert, bound on a model's
+/// The checked `d²` blocks of one prediction, bound on a model's
 /// [`QueryScratch`]: a caller's table is read in place (an `f64` model) or
 /// through one cast (`f32`), and a fill or a repair writes the scratch.
 pub(crate) struct QuerySources<'a, T: KernelScalar> {
@@ -1367,7 +1203,12 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
                         if slot.unchecked && !super::simd::all_valid_distances(tile) {
                             return Err(first_invalid_from(block, slot.rows, 0));
                         }
+                        let at = cast.len();
                         cast.extend(tile.iter().map(|&v| T::from_f64(v)));
+                        if let Some(i) = cast[at..].iter().position(|v| !v.is_finite()) {
+                            let pos = (at - slot.cast_at) % len + i;
+                            return Err(out_of_range(pos % slot.rows, pos / slot.rows));
+                        }
                     }
                 }
             }
@@ -1416,17 +1257,6 @@ impl<'v> BoundBlocks<'v> {
     /// The blocks of `slot`.
     fn find(&self, slot: SlotId) -> Option<&'v RawSlot<'v>> {
         self.raw.iter().find(|raw| raw.id == slot)
-    }
-
-    /// Block `k` of `slot`, or an empty slice when the slot is not bound.
-    pub(crate) fn block(&self, slot: SlotId, k: usize) -> &'v [f64] {
-        self.find(slot)
-            .map_or(&[], |raw| raw.block(k, self.written))
-    }
-
-    /// Whether every slot of `ids` is bound.
-    pub(crate) fn covers(&self, mut ids: impl Iterator<Item = SlotId>) -> bool {
-        ids.all(|id| self.find(id).is_some())
     }
 }
 
@@ -1653,142 +1483,51 @@ mod tests {
         ));
     }
 
-    /// Two scalar slots and one ARD slot of two points.
-    fn store() -> (Vec<DistanceSlot>, TrainSources<f64>) {
+    /// The buffers show their capacity, and a clone starts without them.
+    #[test]
+    fn query_scratch_holds_no_state_to_clone() {
+        let image = ScalarDistance::new();
+        let slots = [DistanceSlot::Scalar(image)];
+        let mut scratch = QueryScratch::<f32>::new();
+        let cross = [0.5, 1.0, 1.5, 2.0];
+        let bound = QuerySources::bind(
+            &slots,
+            [image.borrow(&cross)],
+            2,
+            2,
+            BlockKind::Rect,
+            &mut scratch,
+        )
+        .expect("bind");
+        drop(bound);
+        assert!(scratch.cast.capacity() >= 4);
+        assert!(format!("{scratch:?}").starts_with("QueryScratch"));
+        assert_eq!(scratch.clone().cast.capacity(), 0);
+    }
+
+    #[test]
+    fn two_scalar_slots_and_an_ard_slot_bind_into_one_store() {
         let slots = vec![
             DistanceSlot::Scalar(ScalarDistance::new()),
             DistanceSlot::Scalar(ScalarDistance::new()),
             DistanceSlot::Ard(ArdDistance::new(2).expect("dims")),
         ];
         let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
-            DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..2, 0..2)),
-            DistanceSlot::Ard(a) => a.from_vecs(vec![line(4.0, 0..2, 0..2), line(5.0, 0..2, 0..2)]),
+            DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..3, 0..3)),
+            DistanceSlot::Ard(a) => a.from_vecs(vec![line(4.0, 0..3, 0..3), line(5.0, 0..3, 0..3)]),
         });
-        let store = TrainSources::bind(&slots, sources, 2).expect("store");
-        (slots, store)
-    }
-
-    /// The column of the new point `n` to the points `0..n`.
-    fn column<'a>(
-        slots: &[DistanceSlot],
-        n: usize,
-        scratch: &'a mut QueryScratch<f64>,
-    ) -> QuerySources<'a, f64> {
-        let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
-            DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..n, n..n + 1)),
-            DistanceSlot::Ard(a) => {
-                a.from_vecs(vec![line(4.0, 0..n, n..n + 1), line(5.0, 0..n, n..n + 1)])
-            }
-        });
-        QuerySources::bind(slots, sources, n, 1, BlockKind::Rect, scratch).expect("column")
-    }
-
-    fn expected(n: usize) -> Vec<(SlotShape, Vec<f64>)> {
-        vec![
-            (SlotShape::Scalar, line(1.0, 0..n, 0..n)),
-            (SlotShape::Scalar, line(2.0, 0..n, 0..n)),
-            (
-                SlotShape::Ard(2),
-                [line(4.0, 0..n, 0..n), line(5.0, 0..n, 0..n)].concat(),
-            ),
-        ]
-    }
-
-    #[test]
-    fn a_staged_change_applies_only_on_commit() {
-        let (slots, mut store) = store();
-        let mut scratch = QueryScratch::new();
-        let staged = store
-            .stage_append(column(&slots, 2, &mut scratch).blocks())
-            .expect("stage");
-        assert_eq!(store.n(), 2);
-        assert_eq!(store.dense_f64(), expected(2));
-        store.commit(staged);
-        assert_eq!(store.dense_f64(), expected(3));
-        let staged = store
-            .stage_append(column(&slots, 3, &mut scratch).blocks())
-            .expect("stage");
-        store.commit(staged);
-        assert_eq!(store.dense_f64(), expected(4));
-        assert!(store.stage_delete(4).is_err());
-        let staged = store.stage_delete(3).expect("stage");
-        assert_eq!(store.dense_f64(), expected(4));
-        store.commit(staged);
-        assert_eq!(store.dense_f64(), expected(3));
-    }
-
-    /// Every slot's `d²` of the points at `at` on the line, as `expected`.
-    fn expected_at(at: &[f64]) -> Vec<(SlotShape, Vec<f64>)> {
-        let sq = |scale: f64| -> Vec<f64> {
-            at.iter()
-                .flat_map(|&b| at.iter().map(move |&a| scale * (a - b).powi(2)))
-                .collect()
-        };
-        vec![
-            (SlotShape::Scalar, sq(1.0)),
-            (SlotShape::Scalar, sq(2.0)),
-            (SlotShape::Ard(2), [sq(4.0), sq(5.0)].concat()),
-        ]
-    }
-
-    /// The column of a new point at `p` to the points at `at`.
-    fn column_at<'a>(
-        slots: &[DistanceSlot],
-        at: &[f64],
-        p: f64,
-        scratch: &'a mut QueryScratch<f64>,
-    ) -> QuerySources<'a, f64> {
-        let col =
-            |scale: f64| -> Vec<f64> { at.iter().map(|&a| scale * (a - p).powi(2)).collect() };
-        let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
-            DistanceSlot::Scalar(s) => s.from_vec(col(k as f64 + 1.0)),
-            DistanceSlot::Ard(a) => a.from_vecs(vec![col(4.0), col(5.0)]),
-        });
-        QuerySources::bind(slots, sources, at.len(), 1, BlockKind::Rect, scratch).expect("column")
-    }
-
-    #[test]
-    fn deleting_the_first_a_middle_or_the_last_point_then_appending_matches_a_rebuild() {
-        for index in [0, 2, 4] {
-            let (slots, mut store) = store();
-            let mut scratch = QueryScratch::new();
-            let mut at = vec![0.0, 1.0];
-            // Five points: the leading dimension grows past `n`.
-            for p in [2.0, 3.0, 4.0] {
-                let staged = store
-                    .stage_append(column_at(&slots, &at, p, &mut scratch).blocks())
-                    .expect("stage");
-                store.commit(staged);
-                at.push(p);
-            }
-            let staged = store.stage_delete(index).expect("stage");
-            store.commit(staged);
-            at.remove(index);
-            assert_eq!(store.dense_f64(), expected_at(&at), "delete {index}");
-            // Appending writes over the rows the delete left behind.
-            for p in [7.5, 9.0] {
-                let staged = store
-                    .stage_append(column_at(&slots, &at, p, &mut scratch).blocks())
-                    .expect("stage");
-                store.commit(staged);
-                at.push(p);
-                assert_eq!(store.dense_f64(), expected_at(&at), "append after {index}");
-            }
-        }
-    }
-
-    #[test]
-    fn deleting_down_to_one_point_then_appending_matches_a_rebuild() {
-        let (slots, mut store) = store();
-        let mut scratch = QueryScratch::new();
-        let staged = store.stage_delete(0).expect("stage");
-        store.commit(staged);
-        assert_eq!(store.dense_f64(), expected_at(&[1.0]));
-        let staged = store
-            .stage_append(column_at(&slots, &[1.0], 3.0, &mut scratch).blocks())
-            .expect("stage");
-        store.commit(staged);
-        assert_eq!(store.dense_f64(), expected_at(&[1.0, 3.0]));
+        let store = TrainSources::<f64>::bind(&slots, sources, 3).expect("store");
+        assert_eq!(
+            store.dense_f64(),
+            vec![
+                (SlotShape::Scalar, line(1.0, 0..3, 0..3)),
+                (SlotShape::Scalar, line(2.0, 0..3, 0..3)),
+                (
+                    SlotShape::Ard(2),
+                    [line(4.0, 0..3, 0..3), line(5.0, 0..3, 0..3)].concat(),
+                ),
+            ]
+        );
     }
 
     #[test]

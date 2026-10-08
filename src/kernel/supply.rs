@@ -101,8 +101,6 @@ pub enum ArdLeafSpec {
     RationalQuadratic(RationalQuadraticArdKernel),
 }
 
-impl ScalarLeafSpec {}
-
 impl ArdLeafSpec {
     /// Number of lengthscales, one per dimension of the slot.
     pub(crate) fn dims(&self) -> usize {
@@ -113,8 +111,6 @@ impl ArdLeafSpec {
         }
     }
 }
-
-impl SuppliedLeafSpec {}
 
 /// Every variant of a typed leaf enum, with the leaf bound to `$leaf`.
 macro_rules! each_leaf {
@@ -253,7 +249,7 @@ impl ScalarDistance {
     }
 
     /// Binds `d2` to this slot for one call. Prediction reads it in place;
-    /// a fit or an insert copies it into the model.
+    /// a fit copies it into the model.
     ///
     /// See the example on [`ScalarDistance`].
     pub fn borrow<'a>(&self, d2: &'a [f64]) -> DistanceSource<'a> {
@@ -394,7 +390,7 @@ impl ArdDistance {
     }
 
     /// Binds `d2`, one table per dimension, for one call. Prediction reads
-    /// the tables in place; a fit or an insert copies them into the model.
+    /// the tables in place; a fit copies them into the model.
     ///
     /// See the example on [`ArdDistance`].
     pub fn borrow<'a>(&self, d2: &'a [&'a [f64]]) -> DistanceSource<'a> {

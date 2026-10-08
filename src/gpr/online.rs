@@ -12,11 +12,8 @@ use crate::data::pack_storage;
 use crate::error::PersistErrorKind;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
-use crate::kernel::{
-    BlockKind, DistanceSource, KernelScalar, KernelSpec, ModelKernel, PointKernel, QuerySources,
-    RectSlots,
-};
-use crate::kernel::{ScalarOps, SourceStore};
+use crate::kernel::ScalarOps;
+use crate::kernel::{KernelScalar, KernelSpec, ModelKernel, PointKernel};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
@@ -436,14 +433,9 @@ where
         self.workspace.ld()
     }
 
-    /// Appends one point: coordinates `x_new`, the `n × 1` columns of
-    /// supplied distances to the live points, and the target.
-    pub(crate) fn insert_point(
-        &mut self,
-        x_new: &[f64],
-        sources: Vec<DistanceSource<'_>>,
-        y_new: f64,
-    ) -> Result<PointId, GprError> {
+    /// Appends one point of a coordinate kernel: coordinates `x_new` and
+    /// the target.
+    pub(crate) fn insert_point(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
@@ -454,17 +446,6 @@ where
             return Err(GprError::NonFiniteInput);
         }
         self.registry.require_room()?;
-        // The model's buffers, taken for the call (an error leaves them
-        // empty: they hold no state).
-        let mut scratch = std::mem::take(&mut self.core.query_sources);
-        let columns = QuerySources::<P::Storage>::bind(
-            &self.core.slots,
-            sources,
-            self.core.n,
-            1,
-            BlockKind::Rect,
-            &mut scratch,
-        )?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -502,12 +483,10 @@ where
                 d,
                 query_x.as_mut().submatrix_mut(0, 0, 1, d),
             );
-            let cross =
-                (!self.core.slots.is_empty()).then_some(&columns as &dyn RectSlots<P::Storage>);
             with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
-                cross,
+                None,
                 Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
@@ -528,12 +507,7 @@ where
         insert_stages::add_kernel(kernel_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
-        // Stage the squares first: the border is the last step that can fail.
-        let staged = self.core.sources.stage_append(columns.blocks())?;
-        drop(columns);
-        self.core.query_sources = scratch;
         self.workspace.append_border(k_new)?;
-        self.core.sources.commit(staged);
         #[cfg(feature = "insert-stages")]
         insert_stages::add_border(border_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -562,11 +536,6 @@ where
         let ld = self.workspace.ld();
         self.core
             .predict_with_into(StoredFactor::Ldlt(ld), &mut [], q, options, out)
-    }
-
-    /// The predict `α` of the current points (solved once while stale).
-    pub(crate) fn predict_alpha(&self) -> Result<&[P::Refine], GprError> {
-        Ok(self.alphas()?.1)
     }
 
     /// Removes the training point identified by `id` and packs every buffer.
@@ -610,9 +579,7 @@ where
             });
         }
         let index = self.registry.index_of(id)?;
-        let staged = self.core.sources.stage_delete(index)?;
         self.workspace.delete_index(index)?;
-        self.core.sources.commit(staged);
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
         remove_point_mat_inplace(&mut self.core.x, self.core.n, index);
@@ -790,7 +757,7 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
         if self.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
-        self.insert_point(x_new, Vec::new(), y_new)
+        self.insert_point(x_new, y_new)
     }
 
     /// Returns the kernel whose hyperparameters this model owns.

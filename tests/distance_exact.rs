@@ -1051,3 +1051,312 @@ fn every_source_kind_predicts_alike_at_each_precision() {
     every_source_kind_predicts_alike::<SinglePrecision>(1e-5);
     every_source_kind_predicts_alike::<MixedPrecision<ReevaluateKernel>>(1e-12);
 }
+
+/// A value finite in `f64` but past the range of `f32` is reported where it
+/// is, for the training square and a prediction block, by an `f32` and a
+/// mixed model, on a scalar and an ARD slot; an `f64` model accepts the table.
+#[test]
+fn a_value_past_the_storage_range_is_reported_where_it_is() {
+    use gprx::{DoublePrecision, MixedPrecision, ReevaluateKernel};
+    fn check<P: gprx::GpScalar>(narrow: bool) {
+        let c0 = coord(0, N, 0.0);
+        let q0 = coord(0, M, 0.5);
+        let y = targets();
+        let huge = 1e300;
+        let mut train = sq(&c0, &c0);
+        train[2 + 4 * N] = huge;
+        train[4 + 2 * N] = huge;
+        let mut cross = sq(&c0, &q0);
+        cross[3 + N] = huge;
+        let image = ScalarDistance::new();
+        let bands = ArdDistance::new(2).expect("dims");
+        let scalar = || image.kernel(RbfKernel::new(1.0).expect("ell"));
+        let ard = || {
+            bands
+                .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
+                .expect("dims")
+        };
+        let at = |r: Result<(), GprError>, row: usize, col: usize, what: &str| {
+            if narrow {
+                assert!(
+                    matches!(r, Err(GprError::InvalidDistance { row: a, col: b, .. }) if (a, b) == (row, col)),
+                    "{what}: {r:?}"
+                );
+            } else {
+                // In range for `f64`: no table error (a pair at `d² = 1e300`
+                // may still leave the Gram short of definite).
+                assert!(
+                    !matches!(r, Err(GprError::InvalidDistance { .. })),
+                    "{what}: {r:?}"
+                );
+            }
+        };
+        let fit = |k: gprx::kernel::DistanceKernel, s: gprx::kernel::DistanceSource<'_>| {
+            Gpr::new(k, lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([s], N, &y)
+                .map(drop)
+                .map_err(|(_, e)| e)
+        };
+        at(fit(scalar(), image.from_slice(&train)), 4, 2, "scalar fit");
+        at(
+            fit(ard(), bands.from_vecs(vec![sq(&c0, &c0), train.clone()])),
+            4,
+            2,
+            "ard fit",
+        );
+        let model = Gpr::new(scalar(), lik())
+            .with_precision::<P>()
+            .with_optimizer(Fixed)
+            .factor([image.from_vec(sq(&c0, &c0))], N, &y)
+            .map_err(|(_, e)| e)
+            .expect("fit");
+        at(
+            model.predict([image.borrow(&cross)], M).map(drop),
+            3,
+            1,
+            "scalar predict",
+        );
+        let model = Gpr::new(ard(), lik())
+            .with_precision::<P>()
+            .with_optimizer(Fixed)
+            .factor([bands.from_vecs(vec![sq(&c0, &c0); 2])], N, &y)
+            .map_err(|(_, e)| e)
+            .expect("fit");
+        let ok = sq(&c0, &q0);
+        let blocks: [&[f64]; 2] = [&ok, &cross];
+        at(
+            model.predict([bands.borrow(&blocks)], M).map(drop),
+            3,
+            1,
+            "ard predict",
+        );
+    }
+    check::<SinglePrecision>(true);
+    check::<MixedPrecision<ReevaluateKernel>>(true);
+    check::<DoublePrecision>(false);
+}
+
+/// Reads `d²` squares through a fill, column runs from the diagonal down:
+/// `values` holds one `rows × rows` square per dimension, or one square
+/// that every dimension reads.
+struct Table<'a> {
+    values: &'a [f64],
+    rows: usize,
+    dims: usize,
+}
+
+impl DistanceFill for Table<'_> {
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        let len = rows.len();
+        for k in 0..self.dims {
+            for (slot, i) in out[k * len..(k + 1) * len].iter_mut().zip(rows.clone()) {
+                let square = (k * self.rows * self.rows) % self.values.len();
+                *slot = self.values[square + i + col * self.rows];
+            }
+        }
+    }
+}
+
+/// A rounded training square is refused exactly and repaired on request
+/// whichever way it arrives (a scalar or an ARD table, a borrowed one, or a
+/// fill), and past the tolerance it is refused there too.
+#[test]
+fn a_rounded_square_is_repaired_alike_from_every_source() {
+    let c0 = coord(0, N, 0.0);
+    let q0 = coord(0, M, 0.5);
+    let y = targets();
+    let exact = sq(&c0, &c0);
+    let mut rounded = exact.clone();
+    // A mirror pair a little apart, whose mean is the exact value, and a
+    // diagonal a little off zero.
+    rounded[2 + 3 * N] += 1e-13;
+    rounded[3 + 2 * N] -= 1e-13;
+    rounded[4 + 4 * N] = 1e-13;
+    let mut far = exact.clone();
+    far[1] = -0.5;
+    far[N] = -0.5;
+    let mut far_diag = exact.clone();
+    far_diag[2 + 2 * N] = 0.5;
+    let cross = sq(&c0, &q0);
+    let image = ScalarDistance::new();
+    let bands = ArdDistance::new(2).expect("dims");
+    let scalar = image.kernel(RbfKernel::new(1.0).expect("ell"));
+    let ard = bands
+        .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
+        .expect("dims");
+    fn fit(
+        kernel: &gprx::kernel::DistanceKernel,
+        source: gprx::kernel::DistanceSource<'_>,
+        y: &[f64],
+    ) -> Result<gprx::FittedGpr<Fixed, gprx::DoublePrecision, gprx::kernel::DistanceKernel>, GprError>
+    {
+        Gpr::new(kernel.clone(), lik())
+            .with_optimizer(Fixed)
+            .factor([source], N, y)
+            .map_err(|(_, e)| e)
+    }
+    let fill = |values: &[f64], dims| Table {
+        values: values.to_vec().leak(),
+        rows: N,
+        dims,
+    };
+    let (rounded, far, far_diag) = (&rounded[..], &far[..], &far_diag[..]);
+    // Scalar: the fill path.
+    let want = fit(&scalar, image.from_vec(exact.clone()), &y)
+        .expect("exact")
+        .predict([image.borrow(&cross)], M)
+        .expect("predict");
+    let t = fill(rounded, 1);
+    assert!(matches!(
+        fit(&scalar, image.fill(&t), &y),
+        Err(GprError::InvalidDistance { row: 4, col: 4, .. })
+    ));
+    let got = fit(&scalar, image.fill(&t).tidy(1e-6).expect("tol"), &y)
+        .expect("repaired fill")
+        .predict([image.borrow(&cross)], M)
+        .expect("predict");
+    assert_pred(&got, &want, 1e-9);
+    for (bad, row, col) in [(far, 1, 0), (far_diag, 2, 2)] {
+        let t = fill(bad, 1);
+        assert!(matches!(
+            fit(&scalar, image.fill(&t).tidy(1e-6).expect("tol"), &y),
+            Err(GprError::InvalidDistance { row: r, col: c, .. }) if (r, c) == (row, col)
+        ));
+        assert!(matches!(
+            fit(&scalar, image.fill(&t), &y),
+            Err(GprError::InvalidDistance { .. })
+        ));
+    }
+    // ARD: owned, borrowed, and filled tables.
+    let both: [&[f64]; 2] = [&exact, &exact];
+    let want = fit(&ard, bands.borrow(&both), &y)
+        .expect("exact")
+        .predict([bands.from_vecs(vec![cross.clone(); 2])], M)
+        .expect("predict");
+    let mixed: [&[f64]; 2] = [&exact, rounded];
+    let t = fill(rounded, 2);
+    for source in [
+        bands.from_vecs(vec![exact.clone(), rounded.to_vec()]),
+        bands.borrow(&mixed),
+        bands.fill(&t),
+    ] {
+        let got = fit(&ard, source.tidy(1e-6).expect("tol"), &y)
+            .expect("repaired")
+            .predict([bands.from_vecs(vec![cross.clone(); 2])], M)
+            .expect("predict");
+        assert_pred(&got, &want, 1e-9);
+    }
+    let t = fill(far, 2);
+    let far_pair: [&[f64]; 2] = [&exact, far];
+    for source in [
+        bands.from_vecs(vec![exact.clone(), far.to_vec()]),
+        bands.borrow(&far_pair),
+        bands.fill(&t),
+    ] {
+        assert!(matches!(
+            fit(&ard, source.tidy(1e-6).expect("tol"), &y),
+            Err(GprError::InvalidDistance { row: 1, col: 0, .. })
+        ));
+    }
+    assert!(rounded[4 + 4 * N] > 0.0, "a borrowed table is not written");
+}
+
+/// A slot gets as many tables as it has blocks: one for a scalar slot, `d`
+/// for an ARD slot, at fit and at predict.
+#[test]
+fn a_slot_takes_as_many_tables_as_it_has_blocks() {
+    let c0 = coord(0, N, 0.0);
+    let q0 = coord(0, M, 0.5);
+    let y = targets();
+    let image = ScalarDistance::new();
+    let bands = ArdDistance::new(2).expect("dims");
+    let train = sq(&c0, &c0);
+    let cross = sq(&c0, &q0);
+    let ard = Gpr::new(
+        bands
+            .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
+            .expect("dims"),
+        lik(),
+    )
+    .with_optimizer(Fixed);
+    for source in [
+        bands.from_vecs(vec![train.clone()]),
+        bands.from_vecs(vec![train.clone(); 3]),
+        bands.from_slices(&[&train]),
+    ] {
+        assert!(matches!(
+            ard.clone().factor([source], N, &y),
+            Err((_, GprError::LengthMismatch { .. }))
+        ));
+    }
+    let model = ard
+        .factor([bands.from_vecs(vec![train.clone(); 2])], N, &y)
+        .expect("fit");
+    let one: [&[f64]; 1] = [&cross];
+    assert!(matches!(
+        model.predict([bands.borrow(&one)], M),
+        Err(GprError::LengthMismatch { .. })
+    ));
+    let _ = image;
+}
+
+/// ARD predictions on supplied blocks match the coordinate model whatever
+/// the number of dimensions (past the ones the kernel keeps at hand) and
+/// queries (many per worker, so the columns are pipelined), including a
+/// value checked in a later column and a covariance whose query square is
+/// a fill.
+#[test]
+fn ard_predictions_match_coordinates_at_many_dimensions_and_queries() {
+    let m = 23;
+    for dims in [3, 17] {
+        let cols: Vec<Vec<f64>> = (0..dims).map(|k| coord(k, N, 0.0)).collect();
+        let qcols: Vec<Vec<f64>> = (0..dims).map(|k| coord(k, m, 0.5)).collect();
+        let x: Vec<f64> = cols.concat();
+        let xs: Vec<f64> = qcols.concat();
+        let y = targets();
+        let ell: Vec<f64> = (0..dims).map(|k| 1.5 + 0.3 * k as f64).collect();
+        let ard = RbfArdKernel::new(&ell).expect("ell");
+        let coords = Gpr::new(KernelSpec::from(ard.clone()), lik())
+            .with_optimizer(Fixed)
+            .factor(&x, N, dims, &y)
+            .expect("coords");
+        let bands = ArdDistance::new(dims).expect("dims");
+        let train: Vec<Vec<f64>> = cols.iter().map(|c| sq(c, c)).collect();
+        let mut cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
+        let mut dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+            .with_optimizer(Fixed)
+            .factor([bands.from_vecs(train)], N, &y)
+            .expect("distances");
+        let refs: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+        let mut got = Prediction::default();
+        dist.predict_into([bands.borrow(&refs)], m, &mut got)
+            .expect("predict");
+        let expect = coords.predict(&xs, m, dims).expect("predict");
+        assert_pred(&got, &expect, TOL);
+        // The query square through a fill (every dimension of query 0 → its own).
+        let squares: Vec<f64> = qcols.iter().flat_map(|q| sq(q, q)).collect();
+        let fill = Table {
+            values: squares.leak(),
+            rows: m,
+            dims,
+        };
+        let cov = dist
+            .predict_covariance([bands.borrow(&refs)], [bands.fill(&fill)], m)
+            .expect("covariance");
+        let want = coords.predict_covariance(&xs, m, dims).expect("covariance");
+        assert_slice_close(&cov.covariance, &want.covariance, 1e-9);
+        // A bad value in a later column is found where it is.
+        cross[dims - 1][4 + 17 * N] = f64::NAN;
+        let refs: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+        assert!(matches!(
+            dist.predict_into([bands.borrow(&refs)], m, &mut got),
+            Err(GprError::InvalidDistance {
+                row: 4,
+                col: 17,
+                ..
+            })
+        ));
+    }
+}
