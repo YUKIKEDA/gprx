@@ -673,7 +673,9 @@ pub(crate) enum BlockList<'a, T> {
 }
 
 impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
-    /// `blocks` of `rows × cols` pairs in the state `S`.
+    /// `blocks` of `rows × cols` pairs in the state `S`. The type does not
+    /// prove the state: only binding code makes a `Checked` block, from
+    /// values it checked, cast, or packed.
     pub(crate) fn new(blocks: BlockList<'a, T>, rows: usize, cols: usize, col0: usize) -> Self {
         Self {
             blocks,
@@ -927,7 +929,9 @@ impl<S: BlockState> Gate<'_, S> {
                 return Err(super::sources::first_invalid_from(run, self.rows, self.col));
             }
         }
-        Err(super::sources::invalid_value(f64::NAN, 0, self.col))
+        // The lanes failed, yet no run holds an invalid value: the two
+        // checks disagree. Refuse without claiming a place.
+        Err(super::sources::unlocated())
     }
 }
 
