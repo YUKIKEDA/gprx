@@ -234,10 +234,7 @@ impl<M: crate::math::KernelMath, R: ResidualFormula, S: Supply> RefineSystem
 pub(super) fn exact_sources<'a, S: Supply>(
     sys: &TrainSystem<'a, f32, S>,
 ) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
-    match sys.exact {
-        Some(exact) => Ok(Cow::Borrowed(exact)),
-        None => sys.sources.to_f64().map(Cow::Owned),
-    }
+    crate::kernel::widened(sys.exact, sys.sources)
 }
 
 /// Refined predict `α` for [`MixedPrecision`](super::MixedPrecision).

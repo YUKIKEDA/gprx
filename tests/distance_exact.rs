@@ -651,6 +651,51 @@ fn a_white_term_adds_its_diagonal_to_the_query_covariance() {
     assert_slice_close(&got.covariance, &expect.covariance, TOL);
 }
 
+/// A borrowed ARD query square that `.tidy` repairs is copied first: the
+/// caller's tables stay as they were, and the repaired copy predicts as the
+/// symmetric square does.
+#[test]
+fn a_tidied_borrowed_ard_query_square_is_repaired_on_a_copy() {
+    let cols = [coord(0, N, 0.0), coord(1, N, 0.3)];
+    let qcols = [coord(0, M, 0.5), coord(1, M, 0.2)];
+    let y = targets();
+    let bands = ArdDistance::new(2).expect("dims");
+    let ard = RbfArdKernel::new(&[0.8, 1.4]).expect("ell");
+    let dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+        .with_optimizer(Fixed)
+        .factor(
+            [bands.from_vecs(cols.iter().map(|c| sq(c, c)).collect())],
+            N,
+            &y,
+        )
+        .expect("distances");
+    let cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
+    let cross: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+    let exact: Vec<Vec<f64>> = qcols.iter().map(|q| sq(q, q)).collect();
+    let mut skewed = exact.clone();
+    // One pair of the second dimension off by a relative 1e-9.
+    skewed[1][1] *= 1.0 + 1e-9;
+    let before = skewed.clone();
+    let exact: Vec<&[f64]> = exact.iter().map(Vec::as_slice).collect();
+    let skewed_refs: Vec<&[f64]> = skewed.iter().map(Vec::as_slice).collect();
+    assert!(
+        dist.predict_covariance([bands.borrow(&cross)], [bands.borrow(&skewed_refs)], M)
+            .is_err()
+    );
+    let want = dist
+        .predict_covariance([bands.borrow(&cross)], [bands.borrow(&exact)], M)
+        .expect("cov");
+    let got = dist
+        .predict_covariance(
+            [bands.borrow(&cross)],
+            [bands.borrow(&skewed_refs).tidy(1e-6).expect("tol")],
+            M,
+        )
+        .expect("cov");
+    assert_slice_close(&got.covariance, &want.covariance, 1e-8);
+    assert_eq!(skewed, before);
+}
+
 #[test]
 fn a_negative_squared_distance_is_rejected() {
     let c0 = coord(0, N, 0.0);

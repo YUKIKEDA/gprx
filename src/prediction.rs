@@ -297,7 +297,9 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict`].
+            /// Same as [`Self::predict`]. On an error the contents of `out`
+            /// are unspecified: a value a table fails on can be found after
+            /// part of the kernel block is written.
             ///
             $(#[$pdoc])*
             pub fn predict_into<'s>(
@@ -339,7 +341,7 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict`].
+            /// Same as [`Self::predict_into`], `out` included.
             ///
             $(#[$pdoc])*
             pub fn predict_with_into<'s>(

@@ -5,7 +5,7 @@ use crate::data::pack_points;
 use crate::error::GprError;
 use crate::kernel::GramInputs;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, CrossViews, KernelScalar, Triangle};
+use crate::kernel::{CompiledKernel, KernelScalar, Triangle};
 use crate::linalg::{
     copy_mat, dot, dot_ay, frobenius_dot, gemm, mat_add_mul, mat_sub_mul, mat_vec, quad_form,
     solve_llt, solve_lower, solve_lower_transpose,
@@ -596,13 +596,7 @@ where
         Triangle::Full,
     )?;
     let mut d_kmn = Mat::zeros(m, n);
-    compiled.hess_cross_views::<M>(
-        CrossViews::points(z, x),
-        d_kmn.as_mut(),
-        (i, j),
-        ks.scratch(m, n),
-        &mut compiled.nested_buffers(m, n),
-    )?;
+    ks.hess_cross_into::<M>(compiled, z, x, d_kmn.as_mut(), (i, j))?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.hess_diag_points::<M>(x, &mut diag, i, j)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
