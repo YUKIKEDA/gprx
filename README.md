@@ -381,7 +381,7 @@ The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `
 
 | Source | Copy |
 | --- | --- |
-| `from_vec(d2)` / `from_vecs(blocks)` | moved into the model (an `f64` model keeps the buffer) |
+| `from_vec(d2)` / `from_vecs(blocks)` | moved into the model (an `f64` model keeps the buffers as they are, so the fit copies nothing; an ARD slot then holds `d · n²` values instead of its packed `d · n(n+1)/2`) |
 | `from_slice(d2)` / `from_slices(blocks)` | copied at the call |
 | `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model, and copied by `fit` (an ARD square straight into its packed triangles) |
 | `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` writes `d²(i, col)` for each row `i` of `rows`; an ARD fill writes its `d` runs one after another. A square asks only for the rows `col..n` of each column |
