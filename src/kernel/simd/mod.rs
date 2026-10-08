@@ -83,6 +83,10 @@ fn valid_lanes(values: &[f64]) -> bool {
 /// Columns of one band of a square check ([`square_band`], [`pack_columns`]).
 pub(crate) const SQUARE_BAND: usize = 64;
 
+/// Rows ahead whose mirrors [`mirrors_v3`] fetches into cache.
+#[cfg(target_arch = "x86_64")]
+const MIRROR_AHEAD: usize = 8;
+
 /// Columns compared at a time inside a band ([`band_mirrors`]).
 const SUB_BAND: usize = 8;
 
@@ -257,6 +261,19 @@ fn mirrors_v3(
     let i4 = r0 + r1.saturating_sub(r0) / 4 * 4;
     let mut i = r0;
     while i < i4 {
+        // The mirrors of a row quad a few quads ahead are fetched into
+        // cache while this one is compared: each is a short run in its own
+        // page, which the hardware does not prefetch.
+        for k in i + MIRROR_AHEAD..(i + MIRROR_AHEAD + 4).min(r1) {
+            for at in (k * n + j0..k * n + c4).step_by(8) {
+                if let Some(v) = block.get(at) {
+                    simd.sse
+                        ._mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                            std::ptr::from_ref(v).cast(),
+                        );
+                }
+            }
+        }
         // The mirrors of the row quad: rows `j0..c4` of the columns
         // `i..i + 4`, one contiguous run each.
         let run = |k: usize| block.get(k * n + j0..k * n + c4);

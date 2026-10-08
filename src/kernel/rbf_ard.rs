@@ -401,22 +401,21 @@ impl RbfArdKernel {
             }
         }
         for (dim, slot) in out.iter_mut().enumerate() {
-            let block = cache.block(dim);
-            // Four running sums, folded in a fixed order.
-            let mut acc = [0.0f64; 4];
-            let chunks = s.as_chunks::<4>().0.iter().zip(block.as_chunks::<4>().0);
-            for (a, b) in chunks {
-                for lane in 0..4 {
-                    acc[lane] += a[lane] * b[lane].to_f64();
+            let sum = match cache.packed_block(dim) {
+                Some(block) => lane_dot(s, block),
+                // Dense tables: the same products, one column run at a time.
+                None => {
+                    let mut at = 0;
+                    let mut sum = 0.0;
+                    for col in 0..n {
+                        let run = cache.column(dim, col);
+                        sum += lane_dot(&s[at..at + run.len()], run);
+                        at += run.len();
+                    }
+                    sum
                 }
-            }
-            let tail = len - len % 4;
-            let rest: f64 = s[tail..]
-                .iter()
-                .zip(&block[tail..])
-                .map(|(a, b)| a * b.to_f64())
-                .sum();
-            *slot = 2.0 * w[dim] * (((acc[0] + acc[1]) + (acc[2] + acc[3])) + rest);
+            };
+            *slot = 2.0 * w[dim] * sum;
             // As the coordinate contraction: a weight or a Gram that
             // overflowed is an error, not a `NaN` gradient.
             if !slot.is_finite() {
@@ -775,6 +774,24 @@ fn rbf_hess<M: KernelMath, T: KernelScalar>(t: ArdR2<T>, same: bool) -> Result<T
     finite_kernel(ard_hess_terms::<M, T>(t.r2, t.dim_i, t.dim_j, same))
 }
 
+/// `Σ s_i · b_i` in four running sums, folded in a fixed order, then the
+/// tail.
+fn lane_dot<T: KernelScalar>(s: &[f64], b: &[T]) -> f64 {
+    let mut acc = [0.0f64; 4];
+    for (a, b) in s.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
+        for lane in 0..4 {
+            acc[lane] += a[lane] * b[lane].to_f64();
+        }
+    }
+    let tail = s.len().min(b.len()) / 4 * 4;
+    let rest: f64 = s[tail..]
+        .iter()
+        .zip(&b[tail..])
+        .map(|(a, b)| a * b.to_f64())
+        .sum();
+    ((acc[0] + acc[1]) + (acc[2] + acc[3])) + rest
+}
+
 #[cfg(test)]
 mod tests {
     use super::RbfArdKernel;
@@ -788,6 +805,62 @@ mod tests {
 
     /// A weight that overflowed gives an error, as the coordinate
     /// contraction does, not a `NaN` gradient.
+    /// The contraction over dense tables kept as they are matches the one
+    /// over the packed triangles, and the cache reads the same pairs.
+    #[test]
+    fn contraction_over_dense_tables_matches_the_packed_cache() {
+        use crate::kernel::dist::ArdSqDiffBuf;
+        let (n, d) = (7, 2);
+        let pair =
+            |dim: usize, i: usize, j: usize| ((i as f64) - (j as f64)).powi(2) * (0.5 + dim as f64);
+        let packed = ArdSqDiffBuf::<f64>::from_pairs(n, d, pair).expect("packed");
+        let tables = (0..d)
+            .map(|dim| (0..n * n).map(|at| pair(dim, at % n, at / n)).collect())
+            .collect();
+        let dense = ArdSqDiffBuf::<f64>::from_tables(tables, n);
+        assert!(dense.is_dense() && !packed.is_dense());
+        assert_eq!(dense.stored_len(), d * n * n);
+        let k = RbfArdKernel::new(&[1.0, 2.0]).expect("ell");
+        let gram = Mat::from_fn(n, n, |i, j| (-0.1 * (i as f64 - j as f64).powi(2)).exp());
+        let weight = Mat::from_fn(n, n, |i, j| 0.3 + 0.01 * (i * n + j) as f64);
+        let (mut a, mut b) = ([0.0; 2], [0.0; 2]);
+        let mut fold = Vec::new();
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            packed.view(),
+            &mut a,
+            &mut fold,
+        )
+        .expect("packed");
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            dense.view(),
+            &mut b,
+            &mut fold,
+        )
+        .expect("dense");
+        for (a, b) in a.iter().zip(&b) {
+            assert!((a - b).abs() <= 1e-12 * a.abs().max(1.0));
+        }
+        let (pv, dv) = (packed.view(), dense.view());
+        for dim in 0..d {
+            for i in 0..n {
+                for j in 0..n {
+                    assert_eq!(pv.get(dim, i, j).to_bits(), dv.get(dim, i, j).to_bits());
+                }
+            }
+        }
+        // A cast packs the dense tables.
+        let narrow = dense.map(|v| v as f32);
+        assert!(!narrow.is_dense());
+        assert_eq!(
+            narrow.view().get(1, 5, 2).to_bits(),
+            (pair(1, 5, 2) as f32).to_bits()
+        );
+    }
+
     #[test]
     fn contraction_from_sq_diff_refuses_a_non_finite_sum() {
         use crate::kernel::dist::ArdSqDiffBuf;
