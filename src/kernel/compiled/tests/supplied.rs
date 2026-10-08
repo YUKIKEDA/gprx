@@ -1,9 +1,10 @@
 //! Leaves on supplied squared distances against the same leaves on
 //! coordinates.
 
+use crate::GprError;
 use crate::kernel::compiled::CrossViews;
 use crate::kernel::compiled::gram::GramInputs;
-use crate::kernel::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareTable};
+use crate::kernel::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareTable, unbound};
 use crate::kernel::compiled::weighted::{DiagAccum, WeightedWalk};
 use crate::kernel::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use crate::kernel::{
@@ -22,12 +23,12 @@ struct RectTable<'a> {
 }
 
 impl RectSlots<f64> for RectTable<'_> {
-    fn scalar(&self, at: usize) -> MatRef<'_, f64> {
-        self.scalar[at]
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, f64>, GprError> {
+        self.scalar.get(at).copied().ok_or_else(unbound)
     }
 
-    fn ard(&self, at: usize) -> ArdRect<'_, f64> {
-        self.ard[at]
+    fn ard(&self, at: usize) -> Result<ArdRect<'_, f64>, GprError> {
+        self.ard.get(at).copied().ok_or_else(unbound)
     }
 }
 
@@ -641,4 +642,30 @@ fn compiled_leaves_number_their_slots_per_shape_in_slot_order() {
     let mut numbers = Vec::new();
     leaf_numbers(&spec.spec().compile(), &mut numbers);
     assert_eq!(numbers, [0, 0, 1, 0]);
+}
+
+/// A supply bound for another kernel, which holds fewer slots than the
+/// tree numbers, is reported, not read out of range.
+#[test]
+fn a_supply_without_the_trees_slot_is_an_error() {
+    let p = problem();
+    let (s1, s2) = (ScalarDistance::new(), ScalarDistance::new());
+    let rbf = RbfKernel::new(0.8).expect("ell");
+    let spec = s1.kernel(rbf) + s2.kernel(rbf);
+    let compiled = spec.spec().compile();
+    let table = p.square_table();
+    let x = Mat::<f64>::zeros(N, 0);
+    let mut out = Mat::<f64>::zeros(N, N);
+    let mut scratch = Mat::<f64>::zeros(N, N);
+    let got = compiled.eval_gram::<Accurate>(
+        GramInputs::<_, SuppliedSpec>::supplied(x.as_ref(), &table),
+        out.as_mut(),
+        Triangle::Lower,
+        scratch.as_mut(),
+        &mut Vec::new(),
+    );
+    assert!(matches!(
+        got,
+        Err(GprError::UnsupportedKernelOperation { .. })
+    ));
 }

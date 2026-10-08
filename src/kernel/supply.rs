@@ -63,6 +63,12 @@ impl SlotShape {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuppliedSpec {
     pub(crate) slot: SlotId,
+    /// The slot's number among the slots of its shape in the tree that
+    /// holds the leaf: depth first, in order of first appearance, the
+    /// order of [`DistanceKernel::slots`] split by shape. Every supply of
+    /// the tree keeps its slots in this order. Set when the tree is built
+    /// ([`DistanceKernel::from_spec`]).
+    pub(crate) at: usize,
     pub(crate) leaf: SuppliedLeafSpec,
 }
 
@@ -221,6 +227,7 @@ impl ScalarDistance {
     pub fn kernel(&self, leaf: impl ScalarDistanceLeaf) -> DistanceKernel {
         DistanceKernel::leaf(SuppliedSpec {
             slot: self.slot,
+            at: 0,
             leaf: SuppliedLeafSpec::Scalar(leaf.into_leaf()),
         })
     }
@@ -360,6 +367,7 @@ impl ArdDistance {
         }
         Ok(DistanceKernel::leaf(SuppliedSpec {
             slot: self.slot,
+            at: 0,
             leaf: SuppliedLeafSpec::Ard(leaf.into_leaf()),
         }))
     }
@@ -651,7 +659,11 @@ pub struct DistanceKernel<C: PointUse = DistanceOnly> {
 
 impl<C: PointUse> Clone for DistanceKernel<C> {
     fn clone(&self) -> Self {
-        Self::from_spec(self.spec.clone())
+        // The leaves keep their numbers: the tree is the same.
+        Self {
+            spec: self.spec.clone(),
+            _points: PhantomData,
+        }
     }
 }
 
@@ -676,7 +688,10 @@ impl DistanceKernel {
 }
 
 impl<C: PointUse> DistanceKernel<C> {
-    pub(crate) fn from_spec(spec: KernelSpec<SuppliedSpec>) -> Self {
+    /// The kernel of `spec`, its leaves numbered in their tree
+    /// ([`SuppliedSpec::at`]).
+    pub(crate) fn from_spec(mut spec: KernelSpec<SuppliedSpec>) -> Self {
+        number_leaves(&mut spec, &mut [Vec::new(), Vec::new()]);
         Self {
             spec,
             _points: PhantomData,
@@ -777,47 +792,27 @@ fn collect_slots<S: Supply>(spec: &KernelSpec<S>, out: &mut Vec<DistanceSlot>) {
     }
 }
 
-/// The number of `slot` among the slots of its shape in `root`: how many
-/// distinct slots of that shape first appear before it, depth first. The
-/// order of [`spec_slots`] split by shape; a walk of the tree, no buffer.
-pub(crate) fn slot_number<S: Supply>(root: &KernelSpec<S>, slot: SlotId) -> usize {
-    let ard = |leaf: &SuppliedSpec| matches!(leaf.shape(), SlotShape::Ard(_));
-    let Some(shape) = find_leaf(root, &mut 0, &mut |_, leaf| {
-        (leaf.slot == slot).then(|| ard(leaf))
-    }) else {
-        return 0;
-    };
-    let mut count = 0;
-    find_leaf(root, &mut 0, &mut |at, leaf| {
-        if leaf.slot == slot {
-            return Some(());
-        }
-        let first = find_leaf(root, &mut 0, &mut |k, l| (l.slot == leaf.slot).then_some(k));
-        if ard(leaf) == shape && first == Some(at) {
-            count += 1;
-        }
-        None
-    });
-    count
-}
-
-/// The first `Some` of `f(position, leaf)` over the supplied leaves of
-/// `spec`, depth first; `pos` counts the leaves visited.
-fn find_leaf<S: Supply, R>(
-    spec: &KernelSpec<S>,
-    pos: &mut usize,
-    f: &mut impl FnMut(usize, &SuppliedSpec) -> Option<R>,
-) -> Option<R> {
+/// Sets each leaf's [`SuppliedSpec::at`] in one depth-first walk: `seen`
+/// lists the slots met so far, scalar and ARD, in order, and a leaf's
+/// number is its slot's place in the list of its shape, the slot added
+/// when first met.
+fn number_leaves(spec: &mut KernelSpec<SuppliedSpec>, seen: &mut [Vec<SlotId>; 2]) {
     match spec {
         KernelSpec::Supplied(leaf) => {
-            let at = *pos;
-            *pos += 1;
-            f(at, S::spec(leaf))
+            let list = &mut seen[usize::from(matches!(leaf.shape(), SlotShape::Ard(_)))];
+            leaf.at = match list.iter().position(|&slot| slot == leaf.slot) {
+                Some(at) => at,
+                None => {
+                    list.push(leaf.slot);
+                    list.len() - 1
+                }
+            };
         }
         KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
-            find_leaf(left, pos, f).or_else(|| find_leaf(right, pos, f))
+            number_leaves(left, seen);
+            number_leaves(right, seen);
         }
-        _ => None,
+        _ => {}
     }
 }
 

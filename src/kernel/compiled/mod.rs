@@ -21,8 +21,6 @@ mod hess;
 pub(crate) mod supplied;
 pub(crate) mod weighted;
 
-use supplied::SupplyOrder;
-
 #[cfg(test)]
 mod leaf_table;
 #[cfg(test)]
@@ -211,12 +209,6 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     }
 
     pub(crate) fn from_spec(spec: &KernelSpec<S>) -> Self {
-        let number = |slot| crate::kernel::supply::slot_number(spec, slot);
-        Self::from_spec_in(spec, &SupplyOrder { number: &number })
-    }
-
-    /// Compiles `spec`, numbering its supplied slots in `order`.
-    fn from_spec_in(spec: &KernelSpec<S>, order: &SupplyOrder<'_>) -> Self {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
             KernelSpec::RbfArd(leaf) => Self::RbfArd(leaf.clone()),
@@ -229,17 +221,17 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
             KernelSpec::Custom(leaf) => Self::Custom(leaf.with_scalar()),
-            KernelSpec::Supplied(leaf) => Self::Supplied(S::compile(leaf, order)),
+            KernelSpec::Supplied(leaf) => Self::Supplied(S::compile(leaf)),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
-                flatten_sum(left, &mut terms, order);
-                flatten_sum(right, &mut terms, order);
+                flatten_sum(left, &mut terms);
+                flatten_sum(right, &mut terms);
                 Self::Sum(terms)
             }
             KernelSpec::Product(left, right) => {
                 let mut terms = Vec::new();
-                flatten_product(left, &mut terms, order);
-                flatten_product(right, &mut terms, order);
+                flatten_product(left, &mut terms);
+                flatten_product(right, &mut terms);
                 Self::Product(terms)
             }
         }
@@ -640,28 +632,26 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
 fn flatten_sum<T: KernelScalar, S: Supply>(
     spec: &KernelSpec<S>,
     out: &mut Vec<CompiledKernel<T, S>>,
-    order: &SupplyOrder<'_>,
 ) {
     match spec {
         KernelSpec::Sum(left, right) => {
-            flatten_sum(left, out, order);
-            flatten_sum(right, out, order);
+            flatten_sum(left, out);
+            flatten_sum(right, out);
         }
-        other => out.push(CompiledKernel::<T, S>::from_spec_in(other, order)),
+        other => out.push(CompiledKernel::<T, S>::from_spec(other)),
     }
 }
 
 fn flatten_product<T: KernelScalar, S: Supply>(
     spec: &KernelSpec<S>,
     out: &mut Vec<CompiledKernel<T, S>>,
-    order: &SupplyOrder<'_>,
 ) {
     match spec {
         KernelSpec::Product(left, right) => {
-            flatten_product(left, out, order);
-            flatten_product(right, out, order);
+            flatten_product(left, out);
+            flatten_product(right, out);
         }
-        other => out.push(CompiledKernel::<T, S>::from_spec_in(other, order)),
+        other => out.push(CompiledKernel::<T, S>::from_spec(other)),
     }
 }
 

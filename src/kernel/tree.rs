@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use super::compiled::supplied::{ColRange, RectSlots, SquareSlots, SuppliedLeaf, SupplyOrder};
+use super::compiled::supplied::{ColRange, RectSlots, SquareSlots, SuppliedLeaf};
 use super::{CompiledKernel, KernelScalar, SuppliedSpec};
 
 /// Represents the leaves a kernel tree holds besides coordinate leaves.
@@ -43,7 +43,7 @@ impl Supply for SuppliedSpec {}
 pub(crate) mod sealed {
     use super::{
         ColRange, CompiledKernel, KernelScalar, NoSupply, RectSlots, SquareSlots, SuppliedLeaf,
-        SuppliedSpec, SupplyOrder,
+        SuppliedSpec,
     };
     use std::fmt;
 
@@ -64,7 +64,7 @@ pub(crate) mod sealed {
         fn compiled_mut<T: KernelScalar>(leaf: &mut Self::Compiled<T>) -> &mut SuppliedLeaf<T>;
 
         /// Compiles the leaf for `T`, numbering its slot in `order`.
-        fn compile<T: KernelScalar>(leaf: &Self, order: &SupplyOrder<'_>) -> Self::Compiled<T>;
+        fn compile<T: KernelScalar>(leaf: &Self) -> Self::Compiled<T>;
 
         /// The squared distances of one set a tree of this kind reads:
         /// nothing for a coordinate tree, every slot's otherwise.
@@ -143,7 +143,7 @@ pub(crate) mod sealed {
             match *leaf {}
         }
 
-        fn compile<T: KernelScalar>(leaf: &Self, _order: &SupplyOrder<'_>) -> NoSupply {
+        fn compile<T: KernelScalar>(leaf: &Self) -> NoSupply {
             match *leaf {}
         }
 
@@ -218,8 +218,8 @@ pub(crate) mod sealed {
             leaf
         }
 
-        fn compile<T: KernelScalar>(leaf: &Self, order: &SupplyOrder<'_>) -> SuppliedLeaf<T> {
-            SuppliedLeaf::compile(leaf, order)
+        fn compile<T: KernelScalar>(leaf: &Self) -> SuppliedLeaf<T> {
+            SuppliedLeaf::compile(leaf)
         }
 
         type Squares<'a, T: KernelScalar> = &'a dyn SquareSlots<T>;

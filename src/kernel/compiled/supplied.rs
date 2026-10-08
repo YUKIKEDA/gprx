@@ -27,18 +27,9 @@ use crate::param::Interval;
 pub struct SuppliedLeaf<T: KernelScalar> {
     pub(crate) slot: SlotId,
     /// The slot's number among the slots of its shape in the tree
-    /// ([`SupplyOrder`]): where every supply of the tree keeps it.
+    /// ([`SuppliedSpec::at`]): where every supply of the tree keeps it.
     pub(crate) at: usize,
     pub(crate) leaf: SuppliedCompiled<T>,
-}
-
-/// The numbers of the slots of a tree being compiled: per shape, in
-/// depth-first order of first appearance, the order of
-/// [`crate::kernel::DistanceSlot`]s a tree lists, split by shape. Every
-/// supply keeps its slots in it. Numbering reads the tree and allocates
-/// nothing.
-pub struct SupplyOrder<'a> {
-    pub(crate) number: &'a dyn Fn(SlotId) -> usize,
 }
 
 /// The square supply of an ARD slot: packed lower triangles (the training
@@ -73,25 +64,53 @@ impl<T: KernelScalar> ArdRect<'_, T> {
 }
 
 /// The `d²` of every slot of a tree between the points of one set, by the
-/// slot's number in its shape ([`SuppliedLeaf::at`]). A supply holds every
-/// slot of the tree it was bound for, so a lookup cannot miss.
+/// slot's number in its shape ([`SuppliedLeaf::at`]). A supply bound for
+/// the tree holds every slot it numbers; one bound for another kernel is
+/// reported on the lookup ([`unbound`]), never read out of range.
 pub trait SquareSlots<T>: Sync {
     /// The dense symmetric `n × n` square of scalar slot `at`.
-    fn scalar(&self, at: usize) -> MatRef<'_, T>;
+    ///
+    /// # Errors
+    ///
+    /// [`unbound`] when the supply holds no scalar slot `at`.
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError>;
 
     /// The square of ARD slot `at`.
-    fn ard(&self, at: usize) -> ArdSquare<'_, T>;
+    ///
+    /// # Errors
+    ///
+    /// [`unbound`] when the supply holds no ARD slot `at`.
+    fn ard(&self, at: usize) -> Result<ArdSquare<'_, T>, GprError>;
 }
 
 /// The `d²` of every slot of a tree between the points of two sets, by the
-/// slot's number in its shape ([`SuppliedLeaf::at`]). A supply holds every
-/// slot of the tree it was bound for, so a lookup cannot miss.
+/// slot's number in its shape ([`SuppliedLeaf::at`]). A supply bound for
+/// the tree holds every slot it numbers; one bound for another kernel is
+/// reported on the lookup ([`unbound`]), never read out of range.
 pub trait RectSlots<T>: Sync {
     /// The dense `rows × cols` block of scalar slot `at`.
-    fn scalar(&self, at: usize) -> MatRef<'_, T>;
+    ///
+    /// # Errors
+    ///
+    /// [`unbound`] when the supply holds no scalar slot `at`.
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError>;
 
     /// One dense `rows × cols` block per dimension of ARD slot `at`.
-    fn ard(&self, at: usize) -> ArdRect<'_, T>;
+    ///
+    /// # Errors
+    ///
+    /// [`unbound`] when the supply holds no ARD slot `at`.
+    fn ard(&self, at: usize) -> Result<ArdRect<'_, T>, GprError>;
+}
+
+/// A supply was paired with a tree whose leaf numbers it does not hold
+/// (bound for another kernel). Reported, never read out of range.
+pub(crate) fn unbound() -> GprError {
+    GprError::UnsupportedKernelOperation {
+        reason: "a distance leaf has no supplied squared distances here (the supply was bound \
+                 for another kernel)"
+            .to_owned(),
+    }
 }
 
 /// The compiled leaf of a [`SuppliedLeaf`], typed by its slot's shape.
@@ -120,8 +139,8 @@ pub(crate) enum ArdLeaf {
 }
 
 impl<T: KernelScalar> SuppliedLeaf<T> {
-    /// Compiles `spec` for the scalar `T`, numbering its slot in `order`.
-    pub(crate) fn compile(spec: &SuppliedSpec, order: &SupplyOrder<'_>) -> Self {
+    /// Compiles `spec` for the scalar `T`.
+    pub(crate) fn compile(spec: &SuppliedSpec) -> Self {
         let leaf = match &spec.leaf {
             SuppliedLeafSpec::Scalar(leaf) => SuppliedCompiled::Scalar(match leaf {
                 ScalarLeafSpec::Rbf(k) => ScalarLeaf::Rbf(*k),
@@ -136,10 +155,9 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 ArdLeafSpec::RationalQuadratic(k) => ArdLeaf::RationalQuadratic(k.clone()),
             }),
         };
-        let at = (order.number)(spec.slot);
         Self {
             slot: spec.slot,
-            at,
+            at: spec.at,
             leaf,
         }
     }
@@ -158,7 +176,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = slots.scalar(self.at);
+                let d = slots.scalar(self.at)?;
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.apply_math::<M, _>(d, out, uplo),
                     ScalarLeaf::Matern(k) => k.apply_math::<M, _>(d, out, uplo),
@@ -167,7 +185,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.apply(d, out, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at) {
+            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at)? {
                 ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
                     ArdLeaf::Matern(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
@@ -189,7 +207,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = slots.scalar(self.at);
+                let d = slots.scalar(self.at)?;
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
                     ScalarLeaf::Matern(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
@@ -198,7 +216,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.grad(d, d_k, p, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at) {
+            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at)? {
                 ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
                     ArdLeaf::Matern(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
@@ -219,7 +237,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = slots.scalar(self.at);
+                let d = slots.scalar(self.at)?;
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
                     ScalarLeaf::Matern(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
@@ -228,7 +246,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.hess(d, d2_k, i, j, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at) {
+            SuppliedCompiled::Ard(leaf) => match slots.ard(self.at)? {
                 ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
                     ArdLeaf::Matern(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
@@ -249,7 +267,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = slots.scalar(self.at);
+                let d = slots.scalar(self.at)?;
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.apply_cross_math::<M, _>(d, out),
                     ScalarLeaf::Matern(k) => k.apply_cross_math::<M, _>(d, out),
@@ -259,7 +277,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 }
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = slots.ard(self.at);
+                let b = slots.ard(self.at)?;
                 ard_cross::<M, T>(leaf, b, out)
             }
         }
@@ -274,7 +292,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = slots.scalar(self.at);
+                let d = slots.scalar(self.at)?;
                 match leaf {
                     ScalarLeaf::Rbf(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
                     ScalarLeaf::Matern(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
@@ -284,7 +302,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 }
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = slots.ard(self.at);
+                let b = slots.ard(self.at)?;
                 ard_grad_cross::<M, T>(leaf, b, d_k, p)
             }
         }
@@ -299,11 +317,11 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     ) -> Result<(), GprError> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
-                let d = slots.scalar(self.at);
+                let d = slots.scalar(self.at)?;
                 scalar_hess_cross::<M, T>(leaf, d, d2_k, pair)
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = slots.ard(self.at);
+                let b = slots.ard(self.at)?;
                 ard_hess_cross::<M, T>(leaf, b, d2_k, pair)
             }
         }
@@ -514,12 +532,12 @@ pub(crate) struct SquareTable<'a, T> {
 
 #[cfg(test)]
 impl<T: Sync + Copy> SquareSlots<T> for SquareTable<'_, T> {
-    fn scalar(&self, at: usize) -> MatRef<'_, T> {
-        self.scalar[at]
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError> {
+        self.scalar.get(at).copied().ok_or_else(unbound)
     }
 
-    fn ard(&self, at: usize) -> ArdSquare<'_, T> {
-        self.ard[at]
+    fn ard(&self, at: usize) -> Result<ArdSquare<'_, T>, GprError> {
+        self.ard.get(at).copied().ok_or_else(unbound)
     }
 }
 
@@ -531,11 +549,11 @@ pub(crate) struct ColRange<'a, T> {
 }
 
 impl<T: KernelScalar> RectSlots<T> for ColRange<'_, T> {
-    fn scalar(&self, at: usize) -> MatRef<'_, T> {
-        self.inner.scalar(at).subcols(self.start, self.len)
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError> {
+        Ok(self.inner.scalar(at)?.subcols(self.start, self.len))
     }
 
-    fn ard(&self, at: usize) -> ArdRect<'_, T> {
-        self.inner.ard(at).subcols(self.start, self.len)
+    fn ard(&self, at: usize) -> Result<ArdRect<'_, T>, GprError> {
+        Ok(self.inner.ard(at)?.subcols(self.start, self.len))
     }
 }

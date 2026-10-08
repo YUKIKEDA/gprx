@@ -480,7 +480,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
                         ..
                     },
                     slots,
-                ) => (FastLeaf::from_scalar(leaf), Some(slots.scalar(*at))),
+                ) => (FastLeaf::from_scalar(leaf), Some(slots.scalar(*at)?)),
                 (SuppliedLeaf { .. }, _) => (FastLeaf::None, None),
             },
             (Self::Periodic(leaf), dist) => (FastLeaf::Periodic(leaf), dist),
@@ -527,7 +527,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
                 },
                 slots,
             ) = S::square_leaf(supplied, walk.inputs.slots)
-            && let ArdSquare::Packed(cache) = slots.ard(*at)
+            && let ArdSquare::Packed(cache) = slots.ard(*at)?
         {
             let k = match node.own {
                 Some(k) => k,
