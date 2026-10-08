@@ -16,6 +16,7 @@ use rayon::prelude::*;
 
 use super::compiled::supplied::{RectSlot, RectSlots, SquareSlot, SquareSlots};
 use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
+use super::simd::SquareOut;
 use super::{DistanceFill, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use crate::error::GprError;
@@ -136,7 +137,7 @@ pub(crate) fn valid(v: f64) -> bool {
 /// exactly zero, which for finite values holds only when they are equal
 /// (`0.0` and `-0.0` included). A `NaN` is never the same as anything.
 #[inline]
-fn same(a: f64, b: f64) -> bool {
+pub(crate) fn same(a: f64, b: f64) -> bool {
     a - b == 0.0
 }
 
@@ -216,14 +217,14 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
             Err(first_invalid(block, rows))
         };
     }
-    // A square: [`check_band`] reads each value once and checks the lower
-    // triangle's values, the diagonal, and each mirror, so an invalid value
-    // above the diagonal fails its mirror. The violation is located only
+    // A square: [`super::simd::square_band`] checks the lower triangle's
+    // values, the diagonal, and each mirror, so an invalid value above the
+    // diagonal fails its mirror. The violation is located only
     // once a band has failed.
     let bands = rows.div_ceil(BAND);
     let band = |band: usize| {
         let j0 = band * BAND;
-        check_band(block, rows, j0, (j0 + BAND).min(rows), |_| {})
+        super::simd::square_band(block, rows, (j0, (j0 + BAND).min(rows)))
     };
     let ok = if rows < PAR_ROWS {
         (0..bands).all(band)
@@ -265,48 +266,17 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
 /// squares cost less than handing their bands to the pool.
 const PAR_ROWS: usize = 256;
 
-/// Columns of one band of [`check_band`]: the mirror of the band is read
-/// one row at a time, `BAND` contiguous values (a cache line of `f64`).
-const BAND: usize = 8;
-
-/// Checks the columns `j0..j1` (`j1 − j0 ≤` [`BAND`]) of the `n × n`
-/// square `block` exactly, below and on the diagonal, and hands each lower
-/// run (rows `j..n` of column `j`) to `run`: values finite and
-/// non-negative, a zero diagonal, and each entry equal to its mirror. The
-/// band's mirror is read row by row, contiguous, while its `BAND` columns
-/// are streamed, so no pair is a lone strided load.
-fn check_band(block: &[f64], n: usize, j0: usize, j1: usize, mut run: impl FnMut(&[f64])) -> bool {
-    let mut ok = true;
-    for j in j0..j1 {
-        let lower = &block[j * n + j..(j + 1) * n];
-        ok &= lower.iter().fold(lower[0] == 0.0, |ok, &v| ok & valid(v));
-        run(lower);
-        for i in j + 1..j1 {
-            ok &= same(block[i + j * n], block[j + i * n]);
-        }
-    }
-    if j1 - j0 == BAND {
-        let cols: [&[f64]; BAND] = std::array::from_fn(|c| &block[(j0 + c) * n..(j0 + c + 1) * n]);
-        for i in j1..n {
-            let row = &block[i * n + j0..i * n + j1];
-            ok &= (0..BAND).fold(true, |ok, c| ok & same(cols[c][i], row[c]));
-        }
-    } else {
-        for j in j0..j1 {
-            for i in j1..n {
-                ok &= same(block[i + j * n], block[j + i * n]);
-            }
-        }
-    }
-    ok
-}
+/// Columns of one band of a square check ([`super::simd::square_band`],
+/// [`super::simd::pack_columns`]).
+const BAND: usize = super::simd::SQUARE_BAND;
 
 /// Checks the `d` dense `n × n` training squares of an ARD slot exactly
-/// (`block(k)` is dimension `k`) and packs their lower triangles, reading
-/// each square once, band by band ([`check_band`]) on the Rayon pool, as
-/// the coordinate path fills its `(Δx_d)²` cache. A band's columns are one
-/// contiguous range of the packed triangle. A violation is located with
-/// [`exact_block`].
+/// (`block(k)` is dimension `k`) and packs their lower triangles, band by
+/// band ([`super::simd::pack_columns`]), as the coordinate path fills its
+/// `(Δx_d)²` cache. On one thread the runs are appended in order, so the
+/// buffer is written once and never zeroed; on the Rayon pool each square
+/// is split into ranges of bands ([`pack_bands`]). A violation is located
+/// with [`exact_block`].
 ///
 /// # Errors
 ///
@@ -323,11 +293,20 @@ fn pack_exact_ard<'b, T: KernelScalar>(
         .map(|cells| cells / 2)
         .ok_or(GprError::SizeOverflow)?;
     let len = per_dim.checked_mul(d).ok_or(GprError::SizeOverflow)?;
-    let mut data = vec![T::from_f64(0.0); len];
-    let ok = data
-        .par_chunks_mut(per_dim.max(1))
-        .enumerate()
-        .all(|(k, dest)| pack_bands(block(k), n, 0..n.div_ceil(BAND), dest));
+    let (data, ok) = if rayon::current_num_threads() > 1 {
+        let mut data = vec![T::from_f64(0.0); len];
+        let ok = data
+            .par_chunks_mut(per_dim.max(1))
+            .enumerate()
+            .all(|(k, dest)| pack_bands(block(k), n, 0..n.div_ceil(BAND), dest));
+        (data, ok)
+    } else {
+        let mut data = Vec::with_capacity(len);
+        let ok = (0..d).fold(true, |ok, k| {
+            ok & super::simd::pack_columns(block(k), n, (0, n), SquareOut::Push(&mut data))
+        });
+        (data, ok)
+    };
     if !ok {
         for k in 0..d {
             exact_block(block(k), n, n, BlockKind::Square)?;
@@ -348,14 +327,7 @@ fn pack_bands<T: KernelScalar>(
 ) -> bool {
     let (j0, j1) = (bands.start * BAND, (bands.end * BAND).min(n));
     if bands.len() <= 1 {
-        let mut at = 0;
-        return j0 >= j1
-            || check_band(block, n, j0, j1, |lower| {
-                for (slot, &v) in dest[at..at + lower.len()].iter_mut().zip(lower) {
-                    *slot = T::from_f64(v);
-                }
-                at += lower.len();
-            });
+        return j0 >= j1 || super::simd::pack_columns(block, n, (j0, j1), SquareOut::Over(dest));
     }
     let mid = bands.start + bands.len() / 2;
     // Columns `j0..mid · BAND` hold `n − j` values each.
