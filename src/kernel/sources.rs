@@ -243,7 +243,10 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
         }
         Ok(())
     });
-    found
+    found?;
+    // A band failed, yet the scan that locates violations found none: the
+    // two checks disagree. Refuse the table rather than accept it.
+    Err(invalid(0, 0, "a band of the square failed its check"))
 }
 
 /// Rows below which a square is checked on the calling thread: smaller
@@ -532,12 +535,32 @@ fn fill_scalar_square(
     if let Tidy::Within(rel) = tidy {
         rounding.judge(rel)?;
     }
-    for col in 0..n {
-        for row in col + 1..n {
-            square[col + row * n] = square[row + col * n];
+    mirror_lower(&mut square, n);
+    Ok(square)
+}
+
+/// Side of the tiles [`mirror_lower`] copies: a source tile and its
+/// destination tile fit in L1 together.
+const MIRROR_TILE: usize = 32;
+
+/// Copies the strict lower triangle of the column-major `n × n` `square`
+/// onto its upper triangle, a tile at a time: each destination row of a
+/// tile is written contiguously while the tile's source columns are in
+/// cache, not one strided store per pair.
+fn mirror_lower(square: &mut [f64], n: usize) {
+    for j0 in (0..n).step_by(MIRROR_TILE) {
+        let j1 = (j0 + MIRROR_TILE).min(n);
+        for i0 in (j0..n).step_by(MIRROR_TILE) {
+            let i1 = (i0 + MIRROR_TILE).min(n);
+            for i in i0..i1 {
+                // Row `i` of the upper triangle, columns `j0..min(j1, i)`:
+                // `square[j + i * n]` for consecutive `j`.
+                for j in j0..j1.min(i) {
+                    square[j + i * n] = square[i + j * n];
+                }
+            }
         }
     }
-    Ok(square)
 }
 
 /// An ARD training square of `n` points and `d` dimensions from a fill:
@@ -846,25 +869,7 @@ impl<T: KernelScalar> TrainSources<T> {
 
     /// The same squares in `f64`.
     pub(crate) fn to_f64(&self) -> Result<TrainSources<f64>, GprError> {
-        let n = self.n;
-        let mut slots = Vec::with_capacity(self.slots.len());
-        for (id, data) in &self.slots {
-            let data = match data {
-                TrainData::Scalar(square) => TrainData::Scalar(
-                    (0..n * n)
-                        .map(|at| square[at % n + (at / n) * self.cap].to_f64())
-                        .collect(),
-                ),
-                TrainData::Ard(cache) => {
-                    let view = cache.view();
-                    TrainData::Ard(ArdSqDiffBuf::from_pairs(n, view.d(), |k, i, j| {
-                        view.get(k, i, j).to_f64()
-                    })?)
-                }
-            };
-            slots.push((*id, data));
-        }
-        Ok(TrainSources { n, cap: n, slots })
+        self.cast()
     }
 
     #[cfg(test)]
@@ -905,23 +910,23 @@ impl<T: KernelScalar> TrainSources<T> {
         }
     }
 
-    /// The same squares at the scalar `U`.
+    /// The same squares at the scalar `U`: a scalar square column by
+    /// column (contiguous runs past the leading dimension), an ARD cache in
+    /// one pass over its packed values.
     pub(crate) fn cast<U: KernelScalar>(&self) -> Result<TrainSources<U>, GprError> {
-        let n = self.n;
+        let (n, cap) = (self.n, self.cap.max(1));
+        let cast = |v: T| U::from_f64(v.to_f64());
         let mut slots = Vec::with_capacity(self.slots.len());
         for (id, data) in &self.slots {
             let data = match data {
-                TrainData::Scalar(square) => TrainData::Scalar(
-                    (0..n * n)
-                        .map(|at| U::from_f64(square[at % n + (at / n) * self.cap].to_f64()))
-                        .collect(),
-                ),
-                TrainData::Ard(cache) => {
-                    let view = cache.view();
-                    TrainData::Ard(ArdSqDiffBuf::from_pairs(n, view.d(), |k, i, j| {
-                        U::from_f64(view.get(k, i, j).to_f64())
-                    })?)
+                TrainData::Scalar(square) => {
+                    let mut out = Vec::with_capacity(n * n);
+                    for j in 0..n {
+                        out.extend(square[j * cap..j * cap + n].iter().map(|&v| cast(v)));
+                    }
+                    TrainData::Scalar(out)
                 }
+                TrainData::Ard(cache) => TrainData::Ard(cache.map(cast)),
             };
             slots.push((*id, data));
         }
@@ -1335,11 +1340,11 @@ fn fill_dense(
             let src = &column[k * run..(k + 1) * run];
             let block = &mut all[k * len..(k + 1) * len];
             block[col * rows + first..(col + 1) * rows].copy_from_slice(src);
-            if kind == BlockKind::Square {
-                for (i, &v) in (first..rows).zip(src) {
-                    block[col + i * rows] = v;
-                }
-            }
+        }
+    }
+    if kind == BlockKind::Square {
+        for block in all.chunks_exact_mut(len.max(1)) {
+            mirror_lower(block, rows);
         }
     }
     Ok(())

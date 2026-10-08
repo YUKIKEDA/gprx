@@ -253,6 +253,7 @@ impl Validity {
     }
 
     fn valid(&self) -> bool {
+        // Exact, as [`super::all_valid_distances`]: `0` or `NaN`, nothing between.
         self.nonfinite.reduce_add() == 0.0 && self.least.to_array().iter().all(|&l| l >= 0.0)
     }
 }

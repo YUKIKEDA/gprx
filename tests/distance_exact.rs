@@ -815,6 +815,13 @@ fn rounding_is_refused_exactly_and_repaired_on_request() {
         Err(GprError::InvalidConfig { .. })
     ));
     assert!(image.borrow(&cross).tidy(f64::NAN).is_err());
+    // At `1` and past it any table would pass as rounding.
+    for rel_tol in [1.0, 2.0, f64::INFINITY] {
+        assert!(matches!(
+            image.borrow(&cross).tidy(rel_tol),
+            Err(GprError::InvalidConfig { .. })
+        ));
+    }
 }
 
 /// Fits an ARD distance model of the slot `bands` at `P` on two dimensions and predicts on

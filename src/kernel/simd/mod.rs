@@ -75,6 +75,8 @@ fn valid_lanes(values: &[f64]) -> bool {
         .fold(true, |ok, &v| ok & super::sources::valid(v));
     let sum: f64 = zero.iter().sum();
     let min = least.iter().fold(0.0f64, |m, &l| if l < m { l } else { m });
+    // An exact test, not a tolerance: a sum of `v · 0` is `0` exactly for
+    // finite values and `NaN` otherwise (`float_cmp` allows a literal `0`).
     rest & (sum == 0.0) & (min >= 0.0)
 }
 

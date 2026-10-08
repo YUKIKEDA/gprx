@@ -109,7 +109,7 @@ where
         n: usize,
         y: &[f64],
     ) -> Result<FittedGpr<O, P, DistanceKernel>, (Self, GprError)> {
-        self.fit_input(distances_only(sources, n, y))
+        self.fit_input(train_input(sources, n, (&[], 0), y))
     }
 }
 
@@ -145,7 +145,7 @@ impl<P: GpScalar> Gpr<Fixed, P, DistanceKernel<DistanceOnly>> {
         n: usize,
         y: &[f64],
     ) -> Result<FittedGpr<Fixed, P, DistanceKernel>, (Self, GprError)> {
-        self.factor_input(distances_only(sources, n, y))
+        self.factor_input(train_input(sources, n, (&[], 0), y))
     }
 }
 
@@ -192,7 +192,7 @@ where
         n_cols: usize,
         y: &[f64],
     ) -> Result<FittedGpr<O, P, DistanceKernel<WithPoints>>, (Self, GprError)> {
-        self.fit_input(with_points(sources, n, x, n_cols, y))
+        self.fit_input(train_input(sources, n, (x, n_cols), y))
     }
 }
 
@@ -231,7 +231,7 @@ impl<P: GpScalar> Gpr<Fixed, P, DistanceKernel<WithPoints>> {
         n_cols: usize,
         y: &[f64],
     ) -> Result<FittedGpr<Fixed, P, DistanceKernel<WithPoints>>, (Self, GprError)> {
-        self.factor_input(with_points(sources, n, x, n_cols, y))
+        self.factor_input(train_input(sources, n, (x, n_cols), y))
     }
 }
 
@@ -240,25 +240,12 @@ fn shorten<'s: 'a, 'a>(source: DistanceSource<'s>) -> DistanceSource<'a> {
     source
 }
 
-fn distances_only<'s: 'a, 'a>(
+/// The training input of a distance model: `x` (`n × n_cols`) is empty for
+/// a [`DistanceOnly`] kernel.
+fn train_input<'s: 'a, 'a>(
     sources: impl IntoIterator<Item = DistanceSource<'s>>,
     n: usize,
-    y: &'a [f64],
-) -> TrainInput<'a> {
-    TrainInput {
-        x: &[],
-        n_rows: n,
-        n_cols: 0,
-        y,
-        sources: sources.into_iter().map(shorten).collect(),
-    }
-}
-
-fn with_points<'s: 'a, 'a>(
-    sources: impl IntoIterator<Item = DistanceSource<'s>>,
-    n: usize,
-    x: &'a [f64],
-    n_cols: usize,
+    (x, n_cols): (&'a [f64], usize),
     y: &'a [f64],
 ) -> TrainInput<'a> {
     TrainInput {
@@ -270,96 +257,85 @@ fn with_points<'s: 'a, 'a>(
     }
 }
 
-/// The [`DistanceQuery`] of an Exact model; `$alpha` reads its predict `α`.
-macro_rules! exact_query {
-    ($model:ident, alpha = |$this:ident| $alpha:expr) => {
-        impl<O, P: GpScalar, C: PointUse> DistanceQuery for $model<O, P, DistanceKernel<C>> {
-            type Refine = P::Refine;
+/// The query of an Exact model on supplied distances.
+impl<O, P: GpScalar, C: PointUse> DistanceQuery for FittedGpr<O, P, DistanceKernel<C>> {
+    type Refine = P::Refine;
 
-            fn query_distances<'s>(
-                &self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                points: QueryPoints<'_>,
-                m: usize,
-                options: PredictOptions,
-            ) -> Result<Prediction<P::Refine>, GprError> {
-                let slots = &self.core.slots;
-                let $this = self;
-                let alpha = $alpha?;
-                let mut out = Prediction::default();
-                let mut scratch = QueryScratch::new();
-                bind_query(slots, (self.core.n, m), cross, None, &mut scratch)?.run(
-                    points,
-                    m,
-                    P::REFINES_IN_F64,
-                    |q| {
-                        self.core
-                            .write_prediction(self.factor(), alpha, q, options, &mut out)
-                    },
-                )?;
-                Ok(out)
-            }
+    fn query_distances<'s>(
+        &self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let slots = &self.core.slots;
+        let alpha = &self.core.alpha[..];
+        let mut out = Prediction::default();
+        let mut scratch = QueryScratch::new();
+        bind_query(slots, (self.core.n, m), cross, None, &mut scratch)?.run(
+            points,
+            m,
+            P::REFINES_IN_F64,
+            |q| {
+                self.core
+                    .write_prediction(self.factor(), alpha, q, options, &mut out)
+            },
+        )?;
+        Ok(out)
+    }
 
-            fn query_distances_into<'s>(
-                &mut self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                points: QueryPoints<'_>,
-                m: usize,
-                options: PredictOptions,
-                out: &mut Prediction<P::Refine>,
-            ) -> Result<(), GprError> {
-                // The model's buffers, taken for the call: the blocks borrow
-                // them while the predict borrows the model. They hold no
-                // state, so a panic that loses them loses only capacity.
-                let mut scratch = std::mem::take(&mut self.core.query_sources);
-                let result = bind_query(
-                    &self.core.slots,
-                    (self.core.n, m),
-                    cross,
-                    None,
-                    &mut scratch,
-                )
-                .and_then(|bound| {
-                    bound.run(points, m, P::REFINES_IN_F64, |q| {
-                        self.predict_query_into(q, options, out)
-                    })
-                });
-                self.core.query_sources = scratch;
-                result
-            }
+    fn query_distances_into<'s>(
+        &mut self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        // The model's buffers, taken for the call: the blocks borrow
+        // them while the predict borrows the model. They hold no
+        // state, so a panic that loses them loses only capacity.
+        let mut scratch = std::mem::take(&mut self.core.query_sources);
+        let result = bind_query(
+            &self.core.slots,
+            (self.core.n, m),
+            cross,
+            None,
+            &mut scratch,
+        )
+        .and_then(|bound| {
+            bound.run(points, m, P::REFINES_IN_F64, |q| {
+                self.predict_query_into(q, options, out)
+            })
+        });
+        self.core.query_sources = scratch;
+        result
+    }
 
-            fn query_distance_covariance<'s>(
-                &self,
-                cross: impl IntoIterator<Item = DistanceSource<'s>>,
-                square: impl IntoIterator<Item = DistanceSource<'s>>,
-                points: QueryPoints<'_>,
-                m: usize,
-                options: PredictOptions,
-            ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-                let slots = &self.core.slots;
-                let $this = self;
-                let alpha = $alpha?;
-                let square = Some(square.into_iter().collect());
-                let mut scratch = QueryScratch::new();
-                bind_query(slots, (self.core.n, m), cross, square, &mut scratch)?.run(
-                    points,
-                    m,
-                    P::REFINES_IN_F64,
-                    |q| self.core.write_covariance(self.factor(), alpha, q, options),
-                )
-            }
+    fn query_distance_covariance<'s>(
+        &self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        square: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        let slots = &self.core.slots;
+        let alpha = &self.core.alpha[..];
+        let square = Some(square.into_iter().collect());
+        let mut scratch = QueryScratch::new();
+        bind_query(slots, (self.core.n, m), cross, square, &mut scratch)?.run(
+            points,
+            m,
+            P::REFINES_IN_F64,
+            |q| self.core.write_covariance(self.factor(), alpha, q, options),
+        )
+    }
 
-            fn draw_jitter(&self) -> JitterPolicy {
-                self.core.policies.jitter
-            }
-        }
-    };
+    fn draw_jitter(&self) -> JitterPolicy {
+        self.core.policies.jitter
+    }
 }
-
-exact_query!(
-    FittedGpr,
-    alpha = |model| Ok::<_, GprError>(&model.core.alpha[..])
-);
 
 distance_predict!(
     impl [O, P: GpScalar] FittedGpr<O, P, DistanceKernel<DistanceOnly>>,

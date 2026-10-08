@@ -978,8 +978,8 @@ impl DistanceSource<'_> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InvalidConfig`] when `rel_tol` is negative or not
-    /// finite.
+    /// Returns [`GprError::InvalidConfig`] when `rel_tol` is not in
+    /// `[0, 1)` (negative, `NaN`, or so large that any table would pass).
     ///
     /// # Examples
     ///
@@ -999,9 +999,11 @@ impl DistanceSource<'_> {
     /// # }
     /// ```
     pub fn tidy(mut self, rel_tol: f64) -> Result<Self, GprError> {
-        if !(rel_tol.is_finite() && rel_tol >= 0.0) {
+        // Past `1` the tolerance reaches the largest value itself, so every
+        // negative value, diagonal, and mirror gap would pass as rounding.
+        if !(0.0..1.0).contains(&rel_tol) {
             return Err(GprError::InvalidConfig {
-                reason: format!("tidy tolerance must be finite and non-negative, got {rel_tol}"),
+                reason: format!("tidy tolerance must be in [0, 1), got {rel_tol}"),
             });
         }
         self.tidy = Tidy::Within(rel_tol);

@@ -417,6 +417,11 @@ impl RbfArdKernel {
                 .map(|(a, b)| a * b.to_f64())
                 .sum();
             *slot = 2.0 * w[dim] * (((acc[0] + acc[1]) + (acc[2] + acc[3])) + rest);
+            // As the coordinate contraction: a weight or a Gram that
+            // overflowed is an error, not a `NaN` gradient.
+            if !slot.is_finite() {
+                return Err(GprError::NonFiniteKernelValue);
+            }
         }
         Ok(())
     }
@@ -785,6 +790,42 @@ mod tests {
     const TOL: f64 = 1e-10;
 
     use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, points_2d};
+
+    /// A weight that overflowed gives an error, as the coordinate
+    /// contraction does, not a `NaN` gradient.
+    #[test]
+    fn contraction_from_sq_diff_refuses_a_non_finite_sum() {
+        use crate::kernel::dist::ArdSqDiffBuf;
+        let k = RbfArdKernel::new(&[1.0, 2.0]).expect("ell");
+        let cache = ArdSqDiffBuf::<f64>::from_pairs(3, 2, |dim, i, j| {
+            ((i as f64) - (j as f64)).powi(2) * (1.0 + dim as f64)
+        })
+        .expect("cache");
+        let gram = Mat::from_fn(3, 3, |i, j| if i == j { 1.0 } else { 0.5 });
+        let mut weight = Mat::from_fn(3, 3, |_, _| 1.0);
+        let mut out = [0.0; 2];
+        let mut fold = Vec::new();
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            cache.view(),
+            &mut out,
+            &mut fold,
+        )
+        .expect("finite");
+        assert!(out.iter().all(|g| g.is_finite()));
+        weight[(2, 0)] = f64::INFINITY;
+        assert!(matches!(
+            k.contract_square_from_sq_diff(
+                weight.as_ref(),
+                gram.as_ref(),
+                cache.view(),
+                &mut out,
+                &mut fold
+            ),
+            Err(GprError::NonFiniteKernelValue)
+        ));
+    }
 
     fn sq_dist(x: MatRef<'_, f64>) -> Mat<f64> {
         let n = x.nrows();

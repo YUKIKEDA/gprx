@@ -348,6 +348,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     /// # Errors
     ///
     /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    #[cfg(test)]
     pub(crate) fn from_pairs(
         n: usize,
         d: usize,
@@ -403,6 +404,19 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             packed_len(n).ok().and_then(|l| l.checked_mul(d))
         );
         Self { data, n, d }
+    }
+
+    /// The same cache with every value mapped by `f` (a cast), in one pass
+    /// over the packed values.
+    pub(crate) fn map<U>(&self, f: impl Fn(T) -> U) -> ArdSqDiffBuf<U>
+    where
+        T: Copy,
+    {
+        ArdSqDiffBuf {
+            data: self.data.iter().map(|&v| f(v)).collect(),
+            n: self.n,
+            d: self.d,
+        }
     }
 
     /// A cache of `n` points and `d` dimensions holding zeros, to be
