@@ -102,6 +102,18 @@ fn no_source() -> GprError {
     }
 }
 
+/// A band of a square failed its check, yet the scan that locates a
+/// violation found none (the two checks disagree). The table is refused;
+/// `(0, 0)` stands for an unknown place, as the reason says.
+fn unlocated() -> GprError {
+    invalid(
+        0,
+        0,
+        "a band of the square failed its check, but no pair could be located \
+         (the position (0, 0) is a placeholder)",
+    )
+}
+
 /// An invalid pair `(row, col)` of a table.
 fn invalid(row: usize, col: usize, reason: impl Into<String>) -> GprError {
     GprError::InvalidDistance {
@@ -246,7 +258,7 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
     found?;
     // A band failed, yet the scan that locates violations found none: the
     // two checks disagree. Refuse the table rather than accept it.
-    Err(invalid(0, 0, "a band of the square failed its check"))
+    Err(unlocated())
 }
 
 /// Rows below which a square is checked on the calling thread: smaller
@@ -320,7 +332,7 @@ fn pack_exact_ard<'b, T: KernelScalar>(
         for k in 0..d {
             exact_block(block(k), n, n, BlockKind::Square)?;
         }
-        return Err(invalid(0, 0, "a band of the square failed its check"));
+        return Err(unlocated());
     }
     Ok(ArdSqDiffBuf::from_packed(data, n, d))
 }
@@ -967,10 +979,19 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
 
     /// The squares at `f64`: [`Self::exact`], or the storage values widened.
     fn to_f64(&self) -> Result<Cow<'_, TrainSources<f64>>, GprError> {
-        match self.exact() {
-            Some(exact) => Ok(Cow::Borrowed(exact)),
-            None => self.storage().to_f64().map(Cow::Owned),
-        }
+        widened(self.exact(), self.storage())
+    }
+}
+
+/// The squares at `f64`: `exact` when a store keeps them, else `storage`
+/// widened. The one place that picks between the two.
+pub(crate) fn widened<'a, S: KernelScalar>(
+    exact: Option<&'a TrainSources<f64>>,
+    storage: &TrainSources<S>,
+) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
+    match exact {
+        Some(exact) => Ok(Cow::Borrowed(exact)),
+        None => storage.to_f64().map(Cow::Owned),
     }
 }
 
