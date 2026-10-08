@@ -3,7 +3,7 @@
 
 use crate::kernel::compiled::CrossViews;
 use crate::kernel::compiled::gram::GramInputs;
-use crate::kernel::compiled::supplied::{RectSlot, RectSlots, SquareSlot, SquareTable};
+use crate::kernel::compiled::supplied::{ArdRect, RectSlot, RectSlots, SquareSlot, SquareTable};
 use crate::kernel::compiled::weighted::{DiagAccum, WeightedWalk};
 use crate::kernel::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
 use crate::kernel::{
@@ -126,12 +126,12 @@ impl Problem {
             (self.image_slot(), RectSlot::Scalar(self.cross_sq.as_ref())),
             (
                 self.bands_slot(),
-                RectSlot::Ard(ArdBlocks {
-                    blocks: BlockList::Vecs(&self.cross_blocks),
-                    rows: N,
-                    cols: M,
-                    col0: 0,
-                }),
+                RectSlot::Ard(ArdRect::Checked(ArdBlocks::new(
+                    BlockList::Vecs(&self.cross_blocks),
+                    N,
+                    M,
+                    0,
+                ))),
             ),
         ])
     }

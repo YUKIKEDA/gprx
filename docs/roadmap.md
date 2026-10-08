@@ -25,7 +25,7 @@ C1-4 → C1-7
 C1-5 → C1-7
 C1-6 → C1-7
 C1-7 → C2-1
-D1-1 → D1-2 → D1-3 → D1-4 → D1-5 → D1-6
+D1-1 → D1-2 → D1-3 → D1-3a → D1-3b → D1-3c → D1-4 → D1-5 → D1-6
 ```
 
 Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done. C2-1 follows C1-7.
@@ -239,6 +239,9 @@ Requirements: design §5.6. Every row meets them and pastes its benches.
 | D1-1 | Docs | Requirements for supplied distances (design §5.6) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
 | D1-2 | Task | Benches and allocation checks against the coordinate path, before the implementation | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
 | D1-3 | Feat | `DistanceKernel`, sources, the strict table check, and the exact models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
+| D1-3a | Task | Unchecked and checked ARD prediction blocks as types | [#485](https://github.com/YUKIKEDA/gprx/issues/485) | open |
+| D1-3b | Task | Covariance query squares read without a second copy | [#486](https://github.com/YUKIKEDA/gprx/issues/486) | open |
+| D1-3c | Task | Supply presence in the model's type, not a runtime `Option` | [#487](https://github.com/YUKIKEDA/gprx/issues/487) | open |
 | D1-4 | Feat | Online insert and delete on supplied distances (deferred compaction, ARD in place) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | Set after Grill on #473 |
 | D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |
 | D1-6 | Feat | Save and load of distance models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |

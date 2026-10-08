@@ -1,7 +1,7 @@
 //! ARD rational quadratic kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdBlocks, ArdSqDiff};
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState};
 use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::simd::ard::Profile;
@@ -310,9 +310,9 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `K` from `(Δ_d)²` blocks.
-    pub(crate) fn apply_cross_from_blocks<T: KernelScalar>(
+    pub(crate) fn apply_cross_from_blocks<T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
@@ -324,9 +324,9 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
-    pub(crate) fn grad_cross_from_blocks<T: KernelScalar>(
+    pub(crate) fn grad_cross_from_blocks<T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
     ) -> Result<(), GprError> {
@@ -341,9 +341,9 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
-    pub(crate) fn hess_cross_from_blocks<T: KernelScalar>(
+    pub(crate) fn hess_cross_from_blocks<T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,

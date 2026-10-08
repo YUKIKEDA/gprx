@@ -4,7 +4,7 @@
 //! `r² = Σ_d w_d Δ_d²` (`w_d = 1/ℓ_d²`). The shape checks, the `r²` sums from
 //! coordinates or from the `(Δx_d)²` cache, and the matrix loops live here.
 
-use super::dist::{ArdBlocks, ArdSqDiff};
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState};
 use super::{KernelScalar, Triangle, write_square};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
@@ -140,31 +140,20 @@ pub(crate) fn r2_from_cache<T: KernelScalar>(
 /// is negative (at its place in the caller's table), or
 /// [`GprError::NonFiniteKernelValue`] if `r²` is not finite.
 #[inline]
-pub(crate) fn r2_from_blocks<T: KernelScalar>(
-    blocks: ArdBlocks<'_, T>,
+pub(crate) fn r2_from_blocks<T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
     row: usize,
     col: usize,
     inv_ell_sq: &[f64],
     pick: Pick,
 ) -> Result<ArdR2<T>, GprError> {
-    sum_r2(inv_ell_sq, pick, |dim| {
-        let v = blocks.get(dim, row, col);
-        if super::sources::valid(v.to_f64()) {
-            Ok(v)
-        } else {
-            Err(super::sources::invalid_value(
-                v.to_f64(),
-                row,
-                col + blocks.col0,
-            ))
-        }
-    })
+    sum_r2(inv_ell_sq, pick, |dim| blocks.read(dim, row, col))
 }
 
 /// Writes every entry of the rectangular `out` from `(Δ_d)²` blocks.
 /// `pair(row, col)` is the value.
-pub(crate) fn write_from_blocks<T: KernelScalar>(
-    blocks: ArdBlocks<'_, T>,
+pub(crate) fn write_from_blocks<T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
     out: MatMut<'_, T>,
     d: usize,
     pair: impl FnMut(usize, usize) -> Result<T, GprError>,
@@ -174,8 +163,8 @@ pub(crate) fn write_from_blocks<T: KernelScalar>(
 }
 
 /// Checks that `blocks` has `d` dimensions and the shape of `out`.
-pub(crate) fn require_blocks<T: KernelScalar>(
-    blocks: ArdBlocks<'_, T>,
+pub(crate) fn require_blocks<T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
     out: MatRef<'_, T>,
     d: usize,
 ) -> Result<(), GprError> {
@@ -185,14 +174,14 @@ pub(crate) fn require_blocks<T: KernelScalar>(
             expected_dim: d,
         });
     }
-    if out.nrows() != blocks.rows || out.ncols() != blocks.cols {
+    if out.nrows() != blocks.rows() || out.ncols() != blocks.cols() {
         return Err(GprError::ShapeMismatch {
             reason: format!(
                 "output is {}x{}, expected {}x{}",
                 out.nrows(),
                 out.ncols(),
-                blocks.rows,
-                blocks.cols
+                blocks.rows(),
+                blocks.cols()
             ),
         });
     }

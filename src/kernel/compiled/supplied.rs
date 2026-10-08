@@ -12,7 +12,7 @@
 use faer::{MatMut, MatRef};
 
 use crate::error::GprError;
-use crate::kernel::dist::{ArdBlocks, ArdSqDiff, BlockList};
+use crate::kernel::dist::{ArdBlocks, ArdSqDiff, BlockList, Checked, Unchecked};
 use crate::kernel::leaf_params::LeafParams;
 use crate::kernel::supply::{ArdLeafSpec, ScalarLeafSpec, SuppliedLeafSpec};
 use crate::kernel::{
@@ -44,7 +44,28 @@ pub enum RectSlot<'a, T> {
     /// Dense `rows × cols`.
     Scalar(MatRef<'a, T>),
     /// One dense `rows × cols` block per dimension.
-    Ard(ArdBlocks<'a, T>),
+    Ard(ArdRect<'a, T>),
+}
+
+/// The blocks of an ARD slot, checked when bound or to be checked as they
+/// are read ([`crate::kernel::dist::BlockState`]).
+#[derive(Clone, Copy, Debug)]
+pub enum ArdRect<'a, T> {
+    /// Checked when bound: the training triangles, a cast, a repaired or
+    /// filled table.
+    Checked(ArdBlocks<'a, T, Checked>),
+    /// A caller's block read in place, checked as it is read.
+    Unchecked(ArdBlocks<'a, T, Unchecked>),
+}
+
+impl<T: KernelScalar> ArdRect<'_, T> {
+    /// Columns `start..start + len`.
+    pub(crate) fn subcols(self, start: usize, len: usize) -> Self {
+        match self {
+            Self::Checked(b) => Self::Checked(b.subcols(start, len)),
+            Self::Unchecked(b) => Self::Unchecked(b.subcols(start, len)),
+        }
+    }
 }
 
 /// The square supplies of every slot of a tree.
@@ -102,7 +123,7 @@ fn scalar_rect<'a, T>(
 fn ard_rect<'a, T>(
     slots: Option<&'a dyn RectSlots<T>>,
     slot: SlotId,
-) -> Result<ArdBlocks<'a, T>, GprError> {
+) -> Result<ArdRect<'a, T>, GprError> {
     match slots.and_then(|s| s.rect(slot)) {
         Some(RectSlot::Ard(blocks)) => Ok(blocks),
         _ => Err(missing()),
@@ -380,7 +401,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
     fn at_zero(
         &self,
         scalar: impl FnOnce(&ScalarLeaf<T>, MatRef<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
-        ard: impl FnOnce(&ArdLeaf, ArdBlocks<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
+        ard: impl FnOnce(&ArdLeaf, ArdRect<'_, T>, MatMut<'_, T>) -> Result<(), GprError>,
     ) -> Result<T, GprError> {
         let zero = [T::from_f64(0.0)];
         let mut cell = [T::from_f64(0.0)];
@@ -390,12 +411,12 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                 scalar(leaf, MatRef::from_column_major_slice(&zero, 1, 1), out)?;
             }
             SuppliedCompiled::Ard(leaf) => {
-                let b = ArdBlocks {
-                    blocks: BlockList::Repeat(&zero, leaf.dims()),
-                    rows: 1,
-                    cols: 1,
-                    col0: 0,
-                };
+                let b = ArdRect::Checked(ArdBlocks::new(
+                    BlockList::Repeat(&zero, leaf.dims()),
+                    1,
+                    1,
+                    0,
+                ));
                 ard(leaf, b, out)?;
             }
         }
@@ -414,42 +435,52 @@ impl ArdLeaf {
     }
 }
 
+/// Calls `$f` on the blocks of `$rect` in their state.
+macro_rules! on_state {
+    ($rect:expr, |$b:ident| $f:expr) => {
+        match $rect {
+            ArdRect::Checked($b) => $f,
+            ArdRect::Unchecked($b) => $f,
+        }
+    };
+}
+
 fn ard_cross<M: crate::math::KernelMath, T: KernelScalar>(
     leaf: &ArdLeaf,
-    b: ArdBlocks<'_, T>,
+    b: ArdRect<'_, T>,
     out: MatMut<'_, T>,
 ) -> Result<(), GprError> {
-    match leaf {
-        ArdLeaf::Rbf(k) => k.apply_cross_from_blocks::<M, T>(b, out),
-        ArdLeaf::Matern(k) => k.apply_cross_from_blocks::<M, T>(b, out),
+    on_state!(b, |b| match leaf {
+        ArdLeaf::Rbf(k) => k.apply_cross_from_blocks::<M, T, _>(b, out),
+        ArdLeaf::Matern(k) => k.apply_cross_from_blocks::<M, T, _>(b, out),
         ArdLeaf::RationalQuadratic(k) => k.apply_cross_from_blocks(b, out),
-    }
+    })
 }
 
 fn ard_grad_cross<M: crate::math::KernelMath, T: KernelScalar>(
     leaf: &ArdLeaf,
-    b: ArdBlocks<'_, T>,
+    b: ArdRect<'_, T>,
     d_k: MatMut<'_, T>,
     p: usize,
 ) -> Result<(), GprError> {
-    match leaf {
-        ArdLeaf::Rbf(k) => k.grad_cross_from_blocks::<M, T>(b, d_k, p),
-        ArdLeaf::Matern(k) => k.grad_cross_from_blocks::<M, T>(b, d_k, p),
+    on_state!(b, |b| match leaf {
+        ArdLeaf::Rbf(k) => k.grad_cross_from_blocks::<M, T, _>(b, d_k, p),
+        ArdLeaf::Matern(k) => k.grad_cross_from_blocks::<M, T, _>(b, d_k, p),
         ArdLeaf::RationalQuadratic(k) => k.grad_cross_from_blocks(b, d_k, p),
-    }
+    })
 }
 
 fn ard_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
     leaf: &ArdLeaf,
-    b: ArdBlocks<'_, T>,
+    b: ArdRect<'_, T>,
     d2_k: MatMut<'_, T>,
     (i, j): (usize, usize),
 ) -> Result<(), GprError> {
-    match leaf {
-        ArdLeaf::Rbf(k) => k.hess_cross_from_blocks::<M, T>(b, d2_k, i, j),
-        ArdLeaf::Matern(k) => k.hess_cross_from_blocks::<M, T>(b, d2_k, i, j),
+    on_state!(b, |b| match leaf {
+        ArdLeaf::Rbf(k) => k.hess_cross_from_blocks::<M, T, _>(b, d2_k, i, j),
+        ArdLeaf::Matern(k) => k.hess_cross_from_blocks::<M, T, _>(b, d2_k, i, j),
         ArdLeaf::RationalQuadratic(k) => k.hess_cross_from_blocks(b, d2_k, i, j),
-    }
+    })
 }
 
 fn scalar_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
@@ -526,15 +557,11 @@ pub(crate) struct ColRange<'a, T> {
     pub(crate) len: usize,
 }
 
-impl<T: Sync> RectSlots<T> for ColRange<'_, T> {
+impl<T: KernelScalar> RectSlots<T> for ColRange<'_, T> {
     fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
         Some(match self.inner.rect(slot)? {
             RectSlot::Scalar(view) => RectSlot::Scalar(view.subcols(self.start, self.len)),
-            RectSlot::Ard(blocks) => RectSlot::Ard(ArdBlocks {
-                cols: self.len,
-                col0: blocks.col0 + self.start,
-                ..blocks
-            }),
+            RectSlot::Ard(blocks) => RectSlot::Ard(blocks.subcols(self.start, self.len)),
         })
     }
 }

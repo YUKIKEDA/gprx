@@ -1,7 +1,7 @@
 //! ARD Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdBlocks, ArdSqDiff};
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState};
 use super::finite_kernel;
 use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
 use super::simd::ard::Profile;
@@ -321,9 +321,9 @@ impl MaternArdKernel {
     }
 
     /// Rectangular `K` from `(Δ_d)²` blocks.
-    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
@@ -334,9 +334,9 @@ impl MaternArdKernel {
     }
 
     /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
-    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
     ) -> Result<(), GprError> {
@@ -350,9 +350,9 @@ impl MaternArdKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
-    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,

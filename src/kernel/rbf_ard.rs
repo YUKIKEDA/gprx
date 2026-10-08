@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdBlocks, ArdSqDiff, require_ard_sq_diff_shape};
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -446,20 +446,15 @@ impl RbfArdKernel {
     }
 
     /// Rectangular `K` from `(Δ_d)²` blocks.
-    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         mut out: MatMut<'_, T>,
     ) -> Result<(), GprError> {
         let w = self.lengthscales.inv_ell_sq();
         ard::require_blocks(blocks, out.as_ref(), self.num_params())?;
         if let Some(of) = T::as_f64_mut(out.rb_mut())
-            && lanes::try_apply_cross_from_blocks::<M>(
-                |dim| T::as_f64_slice(blocks.block(dim)),
-                blocks.col0,
-                of,
-                w,
-            )?
+            && lanes::try_apply_cross_from_blocks::<M, T, S>(blocks, of, w)?
         {
             return Ok(());
         }
@@ -469,9 +464,9 @@ impl RbfArdKernel {
     }
 
     /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
-    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         d_k: MatMut<'_, T>,
         param_idx: usize,
     ) -> Result<(), GprError> {
@@ -489,9 +484,9 @@ impl RbfArdKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
-    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar>(
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
-        blocks: ArdBlocks<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
         d2_k: MatMut<'_, T>,
         i: usize,
         j: usize,

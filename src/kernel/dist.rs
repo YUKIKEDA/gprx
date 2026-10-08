@@ -7,6 +7,9 @@ use faer::reborrow::ReborrowMut;
 use faer::{ColMut, Mat, MatMut, MatRef};
 use rayon::prelude::*;
 use std::convert::Infallible;
+use std::fmt;
+use std::marker::PhantomData;
+use wide::f64x4;
 
 /// Returns the Rayon pool size, at least 1.
 pub(crate) fn worker_count() -> usize {
@@ -527,17 +530,54 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     }
 }
 
+/// Whether the values of an [`ArdBlocks`] were checked when they were bound.
+///
+/// [`Checked`] blocks (the training triangles, a cast, a repaired or
+/// filled table) are read as they are. [`Unchecked`] blocks (a caller's
+/// prediction block that an `f64` model reads in place) are checked as
+/// they are read, so the caller's values are read once: their values come
+/// out only through [`ArdBlocks::read`], [`ArdBlocks::column`], and
+/// [`ArdBlocks::gates`], each of which checks what it hands out.
+pub trait BlockState: Copy + fmt::Debug + Send + Sync + 'static + sealed::Sealed {
+    /// Whether the values were checked when bound.
+    const CHECKED: bool;
+}
+
+/// Blocks whose values were checked when bound.
+#[derive(Clone, Copy, Debug)]
+pub enum Checked {}
+
+/// Blocks whose values are checked as they are read.
+#[derive(Clone, Copy, Debug)]
+pub enum Unchecked {}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Checked {}
+    impl Sealed for super::Unchecked {}
+}
+
+impl BlockState for Checked {
+    const CHECKED: bool = true;
+}
+
+impl BlockState for Unchecked {
+    const CHECKED: bool = false;
+}
+
 /// Raw `(Δ_d)²` of a rectangular block (`rows × cols`), one dense
 /// column-major block per dimension: `(row, col)` of dimension `k` is
-/// `block(k)[row + col * rows]`.
+/// `block(k)[row + col * rows]`. `S` says whether the values were checked
+/// when bound ([`BlockState`]).
 #[derive(Clone, Copy, Debug)]
-pub struct ArdBlocks<'a, T> {
+pub struct ArdBlocks<'a, T, S = Checked> {
     /// One block per dimension.
-    pub(crate) blocks: BlockList<'a, T>,
-    pub(crate) rows: usize,
-    pub(crate) cols: usize,
+    blocks: BlockList<'a, T>,
+    rows: usize,
+    cols: usize,
     /// First column of the stored blocks this view starts at.
-    pub(crate) col0: usize,
+    col0: usize,
+    state: PhantomData<S>,
 }
 
 /// The per-dimension blocks of an [`ArdBlocks`]: a caller's borrowed or
@@ -557,7 +597,27 @@ pub(crate) enum BlockList<'a, T> {
     Triangles(ArdSqDiff<'a, T>),
 }
 
-impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
+impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
+    /// `blocks` of `rows × cols` pairs in the state `S`.
+    pub(crate) fn new(blocks: BlockList<'a, T>, rows: usize, cols: usize, col0: usize) -> Self {
+        Self {
+            blocks,
+            rows,
+            cols,
+            col0,
+            state: PhantomData,
+        }
+    }
+
+    /// Columns `start..start + len` of these blocks.
+    pub(crate) fn subcols(self, start: usize, len: usize) -> Self {
+        Self {
+            cols: len,
+            col0: self.col0 + start,
+            ..self
+        }
+    }
+
     /// Number of dimensions.
     pub(crate) fn d(&self) -> usize {
         match self.blocks {
@@ -568,9 +628,19 @@ impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
         }
     }
 
-    /// The dense block of dimension `dim` (`rows` rows per column), or an
-    /// empty slice when the blocks are packed triangles.
-    pub(crate) fn block(&self, dim: usize) -> &'a [T] {
+    /// Rows of the view.
+    pub(crate) fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Columns of the view.
+    pub(crate) fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// The dense block of dimension `dim`, or an empty slice when the
+    /// blocks are packed triangles. Raw: only [`Checked`] blocks expose it.
+    fn raw_block(&self, dim: usize) -> &'a [T] {
         match self.blocks {
             BlockList::Slices(blocks) => blocks[dim],
             BlockList::Vecs(blocks) => &blocks[dim],
@@ -580,13 +650,209 @@ impl<'a, T: KernelScalar> ArdBlocks<'a, T> {
         }
     }
 
-    /// `(Δ_dim)²` of the pair `(row, col)`.
-    #[inline]
-    pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
+    fn raw_get(&self, dim: usize, row: usize, col: usize) -> T {
         match self.blocks {
             BlockList::Triangles(cache) => cache.get(dim, row, col + self.col0),
-            _ => self.block(dim)[row + (col + self.col0) * self.rows],
+            _ => self.raw_block(dim)[row + (col + self.col0) * self.rows],
         }
+    }
+
+    /// `(Δ_dim)²` of the pair `(row, col)`, checked unless the blocks were.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] if the value is not finite or
+    /// is negative, at its place in the caller's table.
+    #[inline]
+    pub(crate) fn read(&self, dim: usize, row: usize, col: usize) -> Result<T, GprError> {
+        let v = self.raw_get(dim, row, col);
+        if S::CHECKED || super::sources::valid(v.to_f64()) {
+            Ok(v)
+        } else {
+            Err(super::sources::invalid_value(
+                v.to_f64(),
+                row,
+                col + self.col0,
+            ))
+        }
+    }
+
+    /// Column `col` of dimension `dim` (every row) as an `f64` slice,
+    /// checked unless the blocks were; `None` when the blocks are not dense
+    /// `f64` columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] at the first invalid value.
+    pub(crate) fn column(&self, dim: usize, col: usize) -> Result<Option<&'a [f64]>, GprError> {
+        let Some(run) = self.f64_column(dim, col) else {
+            return Ok(None);
+        };
+        if !S::CHECKED && !super::simd::all_valid_distances(run) {
+            return Err(super::sources::first_invalid_from(
+                run,
+                self.rows,
+                self.col0 + col,
+            ));
+        }
+        Ok(Some(run))
+    }
+
+    /// Whether every block is a dense `f64` block holding all the view's
+    /// columns, as [`Self::column`] and [`Self::gate`] read them.
+    pub(crate) fn dense_f64(&self) -> bool {
+        let end = (self.col0 + self.cols) * self.rows;
+        !matches!(self.blocks, BlockList::Triangles(_))
+            && T::as_f64_slice(&[]).is_some()
+            && (0..self.d()).all(|dim| self.raw_block(dim).len() >= end)
+    }
+
+    fn f64_column(&self, dim: usize, col: usize) -> Option<&'a [f64]> {
+        if matches!(self.blocks, BlockList::Triangles(_)) {
+            return None;
+        }
+        let start = (self.col0 + col) * self.rows;
+        T::as_f64_slice(self.raw_block(dim).get(start..start + self.rows)?)
+    }
+
+    /// The dense `f64` blocks of every dimension, from which a SIMD loop
+    /// takes one [`Gate`] per column; `None` when the blocks are not dense
+    /// `f64` columns or have more than [`GATE_DIMS`] dimensions.
+    pub(crate) fn gates(&self) -> Option<Gates<'a, S>> {
+        let d = self.d();
+        if d > GATE_DIMS || !self.dense_f64() {
+            return None;
+        }
+        let mut blocks: [&'a [f64]; GATE_DIMS] = [&[]; GATE_DIMS];
+        for (dim, block) in blocks.iter_mut().enumerate().take(d) {
+            *block = T::as_f64_slice(self.raw_block(dim))?;
+        }
+        Some(Gates {
+            blocks,
+            d,
+            rows: self.rows,
+            col0: self.col0,
+            state: PhantomData,
+        })
+    }
+}
+
+impl<'a, T: KernelScalar> ArdBlocks<'a, T, Checked> {
+    /// The dense block of dimension `dim` (`rows` rows per column), or an
+    /// empty slice when the blocks are packed triangles.
+    pub(crate) fn block(&self, dim: usize) -> &'a [T] {
+        self.raw_block(dim)
+    }
+}
+
+/// The dense `f64` blocks of an [`ArdBlocks`] ([`ArdBlocks::gates`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Gates<'a, S> {
+    blocks: [&'a [f64]; GATE_DIMS],
+    d: usize,
+    rows: usize,
+    col0: usize,
+    state: PhantomData<S>,
+}
+
+impl<'a, S: BlockState> Gates<'a, S> {
+    /// The column `col` of every dimension, for one pass of a SIMD loop that
+    /// reads each value once: a [`Gate`] folds the check of every value it
+    /// sums (unless the blocks were checked), and [`Gate::verdict`] gives
+    /// the result.
+    #[inline]
+    pub(crate) fn gate(&self, col: usize) -> Gate<'a, S> {
+        let start = (self.col0 + col) * self.rows;
+        let mut runs: [&'a [f64]; GATE_DIMS] = [&[]; GATE_DIMS];
+        for (run, block) in runs.iter_mut().zip(&self.blocks[..self.d]) {
+            *run = &block[start..start + self.rows];
+        }
+        Gate {
+            runs,
+            d: self.d,
+            nonfinite: f64x4::ZERO,
+            least: f64x4::ZERO,
+            rows: self.rows,
+            col: self.col0 + col,
+            state: PhantomData,
+        }
+    }
+}
+
+/// Dimensions a [`Gate`] holds.
+pub(crate) const GATE_DIMS: usize = 16;
+
+/// One column of every dimension of an [`ArdBlocks`], handed to a SIMD loop
+/// that reads each value once. The loop gets only weighted sums of the
+/// values ([`Self::weighted4`], [`Self::weighted1`]); for [`Unchecked`]
+/// blocks each value is folded into the check as it is summed (two lane
+/// sums without a branch: `v · 0`, which stays `0` unless a value is `NaN`
+/// or infinite, and the least value, which stays `≥ 0` unless one is
+/// negative), and [`Self::verdict`] reports the result.
+#[must_use = "a gate's sums are valid only once its verdict is Ok"]
+pub(crate) struct Gate<'a, S> {
+    runs: [&'a [f64]; GATE_DIMS],
+    d: usize,
+    nonfinite: f64x4,
+    least: f64x4,
+    rows: usize,
+    col: usize,
+    state: PhantomData<S>,
+}
+
+impl<S: BlockState> Gate<'_, S> {
+    /// `Σ_d w_d src_d` of rows `i..i + 4`.
+    #[inline(always)]
+    pub(crate) fn weighted4(&mut self, w: &[f64], i: usize) -> f64x4 {
+        let mut r2 = f64x4::ZERO;
+        for (run, &wd) in self.runs[..self.d].iter().zip(w) {
+            let v = super::simd::load4(run, i);
+            if !S::CHECKED {
+                self.nonfinite += v * f64x4::ZERO;
+                self.least = self.least.fast_min(v);
+            }
+            r2 += v * f64x4::splat(wd);
+        }
+        r2
+    }
+
+    /// `Σ_d w_d src_d` of row `i`.
+    #[inline(always)]
+    pub(crate) fn weighted1(&mut self, w: &[f64], i: usize) -> f64 {
+        let mut r2 = 0.0;
+        for (run, &wd) in self.runs[..self.d].iter().zip(w) {
+            let v = run[i];
+            if !S::CHECKED {
+                self.nonfinite += f64x4::splat(v * 0.0);
+                self.least = self.least.fast_min(f64x4::splat(v));
+            }
+            r2 += v * wd;
+        }
+        r2
+    }
+
+    /// Whether every value summed was valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] at the first invalid value of
+    /// the column, when one was summed.
+    pub(crate) fn verdict(self) -> Result<(), GprError> {
+        if S::CHECKED {
+            return Ok(());
+        }
+        // Exact, not a tolerance: a sum of `v · 0` is `0` or `NaN`.
+        let valid =
+            self.nonfinite.reduce_add() == 0.0 && self.least.to_array().iter().all(|&l| l >= 0.0);
+        if valid {
+            return Ok(());
+        }
+        for run in &self.runs[..self.d] {
+            if !super::simd::all_valid_distances(run) {
+                return Err(super::sources::first_invalid_from(run, self.rows, self.col));
+            }
+        }
+        Err(super::sources::invalid_value(f64::NAN, 0, self.col))
     }
 }
 

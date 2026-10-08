@@ -14,8 +14,8 @@ use std::fmt;
 use faer::MatRef;
 use rayon::prelude::*;
 
-use super::compiled::supplied::{RectSlot, RectSlots, SquareSlot, SquareSlots};
-use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList};
+use super::compiled::supplied::{ArdRect, RectSlot, RectSlots, SquareSlot, SquareSlots};
+use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList, Checked};
 use super::{DistanceFill, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use crate::error::GprError;
@@ -681,12 +681,12 @@ impl<T: KernelScalar> RectSlots<T> for TrainColumns<'_, T> {
                     cap,
                 ))
             }
-            TrainData::Ard(cache) => RectSlot::Ard(ArdBlocks {
-                blocks: BlockList::Triangles(cache.view()),
-                rows: n,
-                cols: self.len,
-                col0: self.start,
-            }),
+            TrainData::Ard(cache) => RectSlot::Ard(ArdRect::Checked(ArdBlocks::new(
+                BlockList::Triangles(cache.view()),
+                n,
+                self.len,
+                self.start,
+            ))),
         })
     }
 }
@@ -1297,19 +1297,19 @@ fn rect_view<'v, U: KernelScalar>(
     } else {
         BlockList::Packed(cast.get(raw.cast_at..)?, len, dims)
     };
-    let ard = ArdBlocks {
-        blocks: list,
-        rows,
-        cols,
-        col0: 0,
-    };
+    let checked = ArdBlocks::<U, Checked>::new(list, rows, cols, 0);
     Some(match raw.shape {
         SlotShape::Scalar => RectSlot::Scalar(MatRef::from_column_major_slice(
-            ard.block(0).get(..len)?,
+            checked.block(0).get(..len)?,
             rows,
             cols,
         )),
-        SlotShape::Ard(_) => RectSlot::Ard(ard),
+        // A caller's block read in place and not checked when bound is
+        // checked as the kernel reads it; a cast checked it already.
+        SlotShape::Ard(_) if raw.unchecked && reads_in_place::<U>() => {
+            RectSlot::Ard(ArdRect::Unchecked(ArdBlocks::new(list, rows, cols, 0)))
+        }
+        SlotShape::Ard(_) => RectSlot::Ard(ArdRect::Checked(checked)),
     })
 }
 
