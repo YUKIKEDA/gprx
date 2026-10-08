@@ -1,3 +1,4 @@
+mod columns;
 mod compose;
 mod coord_deriv;
 mod coord_mode;

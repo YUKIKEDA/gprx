@@ -117,7 +117,10 @@ fn predict_restores_thread_scratch_when_apply_cross_fails() {
     let mut gpr = rbf_gpr(1.0, 0.1)
         .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
         .expect("spd");
-    gpr.core.query.ensure(2, 1, 1).expect("query");
+    gpr.core
+        .query
+        .ensure(2, 1, crate::workspace::QueryCols::Points(1))
+        .expect("query");
     gpr.core.query.query_scratch = Mat::<f64>::zeros(1, 1);
     assert!(matches!(
         gpr.predict_into(&[0.5], 1, 1, &mut Prediction::default()),

@@ -299,13 +299,15 @@ impl ConstantKernel {
     }
 
     /// Writes the rectangular `∂K(x, xs)/∂θ` (`∂k/∂θ = c`) for train × test
-    /// coordinates.
+    /// rows. Only the rows are read: a tree's entry points reject
+    /// coordinates without a column for a coordinate tree
+    /// ([`crate::kernel::CompiledKernel::require_tree_columns`]).
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `param_idx` is not 0, or the
-    /// same shape errors as [`Self::apply_cross_points`].
-    pub(crate) fn grad_cross_points<T: KernelScalar>(
+    /// errors of [`Self::apply_cross_rows`].
+    pub(crate) fn grad_cross_rows<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,
@@ -316,13 +318,14 @@ impl ConstantKernel {
         self.apply_cross_rows(x, xs, d_k)
     }
 
-    /// Writes the rectangular `∂²K(x, xs)/∂θ²` (`∂²k/∂θ² = c`).
+    /// Writes the rectangular `∂²K(x, xs)/∂θ²` (`∂²k/∂θ² = c`) for train ×
+    /// test rows, as [`Self::grad_cross_rows`] reads them.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] if `i` or `j` is not 0, or the
-    /// same shape errors as [`Self::apply_cross_points`].
-    pub(crate) fn hess_cross_points<T: KernelScalar>(
+    /// errors of [`Self::apply_cross_rows`].
+    pub(crate) fn hess_cross_rows<T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
         xs: MatRef<'_, T>,

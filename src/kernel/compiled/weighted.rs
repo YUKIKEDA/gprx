@@ -205,6 +205,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         kept: &mut [Mat<T>],
         products: usize,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(inputs.x)?;
         if products == 0 {
             return self.eval_gram::<M>(inputs, out, Triangle::Lower, scratch, nested);
         }
@@ -279,6 +280,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         out: &mut [f64],
         bufs: &mut [Mat<T>],
     ) -> Result<(), GprError> {
+        self.require_tree_columns(walk.inputs.x)?;
         let kept = walk.kept;
         let mut offset = 0;
         for (t, slot) in self.keep_plan(walk.kept_products) {
@@ -662,6 +664,8 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         nested: &mut [Mat<T>],
         jobs: &mut Vec<f64>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(views.x1)?;
+        self.require_tree_columns(views.x2)?;
         out.fill(0.0);
         let mut offset = 0;
         for (t, _) in self.keep_plan(0) {
@@ -877,6 +881,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         out: &mut [f64],
         accum: &mut DiagAccum<T>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(x)?;
         out.fill(0.0);
         let mut cursor = 0;
         let mut offset = 0;

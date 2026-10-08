@@ -383,7 +383,7 @@ pub trait TargetTransform: Send + Sync {
 
 **表の検査。** 学習の正方行列は対称で対角が 0、すべての値が有限で非負でなければならない。表を黙って直すことはしない。表だけからは、丸めと誤った表を区別できない。`‖a‖² + ‖b‖² − 2a·b` の誤差は `ε · (‖x_i‖² + ‖x_j‖²)` で、点の原点からの遠さで決まり、距離では決まらない。そのため、表から読む許容量では両者を分けられず、黙って直せば有向距離や転置した表まで受け付けてしまう。組ごとに計算した表（`(a − b)²` を両方の順で）は、完全に対称で対角も 0 なので、そのまま通る。
 
-- 既定の検査は厳密である。違反は、最悪の組とその値を示すエラーになる。
+- 既定の検査は厳密である。違反は、検査が表を読む順で最初に失敗した組（並列の帯で検査する正方行列では、最初に失敗した帯の組）とその値を示すエラーになる。修復の許容誤差で判定するフィルは、正方行列が揃ってからしか判定できないので、最悪の組を示す。
 - 丸めの出る作り方（Gram trick）で表を作る呼び出し側は、その供給に、自分で選んだ許容量で修正を指定する。許容量以内なら負の値と対角は `0.0` に、鏡像の組はその平均にする。超えれば表を断る。
 - 不正な値は専用のエラーの variant（行、列、理由）にし、`ShapeMismatch` は形のためだけに残す。スロットの欠落・重複・未知は `LengthMismatch` のまま。
 - 検査は方針によらず、正方行列ごとに表を 1 回読む（`O(n²)`）。ARD の訓練の正方行列は、三角へ詰めながら検査する。ARD の予測ブロック（訓練 × クエリ）は、カーネルが `r²` を足すループで読みながら検査するので、呼び出し側の値を読むのは 1 回だけになる（`f64` のモデルはカーネルが、`f32` のモデルは型変換が読む）。スカラーの予測ブロックは束ねるときに、CPU で使える最も広い SIMD（`pulp` の実行時の切り替え）で検査する。
@@ -775,7 +775,7 @@ pub struct OptResult {
 
 数値計算固有の失敗理由を拡充する。
 
-集合が増えうる公開 enum は `#[non_exhaustive]` にする: `GprError`、`CholeskyStage`、`IntervalError`、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`、`PersistKind`、`KernelSpec`、`CompiledKernel`、`DistanceCachePolicy`、`JitterPolicy`、`KernelExp`、`BoundaryPolicy`。これらへの variant の追加は破壊的変更にならない。クレート外の `match` には `_` が要る。閉じた集合は網羅的な `match` を書けるよう付けない: `Triangle`、`MaternNu`、`VarianceKind`、`CholeskyBuffer`。
+集合が増えうる公開 enum は `#[non_exhaustive]` にする: `GprError`、`CholeskyStage`、`IntervalError`、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`、`PersistKind`、`KernelSpec`、`CompiledKernel`、`DistanceSlot`、`DistanceCachePolicy`、`JitterPolicy`、`KernelExp`、`BoundaryPolicy`。これらへの variant の追加は破壊的変更にならない。クレート外の `match` には `_` が要る。閉じた集合は網羅的な `match` を書けるよう付けない: `Triangle`、`MaternNu`、`VarianceKind`、`CholeskyBuffer`。
 
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
@@ -791,6 +791,7 @@ pub enum GprError {
     OptimizationNotConverged { iterations: usize },
     InvalidHyperparameter { reason: String },
     ShapeMismatch { reason: String },
+    InvalidDistance { row: usize, col: usize, reason: String },
     LengthMismatch { reason: String },
     IndexOutOfRange { reason: String },
     InvalidConfig { reason: String },
@@ -810,7 +811,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 表示文は英語（`src/error.rs`）。
 
-`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。保存・読み込みの失敗は `PersistFailed`（どこで失敗したかを `kind`（`PersistErrorKind`、non_exhaustive）で示し、呼び出し側は `reason` を読まずに分岐できる）、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
+`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。供給した二乗距離が有限でない、負、対角が 0 でない、鏡像の要素と食い違う（ソースの修復が許す範囲を超えて）ときは `InvalidDistance` で、表の中の組の `row` と `col` を持つ。距離のスロットの欠け・重複・未知は `LengthMismatch` のまま。保存・読み込みの失敗は `PersistFailed`（どこで失敗したかを `kind`（`PersistErrorKind`、non_exhaustive）で示し、呼び出し側は `reason` を読まずに分岐できる）、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
 
 **Error/panicの線引き**: ユーザー入力起因(`DimensionMismatch`等)、モデル/データ起因(`CholeskyFailed`等)は`Result`で返し回復可能にする。`CoordGradientUnsupported`はライブラリ内部panic対象ではないため`unimplemented!()`ではなく本Errorを返す。`NotFitted` の variant は無い。未学習の呼び出しは書けない。
 
