@@ -66,6 +66,13 @@ pub(crate) mod sealed {
         /// [`Self::from_f64_slice`] for a list of owned tables.
         fn from_f64_vecs(values: &[Vec<f64>]) -> Option<&[Vec<Self>]>;
 
+        /// Owned `f64` tables as this scalar when it is `f64`, moved as
+        /// they are; otherwise handed back.
+        fn vecs_from_f64(values: Vec<Vec<f64>>) -> Result<Vec<Vec<Self>>, Vec<Vec<f64>>>;
+
+        /// [`Self::as_f64_slice`] for a list of owned tables.
+        fn as_f64_vecs(values: &[Vec<Self>]) -> Option<&[Vec<f64>]>;
+
         fn empty_rows() -> Self::RowCast;
 
         fn empty_cols() -> Self::ColCast;
@@ -342,6 +349,14 @@ impl sealed::ScalarOps for f64 {
         Some(values)
     }
 
+    fn vecs_from_f64(values: Vec<Vec<f64>>) -> Result<Vec<Vec<Self>>, Vec<Vec<f64>>> {
+        Ok(values)
+    }
+
+    fn as_f64_vecs(values: &[Vec<Self>]) -> Option<&[Vec<f64>]> {
+        Some(values)
+    }
+
     fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]> {
         Some(values)
     }
@@ -482,6 +497,14 @@ impl sealed::ScalarOps for f32 {
     }
 
     fn from_f64_vecs(_values: &[Vec<f64>]) -> Option<&[Vec<Self>]> {
+        None
+    }
+
+    fn vecs_from_f64(values: Vec<Vec<f64>>) -> Result<Vec<Vec<Self>>, Vec<Vec<f64>>> {
+        Err(values)
+    }
+
+    fn as_f64_vecs(_values: &[Vec<Self>]) -> Option<&[Vec<f64>]> {
         None
     }
 

@@ -318,14 +318,26 @@ fn packed_col_offset(n: usize, col: usize) -> usize {
 
 /// Raw `(Δx_d)²` for every pair of rows of `x`, owned.
 ///
-/// Only the lower triangle (diagonal included) of each dimension is stored,
-/// column by column, so the cache holds `d · n(n+1)/2` values instead of
-/// `d · n²`. Read it through [`Self::view`].
+/// Each dimension keeps its lower triangle (diagonal included) as column
+/// runs (column `col` holds rows `col..n`), in one of two layouts
+/// ([`ArdStore`]): packed, `d · n(n+1)/2` values, or the dense `n × n`
+/// tables a caller handed over, kept as they are so a fit copies nothing.
+/// Read it through [`Self::view`].
 #[derive(Clone, Debug)]
 pub(crate) struct ArdSqDiffBuf<T> {
-    data: Vec<T>,
+    data: ArdStore<T>,
     n: usize,
     d: usize,
+}
+
+/// The layout of an [`ArdSqDiffBuf`].
+#[derive(Clone, Debug)]
+enum ArdStore<T> {
+    /// The lower triangles, dimension after dimension, column by column.
+    Packed(Vec<T>),
+    /// One dense column-major `n × n` table per dimension; only the lower
+    /// triangle is read.
+    Dense(Vec<Vec<T>>),
 }
 
 impl<T: KernelScalar> ArdSqDiffBuf<T> {
@@ -342,7 +354,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             .ok_or(GprError::SizeOverflow)?;
         let mut data = vec![T::from_f64(0.0); len];
         T::write_ard(x, &mut data);
-        Ok(Self { data, n, d })
+        Ok(Self::from_packed(data, n, d))
     }
 
     /// Packs the lower triangles of `d` dense `n × n` blocks; `pair(k, i, j)`
@@ -368,7 +380,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
                 }
             }
         }
-        Ok(Self { data, n, d })
+        Ok(Self::from_packed(data, n, d))
     }
 
     /// Packs the lower triangles of `d` dense, column-major `n × n` blocks
@@ -396,7 +408,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
                 );
             }
         }
-        Ok(Self { data, n, d })
+        Ok(Self::from_packed(data, n, d))
     }
 
     /// A cache of `n` points and `d` dimensions from its packed values:
@@ -406,17 +418,42 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             Some(data.len()),
             packed_len(n).ok().and_then(|l| l.checked_mul(d))
         );
-        Self { data, n, d }
+        Self {
+            data: ArdStore::Packed(data),
+            n,
+            d,
+        }
     }
 
-    /// The same cache with every value mapped by `f` (a cast), in one pass
-    /// over the packed values.
+    /// A cache of `n` points from `d` dense column-major `n × n` tables,
+    /// kept as they are (one per dimension).
+    pub(crate) fn from_tables(tables: Vec<Vec<T>>, n: usize) -> Self {
+        debug_assert!(tables.iter().all(|t| Some(t.len()) == n.checked_mul(n)));
+        Self {
+            d: tables.len(),
+            data: ArdStore::Dense(tables),
+            n,
+        }
+    }
+
+    /// The same cache with every value mapped by `f` (a cast), packed, in
+    /// one pass over the stored lower triangles.
     pub(crate) fn map<U>(&self, f: impl Fn(T) -> U) -> ArdSqDiffBuf<U>
     where
         T: Copy,
     {
+        let data = match &self.data {
+            ArdStore::Packed(data) => data.iter().map(|&v| f(v)).collect(),
+            ArdStore::Dense(_) => {
+                let view = self.view();
+                (0..self.d)
+                    .flat_map(|dim| (0..self.n).map(move |col| (dim, col)))
+                    .flat_map(|(dim, col)| view.column(dim, col).iter().map(|&v| f(v)))
+                    .collect()
+            }
+        };
         ArdSqDiffBuf {
-            data: self.data.iter().map(|&v| f(v)).collect(),
+            data: ArdStore::Packed(data),
             n: self.n,
             d: self.d,
         }
@@ -432,18 +469,20 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         let len = packed_len(n)?
             .checked_mul(d)
             .ok_or(GprError::SizeOverflow)?;
-        Ok(Self {
-            data: vec![T::from_f64(0.0); len],
-            n,
-            d,
-        })
+        Ok(Self::from_packed(vec![T::from_f64(0.0); len], n, d))
     }
 
     /// The stored rows `col..n` of column `col` of dimension `dim`.
     pub(crate) fn column_mut(&mut self, dim: usize, col: usize) -> &mut [T] {
-        let block = self.data.len().checked_div(self.d).unwrap_or(0);
-        let start = dim * block + packed_col_offset(self.n, col);
-        &mut self.data[start..start + (self.n - col)]
+        let n = self.n;
+        match &mut self.data {
+            ArdStore::Packed(data) => {
+                let block = data.len().checked_div(self.d).unwrap_or(0);
+                let start = dim * block + packed_col_offset(n, col);
+                &mut data[start..start + (n - col)]
+            }
+            ArdStore::Dense(tables) => &mut tables[dim][col * n + col..(col + 1) * n],
+        }
     }
 
     /// `(points, dimensions)` the cache was filled for.
@@ -455,21 +494,38 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     /// Number of stored values.
     #[cfg(test)]
     pub(crate) fn stored_len(&self) -> usize {
-        self.data.len()
+        match &self.data {
+            ArdStore::Packed(data) => data.len(),
+            ArdStore::Dense(tables) => tables.iter().map(Vec::len).sum(),
+        }
+    }
+
+    /// Whether the cache keeps the caller's dense tables.
+    #[cfg(test)]
+    pub(crate) fn is_dense(&self) -> bool {
+        matches!(self.data, ArdStore::Dense(_))
     }
 
     /// Overwrites every cached value, to show that a reader uses the cache.
     #[cfg(test)]
     pub(crate) fn poison(&mut self, value: T) {
-        self.data.fill(value);
+        match &mut self.data {
+            ArdStore::Packed(data) => data.fill(value),
+            ArdStore::Dense(tables) => tables.iter_mut().for_each(|t| t.fill(value)),
+        }
     }
 
     pub(crate) fn view(&self) -> ArdSqDiff<'_, T> {
+        let data = match &self.data {
+            ArdStore::Packed(data) => {
+                StoreRef::Packed(data, data.len().checked_div(self.d).unwrap_or(0))
+            }
+            ArdStore::Dense(tables) => StoreRef::Dense(tables),
+        };
         ArdSqDiff {
-            data: &self.data,
+            data,
             n: self.n,
             d: self.d,
-            block: self.data.len().checked_div(self.d).unwrap_or(0),
         }
     }
 }
@@ -480,11 +536,18 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
 /// contiguous stored part of one column: rows `col..n`.
 #[derive(Clone, Copy, Debug)]
 pub struct ArdSqDiff<'a, T> {
-    data: &'a [T],
+    data: StoreRef<'a, T>,
     n: usize,
     d: usize,
-    /// Entries per dimension, `n(n+1)/2`.
-    block: usize,
+}
+
+/// The borrowed layout of an [`ArdSqDiff`].
+#[derive(Clone, Copy, Debug)]
+enum StoreRef<'a, T> {
+    /// Packed lower triangles, with the entries per dimension (`n(n+1)/2`).
+    Packed(&'a [T], usize),
+    /// Dense `n × n` tables, one per dimension.
+    Dense(&'a [Vec<T>]),
 }
 
 impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
@@ -501,15 +564,24 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
     #[inline]
     pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
-        let start = dim * self.block + packed_col_offset(self.n, col);
-        &self.data[start..start + (self.n - col)]
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => {
+                let start = dim * block + packed_col_offset(n, col);
+                &data[start..start + (n - col)]
+            }
+            StoreRef::Dense(tables) => &tables[dim][col * n + col..(col + 1) * n],
+        }
     }
 
-    /// Every stored value of dimension `dim`: the lower triangle, column by
-    /// column (column `col` holds rows `col..n`).
+    /// Every stored value of dimension `dim`, when the cache is packed: the
+    /// lower triangle, column by column (column `col` holds rows `col..n`).
     #[inline]
-    pub(crate) fn block(&self, dim: usize) -> &'a [T] {
-        &self.data[dim * self.block..(dim + 1) * self.block]
+    pub(crate) fn packed_block(&self, dim: usize) -> Option<&'a [T]> {
+        match self.data {
+            StoreRef::Packed(data, block) => Some(&data[dim * block..(dim + 1) * block]),
+            StoreRef::Dense(_) => None,
+        }
     }
 
     /// `(x_row,dim − x_col,dim)²` for any pair.
@@ -521,11 +593,14 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
 
     /// The same cache as `f64` when `T` is `f64`, for the SIMD paths.
     pub(crate) fn as_f64(self) -> Option<ArdSqDiff<'a, f64>> {
+        let data = match self.data {
+            StoreRef::Packed(data, block) => StoreRef::Packed(T::as_f64_slice(data)?, block),
+            StoreRef::Dense(tables) => StoreRef::Dense(T::as_f64_vecs(tables)?),
+        };
         Some(ArdSqDiff {
-            data: T::as_f64_slice(self.data)?,
+            data,
             n: self.n,
             d: self.d,
-            block: self.block,
         })
     }
 }

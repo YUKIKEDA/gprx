@@ -374,6 +374,12 @@ impl ArdDistance {
 
     /// Binds owned tables of `d²`, one per dimension, to this slot.
     ///
+    /// An `f64` model checks the tables and keeps them as they are, so a
+    /// fit copies nothing; it then holds `d · n²` values for the slot
+    /// rather than the `d · n(n+1)/2` of the packed lower triangles it
+    /// makes from [`Self::borrow`] or [`Self::from_slices`]. An `f32`
+    /// model packs them.
+    ///
     /// See the example on [`ArdDistance`].
     pub fn from_vecs(&self, d2: Vec<Vec<f64>>) -> DistanceSource<'static> {
         self.source(ArdData::Blocks(d2))

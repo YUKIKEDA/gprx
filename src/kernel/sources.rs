@@ -235,7 +235,7 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
         let j0 = band * BAND;
         super::simd::square_band(block, rows, (j0, (j0 + BAND).min(rows)))
     };
-    let ok = if rows < PAR_ROWS {
+    let ok = if rows < PAR_ROWS || rayon::current_num_threads() == 1 {
         (0..bands).all(band)
     } else {
         (0..bands).into_par_iter().all(band)
@@ -272,7 +272,8 @@ fn exact_block(block: &[f64], rows: usize, cols: usize, kind: BlockKind) -> Resu
 }
 
 /// Rows below which a square is checked on the calling thread: smaller
-/// squares cost less than handing their bands to the pool.
+/// squares cost less than handing their bands to the pool. A pool of one
+/// thread is never handed the bands.
 const PAR_ROWS: usize = 256;
 
 /// Columns of one band of a square check ([`super::simd::square_band`],
@@ -323,6 +324,31 @@ fn pack_exact_ard<'b, T: KernelScalar>(
         return Err(unlocated());
     }
     Ok(ArdSqDiffBuf::from_packed(data, n, d))
+}
+
+/// Checks the `d` owned dense `n × n` training squares of an ARD slot
+/// exactly ([`exact_block`]) and keeps them as the store, when the model
+/// reads `f64`: a fit then reads each square once and copies nothing. An
+/// `f32` model packs them ([`pack_exact_ard`]).
+///
+/// # Errors
+///
+/// As [`pack_exact_ard`].
+fn keep_exact_ard<T: KernelScalar>(
+    tables: Vec<Vec<f64>>,
+    n: usize,
+    d: usize,
+) -> Result<ArdSqDiffBuf<T>, GprError> {
+    if !reads_in_place::<T>() {
+        return pack_exact_ard(n, d, |k| &tables[k]);
+    }
+    for table in &tables {
+        exact_block(table, n, n, BlockKind::Square)?;
+    }
+    match T::vecs_from_f64(tables) {
+        Ok(tables) => Ok(ArdSqDiffBuf::from_tables(tables, n)),
+        Err(tables) => pack_exact_ard(n, d, |k| &tables[k]),
+    }
 }
 
 /// Checks and packs the bands `bands` of one square into `dest` (their
@@ -530,7 +556,7 @@ fn train_ard<T: KernelScalar>(
             for table in &tables {
                 crate::data::require_count(table.len(), len, "squared distances")?;
             }
-            pack_exact_ard(n, d, |k| &tables[k])
+            keep_exact_ard(tables, n, d)
         }
         ArdData::Slices(tables) if tidy == Tidy::Exact => {
             require_tables(tables.len(), d)?;
@@ -1724,5 +1750,44 @@ mod tests {
         let store = TrainSources::<f64>::bind(&slots, [image.from_vec(train)], 2).expect("store");
         let view = store.scalar(0).expect("slot");
         assert_eq!(view.as_ptr(), ptr);
+    }
+
+    /// An `f64` store keeps owned ARD tables as they are, after the exact
+    /// check; an `f32` store packs them. Both read the same pairs.
+    #[test]
+    fn owned_ard_tables_move_into_an_f64_store() {
+        use crate::test_check::assert_close;
+        let bands = ArdDistance::new(2).expect("dims");
+        let slots = [DistanceSlot::Ard(bands)];
+        let tables = vec![line(1.0, 0..3, 0..3), line(2.0, 0..3, 0..3)];
+        let kept = tables.clone();
+        let ptr = kept[1].as_ptr();
+        let store = TrainSources::<f64>::bind(&slots, [bands.from_vecs(kept)], 3).expect("f64");
+        let Ok(ArdSquare::Packed(view)) = store.ard(0) else {
+            panic!("ard slot");
+        };
+        assert_eq!(view.column(1, 0).as_ptr(), ptr);
+        assert!(view.packed_block(0).is_none());
+        let narrow =
+            TrainSources::<f32>::bind(&slots, [bands.from_vecs(tables.clone())], 3).expect("f32");
+        let Ok(ArdSquare::Packed(packed)) = narrow.ard(0) else {
+            panic!("ard slot");
+        };
+        assert!(packed.packed_block(0).is_some());
+        for (k, table) in tables.iter().enumerate() {
+            for j in 0..3 {
+                for i in 0..3 {
+                    assert_close(view.get(k, i, j), table[i + j * 3], 0.0);
+                    assert_close(f64::from(packed.get(k, i, j)), table[i + j * 3], 0.0);
+                }
+            }
+        }
+        // An asymmetric table is refused before it is kept.
+        let mut skewed = tables;
+        skewed[0][1] += 1.0;
+        assert!(matches!(
+            TrainSources::<f64>::bind(&slots, [bands.from_vecs(skewed)], 3),
+            Err(GprError::InvalidDistance { .. })
+        ));
     }
 }

@@ -36,7 +36,8 @@ pub struct SuppliedLeaf<T: KernelScalar> {
 /// store), or dense checked blocks (a query square read where it was bound).
 #[derive(Clone, Copy, Debug)]
 pub enum ArdSquare<'a, T> {
-    /// Packed lower triangles, one per dimension.
+    /// The training store: per dimension, the lower triangle as column
+    /// runs (packed, or the dense tables an `f64` model kept).
     Packed(ArdSqDiff<'a, T>),
     /// Dense checked `n × n` blocks, one per dimension.
     Dense(ArdBlocks<'a, T, Checked>),
