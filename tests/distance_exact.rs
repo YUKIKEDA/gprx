@@ -1367,3 +1367,118 @@ fn ard_predictions_match_coordinates_at_many_dimensions_and_queries() {
         ));
     }
 }
+
+/// The query square of a covariance is read where it was bound: a borrowed,
+/// moved, filled, or repaired square gives the coordinate model's
+/// covariance, on a scalar and an ARD slot, at every precision.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn covariance_from_every_square<P: gprx::GpScalar>(tol: f64)
+where
+    P::Refine: gprx::kernel::KernelScalar,
+{
+    use gprx::kernel::KernelScalar;
+    let m = 5;
+    let dims = 2;
+    let cols: Vec<Vec<f64>> = (0..dims).map(|k| coord(k, N, 0.0)).collect();
+    let qcols: Vec<Vec<f64>> = (0..dims).map(|k| coord(k, m, 0.5)).collect();
+    let y = targets();
+    let close = |a: &[P::Refine], b: &[P::Refine]| {
+        for (x, z) in a.iter().zip(b) {
+            assert_close(x.to_f64(), z.to_f64(), tol);
+        }
+    };
+    // Scalar slot on the first coordinate.
+    let image = ScalarDistance::new();
+    let coords = Gpr::new(KernelSpec::from(RbfKernel::new(1.2).expect("ell")), lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor(&cols[0], N, 1, &y)
+        .map_err(|(_, e)| e)
+        .expect("coords");
+    let want = coords
+        .predict_covariance(&qcols[0], m, 1)
+        .expect("covariance")
+        .covariance;
+    let dist = Gpr::new(image.kernel(RbfKernel::new(1.2).expect("ell")), lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&cols[0], &cols[0]))], N, &y)
+        .map_err(|(_, e)| e)
+        .expect("distances");
+    let cross = sq(&cols[0], &qcols[0]);
+    let square = sq(&qcols[0], &qcols[0]);
+    let mut rounded = square.clone();
+    rounded[1 + 2 * m] += 1e-14;
+    rounded[2 + m] -= 1e-14;
+    let pairs = Pairs {
+        rows: &qcols[0],
+        cols: &qcols[0],
+    };
+    for sq_source in [
+        image.borrow(&square),
+        image.from_vec(square.clone()),
+        image.fill(&pairs),
+        image.borrow(&rounded).tidy(1e-9).expect("tol"),
+    ] {
+        let got = dist
+            .predict_covariance([image.borrow(&cross)], [sq_source], m)
+            .expect("covariance");
+        close(&got.covariance, &want);
+    }
+    assert!(
+        rounded[1 + 2 * m] > square[1 + 2 * m],
+        "a borrowed square is not written"
+    );
+    // ARD slot on both coordinates.
+    let x: Vec<f64> = cols.concat();
+    let xs: Vec<f64> = qcols.concat();
+    let ard = RbfArdKernel::new(&[0.9, 1.6]).expect("ell");
+    let coords = Gpr::new(KernelSpec::from(ard.clone()), lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor(&x, N, dims, &y)
+        .map_err(|(_, e)| e)
+        .expect("coords");
+    let want = coords
+        .predict_covariance(&xs, m, dims)
+        .expect("covariance")
+        .covariance;
+    let bands = ArdDistance::new(dims).expect("dims");
+    let dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor(
+            [bands.from_vecs(cols.iter().map(|c| sq(c, c)).collect())],
+            N,
+            &y,
+        )
+        .map_err(|(_, e)| e)
+        .expect("distances");
+    let cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
+    let squares: Vec<Vec<f64>> = qcols.iter().map(|q| sq(q, q)).collect();
+    let cross_refs: Vec<&[f64]> = cross.iter().map(Vec::as_slice).collect();
+    let square_refs: Vec<&[f64]> = squares.iter().map(Vec::as_slice).collect();
+    let fill = Table {
+        values: squares.concat().leak(),
+        rows: m,
+        dims,
+    };
+    for sq_source in [
+        bands.borrow(&square_refs),
+        bands.from_vecs(squares.clone()),
+        bands.fill(&fill),
+    ] {
+        let got = dist
+            .predict_covariance([bands.borrow(&cross_refs)], [sq_source], m)
+            .expect("covariance");
+        close(&got.covariance, &want);
+    }
+}
+
+#[test]
+fn a_covariance_reads_its_query_square_where_it_was_bound() {
+    use gprx::{DoublePrecision, MixedPrecision, ReevaluateKernel};
+    covariance_from_every_square::<DoublePrecision>(1e-9);
+    covariance_from_every_square::<SinglePrecision>(1e-4);
+    covariance_from_every_square::<MixedPrecision<ReevaluateKernel>>(1e-4);
+}

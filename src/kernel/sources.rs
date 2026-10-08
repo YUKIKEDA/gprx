@@ -712,24 +712,6 @@ impl<T: KernelScalar> TrainSources<T> {
         self.slots.is_empty()
     }
 
-    /// The store for the checked squares `blocks` of `n` points (a copy).
-    pub(crate) fn from_blocks(blocks: BoundBlocks<'_>, n: usize) -> Result<Self, GprError> {
-        let mut slots = Vec::with_capacity(blocks.raw.len());
-        for slot in blocks.raw {
-            let block = |k: usize| slot.block(k, blocks.written);
-            let data = match slot.shape {
-                SlotShape::Scalar => {
-                    TrainData::Scalar(block(0).iter().map(|&v| T::from_f64(v)).collect())
-                }
-                SlotShape::Ard(d) => TrainData::Ard(ArdSqDiffBuf::from_dense(n, d, block)?),
-            };
-            slots.push((slot.id, data));
-        }
-        let store = Self { n, cap: n, slots };
-        store.require_in_range()?;
-        Ok(store)
-    }
-
     /// The store of the `n × n` training squares of `slots` (the kernel's
     /// slots, in order) from `sources`, checked as each source asks
     /// ([`check_block`]). A scalar table the caller moved in is kept without
@@ -1233,21 +1215,26 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     pub(crate) fn f64_view(&self) -> F64Blocks<'_> {
         F64Blocks(self.blocks())
     }
-
-    /// The checked `m × m` squares of a query as a store a Gram reads (a
-    /// copy in the storage scalar).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::SizeOverflow`] when an ARD square does not fit.
-    pub(crate) fn to_square(&self, m: usize) -> Result<TrainSources<T>, GprError> {
-        TrainSources::from_blocks(self.blocks(), m)
-    }
 }
 
 impl<T: KernelScalar> RectSlots<T> for QuerySources<'_, T> {
     fn rect(&self, slot: SlotId) -> Option<RectSlot<'_, T>> {
         rect_view(self.blocks(), &self.scratch.cast, slot)
+    }
+}
+
+/// The query squares of a covariance (bound as [`BlockKind::Square`], so
+/// checked in full when bound) read where they were bound: in place for an
+/// `f64` model, from the one cast otherwise. A scalar slot is its dense
+/// square; an ARD slot its dense blocks.
+impl<T: KernelScalar> SquareSlots<T> for QuerySources<'_, T> {
+    fn square(&self, slot: SlotId) -> Option<SquareSlot<'_, T>> {
+        Some(match rect_view(self.blocks(), &self.scratch.cast, slot)? {
+            RectSlot::Scalar(view) => SquareSlot::Scalar(view),
+            RectSlot::Ard(ArdRect::Checked(blocks)) => SquareSlot::ArdDense(blocks),
+            // A square is never left to be checked as it is read.
+            RectSlot::Ard(ArdRect::Unchecked(_)) => return None,
+        })
     }
 }
 

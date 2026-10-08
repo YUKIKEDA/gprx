@@ -36,6 +36,9 @@ pub enum SquareSlot<'a, T> {
     Scalar(MatRef<'a, T>),
     /// Packed lower triangles, one per dimension.
     Ard(ArdSqDiff<'a, T>),
+    /// Dense checked `n × n` blocks, one per dimension: a query square read
+    /// where it was bound, without packing it.
+    ArdDense(ArdBlocks<'a, T, Checked>),
 }
 
 /// One slot's `d²` between the points of two sets.
@@ -97,13 +100,31 @@ pub(super) fn scalar_square<'a, T>(
     }
 }
 
-/// The square supply of an ARD slot.
+/// The packed square supply of an ARD slot (the training triangles).
 pub(super) fn ard_square<'a, T>(
     slots: Option<&'a dyn SquareSlots<T>>,
     slot: SlotId,
 ) -> Result<ArdSqDiff<'a, T>, GprError> {
     match slots.and_then(|s| s.square(slot)) {
         Some(SquareSlot::Ard(cache)) => Ok(cache),
+        _ => Err(missing()),
+    }
+}
+
+/// The square supply of an ARD slot: packed triangles, or dense blocks read
+/// as a rectangle of one set.
+enum ArdSquare<'a, T> {
+    Packed(ArdSqDiff<'a, T>),
+    Dense(ArdBlocks<'a, T, Checked>),
+}
+
+fn ard_square_any<'a, T>(
+    slots: Option<&'a dyn SquareSlots<T>>,
+    slot: SlotId,
+) -> Result<ArdSquare<'a, T>, GprError> {
+    match slots.and_then(|s| s.square(slot)) {
+        Some(SquareSlot::Ard(cache)) => Ok(ArdSquare::Packed(cache)),
+        Some(SquareSlot::ArdDense(blocks)) => Ok(ArdSquare::Dense(blocks)),
         _ => Err(missing()),
     }
 }
@@ -201,14 +222,15 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.apply(d, out, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => {
-                let c = ard_square(slots, self.slot)?;
-                match leaf {
+            SuppliedCompiled::Ard(leaf) => match ard_square_any(slots, self.slot)? {
+                ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
                     ArdLeaf::Matern(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
                     ArdLeaf::RationalQuadratic(k) => k.apply_from_sq_diff(c, out, uplo),
-                }
-            }
+                },
+                // Every entry of a dense square, whatever `uplo` asks.
+                ArdSquare::Dense(b) => ard_cross::<M, T>(leaf, ArdRect::Checked(b), out),
+            },
         }
     }
 
@@ -231,14 +253,14 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.grad(d, d_k, p, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => {
-                let c = ard_square(slots, self.slot)?;
-                match leaf {
+            SuppliedCompiled::Ard(leaf) => match ard_square_any(slots, self.slot)? {
+                ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
                     ArdLeaf::Matern(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
                     ArdLeaf::RationalQuadratic(k) => k.grad_from_sq_diff(c, d_k, p, uplo),
-                }
-            }
+                },
+                ArdSquare::Dense(b) => ard_grad_cross::<M, T>(leaf, ArdRect::Checked(b), d_k, p),
+            },
         }
     }
 
@@ -261,14 +283,16 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
                     ScalarLeaf::Custom(k) => k.hess(d, d2_k, i, j, uplo),
                 }
             }
-            SuppliedCompiled::Ard(leaf) => {
-                let c = ard_square(slots, self.slot)?;
-                match leaf {
+            SuppliedCompiled::Ard(leaf) => match ard_square_any(slots, self.slot)? {
+                ArdSquare::Packed(c) => match leaf {
                     ArdLeaf::Rbf(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
                     ArdLeaf::Matern(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
                     ArdLeaf::RationalQuadratic(k) => k.hess_from_sq_diff(c, d2_k, i, j, uplo),
+                },
+                ArdSquare::Dense(b) => {
+                    ard_hess_cross::<M, T>(leaf, ArdRect::Checked(b), d2_k, (i, j))
                 }
-            }
+            },
         }
     }
 

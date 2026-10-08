@@ -1093,3 +1093,91 @@ fn supplied_distances_allocate_no_more_than_coordinates() {
     }
     assert!(over.is_empty(), "over the coordinate path: {over:?}");
 }
+
+/// Bytes a covariance on supplied distances allocates against the same
+/// covariance on coordinates, on the baseline problem: the query square is
+/// read where it was bound, so no copy of its `q² · d` values is made.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn covariance_bytes() -> Vec<(String, usize, usize)> {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let block = |k: usize| -> Vec<f64> {
+        (0..p.q)
+            .flat_map(|j| (0..p.q).map(move |i| (i, j)))
+            .map(|(i, j)| (p.xq[i + k * p.q] - p.xq[j + k * p.q]).powi(2))
+            .collect()
+    };
+    let squares: Vec<Vec<f64>> = (0..p.d).map(block).collect();
+    let square_sum: Vec<f64> = (0..p.q * p.q)
+        .map(|at| squares.iter().map(|b| b[at]).sum())
+        .collect();
+    let square_refs: Vec<&[f64]> = squares.iter().map(Vec::as_slice).collect();
+    let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
+    let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let image = ScalarDistance::new();
+    let bands = ArdDistance::new(p.d).expect("dims");
+    let ell = [0.5, 0.6, 0.7, 0.8];
+    let mut out = Vec::new();
+    let coords = |kernel: KernelSpec| {
+        Gpr::new(kernel, lik())
+            .with_optimizer(Fixed)
+            .factor(&p.x, p.n, p.d, &p.y)
+            .expect("factor")
+    };
+    // Scalar slot.
+    let c = coords(KernelSpec::from(RbfKernel::new(0.5).expect("ell")));
+    let d = Gpr::new(image.kernel(RbfKernel::new(0.5).expect("ell")), lik())
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&s.train_sum)], p.n, &p.y)
+        .expect("factor");
+    let cb = bytes_in(|| {
+        c.predict_covariance(&p.xq, p.q, p.d).expect("covariance");
+    });
+    let db = bytes_in(|| {
+        d.predict_covariance(
+            [image.borrow(&s.cross_sum)],
+            [image.borrow(&square_sum)],
+            p.q,
+        )
+        .expect("covariance");
+    });
+    out.push(("rbf".to_owned(), db, cb));
+    // ARD slot.
+    let c = coords(KernelSpec::from(RbfArdKernel::new(&ell).expect("ell")));
+    let d = Gpr::new(
+        bands
+            .kernel(RbfArdKernel::new(&ell).expect("ell"))
+            .expect("dims"),
+        lik(),
+    )
+    .with_optimizer(Fixed)
+    .factor([bands.borrow(&train_refs)], p.n, &p.y)
+    .expect("factor");
+    let cb = bytes_in(|| {
+        c.predict_covariance(&p.xq, p.q, p.d).expect("covariance");
+    });
+    let db = bytes_in(|| {
+        d.predict_covariance(
+            [bands.borrow(&cross_refs)],
+            [bands.borrow(&square_refs)],
+            p.q,
+        )
+        .expect("covariance");
+    });
+    out.push(("rbf_ard".to_owned(), db, cb));
+    out
+}
+
+#[test]
+fn a_covariance_on_supplied_distances_copies_no_query_square() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    for (label, supplied, coordinate) in covariance_bytes() {
+        eprintln!("covariance/{label}: supplied={supplied} coordinate={coordinate} bytes");
+        assert!(
+            supplied <= coordinate,
+            "covariance/{label}: {supplied} bytes on supplied distances, {coordinate} on coordinates"
+        );
+    }
+}
