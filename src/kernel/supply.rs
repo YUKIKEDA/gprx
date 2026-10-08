@@ -345,15 +345,18 @@ impl ArdDistance {
     /// # Errors
     ///
     /// Returns [`GprError::DimensionMismatch`] if the leaf's lengthscale
-    /// count is not [`Self::dims`].
+    /// count is not [`Self::dims`]: `x_dim` is [`Self::dims`], `expected_dim`
+    /// the lengthscale count.
     ///
     /// See the example on [`ArdDistance`].
     pub fn kernel(&self, leaf: impl ArdDistanceLeaf) -> Result<DistanceKernel, GprError> {
         let lengthscales = leaf.lengthscale_count();
         if lengthscales != self.dims {
+            // The slot's `d²` per pair are the data's dimensions; the
+            // leaf's lengthscales are the ones the kernel expects.
             return Err(GprError::DimensionMismatch {
-                x_dim: lengthscales,
-                expected_dim: self.dims,
+                x_dim: self.dims,
+                expected_dim: lengthscales,
             });
         }
         Ok(DistanceKernel::leaf(SuppliedSpec {
@@ -760,8 +763,12 @@ fn collect_slots<S: Supply>(spec: &KernelSpec<S>, out: &mut Vec<DistanceSlot>) {
     match spec {
         KernelSpec::Supplied(leaf) => {
             let leaf = S::spec(leaf);
-            if !out.iter().any(|slot| slot.id() == leaf.slot) {
-                out.push(DistanceSlot::from_parts(leaf.slot, leaf.shape()));
+            // A slot id is minted by one constructor with its shape, and a
+            // leaf takes its shape from the slot it was made on, so every
+            // leaf of an id has the same shape.
+            match out.iter().find(|slot| slot.id() == leaf.slot) {
+                Some(seen) => debug_assert_eq!(seen.shape(), leaf.shape()),
+                None => out.push(DistanceSlot::from_parts(leaf.slot, leaf.shape())),
             }
         }
         KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
@@ -1059,12 +1066,15 @@ mod tests {
         let k = a.kernel(RbfKernel::new(1.0).expect("ell"))
             * b.kernel(RbfArdKernel::new(&[1.0, 2.0]).expect("ell"))
                 .expect("dims")
-            + a.kernel(MaternKernel::new(1.0, crate::kernel::MaternNu::FiveHalves).expect("ell"));
+            + a.kernel(MaternKernel::new(1.0, crate::kernel::MaternNu::FiveHalves).expect("ell"))
+            + b.kernel(RbfArdKernel::new(&[3.0, 4.0]).expect("ell"))
+                .expect("dims");
+        // A slot read by two leaves is listed once, with its one shape.
         assert_eq!(
             k.slots(),
             vec![DistanceSlot::Scalar(a), DistanceSlot::Ard(b)]
         );
-        assert_eq!(k.num_params(), 4);
+        assert_eq!(k.num_params(), 6);
     }
 
     #[test]
@@ -1074,8 +1084,8 @@ mod tests {
         assert!(matches!(
             b.kernel(RbfArdKernel::new(&[1.0, 2.0]).expect("ell")),
             Err(GprError::DimensionMismatch {
-                x_dim: 2,
-                expected_dim: 3
+                x_dim: 3,
+                expected_dim: 2
             })
         ));
     }
