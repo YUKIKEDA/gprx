@@ -735,8 +735,7 @@ impl<C: PointUse> DistanceKernel<C> {
     /// Returns the slots this expression reads, in depth-first,
     /// left-to-right order of their first leaf.
     ///
-    /// A model loaded from disk has slots of its own; read them here to
-    /// bind its supplies.
+    /// Each source a fit or a prediction takes names one of these slots.
     ///
     /// See the example on [`DistanceSlot`].
     pub fn slots(&self) -> Vec<DistanceSlot> {

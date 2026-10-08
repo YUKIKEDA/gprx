@@ -524,6 +524,8 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         scratch: MatMut<'_, T>,
         nested: &mut Nested<T>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(views.x1)?;
+        self.require_tree_columns(views.x2)?;
         let CrossViews { x1, x2, .. } = views;
         match self {
             Self::Rbf(leaf) => leaf.grad_cross_from_coords::<M, _>(x1, x2, d_k, param_idx),
@@ -534,7 +536,7 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
             Self::RationalQuadratic(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
             Self::RationalQuadraticArd(leaf) => leaf.grad_cross_from_coords(x1, x2, d_k, param_idx),
             Self::Linear(leaf) => leaf.grad_cross(x1, x2, d_k, param_idx),
-            Self::Constant(leaf) => leaf.grad_cross_points(x1, x2, d_k, param_idx),
+            Self::Constant(leaf) => leaf.grad_cross_rows(x1, x2, d_k, param_idx),
             Self::White(_) => {
                 let _ = param_idx;
                 white_cross_zero(x1, x2, d_k)

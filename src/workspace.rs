@@ -175,6 +175,40 @@ pub(crate) struct GradientViews<'a, S> {
     pub(crate) ard_fold: &'a mut Vec<f64>,
 }
 
+/// The query columns a [`QueryWorkspace`] holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueryCols {
+    /// A kernel with coordinate leaves: `d` columns, at least one.
+    Points(usize),
+    /// A kernel on supplied distances alone: no column.
+    Distances,
+}
+
+impl QueryCols {
+    /// The columns of a kernel whose coordinate leaves read `x` when
+    /// `points`, `d` of them; none otherwise.
+    pub(crate) fn of(points: bool, d: usize) -> Self {
+        if points {
+            Self::Points(d)
+        } else {
+            Self::Distances
+        }
+    }
+
+    /// The number of columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] for [`Self::Points`] of zero.
+    fn count(self) -> Result<usize, GprError> {
+        match self {
+            Self::Points(0) => Err(GprError::EmptyInput),
+            Self::Points(d) => Ok(d),
+            Self::Distances => Ok(0),
+        }
+    }
+}
+
 /// Predict-into buffers owned by [`crate::FittedGpr`].
 ///
 /// Sized on the first `predict_into` for `(n, m, d)`. The same query length
@@ -439,13 +473,15 @@ where
         }
     }
 
-    /// Sizes buffers for an `n×m` predict. No-op when already sized.
+    /// Sizes buffers for an `n×m` predict with the query columns `cols`.
+    /// No-op when already sized.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] if `n` or `m` is zero. `d` is zero
-    /// for a model on supplied distances alone.
-    pub(crate) fn ensure(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
+    /// Returns [`GprError::EmptyInput`] if `n` or `m` is zero, or a kernel
+    /// with coordinate leaves has no column.
+    pub(crate) fn ensure(&mut self, n: usize, m: usize, cols: QueryCols) -> Result<(), GprError> {
+        let d = cols.count()?;
         if n == 0 || m == 0 {
             return Err(GprError::EmptyInput);
         }
@@ -473,9 +509,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] if `n` or `m` is zero.
+    /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
     pub(crate) fn ensure_at_least(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
-        if n == 0 || m == 0 {
+        if n == 0 || m == 0 || d == 0 {
             return Err(GprError::EmptyInput);
         }
         let have_n = self.query_k_star.nrows();
@@ -514,7 +550,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{FitBuffers, FitWorkspace, QueryWorkspace, WorkspaceCore, faer_scratch_req};
+    use super::{
+        FitBuffers, FitWorkspace, QueryCols, QueryWorkspace, WorkspaceCore, faer_scratch_req,
+    };
     use crate::error::GprError;
     use crate::policy::{CholeskyBuffer, DistanceCachePolicy};
     use crate::precision::DoublePrecision;
@@ -611,15 +649,29 @@ mod tests {
     fn query_ensure_allocates_when_needed() {
         let mut query = QueryWorkspace::<DoublePrecision>::new();
         assert_eq!(query.query_k_star.ncols(), 0);
-        query.ensure(4, 3, 2).expect("m,d > 0");
+        query.ensure(4, 3, QueryCols::Points(2)).expect("m,d > 0");
         assert_eq!(query.query_x.nrows(), 3);
         assert_eq!(query.query_x.ncols(), 2);
         assert_eq!(query.query_k_star.nrows(), 4);
         assert_eq!(query.query_k_star.ncols(), 3);
         assert_eq!(query.query_xs.len(), 6);
         assert_eq!(query.query_kss.len(), 3);
-        query.ensure(4, 3, 2).expect("same size");
+        query.ensure(4, 3, QueryCols::Points(2)).expect("same size");
         assert_eq!(query.query_k_star.ncols(), 3);
-        assert_eq!(query.ensure(4, 0, 2).err(), Some(GprError::EmptyInput));
+        assert_eq!(
+            query.ensure(4, 0, QueryCols::Points(2)).err(),
+            Some(GprError::EmptyInput)
+        );
+        // A coordinate kernel reads at least one column; only a kernel on
+        // supplied distances alone sizes a query without one.
+        assert_eq!(
+            query.ensure(4, 3, QueryCols::Points(0)).err(),
+            Some(GprError::EmptyInput)
+        );
+        query.ensure(4, 3, QueryCols::Distances).expect("no column");
+        assert_eq!(
+            query.ensure_at_least(4, 1, 0).err(),
+            Some(GprError::EmptyInput)
+        );
     }
 }

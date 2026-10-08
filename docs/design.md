@@ -390,7 +390,7 @@ A kernel leaf may read squared distances the caller supplies (a geodesic, a grap
 
 **Validation of a table.** A training square must be symmetric with a zero diagonal, and every value must be finite and non-negative. A table is not repaired silently. From the table alone, rounding cannot be told apart from a wrong table: the error of `‖a‖² + ‖b‖² − 2a·b` is `ε · (‖x_i‖² + ‖x_j‖²)`, set by how far the points are from the origin, not by the distances, so no tolerance read off the table separates the two, and a silent repair would also accept a directed distance or a transposed table. A table computed pair by pair (`(a − b)²` in both orders) is exactly symmetric with a zero diagonal and passes as it is.
 
-- By default the check is exact. A violation is an error naming the worst pair and its values.
+- By default the check is exact. A violation is an error naming the first pair that fails, in the order the check reads the table (for a square checked in parallel bands, the first failing band), and its values. A fill judged against a repair tolerance, which can only be judged once the whole square is in, names its worst pair.
 - A caller who builds the table in a way that rounds (the Gram trick) opts in to repair, with a tolerance it chooses, on that source. Within the tolerance a negative value or a diagonal becomes `0.0` and a mirror pair becomes its mean; past it the table is refused.
 - An invalid value is its own error variant (row, column, reason), not `ShapeMismatch`, which stays for shapes. A missing, duplicate, or unknown slot stays `LengthMismatch`.
 - The check reads the table once, `O(n²)` per square, whatever the policy. A training ARD square is checked as it is packed into its triangles. A prediction block (train × query) of an ARD slot is checked as the kernel reads it, in the loop that sums `r²`, so the caller's values are read once: by the kernel for an `f64` model, by the cast for an `f32` one. The blocks carry whether they were checked as a type (`Checked` / `Unchecked`): the values of unchecked blocks come out only through reads that check them, so a leaf or a SIMD path that forgot the check would not compile. A scalar prediction block is checked when it is bound, with the CPU's widest SIMD (`pulp`'s dispatch).
@@ -783,7 +783,7 @@ The trainer bound is `O: for<'a> Optimizer<GprObjective<'a, P>>`. The default is
 
 Cover the failures that are specific to numerical work.
 
-A public enum whose set can grow is `#[non_exhaustive]`: `GprError`, `CholeskyStage`, `IntervalError`, `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`, `PersistKind`, `KernelSpec`, `CompiledKernel`, `DistanceCachePolicy`, `JitterPolicy`, `KernelExp`, and `BoundaryPolicy`. Adding a variant to one of them is not a breaking change; a `match` outside the crate needs a `_` arm. A closed set stays exhaustive so callers can match every case: `Triangle`, `MaternNu`, `VarianceKind`, `CholeskyBuffer`.
+A public enum whose set can grow is `#[non_exhaustive]`: `GprError`, `CholeskyStage`, `IntervalError`, `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`, `PersistKind`, `KernelSpec`, `CompiledKernel`, `DistanceSlot`, `DistanceCachePolicy`, `JitterPolicy`, `KernelExp`, and `BoundaryPolicy`. Adding a variant to one of them is not a breaking change; a `match` outside the crate needs a `_` arm. A closed set stays exhaustive so callers can match every case: `Triangle`, `MaternNu`, `VarianceKind`, `CholeskyBuffer`.
 
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
@@ -799,6 +799,7 @@ pub enum GprError {
     OptimizationNotConverged { iterations: usize },
     InvalidHyperparameter { reason: String },
     ShapeMismatch { reason: String },
+    InvalidDistance { row: usize, col: usize, reason: String },
     LengthMismatch { reason: String },
     IndexOutOfRange { reason: String },
     InvalidConfig { reason: String },
@@ -818,7 +819,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 Display text is English (see `src/error.rs`).
 
-`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`. An interval that does not contain its value is `InvalidInterval`. Save / load failures are `PersistFailed`, whose `kind` (`PersistErrorKind`, non-exhaustive) says which part failed so a caller can branch without reading `reason`, and a file from another format version is `UnsupportedPersistVersion`.
+`InvalidHyperparameter` is only for a hyperparameter value outside its domain. Matrix shape, slice length, and index errors are `ShapeMismatch`, `LengthMismatch`, and `IndexOutOfRange`. Optimizer, jitter-policy, and transform settings are `InvalidConfig`. A size product that overflows `usize` is `SizeOverflow`, not `EmptyInput`. An interval that does not contain its value is `InvalidInterval`. A supplied squared distance that is not finite, is negative, is a non-zero diagonal, or differs from its mirror entry (past what the source's repair allows) is `InvalidDistance`, with the pair's `row` and `col` in its table; a missing, duplicate, or unknown distance slot stays `LengthMismatch`. Save / load failures are `PersistFailed`, whose `kind` (`PersistErrorKind`, non-exhaustive) says which part failed so a caller can branch without reading `reason`, and a file from another format version is `UnsupportedPersistVersion`.
 
 **Error versus panic**: failures caused by user input (`DimensionMismatch` and similar) and by the model or the data (`CholeskyFailed` and similar) return `Result` and stay recoverable. `CoordGradientUnsupported` is not an internal panic, so it returns this error instead of `unimplemented!()`. There is no `NotFitted` variant. An unfitted call cannot be formed.
 
