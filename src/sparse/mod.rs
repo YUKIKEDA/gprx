@@ -618,6 +618,30 @@ impl<T: KernelScalar> KernelScratch<T> {
         )
     }
 
+    /// The rectangular `∂²K(x, xs)/∂θ_i ∂θ_j` (`n × q`) into `out`, on the
+    /// kept scratch and nested levels.
+    pub(crate) fn hess_cross_into<M: crate::math::KernelMath>(
+        &mut self,
+        compiled: &CompiledKernel<T>,
+        x: MatRef<'_, T>,
+        xs: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        pair: (usize, usize),
+    ) -> Result<(), GprError> {
+        let (rows, cols) = (out.nrows(), out.ncols());
+        let KernelScratch {
+            scratch, nested, ..
+        } = self;
+        crate::kernel::ensure_nested_levels(nested, compiled, rows, cols);
+        compiled.hess_cross_views::<M>(
+            CrossViews::points(x, xs),
+            out,
+            pair,
+            view(scratch, rows, cols),
+            nested,
+        )
+    }
+
     /// `K(x, xs)` (`n × q`) in a new matrix.
     pub(crate) fn cross<M: crate::math::KernelMath>(
         &mut self,

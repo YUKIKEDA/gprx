@@ -572,6 +572,11 @@ impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {
         let kernel = self.kernel.compile();
         let mut a = Mat::<f64>::zeros(n, n);
         let mut scratch_k = Mat::<f64>::zeros(n, n);
+        // An `f32` store is widened here, on each call, rather than kept as
+        // an `f64` copy: the copy would double the supplied distances the
+        // model holds, while this call already allocates two `n × n`
+        // matrices and does `O(n³)` work, which the `O(n²)` widening does
+        // not change.
         let sources = self.sources.to_f64()?;
         let sources = sources.as_ref();
         with_kernel_exp!(self.policies.math, M => kernel.eval_gram::<M>(
