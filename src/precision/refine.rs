@@ -150,6 +150,9 @@ pub struct TrainSystem<'a, T: KernelScalar, S: Supply = NoSupply> {
 pub(crate) struct ExactSystem<'s, 'a, M, R, S: Supply> {
     sys: &'s TrainSystem<'a, f32, S>,
     kernel_f64: CompiledKernel<f64, S>,
+    /// The training squares at `f64`, widened once here when the model
+    /// does not keep them, so no residual copies them again.
+    exact: Cow<'a, TrainSources<f64>>,
     saved: Mat<f32>,
     diag: f64,
     _marker: core::marker::PhantomData<(M, R)>,
@@ -173,6 +176,7 @@ impl<'s, 'a, M: crate::math::KernelMath, R: ResidualFormula, S: Supply>
         Ok(Self {
             sys,
             kernel_f64: sys.kernel.compile(),
+            exact: exact_sources(sys)?,
             saved,
             diag: sys.noise + sys.jitter,
             _marker: core::marker::PhantomData,
@@ -200,7 +204,7 @@ impl<M: crate::math::KernelMath, R: ResidualFormula, S: Supply> RefineSystem
         if R::READS_STORAGE {
             Ok(row_sum_matvec(self.saved.as_ref(), w, self.sys.y, r))
         } else {
-            fresh_residual::<M, _>(&self.kernel_f64, self.sys, self.diag, w, r)
+            fresh_residual::<M, _>(&self.kernel_f64, self.sys, &self.exact, self.diag, w, r)
         }
     }
 
@@ -214,20 +218,20 @@ impl<M: crate::math::KernelMath, R: ResidualFormula, S: Supply> RefineSystem
 
     fn accept(&self, w: &[f64], tol: f64) -> Result<bool, GprError> {
         if R::READS_STORAGE {
-            meets_f64_system::<M, _>(&self.kernel_f64, self.sys, self.diag, w, tol)
+            meets_f64_system::<M, _>(&self.kernel_f64, self.sys, &self.exact, self.diag, w, tol)
         } else {
             Ok(true)
         }
     }
 
     fn fallback(&self) -> Result<Vec<f64>, GprError> {
-        f64_alpha::<M, _>(&self.kernel_f64, self.sys, self.diag)
+        f64_alpha::<M, _>(&self.kernel_f64, self.sys, &self.exact, self.diag)
     }
 }
 
 /// The training squares of `sys` at `f64`: the exact values when the model
 /// keeps them, else the storage values widened.
-fn exact_sources<'a, S: Supply>(
+pub(super) fn exact_sources<'a, S: Supply>(
     sys: &TrainSystem<'a, f32, S>,
 ) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
     match sys.exact {
@@ -258,12 +262,13 @@ pub(crate) fn refine_alpha<M: crate::math::KernelMath, R: ResidualFormula, S: Su
 fn meets_f64_system<M: crate::math::KernelMath, S: Supply>(
     kernel_f64: &CompiledKernel<f64, S>,
     sys: &TrainSystem<'_, f32, S>,
+    exact: &TrainSources<f64>,
     diag: f64,
     alpha: &[f64],
     tol: f64,
 ) -> Result<bool, GprError> {
     let mut resid = vec![0.0; alpha.len()];
-    let a_inf = fresh_residual::<M, _>(kernel_f64, sys, diag, alpha, &mut resid)?;
+    let a_inf = fresh_residual::<M, _>(kernel_f64, sys, exact, diag, alpha, &mut resid)?;
     let denom = a_inf * inf_norm(alpha) + inf_norm(sys.y);
     Ok(denom > 0.0 && inf_norm(&resid) / denom < tol)
 }
@@ -331,6 +336,7 @@ fn row_sum_matvec(a: MatRef<'_, f32>, alpha: &[f64], y: &[f64], r: &mut [f64]) -
 fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
     kernel: &CompiledKernel<f64, S>,
     sys: &TrainSystem<'_, f32, S>,
+    exact: &TrainSources<f64>,
     diag: f64,
     alpha: &[f64],
     r: &mut [f64],
@@ -346,7 +352,6 @@ fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
     let mut nested = Vec::new();
     let mut row_abs = vec![0.0f64; n];
     let mut sum = vec![0.0f64; n];
-    let exact = exact_sources(sys)?;
     let mut start = 0;
     while start < n {
         let len = block.min(n - start);
@@ -390,6 +395,7 @@ fn fresh_residual<M: crate::math::KernelMath, S: Supply>(
 pub(crate) fn f64_alpha<M: crate::math::KernelMath, S: Supply>(
     kernel: &CompiledKernel<f64, S>,
     sys: &TrainSystem<'_, f32, S>,
+    sources: &TrainSources<f64>,
     diag: f64,
 ) -> Result<Vec<f64>, GprError> {
     let x = sys.x;
@@ -397,11 +403,6 @@ pub(crate) fn f64_alpha<M: crate::math::KernelMath, S: Supply>(
     let n = y.len();
     let mut a = Mat::<f64>::zeros(n, n);
     let mut scratch = Mat::<f64>::zeros(n, n);
-    let sources = match sys.exact {
-        Some(exact) => Cow::Borrowed(exact),
-        None => Cow::Owned(sys.sources.to_f64()?),
-    };
-    let sources = sources.as_ref();
     kernel.eval_gram::<M>(
         GramInputs {
             slots: (!sources.is_empty()).then_some(sources as &dyn SquareSlots<f64>),
