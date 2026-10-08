@@ -397,8 +397,8 @@ fn main() -> Result<(), gprx::GprError> {
 
 | 供給 | コピー |
 | --- | --- |
-| `from_vec(d2)` / `from_vecs(blocks)` | モデルへムーブ（`f64` のモデルはバッファをそのまま持つ） |
-| `from_slice(d2)` / `from_slices(blocks)` | 呼び出しでコピー |
+| `from_vec(d2)` / `from_vecs(blocks)` | 呼び出しへムーブ。`f64` のモデルは表をそのまま保存として持つので、fit は何もコピーしない。ARD のスロットは詰めた `d · n(n+1)/2` 個ではなく `d · n²` 個を持つ（`tidy` が直す ARD の表は詰める）。`f32` のモデルは自分のバッファへ型変換する（ARD は詰める）。`MixedPrecision` のモデルは `f64` の表を持ち、その型変換も持つ |
+| `from_slice(d2)` / `from_slices(blocks)` | 呼び出しでコピーし、その後は `from_vec` / `from_vecs` と同じ。`f64` のモデルはコピーを持つ（ARD のスロットは `d · n²`）。`borrow` ならこのコピーなしで fit する |
 | `borrow(d2)` / `borrow(blocks)` | `f64` のモデルの `predict` はその場で読む。`f32` のモデルは 1 回だけ型変換する。`fit` はコピーする（ARD の正方行列は詰めた三角へ直接） |
 | `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` が `rows` の各行 `i` の `d²(i, col)` を書く。ARD の fill は `d` 本の列を続けて書く。正方行列では各列の `col..n` 行だけを求める |
 
@@ -409,7 +409,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `Gpr`、`DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`、`WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
-`cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は今は座標のモデルにだけある。与えた距離でのオンラインの追加と削除は次の行（#473）。
+`cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は座標のモデルにだけある。与えた距離のモデルには、オンラインの追加と削除はない。
 
 ```rust
 use gprx::kernel::{

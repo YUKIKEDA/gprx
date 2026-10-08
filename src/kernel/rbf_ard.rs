@@ -395,7 +395,12 @@ impl RbfArdKernel {
         let s = &mut fold[..len];
         let mut at = 0;
         for col in 0..n {
-            for row in col..n {
+            // The diagonal's `(Δ_d)²` is `0`, so its term is `0`, as the
+            // coordinate contraction leaves it, whatever the weight there
+            // (an overflowed `A⁻¹ − ααᵀ` would make `w · k · 0` a `NaN`).
+            s[at] = 0.0;
+            at += 1;
+            for row in col + 1..n {
                 s[at] = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
                 at += 1;
             }
@@ -886,6 +891,18 @@ mod tests {
             &mut fold,
         )
         .expect("finite");
+        assert!(out.iter().all(|g| g.is_finite()));
+        // An infinite weight on the diagonal multiplies `(Δ_d)² = 0` and is
+        // left out, as the coordinate contraction does.
+        weight[(1, 1)] = f64::INFINITY;
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            cache.view(),
+            &mut out,
+            &mut fold,
+        )
+        .expect("diagonal left out");
         assert!(out.iter().all(|g| g.is_finite()));
         weight[(2, 0)] = f64::INFINITY;
         assert!(matches!(
