@@ -32,6 +32,8 @@ pub(crate) struct RawSlot<'a> {
     cast_at: usize,
     /// Whether the values are left to be checked as they are read.
     unchecked: bool,
+    /// How the source asked its values to be checked.
+    tidy: Tidy,
 }
 
 enum RawData<'a> {
@@ -1449,10 +1451,16 @@ fn reads_in_place<T: ScalarOps>() -> bool {
 /// the training points (rows) to the inducing points (columns), as the
 /// caller laid them out, or the squares among the inducing points. Empty
 /// for a coordinate kernel.
+///
+/// Column `c` of a block starts at `c · ld`. A store is bound with
+/// `ld = rows`; an online model's first insert makes room for more rows
+/// ([`Self::reserve_row`]), so a later insert writes one value per column.
+/// The values past `rows` in a column are zero.
 #[derive(Clone, Debug)]
 pub(crate) struct BlockStore<T> {
     rows: usize,
     cols: usize,
+    ld: usize,
     scalar: Vec<Vec<T>>,
     ard: Vec<SlotBlocks<T>>,
 }
@@ -1497,15 +1505,215 @@ impl<T> Default for BlockStore<T> {
         Self {
             rows: 0,
             cols: 0,
+            ld: 0,
             scalar: Vec::new(),
             ard: Vec::new(),
         }
     }
 }
 
+/// One block of a [`BlockStore`]: a scalar slot's, or dimension `k` of an
+/// ARD slot's (`Ard(at, k)`), each slot numbered within its shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockAt {
+    Scalar(usize),
+    Ard(usize, usize),
+}
+
 impl<T: KernelScalar> BlockStore<T> {
+    /// Values in one block's buffer.
     fn len(&self) -> usize {
-        self.rows * self.cols
+        self.ld * self.cols
+    }
+
+    /// Runs `f` on every block, in slot order.
+    fn each_block_mut(&mut self, mut f: impl FnMut(BlockAt, &mut [T])) {
+        let len = self.len();
+        for (at, block) in self.scalar.iter_mut().enumerate() {
+            f(BlockAt::Scalar(at), block);
+        }
+        for (at, slot) in self.ard.iter_mut().enumerate() {
+            match slot {
+                SlotBlocks::Flat(all) => {
+                    for (k, block) in all.chunks_exact_mut(len.max(1)).enumerate() {
+                        f(BlockAt::Ard(at, k), block);
+                    }
+                }
+                SlotBlocks::Tables(tables) => {
+                    for (k, block) in tables.iter_mut().enumerate() {
+                        f(BlockAt::Ard(at, k), block);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same blocks with column stride `ld` and `cols` columns: column
+    /// `c` holds the rows of this store's column `from(c)`, or zeros.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the new blocks cannot be
+    /// allocated.
+    fn relaid(
+        &self,
+        ld: usize,
+        cols: usize,
+        from: impl Fn(usize) -> Option<usize>,
+    ) -> Result<Self, GprError> {
+        let len = ld.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+        let (rows, old_ld, old_len) = (self.rows, self.ld, self.len());
+        let copy = |block: &[T], out: &mut Vec<T>| {
+            for c in 0..cols {
+                match from(c) {
+                    Some(old) => out.extend_from_slice(&block[old * old_ld..old * old_ld + rows]),
+                    None => out.resize(out.len() + rows, T::from_f64(0.0)),
+                }
+                out.resize(out.len() + (ld - rows), T::from_f64(0.0));
+            }
+        };
+        let fresh = |count: usize| -> Result<Vec<T>, GprError> {
+            let mut out = Vec::new();
+            out.try_reserve_exact(len.checked_mul(count).ok_or(GprError::SizeOverflow)?)
+                .map_err(|_| GprError::SizeOverflow)?;
+            Ok(out)
+        };
+        let mut scalar = Vec::with_capacity(self.scalar.len());
+        for block in &self.scalar {
+            let mut out = fresh(1)?;
+            copy(block, &mut out);
+            scalar.push(out);
+        }
+        let mut ard = Vec::with_capacity(self.ard.len());
+        for slot in &self.ard {
+            let dims = slot.count(old_len);
+            let mut out = fresh(dims)?;
+            for k in 0..dims {
+                copy(slot.block(k, old_len), &mut out);
+            }
+            ard.push(SlotBlocks::Flat(out));
+        }
+        Ok(Self {
+            rows,
+            cols,
+            ld,
+            scalar,
+            ard,
+        })
+    }
+
+    /// Makes room for one more row, so [`Self::push_row`] writes in place:
+    /// a full store is laid out again with a quarter more rows, copying its
+    /// values once per `rows / 4` inserts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the larger blocks cannot be
+    /// allocated; the store is then unchanged.
+    pub(crate) fn reserve_row(&mut self) -> Result<(), GprError> {
+        if self.rows < self.ld {
+            return Ok(());
+        }
+        let ld = (self.rows + 1).max(self.rows + self.rows / 4);
+        *self = self.relaid(ld, self.cols, Some)?;
+        Ok(())
+    }
+
+    /// Appends row `rows`, `value(block, col)` in each column, once
+    /// [`Self::reserve_row`] made room: nothing in it fails or allocates.
+    pub(crate) fn push_row(&mut self, mut value: impl FnMut(BlockAt, usize) -> T) {
+        debug_assert!(self.rows < self.ld, "push_row before reserve_row");
+        let (row, ld, cols) = (self.rows, self.ld, self.cols);
+        self.each_block_mut(|at, block| {
+            for c in 0..cols {
+                block[row + c * ld] = value(at, c);
+            }
+        });
+        self.rows += 1;
+    }
+
+    /// Removes row `index` (`< rows`), moving the rows after it up by one in
+    /// every column: `(rows − index) · cols` values per block.
+    pub(crate) fn remove_row(&mut self, index: usize) {
+        debug_assert!(index < self.rows, "remove_row past the rows");
+        let (rows, ld, cols) = (self.rows, self.ld, self.cols);
+        self.each_block_mut(|_, block| {
+            for c in 0..cols {
+                let start = c * ld;
+                block.copy_within(start + index + 1..start + rows, start + index);
+                block[start + rows - 1] = T::from_f64(0.0);
+            }
+        });
+        self.rows -= 1;
+    }
+
+    /// Appends a column, `value(block, row)` in each row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the wider blocks cannot be
+    /// allocated; the store is then unchanged.
+    pub(crate) fn push_col(
+        &mut self,
+        mut value: impl FnMut(BlockAt, usize) -> T,
+    ) -> Result<(), GprError> {
+        let cols = self.cols;
+        let mut wider = self.relaid(self.ld, cols + 1, |c| (c < cols).then_some(c))?;
+        let (rows, ld) = (wider.rows, wider.ld);
+        wider.each_block_mut(|at, block| {
+            for (row, slot) in block[cols * ld..cols * ld + rows].iter_mut().enumerate() {
+                *slot = value(at, row);
+            }
+        });
+        *self = wider;
+        Ok(())
+    }
+
+    /// Removes column `index` (`< cols`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the narrower blocks cannot be
+    /// allocated; the store is then unchanged.
+    pub(crate) fn remove_col(&mut self, index: usize) -> Result<(), GprError> {
+        debug_assert!(index < self.cols, "remove_col past the columns");
+        let cols = self.cols - 1;
+        *self = self.relaid(self.ld, cols, |c| Some(if c < index { c } else { c + 1 }))?;
+        Ok(())
+    }
+
+    /// The value of `block` at `(row, col)`.
+    pub(crate) fn get(&self, at: BlockAt, row: usize, col: usize) -> T {
+        let i = row + col * self.ld;
+        match at {
+            BlockAt::Scalar(slot) => self.scalar[slot][i],
+            BlockAt::Ard(slot, k) => self.ard[slot].block(k, self.len())[i],
+        }
+    }
+
+    /// Sets the value of `block` at `(row, col)`.
+    pub(crate) fn set(&mut self, at: BlockAt, row: usize, col: usize, v: T) {
+        let (i, len) = (row + col * self.ld, self.len());
+        match at {
+            BlockAt::Scalar(slot) => self.scalar[slot][i] = v,
+            BlockAt::Ard(slot, k) => match &mut self.ard[slot] {
+                SlotBlocks::Flat(all) => all[k * len + i] = v,
+                SlotBlocks::Tables(tables) => tables[k][i] = v,
+            },
+        }
+    }
+
+    /// Every block, as [`Self::push_row`] and [`Self::push_col`] name them.
+    pub(crate) fn block_ids(&self) -> Vec<BlockAt> {
+        let len = self.len();
+        (0..self.scalar.len())
+            .map(BlockAt::Scalar)
+            .chain(
+                self.ard.iter().enumerate().flat_map(move |(at, slot)| {
+                    (0..slot.count(len)).map(move |k| BlockAt::Ard(at, k))
+                }),
+            )
+            .collect()
     }
 
     /// Every block, in slot order.
@@ -1533,6 +1741,7 @@ impl<T: KernelScalar> BlockStore<T> {
         Ok(BlockStore {
             rows: self.rows,
             cols: self.cols,
+            ld: self.ld,
             scalar: self.scalar.iter().map(|b| cast(b)).collect(),
             ard: self
                 .ard
@@ -1558,13 +1767,13 @@ impl<T: KernelScalar> BlockStore<T> {
         if !U::ROUNDS_FROM_F64 {
             return Ok(());
         }
-        let rows = self.rows.max(1);
+        let ld = self.ld.max(1);
         for block in self.blocks() {
             if let Some(at) = block
                 .iter()
                 .position(|v| !U::from_f64(v.to_f64()).to_f64().is_finite())
             {
-                return Err(out_of_range(at % rows, at / rows));
+                return Err(out_of_range(at % ld, at / ld));
             }
         }
         Ok(())
@@ -1573,13 +1782,14 @@ impl<T: KernelScalar> BlockStore<T> {
     /// Rows `rows` of every block (a minibatch) into `out`, reusing its
     /// buffers: once `out` has held a batch this large, nothing allocates.
     pub(crate) fn rows_into(&self, rows: &[usize], out: &mut Self) {
-        let (n, len) = (self.rows, self.len());
+        let (ld, len) = (self.ld, self.len());
         out.rows = rows.len();
         out.cols = self.cols;
+        out.ld = rows.len();
         // Column by column of every block: the picked blocks lie one after
         // another.
         let pick = |block: &[T], picked: &mut Vec<T>| {
-            for column in block.chunks_exact(n.max(1)) {
+            for column in block.chunks_exact(ld.max(1)) {
                 picked.extend(rows.iter().map(|&i| column[i]));
             }
         };
@@ -1612,6 +1822,10 @@ impl<T: KernelScalar> SquareSlots<T> for BlockStore<T> {
     }
 
     fn ard(&self, at: usize) -> Result<ArdSquare<'_, T>, GprError> {
+        debug_assert_eq!(
+            self.ld, self.rows,
+            "a square store is laid out back to back"
+        );
         match self.ard.get(at).ok_or_else(unbound)? {
             SlotBlocks::Flat(all) => Ok(ArdSquare::Packed(ArdSqDiff::flat(all, self.rows))),
             SlotBlocks::Tables(_) => Ok(ArdSquare::Dense(ArdBlocks::new(
@@ -1628,16 +1842,19 @@ impl<T: KernelScalar> SquareSlots<T> for BlockStore<T> {
 impl<T: KernelScalar> RectSlots<T> for BlockStore<T> {
     fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError> {
         let block = self.scalar.get(at).ok_or_else(unbound)?;
-        Ok(MatRef::from_column_major_slice(block, self.rows, self.cols))
+        Ok(MatRef::from_column_major_slice_with_stride(
+            block, self.rows, self.cols, self.ld,
+        ))
     }
 
     fn ard(&self, at: usize) -> Result<ArdRect<'_, T>, GprError> {
         let slot = self.ard.get(at).ok_or_else(unbound)?;
-        Ok(ArdRect::Checked(ArdBlocks::new(
+        Ok(ArdRect::Checked(ArdBlocks::strided(
             slot.list(self.len()),
             self.rows,
             self.cols,
             0,
+            self.ld,
         )))
     }
 }
@@ -1676,6 +1893,7 @@ pub(crate) fn bind_inducing<'s>(
     let store = |rows, cols| BlockStore {
         rows,
         cols,
+        ld: rows,
         scalar: vec![Vec::new(); slots.len() - ards],
         ard: (0..ards).map(|_| SlotBlocks::Flat(Vec::new())).collect(),
     };
@@ -1958,6 +2176,7 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
                 cols,
                 cast_at: 0,
                 unchecked: false,
+                tidy,
             };
             // An ARD block of pairs of two sets is checked as it is read:
             // an `f64` model's by the kernel ([`crate::kernel::ard::r2_from_blocks`]
@@ -2030,6 +2249,105 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     pub(crate) fn f64_view(&self) -> F64Blocks<'_> {
         F64Blocks(self.blocks())
     }
+
+    /// How the source of `block`'s slot asked its values to be checked.
+    pub(crate) fn tidy(&self, block: BlockAt) -> Tidy {
+        let at = match block {
+            BlockAt::Scalar(at) => at,
+            BlockAt::Ard(at, _) => self.scalars + at,
+        };
+        self.raw.get(at).map_or(Tidy::Exact, |raw| raw.tidy)
+    }
+}
+
+/// Value `row` of the bound `rows × 1` column of `block` in `cols`.
+///
+/// # Errors
+///
+/// Returns the error of reading the block: unbound, or an unchecked value
+/// that is invalid.
+pub(crate) fn column_value(
+    cols: &dyn RectSlots<f64>,
+    block: BlockAt,
+    row: usize,
+) -> Result<f64, GprError> {
+    match block {
+        BlockAt::Scalar(at) => Ok(cols.scalar(at)?[(row, 0)]),
+        BlockAt::Ard(at, k) => match cols.ard(at)? {
+            ArdRect::Checked(blocks) => blocks.read(k, row, 0),
+            ArdRect::Unchecked(blocks) => blocks.read(k, row, 0),
+        },
+    }
+}
+
+/// The column of training point `point` (`n × 1` per block in `cols`, its
+/// squared distances to the `n` training points) once it becomes inducing
+/// point `m` of the training blocks `xz` and the squares `zz` of
+/// `inducing`. Its `(m + 1)²` square among the inducing points is checked
+/// as a training square is: its row of `xz` and the new column's inducing
+/// rows are the mirror pairs, and its own row is the diagonal. A tidy
+/// source repairs that square as a training square is repaired.
+///
+/// Returns, block by block in [`BlockStore::block_ids`] order, the new
+/// column (`n` values each) and the row of `xz` the point holds after the
+/// repair (`m` values each).
+///
+/// # Errors
+///
+/// Returns [`GprError::InvalidDistance`] for a square the source's check
+/// refuses, located in the caller's column, and the errors of reading
+/// `cols`.
+pub(crate) fn new_inducing_column(
+    xz: &BlockStore<f64>,
+    zz: &BlockStore<f64>,
+    inducing: &[usize],
+    point: usize,
+    cols: &dyn RectSlots<f64>,
+    tidy: impl Fn(BlockAt) -> Tidy,
+) -> Result<(Vec<f64>, Vec<f64>), GprError> {
+    let (n, m) = (xz.rows, inducing.len());
+    let side = m + 1;
+    let blocks = xz.block_ids();
+    let mut column = Vec::with_capacity(n * blocks.len());
+    let mut mirror = Vec::with_capacity(m * blocks.len());
+    let mut square = vec![0.0; side * side];
+    for &at in &blocks {
+        let start = column.len();
+        for row in 0..n {
+            column.push(column_value(cols, at, row)?);
+        }
+        let new = &mut column[start..];
+        for b in 0..m {
+            for a in 0..m {
+                square[a + b * side] = zz.get(at, a, b);
+            }
+            square[m + b * side] = xz.get(at, point, b);
+            square[b + m * side] = new[inducing[b]];
+        }
+        square[m + m * side] = new[point];
+        // A violation is located in the caller's column: the row of an
+        // inducing point, or of the point itself.
+        let row_of = |i: usize| inducing.get(i).copied().unwrap_or(point);
+        match check_block(&square, side, side, BlockKind::Square, tidy(at)) {
+            Ok(true) => repair_block(&mut square, side, side, BlockKind::Square),
+            Ok(false) => {}
+            Err(GprError::InvalidDistance { row, col, reason }) => {
+                let row = if row == m { row_of(col) } else { row_of(row) };
+                return Err(GprError::InvalidDistance {
+                    row,
+                    col: 0,
+                    reason,
+                });
+            }
+            Err(err) => return Err(err),
+        }
+        for b in 0..m {
+            new[inducing[b]] = square[b + m * side];
+            mirror.push(square[m + b * side]);
+        }
+        new[point] = square[m + m * side];
+    }
+    Ok((column, mirror))
 }
 
 impl<T: KernelScalar> RectSlots<T> for QuerySources<'_, T> {

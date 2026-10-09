@@ -1868,6 +1868,7 @@ fn delete_by_reassembly_publishes_weights_of_the_remaining_points() {
             y_next.clone(),
             x_next.clone(),
             y_next.clone(),
+            online.state.core.supply.clone(),
         )
         .expect("reassemble");
     let rebuilt = sgpr()

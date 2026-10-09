@@ -21,7 +21,7 @@ use crate::sparse::{PredictScratch, SparseCore};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{VfeSystem, assemble_fitted, predict_vfe_covariance, predict_vfe_into};
-use super::{FittedSgpr, FixedInducing, InducingLayout, Sgpr, SgprObjective};
+use super::{FittedSgpr, FixedInducing, InducingLayout, OnlineSgpr, Sgpr, SgprObjective};
 
 /// A fitted SGPR on supplied distances, or the trainer `S` back with the
 /// error.
@@ -292,6 +292,20 @@ impl<O, I, P: GpScalar, C: PointUse> FittedSgpr<O, I, P, DistanceKernel<C>> {
     /// See the example on [`Sgpr::fit`] of a [`DistanceKernel<DistanceOnly>`].
     pub fn inducing(&self) -> &[usize] {
         &self.core.supply.inducing
+    }
+}
+
+impl<O, P: GpScalar, C: PointUse> FittedSgpr<O, FixedInducing, P, DistanceKernel<C>> {
+    /// Converts this model to an online SGPR whose `insert`,
+    /// `insert_inducing`, and deletes keep the training blocks.
+    ///
+    /// The point identifiers are `0..n` and the inducing identifiers
+    /// `0..m`, in buffer order; nothing is copied.
+    ///
+    /// See the example on [`OnlineSgpr::insert`] of a
+    /// [`DistanceKernel<DistanceOnly>`].
+    pub fn into_online(self) -> OnlineSgpr<O, P, DistanceKernel<C>> {
+        OnlineSgpr::from_fitted(self)
     }
 }
 

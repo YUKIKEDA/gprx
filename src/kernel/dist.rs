@@ -960,6 +960,9 @@ pub struct ArdBlocks<'a, T, S = Checked> {
     cols: usize,
     /// First column of the stored blocks this view starts at.
     col0: usize,
+    /// Distance between the starts of two columns of a block: `rows`, or
+    /// more for a block with room for more rows (an online sparse model's).
+    ld: usize,
     state: PhantomData<S>,
 }
 
@@ -985,11 +988,24 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
     /// prove the state: only binding code makes a `Checked` block, from
     /// values it checked, cast, or packed.
     pub(crate) fn new(blocks: BlockList<'a, T>, rows: usize, cols: usize, col0: usize) -> Self {
+        Self::strided(blocks, rows, cols, col0, rows)
+    }
+
+    /// As [`Self::new`], with column `c` of each block starting at `c · ld`
+    /// (`ld ≥ rows`).
+    pub(crate) fn strided(
+        blocks: BlockList<'a, T>,
+        rows: usize,
+        cols: usize,
+        col0: usize,
+        ld: usize,
+    ) -> Self {
         Self {
             blocks,
             rows,
             cols,
             col0,
+            ld,
             state: PhantomData,
         }
     }
@@ -1038,7 +1054,7 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
     fn raw_get(&self, dim: usize, row: usize, col: usize) -> T {
         match self.blocks {
             BlockList::Triangles(cache) => cache.get(dim, row, col + self.col0),
-            _ => self.raw_block(dim)[row + (col + self.col0) * self.rows],
+            _ => self.raw_block(dim)[row + (col + self.col0) * self.ld],
         }
     }
 
@@ -1086,7 +1102,10 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
     /// Whether every block is a dense `f64` block holding all the view's
     /// columns, as [`Self::column`] and [`Self::gate`] read them.
     pub(crate) fn dense_f64(&self) -> bool {
-        let end = (self.col0 + self.cols) * self.rows;
+        let end = match self.cols {
+            0 => 0,
+            cols => (self.col0 + cols - 1) * self.ld + self.rows,
+        };
         !matches!(self.blocks, BlockList::Triangles(_))
             && T::as_f64_slice(&[]).is_some()
             && (0..self.d()).all(|dim| self.raw_block(dim).len() >= end)
@@ -1096,7 +1115,7 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
         if matches!(self.blocks, BlockList::Triangles(_)) {
             return None;
         }
-        let start = (self.col0 + col) * self.rows;
+        let start = (self.col0 + col) * self.ld;
         T::as_f64_slice(self.raw_block(dim).get(start..start + self.rows)?)
     }
 
@@ -1117,6 +1136,7 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
             d,
             rows: self.rows,
             col0: self.col0,
+            ld: self.ld,
             state: PhantomData,
         })
     }
@@ -1124,7 +1144,8 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
 
 impl<'a, T: KernelScalar> ArdBlocks<'a, T, Checked> {
     /// The dense block of dimension `dim` (`rows` rows per column), or an
-    /// empty slice when the blocks are packed triangles.
+    /// empty slice when the blocks are packed triangles. Only a block whose
+    /// columns lie back to back ([`Self::new`]) reads this way.
     pub(crate) fn block(&self, dim: usize) -> &'a [T] {
         self.raw_block(dim)
     }
@@ -1137,6 +1158,8 @@ pub(crate) struct Gates<'a, S> {
     d: usize,
     rows: usize,
     col0: usize,
+    /// Column stride of the blocks ([`ArdBlocks::strided`]).
+    ld: usize,
     state: PhantomData<S>,
 }
 
@@ -1147,7 +1170,7 @@ impl<'a, S: BlockState> Gates<'a, S> {
     /// the result.
     #[inline]
     pub(crate) fn gate(&self, col: usize) -> Gate<'a, S> {
-        let start = (self.col0 + col) * self.rows;
+        let start = (self.col0 + col) * self.ld;
         let mut runs: [&'a [f64]; GATE_DIMS] = [&[]; GATE_DIMS];
         for (run, block) in runs.iter_mut().zip(&self.blocks[..self.d]) {
             *run = &block[start..start + self.rows];

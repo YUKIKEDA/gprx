@@ -101,7 +101,11 @@ where
     ks.cross::<M, NoSupply>(&compiled, CrossViews::points(z_mat, x_mat))
 }
 
-pub(crate) fn kernel_diag_at<T>(kernel: &KernelSpec, x_pt: &[f64], d: usize) -> Result<T, GprError>
+pub(crate) fn kernel_diag_at<T, U: crate::kernel::Supply>(
+    kernel: &KernelSpec<U>,
+    x_pt: &[f64],
+    d: usize,
+) -> Result<T, GprError>
 where
     T: KernelScalar,
 {
@@ -110,7 +114,10 @@ where
     let mut x_cast = T::empty_cols();
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let mut diag = vec![lit::<T>(0.0); 1];
-    compiled.fill_diag_points(x_mat, &mut diag)?;
+    match U::coordinates(&compiled) {
+        Some(coords) => coords.fill_diag_points(x_mat, &mut diag)?,
+        None => compiled.eval_diag(x_mat, &mut diag)?,
+    }
     Ok(diag[0])
 }
 
@@ -156,7 +163,7 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let y_s = T::storage_rows(y, &mut y_cast);
     let mut k_zz = ks.cross::<M, NoSupply>(&compiled, CrossViews::points(z_mat, z_new_mat))?;
-    let k_nn = kernel_diag_at::<T>(kernel, z_new, d)?;
+    let k_nn = kernel_diag_at::<T, crate::kernel::NoSupply>(kernel, z_new, d)?;
     let k_zx = ks.cross::<M, NoSupply>(&compiled, CrossViews::points(z_new_mat, x_mat))?;
     solve_lmm(state.k_mm_l.as_ref(), k_zz.as_mut());
     let mut ell2 = k_nn;

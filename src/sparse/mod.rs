@@ -9,7 +9,7 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
-use crate::kernel::{BlockStore, KernelSpec, Supply};
+use crate::kernel::{BlockAt, BlockStore, KernelSpec, Supply};
 use crate::kernel::{
     CompiledKernel, CrossViews, DiagAccum, GramInputs, KernelScalar, NoSupply, Triangle,
     WeightedWalk,
@@ -514,6 +514,10 @@ impl<U: Supply> SparseCore<U> {
     pub(crate) fn map_point(&self, point: &[f64], out: &mut Vec<f64>) -> Result<(), GprError> {
         out.clear();
         out.extend_from_slice(point);
+        // A model of supplied distances alone has no coordinates to map.
+        if self.d == 0 {
+            return Ok(());
+        }
         self.x_transform.apply(out, 1, self.d)
     }
 
@@ -1470,6 +1474,155 @@ impl SparseSupply {
     /// The `f64` supply, always held.
     pub(crate) fn exact(&self) -> &SupplyAt<f64> {
         &self.f64
+    }
+
+    /// Whether training blocks are held (a model on supplied distances).
+    pub(crate) fn is_supplied(&self) -> bool {
+        !self.f64.xz.block_ids().is_empty()
+    }
+
+    /// The `f32` copy, when one was made.
+    fn f32_mut(&mut self) -> Option<&mut SupplyAt<f32>> {
+        self.f32.get_mut().and_then(|made| made.as_mut().ok())
+    }
+
+    /// Where training point `index` is an inducing point, if it is one.
+    pub(crate) fn inducing_at(&self, index: usize) -> Option<usize> {
+        self.inducing.iter().position(|&i| i == index)
+    }
+
+    /// Makes room in the training blocks for one more point, so
+    /// [`Self::push_point`] cannot fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the blocks cannot grow.
+    pub(crate) fn reserve_point(&mut self) -> Result<(), GprError> {
+        self.f64.xz.reserve_row()?;
+        if let Some(f32) = self.f32_mut() {
+            f32.xz.reserve_row()?;
+        }
+        Ok(())
+    }
+
+    /// Appends a training point whose squared distance to inducing point
+    /// `col` in `block` is `value(block, col)`, once [`Self::reserve_point`]
+    /// made room: nothing in it fails.
+    pub(crate) fn push_point(&mut self, value: impl Fn(BlockAt, usize) -> f64) {
+        self.f64.xz.push_row(&value);
+        if let Some(f32) = self.f32_mut() {
+            f32.xz.push_row(|at, col| f32::from_f64(value(at, col)));
+        }
+    }
+
+    /// Removes training point `index`, which is not an inducing point: its
+    /// row of every block, and one off the inducing indices past it.
+    pub(crate) fn remove_point(&mut self, index: usize) {
+        debug_assert!(self.inducing_at(index).is_none(), "an inducing point");
+        if self.is_supplied() {
+            self.f64.xz.remove_row(index);
+            if let Some(f32) = self.f32_mut() {
+                f32.xz.remove_row(index);
+            }
+        }
+        for i in &mut self.inducing {
+            if *i > index {
+                *i -= 1;
+            }
+        }
+    }
+
+    /// This supply with training point `point` (not an inducing point) as
+    /// one more inducing point: `value(block, row)` is its squared distance
+    /// to training point `row`, and `mirror(block, col)` the value its row
+    /// of the blocks now holds for inducing point `col` (the stored one, or
+    /// a pair a tidy source repaired). The squares among the inducing
+    /// points are formed again from the blocks' inducing rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the blocks cannot grow.
+    pub(crate) fn with_inducing(
+        &self,
+        point: usize,
+        value: impl Fn(BlockAt, usize) -> f64,
+        mirror: impl Fn(BlockAt, usize) -> f64,
+    ) -> Result<Self, GprError> {
+        let mut inducing = self.inducing.clone();
+        inducing.push(point);
+        let m = self.inducing.len();
+        let mut xz = self.f64.xz.clone();
+        for at in xz.block_ids() {
+            for col in 0..m {
+                xz.set(at, point, col, mirror(at, col));
+            }
+        }
+        xz.push_col(&value)?;
+        let f32 = match self.f32.get() {
+            Some(Ok(copy)) => {
+                let mut xz32 = copy.xz.clone();
+                for at in xz32.block_ids() {
+                    for col in 0..m {
+                        xz32.set(at, point, col, f32::from_f64(mirror(at, col)));
+                    }
+                }
+                xz32.push_col(|at, row| f32::from_f64(value(at, row)))?;
+                Some(xz32)
+            }
+            _ => None,
+        };
+        Ok(Self::from_blocks(inducing, xz, f32))
+    }
+
+    /// This supply without inducing point `at` (its column of the blocks).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] if the narrower blocks cannot be
+    /// allocated.
+    pub(crate) fn without_inducing(&self, at: usize) -> Result<Self, GprError> {
+        let mut inducing = self.inducing.clone();
+        inducing.remove(at);
+        let mut xz = self.f64.xz.clone();
+        xz.remove_col(at)?;
+        let f32 = match self.f32.get() {
+            Some(Ok(copy)) => {
+                let mut xz32 = copy.xz.clone();
+                xz32.remove_col(at)?;
+                Some(xz32)
+            }
+            _ => None,
+        };
+        Ok(Self::from_blocks(inducing, xz, f32))
+    }
+
+    /// The supply of `inducing` from its training blocks: the squares are
+    /// their inducing rows.
+    fn from_blocks(
+        inducing: Vec<usize>,
+        xz: BlockStore<f64>,
+        xz32: Option<BlockStore<f32>>,
+    ) -> Self {
+        fn square<T: KernelScalar>(xz: &BlockStore<T>, inducing: &[usize]) -> BlockStore<T> {
+            let mut zz = BlockStore::default();
+            xz.rows_into(inducing, &mut zz);
+            zz
+        }
+        let f32 = std::sync::OnceLock::new();
+        if let Some(xz) = xz32 {
+            let _ = f32.set(Ok(SupplyAt {
+                zz: square(&xz, &inducing),
+                xz,
+            }));
+        }
+        Self {
+            f64: SupplyAt {
+                zz: square(&xz, &inducing),
+                xz,
+            },
+            f32,
+            inducing,
+        }
     }
 
     /// The supply at `T` (`f64`, or the `f32` cast, made on the first read).

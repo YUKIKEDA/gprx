@@ -4,19 +4,26 @@ use std::marker::PhantomData;
 
 use faer::Mat;
 
+use crate::data::pack_points;
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
-use crate::kernel::KernelScalar;
-use crate::kernel::NoSupply;
+use crate::kernel::ScalarOps;
+use crate::kernel::{
+    BlockAt, CrossViews, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar,
+    KernelSpec, ModelKernel, NoSupply, PointUse, QueryScratch, QuerySources, SuppliedSpec, Supply,
+    SupplyViews, WithPoints, column_value, new_inducing_column,
+};
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2, solve_llt};
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::points::PointId;
 use crate::points::{IdRegistry, PointRegistry, RegistryId};
+use crate::policy::JitterPolicy;
 use crate::policy::with_kernel_exp;
 use crate::precision::{DoublePrecision, ModelPrecision};
+use crate::prediction::{DistanceQuery, QueryPoints, distance_predict};
 use crate::sgpr::SgprObjective;
 use crate::sparse::{
-    KernelScratch, PredictScratch, SparseCore, SparseScratch, sparse_core_accessors,
+    KernelScratch, PredictScratch, SparseCore, SparseScratch, SparseSupply, sparse_core_accessors,
     sparse_kernel_accessor, sparse_point_accessors,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
@@ -124,20 +131,21 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 /// # }
 /// ```
 #[derive(Clone, Debug)]
-pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision> {
+pub struct OnlineSgpr<O = Lbfgs, P: ModelPrecision = DoublePrecision, K: ModelKernel = KernelSpec> {
     /// Everything an online update writes; [`OnlineSgpr::atomically`]
     /// copies and restores it as one value.
-    pub(super) state: OnlineState<P>,
+    pub(super) state: OnlineState<P, K::Supply>,
     /// Kernel scratch kept between `&mut self` calls.
-    pub(super) scratch: SparseScratch<P::Storage>,
+    pub(super) scratch: SparseScratch<P::Storage, K::Supply>,
     optimizer: O,
+    _kernel: PhantomData<K>,
 }
 
 /// The fields of an [`OnlineSgpr`] an online update writes. A field added
 /// here is undone by [`OnlineSgpr::atomically`] with the rest.
 #[derive(Clone, Debug)]
-pub(super) struct OnlineState<P: ModelPrecision> {
-    pub(super) core: SparseCore,
+pub(super) struct OnlineState<P: ModelPrecision, U: Supply = NoSupply> {
+    pub(super) core: SparseCore<U>,
     k_mm_l: Mat<P::Storage>,
     a: Mat<P::Storage>,
     b_l: Mat<P::Storage>,
@@ -152,11 +160,11 @@ pub(super) struct OnlineState<P: ModelPrecision> {
     inducing: InducingRegistry,
 }
 
-impl<O, P> OnlineSgpr<O, P>
+impl<O, P, K: ModelKernel> OnlineSgpr<O, P, K>
 where
     P: crate::precision::GpScalar,
 {
-    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P>) -> Self {
+    pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P, K>) -> Self {
         let registry = PointRegistry::from_count(fitted.core.n);
         let inducing = InducingRegistry::from_count(fitted.core.m);
         let ay = a_times_y(fitted.a.as_ref(), &fitted.core.y_train);
@@ -176,10 +184,11 @@ where
             },
             scratch: fitted.scratch,
             optimizer: fitted.optimizer,
+            _kernel: PhantomData,
         }
     }
 
-    fn snapshot_fitted(&mut self) -> FittedSgpr<O, FixedInducing, P>
+    fn snapshot_fitted(&mut self) -> FittedSgpr<O, FixedInducing, P, K>
     where
         O: Clone,
     {
@@ -200,7 +209,7 @@ where
         }
     }
 
-    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P>) {
+    fn adopt_fitted(&mut self, fitted: FittedSgpr<O, FixedInducing, P, K>) {
         self.state.core = fitted.core;
         self.scratch = fitted.scratch;
         self.optimizer = fitted.optimizer;
@@ -270,7 +279,7 @@ where
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
             self.state.predict_w =
-                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64, NoSupply>(
+                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64, K::Supply>(
                     &self.state.core.kernel,
                     self.state.core.jitter,
                     self.state.core.likelihood,
@@ -284,7 +293,7 @@ where
                 .collect();
             return Ok(());
         }
-        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P, NoSupply>(
+        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P, K::Supply>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.a.as_ref(),
@@ -310,8 +319,6 @@ where
     }
 
     sparse_core_accessors!(state.core);
-    sparse_point_accessors!(state.core);
-    sparse_kernel_accessor!(state.core);
 
     /// Returns training-point identifiers in buffer order.
     ///
@@ -429,6 +436,405 @@ where
             self.state.core.m,
         )
     }
+
+    /// Returns the leave-one-out mean and observation variance at every training point.
+    ///
+    /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
+    /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
+    /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
+    /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
+    /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
+    /// inverse-transformed like [`Self::predict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a downdated `B` is
+    /// not positive definite, or [`GprError::CholeskyFailed`] if an `f32` storage cannot factor `K_mm` again in `f64`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let mut fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    /// .map_err(|(_, e)| e)?
+    /// .into_online();
+    /// fitted.insert(&[3.0], 0.2)?;
+    /// let loo = fitted.loo_predict()?;
+    /// assert_eq!(loo.mean.len(), fitted.n());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
+        self.loo_predict_with(PredictOptions::default())
+    }
+
+    /// Returns leave-one-out mean and variance with an explicit variance kind.
+    ///
+    /// Latent variance is the VFE variance of `f(x_i)` without point `i`;
+    /// observation variance adds `σn²`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`OnlineSgpr`].
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        vfe_loo::<P, K::Supply>(
+            &self.state.core,
+            self.state.a.as_ref(),
+            self.state.b_l.as_ref(),
+            &self.state.w,
+            options,
+        )
+    }
+
+    /// Removes the training point identified by `id` and packs every buffer.
+    ///
+    /// Updates `B` with a rank-1 downdate. If that loses positive
+    /// definiteness, the remaining points are factored again. The last
+    /// remaining point cannot be deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InsufficientData`] when `n == 1`, or
+    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(
+    ///     &[0.0, 1.0, 2.0, 3.0],
+    ///     4,
+    ///     1,
+    ///     &[0.0, 1.0, 0.5, 0.25],
+    ///     &[0.5, 2.5],
+    ///     2,
+    /// )
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online();
+    /// let id = online.point_ids()[1];
+    /// online.delete(id)?;
+    /// assert_eq!(online.n(), 3);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn delete(&mut self, id: PointId) -> Result<(), GprError> {
+        if self.state.core.n <= 1 {
+            return Err(GprError::InsufficientData {
+                n: self.state.core.n,
+                min: 2,
+            });
+        }
+        let idx = self.state.registry.index_of(id)?;
+        if let Some(at) = self.state.core.supply.inducing_at(idx) {
+            return Err(GprError::InvalidConfig {
+                reason: format!(
+                    "the point is inducing point {at}: delete it with delete_inducing first"
+                ),
+            });
+        }
+        self.atomically(|model| model.delete_at(idx))
+    }
+
+    /// [`Self::delete`] of the point at buffer index `idx`.
+    fn delete_at(&mut self, idx: usize) -> Result<(), GprError> {
+        let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
+        for (i, slot) in v.iter_mut().enumerate() {
+            *slot = self.state.a[(i, idx)];
+        }
+        let x_pt = point_at(
+            &self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            idx,
+        );
+        let diag = kernel_diag_at::<P::Storage, K::Supply>(
+            &self.state.core.kernel,
+            &x_pt,
+            self.state.core.d,
+        )?;
+        let mut col_norm = P::Storage::from_f64(0.0);
+        for value in &v {
+            col_norm += *value * *value;
+        }
+        let x_next = remove_point(
+            &self.state.core.x_train,
+            self.state.core.n,
+            self.state.core.d,
+            idx,
+        );
+        let mut y_next = self.state.core.y_train.clone();
+        y_next.remove(idx);
+        let x_obs_next = remove_point(
+            &self.state.core.x_obs,
+            self.state.core.n,
+            self.state.core.d,
+            idx,
+        );
+        let mut y_obs_next = self.state.core.y_obs.clone();
+        y_obs_next.remove(idx);
+        let mut b_trial = self.state.b_l.clone();
+        let mut v_trial = v;
+        if chol_rank1_downdate(&mut b_trial, &mut v_trial) {
+            self.state.k_diag_sum -= diag;
+            self.state.a_frobenius2 -= col_norm;
+            let y_idx = self.state.core.y_train[idx];
+            for (row, slot) in self.state.ay.iter_mut().enumerate() {
+                *slot -= self.state.a[(row, idx)].to_f64() * y_idx;
+            }
+            remove_column_in_place(&mut self.state.a, idx);
+            self.state.b_l = b_trial;
+            self.state.core.supply.remove_point(idx);
+            self.state.core.x_train = x_next;
+            self.state.core.y_train = y_next;
+            self.state.core.x_obs = x_obs_next;
+            self.state.core.y_obs = y_obs_next;
+            self.state.core.n -= 1;
+            self.recompute_w()?;
+        } else {
+            let mut supply = self.state.core.supply.clone();
+            supply.remove_point(idx);
+            self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next, supply)?;
+        }
+        self.state.registry.remove_at(idx);
+        Ok(())
+    }
+
+    /// The [`Self::delete`] path when the downdate of `B` fails: assembles
+    /// the VFE system again from the remaining points (one fewer than now)
+    /// and publishes its predict weights with it.
+    pub(super) fn delete_by_reassembly(
+        &mut self,
+        x_next: Vec<f64>,
+        y_next: Vec<f64>,
+        x_obs_next: Vec<f64>,
+        y_obs_next: Vec<f64>,
+        supply: SparseSupply,
+    ) -> Result<(), GprError> {
+        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage, K::Supply>(
+            &self.state.core.kernel,
+            self.state.core.jitter,
+            self.state.core.likelihood,
+            crate::sparse::SparseData {
+                x: &x_next,
+                n: self.state.core.n - 1,
+                y: &y_next,
+                supply: &supply,
+                ..self.state.core.data()
+            },
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
+        ))?;
+        self.state.core.x_train = x_next;
+        self.state.core.y_train = y_next;
+        self.state.core.x_obs = x_obs_next;
+        self.state.core.y_obs = y_obs_next;
+        self.state.core.supply = supply;
+        self.state.core.n -= 1;
+        self.apply_vfe(state)
+    }
+
+    /// Factors the VFE system at the inducing set `z_train` (`m × d`) and
+    /// commits it with `z_obs`. A factor failure, such as `K_mm` not
+    /// factoring under the jitter policy, leaves the model unchanged.
+    ///
+    /// ADR 0005 applies first. This full factor keeps `L` aligned with
+    /// `k(Z, Z)` so a long insert/delete sequence stays within the public
+    /// 1e-12 check.
+    fn commit_inducing(
+        &mut self,
+        z_train: Vec<f64>,
+        z_obs: Vec<f64>,
+        m: usize,
+        supply: Option<SparseSupply>,
+    ) -> Result<(), GprError> {
+        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, K::Supply>(
+            &self.state.core.kernel,
+            self.state.core.jitter,
+            self.state.core.likelihood,
+            crate::sparse::SparseData {
+                z: &z_train,
+                m,
+                supply: supply.as_ref().unwrap_or(&self.state.core.supply),
+                ..self.state.core.data()
+            },
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
+        ))?;
+        self.state.core.z_train = z_train;
+        self.state.core.z_obs = z_obs;
+        self.state.core.m = m;
+        if let Some(supply) = supply {
+            self.state.core.supply = supply;
+        }
+        match w64 {
+            // The `f64` weights of this assembly are the refined predict weights.
+            Some(w64) if P::REFINES_IN_F64 => {
+                self.state.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
+                self.set_vfe(state);
+                Ok(())
+            }
+            _ => self.apply_vfe(state),
+        }
+    }
+
+    /// Removes the inducing point identified by `id` and packs every buffer.
+    ///
+    /// Updates `K_mm` with a trailing cholupdate and rebuilds `A` / `B`
+    /// from the reduced inducing set. The last remaining inducing point
+    /// cannot be deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InsufficientData`] when `m == 1`, or
+    /// [`GprError::InvalidInducingId`] when `id` is unknown or already
+    /// deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(
+    ///     &[0.0, 1.0, 2.0, 3.0],
+    ///     4,
+    ///     1,
+    ///     &[0.0, 1.0, 0.5, 0.25],
+    ///     &[0.5, 2.5],
+    ///     2,
+    /// )
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online();
+    /// let id = online.inducing_ids()[0];
+    /// online.delete_inducing(id)?;
+    /// assert_eq!(online.m(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn delete_inducing(&mut self, id: InducingId) -> Result<(), GprError> {
+        if self.state.core.m <= 1 {
+            return Err(GprError::InsufficientData {
+                n: self.state.core.m,
+                min: 2,
+            });
+        }
+        let idx = self.state.inducing.index_of(id)?;
+        self.atomically(|model| model.delete_inducing_at(idx))
+    }
+
+    /// [`Self::delete_inducing`] of the inducing point at index `idx`.
+    fn delete_inducing_at(&mut self, idx: usize) -> Result<(), GprError> {
+        let mut state = self.vfe_state();
+        inducing_delete(
+            &mut state,
+            self.state.core.likelihood.noise_variance(),
+            &self.state.core.y_train,
+            idx,
+        )?;
+        let (m, d) = (self.state.core.m, self.state.core.d);
+        let z_train = remove_point(&self.state.core.z_train, m, d, idx);
+        let z_obs = remove_point(&self.state.core.z_obs, m, d, idx);
+        let supply = if self.state.core.supply.is_supplied() {
+            Some(self.state.core.supply.without_inducing(idx)?)
+        } else {
+            None
+        };
+        self.commit_inducing(z_train, z_obs, m - 1, supply)?;
+        self.state.inducing.remove_at(idx);
+        Ok(())
+    }
+
+    /// Converts this model back to a batch sparse GPR with fixed inducing points.
+    ///
+    /// Point and inducing identifiers are discarded. Parameters stay
+    /// kernel then likelihood `θ`. The snapshot `Z` is the current
+    /// inducing coordinates.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(
+    ///     &[0.0, 1.0, 2.0, 3.0],
+    ///     4,
+    ///     1,
+    ///     &[0.0, 1.0, 0.5, 0.25],
+    ///     &[0.5, 2.5],
+    ///     2,
+    /// )
+    /// .map_err(|(_, e)| e)?;
+    /// let online = fitted.into_online();
+    /// let fitted = online.into_fitted();
+    /// assert_eq!(fitted.n(), 4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P, K> {
+        FittedSgpr {
+            core: self.state.core,
+            scratch: self.scratch,
+            optimizer: self.optimizer,
+            inducing: PhantomData,
+            _kernel: PhantomData,
+            k_mm_l: self.state.k_mm_l,
+            a: self.state.a,
+            b_l: self.state.b_l,
+            w: self.state.w,
+            predict_w: self.state.predict_w,
+            k_diag_sum: self.state.k_diag_sum,
+            a_frobenius2: self.state.a_frobenius2,
+        }
+    }
+}
+
+impl<O, P, K> OnlineSgpr<O, P, K>
+where
+    P: crate::precision::GpScalar,
+    K: crate::kernel::PointKernel,
+{
+    sparse_point_accessors!(state.core);
+}
+
+impl<O, P> OnlineSgpr<O, P>
+where
+    P: crate::precision::GpScalar,
+{
+    sparse_kernel_accessor!(state.core);
 
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
@@ -606,68 +1012,6 @@ where
             .draw(n_draws, seed, self.state.core.jitter)
     }
 
-    /// Returns the leave-one-out mean and observation variance at every training point.
-    ///
-    /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
-    /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
-    /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
-    /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
-    /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
-    /// inverse-transformed like [`Self::predict`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a downdated `B` is
-    /// not positive definite, or [`GprError::CholeskyFailed`] if an `f32` storage cannot factor `K_mm` again in `f64`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let mut fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
-    /// .map_err(|(_, e)| e)?
-    /// .into_online();
-    /// fitted.insert(&[3.0], 0.2)?;
-    /// let loo = fitted.loo_predict()?;
-    /// assert_eq!(loo.mean.len(), fitted.n());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
-        self.loo_predict_with(PredictOptions::default())
-    }
-
-    /// Returns leave-one-out mean and variance with an explicit variance kind.
-    ///
-    /// Latent variance is the VFE variance of `f(x_i)` without point `i`;
-    /// observation variance adds `σn²`.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::loo_predict`].
-    ///
-    /// See the example on [`OnlineSgpr`].
-    pub fn loo_predict_with(
-        &self,
-        options: PredictOptions,
-    ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_loo::<P, NoSupply>(
-            &self.state.core,
-            self.state.a.as_ref(),
-            self.state.b_l.as_ref(),
-            &self.state.w,
-            options,
-        )
-    }
-
     /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
     ///
     /// Same values as [`Self::predict`]. The buffers are kept on the model
@@ -781,7 +1125,7 @@ where
         self.state.core.map_point(x_obs, mapped)?;
         let x_new = mapped.as_slice();
         let y_new = self.state.core.map_target(y_obs)?;
-        let mut a_col = with_kernel_exp!(self.state.core.math, M => kernel_column::<M, P::Storage>(
+        let a_col = with_kernel_exp!(self.state.core.math, M => kernel_column::<M, P::Storage>(
             &self.state.core.kernel,
             &self.state.core.z_train,
             self.state.core.m,
@@ -789,13 +1133,38 @@ where
             self.state.core.d,
             &mut self.scratch.storage,
         ))?;
+        let k_diag = kernel_diag_at::<P::Storage, NoSupply>(
+            &self.state.core.kernel,
+            x_new,
+            self.state.core.d,
+        )?;
+        self.append_point(a_col, k_diag, x_new, x_obs, y_new, y_obs, |_| {})
+    }
+}
+
+impl<O, P, K: ModelKernel> OnlineSgpr<O, P, K>
+where
+    P: crate::precision::GpScalar,
+{
+    /// Appends a training point at the current `θ` from `K(Z, x)`
+    /// (`a_col`, `m × 1`) and `k(x, x)`, with `x_new` / `y_new` its mapped
+    /// coordinates and target and `x_obs` / `y_obs` the caller's. `supply`
+    /// writes its training blocks once every step that can fail has run.
+    pub(super) fn append_point(
+        &mut self,
+        mut a_col: Mat<P::Storage>,
+        k_diag: P::Storage,
+        x_new: &[f64],
+        x_obs: &[f64],
+        y_new: f64,
+        y_obs: f64,
+        supply: impl FnOnce(&mut SparseSupply),
+    ) -> Result<PointId, GprError> {
         solve_lmm(self.state.k_mm_l.as_ref(), a_col.as_mut());
         let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
             *slot = a_col[(i, 0)];
         }
-        let k_diag =
-            kernel_diag_at::<P::Storage>(&self.state.core.kernel, x_new, self.state.core.d)?;
         // No step below fails until the predict weights (see `atomically`).
         self.state.a_frobenius2 += frobenius2(a_col.as_ref());
         self.state.k_diag_sum += k_diag;
@@ -818,149 +1187,17 @@ where
         );
         self.state.core.y_train.push(y_new);
         self.state.core.y_obs.push(y_obs);
+        supply(&mut self.state.core.supply);
         self.state.core.n += 1;
         self.recompute_w()?;
         Ok(self.state.registry.insert())
     }
+}
 
-    /// Removes the training point identified by `id` and packs every buffer.
-    ///
-    /// Updates `B` with a rank-1 downdate. If that loses positive
-    /// definiteness, the remaining points are factored again. The last
-    /// remaining point cannot be deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::InsufficientData`] when `n == 1`, or
-    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(
-    ///     &[0.0, 1.0, 2.0, 3.0],
-    ///     4,
-    ///     1,
-    ///     &[0.0, 1.0, 0.5, 0.25],
-    ///     &[0.5, 2.5],
-    ///     2,
-    /// )
-    /// .map_err(|(_, e)| e)?;
-    /// let mut online = fitted.into_online();
-    /// let id = online.point_ids()[1];
-    /// online.delete(id)?;
-    /// assert_eq!(online.n(), 3);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn delete(&mut self, id: PointId) -> Result<(), GprError> {
-        if self.state.core.n <= 1 {
-            return Err(GprError::InsufficientData {
-                n: self.state.core.n,
-                min: 2,
-            });
-        }
-        let idx = self.state.registry.index_of(id)?;
-        self.atomically(|model| model.delete_at(idx))
-    }
-
-    /// [`Self::delete`] of the point at buffer index `idx`.
-    fn delete_at(&mut self, idx: usize) -> Result<(), GprError> {
-        let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
-        for (i, slot) in v.iter_mut().enumerate() {
-            *slot = self.state.a[(i, idx)];
-        }
-        let x_pt = point_at(
-            &self.state.core.x_train,
-            self.state.core.n,
-            self.state.core.d,
-            idx,
-        );
-        let diag = kernel_diag_at::<P::Storage>(&self.state.core.kernel, &x_pt, self.state.core.d)?;
-        let mut col_norm = P::Storage::from_f64(0.0);
-        for value in &v {
-            col_norm += *value * *value;
-        }
-        let x_next = remove_point(
-            &self.state.core.x_train,
-            self.state.core.n,
-            self.state.core.d,
-            idx,
-        );
-        let mut y_next = self.state.core.y_train.clone();
-        y_next.remove(idx);
-        let x_obs_next = remove_point(
-            &self.state.core.x_obs,
-            self.state.core.n,
-            self.state.core.d,
-            idx,
-        );
-        let mut y_obs_next = self.state.core.y_obs.clone();
-        y_obs_next.remove(idx);
-        let mut b_trial = self.state.b_l.clone();
-        let mut v_trial = v;
-        if chol_rank1_downdate(&mut b_trial, &mut v_trial) {
-            self.state.k_diag_sum -= diag;
-            self.state.a_frobenius2 -= col_norm;
-            let y_idx = self.state.core.y_train[idx];
-            for (row, slot) in self.state.ay.iter_mut().enumerate() {
-                *slot -= self.state.a[(row, idx)].to_f64() * y_idx;
-            }
-            remove_column_in_place(&mut self.state.a, idx);
-            self.state.b_l = b_trial;
-            self.state.core.x_train = x_next;
-            self.state.core.y_train = y_next;
-            self.state.core.x_obs = x_obs_next;
-            self.state.core.y_obs = y_obs_next;
-            self.state.core.n -= 1;
-            self.recompute_w()?;
-        } else {
-            self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next)?;
-        }
-        self.state.registry.remove_at(idx);
-        Ok(())
-    }
-
-    /// The [`Self::delete`] path when the downdate of `B` fails: assembles
-    /// the VFE system again from the remaining points (one fewer than now)
-    /// and publishes its predict weights with it.
-    pub(super) fn delete_by_reassembly(
-        &mut self,
-        x_next: Vec<f64>,
-        y_next: Vec<f64>,
-        x_obs_next: Vec<f64>,
-        y_obs_next: Vec<f64>,
-    ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage, NoSupply>(
-            &self.state.core.kernel,
-            self.state.core.jitter,
-            self.state.core.likelihood,
-            crate::sparse::SparseData {
-                x: &x_next,
-                n: self.state.core.n - 1,
-                y: &y_next,
-                ..self.state.core.data()
-            },
-            &mut self.scratch.storage,
-            &mut self.scratch.f64,
-        ))?;
-        self.state.core.x_train = x_next;
-        self.state.core.y_train = y_next;
-        self.state.core.x_obs = x_obs_next;
-        self.state.core.y_obs = y_obs_next;
-        self.state.core.n -= 1;
-        self.apply_vfe(state)
-    }
-
+impl<O, P> OnlineSgpr<O, P>
+where
+    P: crate::precision::GpScalar,
+{
     /// Appends one inducing point at the current `θ` with a bordered VFE update.
     ///
     /// `z_new` has length [`Self::d`], in the original coordinates of `X`;
@@ -1052,115 +1289,8 @@ where
         append_point(&mut z_train, m, d, z_new);
         let mut z_obs_next = self.state.core.z_obs.clone();
         append_point(&mut z_obs_next, m, d, z_obs);
-        self.commit_inducing(z_train, z_obs_next, m + 1)?;
+        self.commit_inducing(z_train, z_obs_next, m + 1, None)?;
         Ok(self.state.inducing.insert())
-    }
-
-    /// Factors the VFE system at the inducing set `z_train` (`m × d`) and
-    /// commits it with `z_obs`. A factor failure, such as `K_mm` not
-    /// factoring under the jitter policy, leaves the model unchanged.
-    ///
-    /// ADR 0005 applies first. This full factor keeps `L` aligned with
-    /// `k(Z, Z)` so a long insert/delete sequence stays within the public
-    /// 1e-12 check.
-    fn commit_inducing(
-        &mut self,
-        z_train: Vec<f64>,
-        z_obs: Vec<f64>,
-        m: usize,
-    ) -> Result<(), GprError> {
-        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, NoSupply>(
-            &self.state.core.kernel,
-            self.state.core.jitter,
-            self.state.core.likelihood,
-            crate::sparse::SparseData {
-                z: &z_train,
-                m,
-                ..self.state.core.data()
-            },
-            &mut self.scratch.storage,
-            &mut self.scratch.f64,
-        ))?;
-        self.state.core.z_train = z_train;
-        self.state.core.z_obs = z_obs;
-        self.state.core.m = m;
-        match w64 {
-            // The `f64` weights of this assembly are the refined predict weights.
-            Some(w64) if P::REFINES_IN_F64 => {
-                self.state.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
-                self.set_vfe(state);
-                Ok(())
-            }
-            _ => self.apply_vfe(state),
-        }
-    }
-
-    /// Removes the inducing point identified by `id` and packs every buffer.
-    ///
-    /// Updates `K_mm` with a trailing cholupdate and rebuilds `A` / `B`
-    /// from the reduced inducing set. The last remaining inducing point
-    /// cannot be deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::InsufficientData`] when `m == 1`, or
-    /// [`GprError::InvalidInducingId`] when `id` is unknown or already
-    /// deleted.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(
-    ///     &[0.0, 1.0, 2.0, 3.0],
-    ///     4,
-    ///     1,
-    ///     &[0.0, 1.0, 0.5, 0.25],
-    ///     &[0.5, 2.5],
-    ///     2,
-    /// )
-    /// .map_err(|(_, e)| e)?;
-    /// let mut online = fitted.into_online();
-    /// let id = online.inducing_ids()[0];
-    /// online.delete_inducing(id)?;
-    /// assert_eq!(online.m(), 1);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn delete_inducing(&mut self, id: InducingId) -> Result<(), GprError> {
-        if self.state.core.m <= 1 {
-            return Err(GprError::InsufficientData {
-                n: self.state.core.m,
-                min: 2,
-            });
-        }
-        let idx = self.state.inducing.index_of(id)?;
-        self.atomically(|model| model.delete_inducing_at(idx))
-    }
-
-    /// [`Self::delete_inducing`] of the inducing point at index `idx`.
-    fn delete_inducing_at(&mut self, idx: usize) -> Result<(), GprError> {
-        let mut state = self.vfe_state();
-        inducing_delete(
-            &mut state,
-            self.state.core.likelihood.noise_variance(),
-            &self.state.core.y_train,
-            idx,
-        )?;
-        let (m, d) = (self.state.core.m, self.state.core.d);
-        let z_train = remove_point(&self.state.core.z_train, m, d, idx);
-        let z_obs = remove_point(&self.state.core.z_obs, m, d, idx);
-        self.commit_inducing(z_train, z_obs, m - 1)?;
-        self.state.inducing.remove_at(idx);
-        Ok(())
     }
 
     pub(crate) fn core(&self) -> &SparseCore {
@@ -1245,62 +1375,12 @@ where
     pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
         crate::persist::save_online_sgpr(self, dir.as_ref())
     }
-
-    /// Converts this model back to a batch sparse GPR with fixed inducing points.
-    ///
-    /// Point and inducing identifiers are discarded. Parameters stay
-    /// kernel then likelihood `θ`. The snapshot `Z` is the current
-    /// inducing coordinates.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(
-    ///     &[0.0, 1.0, 2.0, 3.0],
-    ///     4,
-    ///     1,
-    ///     &[0.0, 1.0, 0.5, 0.25],
-    ///     &[0.5, 2.5],
-    ///     2,
-    /// )
-    /// .map_err(|(_, e)| e)?;
-    /// let online = fitted.into_online();
-    /// let fitted = online.into_fitted();
-    /// assert_eq!(fitted.n(), 4);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn into_fitted(self) -> FittedSgpr<O, FixedInducing, P> {
-        FittedSgpr {
-            core: self.state.core,
-            scratch: self.scratch,
-            optimizer: self.optimizer,
-            inducing: PhantomData,
-            _kernel: PhantomData,
-            k_mm_l: self.state.k_mm_l,
-            a: self.state.a,
-            b_l: self.state.b_l,
-            w: self.state.w,
-            predict_w: self.state.predict_w,
-            k_diag_sum: self.state.k_diag_sum,
-            a_frobenius2: self.state.a_frobenius2,
-        }
-    }
 }
 
-impl<O, P> OnlineSgpr<O, P>
+impl<O, P, K: ModelKernel> OnlineSgpr<O, P, K>
 where
     P: crate::precision::GpScalar,
-    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P>>,
+    O: Clone + for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P, K>>,
 {
     /// Re-runs the stored optimizer on the stored training data.
     ///
@@ -1344,3 +1424,509 @@ where
         Ok(())
     }
 }
+
+/// The position of `at` among `blocks` ([`crate::kernel::BlockStore::block_ids`]).
+fn block_index(blocks: &[BlockAt], at: BlockAt) -> usize {
+    blocks.iter().position(|&b| b == at).unwrap_or(0)
+}
+
+impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKernel<C>> {
+    /// The factors a prediction reads.
+    fn vfe_system(&self) -> VfeSystem<'_, P, SuppliedSpec> {
+        VfeSystem::new(
+            &self.state.core,
+            self.state.k_mm_l.as_ref(),
+            self.state.b_l.as_ref(),
+            &self.state.predict_w,
+        )
+    }
+
+    /// Appends one point from its supplied columns (each slot's `m × 1`
+    /// squared distances from the inducing points to the new point) and,
+    /// for a kernel that also reads coordinates, `x_obs`.
+    fn insert_sources<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_obs: &[f64],
+        y_obs: f64,
+    ) -> Result<PointId, GprError> {
+        let d = self.state.core.d;
+        if x_obs.len() != d {
+            return Err(GprError::DimensionMismatch {
+                x_dim: x_obs.len(),
+                expected_dim: d,
+            });
+        }
+        if x_obs.iter().any(|v| !v.is_finite()) || !y_obs.is_finite() {
+            return Err(GprError::NonFiniteInput);
+        }
+        self.state.registry.require_room()?;
+        // The model's buffers, taken for the call as a predict takes them.
+        let mut scratch = std::mem::take(&mut self.scratch.predict.query_storage);
+        let result = self.insert_bound(sources, x_obs, y_obs, &mut scratch);
+        self.scratch.predict.query_storage = scratch;
+        result
+    }
+
+    fn insert_bound<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_obs: &[f64],
+        y_obs: f64,
+        scratch: &mut QueryScratch<P::Storage>,
+    ) -> Result<PointId, GprError> {
+        let (m, d) = (self.state.core.m, self.state.core.d);
+        let cols = QuerySources::bind_column(&self.state.core.slots, sources, m, scratch)?;
+        let mut mapped = std::mem::take(&mut self.scratch.point);
+        let result = (|| {
+            self.state.core.map_point(x_obs, &mut mapped)?;
+            let y_new = self.state.core.map_target(y_obs)?;
+            let compiled = self.state.core.kernel.compile_as::<P::Storage>();
+            let z64 = pack_points(&self.state.core.z_train, m, d);
+            let x64 = pack_points(&mapped, 1, d);
+            let (mut z_cast, mut x_cast) = (P::Storage::empty_cols(), P::Storage::empty_cols());
+            let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
+            let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
+            let views = CrossViews {
+                x1: z,
+                x2: x,
+                dist: None,
+                slots: <SuppliedSpec as SupplyViews>::rects(&cols),
+            };
+            let a_col = with_kernel_exp!(self.state.core.math, M => self
+                .scratch
+                .storage
+                .cross::<M, SuppliedSpec>(&compiled, views))?;
+            let k_diag =
+                kernel_diag_at::<P::Storage, SuppliedSpec>(&self.state.core.kernel, &mapped, d)?;
+            // The new row of every training block, read before anything
+            // changes: the columns are checked, so nothing below fails.
+            let exact = cols.f64_view();
+            let blocks = self.state.core.supply.exact().xz.block_ids();
+            let mut row = Vec::with_capacity(blocks.len() * m);
+            for &at in &blocks {
+                for col in 0..m {
+                    row.push(column_value(&exact, at, col)?);
+                }
+            }
+            self.state.core.supply.reserve_point()?;
+            self.atomically(|model| {
+                model.append_point(a_col, k_diag, &mapped, x_obs, y_new, y_obs, |supply| {
+                    supply.push_point(|at, col| row[block_index(&blocks, at) * m + col]);
+                })
+            })
+        })();
+        self.scratch.point = mapped;
+        result
+    }
+
+    /// Makes training point `point` one more inducing point, from its
+    /// supplied columns (each slot's `n × 1` squared distances from the
+    /// training points to it).
+    fn insert_inducing_sources<'s>(
+        &mut self,
+        point: PointId,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+    ) -> Result<InducingId, GprError> {
+        let row = self.state.registry.index_of(point)?;
+        if let Some(at) = self.state.core.supply.inducing_at(row) {
+            return Err(GprError::InvalidConfig {
+                reason: format!("the point is inducing point {at} already"),
+            });
+        }
+        self.state.inducing.require_room()?;
+        let mut scratch = std::mem::take(&mut self.scratch.predict.query_storage);
+        let result = self.insert_inducing_bound(row, sources, &mut scratch);
+        self.scratch.predict.query_storage = scratch;
+        result
+    }
+
+    fn insert_inducing_bound<'s>(
+        &mut self,
+        row: usize,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        scratch: &mut QueryScratch<P::Storage>,
+    ) -> Result<InducingId, GprError> {
+        let (n, m, d) = (self.state.core.n, self.state.core.m, self.state.core.d);
+        let cols = QuerySources::bind_column(&self.state.core.slots, sources, n, scratch)?;
+        let supply = &self.state.core.supply;
+        let exact = cols.f64_view();
+        let (column, mirror) = new_inducing_column(
+            &supply.exact().xz,
+            &supply.exact().zz,
+            &supply.inducing,
+            row,
+            &exact,
+            |at| cols.tidy(at),
+        )?;
+        let blocks = supply.exact().xz.block_ids();
+        let next = supply.with_inducing(
+            row,
+            |at, i| column[block_index(&blocks, at) * n + i],
+            |at, col| mirror[block_index(&blocks, at) * m + col],
+        )?;
+        // A kernel that also reads coordinates takes the point's as `z`.
+        let mut z_train = self.state.core.z_train.clone();
+        append_point(
+            &mut z_train,
+            m,
+            d,
+            &point_at(&self.state.core.x_train, n, d, row),
+        );
+        let mut z_obs = self.state.core.z_obs.clone();
+        append_point(
+            &mut z_obs,
+            m,
+            d,
+            &point_at(&self.state.core.x_obs, n, d, row),
+        );
+        self.atomically(|model| {
+            model.commit_inducing(z_train, z_obs, m + 1, Some(next))?;
+            Ok(model.state.inducing.insert())
+        })
+    }
+
+    /// Returns a copy of the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as crate::kernel::ModelKernelParts>::from_spec(
+            self.state.core.kernel.clone(),
+        )
+    }
+
+    /// Returns the slots of the kernel, in the order of
+    /// [`DistanceKernel::slots`]; bind supplies to these.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn slots(&self) -> Vec<DistanceSlot> {
+        crate::kernel::spec_slots(&self.state.core.kernel)
+    }
+
+    /// Returns the training points that are the inducing points, as indices
+    /// into [`Self::point_ids`], in the order of the columns of the
+    /// training blocks and the rows of a prediction's blocks.
+    ///
+    /// See the example on [`Self::insert_inducing`].
+    pub fn inducing(&self) -> &[usize] {
+        &self.state.core.supply.inducing
+    }
+}
+
+impl<O, P: crate::precision::GpScalar, C: PointUse> DistanceQuery
+    for OnlineSgpr<O, P, DistanceKernel<C>>
+{
+    type Refine = P::Refine;
+
+    fn query_distances<'s>(
+        &self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        q: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let mut out = Prediction::default();
+        predict_vfe_into::<P, SuppliedSpec>(
+            &self.state.core,
+            &self.vfe_system(),
+            points.xs,
+            q,
+            points.n_cols,
+            cross,
+            options,
+            &mut PredictScratch::default(),
+            &mut out,
+        )?;
+        Ok(out)
+    }
+
+    fn query_distances_into<'s>(
+        &mut self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        q: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        let sys = VfeSystem::new(
+            &self.state.core,
+            self.state.k_mm_l.as_ref(),
+            self.state.b_l.as_ref(),
+            &self.state.predict_w,
+        );
+        predict_vfe_into::<P, SuppliedSpec>(
+            &self.state.core,
+            &sys,
+            points.xs,
+            q,
+            points.n_cols,
+            cross,
+            options,
+            &mut self.scratch.predict,
+            out,
+        )
+    }
+
+    fn query_distance_covariance<'s>(
+        &self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        square: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        q: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        predict_vfe_covariance::<P, SuppliedSpec>(
+            &self.state.core,
+            &self.vfe_system(),
+            points.xs,
+            q,
+            points.n_cols,
+            cross,
+            square,
+            options,
+        )
+    }
+
+    fn draw_jitter(&self) -> JitterPolicy {
+        self.state.core.jitter
+    }
+}
+
+impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceOnly>> {
+    /// Appends one training point at the current `θ` with the rank-1 VFE
+    /// update of [`OnlineSgpr::insert`], from its squared distances to the
+    /// inducing points.
+    ///
+    /// `sources` binds, per slot, the `m × 1` column from the `m` inducing
+    /// points (in [`Self::inducing`] order) to the new point; an ARD slot
+    /// binds one such column per dimension. A table may be borrowed, owned,
+    /// or filled. Every value is checked (finite, `≥ 0`; see
+    /// [`DistanceSource::tidy`]) and the column is kept as the point's row
+    /// of the training blocks: the blocks keep room for more rows (a
+    /// quarter more each time they fill), so most inserts write only the
+    /// row. The returned [`PointId`] is never reused after a later
+    /// [`Self::delete`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NonFiniteInput`] if `y_new` is `NaN` or `Inf`,
+    /// [`GprError::InvalidDistance`] for a negative or non-finite distance,
+    /// [`GprError::LengthMismatch`] for a column whose length is not `m`, a
+    /// source of a slot the kernel does not read, a slot without a source,
+    /// or two sources of one slot, [`GprError::IndexOutOfRange`] if no new
+    /// [`PointId`] is left, or [`GprError::SizeOverflow`] if the training
+    /// blocks cannot grow. On an error the model holds the same points.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// // Training points at x = 0, 1, 2, 3; inducing points: samples 0 and 2.
+    /// let train = [0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    /// let fitted = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.borrow(&train)], 4, &[0.0, 1.0, 0.5, 0.25], &[0, 2])
+    ///     .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online();
+    /// // A point at x = 4: its squared distances to the inducing points.
+    /// let id = online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
+    /// assert_eq!(online.n(), 5);
+    /// // A query at x = 0.5: inducing points × query.
+    /// let pred = online.predict([image.from_vec(vec![0.25, 2.25])], 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// online.delete(id)?;
+    /// assert_eq!(online.n(), 4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        y_new: f64,
+    ) -> Result<PointId, GprError> {
+        self.insert_sources(sources, &[], y_new)
+    }
+
+    /// Makes training point `point` one more inducing point at the current
+    /// `θ`, from its squared distances to the training points.
+    ///
+    /// `sources` binds, per slot, the `n × 1` column from the `n` training
+    /// points (in [`Self::point_ids`] order) to `point`; an ARD slot binds
+    /// one such column per dimension. The column is checked as a training
+    /// block is, and its square among the inducing points as a training
+    /// square is: the value at `point` itself is zero, and the value at
+    /// each inducing point equals the one the training blocks hold for that
+    /// pair (a [`DistanceSource::tidy`] source repairs both to their mean).
+    /// The column is kept as a new column of the training blocks, and the
+    /// VFE system is assembled again, as [`OnlineSgpr::insert_inducing`]
+    /// does when its bordered update is not taken. The returned
+    /// [`InducingId`] is never reused after a later
+    /// [`Self::delete_inducing`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidPointId`] if `point` is unknown or
+    /// deleted, [`GprError::InvalidConfig`] if it is an inducing point
+    /// already, [`GprError::InvalidDistance`] for a value the check refuses
+    /// (located in the caller's column), [`GprError::LengthMismatch`] for a
+    /// column whose length is not `n` or a slot without a source or with
+    /// two, [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left,
+    /// [`GprError::SizeOverflow`] if the training blocks cannot grow, or
+    /// [`GprError::CholeskyFailed`] if the enlarged system does not factor.
+    /// On an error the model holds the same inducing points.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// // Training points at x = 0, 1, 2, 3; inducing points: samples 0 and 2.
+    /// let train = [0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    /// let mut online = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.borrow(&train)], 4, &[0.0, 1.0, 0.5, 0.25], &[0, 2])
+    ///     .map_err(|(_, e)| e)?
+    ///     .into_online();
+    /// // Sample 1 (x = 1) becomes an inducing point: its squared distances
+    /// // to the four training points.
+    /// let point = online.point_ids()[1];
+    /// let id = online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0])])?;
+    /// assert_eq!(online.inducing(), &[0, 2, 1]);
+    /// // A query at x = 0.5: the three inducing points × query.
+    /// let pred = online.predict([image.from_vec(vec![0.25, 2.25, 0.25])], 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// online.delete_inducing(id)?;
+    /// assert_eq!(online.m(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert_inducing<'s>(
+        &mut self,
+        point: PointId,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+    ) -> Result<InducingId, GprError> {
+        self.insert_inducing_sources(point, sources)
+    }
+}
+
+impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<WithPoints>> {
+    /// Appends one training point at the current `θ`, from its squared
+    /// distances to the inducing points and its coordinates `x_new`
+    /// (length [`Self::d`]).
+    ///
+    /// The columns are as in the insert of a [`DistanceOnly`] model;
+    /// `x_new` goes through the stored input transform, which is not
+    /// re-fit.
+    ///
+    /// # Errors
+    ///
+    /// Those of the insert of a [`DistanceOnly`] model, and
+    /// [`GprError::DimensionMismatch`] if `x_new` is the wrong length or
+    /// [`GprError::NonFiniteInput`] if one of its values is `NaN` or `Inf`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+    /// let train = [0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    /// let x = [0.0, 0.5, 1.0, 1.5];
+    /// let mut online = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.borrow(&train)], 4, &x, 1, &[0.0, 1.0, 0.5, 0.25], &[0, 2])
+    ///     .map_err(|(_, e)| e)?
+    ///     .into_online();
+    /// online.insert([image.from_vec(vec![16.0, 4.0])], &[2.0], 0.1)?;
+    /// // Sample 1 becomes an inducing point; its coordinates come along.
+    /// let point = online.point_ids()[1];
+    /// online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0, 9.0])])?;
+    /// assert_eq!(online.z(), &[0.0, 1.0, 0.5]);
+    /// let pred = online.predict([image.from_vec(vec![0.25, 2.25, 0.25])], &[0.25], 1, 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_new: &[f64],
+        y_new: f64,
+    ) -> Result<PointId, GprError> {
+        self.insert_sources(sources, x_new, y_new)
+    }
+
+    /// Makes training point `point` one more inducing point, as the
+    /// [`DistanceOnly`] model does; its coordinates are those of `point`.
+    ///
+    /// # Errors
+    ///
+    /// Those of the [`DistanceOnly`] model's `insert_inducing`.
+    ///
+    /// See the example on [`Self::insert`].
+    pub fn insert_inducing<'s>(
+        &mut self,
+        point: PointId,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+    ) -> Result<InducingId, GprError> {
+        self.insert_inducing_sources(point, sources)
+    }
+}
+
+distance_predict!(
+    impl [O, P: crate::precision::GpScalar] OnlineSgpr<O, P, DistanceKernel<DistanceOnly>>,
+    refine = P::Refine,
+    args = (),
+    tail = (),
+    points = QueryPoints::NONE,
+    count = q,
+    cross = {
+        /// the `m × q` squared distances from the `m` inducing points (in
+        /// [`Self::inducing`] order) to the `q` queries.
+    },
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// in `f64`, as it predicts); a fill writes scratch once.
+    },
+    predict_doc = {
+        /// See the example on [`Self::insert`].
+    },
+    covariance_doc = {
+        /// See [`crate::FittedSgpr::predict_covariance`] of a
+        /// [`DistanceKernel<DistanceOnly>`]: the same arguments.
+    },
+);
+
+distance_predict!(
+    impl [O, P: crate::precision::GpScalar] OnlineSgpr<O, P, DistanceKernel<WithPoints>>,
+    refine = P::Refine,
+    args = (xs: &[f64]),
+    tail = (n_cols: usize),
+    points = QueryPoints { xs, n_cols },
+    count = q,
+    cross = {
+        /// the `m × q` squared distances from the `m` inducing points (in
+        /// [`Self::inducing`] order) to the `q` queries.
+    },
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// in `f64`, as it predicts); a fill writes scratch once.
+    },
+    predict_doc = {
+        /// See the example on [`Self::insert`].
+    },
+    covariance_doc = {
+        /// See [`crate::FittedSgpr::predict_covariance`] of a
+        /// [`DistanceKernel<WithPoints>`]: the same arguments.
+    },
+);
