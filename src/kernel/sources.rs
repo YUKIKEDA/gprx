@@ -92,6 +92,10 @@ fn slot_of<'k>(
             reason: "two sources were supplied for one distance slot".to_owned(),
         });
     }
+    // A source is made by the slot it names (`ScalarDistance`,
+    // `ArdDistance`), which gives it data of its own shape, so the two
+    // cannot disagree.
+    debug_assert_eq!(slot.shape(), source.data.shape());
     Ok(slot)
 }
 
