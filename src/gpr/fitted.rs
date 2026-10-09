@@ -1115,6 +1115,10 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         }
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
+        // The saved maps are read back, not fitted: a map that sends the
+        // data past `f64` is refused here, not later in a factor.
+        crate::data::require_finite(&x_buf)?;
+        crate::data::require_finite(&y_buf)?;
         let slots = spec_slots(&parts.kernel);
         let sources = parts.sources;
         let compiled = parts.kernel.compile_as::<P::Storage>();

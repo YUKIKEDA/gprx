@@ -25,7 +25,7 @@ use crate::{PredictOptions, Prediction};
 
 use super::config::{
     DistanceJson, JitterJson, LikelihoodJson, MathJson, ModelJson, PointsJson, PrecisionJson,
-    ResidualJson, SparseConfig, d2_tensor, parse_model, parse_sparse_config,
+    ResidualJson, SparseConfig, SparseDistanceJson, d2_tensor, parse_model, parse_sparse_config,
 };
 use super::kernel::KernelJson;
 use super::tensors::{TensorFile, f64_tensor, read_f64, write_f64_tensors};
@@ -137,8 +137,10 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
         next_point_id,
         inducing_ids,
         next_inducing_id,
-        distance: points.map(|points| DistanceJson::encode(points, slots)),
-        inducing: points.map(|_| core.supply.inducing.clone()),
+        distance: points.map(|points| SparseDistanceJson {
+            table: DistanceJson::encode(points, slots),
+            inducing: core.supply.inducing.clone(),
+        }),
     };
     let json = serde_json::to_vec_pretty(&config).map_err(|err| {
         persist_err(
@@ -224,7 +226,8 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
     registry: &PersistRegistry,
 ) -> Result<SparseCore<K::Supply>, GprError> {
     let (n, m, d) = (config.n, config.m, config.d);
-    let (kernel, slots) = decode_kernel::<K>(&config.kernel, config.distance.as_ref(), registry)?;
+    let table = config.distance.as_ref().map(|distance| &distance.table);
+    let (kernel, slots) = decode_kernel::<K>(&config.kernel, table, registry)?;
     let spec = SparseSpec {
         kernel,
         likelihood: config.likelihood.decode()?,
@@ -233,10 +236,10 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
         x_transform: config.x_unfitted.clone().decode(registry)?,
         y_transform: config.y_unfitted.clone().decode(registry)?,
     };
-    let supply = if slots.is_empty() {
-        SparseSupply::default()
-    } else {
-        read_supply::<S>(tensors, config, &slots)?
+    // `decode_kernel` makes slots only from the config's distance part.
+    let supply = match &config.distance {
+        Some(distance) => read_supply::<S>(tensors, config, &slots, &distance.inducing)?,
+        None => SparseSupply::default(),
     };
     SparseCore::from_persisted(PersistedSparse {
         spec,
@@ -254,21 +257,18 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
     })
 }
 
-/// The training blocks of `slots` (tensors `d2.<k>`) bound as a fit binds
-/// its sources ([`crate::kernel::bind_inducing`]): the same checks, and the
-/// squares among the inducing points formed again from the blocks.
+/// The training blocks of `slots` (tensors `d2.<k>`) at the training
+/// points `inducing`, bound as a fit binds its sources
+/// ([`crate::kernel::bind_inducing`]): the same checks of the indices (`m`
+/// of them, each below `n`, none twice) and of the values, and the squares
+/// among the inducing points formed again from the blocks.
 fn read_supply<S: crate::kernel::KernelScalar>(
     tensors: &SafeTensors<'_>,
     config: &SparseConfig,
     slots: &[DistanceSlot],
+    inducing: &[usize],
 ) -> Result<SparseSupply, GprError> {
     let (n, m) = (config.n, config.m);
-    let inducing = config.inducing.clone().ok_or_else(|| {
-        persist_err(
-            PersistErrorKind::Config,
-            "a sparse distance model's config has no inducing indices",
-        )
-    })?;
     if inducing.len() != m {
         return Err(persist_err(
             PersistErrorKind::Config,
@@ -278,6 +278,9 @@ fn read_supply<S: crate::kernel::KernelScalar>(
             ),
         ));
     }
+    // Each below `n` and none twice, as a fit checks them: the binding
+    // reads the blocks at these rows.
+    crate::sparse::check_inducing(inducing, n)?;
     let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
     let sources = slots
         .iter()
@@ -300,8 +303,8 @@ fn read_supply<S: crate::kernel::KernelScalar>(
             })
         })
         .collect::<Result<Vec<_>, GprError>>()?;
-    let (zz, xz) = crate::kernel::bind_inducing(slots, sources, n, &inducing)?;
-    SparseSupply::new::<S>(inducing, zz, xz)
+    let (zz, xz) = crate::kernel::bind_inducing(slots, sources, n, inducing)?;
+    SparseSupply::new::<S>(inducing.to_vec(), zz, xz)
 }
 
 /// The saved online identifiers.
@@ -444,8 +447,9 @@ impl LoadedSgpr {
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
     /// is not [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
     /// directory holds another model, or its JSON, tensors, or registry
-    /// lookup is invalid. Factorization errors use the same variants as
-    /// [`crate::Sgpr<Fixed>::factor`].
+    /// lookup is invalid, and [`GprError::NonFiniteInput`] when the saved
+    /// maps send the training data past `f64`. Factorization errors use the
+    /// same variants as [`crate::Sgpr<Fixed>::factor`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {

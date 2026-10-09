@@ -98,7 +98,7 @@ Floating-point numbers are written in the shortest form that reads back to the s
 | `jitter` | The policy for factoring `K_mm` (the sparse default is adaptive: `initial` 1e-8, `multiplier` 10, `max_retries` 5, `max_jitter` 1e-3) |
 | `has_factor`, `factor_kind`, `factor_jitter`, `distance_cache` | Not written. No factor is stored (§7) |
 | `inducing_ids`, `next_inducing_id` | Added, required for `online_sgpr`, absent otherwise. `point_ids` and `next_point_id` are also required for `online_sgpr` |
-| `distance`, `inducing` | Added for a `DistanceKernel` model, absent otherwise (§10) |
+| `distance` | Added for a `DistanceKernel` model, absent otherwise. A sparse model's also holds `inducing` (§10) |
 
 `precision`, `residual`, `math`, `kernel`, `likelihood`, and the four transform keys have the same form as in §3. An example (`svgp`, same kernel, transforms, and 2 inducing points), with only the keys that differ from §3 shown in full:
 
@@ -300,7 +300,7 @@ A model of a `DistanceKernel` (the kernel reads squared distances the caller sup
 
 The coordinate loaders (`LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`) are unchanged and refuse a distance file; a distance loader refuses a coordinate file and a file of the other marker. All of these are `WrongModel`.
 
-### 10.1 `distance` and `inducing` in `config.json`
+### 10.1 `distance` in `config.json`
 
 ```json
 "distance": {
@@ -312,7 +312,8 @@ The coordinate loaders (`LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`) are unchanged a
 - `points`: `"distance_only"` (the kernel reads only supplied distances; `d` is `0` and `x`, `z`, `z_train` are empty) or `"with_points"` (the kernel also has coordinate leaves that read `x`).
 - `slots`: the slot table, in the order of the kernel's `DistanceKernel::slots` (depth first, in order of first appearance). A slot is `scalar` (one `d²` per pair) or `ard` with `dims` (one `d²` per dimension per pair). The kernel tree must read every slot of the table, in the table's order; otherwise load fails with `PersistFailed` (`kind: Config`).
 - A kernel leaf on a slot is `{"distance": {"slot": k, "leaf": <kernel>}}` (§5.1). `custom` leaves are restored through `PersistRegistry` as in §5.5.
-- `inducing` (sparse only): the training points that are the inducing points, in the order of the columns of the blocks. Its length is `m`.
+- `inducing` (sparse only, inside `distance`, required there): the training points that are the inducing points, in the order of the columns of the blocks. There are `m` of them, each below `n`, none twice: load refuses an index past `n` with `IndexOutOfRange`, one listed twice with `InvalidConfig`, and another count with `PersistFailed` (`kind: Config`). For a `with_points` model, `z` and `z_train` must be the rows of `x` and of the mapped `x` that `inducing` names, to the bit, as a fit makes them; otherwise `PersistFailed` (`kind: Config`).
+- A `distance_only` kernel holds no leaf that reads coordinates (`constant` and `white` are allowed); a file whose tree has one is `PersistFailed` (`kind: Config`).
 
 A real example (`FittedGpr::save` of a scalar RBF plus an ARD RBF on two dimensions, 3 points):
 
@@ -346,7 +347,7 @@ A real example (`FittedGpr::save` of a scalar RBF plus an ARD RBF on two dimensi
 }
 ```
 
-The tensors are `x` (`[3, 0]`), `y`, `d2.0` (`[6]`), and `d2.1` (`[2, 6]`). `FittedSgpr::save` of the scalar slot alone with inducing points `[0, 2]` writes `"model": "sgpr"`, `"m": 2`, the same `distance` with one slot, and `"inducing": [0, 2]`, with `d2.0` of shape `[3, 2]`. (The files are indented one key per line; folded here to fit.)
+The tensors are `x` (`[3, 0]`), `y`, `d2.0` (`[6]`), and `d2.1` (`[2, 6]`). `FittedSgpr::save` of the scalar slot alone with inducing points `[0, 2]` writes `"model": "sgpr"`, `"m": 2`, and `"distance": {"points": "distance_only", "slots": [{"kind": "scalar"}], "inducing": [0, 2]}`, with `d2.0` of shape `[3, 2]`. (Both are the real output of `save`, every key in place; the file has one key per line, folded here to fit.)
 
 ### 10.2 Tensors
 
@@ -354,11 +355,12 @@ The tensors are `x` (`[3, 0]`), `y`, `d2.0` (`[6]`), and `d2.1` (`[2, 6]`). `Fit
 
 | Model | Shape (scalar slot) | Shape (ARD slot) | Layout | dtype |
 | --- | --- | --- | --- | --- |
-| Exact (`exact`) | `[n(n+1)/2]` | `[dims, n(n+1)/2]` | The lower triangle, column by column: column `j` holds rows `j..n` (diagonal included), then column `j + 1`. An ARD slot is dimension after dimension | `F32` for `single`; `F64` for `double` and `mixed` |
+| Exact (no `model` key) | `[n(n+1)/2]` | `[dims, n(n+1)/2]` | The lower triangle, column by column: column `j` holds rows `j..n` (diagonal included), then column `j + 1`. An ARD slot is dimension after dimension | `F32` for `single`; `F64` for `double` and `mixed` |
 | Sparse (`sgpr`, `online_sgpr`, `svgp`) | `[n, m]` | `[dims, n, m]` | Each block column-major, `n` training points × `m` inducing points; an ARD slot is dimension after dimension | `F64` |
 
 - The values are what the model owns, after a `tidy` repair, in the order of the model's points (an online model's live points, in `point_ids` order). An online model whose ARD slot it laid out as row runs for its updates still writes the canonical layout above.
 - A `single` Exact model writes its `f32` store as it is. A `mixed` Exact model writes the caller's `f64` values (it keeps them beside its `f32` copy) and casts them again on load. A sparse model keeps its blocks at `f64` at every precision, and writes them so.
+- Load reads `d2.<k>` for each slot `k` of the table and no other: a tensor no slot names is not read, and neither are `l` and `alpha` when `has_factor` is `false` (as for a coordinate file).
 - On load the values are checked as a fit checks its sources: finite, non-negative, and a zero diagonal (Exact); the same for the blocks, and the inducing rows a symmetric square with a zero diagonal (sparse). A violation is `GprError::InvalidDistance`.
 - Exact with `has_factor: false` factors again at the saved `θ` from the stored `d²`; with `has_factor: true` it reads `l` and `alpha` as in §7. A sparse model factors again from the stored blocks, as in §7.
 

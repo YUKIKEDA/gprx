@@ -806,32 +806,88 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-供給された距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](docs/persist-format.ja.md#10-供給された距離のモデル)。
+供給された距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-供給された距離のモデル)。
 
 ```rust
-use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
-use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
-use gprx::{Fixed, GaussianLikelihood, Gpr};
+use gprx::kernel::{
+    DistanceOnly, DistanceSlot, KernelSpec, RbfKernel, ScalarDistance, WithPoints,
+};
+use gprx::persist::{LoadedDistanceGpr, LoadedDistanceSgpr, LoadedDistanceSvgp, PersistRegistry};
+use gprx::{Fixed, GaussianLikelihood, GprError, Gpr, Sgpr, Svgp};
 
-fn main() -> Result<(), gprx::GprError> {
-    let image = ScalarDistance::new();
-    let train = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
-    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
-        .with_optimizer(Fixed)
-        .factor([image.from_vec(train)], 3, &[0.0, 1.0, 0.5])
-        .map_err(|(_, e)| e)?;
+/// The one scalar slot of a loaded kernel.
+fn scalar(slots: &[DistanceSlot]) -> Result<ScalarDistance, GprError> {
+    match slots {
+        [DistanceSlot::Scalar(slot)] => Ok(*slot),
+        _ => Err(GprError::InvalidConfig {
+            reason: "expected one scalar slot".into(),
+        }),
+    }
+}
+
+fn main() -> Result<(), GprError> {
+    let registry = PersistRegistry::new();
     let dir = std::env::temp_dir().join("gprx-readme-distance");
     let _ = std::fs::remove_dir_all(&dir);
-    fitted.save(&dir)?;
-    let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
-    let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
-        return Err(gprx::GprError::InvalidConfig {
-            reason: "expected one scalar slot".into(),
-        });
-    };
+    let image = ScalarDistance::new();
+    // Three samples at 0, 1, 2: their 3 × 3 squared distances.
+    let train = [0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5];
+    // The three samples × one query at 0.5.
     let cross = [0.25, 0.25, 2.25];
+
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&train)], 3, &y)
+        .map_err(|(_, e)| e)?;
+    fitted.save(&dir)?;
+    // The marker is part of the loaded type: name it.
+    let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &registry)?;
+    assert_eq!((loaded.n(), loaded.is_online()), (3, false));
+    // The loaded kernel has new slots: bind the query to them.
+    let slot = scalar(&loaded.slots())?;
+    assert_eq!(loaded.to_kernel().slots(), loaded.slots());
     let pred = loaded.predict([slot.borrow(&cross)], 1)?;
     assert_eq!(pred.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+
+    // A kernel with coordinate leaves is `WithPoints`: the query adds its coordinates.
+    let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+    Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&train)], 3, &[0.0, 1.0, 2.0], 1, &y)
+        .map_err(|(_, e)| e)?
+        .save(&dir)?;
+    let loaded = LoadedDistanceGpr::<WithPoints>::load(&dir, &registry)?;
+    assert_eq!(loaded.d(), 1);
+    let slot = scalar(&loaded.slots())?;
+    let _ = loaded.predict_with([slot.borrow(&cross)], &[0.5], 1, 1, gprx::PredictOptions::default())?;
+
+    // Sparse: the blocks from the three samples to the inducing samples 0 and 2.
+    let blocks = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+    Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&blocks)], 3, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
+    assert_eq!((loaded.m(), loaded.inducing()), (2, &[0, 2][..]));
+    let slot = scalar(&loaded.slots())?;
+    // The inducing samples × the query at 0.5.
+    let _ = loaded.predict([slot.borrow(&[2.25, 0.25])], 1)?;
+    let LoadedDistanceSgpr::Double(model) = loaded else {
+        return Err(GprError::InvalidConfig {
+            reason: "expected Double".into(),
+        });
+    };
+    let _online = model.into_online();
+
+    Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .factor([image.borrow(&blocks)], 3, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &registry)?;
+    let slot = scalar(&loaded.slots())?;
+    let _ = loaded.predict([slot.borrow(&[2.25, 0.25])], 1)?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -844,6 +900,9 @@ fn main() -> Result<(), gprx::GprError> {
 | `LoadedGpr` | `Double`、`Single`、`Mixed`、`Reevaluate`、`OnlineDouble`、`OnlineSingle`、`OnlineMixed`、`OnlineReevaluate` |
 | `LoadedSgpr` | 同じ 8 つ。`Double` は `FittedSgpr<Fixed>`。オンラインは `OnlineSgpr<Fixed, _>` |
 | `LoadedSvgp` | `Double`、`Single`、`Mixed`、`Reevaluate`。オンラインはない |
+| `LoadedDistanceGpr<C>` | `LoadedGpr` と同じ 8 つで、中身は `FittedGpr<Fixed, _, DistanceKernel<C>>` / `OnlineGpr<Fixed, _, DistanceKernel<C>>`。`C` は `DistanceOnly` か `WithPoints` で、`load` で名指しする |
+| `LoadedDistanceSgpr<C>` | `LoadedSgpr` と同じ 8 つで、中身は `DistanceKernel<C>` のモデル |
+| `LoadedDistanceSvgp<C>` | `LoadedSvgp` と同じ 4 つで、中身は `FittedSvgp<_, DistanceKernel<C>>` |
 
 読み込んだ全学習点モデルは `Fixed` かつ `CholeskyBuffer::Retain` となる。ファイルにソルバは含まれない。照合したモデルで `with_optimizer` を呼び、`refit` すると、もう一度探索する。`save` で因子なしに書いたファイルは、読み込み時に因子を作る。`save_with_factor` は `L` をメモリマップのまま使う。
 

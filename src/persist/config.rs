@@ -421,6 +421,16 @@ impl DistanceJson {
     }
 }
 
+/// The distance part of a sparse config: [`DistanceJson`] and the
+/// training points that are the inducing points, in the order of the
+/// columns of the blocks. A sparse distance model has both or neither.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct SparseDistanceJson {
+    #[serde(flatten)]
+    pub table: DistanceJson,
+    pub inducing: Vec<usize>,
+}
+
 /// The name of tensor of slot `k`'s training `d²`.
 pub(super) fn d2_tensor(k: usize) -> String {
     format!("d2.{k}")
@@ -546,13 +556,9 @@ pub(super) struct SparseConfig {
     pub inducing_ids: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub next_inducing_id: Option<u64>,
-    /// As [`ModelConfig::distance`].
+    /// As [`ModelConfig::distance`], with the inducing indices.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub distance: Option<DistanceJson>,
-    /// The training points that are the inducing points, in order: present
-    /// for a model on supplied distances.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub inducing: Option<Vec<usize>>,
+    pub distance: Option<SparseDistanceJson>,
 }
 
 impl SparseConfig {
@@ -575,7 +581,12 @@ pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError
             supported: FORMAT_VERSION,
         });
     }
-    check_sizes(config.n, config.m, config.d, config.distance.as_ref())?;
+    check_sizes(
+        config.n,
+        config.m,
+        config.d,
+        config.distance.as_ref().map(|distance| &distance.table),
+    )?;
     Ok(config)
 }
 

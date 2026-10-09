@@ -130,10 +130,12 @@ impl<C: PointUse> LoadedDistanceGpr<C> {
     /// [`crate::PersistErrorKind::WrongModel`] when the directory holds
     /// another model (a sparse one, a coordinate one, or one of the other
     /// [`PointUse`]), and [`GprError::PersistFailed`] when the JSON, the
-    /// tensors, or a registry lookup is invalid. A stored `d²` that is not
-    /// finite, negative, or a non-zero diagonal is
-    /// [`GprError::InvalidDistance`]. Factorization errors use the same
-    /// variants as the model's `factor`.
+    /// tensors, or a registry lookup is invalid, or when a `DistanceOnly`
+    /// file's kernel holds a leaf that reads coordinates. A stored `d²` that
+    /// is not finite, negative, or a non-zero diagonal is
+    /// [`GprError::InvalidDistance`]. Saved maps that send the training data
+    /// past `f64` are [`GprError::NonFiniteInput`]. Factorization errors use
+    /// the same variants as the model's `factor`.
     ///
     /// See the example on [`LoadedDistanceGpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
@@ -392,8 +394,15 @@ impl<C: PointUse> LoadedDistanceSgpr<C> {
     /// is not [`super::FORMAT_VERSION`], [`GprError::PersistFailed`] with
     /// [`crate::PersistErrorKind::WrongModel`] when the directory holds
     /// another model, and [`GprError::PersistFailed`] when the JSON, the
-    /// tensors, or a registry lookup is invalid. Stored blocks are checked
-    /// as a fit checks its sources ([`GprError::InvalidDistance`]).
+    /// tensors, or a registry lookup is invalid, when a `DistanceOnly`
+    /// file's kernel holds a leaf that reads coordinates, when the number of
+    /// inducing indices is not `m`, or when a `WithPoints` file's `z` or
+    /// `z_train` is not the training rows its inducing indices name. The
+    /// inducing indices and the stored blocks are checked as a fit checks
+    /// them: [`GprError::IndexOutOfRange`] for an index not below `n`,
+    /// [`GprError::InvalidConfig`] for an index listed twice, and
+    /// [`GprError::InvalidDistance`] for a value. Saved maps that send the
+    /// training data past `f64` are [`GprError::NonFiniteInput`].
     /// Factorization errors use the same variants as the model's `factor`.
     ///
     /// See the example on [`LoadedDistanceSgpr`].

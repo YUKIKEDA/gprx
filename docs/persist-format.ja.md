@@ -98,7 +98,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 | `jitter` | `K_mm` を分解するときの方針（Sparse の既定は adaptive: `initial` 1e-8、`multiplier` 10、`max_retries` 5、`max_jitter` 1e-3） |
 | `has_factor`、`factor_kind`、`factor_jitter`、`distance_cache` | 書かない。因子は保存しない（7 節） |
 | `inducing_ids`、`next_inducing_id` | 追加。`online_sgpr` では必須、それ以外は無し。`online_sgpr` では `point_ids` と `next_point_id` も必須 |
-| `distance`、`inducing` | `DistanceKernel` のモデルで追加、それ以外は無し（10 節） |
+| `distance` | `DistanceKernel` のモデルで追加、それ以外は無し。Sparse のものは `inducing` も持つ（10 節） |
 
 `precision`、`residual`、`math`、`kernel`、`likelihood`、4 つの変換のキーは、3 節と同じ形。例（`svgp`、同じカーネルと変換、誘導点 2 つ）:
 
@@ -320,7 +320,7 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 
 座標のローダー（`LoadedGpr`、`LoadedSgpr`、`LoadedSvgp`）は変わらず、距離のファイルを断る。距離のローダーは、座標のファイルと、もう一方のマーカーのファイルを断る。どれも `WrongModel` である。
 
-### 10.1 `config.json` の `distance` と `inducing`
+### 10.1 `config.json` の `distance`
 
 ```json
 "distance": {
@@ -332,7 +332,8 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 - `points`: `"distance_only"`（カーネルは渡された距離だけを読む。`d` は `0` で、`x`、`z`、`z_train` は空）か `"with_points"`（カーネルは `x` を読む座標の葉も持つ）。
 - `slots`: slot の表。カーネルの `DistanceKernel::slots` の順（深さ優先、最初に現れた順）。slot は `scalar`（組ごとに `d²` が 1 つ）か、`dims` を持つ `ard`（組ごと、次元ごとに `d²` が 1 つ）。カーネルの木は表のすべての slot を表の順に読まなければならない。そうでなければ読み込みは `PersistFailed`（`kind: Config`）で失敗する。
 - slot の上のカーネルの葉は `{"distance": {"slot": k, "leaf": <kernel>}}`（5.1 節）。`custom` の葉は 5.5 節と同じく `PersistRegistry` で戻す。
-- `inducing`（Sparse だけ）: 誘導点である学習点を、ブロックの列の順に並べたもの。長さは `m`。
+- `inducing`（Sparse だけ。`distance` の中にあり、そこでは必須）: 誘導点である学習点を、ブロックの列の順に並べたもの。`m` 個で、どれも `n` 未満、重複なし。読み込みは、`n` 以上の添字を `IndexOutOfRange`、重複を `InvalidConfig`、個数の違いを `PersistFailed`（`kind: Config`）で断る。`with_points` のモデルでは、`z` と `z_train` が、`inducing` の指す `x` の行と変換後の `x` の行に、fit が作るとおりビットで一致しなければならない。そうでなければ `PersistFailed`（`kind: Config`）。
+- `distance_only` のカーネルは座標を読む葉を持たない（`constant` と `white` は持てる）。木にそれがあるファイルは `PersistFailed`（`kind: Config`）。
 
 実際の例（3 点で、スカラーの RBF と 2 次元の ARD RBF の和を `FittedGpr::save` したもの）:
 
@@ -366,7 +367,7 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 }
 ```
 
-テンソルは `x`（`[3, 0]`）、`y`、`d2.0`（`[6]`）、`d2.1`（`[2, 6]`）。スカラーの slot だけで誘導点 `[0, 2]` の `FittedSgpr::save` は、`"model": "sgpr"`、`"m": 2`、slot 1 つの同じ `distance`、`"inducing": [0, 2]` を書き、`d2.0` の形は `[3, 2]`。（ファイルは 1 行 1 キーで字下げしてある。ここでは収めるために畳んだ。）
+テンソルは `x`（`[3, 0]`）、`y`、`d2.0`（`[6]`）、`d2.1`（`[2, 6]`）。スカラーの slot だけで誘導点 `[0, 2]` の `FittedSgpr::save` は、`"model": "sgpr"`、`"m": 2`、`"distance": {"points": "distance_only", "slots": [{"kind": "scalar"}], "inducing": [0, 2]}` を書き、`d2.0` の形は `[3, 2]`。（どちらも `save` の実際の出力で、キーは全部ある。ファイルは 1 行 1 キーで、ここでは収めるために畳んだ。）
 
 ### 10.2 テンソル
 
@@ -374,11 +375,12 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 
 | モデル | 形（スカラーの slot） | 形（ARD の slot） | 並び | dtype |
 | --- | --- | --- | --- | --- |
-| Exact（`exact`） | `[n(n+1)/2]` | `[dims, n(n+1)/2]` | 下三角を列ごとに: 列 `j` が行 `j..n`（対角を含む）を持ち、次に列 `j + 1`。ARD の slot は次元を順に並べる | `single` は `F32`、`double` と `mixed` は `F64` |
+| Exact（`model` キー無し） | `[n(n+1)/2]` | `[dims, n(n+1)/2]` | 下三角を列ごとに: 列 `j` が行 `j..n`（対角を含む）を持ち、次に列 `j + 1`。ARD の slot は次元を順に並べる | `single` は `F32`、`double` と `mixed` は `F64` |
 | Sparse（`sgpr`、`online_sgpr`、`svgp`） | `[n, m]` | `[dims, n, m]` | ブロックごとに列優先。`n` 個の学習点 × `m` 個の誘導点。ARD の slot は次元を順に並べる | `F64` |
 
 - 値は、モデルが持っているもの（`tidy` の修復の後）で、モデルの点の順（online のモデルなら生きている点を `point_ids` の順）。更新のために ARD の slot を行の並びに置き直した online のモデルも、上の正規の並びで書く。
 - `single` の Exact は `f32` のストアをそのまま書く。`mixed` の Exact は呼び出し側の `f64` の値（`f32` の写しの横に持っている）を書き、読み込みでもう一度丸める。Sparse のモデルはどの精度でもブロックを `f64` で持つので、そのまま書く。
+- 読み込みは表の各 slot `k` の `d2.<k>` だけを読む。どの slot も指さないテンソルは読まない。`has_factor` が `false` のときの `l` と `alpha` も読まない（座標のファイルと同じ）。
 - 読み込みでは、fit が source を検査するのと同じく値を検査する。有限、非負、対角が 0（Exact）。ブロックも同じで、誘導点の行が対角 0 の対称な正方行列であること（Sparse）。違反は `GprError::InvalidDistance`。
 - Exact の `has_factor: false` は、保存した `d²` から保存した `θ` でもう一度分解する。`has_factor: true` は 7 節のとおり `l` と `alpha` を読む。Sparse のモデルは 7 節のとおり、保存したブロックからもう一度分解する。
 

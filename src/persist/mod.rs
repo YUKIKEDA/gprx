@@ -136,9 +136,10 @@ impl LoadedGpr {
     ///
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
     /// is not [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
-    /// directory, JSON, tensors, or registry lookup is invalid. Factorization
-    /// errors from a file written without `L` use the same variants as
-    /// [`crate::Gpr<Fixed>::factor`].
+    /// directory, JSON, tensors, or registry lookup is invalid, and
+    /// [`GprError::NonFiniteInput`] when the saved maps send the training
+    /// data past `f64`. Factorization errors from a file written without `L`
+    /// use the same variants as [`crate::Gpr<Fixed>::factor`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
@@ -768,7 +769,29 @@ fn decode_kernel<K: ModelKernel>(
             "the kernel does not read the slot table's slots in the table's order",
         ));
     }
+    // A `DistanceOnly` kernel holds no leaf that reads coordinates: its
+    // model has none to give it.
+    if !<K as ModelKernelParts>::POINTS && reads_coordinates(&spec) {
+        return Err(persist_err(
+            PersistErrorKind::Config,
+            "a distance_only kernel holds a leaf that reads coordinates",
+        ));
+    }
     Ok((spec, slots))
+}
+
+/// Whether `spec` holds a leaf that reads coordinates: every coordinate
+/// leaf but [`crate::kernel::ConstantKernel`] and
+/// [`crate::kernel::WhiteKernel`], which a [`crate::kernel::DistanceOnly`]
+/// kernel may hold.
+fn reads_coordinates<S: crate::kernel::Supply>(spec: &KernelSpec<S>) -> bool {
+    match spec {
+        KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
+            reads_coordinates(left) || reads_coordinates(right)
+        }
+        KernelSpec::Constant(_) | KernelSpec::White(_) | KernelSpec::Supplied(_) => false,
+        _ => true,
+    }
 }
 
 fn load_precision<P, K, L>(
