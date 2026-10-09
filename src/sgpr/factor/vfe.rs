@@ -173,7 +173,7 @@ where
     // `K(Z, X)` is the rectangular cross covariance whatever the values of
     // `Z` and `X`: a White leaf adds nothing to it, so the objective does not
     // jump when a free `Z` leaves `X` (docs/design.md §5).
-    let mut a = ks.cross::<M, U>(&compiled, sets.k_mn())?;
+    let mut a = ks.cross_mn::<M, U>(&compiled, sets)?;
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);

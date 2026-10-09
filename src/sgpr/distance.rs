@@ -23,6 +23,10 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use super::factor::{VfeSystem, assemble_fitted, predict_vfe_covariance, predict_vfe_into};
 use super::{FittedSgpr, FixedInducing, InducingLayout, Sgpr, SgprObjective};
 
+/// A fitted SGPR on supplied distances, or the trainer `S` back with the
+/// error.
+type Fitted<O, P, C, S> = Result<FittedSgpr<O, FixedInducing, P, DistanceKernel<C>>, (S, GprError)>;
+
 impl<O: Clone, P: GpScalar, C: PointUse> Sgpr<O, FixedInducing, P, DistanceKernel<C>> {
     /// The model factored at the current `θ`: the shared part of `fit` and
     /// `factor`.
@@ -34,7 +38,7 @@ impl<O: Clone, P: GpScalar, C: PointUse> Sgpr<O, FixedInducing, P, DistanceKerne
         points: (&[f64], usize),
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<O, FixedInducing, P, DistanceKernel<C>>, (Self, GprError)> {
+    ) -> Fitted<O, P, C, Self> {
         let core = match SparseCore::prepare_supplied::<P::Storage>(
             &self.spec, sources, n, points, y, inducing,
         ) {
@@ -59,7 +63,7 @@ impl<O: Clone, P: GpScalar, C: PointUse> Sgpr<O, FixedInducing, P, DistanceKerne
         points: (&[f64], usize),
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<O, FixedInducing, P, DistanceKernel<C>>, (Self, GprError)>
+    ) -> Fitted<O, P, C, Self>
     where
         O: for<'a> Optimizer<SgprObjective<'a, O, FixedInducing, P, DistanceKernel<C>>>,
     {
@@ -217,7 +221,7 @@ where
         n_cols: usize,
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<O, FixedInducing, P, DistanceKernel<WithPoints>>, (Self, GprError)> {
+    ) -> Fitted<O, P, WithPoints, Self> {
         self.fit_supplied(sources, n, (x, n_cols), y, inducing)
     }
 }
@@ -258,8 +262,7 @@ impl<P: GpScalar> Sgpr<Fixed, FixedInducing, P, DistanceKernel<WithPoints>> {
         n_cols: usize,
         y: &[f64],
         inducing: &[usize],
-    ) -> Result<FittedSgpr<Fixed, FixedInducing, P, DistanceKernel<WithPoints>>, (Self, GprError)>
-    {
+    ) -> Fitted<Fixed, P, WithPoints, Self> {
         self.factor_supplied(sources, n, (x, n_cols), y, inducing)
     }
 }

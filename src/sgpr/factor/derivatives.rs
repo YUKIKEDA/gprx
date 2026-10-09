@@ -316,9 +316,9 @@ where
         adjoint.w_mm.as_ref(),
         &mut out[..n_kernel],
     )?;
-    ks.add_cross_contraction::<M, K::Supply>(
+    ks.add_cross_contraction_mn::<M, K::Supply>(
         &compiled,
-        sets.k_mn(),
+        sets,
         adjoint.w_mn.as_ref(),
         1.0,
         &mut out[..n_kernel],
@@ -466,7 +466,7 @@ where
         Triangle::Full,
     )?;
     let mut d_kmn = Mat::zeros(m, n);
-    ks.grad_cross_into::<M, U>(compiled, sets.k_mn(), d_kmn.as_mut(), param_idx)?;
+    ks.grad_cross_mn_into::<M, U>(compiled, sets, d_kmn.as_mut(), param_idx)?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.grad_diag_points::<M>(sets.x, &mut diag, param_idx)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
@@ -617,7 +617,7 @@ where
         Triangle::Full,
     )?;
     let mut d_kmn = Mat::zeros(m, n);
-    ks.hess_cross_into::<M, U>(compiled, sets.k_mn(), d_kmn.as_mut(), (i, j))?;
+    ks.hess_cross_mn_into::<M, U>(compiled, sets, d_kmn.as_mut(), (i, j))?;
     let mut diag = vec![lit::<T>(0.0); n];
     compiled.hess_diag_points::<M>(sets.x, &mut diag, i, j)?;
     let d_kdiag = diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);

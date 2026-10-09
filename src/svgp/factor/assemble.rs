@@ -131,7 +131,7 @@ where
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let sets = SparseSets::<T, U>::new(x_mat, z_mat, data.supply.at::<T>()?);
     // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
-    let mut a = ks.cross::<M, U>(&compiled, sets.k_mn())?;
+    let mut a = ks.cross_mn::<M, U>(&compiled, sets)?;
     solve_lower(k_mm_l, a.as_mut());
     let mut k_diag = vec![T::from_f64(0.0); data.n];
     compiled.fill_diag_rows(x_mat, &mut k_diag)?;

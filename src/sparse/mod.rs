@@ -157,13 +157,13 @@ impl SparseData<'_> {
 
 /// The two point sets a sparse kernel reads at `T`: the training points
 /// `x` (`n × d`) and the inducing points `z` (`m × d`), with the supplied
-/// `d²` among the inducing points (`zz`) and from them to the training
-/// points (`zx`, `m × n`).
+/// `d²` among the inducing points (`zz`) and from the training points to
+/// them (`xz`, `n × m`, as the caller laid them out).
 pub(crate) struct SparseSets<'a, T: KernelScalar, U: Supply> {
     pub(crate) x: MatRef<'a, T>,
     pub(crate) z: MatRef<'a, T>,
     pub(crate) zz: U::Squares<'a, T>,
-    pub(crate) zx: U::Rects<'a, T>,
+    pub(crate) xz: U::Rects<'a, T>,
 }
 
 impl<T: KernelScalar, U: Supply> Clone for SparseSets<'_, T, U> {
@@ -181,7 +181,7 @@ impl<'a, T: KernelScalar, U: Supply> SparseSets<'a, T, U> {
             x,
             z,
             zz: U::squares(&at.zz),
-            zx: U::rects(&at.zx),
+            xz: U::rects(&at.xz),
         }
     }
 
@@ -190,13 +190,15 @@ impl<'a, T: KernelScalar, U: Supply> SparseSets<'a, T, U> {
         GramInputs::supplied(self.z, self.zz)
     }
 
-    /// The views of `K(Z, X)` (`m × n`).
-    pub(crate) fn k_mn(&self) -> CrossViews<'a, T, U> {
+    /// The views of `K(X, Z)` (`n × m`): the supplied blocks are read in
+    /// their own layout. A coordinate kernel forms `K(Z, X)` directly
+    /// ([`KernelScratch::cross_mn_into`]).
+    pub(crate) fn k_nm(&self) -> CrossViews<'a, T, U> {
         CrossViews {
-            x1: self.z,
-            x2: self.x,
+            x1: self.x,
+            x2: self.z,
             dist: None,
-            slots: self.zx,
+            slots: self.xz,
         }
     }
 }
@@ -414,8 +416,8 @@ impl<U: Supply> SparseCore<U> {
             validate_training(x, n, n_cols, y)?;
         }
         let slots = crate::kernel::spec_slots(&spec.kernel);
-        let (zz, zx) = crate::kernel::bind_inducing(&slots, sources, n, inducing)?;
-        let supply = SparseSupply::new::<S>(inducing.to_vec(), zz, zx)?;
+        let (zz, xz) = crate::kernel::bind_inducing(&slots, sources, n, inducing)?;
+        let supply = SparseSupply::new::<S>(inducing.to_vec(), zz, xz)?;
         let mut z_obs = Vec::with_capacity(m * n_cols);
         for j in 0..n_cols {
             z_obs.extend(inducing.iter().map(|&i| x[j * n + i]));
@@ -887,6 +889,129 @@ impl<T: KernelScalar> KernelScratch<T> {
         Ok(out)
     }
 
+    /// `K(Z, X)` (`m × n`) of `sets` into `out`. A coordinate kernel forms
+    /// it directly; a kernel on supplied blocks (`n × m`) forms `K(X, Z)` in
+    /// the distance buffer, which it does not otherwise use, and writes its
+    /// transpose.
+    pub(crate) fn cross_mn_into<M: crate::math::KernelMath, U: Supply>(
+        &mut self,
+        compiled: &CompiledKernel<T, U>,
+        sets: SparseSets<'_, T, U>,
+        mut out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        if let Some(coords) = U::coordinates(compiled) {
+            return self.cross_into::<M, NoSupply>(coords, CrossViews::points(sets.z, sets.x), out);
+        }
+        let (n, m) = (sets.x.nrows(), sets.z.nrows());
+        let KernelScratch {
+            dist,
+            scratch,
+            nested,
+            ..
+        } = self;
+        let mut k = view(dist, n, m);
+        let views = sets.k_nm();
+        compiled.eval_cross_slots::<M>(
+            views.x1,
+            views.x2,
+            views.slots,
+            None,
+            k.as_mut(),
+            view(scratch, n, m),
+            nested,
+            &mut [],
+        )?;
+        out.copy_from(k.transpose());
+        Ok(())
+    }
+
+    /// [`Self::cross_mn_into`] into a new matrix.
+    pub(crate) fn cross_mn<M: crate::math::KernelMath, U: Supply>(
+        &mut self,
+        compiled: &CompiledKernel<T, U>,
+        sets: SparseSets<'_, T, U>,
+    ) -> Result<Mat<T>, GprError> {
+        let mut out = Mat::zeros(sets.z.nrows(), sets.x.nrows());
+        self.cross_mn_into::<M, U>(compiled, sets, out.as_mut())?;
+        Ok(out)
+    }
+
+    /// `∂K(Z, X)/∂θ_p` (`m × n`) into `out`, as [`Self::cross_mn_into`].
+    pub(crate) fn grad_cross_mn_into<M: crate::math::KernelMath, U: Supply>(
+        &mut self,
+        compiled: &CompiledKernel<T, U>,
+        sets: SparseSets<'_, T, U>,
+        mut out: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if let Some(coords) = U::coordinates(compiled) {
+            let views = CrossViews::points(sets.z, sets.x);
+            return self.grad_cross_into::<M, NoSupply>(coords, views, out, param_idx);
+        }
+        let (n, m) = (sets.x.nrows(), sets.z.nrows());
+        let mut k = std::mem::replace(&mut self.dist, Mat::new());
+        let result =
+            self.grad_cross_into::<M, U>(compiled, sets.k_nm(), view(&mut k, n, m), param_idx);
+        if result.is_ok() {
+            out.copy_from(k.as_ref().submatrix(0, 0, n, m).transpose());
+        }
+        self.dist = k;
+        result
+    }
+
+    /// `∂²K(Z, X)/∂θ_i ∂θ_j` (`m × n`) into `out`, as
+    /// [`Self::cross_mn_into`].
+    pub(crate) fn hess_cross_mn_into<M: crate::math::KernelMath, U: Supply>(
+        &mut self,
+        compiled: &CompiledKernel<T, U>,
+        sets: SparseSets<'_, T, U>,
+        mut out: MatMut<'_, T>,
+        pair: (usize, usize),
+    ) -> Result<(), GprError> {
+        if let Some(coords) = U::coordinates(compiled) {
+            let views = CrossViews::points(sets.z, sets.x);
+            return self.hess_cross_into::<M, NoSupply>(coords, views, out, pair);
+        }
+        let (n, m) = (sets.x.nrows(), sets.z.nrows());
+        let mut k = std::mem::replace(&mut self.dist, Mat::new());
+        let result = self.hess_cross_into::<M, U>(compiled, sets.k_nm(), view(&mut k, n, m), pair);
+        if result.is_ok() {
+            out.copy_from(k.as_ref().submatrix(0, 0, n, m).transpose());
+        }
+        self.dist = k;
+        result
+    }
+
+    /// Adds `coeff · ⟨weight, ∂K(Z, X)/∂θ⟩_F` (`weight` is `m × n`) for
+    /// every kernel parameter. On supplied blocks the weight is transposed
+    /// once into the distance buffer and contracted with `K(X, Z)`.
+    pub(crate) fn add_cross_contraction_mn<M: crate::math::KernelMath, U: Supply>(
+        &mut self,
+        compiled: &CompiledKernel<T, U>,
+        sets: SparseSets<'_, T, U>,
+        weight: MatRef<'_, T>,
+        coeff: f64,
+        out: &mut [f64],
+    ) -> Result<(), GprError> {
+        if let Some(coords) = U::coordinates(compiled) {
+            let views = CrossViews::points(sets.z, sets.x);
+            return self.add_cross_contraction::<M, NoSupply>(coords, views, weight, coeff, out);
+        }
+        let (n, m) = (sets.x.nrows(), sets.z.nrows());
+        let mut w = std::mem::replace(&mut self.dist, Mat::new());
+        let mut wt = view(&mut w, n, m);
+        wt.copy_from(weight.transpose());
+        let result = self.add_cross_contraction::<M, U>(
+            compiled,
+            sets.k_nm(),
+            w.as_ref().submatrix(0, 0, n, m),
+            coeff,
+            out,
+        );
+        self.dist = w;
+        result
+    }
+
     /// Writes `⟨weight, ∂K(x, x)/∂θ⟩_F` for every kernel parameter into `out`.
     ///
     /// One walk, keeping no Grams. `out` is replaced. Squared distances of
@@ -1307,7 +1432,7 @@ pub(crate) struct SupplyAt<T: KernelScalar> {
     /// `m × m` among the inducing points.
     pub(crate) zz: BlockStore<T>,
     /// `m × n` from the inducing points to the training points.
-    pub(crate) zx: BlockStore<T>,
+    pub(crate) xz: BlockStore<T>,
 }
 
 impl SparseSupply {
@@ -1321,14 +1446,14 @@ impl SparseSupply {
     pub(crate) fn new<S: KernelScalar>(
         inducing: Vec<usize>,
         zz: BlockStore<f64>,
-        zx: BlockStore<f64>,
+        xz: BlockStore<f64>,
     ) -> Result<Self, GprError> {
         // The squares are the blocks' inducing rows (a repaired pair is the
         // mean of two values in range), so the blocks are the values to check.
-        zx.require_in_range::<S>()?;
+        xz.require_in_range::<S>()?;
         Ok(Self {
             inducing,
-            f64: SupplyAt { zz, zx },
+            f64: SupplyAt { zz, xz },
             f32: std::sync::OnceLock::new(),
         })
     }
@@ -1351,7 +1476,7 @@ impl SparseSupply {
             .get_or_init(|| {
                 Ok(SupplyAt {
                     zz: self.f64.zz.cast()?,
-                    zx: self.f64.zx.cast()?,
+                    xz: self.f64.xz.cast()?,
                 })
             })
             .as_ref()

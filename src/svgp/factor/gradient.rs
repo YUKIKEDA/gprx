@@ -15,12 +15,10 @@
 
 use super::assemble::q_param_len;
 use crate::error::GprError;
-use crate::kernel::{
-    BlockStore, CompiledKernel, CrossViews, GramInputs, KernelScalar, ModelKernel, SupplyViews,
-};
+use crate::kernel::{BlockStore, CompiledKernel, KernelScalar, ModelKernel, SupplyViews};
 use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
-use crate::sparse::{KernelScratch, SparseScratch, view};
+use crate::sparse::{KernelScratch, SparseScratch, SparseSets, view};
 use crate::svgp::FittedSvgp;
 use faer::reborrow::IntoConst;
 use faer::{Accum, Mat, MatMut, MatRef};
@@ -45,9 +43,9 @@ pub(crate) struct GradBuffers {
     w_mm: Mat<f64>,
     /// `tril½(G Aᵀ)` through `L⁻ᵀ` (`m × m`).
     half: Mat<f64>,
-    /// The supplied `d²` from `Z` to the batch points (`m × b`), gathered
-    /// from the stored `m × n` blocks.
-    zx: BlockStore<f64>,
+    /// The supplied `d²` from the batch points to `Z` (`b × m`), gathered
+    /// from the stored `n × m` blocks.
+    xz: BlockStore<f64>,
     ks: KernelScratch<f64>,
 }
 
@@ -68,7 +66,7 @@ impl Default for GradBuffers {
             w_mn: Mat::new(),
             w_mm: Mat::new(),
             half: Mat::new(),
-            zx: BlockStore::default(),
+            xz: BlockStore::default(),
             ks: KernelScratch::new(),
         }
     }
@@ -137,18 +135,18 @@ where
         w_mn,
         w_mm,
         half,
-        zx,
+        xz,
         ks,
     } = bufs;
     let supply = core.supply.at::<f64>()?;
-    // Every point in order reads the stored blocks; a batch reads its columns.
-    let zx: &BlockStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
-        &supply.zx
+    // Every point in order reads the stored blocks; a batch reads its rows.
+    let xz: &BlockStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
+        &supply.xz
     } else {
-        supply.zx.columns_into(batch, zx);
-        zx
+        supply.xz.rows_into(batch, xz);
+        xz
     };
-    let zx = <K::Supply as SupplyViews>::rects(zx);
+    let xz = <K::Supply as SupplyViews>::rects(xz);
     let zz = <K::Supply as SupplyViews>::squares(&supply.zz);
     let mut k_mm_l = view(k_mm_l, m, m);
     for j in 0..m {
@@ -174,13 +172,8 @@ where
     let mut a = view(a, m, b);
     // `K(Z, X_b)` is the rectangular cross covariance even when `Z` equals
     // `X`: a White leaf adds nothing to it.
-    let cross = CrossViews {
-        x1: z,
-        x2: x,
-        dist: None,
-        slots: zx,
-    };
-    ks.cross_into::<M, K::Supply>(compiled, cross, a.as_mut())?;
+    let sets = SparseSets::<f64, K::Supply> { x, z, zz, xz };
+    ks.cross_mn_into::<M, K::Supply>(compiled, sets, a.as_mut())?;
     solve_lower(k_mm_l, a.as_mut());
     let a = a.into_const();
     k_diag.resize(b, 0.0);
@@ -238,13 +231,8 @@ where
     );
     let (w_mm, w_mn) = (w_mm.into_const(), w_mn.into_const());
     // `g = ⟨w_mm, ∂K_mm⟩ + ⟨w_mn, ∂K(Z, X_b)⟩ − Σ ∂k_ii / (2σ²)`, then `−scale · g`.
-    ks.write_square_contraction::<M, K::Supply>(
-        compiled,
-        GramInputs::supplied(z, zz),
-        w_mm,
-        &mut out[..n_kernel],
-    )?;
-    ks.add_cross_contraction::<M, K::Supply>(compiled, cross, w_mn, 1.0, &mut out[..n_kernel])?;
+    ks.write_square_contraction::<M, K::Supply>(compiled, sets.k_mm(), w_mm, &mut out[..n_kernel])?;
+    ks.add_cross_contraction_mn::<M, K::Supply>(compiled, sets, w_mn, 1.0, &mut out[..n_kernel])?;
     ks.add_diag_contraction::<M, K::Supply>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
     for slot in &mut out[..n_kernel] {
         *slot *= -scale;
