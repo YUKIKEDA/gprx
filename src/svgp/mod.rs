@@ -4,6 +4,7 @@
 //! mini-batch Adam from that prior. [`FittedSvgp::value_and_gradient_into`]
 //! is the full-data negative ELBO.
 
+mod distance;
 pub(crate) mod factor;
 mod fitted;
 mod model;

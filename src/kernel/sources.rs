@@ -1377,6 +1377,192 @@ fn reads_in_place<T: ScalarOps>() -> bool {
     T::from_f64_slice(&[]).is_some()
 }
 
+/// The training `d²` between two sets a sparse model keeps: per slot, the
+/// `rows × cols` block from the inducing points (rows) to the training
+/// points (columns), column-major and checked, one block per dimension of
+/// an ARD slot. Empty for a coordinate kernel.
+#[derive(Clone, Debug)]
+pub(crate) struct RectStore<T> {
+    rows: usize,
+    cols: usize,
+    scalar: Vec<Vec<T>>,
+    ard: Vec<Vec<Vec<T>>>,
+}
+
+impl<T> Default for RectStore<T> {
+    fn default() -> Self {
+        Self {
+            rows: 0,
+            cols: 0,
+            scalar: Vec::new(),
+            ard: Vec::new(),
+        }
+    }
+}
+
+impl<T: KernelScalar> RectStore<T> {
+    /// The same blocks at the scalar `U`: checked when they were bound, so
+    /// a value past the range of `U` is reported where it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] for a value that is not
+    /// finite at `U`.
+    pub(crate) fn cast<U: KernelScalar>(&self) -> Result<RectStore<U>, GprError> {
+        let rows = self.rows;
+        let cast = |block: &Vec<T>| -> Result<Vec<U>, GprError> {
+            let out: Vec<U> = block.iter().map(|v| U::from_f64(v.to_f64())).collect();
+            match out.iter().position(|v| !v.to_f64().is_finite()) {
+                Some(at) => Err(out_of_range(at % rows.max(1), at / rows.max(1))),
+                None => Ok(out),
+            }
+        };
+        Ok(RectStore {
+            rows,
+            cols: self.cols,
+            scalar: self.scalar.iter().map(cast).collect::<Result<_, _>>()?,
+            ard: self
+                .ard
+                .iter()
+                .map(|blocks| blocks.iter().map(cast).collect::<Result<_, _>>())
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// Columns `cols` of every block (a minibatch) into `out`, reusing its
+    /// buffers: once `out` has held a batch this large, nothing allocates.
+    pub(crate) fn columns_into(&self, cols: &[usize], out: &mut Self) {
+        let rows = self.rows;
+        out.rows = rows;
+        out.cols = cols.len();
+        let pick = |block: &[T], picked: &mut Vec<T>| {
+            picked.clear();
+            for &j in cols {
+                picked.extend_from_slice(&block[j * rows..(j + 1) * rows]);
+            }
+        };
+        out.scalar.resize_with(self.scalar.len(), Vec::new);
+        for (block, picked) in self.scalar.iter().zip(&mut out.scalar) {
+            pick(block, picked);
+        }
+        out.ard.resize_with(self.ard.len(), Vec::new);
+        for (blocks, picked) in self.ard.iter().zip(&mut out.ard) {
+            picked.resize_with(blocks.len(), Vec::new);
+            for (block, picked) in blocks.iter().zip(picked.iter_mut()) {
+                pick(block, picked);
+            }
+        }
+    }
+}
+
+/// The blocks read in place.
+impl<T: KernelScalar> RectSlots<T> for RectStore<T> {
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError> {
+        let block = self.scalar.get(at).ok_or_else(unbound)?;
+        Ok(MatRef::from_column_major_slice(block, self.rows, self.cols))
+    }
+
+    fn ard(&self, at: usize) -> Result<ArdRect<'_, T>, GprError> {
+        let blocks = self.ard.get(at).ok_or_else(unbound)?;
+        Ok(ArdRect::Checked(ArdBlocks::new(
+            BlockList::Vecs(blocks),
+            self.rows,
+            self.cols,
+            0,
+        )))
+    }
+}
+
+/// The training `d²` of a sparse model on supplied distances: `sources`
+/// bind each slot's `n × m` block from the `n` training points to the `m`
+/// inducing points (training points `inducing`, in that order), checked as
+/// a training block is. Returns the `m × m` squares among the inducing
+/// points (their rows of the block: checked, with the source's repair,
+/// as a training square is) and the `m × n` blocks from the inducing points
+/// to the training points (the block transposed).
+///
+/// # Errors
+///
+/// The errors of [`QuerySources::bind_rect`] and [`TrainSources::bind`];
+/// [`GprError::InvalidDistance`] when the inducing points' rows are not a
+/// square with a zero diagonal and equal mirror entries.
+pub(crate) fn bind_inducing<'s>(
+    slots: &[DistanceSlot],
+    sources: impl IntoIterator<Item = DistanceSource<'s>>,
+    n: usize,
+    inducing: &[usize],
+) -> Result<(TrainSources<f64>, RectStore<f64>), GprError> {
+    let m = inducing.len();
+    let sources: Vec<DistanceSource<'s>> = sources.into_iter().collect();
+    let tidy: Vec<(SlotId, Tidy)> = sources.iter().map(|s| (s.slot, s.tidy)).collect();
+    let mut scratch = QueryScratch::<f64>::new();
+    let bound = QuerySources::bind(slots, sources, n, m, BlockKind::Rect, false, &mut scratch)?;
+    let mut rect = RectStore {
+        rows: m,
+        cols: n,
+        scalar: Vec::new(),
+        ard: Vec::new(),
+    };
+    // `m × n` from `n × m`, and the rows `inducing` (an `m × m` square).
+    let transpose = |block: &[f64]| -> Vec<f64> {
+        let mut out = vec![0.0; m * n];
+        for a in 0..m {
+            for (i, &v) in block[a * n..(a + 1) * n].iter().enumerate() {
+                out[a + i * m] = v;
+            }
+        }
+        out
+    };
+    let square = |block: &[f64]| -> Vec<f64> {
+        let mut out = Vec::with_capacity(m * m);
+        for b in 0..m {
+            out.extend(inducing.iter().map(|&i| block[i + b * n]));
+        }
+        out
+    };
+    let tidy_of = |id: SlotId| {
+        tidy.iter()
+            .find(|(slot, _)| *slot == id)
+            .map_or(Tidy::Exact, |(_, t)| *t)
+    };
+    let mut squares = Vec::with_capacity(slots.len());
+    let (mut scalars, mut ards) = (0, 0);
+    for slot in slots {
+        let id = slot.id();
+        let data = match slot.shape() {
+            SlotShape::Scalar => {
+                let block = bound.scalar(scalars)?;
+                scalars += 1;
+                let values: Vec<f64> = (0..m)
+                    .flat_map(|a| (0..n).map(move |i| (i, a)))
+                    .map(|(i, a)| block[(i, a)])
+                    .collect();
+                rect.scalar.push(transpose(&values));
+                SourceData::Scalar(ScalarData::Values(Cow::Owned(square(&values))))
+            }
+            SlotShape::Ard(d) => {
+                let ArdRect::Checked(blocks) = bound.ard(ards)? else {
+                    return Err(unbound());
+                };
+                ards += 1;
+                rect.ard
+                    .push((0..d).map(|k| transpose(blocks.block(k))).collect());
+                SourceData::Ard(
+                    d,
+                    ArdData::Blocks((0..d).map(|k| square(blocks.block(k))).collect()),
+                )
+            }
+        };
+        squares.push(DistanceSource {
+            slot: id,
+            data,
+            tidy: tidy_of(id),
+        });
+    }
+    let zz = TrainSources::<f64>::bind(slots, squares, m)?;
+    Ok((zz, rect))
+}
+
 /// The checked `d²` blocks of one prediction, bound on a model's
 /// [`QueryScratch`]: a caller's table is read in place (an `f64` model) or
 /// through one cast (`f32`), and a fill or a repair writes the scratch.

@@ -89,8 +89,8 @@ pub(super) fn shuffle_indices(idx: &mut [usize], rng: &mut SeededRng) {
     }
 }
 
-pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P>(
-    model: &mut FittedSvgp<P>,
+pub(crate) fn run_adam_fit<M: crate::math::KernelMath, P, K: crate::kernel::ModelKernel>(
+    model: &mut FittedSvgp<P, K>,
     adam: &Adam,
 ) -> Result<(), GprError>
 where
@@ -122,7 +122,7 @@ where
             let batch = &order[start..end];
             unconstrained_to_user_into(&z, n_theta, m, &intervals, &mut user)?;
             model.set_params_step::<M>(&user, &mut step)?;
-            svgp_value_and_gradient_with::<M, _>(
+            svgp_value_and_gradient_with::<M, _, K>(
                 model,
                 &mut g_user,
                 batch,

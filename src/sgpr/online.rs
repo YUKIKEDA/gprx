@@ -7,6 +7,7 @@ use faer::Mat;
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::kernel::KernelScalar;
+use crate::kernel::NoSupply;
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2, solve_llt};
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::points::PointId;
@@ -16,6 +17,7 @@ use crate::precision::{DoublePrecision, ModelPrecision};
 use crate::sgpr::SgprObjective;
 use crate::sparse::{
     KernelScratch, PredictScratch, SparseCore, SparseScratch, sparse_core_accessors,
+    sparse_kernel_accessor, sparse_point_accessors,
 };
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
@@ -187,6 +189,7 @@ where
             scratch: std::mem::take(&mut self.scratch),
             optimizer: self.optimizer.clone(),
             inducing: PhantomData,
+            _kernel: PhantomData,
             k_mm_l: self.state.k_mm_l.clone(),
             a: self.state.a.clone(),
             b_l: self.state.b_l.clone(),
@@ -267,16 +270,11 @@ where
     fn refresh_predict_w(&mut self) -> Result<(), GprError> {
         if P::REFINES_IN_F64 {
             self.state.predict_w =
-                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64>(
+                with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, f64, NoSupply>(
                     &self.state.core.kernel,
                     self.state.core.jitter,
                     self.state.core.likelihood,
-                    &self.state.core.x_train,
-                    self.state.core.n,
-                    self.state.core.d,
-                    &self.state.core.y_train,
-                    &self.state.core.z_train,
-                    self.state.core.m,
+                    self.state.core.data(),
                     &mut self.scratch.f64,
                     &mut KernelScratch::new(),
                 ))?
@@ -286,19 +284,14 @@ where
                 .collect();
             return Ok(());
         }
-        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P>(
+        self.state.predict_w = with_kernel_exp!(self.state.core.math, M => publish_sgpr_weights::<M, P, NoSupply>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.a.as_ref(),
             self.state.b_l.as_ref(),
             &self.state.w,
-            &self.state.core.x_train,
-            &self.state.core.y_train,
-            &self.state.core.z_train,
+            self.state.core.data(),
             self.state.core.likelihood.noise_variance(),
-            self.state.core.n,
-            self.state.core.m,
-            self.state.core.d,
         ))?;
         Ok(())
     }
@@ -317,6 +310,8 @@ where
     }
 
     sparse_core_accessors!(state.core);
+    sparse_point_accessors!(state.core);
+    sparse_kernel_accessor!(state.core);
 
     /// Returns training-point identifiers in buffer order.
     ///
@@ -466,17 +461,18 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, NoSupply>(
             &self.state.core,
             &VfeSystem::new(
                 &self.state.core,
                 self.state.k_mm_l.as_ref(),
                 self.state.b_l.as_ref(),
                 &self.state.predict_w,
-            ),
+            )?,
             xs,
             n_rows,
             n_cols,
+            std::iter::empty(),
             options,
             &mut PredictScratch::default(),
             &mut out,
@@ -546,17 +542,19 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        predict_vfe_covariance::<P>(
+        predict_vfe_covariance::<P, NoSupply>(
             &self.state.core,
             &VfeSystem::new(
                 &self.state.core,
                 self.state.k_mm_l.as_ref(),
                 self.state.b_l.as_ref(),
                 &self.state.predict_w,
-            ),
+            )?,
             xs,
             n_rows,
             n_cols,
+            std::iter::empty(),
+            std::iter::empty(),
             options,
         )
     }
@@ -661,7 +659,7 @@ where
         &self,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_loo::<P>(
+        vfe_loo::<P, NoSupply>(
             &self.state.core,
             self.state.a.as_ref(),
             self.state.b_l.as_ref(),
@@ -709,17 +707,18 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, NoSupply>(
             &self.state.core,
             &VfeSystem::new(
                 &self.state.core,
                 self.state.k_mm_l.as_ref(),
                 self.state.b_l.as_ref(),
                 &self.state.predict_w,
-            ),
+            )?,
             xs,
             n_rows,
             n_cols,
+            std::iter::empty(),
             options,
             &mut self.scratch.predict,
             out,
@@ -941,16 +940,16 @@ where
         x_obs_next: Vec<f64>,
         y_obs_next: Vec<f64>,
     ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage>(
+        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage, NoSupply>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.core.likelihood,
-            &x_next,
-            self.state.core.n - 1,
-            self.state.core.d,
-            &y_next,
-            &self.state.core.z_train,
-            self.state.core.m,
+            crate::sparse::SparseData {
+                x: &x_next,
+                n: self.state.core.n - 1,
+                y: &y_next,
+                ..self.state.core.data()
+            },
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
@@ -1070,16 +1069,15 @@ where
         z_obs: Vec<f64>,
         m: usize,
     ) -> Result<(), GprError> {
-        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage>(
+        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, NoSupply>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.core.likelihood,
-            &self.state.core.x_train,
-            self.state.core.n,
-            self.state.core.d,
-            &self.state.core.y_train,
-            &z_train,
-            m,
+            crate::sparse::SparseData {
+                z: &z_train,
+                m,
+                ..self.state.core.data()
+            },
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
@@ -1287,6 +1285,7 @@ where
             scratch: self.scratch,
             optimizer: self.optimizer,
             inducing: PhantomData,
+            _kernel: PhantomData,
             k_mm_l: self.state.k_mm_l,
             a: self.state.a,
             b_l: self.state.b_l,

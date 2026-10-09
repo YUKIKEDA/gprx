@@ -157,7 +157,17 @@ fn alloc_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn allocs_in(f: impl FnOnce()) -> usize {
+/// The allocations of `f`, the fewer of two runs: `stats_alloc` counts the
+/// process, and the test harness's own thread (reporting the test that
+/// released the lock, starting the next one) can allocate inside one run.
+/// A call that changes its model runs once, through [`allocs_once`] in
+/// [`least_of_two`].
+fn allocs_in(mut f: impl FnMut()) -> usize {
+    least_of_two(|| allocs_once(&mut f))
+}
+
+/// The allocations of one run of `f`.
+fn allocs_once(f: impl FnOnce()) -> usize {
     let region = Region::new(GLOBAL);
     f();
     let stats = region.change();
@@ -249,11 +259,14 @@ where
     Ok((gpr, xs))
 }
 
-fn bytes_in(f: impl FnOnce()) -> usize {
-    let region = Region::new(GLOBAL);
-    f();
-    let stats = region.change();
-    stats.bytes_allocated + stats.bytes_reallocated.max(0) as usize
+/// The bytes `f` allocates, the fewer of two runs (see [`allocs_in`]).
+fn bytes_in(mut f: impl FnMut()) -> usize {
+    least_of_two(|| {
+        let region = Region::new(GLOBAL);
+        f();
+        let stats = region.change();
+        stats.bytes_allocated + stats.bytes_reallocated.max(0) as usize
+    })
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
@@ -674,10 +687,14 @@ fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
         .with_epochs(NonZeroU64::new(epochs).expect("epochs"));
     let trainer =
         Svgp::new(kernel, GaussianLikelihood::new(NOISE).expect("noise")).with_optimizer(adam);
+    // One trainer per counted run, made before the count.
+    let mut trainers = vec![trainer.clone(), trainer];
     let mut fitted = None;
     let bytes = bytes_in(|| {
         fitted = Some(
-            trainer
+            trainers
+                .pop()
+                .expect("one trainer per run")
                 .fit(&x, n, D, &y, &z, M_SPARSE)
                 .map_err(|(_, e)| e)
                 .expect("fit"),
@@ -840,25 +857,25 @@ fn distance_baseline_allocs() -> Vec<(String, usize)> {
         let mut base = model.into_online().expect("online");
         let id = base.insert(&p.x_new, p.y_new).expect("grow");
         base.delete(id).expect("shrink");
-        let mut online = base.clone();
-        out.push((
-            format!("{name}/online_insert"),
-            allocs_in(|| {
-                online.insert(&p.x_new, p.y_new).expect("counted");
-            }),
-        ));
-        for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
+        let count = least_of_two(|| {
             let mut online = base.clone();
-            let id = online.point_ids()[index];
-            out.push((
-                format!("{name}/online_delete_{label}"),
-                allocs_in(|| online.delete(id).expect("counted")),
-            ));
+            allocs_once(|| {
+                online.insert(&p.x_new, p.y_new).expect("counted");
+            })
+        });
+        out.push((format!("{name}/online_insert"), count));
+        for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
+            let id = base.point_ids()[index];
+            let count = least_of_two(|| {
+                let mut online = base.clone();
+                allocs_once(|| online.delete(id).expect("counted"))
+            });
+            out.push((format!("{name}/online_delete_{label}"), count));
         }
         let mut online = base.clone();
         out.push((
             format!("{name}/online_refit"),
-            allocs_in(|| online.refit().expect("counted")),
+            allocs_once(|| online.refit().expect("counted")),
         ));
         let sgpr = || {
             Sgpr::new(kernel.clone(), lik())
@@ -962,7 +979,7 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         };
         let _warm = fit();
         let mut model = None;
-        let count = least_of_two(|| allocs_in(|| model = Some(fit())));
+        let count = allocs_in(|| model = Some(fit()));
         out.push((format!("{name}/factor"), count));
         let mut model = model.expect("model");
         let mut theta = vec![0.0; model.num_params()];
@@ -1000,7 +1017,7 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         // The insert on the warm model itself: a clone starts without the
         // query buffers.
         let count = least_of_two(|| {
-            let count = allocs_in(|| {
+            let count = allocs_once(|| {
                 base.insert([new()], p.y_new).expect("counted");
             });
             let id = base.point_ids()[p.n];
@@ -1014,9 +1031,9 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
 }
 
 /// The fewer allocations of two runs of `count`. The counter sees the
-/// whole process, and the test harness formats a notice once for a test
-/// that runs past sixty seconds; a run it lands in counts it, the other
-/// does not.
+/// whole process: the test harness's thread allocates when it reports a
+/// test or starts one, and formats a notice once for a test that runs past
+/// sixty seconds; a run it lands in counts it, the other does not.
 fn least_of_two(mut count: impl FnMut() -> usize) -> usize {
     count().min(count())
 }
@@ -1034,13 +1051,13 @@ fn online_deletes_and_refit<P: GpScalar, K: gprx::kernel::ModelKernel>(
         let id = base.point_ids()[index];
         let count = least_of_two(|| {
             let mut online = base.clone();
-            allocs_in(|| online.delete(id).expect("counted"))
+            allocs_once(|| online.delete(id).expect("counted"))
         });
         out.push((format!("{name}/online_delete_{label}"), count));
     }
     let count = least_of_two(|| {
         let mut online = base.clone();
-        allocs_in(|| online.refit().expect("counted"))
+        allocs_once(|| online.refit().expect("counted"))
     });
     out.push((format!("{name}/online_refit"), count));
 }
@@ -1069,7 +1086,7 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         };
         let _warm = fit();
         let mut model = None;
-        let count = least_of_two(|| allocs_in(|| model = Some(fit())));
+        let count = allocs_in(|| model = Some(fit()));
         out.push((format!("{name}/factor"), count));
         let mut model = model.expect("model");
         let mut theta = vec![0.0; model.num_params()];
@@ -1102,7 +1119,7 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         let id = base.insert(&p.x_new, p.y_new).expect("grow");
         base.delete(id).expect("shrink");
         let count = least_of_two(|| {
-            let count = allocs_in(|| {
+            let count = allocs_once(|| {
                 base.insert(&p.x_new, p.y_new).expect("counted");
             });
             let id = base.point_ids()[p.n];

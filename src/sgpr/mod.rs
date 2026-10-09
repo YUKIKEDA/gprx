@@ -1,5 +1,6 @@
 //! Collapsed variational SGPR (Titsias / VFE) with caller-supplied inducing points.
 
+mod distance;
 pub(crate) mod factor;
 mod fitted;
 mod model;

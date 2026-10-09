@@ -15,7 +15,9 @@
 
 use super::assemble::q_param_len;
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, KernelScalar};
+use crate::kernel::{
+    CompiledKernel, CrossViews, GramInputs, KernelScalar, ModelKernel, RectStore, SupplyViews,
+};
 use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseScratch, view};
@@ -43,6 +45,9 @@ pub(crate) struct GradBuffers {
     w_mm: Mat<f64>,
     /// `tril½(G Aᵀ)` through `L⁻ᵀ` (`m × m`).
     half: Mat<f64>,
+    /// The supplied `d²` from `Z` to the batch points (`m × b`), gathered
+    /// from the stored `m × n` blocks.
+    zx: RectStore<f64>,
     ks: KernelScratch<f64>,
 }
 
@@ -63,6 +68,7 @@ impl Default for GradBuffers {
             w_mn: Mat::new(),
             w_mm: Mat::new(),
             half: Mat::new(),
+            zx: RectStore::default(),
             ks: KernelScratch::new(),
         }
     }
@@ -76,11 +82,11 @@ impl Default for GradBuffers {
 /// `k_diag`, which a mini-batch fit leaves stale until it ends. Compiles the
 /// kernel and sizes new buffers for this call; the Adam loop keeps both with
 /// [`svgp_value_and_gradient_with`].
-pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P>(
-    model: &FittedSvgp<P>,
+pub(crate) fn svgp_value_and_gradient<M: crate::math::KernelMath, P, K: ModelKernel>(
+    model: &FittedSvgp<P, K>,
     out: &mut [f64],
     batch: &[usize],
-    scratch: &mut SparseScratch<P::Storage>,
+    scratch: &mut SparseScratch<P::Storage, K::Supply>,
 ) -> Result<f64, GprError>
 where
     P: ModelPrecision,
@@ -90,18 +96,18 @@ where
         ks: std::mem::take(&mut scratch.f64),
         ..GradBuffers::default()
     };
-    let result = svgp_value_and_gradient_with::<M, P>(model, out, batch, &compiled, &mut bufs);
+    let result = svgp_value_and_gradient_with::<M, P, K>(model, out, batch, &compiled, &mut bufs);
     scratch.f64 = bufs.ks;
     result
 }
 
 /// [`svgp_value_and_gradient`] with the kernel compiled at the model's `θ`
 /// (`compiled`) and the buffers of earlier calls.
-pub(crate) fn svgp_value_and_gradient_with<M: crate::math::KernelMath, P>(
-    model: &FittedSvgp<P>,
+pub(crate) fn svgp_value_and_gradient_with<M: crate::math::KernelMath, P, K: ModelKernel>(
+    model: &FittedSvgp<P, K>,
     out: &mut [f64],
     batch: &[usize],
-    compiled: &CompiledKernel<f64>,
+    compiled: &CompiledKernel<f64, K::Supply>,
     bufs: &mut GradBuffers,
 ) -> Result<f64, GprError>
 where
@@ -131,8 +137,19 @@ where
         w_mn,
         w_mm,
         half,
+        zx,
         ks,
     } = bufs;
+    let supply = core.supply.at::<f64>()?;
+    // Every point in order reads the stored blocks; a batch reads its columns.
+    let zx: &RectStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
+        &supply.zx
+    } else {
+        supply.zx.columns_into(batch, zx);
+        zx
+    };
+    let zx = <K::Supply as SupplyViews>::rects(zx);
+    let zz = <K::Supply as SupplyViews>::squares(&supply.zz);
     let mut k_mm_l = view(k_mm_l, m, m);
     for j in 0..m {
         for i in j..m {
@@ -157,11 +174,17 @@ where
     let mut a = view(a, m, b);
     // `K(Z, X_b)` is the rectangular cross covariance even when `Z` equals
     // `X`: a White leaf adds nothing to it.
-    ks.cross_into::<M>(compiled, z, x, a.as_mut())?;
+    let cross = CrossViews {
+        x1: z,
+        x2: x,
+        dist: None,
+        slots: zx,
+    };
+    ks.cross_into::<M, K::Supply>(compiled, cross, a.as_mut())?;
     solve_lower(k_mm_l, a.as_mut());
     let a = a.into_const();
     k_diag.resize(b, 0.0);
-    compiled.fill_diag_points(x, k_diag)?;
+    compiled.fill_diag_rows(x, k_diag)?;
     out.fill(0.0);
     let noise = core.likelihood.noise_variance();
     let inv_noise = 1.0 / noise;
@@ -215,9 +238,14 @@ where
     );
     let (w_mm, w_mn) = (w_mm.into_const(), w_mn.into_const());
     // `g = ⟨w_mm, ∂K_mm⟩ + ⟨w_mn, ∂K(Z, X_b)⟩ − Σ ∂k_ii / (2σ²)`, then `−scale · g`.
-    ks.write_square_contraction::<M>(compiled, z, w_mm, &mut out[..n_kernel])?;
-    ks.add_cross_contraction::<M>(compiled, z, x, w_mn, 1.0, &mut out[..n_kernel])?;
-    ks.add_diag_contraction::<M>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
+    ks.write_square_contraction::<M, K::Supply>(
+        compiled,
+        GramInputs::supplied(z, zz),
+        w_mm,
+        &mut out[..n_kernel],
+    )?;
+    ks.add_cross_contraction::<M, K::Supply>(compiled, cross, w_mn, 1.0, &mut out[..n_kernel])?;
+    ks.add_diag_contraction::<M, K::Supply>(compiled, x, -0.5 * inv_noise, &mut out[..n_kernel])?;
     for slot in &mut out[..n_kernel] {
         *slot *= -scale;
     }

@@ -249,9 +249,11 @@ pub(crate) trait DistanceQuery {
 /// `predict_covariance`, `predict_covariance_with`, `sample`, and
 /// `sample_with`, over [`DistanceQuery`].
 ///
-/// `refine` is the model's predict scalar. `args` are the coordinate arguments before the query count `m` and
-/// `tail` those after it (none for a `DistanceOnly` kernel); `points` is
-/// the [`QueryPoints`] they make. `reads` says how the model reads a
+/// `refine` is the model's predict scalar. `args` are the coordinate
+/// arguments before the query count `count` and `tail` those after it
+/// (none for a `DistanceOnly` kernel); `points` is the [`QueryPoints`]
+/// they make. `cross` names the block of one slot, from the model's points
+/// to the queries. `reads` says how the model reads a
 /// table; `predict_doc` / `covariance_doc` end the docs of the `predict`
 /// and the covariance methods.
 macro_rules! distance_predict {
@@ -261,21 +263,23 @@ macro_rules! distance_predict {
         args = ($($arg:ident: $ty:ty),*),
         tail = ($($tail:ident: $tty:ty),*),
         points = $points:expr,
+        count = $count:ident,
+        cross = { $(#[$cross:meta])* },
         reads = { $(#[$reads:meta])* },
         predict_doc = { $(#[$pdoc:meta])* },
         covariance_doc = { $(#[$cdoc:meta])* },
     ) => {
         impl<$($gen)*> $model {
-            /// Predicts at `m` queries with [`PredictOptions::default`]
+            /// Predicts at the queries with [`PredictOptions::default`]
             /// (observation variance).
             ///
-            /// `sources` holds one source per slot: the `n × m` squared
-            /// distances from the training samples to the queries.
+            /// `sources` holds one source per slot:
+            $(#[$cross])*
             $(#[$reads])*
             ///
             /// # Errors
             ///
-            /// Returns [`GprError::EmptyInput`] if `m` is zero,
+            #[doc = concat!("Returns [`GprError::EmptyInput`] if `", stringify!($count), "` is zero,")]
             /// [`GprError::LengthMismatch`] if a table has the wrong length
             /// or a slot has no source or two,
             /// [`GprError::InvalidDistance`] for a value that is not finite or
@@ -287,10 +291,10 @@ macro_rules! distance_predict {
                 &self,
                 sources: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
             ) -> Result<Prediction<$refine>, GprError> {
-                self.predict_with(sources, $($arg,)* m, $($tail,)* PredictOptions::default())
+                self.predict_with(sources, $($arg,)* $count, $($tail,)* PredictOptions::default())
             }
 
             /// Writes [`Self::predict`] into `out`, reusing its capacity.
@@ -306,11 +310,11 @@ macro_rules! distance_predict {
                 &mut self,
                 sources: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
                 out: &mut Prediction<$refine>,
             ) -> Result<(), GprError> {
-                self.predict_with_into(sources, $($arg,)* m, $($tail,)* PredictOptions::default(), out)
+                self.predict_with_into(sources, $($arg,)* $count, $($tail,)* PredictOptions::default(), out)
             }
 
             /// Predicts with an explicit variance kind.
@@ -324,7 +328,7 @@ macro_rules! distance_predict {
                 &self,
                 sources: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
                 options: PredictOptions,
             ) -> Result<Prediction<$refine>, GprError> {
@@ -332,7 +336,7 @@ macro_rules! distance_predict {
                     self,
                     sources,
                     $points,
-                    m,
+                    $count,
                     options,
                 )
             }
@@ -348,7 +352,7 @@ macro_rules! distance_predict {
                 &mut self,
                 sources: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
                 options: PredictOptions,
                 out: &mut Prediction<$refine>,
@@ -357,7 +361,7 @@ macro_rules! distance_predict {
                     self,
                     sources,
                     $points,
-                    m,
+                    $count,
                     options,
                     out,
                 )
@@ -365,9 +369,10 @@ macro_rules! distance_predict {
 
             /// Returns the predictive mean and query–query covariance.
             ///
-            /// `cross` holds the `n × m` squared distances from the training
-            /// samples to the queries; `square` the `m × m` ones between the
-            /// queries (zero diagonal, symmetric).
+            /// `cross` holds one source per slot:
+            $(#[$cross])*
+            /// `square` holds the squared distances between the queries
+            /// (square, zero diagonal, symmetric).
             $(#[$reads])*
             ///
             /// # Errors
@@ -382,14 +387,14 @@ macro_rules! distance_predict {
                 cross: impl IntoIterator<Item = DistanceSource<'s>>,
                 square: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
             ) -> Result<PredictiveCovariance<$refine>, GprError> {
                 self.predict_covariance_with(
                     cross,
                     square,
                     $($arg,)*
-                    m,
+                    $count,
                     $($tail,)*
                     PredictOptions::default(),
                 )
@@ -407,7 +412,7 @@ macro_rules! distance_predict {
                 cross: impl IntoIterator<Item = DistanceSource<'s>>,
                 square: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
                 options: PredictOptions,
             ) -> Result<PredictiveCovariance<$refine>, GprError> {
@@ -416,7 +421,7 @@ macro_rules! distance_predict {
                     cross,
                     square,
                     $points,
-                    m,
+                    $count,
                     options,
                 )
             }
@@ -439,7 +444,7 @@ macro_rules! distance_predict {
                 cross: impl IntoIterator<Item = DistanceSource<'s>>,
                 square: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
                 n_draws: usize,
                 seed: u64,
@@ -448,7 +453,7 @@ macro_rules! distance_predict {
                     cross,
                     square,
                     $($arg,)*
-                    m,
+                    $count,
                     $($tail,)*
                     PredictOptions::default(),
                     n_draws,
@@ -469,14 +474,14 @@ macro_rules! distance_predict {
                 cross: impl IntoIterator<Item = DistanceSource<'s>>,
                 square: impl IntoIterator<Item = DistanceSource<'s>>,
                 $($arg: $ty,)*
-                m: usize,
+                $count: usize,
                 $($tail: $tty,)*
                 options: PredictOptions,
                 n_draws: usize,
                 seed: u64,
             ) -> Result<Vec<$refine>, GprError> {
                 let jitter = $crate::prediction::DistanceQuery::draw_jitter(self);
-                self.predict_covariance_with(cross, square, $($arg,)* m, $($tail,)* options)?
+                self.predict_covariance_with(cross, square, $($arg,)* $count, $($tail,)* options)?
                     .draw(n_draws, seed, jitter)
             }
         }

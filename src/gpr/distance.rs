@@ -313,6 +313,11 @@ distance_predict!(
     args = (),
     tail = (),
     points = QueryPoints::NONE,
+    count = m,
+    cross = {
+        /// the `n × m` squared distances from the training samples to the
+        /// `m` queries.
+    },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
         /// through a cast); a fill writes scratch once.
@@ -358,6 +363,11 @@ distance_predict!(
     args = (xs: &[f64]),
     tail = (n_cols: usize),
     points = QueryPoints { xs, n_cols },
+    count = m,
+    cross = {
+        /// the `n × m` squared distances from the training samples to the
+        /// `m` queries.
+    },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
         /// through a cast); a fill writes scratch once.
@@ -614,6 +624,11 @@ distance_predict!(
     args = (),
     tail = (),
     points = QueryPoints::NONE,
+    count = m,
+    cross = {
+        /// the `n × m` squared distances from the training samples to the
+        /// `m` queries.
+    },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
         /// through a cast); a fill writes scratch once. After an insert or
@@ -662,6 +677,11 @@ distance_predict!(
     args = (xs: &[f64]),
     tail = (n_cols: usize),
     points = QueryPoints { xs, n_cols },
+    count = m,
+    cross = {
+        /// the `n × m` squared distances from the training samples to the
+        /// `m` queries.
+    },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
         /// through a cast); a fill writes scratch once. After an insert or

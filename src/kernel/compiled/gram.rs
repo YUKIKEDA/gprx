@@ -33,6 +33,7 @@ impl<T: KernelScalar, S: Supply> Copy for GramInputs<'_, T, S> {}
 
 impl<'a, T: KernelScalar> GramInputs<'a, T> {
     /// Coordinates only. Distance leaves compute `‖x_i − x_j‖²` per pair.
+    #[cfg(test)]
     pub(crate) fn points(x: MatRef<'a, T>) -> Self {
         Self {
             x,
