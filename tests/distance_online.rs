@@ -530,3 +530,72 @@ fn a_large_two_slot_model_deletes_beside_the_factor() {
     live.push(n + M);
     check(&online, &live);
 }
+
+/// Refused inserts and deletes on a mixed-precision model of a scalar and
+/// an ARD slot change nothing: its two copies of the squares and its factor
+/// stay in step, so a later insert and delete still match a fresh factor.
+#[test]
+fn refused_updates_keep_the_copies_and_the_factor_in_step() {
+    let image = ScalarDistance::new();
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.1, 1.7]).expect("ell"));
+    let kernel = image.kernel(RbfKernel::new(1.3).expect("ell")) * ard;
+    let bind = |rows: &[usize], cols: &[usize]| {
+        let block = |k: usize| sq(&coords(k, rows), &coords(k, cols));
+        (block(0), vec![block(1), block(2)])
+    };
+    let fit = |live: &[usize]| {
+        let (scalar, ard) = bind(live, live);
+        let y: Vec<f64> = live.iter().map(|&i| target(i)).collect();
+        Gpr::new(kernel.clone(), lik())
+            .with_precision::<MixedPrecision<ReevaluateKernel>>()
+            .with_optimizer(Fixed)
+            .factor(
+                [image.from_vec(scalar), bands.from_vecs(ard)],
+                live.len(),
+                &y,
+            )
+            .map_err(|(_, e)| e)
+            .expect("fit")
+    };
+    let mut live: Vec<usize> = (0..6).collect();
+    let mut online = fit(&live).into_online().expect("online");
+    let new = [8];
+    let (scalar, ard) = bind(&live, &new);
+    let refs: Vec<&[f64]> = ard.iter().map(Vec::as_slice).collect();
+    // A target that is not finite, and a column one value short.
+    assert!(matches!(
+        online.insert([image.borrow(&scalar), bands.borrow(&refs)], f64::NAN),
+        Err(GprError::NonFiniteInput)
+    ));
+    assert!(matches!(
+        online.insert([image.borrow(&scalar[1..]), bands.borrow(&refs)], target(8)),
+        Err(GprError::LengthMismatch { .. })
+    ));
+    assert_eq!(online.n(), live.len());
+    online
+        .insert([image.borrow(&scalar), bands.borrow(&refs)], target(8))
+        .expect("insert");
+    live.push(8);
+    let gone = online.point_ids()[2];
+    online.delete(gone).expect("delete");
+    live.remove(2);
+    // The same id twice, and the last point, are refused.
+    assert!(matches!(online.delete(gone), Err(GprError::InvalidPointId)));
+    let queries: Vec<usize> = (20..20 + M).collect();
+    let (scalar, ard) = bind(&live, &queries);
+    let refs: Vec<&[f64]> = ard.iter().map(Vec::as_slice).collect();
+    let cross = || [image.borrow(&scalar), bands.borrow(&refs)];
+    let got = online.predict(cross(), M).expect("online");
+    let want = fit(&live).predict(cross(), M).expect("fresh");
+    assert_pred(&got, &want, 1e-9);
+    while online.n() > 1 {
+        let id = online.point_ids()[0];
+        online.delete(id).expect("delete");
+    }
+    let last = online.point_ids()[0];
+    assert!(matches!(
+        online.delete(last),
+        Err(GprError::InsufficientData { .. })
+    ));
+    assert_eq!(online.n(), 1);
+}

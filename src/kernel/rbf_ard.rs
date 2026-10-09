@@ -1,7 +1,9 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdBlocks, ArdSqDiff, BlockState, RowRuns, require_ard_sq_diff_shape};
+use super::dist::{
+    ArdBlocks, ArdSqDiff, BlockState, RowRuns, Runs, require_ard_sq_diff_shape, walk_row_runs,
+};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -393,11 +395,9 @@ impl RbfArdKernel {
             fold.resize(len, 0.0);
         }
         let s = &mut fold[..len];
-        if let Some(rows) = cache.rows() {
-            return contract_rows(rows, weight, k, w, s, out);
-        }
-        let Some(cache) = cache.lower() else {
-            return Ok(());
+        let cache = match cache.runs() {
+            Runs::Rows(rows) => return contract_rows(rows, weight, k, w, s, out),
+            Runs::Lower(lower) => lower,
         };
         let mut at = 0;
         for col in 0..n {
@@ -887,23 +887,14 @@ fn contract_rows<T: KernelScalar>(
     s: &mut [f64],
     out: &mut [f64],
 ) -> Result<(), GprError> {
-    const TILE: usize = 16;
-    let n = rows.n();
-    let mut j0 = 0;
-    while j0 < n {
-        let j1 = (j0 + TILE).min(n);
-        for i in j0..n {
-            let base = i * (i + 1) / 2;
-            for j in j0..j1.min(i) {
-                s[base + j] = weight[(i, j)].to_f64() * k[(i, j)].to_f64();
-            }
-            if i < j1 {
-                // As the column runs: the diagonal's term is `0`.
-                s[base + i] = 0.0;
-            }
-        }
-        j0 = j1;
-    }
+    // As the column runs: the diagonal's term is `0`.
+    walk_row_runs(rows.n(), |i, at, j| {
+        s[at] = if j == i {
+            0.0
+        } else {
+            weight[(i, j)].to_f64() * k[(i, j)].to_f64()
+        };
+    });
     for (dim, slot) in out.iter_mut().enumerate() {
         *slot = 2.0 * w[dim] * lane_dot(s, rows.buffer(dim));
         if !slot.is_finite() {
