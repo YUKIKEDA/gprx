@@ -939,20 +939,15 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
     let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
     let lik = || GaussianLikelihood::new(0.1).expect("noise");
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(p.d).expect("dims");
+    let (bands, ard) =
+        ArdDistance::from_leaf(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8][..p.d]).expect("ell"));
     let kernels = [
         (
             "rbf",
             BaselineSlot::Scalar(image),
             image.kernel(RbfKernel::new(0.5).expect("ell")),
         ),
-        (
-            "rbf_ard",
-            BaselineSlot::Ard(bands),
-            bands
-                .kernel(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell"))
-                .expect("dims"),
-        ),
+        ("rbf_ard", BaselineSlot::Ard(bands), ard),
     ];
     let mut out = Vec::new();
     for (name, slot, kernel) in kernels {
@@ -1116,8 +1111,8 @@ fn covariance_bytes() -> Vec<(String, usize, usize)> {
     let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
     let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(p.d).expect("dims");
     let ell = [0.5, 0.6, 0.7, 0.8];
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&ell).expect("ell"));
     let mut out = Vec::new();
     let coords = |kernel: KernelSpec| {
         Gpr::new(kernel, lik())
@@ -1145,15 +1140,10 @@ fn covariance_bytes() -> Vec<(String, usize, usize)> {
     out.push(("rbf".to_owned(), db, cb));
     // ARD slot.
     let c = coords(KernelSpec::from(RbfArdKernel::new(&ell).expect("ell")));
-    let d = Gpr::new(
-        bands
-            .kernel(RbfArdKernel::new(&ell).expect("ell"))
-            .expect("dims"),
-        lik(),
-    )
-    .with_optimizer(Fixed)
-    .factor([bands.borrow(&train_refs)], p.n, &p.y)
-    .expect("factor");
+    let d = Gpr::new(ard, lik())
+        .with_optimizer(Fixed)
+        .factor([bands.borrow(&train_refs)], p.n, &p.y)
+        .expect("factor");
     let cb = bytes_in(|| {
         c.predict_covariance(&p.xq, p.q, p.d).expect("covariance");
     });

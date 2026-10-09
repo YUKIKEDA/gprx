@@ -1648,7 +1648,7 @@ mod tests {
     /// not again.
     #[test]
     fn a_cast_ard_block_is_read_as_checked_in_f64() {
-        let bands = ArdDistance::new(2).expect("dims");
+        let bands = ArdDistance::of_dims(2);
         let slots = [DistanceSlot::Ard(bands)];
         let (b0, b1) = ([0.5, 1.0, 1.5, 2.0], [0.25, 0.5, 0.75, 1.0]);
         let tables: [&[f64]; 2] = [&b0, &b1];
@@ -1671,7 +1671,7 @@ mod tests {
         let slots = vec![
             DistanceSlot::Scalar(ScalarDistance::new()),
             DistanceSlot::Scalar(ScalarDistance::new()),
-            DistanceSlot::Ard(ArdDistance::new(2).expect("dims")),
+            DistanceSlot::Ard(ArdDistance::of_dims(2)),
         ];
         let sources = slots.iter().enumerate().map(|(k, slot)| match *slot {
             DistanceSlot::Scalar(s) => s.from_vec(line(k as f64 + 1.0, 0..3, 0..3)),
@@ -1696,7 +1696,7 @@ mod tests {
     #[test]
     fn sources_bind_by_shape_in_the_kernels_slot_order() {
         let (s1, s2) = (ScalarDistance::new(), ScalarDistance::new());
-        let a = ArdDistance::new(2).expect("dims");
+        let a = ArdDistance::of_dims(2);
         let slots = [
             DistanceSlot::Scalar(s1),
             DistanceSlot::Ard(a),
@@ -1783,7 +1783,7 @@ mod tests {
     #[test]
     fn owned_ard_tables_move_into_an_f64_store() {
         use crate::test_check::assert_close;
-        let bands = ArdDistance::new(2).expect("dims");
+        let bands = ArdDistance::of_dims(2);
         let slots = [DistanceSlot::Ard(bands)];
         let tables = vec![line(1.0, 0..3, 0..3), line(2.0, 0..3, 0..3)];
         let kept = tables.clone();

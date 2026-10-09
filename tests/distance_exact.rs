@@ -126,10 +126,10 @@ fn ard_on_supplied_squared_differences_matches_coordinates() {
         .with_optimizer(Fixed)
         .factor(&x, N, 3, &y)
         .expect("coords");
-    let bands = ArdDistance::new(3).expect("dims");
+    let (bands, ard) = ArdDistance::from_leaf(ard);
     let train: Vec<Vec<f64>> = cols.iter().map(|c| sq(c, c)).collect();
     let cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
-    let dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+    let dist = Gpr::new(ard, lik())
         .with_optimizer(Fixed)
         .factor([bands.from_vecs(train)], N, &y)
         .expect("distances");
@@ -425,11 +425,8 @@ fn single_precision_converts_the_supplied_distances() {
     let q0 = coord(0, M, 0.5);
     let y = targets();
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(1).expect("dims");
-    let kernel = image.kernel(RbfKernel::new(1.0).expect("ell"))
-        * bands
-            .kernel(RbfArdKernel::new(&[2.0]).expect("ell"))
-            .expect("dims");
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[2.0]).expect("ell"));
+    let kernel = image.kernel(RbfKernel::new(1.0).expect("ell")) * ard;
     let double = Gpr::new(kernel.clone(), lik())
         .with_optimizer(Fixed)
         .factor(
@@ -632,8 +629,8 @@ fn a_white_term_adds_its_diagonal_to_the_query_covariance() {
     .factor(&x, N, 2, &y)
     .expect("coords");
     let expect = coords.predict_covariance(&xs, M, 2).expect("cov");
-    let bands = ArdDistance::new(2).expect("dims");
-    let dist = Gpr::new(bands.kernel(ard).expect("dims") + white, lik())
+    let (bands, ard) = ArdDistance::from_leaf(ard);
+    let dist = Gpr::new(ard + white, lik())
         .with_optimizer(Fixed)
         .factor(
             [bands.from_vecs(cols.iter().map(|c| sq(c, c)).collect())],
@@ -659,9 +656,8 @@ fn a_tidied_borrowed_ard_query_square_is_repaired_on_a_copy() {
     let cols = [coord(0, N, 0.0), coord(1, N, 0.3)];
     let qcols = [coord(0, M, 0.5), coord(1, M, 0.2)];
     let y = targets();
-    let bands = ArdDistance::new(2).expect("dims");
-    let ard = RbfArdKernel::new(&[0.8, 1.4]).expect("ell");
-    let dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.8, 1.4]).expect("ell"));
+    let dist = Gpr::new(ard, lik())
         .with_optimizer(Fixed)
         .factor(
             [bands.from_vecs(cols.iter().map(|c| sq(c, c)).collect())],
@@ -752,10 +748,8 @@ fn mixed_precision_refines_an_ard_slot_and_an_uncached_fill_fits_the_same() {
     let c0 = coord(0, N, 0.0);
     let q0 = coord(0, M, 0.5);
     let y = targets();
-    let bands = ArdDistance::new(2).expect("dims");
-    let kernel = bands
-        .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
-        .expect("dims");
+    let (bands, kernel) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
+
     let train = Bands {
         rows: &c0,
         cols: &c0,
@@ -936,7 +930,7 @@ fn ard_query_value_is_reported<P: gprx::GpScalar>(
 fn an_invalid_ard_query_value_is_reported_where_it_is() {
     use gprx::kernel::{MaternArdKernel, RationalQuadraticArdKernel};
     use gprx::{DoublePrecision, MixedPrecision, ReevaluateKernel};
-    let bands = ArdDistance::new(2).expect("dims");
+    let (bands, _) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
     let kernels = || {
         [
             bands
@@ -1052,18 +1046,13 @@ where
     }
     assert!(rounded[at] < 0.0, "a borrowed table is not written");
     // ARD slot: two dimensions with the same differences.
-    let bands = ArdDistance::new(2).expect("dims");
-    let mut ard = Gpr::new(
-        bands
-            .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
-            .expect("dims"),
-        lik(),
-    )
-    .with_precision::<P>()
-    .with_optimizer(Fixed)
-    .factor([bands.from_vecs(vec![sq(&c0, &c0); 2])], N, &y)
-    .map_err(|(_, e)| e)
-    .expect("ard");
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
+    let mut ard = Gpr::new(ard, lik())
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor([bands.from_vecs(vec![sq(&c0, &c0); 2])], N, &y)
+        .map_err(|(_, e)| e)
+        .expect("ard");
     let expect = ard
         .predict([bands.from_vecs(vec![cross.clone(); 2])], M)
         .expect("expect");
@@ -1121,13 +1110,9 @@ fn a_value_past_the_storage_range_is_reported_where_it_is() {
         let mut cross = sq(&c0, &q0);
         cross[3 + N] = huge;
         let image = ScalarDistance::new();
-        let bands = ArdDistance::new(2).expect("dims");
+        let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
         let scalar = || image.kernel(RbfKernel::new(1.0).expect("ell"));
-        let ard = || {
-            bands
-                .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
-                .expect("dims")
-        };
+        let ard = || ard.clone();
         let at = |r: Result<(), GprError>, row: usize, col: usize, what: &str| {
             if narrow {
                 assert!(
@@ -1233,11 +1218,9 @@ fn a_rounded_square_is_repaired_alike_from_every_source() {
     far_diag[2 + 2 * N] = 0.5;
     let cross = sq(&c0, &q0);
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(2).expect("dims");
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
     let scalar = image.kernel(RbfKernel::new(1.0).expect("ell"));
-    let ard = bands
-        .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
-        .expect("dims");
+
     fn fit(
         kernel: &gprx::kernel::DistanceKernel,
         source: gprx::kernel::DistanceSource<'_>,
@@ -1323,16 +1306,10 @@ fn a_slot_takes_as_many_tables_as_it_has_blocks() {
     let q0 = coord(0, M, 0.5);
     let y = targets();
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(2).expect("dims");
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
     let train = sq(&c0, &c0);
     let cross = sq(&c0, &q0);
-    let ard = Gpr::new(
-        bands
-            .kernel(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"))
-            .expect("dims"),
-        lik(),
-    )
-    .with_optimizer(Fixed);
+    let ard = Gpr::new(ard, lik()).with_optimizer(Fixed);
     for source in [
         bands.from_vecs(vec![train.clone()]),
         bands.from_vecs(vec![train.clone(); 3]),
@@ -1374,10 +1351,10 @@ fn ard_predictions_match_coordinates_at_many_dimensions_and_queries() {
             .with_optimizer(Fixed)
             .factor(&x, N, dims, &y)
             .expect("coords");
-        let bands = ArdDistance::new(dims).expect("dims");
+        let (bands, ard) = ArdDistance::from_leaf(ard);
         let train: Vec<Vec<f64>> = cols.iter().map(|c| sq(c, c)).collect();
         let mut cross: Vec<Vec<f64>> = cols.iter().zip(&qcols).map(|(c, q)| sq(c, q)).collect();
-        let mut dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+        let mut dist = Gpr::new(ard, lik())
             .with_optimizer(Fixed)
             .factor([bands.from_vecs(train)], N, &y)
             .expect("distances");
@@ -1488,8 +1465,8 @@ where
         .predict_covariance(&xs, m, dims)
         .expect("covariance")
         .covariance;
-    let bands = ArdDistance::new(dims).expect("dims");
-    let dist = Gpr::new(bands.kernel(ard).expect("dims"), lik())
+    let (bands, ard) = ArdDistance::from_leaf(ard);
+    let dist = Gpr::new(ard, lik())
         .with_precision::<P>()
         .with_optimizer(Fixed)
         .factor(

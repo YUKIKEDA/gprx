@@ -74,7 +74,7 @@ struct Problem {
 
 fn problem() -> Problem {
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(2).expect("dims");
+    let bands = ArdDistance::of_dims(2);
     let rbf = RbfKernel::new(0.8).expect("ell");
     let ard = RbfArdKernel::new(&[0.7, 1.3]).expect("ell");
     let point = RbfKernel::new(0.9).expect("ell");
@@ -503,7 +503,7 @@ fn f32_reads_the_supplied_ard_tables() {
 
 #[test]
 fn ard_leaves_on_the_diagonal_match_the_gram_diagonal() {
-    let bands = ArdDistance::new(2).expect("dims");
+    let bands = ArdDistance::of_dims(2);
     let rq = RationalQuadraticArdKernel::new(&[0.7, 1.3], 0.8).expect("rq");
     let spec = bands.kernel(rq).expect("dims") * ConstantKernel::new(1.5).expect("c")
         + bands
@@ -626,7 +626,7 @@ fn leaf_numbers(k: &CompiledKernel<f64, SuppliedSpec>, out: &mut Vec<usize>) {
 #[test]
 fn compiled_leaves_number_their_slots_per_shape_in_slot_order() {
     let (s1, s2) = (ScalarDistance::new(), ScalarDistance::new());
-    let a = ArdDistance::new(2).expect("dims");
+    let a = ArdDistance::of_dims(2);
     let rbf = RbfKernel::new(0.8).expect("ell");
     let ard = a
         .kernel(RbfArdKernel::new(&[0.7, 1.3]).expect("ell"))

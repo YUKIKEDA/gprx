@@ -289,8 +289,10 @@ impl ScalarDistance {
 /// Names a supply of `d` squared distances per pair of samples, one per
 /// dimension, for the ARD leaves.
 ///
-/// [`Self::kernel`] makes a leaf whose lengthscale `ℓ_k` scales dimension
-/// `k`: `r² = Σ_k d_k² / ℓ_k²`. Bind the supply with [`Self::from_vecs`]
+/// [`Self::from_leaf`] makes the slot from its first leaf, whose
+/// lengthscale `ℓ_k` scales dimension `k`: `r² = Σ_k d_k² / ℓ_k²`; the slot
+/// has one dimension per lengthscale. [`Self::kernel`] puts further leaves
+/// on the same slot. Bind the supply with [`Self::from_vecs`]
 /// (moves), [`Self::from_slices`] (copies), [`Self::borrow`] (reads in place
 /// for the call), or [`Self::fill`]. Each dimension is a column-major block
 /// of `d²`, laid out and checked as for [`ScalarDistance`].
@@ -302,8 +304,7 @@ impl ScalarDistance {
 /// use gprx::{GaussianLikelihood, Gpr};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let bands = ArdDistance::new(2)?;
-/// let kernel = bands.kernel(RbfArdKernel::new(&[1.0, 2.0])?)?;
+/// let (bands, kernel) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
 /// let b0 = vec![0.0, 1.0, 1.0, 0.0];
 /// let b1 = vec![0.0, 4.0, 4.0, 0.0];
 /// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
@@ -322,19 +323,28 @@ pub struct ArdDistance {
 }
 
 impl ArdDistance {
-    /// Returns a new slot with `dims` squared distances per pair.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::EmptyInput`] if `dims` is zero.
+    /// Returns a new slot of as many squared distances per pair as `leaf`
+    /// has lengthscales, and the leaf that evaluates `leaf` on it. The
+    /// slot's dimensions are the leaf's, so they cannot disagree.
     ///
     /// See the example on [`ArdDistance`].
-    pub fn new(dims: usize) -> Result<Self, GprError> {
-        crate::data::require_nonempty(dims)?;
-        Ok(Self {
+    pub fn from_leaf(leaf: impl ArdDistanceLeaf) -> (Self, DistanceKernel) {
+        let bands = Self {
+            slot: SlotId::fresh(),
+            dims: leaf.lengthscale_count(),
+        };
+        let kernel = bands.leaf(leaf);
+        (bands, kernel)
+    }
+
+    /// A slot of `dims` squared distances per pair with no leaf, for the
+    /// tests of the stores.
+    #[cfg(test)]
+    pub(crate) fn of_dims(dims: usize) -> Self {
+        Self {
             slot: SlotId::fresh(),
             dims,
-        })
+        }
     }
 
     pub(crate) fn with_slot(slot: SlotId, dims: usize) -> Self {
@@ -348,7 +358,9 @@ impl ArdDistance {
         self.dims
     }
 
-    /// Returns a leaf that evaluates the ARD `leaf` on this slot's `d²`.
+    /// Returns another leaf that evaluates the ARD `leaf` on this slot's
+    /// `d²` (the first comes from [`Self::from_leaf`]): every leaf of the
+    /// slot reads the same supply.
     ///
     /// # Errors
     ///
@@ -367,11 +379,17 @@ impl ArdDistance {
                 expected_dim: lengthscales,
             });
         }
-        Ok(DistanceKernel::leaf(SuppliedSpec {
+        Ok(self.leaf(leaf))
+    }
+
+    /// The leaf of `leaf` on this slot, its lengthscale count already
+    /// [`Self::dims`].
+    fn leaf(&self, leaf: impl ArdDistanceLeaf) -> DistanceKernel {
+        DistanceKernel::leaf(SuppliedSpec {
             slot: self.slot,
             at: 0,
             leaf: SuppliedLeafSpec::Ard(leaf.into_leaf()),
-        }))
+        })
     }
 
     /// Binds owned tables of `d²`, one per dimension, to this slot.
@@ -394,10 +412,10 @@ impl ArdDistance {
     /// # Examples
     ///
     /// ```rust
-    /// use gprx::kernel::ArdDistance;
+    /// use gprx::kernel::{ArdDistance, RbfArdKernel};
     ///
     /// # fn main() -> Result<(), gprx::GprError> {
-    /// let bands = ArdDistance::new(2)?;
+    /// let (bands, _kernel) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
     /// let (b0, b1) = ([0.0, 1.0, 1.0, 0.0], [0.0, 4.0, 4.0, 0.0]);
     /// let _source = bands.from_slices(&[&b0, &b1]);
     /// # Ok(())
@@ -652,10 +670,9 @@ impl JoinPoints<WithPoints> for WithPoints {
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
-/// let bands = ArdDistance::new(2)?;
-/// let only: DistanceKernel<DistanceOnly> = ConstantKernel::new(2.0)?
-///     * image.kernel(RbfKernel::new(1.0)?)
-///     * bands.kernel(RbfArdKernel::new(&[1.0, 0.5])?)?;
+/// let (_bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 0.5])?);
+/// let only: DistanceKernel<DistanceOnly> =
+///     ConstantKernel::new(2.0)? * image.kernel(RbfKernel::new(1.0)?) * ard;
 /// assert_eq!(only.num_params(), 4);
 /// let mixed: DistanceKernel<WithPoints> = only * KernelSpec::from(RbfKernel::new(0.5)?);
 /// assert_eq!(mixed.slots().len(), 2);
@@ -1134,11 +1151,10 @@ mod tests {
     #[test]
     fn slots_are_distinct_and_ordered() {
         let a = ScalarDistance::new();
-        let b = ArdDistance::new(2).expect("dims");
+        let (b, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0]).expect("ell"));
+        assert_eq!(b.dims(), 2);
         assert_ne!(a, ScalarDistance::new());
-        let k = a.kernel(RbfKernel::new(1.0).expect("ell"))
-            * b.kernel(RbfArdKernel::new(&[1.0, 2.0]).expect("ell"))
-                .expect("dims")
+        let k = a.kernel(RbfKernel::new(1.0).expect("ell")) * ard
             + a.kernel(MaternKernel::new(1.0, crate::kernel::MaternNu::FiveHalves).expect("ell"))
             + b.kernel(RbfArdKernel::new(&[3.0, 4.0]).expect("ell"))
                 .expect("dims");
@@ -1151,9 +1167,8 @@ mod tests {
     }
 
     #[test]
-    fn ard_rejects_zero_dims_and_wrong_lengthscales() {
-        assert_eq!(ArdDistance::new(0).unwrap_err(), GprError::EmptyInput);
-        let b = ArdDistance::new(3).expect("dims");
+    fn a_further_ard_leaf_must_match_the_slot() {
+        let (b, _) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0, 3.0]).expect("ell"));
         assert!(matches!(
             b.kernel(RbfArdKernel::new(&[1.0, 2.0]).expect("ell")),
             Err(GprError::DimensionMismatch {
@@ -1174,7 +1189,7 @@ mod tests {
     #[test]
     fn sources_and_kernels_describe_themselves() {
         let a = ScalarDistance::default();
-        let b = ArdDistance::new(2).expect("dims");
+        let b = ArdDistance::of_dims(2);
         let (b0, b1) = ([0.0, 1.0], [0.0, 4.0]);
         let shown = [
             format!("{:?}", a.from_slice(&[0.0])),

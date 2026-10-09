@@ -389,7 +389,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 与えられた距離（`ScalarDistance`、`ArdDistance`）
 
-カーネルの葉は、座標の代わりに、与えた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::new(d)` は `d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロット。`kernel(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、葉の長さスケールの数が `d` でなければ `DimensionMismatch` を返す。`ArdDistance::new(0)` は `EmptyInput`。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
+カーネルの葉は、座標の代わりに、与えた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
 
 結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。`DistanceKernel` と `KernelSpec` は `WithPoints`。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
 
@@ -475,10 +475,11 @@ fn main() -> Result<(), gprx::GprError> {
     assert!(fitted.predict([image.borrow(&rounded)], 2).is_err());
     let _ = fitted.predict([image.borrow(&rounded).tidy(1e-12)?], 2)?;
 
-    // ARD: one block per dimension, here two copies of the line.
-    let bands = ArdDistance::new(2)?;
+    // ARD: one block per dimension, here two copies of the line. The slot
+    // takes its dimensions from its first leaf.
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
     assert_eq!(bands.dims(), 2);
-    let ard: DistanceKernel<DistanceOnly> = bands.kernel(RbfArdKernel::new(&[1.0, 2.0])?)?;
+    let ard: DistanceKernel<DistanceOnly> = ard;
     let blocks: [&[f64]; 2] = [&d2, &d2];
     let fitted = Gpr::new(ard, GaussianLikelihood::new(0.1)?)
         .with_optimizer(Fixed)

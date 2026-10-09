@@ -159,20 +159,15 @@ enum Slot {
 
 fn distance_kernels(d: usize) -> [(&'static str, Slot, DistanceKernel); 2] {
     let image = ScalarDistance::new();
-    let bands = ArdDistance::new(d).expect("dims");
+    let (bands, ard) =
+        ArdDistance::from_leaf(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8][..d]).expect("ell"));
     [
         (
             "rbf",
             Slot::Scalar(image),
             image.kernel(RbfKernel::new(0.5).expect("ell")),
         ),
-        (
-            "rbf_ard",
-            Slot::Ard(bands),
-            bands
-                .kernel(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell"))
-                .expect("dims"),
-        ),
+        ("rbf_ard", Slot::Ard(bands), ard),
     ]
 }
 
