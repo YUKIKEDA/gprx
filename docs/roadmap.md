@@ -230,6 +230,12 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | --- | --- | --- | --- | --- |
 | C2-1 | Task | Make `cargo publish` the only step left for 0.1.0 | [#450](https://github.com/YUKIKEDA/gprx/issues/450) | open |
 
+## C3 (crates.io 0.2.0, [#491](https://github.com/YUKIKEDA/gprx/issues/491))
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | Set after Grill on #491 |
+
 ## D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470))
 
 Requirements: design §5.6. Every row meets them and pastes its benches.
