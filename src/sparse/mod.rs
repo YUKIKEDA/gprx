@@ -1412,11 +1412,14 @@ impl<S: KernelScalar, U: Supply> Default for SparseScratch<S, U> {
 pub(crate) struct SparseSupply {
     /// The training points that are the inducing points, in order.
     pub(crate) inducing: Vec<usize>,
-    f64: SupplyAt<f64>,
+    /// Shared, so a copy of a model (an online model's snapshot of
+    /// itself) does not copy the blocks; a change copies them only while
+    /// they are shared.
+    f64: std::sync::Arc<SupplyAt<f64>>,
     /// The `f32` copy, cast when an `f32` kernel first reads it: a factor
     /// that runs in `f64` (an `f32` SGPR's) never makes it. Checked to fit
     /// when the supply is made.
-    f32: std::sync::OnceLock<Result<SupplyAt<f32>, GprError>>,
+    f32: std::sync::Arc<std::sync::OnceLock<Result<SupplyAt<f32>, GprError>>>,
 }
 
 /// Checks the inducing indices of a model on supplied distances: each
@@ -1466,8 +1469,8 @@ impl SparseSupply {
         xz.require_in_range::<S>()?;
         Ok(Self {
             inducing,
-            f64: SupplyAt { zz, xz },
-            f32: std::sync::OnceLock::new(),
+            f64: std::sync::Arc::new(SupplyAt { zz, xz }),
+            f32: std::sync::Arc::default(),
         })
     }
 
@@ -1481,14 +1484,35 @@ impl SparseSupply {
         !self.f64.xz.block_ids().is_empty()
     }
 
-    /// The `f32` copy, when one was made.
-    fn f32_mut(&mut self) -> Option<&mut SupplyAt<f32>> {
-        self.f32.get_mut().and_then(|made| made.as_mut().ok())
-    }
-
     /// Where training point `index` is an inducing point, if it is one.
     pub(crate) fn inducing_at(&self, index: usize) -> Option<usize> {
         self.inducing.iter().position(|&i| i == index)
+    }
+
+    /// Both copies of the blocks, writable (the `f64` one always, the `f32`
+    /// one when it was made): a shared copy is copied first.
+    fn copies_mut(&mut self) -> (&mut SupplyAt<f64>, Option<&mut SupplyAt<f32>>) {
+        let f32 = if self.f32.get().is_some() {
+            std::sync::Arc::make_mut(&mut self.f32)
+                .get_mut()
+                .and_then(|made| made.as_mut().ok())
+        } else {
+            None
+        };
+        (std::sync::Arc::make_mut(&mut self.f64), f32)
+    }
+
+    /// Forms the squares among the inducing points again from the blocks'
+    /// inducing rows, in place.
+    fn rebuild_squares(&mut self) {
+        let inducing = std::mem::take(&mut self.inducing);
+        let (f64, f32) = self.copies_mut();
+        let SupplyAt { zz, xz } = f64;
+        xz.rows_into(&inducing, zz);
+        if let Some(SupplyAt { zz, xz }) = f32 {
+            xz.rows_into(&inducing, zz);
+        }
+        self.inducing = inducing;
     }
 
     /// Makes room in the training blocks for one more point, so
@@ -1498,8 +1522,9 @@ impl SparseSupply {
     ///
     /// Returns [`GprError::SizeOverflow`] if the blocks cannot grow.
     pub(crate) fn reserve_point(&mut self) -> Result<(), GprError> {
-        self.f64.xz.reserve_row()?;
-        if let Some(f32) = self.f32_mut() {
+        let (f64, f32) = self.copies_mut();
+        f64.xz.reserve_row()?;
+        if let Some(f32) = f32 {
             f32.xz.reserve_row()?;
         }
         Ok(())
@@ -1509,19 +1534,36 @@ impl SparseSupply {
     /// `col` in `block` is `value(block, col)`, once [`Self::reserve_point`]
     /// made room: nothing in it fails.
     pub(crate) fn push_point(&mut self, value: impl Fn(BlockAt, usize) -> f64) {
-        self.f64.xz.push_row(&value);
-        if let Some(f32) = self.f32_mut() {
+        let (f64, f32) = self.copies_mut();
+        f64.xz.push_row(&value);
+        if let Some(f32) = f32 {
             f32.xz.push_row(|at, col| f32::from_f64(value(at, col)));
         }
     }
 
+    /// Removes the last training point (the undo of [`Self::push_point`]).
+    pub(crate) fn pop_point(&mut self) {
+        if self.is_supplied() {
+            let (f64, f32) = self.copies_mut();
+            f64.xz.pop_row();
+            if let Some(f32) = f32 {
+                f32.xz.pop_row();
+            }
+        }
+    }
+
     /// Removes training point `index`, which is not an inducing point: its
-    /// row of every block, and one off the inducing indices past it.
-    pub(crate) fn remove_point(&mut self, index: usize) {
+    /// row of every block, and one off the inducing indices past it. With
+    /// `saved`, its row is appended there for [`Self::restore_point`].
+    pub(crate) fn remove_point(&mut self, index: usize, saved: Option<&mut Vec<f64>>) {
         debug_assert!(self.inducing_at(index).is_none(), "an inducing point");
         if self.is_supplied() {
-            self.f64.xz.remove_row(index);
-            if let Some(f32) = self.f32_mut() {
+            if let Some(saved) = saved {
+                self.f64.xz.row_into(index, saved);
+            }
+            let (f64, f32) = self.copies_mut();
+            f64.xz.remove_row(index);
+            if let Some(f32) = f32 {
                 f32.xz.remove_row(index);
             }
         }
@@ -1532,97 +1574,120 @@ impl SparseSupply {
         }
     }
 
-    /// This supply with training point `point` (not an inducing point) as
-    /// one more inducing point: `value(block, row)` is its squared distance
-    /// to training point `row`, and `mirror(block, col)` the value its row
-    /// of the blocks now holds for inducing point `col` (the stored one, or
-    /// a pair a tidy source repaired). The squares among the inducing
-    /// points are formed again from the blocks' inducing rows.
+    /// Puts back training point `index` from `saved` (the undo of
+    /// [`Self::remove_point`]).
+    pub(crate) fn restore_point(&mut self, index: usize, saved: &[f64]) {
+        for i in &mut self.inducing {
+            if *i >= index {
+                *i += 1;
+            }
+        }
+        if self.is_supplied() {
+            let (f64, f32) = self.copies_mut();
+            f64.xz.insert_row(index, saved);
+            if let Some(f32) = f32 {
+                f32.xz.insert_row(index, saved);
+            }
+        }
+    }
+
+    /// Makes room for one more inducing point, so [`Self::add_inducing`]
+    /// cannot fail.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::SizeOverflow`] if the blocks cannot grow.
-    pub(crate) fn with_inducing(
-        &self,
+    pub(crate) fn reserve_inducing(&mut self) -> Result<(), GprError> {
+        let (f64, f32) = self.copies_mut();
+        f64.xz.reserve_col()?;
+        if let Some(f32) = f32 {
+            f32.xz.reserve_col()?;
+        }
+        Ok(())
+    }
+
+    /// Makes training point `point` (not an inducing point) one more
+    /// inducing point, once [`Self::reserve_inducing`] ran: `value(block,
+    /// row)` is its squared distance to training point `row`, and
+    /// `mirror(block, col)` the value its row of the blocks holds for
+    /// inducing point `col` from now on (the stored one, or a pair a tidy
+    /// source repaired); the values it held are appended to `saved` for
+    /// [`Self::undo_add_inducing`].
+    pub(crate) fn add_inducing(
+        &mut self,
         point: usize,
         value: impl Fn(BlockAt, usize) -> f64,
         mirror: impl Fn(BlockAt, usize) -> f64,
-    ) -> Result<Self, GprError> {
-        let mut inducing = self.inducing.clone();
-        inducing.push(point);
+        saved: &mut Vec<f64>,
+    ) {
         let m = self.inducing.len();
-        let mut xz = self.f64.xz.clone();
-        for at in xz.block_ids() {
+        self.f64.xz.row_into(point, saved);
+        let (f64, f32) = self.copies_mut();
+        for at in f64.xz.block_ids() {
             for col in 0..m {
-                xz.set(at, point, col, mirror(at, col));
+                f64.xz.set(at, point, col, mirror(at, col));
             }
         }
-        xz.push_col(&value)?;
-        let f32 = match self.f32.get() {
-            Some(Ok(copy)) => {
-                let mut xz32 = copy.xz.clone();
-                for at in xz32.block_ids() {
-                    for col in 0..m {
-                        xz32.set(at, point, col, f32::from_f64(mirror(at, col)));
-                    }
+        f64.xz.push_col(&value);
+        if let Some(f32) = f32 {
+            for at in f32.xz.block_ids() {
+                for col in 0..m {
+                    f32.xz.set(at, point, col, f32::from_f64(mirror(at, col)));
                 }
-                xz32.push_col(|at, row| f32::from_f64(value(at, row)))?;
-                Some(xz32)
             }
-            _ => None,
-        };
-        Ok(Self::from_blocks(inducing, xz, f32))
+            f32.xz.push_col(|at, row| f32::from_f64(value(at, row)));
+        }
+        self.inducing.push(point);
+        self.rebuild_squares();
     }
 
-    /// This supply without inducing point `at` (its column of the blocks).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::SizeOverflow`] if the narrower blocks cannot be
-    /// allocated.
-    pub(crate) fn without_inducing(&self, at: usize) -> Result<Self, GprError> {
-        let mut inducing = self.inducing.clone();
-        inducing.remove(at);
-        let mut xz = self.f64.xz.clone();
-        xz.remove_col(at)?;
-        let f32 = match self.f32.get() {
-            Some(Ok(copy)) => {
-                let mut xz32 = copy.xz.clone();
-                xz32.remove_col(at)?;
-                Some(xz32)
-            }
-            _ => None,
+    /// The undo of [`Self::add_inducing`] with the values it saved.
+    pub(crate) fn undo_add_inducing(&mut self, saved: &[f64]) {
+        let Some(point) = self.inducing.pop() else {
+            return;
         };
-        Ok(Self::from_blocks(inducing, xz, f32))
+        let m = self.inducing.len();
+        let (f64, f32) = self.copies_mut();
+        f64.xz.pop_col();
+        for (b, at) in f64.xz.block_ids().into_iter().enumerate() {
+            for col in 0..m {
+                f64.xz.set(at, point, col, saved[b * m + col]);
+            }
+        }
+        if let Some(f32) = f32 {
+            f32.xz.pop_col();
+            for (b, at) in f32.xz.block_ids().into_iter().enumerate() {
+                for col in 0..m {
+                    f32.xz
+                        .set(at, point, col, f32::from_f64(saved[b * m + col]));
+                }
+            }
+        }
+        self.rebuild_squares();
     }
 
-    /// The supply of `inducing` from its training blocks: the squares are
-    /// their inducing rows.
-    fn from_blocks(
-        inducing: Vec<usize>,
-        xz: BlockStore<f64>,
-        xz32: Option<BlockStore<f32>>,
-    ) -> Self {
-        fn square<T: KernelScalar>(xz: &BlockStore<T>, inducing: &[usize]) -> BlockStore<T> {
-            let mut zz = BlockStore::default();
-            xz.rows_into(inducing, &mut zz);
-            zz
+    /// Removes inducing point `at` (its column of the blocks) in place; the
+    /// column is appended to `saved` for [`Self::undo_remove_inducing`].
+    pub(crate) fn remove_inducing(&mut self, at: usize, saved: &mut Vec<f64>) {
+        let (f64, f32) = self.copies_mut();
+        f64.xz.remove_col(at, saved);
+        if let Some(f32) = f32 {
+            f32.xz.remove_col(at, &mut Vec::new());
         }
-        let f32 = std::sync::OnceLock::new();
-        if let Some(xz) = xz32 {
-            let _ = f32.set(Ok(SupplyAt {
-                zz: square(&xz, &inducing),
-                xz,
-            }));
+        self.inducing.remove(at);
+        self.rebuild_squares();
+    }
+
+    /// The undo of [`Self::remove_inducing`]: training point `point` is
+    /// inducing point `at` again, with the column it saved.
+    pub(crate) fn undo_remove_inducing(&mut self, at: usize, point: usize, saved: &[f64]) {
+        let (f64, f32) = self.copies_mut();
+        f64.xz.insert_col(at, saved);
+        if let Some(f32) = f32 {
+            f32.xz.insert_col(at, saved);
         }
-        Self {
-            f64: SupplyAt {
-                zz: square(&xz, &inducing),
-                xz,
-            },
-            f32,
-            inducing,
-        }
+        self.inducing.insert(at, point);
+        self.rebuild_squares();
     }
 
     /// The supply at `T` (`f64`, or the `f32` cast, made on the first read).
@@ -1634,7 +1699,7 @@ impl SparseSupply {
     /// [`GprError::InvalidDistance`] (an `f32` model's supply was checked
     /// when it was made).
     pub(crate) fn at<T: KernelScalar>(&self) -> Result<&SupplyAt<T>, GprError> {
-        let f64: &dyn std::any::Any = &self.f64;
+        let f64: &dyn std::any::Any = &*self.f64;
         if let Some(at) = f64.downcast_ref() {
             return Ok(at);
         }

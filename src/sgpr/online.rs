@@ -241,10 +241,16 @@ where
         if !P::REFINES_IN_F64 {
             return update(self);
         }
+        // The training blocks are not copied: an update that changes them
+        // undoes its own change when it fails.
+        let supply = std::mem::take(&mut self.state.core.supply);
         let undo = self.state.clone();
+        self.state.core.supply = supply;
         let result = update(self);
         if result.is_err() {
+            let supply = std::mem::take(&mut self.state.core.supply);
             self.state = undo;
+            self.state.core.supply = supply;
         }
         result
     }
@@ -604,17 +610,23 @@ where
             }
             remove_column_in_place(&mut self.state.a, idx);
             self.state.b_l = b_trial;
-            self.state.core.supply.remove_point(idx);
+            // Only a precision whose weights can still fail keeps the row.
+            let mut saved = Vec::new();
+            self.state
+                .core
+                .supply
+                .remove_point(idx, P::REFINES_IN_F64.then_some(&mut saved));
             self.state.core.x_train = x_next;
             self.state.core.y_train = y_next;
             self.state.core.x_obs = x_obs_next;
             self.state.core.y_obs = y_obs_next;
             self.state.core.n -= 1;
-            self.recompute_w()?;
+            if let Err(err) = self.recompute_w() {
+                self.state.core.supply.restore_point(idx, &saved);
+                return Err(err);
+            }
         } else {
-            let mut supply = self.state.core.supply.clone();
-            supply.remove_point(idx);
-            self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next, supply)?;
+            self.delete_by_reassembly(x_next, y_next, x_obs_next, y_obs_next, idx)?;
         }
         self.state.registry.remove_at(idx);
         Ok(())
@@ -629,7 +641,25 @@ where
         y_next: Vec<f64>,
         x_obs_next: Vec<f64>,
         y_obs_next: Vec<f64>,
-        supply: SparseSupply,
+        idx: usize,
+    ) -> Result<(), GprError> {
+        let mut saved = Vec::new();
+        self.state.core.supply.remove_point(idx, Some(&mut saved));
+        let result = self.reassemble_without(x_next, y_next, x_obs_next, y_obs_next);
+        if result.is_err() {
+            self.state.core.supply.restore_point(idx, &saved);
+        }
+        result
+    }
+
+    /// [`Self::delete_by_reassembly`] once the training blocks dropped the
+    /// point.
+    fn reassemble_without(
+        &mut self,
+        x_next: Vec<f64>,
+        y_next: Vec<f64>,
+        x_obs_next: Vec<f64>,
+        y_obs_next: Vec<f64>,
     ) -> Result<(), GprError> {
         let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage, K::Supply>(
             &self.state.core.kernel,
@@ -639,7 +669,6 @@ where
                 x: &x_next,
                 n: self.state.core.n - 1,
                 y: &y_next,
-                supply: &supply,
                 ..self.state.core.data()
             },
             &mut self.scratch.storage,
@@ -649,7 +678,6 @@ where
         self.state.core.y_train = y_next;
         self.state.core.x_obs = x_obs_next;
         self.state.core.y_obs = y_obs_next;
-        self.state.core.supply = supply;
         self.state.core.n -= 1;
         self.apply_vfe(state)
     }
@@ -666,7 +694,22 @@ where
         z_train: Vec<f64>,
         z_obs: Vec<f64>,
         m: usize,
-        supply: Option<SparseSupply>,
+        undo: impl FnOnce(&mut SparseSupply),
+    ) -> Result<(), GprError> {
+        let result = self.factor_inducing(z_train, z_obs, m);
+        if result.is_err() {
+            undo(&mut self.state.core.supply);
+        }
+        result
+    }
+
+    /// [`Self::commit_inducing`] once the training blocks hold the new
+    /// inducing set.
+    fn factor_inducing(
+        &mut self,
+        z_train: Vec<f64>,
+        z_obs: Vec<f64>,
+        m: usize,
     ) -> Result<(), GprError> {
         let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, K::Supply>(
             &self.state.core.kernel,
@@ -675,7 +718,6 @@ where
             crate::sparse::SparseData {
                 z: &z_train,
                 m,
-                supply: supply.as_ref().unwrap_or(&self.state.core.supply),
                 ..self.state.core.data()
             },
             &mut self.scratch.storage,
@@ -684,9 +726,6 @@ where
         self.state.core.z_train = z_train;
         self.state.core.z_obs = z_obs;
         self.state.core.m = m;
-        if let Some(supply) = supply {
-            self.state.core.supply = supply;
-        }
         match w64 {
             // The `f64` weights of this assembly are the refined predict weights.
             Some(w64) if P::REFINES_IN_F64 => {
@@ -761,12 +800,19 @@ where
         let (m, d) = (self.state.core.m, self.state.core.d);
         let z_train = remove_point(&self.state.core.z_train, m, d, idx);
         let z_obs = remove_point(&self.state.core.z_obs, m, d, idx);
-        let supply = if self.state.core.supply.is_supplied() {
-            Some(self.state.core.supply.without_inducing(idx)?)
-        } else {
-            None
-        };
-        self.commit_inducing(z_train, z_obs, m - 1, supply)?;
+        // The training point of a model on supplied distances, kept to put
+        // its column back if the smaller system does not factor.
+        let supply = &mut self.state.core.supply;
+        let mut saved = Vec::new();
+        let point = supply.inducing.get(idx).copied();
+        if point.is_some() {
+            supply.remove_inducing(idx, &mut saved);
+        }
+        self.commit_inducing(z_train, z_obs, m - 1, |supply| {
+            if let Some(point) = point {
+                supply.undo_remove_inducing(idx, point, &saved);
+            }
+        })?;
         self.state.inducing.remove_at(idx);
         Ok(())
     }
@@ -1189,7 +1235,10 @@ where
         self.state.core.y_obs.push(y_obs);
         supply(&mut self.state.core.supply);
         self.state.core.n += 1;
-        self.recompute_w()?;
+        if let Err(err) = self.recompute_w() {
+            self.state.core.supply.pop_point();
+            return Err(err);
+        }
         Ok(self.state.registry.insert())
     }
 }
@@ -1289,7 +1338,7 @@ where
         append_point(&mut z_train, m, d, z_new);
         let mut z_obs_next = self.state.core.z_obs.clone();
         append_point(&mut z_obs_next, m, d, z_obs);
-        self.commit_inducing(z_train, z_obs_next, m + 1, None)?;
+        self.commit_inducing(z_train, z_obs_next, m + 1, |_| {})?;
         Ok(self.state.inducing.insert())
     }
 
@@ -1560,11 +1609,6 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             |at| cols.tidy(at),
         )?;
         let blocks = supply.exact().xz.block_ids();
-        let next = supply.with_inducing(
-            row,
-            |at, i| column[block_index(&blocks, at) * n + i],
-            |at, col| mirror[block_index(&blocks, at) * m + col],
-        )?;
         // A kernel that also reads coordinates takes the point's as `z`.
         let mut z_train = self.state.core.z_train.clone();
         append_point(
@@ -1580,8 +1624,18 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             d,
             &point_at(&self.state.core.x_obs, n, d, row),
         );
+        self.state.core.supply.reserve_inducing()?;
         self.atomically(|model| {
-            model.commit_inducing(z_train, z_obs, m + 1, Some(next))?;
+            let mut saved = Vec::new();
+            model.state.core.supply.add_inducing(
+                row,
+                |at, i| column[block_index(&blocks, at) * n + i],
+                |at, col| mirror[block_index(&blocks, at) * m + col],
+                &mut saved,
+            );
+            model.commit_inducing(z_train, z_obs, m + 1, |supply| {
+                supply.undo_add_inducing(&saved);
+            })?;
             Ok(model.state.inducing.insert())
         })
     }
