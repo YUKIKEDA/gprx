@@ -66,6 +66,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 stats_alloc = "0.1.10"
 
+[[test]]
+# Counts the allocations of the whole process: runs its checks one after
+# another without the libtest harness's threads (#494).
+name = "alloc"
+harness = false
+
 [[bench]]
 name = "exact"
 harness = false

@@ -6,6 +6,19 @@
 //! `predict_into` after warmup). User kernels are excluded. P2B-22 (#143)
 //! pins `RAYON_NUM_THREADS=1` in this binary so faer `Par::rayon(1)` does
 //! not allocate worker scratch that a multi-thread pool would.
+//!
+//! `stats_alloc` counts the whole process, so this binary has no libtest
+//! harness (`harness = false` in `Cargo.toml`, #494): [`main`] runs the
+//! checks of [`CHECKS`] one after another on its own thread, and no harness
+//! thread (reporting a test, starting the next, capturing output) can
+//! allocate inside a count. It reads the libtest arguments a `cargo test`
+//! run passes: name filters, `--exact`, `--skip`, `--list`, `--ignored`;
+//! `--test-threads` and the output flags change nothing here.
+
+// The checks are this binary's test bodies, and `harness = false` builds
+// them without `cfg(test)`, so clippy.toml's allowance for test bodies does
+// not reach them.
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
 use common::rng::{open_unit, seeded_rng};
@@ -21,6 +34,7 @@ use gprx::{
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::process::ExitCode;
 use std::sync::{Mutex, OnceLock};
 
 #[global_allocator]
@@ -151,19 +165,11 @@ fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     Ok((gpr, xs))
 }
 
-fn alloc_lock() -> std::sync::MutexGuard<'static, ()> {
-    // `stats_alloc` counts the process, not the calling thread.
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// The allocations of `f`, the fewer of two runs: `stats_alloc` counts the
-/// process, and the test harness's own thread (reporting the test that
-/// released the lock, starting the next one) can allocate inside one run.
-/// A call that changes its model runs once, through [`allocs_once`] in
-/// [`least_of_two`].
-fn allocs_in(mut f: impl FnMut()) -> usize {
-    least_of_two(|| allocs_once(&mut f))
+/// The allocations of one run of `f`. `stats_alloc` counts the process,
+/// and this binary runs its checks one after another on one thread, so
+/// the count is `f`'s and its Rayon worker's.
+fn allocs_in(f: impl FnMut()) -> usize {
+    allocs_once(f)
 }
 
 /// The allocations of one run of `f`.
@@ -182,9 +188,7 @@ fn assert_alloc_cap(label: &str, count: usize, cap: usize) {
     );
 }
 
-#[test]
 fn mll_and_grad_allocs_after_workspace() {
-    let _guard = alloc_lock();
     let (mut gpr, _) = fitted_model().expect("spd");
     let mut params = vec![0.0; gpr.num_params()];
     gpr.get_params(&mut params).expect("len");
@@ -198,9 +202,7 @@ fn mll_and_grad_allocs_after_workspace() {
     assert_alloc_cap("mll_and_grad", count, MAX_MLL_AND_GRAD_ALLOCS);
 }
 
-#[test]
 fn fast_approx_mll_and_grad_allocs_after_workspace() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
@@ -225,9 +227,7 @@ fn fast_approx_mll_and_grad_allocs_after_workspace() {
     let _typed: FittedGpr<Fixed> = gpr;
 }
 
-#[test]
 fn predict_100_allocs_after_workspace() {
-    let _guard = alloc_lock();
     let (mut gpr, xs) = fitted_model().expect("spd");
     let mut pred = Prediction::default();
     gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
@@ -259,23 +259,19 @@ where
     Ok((gpr, xs))
 }
 
-/// The bytes `f` allocates, the fewer of two runs (see [`allocs_in`]).
+/// The bytes one run of `f` allocates (see [`allocs_in`]).
 fn bytes_in(mut f: impl FnMut()) -> usize {
-    least_of_two(|| {
-        let region = Region::new(GLOBAL);
-        f();
-        let stats = region.change();
-        stats.bytes_allocated + stats.bytes_reallocated.max(0) as usize
-    })
+    let region = Region::new(GLOBAL);
+    f();
+    let stats = region.change();
+    stats.bytes_allocated + stats.bytes_reallocated.max(0) as usize
 }
 
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn assert_mixed_predict_bytes<R>(label: &str)
 where
     MixedPrecision<R>: gprx::GpScalar,
     R: gprx::ResidualFormula,
 {
-    let _guard = alloc_lock();
     let (mut gpr, xs) = fitted_mixed::<R>().expect("spd");
     let mut pred = Prediction::default();
     gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
@@ -289,12 +285,10 @@ where
     );
 }
 
-#[test]
 fn mixed_promote_predict_100_bytes_after_workspace() {
     assert_mixed_predict_bytes::<gprx::PromoteStorage>("mixed_promote_predict_100");
 }
 
-#[test]
 fn mixed_reevaluate_predict_100_bytes_after_workspace() {
     assert_mixed_predict_bytes::<ReevaluateKernel>("mixed_reevaluate_predict_100");
 }
@@ -330,9 +324,7 @@ impl<P: gprx::Objective> gprx::Optimizer<P> for LeafStepProbe {
     }
 }
 
-#[test]
 fn incremental_leaf_step_allocs_after_warmup() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
         + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell"));
@@ -351,7 +343,6 @@ fn incremental_leaf_step_allocs_after_warmup() {
 
 /// Flat sums and products, one ARD leaf, and a sum / product nested in
 /// another in distance mode and in mixed coordinate mode.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn composite_kernels() -> [(&'static str, KernelSpec); 6] {
     let rbf = |ell: f64| KernelSpec::from(RbfKernel::new(ell).expect("ell"));
     let ard = || KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell"));
@@ -372,7 +363,6 @@ fn composite_kernels() -> [(&'static str, KernelSpec); 6] {
     ]
 }
 
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
     ensure_one_rayon_worker();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
@@ -387,9 +377,7 @@ fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
 }
 
 /// `value_and_gradient_into` on composite kernels after a warmup call.
-#[test]
 fn composite_mll_and_grad_allocs_after_workspace() {
-    let _guard = alloc_lock();
     for ((label, cap), (name, kernel)) in MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS
         .into_iter()
         .zip(composite_kernels())
@@ -410,9 +398,7 @@ fn composite_mll_and_grad_allocs_after_workspace() {
 }
 
 /// `hessian_into` on the RBF leaf and the composite kernels after a warmup call.
-#[test]
 fn hessian_allocs_after_warmup() {
-    let _guard = alloc_lock();
     let kernels = std::iter::once(("rbf", KernelSpec::from(RbfKernel::new(ELL).expect("ell"))))
         .chain(composite_kernels());
     for ((label, cap), (name, kernel)) in MAX_HESSIAN_ALLOCS.into_iter().zip(kernels) {
@@ -430,9 +416,7 @@ fn hessian_allocs_after_warmup() {
 }
 
 /// `predict_into` of 100 points on the composite kernels after a warmup call.
-#[test]
 fn composite_predict_100_allocs_after_workspace() {
-    let _guard = alloc_lock();
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     for ((label, cap), (name, kernel)) in MAX_COMPOSITE_PREDICT_100_ALLOCS
         .into_iter()
@@ -449,7 +433,6 @@ fn composite_predict_100_allocs_after_workspace() {
     }
 }
 
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
     ensure_one_rayon_worker();
     let x = fill_column_major(N, D, SEED);
@@ -516,9 +499,7 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
 
 /// One call on each sparse path after a warmup call. The nested kernel (a
 /// product of sums) covers the nested scratch levels on the insert path.
-#[test]
 fn sparse_allocs_after_warmup() {
-    let _guard = alloc_lock();
     let rbf = || KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let constant = |v: f64| KernelSpec::from(ConstantKernel::new(v).expect("constant"));
     let nested = (rbf() + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell")))
@@ -539,7 +520,6 @@ fn sparse_allocs_after_warmup() {
 /// `M` points after a warmup call on a [`gprx::FittedSgpr`], the
 /// [`gprx::OnlineSgpr`] after one insert, and a [`gprx::FittedSvgp`], at
 /// precision `P`.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn sparse_predict_counts<P: GpScalar>(
     kernel: KernelSpec,
     count: fn(&mut dyn FnMut()) -> usize,
@@ -585,9 +565,7 @@ fn bytes_in_dyn(f: &mut dyn FnMut()) -> usize {
 
 /// Sparse `predict_into` after a warmup call: every model, a leaf and a
 /// nested kernel, `f64` and `f32` storage, and mixed precision.
-#[test]
 fn sparse_predict_into_allocs_after_warmup() {
-    let _guard = alloc_lock();
     let rbf = || KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let constant = |v: f64| KernelSpec::from(ConstantKernel::new(v).expect("constant"));
     let nested = || {
@@ -674,7 +652,6 @@ const MAX_SVGP_STEP_BYTES_GROWTH: f64 = 1.25;
 const SVGP_STEP_BYTES_SLACK: f64 = 1024.0;
 
 /// Bytes of one `Svgp::fit` with `epochs` epochs of mini-batches of 32.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
     ensure_one_rayon_worker();
     let x = fill_column_major(n, D, SEED);
@@ -711,9 +688,7 @@ fn svgp_step_bytes(n: usize) -> f64 {
     extra / (n / 32) as f64
 }
 
-#[test]
 fn svgp_adam_step_bytes_do_not_grow_with_n() {
-    let _guard = alloc_lock();
     let _ = svgp_fit_bytes(64, 1); // one-time allocations (thread pool, statics)
     let small = svgp_step_bytes(512);
     let large = svgp_step_bytes(4096);
@@ -729,9 +704,7 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
 const MAX_SVGP_ADAM_EPOCH_ALLOCS: [(&str, usize); 3] =
     [("rbf", 0), ("rbf_ard", 0), ("constant_times_rbf", 0)];
 
-#[test]
 fn svgp_adam_epoch_allocs() {
-    let _guard = alloc_lock();
     let n = 64;
     let x: Vec<f64> = (0..n * 2)
         .map(|i| (i % n) as f64 / 8.0 + (i / n) as f64)
@@ -804,7 +777,6 @@ const DISTANCE_BASELINE_ALLOCS: [(&str, usize); 22] = [
 
 /// The coordinate path's allocations on the baseline problem, in the order
 /// of [`DISTANCE_BASELINE_ALLOCS`].
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn distance_baseline_allocs() -> Vec<(String, usize)> {
     let p = common::problems::distance_baseline();
     let lik = || GaussianLikelihood::new(0.1).expect("noise");
@@ -857,19 +829,19 @@ fn distance_baseline_allocs() -> Vec<(String, usize)> {
         let mut base = model.into_online().expect("online");
         let id = base.insert(&p.x_new, p.y_new).expect("grow");
         base.delete(id).expect("shrink");
-        let count = least_of_two(|| {
+        let count = {
             let mut online = base.clone();
             allocs_once(|| {
                 online.insert(&p.x_new, p.y_new).expect("counted");
             })
-        });
+        };
         out.push((format!("{name}/online_insert"), count));
         for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
             let id = base.point_ids()[index];
-            let count = least_of_two(|| {
+            let count = {
                 let mut online = base.clone();
                 allocs_once(|| online.delete(id).expect("counted"))
-            });
+            };
             out.push((format!("{name}/online_delete_{label}"), count));
         }
         let mut online = base.clone();
@@ -919,9 +891,7 @@ fn distance_baseline_allocs() -> Vec<(String, usize)> {
     out
 }
 
-#[test]
 fn distance_baseline_coordinate_allocs() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let measured = distance_baseline_allocs();
     assert_eq!(measured.len(), DISTANCE_BASELINE_ALLOCS.len());
@@ -948,7 +918,6 @@ impl BaselineSlot {
 
 /// The exact and online operations of [`DISTANCE_BASELINE_ALLOCS`] on
 /// supplied distances, measured as the coordinate ones are, at `P`.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
     let p = common::problems::distance_baseline();
     let s = p.supplied();
@@ -988,26 +957,26 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         model
             .value_and_gradient_into(&theta, &mut grad)
             .expect("warmup");
-        let count = least_of_two(|| {
+        let count = {
             allocs_in(|| {
                 model
                     .value_and_gradient_into(&theta, &mut grad)
                     .expect("counted");
             })
-        });
+        };
         out.push((format!("{name}/mll_and_grad"), count));
         let mut pred = Prediction::default();
         let cross = || slot.borrow(&s.cross_sum, &cross_refs);
         model
             .predict_into([cross()], p.q, &mut pred)
             .expect("warmup");
-        let count = least_of_two(|| {
+        let count = {
             allocs_in(|| {
                 model
                     .predict_into([cross()], p.q, &mut pred)
                     .expect("counted")
             })
-        });
+        };
         out.push((format!("{name}/predict_into"), count));
         // Room for one more point, as the coordinate model.
         let new = || slot.borrow(&s.new_sum, &new_refs);
@@ -1016,14 +985,14 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         base.delete(id).expect("shrink");
         // The insert on the warm model itself: a clone starts without the
         // query buffers.
-        let count = least_of_two(|| {
+        let count = {
             let count = allocs_once(|| {
                 base.insert([new()], p.y_new).expect("counted");
             });
             let id = base.point_ids()[p.n];
             base.delete(id).expect("shrink");
             count
-        });
+        };
         out.push((format!("{name}/online_insert"), count));
         online_deletes_and_refit(name, &base, p.n, &mut out);
         // The sparse models on the first `m` training points.
@@ -1077,17 +1046,8 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
     out
 }
 
-/// The fewer allocations of two runs of `count`. The counter sees the
-/// whole process: the test harness's thread allocates when it reports a
-/// test or starts one, and formats a notice once for a test that runs past
-/// sixty seconds; a run it lands in counts it, the other does not.
-fn least_of_two(mut count: impl FnMut() -> usize) -> usize {
-    count().min(count())
-}
-
 /// The deletes and refit of [`DISTANCE_BASELINE_ALLOCS`] on clones of
 /// `base`, an online model with room for one more point.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn online_deletes_and_refit<P: GpScalar, K: gprx::kernel::ModelKernel>(
     name: &str,
     base: &gprx::OnlineGpr<Fixed, P, K>,
@@ -1096,21 +1056,20 @@ fn online_deletes_and_refit<P: GpScalar, K: gprx::kernel::ModelKernel>(
 ) {
     for (label, index) in [("first", 0), ("middle", n / 2), ("last", n - 1)] {
         let id = base.point_ids()[index];
-        let count = least_of_two(|| {
+        let count = {
             let mut online = base.clone();
             allocs_once(|| online.delete(id).expect("counted"))
-        });
+        };
         out.push((format!("{name}/online_delete_{label}"), count));
     }
-    let count = least_of_two(|| {
+    let count = {
         let mut online = base.clone();
         allocs_once(|| online.refit().expect("counted"))
-    });
+    };
     out.push((format!("{name}/online_refit"), count));
 }
 
 /// [`supplied_allocs`] on the coordinate path at `P`.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
     let p = common::problems::distance_baseline();
     let lik = || GaussianLikelihood::new(0.1).expect("noise");
@@ -1142,37 +1101,37 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         model
             .value_and_gradient_into(&theta, &mut grad)
             .expect("warmup");
-        let count = least_of_two(|| {
+        let count = {
             allocs_in(|| {
                 model
                     .value_and_gradient_into(&theta, &mut grad)
                     .expect("counted");
             })
-        });
+        };
         out.push((format!("{name}/mll_and_grad"), count));
         let mut pred = Prediction::default();
         model
             .predict_into(&p.xq, p.q, p.d, &mut pred)
             .expect("warmup");
-        let count = least_of_two(|| {
+        let count = {
             allocs_in(|| {
                 model
                     .predict_into(&p.xq, p.q, p.d, &mut pred)
                     .expect("counted")
             })
-        });
+        };
         out.push((format!("{name}/predict_into"), count));
         let mut base = model.into_online().expect("online");
         let id = base.insert(&p.x_new, p.y_new).expect("grow");
         base.delete(id).expect("shrink");
-        let count = least_of_two(|| {
+        let count = {
             let count = allocs_once(|| {
                 base.insert(&p.x_new, p.y_new).expect("counted");
             });
             let id = base.point_ids()[p.n];
             base.delete(id).expect("shrink");
             count
-        });
+        };
         out.push((format!("{name}/online_insert"), count));
         online_deletes_and_refit(name, &base, p.n, &mut out);
         let sgpr = || {
@@ -1230,18 +1189,15 @@ fn online_change_allocs<M: Clone>(
     changes: [&dyn Fn(&mut M); 4],
 ) -> [usize; 4] {
     changes.map(|change| {
-        least_of_two(|| {
-            let mut model = base.clone();
-            settle(&mut model);
-            allocs_once(|| change(&mut model))
-        })
+        let mut model = base.clone();
+        settle(&mut model);
+        allocs_once(|| change(&mut model))
     })
 }
 
 /// [`online_change_allocs`] of `OnlineSgpr` on supplied distances and on
 /// coordinates at `P`, rbf and rbf_ard, on the baseline problem with the
 /// first `m` training points inducing: `(label, supplied, coordinate)`.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn online_sparse_allocs<P: GpScalar>() -> Vec<(String, usize, usize)> {
     let p = common::problems::distance_baseline();
     let s = p.supplied();
@@ -1386,9 +1342,7 @@ fn online_sparse_allocs<P: GpScalar>() -> Vec<(String, usize, usize)> {
 
 /// An `OnlineSgpr` on supplied distances allocates no more than the
 /// coordinate one for each change, at each precision (#493).
-#[test]
 fn online_sgpr_on_supplied_distances_allocates_no_more_than_coordinates() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let mut over = Vec::new();
     for (precision, rows) in [
@@ -1414,9 +1368,7 @@ fn online_sgpr_on_supplied_distances_allocates_no_more_than_coordinates() {
 /// path on the baseline problem at the same precision (design §5.6): a
 /// borrowed table is read in place, so `predict_into` of an `f64` model
 /// allocates nothing, as the coordinate one.
-#[test]
 fn supplied_distances_allocate_no_more_than_coordinates() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let mut over = Vec::new();
     for (precision, supplied, coordinate) in [
@@ -1453,13 +1405,12 @@ fn supplied_distances_allocate_no_more_than_coordinates() {
 fn grad_allocs(theta: Vec<f64>, mut value_and_gradient: impl FnMut(&[f64], &mut [f64])) -> usize {
     let mut grad = vec![0.0; theta.len()];
     value_and_gradient(&theta, &mut grad);
-    least_of_two(|| allocs_in(|| value_and_gradient(&theta, &mut grad)))
+    allocs_in(|| value_and_gradient(&theta, &mut grad))
 }
 
 /// One SVGP `value_and_gradient_into` after a warmup, on a slot next to a
 /// coordinate leaf (`k_slot(Δ²) · k(x)`), and on the coordinate kernel of
 /// the same shape (`k(x) · k(x)`), at `P`.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn svgp_with_points_grad_allocs<P: GpScalar>() -> (usize, usize) {
     let p = common::problems::distance_baseline();
     let s = p.supplied();
@@ -1503,9 +1454,7 @@ fn svgp_with_points_grad_allocs<P: GpScalar>() -> (usize, usize) {
 /// The SVGP gradient on a slot next to a coordinate leaf, which reads the
 /// coordinate distances into a buffer of its own, allocates no more than
 /// the coordinate kernel of the same shape (design §5.6).
-#[test]
 fn svgp_gradient_with_points_allocates_no_more_than_coordinates() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     for (precision, (with_points, coordinate)) in [
         ("f64", svgp_with_points_grad_allocs::<DoublePrecision>()),
@@ -1528,7 +1477,6 @@ fn svgp_gradient_with_points_allocates_no_more_than_coordinates() {
 /// Bytes a covariance on supplied distances allocates against the same
 /// covariance on coordinates, on the baseline problem: the query square is
 /// read where it was bound, so no copy of its `q² · d` values is made.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn covariance_bytes() -> Vec<(String, usize, usize)> {
     let p = common::problems::distance_baseline();
     let s = p.supplied();
@@ -1595,9 +1543,7 @@ fn covariance_bytes() -> Vec<(String, usize, usize)> {
     out
 }
 
-#[test]
 fn a_covariance_on_supplied_distances_copies_no_query_square() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     for (label, supplied, coordinate) in covariance_bytes() {
         eprintln!("covariance/{label}: supplied={supplied} coordinate={coordinate} bytes");
@@ -1605,5 +1551,124 @@ fn a_covariance_on_supplied_distances_copies_no_query_square() {
             supplied <= coordinate,
             "covariance/{label}: {supplied} bytes on supplied distances, {coordinate} on coordinates"
         );
+    }
+}
+
+/// The checks `$name`, each paired with its name.
+macro_rules! checks {
+    ($($name:ident),* $(,)?) => {
+        [$((stringify!($name), $name as fn())),*]
+    };
+}
+
+/// Every check of this binary, in the order [`main`] runs them.
+const CHECKS: [(&str, fn()); 18] = checks![
+    mll_and_grad_allocs_after_workspace,
+    fast_approx_mll_and_grad_allocs_after_workspace,
+    predict_100_allocs_after_workspace,
+    mixed_promote_predict_100_bytes_after_workspace,
+    mixed_reevaluate_predict_100_bytes_after_workspace,
+    incremental_leaf_step_allocs_after_warmup,
+    composite_mll_and_grad_allocs_after_workspace,
+    hessian_allocs_after_warmup,
+    composite_predict_100_allocs_after_workspace,
+    sparse_allocs_after_warmup,
+    sparse_predict_into_allocs_after_warmup,
+    svgp_adam_step_bytes_do_not_grow_with_n,
+    svgp_adam_epoch_allocs,
+    distance_baseline_coordinate_allocs,
+    online_sgpr_on_supplied_distances_allocates_no_more_than_coordinates,
+    supplied_distances_allocate_no_more_than_coordinates,
+    svgp_gradient_with_points_allocates_no_more_than_coordinates,
+    a_covariance_on_supplied_distances_copies_no_query_square,
+];
+
+/// What a `cargo test` run asks of this binary: the libtest arguments it
+/// reads.
+#[derive(Default)]
+struct Args {
+    filters: Vec<String>,
+    skip: Vec<String>,
+    exact: bool,
+    list: bool,
+    ignored: bool,
+}
+
+impl Args {
+    fn parse(mut args: impl Iterator<Item = String>) -> Self {
+        let mut out = Self::default();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--exact" => out.exact = true,
+                "--list" => out.list = true,
+                // No check is ignored, so `--ignored` runs none of them.
+                "--ignored" => out.ignored = true,
+                "--skip" => out.skip.extend(args.next()),
+                // Flags that take a value in the next argument.
+                "--test-threads" | "--color" | "--format" | "-Z" | "--logfile" => {
+                    let _ = args.next();
+                }
+                flag if flag.starts_with('-') => {}
+                filter => out.filters.push(filter.to_owned()),
+            }
+        }
+        out
+    }
+
+    fn selects(&self, name: &str) -> bool {
+        let matches = |pattern: &String| {
+            if self.exact {
+                name == pattern
+            } else {
+                name.contains(pattern.as_str())
+            }
+        };
+        !self.ignored
+            && (self.filters.is_empty() || self.filters.iter().any(matches))
+            && !self.skip.iter().any(matches)
+    }
+}
+
+/// Runs the selected checks one after another and reports them as libtest
+/// does.
+fn main() -> ExitCode {
+    ensure_one_rayon_worker();
+    let args = Args::parse(std::env::args().skip(1));
+    let selected: Vec<_> = CHECKS
+        .iter()
+        .filter(|(name, _)| args.selects(name))
+        .collect();
+    if args.list {
+        for (name, _) in &selected {
+            println!("{name}: test");
+        }
+        return ExitCode::SUCCESS;
+    }
+    println!("\nrunning {} tests", selected.len());
+    let mut failed = Vec::new();
+    for (name, check) in &selected {
+        let passed = std::panic::catch_unwind(*check).is_ok();
+        println!("test {name} ... {}", if passed { "ok" } else { "FAILED" });
+        if !passed {
+            failed.push(*name);
+        }
+    }
+    if !failed.is_empty() {
+        println!("\nfailures:");
+        for name in &failed {
+            println!("    {name}");
+        }
+    }
+    println!(
+        "\ntest result: {}. {} passed; {} failed; 0 ignored; 0 measured; {} filtered out\n",
+        if failed.is_empty() { "ok" } else { "FAILED" },
+        selected.len() - failed.len(),
+        failed.len(),
+        CHECKS.len() - selected.len(),
+    );
+    if failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(101)
     }
 }

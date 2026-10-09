@@ -1014,7 +1014,7 @@ Order and status are [roadmap.md](roadmap.md). Acceptance text stays on each Iss
 | Track | Tool | When | What is read |
 |---|---|---|---|
 | Time | criterion, `benches/exact.rs`, `benches/distance.rs` | `just bench` (local). Not in default CI (noise) | Wall time. Groups are measured separately |
-| Allocations | `tests/alloc.rs` | `just test` (required) | New allocations **after** Workspace setup. The cap is a ratchet (it may fall, and it does not rise without an Issue) |
+| Allocations | `tests/alloc.rs` | `just test` (required) | New allocations **after** Workspace setup. The cap is a ratchet (it may fall, and it does not rise without an Issue). The counter sees the whole process, so the binary has no libtest harness (`harness = false`) and runs its checks one after another on one thread (#494) |
 | Cross-library time and RSS | `compare/perf/` | `just perf`, `perf-online`, `perf-online-stages`, `perf-online-delete`, `perf-sparse`, `perf-sparse-online` (manual, not CI) | gprx against sklearn / libgp / friedrich (Exact), libgp (online insert), GPyTorch / GPy (sparse), GPyTorch (sparse online). No correctness gate |
 
 Do not mix time and allocations into one number. Do not mix a full L-BFGS with "one MLL+gradient". Do not add a sparse or online group to criterion; those are measured by `compare/perf/`.
