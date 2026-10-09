@@ -962,7 +962,8 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         };
         let _warm = fit();
         let mut model = None;
-        out.push((format!("{name}/factor"), allocs_in(|| model = Some(fit()))));
+        let count = least_of_two(|| allocs_in(|| model = Some(fit())));
+        out.push((format!("{name}/factor"), count));
         let mut model = model.expect("model");
         let mut theta = vec![0.0; model.num_params()];
         model.get_params(&mut theta).expect("theta");
@@ -970,27 +971,27 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         model
             .value_and_gradient_into(&theta, &mut grad)
             .expect("warmup");
-        out.push((
-            format!("{name}/mll_and_grad"),
+        let count = least_of_two(|| {
             allocs_in(|| {
                 model
                     .value_and_gradient_into(&theta, &mut grad)
                     .expect("counted");
-            }),
-        ));
+            })
+        });
+        out.push((format!("{name}/mll_and_grad"), count));
         let mut pred = Prediction::default();
         let cross = || slot.borrow(&s.cross_sum, &cross_refs);
         model
             .predict_into([cross()], p.q, &mut pred)
             .expect("warmup");
-        out.push((
-            format!("{name}/predict_into"),
+        let count = least_of_two(|| {
             allocs_in(|| {
                 model
                     .predict_into([cross()], p.q, &mut pred)
                     .expect("counted")
-            }),
-        ));
+            })
+        });
+        out.push((format!("{name}/predict_into"), count));
         // Room for one more point, as the coordinate model.
         let new = || slot.borrow(&s.new_sum, &new_refs);
         let mut base = model.into_online().expect("online");
@@ -998,17 +999,26 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         base.delete(id).expect("shrink");
         // The insert on the warm model itself: a clone starts without the
         // query buffers.
-        out.push((
-            format!("{name}/online_insert"),
-            allocs_in(|| {
+        let count = least_of_two(|| {
+            let count = allocs_in(|| {
                 base.insert([new()], p.y_new).expect("counted");
-            }),
-        ));
-        let id = base.point_ids()[p.n];
-        base.delete(id).expect("shrink");
+            });
+            let id = base.point_ids()[p.n];
+            base.delete(id).expect("shrink");
+            count
+        });
+        out.push((format!("{name}/online_insert"), count));
         online_deletes_and_refit(name, &base, p.n, &mut out);
     }
     out
+}
+
+/// The fewer allocations of two runs of `count`. The counter sees the
+/// whole process, and the test harness formats a notice once for a test
+/// that runs past sixty seconds; a run it lands in counts it, the other
+/// does not.
+fn least_of_two(mut count: impl FnMut() -> usize) -> usize {
+    count().min(count())
 }
 
 /// The deletes and refit of [`DISTANCE_BASELINE_ALLOCS`] on clones of
@@ -1021,18 +1031,18 @@ fn online_deletes_and_refit<P: GpScalar, K: gprx::kernel::ModelKernel>(
     out: &mut Vec<(String, usize)>,
 ) {
     for (label, index) in [("first", 0), ("middle", n / 2), ("last", n - 1)] {
-        let mut online = base.clone();
-        let id = online.point_ids()[index];
-        out.push((
-            format!("{name}/online_delete_{label}"),
-            allocs_in(|| online.delete(id).expect("counted")),
-        ));
+        let id = base.point_ids()[index];
+        let count = least_of_two(|| {
+            let mut online = base.clone();
+            allocs_in(|| online.delete(id).expect("counted"))
+        });
+        out.push((format!("{name}/online_delete_{label}"), count));
     }
-    let mut online = base.clone();
-    out.push((
-        format!("{name}/online_refit"),
-        allocs_in(|| online.refit().expect("counted")),
-    ));
+    let count = least_of_two(|| {
+        let mut online = base.clone();
+        allocs_in(|| online.refit().expect("counted"))
+    });
+    out.push((format!("{name}/online_refit"), count));
 }
 
 /// [`supplied_allocs`] on the coordinate path at `P`.
@@ -1059,7 +1069,8 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         };
         let _warm = fit();
         let mut model = None;
-        out.push((format!("{name}/factor"), allocs_in(|| model = Some(fit()))));
+        let count = least_of_two(|| allocs_in(|| model = Some(fit())));
+        out.push((format!("{name}/factor"), count));
         let mut model = model.expect("model");
         let mut theta = vec![0.0; model.num_params()];
         model.get_params(&mut theta).expect("theta");
@@ -1067,37 +1078,38 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         model
             .value_and_gradient_into(&theta, &mut grad)
             .expect("warmup");
-        out.push((
-            format!("{name}/mll_and_grad"),
+        let count = least_of_two(|| {
             allocs_in(|| {
                 model
                     .value_and_gradient_into(&theta, &mut grad)
                     .expect("counted");
-            }),
-        ));
+            })
+        });
+        out.push((format!("{name}/mll_and_grad"), count));
         let mut pred = Prediction::default();
         model
             .predict_into(&p.xq, p.q, p.d, &mut pred)
             .expect("warmup");
-        out.push((
-            format!("{name}/predict_into"),
+        let count = least_of_two(|| {
             allocs_in(|| {
                 model
                     .predict_into(&p.xq, p.q, p.d, &mut pred)
                     .expect("counted")
-            }),
-        ));
+            })
+        });
+        out.push((format!("{name}/predict_into"), count));
         let mut base = model.into_online().expect("online");
         let id = base.insert(&p.x_new, p.y_new).expect("grow");
         base.delete(id).expect("shrink");
-        out.push((
-            format!("{name}/online_insert"),
-            allocs_in(|| {
+        let count = least_of_two(|| {
+            let count = allocs_in(|| {
                 base.insert(&p.x_new, p.y_new).expect("counted");
-            }),
-        ));
-        let id = base.point_ids()[p.n];
-        base.delete(id).expect("shrink");
+            });
+            let id = base.point_ids()[p.n];
+            base.delete(id).expect("shrink");
+            count
+        });
+        out.push((format!("{name}/online_insert"), count));
         online_deletes_and_refit(name, &base, p.n, &mut out);
     }
     out
