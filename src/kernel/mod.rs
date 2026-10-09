@@ -62,7 +62,6 @@ pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
-#[cfg(test)]
 pub(crate) use sources::BlockAt;
 pub(crate) use sources::{
     BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,

@@ -480,6 +480,24 @@ pub(super) fn write_f64_tensors(
     super::atomic::write_atomic(&path, &bytes)
 }
 
+/// The `f64` tensor `name` of shape `shape`, read in place.
+pub(super) fn f64_tensor<'a>(
+    tensors: &SafeTensors<'a>,
+    name: &str,
+    shape: &[usize],
+) -> Result<&'a [f64], GprError> {
+    let tensor = tensors.tensor(name).map_err(|err| {
+        persist_err(
+            PersistErrorKind::Tensor,
+            format!("missing tensor {name}: {err}"),
+        )
+    })?;
+    validate_f64_shape(&tensor, shape, name)?;
+    let data = f64_slice(tensor.data())?;
+    require_finite_tensor(data, name)?;
+    Ok(data)
+}
+
 /// Reads the `f64` tensor `name` of shape `shape` from `model.safetensors`.
 pub(super) fn read_f64(
     tensors: &SafeTensors<'_>,

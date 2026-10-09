@@ -92,8 +92,8 @@ impl<U: Supply> SparseSpec<U> {
 }
 
 /// The saved parts of a fitted sparse model ([`SparseCore::from_persisted`]).
-pub(crate) struct PersistedSparse {
-    pub(crate) spec: SparseSpec,
+pub(crate) struct PersistedSparse<U: Supply = NoSupply> {
+    pub(crate) spec: SparseSpec<U>,
     pub(crate) x_transform: Box<dyn Transform>,
     pub(crate) y_transform: Box<dyn TargetTransform>,
     pub(crate) x_obs: Vec<f64>,
@@ -103,6 +103,11 @@ pub(crate) struct PersistedSparse {
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
+    /// The supplied `d²` and the inducing indices (empty for a coordinate
+    /// kernel).
+    pub(crate) supply: SparseSupply,
+    /// The kernel's slots, in its order (none for a coordinate kernel).
+    pub(crate) slots: Vec<crate::kernel::DistanceSlot>,
 }
 
 /// The transformed training data a sparse model's kernel and objective
@@ -326,18 +331,21 @@ impl SparseCore {
             slots: Vec::new(),
         })
     }
+}
 
+impl<U: Supply> SparseCore<U> {
     /// A fitted core read back from a persist directory. The fitted
     /// transforms are the saved ones, not fitted again: an online model's
     /// were fitted on its first training set. `X` and `y` go through them;
     /// `z_train` is the saved transformed `Z`, so a moved `Z` is not mapped
-    /// back and forth.
+    /// back and forth. A kernel on supplied distances alone has `d = 0`
+    /// and no coordinates.
     ///
     /// # Errors
     ///
     /// Returns the input errors of [`crate::data::validate_training`] and
     /// [`crate::data::validate_inducing`], or the error of a transform map.
-    pub(crate) fn from_persisted(parts: PersistedSparse) -> Result<Self, GprError> {
+    pub(crate) fn from_persisted(parts: PersistedSparse<U>) -> Result<Self, GprError> {
         let PersistedSparse {
             spec,
             x_transform,
@@ -349,12 +357,26 @@ impl SparseCore {
             n,
             m,
             d,
+            supply,
+            slots,
         } = parts;
-        validate_training(&x_obs, n, d, &y_obs)?;
-        validate_inducing(&z_obs, m, d)?;
-        validate_inducing(&z_train, m, d)?;
+        if d == 0 {
+            crate::data::require_nonempty(n)?;
+            crate::data::require_nonempty(m)?;
+            crate::data::require_count(x_obs.len(), 0, "feature values")?;
+            crate::data::require_count(z_obs.len(), 0, "inducing values")?;
+            crate::data::require_count(z_train.len(), 0, "inducing values")?;
+            crate::data::require_count(y_obs.len(), n, "targets")?;
+            crate::data::require_finite(&y_obs)?;
+        } else {
+            validate_training(&x_obs, n, d, &y_obs)?;
+            validate_inducing(&z_obs, m, d)?;
+            validate_inducing(&z_train, m, d)?;
+        }
         let mut x_train = x_obs.clone();
-        x_transform.apply(&mut x_train, n, d)?;
+        if d > 0 {
+            x_transform.apply(&mut x_train, n, d)?;
+        }
         let mut y_train = y_obs.clone();
         y_transform.transform(&mut y_train)?;
         Ok(Self {
@@ -375,13 +397,11 @@ impl SparseCore {
             n,
             m,
             d,
-            supply: SparseSupply::default(),
-            slots: Vec::new(),
+            supply,
+            slots,
         })
     }
-}
 
-impl<U: Supply> SparseCore<U> {
     /// The core of a model on supplied distances: `sources` bind each
     /// slot's `n × m` block from the `n` training points to the inducing
     /// points, which are the training points `inducing` (in that order).

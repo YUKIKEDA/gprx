@@ -902,15 +902,15 @@ where
     }
 }
 
-impl<P: crate::precision::GpScalar> FittedSgpr<Fixed, FixedInducing, P> {
+impl<P: crate::precision::GpScalar, K: ModelKernel> FittedSgpr<Fixed, FixedInducing, P, K> {
     /// The model of a persist directory: the VFE system factored at the
     /// saved `θ` and `Z`, as [`Sgpr<Fixed>::factor`] does.
     ///
     /// # Errors
     ///
     /// Same as [`Sgpr<Fixed>::factor`].
-    pub(crate) fn from_persisted(core: SparseCore) -> Result<Self, GprError> {
-        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<Fixed, FixedInducing, M, P, KernelSpec>(
+    pub(crate) fn from_persisted(core: SparseCore<K::Supply>) -> Result<Self, GprError> {
+        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<Fixed, FixedInducing, M, P, K>(
             core, Fixed
         ))
     }

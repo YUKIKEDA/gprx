@@ -299,12 +299,7 @@ where
     sparse_point_accessors!();
 }
 
-impl<P> FittedSvgp<P>
-where
-    P: GpScalar,
-{
-    sparse_kernel_accessor!();
-
+impl<P: GpScalar, K: ModelKernel> FittedSvgp<P, K> {
     /// The model of a persist directory: `K_mm` and `A` factored at the
     /// saved `θ` and `Z`, with the saved whitened `q(u)`.
     ///
@@ -312,15 +307,22 @@ where
     ///
     /// Same as [`crate::Svgp<crate::Fixed>::factor`].
     pub(crate) fn from_persisted(
-        core: SparseCore,
+        core: SparseCore<K::Supply>,
         q_mean: Vec<f64>,
         q_l: Mat<f64>,
     ) -> Result<Self, GprError> {
-        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<M, P, KernelSpec>(
+        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<M, P, K>(
             core,
             Some((q_mean, q_l))
         ))
     }
+}
+
+impl<P> FittedSvgp<P>
+where
+    P: GpScalar,
+{
+    sparse_kernel_accessor!();
 
     /// Writes this model to `dir` as `config.json` and `model.safetensors`.
     ///

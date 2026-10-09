@@ -32,7 +32,7 @@ use tensors::{
     write_tensors,
 };
 
-pub use distance::LoadedDistanceGpr;
+pub use distance::{LoadedDistanceGpr, LoadedDistanceSgpr, LoadedDistanceSvgp};
 pub use sparse::{LoadedSgpr, LoadedSvgp};
 pub(crate) use sparse::{save_online_sgpr, save_sgpr, save_svgp};
 pub(crate) use tensors::MappedTensors;

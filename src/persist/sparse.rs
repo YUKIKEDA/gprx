@@ -14,24 +14,25 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
+use crate::kernel::{BlockAt, DistanceSlot, ModelKernel, ModelKernelParts, SlotShape};
 use crate::optimizer::Fixed;
 use crate::points::{IdRegistry, PointRegistry};
 use crate::precision::{GpScalar, PersistKind};
 use crate::sgpr::{FittedSgpr, FixedInducing, InducingRegistry, OnlineSgpr};
-use crate::sparse::{PersistedSparse, SparseCore, SparseSpec};
+use crate::sparse::{PersistedSparse, SparseCore, SparseSpec, SparseSupply};
 use crate::svgp::FittedSvgp;
 use crate::{PredictOptions, Prediction};
 
 use super::config::{
-    JitterJson, LikelihoodJson, MathJson, ModelJson, PrecisionJson, ResidualJson, SparseConfig,
-    parse_model, parse_sparse_config,
+    DistanceJson, JitterJson, LikelihoodJson, MathJson, ModelJson, PointsJson, PrecisionJson,
+    ResidualJson, SparseConfig, d2_tensor, parse_model, parse_sparse_config,
 };
 use super::kernel::KernelJson;
-use super::tensors::{TensorFile, read_f64, write_f64_tensors};
+use super::tensors::{TensorFile, f64_tensor, read_f64, write_f64_tensors};
 use super::transform::{
     encode_fitted_input, encode_fitted_target, encode_unfitted_input, encode_unfitted_target,
 };
-use super::{CONFIG_FILE, FORMAT_VERSION, PersistRegistry, persist_err, widen};
+use super::{CONFIG_FILE, FORMAT_VERSION, PersistRegistry, decode_kernel, persist_err, widen};
 use safetensors::SafeTensors;
 
 const TENSOR_X: &str = "x";
@@ -49,9 +50,55 @@ struct OnlineIds {
     next_inducing: u64,
 }
 
-fn write_sparse<P: GpScalar>(
+/// The distance marker of a model of kernel `K` with `slots`: none for a
+/// coordinate kernel.
+fn points_of<K: ModelKernel>(slots: &[DistanceSlot]) -> Option<PointsJson> {
+    if slots.is_empty() {
+        None
+    } else if <K as ModelKernelParts>::POINTS {
+        Some(PointsJson::WithPoints)
+    } else {
+        Some(PointsJson::DistanceOnly)
+    }
+}
+
+/// Each slot's `n × m` training blocks, as tensor `d2.<k>` for slot `k`:
+/// `[n, m]` for a scalar slot, `[dims, n, m]` for an ARD slot, each block
+/// column-major.
+fn supply_tensors(
+    supply: &SparseSupply,
+    slots: &[DistanceSlot],
+    (n, m): (usize, usize),
+) -> Vec<(String, Vec<usize>, Vec<f64>)> {
+    let xz = &supply.exact().xz;
+    let (mut scalar, mut ard) = (0, 0);
+    slots
+        .iter()
+        .enumerate()
+        .map(|(k, slot)| {
+            let mut values = Vec::new();
+            let shape = match slot.shape() {
+                SlotShape::Scalar => {
+                    xz.block_into(BlockAt::Scalar(scalar), &mut values);
+                    scalar += 1;
+                    vec![n, m]
+                }
+                SlotShape::Ard(dims) => {
+                    for dim in 0..dims {
+                        xz.block_into(BlockAt::Ard(ard, dim), &mut values);
+                    }
+                    ard += 1;
+                    vec![dims, n, m]
+                }
+            };
+            (d2_tensor(k), shape, values)
+        })
+        .collect()
+}
+
+fn write_sparse<P: GpScalar, K: ModelKernel>(
     dir: &Path,
-    core: &SparseCore,
+    core: &SparseCore<K::Supply>,
     model: ModelJson,
     ids: Option<OnlineIds>,
     q: Option<(&[f64], faer::MatRef<'_, f64>)>,
@@ -68,6 +115,8 @@ fn write_sparse<P: GpScalar>(
         ),
         None => (None, None, None, None),
     };
+    let slots = &core.slots;
+    let points = points_of::<K>(slots);
     let config = SparseConfig {
         format_version: FORMAT_VERSION,
         model,
@@ -77,7 +126,7 @@ fn write_sparse<P: GpScalar>(
         precision: PrecisionJson::from_persist(kind),
         residual: ResidualJson::from_persist(kind),
         math: MathJson::encode(core.math),
-        kernel: KernelJson::encode(&core.kernel, &[])?,
+        kernel: KernelJson::encode(&core.kernel, slots)?,
         likelihood: LikelihoodJson::encode(&core.likelihood),
         jitter: JitterJson::encode(core.jitter),
         x_unfitted: encode_unfitted_input(core.x_unfitted.as_ref())?,
@@ -88,7 +137,8 @@ fn write_sparse<P: GpScalar>(
         next_point_id,
         inducing_ids,
         next_inducing_id,
-        distance: None,
+        distance: points.map(|points| DistanceJson::encode(points, slots)),
+        inducing: points.map(|_| core.supply.inducing.clone()),
     };
     let json = serde_json::to_vec_pretty(&config).map_err(|err| {
         persist_err(
@@ -112,19 +162,28 @@ fn write_sparse<P: GpScalar>(
         tensors.push((TENSOR_Q_MEAN, vec![m], q_mean));
         tensors.push((TENSOR_Q_L, vec![m, m], &q_l_values));
     }
+    let d2 = supply_tensors(&core.supply, slots, (n, m));
+    for (name, shape, values) in &d2 {
+        tensors.push((name.as_str(), shape.clone(), values));
+    }
     write_f64_tensors(dir, &tensors, &[])?;
     super::write_config(dir, &json)
 }
 
-pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout<crate::kernel::NoSupply>, P: GpScalar>(
-    model: &FittedSgpr<O, I, P>,
+pub(crate) fn save_sgpr<O, I, P, K>(
+    model: &FittedSgpr<O, I, P, K>,
     dir: &Path,
-) -> Result<(), GprError> {
-    write_sparse::<P>(dir, model.core(), ModelJson::Sgpr, None, None)
+) -> Result<(), GprError>
+where
+    I: crate::sgpr::InducingLayout<K::Supply>,
+    P: GpScalar,
+    K: ModelKernel,
+{
+    write_sparse::<P, K>(dir, model.core(), ModelJson::Sgpr, None, None)
 }
 
-pub(crate) fn save_online_sgpr<O, P: GpScalar>(
-    model: &OnlineSgpr<O, P>,
+pub(crate) fn save_online_sgpr<O, P: GpScalar, K: ModelKernel>(
+    model: &OnlineSgpr<O, P, K>,
     dir: &Path,
 ) -> Result<(), GprError> {
     let ids = OnlineIds {
@@ -133,36 +192,51 @@ pub(crate) fn save_online_sgpr<O, P: GpScalar>(
         inducing: model.inducing_registry().raw_ids(),
         next_inducing: model.inducing_registry().next_id(),
     };
-    write_sparse::<P>(dir, model.core(), ModelJson::OnlineSgpr, Some(ids), None)
+    write_sparse::<P, K>(dir, model.core(), ModelJson::OnlineSgpr, Some(ids), None)
 }
 
-pub(crate) fn save_svgp<P: GpScalar>(model: &FittedSvgp<P>, dir: &Path) -> Result<(), GprError> {
-    write_sparse::<P>(dir, model.core(), ModelJson::Svgp, None, Some(model.q()))
+pub(crate) fn save_svgp<P: GpScalar, K: ModelKernel>(
+    model: &FittedSvgp<P, K>,
+    dir: &Path,
+) -> Result<(), GprError> {
+    write_sparse::<P, K>(dir, model.core(), ModelJson::Svgp, None, Some(model.q()))
 }
 
-fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprError> {
+pub(super) fn read_config(
+    dir: &Path,
+    expected: &[ModelJson],
+    points: Option<PointsJson>,
+) -> Result<SparseConfig, GprError> {
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
-    parse_model(&bytes, expected, None)?;
+    parse_model(&bytes, expected, points)?;
     parse_sparse_config(&bytes)
 }
 
 /// The core of a sparse persist directory, with the fitted transforms
-/// read back from the config.
-fn read_core(
+/// read back from the config, and for a kernel on supplied distances its
+/// training blocks bound to new slots, checked as a fit checks them and cast
+/// for the storage scalar `S`.
+fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
     tensors: &SafeTensors<'_>,
     config: &SparseConfig,
     registry: &PersistRegistry,
-) -> Result<SparseCore, GprError> {
+) -> Result<SparseCore<K::Supply>, GprError> {
     let (n, m, d) = (config.n, config.m, config.d);
+    let (kernel, slots) = decode_kernel::<K>(&config.kernel, config.distance.as_ref(), registry)?;
     let spec = SparseSpec {
-        kernel: config.kernel.clone().decode(registry)?,
+        kernel,
         likelihood: config.likelihood.decode()?,
         math: config.math.decode(),
         jitter: config.jitter.decode()?,
         x_transform: config.x_unfitted.clone().decode(registry)?,
         y_transform: config.y_unfitted.clone().decode(registry)?,
+    };
+    let supply = if slots.is_empty() {
+        SparseSupply::default()
+    } else {
+        read_supply::<S>(tensors, config, &slots)?
     };
     SparseCore::from_persisted(PersistedSparse {
         spec,
@@ -175,7 +249,59 @@ fn read_core(
         n,
         m,
         d,
+        supply,
+        slots,
     })
+}
+
+/// The training blocks of `slots` (tensors `d2.<k>`) bound as a fit binds
+/// its sources ([`crate::kernel::bind_inducing`]): the same checks, and the
+/// squares among the inducing points formed again from the blocks.
+fn read_supply<S: crate::kernel::KernelScalar>(
+    tensors: &SafeTensors<'_>,
+    config: &SparseConfig,
+    slots: &[DistanceSlot],
+) -> Result<SparseSupply, GprError> {
+    let (n, m) = (config.n, config.m);
+    let inducing = config.inducing.clone().ok_or_else(|| {
+        persist_err(
+            PersistErrorKind::Config,
+            "a sparse distance model's config has no inducing indices",
+        )
+    })?;
+    if inducing.len() != m {
+        return Err(persist_err(
+            PersistErrorKind::Config,
+            format!(
+                "config has {} inducing indices, expected m = {m}",
+                inducing.len()
+            ),
+        ));
+    }
+    let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
+    let sources = slots
+        .iter()
+        .enumerate()
+        .map(|(k, slot)| {
+            let name = d2_tensor(k);
+            Ok(match slot {
+                DistanceSlot::Ard(ard) => {
+                    let values = f64_tensor(tensors, &name, &[ard.dims(), n, m])?;
+                    ard.from_vecs(
+                        values
+                            .chunks_exact(len.max(1))
+                            .map(<[f64]>::to_vec)
+                            .collect(),
+                    )
+                }
+                DistanceSlot::Scalar(scalar) => {
+                    scalar.from_slice(f64_tensor(tensors, &name, &[n, m])?)
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, GprError>>()?;
+    let (zz, xz) = crate::kernel::bind_inducing(slots, sources, n, &inducing)?;
+    SparseSupply::new::<S>(inducing, zz, xz)
 }
 
 /// The saved online identifiers.
@@ -281,23 +407,25 @@ pub enum LoadedSgpr {
     OnlineReevaluate(OnlineSgpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
-/// The [`LoadedSgpr`] variants that hold precision `P`.
-struct SgprVariants<P: GpScalar> {
-    fitted: fn(FittedSgpr<Fixed, FixedInducing, P>) -> LoadedSgpr,
-    online: fn(OnlineSgpr<Fixed, P>) -> LoadedSgpr,
+/// The variants of a loaded SGPR enum `L` that hold precision `P` and
+/// kernel `K`.
+pub(super) struct SgprVariants<P: GpScalar, K: ModelKernel, L> {
+    pub(super) fitted: fn(FittedSgpr<Fixed, FixedInducing, P, K>) -> L,
+    pub(super) online: fn(OnlineSgpr<Fixed, P, K>) -> L,
 }
 
-fn load_sgpr_as<P: GpScalar>(
+pub(super) fn load_sgpr_as<P: GpScalar, K: ModelKernel, L>(
     dir: &Path,
     config: &SparseConfig,
     registry: &PersistRegistry,
-    variants: SgprVariants<P>,
-) -> Result<LoadedSgpr, GprError> {
-    let fitted = FittedSgpr::<Fixed, FixedInducing, P>::from_persisted(read_core(
-        &TensorFile::read(dir)?.tensors()?,
-        config,
-        registry,
-    )?)?;
+    variants: SgprVariants<P, K, L>,
+) -> Result<L, GprError> {
+    let fitted =
+        FittedSgpr::<Fixed, FixedInducing, P, K>::from_persisted(read_core::<P::Storage, K>(
+            &TensorFile::read(dir)?.tensors()?,
+            config,
+            registry,
+        )?)?;
     if config.model == ModelJson::OnlineSgpr {
         let (points, inducing) = read_ids(config)?;
         Ok((variants.online)(OnlineSgpr::from_persisted(
@@ -322,7 +450,7 @@ impl LoadedSgpr {
     /// See the example on [`LoadedSgpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
-        let config = read_config(dir, &[ModelJson::Sgpr, ModelJson::OnlineSgpr])?;
+        let config = read_config(dir, &[ModelJson::Sgpr, ModelJson::OnlineSgpr], None)?;
         match config.persist_kind() {
             PersistKind::Double => load_sgpr_as(
                 dir,
@@ -486,15 +614,15 @@ pub enum LoadedSvgp {
     Reevaluate(FittedSvgp<crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
-fn load_svgp_as<P: GpScalar>(
+pub(super) fn load_svgp_as<P: GpScalar, K: ModelKernel, L>(
     dir: &Path,
     config: &SparseConfig,
     registry: &PersistRegistry,
-    variant: fn(FittedSvgp<P>) -> LoadedSvgp,
-) -> Result<LoadedSvgp, GprError> {
+    variant: fn(FittedSvgp<P, K>) -> L,
+) -> Result<L, GprError> {
     let file = TensorFile::read(dir)?;
     let tensors = file.tensors()?;
-    let core = read_core(&tensors, config, registry)?;
+    let core = read_core::<P::Storage, K>(&tensors, config, registry)?;
     let (q_mean, q_l) = read_q(&tensors, config.m)?;
     Ok(variant(FittedSvgp::from_persisted(core, q_mean, q_l)?))
 }
@@ -511,7 +639,7 @@ impl LoadedSvgp {
     /// See the example on [`LoadedSvgp`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
-        let config = read_config(dir, &[ModelJson::Svgp])?;
+        let config = read_config(dir, &[ModelJson::Svgp], None)?;
         match config.persist_kind() {
             PersistKind::Double => load_svgp_as(dir, &config, registry, Self::Double),
             PersistKind::Single => load_svgp_as(dir, &config, registry, Self::Single),

@@ -715,7 +715,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FORMAT_VERSION` は `1`。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
 
-`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` はディレクトリからモデルを読み込む。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
+`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` は座標のモデルのディレクトリを読み込む。供給された距離のモデルのディレクトリは `LoadedDistanceGpr::<C>::load`、`LoadedDistanceSgpr::<C>::load`、`LoadedDistanceSvgp::<C>::load` が読む（下）。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
 
 - `register_kernel`
 - `register_unfitted_input`、`register_fitted_input`
@@ -802,6 +802,37 @@ fn main() -> Result<(), gprx::GprError> {
     };
     let _ = model.neg_elbo()?;
     let _ = std::fs::remove_dir_all(&svgp_dir);
+    Ok(())
+}
+```
+
+供給された距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](docs/persist-format.ja.md#10-供給された距離のモデル)。
+
+```rust
+use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
+use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
+use gprx::{Fixed, GaussianLikelihood, Gpr};
+
+fn main() -> Result<(), gprx::GprError> {
+    let image = ScalarDistance::new();
+    let train = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train)], 3, &[0.0, 1.0, 0.5])
+        .map_err(|(_, e)| e)?;
+    let dir = std::env::temp_dir().join("gprx-readme-distance");
+    let _ = std::fs::remove_dir_all(&dir);
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+        return Err(gprx::GprError::InvalidConfig {
+            reason: "expected one scalar slot".into(),
+        });
+    };
+    let cross = [0.25, 0.25, 2.25];
+    let pred = loaded.predict([slot.borrow(&cross)], 1)?;
+    assert_eq!(pred.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 ```

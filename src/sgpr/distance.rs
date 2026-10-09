@@ -296,6 +296,25 @@ impl<O, I, P: GpScalar, C: PointUse> FittedSgpr<O, I, P, DistanceKernel<C>> {
 }
 
 impl<O, P: GpScalar, C: PointUse> FittedSgpr<O, FixedInducing, P, DistanceKernel<C>> {
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores what [`FittedSgpr::save`] of a coordinate kernel stores, with
+    /// the kernel's slot table, each slot's `n × m` training blocks (in
+    /// `f64` at every precision: the model keeps them at `f64`), and the
+    /// inducing indices ([`Self::inducing`]). The factors are not stored;
+    /// [`crate::persist::LoadedDistanceSgpr::load`] binds the blocks to new
+    /// slots and factors the system again at the saved `θ`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// See the example on [`crate::persist::LoadedDistanceSgpr`].
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_sgpr(self, dir.as_ref())
+    }
+
     /// Converts this model to an online SGPR whose `insert`,
     /// `insert_inducing`, and deletes keep the training blocks.
     ///

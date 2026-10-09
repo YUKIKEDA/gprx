@@ -7,10 +7,13 @@ use gprx::kernel::{
     KernelScalar, KernelSpec, MaternKernel, MaternNu, RationalQuadraticArdKernel, RbfArdKernel,
     RbfKernel, ScalarDistance, WithPoints,
 };
-use gprx::persist::{LoadedDistanceGpr, LoadedGpr, PersistRegistry};
+use gprx::persist::{
+    LoadedDistanceGpr, LoadedDistanceSgpr, LoadedDistanceSvgp, LoadedGpr, LoadedSgpr, LoadedSvgp,
+    PersistRegistry,
+};
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, MixedPrecision,
-    PersistErrorKind, Prediction, ReevaluateKernel, SinglePrecision,
+    PersistErrorKind, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
 };
 
 const N: usize = 7;
@@ -307,6 +310,180 @@ fn coordinate_and_distance_files_refuse_the_other_loader() -> Result<(), GprErro
         &dir, &registry
     )));
     assert!(is_wrong_model(&LoadedDistanceGpr::<WithPoints>::load(
+        &dir, &registry
+    )));
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// The training points that start as inducing points.
+const INDUCING: [usize; 3] = [0, 3, 5];
+
+/// The values of `points` at the indices `at`.
+fn pick(points: &[f64], at: &[usize]) -> Vec<f64> {
+    at.iter().map(|&i| points[i]).collect()
+}
+
+/// Saves an SGPR, its online model after a point insert, an inducing
+/// insert, and a point delete, and an SVGP of the same kernel; loads each
+/// and checks the predictions at the queries. Load factors afresh, so an
+/// online model after updates is checked within `refactored`.
+fn sparse_round_trip<P: GpScalar>(
+    label: &str,
+    kernel: fn() -> Result<DistanceKernel, GprError>,
+    tol: f64,
+    refactored: f64,
+) -> Result<(), GprError> {
+    let rows = train_idx(N);
+    let y = targets(N);
+    let registry = PersistRegistry::new();
+    let q = query_idx();
+    let first = kernel()?;
+    let slots = first.slots();
+    let z = pick(&rows, &INDUCING);
+    let fitted = Sgpr::new(first, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(sources(&slots, &rows, &z), N, &y, &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(fitted.predict(sources(&slots, &z, &q), M)?);
+    let dir = temp_dir(&format!("sgpr-{label}"));
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
+    assert!(!loaded.is_online());
+    assert_eq!((loaded.n(), loaded.m()), (N, INDUCING.len()));
+    assert_eq!(loaded.inducing(), &INDUCING);
+    assert_eq!(loaded.to_kernel().slots(), loaded.slots());
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), M)?);
+    assert_same(&format!("sgpr {label}"), &got, &want, tol);
+    assert!(is_wrong_model(&LoadedSgpr::load(&dir, &registry)));
+    assert!(is_wrong_model(&LoadedDistanceSvgp::<DistanceOnly>::load(
+        &dir, &registry
+    )));
+    assert!(is_wrong_model(&LoadedDistanceGpr::<DistanceOnly>::load(
+        &dir, &registry
+    )));
+    assert!(is_wrong_model(&LoadedDistanceSgpr::<WithPoints>::load(
+        &dir, &registry
+    )));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut online = fitted.into_online();
+    let mut live = rows.clone();
+    let new = N as f64;
+    online.insert(sources(&slots, &z, &[new]), (new * 0.7).cos())?;
+    live.push(new);
+    let point = online.point_ids()[1];
+    online.insert_inducing(point, sources(&slots, &live, &[live[1]]))?;
+    let gone = online.point_ids()[2];
+    online.delete(gone)?;
+    live.remove(2);
+    let z_live = pick(&live, online.inducing());
+    let want = widen(online.predict(sources(&slots, &z_live, &q), M)?);
+    let dir = temp_dir(&format!("online-sgpr-{label}"));
+    online.save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
+    assert!(loaded.is_online());
+    assert_eq!(loaded.n(), live.len());
+    assert_eq!(loaded.inducing(), online.inducing());
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z_live, &q), M)?);
+    assert_same(&format!("online sgpr {label}"), &got, &want, refactored);
+    let (LoadedDistanceSgpr::OnlineDouble(_)
+    | LoadedDistanceSgpr::OnlineSingle(_)
+    | LoadedDistanceSgpr::OnlineMixed(_)
+    | LoadedDistanceSgpr::OnlineReevaluate(_)) = loaded
+    else {
+        return Err(GprError::InvalidConfig {
+            reason: format!("{label}: an online file loaded a fitted model"),
+        });
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let second = kernel()?;
+    let slots = second.slots();
+    let svgp = Svgp::new(second, GaussianLikelihood::new(0.1)?)
+        .with_precision::<P>()
+        .factor(sources(&slots, &rows, &z), N, &y, &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(svgp.predict(sources(&slots, &z, &q), M)?);
+    let dir = temp_dir(&format!("svgp-{label}"));
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &registry)?;
+    assert_eq!((loaded.n(), loaded.m()), (N, INDUCING.len()));
+    assert_eq!(loaded.inducing(), &INDUCING);
+    assert_eq!(loaded.to_kernel().slots(), loaded.slots());
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), M)?);
+    assert_same(&format!("svgp {label}"), &got, &want, tol);
+    assert!(is_wrong_model(&LoadedSvgp::load(&dir, &registry)));
+    assert!(is_wrong_model(&LoadedDistanceSgpr::<DistanceOnly>::load(
+        &dir, &registry
+    )));
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn sparse_models_round_trip_at_every_precision() -> Result<(), GprError> {
+    for (label, kernel) in [
+        ("scalar", scalar_only as KernelFn),
+        ("ard", ard_only),
+        ("two", two_slots),
+    ] {
+        sparse_round_trip::<DoublePrecision>(&format!("{label}-double"), kernel, 1e-12, 1e-9)?;
+        sparse_round_trip::<SinglePrecision>(&format!("{label}-single"), kernel, 1e-5, 1e-4)?;
+        sparse_round_trip::<MixedPrecision>(&format!("{label}-mixed"), kernel, 1e-9, 1e-4)?;
+        sparse_round_trip::<MixedPrecision<ReevaluateKernel>>(
+            &format!("{label}-reevaluate"),
+            kernel,
+            1e-9,
+            1e-4,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn sparse_with_points_round_trips() -> Result<(), GprError> {
+    let rows = train_idx(N);
+    let z = pick(&rows, &INDUCING);
+    let q = query_idx();
+    let (x, xq) = (coords(0, &rows), coords(0, &q));
+    let kernel = || -> Result<DistanceKernel<WithPoints>, GprError> {
+        Ok(ScalarDistance::new().kernel(RbfKernel::new(1.2)?)
+            * KernelSpec::from(RbfKernel::new(0.7)?))
+    };
+    let registry = PersistRegistry::new();
+    let first = kernel()?;
+    let slots = first.slots();
+    let fitted = Sgpr::new(first, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor(sources(&slots, &rows, &z), N, &x, 1, &targets(N), &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(fitted.predict(sources(&slots, &z, &q), &xq, M, 1)?);
+    let dir = temp_dir("sgpr-points");
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<WithPoints>::load(&dir, &registry)?;
+    assert_eq!(loaded.d(), 1);
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), &xq, M, 1)?);
+    assert_same("sgpr points", &got, &want, 1e-12);
+    assert!(is_wrong_model(&LoadedDistanceSgpr::<DistanceOnly>::load(
+        &dir, &registry
+    )));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let second = kernel()?;
+    let slots = second.slots();
+    let svgp = Svgp::new(second, GaussianLikelihood::new(0.1)?)
+        .factor(sources(&slots, &rows, &z), N, &x, 1, &targets(N), &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(svgp.predict(sources(&slots, &z, &q), &xq, M, 1)?);
+    let dir = temp_dir("svgp-points");
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<WithPoints>::load(&dir, &registry)?;
+    assert_eq!(loaded.d(), 1);
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), &xq, M, 1)?);
+    assert_same("svgp points", &got, &want, 1e-12);
+    assert!(is_wrong_model(&LoadedDistanceSvgp::<DistanceOnly>::load(
         &dir, &registry
     )));
     let _ = std::fs::remove_dir_all(&dir);

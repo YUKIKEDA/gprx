@@ -700,7 +700,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FORMAT_VERSION` is `1`. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
 
-`LoadedGpr::load(dir, registry)`, `LoadedSgpr::load`, and `LoadedSvgp::load` read the directory. `PersistRegistry::new` is empty. Built-ins need no registration. Register a custom kernel or transform before load:
+`LoadedGpr::load(dir, registry)`, `LoadedSgpr::load`, and `LoadedSvgp::load` read the directory of a coordinate model; `LoadedDistanceGpr::<C>::load`, `LoadedDistanceSgpr::<C>::load`, and `LoadedDistanceSvgp::<C>::load` read that of a model on supplied distances (below). `PersistRegistry::new` is empty. Built-ins need no registration. Register a custom kernel or transform before load:
 
 - `register_kernel`
 - `register_unfitted_input`, `register_fitted_input`
@@ -787,6 +787,37 @@ fn main() -> Result<(), gprx::GprError> {
     };
     let _ = model.neg_elbo()?;
     let _ = std::fs::remove_dir_all(&svgp_dir);
+    Ok(())
+}
+```
+
+A model on supplied distances saves with the same `save` / `save_with_factor`. The file also holds the training `d²` the model owns (an Exact model's lower triangles, a sparse model's `n × m` blocks and its inducing indices) and the kernel's slot table. The loader is typed by the kernel's marker (`DistanceOnly` or `WithPoints`); a coordinate file, or one of the other marker, is `WrongModel`. A loaded kernel has new slots: a `ScalarDistance` or `ArdDistance` from before the save names none of them, so take them from `slots()` (in the saved kernel's order) and bind the queries to those. The format: [persist-format.md §10](docs/persist-format.md#10-models-on-supplied-distances).
+
+```rust
+use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
+use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
+use gprx::{Fixed, GaussianLikelihood, Gpr};
+
+fn main() -> Result<(), gprx::GprError> {
+    let image = ScalarDistance::new();
+    let train = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train)], 3, &[0.0, 1.0, 0.5])
+        .map_err(|(_, e)| e)?;
+    let dir = std::env::temp_dir().join("gprx-readme-distance");
+    let _ = std::fs::remove_dir_all(&dir);
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+        return Err(gprx::GprError::InvalidConfig {
+            reason: "expected one scalar slot".into(),
+        });
+    };
+    let cross = [0.25, 0.25, 2.25];
+    let pred = loaded.predict([slot.borrow(&cross)], 1)?;
+    assert_eq!(pred.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 ```

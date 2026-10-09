@@ -549,6 +549,10 @@ pub(super) struct SparseConfig {
     /// As [`ModelConfig::distance`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub distance: Option<DistanceJson>,
+    /// The training points that are the inducing points, in order: present
+    /// for a model on supplied distances.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub inducing: Option<Vec<usize>>,
 }
 
 impl SparseConfig {

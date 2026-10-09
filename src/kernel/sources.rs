@@ -1711,6 +1711,19 @@ impl<T: KernelScalar> BlockStore<T> {
         }
     }
 
+    /// Appends the values of block `at` to `out`: `rows × cols`,
+    /// column-major, without the room past them.
+    pub(crate) fn block_into(&self, at: BlockAt, out: &mut Vec<T>) {
+        let (rows, cols, ld, stride) = (self.rows, self.cols, self.ld, self.stride);
+        let block: &[T] = match at {
+            BlockAt::Scalar(place) => &self.scalar[place],
+            BlockAt::Ard(place, k) => self.ard[place].block(k, stride),
+        };
+        for c in 0..cols {
+            out.extend_from_slice(&block[c * ld..c * ld + rows]);
+        }
+    }
+
     /// The same blocks with column stride `ld` and room for `cap` columns,
     /// `cols` of them: column `c` holds the rows of this store's column
     /// `from(c)`, or zeros.

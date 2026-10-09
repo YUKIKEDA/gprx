@@ -27,7 +27,9 @@ The `model` key of `config.json` says. An Exact file has no `model` key and read
 | `online_sgpr` | `OnlineSgpr::save` | `LoadedSgpr::load` | `m`, `point_ids`, `next_point_id`, `inducing_ids`, `next_inducing_id` | `x`, `y`, `z`, `z_train` |
 | `svgp` | `FittedSvgp::save` | `LoadedSvgp::load` | `m` | `x`, `y`, `z`, `z_train`, `q_mean`, `q_l` |
 
-A directory read by the wrong loader is refused with `GprError::PersistFailed` (`kind: WrongModel`), and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too.
+A model of a `DistanceKernel` (supplied squared distances) has the same `model` values and adds a `distance` key; it loads with `LoadedDistanceGpr`, `LoadedDistanceSgpr`, or `LoadedDistanceSvgp` of its marker (§10).
+
+A directory read by the wrong loader is refused with `GprError::PersistFailed` (`kind: WrongModel`), and the message names the right loader (for example, "config.json holds a svgp model; load it with LoadedSvgp::load"). This is true of `LoadedGpr::load` too, and of a coordinate file read by a distance loader or the other way round.
 
 ## 3. `config.json` of an Exact model
 
@@ -37,7 +39,7 @@ A JSON object, written pretty-printed. Unknown keys are ignored on read. "Omitte
 | --- | --- | --- | --- |
 | `format_version` | integer | required | `1`. Checked first (§8) |
 | `n` | integer | required | Number of training points. `0` is `EmptyInput` |
-| `d` | integer | required | Number of features. `0` is `EmptyInput` |
+| `d` | integer | required | Number of features. `0` is `EmptyInput`, except for a `distance_only` model, whose `d` is `0` (§10) |
 | `has_factor` | bool | required | Whether `l` and `alpha` are in the tensor file (§7) |
 | `factor_kind` | `"llt"` or `"ldlt"` | required | `llt` loads a `FittedGpr`; `ldlt` loads an `OnlineGpr` |
 | `precision` | `"double"`, `"single"`, `"mixed"` | omitted when `double` | Storage and predict scalars |
@@ -54,6 +56,7 @@ A JSON object, written pretty-printed. Unknown keys are ignored on read. "Omitte
 | `y_transform` | object or string | required | Target map as fitted (§5.4) |
 | `point_ids` | array of integers | required for `ldlt`, else absent | The `PointId` of each row, in row order. Its length must equal `n` |
 | `next_point_id` | integer | required for `ldlt`, else absent | The next id `insert` will hand out |
+| `distance` | object | a `DistanceKernel` model only | The marker and the slot table (§10) |
 
 An example, from `FittedGpr::save` of a `Constant × RBF` model with `MinMaxInput` and `StandardizeTarget`:
 
@@ -95,6 +98,7 @@ Floating-point numbers are written in the shortest form that reads back to the s
 | `jitter` | The policy for factoring `K_mm` (the sparse default is adaptive: `initial` 1e-8, `multiplier` 10, `max_retries` 5, `max_jitter` 1e-3) |
 | `has_factor`, `factor_kind`, `factor_jitter`, `distance_cache` | Not written. No factor is stored (§7) |
 | `inducing_ids`, `next_inducing_id` | Added, required for `online_sgpr`, absent otherwise. `point_ids` and `next_point_id` are also required for `online_sgpr` |
+| `distance`, `inducing` | Added for a `DistanceKernel` model, absent otherwise (§10) |
 
 `precision`, `residual`, `math`, `kernel`, `likelihood`, and the four transform keys have the same form as in §3. An example (`svgp`, same kernel, transforms, and 2 inducing points), with only the keys that differ from §3 shown in full:
 
@@ -137,6 +141,7 @@ A bounded parameter is the object `{"value": v, "lo": lo, "hi": hi}`: the value 
 | `white` | `variance` (bounded) |
 | `sum`, `product` | `left`, `right`: each a kernel |
 | `custom` | `persist_id` (string), `state` (any JSON) |
+| `distance` | `slot` (integer: a place in the slot table), `leaf`: a `rbf`, `matern`, `periodic`, `rational_quadratic`, or `custom` kernel for a scalar slot; a `rbf_ard`, `matern_ard`, or `rational_quadratic_ard` kernel with one lengthscale per dimension for an ARD slot (§10) |
 
 The format sets no depth limit on `sum` and `product` (see §8). An empty `lengthscales` array is `EmptyInput`.
 
@@ -212,6 +217,8 @@ All tensors are `F64`, whatever the model's precision (the precision is in `conf
 | `q_mean` | `[m]` | `svgp` only | The mean of the whitened `q(u)` |
 | `q_l` | `[m, m]` | `svgp` only | The lower Cholesky factor of the whitened `q(u)` covariance. Zero above the diagonal, positive on it |
 
+A `DistanceKernel` model adds one tensor `d2.<k>` per slot (§10).
+
 ### 6.3 What is not stored
 
 No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. They are rebuilt on load. Only the Exact factor `l` and `alpha` can be stored (§7).
@@ -243,7 +250,8 @@ On load, `q_mean` and `q_l` must be finite, `q_l` lower triangular with a positi
 | --- | --- |
 | File cannot be read or written; not valid JSON; a missing tensor; a wrong shape or dtype; an unaligned tensor; wrong loader for the `model`; `point_ids` of the wrong length; an unregistered or reserved `persist_id`; `q` not valid | `GprError::PersistFailed { kind, reason }`: `Io` (read / write), `Config` (JSON, keys, `point_ids`), `Tensor` (tensors, `q`), `WrongModel`, `UnregisteredId`, `InvalidPersistId`, `NotPersistable` |
 | `format_version` is not `1` | `GprError::UnsupportedPersistVersion` |
-| `n`, `d`, or (sparse) `m` is `0`; empty `lengthscales` | `GprError::EmptyInput` |
+| `n`, `d` (but for `distance_only`), or (sparse) `m` is `0`; empty `lengthscales` | `GprError::EmptyInput` |
+| A stored `d²` that is not finite, is negative, or is a non-zero diagonal; a sparse block whose inducing rows are not a symmetric square | `GprError::InvalidDistance` |
 | A stored value that a constructor refuses (a bound, a jitter, a kernel parameter) | The constructor's own error |
 
 Treat a directory as trusted input. A `sum` / `product` / `pipeline` / `columnwise` tree nested deeper than the JSON parser's limit (128 nested arrays or objects) fails with `PersistFailed` before it is decoded. The reader checks shapes and dtypes, that every stored tensor is finite (a `NaN` or `±∞` fails with `PersistFailed`), and, for `q`, finiteness and triangularity.
@@ -279,3 +287,78 @@ x, y = t["x"], t["y"]          # (n, d) and (n,), as you passed them to fit
 ```
 
 `order="F"` is what makes `x[i, j]` the value of feature `j` at point `i`. Read with the default row-major order, the same bytes give a scrambled matrix whenever `d > 1`.
+
+## 10. Models on supplied distances
+
+A model of a `DistanceKernel` (the kernel reads squared distances the caller supplies: `ScalarDistance`, `ArdDistance`) saves through the same `save` / `save_with_factor` and the same two files. It adds the training `d²` the model owns and a table of its slots. Load gives the kernel **new slots**: a `ScalarDistance` or `ArdDistance` from before the save names none of them. Take them from the loaded model's `slots()` (in the order of the saved kernel's `DistanceKernel::slots`) or `to_kernel()`, and bind each query's sources to them.
+
+| Model | Loaded by | Marker type |
+| --- | --- | --- |
+| `FittedGpr` / `OnlineGpr` of a `DistanceKernel<C>` | `LoadedDistanceGpr::<C>::load` | `C` is `DistanceOnly` or `WithPoints` |
+| `FittedSgpr` / `OnlineSgpr` of a `DistanceKernel<C>` | `LoadedDistanceSgpr::<C>::load` | as above |
+| `FittedSvgp` of a `DistanceKernel<C>` | `LoadedDistanceSvgp::<C>::load` | as above |
+
+The coordinate loaders (`LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`) are unchanged and refuse a distance file; a distance loader refuses a coordinate file and a file of the other marker. All of these are `WrongModel`.
+
+### 10.1 `distance` and `inducing` in `config.json`
+
+```json
+"distance": {
+  "points": "distance_only",
+  "slots": [ { "kind": "scalar" }, { "kind": "ard", "dims": 2 } ]
+}
+```
+
+- `points`: `"distance_only"` (the kernel reads only supplied distances; `d` is `0` and `x`, `z`, `z_train` are empty) or `"with_points"` (the kernel also has coordinate leaves that read `x`).
+- `slots`: the slot table, in the order of the kernel's `DistanceKernel::slots` (depth first, in order of first appearance). A slot is `scalar` (one `d²` per pair) or `ard` with `dims` (one `d²` per dimension per pair). The kernel tree must read every slot of the table, in the table's order; otherwise load fails with `PersistFailed` (`kind: Config`).
+- A kernel leaf on a slot is `{"distance": {"slot": k, "leaf": <kernel>}}` (§5.1). `custom` leaves are restored through `PersistRegistry` as in §5.5.
+- `inducing` (sparse only): the training points that are the inducing points, in the order of the columns of the blocks. Its length is `m`.
+
+A real example (`FittedGpr::save` of a scalar RBF plus an ARD RBF on two dimensions, 3 points):
+
+```json
+{
+  "format_version": 1,
+  "n": 3,
+  "d": 0,
+  "has_factor": false,
+  "factor_kind": "llt",
+  "kernel": {
+    "sum": {
+      "left":  { "distance": { "slot": 0, "leaf": { "rbf": { "lengthscale": { "value": 1.0, "lo": 0.00001, "hi": 100000.0 } } } } },
+      "right": { "distance": { "slot": 1, "leaf": { "rbf_ard": { "lengthscales": [
+        { "value": 1.0, "lo": 0.00001, "hi": 100000.0 },
+        { "value": 2.0, "lo": 0.00001, "hi": 100000.0 }
+      ] } } } }
+    }
+  },
+  "likelihood": { "noise_variance": { "value": 0.1, "lo": 0.00001, "hi": 100000.0 } },
+  "jitter": { "fixed": { "jitter": 0.0 } },
+  "distance_cache": "always",
+  "x_unfitted": "identity",
+  "y_unfitted": "identity",
+  "x_transform": "identity",
+  "y_transform": "identity",
+  "distance": {
+    "points": "distance_only",
+    "slots": [ { "kind": "scalar" }, { "kind": "ard", "dims": 2 } ]
+  }
+}
+```
+
+The tensors are `x` (`[3, 0]`), `y`, `d2.0` (`[6]`), and `d2.1` (`[2, 6]`). `FittedSgpr::save` of the scalar slot alone with inducing points `[0, 2]` writes `"model": "sgpr"`, `"m": 2`, the same `distance` with one slot, and `"inducing": [0, 2]`, with `d2.0` of shape `[3, 2]`. (The files are indented one key per line; folded here to fit.)
+
+### 10.2 Tensors
+
+`d2.<k>` holds slot `k`'s training `d²`.
+
+| Model | Shape (scalar slot) | Shape (ARD slot) | Layout | dtype |
+| --- | --- | --- | --- | --- |
+| Exact (`exact`) | `[n(n+1)/2]` | `[dims, n(n+1)/2]` | The lower triangle, column by column: column `j` holds rows `j..n` (diagonal included), then column `j + 1`. An ARD slot is dimension after dimension | `F32` for `single`; `F64` for `double` and `mixed` |
+| Sparse (`sgpr`, `online_sgpr`, `svgp`) | `[n, m]` | `[dims, n, m]` | Each block column-major, `n` training points × `m` inducing points; an ARD slot is dimension after dimension | `F64` |
+
+- The values are what the model owns, after a `tidy` repair, in the order of the model's points (an online model's live points, in `point_ids` order). An online model whose ARD slot it laid out as row runs for its updates still writes the canonical layout above.
+- A `single` Exact model writes its `f32` store as it is. A `mixed` Exact model writes the caller's `f64` values (it keeps them beside its `f32` copy) and casts them again on load. A sparse model keeps its blocks at `f64` at every precision, and writes them so.
+- On load the values are checked as a fit checks its sources: finite, non-negative, and a zero diagonal (Exact); the same for the blocks, and the inducing rows a symmetric square with a zero diagonal (sparse). A violation is `GprError::InvalidDistance`.
+- Exact with `has_factor: false` factors again at the saved `θ` from the stored `d²`; with `has_factor: true` it reads `l` and `alpha` as in §7. A sparse model factors again from the stored blocks, as in §7.
+

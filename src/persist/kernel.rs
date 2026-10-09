@@ -173,16 +173,6 @@ impl KernelJson {
         }
     }
 
-    /// The coordinate tree of this JSON.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::decode_tree`]; a leaf on supplied distances is
-    /// [`PersistErrorKind::WrongModel`].
-    pub(super) fn decode(self, registry: &PersistRegistry) -> Result<KernelSpec, GprError> {
-        self.decode_tree(registry, &[])
-    }
-
     /// The tree of kind `S` of this JSON; a leaf on supplied distances reads
     /// `slots[slot]` (the decoded slot table).
     ///

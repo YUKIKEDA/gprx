@@ -84,7 +84,7 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 | `sparse` | What `sgpr` and `svgp` share: the trainer settings, the training data, `Z`, and `θ` over kernel and likelihood | Crate: `SparseSpec`, `SparseCore` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `param`, `policy`, `precision`, `prediction`, `transform` |
 | `sgpr` | Sparse GPR with the collapsed VFE bound: fixed or free inducing points `Z`, rank-1 online updates, insert / delete of points and of inducing points, predict, covariance, samples, leave-one-out | Public: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `sparse`, `transform` |
 | `svgp` | SVGP: whitened `q(u)`, the ELBO, minibatch Adam whose step cost does not grow with `n`, predict, covariance, samples | Public: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `rng`, `sparse`, `transform` |
-| `persist` | One directory per model: `config.json` and `model.safetensors`; the restore table for `Custom` kernels and caller transforms | Public mod: `LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`, `PersistRegistry`, `FORMAT_VERSION` | `error`, `gpr`, `kernel`, `optimizer`, `param`, `points`, `policy`, `precision`, `sgpr`, `sparse`, `svgp`, `transform` |
+| `persist` | One directory per model: `config.json` and `model.safetensors`; the restore table for `Custom` kernels and caller transforms | Public mod: `LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`, `LoadedDistanceGpr`, `LoadedDistanceSgpr`, `LoadedDistanceSvgp`, `PersistRegistry`, `FORMAT_VERSION` | `error`, `gpr`, `kernel`, `optimizer`, `param`, `points`, `policy`, `precision`, `sgpr`, `sparse`, `svgp`, `transform` |
 | `internals` | Hooks for benchmarks and `compare/perf`. Exists only with the `bench-internals` or `insert-stages` feature | Public mod, feature-gated | `gpr`, `kernel`, `objective` |
 
 ## 3. Dependencies among the building blocks and models
@@ -138,7 +138,7 @@ What the picture shows:
 Held at this commit (`use crate::…` outside `#[cfg(test)]`):
 
 1. **Models do not import one another.** `gpr`, `sgpr`, and `svgp` have no import among them. Shared code goes down a layer (`sparse` for the two sparse families; the building blocks for all three).
-2. **`persist` is the one module that imports models**, in `persist/mod.rs` (Exact) and `persist/sparse.rs` (Sparse, SVGP). It is the only place that names all the concrete model types, so `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` can hold one variant per precision.
+2. **`persist` is the one module that imports models**, in `persist/mod.rs` (Exact), `persist/sparse.rs` (Sparse, SVGP), and `persist/distance.rs` (the loaded types of a `DistanceKernel`). It is the only place that names all the concrete model types, so `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` and `LoadedDistanceGpr` / `LoadedDistanceSgpr` / `LoadedDistanceSvgp` can hold one variant per precision.
 3. **The crossing is narrow the other way.** Models call `persist::save_*`, and `gpr` also uses `PersistedModel` (the parts a loaded Exact model is rebuilt from) and `MappedTensors` (the memory-mapped `L`). `gpr`, `sgpr`, and `points` use `persist_err` to build the error. Nothing else of `persist` is used by a model.
 4. **`optimizer`, `objective`, `precision`, and `transform` do not import a model.** The unit tests of `optimizer` build a `Gpr`; that is test code only.
 5. **`Workspace`, `QueryWorkspace`, `LltStore`, `LdltStore`, and faer types are crate-private** ([layout rule](../.cursor/rules/layout.mdc)).
@@ -154,9 +154,9 @@ The three families follow the same typestate: a trainer, `fit` (or `factor`), a 
 
 | Family | Trainer | Fitted | Online | Loaded from disk |
 | --- | --- | --- | --- | --- |
-| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>` (`insert`, `delete`) | `LoadedGpr` (8 variants) |
-| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants) |
-| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | none | `LoadedSvgp` (4 variants) |
+| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>` (`insert`, `delete`) | `LoadedGpr` (8 variants); `LoadedDistanceGpr<C>` (8) for a `DistanceKernel<C>` |
+| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants); `LoadedDistanceSgpr<C>` (8) |
+| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | none | `LoadedSvgp` (4 variants); `LoadedDistanceSvgp<C>` (4) |
 
 The type parameters:
 

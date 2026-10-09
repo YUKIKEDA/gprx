@@ -1,4 +1,5 @@
-//! The loaded Exact model of a [`DistanceKernel`]: [`LoadedDistanceGpr`].
+//! The loaded models of a [`DistanceKernel`]: [`LoadedDistanceGpr`],
+//! [`LoadedDistanceSgpr`], and [`LoadedDistanceSvgp`].
 
 use std::path::Path;
 
@@ -10,11 +11,14 @@ use crate::kernel::{
 };
 use crate::optimizer::Fixed;
 use crate::precision::PersistKind;
+use crate::sgpr::{FittedSgpr, FixedInducing, OnlineSgpr};
+use crate::svgp::FittedSvgp;
 use crate::{
     DoublePrecision, MixedPrecision, PredictOptions, Prediction, ReevaluateKernel, SinglePrecision,
 };
 
-use super::config::PointsJson;
+use super::config::{ModelJson, PointsJson};
+use super::sparse::{self, SgprVariants};
 use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen};
 
 /// Represents the prediction-only Exact model of a [`DistanceKernel`]
@@ -38,7 +42,7 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{DistanceSlot, RbfKernel, ScalarDistance};
+/// use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
 /// use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
 /// use gprx::{GaussianLikelihood, Gpr};
 ///
@@ -51,7 +55,7 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// let dir = std::env::temp_dir().join(format!("gprx-doctest-distance-{}", std::process::id()));
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
-/// let loaded = LoadedDistanceGpr::load(&dir, &PersistRegistry::new())?;
+/// let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
 /// // The loaded kernel has slots of its own: bind the query to them.
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
@@ -294,5 +298,486 @@ impl LoadedDistanceGpr<WithPoints> {
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
         each_model!(self, model => model.predict_with(sources, xs, m, n_cols, options).map(widen))
+    }
+}
+
+/// Represents the prediction-only SGPR of a [`DistanceKernel`] loaded from
+/// a persist directory written by [`crate::FittedSgpr::save`] or
+/// [`crate::OnlineSgpr::save`].
+///
+/// One variant per precision and model, as [`super::LoadedSgpr`]. The
+/// training blocks are bound to new slots, as [`LoadedDistanceGpr`] binds
+/// its `d²`: take them from [`Self::slots`]. The VFE system is factored
+/// again at the saved `θ`. Loading a directory of the other [`PointUse`],
+/// or of a coordinate model, returns [`GprError::PersistFailed`] with
+/// [`crate::PersistErrorKind::WrongModel`].
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
+/// use gprx::persist::{LoadedDistanceSgpr, PersistRegistry};
+/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let image = ScalarDistance::new();
+/// // Three samples at 0, 1, 2; the inducing points are samples 0 and 2.
+/// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+/// let fitted = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .with_optimizer(Fixed)
+///     .factor([image.borrow(&train)], 3, &[0.0, 1.0, 0.5], &[0, 2])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-dsgpr-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!(loaded.inducing(), &[0, 2]);
+/// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+///     panic!("one scalar slot");
+/// };
+/// // One query at 1.5: its squared distances to the two inducing points.
+/// let cross = [2.25, 0.25];
+/// let got = loaded.predict([slot.borrow(&cross)], 1)?;
+/// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum LoadedDistanceSgpr<C: PointUse = DistanceOnly> {
+    /// Marks a [`DoublePrecision`] model.
+    Double(FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<C>>),
+    /// Marks a [`SinglePrecision`] model.
+    Single(FittedSgpr<Fixed, FixedInducing, SinglePrecision, DistanceKernel<C>>),
+    /// Marks a promoted-storage [`MixedPrecision`] model.
+    Mixed(FittedSgpr<Fixed, FixedInducing, MixedPrecision, DistanceKernel<C>>),
+    /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    Reevaluate(
+        FittedSgpr<Fixed, FixedInducing, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>,
+    ),
+    /// Marks a [`DoublePrecision`] online model.
+    OnlineDouble(OnlineSgpr<Fixed, DoublePrecision, DistanceKernel<C>>),
+    /// Marks a [`SinglePrecision`] online model.
+    OnlineSingle(OnlineSgpr<Fixed, SinglePrecision, DistanceKernel<C>>),
+    /// Marks a promoted-storage [`MixedPrecision`] online model.
+    OnlineMixed(OnlineSgpr<Fixed, MixedPrecision, DistanceKernel<C>>),
+    /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` online model.
+    OnlineReevaluate(OnlineSgpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
+}
+
+/// Runs `$body` on the model of any [`LoadedDistanceSgpr`] variant.
+macro_rules! each_sgpr {
+    ($value:expr, $model:ident => $body:expr) => {
+        match $value {
+            LoadedDistanceSgpr::Double($model) => $body,
+            LoadedDistanceSgpr::Single($model) => $body,
+            LoadedDistanceSgpr::Mixed($model) => $body,
+            LoadedDistanceSgpr::Reevaluate($model) => $body,
+            LoadedDistanceSgpr::OnlineDouble($model) => $body,
+            LoadedDistanceSgpr::OnlineSingle($model) => $body,
+            LoadedDistanceSgpr::OnlineMixed($model) => $body,
+            LoadedDistanceSgpr::OnlineReevaluate($model) => $body,
+        }
+    };
+}
+
+impl<C: PointUse> LoadedDistanceSgpr<C> {
+    /// Reads `dir/config.json` and `dir/model.safetensors` written by the
+    /// `save` of an SGPR (or online SGPR) of a [`DistanceKernel<C>`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
+    /// is not [`super::FORMAT_VERSION`], [`GprError::PersistFailed`] with
+    /// [`crate::PersistErrorKind::WrongModel`] when the directory holds
+    /// another model, and [`GprError::PersistFailed`] when the JSON, the
+    /// tensors, or a registry lookup is invalid. Stored blocks are checked
+    /// as a fit checks its sources ([`GprError::InvalidDistance`]).
+    /// Factorization errors use the same variants as the model's `factor`.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
+        let dir = dir.as_ref();
+        let config = sparse::read_config(
+            dir,
+            &[ModelJson::Sgpr, ModelJson::OnlineSgpr],
+            Some(points_of::<C>()),
+        )?;
+        // Each arm names its own precision type, so the call stays in the arm.
+        match config.persist_kind() {
+            PersistKind::Double => sparse::load_sgpr_as(
+                dir,
+                &config,
+                registry,
+                SgprVariants {
+                    fitted: Self::Double,
+                    online: Self::OnlineDouble,
+                },
+            ),
+            PersistKind::Single => sparse::load_sgpr_as(
+                dir,
+                &config,
+                registry,
+                SgprVariants {
+                    fitted: Self::Single,
+                    online: Self::OnlineSingle,
+                },
+            ),
+            PersistKind::MixedPromote => sparse::load_sgpr_as(
+                dir,
+                &config,
+                registry,
+                SgprVariants {
+                    fitted: Self::Mixed,
+                    online: Self::OnlineMixed,
+                },
+            ),
+            PersistKind::MixedReevaluate => sparse::load_sgpr_as(
+                dir,
+                &config,
+                registry,
+                SgprVariants {
+                    fitted: Self::Reevaluate,
+                    online: Self::OnlineReevaluate,
+                },
+            ),
+        }
+    }
+
+    /// Returns the number of training points.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn n(&self) -> usize {
+        each_sgpr!(self, model => model.n())
+    }
+
+    /// Returns the number of inducing points.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn m(&self) -> usize {
+        each_sgpr!(self, model => model.m())
+    }
+
+    /// Returns the training samples that are the inducing points, in the
+    /// order of the rows of a prediction's blocks.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn inducing(&self) -> &[usize] {
+        each_sgpr!(self, model => model.inducing())
+    }
+
+    /// Returns `true` for an [`OnlineSgpr`] variant.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn is_online(&self) -> bool {
+        matches!(
+            self,
+            Self::OnlineDouble(_)
+                | Self::OnlineSingle(_)
+                | Self::OnlineMixed(_)
+                | Self::OnlineReevaluate(_)
+        )
+    }
+
+    /// Returns the slots of the loaded kernel, in the order of the saved
+    /// kernel's [`DistanceKernel::slots`].
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn slots(&self) -> Vec<DistanceSlot> {
+        each_sgpr!(self, model => model.slots())
+    }
+
+    /// Returns a copy of the loaded kernel, on the slots of [`Self::slots`].
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        each_sgpr!(self, model => model.to_kernel())
+    }
+}
+
+impl LoadedDistanceSgpr<DistanceOnly> {
+    /// Returns the predictive mean and observation variance at `m` queries,
+    /// in `f64` whatever the stored precision. `sources` holds one source
+    /// per slot of [`Self::slots`]: the `m_inducing × m` squared distances
+    /// from the inducing points ([`Self::inducing`]) to the queries.
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict`.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn predict<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        m: usize,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(sources, m, PredictOptions::default())
+    }
+
+    /// Returns [`Self::predict`] with [`PredictOptions`].
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict_with`.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn predict_with<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        each_sgpr!(self, model => model.predict_with(sources, m, options).map(widen))
+    }
+}
+
+impl LoadedDistanceSgpr<WithPoints> {
+    /// Returns the number of input features of the coordinate leaves.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn d(&self) -> usize {
+        each_sgpr!(self, model => model.d())
+    }
+
+    /// Returns the predictive mean and observation variance at the `m`
+    /// queries `xs` (column-major `m × n_cols`), in `f64` whatever the
+    /// stored precision. `sources` holds one source per slot of
+    /// [`Self::slots`], from the inducing points to the queries.
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict`.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn predict<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        xs: &[f64],
+        m: usize,
+        n_cols: usize,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(sources, xs, m, n_cols, PredictOptions::default())
+    }
+
+    /// Returns [`Self::predict`] with [`PredictOptions`].
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict_with`.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn predict_with<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        xs: &[f64],
+        m: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        each_sgpr!(self, model => model.predict_with(sources, xs, m, n_cols, options).map(widen))
+    }
+}
+
+/// Represents the prediction-only SVGP of a [`DistanceKernel`] loaded from
+/// a persist directory written by [`crate::FittedSvgp::save`].
+///
+/// One variant per precision, as [`super::LoadedSvgp`]. The training blocks
+/// are bound to new slots ([`Self::slots`]); `K_mm` is factored again at
+/// the saved `θ`, with the saved `q(u)`. Loading a directory of the other
+/// [`PointUse`], or of a coordinate model, returns
+/// [`GprError::PersistFailed`] with [`crate::PersistErrorKind::WrongModel`].
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
+/// use gprx::persist::{LoadedDistanceSvgp, PersistRegistry};
+/// use gprx::{GaussianLikelihood, Svgp};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let image = ScalarDistance::new();
+/// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+/// let fitted = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .factor([image.borrow(&train)], 3, &[0.0, 1.0, 0.5], &[0, 2])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-dsvgp-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+///     panic!("one scalar slot");
+/// };
+/// let cross = [2.25, 0.25];
+/// let got = loaded.predict([slot.borrow(&cross)], 1)?;
+/// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum LoadedDistanceSvgp<C: PointUse = DistanceOnly> {
+    /// Marks a [`DoublePrecision`] model.
+    Double(FittedSvgp<DoublePrecision, DistanceKernel<C>>),
+    /// Marks a [`SinglePrecision`] model.
+    Single(FittedSvgp<SinglePrecision, DistanceKernel<C>>),
+    /// Marks a promoted-storage [`MixedPrecision`] model.
+    Mixed(FittedSvgp<MixedPrecision, DistanceKernel<C>>),
+    /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    Reevaluate(FittedSvgp<MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
+}
+
+/// Runs `$body` on the model of any [`LoadedDistanceSvgp`] variant.
+macro_rules! each_svgp {
+    ($value:expr, $model:ident => $body:expr) => {
+        match $value {
+            LoadedDistanceSvgp::Double($model) => $body,
+            LoadedDistanceSvgp::Single($model) => $body,
+            LoadedDistanceSvgp::Mixed($model) => $body,
+            LoadedDistanceSvgp::Reevaluate($model) => $body,
+        }
+    };
+}
+
+impl<C: PointUse> LoadedDistanceSvgp<C> {
+    /// Reads `dir/config.json` and `dir/model.safetensors` written by the
+    /// `save` of an SVGP of a [`DistanceKernel<C>`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`LoadedDistanceSgpr::load`], plus
+    /// [`GprError::PersistFailed`] when the saved `q(u)` is not finite or
+    /// its `L` is not lower triangular with a positive diagonal.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
+        let dir = dir.as_ref();
+        let config = sparse::read_config(dir, &[ModelJson::Svgp], Some(points_of::<C>()))?;
+        match config.persist_kind() {
+            PersistKind::Double => sparse::load_svgp_as(dir, &config, registry, Self::Double),
+            PersistKind::Single => sparse::load_svgp_as(dir, &config, registry, Self::Single),
+            PersistKind::MixedPromote => sparse::load_svgp_as(dir, &config, registry, Self::Mixed),
+            PersistKind::MixedReevaluate => {
+                sparse::load_svgp_as(dir, &config, registry, Self::Reevaluate)
+            }
+        }
+    }
+
+    /// Returns the number of training points.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn n(&self) -> usize {
+        each_svgp!(self, model => model.n())
+    }
+
+    /// Returns the number of inducing points.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn m(&self) -> usize {
+        each_svgp!(self, model => model.m())
+    }
+
+    /// Returns the training samples that are the inducing points.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn inducing(&self) -> &[usize] {
+        each_svgp!(self, model => model.inducing())
+    }
+
+    /// Returns the slots of the loaded kernel, in the order of the saved
+    /// kernel's [`DistanceKernel::slots`].
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn slots(&self) -> Vec<DistanceSlot> {
+        each_svgp!(self, model => model.slots())
+    }
+
+    /// Returns a copy of the loaded kernel, on the slots of [`Self::slots`].
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        each_svgp!(self, model => model.to_kernel())
+    }
+}
+
+impl LoadedDistanceSvgp<DistanceOnly> {
+    /// Returns the predictive mean and observation variance at `m` queries,
+    /// in `f64` whatever the stored precision; `sources` as
+    /// [`LoadedDistanceSgpr::predict`] takes them.
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict`.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn predict<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        m: usize,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(sources, m, PredictOptions::default())
+    }
+
+    /// Returns [`Self::predict`] with [`PredictOptions`].
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict_with`.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn predict_with<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        each_svgp!(self, model => model.predict_with(sources, m, options).map(widen))
+    }
+}
+
+impl LoadedDistanceSvgp<WithPoints> {
+    /// Returns the number of input features of the coordinate leaves.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn d(&self) -> usize {
+        each_svgp!(self, model => model.d())
+    }
+
+    /// Returns the predictive mean and observation variance at the `m`
+    /// queries `xs` (column-major `m × n_cols`); `sources` as
+    /// [`LoadedDistanceSgpr::predict`] takes them.
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict`.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn predict<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        xs: &[f64],
+        m: usize,
+        n_cols: usize,
+    ) -> Result<Prediction<f64>, GprError> {
+        self.predict_with(sources, xs, m, n_cols, PredictOptions::default())
+    }
+
+    /// Returns [`Self::predict`] with [`PredictOptions`].
+    ///
+    /// # Errors
+    ///
+    /// Same as the variant's `predict_with`.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
+    pub fn predict_with<'s>(
+        &self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        xs: &[f64],
+        m: usize,
+        n_cols: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<f64>, GprError> {
+        each_svgp!(self, model => model.predict_with(sources, xs, m, n_cols, options).map(widen))
     }
 }

@@ -264,6 +264,25 @@ impl<P: GpScalar> Svgp<Adam, P, DistanceKernel<WithPoints>> {
 }
 
 impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores what [`FittedSvgp::save`] of a coordinate kernel stores, with
+    /// the kernel's slot table, each slot's `n × m` training blocks (in
+    /// `f64` at every precision), and the inducing indices
+    /// ([`Self::inducing`]). [`crate::persist::LoadedDistanceSvgp::load`]
+    /// binds the blocks to new slots and factors `K_mm` again at the saved
+    /// `θ`, with the saved `q(u)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// See the example on [`crate::persist::LoadedDistanceSvgp`].
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_svgp(self, dir.as_ref())
+    }
+
     /// Returns a copy of the kernel whose hyperparameters this model owns.
     ///
     /// See the example on [`DistanceKernel`].

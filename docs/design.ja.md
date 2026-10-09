@@ -24,7 +24,7 @@
   → persist: モデルごとに 1 ディレクトリ（`config.json` + `model.safetensors`）（§6.3、§11）
 ```
 
-persist は 1 ディレクトリに書く。`format_version` は 1。Exact のモデルは `factor_kind` が必須で（`llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む）、保存した因子は mmap する。Sparse のモデルは `model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を足し、`LoadedSgpr` / `LoadedSvgp` で読む。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、読み込んだモデルは同じ値をビットで予測する。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）。読み込んだモデルの再学習は `with_optimizer` → `refit`。すべてのキーとテンソルは [persist-format.ja.md](persist-format.ja.md)。モジュールと依存の向きは [architecture.ja.md](architecture.ja.md)。
+persist は 1 ディレクトリに書く。`format_version` は 1。Exact のモデルは `factor_kind` が必須で（`llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む）、保存した因子は mmap する。Sparse のモデルは `model` キー（`sgpr` / `online_sgpr` / `svgp`。Exact のファイルには無い）を足し、`LoadedSgpr` / `LoadedSvgp` で読む。テンソルは元の `X` / `y` / `Z`、変換後の `Z`、SVGP の `q(u)`。因子は組み直すので、読み込んだモデルは同じ値をビットで予測する。`config.json` の浮動小数点は正確に往復する（serde_json の `float_roundtrip`）。読み込んだモデルの再学習は `with_optimizer` → `refit`。供給された距離のモデル（5.6 節）は `distance` キーと学習の `d²` を足し、マーカーごとの `LoadedDistanceGpr` / `LoadedDistanceSgpr` / `LoadedDistanceSvgp` で読む。すべてのキーとテンソルは [persist-format.ja.md](persist-format.ja.md)。モジュールと依存の向きは [architecture.ja.md](architecture.ja.md)。
 
 主要な設計原則:
 - **識別子は gprx / GPR の概念を名付ける**（カーネル、尤度、θ、分解、正パラメータの区間、…）。他製品・テストハーネス・無関係なドメインの名前は置かない
@@ -391,6 +391,8 @@ pub trait TargetTransform: Send + Sync {
 - 検査は方針によらず、正方行列ごとに表を 1 回読む（`O(n²)`）。ARD の訓練の正方行列は、三角へ詰めながら検査する。ARD の予測ブロック（訓練 × クエリ）は、カーネルが `r²` を足すループで読みながら検査するので、呼び出し側の値を読むのは 1 回だけになる（`f64` のモデルはカーネルが、`f32` のモデルは型変換が読む）。ブロックは検査済みかどうかを型（`Checked` / `Unchecked`）で持つ。未検査のブロックの値は検査つきの読み出しからしか取り出せないので、`Unchecked` のブロックを読む葉や SIMD の経路は、検査を飛ばせない。どちらの状態でブロックを作るかは束ねる側のコードが決める（`ArdBlocks::new` はどちらも作れる）。`Checked` のブロックを作るのは束ねるコードだけで、検査した値、型変換した値、詰めた値から作る。スカラーの予測ブロックは束ねるときに、CPU で使える最も広い SIMD（`pulp` の実行時の切り替え）で検査する。
 
 **供給は型で表す。** 木の `Supply` の種類が、評価で読むものを決める。座標の木（`NoSupply`）は供給を持たない。ビューは `()` を持つので、経路には供給の引数も、それによる分岐もない。供給した距離の葉を持つ木は、すべてのスロットの供給を必須の引数として受け取る。供給した距離の葉は、同じ形状のスロットの中での自分のスロットの番号を持つ。番号は木を組んだときに一度だけ振る。どの供給（訓練の保存、束ねた予測、列の範囲）もスロットをその順に持つので、その木のために束ねた供給は、葉が読む番号をすべて持つ。別のカーネルのために束ねた供給を渡すと、引いた時点で `UnsupportedKernelOperation` を返し、範囲外を読むことはない。
+
+**保存と読み込み。** 供給された距離のモデルは、持っている学習の `d²` を保存する。だから読み込んだモデルは、呼び出し側が学習の正方行列をもう一度渡さなくても予測できる。ディスク上の並びは、ストアの並びによらず正規の形にする。Exact の slot は下三角を列ごとに詰めたもの（`n(n+1)/2` 個、ARD の slot はそれを `dims` 個、次元を順に）で、online のモデルの行の並びも fit の詰めた三角と同じ順で書く。`f32` のモデルは `f32` で書く。`MixedPrecision` のモデルは呼び出し側の正確な `f64` の値を書き、読み込みでもう一度丸める。Sparse のモデルは `n × m` のブロックを `f64` で持ち、そのまま書き、誘導点の添字も書く。カーネルの JSON は slot の表（形と次元、`DistanceKernel::slots` の順）を持ち、葉は表での位置で slot を指す。読み込みは新しい slot を作るので、保存前のハンドルはそのどれも指さない。新しいものは読み込んだモデルの `slots()` / `to_kernel()` で得る。読み込みの型は座標のものと分ける（`LoadedGpr` と同じ 8 variant の `LoadedDistanceGpr<C>`、`LoadedDistanceSgpr<C>`、`LoadedDistanceSvgp<C>`）。マーカー `C` で型が決まるので、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` は 0.1.0 のまま。種類やマーカーの違うファイルは `WrongModel`。座標のファイルには新しいキーが無いので、`FORMAT_VERSION` は 1 のまま。
 
 **最初の試みから、測ってから流用するもの。** 型の層（`DistanceKernel<C>`、`KernelSpec<S>` / `CompiledKernel<T, S>` の封印した `Supply` の種類、`ModelKernel`）と保存形式は、上のベンチで要件を満たすと分かれば流用する。
 
@@ -783,7 +785,7 @@ pub struct OptResult {
 
 数値計算固有の失敗理由を拡充する。
 
-集合が増えうる公開 enum は `#[non_exhaustive]` にする: `GprError`、`CholeskyStage`、`IntervalError`、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`、`PersistKind`、`KernelSpec`、`CompiledKernel`、`DistanceSlot`、`DistanceCachePolicy`、`JitterPolicy`、`KernelExp`、`BoundaryPolicy`。これらへの variant の追加は破壊的変更にならない。クレート外の `match` には `_` が要る。閉じた集合は網羅的な `match` を書けるよう付けない: `Triangle`、`MaternNu`、`VarianceKind`、`CholeskyBuffer`。
+集合が増えうる公開 enum は `#[non_exhaustive]` にする: `GprError`、`CholeskyStage`、`IntervalError`、`LoadedGpr` / `LoadedSgpr` / `LoadedSvgp`、`LoadedDistanceGpr` / `LoadedDistanceSgpr` / `LoadedDistanceSvgp`、`PersistKind`、`KernelSpec`、`CompiledKernel`、`DistanceSlot`、`DistanceCachePolicy`、`JitterPolicy`、`KernelExp`、`BoundaryPolicy`。これらへの variant の追加は破壊的変更にならない。クレート外の `match` には `_` が要る。閉じた集合は網羅的な `match` を書けるよう付けない: `Triangle`、`MaternNu`、`VarianceKind`、`CholeskyBuffer`。
 
 ```rust
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]

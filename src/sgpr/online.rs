@@ -164,6 +164,48 @@ impl<O, P, K: ModelKernel> OnlineSgpr<O, P, K>
 where
     P: crate::precision::GpScalar,
 {
+    pub(crate) fn core(&self) -> &SparseCore<K::Supply> {
+        &self.state.core
+    }
+
+    pub(crate) fn point_registry(&self) -> &PointRegistry {
+        &self.state.registry
+    }
+
+    pub(crate) fn inducing_registry(&self) -> &InducingRegistry {
+        &self.state.inducing
+    }
+
+    /// The online model of a persist directory: `fitted` with the saved
+    /// point and inducing identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when an identifier list is
+    /// invalid or its length is not `n` / `m`.
+    pub(crate) fn from_persisted<I>(
+        fitted: FittedSgpr<O, I, P, K>,
+        points: PointRegistry,
+        inducing: InducingRegistry,
+    ) -> Result<Self, GprError> {
+        let mut online = Self::from_fitted(fitted);
+        if points.len() != online.state.core.n || inducing.len() != online.state.core.m {
+            return Err(crate::persist::persist_err(
+                PersistErrorKind::Config,
+                format!(
+                    "config has {} point ids and {} inducing ids, expected n = {} and m = {}",
+                    points.len(),
+                    inducing.len(),
+                    online.state.core.n,
+                    online.state.core.m
+                ),
+            ));
+        }
+        online.state.registry = points;
+        online.state.inducing = inducing;
+        Ok(online)
+    }
+
     pub(crate) fn from_fitted<I>(fitted: FittedSgpr<O, I, P, K>) -> Self {
         let registry = PointRegistry::from_count(fitted.core.n);
         let inducing = InducingRegistry::from_count(fitted.core.m);
@@ -1380,48 +1422,6 @@ where
         Ok(self.state.inducing.insert())
     }
 
-    pub(crate) fn core(&self) -> &SparseCore {
-        &self.state.core
-    }
-
-    pub(crate) fn point_registry(&self) -> &PointRegistry {
-        &self.state.registry
-    }
-
-    pub(crate) fn inducing_registry(&self) -> &InducingRegistry {
-        &self.state.inducing
-    }
-
-    /// The online model of a persist directory: `fitted` with the saved
-    /// point and inducing identifiers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when an identifier list is
-    /// invalid or its length is not `n` / `m`.
-    pub(crate) fn from_persisted<I>(
-        fitted: FittedSgpr<O, I, P>,
-        points: PointRegistry,
-        inducing: InducingRegistry,
-    ) -> Result<Self, GprError> {
-        let mut online = Self::from_fitted(fitted);
-        if points.len() != online.state.core.n || inducing.len() != online.state.core.m {
-            return Err(crate::persist::persist_err(
-                PersistErrorKind::Config,
-                format!(
-                    "config has {} point ids and {} inducing ids, expected n = {} and m = {}",
-                    points.len(),
-                    inducing.len(),
-                    online.state.core.n,
-                    online.state.core.m
-                ),
-            ));
-        }
-        online.state.registry = points;
-        online.state.inducing = inducing;
-        Ok(online)
-    }
-
     /// Writes this model to `dir` as `config.json` and `model.safetensors`.
     ///
     /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
@@ -1519,6 +1519,23 @@ pub(super) struct NewPoint<'a> {
 }
 
 impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKernel<C>> {
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores what [`crate::FittedSgpr::save`] of a [`DistanceKernel`]
+    /// stores, with the point and inducing identifiers.
+    /// [`crate::persist::LoadedDistanceSgpr::load`] loads it as an online
+    /// model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// See the example on [`crate::persist::LoadedDistanceSgpr`].
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_online_sgpr(self, dir.as_ref())
+    }
+
     /// The factors a prediction reads.
     fn vfe_system(&self) -> VfeSystem<'_, P, SuppliedSpec> {
         VfeSystem::new(
