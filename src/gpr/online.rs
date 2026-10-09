@@ -455,8 +455,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InsufficientData`] when `n == 1`, or
-    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted.
+    /// Returns [`GprError::InsufficientData`] when `n == 1`,
+    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted,
+    /// or, for a model on supplied distances, [`GprError::SizeOverflow`] when
+    /// the kept ARD squares cannot be laid out for the change (their memory
+    /// cannot be reserved). On an error the model holds the same points.
     ///
     /// # Examples
     ///
@@ -657,12 +660,6 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
 }
 
 impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
-    /// Appends one point at the current `θ` with a bordered LDLT update:
-    /// coordinates `x_new` (none for a kernel on supplied distances alone),
-    /// the target, and `cols`, the point's `n × 1` supplied distances to
-    /// the live points (`()` for a coordinate kernel). Once the factor has
-    /// grown, `push` appends those distances to the training store; the
-    /// store reserved room before, so it does not fail.
     /// The checks of a new point that need nothing but its values: run
     /// before the store makes room, so a refused point changes nothing.
     ///
@@ -684,14 +681,29 @@ impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
         self.registry.require_room()
     }
 
+    /// Appends one point at the current `θ` with a bordered LDLT update,
+    /// once [`Self::check_new_point`] passed: coordinates `x_new` (none for
+    /// a kernel on supplied distances alone), the target, and `cols`, the
+    /// point's `n × 1` supplied distances to the live points (`()` for a
+    /// coordinate kernel). `check` runs every check of the store's append
+    /// before anything changes; once the factor has grown, `write` appends
+    /// the distances, and it cannot fail.
+    ///
+    /// # Errors
+    ///
+    /// The errors of `check`, [`GprError::EmptyInput`] if the workspace
+    /// cannot accept a row, [`GprError::CholeskyFailed`] if the new pivot is
+    /// not positive, and the errors of the kernel's evaluation and of the
+    /// stored transforms. On an error the model holds the same points.
     pub(crate) fn insert_with(
         &mut self,
         x_new: &[f64],
         y_new: f64,
         cols: <K::Supply as SupplyViews>::Rects<'_, P::Storage>,
-        push: impl FnOnce(&mut P::Sources) -> Result<(), GprError>,
+        check: impl FnOnce(&P::Sources) -> Result<(), GprError>,
+        write: impl FnOnce(&mut P::Sources),
     ) -> Result<PointId, GprError> {
-        self.check_new_point(x_new, y_new)?;
+        check(&self.core.sources)?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -756,7 +768,7 @@ impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
         self.workspace.append_border(k_new)?;
-        push(&mut self.core.sources)?;
+        write(&mut self.core.sources);
         #[cfg(feature = "insert-stages")]
         insert_stages::add_border(border_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -800,7 +812,8 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
         if self.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
-        self.insert_with(x_new, y_new, (), |_| Ok(()))
+        self.check_new_point(x_new, y_new)?;
+        self.insert_with(x_new, y_new, (), |_| Ok(()), |_| {})
     }
 
     /// Returns the kernel whose hyperparameters this model owns.

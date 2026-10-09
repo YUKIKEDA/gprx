@@ -438,7 +438,13 @@ impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
         let cols = QuerySources::bind_column(&self.core.slots, sources, self.core.n, scratch)?;
         let exact = cols.f64_view();
         self.core.sources.reserve_point()?;
-        self.insert_with(x_new, y_new, &cols, |store| store.push_point(&cols, &exact))
+        self.insert_with(
+            x_new,
+            y_new,
+            &cols,
+            |store| store.check_push(&cols, &exact),
+            |store| store.write_point(&cols, &exact),
+        )
     }
 
     /// Returns a copy of the kernel whose hyperparameters this model owns.
@@ -477,8 +483,10 @@ impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {
     /// [`GprError::LengthMismatch`] for a column whose length is not `n`, a
     /// source of a slot the kernel does not read, a slot without a source,
     /// or two sources of one slot, [`GprError::IndexOutOfRange`] if no new
-    /// [`PointId`] is left, or [`GprError::CholeskyFailed`] if the new pivot
-    /// is not positive. On an error the model holds the same points.
+    /// [`PointId`] is left, [`GprError::SizeOverflow`] if the kept squares
+    /// cannot grow by a point (their memory cannot be reserved), or
+    /// [`GprError::CholeskyFailed`] if the new pivot is not positive. On an
+    /// error the model holds the same points.
     ///
     /// # Examples
     ///
