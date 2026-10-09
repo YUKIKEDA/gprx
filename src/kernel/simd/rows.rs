@@ -119,12 +119,12 @@ where
                     return false;
                 }
             }
-            let a = v.map(|x| x.to_array());
-            for c in 0..LANES {
-                let Some(dest) = col_slice_mut(block.rb_mut(), j + c) else {
+            let [a0, a1, a2, a3] = v.map(|x| x.to_array());
+            for (c, column) in (j..j + LANES).enumerate() {
+                let Some(dest) = col_slice_mut(block.rb_mut(), column) else {
                     return false;
                 };
-                dest[local..local + PANEL].copy_from_slice(&[a[0][c], a[1][c], a[2][c], a[3][c]]);
+                dest[local..local + PANEL].copy_from_slice(&[a0[c], a1[c], a2[c], a3[c]]);
             }
             j += LANES;
         }

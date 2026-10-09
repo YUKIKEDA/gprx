@@ -1157,9 +1157,6 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
         exact: &dyn RectSlots<f64>,
     ) -> Result<(), GprError>;
 
-    /// Whether the store holds no slot (a coordinate kernel's).
-    fn is_empty(&self) -> bool;
-
     /// About how many values [`Self::remove_point`] moves for `index`.
     fn remove_work(&self, index: usize) -> usize;
 
@@ -1228,10 +1225,6 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
         Self::remove_point(self, index)
     }
 
-    fn is_empty(&self) -> bool {
-        Self::is_empty(self)
-    }
-
     fn remove_work(&self, index: usize) -> usize {
         Self::remove_work(self, index)
     }
@@ -1294,10 +1287,6 @@ impl SourceStore<f32> for RefinedSources {
     fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
         self.storage.remove_point(index)?;
         self.exact.remove_point(index)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.storage.is_empty()
     }
 
     fn remove_work(&self, index: usize) -> usize {

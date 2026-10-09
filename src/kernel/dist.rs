@@ -542,7 +542,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     ///
     /// Returns [`GprError::SizeOverflow`] when the grown cache does not fit.
     pub(crate) fn reserve_point(&mut self) -> Result<(), GprError> {
-        self.into_rows()?;
+        self.lay_out_rows()?;
         let n = self.n;
         if let ArdStore::Rows(rows) = &mut self.data {
             let more = n.checked_add(1).ok_or(GprError::SizeOverflow)?;
@@ -560,11 +560,11 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     ///
     /// Returns [`GprError::SizeOverflow`] when the row runs do not fit.
     pub(crate) fn ready_to_change(&mut self) -> Result<(), GprError> {
-        self.into_rows()
+        self.lay_out_rows()
     }
 
     /// Lays the cache out as row runs, unless it is already.
-    fn into_rows(&mut self) -> Result<(), GprError> {
+    fn lay_out_rows(&mut self) -> Result<(), GprError> {
         if matches!(self.data, ArdStore::Rows(_)) {
             return Ok(());
         }
@@ -647,7 +647,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
                 reason: format!("point index {index} is out of range for n={n}"),
             });
         }
-        self.into_rows()?;
+        self.lay_out_rows()?;
         let ArdStore::Rows(rows) = &mut self.data else {
             return Err(GprError::SizeOverflow);
         };
@@ -1650,8 +1650,7 @@ mod tests {
     fn row_runs_grow_and_shrink_in_place() {
         let d = 3;
         let start: Vec<usize> = (0..5).collect();
-        let packed =
-            ArdSqDiffBuf::<f64>::from_pairs(5, d, |k, i, j| pool_pair(k, i, j)).expect("cache");
+        let packed = ArdSqDiffBuf::<f64>::from_pairs(5, d, pool_pair).expect("cache");
         let tables: Vec<Vec<f64>> = (0..d)
             .map(|k| (0..25).map(|at| pool_pair(k, at % 5, at / 5)).collect())
             .collect();
@@ -1684,8 +1683,7 @@ mod tests {
     /// and a delete out of range are refused, leaving the cache as it was.
     #[test]
     fn row_runs_refuse_a_push_without_room_and_clone_their_room() {
-        let mut cache =
-            ArdSqDiffBuf::<f64>::from_pairs(4, 2, |k, i, j| pool_pair(k, i, j)).expect("cache");
+        let mut cache = ArdSqDiffBuf::<f64>::from_pairs(4, 2, pool_pair).expect("cache");
         let column: Vec<f64> = (0..4).map(|a| pool_pair(0, a, 4)).collect();
         assert!(matches!(
             cache.push_point(|_| &column),
@@ -1707,9 +1705,13 @@ mod tests {
         // A cast keeps the row runs.
         let cast = copy.map(|v| v as f32);
         assert!(cast.view().rows().is_some());
-        assert_eq!(cast.view().get(1, 4, 2), pool_pair(1, 4, 2) as f32);
         assert_eq!(
-            copy.view().position(1, |v| v == pool_pair(1, 4, 2)),
+            cast.view().get(1, 4, 2).to_bits(),
+            (pool_pair(1, 4, 2) as f32).to_bits()
+        );
+        assert_eq!(
+            copy.view()
+                .position(1, |v| v.to_bits() == pool_pair(1, 4, 2).to_bits()),
             Some((4, 2))
         );
     }
