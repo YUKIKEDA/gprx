@@ -9,7 +9,7 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
-use crate::kernel::{BlockAt, BlockStore, KernelSpec, Supply};
+use crate::kernel::{BlockStore, KernelSpec, Supply};
 use crate::kernel::{
     CompiledKernel, CrossViews, DiagAccum, GramInputs, KernelScalar, NoSupply, Triangle,
     WeightedWalk,
@@ -1487,8 +1487,13 @@ impl SparseSupply {
     }
 
     /// Both copies of the blocks, writable: the `f64` one always, the
-    /// `f32` one when it was made.
+    /// `f32` one when it was made. A cast that failed is dropped, so the
+    /// next `f32` read casts the changed blocks again rather than keep an
+    /// error about the old ones.
     fn copies_mut(&mut self) -> (&mut SupplyAt<f64>, Option<&mut SupplyAt<f32>>) {
+        if matches!(self.f32.get(), Some(Err(_))) {
+            self.f32 = std::sync::OnceLock::new();
+        }
         let f32 = self.f32.get_mut().and_then(|made| made.as_mut().ok());
         (&mut self.f64, f32)
     }
@@ -1522,13 +1527,14 @@ impl SparseSupply {
     }
 
     /// Appends a training point whose squared distance to inducing point
-    /// `col` in `block` is `value(block, col)`, once [`Self::reserve_point`]
-    /// made room: nothing in it fails.
-    pub(crate) fn push_point(&mut self, value: impl Fn(BlockAt, usize) -> f64) {
+    /// `col` in block `b` ([`BlockStore::block_ids`] order) is
+    /// `value(b, col)`, once [`Self::reserve_point`] made room: nothing in
+    /// it fails.
+    pub(crate) fn push_point(&mut self, value: impl Fn(usize, usize) -> f64) {
         let (f64, f32) = self.copies_mut();
         f64.xz.push_row(&value);
         if let Some(f32) = f32 {
-            f32.xz.push_row(|at, col| f32::from_f64(value(at, col)));
+            f32.xz.push_row(|b, col| f32::from_f64(value(b, col)));
         }
     }
 
@@ -1598,45 +1604,45 @@ impl SparseSupply {
     }
 
     /// Makes training point `point` (not an inducing point) one more
-    /// inducing point, once [`Self::reserve_inducing`] ran: `value(block,
-    /// row)` is its squared distance to training point `row`, and
-    /// `mirror(block, col)` the value its row of the blocks holds for
-    /// inducing point `col` from now on (the stored one, or a pair a tidy
-    /// source repaired); the values it held are appended to `saved` for
-    /// [`Self::undo_add_inducing`].
+    /// inducing point, once [`Self::reserve_inducing`] ran: `value(b, row)`
+    /// is its squared distance to training point `row` in block `b`
+    /// ([`BlockStore::block_ids`] order), and `mirror(b, col)` the value
+    /// its row of block `b` holds for inducing point `col` from now on (the
+    /// stored one, or a pair a tidy source repaired); the values it held
+    /// are appended to `saved` for [`Self::undo_add_inducing`].
     pub(crate) fn add_inducing(
         &mut self,
         point: usize,
-        value: impl Fn(BlockAt, usize) -> f64,
-        mirror: impl Fn(BlockAt, usize) -> f64,
+        value: impl Fn(usize, usize) -> f64,
+        mirror: impl Fn(usize, usize) -> f64,
         saved: &mut Vec<f64>,
     ) {
         let m = self.inducing.len();
         self.f64.xz.row_into(point, saved);
         let (f64, f32) = self.copies_mut();
-        for at in f64.xz.block_ids() {
+        for (b, at) in f64.xz.block_ids().into_iter().enumerate() {
             for col in 0..m {
-                f64.xz.set(at, point, col, mirror(at, col));
+                f64.xz.set(at, point, col, mirror(b, col));
             }
         }
         f64.xz.push_col(&value);
         if let Some(f32) = f32 {
-            for at in f32.xz.block_ids() {
+            for (b, at) in f32.xz.block_ids().into_iter().enumerate() {
                 for col in 0..m {
-                    f32.xz.set(at, point, col, f32::from_f64(mirror(at, col)));
+                    f32.xz.set(at, point, col, f32::from_f64(mirror(b, col)));
                 }
             }
-            f32.xz.push_col(|at, row| f32::from_f64(value(at, row)));
+            f32.xz.push_col(|b, row| f32::from_f64(value(b, row)));
         }
         self.inducing.push(point);
         self.rebuild_squares();
     }
 
-    /// The undo of [`Self::add_inducing`] with the values it saved.
-    pub(crate) fn undo_add_inducing(&mut self, saved: &[f64]) {
-        let Some(point) = self.inducing.pop() else {
-            return;
-        };
+    /// The undo of [`Self::add_inducing`] of training point `point`, with
+    /// the values it saved.
+    pub(crate) fn undo_add_inducing(&mut self, point: usize, saved: &[f64]) {
+        debug_assert_eq!(self.inducing.last(), Some(&point), "not the last added");
+        self.inducing.retain(|&i| i != point);
         let m = self.inducing.len();
         let (f64, f32) = self.copies_mut();
         f64.xz.pop_col();
@@ -1661,9 +1667,9 @@ impl SparseSupply {
     /// column is appended to `saved` for [`Self::undo_remove_inducing`].
     pub(crate) fn remove_inducing(&mut self, at: usize, saved: &mut Vec<f64>) {
         let (f64, f32) = self.copies_mut();
-        f64.xz.remove_col(at, saved);
+        f64.xz.remove_col(at, Some(saved));
         if let Some(f32) = f32 {
-            f32.xz.remove_col(at, &mut Vec::new());
+            f32.xz.remove_col(at, None);
         }
         self.inducing.remove(at);
         self.rebuild_squares();
@@ -1706,5 +1712,126 @@ impl SparseSupply {
             .map_err(Clone::clone)?;
         let f32: &dyn std::any::Any = f32;
         f32.downcast_ref().ok_or_else(crate::kernel::unbound)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::{
+        ArdDistance, BlockAt, ModelKernelParts, RbfArdKernel, RbfKernel, ScalarDistance,
+    };
+
+    /// Everything a change and its undo must give back: the inducing
+    /// points, and both copies of the blocks and squares.
+    type Values = (usize, usize, Vec<f64>);
+
+    fn state(supply: &SparseSupply) -> (Vec<usize>, Values, Values, Values, Values) {
+        let f32 = supply.at::<f32>().expect("f32");
+        (
+            supply.inducing.clone(),
+            supply.exact().xz.values(),
+            supply.exact().zz.values(),
+            f32.xz.values(),
+            f32.zz.values(),
+        )
+    }
+
+    /// A supply of a scalar slot and a two-dimensional ARD slot over `n`
+    /// points, `inducing` among them, with its `f32` copy made, and the
+    /// points' coordinates (the scalar slot's, then the ARD slot's two).
+    fn supply(n: usize, inducing: &[usize]) -> (SparseSupply, [Vec<f64>; 3]) {
+        let image = ScalarDistance::new();
+        let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0]).expect("ell"));
+        let kernel = image.kernel(RbfKernel::new(1.0).expect("ell")) * ard;
+        let slots = crate::kernel::spec_slots(&kernel.into_spec());
+        let coords = [0.3, 0.7, 1.1].map(|step| {
+            (0..n)
+                .map(|i| (i as f64 * step).sin() * 2.0)
+                .collect::<Vec<f64>>()
+        });
+        let block = |x: &[f64]| -> Vec<f64> {
+            inducing
+                .iter()
+                .flat_map(|&j| x.iter().map(move |xi| (xi - x[j]).powi(2)))
+                .collect()
+        };
+        let (zz, xz) = crate::kernel::bind_inducing(
+            &slots,
+            [
+                bands.from_vecs(vec![block(&coords[1]), block(&coords[2])]),
+                image.from_vec(block(&coords[0])),
+            ],
+            n,
+            inducing,
+        )
+        .expect("bind");
+        let supply = SparseSupply::new::<f32>(inducing.to_vec(), zz, xz).expect("supply");
+        supply.at::<f32>().expect("f32");
+        (supply, coords)
+    }
+
+    /// Each change of the training blocks and its undo give back the same
+    /// inducing points, blocks, squares, and `f32` copy.
+    #[test]
+    fn supply_changes_undo_to_the_same_state() {
+        let (n, inducing) = (7, [5, 1, 3]);
+        let (mut s, coords) = supply(n, &inducing);
+        let original = state(&s);
+        // A point, then its undo.
+        for _ in 0..2 {
+            s.reserve_point().expect("room");
+            s.push_point(|b, col| 10.0 + (b * 3 + col) as f64);
+            assert_eq!(s.exact().xz.values().0, n + 1);
+            s.pop_point();
+            assert_eq!(state(&s), original);
+        }
+        // A point that is not inducing, removed and put back: the inducing
+        // indices past it move down and back up.
+        for index in [0, 2, 6] {
+            let mut saved = Vec::new();
+            s.remove_point(index, Some(&mut saved));
+            let shifted: Vec<usize> = inducing
+                .iter()
+                .map(|&i| if i > index { i - 1 } else { i })
+                .collect();
+            assert_eq!(s.inducing, shifted);
+            s.restore_point(index, &saved);
+            assert_eq!(state(&s), original);
+        }
+        // Point 4 as one more inducing point, with mirror values that differ
+        // from the stored ones (a tidy repair), then its undo.
+        let column = |b: usize, row: usize| -> f64 {
+            // Blocks in slot order: the scalar slot's, then the ARD slot's two.
+            (coords[b][row] - coords[b][4]).powi(2)
+        };
+        for _ in 0..2 {
+            s.reserve_inducing().expect("room");
+            let mut saved = Vec::new();
+            s.add_inducing(
+                4,
+                column,
+                |b, col| column(b, inducing[col]) + 0.5,
+                &mut saved,
+            );
+            assert_eq!(s.inducing, [5, 1, 3, 4]);
+            assert_eq!(s.exact().zz.values().0, 4);
+            assert_eq!(
+                s.exact().xz.get(BlockAt::Scalar(0), 4, 0),
+                column(0, 5) + 0.5
+            );
+            let f32 = s.at::<f32>().expect("f32");
+            assert_eq!(f32.xz.get(BlockAt::Ard(0, 1), 3, 3), column(2, 3) as f32);
+            s.undo_add_inducing(4, &saved);
+            assert_eq!(state(&s), original);
+        }
+        // Each inducing point removed and put back.
+        for at in 0..inducing.len() {
+            let mut saved = Vec::new();
+            s.remove_inducing(at, &mut saved);
+            assert_eq!(s.exact().zz.values().0, 2);
+            s.undo_remove_inducing(at, inducing[at], &saved);
+            assert_eq!(state(&s), original);
+        }
     }
 }

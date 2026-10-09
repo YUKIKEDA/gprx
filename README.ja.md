@@ -522,6 +522,9 @@ fn main() -> Result<(), gprx::GprError> {
     let point = online.point_ids()[1];
     online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0, 9.0])])?;
     assert_eq!(online.inducing(), &[0, 2, 1]);
+    let _ = online.predict([image.from_vec(vec![0.25, 2.25, 0.25])], 1)?;
+    let _ = (online.to_kernel(), online.slots());
+    online.delete_inducing(online.inducing_ids()[2])?;
     let svgp = Svgp::new(kernel, GaussianLikelihood::new(0.1)?)
         .factor([image.from_vec(train_z.to_vec())], 4, &y, &[0, 2])
         .map_err(|(_, e)| e)?;

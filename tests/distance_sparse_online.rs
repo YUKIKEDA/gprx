@@ -118,115 +118,181 @@ impl Live {
     }
 }
 
-/// One kernel of the comparison: the distance kernel's slot reads `dist`
-/// (summed for a scalar slot), and coordinates of `coords`.
-#[derive(Clone, Copy)]
+/// One kernel of the comparison. Each is the ARD RBF of `ELL` over the
+/// two coordinates, written as distance slots (and a coordinate leaf).
+#[derive(Clone, Copy, Debug)]
 enum Kind {
+    /// One scalar slot of the summed squares (the isotropic RBF of
+    /// `ELL[0]`, compared with the coordinate RBF of `ELL[0]`).
     Scalar,
+    /// One ARD slot of both dimensions, from moved-in tables.
     Ard,
+    /// The same ARD slot from borrowed tables (packed when bound).
+    ArdBorrowed,
+    /// A scalar slot of dimension 0 times a coordinate leaf of dimension 1.
     WithPoints,
+    /// A scalar slot of dimension 0 times a one-dimensional ARD slot of
+    /// dimension 1, their sources handed over ARD first.
+    SlotPair,
+    /// Two scalar slots, one per dimension.
+    TwoScalars,
 }
 
-/// Runs `$body` with `$online` the online model of `$kind` on the starting
-/// points, `$src(rows, cols)` a source of the blocks between samples
-/// (`cols: None` for the queries), and `$coords` the coordinate model's
-/// kernel and dimensions; `$extra(rows)` is the coordinates a `WithPoints`
-/// model takes (empty otherwise).
+const KINDS: [Kind; 6] = [
+    Kind::Scalar,
+    Kind::Ard,
+    Kind::ArdBorrowed,
+    Kind::WithPoints,
+    Kind::SlotPair,
+    Kind::TwoScalars,
+];
+
+/// The squares a kind's slots read, one block per slot dimension, in the
+/// order `wrap` takes them.
+fn blocks_of(kind: Kind, world: &World, rows: &[usize], cols: Option<&[usize]>) -> Vec<Vec<f64>> {
+    match kind {
+        Kind::Scalar => vec![world.summed(&[0, 1], rows, cols)],
+        Kind::Ard | Kind::ArdBorrowed | Kind::SlotPair | Kind::TwoScalars => {
+            vec![world.sq(0, rows, cols), world.sq(1, rows, cols)]
+        }
+        Kind::WithPoints => vec![world.sq(0, rows, cols)],
+    }
+}
+
+/// Runs `$body` with `$online` the online model of `$kind` on `$live`'s
+/// points, `$blocks(rows, cols)` the raw squares between samples (`cols:
+/// None` for the queries), `$wrap(blocks)` their sources, `$src` the two
+/// together, `$coords` the coordinate model's kernel and dimensions, and
+/// `$extra(rows)` the coordinates a `WithPoints` model takes (empty
+/// otherwise).
 macro_rules! with_online {
-    ($p:ty, $kind:expr, $world:expr, |$online:ident, $src:ident, $extra:ident, $coords:ident| $body:block) => {{
+    ($p:ty, $kind:expr, $world:expr, $live:expr, |$online:ident, $src:ident, $blocks:ident, $wrap:ident, $extra:ident, $coords:ident| $body:block) => {{
         let world: &World = $world;
-        let live = Live::start();
+        let live: &Live = &$live;
+        let kind: Kind = $kind;
         let y = world.y(&live.points);
         let n = live.points.len();
-        match $kind {
+        let $blocks = |rows: &[usize], cols: Option<&[usize]>| blocks_of(kind, world, rows, cols);
+        let $extra = |rows: &[usize]| -> Vec<f64> {
+            match kind {
+                Kind::WithPoints => world.x(&[1], rows),
+                _ => Vec::new(),
+            }
+        };
+        // The coordinate model of a summed slot is the isotropic RBF.
+        let $coords = (
+            match kind {
+                Kind::Scalar => KernelSpec::from(RbfKernel::new(ELL[0]).expect("ell")),
+                _ => KernelSpec::from(RbfArdKernel::new(&ELL).expect("ell")),
+            },
+            vec![0usize, 1],
+        );
+        let train = $blocks(&live.points, Some(&live.inducing));
+        let rbf = |ell: f64| RbfKernel::new(ell).expect("ell");
+        macro_rules! run {
+            ($kernel:expr, $first:expr, $wrapped:expr) => {{
+                let $wrap = $wrapped;
+                let $src = |rows: &[usize], cols: Option<&[usize]>| $wrap($blocks(rows, cols));
+                #[allow(unused_mut)]
+                let mut $online = Sgpr::new($kernel, lik())
+                    .with_precision::<$p>()
+                    .with_optimizer(Fixed)
+                    .factor($first, n, &y, &live.inducing)
+                    .map_err(|(_, e)| e)
+                    .expect("factor")
+                    .into_online();
+                #[allow(unused_macros)]
+                macro_rules! insert {
+                    ($s:expr, $x:expr, $y:expr) => {{
+                        let _: Vec<f64> = $x;
+                        $online.insert($s, $y)
+                    }};
+                }
+                macro_rules! predict {
+                    ($s:expr, $xq:expr) => {
+                        $online.predict($s, Q)
+                    };
+                }
+                $body
+            }};
+        }
+        match kind {
             Kind::Scalar => {
                 let image = ScalarDistance::new();
-                let rbf = RbfKernel::new(ELL[0]).expect("ell");
-                let $src = |rows: &[usize], cols: Option<&[usize]>| -> DistanceSource<'static> {
-                    image.from_vec(world.summed(&[0, 1], rows, cols))
-                };
-                let $extra = |_rows: &[usize]| -> Vec<f64> { Vec::new() };
-                let $coords = (KernelSpec::from(rbf), vec![0usize, 1]);
-                #[allow(unused_mut)]
-                let mut $online = Sgpr::new(image.kernel(rbf), lik())
-                    .with_precision::<$p>()
-                    .with_optimizer(Fixed)
-                    .factor(
-                        [$src(&live.points, Some(&live.inducing))],
-                        n,
-                        &y,
-                        &live.inducing,
-                    )
-                    .map_err(|(_, e)| e)
-                    .expect("factor")
-                    .into_online();
-                macro_rules! insert {
-                    ($s:expr, $x:expr, $y:expr) => {{
-                        let _: Vec<f64> = $x;
-                        $online.insert($s, $y)
-                    }};
-                }
-                macro_rules! predict {
-                    ($s:expr, $xq:expr) => {
-                        $online.predict($s, Q)
-                    };
-                }
-                $body
+                run!(
+                    image.kernel(rbf(ELL[0])),
+                    [image.from_vec(train[0].clone())],
+                    |b: Vec<Vec<f64>>| -> Vec<DistanceSource<'static>> {
+                        b.into_iter().map(|v| image.from_vec(v)).collect()
+                    }
+                )
             }
             Kind::Ard => {
-                let ard = RbfArdKernel::new(&ELL).expect("ell");
-                let (bands, kernel) = ArdDistance::from_leaf(ard.clone());
-                let $src = |rows: &[usize], cols: Option<&[usize]>| -> DistanceSource<'static> {
-                    bands.from_vecs((0..D).map(|k| world.sq(k, rows, cols)).collect())
-                };
-                let $extra = |_rows: &[usize]| -> Vec<f64> { Vec::new() };
-                let $coords = (KernelSpec::from(ard), vec![0usize, 1]);
-                #[allow(unused_mut)]
-                let mut $online = Sgpr::new(kernel, lik())
-                    .with_precision::<$p>()
-                    .with_optimizer(Fixed)
-                    .factor(
-                        [$src(&live.points, Some(&live.inducing))],
-                        n,
-                        &y,
-                        &live.inducing,
-                    )
-                    .map_err(|(_, e)| e)
-                    .expect("factor")
-                    .into_online();
-                macro_rules! insert {
-                    ($s:expr, $x:expr, $y:expr) => {{
-                        let _: Vec<f64> = $x;
-                        $online.insert($s, $y)
-                    }};
-                }
-                macro_rules! predict {
-                    ($s:expr, $xq:expr) => {
-                        $online.predict($s, Q)
-                    };
-                }
-                $body
+                let (bands, kernel) = ArdDistance::from_leaf(RbfArdKernel::new(&ELL).expect("ell"));
+                run!(kernel, [bands.from_vecs(train.clone())], |b: Vec<
+                    Vec<f64>,
+                >|
+                 -> Vec<
+                    DistanceSource<'static>,
+                > {
+                    vec![bands.from_vecs(b)]
+                })
+            }
+            Kind::ArdBorrowed => {
+                let (bands, kernel) = ArdDistance::from_leaf(RbfArdKernel::new(&ELL).expect("ell"));
+                let refs: Vec<&[f64]> = train.iter().map(Vec::as_slice).collect();
+                run!(kernel, [bands.borrow(&refs)], |b: Vec<Vec<f64>>| -> Vec<
+                    DistanceSource<'static>,
+                > {
+                    vec![bands.from_vecs(b)]
+                })
+            }
+            Kind::SlotPair => {
+                let image = ScalarDistance::new();
+                let (bands, ard) =
+                    ArdDistance::from_leaf(RbfArdKernel::new(&ELL[1..]).expect("ell"));
+                run!(
+                    image.kernel(rbf(ELL[0])) * ard,
+                    [
+                        bands.from_vecs(vec![train[1].clone()]),
+                        image.from_vec(train[0].clone()),
+                    ],
+                    |b: Vec<Vec<f64>>| -> Vec<DistanceSource<'static>> {
+                        let mut b = b.into_iter();
+                        let (first, second) =
+                            (b.next().unwrap_or_default(), b.next().unwrap_or_default());
+                        vec![bands.from_vecs(vec![second]), image.from_vec(first)]
+                    }
+                )
+            }
+            Kind::TwoScalars => {
+                let (a, b) = (ScalarDistance::new(), ScalarDistance::new());
+                run!(
+                    a.kernel(rbf(ELL[0])) * b.kernel(rbf(ELL[1])),
+                    [b.from_vec(train[1].clone()), a.from_vec(train[0].clone())],
+                    |v: Vec<Vec<f64>>| -> Vec<DistanceSource<'static>> {
+                        let mut v = v.into_iter();
+                        let (first, second) =
+                            (v.next().unwrap_or_default(), v.next().unwrap_or_default());
+                        vec![a.from_vec(first), b.from_vec(second)]
+                    }
+                )
             }
             Kind::WithPoints => {
                 let image = ScalarDistance::new();
-                let $src = |rows: &[usize], cols: Option<&[usize]>| -> DistanceSource<'static> {
-                    image.from_vec(world.sq(0, rows, cols))
+                let $wrap = |b: Vec<Vec<f64>>| -> Vec<DistanceSource<'static>> {
+                    b.into_iter().map(|v| image.from_vec(v)).collect()
                 };
-                let $extra = |rows: &[usize]| -> Vec<f64> { world.x(&[1], rows) };
-                let $coords = (
-                    KernelSpec::from(RbfArdKernel::new(&ELL).expect("ell")),
-                    vec![0usize, 1],
-                );
-                let kernel = image.kernel(RbfKernel::new(ELL[0]).expect("ell"))
-                    * KernelSpec::from(RbfKernel::new(ELL[1]).expect("ell"));
+                let $src = |rows: &[usize], cols: Option<&[usize]>| $wrap($blocks(rows, cols));
+                let kernel = image.kernel(rbf(ELL[0])) * KernelSpec::from(rbf(ELL[1]));
                 #[allow(unused_mut)]
                 let mut $online = Sgpr::new(kernel, lik())
                     .with_precision::<$p>()
                     .with_optimizer(Fixed)
                     .factor(
-                        [$src(&live.points, Some(&live.inducing))],
+                        [image.from_vec(train[0].clone())],
                         n,
-                        &$extra(&live.points),
+                        &world.x(&[1], &live.points),
                         1,
                         &y,
                         &live.inducing,
@@ -234,6 +300,7 @@ macro_rules! with_online {
                     .map_err(|(_, e)| e)
                     .expect("factor")
                     .into_online();
+                #[allow(unused_macros)]
                 macro_rules! insert {
                     ($s:expr, $x:expr, $y:expr) => {
                         $online.insert($s, &$x, $y)
@@ -251,17 +318,21 @@ macro_rules! with_online {
 }
 
 /// The online model holds what `live` says: the inducing points at their
-/// buffer places, the same predictions and bound as the coordinate model
-/// factored from scratch.
+/// buffer places, and the same predictions, bound, gradient, and Hessian
+/// as the coordinate model factored from scratch. The gradient and the
+/// Hessian are taken at a shifted `θ` on a copy, so they assemble the
+/// system again from the stored blocks; the copy then predicts at that
+/// `θ` from the blocks it lent and got back.
 macro_rules! check {
     ($p:ty, $online:ident, $live:expr, $world:expr, $src:ident, $coords:ident, $tol:expr) => {{
         let (live, world): (&Live, &World) = (&$live, $world);
+        let tol: f64 = $tol;
         let places: Vec<usize> = live.inducing.iter().map(|&i| live.at(i)).collect();
         assert_eq!($online.inducing(), places.as_slice());
         assert_eq!($online.n(), live.points.len());
         assert_eq!($online.m(), live.inducing.len());
         let (kernel, dims) = &$coords;
-        let reference = Sgpr::new(kernel.clone(), lik())
+        let mut reference = Sgpr::new(kernel.clone(), lik())
             .with_precision::<$p>()
             .with_optimizer(Fixed)
             .factor(
@@ -277,101 +348,126 @@ macro_rules! check {
         let expect = reference
             .predict(&world.xq(dims), Q, dims.len())
             .expect("predict");
-        let got = predict!([$src(&live.inducing, None)], world.xq(&[1])).expect("predict");
-        assert_slice_close(&to64(&got.mean), &to64(&expect.mean), $tol);
-        assert_slice_close(&to64(&got.variance), &to64(&expect.variance), $tol);
+        let got = predict!($src(&live.inducing, None), world.xq(&[1])).expect("predict");
+        assert_slice_close(&to64(&got.mean), &to64(&expect.mean), tol);
+        assert_slice_close(&to64(&got.variance), &to64(&expect.variance), tol);
         assert_close(
             $online.neg_log_marginal_likelihood().expect("nlml"),
             reference.neg_log_marginal_likelihood().expect("nlml"),
-            $tol * 10.0,
+            tol * 10.0,
         );
+        let p = reference.num_params();
+        assert_eq!($online.num_params(), p);
+        let mut theta = vec![0.0; p];
+        reference.get_params(&mut theta).expect("theta");
+        let at: Vec<f64> = theta.iter().map(|t| t + 0.1).collect();
+        let saved = $online.clone();
+        let (mut gr, mut go) = (vec![0.0; p], vec![0.0; p]);
+        let vr = reference
+            .value_and_gradient_into(&at, &mut gr)
+            .expect("grad");
+        let vo = $online.value_and_gradient_into(&at, &mut go).expect("grad");
+        assert_close(vo, vr, tol * 10.0);
+        assert_slice_close(&go, &gr, tol * 10.0);
+        let (mut hr, mut ho) = (vec![0.0; p * p], vec![0.0; p * p]);
+        reference.hessian_into(&at, &mut hr).expect("hess");
+        $online.hessian_into(&at, &mut ho).expect("hess");
+        assert_slice_close(&ho, &hr, tol * 10.0);
+        let expect = reference
+            .predict(&world.xq(dims), Q, dims.len())
+            .expect("predict");
+        let got = predict!($src(&live.inducing, None), world.xq(&[1])).expect("predict");
+        assert_slice_close(&to64(&got.mean), &to64(&expect.mean), tol);
+        $online = saved;
     }};
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn online_matches<P: GpScalar + std::fmt::Debug>(kind: Kind, tol: f64) {
     let world = World::new();
-    with_online!(P, kind, &world, |online, src, extra, coords| {
-        let mut live = Live::start();
-        check!(P, online, live, &world, src, coords, tol);
-        // Two inserts fill the room the first one makes (a quarter more).
-        for new in [10, 11] {
-            insert!(
-                [src(&live.inducing, Some(&[new]))],
-                extra(&[new]),
-                world.y[new]
-            )
-            .expect("insert");
-            live.points.push(new);
+    with_online!(
+        P,
+        kind,
+        &world,
+        Live::start(),
+        |online, src, blocks, wrap, extra, coords| {
+            let _ = (&blocks, &wrap);
+            let mut live = Live::start();
             check!(P, online, live, &world, src, coords, tol);
-        }
-        // Sample 3 becomes an inducing point.
-        let id = online.point_ids()[live.at(3)];
-        online
-            .insert_inducing(id, [src(&live.points, Some(&[3]))])
-            .expect("insert_inducing");
-        live.inducing.push(3);
-        check!(P, online, live, &world, src, coords, tol);
-        // A point in the middle that is not inducing.
-        let id = online.point_ids()[live.at(5)];
-        online.delete(id).expect("delete");
-        live.points.retain(|&p| p != 5);
-        check!(P, online, live, &world, src, coords, tol);
-        // An inducing point's sample cannot go; once it is not inducing, it can.
-        let id = online.point_ids()[live.at(0)];
-        let before = predict!([src(&live.inducing, None)], world.xq(&[1])).expect("predict");
-        assert!(matches!(
-            online.delete(id),
-            Err(GprError::InvalidConfig { .. })
-        ));
-        let after = predict!([src(&live.inducing, None)], world.xq(&[1])).expect("predict");
-        assert_eq!(bits(&after.mean), bits(&before.mean));
-        let at = live
-            .inducing
-            .iter()
-            .position(|&i| i == 0)
-            .expect("inducing");
-        online
-            .delete_inducing(online.inducing_ids()[at])
-            .expect("delete_inducing");
-        live.inducing.remove(at);
-        check!(P, online, live, &world, src, coords, tol);
-        online.delete(id).expect("delete");
-        live.points.retain(|&p| p != 0);
-        check!(P, online, live, &world, src, coords, tol);
-        // A new point, then the same point as an inducing point; then more
-        // points than the room holds, so the blocks are laid out again.
-        insert!(
-            [src(&live.inducing, Some(&[12]))],
-            extra(&[12]),
-            world.y[12]
-        )
-        .expect("insert");
-        live.points.push(12);
-        let id = online.point_ids()[live.at(12)];
-        online
-            .insert_inducing(id, [src(&live.points, Some(&[12]))])
-            .expect("insert_inducing");
-        live.inducing.push(12);
-        check!(P, online, live, &world, src, coords, tol);
-        for new in 13..TOTAL {
-            insert!(
-                [src(&live.inducing, Some(&[new]))],
-                extra(&[new]),
-                world.y[new]
-            )
-            .expect("insert");
-            live.points.push(new);
+            // Two inserts fill the room the first one makes (a quarter more).
+            for new in [10, 11] {
+                insert!(
+                    src(&live.inducing, Some(&[new])),
+                    extra(&[new]),
+                    world.y[new]
+                )
+                .expect("insert");
+                live.points.push(new);
+                check!(P, online, live, &world, src, coords, tol);
+            }
+            // Sample 3 becomes an inducing point.
+            let id = online.point_ids()[live.at(3)];
+            online
+                .insert_inducing(id, src(&live.points, Some(&[3])))
+                .expect("insert_inducing");
+            live.inducing.push(3);
             check!(P, online, live, &world, src, coords, tol);
-        }
-        // The first point, and the last.
-        for gone in [live.points[0], *live.points.last().expect("points")] {
-            let id = online.point_ids()[live.at(gone)];
+            // A point in the middle that is not inducing.
+            let id = online.point_ids()[live.at(5)];
             online.delete(id).expect("delete");
-            live.points.retain(|&p| p != gone);
+            live.points.retain(|&p| p != 5);
             check!(P, online, live, &world, src, coords, tol);
+            // An inducing point's sample cannot go; once it is not inducing, it can.
+            let id = online.point_ids()[live.at(0)];
+            let before = predict!(src(&live.inducing, None), world.xq(&[1])).expect("predict");
+            assert!(matches!(
+                online.delete(id),
+                Err(GprError::InvalidConfig { .. })
+            ));
+            let after = predict!(src(&live.inducing, None), world.xq(&[1])).expect("predict");
+            assert_eq!(bits(&after.mean), bits(&before.mean));
+            let at = live
+                .inducing
+                .iter()
+                .position(|&i| i == 0)
+                .expect("inducing");
+            online
+                .delete_inducing(online.inducing_ids()[at])
+                .expect("delete_inducing");
+            live.inducing.remove(at);
+            check!(P, online, live, &world, src, coords, tol);
+            online.delete(id).expect("delete");
+            live.points.retain(|&p| p != 0);
+            check!(P, online, live, &world, src, coords, tol);
+            // A new point, then the same point as an inducing point; then more
+            // points than the room holds, so the blocks are laid out again.
+            insert!(src(&live.inducing, Some(&[12])), extra(&[12]), world.y[12]).expect("insert");
+            live.points.push(12);
+            let id = online.point_ids()[live.at(12)];
+            online
+                .insert_inducing(id, src(&live.points, Some(&[12])))
+                .expect("insert_inducing");
+            live.inducing.push(12);
+            check!(P, online, live, &world, src, coords, tol);
+            for new in 13..TOTAL {
+                insert!(
+                    src(&live.inducing, Some(&[new])),
+                    extra(&[new]),
+                    world.y[new]
+                )
+                .expect("insert");
+                live.points.push(new);
+                check!(P, online, live, &world, src, coords, tol);
+            }
+            // The first point, and the last.
+            for gone in [live.points[0], *live.points.last().expect("points")] {
+                let id = online.point_ids()[live.at(gone)];
+                online.delete(id).expect("delete");
+                live.points.retain(|&p| p != gone);
+                check!(P, online, live, &world, src, coords, tol);
+            }
         }
-    });
+    );
 }
 
 fn bits<T: KernelScalar>(values: &[T]) -> Vec<u64> {
@@ -380,17 +476,141 @@ fn bits<T: KernelScalar>(values: &[T]) -> Vec<u64> {
 
 #[test]
 fn online_sgpr_on_supplied_distances_matches_a_fresh_factor() {
-    for kind in [Kind::Scalar, Kind::Ard, Kind::WithPoints] {
+    for kind in KINDS {
         online_matches::<DoublePrecision>(kind, 1e-9);
     }
 }
 
 #[test]
 fn online_sgpr_on_supplied_distances_matches_in_single_and_mixed() {
-    for kind in [Kind::Scalar, Kind::Ard, Kind::WithPoints] {
-        online_matches::<SinglePrecision>(kind, 2e-3);
-        online_matches::<MixedPrecision<PromoteStorage>>(kind, 2e-3);
+    for kind in KINDS {
+        online_matches::<SinglePrecision>(kind, 5e-4);
+        online_matches::<MixedPrecision<PromoteStorage>>(kind, 5e-4);
     }
+}
+
+/// Columns that are not finite, negative, or of the wrong length are
+/// refused, for every kernel and precision, and leave the model's
+/// predictions, points, and inducing points as they were.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn refused<P: GpScalar + std::fmt::Debug>(kind: Kind) {
+    let world = World::new();
+    with_online!(
+        P,
+        kind,
+        &world,
+        Live::start(),
+        |online, src, blocks, wrap, extra, coords| {
+            let _ = &coords;
+            let live = Live::start();
+            let before = predict!(src(&live.inducing, None), world.xq(&[1])).expect("predict");
+            let unchanged = |n: usize, m: usize, got: &gprx::Prediction<P::Refine>| {
+                assert_eq!(n, live.points.len());
+                assert_eq!(m, live.inducing.len());
+                assert_eq!(bits(&got.mean), bits(&before.mean));
+                assert_eq!(bits(&got.variance), bits(&before.variance));
+            };
+            let row = blocks(&live.inducing, Some(&[10]));
+            let column = blocks(&live.points, Some(&[3]));
+            for bad in [f64::NAN, f64::INFINITY, -1.0] {
+                for b in 0..row.len() {
+                    let mut rows = row.clone();
+                    rows[b][1] = bad;
+                    assert!(
+                        matches!(
+                            insert!(wrap(rows), extra(&[10]), world.y[10]),
+                            Err(GprError::InvalidDistance { .. })
+                        ),
+                        "{kind:?} insert of {bad}"
+                    );
+                    let got = predict!(src(&live.inducing, None), world.xq(&[1])).expect("predict");
+                    unchanged(online.n(), online.m(), &got);
+                    let mut cols = column.clone();
+                    cols[b][live.at(9)] = bad;
+                    let id = online.point_ids()[live.at(3)];
+                    assert!(
+                        matches!(
+                            online.insert_inducing(id, wrap(cols)),
+                            Err(GprError::InvalidDistance { .. })
+                        ),
+                        "{kind:?} insert_inducing of {bad}"
+                    );
+                    let got = predict!(src(&live.inducing, None), world.xq(&[1])).expect("predict");
+                    unchanged(online.n(), online.m(), &got);
+                }
+            }
+            let mut short = row.clone();
+            short[0].pop();
+            assert!(matches!(
+                insert!(wrap(short), extra(&[10]), world.y[10]),
+                Err(GprError::LengthMismatch { .. })
+            ));
+            let mut short = column.clone();
+            short[0].pop();
+            let id = online.point_ids()[live.at(3)];
+            assert!(matches!(
+                online.insert_inducing(id, wrap(short)),
+                Err(GprError::LengthMismatch { .. })
+            ));
+            let got = predict!(src(&live.inducing, None), world.xq(&[1])).expect("predict");
+            unchanged(online.n(), online.m(), &got);
+            // The model still takes good columns.
+            insert!(wrap(row), extra(&[10]), world.y[10]).expect("insert");
+        }
+    );
+}
+
+#[test]
+fn bad_columns_are_refused_for_every_kernel_and_precision() {
+    for kind in KINDS {
+        refused::<DoublePrecision>(kind);
+        refused::<SinglePrecision>(kind);
+        refused::<MixedPrecision<PromoteStorage>>(kind);
+    }
+}
+
+/// One inducing point, which cannot be deleted; then every training point
+/// inducing (`m = n`), each step matching the coordinate model.
+#[test]
+fn one_inducing_point_and_every_point_inducing() {
+    let world = World::new();
+    let start = Live {
+        points: (0..6).collect(),
+        inducing: vec![2],
+    };
+    with_online!(
+        DoublePrecision,
+        Kind::Ard,
+        &world,
+        start,
+        |online, src, blocks, wrap, extra, coords| {
+            let _ = (&blocks, &wrap, &extra);
+            let mut live = Live {
+                points: (0..6).collect(),
+                inducing: vec![2],
+            };
+            check!(DoublePrecision, online, live, &world, src, coords, 1e-9);
+            assert!(matches!(
+                online.delete_inducing(online.inducing_ids()[0]),
+                Err(GprError::InsufficientData { .. })
+            ));
+            for next in [5, 0, 3, 1, 4] {
+                let id = online.point_ids()[live.at(next)];
+                online
+                    .insert_inducing(id, src(&live.points, Some(&[next])))
+                    .expect("insert_inducing");
+                live.inducing.push(next);
+                check!(DoublePrecision, online, live, &world, src, coords, 1e-8);
+            }
+            assert_eq!(online.m(), online.n());
+            // Every point is inducing: none can be deleted until it is not.
+            let id = online.point_ids()[0];
+            assert!(matches!(
+                online.delete(id),
+                Err(GprError::InvalidConfig { .. })
+            ));
+        }
+    );
 }
 
 /// Fills one `m × 1` column (the inducing samples to sample `point`).

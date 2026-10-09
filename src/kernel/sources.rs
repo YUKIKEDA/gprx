@@ -1581,12 +1581,14 @@ impl<T: KernelScalar> BlockStore<T> {
         from: impl Fn(usize) -> Option<usize>,
     ) -> Result<Self, GprError> {
         let len = ld.checked_mul(cap).ok_or(GprError::SizeOverflow)?;
-        // A whole number of pages and one cache line more: the blocks of
-        // one slot start a line apart within a page.
+        // A whole number of 4 KiB pages and one 64-byte cache line more: the
+        // blocks of one slot start a line apart within a page.
+        let size = std::mem::size_of::<T>().max(1);
+        let (page, line) = (4096 / size, 64 / size);
         let stride = len
-            .div_ceil(512)
-            .checked_mul(512)
-            .and_then(|v| v.checked_add(8))
+            .div_ceil(page)
+            .checked_mul(page)
+            .and_then(|v| v.checked_add(line))
             .ok_or(GprError::SizeOverflow)?;
         let (rows, old_ld, old_stride) = (self.rows, self.ld, self.stride);
         let zero = T::from_f64(0.0);
@@ -1650,15 +1652,18 @@ impl<T: KernelScalar> BlockStore<T> {
         Ok(())
     }
 
-    /// Appends row `rows`, `value(block, col)` in each column, once
-    /// [`Self::reserve_row`] made room: nothing in it fails or allocates.
-    pub(crate) fn push_row(&mut self, mut value: impl FnMut(BlockAt, usize) -> T) {
+    /// Appends row `rows`, `value(b, col)` in each column of block `b`
+    /// (in [`Self::block_ids`] order), once [`Self::reserve_row`] made
+    /// room: nothing in it fails or allocates.
+    pub(crate) fn push_row(&mut self, mut value: impl FnMut(usize, usize) -> T) {
         debug_assert!(self.rows < self.ld, "push_row before reserve_row");
         let (row, ld, cols) = (self.rows, self.ld, self.cols);
-        self.each_block_mut(|at, block| {
+        let mut b = 0;
+        self.each_block_mut(|_, block| {
             for c in 0..cols {
-                block[row + c * ld] = value(at, c);
+                block[row + c * ld] = value(b, c);
             }
+            b += 1;
         });
         self.rows += 1;
     }
@@ -1741,15 +1746,18 @@ impl<T: KernelScalar> BlockStore<T> {
         Ok(())
     }
 
-    /// Appends a column, `value(block, row)` in each row, once
-    /// [`Self::reserve_col`] made room: nothing in it fails or allocates.
-    pub(crate) fn push_col(&mut self, mut value: impl FnMut(BlockAt, usize) -> T) {
+    /// Appends a column, `value(b, row)` in each row of block `b` (in
+    /// [`Self::block_ids`] order), once [`Self::reserve_col`] made room:
+    /// nothing in it fails or allocates.
+    pub(crate) fn push_col(&mut self, mut value: impl FnMut(usize, usize) -> T) {
         debug_assert!(self.cols < self.cap, "push_col before reserve_col");
         let (rows, ld, col) = (self.rows, self.ld, self.cols);
-        self.each_block_mut(|at, block| {
+        let mut b = 0;
+        self.each_block_mut(|_, block| {
             for (row, slot) in block[col * ld..col * ld + rows].iter_mut().enumerate() {
-                *slot = value(at, row);
+                *slot = value(b, row);
             }
+            b += 1;
         });
         self.cols += 1;
     }
@@ -1761,14 +1769,16 @@ impl<T: KernelScalar> BlockStore<T> {
         self.cols = col;
     }
 
-    /// Removes column `index` in place, appending its `rows` values block
-    /// by block to `saved` for [`Self::insert_col`].
-    pub(crate) fn remove_col(&mut self, index: usize, saved: &mut Vec<f64>) {
+    /// Removes column `index` in place; with `saved`, its `rows` values are
+    /// appended there block by block for [`Self::insert_col`].
+    pub(crate) fn remove_col(&mut self, index: usize, mut saved: Option<&mut Vec<f64>>) {
         debug_assert!(index < self.cols, "remove_col past the columns");
         let (rows, ld, cols) = (self.rows, self.ld, self.cols);
         self.each_block_mut(|_, block| {
             let start = index * ld;
-            saved.extend(block[start..start + rows].iter().map(|v| v.to_f64()));
+            if let Some(saved) = saved.as_deref_mut() {
+                saved.extend(block[start..start + rows].iter().map(|v| v.to_f64()));
+            }
             block.copy_within(start + ld..cols * ld, start);
             block[(cols - 1) * ld..cols * ld].fill(T::from_f64(0.0));
         });
@@ -1826,6 +1836,21 @@ impl<T: KernelScalar> BlockStore<T> {
                 (0..slot.count(stride)).map(move |k| BlockAt::Ard(at, k))
             }))
             .collect()
+    }
+
+    /// Every value `(block, row, col)` in [`Self::block_ids`] order, with
+    /// the shape: what a change and its undo must give back.
+    #[cfg(test)]
+    pub(crate) fn values(&self) -> (usize, usize, Vec<f64>) {
+        let mut out = Vec::new();
+        for at in self.block_ids() {
+            for col in 0..self.cols {
+                for row in 0..self.rows {
+                    out.push(self.get(at, row, col).to_f64());
+                }
+            }
+        }
+        (self.rows, self.cols, out)
     }
 
     /// Every block's buffer, in slot order.
@@ -2371,12 +2396,17 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     }
 
     /// How the source of `block`'s slot asked its values to be checked.
-    pub(crate) fn tidy(&self, block: BlockAt) -> Tidy {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::UnsupportedKernelOperation`] for a slot these
+    /// sources do not bind.
+    pub(crate) fn tidy(&self, block: BlockAt) -> Result<Tidy, GprError> {
         let at = match block {
             BlockAt::Scalar(at) => at,
             BlockAt::Ard(at, _) => self.scalars + at,
         };
-        self.raw.get(at).map_or(Tidy::Exact, |raw| raw.tidy)
+        self.raw.get(at).map(|raw| raw.tidy).ok_or_else(unbound)
     }
 }
 
@@ -2445,7 +2475,7 @@ pub(crate) fn new_inducing_column(
     inducing: &[usize],
     point: usize,
     cols: &dyn RectSlots<f64>,
-    tidy: impl Fn(BlockAt) -> Tidy,
+    tidy: impl Fn(BlockAt) -> Result<Tidy, GprError>,
 ) -> Result<(Vec<f64>, Vec<f64>), GprError> {
     let (n, m) = (xz.rows, inducing.len());
     let side = m + 1;
@@ -2468,7 +2498,7 @@ pub(crate) fn new_inducing_column(
         // A violation is located in the caller's column: the row of an
         // inducing point, or of the point itself.
         let row_of = |i: usize| inducing.get(i).copied().unwrap_or(point);
-        match check_block(&square, side, side, BlockKind::Square, tidy(at)) {
+        match check_block(&square, side, side, BlockKind::Square, tidy(at)?) {
             Ok(true) => repair_block(&mut square, side, side, BlockKind::Square),
             Ok(false) => {}
             Err(GprError::InvalidDistance { row, col, reason }) => {
@@ -2733,6 +2763,114 @@ fn check_slot(
 mod tests {
     use super::*;
     use crate::kernel::{ArdDistance, ScalarDistance};
+
+    /// A store of one scalar slot and two ARD slots (packed, and moved-in
+    /// tables), `rows × cols`, every value distinct.
+    fn store(rows: usize, cols: usize) -> BlockStore<f64> {
+        let block =
+            |seed: f64| -> Vec<f64> { (0..rows * cols).map(|i| seed + i as f64 * 0.25).collect() };
+        let packed: Vec<f64> = [block(100.0), block(200.0)].concat();
+        BlockStore::packed(
+            rows,
+            cols,
+            vec![block(0.0)],
+            vec![
+                SlotBlocks::Flat(packed),
+                SlotBlocks::Tables(vec![block(300.0), block(400.0), block(500.0)]),
+            ],
+        )
+    }
+
+    /// What a kernel reads from `store`: every value through
+    /// [`RectSlots`], in [`BlockStore::values`] order.
+    fn read(store: &BlockStore<f64>) -> Vec<f64> {
+        let (rows, cols, _) = store.values();
+        let mut out = Vec::new();
+        let scalar = RectSlots::scalar(store, 0).expect("scalar");
+        for c in 0..cols {
+            out.extend((0..rows).map(|r| scalar[(r, c)]));
+        }
+        for at in 0..2 {
+            let ArdRect::Checked(blocks) = RectSlots::ard(store, at).expect("ard") else {
+                panic!("a stored block is checked");
+            };
+            for k in 0..blocks.d() {
+                for c in 0..cols {
+                    for r in 0..rows {
+                        out.push(blocks.read(k, r, c).expect("read"));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Each change of a store and its undo give back every value, and a
+    /// kernel reads what the store holds, laid out again or not.
+    #[test]
+    fn block_store_changes_undo_to_the_same_values() {
+        let mut s = store(5, 3);
+        let original = s.values();
+        assert_eq!(read(&s), original.2);
+        // A row: room (a new layout), then in place.
+        for _ in 0..2 {
+            s.reserve_row().expect("room");
+            s.push_row(|b, c| 1000.0 + (b * 10 + c) as f64);
+            assert_eq!(s.values().0, 6);
+            assert_eq!(read(&s), s.values().2);
+            assert_eq!(s.get(BlockAt::Ard(1, 2), 5, 1), 1000.0 + 51.0);
+            s.pop_row();
+            assert_eq!(s.values(), original);
+        }
+        for index in [0, 2, 4] {
+            let mut saved = Vec::new();
+            s.row_into(index, &mut saved);
+            s.remove_row(index);
+            assert_eq!(read(&s), s.values().2);
+            s.insert_row(index, &saved);
+            assert_eq!(s.values(), original);
+        }
+        // A column: room, then in place.
+        for _ in 0..2 {
+            s.reserve_col().expect("room");
+            s.push_col(|b, r| 2000.0 + (b * 10 + r) as f64);
+            assert_eq!(read(&s), s.values().2);
+            assert_eq!(s.get(BlockAt::Scalar(0), 4, 3), 2004.0);
+            s.pop_col();
+            assert_eq!(s.values(), original);
+        }
+        for index in [0, 1, 2] {
+            let mut saved = Vec::new();
+            s.remove_col(index, Some(&mut saved));
+            assert_eq!(read(&s), s.values().2);
+            s.insert_col(index, &saved);
+            assert_eq!(s.values(), original);
+            assert_eq!(read(&s), original.2);
+        }
+        // The same changes on the store as bound (moved-in tables, no room).
+        let mut fresh = store(5, 3);
+        let mut saved = Vec::new();
+        fresh.remove_col(1, Some(&mut saved));
+        fresh.insert_col(1, &saved);
+        assert_eq!(fresh.values(), original);
+        let mut saved = Vec::new();
+        fresh.row_into(3, &mut saved);
+        fresh.remove_row(3);
+        fresh.insert_row(3, &saved);
+        assert_eq!(fresh.values(), original);
+        // A cast keeps the layout; the inducing rows are read back to back.
+        let cast = s.cast::<f32>().expect("cast");
+        assert_eq!(cast.values().2, original.2);
+        let mut square = BlockStore::default();
+        s.rows_into(&[4, 0], &mut square);
+        assert_eq!(
+            square.values().2[..2],
+            [
+                s.get(BlockAt::Scalar(0), 4, 0),
+                s.get(BlockAt::Scalar(0), 0, 0)
+            ]
+        );
+    }
 
     fn line(scale: f64, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>) -> Vec<f64> {
         cols.flat_map(|j| {

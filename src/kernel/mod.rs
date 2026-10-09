@@ -62,8 +62,10 @@ pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
+#[cfg(test)]
+pub(crate) use sources::BlockAt;
 pub(crate) use sources::{
-    BlockAt, BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
+    BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
     bind_inducing, column_into, new_inducing_column, widened,
 };
 pub use spec::{KernelSpec, ParameterBinding};

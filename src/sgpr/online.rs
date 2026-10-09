@@ -9,7 +9,7 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
-    BlockAt, CrossViews, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar,
+    CrossViews, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar,
     KernelSpec, ModelKernel, NoSupply, PointUse, QueryScratch, QuerySources, SuppliedSpec, Supply,
     SupplyViews, WithPoints, column_into, new_inducing_column,
 };
@@ -533,8 +533,15 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InsufficientData`] when `n == 1`, or
-    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted.
+    /// Returns [`GprError::InsufficientData`] when `n == 1`,
+    /// [`GprError::InvalidPointId`] when `id` is unknown or already deleted,
+    /// [`GprError::InvalidConfig`] when the point is an inducing point of a
+    /// model on supplied distances (remove it with [`Self::delete_inducing`]
+    /// first), or [`GprError::CholeskyFailed`] when the system of the
+    /// remaining points does not factor (a downdate that failed falls back
+    /// to factoring it again, and a precision that refines in `f64` factors
+    /// its predict weights again). On an error the model holds the same
+    /// points.
     ///
     /// # Examples
     ///
@@ -765,9 +772,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::InsufficientData`] when `m == 1`, or
+    /// Returns [`GprError::InsufficientData`] when `m == 1`,
     /// [`GprError::InvalidInducingId`] when `id` is unknown or already
-    /// deleted.
+    /// deleted, or [`GprError::CholeskyFailed`] when the smaller inducing
+    /// set does not factor under [`Self::jitter_policy`]. On an error the
+    /// model holds the same inducing points.
     ///
     /// # Examples
     ///
@@ -1509,11 +1518,6 @@ pub(super) struct NewPoint<'a> {
     y_obs: f64,
 }
 
-/// The position of `at` among `blocks` ([`crate::kernel::BlockStore::block_ids`]).
-fn block_index(blocks: &[BlockAt], at: BlockAt) -> usize {
-    blocks.iter().position(|&b| b == at).unwrap_or(0)
-}
-
 impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKernel<C>> {
     /// The factors a prediction reads.
     fn vfe_system(&self) -> VfeSystem<'_, P, SuppliedSpec> {
@@ -1600,7 +1604,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
                     y_obs,
                 };
                 model.append_point(a_col, k_diag, point, |supply| {
-                    supply.push_point(|at, col| row[block_index(&blocks, at) * m + col]);
+                    supply.push_point(|b, col| row[b * m + col]);
                 })
             })
         })();
@@ -1647,7 +1651,6 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             &exact,
             |at| cols.tidy(at),
         )?;
-        let blocks = supply.exact().xz.block_ids();
         // A kernel that also reads coordinates takes the point's as `z`.
         let mut z_train = self.state.core.z_train.clone();
         append_point(
@@ -1668,12 +1671,12 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             let mut saved = Vec::new();
             model.state.core.supply.add_inducing(
                 row,
-                |at, i| column[block_index(&blocks, at) * n + i],
-                |at, col| mirror[block_index(&blocks, at) * m + col],
+                |b, i| column[b * n + i],
+                |b, col| mirror[b * m + col],
                 &mut saved,
             );
             model.commit_inducing(z_train, z_obs, m + 1, |supply| {
-                supply.undo_add_inducing(&saved);
+                supply.undo_add_inducing(row, &saved);
             })?;
             Ok(model.state.inducing.insert())
         })
@@ -1681,7 +1684,8 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
 
     /// Returns a copy of the kernel whose hyperparameters this model owns.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// See the example on `insert` of a [`DistanceKernel<DistanceOnly>`]
+    /// model.
     pub fn to_kernel(&self) -> DistanceKernel<C> {
         <DistanceKernel<C> as crate::kernel::ModelKernelParts>::from_spec(
             self.state.core.kernel.clone(),
@@ -1691,7 +1695,8 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
     /// Returns the slots of the kernel, in the order of
     /// [`DistanceKernel::slots`]; bind supplies to these.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// See the example on `insert` of a [`DistanceKernel<DistanceOnly>`]
+    /// model.
     pub fn slots(&self) -> Vec<DistanceSlot> {
         crate::kernel::spec_slots(&self.state.core.kernel)
     }
@@ -1807,8 +1812,10 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// [`GprError::LengthMismatch`] for a column whose length is not `m`, a
     /// source of a slot the kernel does not read, a slot without a source,
     /// or two sources of one slot, [`GprError::IndexOutOfRange`] if no new
-    /// [`PointId`] is left, or [`GprError::SizeOverflow`] if the training
-    /// blocks cannot grow. On an error the model holds the same points.
+    /// [`PointId`] is left, [`GprError::SizeOverflow`] if the training
+    /// blocks cannot grow, or [`GprError::CholeskyFailed`] if a precision
+    /// that refines in `f64` cannot factor its predict weights again. On an
+    /// error the model holds the same points.
     ///
     /// # Examples
     ///
@@ -1828,6 +1835,8 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// // A point at x = 4: its squared distances to the inducing points.
     /// let id = online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
     /// assert_eq!(online.n(), 5);
+    /// assert_eq!(online.slots().len(), 1);
+    /// let _kernel = online.to_kernel();
     /// // A query at x = 0.5: inducing points × query.
     /// let pred = online.predict([image.from_vec(vec![0.25, 2.25])], 1)?;
     /// assert_eq!(pred.mean.len(), 1);
