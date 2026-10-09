@@ -16,6 +16,7 @@ use crate::sgpr::SgprObjective;
 use super::factor::assemble_fitted;
 use super::fitted::FittedSgpr;
 use super::{FixedInducing, FreeInducing, InducingLayout};
+use crate::kernel::NoSupply;
 
 /// Represents the trainer for collapsed variational SGPR at a caller-supplied inducing set `Z`.
 ///
@@ -469,7 +470,7 @@ where
     }
 }
 
-impl<I: InducingLayout, P> Sgpr<Fixed, I, P>
+impl<I: InducingLayout<NoSupply>, P> Sgpr<Fixed, I, P>
 where
     P: GpScalar,
 {

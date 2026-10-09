@@ -115,7 +115,7 @@ fn write_sparse<P: GpScalar>(
     super::write_config(dir, &json)
 }
 
-pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout, P: GpScalar>(
+pub(crate) fn save_sgpr<O, I: crate::sgpr::InducingLayout<crate::kernel::NoSupply>, P: GpScalar>(
     model: &FittedSgpr<O, I, P>,
     dir: &Path,
 ) -> Result<(), GprError> {

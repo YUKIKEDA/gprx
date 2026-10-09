@@ -31,7 +31,7 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P, K: ModelKernel> Objective for SgprObjective<'_, O, I, P, K>
+impl<O, I: InducingLayout<K::Supply>, P, K: ModelKernel> Objective for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
@@ -53,7 +53,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P, K: ModelKernel> Differentiable for SgprObjective<'_, O, I, P, K>
+impl<O, I: InducingLayout<K::Supply>, P, K: ModelKernel> Differentiable
+    for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
@@ -72,7 +73,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P, K: ModelKernel> TwiceDifferentiable for SgprObjective<'_, O, I, P, K>
+impl<O, I: InducingLayout<K::Supply>, P, K: ModelKernel> TwiceDifferentiable
+    for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {

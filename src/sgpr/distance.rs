@@ -296,7 +296,7 @@ impl<O, I, P: GpScalar, C: PointUse> FittedSgpr<O, I, P, DistanceKernel<C>> {
 }
 
 /// The query of an SGPR on supplied distances.
-impl<O, I: InducingLayout, P: GpScalar, C: PointUse> DistanceQuery
+impl<O, I: InducingLayout<SuppliedSpec>, P: GpScalar, C: PointUse> DistanceQuery
     for FittedSgpr<O, I, P, DistanceKernel<C>>
 {
     type Refine = P::Refine;
@@ -388,7 +388,7 @@ impl<O, I, P: GpScalar, C: PointUse> FittedSgpr<O, I, P, DistanceKernel<C>> {
 }
 
 distance_predict!(
-    impl [O, I: InducingLayout, P: GpScalar] FittedSgpr<O, I, P, DistanceKernel<DistanceOnly>>,
+    impl [O, I: InducingLayout<SuppliedSpec>, P: GpScalar] FittedSgpr<O, I, P, DistanceKernel<DistanceOnly>>,
     refine = P::Refine,
     args = (),
     tail = (),
@@ -439,7 +439,7 @@ distance_predict!(
 );
 
 distance_predict!(
-    impl [O, I: InducingLayout, P: GpScalar] FittedSgpr<O, I, P, DistanceKernel<WithPoints>>,
+    impl [O, I: InducingLayout<SuppliedSpec>, P: GpScalar] FittedSgpr<O, I, P, DistanceKernel<WithPoints>>,
     refine = P::Refine,
     args = (xs: &[f64]),
     tail = (n_cols: usize),

@@ -28,6 +28,7 @@ use super::factor::{
 use super::model::Sgpr;
 use super::online::OnlineSgpr;
 use super::{FixedInducing, InducingLayout};
+use crate::kernel::NoSupply;
 
 /// Represents the factored collapsed variational SGPR at the `θ` used by [`Sgpr::fit`] or [`Sgpr<Fixed>::factor`].
 ///
@@ -67,7 +68,7 @@ pub struct FittedSgpr<
     pub(super) a_frobenius2: P::Storage,
 }
 
-impl<O, I: InducingLayout, P, K> FittedSgpr<O, I, P, K>
+impl<O, I: InducingLayout<K::Supply>, P, K> FittedSgpr<O, I, P, K>
 where
     P: crate::precision::GpScalar,
     K: ModelKernel,
@@ -248,10 +249,9 @@ where
         crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let value = self.neg_log_marginal_likelihood()?;
-        let include_z = I::z_params(self.core.m, self.core.d) > 0;
         let mut ks = std::mem::take(&mut self.scratch.storage);
         let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _, _>(
-            self, out, include_z, &mut ks
+            self, out, &mut ks
         ));
         self.scratch.storage = ks;
         result?;
@@ -296,10 +296,9 @@ where
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         self.set_params(params)?;
-        let include_z = I::z_params(self.core.m, self.core.d) > 0;
         let mut ks = std::mem::take(&mut self.scratch.storage);
         let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _, _>(
-            self, out, include_z, &mut ks
+            self, out, &mut ks
         ));
         self.scratch.storage = ks;
         result?;
@@ -519,7 +518,7 @@ where
     sparse_point_accessors!();
 }
 
-impl<O, I: InducingLayout, P> FittedSgpr<O, I, P>
+impl<O, I: InducingLayout<NoSupply>, P> FittedSgpr<O, I, P>
 where
     P: crate::precision::GpScalar,
 {

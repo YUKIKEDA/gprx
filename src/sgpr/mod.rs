@@ -10,6 +10,8 @@ mod online;
 #[cfg(test)]
 mod tests;
 
+use crate::kernel::{CompiledKernel, KernelScalar, NoSupply, Supply};
+
 pub use fitted::FittedSgpr;
 pub use model::Sgpr;
 pub(crate) use objective::SgprObjective;
@@ -33,18 +35,40 @@ pub struct FixedInducing;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FreeInducing;
 
-pub trait InducingLayout: Clone {
+/// How the inducing points of a model whose kernel tree is of kind `U` enter
+/// its parameters. [`FreeInducing`] moves coordinates, so it is a layout of
+/// coordinate trees ([`NoSupply`]) only: a model of supplied distances has
+/// no `Z` to move.
+pub trait InducingLayout<U: Supply>: Clone {
     fn z_params(m: usize, d: usize) -> usize;
+
+    /// The coordinate tree whose derivatives the free `Z` reads, or `None`
+    /// when `Z` is not a parameter.
+    fn free_z<T: KernelScalar>(
+        compiled: &CompiledKernel<T, U>,
+    ) -> Option<&CompiledKernel<T, NoSupply>>;
 }
 
-impl InducingLayout for FixedInducing {
+impl<U: Supply> InducingLayout<U> for FixedInducing {
     fn z_params(_m: usize, _d: usize) -> usize {
         0
     }
+
+    fn free_z<T: KernelScalar>(
+        _compiled: &CompiledKernel<T, U>,
+    ) -> Option<&CompiledKernel<T, NoSupply>> {
+        None
+    }
 }
 
-impl InducingLayout for FreeInducing {
+impl InducingLayout<NoSupply> for FreeInducing {
     fn z_params(m: usize, d: usize) -> usize {
         m * d
+    }
+
+    fn free_z<T: KernelScalar>(
+        compiled: &CompiledKernel<T, NoSupply>,
+    ) -> Option<&CompiledKernel<T, NoSupply>> {
+        Some(compiled)
     }
 }

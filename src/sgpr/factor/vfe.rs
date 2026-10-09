@@ -66,7 +66,7 @@ pub(crate) struct VfeState<T: KernelScalar> {
     pub(crate) a_frobenius2: T,
 }
 
-pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P, K>(
+pub(crate) fn assemble_fitted<O, I: InducingLayout<K::Supply>, M: crate::math::KernelMath, P, K>(
     core: SparseCore<K::Supply>,
     optimizer: O,
 ) -> Result<FittedSgpr<O, I, P, K>, GprError>

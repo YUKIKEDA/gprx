@@ -610,7 +610,7 @@ fn kernel_ard() -> KernelSpec {
     KernelSpec::from(RbfArdKernel::new(&[1.0, 1.5]).expect("ℓ"))
 }
 
-fn fd_grad_from_value<I: InducingLayout>(
+fn fd_grad_from_value<I: InducingLayout<NoSupply>>(
     model: &mut FittedSgpr<Fixed, I>,
     params: &[f64],
 ) -> Vec<f64> {
@@ -632,7 +632,7 @@ fn fd_grad_from_value<I: InducingLayout>(
     out
 }
 
-fn fd_hess_from_grad<I: InducingLayout>(
+fn fd_hess_from_grad<I: InducingLayout<NoSupply>>(
     model: &mut FittedSgpr<Fixed, I>,
     params: &[f64],
 ) -> Vec<f64> {

@@ -4,13 +4,13 @@ use super::lit;
 use crate::data::pack_points;
 use crate::error::GprError;
 use crate::kernel::ScalarOps;
-use crate::kernel::{CompiledKernel, KernelScalar, ModelKernel, NoSupply, Supply, Triangle};
+use crate::kernel::{CompiledKernel, KernelScalar, ModelKernel, Supply, Triangle};
 use crate::linalg::{
     copy_mat, dot, dot_ay, frobenius_dot, gemm, mat_add_mul, mat_sub_mul, mat_vec, quad_form,
     solve_llt, solve_lower, solve_lower_transpose,
 };
 use crate::precision::ModelPrecision;
-use crate::sgpr::FittedSgpr;
+use crate::sgpr::{FittedSgpr, InducingLayout};
 use crate::sparse::{KernelScratch, SparseSets};
 use faer::{Accum, Mat, MatRef};
 
@@ -60,7 +60,10 @@ pub(crate) struct VfeEngine<'a, T: KernelScalar> {
 }
 
 impl<'a, T: KernelScalar> VfeEngine<'a, T> {
-    fn from_model<O, I, P, K: ModelKernel>(model: &'a FittedSgpr<O, I, P, K>, y: &'a [T]) -> Self
+    fn from_model<O, I: InducingLayout<K::Supply>, P, K: ModelKernel>(
+        model: &'a FittedSgpr<O, I, P, K>,
+        y: &'a [T],
+    ) -> Self
     where
         P: ModelPrecision<Storage = T>,
     {
@@ -277,20 +280,15 @@ pub(crate) struct VfeTangent<T: KernelScalar> {
     pub(crate) d_noise: T,
 }
 
-/// The coordinate tree of `compiled`, which a free inducing point's
-/// derivatives read: a model of supplied distances has no free `Z`.
-fn coordinates<T: KernelScalar, U: Supply>(
-    compiled: &CompiledKernel<T, U>,
-) -> Result<&CompiledKernel<T, NoSupply>, GprError> {
-    U::coordinates(compiled).ok_or_else(|| GprError::UnsupportedKernelOperation {
-        reason: "free inducing points need a coordinate kernel".to_owned(),
-    })
-}
-
-pub(crate) fn analytic_gradient<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+pub(crate) fn analytic_gradient<
+    M: crate::math::KernelMath,
+    O,
+    I: InducingLayout<K::Supply>,
+    P,
+    K: ModelKernel,
+>(
     model: &FittedSgpr<O, I, P, K>,
     out: &mut [f64],
-    include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
 ) -> Result<(), GprError>
 where
@@ -332,8 +330,7 @@ where
     out[n_kernel] = engine
         .directional_noise(model.core.likelihood.noise_variance())
         .to_f64();
-    if include_z {
-        let coords = coordinates(&compiled)?;
+    if let Some(coords) = I::free_z(&compiled) {
         let (m, n) = (model.core.m, model.core.n);
         let mut g_zz = Mat::zeros(m, m);
         let mut g_xz = Mat::zeros(n, m);
@@ -361,10 +358,15 @@ where
     Ok(())
 }
 
-pub(crate) fn analytic_hessian<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+pub(crate) fn analytic_hessian<
+    M: crate::math::KernelMath,
+    O,
+    I: InducingLayout<K::Supply>,
+    P,
+    K: ModelKernel,
+>(
     model: &FittedSgpr<O, I, P, K>,
     out: &mut [f64],
-    include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
 ) -> Result<(), GprError>
 where
@@ -373,13 +375,13 @@ where
     let mut y_cast = P::Storage::empty_rows();
     let y_s = P::Storage::storage_rows(&model.core.y_train, &mut y_cast);
     let engine = VfeEngine::<P::Storage>::from_model(model, y_s);
-    let vars = collect_first_vars::<M, _, _, _, _>(model, include_z, ks)?;
+    let vars = collect_first_vars::<M, _, _, _, _>(model, ks)?;
     let tangents: Vec<VfeTangent<P::Storage>> =
         vars.iter().map(|v| engine.first_tangent(v)).collect();
     let p = vars.len();
     for j in 0..p {
         for i in j..p {
-            let dd = second_var::<M, _, _, _, _>(model, i, j, include_z, ks)?;
+            let dd = second_var::<M, _, _, _, _>(model, i, j, ks)?;
             let hij = engine
                 .second_directional(&tangents[i], &tangents[j], &dd)
                 .to_f64();
@@ -390,9 +392,14 @@ where
     Ok(())
 }
 
-pub(crate) fn collect_first_vars<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+pub(crate) fn collect_first_vars<
+    M: crate::math::KernelMath,
+    O,
+    I: InducingLayout<K::Supply>,
+    P,
+    K: ModelKernel,
+>(
     model: &FittedSgpr<O, I, P, K>,
-    include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
 ) -> Result<Vec<KernelVar<P::Storage>>, GprError>
 where
@@ -408,14 +415,7 @@ where
     let sets = SparseSets::<P::Storage, K::Supply>::new(x, z, model.core.supply.at()?);
     let n_kernel = model.core.kernel.num_params();
     let n_theta = n_kernel + model.core.likelihood.num_params();
-    let mut vars = Vec::with_capacity(
-        n_theta
-            + if include_z {
-                model.core.m * model.core.d
-            } else {
-                0
-            },
-    );
+    let mut vars = Vec::with_capacity(n_theta + I::z_params(model.core.m, model.core.d));
     for i in 0..n_kernel {
         vars.push(kernel_theta_var::<M, _, _>(
             &compiled,
@@ -430,8 +430,7 @@ where
         model.core.n,
         model.core.likelihood.noise_variance(),
     ));
-    if include_z {
-        let coords = coordinates(&compiled)?;
+    if let Some(coords) = I::free_z(&compiled) {
         for dim in 0..model.core.d {
             for p in 0..model.core.m {
                 vars.push(z_coord_var::<M, _>(coords, ks, x, z, p, dim)?);
@@ -522,11 +521,16 @@ where
     })
 }
 
-pub(crate) fn second_var<M: crate::math::KernelMath, O, I, P, K: ModelKernel>(
+pub(crate) fn second_var<
+    M: crate::math::KernelMath,
+    O,
+    I: InducingLayout<K::Supply>,
+    P,
+    K: ModelKernel,
+>(
     model: &FittedSgpr<O, I, P, K>,
     i: usize,
     j: usize,
-    include_z: bool,
     ks: &mut KernelScratch<P::Storage>,
 ) -> Result<KernelVar<P::Storage>, GprError>
 where
@@ -545,7 +549,7 @@ where
     let m = model.core.m;
     let n = model.core.n;
     let z_index = |idx: usize| -> Option<(usize, usize)> {
-        if !include_z || idx < n_theta {
+        if idx < n_theta {
             None
         } else {
             let local = idx - n_theta;
@@ -566,7 +570,11 @@ where
             d_noise: lit::<P::Storage>(0.0),
         });
     }
-    let coords = coordinates(&compiled)?;
+    let Some(coords) = I::free_z(&compiled) else {
+        return Err(GprError::IndexOutOfRange {
+            reason: "expected a free inducing coordinate".to_owned(),
+        });
+    };
     if let (Some((pi, ei)), Some((pj, ej))) = (z_index(i), z_index(j)) {
         return z_z_second::<M, _>(coords, ks, x, z, pi, ei, pj, ej);
     }
