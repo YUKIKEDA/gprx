@@ -392,8 +392,12 @@ Tables are column-major `dist[i + j * n_rows]`. Every value must be finite and n
 | --- | --- | --- | --- |
 | `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+| `Sgpr` / `Svgp`, `DistanceOnly` | `(sources, n, y, inducing)` | `(sources, q)` | `(cross, square, q)` |
+| `Sgpr` / `Svgp`, `WithPoints` | `(sources, n, x, n_cols, y, inducing)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
 `cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` converts a distance model too. Its `insert` takes, per slot, the `n × 1` column of squared distances from the current points, in `point_ids` order, to the new point (`d` such columns for an ARD slot), from any source above: `insert(sources, y_new)` for `DistanceOnly`, `insert(sources, x_new, y_new)` for `WithPoints`. The column is checked as a training square is (or repaired by `tidy`) and kept, and `delete(id)` removes the point from the kept squares in place. The online model predicts with the same arguments as the fitted one. Neither allocates once the model has grown once (a scalar square grows by a quarter, an ARD slot by doubling), except that a large delete on a Rayon pool of more than one worker queues one job beside the factor's update.
+
+A sparse model on supplied distances names its inducing points by training index: `inducing` lists them, without repeats, and each source of `fit` / `factor` is the `n × m` block from the training points to them (column `a` is the training point `inducing[a]`); `K_mm` reads their rows of it. The model keeps the blocks as they were handed over (a moved table without a copy, a borrowed one copied once). A prediction's `cross` is the `m × q` block from the inducing points, in `inducing()` order, to the queries; `square` is as above. `FreeInducing` needs coordinates to move, so a distance model keeps its inducing points; `OnlineSgpr` takes coordinates only. A factor reads the `d · n · m` supplied values a coordinate model computes from `n · d` coordinates, so it costs more for an ARD slot than the coordinate factor; the gradient and the predictions cost no more (design §5.6).
 
 ```rust
 use gprx::kernel::{

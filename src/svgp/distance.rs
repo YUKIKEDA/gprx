@@ -7,7 +7,7 @@
 //! block from the `n` training points to the `m` inducing points; a
 //! prediction the `m × q` block from the inducing points to the `q`
 //! queries, and a covariance the `q × q` square among the queries. A
-//! mini-batch step reads the batch's columns of the stored blocks.
+//! mini-batch step reads the batch's rows of the stored blocks.
 
 use crate::error::GprError;
 use crate::kernel::{
@@ -125,7 +125,7 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<DistanceOnly>> {
 impl<P: GpScalar> Svgp<Adam, P, DistanceKernel<DistanceOnly>> {
     /// Factors on the supplied distances, then runs mini-batch Adam from
     /// the whitened prior. Same data contract as [`Svgp::factor`] of this
-    /// kernel; a mini-batch step reads the batch's columns of the stored
+    /// kernel; a mini-batch step reads the batch's rows of the stored
     /// blocks.
     ///
     /// # Errors

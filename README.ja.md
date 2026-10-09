@@ -408,8 +408,12 @@ fn main() -> Result<(), gprx::GprError> {
 | --- | --- | --- | --- |
 | `Gpr`、`DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`、`WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+| `Sgpr` / `Svgp`、`DistanceOnly` | `(sources, n, y, inducing)` | `(sources, q)` | `(cross, square, q)` |
+| `Sgpr` / `Svgp`、`WithPoints` | `(sources, n, x, n_cols, y, inducing)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
 `cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は距離のモデルも変換する。その `insert` はスロットごとに、今の点から新しい点への二乗距離の `n × 1` の列（`point_ids` の順）を、上のどのソースからでも受け取る。ARD のスロットはこの列を `d` 本受け取る。`DistanceOnly` は `insert(sources, y_new)`、`WithPoints` は `insert(sources, x_new, y_new)`。列は学習の正方行列と同じく検査し（`tidy` なら直し）、保持する。`delete(id)` は、保持した二乗距離からその点をその場で除く。オンラインのモデルは、学習済みのモデルと同じ引数で予測する。モデルが一度伸びた後は、どちらも確保しない（scalar の正方行列は 4 分の 1 ずつ、ARD のスロットは倍々に伸びる）。ただし、ワーカーが 2 つ以上の Rayon のプールで大きな削除をするときは、因子の更新の横で動かすジョブを 1 つ積む。
+
+距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`OnlineSgpr` は座標だけを受け取る。factor は、座標のモデルが `n · d` 個の座標から計算する組を、供給された `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（設計 §5.6）。
 
 ```rust
 use gprx::kernel::{

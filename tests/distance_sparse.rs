@@ -533,3 +533,93 @@ fn inducing_indices_are_checked() {
         Err(GprError::LengthMismatch { .. })
     ));
 }
+
+/// Fills the `n × m` blocks from the training points to the inducing ones
+/// (column `a` is `INDUCING[a]`): one per coordinate, or their sum.
+struct Block<'a> {
+    cols: &'a [Vec<f64>],
+    summed: bool,
+}
+
+impl gprx::kernel::DistanceFill for Block<'_> {
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        // An ARD fill writes its runs one after another, dimension by dimension.
+        let len = rows.len();
+        out.fill(0.0);
+        for (k, c) in self.cols.iter().enumerate() {
+            let z = c[INDUCING[col]];
+            let at = if self.summed { 0 } else { k * len };
+            for (slot, i) in out[at..at + len].iter_mut().zip(rows.clone()) {
+                *slot += (c[i] - z) * (c[i] - z);
+            }
+        }
+    }
+}
+
+/// Every way to hand over the training blocks (borrowed, copied, moved,
+/// filled; repaired by `tidy` when rounded) gives the same model.
+#[test]
+fn every_source_kind_fits_the_same_sparse_model() {
+    let case = Case::new(2);
+    let y = targets();
+    let (train, cross, _) = summed(&case);
+    let image = ScalarDistance::new();
+    let rbf = RbfKernel::new(0.9).expect("ell");
+    let fit = |source: gprx::kernel::DistanceSource<'_>| {
+        Sgpr::new(image.kernel(rbf), lik())
+            .with_optimizer(Fixed)
+            .factor([source], N, &y, &INDUCING)
+            .map_err(|(_, e)| e)
+            .expect("fit")
+    };
+    let expect = fit(image.borrow(&train))
+        .predict([image.borrow(&cross)], Q)
+        .expect("predict");
+    // A rounded table: one value a hair below zero, repaired by `tidy`.
+    let mut rounded = train.clone();
+    rounded[INDUCING[0]] = -1e-15;
+    for source in [
+        image.from_slice(&train),
+        image.from_vec(train.clone()),
+        image.fill(&Block {
+            cols: &case.cols,
+            summed: true,
+        }),
+        image.from_vec(rounded).tidy(1e-9).expect("tidy"),
+    ] {
+        let got = fit(source)
+            .predict([image.borrow(&cross)], Q)
+            .expect("predict");
+        assert_pred(&got, &expect, 1e-12);
+    }
+    // The same for an ARD slot.
+    let ard = RbfArdKernel::new(&[0.8, 1.4]).expect("ell");
+    let (bands, ard) = ArdDistance::from_leaf(ard);
+    let parts: Vec<_> = (0..2).map(|k| case.blocks(k)).collect();
+    let blocks: Vec<Vec<f64>> = parts.iter().map(|p| p.0.clone()).collect();
+    let refs: Vec<&[f64]> = blocks.iter().map(Vec::as_slice).collect();
+    let cross: Vec<&[f64]> = parts.iter().map(|p| p.1.as_slice()).collect();
+    let fit = |source: gprx::kernel::DistanceSource<'_>| {
+        Svgp::new(ard.clone(), lik())
+            .factor([source], N, &y, &INDUCING)
+            .map_err(|(_, e)| e)
+            .expect("fit")
+    };
+    let expect = fit(bands.borrow(&refs))
+        .predict([bands.borrow(&cross)], Q)
+        .expect("predict");
+    for source in [
+        bands.from_slices(&refs),
+        bands.from_vecs(blocks.clone()),
+        bands.fill(&Block {
+            cols: &case.cols,
+            summed: false,
+        }),
+        bands.from_vecs(blocks.clone()).tidy(1e-9).expect("tidy"),
+    ] {
+        let got = fit(source)
+            .predict([bands.borrow(&cross)], Q)
+            .expect("predict");
+        assert_pred(&got, &expect, 1e-12);
+    }
+}
