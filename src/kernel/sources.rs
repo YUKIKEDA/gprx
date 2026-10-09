@@ -866,29 +866,16 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(())
     }
 
-    /// Appends point `n` from `cols`, its `n × 1` columns to the points
-    /// `0..n` (bound for this store's slots, checked); its diagonal is
-    /// zero. [`Self::reserve_point`] made room first. Every column is looked
-    /// up before anything is written, so an error leaves the store as it
-    /// was.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::UnsupportedKernelOperation`] when `cols` lacks a
-    /// slot of the store, and [`GprError::SizeOverflow`] when no room was
-    /// reserved.
-    pub(crate) fn push_point(&mut self, cols: &dyn RectSlots<T>) -> Result<(), GprError> {
-        self.check_push(cols)?;
-        self.write_point(cols);
-        Ok(())
-    }
-
-    /// Every check of [`Self::push_point`], with nothing written: the room
+    /// Every check of appending a point (`n × 1` columns `cols` to the
+    /// points `0..n`), with nothing written: the room
     /// [`Self::reserve_point`] made, and a checked column for every slot.
+    /// [`Self::write_point`] then writes it.
     ///
     /// # Errors
     ///
-    /// As [`Self::push_point`].
+    /// Returns [`GprError::UnsupportedKernelOperation`] when no room was
+    /// reserved, or when `cols` lacks a slot of the store or holds an
+    /// unchecked ARD block.
     pub(crate) fn check_push(&self, cols: &dyn RectSlots<T>) -> Result<(), GprError> {
         if self.is_empty() {
             return Ok(());
@@ -907,9 +894,14 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(())
     }
 
-    /// [`Self::push_point`] once [`Self::check_push`] passed: nothing in it
-    /// fails, so a store of two copies writes both or neither.
+    /// Appends the point once [`Self::check_push`] passed on the same
+    /// `cols`: nothing in it fails, so a store of two copies writes both or
+    /// neither.
     pub(crate) fn write_point(&mut self, cols: &dyn RectSlots<T>) {
+        debug_assert!(
+            self.check_push(cols).is_ok(),
+            "write_point before check_push"
+        );
         if self.is_empty() {
             return;
         }
@@ -1196,19 +1188,22 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     /// As [`TrainSources::reserve_point`].
     fn reserve_point(&mut self) -> Result<(), GprError>;
 
-    /// [`TrainSources::push_point`] on every copy the store keeps: `cols`
-    /// in the storage scalar, `exact` the same columns at `f64`. Every copy
-    /// is checked before any is written, so an error leaves all as they
-    /// were.
+    /// [`TrainSources::check_push`] on every copy the store keeps: `cols`
+    /// in the storage scalar, `exact` the same columns at `f64`.
     ///
     /// # Errors
     ///
-    /// As [`TrainSources::push_point`].
-    fn push_point(
-        &mut self,
+    /// As [`TrainSources::check_push`].
+    fn check_push(
+        &self,
         cols: &dyn RectSlots<S>,
         exact: &dyn RectSlots<f64>,
     ) -> Result<(), GprError>;
+
+    /// [`TrainSources::write_point`] on every copy, once
+    /// [`Self::check_push`] passed on the same columns. Nothing in it fails,
+    /// so every copy is written or none.
+    fn write_point(&mut self, cols: &dyn RectSlots<S>, exact: &dyn RectSlots<f64>);
 
     /// About how many values [`Self::remove_point`] moves for `index`.
     fn remove_work(&self, index: usize) -> usize;
@@ -1270,12 +1265,16 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
         Self::reserve_point(self)
     }
 
-    fn push_point(
-        &mut self,
+    fn check_push(
+        &self,
         cols: &dyn RectSlots<S>,
         _exact: &dyn RectSlots<f64>,
     ) -> Result<(), GprError> {
-        Self::push_point(self, cols)
+        Self::check_push(self, cols)
+    }
+
+    fn write_point(&mut self, cols: &dyn RectSlots<S>, _exact: &dyn RectSlots<f64>) {
+        Self::write_point(self, cols);
     }
 
     fn check_remove(&self, index: usize) -> Result<(), GprError> {
@@ -1333,18 +1332,18 @@ impl SourceStore<f32> for RefinedSources {
         self.exact.reserve_point()
     }
 
-    fn push_point(
-        &mut self,
+    fn check_push(
+        &self,
         cols: &dyn RectSlots<f32>,
         exact: &dyn RectSlots<f64>,
     ) -> Result<(), GprError> {
-        // Both copies are checked before either is written, so an error
-        // leaves both as they were.
         self.exact.check_push(exact)?;
-        self.storage.check_push(cols)?;
+        self.storage.check_push(cols)
+    }
+
+    fn write_point(&mut self, cols: &dyn RectSlots<f32>, exact: &dyn RectSlots<f64>) {
         self.exact.write_point(exact);
         self.storage.write_point(cols);
-        Ok(())
     }
 
     fn check_remove(&self, index: usize) -> Result<(), GprError> {
