@@ -487,24 +487,22 @@ where
             });
         }
         let index = self.registry.index_of(id)?;
-        // The store lays itself out for the change first (the one step
-        // that can fail); then it and the factor drop the point side by
-        // side, neither failing on an index the registry holds.
-        // A store with little to move drops the point after the factor:
-        // waking a worker would cost more than the move.
+        // Every step that can fail runs first: the store lays itself out
+        // and checks `index`; the factor's update fails only for `n ≤ 1`
+        // or `index ≥ n`, both refused above. Then the factor and the store
+        // drop the point, neither failing, so they never disagree.
+        self.core.sources.ready_to_change()?;
+        self.core.sources.check_remove(index)?;
         if self.core.sources.remove_work(index) < BESIDE_WORK {
-            self.core.sources.ready_to_change()?;
+            // Little to move: waking a worker would cost more than the move.
             self.workspace.delete_index(index)?;
-            self.core.sources.remove_point(index)?;
+            self.core.sources.remove_point(index);
         } else {
-            self.core.sources.ready_to_change()?;
             let (workspace, sources) = (&mut self.workspace, &mut self.core.sources);
-            let (factor, store) = beside(
+            beside(
                 || workspace.delete_index(index),
                 || sources.remove_point(index),
-            );
-            factor?;
-            store?;
+            )?;
         }
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
@@ -665,13 +663,15 @@ impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
     /// the live points (`()` for a coordinate kernel). Once the factor has
     /// grown, `push` appends those distances to the training store; the
     /// store reserved room before, so it does not fail.
-    pub(crate) fn insert_with(
-        &mut self,
-        x_new: &[f64],
-        y_new: f64,
-        cols: <K::Supply as SupplyViews>::Rects<'_, P::Storage>,
-        push: impl FnOnce(&mut P::Sources) -> Result<(), GprError>,
-    ) -> Result<PointId, GprError> {
+    /// The checks of a new point that need nothing but its values: run
+    /// before the store makes room, so a refused point changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::DimensionMismatch`] if `x_new` is not `d` long,
+    /// [`GprError::NonFiniteInput`] for a value that is not finite, and
+    /// [`GprError::IndexOutOfRange`] when no new [`PointId`] is left.
+    pub(crate) fn check_new_point(&self, x_new: &[f64], y_new: f64) -> Result<(), GprError> {
         if x_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
@@ -681,7 +681,17 @@ impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
         if x_new.iter().any(|v| !v.is_finite()) || !y_new.is_finite() {
             return Err(GprError::NonFiniteInput);
         }
-        self.registry.require_room()?;
+        self.registry.require_room()
+    }
+
+    pub(crate) fn insert_with(
+        &mut self,
+        x_new: &[f64],
+        y_new: f64,
+        cols: <K::Supply as SupplyViews>::Rects<'_, P::Storage>,
+        push: impl FnOnce(&mut P::Sources) -> Result<(), GprError>,
+    ) -> Result<PointId, GprError> {
+        self.check_new_point(x_new, y_new)?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -1069,26 +1079,20 @@ where
 /// moves, the time a parked worker takes to wake.
 const BESIDE_WORK: usize = 1 << 16;
 
-/// `(a(), b())`: `a` on this thread while a worker of the Rayon pool runs
-/// `b`, when the pool has more than one worker; one after the other
-/// otherwise (a job queued from outside the pool can allocate).
-fn beside<A>(
-    a: impl FnOnce() -> A,
-    b: impl FnOnce() -> Result<(), GprError> + Send,
-) -> (A, Result<(), GprError>) {
+/// `a()` on this thread while a worker of the Rayon pool runs `b`, when
+/// the pool has more than one worker; one after the other otherwise. `b`
+/// cannot fail, so there is no result of it to report. Queuing `b` for a
+/// worker allocates its job; with one worker nothing is allocated.
+fn beside<A>(a: impl FnOnce() -> A, b: impl FnOnce() + Send) -> A {
     if rayon::current_num_threads() <= 1 {
-        return (a(), b());
+        let first = a();
+        b();
+        return first;
     }
-    // The scope waits for the job, which overwrites this.
-    let mut second = Err(GprError::UnsupportedKernelOperation {
-        reason: "the training store's update did not run".to_owned(),
-    });
-    let first = rayon::in_place_scope(|scope| {
-        let slot = &mut second;
-        scope.spawn(move |_| *slot = b());
+    rayon::in_place_scope(|scope| {
+        scope.spawn(move |_| b());
         a()
-    });
-    (first, second)
+    })
 }
 
 fn append_colmajor(x: &mut Vec<f64>, n: usize, d: usize, x_new: &[f64]) {

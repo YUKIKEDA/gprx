@@ -15,7 +15,7 @@ use faer::MatRef;
 use rayon::prelude::*;
 
 use super::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareSlots, unbound};
-use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList, Checked};
+use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList, Checked, packed_run};
 use super::simd::SquareOut;
 use super::{ArdData, DistanceFill, ScalarData, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
@@ -106,6 +106,15 @@ fn slot_rank(slots: &[DistanceSlot], id: SlotId) -> usize {
         .iter()
         .position(|slot| slot.id() == id)
         .unwrap_or(slots.len())
+}
+
+/// A store changed before it was laid out for the change
+/// ([`TrainSources::reserve_point`], [`TrainSources::ready_to_change`]):
+/// refused before anything is written.
+fn no_room() -> GprError {
+    GprError::UnsupportedKernelOperation {
+        reason: "the training store was not laid out for the change".to_owned(),
+    }
 }
 
 /// A slot of the kernel was given no source (every source names a distinct
@@ -653,7 +662,13 @@ fn fill_ard_square<T: KernelScalar>(
     d: usize,
     tidy: Tidy,
 ) -> Result<ArdSqDiffBuf<T>, GprError> {
-    let mut packed = ArdSqDiffBuf::<T>::zeros(n, d)?;
+    let len = n
+        .checked_add(1)
+        .and_then(|n1| n.checked_mul(n1))
+        .map(|cells| cells / 2)
+        .and_then(|per_dim| per_dim.checked_mul(d))
+        .ok_or(GprError::SizeOverflow)?;
+    let mut packed = vec![T::from_f64(0.0); len];
     let mut buffer = vec![0.0; n.checked_mul(d).ok_or(GprError::SizeOverflow)?];
     let mut rounding: Vec<FillRounding> = (0..d).map(|_| FillRounding::default()).collect();
     for col in 0..n {
@@ -661,7 +676,7 @@ fn fill_ard_square<T: KernelScalar>(
         let runs = &mut buffer[..len * d];
         filler.fill_column(col, col..n, runs);
         for (k, rounding) in rounding.iter_mut().enumerate() {
-            let column = packed.column_mut(k, col);
+            let column = &mut packed[packed_run(n, k, col)];
             fill_run(
                 &runs[k * len..(k + 1) * len],
                 col,
@@ -678,7 +693,7 @@ fn fill_ard_square<T: KernelScalar>(
             rounding.judge(rel)?;
         }
     }
-    Ok(packed)
+    Ok(ArdSqDiffBuf::from_packed(packed, n, d))
 }
 
 /// Checks one column run of a training square a fill wrote (rows
@@ -863,14 +878,24 @@ impl<T: KernelScalar> TrainSources<T> {
     /// slot of the store, and [`GprError::SizeOverflow`] when no room was
     /// reserved.
     pub(crate) fn push_point(&mut self, cols: &dyn RectSlots<T>) -> Result<(), GprError> {
+        self.check_push(cols)?;
+        self.write_point(cols);
+        Ok(())
+    }
+
+    /// Every check of [`Self::push_point`], with nothing written: the room
+    /// [`Self::reserve_point`] made, and a checked column for every slot.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::push_point`].
+    pub(crate) fn check_push(&self, cols: &dyn RectSlots<T>) -> Result<(), GprError> {
         if self.is_empty() {
             return Ok(());
         }
-        let (n, cap) = (self.n, self.cap);
-        if cap <= n {
-            return Err(GprError::SizeOverflow);
+        if self.cap <= self.n || self.ard.iter().any(|(_, cache)| !cache.can_push()) {
+            return Err(no_room());
         }
-        // Every column is looked up before anything is written.
         for at in 0..self.scalar.len() {
             cols.scalar(at)?;
         }
@@ -879,42 +904,69 @@ impl<T: KernelScalar> TrainSources<T> {
                 return Err(unbound());
             }
         }
-        for (at, (_, square)) in self.scalar.iter_mut().enumerate() {
-            let column = cols.scalar(at)?;
-            for i in 0..n {
-                let v = column[(i, 0)];
-                square[i + n * cap] = v;
-                square[n + i * cap] = v;
-            }
-            square[n + n * cap] = T::from_f64(0.0);
-        }
-        for (at, (_, cache)) in self.ard.iter_mut().enumerate() {
-            if let ArdRect::Checked(blocks) = cols.ard(at)? {
-                cache.push_point(|k| &blocks.block(k)[..n])?;
-            }
-        }
-        self.n = n + 1;
         Ok(())
     }
 
-    /// Removes point `index` in place: its row and column leave every
-    /// slot, and the later points move up one.
+    /// [`Self::push_point`] once [`Self::check_push`] passed: nothing in it
+    /// fails, so a store of two copies writes both or neither.
+    pub(crate) fn write_point(&mut self, cols: &dyn RectSlots<T>) {
+        if self.is_empty() {
+            return;
+        }
+        let (n, cap) = (self.n, self.cap);
+        for (at, (_, square)) in self.scalar.iter_mut().enumerate() {
+            if let Ok(column) = cols.scalar(at) {
+                for i in 0..n {
+                    let v = column[(i, 0)];
+                    square[i + n * cap] = v;
+                    square[n + i * cap] = v;
+                }
+                square[n + n * cap] = T::from_f64(0.0);
+            }
+        }
+        for (at, (_, cache)) in self.ard.iter_mut().enumerate() {
+            if let Ok(ArdRect::Checked(blocks)) = cols.ard(at) {
+                cache.push_point(|k| &blocks.block(k)[..n]);
+            }
+        }
+        self.n = n + 1;
+    }
+
+    /// Every check of [`Self::remove_point`], with nothing changed: `index`
+    /// below `n`, and the ARD slots laid out ([`Self::ready_to_change`]).
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::IndexOutOfRange`] when `index ≥ n`.
-    pub(crate) fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
+    /// Returns [`GprError::IndexOutOfRange`] when `index ≥ n`, and
+    /// [`GprError::UnsupportedKernelOperation`] when the store was not laid
+    /// out for the change.
+    pub(crate) fn check_remove(&self, index: usize) -> Result<(), GprError> {
         if self.is_empty() {
             return Ok(());
         }
-        let (n, cap) = (self.n, self.cap);
+        let n = self.n;
         if index >= n {
             return Err(GprError::IndexOutOfRange {
                 reason: format!("point index {index} is out of range for n={n}"),
             });
         }
+        if self.ard.iter().any(|(_, cache)| !cache.can_remove()) {
+            return Err(no_room());
+        }
+        Ok(())
+    }
+
+    /// Removes point `index` in place, once [`Self::check_remove`] passed:
+    /// its row and column leave every slot, and the later points move up
+    /// one. Nothing in it fails.
+    pub(crate) fn remove_point(&mut self, index: usize) {
+        if self.is_empty() {
+            return;
+        }
+        let (n, cap) = (self.n, self.cap);
+        debug_assert!(index < n, "remove_point past the points");
         for (_, cache) in &mut self.ard {
-            cache.remove_point(index)?;
+            cache.remove_point(index);
         }
         for (_, square) in &mut self.scalar {
             // Columns before `index` keep their rows above it and move the
@@ -946,7 +998,6 @@ impl<T: KernelScalar> TrainSources<T> {
             }
         }
         self.n = n - 1;
-        Ok(())
     }
 
     /// The store of the `n × n` training squares of `slots` (the kernel's
@@ -1146,7 +1197,9 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     fn reserve_point(&mut self) -> Result<(), GprError>;
 
     /// [`TrainSources::push_point`] on every copy the store keeps: `cols`
-    /// in the storage scalar, `exact` the same columns at `f64`.
+    /// in the storage scalar, `exact` the same columns at `f64`. Every copy
+    /// is checked before any is written, so an error leaves all as they
+    /// were.
     ///
     /// # Errors
     ///
@@ -1168,12 +1221,16 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     /// As [`TrainSources::ready_to_change`].
     fn ready_to_change(&mut self) -> Result<(), GprError>;
 
-    /// [`TrainSources::remove_point`] on every copy the store keeps.
+    /// [`TrainSources::check_remove`] on every copy the store keeps.
     ///
     /// # Errors
     ///
-    /// As [`TrainSources::remove_point`].
-    fn remove_point(&mut self, index: usize) -> Result<(), GprError>;
+    /// As [`TrainSources::check_remove`].
+    fn check_remove(&self, index: usize) -> Result<(), GprError>;
+
+    /// [`TrainSources::remove_point`] on every copy the store keeps, once
+    /// [`Self::check_remove`] passed. Nothing in it fails.
+    fn remove_point(&mut self, index: usize);
 }
 
 /// The squares at `f64`: `exact` when a store keeps them, else `storage`
@@ -1221,8 +1278,12 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
         Self::push_point(self, cols)
     }
 
-    fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
-        Self::remove_point(self, index)
+    fn check_remove(&self, index: usize) -> Result<(), GprError> {
+        Self::check_remove(self, index)
+    }
+
+    fn remove_point(&mut self, index: usize) {
+        Self::remove_point(self, index);
     }
 
     fn remove_work(&self, index: usize) -> usize {
@@ -1277,16 +1338,23 @@ impl SourceStore<f32> for RefinedSources {
         cols: &dyn RectSlots<f32>,
         exact: &dyn RectSlots<f64>,
     ) -> Result<(), GprError> {
-        // Both copies reserved room and hold the same slots, so neither
-        // push fails once the columns are bound for them; the exact copy
-        // goes first, so an error there leaves both as they were.
-        self.exact.push_point(exact)?;
-        self.storage.push_point(cols)
+        // Both copies are checked before either is written, so an error
+        // leaves both as they were.
+        self.exact.check_push(exact)?;
+        self.storage.check_push(cols)?;
+        self.exact.write_point(exact);
+        self.storage.write_point(cols);
+        Ok(())
     }
 
-    fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
-        self.storage.remove_point(index)?;
-        self.exact.remove_point(index)
+    fn check_remove(&self, index: usize) -> Result<(), GprError> {
+        self.storage.check_remove(index)?;
+        self.exact.check_remove(index)
+    }
+
+    fn remove_point(&mut self, index: usize) {
+        self.storage.remove_point(index);
+        self.exact.remove_point(index);
     }
 
     fn remove_work(&self, index: usize) -> usize {

@@ -421,6 +421,10 @@ impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
         y_new: f64,
         scratch: &mut QueryScratch<P::Storage>,
     ) -> Result<PointId, GprError> {
+        // Every check of the point and its columns runs before the store
+        // makes room; a pivot the factor refuses after that leaves only the
+        // room, which reads nothing.
+        self.check_new_point(x_new, y_new)?;
         let cols = QuerySources::bind_column(&self.core.slots, sources, self.core.n, scratch)?;
         let exact = cols.f64_view();
         self.core.sources.reserve_point()?;
