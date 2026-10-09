@@ -1219,6 +1219,197 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
     out
 }
 
+/// Allocations of each change of an online model, `[insert, delete,
+/// insert_inducing, delete_inducing]`, each on a copy of `base` that a
+/// first insert and delete (`settle`) made its own, as a model is after
+/// its first changes: the model has room for one more point and one more
+/// inducing point, so most changes write in place.
+fn online_change_allocs<M: Clone>(
+    base: &M,
+    settle: &dyn Fn(&mut M),
+    changes: [&dyn Fn(&mut M); 4],
+) -> [usize; 4] {
+    changes.map(|change| {
+        least_of_two(|| {
+            let mut model = base.clone();
+            settle(&mut model);
+            allocs_once(|| change(&mut model))
+        })
+    })
+}
+
+/// [`online_change_allocs`] of `OnlineSgpr` on supplied distances and on
+/// coordinates at `P`, rbf and rbf_ard, on the baseline problem with the
+/// first `m` training points inducing: `(label, supplied, coordinate)`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn online_sparse_allocs<P: GpScalar>() -> Vec<(String, usize, usize)> {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let (n, m) = (p.n, p.m);
+    let inducing: Vec<usize> = (0..m).collect();
+    let nm = n * m;
+    // The new point's squared distances to the inducing points, and
+    // training point `m`'s to every training point.
+    let row: Vec<Vec<f64>> = s.new.iter().map(|b| b[..m].to_vec()).collect();
+    let column: Vec<Vec<f64>> = s
+        .train
+        .iter()
+        .map(|b| b[m * n..(m + 1) * n].to_vec())
+        .collect();
+    let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
+        (0..blocks[0].len())
+            .map(|i| blocks.iter().map(|b| b[i]).sum())
+            .collect()
+    };
+    let (row_sum, column_sum) = (sum(&row), sum(&column));
+    let z_new: Vec<f64> = (0..p.d).map(|k| p.x[m + k * n]).collect();
+    let image = ScalarDistance::new();
+    let ell = [0.5, 0.6, 0.7, 0.8];
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&ell[..p.d]).expect("ell"));
+    let mut out = Vec::new();
+    for name in ["rbf", "rbf_ard"] {
+        let scalar = name == "rbf";
+        let coords = Sgpr::new(
+            if scalar {
+                KernelSpec::from(RbfKernel::new(0.5).expect("ell"))
+            } else {
+                KernelSpec::from(RbfArdKernel::new(&ell[..p.d]).expect("ell"))
+            },
+            lik(),
+        )
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor(&p.x, n, p.d, &p.y, &p.z, m)
+        .map_err(|(_, e)| e)
+        .expect("coords");
+        let train: Vec<&[f64]> = s.train.iter().map(|b| &b[..nm]).collect();
+        let train_sum = &s.train_sum[..nm];
+        let supplied = if scalar {
+            Sgpr::new(image.kernel(RbfKernel::new(0.5).expect("ell")), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([image.borrow(train_sum)], n, &p.y, &inducing)
+        } else {
+            Sgpr::new(ard.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([bands.borrow(&train)], n, &p.y, &inducing)
+        }
+        .map_err(|(_, e)| e)
+        .expect("supplied");
+        let row_refs: Vec<&[f64]> = row.iter().map(Vec::as_slice).collect();
+        let column_refs: Vec<&[f64]> = column.iter().map(Vec::as_slice).collect();
+        let row_src = || {
+            if scalar {
+                image.borrow(&row_sum)
+            } else {
+                bands.borrow(&row_refs)
+            }
+        };
+        let column_src = || {
+            if scalar {
+                image.borrow(&column_sum)
+            } else {
+                bands.borrow(&column_refs)
+            }
+        };
+        // Room for a point and an inducing point, as after the first changes.
+        let mut coords = coords.into_online();
+        let id = coords.insert(&p.x_new, p.y_new).expect("insert");
+        coords.delete(id).expect("delete");
+        let id = coords.insert_inducing(&z_new).expect("insert_inducing");
+        coords.delete_inducing(id).expect("delete_inducing");
+        let mut supplied = supplied.into_online();
+        let id = supplied.insert([row_src()], p.y_new).expect("insert");
+        supplied.delete(id).expect("delete");
+        let point = supplied.point_ids()[m];
+        let id = supplied
+            .insert_inducing(point, [column_src()])
+            .expect("insert_inducing");
+        supplied.delete_inducing(id).expect("delete_inducing");
+        let coordinate = online_change_allocs(
+            &coords,
+            &|model| {
+                let id = model.insert(&p.x_new, p.y_new).expect("settle");
+                model.delete(id).expect("settle");
+            },
+            [
+                &|model| {
+                    model.insert(&p.x_new, p.y_new).expect("insert");
+                },
+                &|model| model.delete(model.point_ids()[n / 2]).expect("delete"),
+                &|model| {
+                    model.insert_inducing(&z_new).expect("insert_inducing");
+                },
+                &|model| {
+                    model
+                        .delete_inducing(model.inducing_ids()[m / 2])
+                        .expect("delete_inducing");
+                },
+            ],
+        );
+        let on_supplied = online_change_allocs(
+            &supplied,
+            &|model| {
+                let id = model.insert([row_src()], p.y_new).expect("settle");
+                model.delete(id).expect("settle");
+            },
+            [
+                &|model| {
+                    model.insert([row_src()], p.y_new).expect("insert");
+                },
+                &|model| model.delete(model.point_ids()[n / 2]).expect("delete"),
+                &|model| {
+                    let point = model.point_ids()[m];
+                    model
+                        .insert_inducing(point, [column_src()])
+                        .expect("insert_inducing");
+                },
+                &|model| {
+                    model
+                        .delete_inducing(model.inducing_ids()[m / 2])
+                        .expect("delete_inducing");
+                },
+            ],
+        );
+        for ((label, got), cap) in ["insert", "delete", "insert_inducing", "delete_inducing"]
+            .iter()
+            .zip(on_supplied)
+            .zip(coordinate)
+        {
+            out.push((format!("{name}/online_sgpr_{label}"), got, cap));
+        }
+    }
+    out
+}
+
+/// An `OnlineSgpr` on supplied distances allocates no more than the
+/// coordinate one for each change, at each precision (#493).
+#[test]
+fn online_sgpr_on_supplied_distances_allocates_no_more_than_coordinates() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    let mut over = Vec::new();
+    for (precision, rows) in [
+        ("f64", online_sparse_allocs::<DoublePrecision>()),
+        ("f32", online_sparse_allocs::<SinglePrecision>()),
+        (
+            "mixed",
+            online_sparse_allocs::<MixedPrecision<ReevaluateKernel>>(),
+        ),
+    ] {
+        for (label, count, cap) in rows {
+            let label = format!("supplied/{precision}/{label}");
+            eprintln!("{label}: allocations={count} cap={cap}");
+            if count > cap {
+                over.push(label);
+            }
+        }
+    }
+    assert!(over.is_empty(), "over the coordinate path: {over:?}");
+}
+
 /// A model on supplied distances allocates no more than the coordinate
 /// path on the baseline problem at the same precision (design §5.6): a
 /// borrowed table is read in place, so `predict_into` of an `f64` model

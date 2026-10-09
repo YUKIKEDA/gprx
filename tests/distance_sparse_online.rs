@@ -542,3 +542,58 @@ fn inserts_check_their_columns_and_change_nothing_on_an_error() {
     assert_slice_close(&got.mean, &want.mean, 1e-8);
     assert_slice_close(&got.variance, &want.variance, 1e-8);
 }
+
+/// An inducing point that leaves `K_mm` singular (a copy of one already
+/// inducing) does not factor without jitter: the model keeps its inducing
+/// points, its blocks, and its predictions, at every precision.
+#[test]
+fn an_inducing_point_that_does_not_factor_changes_nothing() {
+    fn run<P: GpScalar>() {
+        let world = World::new();
+        let image = ScalarDistance::new();
+        let live = Live::start();
+        let n = live.points.len();
+        let block = |rows: &[usize], cols: &[usize]| world.summed(&[0, 1], rows, Some(cols));
+        let mut online = Sgpr::new(image.kernel(RbfKernel::new(ELL[0]).expect("ell")), lik())
+            .with_precision::<P>()
+            .with_optimizer(Fixed)
+            .with_jitter_policy(gprx::JitterPolicy::fixed(0.0).expect("jitter"))
+            .factor(
+                [image.from_vec(block(&live.points, &live.inducing))],
+                n,
+                &world.y(&live.points),
+                &live.inducing,
+            )
+            .map_err(|(_, e)| e)
+            .expect("factor")
+            .into_online();
+        // A copy of sample 7 (inducing): its squared distances to the
+        // inducing points are those of sample 7.
+        online
+            .insert([image.from_vec(block(&live.inducing, &[7]))], world.y[7])
+            .expect("insert");
+        let mut points = live.points.clone();
+        points.push(7);
+        let query = world.summed(&[0, 1], &live.inducing, None);
+        let before = online.predict([image.borrow(&query)], Q).expect("predict");
+        let copy = online.point_ids()[n];
+        assert!(matches!(
+            online.insert_inducing(copy, [image.from_vec(block(&points, &[7]))]),
+            Err(GprError::CholeskyFailed { .. })
+        ));
+        assert_eq!(online.m(), live.inducing.len());
+        assert_eq!(online.inducing(), &[7, 0, 4, 9]);
+        let after = online.predict([image.borrow(&query)], Q).expect("predict");
+        assert_eq!(bits(&after.mean), bits(&before.mean));
+        assert_eq!(bits(&after.variance), bits(&before.variance));
+        // The blocks are as they were: a point that factors goes in.
+        let id = online.point_ids()[live.at(3)];
+        online
+            .insert_inducing(id, [image.from_vec(block(&points, &[3]))])
+            .expect("insert_inducing");
+        assert_eq!(online.inducing(), &[7, 0, 4, 9, 3]);
+    }
+    run::<DoublePrecision>();
+    run::<SinglePrecision>();
+    run::<MixedPrecision<PromoteStorage>>();
+}

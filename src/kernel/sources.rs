@@ -2380,22 +2380,44 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     }
 }
 
-/// Value `row` of the bound `rows × 1` column of `block` in `cols`.
+/// The `rows` values of the bound `rows × 1` column of `block` in `cols`,
+/// appended to `out`.
 ///
 /// # Errors
 ///
 /// Returns the error of reading the block: unbound, or an unchecked value
 /// that is invalid.
-pub(crate) fn column_value(
+pub(crate) fn column_into(
     cols: &dyn RectSlots<f64>,
     block: BlockAt,
-    row: usize,
-) -> Result<f64, GprError> {
+    rows: usize,
+    out: &mut Vec<f64>,
+) -> Result<(), GprError> {
+    fn from_blocks<S: super::dist::BlockState>(
+        blocks: ArdBlocks<'_, f64, S>,
+        k: usize,
+        rows: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
+        match blocks.column(k, 0)? {
+            Some(run) => out.extend_from_slice(run),
+            None => {
+                for row in 0..rows {
+                    out.push(blocks.read(k, row, 0)?);
+                }
+            }
+        }
+        Ok(())
+    }
     match block {
-        BlockAt::Scalar(at) => Ok(cols.scalar(at)?[(row, 0)]),
+        BlockAt::Scalar(at) => {
+            let column = cols.scalar(at)?;
+            out.extend((0..rows).map(|row| column[(row, 0)]));
+            Ok(())
+        }
         BlockAt::Ard(at, k) => match cols.ard(at)? {
-            ArdRect::Checked(blocks) => blocks.read(k, row, 0),
-            ArdRect::Unchecked(blocks) => blocks.read(k, row, 0),
+            ArdRect::Checked(blocks) => from_blocks(blocks, k, rows, out),
+            ArdRect::Unchecked(blocks) => from_blocks(blocks, k, rows, out),
         },
     }
 }
@@ -2433,9 +2455,7 @@ pub(crate) fn new_inducing_column(
     let mut square = vec![0.0; side * side];
     for &at in &blocks {
         let start = column.len();
-        for row in 0..n {
-            column.push(column_value(cols, at, row)?);
-        }
+        column_into(cols, at, n, &mut column)?;
         let new = &mut column[start..];
         for b in 0..m {
             for a in 0..m {

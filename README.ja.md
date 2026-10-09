@@ -413,7 +413,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は距離のモデルも変換する。その `insert` はスロットごとに、今の点から新しい点への二乗距離の `n × 1` の列（`point_ids` の順）を、上のどのソースからでも受け取る。ARD のスロットはこの列を `d` 本受け取る。`DistanceOnly` は `insert(sources, y_new)`、`WithPoints` は `insert(sources, x_new, y_new)`。列は学習の正方行列と同じく検査し（`tidy` なら直し）、保持する。`delete(id)` は、保持した二乗距離からその点をその場で除く。オンラインのモデルは、学習済みのモデルと同じ引数で予測する。モデルが一度伸びた後は、どちらも確保しない（scalar の正方行列は 4 分の 1 ずつ、ARD のスロットは倍々に伸びる）。ただし、ワーカーが 2 つ以上の Rayon のプールで大きな削除をするときは、因子の更新の横で動かすジョブを 1 つ積む。
 
-距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`OnlineSgpr` は座標だけを受け取る。factor は、座標のモデルが `n · d` 個の座標から計算する組を、供給された `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
+距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`into_online` はブロックを持ったまま変換する。`insert` はスロットごとに、誘導点から新しい点への `m × 1` の二乗距離を受け取る。`insert_inducing` は学習点を `PointId` で指定し、学習点からその点への `n × 1` の二乗距離を受け取って、持っている組と照らして検査する。誘導点である点は、`delete_inducing` で外すまで `delete` できない。factor は、座標のモデルが `n · d` 個の座標から計算する組を、供給された `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{
@@ -515,6 +515,13 @@ fn main() -> Result<(), gprx::GprError> {
     // The 2 × 2 block from the inducing points to the queries at 0.5 and 1.5.
     let cross_z = [0.25, 2.25, 2.25, 0.25];
     let _ = sgpr.predict([image.borrow(&cross_z)], 2)?;
+    // OnlineSgpr: x = 4 の点（誘導点への二乗距離）を足し、学習点 1 を
+    // 3 つめの誘導点にする（5 つの学習点への二乗距離）。
+    let mut online = sgpr.clone().into_online();
+    online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
+    let point = online.point_ids()[1];
+    online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0, 9.0])])?;
+    assert_eq!(online.inducing(), &[0, 2, 1]);
     let svgp = Svgp::new(kernel, GaussianLikelihood::new(0.1)?)
         .factor([image.from_vec(train_z.to_vec())], 4, &y, &[0, 2])
         .map_err(|(_, e)| e)?;

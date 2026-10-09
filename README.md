@@ -397,7 +397,7 @@ Tables are column-major `dist[i + j * n_rows]`. Every value must be finite and n
 
 `cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` converts a distance model too. Its `insert` takes, per slot, the `n × 1` column of squared distances from the current points, in `point_ids` order, to the new point (`d` such columns for an ARD slot), from any source above: `insert(sources, y_new)` for `DistanceOnly`, `insert(sources, x_new, y_new)` for `WithPoints`. The column is checked as a training square is (or repaired by `tidy`) and kept, and `delete(id)` removes the point from the kept squares in place. The online model predicts with the same arguments as the fitted one. Neither allocates once the model has grown once (a scalar square grows by a quarter, an ARD slot by doubling), except that a large delete on a Rayon pool of more than one worker queues one job beside the factor's update.
 
-A sparse model on supplied distances names its inducing points by training index: `inducing` lists them, without repeats, and each source of `fit` / `factor` is the `n × m` block from the training points to them (column `a` is the training point `inducing[a]`); `K_mm` reads their rows of it. The model keeps the blocks as they were handed over (a moved table without a copy, a borrowed one copied once). A prediction's `cross` is the `m × q` block from the inducing points, in `inducing()` order, to the queries; `square` is as above. `FreeInducing` needs coordinates to move, so a distance model keeps its inducing points; `OnlineSgpr` takes coordinates only. A factor reads the `d · n · m` supplied values a coordinate model computes from `n · d` coordinates, so it costs more for an ARD slot than the coordinate factor; the gradient and the predictions cost no more ([design §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.md#56-supplied-squared-distances-requirements-470)).
+A sparse model on supplied distances names its inducing points by training index: `inducing` lists them, without repeats, and each source of `fit` / `factor` is the `n × m` block from the training points to them (column `a` is the training point `inducing[a]`); `K_mm` reads their rows of it. The model keeps the blocks as they were handed over (a moved table without a copy, a borrowed one copied once). A prediction's `cross` is the `m × q` block from the inducing points, in `inducing()` order, to the queries; `square` is as above. `FreeInducing` needs coordinates to move, so a distance model keeps its inducing points. `into_online` keeps the blocks: `insert` takes, per slot, the `m × 1` squared distances from the inducing points to the new point; `insert_inducing` names a training point by its `PointId` and takes its `n × 1` squared distances to the training points, checked against the stored pairs; an inducing point cannot be `delete`d until `delete_inducing` removes it. A factor reads the `d · n · m` supplied values a coordinate model computes from `n · d` coordinates, so it costs more for an ARD slot than the coordinate factor; the gradient and the predictions cost no more ([design §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.md#56-supplied-squared-distances-requirements-470)).
 
 ```rust
 use gprx::kernel::{
@@ -499,6 +499,14 @@ fn main() -> Result<(), gprx::GprError> {
     // The 2 × 2 block from the inducing points to the queries at 0.5 and 1.5.
     let cross_z = [0.25, 2.25, 2.25, 0.25];
     let _ = sgpr.predict([image.borrow(&cross_z)], 2)?;
+    // OnlineSgpr: a point at 4 (its squared distances to the inducing
+    // points), then training point 1 as a third inducing point (its squared
+    // distances to the five training points).
+    let mut online = sgpr.clone().into_online();
+    online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
+    let point = online.point_ids()[1];
+    online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0, 9.0])])?;
+    assert_eq!(online.inducing(), &[0, 2, 1]);
     let svgp = Svgp::new(kernel, GaussianLikelihood::new(0.1)?)
         .factor([image.from_vec(train_z.to_vec())], 4, &y, &[0, 2])
         .map_err(|(_, e)| e)?;

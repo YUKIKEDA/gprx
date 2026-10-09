@@ -11,7 +11,7 @@ use crate::kernel::ScalarOps;
 use crate::kernel::{
     BlockAt, CrossViews, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar,
     KernelSpec, ModelKernel, NoSupply, PointUse, QueryScratch, QuerySources, SuppliedSpec, Supply,
-    SupplyViews, WithPoints, column_value, new_inducing_column,
+    SupplyViews, WithPoints, column_into, new_inducing_column,
 };
 use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2, solve_llt};
 use crate::optimizer::{Lbfgs, Optimizer};
@@ -1554,9 +1554,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             let blocks = self.state.core.supply.exact().xz.block_ids();
             let mut row = Vec::with_capacity(blocks.len() * m);
             for &at in &blocks {
-                for col in 0..m {
-                    row.push(column_value(&exact, at, col)?);
-                }
+                column_into(&exact, at, m, &mut row)?;
             }
             self.state.core.supply.reserve_point()?;
             self.atomically(|model| {

@@ -170,8 +170,72 @@ fn sparse(c: &mut Criterion) {
                     .expect("predict")
             });
         });
+        // Training point `m` becomes inducing; room for a point and an
+        // inducing point, as after the first changes.
+        let z_new: Vec<f64> = (0..p.d).map(|k| p.x[p.m + k * p.n]).collect();
+        let mut base = sgpr().into_online();
+        let id = base.insert(&p.x_new, p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        let id = base.insert_inducing(&z_new).expect("grow");
+        base.delete_inducing(id).expect("shrink");
+        online_sgpr_changes(
+            &mut group,
+            &format!("{name}/online_sgpr"),
+            &base,
+            &|model| {
+                let id = model.insert(&p.x_new, p.y_new).expect("settle");
+                model.delete(id).expect("settle");
+            },
+            [
+                &|model| {
+                    model.insert(&p.x_new, p.y_new).expect("insert");
+                },
+                &|model| model.delete(model.point_ids()[p.n / 2]).expect("delete"),
+                &|model| {
+                    model.insert_inducing(&z_new).expect("insert_inducing");
+                },
+                &|model| {
+                    let id = model.inducing_ids()[p.m / 2];
+                    model.delete_inducing(id).expect("delete_inducing");
+                },
+            ],
+        );
     }
     group.finish();
+}
+
+/// The four changes of an online SGPR, each on a copy of `base` that a
+/// first insert and delete (`settle`) made its own (as a model is after its
+/// first changes; the copy is not timed): `[insert, delete of the middle
+/// point, insert_inducing, delete_inducing of the middle one]`.
+fn online_sgpr_changes<M: Clone>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    prefix: &str,
+    base: &M,
+    settle: &dyn Fn(&mut M),
+    changes: [&dyn Fn(&mut M); 4],
+) {
+    for (label, change) in [
+        "insert",
+        "delete_middle",
+        "insert_inducing",
+        "delete_inducing",
+    ]
+    .into_iter()
+    .zip(changes)
+    {
+        group.bench_function(format!("{prefix}_{label}"), |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut model = base.clone();
+                    settle(&mut model);
+                    model
+                },
+                |model| change(model),
+                BatchSize::LargeInput,
+            );
+        });
+    }
 }
 
 /// The bound and its gradient of a fitted SGPR at its own `θ`.
@@ -202,6 +266,14 @@ fn sparse_supplied(c: &mut Criterion) {
     let train_refs: Vec<&[f64]> = s.train.iter().map(|b| &b[..nm]).collect();
     let cross_refs: Vec<&[f64]> = s.sparse_cross.iter().map(Vec::as_slice).collect();
     let inducing: Vec<usize> = (0..p.m).collect();
+    let row_refs: Vec<&[f64]> = s.new.iter().map(|b| &b[..p.m]).collect();
+    let row_sum = &s.new_sum;
+    let column_refs: Vec<&[f64]> = s
+        .train
+        .iter()
+        .map(|b| &b[p.m * p.n..(p.m + 1) * p.n])
+        .collect();
+    let column_sum = &s.train_sum[p.m * p.n..(p.m + 1) * p.n];
     let mut group = c.benchmark_group("distance_baseline");
     group.sample_size(20);
     for (name, slot, kernel) in distance_kernels(p.d) {
@@ -248,6 +320,47 @@ fn sparse_supplied(c: &mut Criterion) {
                     .expect("predict")
             });
         });
+        // As `sparse`: the new point's squared distances to the inducing
+        // points, and training point `m`'s to every training point.
+        let row = || match &slot {
+            Slot::Scalar(image) => image.borrow(&row_sum[..p.m]),
+            Slot::Ard(bands) => bands.borrow(&row_refs),
+        };
+        let column = || match &slot {
+            Slot::Scalar(image) => image.borrow(&column_sum),
+            Slot::Ard(bands) => bands.borrow(&column_refs),
+        };
+        let mut base = sgpr().into_online();
+        let id = base.insert([row()], p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        let point = base.point_ids()[p.m];
+        let id = base.insert_inducing(point, [column()]).expect("grow");
+        base.delete_inducing(id).expect("shrink");
+        online_sgpr_changes(
+            &mut group,
+            &format!("{name}/dist_online_sgpr"),
+            &base,
+            &|model| {
+                let id = model.insert([row()], p.y_new).expect("settle");
+                model.delete(id).expect("settle");
+            },
+            [
+                &|model| {
+                    model.insert([row()], p.y_new).expect("insert");
+                },
+                &|model| model.delete(model.point_ids()[p.n / 2]).expect("delete"),
+                &|model| {
+                    let point = model.point_ids()[p.m];
+                    model
+                        .insert_inducing(point, [column()])
+                        .expect("insert_inducing");
+                },
+                &|model| {
+                    let id = model.inducing_ids()[p.m / 2];
+                    model.delete_inducing(id).expect("delete_inducing");
+                },
+            ],
+        );
     }
     group.finish();
 }
