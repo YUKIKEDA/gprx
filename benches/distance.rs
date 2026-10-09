@@ -85,26 +85,26 @@ fn exact(c: &mut Criterion) {
         });
         let base = online(&p, &kernel);
         group.bench_function(format!("{name}/online_insert"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || base.clone(),
-                |mut online| online.insert(&p.x_new, p.y_new).expect("insert"),
+                |online| online.insert(&p.x_new, p.y_new).expect("insert"),
                 BatchSize::LargeInput,
             );
         });
         for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
             let id = base.point_ids()[index];
             group.bench_function(format!("{name}/online_delete_{label}"), |b| {
-                b.iter_batched(
+                b.iter_batched_ref(
                     || base.clone(),
-                    |mut online| online.delete(id).expect("delete"),
+                    |online| online.delete(id).expect("delete"),
                     BatchSize::LargeInput,
                 );
             });
         }
         group.bench_function(format!("{name}/online_refit"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || base.clone(),
-                |mut online| online.refit().expect("refit"),
+                |online| online.refit().expect("refit"),
                 BatchSize::LargeInput,
             );
         });
@@ -180,6 +180,14 @@ impl Slot {
         }
     }
 
+    /// The training points' column to `x_new`, borrowed.
+    fn new_point<'a>(&self, s: &'a Supplied, refs: &'a [&'a [f64]]) -> DistanceSource<'a> {
+        match self {
+            Self::Scalar(slot) => slot.borrow(&s.new_sum),
+            Self::Ard(slot) => slot.borrow(refs),
+        }
+    }
+
     /// The train × query block, borrowed.
     fn cross<'a>(&self, s: &'a Supplied, refs: &'a [&'a [f64]]) -> DistanceSource<'a> {
         match self {
@@ -195,6 +203,7 @@ fn exact_supplied(c: &mut Criterion) {
     let s = p.supplied();
     let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
     let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let new_refs: Vec<&[f64]> = s.new.iter().map(Vec::as_slice).collect();
     let mut group = c.benchmark_group("distance_baseline");
     group.sample_size(20);
     for (name, slot, kernel) in distance_kernels(p.d) {
@@ -228,6 +237,35 @@ fn exact_supplied(c: &mut Criterion) {
         });
         group.bench_function(format!("{name}/dist_refit"), |b| {
             b.iter(|| model.refit().expect("refit"));
+        });
+        // As `online`: room for one more point.
+        let new = || slot.new_point(&s, &new_refs);
+        let mut base = model.into_online().expect("online");
+        let id = base.insert([new()], p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        group.bench_function(format!("{name}/dist_online_insert"), |b| {
+            b.iter_batched_ref(
+                || base.clone(),
+                |online| online.insert([new()], p.y_new).expect("insert"),
+                BatchSize::LargeInput,
+            );
+        });
+        for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
+            let id = base.point_ids()[index];
+            group.bench_function(format!("{name}/dist_online_delete_{label}"), |b| {
+                b.iter_batched_ref(
+                    || base.clone(),
+                    |online| online.delete(id).expect("delete"),
+                    BatchSize::LargeInput,
+                );
+            });
+        }
+        group.bench_function(format!("{name}/dist_online_refit"), |b| {
+            b.iter_batched_ref(
+                || base.clone(),
+                |online| online.refit().expect("refit"),
+                BatchSize::LargeInput,
+            );
         });
     }
     // The coordinate refit of a `FittedGpr`, beside `dist_refit`.

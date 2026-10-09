@@ -509,9 +509,16 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] if `n`, `m`, or `d` is zero.
-    pub(crate) fn ensure_at_least(&mut self, n: usize, m: usize, d: usize) -> Result<(), GprError> {
-        if n == 0 || m == 0 || d == 0 {
+    /// Returns [`GprError::EmptyInput`] if `n` or `m` is zero, or `cols` is
+    /// [`QueryCols::Points`] of zero.
+    pub(crate) fn ensure_at_least(
+        &mut self,
+        n: usize,
+        m: usize,
+        cols: QueryCols,
+    ) -> Result<(), GprError> {
+        let d = cols.count()?;
+        if n == 0 || m == 0 {
             return Err(GprError::EmptyInput);
         }
         let have_n = self.query_k_star.nrows();
@@ -670,7 +677,7 @@ mod tests {
         );
         query.ensure(4, 3, QueryCols::Distances).expect("no column");
         assert_eq!(
-            query.ensure_at_least(4, 1, 0).err(),
+            query.ensure_at_least(4, 1, QueryCols::Points(0)).err(),
             Some(GprError::EmptyInput)
         );
     }

@@ -641,8 +641,11 @@ where
     }
 }
 
-impl<O, P: GpScalar> FittedGpr<O, P> {
+impl<O, P: GpScalar, K: ModelKernel> FittedGpr<O, P, K> {
     /// Converts this LLT factorization into an [`OnlineGpr`] for tail inserts.
+    ///
+    /// A model of supplied distances keeps its training squares; its ARD
+    /// slots are packed with room to grow at the first insert.
     ///
     /// Writes `D[j] = L_jj²` and `L_ldlt[i,j] = L_llt[i,j] / L_jj`, then
     /// rebuilds `A = K + σn² I` on the online workspace. [`OnlineGpr::insert`]
@@ -674,7 +677,7 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_online(self) -> Result<OnlineGpr<O, P>, GprError> {
+    pub fn into_online(self) -> Result<OnlineGpr<O, P, K>, GprError> {
         let n = self.core.n;
         let mut workspace = LdltStore::from_active(n)?;
         workspace.fill_ld_from_llt(self.chol_l(), n)?;
@@ -683,7 +686,9 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
         LdltStore::set_vector_prefix(&mut workspace.alpha, &self.core.factor_alpha);
         Ok(OnlineGpr::from_core(self.core, self.optimizer, workspace))
     }
+}
 
+impl<O, P: GpScalar> FittedGpr<O, P> {
     /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
     ///
     /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them

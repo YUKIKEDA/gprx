@@ -117,13 +117,17 @@ pub fn distance_baseline() -> DistanceBaseline {
 pub struct Supplied {
     pub train: Vec<Vec<f64>>,
     pub cross: Vec<Vec<f64>>,
+    /// The `n × 1` blocks from the training points to `x_new`.
+    pub new: Vec<Vec<f64>>,
     /// `Σ_k` of the blocks: the squared Euclidean distance.
     pub train_sum: Vec<f64>,
     pub cross_sum: Vec<f64>,
+    pub new_sum: Vec<f64>,
 }
 
 impl DistanceBaseline {
-    /// The training square and the train × query block of the problem.
+    /// The training square, the train × query block, and the training
+    /// points' column to `x_new` of the problem.
     pub fn supplied(&self) -> Supplied {
         let block = |a: &[f64], ra: usize, b: &[f64], rb: usize, k: usize| -> Vec<f64> {
             (0..rb)
@@ -136,6 +140,9 @@ impl DistanceBaseline {
         let cross: Vec<Vec<f64>> = (0..self.d)
             .map(|k| block(&self.x, self.n, &self.xq, self.q, k))
             .collect();
+        let new: Vec<Vec<f64>> = (0..self.d)
+            .map(|k| block(&self.x, self.n, &self.x_new, 1, k))
+            .collect();
         let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
             (0..blocks[0].len())
                 .map(|at| blocks.iter().map(|b| b[at]).sum())
@@ -144,8 +151,10 @@ impl DistanceBaseline {
         Supplied {
             train_sum: sum(&train),
             cross_sum: sum(&cross),
+            new_sum: sum(&new),
             train,
             cross,
+            new,
         }
     }
 }

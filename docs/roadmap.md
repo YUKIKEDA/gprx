@@ -248,7 +248,7 @@ Requirements: design §5.6. Every row meets them and pastes its benches.
 | D1-3a | Task | Unchecked and checked ARD prediction blocks as types | [#485](https://github.com/YUKIKEDA/gprx/issues/485) | open |
 | D1-3b | Task | Covariance query squares read without a second copy | [#486](https://github.com/YUKIKEDA/gprx/issues/486) | open |
 | D1-3c | Task | Supply presence in the model's type, not a runtime `Option` | [#487](https://github.com/YUKIKEDA/gprx/issues/487) | open |
-| D1-4 | Feat | Online insert and delete on supplied distances (deferred compaction, ARD in place) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | Set after Grill on #473 |
+| D1-4 | Feat | Online insert and delete on supplied distances (compacted in place, packed ARD with capacity) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | open |
 | D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |
 | D1-6 | Feat | Save and load of distance models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | Set after Grill on #470 |
 

@@ -1,6 +1,6 @@
 //! Exact GPR on supplied squared distances: the `fit`, `factor`, and
-//! predict of [`Gpr`] and [`FittedGpr`] for a [`DistanceKernel`]. Online
-//! insert and delete on supplied distances are not here yet (#473).
+//! predict of [`Gpr`] and [`FittedGpr`] for a [`DistanceKernel`], and the
+//! insert and predict of its [`OnlineGpr`].
 //!
 //! A [`DistanceKernel<DistanceOnly>`] model takes no coordinates; a
 //! [`DistanceKernel<WithPoints>`] model takes the column-major `x` of its
@@ -11,7 +11,7 @@ use crate::error::GprError;
 use crate::gpr::GprObjective;
 use crate::kernel::{
     DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, KernelScalar, PointUse,
-    QueryScratch, QuerySources, SuppliedSpec, WithPoints,
+    QueryScratch, QuerySources, SourceStore, SuppliedSpec, WithPoints,
 };
 use crate::optimizer::{Fixed, Optimizer};
 use crate::policy::JitterPolicy;
@@ -20,7 +20,9 @@ use crate::prediction::{DistanceQuery, QueryPoints, distance_predict};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::shared::Query;
-use super::{FittedGpr, Gpr, TrainInput};
+use crate::points::PointId;
+
+use super::{FittedGpr, Gpr, OnlineGpr, TrainInput};
 
 /// Binds the `n × m` train × query blocks of `cross` on `scratch`. The
 /// result borrows the scratch and the caller's tables, not `slots`, so the
@@ -387,6 +389,313 @@ distance_predict!(
         /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
         /// let _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
         /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
+        /// # Ok(())
+        /// # }
+        /// ```
+    },
+);
+
+impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
+    /// Appends one point from its supplied columns: each binds its slot's
+    /// `n × 1` squared distances from the `n` live points, in
+    /// [`Self::point_ids`] order, to the new point (`d` such columns for an
+    /// ARD slot). The columns are checked in full, as training squares
+    /// are, then kept.
+    fn insert_sources<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_new: &[f64],
+        y_new: f64,
+    ) -> Result<PointId, GprError> {
+        // The model's buffers, taken for the call as a predict takes them.
+        let mut scratch = std::mem::take(&mut self.core.query_sources);
+        let result = self.insert_bound(sources, x_new, y_new, &mut scratch);
+        self.core.query_sources = scratch;
+        result
+    }
+
+    fn insert_bound<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_new: &[f64],
+        y_new: f64,
+        scratch: &mut QueryScratch<P::Storage>,
+    ) -> Result<PointId, GprError> {
+        let cols = QuerySources::bind_column(&self.core.slots, sources, self.core.n, scratch)?;
+        let exact = cols.f64_view();
+        self.core.sources.reserve_point()?;
+        self.insert_with(x_new, y_new, &cols, |store| store.push_point(&cols, &exact))
+    }
+
+    /// Returns a copy of the kernel whose hyperparameters this model owns.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as crate::kernel::ModelKernelParts>::from_spec(self.core.kernel.clone())
+    }
+
+    /// Returns the slots of the kernel, in the order of
+    /// [`DistanceKernel::slots`]; bind supplies to these.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn slots(&self) -> Vec<DistanceSlot> {
+        crate::kernel::spec_slots(&self.core.kernel)
+    }
+}
+
+impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {
+    /// Appends one training point at the current `θ` with a bordered LDLT
+    /// update, from its squared distances to the live points.
+    ///
+    /// `sources` binds, per slot, the `n × 1` column from the `n` live
+    /// points (in [`Self::point_ids`] order) to the new point; an ARD slot
+    /// binds one such column per dimension. A table may be borrowed, owned,
+    /// or filled. Every value is checked (finite, `≥ 0`) and the column is
+    /// kept: the store grows its capacity by doubling, so most inserts copy
+    /// only the column. `α` is not solved here; the first later read solves
+    /// it. The returned [`PointId`] is never reused after a later
+    /// [`Self::delete`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NonFiniteInput`] if `y_new` is `NaN` or `Inf`,
+    /// [`GprError::InvalidDistance`] for a negative or non-finite distance,
+    /// [`GprError::LengthMismatch`] for a column whose length is not `n`, a
+    /// source of a slot the kernel does not read, a slot without a source,
+    /// or two sources of one slot, [`GprError::IndexOutOfRange`] if no new
+    /// [`PointId`] is left, or [`GprError::CholeskyFailed`] if the new pivot
+    /// is not positive. On an error the model holds the same points.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online()?;
+    /// // The new point's squared distances to the two live points.
+    /// let id = online.insert([image.from_vec(vec![4.0, 1.0])], 0.5)?;
+    /// let pred = online.predict([image.from_vec(vec![1.0, 0.0, 1.0])], 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// online.delete(id)?;
+    /// assert_eq!(online.n(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        y_new: f64,
+    ) -> Result<PointId, GprError> {
+        self.insert_sources(sources, &[], y_new)
+    }
+}
+
+impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<WithPoints>> {
+    /// Appends one training point at the current `θ` with a bordered LDLT
+    /// update, from its squared distances to the live points and its
+    /// coordinates `x_new` (length [`Self::d`]).
+    ///
+    /// The columns are as in the insert of a [`DistanceOnly`] model; `x_new`
+    /// goes through the stored input transform, which is not re-fit.
+    ///
+    /// # Errors
+    ///
+    /// Those of the insert of a [`DistanceOnly`] model, and
+    /// [`GprError::DimensionMismatch`] if `x_new` is the wrong length or
+    /// [`GprError::NonFiniteInput`] if one of its values is `NaN` or `Inf`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+    /// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online()?;
+    /// online.insert([image.from_vec(vec![4.0, 1.0])], &[2.0], 0.5)?;
+    /// assert_eq!(online.n(), 3);
+    /// let pred = online.predict([image.from_vec(vec![1.0, 0.0, 1.0])], &[1.0], 1, 1)?;
+    /// assert_eq!(pred.mean.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert<'s>(
+        &mut self,
+        sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_new: &[f64],
+        y_new: f64,
+    ) -> Result<PointId, GprError> {
+        self.insert_sources(sources, x_new, y_new)
+    }
+}
+
+/// The query of an online model on supplied distances.
+impl<O, P: GpScalar, C: PointUse> DistanceQuery for OnlineGpr<O, P, DistanceKernel<C>> {
+    type Refine = P::Refine;
+
+    fn query_distances<'s>(
+        &self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        let alpha = self.alpha()?;
+        let mut out = Prediction::default();
+        let mut scratch = QueryScratch::new();
+        let cross = bind_cross(&self.core.slots, (self.core.n, m), cross, &mut scratch)?;
+        run(&cross, points, m, |q| {
+            self.core
+                .write_prediction(self.factor(), alpha, q, options, &mut out)
+        })?;
+        Ok(out)
+    }
+
+    fn query_distances_into<'s>(
+        &mut self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+        out: &mut Prediction<P::Refine>,
+    ) -> Result<(), GprError> {
+        let mut scratch = std::mem::take(&mut self.core.query_sources);
+        let result =
+            bind_cross(&self.core.slots, (self.core.n, m), cross, &mut scratch).and_then(|cross| {
+                run(&cross, points, m, |q| {
+                    self.predict_query_into(q, options, out)
+                })
+            });
+        self.core.query_sources = scratch;
+        result
+    }
+
+    fn query_distance_covariance<'s>(
+        &self,
+        cross: impl IntoIterator<Item = DistanceSource<'s>>,
+        square: impl IntoIterator<Item = DistanceSource<'s>>,
+        points: QueryPoints<'_>,
+        m: usize,
+        options: PredictOptions,
+    ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
+        let alpha = self.alpha()?;
+        let slots = &self.core.slots;
+        let mut scratch = QueryScratch::new();
+        let mut square_scratch = QueryScratch::new();
+        let cross = bind_cross(slots, (self.core.n, m), cross, &mut scratch)?;
+        let square = QuerySources::bind_square(slots, square, m, &mut square_scratch)?;
+        run(&cross, points, m, |q| {
+            self.core
+                .write_covariance(self.factor(), alpha, q, &square, options)
+        })
+    }
+
+    fn draw_jitter(&self) -> JitterPolicy {
+        self.core.policies.jitter
+    }
+}
+
+distance_predict!(
+    impl [O, P: GpScalar] OnlineGpr<O, P, DistanceKernel<DistanceOnly>>,
+    refine = P::Refine,
+    args = (),
+    tail = (),
+    points = QueryPoints::NONE,
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// through a cast); a fill writes scratch once. After an insert or
+        /// delete the first read solves `α`.
+    },
+    predict_doc = {
+        /// See the example on [`OnlineGpr::insert`].
+    },
+    covariance_doc = {
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// let mut online = fitted.into_online()?;
+        /// online.insert([image.from_vec(vec![4.0, 1.0])], 0.5)?;
+        /// // Two queries: train × query (3 × 2), then query × query.
+        /// let cross = [0.25, 0.25, 2.25, 0.25, 2.25, 0.25];
+        /// let query = [0.0, 1.0, 1.0, 0.0];
+        /// let options = PredictOptions::default();
+        /// let mut out = Prediction::default();
+        /// online.predict_into([image.borrow(&cross)], 2, &mut out)?;
+        /// online.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;
+        /// let _ = online.predict_with([image.borrow(&cross)], 2, options)?;
+        /// let cov = online.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;
+        /// assert_eq!(cov.covariance.len(), 4);
+        /// let _ = online.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, options)?;
+        /// let draws = online.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;
+        /// assert_eq!(draws.len(), 6);
+        /// let _ = online.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, options, 3, 7)?;
+        /// # Ok(())
+        /// # }
+        /// ```
+    },
+);
+
+distance_predict!(
+    impl [O, P: GpScalar] OnlineGpr<O, P, DistanceKernel<WithPoints>>,
+    refine = P::Refine,
+    args = (xs: &[f64]),
+    tail = (n_cols: usize),
+    points = QueryPoints { xs, n_cols },
+    reads = {
+        /// A table is read in place for this call (an `f32` model reads it
+        /// through a cast); a fill writes scratch once. After an insert or
+        /// delete the first read solves `α`.
+    },
+    predict_doc = {
+        /// See the example on [`OnlineGpr::insert`].
+    },
+    covariance_doc = {
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+        /// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// let mut online = fitted.into_online()?;
+        /// online.insert([image.from_vec(vec![4.0, 1.0])], &[2.0], 0.5)?;
+        /// let (cross, query, xs) = ([0.25, 0.25, 2.25, 0.25, 2.25, 0.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
+        /// let options = PredictOptions::default();
+        /// let mut out = Prediction::default();
+        /// online.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
+        /// online.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
+        /// let _ = online.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;
+        /// let cov = online.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;
+        /// assert_eq!(cov.mean.len(), 2);
+        /// let _ = online.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
+        /// let _ = online.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
+        /// let _ = online.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
         /// # Ok(())
         /// # }
         /// ```

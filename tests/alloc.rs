@@ -929,14 +929,15 @@ impl BaselineSlot {
     }
 }
 
-/// The operations of [`DISTANCE_BASELINE_ALLOCS`] a model on supplied
-/// distances has at D1-3, measured as the coordinate ones are, at `P`.
+/// The exact and online operations of [`DISTANCE_BASELINE_ALLOCS`] on
+/// supplied distances, measured as the coordinate ones are, at `P`.
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
     let p = common::problems::distance_baseline();
     let s = p.supplied();
     let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
     let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let new_refs: Vec<&[f64]> = s.new.iter().map(Vec::as_slice).collect();
     let lik = || GaussianLikelihood::new(0.1).expect("noise");
     let image = ScalarDistance::new();
     let (bands, ard) =
@@ -990,8 +991,48 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
                     .expect("counted")
             }),
         ));
+        // Room for one more point, as the coordinate model.
+        let new = || slot.borrow(&s.new_sum, &new_refs);
+        let mut base = model.into_online().expect("online");
+        let id = base.insert([new()], p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        // The insert on the warm model itself: a clone starts without the
+        // query buffers.
+        out.push((
+            format!("{name}/online_insert"),
+            allocs_in(|| {
+                base.insert([new()], p.y_new).expect("counted");
+            }),
+        ));
+        let id = base.point_ids()[p.n];
+        base.delete(id).expect("shrink");
+        online_deletes_and_refit(name, &base, p.n, &mut out);
     }
     out
+}
+
+/// The deletes and refit of [`DISTANCE_BASELINE_ALLOCS`] on clones of
+/// `base`, an online model with room for one more point.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn online_deletes_and_refit<P: GpScalar, K: gprx::kernel::ModelKernel>(
+    name: &str,
+    base: &gprx::OnlineGpr<Fixed, P, K>,
+    n: usize,
+    out: &mut Vec<(String, usize)>,
+) {
+    for (label, index) in [("first", 0), ("middle", n / 2), ("last", n - 1)] {
+        let mut online = base.clone();
+        let id = online.point_ids()[index];
+        out.push((
+            format!("{name}/online_delete_{label}"),
+            allocs_in(|| online.delete(id).expect("counted")),
+        ));
+    }
+    let mut online = base.clone();
+    out.push((
+        format!("{name}/online_refit"),
+        allocs_in(|| online.refit().expect("counted")),
+    ));
 }
 
 /// [`supplied_allocs`] on the coordinate path at `P`.
@@ -1046,6 +1087,18 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
                     .expect("counted")
             }),
         ));
+        let mut base = model.into_online().expect("online");
+        let id = base.insert(&p.x_new, p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        out.push((
+            format!("{name}/online_insert"),
+            allocs_in(|| {
+                base.insert(&p.x_new, p.y_new).expect("counted");
+            }),
+        ));
+        let id = base.point_ids()[p.n];
+        base.delete(id).expect("shrink");
+        online_deletes_and_refit(name, &base, p.n, &mut out);
     }
     out
 }

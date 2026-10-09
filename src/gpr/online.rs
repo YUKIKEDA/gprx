@@ -13,14 +13,14 @@ use crate::error::PersistErrorKind;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{KernelScalar, KernelSpec, ModelKernel, PointKernel};
+use crate::kernel::{KernelScalar, KernelSpec, ModelKernel, PointKernel, SourceStore, SupplyViews};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
 use crate::persist::{self, PersistedModel, persist_err};
 use crate::precision::{DoublePrecision, GpScalar, StoredFactor};
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
-use crate::workspace::{FitWorkspace, QueryWorkspace};
+use crate::workspace::{FitWorkspace, QueryCols, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::shared::Query;
@@ -487,6 +487,9 @@ where
             });
         }
         let index = self.registry.index_of(id)?;
+        // The store fails only on an index it does not hold, before any
+        // change; the factor is updated after it.
+        self.core.sources.remove_point(index)?;
         self.workspace.delete_index(index)?;
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
@@ -640,10 +643,20 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
     }
 }
 
-impl<O, P: GpScalar> OnlineGpr<O, P> {
-    /// Appends one point of a coordinate kernel: coordinates `x_new` and
-    /// the target.
-    pub(crate) fn insert_point(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
+impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
+    /// Appends one point at the current `θ` with a bordered LDLT update:
+    /// coordinates `x_new` (none for a kernel on supplied distances alone),
+    /// the target, and `cols`, the point's `n × 1` supplied distances to
+    /// the live points (`()` for a coordinate kernel). Once the factor has
+    /// grown, `push` appends those distances to the training store; the
+    /// store reserved room before, so it does not fail.
+    pub(crate) fn insert_with(
+        &mut self,
+        x_new: &[f64],
+        y_new: f64,
+        cols: <K::Supply as SupplyViews>::Rects<'_, P::Storage>,
+        push: impl FnOnce(&mut P::Sources) -> Result<(), GprError>,
+    ) -> Result<PointId, GprError> {
         if x_new.len() != self.core.d {
             return Err(GprError::DimensionMismatch {
                 x_dim: x_new.len(),
@@ -658,7 +671,9 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
         let kernel_start = Instant::now();
         let n = self.core.n;
         let d = self.core.d;
-        self.core.query.ensure_at_least(n, 1, d)?;
+        self.core
+            .query
+            .ensure_at_least(n, 1, QueryCols::of(K::POINTS, d))?;
         let xs_len = d;
         if self.core.query.query_xs.len() < xs_len {
             self.core.query.query_xs.resize(xs_len, 0.0);
@@ -694,7 +709,7 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
             with_kernel_exp!(self.core.policies.math, M => self.core.compiled.eval_cross_slots::<M>(
                 x_train,
                 query_x.as_ref().submatrix(0, 0, 1, d),
-                (),
+                cols,
                 Some(query_dist.as_mut().submatrix_mut(0, 0, n, 1)),
                 dest,
                 query_scratch.as_mut().submatrix_mut(0, 0, n, 1),
@@ -716,6 +731,7 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
         self.workspace.append_border(k_new)?;
+        push(&mut self.core.sources)?;
         #[cfg(feature = "insert-stages")]
         insert_stages::add_border(border_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]
@@ -732,7 +748,9 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
         insert_stages::add_rest(rest_start.elapsed().as_secs_f64());
         Ok(id)
     }
+}
 
+impl<O, P: GpScalar> OnlineGpr<O, P> {
     /// Appends one training point at the current `θ` with a bordered LDLT update.
     ///
     /// `x_new` has length [`Self::d`]. Transforms already stored on this model
@@ -757,7 +775,7 @@ impl<O, P: GpScalar> OnlineGpr<O, P> {
         if self.core.d == 0 {
             return Err(GprError::EmptyInput);
         }
-        self.insert_point(x_new, y_new)
+        self.insert_with(x_new, y_new, (), |_| Ok(()))
     }
 
     /// Returns the kernel whose hyperparameters this model owns.
