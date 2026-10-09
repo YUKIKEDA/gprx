@@ -316,6 +316,11 @@ where
         self.store.buffers.core().factor_jitter
     }
 
+    /// The state a save writes.
+    pub(crate) fn core(&self) -> &GprCore<P, K> {
+        &self.core
+    }
+
     pub(crate) fn policies(&self) -> Policies {
         self.core.policies
     }
@@ -688,12 +693,19 @@ impl<O, P: GpScalar, K: ModelKernel> FittedGpr<O, P, K> {
     }
 }
 
-impl<O, P: GpScalar> FittedGpr<O, P> {
+impl<O, P: GpScalar, K: ModelKernel> FittedGpr<O, P, K> {
     /// Writes this fitted model to `dir/config.json` and `dir/model.safetensors`.
     ///
     /// Omits `L` and `α`. [`crate::persist::LoadedGpr::load`] rebuilds them
     /// by factorizing. The Cholesky buffer policy is not written; load
     /// reconstructs [`crate::CholeskyBuffer::Retain`].
+    ///
+    /// A model of a [`DistanceKernel`] also writes the training `d²` it
+    /// owns, each slot's lower triangle: in `f32` for
+    /// [`crate::SinglePrecision`], and in `f64` otherwise (a
+    /// [`crate::MixedPrecision`] model writes the caller's `f64` values and
+    /// casts them again on load). Load it with
+    /// [`crate::persist::LoadedDistanceGpr::load`]; see there for its slots.
     ///
     /// # Errors
     ///
@@ -1089,10 +1101,12 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
             ));
         }
         let d = parts.x_obs.len() / n;
-        if parts.alpha.len() != n {
+        if let Some(alpha) = &parts.alpha
+            && alpha.len() != n
+        {
             return Err(persist::persist_err(
                 PersistErrorKind::Tensor,
-                format!("alpha has {} values, expected n = {n}", parts.alpha.len()),
+                format!("alpha has {} values, expected n = {n}", alpha.len()),
             ));
         }
         let mut x_buf = parts.x_obs.clone();
@@ -1102,7 +1116,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         let mut y_buf = parts.y_obs.clone();
         parts.y_transform.transform(&mut y_buf)?;
         let slots = spec_slots(&parts.kernel);
-        let sources = bind_training::<P::Storage, P::Sources>(&slots, Vec::new(), n)?;
+        let sources = parts.sources;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         let mut workspace = fit_buffers::<P, _>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
@@ -1114,12 +1128,19 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
                 }
             }
         }
-        let factor_alpha = storage_alpha_from_saved::<P>(
-            workspace.core().k_matrix.as_ref(),
-            &y_buf,
-            &parts.alpha,
-        )?;
-        Ok(Self {
+        // Without a saved factor the weights are written by the refit below.
+        let saved = parts.alpha.is_some();
+        let (factor_alpha, alpha) = match parts.alpha {
+            Some(alpha) => (
+                storage_alpha_from_saved::<P>(workspace.core().k_matrix.as_ref(), &y_buf, &alpha)?,
+                alpha,
+            ),
+            None => (
+                vec![P::Storage::from_f64(0.0); n],
+                vec![P::Refine::from_f64(0.0); n],
+            ),
+        };
+        let mut model = Self {
             core: GprCore {
                 slots,
                 kernel: parts.kernel,
@@ -1137,7 +1158,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
                 x: pack_points(&x_buf, n, d),
                 y_train: y_buf,
                 factor_alpha,
-                alpha: parts.alpha,
+                alpha,
                 x_cast: P::Storage::empty_cols(),
                 y_cast: P::Storage::empty_rows(),
                 sources,
@@ -1147,7 +1168,11 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
             optimizer: Fixed,
             store: LltStore::with_mapped(workspace, parts.mapped),
             _kernel: PhantomData,
-        })
+        };
+        if !saved {
+            model.refit()?;
+        }
+        Ok(model)
     }
 }
 

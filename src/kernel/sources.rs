@@ -15,7 +15,7 @@ use faer::MatRef;
 use rayon::prelude::*;
 
 use super::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareSlots, unbound};
-use super::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf, BlockList, Checked, packed_run};
+use super::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf, BlockList, Checked, packed_len, packed_run};
 use super::simd::SquareOut;
 use super::{ArdData, DistanceFill, ScalarData, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
@@ -1084,6 +1084,83 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(())
     }
 
+    /// The training `d²` of `slot` in the persist layout: the lower
+    /// triangle column by column (column `col` holds rows `col..n`), an ARD
+    /// slot dimension after dimension. `None` when the store has no such
+    /// slot. A packed ARD slot is read in place.
+    pub(crate) fn packed(&self, slot: SlotId) -> Option<Cow<'_, [T]>> {
+        let (n, cap) = (self.n, self.cap.max(1));
+        if let Some((_, square)) = self.scalar.iter().find(|(id, _)| *id == slot) {
+            return Some(Cow::Owned(
+                (0..n)
+                    .flat_map(|col| &square[col * cap + col..col * cap + n])
+                    .copied()
+                    .collect(),
+            ));
+        }
+        self.ard
+            .iter()
+            .find(|(id, _)| *id == slot)
+            .map(|(_, cache)| cache.packed())
+    }
+
+    /// The store of `n` points of `slots` (the kernel's slots, in order)
+    /// from their [`Self::packed`] values, one entry per slot. A scalar
+    /// slot is unpacked into its square; an ARD slot keeps its values as
+    /// they are. Every value must be finite and non-negative and every
+    /// diagonal zero: a persisted store was checked when it was bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::EmptyInput`] when `n` is zero,
+    /// [`GprError::LengthMismatch`] when the entries do not match the slots
+    /// or their lengths their shapes, [`GprError::SizeOverflow`] when a
+    /// slot does not fit, and [`GprError::InvalidDistance`] at the first
+    /// value that is not valid.
+    pub(crate) fn from_packed(
+        slots: &[DistanceSlot],
+        values: Vec<Vec<T>>,
+        n: usize,
+    ) -> Result<Self, GprError> {
+        crate::data::require_nonempty(n)?;
+        crate::data::require_count(values.len(), slots.len(), "persisted distance slots")?;
+        let tri = packed_len(n)?;
+        let mut scalar = Vec::new();
+        let mut ard = Vec::new();
+        for (slot, values) in slots.iter().zip(values) {
+            let len = tri
+                .checked_mul(slot.shape().blocks())
+                .ok_or(GprError::SizeOverflow)?;
+            crate::data::require_count(values.len(), len, "persisted squared distances")?;
+            check_packed(&values, n)?;
+            match slot.shape() {
+                SlotShape::Scalar => {
+                    let mut square =
+                        vec![T::from_f64(0.0); n.checked_mul(n).ok_or(GprError::SizeOverflow)?];
+                    let mut at = 0;
+                    for col in 0..n {
+                        for row in col..n {
+                            let v = values[at];
+                            square[row + col * n] = v;
+                            square[col + row * n] = v;
+                            at += 1;
+                        }
+                    }
+                    scalar.push((slot.id(), square));
+                }
+                SlotShape::Ard(dims) => {
+                    ard.push((slot.id(), ArdSqDiffBuf::from_packed(values, n, dims)));
+                }
+            }
+        }
+        Ok(Self {
+            n,
+            cap: n,
+            scalar,
+            ard,
+        })
+    }
+
     /// The same squares in `f64`.
     pub(crate) fn to_f64(&self) -> Result<TrainSources<f64>, GprError> {
         self.cast()
@@ -1156,14 +1233,55 @@ impl<T: KernelScalar> TrainSources<T> {
     }
 }
 
+/// Checks persisted lower triangles of order `n`, block after block:
+/// every value finite and non-negative, every diagonal zero.
+fn check_packed<T: KernelScalar>(values: &[T], n: usize) -> Result<(), GprError> {
+    let mut at = 0;
+    while at < values.len() {
+        for col in 0..n {
+            for row in col..n {
+                let v = values[at].to_f64();
+                if !valid(v) {
+                    return Err(invalid_value(v, row, col));
+                }
+                if row == col && v != 0.0 {
+                    return Err(invalid(row, col, format!("the diagonal is {v}, not zero")));
+                }
+                at += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The training `d²` a model of one precision keeps.
 ///
 /// [`TrainSources`] in the storage scalar for a model that factors and
 /// predicts in it; [`RefinedSources`] for a model that also refines in
 /// `f64` and so keeps the caller's `f64` values next to the storage copy.
 pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'static {
+    /// The scalar a save writes: the storage scalar, or `f64` for a store
+    /// that keeps the caller's values.
+    type Saved: KernelScalar;
+
     /// A coordinate model's: no slots.
     fn empty() -> Self;
+
+    /// The copy a save writes, in [`Self::Saved`].
+    fn saved(&self) -> &TrainSources<Self::Saved>;
+
+    /// The store of a loaded model from what [`Self::saved`] wrote
+    /// ([`TrainSources::from_packed`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`TrainSources::from_packed`], and [`GprError::InvalidDistance`]
+    /// when a value does not fit the storage scalar.
+    fn from_saved(
+        slots: &[DistanceSlot],
+        values: Vec<Vec<Self::Saved>>,
+        n: usize,
+    ) -> Result<Self, GprError>;
 
     /// [`TrainSources::bind`].
     fn bind<'a>(
@@ -1243,8 +1361,18 @@ pub(crate) fn widened<'a, S: KernelScalar>(
 }
 
 impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
+    type Saved = S;
+
     fn empty() -> Self {
         Self::empty()
+    }
+
+    fn saved(&self) -> &TrainSources<S> {
+        self
+    }
+
+    fn from_saved(slots: &[DistanceSlot], values: Vec<Vec<S>>, n: usize) -> Result<Self, GprError> {
+        Self::from_packed(slots, values, n)
     }
 
     fn bind<'a>(
@@ -1305,8 +1433,26 @@ pub struct RefinedSources {
 }
 
 impl SourceStore<f32> for RefinedSources {
+    type Saved = f64;
+
     fn empty() -> Self {
         Self::default()
+    }
+
+    fn saved(&self) -> &TrainSources<f64> {
+        &self.exact
+    }
+
+    fn from_saved(
+        slots: &[DistanceSlot],
+        values: Vec<Vec<f64>>,
+        n: usize,
+    ) -> Result<Self, GprError> {
+        let exact = TrainSources::from_packed(slots, values, n)?;
+        Ok(Self {
+            storage: exact.cast()?,
+            exact,
+        })
     }
 
     fn bind<'a>(

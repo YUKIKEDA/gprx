@@ -630,12 +630,16 @@ where
     }
 }
 
-impl<O, P: GpScalar> OnlineGpr<O, P> {
+impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
     /// Writes this model to `dir/config.json` and `dir/model.safetensors`.
     ///
     /// Omits the LDLT factor and `α`. [`crate::persist::LoadedGpr::load`]
     /// rebuilds an [`OnlineGpr`] (`factor_kind` is `ldlt`) and restores
     /// [`Self::point_ids`].
+    ///
+    /// A model of a [`crate::kernel::DistanceKernel`] also writes the
+    /// training `d²` it owns, as [`crate::FittedGpr::save`] does, and loads
+    /// with [`crate::persist::LoadedDistanceGpr::load`].
     ///
     /// # Errors
     ///

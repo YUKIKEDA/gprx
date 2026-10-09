@@ -151,6 +151,27 @@ pub(super) struct FactorBytes<'a> {
     pub alpha: &'a [u8],
 }
 
+/// One more tensor a save writes beside `x` / `y` (and the factor): its
+/// name, scalar, shape, and bytes.
+pub(super) struct RawTensor<'a> {
+    pub name: &'a str,
+    pub dtype: Dtype,
+    pub shape: Vec<usize>,
+    pub bytes: &'a [u8],
+}
+
+impl<'a> RawTensor<'a> {
+    fn view(&self) -> Result<(&'a str, TensorView<'a>), GprError> {
+        let view = TensorView::new(self.dtype, self.shape.clone(), self.bytes).map_err(|err| {
+            persist_err(
+                PersistErrorKind::Tensor,
+                format!("{} tensor: {err}", self.name),
+            )
+        })?;
+        Ok((self.name, view))
+    }
+}
+
 pub(super) fn scalar_bytes<T>(values: &[T]) -> &[u8] {
     // SAFETY: any `T` slice is a valid byte slice of `size_of_val` bytes.
     unsafe {
@@ -178,6 +199,7 @@ pub(super) fn write_tensors(
     n: usize,
     d: usize,
     factor: Option<FactorBytes<'_>>,
+    extra: &[RawTensor<'_>],
 ) -> Result<(), GprError> {
     if x.len() != n * d {
         return Err(persist_err(
@@ -197,7 +219,7 @@ pub(super) fn write_tensors(
         .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("x tensor: {err}")))?;
     let y_view = TensorView::new(Dtype::F64, vec![n], y_bytes)
         .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("y tensor: {err}")))?;
-    let bytes = if let Some(factor) = factor {
+    let views = if let Some(factor) = factor {
         let l_cells = match factor.l_dtype {
             Dtype::F32 => factor.l.len() / size_of::<f32>(),
             Dtype::F64 => factor.l.len() / size_of::<f64>(),
@@ -234,19 +256,20 @@ pub(super) fn write_tensors(
             .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("L tensor: {err}")))?;
         let alpha_view = TensorView::new(factor.alpha_dtype, vec![n], factor.alpha)
             .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("alpha tensor: {err}")))?;
-        serialize(
-            [
-                (TENSOR_X, x_view),
-                (TENSOR_Y, y_view),
-                (TENSOR_L, l_view),
-                (TENSOR_ALPHA, alpha_view),
-            ],
-            None,
-        )
+        vec![
+            (TENSOR_X, x_view),
+            (TENSOR_Y, y_view),
+            (TENSOR_L, l_view),
+            (TENSOR_ALPHA, alpha_view),
+        ]
     } else {
-        serialize([(TENSOR_X, x_view), (TENSOR_Y, y_view)], None)
+        vec![(TENSOR_X, x_view), (TENSOR_Y, y_view)]
+    };
+    let mut views = views;
+    for tensor in extra {
+        views.push(tensor.view()?);
     }
-    .map_err(|err| {
+    let bytes = serialize(views, None).map_err(|err| {
         persist_err(
             PersistErrorKind::Tensor,
             format!("serialize safetensors: {err}"),
@@ -381,6 +404,11 @@ fn f64_as_bytes(values: &[f64]) -> &[u8] {
 }
 
 fn scalar_slice<T: Copy>(bytes: &[u8]) -> Result<&[T], GprError> {
+    // An empty tensor (`x` of a model without coordinates) may sit at any
+    // offset.
+    if bytes.is_empty() {
+        return Ok(&[]);
+    }
     if !(bytes.as_ptr() as usize).is_multiple_of(align_of::<T>()) {
         return Err(persist_err(
             PersistErrorKind::Tensor,
@@ -422,6 +450,7 @@ unsafe fn f64_slice_unchecked(bytes: &[u8]) -> &[f64] {
 pub(super) fn write_f64_tensors(
     dir: &Path,
     tensors: &[(&str, Vec<usize>, &[f64])],
+    extra: &[RawTensor<'_>],
 ) -> Result<(), GprError> {
     let mut views = Vec::with_capacity(tensors.len());
     for (name, shape, values) in tensors {
@@ -437,6 +466,9 @@ pub(super) fn write_f64_tensors(
                 persist_err(PersistErrorKind::Tensor, format!("{name} tensor: {err}"))
             })?;
         views.push((*name, view));
+    }
+    for tensor in extra {
+        views.push(tensor.view()?);
     }
     let bytes = serialize(views, None).map_err(|err| {
         persist_err(

@@ -77,7 +77,7 @@ fn write_sparse<P: GpScalar>(
         precision: PrecisionJson::from_persist(kind),
         residual: ResidualJson::from_persist(kind),
         math: MathJson::encode(core.math),
-        kernel: KernelJson::encode(&core.kernel)?,
+        kernel: KernelJson::encode(&core.kernel, &[])?,
         likelihood: LikelihoodJson::encode(&core.likelihood),
         jitter: JitterJson::encode(core.jitter),
         x_unfitted: encode_unfitted_input(core.x_unfitted.as_ref())?,
@@ -88,6 +88,7 @@ fn write_sparse<P: GpScalar>(
         next_point_id,
         inducing_ids,
         next_inducing_id,
+        distance: None,
     };
     let json = serde_json::to_vec_pretty(&config).map_err(|err| {
         persist_err(
@@ -111,7 +112,7 @@ fn write_sparse<P: GpScalar>(
         tensors.push((TENSOR_Q_MEAN, vec![m], q_mean));
         tensors.push((TENSOR_Q_L, vec![m, m], &q_l_values));
     }
-    write_f64_tensors(dir, &tensors)?;
+    write_f64_tensors(dir, &tensors, &[])?;
     super::write_config(dir, &json)
 }
 
@@ -143,7 +144,7 @@ fn read_config(dir: &Path, expected: &[ModelJson]) -> Result<SparseConfig, GprEr
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
-    parse_model(&bytes, expected)?;
+    parse_model(&bytes, expected, None)?;
     parse_sparse_config(&bytes)
 }
 

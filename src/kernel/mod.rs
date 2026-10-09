@@ -70,8 +70,8 @@ pub(crate) use sources::{
 };
 pub use spec::{KernelSpec, ParameterBinding};
 pub(crate) use supply::{
-    ArdData, CompiledOf, ModelKernelParts, ScalarData, SlotId, SlotShape, SourceData, SpecOf,
-    SuppliedSpec, Tidy, spec_slots,
+    ArdData, ArdLeafSpec, CompiledOf, ModelKernelParts, ScalarData, ScalarLeafSpec, SlotId,
+    SlotShape, SourceData, SpecOf, SuppliedLeafSpec, SuppliedSpec, Tidy, spec_slots,
 };
 pub use supply::{
     ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,

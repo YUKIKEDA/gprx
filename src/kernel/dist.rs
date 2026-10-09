@@ -6,6 +6,7 @@ use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
 use faer::{ColMut, Mat, MatMut, MatRef};
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt;
 use std::marker::PhantomData;
@@ -302,7 +303,7 @@ pub(crate) fn fill_squared_euclidean(
 
 /// Number of entries in the lower triangle (diagonal included) of an
 /// `n × n` matrix.
-fn packed_len(n: usize) -> Result<usize, GprError> {
+pub(crate) fn packed_len(n: usize) -> Result<usize, GprError> {
     n.checked_add(1)
         .and_then(|n1| n.checked_mul(n1))
         .map(|cells| cells / 2)
@@ -483,6 +484,35 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             data: ArdStore::Packed(data),
             n,
             d,
+        }
+    }
+
+    /// The lower triangles in their persist order, whatever the layout:
+    /// dimension after dimension, each column by column (column `col`
+    /// holds rows `col..n`). A packed cache is read in place.
+    pub(crate) fn packed(&self) -> Cow<'_, [T]>
+    where
+        T: Copy,
+    {
+        let n = self.n;
+        match &self.data {
+            ArdStore::Packed(data) => Cow::Borrowed(data),
+            ArdStore::Dense(tables) => Cow::Owned(
+                tables
+                    .iter()
+                    .flat_map(|t| (0..n).flat_map(move |col| &t[col * n + col..(col + 1) * n]))
+                    .copied()
+                    .collect(),
+            ),
+            ArdStore::Rows(rows) => Cow::Owned(
+                rows.iter()
+                    .flat_map(|dim| {
+                        (0..n).flat_map(move |col| {
+                            (col..n).map(move |row| dim[row * (row + 1) / 2 + col])
+                        })
+                    })
+                    .collect(),
+            ),
         }
     }
 
