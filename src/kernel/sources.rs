@@ -2818,7 +2818,10 @@ mod tests {
             s.push_row(|b, c| 1000.0 + (b * 10 + c) as f64);
             assert_eq!(s.values().0, 6);
             assert_eq!(read(&s), s.values().2);
-            assert_eq!(s.get(BlockAt::Ard(1, 2), 5, 1), 1000.0 + 51.0);
+            assert_eq!(
+                s.get(BlockAt::Ard(1, 2), 5, 1).to_bits(),
+                1051.0f64.to_bits()
+            );
             s.pop_row();
             assert_eq!(s.values(), original);
         }
@@ -2835,7 +2838,10 @@ mod tests {
             s.reserve_col().expect("room");
             s.push_col(|b, r| 2000.0 + (b * 10 + r) as f64);
             assert_eq!(read(&s), s.values().2);
-            assert_eq!(s.get(BlockAt::Scalar(0), 4, 3), 2004.0);
+            assert_eq!(
+                s.get(BlockAt::Scalar(0), 4, 3).to_bits(),
+                2004.0f64.to_bits()
+            );
             s.pop_col();
             assert_eq!(s.values(), original);
         }

@@ -1817,20 +1817,23 @@ mod tests {
             assert_eq!(s.inducing, [5, 1, 3, 4]);
             assert_eq!(s.exact().zz.values().0, 4);
             assert_eq!(
-                s.exact().xz.get(BlockAt::Scalar(0), 4, 0),
-                column(0, 5) + 0.5
+                s.exact().xz.get(BlockAt::Scalar(0), 4, 0).to_bits(),
+                (column(0, 5) + 0.5).to_bits()
             );
             let f32 = s.at::<f32>().expect("f32");
-            assert_eq!(f32.xz.get(BlockAt::Ard(0, 1), 3, 3), column(2, 3) as f32);
+            assert_eq!(
+                f32.xz.get(BlockAt::Ard(0, 1), 3, 3).to_bits(),
+                (column(2, 3) as f32).to_bits()
+            );
             s.undo_add_inducing(4, &saved);
             assert_eq!(state(&s), original);
         }
         // Each inducing point removed and put back.
-        for at in 0..inducing.len() {
+        for (at, &point) in inducing.iter().enumerate() {
             let mut saved = Vec::new();
             s.remove_inducing(at, &mut saved);
             assert_eq!(s.exact().zz.values().0, 2);
-            s.undo_remove_inducing(at, inducing[at], &saved);
+            s.undo_remove_inducing(at, point, &saved);
             assert_eq!(state(&s), original);
         }
     }
