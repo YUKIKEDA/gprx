@@ -33,28 +33,25 @@ pub(crate) struct SvgpSystem<'a, P: ModelPrecision, U: Supply = NoSupply> {
 }
 
 impl<'a, P: ModelPrecision, U: Supply> SvgpSystem<'a, P, U> {
-    /// # Errors
-    ///
-    /// The `f64` supply of `core` is always held; an unbound one is reported.
     pub(crate) fn new(
         core: &'a SparseCore<U>,
         k_mm_l: MatRef<'a, P::Storage>,
         q_mean: &'a [f64],
         q_l: MatRef<'a, f64>,
-    ) -> Result<Self, GprError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             kernel: &core.kernel,
             k_mm_jitter: core.jitter,
             z: &core.z_train,
             slots: &core.slots,
-            zz: &core.supply.at::<f64>()?.zz,
+            zz: &core.supply.exact().zz,
             k_mm_l,
             q_mean,
             q_l,
             noise: core.likelihood.noise_variance(),
             m: core.m,
             d: core.d,
-        })
+        }
     }
 }
 

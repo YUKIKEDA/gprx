@@ -1258,6 +1258,82 @@ fn supplied_distances_allocate_no_more_than_coordinates() {
     assert!(over.is_empty(), "over the coordinate path: {over:?}");
 }
 
+/// Allocations of one `value_and_gradient(theta, grad)` after a warmup call.
+fn grad_allocs(theta: Vec<f64>, mut value_and_gradient: impl FnMut(&[f64], &mut [f64])) -> usize {
+    let mut grad = vec![0.0; theta.len()];
+    value_and_gradient(&theta, &mut grad);
+    least_of_two(|| allocs_in(|| value_and_gradient(&theta, &mut grad)))
+}
+
+/// One SVGP `value_and_gradient_into` after a warmup, on a slot next to a
+/// coordinate leaf (`k_slot(Δ²) · k(x)`), and on the coordinate kernel of
+/// the same shape (`k(x) · k(x)`), at `P`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn svgp_with_points_grad_allocs<P: GpScalar>() -> (usize, usize) {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let rbf = |ell: f64| RbfKernel::new(ell).expect("ell");
+    let image = ScalarDistance::new();
+    let inducing: Vec<usize> = (0..p.m).collect();
+    let mut supplied = Svgp::new(image.kernel(rbf(0.5)) * KernelSpec::from(rbf(0.7)), lik())
+        .with_precision::<P>()
+        .factor(
+            [image.borrow(&s.train_sum[..p.n * p.m])],
+            p.n,
+            &p.x,
+            p.d,
+            &p.y,
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("supplied");
+    let mut theta = vec![0.0; supplied.num_params()];
+    supplied.get_params(&mut theta).expect("theta");
+    let with_points = grad_allocs(theta, |t, g| {
+        supplied.value_and_gradient_into(t, g).expect("grad");
+    });
+    let mut coords = Svgp::new(
+        KernelSpec::from(rbf(0.5)) * KernelSpec::from(rbf(0.7)),
+        lik(),
+    )
+    .with_precision::<P>()
+    .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+    .map_err(|(_, e)| e)
+    .expect("coords");
+    let mut theta = vec![0.0; coords.num_params()];
+    coords.get_params(&mut theta).expect("theta");
+    let coordinate = grad_allocs(theta, |t, g| {
+        coords.value_and_gradient_into(t, g).expect("grad");
+    });
+    (with_points, coordinate)
+}
+
+/// The SVGP gradient on a slot next to a coordinate leaf, which reads the
+/// coordinate distances into a buffer of its own, allocates no more than
+/// the coordinate kernel of the same shape (design §5.6).
+#[test]
+fn svgp_gradient_with_points_allocates_no_more_than_coordinates() {
+    let _guard = alloc_lock();
+    ensure_one_rayon_worker();
+    for (precision, (with_points, coordinate)) in [
+        ("f64", svgp_with_points_grad_allocs::<DoublePrecision>()),
+        ("f32", svgp_with_points_grad_allocs::<SinglePrecision>()),
+        (
+            "mixed",
+            svgp_with_points_grad_allocs::<MixedPrecision<ReevaluateKernel>>(),
+        ),
+    ] {
+        eprintln!(
+            "svgp_with_points/{precision}/mll_and_grad: allocations={with_points} cap={coordinate}"
+        );
+        assert!(
+            with_points <= coordinate,
+            "{precision}: {with_points} allocations, the coordinate path {coordinate}"
+        );
+    }
+}
+
 /// Bytes a covariance on supplied distances allocates against the same
 /// covariance on coordinates, on the baseline problem: the query square is
 /// read where it was bound, so no copy of its `q² · d` values is made.

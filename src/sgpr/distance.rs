@@ -188,8 +188,10 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Sgpr::fit`] of a [`DistanceKernel<DistanceOnly>`], plus the
-    /// coordinate errors of the coordinate [`Sgpr::fit`].
+    /// Same as [`Sgpr::fit`] of a [`DistanceKernel<DistanceOnly>`], plus
+    /// [`GprError::EmptyInput`] if `x` is empty, [`GprError::LengthMismatch`]
+    /// if `x` is not `n × n_cols` (`n_cols` zero included), [`GprError::NonFiniteInput`] for a
+    /// coordinate that is not finite, and the error of the input transform.
     ///
     /// # Examples
     ///
@@ -309,7 +311,7 @@ impl<O, I: InducingLayout, P: GpScalar, C: PointUse> DistanceQuery
         let mut out = Prediction::default();
         predict_vfe_into::<P, SuppliedSpec>(
             &self.core,
-            &self.vfe_system()?,
+            &self.vfe_system(),
             points.xs,
             q,
             points.n_cols,
@@ -334,7 +336,7 @@ impl<O, I: InducingLayout, P: GpScalar, C: PointUse> DistanceQuery
             self.k_mm_l.as_ref(),
             self.b_l.as_ref(),
             &self.predict_w,
-        )?;
+        );
         predict_vfe_into::<P, SuppliedSpec>(
             &self.core,
             &sys,
@@ -358,7 +360,7 @@ impl<O, I: InducingLayout, P: GpScalar, C: PointUse> DistanceQuery
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         predict_vfe_covariance::<P, SuppliedSpec>(
             &self.core,
-            &self.vfe_system()?,
+            &self.vfe_system(),
             points.xs,
             q,
             points.n_cols,
@@ -375,7 +377,7 @@ impl<O, I: InducingLayout, P: GpScalar, C: PointUse> DistanceQuery
 
 impl<O, I, P: GpScalar, C: PointUse> FittedSgpr<O, I, P, DistanceKernel<C>> {
     /// The factors a prediction reads.
-    fn vfe_system(&self) -> Result<VfeSystem<'_, P, SuppliedSpec>, GprError> {
+    fn vfe_system(&self) -> VfeSystem<'_, P, SuppliedSpec> {
         VfeSystem::new(
             &self.core,
             self.k_mm_l.as_ref(),

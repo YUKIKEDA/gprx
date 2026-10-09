@@ -138,7 +138,7 @@ where
         xz,
         ks,
     } = bufs;
-    let supply = core.supply.at::<f64>()?;
+    let supply = core.supply.exact();
     // Every point in order reads the stored blocks; a batch reads its rows.
     let xz: &BlockStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
         &supply.xz

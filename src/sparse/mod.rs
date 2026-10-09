@@ -730,6 +730,9 @@ pub(crate) struct KernelScratch<T> {
     scratch: Mat<T>,
     nested: Vec<Mat<T>>,
     dist: Mat<T>,
+    /// `K(X, Z)` (`n × m`) or a transposed weight on supplied blocks, before
+    /// its one transpose ([`Self::cross_mn_into`]).
+    transposed: Mat<T>,
     /// Exact `m × m` buffers of one square contraction.
     square: Vec<Mat<T>>,
     /// Exact `m × n` buffers of one rectangular contraction.
@@ -749,6 +752,7 @@ impl<T> Clone for KernelScratch<T> {
             scratch: Mat::new(),
             nested: Vec::new(),
             dist: Mat::new(),
+            transposed: Mat::new(),
             square: Vec::new(),
             cross: Vec::new(),
             partial: Vec::new(),
@@ -776,6 +780,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             scratch: Mat::new(),
             nested: Vec::new(),
             dist: Mat::new(),
+            transposed: Mat::new(),
             square: Vec::new(),
             cross: Vec::new(),
             partial: Vec::new(),
@@ -891,8 +896,7 @@ impl<T: KernelScalar> KernelScratch<T> {
 
     /// `K(Z, X)` (`m × n`) of `sets` into `out`. A coordinate kernel forms
     /// it directly; a kernel on supplied blocks (`n × m`) forms `K(X, Z)` in
-    /// the distance buffer, which it does not otherwise use, and writes its
-    /// transpose.
+    /// a kept buffer and writes its transpose.
     pub(crate) fn cross_mn_into<M: crate::math::KernelMath, U: Supply>(
         &mut self,
         compiled: &CompiledKernel<T, U>,
@@ -903,19 +907,23 @@ impl<T: KernelScalar> KernelScratch<T> {
             return self.cross_into::<M, NoSupply>(coords, CrossViews::points(sets.z, sets.x), out);
         }
         let (n, m) = (sets.x.nrows(), sets.z.nrows());
+        let reads = compiled.reads_distances()?;
         let KernelScratch {
             dist,
+            transposed,
             scratch,
             nested,
             ..
         } = self;
-        let mut k = view(dist, n, m);
+        let mut k = view(transposed, n, m);
         let views = sets.k_nm();
+        // The coordinate leaves of a mixed tree read their `d²` here, kept
+        // from call to call as the coordinate path keeps them.
         compiled.eval_cross_slots::<M>(
             views.x1,
             views.x2,
             views.slots,
-            None,
+            reads.then(|| view(dist, n, m)),
             k.as_mut(),
             view(scratch, n, m),
             nested,
@@ -949,13 +957,13 @@ impl<T: KernelScalar> KernelScratch<T> {
             return self.grad_cross_into::<M, NoSupply>(coords, views, out, param_idx);
         }
         let (n, m) = (sets.x.nrows(), sets.z.nrows());
-        let mut k = std::mem::replace(&mut self.dist, Mat::new());
+        let mut k = std::mem::replace(&mut self.transposed, Mat::new());
         let result =
             self.grad_cross_into::<M, U>(compiled, sets.k_nm(), view(&mut k, n, m), param_idx);
         if result.is_ok() {
             out.copy_from(k.as_ref().submatrix(0, 0, n, m).transpose());
         }
-        self.dist = k;
+        self.transposed = k;
         result
     }
 
@@ -973,18 +981,18 @@ impl<T: KernelScalar> KernelScratch<T> {
             return self.hess_cross_into::<M, NoSupply>(coords, views, out, pair);
         }
         let (n, m) = (sets.x.nrows(), sets.z.nrows());
-        let mut k = std::mem::replace(&mut self.dist, Mat::new());
+        let mut k = std::mem::replace(&mut self.transposed, Mat::new());
         let result = self.hess_cross_into::<M, U>(compiled, sets.k_nm(), view(&mut k, n, m), pair);
         if result.is_ok() {
             out.copy_from(k.as_ref().submatrix(0, 0, n, m).transpose());
         }
-        self.dist = k;
+        self.transposed = k;
         result
     }
 
     /// Adds `coeff · ⟨weight, ∂K(Z, X)/∂θ⟩_F` (`weight` is `m × n`) for
     /// every kernel parameter. On supplied blocks the weight is transposed
-    /// once into the distance buffer and contracted with `K(X, Z)`.
+    /// once into a kept buffer and contracted with `K(X, Z)`.
     pub(crate) fn add_cross_contraction_mn<M: crate::math::KernelMath, U: Supply>(
         &mut self,
         compiled: &CompiledKernel<T, U>,
@@ -998,7 +1006,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             return self.add_cross_contraction::<M, NoSupply>(coords, views, weight, coeff, out);
         }
         let (n, m) = (sets.x.nrows(), sets.z.nrows());
-        let mut w = std::mem::replace(&mut self.dist, Mat::new());
+        let mut w = std::mem::replace(&mut self.transposed, Mat::new());
         let mut wt = view(&mut w, n, m);
         wt.copy_from(weight.transpose());
         let result = self.add_cross_contraction::<M, U>(
@@ -1008,7 +1016,7 @@ impl<T: KernelScalar> KernelScratch<T> {
             coeff,
             out,
         );
-        self.dist = w;
+        self.transposed = w;
         result
     }
 
@@ -1394,7 +1402,7 @@ impl<S: KernelScalar, U: Supply> Default for SparseScratch<S, U> {
 
 /// The training `d²` of a sparse model on supplied distances, at `f64` and,
 /// for an `f32` storage, cast once: the `m × m` squares among the inducing
-/// points and the `m × n` blocks from them to the training points. Empty
+/// points and the `n × m` blocks from the training points to them. Empty
 /// for a coordinate kernel.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SparseSupply {
@@ -1431,7 +1439,8 @@ fn check_inducing(inducing: &[usize], n: usize) -> Result<(), GprError> {
 pub(crate) struct SupplyAt<T: KernelScalar> {
     /// `m × m` among the inducing points.
     pub(crate) zz: BlockStore<T>,
-    /// `m × n` from the inducing points to the training points.
+    /// `n × m` from the training points to the inducing points, as the
+    /// caller laid them out.
     pub(crate) xz: BlockStore<T>,
 }
 
@@ -1456,6 +1465,11 @@ impl SparseSupply {
             f64: SupplyAt { zz, xz },
             f32: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The `f64` supply, always held.
+    pub(crate) fn exact(&self) -> &SupplyAt<f64> {
+        &self.f64
     }
 
     /// The supply at `T` (`f64`, or the `f32` cast, made on the first read).

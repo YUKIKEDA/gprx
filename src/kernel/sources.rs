@@ -1683,7 +1683,9 @@ pub(crate) fn bind_inducing<'s>(
     let mut column = Vec::new();
     for source in sources {
         let slot = slot_of(slots, &source, std::iter::empty())?;
-        let at = slots.iter().position(|s| s.id() == slot.id()).unwrap_or(0);
+        let Some(at) = slots.iter().position(|s| s.id() == slot.id()) else {
+            return Err(unbound());
+        };
         // Each store in the kernel's slot order: a slot's place among the
         // slots of its shape.
         let place = slots[..at]
@@ -1782,9 +1784,9 @@ pub(crate) fn bind_inducing<'s>(
 /// One `n × m` block (training points × inducing points `inducing`),
 /// checked as `tidy` asks and repaired where it allows (a borrowed block is
 /// copied only to be repaired), and the `m × m` square of its inducing rows
-/// written to `square`, checked and repaired as a training square is. A
-/// violation of the square is located in `block`: row `inducing[a]`,
-/// column `b`.
+/// written to `square`, checked and repaired as a training square is; the
+/// repaired pairs are written back to those rows. A violation of the square
+/// is located in `block`: row `inducing[a]`, column `b`.
 fn inducing_parts(
     block: &mut Cow<'_, [f64]>,
     n: usize,
@@ -1803,7 +1805,17 @@ fn inducing_parts(
         }
     }
     match check_block(square, m, m, BlockKind::Square, tidy) {
-        Ok(true) => repair_block(square, m, m, BlockKind::Square),
+        Ok(true) => {
+            // The repaired pairs go back to the block's inducing rows, so
+            // `K_mm` and `K(Z, X)` read the same values.
+            repair_block(square, m, m, BlockKind::Square);
+            let block = block.to_mut();
+            for (b, column) in square.chunks_exact(m).enumerate() {
+                for (&v, &i) in column.iter().zip(inducing) {
+                    block[i + b * n] = v;
+                }
+            }
+        }
         Ok(false) => {}
         Err(GprError::InvalidDistance { row, col, reason }) => {
             return Err(GprError::InvalidDistance {

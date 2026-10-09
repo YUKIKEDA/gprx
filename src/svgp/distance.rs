@@ -176,7 +176,9 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<WithPoints>> {
     /// # Errors
     ///
     /// Same as [`Svgp::factor`] of a [`DistanceKernel<DistanceOnly>`], plus
-    /// the coordinate errors of the coordinate [`Svgp::factor`].
+    /// [`GprError::EmptyInput`] if `x` is empty, [`GprError::LengthMismatch`]
+    /// if `x` is not `n × n_cols` (`n_cols` zero included), [`GprError::NonFiniteInput`] for a
+    /// coordinate that is not finite, and the error of the input transform.
     ///
     /// # Examples
     ///
@@ -287,7 +289,7 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
     }
 
     /// The factors and `q(u)` a prediction reads.
-    fn svgp_system(&self) -> Result<SvgpSystem<'_, P, SuppliedSpec>, GprError> {
+    fn svgp_system(&self) -> SvgpSystem<'_, P, SuppliedSpec> {
         SvgpSystem::new(
             &self.core,
             self.k_mm_l.as_ref(),
@@ -311,7 +313,7 @@ impl<P: GpScalar, C: PointUse> DistanceQuery for FittedSvgp<P, DistanceKernel<C>
         let mut out = Prediction::default();
         predict_svgp_into::<P, SuppliedSpec>(
             &self.core,
-            &self.svgp_system()?,
+            &self.svgp_system(),
             points.xs,
             q,
             points.n_cols,
@@ -336,7 +338,7 @@ impl<P: GpScalar, C: PointUse> DistanceQuery for FittedSvgp<P, DistanceKernel<C>
             self.k_mm_l.as_ref(),
             &self.q_mean,
             self.q_l.as_ref(),
-        )?;
+        );
         predict_svgp_into::<P, SuppliedSpec>(
             &self.core,
             &sys,
@@ -360,7 +362,7 @@ impl<P: GpScalar, C: PointUse> DistanceQuery for FittedSvgp<P, DistanceKernel<C>
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         predict_svgp_covariance::<P, SuppliedSpec>(
             &self.core,
-            &self.svgp_system()?,
+            &self.svgp_system(),
             points.xs,
             q,
             points.n_cols,

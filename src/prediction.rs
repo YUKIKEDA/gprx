@@ -210,7 +210,9 @@ pub(crate) trait DistanceQuery {
     type Refine;
 
     /// Mean and variance at `m` queries: `cross` is one source per slot of
-    /// the `n × m` train × query squares.
+    /// the squared distances from the model's points to the queries (`n × m`
+    /// from the training points for an Exact model, from the inducing
+    /// points for a sparse one).
     fn query_distances<'s>(
         &self,
         cross: impl IntoIterator<Item = DistanceSource<'s>>,

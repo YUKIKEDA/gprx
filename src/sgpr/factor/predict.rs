@@ -34,28 +34,25 @@ pub(crate) struct VfeSystem<'a, P: ModelPrecision, U: Supply = crate::kernel::No
 }
 
 impl<'a, P: ModelPrecision, U: Supply> VfeSystem<'a, P, U> {
-    /// # Errors
-    ///
-    /// The `f64` supply of `core` is always held; an unbound one is reported.
     pub(crate) fn new(
         core: &'a SparseCore<U>,
         k_mm_l: MatRef<'a, P::Storage>,
         b_l: MatRef<'a, P::Storage>,
         predict_w: &'a [P::Refine],
-    ) -> Result<Self, GprError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             kernel: &core.kernel,
             k_mm_jitter: core.jitter,
             z: &core.z_train,
             slots: &core.slots,
-            zz: &core.supply.at::<f64>()?.zz,
+            zz: &core.supply.exact().zz,
             k_mm_l,
             b_l,
             predict_w,
             noise: core.likelihood.noise_variance(),
             m: core.m,
             d: core.d,
-        })
+        }
     }
 }
 

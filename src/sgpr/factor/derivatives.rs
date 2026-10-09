@@ -908,7 +908,7 @@ mod adjoint_tests {
             let sets = SparseSets::<f64, crate::kernel::NoSupply>::new(
                 xm.as_ref(),
                 zm.as_ref(),
-                model.core.supply.at::<f64>().expect("supply"),
+                model.core.supply.exact(),
             );
             let var =
                 kernel_theta_var::<Accurate, f64, _>(&compiled, &mut ks, sets, 6, i).expect("var");
