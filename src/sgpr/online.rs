@@ -192,8 +192,13 @@ where
     where
         O: Clone,
     {
+        // The training blocks are lent, not copied; `with_snapshot` takes
+        // them back whatever the call returns.
+        let supply = std::mem::take(&mut self.state.core.supply);
+        let mut core = self.state.core.clone();
+        core.supply = supply;
         FittedSgpr {
-            core: self.state.core.clone(),
+            core,
             // Lent for the call; `adopt_fitted` takes it back.
             scratch: std::mem::take(&mut self.scratch),
             optimizer: self.optimizer.clone(),
@@ -206,6 +211,30 @@ where
             predict_w: self.state.predict_w.clone(),
             k_diag_sum: self.state.k_diag_sum,
             a_frobenius2: self.state.a_frobenius2,
+        }
+    }
+
+    /// Runs `call` on a batch model of this one: on success this model
+    /// takes its state, on an error only the lent training blocks and
+    /// scratch come back.
+    fn with_snapshot<R>(
+        &mut self,
+        call: impl FnOnce(&mut FittedSgpr<O, FixedInducing, P, K>) -> Result<R, GprError>,
+    ) -> Result<R, GprError>
+    where
+        O: Clone,
+    {
+        let mut fitted = self.snapshot_fitted();
+        match call(&mut fitted) {
+            Ok(value) => {
+                self.adopt_fitted(fitted);
+                Ok(value)
+            }
+            Err(err) => {
+                self.state.core.supply = fitted.core.supply;
+                self.scratch = fitted.scratch;
+                Err(err)
+            }
         }
     }
 
@@ -376,10 +405,7 @@ where
     where
         O: Clone,
     {
-        let mut fitted = self.snapshot_fitted();
-        fitted.set_params(params)?;
-        self.adopt_fitted(fitted);
-        Ok(())
+        self.with_snapshot(|fitted| fitted.set_params(params))
     }
 
     /// Sets parameters, rebuilds the VFE system, and writes `∂L/∂θ` of the negative ELBO.
@@ -399,10 +425,7 @@ where
     where
         O: Clone,
     {
-        let mut fitted = self.snapshot_fitted();
-        let value = fitted.value_and_gradient_into(params, out)?;
-        self.adopt_fitted(fitted);
-        Ok(value)
+        self.with_snapshot(|fitted| fitted.value_and_gradient_into(params, out))
     }
 
     /// Writes the Hessian of the negative ELBO (row-major `p×p`) into `out`.
@@ -416,10 +439,7 @@ where
     where
         O: Clone,
     {
-        let mut fitted = self.snapshot_fitted();
-        fitted.hessian_into(params, out)?;
-        self.adopt_fitted(fitted);
-        Ok(())
+        self.with_snapshot(|fitted| fitted.hessian_into(params, out))
     }
 
     /// Returns the negative VFE evidence lower bound (the sparse NLML).
@@ -1184,7 +1204,13 @@ where
             x_new,
             self.state.core.d,
         )?;
-        self.append_point(a_col, k_diag, x_new, x_obs, y_new, y_obs, |_| {})
+        let point = NewPoint {
+            x: x_new,
+            x_obs,
+            y: y_new,
+            y_obs,
+        };
+        self.append_point(a_col, k_diag, point, |_| {})
     }
 }
 
@@ -1193,19 +1219,22 @@ where
     P: crate::precision::GpScalar,
 {
     /// Appends a training point at the current `θ` from `K(Z, x)`
-    /// (`a_col`, `m × 1`) and `k(x, x)`, with `x_new` / `y_new` its mapped
-    /// coordinates and target and `x_obs` / `y_obs` the caller's. `supply`
+    /// (`a_col`, `m × 1`) and `k(x, x)`, and `point` its coordinates and
+    /// target. `supply`
     /// writes its training blocks once every step that can fail has run.
     pub(super) fn append_point(
         &mut self,
         mut a_col: Mat<P::Storage>,
         k_diag: P::Storage,
-        x_new: &[f64],
-        x_obs: &[f64],
-        y_new: f64,
-        y_obs: f64,
+        point: NewPoint<'_>,
         supply: impl FnOnce(&mut SparseSupply),
     ) -> Result<PointId, GprError> {
+        let NewPoint {
+            x: x_new,
+            x_obs,
+            y: y_new,
+            y_obs,
+        } = point;
         solve_lmm(self.state.k_mm_l.as_ref(), a_col.as_mut());
         let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
@@ -1467,11 +1496,17 @@ where
     /// # }
     /// ```
     pub fn refit(&mut self) -> Result<(), GprError> {
-        let mut fitted = self.snapshot_fitted();
-        fitted.optimize_hyperparameters()?;
-        self.adopt_fitted(fitted);
-        Ok(())
+        self.with_snapshot(FittedSgpr::optimize_hyperparameters)
     }
+}
+
+/// A point an insert appends: its coordinates and target through the
+/// fitted transforms (`x`, `y`) and as the caller gave them.
+pub(super) struct NewPoint<'a> {
+    x: &'a [f64],
+    x_obs: &'a [f64],
+    y: f64,
+    y_obs: f64,
 }
 
 /// The position of `at` among `blocks` ([`crate::kernel::BlockStore::block_ids`]).
@@ -1558,7 +1593,13 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             }
             self.state.core.supply.reserve_point()?;
             self.atomically(|model| {
-                model.append_point(a_col, k_diag, &mapped, x_obs, y_new, y_obs, |supply| {
+                let point = NewPoint {
+                    x: &mapped,
+                    x_obs,
+                    y: y_new,
+                    y_obs,
+                };
+                model.append_point(a_col, k_diag, point, |supply| {
                     supply.push_point(|at, col| row[block_index(&blocks, at) * m + col]);
                 })
             })

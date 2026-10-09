@@ -327,7 +327,7 @@ fn sparse_supplied(c: &mut Criterion) {
             Slot::Ard(bands) => bands.borrow(&row_refs),
         };
         let column = || match &slot {
-            Slot::Scalar(image) => image.borrow(&column_sum),
+            Slot::Scalar(image) => image.borrow(column_sum),
             Slot::Ard(bands) => bands.borrow(&column_refs),
         };
         let mut base = sgpr().into_online();

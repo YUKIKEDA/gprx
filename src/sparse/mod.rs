@@ -1412,14 +1412,11 @@ impl<S: KernelScalar, U: Supply> Default for SparseScratch<S, U> {
 pub(crate) struct SparseSupply {
     /// The training points that are the inducing points, in order.
     pub(crate) inducing: Vec<usize>,
-    /// Shared, so a copy of a model (an online model's snapshot of
-    /// itself) does not copy the blocks; a change copies them only while
-    /// they are shared.
-    f64: std::sync::Arc<SupplyAt<f64>>,
+    f64: SupplyAt<f64>,
     /// The `f32` copy, cast when an `f32` kernel first reads it: a factor
     /// that runs in `f64` (an `f32` SGPR's) never makes it. Checked to fit
     /// when the supply is made.
-    f32: std::sync::Arc<std::sync::OnceLock<Result<SupplyAt<f32>, GprError>>>,
+    f32: std::sync::OnceLock<Result<SupplyAt<f32>, GprError>>,
 }
 
 /// Checks the inducing indices of a model on supplied distances: each
@@ -1469,8 +1466,8 @@ impl SparseSupply {
         xz.require_in_range::<S>()?;
         Ok(Self {
             inducing,
-            f64: std::sync::Arc::new(SupplyAt { zz, xz }),
-            f32: std::sync::Arc::default(),
+            f64: SupplyAt { zz, xz },
+            f32: std::sync::OnceLock::new(),
         })
     }
 
@@ -1489,17 +1486,11 @@ impl SparseSupply {
         self.inducing.iter().position(|&i| i == index)
     }
 
-    /// Both copies of the blocks, writable (the `f64` one always, the `f32`
-    /// one when it was made): a shared copy is copied first.
+    /// Both copies of the blocks, writable: the `f64` one always, the
+    /// `f32` one when it was made.
     fn copies_mut(&mut self) -> (&mut SupplyAt<f64>, Option<&mut SupplyAt<f32>>) {
-        let f32 = if self.f32.get().is_some() {
-            std::sync::Arc::make_mut(&mut self.f32)
-                .get_mut()
-                .and_then(|made| made.as_mut().ok())
-        } else {
-            None
-        };
-        (std::sync::Arc::make_mut(&mut self.f64), f32)
+        let f32 = self.f32.get_mut().and_then(|made| made.as_mut().ok());
+        (&mut self.f64, f32)
     }
 
     /// Forms the squares among the inducing points again from the blocks'
@@ -1699,7 +1690,7 @@ impl SparseSupply {
     /// [`GprError::InvalidDistance`] (an `f32` model's supply was checked
     /// when it was made).
     pub(crate) fn at<T: KernelScalar>(&self) -> Result<&SupplyAt<T>, GprError> {
-        let f64: &dyn std::any::Any = &*self.f64;
+        let f64: &dyn std::any::Any = &self.f64;
         if let Some(at) = f64.downcast_ref() {
             return Ok(at);
         }
