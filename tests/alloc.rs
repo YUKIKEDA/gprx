@@ -1026,6 +1026,53 @@ fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         });
         out.push((format!("{name}/online_insert"), count));
         online_deletes_and_refit(name, &base, p.n, &mut out);
+        // The sparse models on the first `m` training points.
+        let inducing: Vec<usize> = (0..p.m).collect();
+        let nm = p.n * p.m;
+        let sparse_refs: Vec<&[f64]> = s.train.iter().map(|b| &b[..nm]).collect();
+        let sparse_train = || slot.borrow(&s.train_sum[..nm], &sparse_refs);
+        let sgpr = || {
+            Sgpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([sparse_train()], p.n, &p.y, &inducing)
+                .map_err(|(_, e)| e)
+                .expect("sgpr")
+        };
+        let _warm = sgpr();
+        let mut sparse = None;
+        out.push((
+            format!("{name}/sgpr_factor"),
+            allocs_in(|| sparse = Some(sgpr())),
+        ));
+        let mut sparse = sparse.expect("sgpr");
+        let cross_refs: Vec<&[f64]> = s.sparse_cross.iter().map(Vec::as_slice).collect();
+        let cross = || slot.borrow(&s.sparse_cross_sum, &cross_refs);
+        sparse
+            .predict_into([cross()], p.q, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/sgpr_predict_into"),
+            allocs_in(|| {
+                sparse
+                    .predict_into([cross()], p.q, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+        let mut svgp = Svgp::new(kernel.clone(), lik())
+            .with_precision::<P>()
+            .factor([sparse_train()], p.n, &p.y, &inducing)
+            .map_err(|(_, e)| e)
+            .expect("svgp");
+        svgp.predict_into([cross()], p.q, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/svgp_predict_into"),
+            allocs_in(|| {
+                svgp.predict_into([cross()], p.q, &mut pred)
+                    .expect("counted")
+            }),
+        ));
     }
     out
 }
@@ -1128,6 +1175,46 @@ fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
         });
         out.push((format!("{name}/online_insert"), count));
         online_deletes_and_refit(name, &base, p.n, &mut out);
+        let sgpr = || {
+            Sgpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+                .map_err(|(_, e)| e)
+                .expect("sgpr")
+        };
+        let _warm = sgpr();
+        let mut sparse = None;
+        out.push((
+            format!("{name}/sgpr_factor"),
+            allocs_in(|| sparse = Some(sgpr())),
+        ));
+        let mut sparse = sparse.expect("sgpr");
+        sparse
+            .predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/sgpr_predict_into"),
+            allocs_in(|| {
+                sparse
+                    .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+        let mut svgp = Svgp::new(kernel.clone(), lik())
+            .with_precision::<P>()
+            .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+            .map_err(|(_, e)| e)
+            .expect("svgp");
+        svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/svgp_predict_into"),
+            allocs_in(|| {
+                svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
     }
     out
 }

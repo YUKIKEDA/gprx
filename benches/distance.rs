@@ -14,7 +14,9 @@ use gprx::kernel::{
     ArdDistance, DistanceKernel, DistanceSource, KernelSpec, RbfArdKernel, RbfKernel,
     ScalarDistance,
 };
-use gprx::{FittedGpr, Fixed, GaussianLikelihood, Gpr, OnlineGpr, Prediction, Sgpr, Svgp};
+use gprx::{
+    FittedGpr, FittedSgpr, Fixed, GaussianLikelihood, Gpr, OnlineGpr, Prediction, Sgpr, Svgp,
+};
 
 #[path = "../tests/common/problems.rs"]
 #[allow(dead_code)]
@@ -148,6 +150,7 @@ fn sparse(c: &mut Criterion) {
             b.iter(sgpr);
         });
         let mut model = sgpr();
+        sgpr_mll_and_grad(&mut group, &format!("{name}/sgpr_mll_and_grad"), &mut model);
         let mut pred = Prediction::default();
         group.bench_function(format!("{name}/sgpr_predict_into"), |b| {
             b.iter(|| {
@@ -164,6 +167,84 @@ fn sparse(c: &mut Criterion) {
             b.iter(|| {
                 model
                     .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("predict")
+            });
+        });
+    }
+    group.finish();
+}
+
+/// The bound and its gradient of a fitted SGPR at its own `θ`.
+fn sgpr_mll_and_grad<K: gprx::kernel::ModelKernel>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    id: &str,
+    model: &mut FittedSgpr<Fixed, gprx::FixedInducing, gprx::DoublePrecision, K>,
+) {
+    let mut theta = vec![0.0; model.num_params()];
+    model.get_params(&mut theta).expect("theta");
+    let mut grad = vec![0.0; theta.len()];
+    group.bench_function(id, |b| {
+        b.iter(|| {
+            model
+                .value_and_gradient_into(&theta, &mut grad)
+                .expect("mll")
+        });
+    });
+}
+
+/// The sparse operations of `sparse` on supplied distances, as `dist_*`:
+/// the inducing points are the training points `0..m`, the points `z`
+/// of the coordinate rows.
+fn sparse_supplied(c: &mut Criterion) {
+    let p = distance_baseline();
+    let s = p.supplied();
+    let nm = p.n * p.m;
+    let train_refs: Vec<&[f64]> = s.train.iter().map(|b| &b[..nm]).collect();
+    let cross_refs: Vec<&[f64]> = s.sparse_cross.iter().map(Vec::as_slice).collect();
+    let inducing: Vec<usize> = (0..p.m).collect();
+    let mut group = c.benchmark_group("distance_baseline");
+    group.sample_size(20);
+    for (name, slot, kernel) in distance_kernels(p.d) {
+        let train = || match &slot {
+            Slot::Scalar(image) => image.borrow(&s.train_sum[..nm]),
+            Slot::Ard(bands) => bands.borrow(&train_refs),
+        };
+        let cross = || match &slot {
+            Slot::Scalar(image) => image.borrow(&s.sparse_cross_sum),
+            Slot::Ard(bands) => bands.borrow(&cross_refs),
+        };
+        let sgpr = || {
+            Sgpr::new(kernel.clone(), lik())
+                .with_optimizer(Fixed)
+                .factor([train()], p.n, &p.y, &inducing)
+                .map_err(|(_, e)| e)
+                .expect("sgpr")
+        };
+        group.bench_function(format!("{name}/dist_sgpr_factor"), |b| {
+            b.iter(sgpr);
+        });
+        let mut model = sgpr();
+        sgpr_mll_and_grad(
+            &mut group,
+            &format!("{name}/dist_sgpr_mll_and_grad"),
+            &mut model,
+        );
+        let mut pred = Prediction::default();
+        group.bench_function(format!("{name}/dist_sgpr_predict_into"), |b| {
+            b.iter(|| {
+                model
+                    .predict_into([cross()], p.q, &mut pred)
+                    .expect("predict")
+            });
+        });
+        let mut model = Svgp::new(kernel.clone(), lik())
+            .factor([train()], p.n, &p.y, &inducing)
+            .map_err(|(_, e)| e)
+            .expect("svgp");
+        group.bench_function(format!("{name}/dist_svgp_predict_into"), |b| {
+            b.iter(|| {
+                model
+                    .predict_into([cross()], p.q, &mut pred)
                     .expect("predict")
             });
         });
@@ -303,5 +384,5 @@ fn exact_supplied(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(distance, exact, sparse, exact_supplied);
+criterion_group!(distance, exact, sparse, exact_supplied, sparse_supplied);
 criterion_main!(distance);

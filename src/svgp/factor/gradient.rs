@@ -16,7 +16,7 @@
 use super::assemble::q_param_len;
 use crate::error::GprError;
 use crate::kernel::{
-    CompiledKernel, CrossViews, GramInputs, KernelScalar, ModelKernel, RectStore, SupplyViews,
+    BlockStore, CompiledKernel, CrossViews, GramInputs, KernelScalar, ModelKernel, SupplyViews,
 };
 use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
@@ -47,7 +47,7 @@ pub(crate) struct GradBuffers {
     half: Mat<f64>,
     /// The supplied `d²` from `Z` to the batch points (`m × b`), gathered
     /// from the stored `m × n` blocks.
-    zx: RectStore<f64>,
+    zx: BlockStore<f64>,
     ks: KernelScratch<f64>,
 }
 
@@ -68,7 +68,7 @@ impl Default for GradBuffers {
             w_mn: Mat::new(),
             w_mm: Mat::new(),
             half: Mat::new(),
-            zx: RectStore::default(),
+            zx: BlockStore::default(),
             ks: KernelScratch::new(),
         }
     }
@@ -142,7 +142,7 @@ where
     } = bufs;
     let supply = core.supply.at::<f64>()?;
     // Every point in order reads the stored blocks; a batch reads its columns.
-    let zx: &RectStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
+    let zx: &BlockStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
         &supply.zx
     } else {
         supply.zx.columns_into(batch, zx);

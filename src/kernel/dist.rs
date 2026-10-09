@@ -741,6 +741,8 @@ enum StoreRef<'a, T> {
     Packed(&'a [T], usize),
     /// Dense `n × n` tables, one per dimension.
     Dense(&'a [Vec<T>]),
+    /// Dense `n × n` tables, one per dimension, one after another.
+    Flat(&'a [T]),
     /// Row runs, one buffer per dimension.
     Rows(&'a [Vec<T>]),
 }
@@ -770,6 +772,7 @@ impl<'a, T> LowerRuns<'a, T> {
                 &data[start..start + (n - col)]
             }
             StoreRef::Dense(tables) => &tables[dim][col * n + col..(col + 1) * n],
+            StoreRef::Flat(data) => &data[dim * n * n + col * n + col..dim * n * n + (col + 1) * n],
             StoreRef::Rows(_) => &[],
         }
     }
@@ -780,7 +783,7 @@ impl<'a, T> LowerRuns<'a, T> {
     pub(crate) fn packed_block(&self, dim: usize) -> Option<&'a [T]> {
         match self.data {
             StoreRef::Packed(data, block) => Some(&data[dim * block..(dim + 1) * block]),
-            StoreRef::Dense(_) | StoreRef::Rows(_) => None,
+            StoreRef::Dense(_) | StoreRef::Flat(_) | StoreRef::Rows(_) => None,
         }
     }
 }
@@ -806,6 +809,17 @@ impl<'a, T> RowRuns<'a, T> {
 }
 
 impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
+    /// The `d` dense checked `n × n` squares of `data`, one after another
+    /// (only the lower triangles are read).
+    pub(crate) fn flat(data: &'a [T], n: usize) -> Self {
+        let d = data.len().checked_div(n * n).unwrap_or(0);
+        Self {
+            data: StoreRef::Flat(data),
+            n,
+            d,
+        }
+    }
+
     /// Number of points.
     pub(crate) fn n(&self) -> usize {
         self.n
@@ -820,7 +834,7 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     #[inline]
     pub(crate) fn lower(&self) -> Option<LowerRuns<'a, T>> {
         match self.data {
-            StoreRef::Packed(..) | StoreRef::Dense(_) => Some(LowerRuns {
+            StoreRef::Packed(..) | StoreRef::Dense(_) | StoreRef::Flat(_) => Some(LowerRuns {
                 data: self.data,
                 n: self.n,
             }),
@@ -833,7 +847,7 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     pub(crate) fn rows(&self) -> Option<RowRuns<'a, T>> {
         match self.data {
             StoreRef::Rows(rows) => Some(RowRuns { rows, n: self.n }),
-            StoreRef::Packed(..) | StoreRef::Dense(_) => None,
+            StoreRef::Packed(..) | StoreRef::Dense(_) | StoreRef::Flat(_) => None,
         }
     }
 
@@ -843,7 +857,7 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         let (row, col) = if row >= col { (row, col) } else { (col, row) };
         match self.data {
             StoreRef::Rows(rows) => rows[dim][row_offset(row) + col],
-            StoreRef::Packed(..) | StoreRef::Dense(_) => LowerRuns {
+            StoreRef::Packed(..) | StoreRef::Dense(_) | StoreRef::Flat(_) => LowerRuns {
                 data: self.data,
                 n: self.n,
             }
@@ -877,6 +891,7 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         let data = match self.data {
             StoreRef::Packed(data, block) => StoreRef::Packed(T::as_f64_slice(data)?, block),
             StoreRef::Dense(tables) => StoreRef::Dense(T::as_f64_vecs(tables)?),
+            StoreRef::Flat(data) => StoreRef::Flat(T::as_f64_slice(data)?),
             StoreRef::Rows(rows) => StoreRef::Rows(T::as_f64_vecs(rows)?),
         };
         Some(ArdSqDiff {

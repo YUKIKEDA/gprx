@@ -2,11 +2,11 @@
 
 use super::lit;
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Supply, Triangle};
 use crate::kernel::{
-    CrossViews, DistanceSlot, DistanceSource, GramInputs, QuerySources, ScalarOps, SupplyViews,
-    TrainSources,
+    BlockStore, CrossViews, DistanceSlot, DistanceSource, GramInputs, QuerySources, ScalarOps,
+    SupplyViews,
 };
+use crate::kernel::{CompiledKernel, KernelScalar, KernelSpec, Supply, Triangle};
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::{DoublePrecision, ModelPrecision};
@@ -24,7 +24,7 @@ pub(crate) struct VfeSystem<'a, P: ModelPrecision, U: Supply = crate::kernel::No
     pub(crate) z: &'a [f64],
     /// The kernel's slots, and the `f64` squares among the inducing points.
     pub(crate) slots: &'a [DistanceSlot],
-    pub(crate) zz: &'a TrainSources<f64>,
+    pub(crate) zz: &'a BlockStore<f64>,
     pub(crate) k_mm_l: MatRef<'a, P::Storage>,
     pub(crate) b_l: MatRef<'a, P::Storage>,
     pub(crate) predict_w: &'a [P::Refine],

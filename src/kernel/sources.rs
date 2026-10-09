@@ -11,11 +11,11 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::fmt;
 
-use faer::MatRef;
+use faer::{MatMut, MatRef};
 use rayon::prelude::*;
 
 use super::compiled::supplied::{ArdRect, ArdSquare, RectSlots, SquareSlots, unbound};
-use super::dist::{ArdBlocks, ArdSqDiffBuf, BlockList, Checked};
+use super::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf, BlockList, Checked};
 use super::simd::SquareOut;
 use super::{ArdData, DistanceFill, ScalarData, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
@@ -1377,19 +1377,21 @@ fn reads_in_place<T: ScalarOps>() -> bool {
     T::from_f64_slice(&[]).is_some()
 }
 
-/// The training `d²` between two sets a sparse model keeps: per slot, the
-/// `rows × cols` block from the inducing points (rows) to the training
-/// points (columns), column-major and checked, one block per dimension of
-/// an ARD slot. Empty for a coordinate kernel.
+/// Training `d²` a sparse model keeps: per slot, a checked column-major
+/// `rows × cols` block, one per dimension of an ARD slot, laid one after
+/// another. The blocks from the inducing points (rows) to the training
+/// points (columns), or the squares among the inducing points. Empty for a
+/// coordinate kernel.
 #[derive(Clone, Debug)]
-pub(crate) struct RectStore<T> {
+pub(crate) struct BlockStore<T> {
     rows: usize,
     cols: usize,
     scalar: Vec<Vec<T>>,
-    ard: Vec<Vec<Vec<T>>>,
+    /// Per ARD slot, its `d` blocks one after another.
+    ard: Vec<Vec<T>>,
 }
 
-impl<T> Default for RectStore<T> {
+impl<T> Default for BlockStore<T> {
     fn default() -> Self {
         Self {
             rows: 0,
@@ -1400,7 +1402,7 @@ impl<T> Default for RectStore<T> {
     }
 }
 
-impl<T: KernelScalar> RectStore<T> {
+impl<T: KernelScalar> BlockStore<T> {
     /// The same blocks at the scalar `U`: checked when they were bound, so
     /// a value past the range of `U` is reported where it is.
     ///
@@ -1408,37 +1410,58 @@ impl<T: KernelScalar> RectStore<T> {
     ///
     /// Returns [`GprError::InvalidDistance`] for a value that is not
     /// finite at `U`.
-    pub(crate) fn cast<U: KernelScalar>(&self) -> Result<RectStore<U>, GprError> {
-        let rows = self.rows;
+    pub(crate) fn cast<U: KernelScalar>(&self) -> Result<BlockStore<U>, GprError> {
+        self.require_in_range::<U>()?;
         let cast = |block: &Vec<T>| -> Result<Vec<U>, GprError> {
-            let out: Vec<U> = block.iter().map(|v| U::from_f64(v.to_f64())).collect();
-            match out.iter().position(|v| !v.to_f64().is_finite()) {
-                Some(at) => Err(out_of_range(at % rows.max(1), at / rows.max(1))),
-                None => Ok(out),
-            }
+            Ok(block.iter().map(|v| U::from_f64(v.to_f64())).collect())
         };
-        Ok(RectStore {
-            rows,
+        Ok(BlockStore {
+            rows: self.rows,
             cols: self.cols,
             scalar: self.scalar.iter().map(cast).collect::<Result<_, _>>()?,
-            ard: self
-                .ard
-                .iter()
-                .map(|blocks| blocks.iter().map(cast).collect::<Result<_, _>>())
-                .collect::<Result<_, _>>()?,
+            ard: self.ard.iter().map(cast).collect::<Result<_, _>>()?,
         })
+    }
+
+    /// Checks that every value is finite at the scalar `U`, without a copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] at the first value past the
+    /// range of `U`, located in the caller's `n × m` block (the store holds
+    /// it transposed).
+    pub(crate) fn require_in_range<U: KernelScalar>(&self) -> Result<(), GprError> {
+        if !U::ROUNDS_FROM_F64 {
+            return Ok(());
+        }
+        let (rows, len) = (self.rows.max(1), (self.rows * self.cols).max(1));
+        for block in self.scalar.iter().chain(&self.ard) {
+            if let Some(at) = block
+                .iter()
+                .position(|v| !U::from_f64(v.to_f64()).to_f64().is_finite())
+            {
+                let at = at % len;
+                return Err(out_of_range(at / rows, at % rows));
+            }
+        }
+        Ok(())
     }
 
     /// Columns `cols` of every block (a minibatch) into `out`, reusing its
     /// buffers: once `out` has held a batch this large, nothing allocates.
     pub(crate) fn columns_into(&self, cols: &[usize], out: &mut Self) {
         let rows = self.rows;
+        let len = rows * self.cols;
         out.rows = rows;
         out.cols = cols.len();
-        let pick = |block: &[T], picked: &mut Vec<T>| {
+        // Every block of a slot, in turn: the picked blocks lie one after
+        // another as the stored ones do.
+        let pick = |blocks: &[T], picked: &mut Vec<T>| {
             picked.clear();
-            for &j in cols {
-                picked.extend_from_slice(&block[j * rows..(j + 1) * rows]);
+            for block in blocks.chunks_exact(len.max(1)) {
+                for &j in cols {
+                    picked.extend_from_slice(&block[j * rows..(j + 1) * rows]);
+                }
             }
         };
         out.scalar.resize_with(self.scalar.len(), Vec::new);
@@ -1447,16 +1470,26 @@ impl<T: KernelScalar> RectStore<T> {
         }
         out.ard.resize_with(self.ard.len(), Vec::new);
         for (blocks, picked) in self.ard.iter().zip(&mut out.ard) {
-            picked.resize_with(blocks.len(), Vec::new);
-            for (block, picked) in blocks.iter().zip(picked.iter_mut()) {
-                pick(block, picked);
-            }
+            pick(blocks, picked);
         }
     }
 }
 
+/// The squares read in place (a store of `rows = cols`, checked as
+/// squares when bound).
+impl<T: KernelScalar> SquareSlots<T> for BlockStore<T> {
+    fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError> {
+        RectSlots::scalar(self, at)
+    }
+
+    fn ard(&self, at: usize) -> Result<ArdSquare<'_, T>, GprError> {
+        let blocks = self.ard.get(at).ok_or_else(unbound)?;
+        Ok(ArdSquare::Packed(ArdSqDiff::flat(blocks, self.rows)))
+    }
+}
+
 /// The blocks read in place.
-impl<T: KernelScalar> RectSlots<T> for RectStore<T> {
+impl<T: KernelScalar> RectSlots<T> for BlockStore<T> {
     fn scalar(&self, at: usize) -> Result<MatRef<'_, T>, GprError> {
         let block = self.scalar.get(at).ok_or_else(unbound)?;
         Ok(MatRef::from_column_major_slice(block, self.rows, self.cols))
@@ -1464,8 +1497,10 @@ impl<T: KernelScalar> RectSlots<T> for RectStore<T> {
 
     fn ard(&self, at: usize) -> Result<ArdRect<'_, T>, GprError> {
         let blocks = self.ard.get(at).ok_or_else(unbound)?;
+        let len = self.rows * self.cols;
+        let dims = blocks.len().checked_div(len).unwrap_or(0);
         Ok(ArdRect::Checked(ArdBlocks::new(
-            BlockList::Vecs(blocks),
+            BlockList::Packed(blocks, len, dims),
             self.rows,
             self.cols,
             0,
@@ -1477,90 +1512,161 @@ impl<T: KernelScalar> RectSlots<T> for RectStore<T> {
 /// bind each slot's `n × m` block from the `n` training points to the `m`
 /// inducing points (training points `inducing`, in that order), checked as
 /// a training block is. Returns the `m × m` squares among the inducing
-/// points (their rows of the block: checked, with the source's repair,
-/// as a training square is) and the `m × n` blocks from the inducing points
-/// to the training points (the block transposed).
+/// points (their rows of the block: checked, with the source's repair, as
+/// a training square is) and the `m × n` blocks from the inducing points to
+/// the training points (the block transposed). Each block is read once and
+/// written to these two stores; nothing else is copied.
 ///
 /// # Errors
 ///
-/// The errors of [`QuerySources::bind_rect`] and [`TrainSources::bind`];
-/// [`GprError::InvalidDistance`] when the inducing points' rows are not a
-/// square with a zero diagonal and equal mirror entries.
+/// Returns [`GprError::EmptyInput`] when `n` or `inducing` is empty,
+/// [`GprError::LengthMismatch`] for a source of a slot the kernel does not
+/// read, a slot without a source, two sources of one slot, or a block of
+/// the wrong length or count, and [`GprError::InvalidDistance`] for a value
+/// the source's check refuses, or inducing rows that are not a square with
+/// a zero diagonal and equal mirror entries (located in the caller's
+/// block).
 pub(crate) fn bind_inducing<'s>(
     slots: &[DistanceSlot],
     sources: impl IntoIterator<Item = DistanceSource<'s>>,
     n: usize,
     inducing: &[usize],
-) -> Result<(TrainSources<f64>, RectStore<f64>), GprError> {
+) -> Result<(BlockStore<f64>, BlockStore<f64>), GprError> {
     let m = inducing.len();
-    let sources: Vec<DistanceSource<'s>> = sources.into_iter().collect();
-    let tidy: Vec<(SlotId, Tidy)> = sources.iter().map(|s| (s.slot, s.tidy)).collect();
-    let mut scratch = QueryScratch::<f64>::new();
-    let bound = QuerySources::bind(slots, sources, n, m, BlockKind::Rect, false, &mut scratch)?;
-    let mut rect = RectStore {
-        rows: m,
-        cols: n,
-        scalar: Vec::new(),
-        ard: Vec::new(),
+    crate::data::require_nonempty(n)?;
+    crate::data::require_nonempty(m)?;
+    let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
+    let square_len = m.checked_mul(m).ok_or(GprError::SizeOverflow)?;
+    let is_ard = |slot: &DistanceSlot| matches!(slot.shape(), SlotShape::Ard(_));
+    let ards = slots.iter().filter(|slot| is_ard(slot)).count();
+    let store = |rows, cols| BlockStore {
+        rows,
+        cols,
+        scalar: vec![Vec::new(); slots.len() - ards],
+        ard: vec![Vec::new(); ards],
     };
-    // `m × n` from `n × m`, and the rows `inducing` (an `m × m` square).
-    let transpose = |block: &[f64]| -> Vec<f64> {
-        let mut out = vec![0.0; m * n];
-        for a in 0..m {
-            for (i, &v) in block[a * n..(a + 1) * n].iter().enumerate() {
-                out[a + i * m] = v;
-            }
+    let (mut zz, mut zx) = (store(m, m), store(m, n));
+    let mut column = Vec::new();
+    for source in sources {
+        let at = slots.iter().position(|slot| slot.id() == source.slot);
+        let slot = slot_of(slots, &source, std::iter::empty())?;
+        // Each store in the kernel's slot order: a slot's place among the
+        // slots of its shape.
+        let place = slots[..at.unwrap_or(0)]
+            .iter()
+            .filter(|other| is_ard(other) == is_ard(slot))
+            .count();
+        let (squares, rects) = if is_ard(slot) {
+            (&mut zz.ard[place], &mut zx.ard[place])
+        } else {
+            (&mut zz.scalar[place], &mut zx.scalar[place])
+        };
+        if !rects.is_empty() {
+            return Err(GprError::LengthMismatch {
+                reason: "two sources were supplied for one distance slot".to_owned(),
+            });
         }
-        out
-    };
-    let square = |block: &[f64]| -> Vec<f64> {
-        let mut out = Vec::with_capacity(m * m);
-        for b in 0..m {
-            out.extend(inducing.iter().map(|&i| block[i + b * n]));
-        }
-        out
-    };
-    let tidy_of = |id: SlotId| {
-        tidy.iter()
-            .find(|(slot, _)| *slot == id)
-            .map_or(Tidy::Exact, |(_, t)| *t)
-    };
-    let mut squares = Vec::with_capacity(slots.len());
-    let (mut scalars, mut ards) = (0, 0);
-    for slot in slots {
-        let id = slot.id();
-        let data = match slot.shape() {
-            SlotShape::Scalar => {
-                let block = bound.scalar(scalars)?;
-                scalars += 1;
-                let values: Vec<f64> = (0..m)
-                    .flat_map(|a| (0..n).map(move |i| (i, a)))
-                    .map(|(i, a)| block[(i, a)])
-                    .collect();
-                rect.scalar.push(transpose(&values));
-                SourceData::Scalar(ScalarData::Values(Cow::Owned(square(&values))))
-            }
-            SlotShape::Ard(d) => {
-                let ArdRect::Checked(blocks) = bound.ard(ards)? else {
-                    return Err(unbound());
-                };
-                ards += 1;
-                rect.ard
-                    .push((0..d).map(|k| transpose(blocks.block(k))).collect());
-                SourceData::Ard(
+        let tidy = source.tidy;
+        let mut filled = Vec::new();
+        let (data, d) = match source.data {
+            SourceData::Scalar(data) => (DataOf::Scalar(data), 1),
+            SourceData::Ard(d, data) => (DataOf::Ard(data), d),
+        };
+        let count = match &data {
+            DataOf::Scalar(ScalarData::Values(_)) => 1,
+            DataOf::Ard(ArdData::Blocks(tables)) => tables.len(),
+            DataOf::Ard(ArdData::Slices(tables)) => tables.len(),
+            DataOf::Scalar(ScalarData::Fill(filler)) | DataOf::Ard(ArdData::Fill(filler)) => {
+                fill_dense(
+                    *filler,
+                    (n, m),
                     d,
-                    ArdData::Blocks((0..d).map(|k| square(blocks.block(k))).collect()),
-                )
+                    BlockKind::Rect,
+                    &mut filled,
+                    &mut column,
+                )?;
+                d
             }
         };
-        squares.push(DistanceSource {
-            slot: id,
-            data,
-            tidy: tidy_of(id),
-        });
+        require_tables(count, d)?;
+        let table = |k: usize| -> &[f64] {
+            match &data {
+                DataOf::Scalar(ScalarData::Values(values)) => values,
+                DataOf::Ard(ArdData::Blocks(tables)) => &tables[k],
+                DataOf::Ard(ArdData::Slices(tables)) => tables[k],
+                DataOf::Scalar(ScalarData::Fill(_)) | DataOf::Ard(ArdData::Fill(_)) => {
+                    &filled[k * len..(k + 1) * len]
+                }
+            }
+        };
+        rects.reserve_exact(len.checked_mul(d).ok_or(GprError::SizeOverflow)?);
+        squares.reserve_exact(square_len.checked_mul(d).ok_or(GprError::SizeOverflow)?);
+        for k in 0..d {
+            let table = table(k);
+            crate::data::require_count(table.len(), len, "squared distances")?;
+            inducing_parts(table, n, inducing, tidy, rects, squares)?;
+        }
     }
-    let zz = TrainSources::<f64>::bind(slots, squares, m)?;
-    Ok((zz, rect))
+    if zx.scalar.iter().chain(&zx.ard).any(Vec::is_empty) {
+        return Err(no_source());
+    }
+    Ok((zz, zx))
+}
+
+/// The data of a source, either shape.
+enum DataOf<'s> {
+    Scalar(ScalarData<'s>),
+    Ard(ArdData<'s>),
+}
+
+/// Appends the transpose of the column-major `rows × cols` `src` to `dst`
+/// (`cols × rows`, column-major).
+fn transpose_extend(src: &[f64], rows: usize, cols: usize, dst: &mut Vec<f64>) {
+    let at = dst.len();
+    dst.resize(at + rows * cols, 0.0);
+    MatMut::from_column_major_slice_mut(&mut dst[at..], cols, rows)
+        .copy_from(MatRef::from_column_major_slice(src, rows, cols).transpose());
+}
+
+/// One `n × m` block (training points × inducing points `inducing`),
+/// checked as `tidy` asks: its transpose appended to `rects` (`m × n`) and
+/// the `m × m` square of its inducing rows to `squares`, each repaired where
+/// `tidy` allows. A violation of the square is located in `block`: row
+/// `inducing[a]`, column `b`.
+fn inducing_parts(
+    block: &[f64],
+    n: usize,
+    inducing: &[usize],
+    tidy: Tidy,
+    rects: &mut Vec<f64>,
+    squares: &mut Vec<f64>,
+) -> Result<(), GprError> {
+    let m = inducing.len();
+    let repair = check_block(block, n, m, BlockKind::Rect, tidy)?;
+    let at = rects.len();
+    transpose_extend(block, n, m, rects);
+    let rect = &mut rects[at..];
+    if repair {
+        repair_block(rect, m, n, BlockKind::Rect);
+    }
+    let at = squares.len();
+    for b in 0..m {
+        squares.extend(inducing.iter().map(|&i| rect[b + i * m]));
+    }
+    let square = &mut squares[at..];
+    match check_block(square, m, m, BlockKind::Square, tidy) {
+        Ok(true) => repair_block(square, m, m, BlockKind::Square),
+        Ok(false) => {}
+        Err(GprError::InvalidDistance { row, col, reason }) => {
+            return Err(GprError::InvalidDistance {
+                row: inducing.get(row).copied().unwrap_or(row),
+                col,
+                reason,
+            });
+        }
+        Err(err) => return Err(err),
+    }
+    Ok(())
 }
 
 /// The checked `d²` blocks of one prediction, bound on a model's

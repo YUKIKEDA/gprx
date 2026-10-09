@@ -473,6 +473,77 @@ impl RbfArdKernel {
         })
     }
 
+    /// `⟨weight, ∂K/∂θ_d⟩` of a rectangle for every lengthscale, from its
+    /// `(Δ_d)²` blocks and its Gram `k`: `∂k/∂θ_d = k · w_d (Δ_d)²`, so the
+    /// Gram is formed once and each lengthscale is one pass over its block
+    /// (the rectangle's [`Self::contract_square_from_sq_diff`]). `fold`
+    /// holds `weight ∘ k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`], [`GprError::DimensionMismatch`],
+    /// or [`GprError::ShapeMismatch`] for a wrong `out`, `blocks`, `weight`,
+    /// or `k`, [`GprError::InvalidDistance`] for an unchecked block value that is not finite or is negative, and
+    /// [`GprError::NonFiniteKernelValue`] for an overflowed sum.
+    pub(crate) fn contract_cross_from_blocks<T: KernelScalar, S: BlockState>(
+        &self,
+        weight: MatRef<'_, T>,
+        k: MatRef<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
+        out: &mut [f64],
+        fold: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let d = w.len();
+        if out.len() != d {
+            return Err(GprError::LengthMismatch {
+                reason: format!("gradient has {} entries, expected {d}", out.len()),
+            });
+        }
+        ard::require_blocks(blocks, k, d)?;
+        let (rows, cols) = (blocks.rows(), blocks.cols());
+        if weight.nrows() != rows || weight.ncols() != cols {
+            return Err(GprError::ShapeMismatch {
+                reason: format!(
+                    "weight is {}x{}, expected {rows}x{cols}",
+                    weight.nrows(),
+                    weight.ncols()
+                ),
+            });
+        }
+        let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+        if fold.len() < len {
+            fold.resize(len, 0.0);
+        }
+        let s = &mut fold[..len];
+        for col in 0..cols {
+            for row in 0..rows {
+                s[col * rows + row] = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
+            }
+        }
+        for (dim, slot) in out.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for col in 0..cols {
+                let run = &s[col * rows..(col + 1) * rows];
+                sum += match blocks.column(dim, col)? {
+                    Some(values) => lane_dot(run, values),
+                    None => {
+                        let mut part = 0.0;
+                        for (row, &v) in run.iter().enumerate() {
+                            part += v * blocks.read(dim, row, col)?.to_f64();
+                        }
+                        part
+                    }
+                };
+            }
+            *slot = w[dim] * sum;
+            if !slot.is_finite() {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+        }
+        Ok(())
+    }
+
     /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
     pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,

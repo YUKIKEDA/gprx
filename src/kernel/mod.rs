@@ -63,7 +63,7 @@ pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
 pub(crate) use sources::{
-    QueryScratch, QuerySources, RectStore, RefinedSources, SourceStore, TrainSources,
+    BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
     bind_inducing, widened,
 };
 pub use spec::{KernelSpec, ParameterBinding};

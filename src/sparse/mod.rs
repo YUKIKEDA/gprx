@@ -9,11 +9,11 @@ use faer::{Mat, MatMut, MatRef};
 
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
+use crate::kernel::{BlockStore, KernelSpec, Supply};
 use crate::kernel::{
     CompiledKernel, CrossViews, DiagAccum, GramInputs, KernelScalar, NoSupply, Triangle,
     WeightedWalk,
 };
-use crate::kernel::{KernelSpec, RectStore, Supply, TrainSources};
 use crate::likelihood::GaussianLikelihood;
 use crate::param::{Interval, write_params};
 use crate::policy::KernelExp;
@@ -1169,7 +1169,7 @@ impl<S: KernelScalar, U: Supply> PredictScratch<S, U> {
         z: &[f64],
         m: usize,
         d: usize,
-        zz: &'a TrainSources<f64>,
+        zz: &'a BlockStore<f64>,
         jitter: JitterPolicy,
     ) -> Result<F64System<'a, U>, GprError> {
         let Self {
@@ -1276,23 +1276,27 @@ pub(crate) struct SparseSupply {
     /// The training points that are the inducing points, in order.
     pub(crate) inducing: Vec<usize>,
     f64: SupplyAt<f64>,
-    f32: SupplyAt<f32>,
+    /// The `f32` copy, cast when an `f32` kernel first reads it: a factor
+    /// that runs in `f64` (an `f32` SGPR's) never makes it. Checked to fit
+    /// when the supply is made.
+    f32: std::sync::OnceLock<Result<SupplyAt<f32>, GprError>>,
 }
 
 /// Checks the inducing indices of a model on supplied distances: each
 /// below `n`, none twice.
 fn check_inducing(inducing: &[usize], n: usize) -> Result<(), GprError> {
-    let mut seen = vec![false; n];
-    for &i in inducing {
-        let slot = seen.get_mut(i).ok_or_else(|| GprError::IndexOutOfRange {
-            reason: format!("inducing index {i} is not below the {n} training points"),
-        })?;
-        if *slot {
+    // `O(m²)` comparisons, below the `O(m³)` factor of `K_mm`; no buffer.
+    for (at, &i) in inducing.iter().enumerate() {
+        if i >= n {
+            return Err(GprError::IndexOutOfRange {
+                reason: format!("inducing index {i} is not below the {n} training points"),
+            });
+        }
+        if inducing[..at].contains(&i) {
             return Err(GprError::InvalidConfig {
                 reason: format!("inducing index {i} is listed twice"),
             });
         }
-        *slot = true;
     }
     Ok(())
 }
@@ -1301,9 +1305,9 @@ fn check_inducing(inducing: &[usize], n: usize) -> Result<(), GprError> {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SupplyAt<T: KernelScalar> {
     /// `m × m` among the inducing points.
-    pub(crate) zz: TrainSources<T>,
+    pub(crate) zz: BlockStore<T>,
     /// `m × n` from the inducing points to the training points.
-    pub(crate) zx: RectStore<T>,
+    pub(crate) zx: BlockStore<T>,
 }
 
 impl SparseSupply {
@@ -1316,35 +1320,43 @@ impl SparseSupply {
     /// `S`.
     pub(crate) fn new<S: KernelScalar>(
         inducing: Vec<usize>,
-        zz: TrainSources<f64>,
-        zx: RectStore<f64>,
+        zz: BlockStore<f64>,
+        zx: BlockStore<f64>,
     ) -> Result<Self, GprError> {
-        let f32 = if std::any::TypeId::of::<S>() == std::any::TypeId::of::<f32>() {
-            SupplyAt {
-                zz: zz.cast()?,
-                zx: zx.cast()?,
-            }
-        } else {
-            SupplyAt::default()
-        };
+        // The squares are the blocks' inducing rows (a repaired pair is the
+        // mean of two values in range), so the blocks are the values to check.
+        zx.require_in_range::<S>()?;
         Ok(Self {
             inducing,
             f64: SupplyAt { zz, zx },
-            f32,
+            f32: std::sync::OnceLock::new(),
         })
     }
 
-    /// The supply at `T` (`f64`, or the `f32` cast).
+    /// The supply at `T` (`f64`, or the `f32` cast, made on the first read).
     ///
     /// # Errors
     ///
     /// The supply holds `f64` and `f32` only; any other `T` is reported as
-    /// unbound.
+    /// unbound. A value past the range of `f32` is reported as
+    /// [`GprError::InvalidDistance`] (an `f32` model's supply was checked
+    /// when it was made).
     pub(crate) fn at<T: KernelScalar>(&self) -> Result<&SupplyAt<T>, GprError> {
         let f64: &dyn std::any::Any = &self.f64;
-        let f32: &dyn std::any::Any = &self.f32;
-        f64.downcast_ref()
-            .or_else(|| f32.downcast_ref())
-            .ok_or_else(crate::kernel::unbound)
+        if let Some(at) = f64.downcast_ref() {
+            return Ok(at);
+        }
+        let f32 = self
+            .f32
+            .get_or_init(|| {
+                Ok(SupplyAt {
+                    zz: self.f64.zz.cast()?,
+                    zx: self.f64.zx.cast()?,
+                })
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let f32: &dyn std::any::Any = f32;
+        f32.downcast_ref().ok_or_else(crate::kernel::unbound)
     }
 }

@@ -119,10 +119,15 @@ pub struct Supplied {
     pub cross: Vec<Vec<f64>>,
     /// The `n × 1` blocks from the training points to `x_new`.
     pub new: Vec<Vec<f64>>,
+    /// The `m × q` blocks from the inducing points (training points
+    /// `0..m`) to the queries. The `n × m` training blocks of a sparse
+    /// model are the first `m` columns of `train`.
+    pub sparse_cross: Vec<Vec<f64>>,
     /// `Σ_k` of the blocks: the squared Euclidean distance.
     pub train_sum: Vec<f64>,
     pub cross_sum: Vec<f64>,
     pub new_sum: Vec<f64>,
+    pub sparse_cross_sum: Vec<f64>,
 }
 
 impl DistanceBaseline {
@@ -143,6 +148,9 @@ impl DistanceBaseline {
         let new: Vec<Vec<f64>> = (0..self.d)
             .map(|k| block(&self.x, self.n, &self.x_new, 1, k))
             .collect();
+        let sparse_cross: Vec<Vec<f64>> = (0..self.d)
+            .map(|k| block(&self.z, self.m, &self.xq, self.q, k))
+            .collect();
         let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
             (0..blocks[0].len())
                 .map(|at| blocks.iter().map(|b| b[at]).sum())
@@ -152,9 +160,11 @@ impl DistanceBaseline {
             train_sum: sum(&train),
             cross_sum: sum(&cross),
             new_sum: sum(&new),
+            sparse_cross_sum: sum(&sparse_cross),
             train,
             cross,
             new,
+            sparse_cross,
         }
     }
 }

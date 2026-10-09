@@ -22,7 +22,7 @@
 //! `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
-use super::supplied::{ArdLeaf, ArdSquare, ScalarLeaf, SuppliedCompiled, SuppliedLeaf};
+use super::supplied::{ArdLeaf, ArdRect, ArdSquare, ScalarLeaf, SuppliedCompiled, SuppliedLeaf};
 use super::{CompiledKernel, CrossViews, add_triangle};
 use crate::error::GprError;
 use crate::kernel::dist::{for_each_lower_col, lower_fold_infallible};
@@ -832,6 +832,32 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         let Some(d_k) = bufs.first_mut() else {
             return Err(too_few_buffers());
         };
+        // An accurate ARD RBF on a supplied slot's `(Δ_d)²` blocks: one
+        // Gram, then every lengthscale from the blocks, as the square's
+        // packed path. `FastApprox` stays on the per-parameter loop.
+        if M::ACCURATE
+            && let Self::Supplied(supplied) = self
+            && let (
+                SuppliedLeaf {
+                    at,
+                    leaf: SuppliedCompiled::Ard(ArdLeaf::Rbf(rbf)),
+                    ..
+                },
+                slots,
+            ) = S::rect_leaf(supplied, views.slots)
+        {
+            self.apply_cross_mixed::<M>(views, d_k.as_mut(), scratch.as_mut(), nested)?;
+            let k = d_k.as_ref();
+            match slots.ard(*at)? {
+                ArdRect::Checked(blocks) => {
+                    rbf.contract_cross_from_blocks(weight, k, blocks, out, jobs)?;
+                }
+                ArdRect::Unchecked(blocks) => {
+                    rbf.contract_cross_from_blocks(weight, k, blocks, out, jobs)?;
+                }
+            }
+            return Ok(if want_value { rect_dot(weight, k) } else { 0.0 });
+        }
         let value = if want_value {
             self.apply_cross_mixed::<M>(views, d_k.as_mut(), scratch.as_mut(), nested)?;
             rect_dot(weight, d_k.as_ref())

@@ -1,11 +1,11 @@
 //! SVGP predictive mean and variance.
 
 use crate::error::GprError;
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
 use crate::kernel::{
-    CrossViews, DistanceSlot, DistanceSource, NoSupply, QueryScratch, QuerySources, Supply,
-    SupplyViews, TrainSources,
+    BlockStore, CrossViews, DistanceSlot, DistanceSource, NoSupply, QueryScratch, QuerySources,
+    Supply, SupplyViews,
 };
+use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
 use crate::precision::ModelPrecision;
@@ -23,7 +23,7 @@ pub(crate) struct SvgpSystem<'a, P: ModelPrecision, U: Supply = NoSupply> {
     pub(crate) z: &'a [f64],
     /// The kernel's slots, and the `f64` squares among the inducing points.
     pub(crate) slots: &'a [DistanceSlot],
-    pub(crate) zz: &'a TrainSources<f64>,
+    pub(crate) zz: &'a BlockStore<f64>,
     pub(crate) k_mm_l: MatRef<'a, P::Storage>,
     pub(crate) q_mean: &'a [f64],
     pub(crate) q_l: MatRef<'a, f64>,
