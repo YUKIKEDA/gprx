@@ -487,10 +487,25 @@ where
             });
         }
         let index = self.registry.index_of(id)?;
-        // The store fails only on an index it does not hold, before any
-        // change; the factor is updated after it.
-        self.core.sources.remove_point(index)?;
-        self.workspace.delete_index(index)?;
+        // The store lays itself out for the change first (the one step
+        // that can fail); then it and the factor drop the point side by
+        // side, neither failing on an index the registry holds.
+        // A store with little to move drops the point after the factor:
+        // waking a worker would cost more than the move.
+        if self.core.sources.remove_work(index) < BESIDE_WORK {
+            self.core.sources.ready_to_change()?;
+            self.workspace.delete_index(index)?;
+            self.core.sources.remove_point(index)?;
+        } else {
+            self.core.sources.ready_to_change()?;
+            let (workspace, sources) = (&mut self.workspace, &mut self.core.sources);
+            let (factor, store) = beside(
+                || workspace.delete_index(index),
+                || sources.remove_point(index),
+            );
+            factor?;
+            store?;
+        }
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
         remove_point_mat_inplace(&mut self.core.x, self.core.n, index);
@@ -1047,6 +1062,33 @@ where
             Err(err)
         }
     }
+}
+
+/// Values a delete must move in the training store before it runs beside
+/// the factor's update ([`beside`]): about a hundred microseconds of
+/// moves, the time a parked worker takes to wake.
+const BESIDE_WORK: usize = 1 << 16;
+
+/// `(a(), b())`: `a` on this thread while a worker of the Rayon pool runs
+/// `b`, when the pool has more than one worker; one after the other
+/// otherwise (a job queued from outside the pool can allocate).
+fn beside<A>(
+    a: impl FnOnce() -> A,
+    b: impl FnOnce() -> Result<(), GprError> + Send,
+) -> (A, Result<(), GprError>) {
+    if rayon::current_num_threads() <= 1 {
+        return (a(), b());
+    }
+    // The scope waits for the job, which overwrites this.
+    let mut second = Err(GprError::UnsupportedKernelOperation {
+        reason: "the training store's update did not run".to_owned(),
+    });
+    let first = rayon::in_place_scope(|scope| {
+        let slot = &mut second;
+        scope.spawn(move |_| *slot = b());
+        a()
+    });
+    (first, second)
 }
 
 fn append_colmajor(x: &mut Vec<f64>, n: usize, d: usize, x_new: &[f64]) {

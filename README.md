@@ -393,7 +393,7 @@ Tables are column-major `dist[i + j * n_rows]`. Every value must be finite and n
 | `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 | `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 
-`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` is on coordinate models only: a model of supplied distances has no online insert or delete.
+`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` converts a distance model too. Its `insert` takes, per slot, the `n × 1` column of squared distances from the current points, in `point_ids` order, to the new point (`d` such columns for an ARD slot), from any source above: `insert(sources, y_new)` for `DistanceOnly`, `insert(sources, x_new, y_new)` for `WithPoints`. The column is checked as a training square is (or repaired by `tidy`) and kept, and `delete(id)` removes the point from the kept squares in place. The online model predicts with the same arguments as the fitted one. Neither allocates once the model has grown once (a scalar square grows by a quarter, an ARD slot by doubling).
 
 ```rust
 use gprx::kernel::{

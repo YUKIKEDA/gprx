@@ -381,9 +381,9 @@ A kernel leaf may read squared distances the caller supplies (a geodesic, a grap
 | `fit` / `factor` | Time and allocation count no more than the baseline. Peak memory the crate owns no more than the baseline's distance cache: dense `n²` for a scalar slot, packed `d · n(n+1)/2` for an ARD slot (§5.2). The caller's own tables are not counted, including the dense `d · n²` tables an `f64` model keeps when they are handed over (`from_vecs`, or `from_slices`, whose copy is made at the caller's request): it checks them in place and keeps them instead of packing a copy, so the fit copies nothing; an ARD `fill` writes column chunks into a reused buffer packed straight into the triangles, never a dense `d · n²` buffer |
 | `mll`, gradient, Hessian at one `θ` (an optimizer step) | No allocation once the workspace exists, as the baseline. Time no more than the baseline |
 | `predict_into` (Exact, Online, Sgpr, Svgp) | No allocation after a warmup call with the same shapes. Time no more than the baseline. Sources are taken without collecting them into a new `Vec`; a sparse model gathers the inducing rows into a reused buffer |
-| `insert` within capacity | Allocations and time no more than the baseline's insert. The new point's column is written in place (`n` values, `d · n` for ARD) |
-| `delete` | Allocations and time no more than the baseline's delete. The stored squares are not shifted: the deleted index is recorded, and the store is compacted once, the next time the whole square is read (`refit`, `set_params`, save). That compaction is `O(d · n²)`, the same as the baseline rebuilding its cache |
-| `refit` / `set_params` | Time no more than the baseline, the compaction included |
+| `insert` within capacity | Allocations and time no more than the baseline's insert. The new point's squares are written in place: its column and mirror row of a scalar square (`2n` values), one contiguous run per dimension of an ARD slot (`d · n`) (§11) |
+| `delete` | Allocations and time no more than the baseline's delete. The stored squares are compacted in place, `O((n − i) · n)` values per scalar slot and `O(d · (n² − i²) / 2)` per ARD slot for index `i`; a compaction large enough to pay for waking a worker runs beside the factor's update (§11) |
+| `refit` / `set_params` | Time no more than the baseline. An ARD slot that an insert or delete laid out as row runs (§11) is read in its own order, so the Gram, gradient, and Hessian cost what they cost on column runs |
 | `borrow` | An `f64` model reads a borrowed table in place, without a copy |
 
 **Acceptance checks, written before the implementation.** `benches/` puts each operation above side by side: coordinates, a scalar slot, an ARD slot, at the same problem. Every PR of the implementation pastes the numbers before and after. `tests/alloc.rs` asserts, per operation, that the distance path allocates no more than the coordinate path (a relative check) and fixes the measured count (an absolute ratchet). A PR that misses a requirement does not merge.
@@ -914,6 +914,15 @@ type PointRegistry = IdRegistry<PointId>; // OnlineGpr, OnlineSgpr
 type InducingRegistry = IdRegistry<InducingId>; // OnlineSgpr's inducing points
 ```
 
+### Supplied distances
+
+A model of supplied distances (§5.6) converts too, and keeps its training squares (`TrainSources`) beside the factor. `insert` takes, per slot, the `n × 1` column of squared distances from the live points, in `point_ids` order, to the new point (`d` such columns for an ARD slot), from any source a prediction takes. The column is checked in full, as a training square is (a `tidy` source repairs within its tolerance), before anything changes, and is then kept: unlike a prediction block, it outlives the call. Each layout grows so that a point is cheap to add and to remove:
+
+- **A scalar slot** stays a dense symmetric square, because a scalar leaf (and a `KernelTerm`) reads its `d²` as a dense `MatRef`. Its leading dimension `cap ≥ n` grows by a quarter when full (`cap = n + n/4`): a re-layout copies the `n²` values once per `n/4` inserts, and the square stays near `n²`. An insert writes the new column (contiguous) and its mirror row. A delete moves the columns before `i` up one row below `i` and the columns after `i` left by one, two parts that share no column.
+- **An ARD slot** is read by the fit as column runs of the lower triangle (column `j` holds rows `j..n`), the layout the coordinate cache shares. A new point would add one value to every column, `d · n` strided writes, so the first insert or delete lays the slot out once as **row runs**: one buffer per dimension, row `i` holding columns `0..=i` from `i(i+1)/2`. An insert then appends one contiguous run per dimension in room the `Vec` reserved (it grows by doubling, and a clone keeps that room); a delete is one forward pass over the rows past `i`, each losing its column `i`. The readers take the row runs in their own order: the `f64x4` Gram and gradient loops fill the lower triangle four rows at a time (four contiguous columns of each row's run per load, the leaf's value lane-wise, then a 4 × 4 transpose stores four rows of each output column), the gradient contraction lays `weight ∘ K` out as the cache is and takes one contiguous dot product per dimension, and the scalar loops (`f32`, Hessians) visit the lower triangle in the same panels. The fit and its coordinate cache keep column runs: their order, and so their rounding, does not change.
+
+A delete moves `O(n²)` stored values where the coordinate model moves `O(n · d)`. When that move is large (`2^16` values or more), it runs on a worker of the Rayon pool while this thread updates the factor (`rayon::in_place_scope`), and the dimensions of an ARD slot move side by side; a small move runs after the factor's update, because waking a parked worker costs about as much. With one worker everything runs on this thread, which allocates nothing. Before a delete the store lays itself out (the one step that can fail), so neither half fails after the other has changed.
+
 ### API
 
 **Separate insert/delete from reoptimizing hyperparameters.**
@@ -921,8 +930,17 @@ type InducingRegistry = IdRegistry<InducingId>; // OnlineSgpr's inducing points
 An unfitted `Gpr` does not gain points. A batch `FittedGpr` has no `insert`.
 
 ```rust
-impl<O, P: GpScalar> FittedGpr<O, P> {
-    pub fn into_online(self) -> Result<OnlineGpr<O, P>, GprError>;
+impl<O, P: GpScalar, K: ModelKernel> FittedGpr<O, P, K> {
+    pub fn into_online(self) -> Result<OnlineGpr<O, P, K>, GprError>;
+}
+
+impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {
+    pub fn insert<'s>(&mut self, sources: impl IntoIterator<Item = DistanceSource<'s>>, y_new: f64)
+        -> Result<PointId, GprError>;
+}
+impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<WithPoints>> {
+    pub fn insert<'s>(&mut self, sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_new: &[f64], y_new: f64) -> Result<PointId, GprError>;
 }
 
 impl<O, P: GpScalar> OnlineGpr<O, P> {

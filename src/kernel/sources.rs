@@ -787,12 +787,38 @@ impl<T: KernelScalar> TrainSources<T> {
     }
 
     /// Whether the store has no slot (a coordinate model's).
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.scalar.is_empty() && self.ard.is_empty()
     }
 
+    /// About how many values [`Self::remove_point`] moves for `index`:
+    /// the columns past it of each scalar square, and the rows past it of
+    /// each dimension of each ARD slot.
+    pub(crate) fn remove_work(&self, index: usize) -> usize {
+        let n = self.n;
+        let later = n.saturating_sub(index + 1);
+        let scalar = self.scalar.len().saturating_mul(later.saturating_mul(n));
+        let dims: usize = self.ard.iter().map(|(_, cache)| cache.view().d()).sum();
+        let rows = (n * (n + 1) / 2).saturating_sub(index * (index + 1) / 2);
+        scalar.saturating_add(dims.saturating_mul(rows))
+    }
+
+    /// Lays every ARD slot out as row runs (once), so an insert or a
+    /// delete after does not fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when a slot cannot be laid out.
+    pub(crate) fn ready_to_change(&mut self) -> Result<(), GprError> {
+        for (_, cache) in &mut self.ard {
+            cache.ready_to_change()?;
+        }
+        Ok(())
+    }
+
     /// Makes room for one more point, so [`Self::push_point`] writes in
-    /// place: a full scalar square doubles its leading dimension, and each
+    /// place: a full scalar square grows its leading dimension by a
+    /// quarter, and each
     /// ARD slot reserves its own ([`ArdSqDiffBuf::reserve_point`]). The
     /// values read stay the same.
     ///
@@ -805,7 +831,9 @@ impl<T: KernelScalar> TrainSources<T> {
         }
         let n = self.n;
         if self.cap <= n {
-            let cap = (n + 1).max(self.cap.max(1).saturating_mul(2));
+            // A quarter more room: a re-layout copies the n² values once
+            // per n/4 inserts, and the square stays near n² in memory.
+            let cap = (n + 1).max(n + n / 4);
             let len = cap.checked_mul(cap).ok_or(GprError::SizeOverflow)?;
             for (_, square) in &mut self.scalar {
                 let mut wider = vec![T::from_f64(0.0); len];
@@ -888,13 +916,33 @@ impl<T: KernelScalar> TrainSources<T> {
         for (_, cache) in &mut self.ard {
             cache.remove_point(index)?;
         }
-        let skip = |i: usize| if i >= index { i + 1 } else { i };
         for (_, square) in &mut self.scalar {
-            // Forward walk: every read is at or past its write.
-            for j in 0..n - 1 {
-                for i in 0..n - 1 {
-                    square[i + j * cap] = square[skip(i) + skip(j) * cap];
+            // Columns before `index` keep their rows above it and move the
+            // rows below it up one; each later column `j` takes column
+            // `j + 1` without row `index`, going forward, so it reads a
+            // column not yet written. The two parts share no column, and
+            // from inside the pool (a delete beside the factor's update)
+            // they move side by side.
+            let split = (index * cap).min(square.len());
+            let (before, after) = square.split_at_mut(split);
+            let head = |before: &mut [T]| {
+                for j in 0..index {
+                    let at = j * cap;
+                    before.copy_within(at + index + 1..at + n, at + index);
                 }
+            };
+            let tail = |after: &mut [T]| {
+                for j in 0..(n - 1).saturating_sub(index) {
+                    let (from, to) = ((j + 1) * cap, j * cap);
+                    after.copy_within(from..from + index, to);
+                    after.copy_within(from + index + 1..from + n, to + index);
+                }
+            };
+            if rayon::current_thread_index().is_some() {
+                rayon::join(|| head(before), || tail(after));
+            } else {
+                head(before);
+                tail(after);
             }
         }
         self.n = n - 1;
@@ -983,11 +1031,8 @@ impl<T: KernelScalar> TrainSources<T> {
         for (_, cache) in &self.ard {
             let view = cache.view();
             for dim in 0..view.d() {
-                for j in 0..n {
-                    let run = view.column(dim, j);
-                    if let Some(k) = run.iter().position(|v| !v.is_finite()) {
-                        return Err(out_of_range(j + k, j));
-                    }
+                if let Some((row, col)) = view.position(dim, |v| !v.is_finite()) {
+                    return Err(out_of_range(row, col));
                 }
             }
         }
@@ -1112,6 +1157,20 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
         exact: &dyn RectSlots<f64>,
     ) -> Result<(), GprError>;
 
+    /// Whether the store holds no slot (a coordinate kernel's).
+    fn is_empty(&self) -> bool;
+
+    /// About how many values [`Self::remove_point`] moves for `index`.
+    fn remove_work(&self, index: usize) -> usize;
+
+    /// Lays every copy out for an insert or a delete
+    /// ([`TrainSources::ready_to_change`]), so neither fails after.
+    ///
+    /// # Errors
+    ///
+    /// As [`TrainSources::ready_to_change`].
+    fn ready_to_change(&mut self) -> Result<(), GprError>;
+
     /// [`TrainSources::remove_point`] on every copy the store keeps.
     ///
     /// # Errors
@@ -1168,6 +1227,18 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
     fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
         Self::remove_point(self, index)
     }
+
+    fn is_empty(&self) -> bool {
+        Self::is_empty(self)
+    }
+
+    fn remove_work(&self, index: usize) -> usize {
+        Self::remove_work(self, index)
+    }
+
+    fn ready_to_change(&mut self) -> Result<(), GprError> {
+        Self::ready_to_change(self)
+    }
 }
 
 /// The training `d²` of a model that factors in `f32` and refines in
@@ -1223,6 +1294,21 @@ impl SourceStore<f32> for RefinedSources {
     fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
         self.storage.remove_point(index)?;
         self.exact.remove_point(index)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    fn remove_work(&self, index: usize) -> usize {
+        self.storage
+            .remove_work(index)
+            .saturating_add(self.exact.remove_work(index))
+    }
+
+    fn ready_to_change(&mut self) -> Result<(), GprError> {
+        self.storage.ready_to_change()?;
+        self.exact.ready_to_change()
     }
 }
 
@@ -1996,14 +2082,14 @@ mod tests {
         let Ok(ArdSquare::Packed(view)) = store.ard(0) else {
             panic!("ard slot");
         };
-        assert_eq!(view.column(1, 0).as_ptr(), ptr);
-        assert!(view.packed_block(0).is_none());
+        assert_eq!(view.lower().expect("lower").column(1, 0).as_ptr(), ptr);
+        assert!(view.lower().expect("lower").packed_block(0).is_none());
         let narrow =
             TrainSources::<f32>::bind(&slots, [bands.from_vecs(tables.clone())], 3).expect("f32");
         let Ok(ArdSquare::Packed(packed)) = narrow.ard(0) else {
             panic!("ard slot");
         };
-        assert!(packed.packed_block(0).is_some());
+        assert!(packed.lower().expect("lower").packed_block(0).is_some());
         for (k, table) in tables.iter().enumerate() {
             for j in 0..3 {
                 for i in 0..3 {

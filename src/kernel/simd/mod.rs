@@ -24,6 +24,7 @@
 pub(crate) mod ard;
 pub(crate) mod dist;
 pub(crate) mod rbf_ard;
+pub(crate) mod rows;
 pub(crate) mod stationary;
 
 use super::KernelScalar;

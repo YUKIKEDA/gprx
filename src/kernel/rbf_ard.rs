@@ -1,7 +1,7 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdBlocks, ArdSqDiff, BlockState, require_ard_sq_diff_shape};
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState, RowRuns, require_ard_sq_diff_shape};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -393,6 +393,12 @@ impl RbfArdKernel {
             fold.resize(len, 0.0);
         }
         let s = &mut fold[..len];
+        if let Some(rows) = cache.rows() {
+            return contract_rows(rows, weight, k, w, s, out);
+        }
+        let Some(cache) = cache.lower() else {
+            return Ok(());
+        };
         let mut at = 0;
         for col in 0..n {
             // The diagonal's `(Δ_d)²` is `0`, so its term is `0`, as the
@@ -444,7 +450,7 @@ impl RbfArdKernel {
         {
             return Ok(());
         }
-        write_square(out, uplo, |row, col| {
+        ard::write_cached(cache, out, uplo, |row, col| {
             rbf_value::<M, T>(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?)
         })
     }
@@ -521,7 +527,7 @@ impl RbfArdKernel {
         {
             return Ok(());
         }
-        write_square(d_k, uplo, |row, col| {
+        ard::write_cached(cache, d_k, uplo, |row, col| {
             rbf_grad::<M, T>(ard::r2_from_cache(
                 cache,
                 row,
@@ -795,6 +801,45 @@ fn lane_dot<T: KernelScalar>(s: &[f64], b: &[T]) -> f64 {
         .map(|(a, b)| a * b.to_f64())
         .sum();
     ((acc[0] + acc[1]) + (acc[2] + acc[3])) + rest
+}
+
+/// [`RbfArdKernel::contract_square_from_sq_diff`] on a cache of row runs:
+/// `S = weight ∘ k` is laid out in `s` as the cache is (row `i` holds the
+/// columns `0..=i`, the diagonal `0`), a tile of columns at a time so the
+/// lower triangle of `weight` and `k` is read down its columns, and each
+/// lengthscale is one contiguous dot product with its dimension's buffer.
+fn contract_rows<T: KernelScalar>(
+    rows: RowRuns<'_, T>,
+    weight: MatRef<'_, T>,
+    k: MatRef<'_, T>,
+    w: &[f64],
+    s: &mut [f64],
+    out: &mut [f64],
+) -> Result<(), GprError> {
+    const TILE: usize = 16;
+    let n = rows.n();
+    let mut j0 = 0;
+    while j0 < n {
+        let j1 = (j0 + TILE).min(n);
+        for i in j0..n {
+            let base = i * (i + 1) / 2;
+            for j in j0..j1.min(i) {
+                s[base + j] = weight[(i, j)].to_f64() * k[(i, j)].to_f64();
+            }
+            if i < j1 {
+                // As the column runs: the diagonal's term is `0`.
+                s[base + i] = 0.0;
+            }
+        }
+        j0 = j1;
+    }
+    for (dim, slot) in out.iter_mut().enumerate() {
+        *slot = 2.0 * w[dim] * lane_dot(s, rows.buffer(dim));
+        if !slot.is_finite() {
+            return Err(GprError::NonFiniteKernelValue);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

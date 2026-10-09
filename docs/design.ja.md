@@ -374,9 +374,9 @@ pub trait TargetTransform: Send + Sync {
 | `fit` / `factor` | 時間と確保数が基準以下。クレートが持つメモリのピークが、基準の距離キャッシュ（スカラーのスロットは密な `n²`、ARD のスロットは詰めた `d · n(n+1)/2`、5.2 節）以下。呼び出し側が持つ表は数えない。`f64` のモデルに所有ごと渡した ARD の密な表（`from_vecs`、または呼び出し側の求めでコピーする `from_slices`、`d · n²`）も数えない。この表はその場で検査して、詰めた複製を作らずにそのまま持つので、fit は何もコピーしない。ARD の `fill` は、使い回すバッファへ列の塊ごとに書かせて下三角へ直接詰め、密な `d · n²` のバッファは作らない |
 | ある `θ` での `mll`・勾配・Hessian（最適化の 1 ステップ） | ワークスペースを作った後は確保しない（基準と同じ）。時間は基準以下 |
 | `predict_into`（Exact、Online、Sgpr、Svgp） | 同じ形でのウォームアップの後は確保しない。時間は基準以下。供給は新しい `Vec` に集めずに受ける。Sparse のモデルは、誘導点の行を使い回すバッファへ集める |
-| 容量内の `insert` | 確保と時間が基準の insert 以下。新しい点の列（`n` 個、ARD は `d · n` 個）をその場で書く |
-| `delete` | 確保と時間が基準の delete 以下。格納した二乗距離は詰め直さない。消した添字を記録し、次に正方行列の全体を読むとき（`refit`、`set_params`、保存）に 1 回だけ詰める。その `O(d · n²)` は、基準がキャッシュを作り直す量と同じ |
-| `refit` / `set_params` | 詰め直しを含めて、時間が基準以下 |
+| 容量内の `insert` | 確保と時間が基準の insert 以下。新しい点の二乗距離をその場で書く。scalar の正方行列はその列と鏡像の行（`2n` 個）、ARD のスロットは次元ごとに連続した 1 本（`d · n` 個）（§11） |
+| `delete` | 確保と時間が基準の delete 以下。格納した二乗距離をその場で詰める。添字 `i` に対して、scalar のスロットは `O((n − i) · n)` 個、ARD のスロットは `O(d · (n² − i²) / 2)` 個を動かす。ワーカーを起こすのに見合う量の詰め直しは、因子の更新と並べて走らせる（§11） |
+| `refit` / `set_params` | 時間が基準以下。挿入や削除で行の並び（§11）になった ARD のスロットは、その並びの順に読むので、Gram・勾配・ヘッセ行列の費用は列の並びと変わらない |
 | `borrow` | `f64` のモデルは、借りた表をコピーせずにその場で読む |
 
 **受け入れの確認（実装より先に書く）。** `benches/` は、上の各操作を、同じ問題で「座標・スカラーのスロット・ARD のスロット」に並べて測る。実装の各 PR は、変更前後の数値を貼る。`tests/alloc.rs` は、操作ごとに、距離の経路の確保数が座標の経路以下であること（相対の確認）と、測った数（絶対の上限、ラチェット）を固定する。要件を満たさない PR はマージしない。
@@ -906,6 +906,15 @@ type PointRegistry = IdRegistry<PointId>; // OnlineGpr, OnlineSgpr
 type InducingRegistry = IdRegistry<InducingId>; // OnlineSgpr's inducing points
 ```
 
+### 与えられた二乗距離
+
+与えた二乗距離のモデル（§5.6）も変換でき、学習の二乗距離（`TrainSources`）を因子と並べて持つ。`insert` はスロットごとに、生きている点から新しい点への二乗距離の `n × 1` の列（`point_ids` の順）を受け取る。ARD のスロットはこの列を `d` 本受け取る。ソースは予測が受け取るものなら何でもよい。列は学習の正方行列と同じく全体を検査し（`tidy` のソースは許容誤差の内で直す）、何かを変える前に確かめてから保持する。予測のブロックと違い、呼び出しの後も残るためである。どの並びも、点を足すのと消すのが安くなるように伸びる。
+
+- **scalar のスロット**は密な対称の正方行列のままにする。scalar の葉（と `KernelTerm`）が `d²` を密な `MatRef` として読むためである。先頭次元 `cap ≥ n` は、いっぱいになると 4 分の 1 だけ伸ばす（`cap = n + n/4`）。並べ直しで `n²` 個をコピーするのは `n/4` 回の挿入に 1 回で、正方行列は `n²` に近いままである。挿入は新しい列（連続）と鏡像の行を書く。削除は、`i` より前の列は `i` より下の行を 1 つ上へ、`i` より後の列は列ごと 1 つ左へ動かす。2 つの部分は同じ列を持たない。
+- **ARD のスロット**は、fit では下三角の列の並び（列 `j` が行 `j..n` を持つ）で読む。座標のキャッシュと同じ並びである。この並びで新しい点を足すと、すべての列に値が 1 つずつ増え、`d · n` 回の飛び飛びの書き込みになる。そこで最初の挿入か削除のときに一度だけ、スロットを**行の並び**にする。次元ごとに 1 本のバッファを持ち、行 `i` が列 `0..=i` を `i(i+1)/2` から持つ。挿入は、`Vec` が確保した余地に次元ごとに連続した 1 本を足すだけになる（倍々に伸び、クローンもその余地を保つ）。削除は `i` より後の行を前から 1 回なめ、それぞれの行から列 `i` を除く。読み出しは行の並びをその順に読む。`f64x4` の Gram と勾配のループは下三角を 4 行ずつ埋める（各行の並びの連続した 4 列を一度に読み、葉の値をレーンごとに取り、4 × 4 の転置で出力の各列に 4 行ずつ書く）。勾配の縮約は `weight ∘ K` をキャッシュと同じ並びに置き、次元ごとに連続した内積を 1 回取る。スカラーのループ（`f32`、ヘッセ行列）も同じパネルで下三角を回る。fit と座標のキャッシュは列の並びのままなので、その順序、つまり丸めは変わらない。
+
+削除は、座標のモデルが `O(n · d)` 個を動かすところで、`O(n²)` 個を動かす。動かす量が大きいとき（`2^16` 個以上）は、このスレッドが因子を更新する間に Rayon のプールのワーカーで動かし（`rayon::in_place_scope`）、ARD のスロットの次元どうしも並べて動かす。量が小さいときは因子の更新の後に動かす。眠っているワーカーを起こす費用が同じくらいかかるためである。ワーカーが 1 つのときはすべてこのスレッドで走り、何も確保しない。削除の前に、ストアは自分の並びを整える（失敗しうる唯一の段）。そのため、片方が変わった後にもう片方が失敗することはない。
+
 ### API
 
 **insert/deleteとハイパラ再最適化を分離する**。
@@ -913,8 +922,17 @@ type InducingRegistry = IdRegistry<InducingId>; // OnlineSgpr's inducing points
 未学習の `Gpr` には点を足さない。バッチの `FittedGpr` に `insert` は無い。
 
 ```rust
-impl<O, P: GpScalar> FittedGpr<O, P> {
-    pub fn into_online(self) -> Result<OnlineGpr<O, P>, GprError>;
+impl<O, P: GpScalar, K: ModelKernel> FittedGpr<O, P, K> {
+    pub fn into_online(self) -> Result<OnlineGpr<O, P, K>, GprError>;
+}
+
+impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {
+    pub fn insert<'s>(&mut self, sources: impl IntoIterator<Item = DistanceSource<'s>>, y_new: f64)
+        -> Result<PointId, GprError>;
+}
+impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<WithPoints>> {
+    pub fn insert<'s>(&mut self, sources: impl IntoIterator<Item = DistanceSource<'s>>,
+        x_new: &[f64], y_new: f64) -> Result<PointId, GprError>;
 }
 
 impl<O, P: GpScalar> OnlineGpr<O, P> {

@@ -318,12 +318,13 @@ fn packed_col_offset(n: usize, col: usize) -> usize {
 
 /// Raw `(Δx_d)²` for every pair of rows of `x`, owned.
 ///
-/// Each dimension keeps its lower triangle (diagonal included) as column
-/// runs (column `col` holds rows `col..n`), in one of two layouts
-/// ([`ArdStore`]): packed, `d · cap(cap+1)/2` values for a capacity
-/// `cap ≥ n` (an online model's room to grow), or the dense `n × n`
-/// tables a caller handed over, kept as they are so a fit copies nothing.
-/// Read it through [`Self::view`].
+/// Each dimension keeps one triangle (diagonal included) in one of three
+/// layouts ([`ArdStore`]): the lower triangle packed as column runs
+/// (column `col` holds rows `col..n`), the dense `n × n` tables a caller
+/// handed over (kept as they are so a fit copies nothing), or, once an
+/// online model grows or shrinks the cache, row runs (row `i` holds
+/// columns `0..=i`), to which a new point is one contiguous run. Read it
+/// through [`Self::view`].
 #[derive(Clone, Debug)]
 pub(crate) struct ArdSqDiffBuf<T> {
     data: ArdStore<T>,
@@ -332,16 +333,48 @@ pub(crate) struct ArdSqDiffBuf<T> {
 }
 
 /// The layout of an [`ArdSqDiffBuf`].
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum ArdStore<T> {
-    /// The lower triangles of order `cap`, dimension after dimension,
-    /// column by column: column `col` has room for rows `col..cap` and
-    /// holds rows `col..n`.
-    Packed { data: Vec<T>, cap: usize },
+    /// The lower triangles, dimension after dimension, column by column:
+    /// column `col` holds rows `col..n`.
+    Packed(Vec<T>),
     /// One dense column-major `n × n` table per dimension; only the lower
     /// triangle is read.
     Dense(Vec<Vec<T>>),
+    /// One buffer per dimension, row by row: row `i` holds columns
+    /// `0..=i` and starts at `i(i+1)/2`. A buffer's spare capacity is the
+    /// room for later points.
+    Rows(Vec<Vec<T>>),
 }
+
+/// A clone keeps the room the row runs reserved, so a cloned online model
+/// grows as the original does.
+impl<T: Clone> Clone for ArdStore<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Packed(data) => Self::Packed(data.clone()),
+            Self::Dense(tables) => Self::Dense(tables.clone()),
+            Self::Rows(rows) => Self::Rows(
+                rows.iter()
+                    .map(|dim| {
+                        let mut copy = Vec::with_capacity(dim.capacity());
+                        copy.extend_from_slice(dim);
+                        copy
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Offset of row `i` in a row-packed lower triangle.
+#[inline]
+fn row_offset(i: usize) -> usize {
+    i * (i + 1) / 2
+}
+
+/// Columns transposed together when column runs become row runs.
+const TRANSPOSE_TILE: usize = 16;
 
 impl<T: KernelScalar> ArdSqDiffBuf<T> {
     /// Fills the cache for the rows of `x`.
@@ -422,7 +455,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             packed_len(n).ok().and_then(|l| l.checked_mul(d))
         );
         Self {
-            data: ArdStore::Packed { data, cap: n },
+            data: ArdStore::Packed(data),
             n,
             d,
         }
@@ -439,26 +472,33 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         }
     }
 
-    /// The same cache with every value mapped by `f` (a cast), packed, in
-    /// one pass over the stored lower triangles.
+    /// The same cache with every value mapped by `f` (a cast), in one pass
+    /// over the stored triangles: row runs stay row runs, and the other
+    /// layouts are packed as column runs.
     pub(crate) fn map<U>(&self, f: impl Fn(T) -> U) -> ArdSqDiffBuf<U>
     where
         T: Copy,
     {
         let data = match &self.data {
-            ArdStore::Packed { data, cap } if *cap == self.n => {
-                data.iter().map(|&v| f(v)).collect()
-            }
-            ArdStore::Packed { .. } | ArdStore::Dense(_) => {
-                let view = self.view();
-                (0..self.d)
-                    .flat_map(|dim| (0..self.n).map(move |col| (dim, col)))
-                    .flat_map(|(dim, col)| view.column(dim, col).iter().map(|&v| f(v)))
-                    .collect()
+            ArdStore::Packed(data) => ArdStore::Packed(data.iter().map(|&v| f(v)).collect()),
+            ArdStore::Rows(rows) => ArdStore::Rows(
+                rows.iter()
+                    .map(|dim| dim.iter().map(|&v| f(v)).collect())
+                    .collect(),
+            ),
+            ArdStore::Dense(tables) => {
+                let n = self.n;
+                ArdStore::Packed(
+                    tables
+                        .iter()
+                        .flat_map(|t| (0..n).flat_map(move |col| &t[col * n + col..(col + 1) * n]))
+                        .map(|&v| f(v))
+                        .collect(),
+                )
             }
         };
         ArdSqDiffBuf {
-            data: ArdStore::Packed { data, cap: self.n },
+            data,
             n: self.n,
             d: self.d,
         }
@@ -477,54 +517,92 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         Ok(Self::from_packed(vec![T::from_f64(0.0); len], n, d))
     }
 
-    /// The stored rows `col..n` of column `col` of dimension `dim`.
+    /// The stored rows `col..n` of column `col` of dimension `dim`, of a
+    /// cache [`Self::zeros`] made (column runs).
     pub(crate) fn column_mut(&mut self, dim: usize, col: usize) -> &mut [T] {
         let n = self.n;
         match &mut self.data {
-            ArdStore::Packed { data, cap } => {
+            ArdStore::Packed(data) => {
                 let block = data.len().checked_div(self.d).unwrap_or(0);
-                let start = dim * block + packed_col_offset(*cap, col);
+                let start = dim * block + packed_col_offset(n, col);
                 &mut data[start..start + (n - col)]
             }
             ArdStore::Dense(tables) => &mut tables[dim][col * n + col..(col + 1) * n],
+            // Only a cache of column runs is written column by column.
+            ArdStore::Rows(_) => &mut [],
         }
     }
 
-    /// Makes room for one more point: a packed cache whose capacity is
-    /// full doubles it, and dense tables are packed at a capacity of their
-    /// own. The values read stay the same.
+    /// Makes room for one more point: the cache becomes row runs (once,
+    /// for a cache of column runs or dense tables), and each dimension's
+    /// buffer reserves the new row, so [`Self::push_point`] does not
+    /// allocate. A buffer grows as a `Vec` does, by doubling.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::SizeOverflow`] when the grown cache does not fit.
     pub(crate) fn reserve_point(&mut self) -> Result<(), GprError> {
+        self.into_rows()?;
         let n = self.n;
-        if let ArdStore::Packed { cap, .. } = &self.data
-            && *cap > n
-        {
-            return Ok(());
-        }
-        let cap = match &self.data {
-            ArdStore::Packed { cap, .. } => (n + 1).max(cap.max(&1).saturating_mul(2)),
-            ArdStore::Dense(_) => (n + 1).max(n.saturating_mul(2)),
-        };
-        let block = packed_len(cap)?;
-        let len = block.checked_mul(self.d).ok_or(GprError::SizeOverflow)?;
-        let mut data = vec![T::from_f64(0.0); len];
-        let view = self.view();
-        for dim in 0..self.d {
-            for col in 0..n {
-                let start = dim * block + packed_col_offset(cap, col);
-                data[start..start + (n - col)].copy_from_slice(view.column(dim, col));
+        if let ArdStore::Rows(rows) = &mut self.data {
+            let more = n.checked_add(1).ok_or(GprError::SizeOverflow)?;
+            for dim in rows {
+                dim.try_reserve(more).map_err(|_| GprError::SizeOverflow)?;
             }
         }
-        self.data = ArdStore::Packed { data, cap };
+        Ok(())
+    }
+
+    /// Lays the cache out as row runs, unless it is already, so a later
+    /// [`Self::remove_point`] does not fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when the row runs do not fit.
+    pub(crate) fn ready_to_change(&mut self) -> Result<(), GprError> {
+        self.into_rows()
+    }
+
+    /// Lays the cache out as row runs, unless it is already.
+    fn into_rows(&mut self) -> Result<(), GprError> {
+        if matches!(self.data, ArdStore::Rows(_)) {
+            return Ok(());
+        }
+        let n = self.n;
+        let len = packed_len(n)?;
+        let view = self.view();
+        let Some(lower) = view.lower() else {
+            return Ok(());
+        };
+        let mut rows = Vec::with_capacity(self.d);
+        for dim in 0..self.d {
+            let mut out = Vec::new();
+            out.try_reserve_exact(packed_len(n + 1)?)
+                .map_err(|_| GprError::SizeOverflow)?;
+            out.resize(len, T::from_f64(0.0));
+            // Columns `j0..j1` at a time: each row takes a contiguous run
+            // of them, read from as many column runs.
+            let mut j0 = 0;
+            while j0 < n {
+                let j1 = (j0 + TRANSPOSE_TILE).min(n);
+                for i in j0..n {
+                    let base = row_offset(i);
+                    for j in j0..j1.min(i + 1) {
+                        out[base + j] = lower.column(dim, j)[i - j];
+                    }
+                }
+                j0 = j1;
+            }
+            rows.push(out);
+        }
+        self.data = ArdStore::Rows(rows);
         Ok(())
     }
 
     /// Appends point `n`: `column(dim)` holds its `(Δ_dim)²` to the points
-    /// `0..n`; its own diagonal is zero. [`Self::reserve_point`] made room
-    /// first, so the values are written in place.
+    /// `0..n` (at least `n` values); its own diagonal is zero. Each
+    /// dimension's buffer takes one contiguous run, in the room
+    /// [`Self::reserve_point`] made.
     ///
     /// # Errors
     ///
@@ -538,34 +616,30 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         T: 'c,
     {
         let n = self.n;
-        let d = self.d;
-        let ArdStore::Packed { data, cap } = &mut self.data else {
+        let ArdStore::Rows(rows) = &mut self.data else {
             return Err(GprError::SizeOverflow);
         };
-        let cap = *cap;
-        if cap <= n {
+        if rows.iter().any(|dim| dim.capacity() - dim.len() < n + 1) {
             return Err(GprError::SizeOverflow);
         }
-        let block = data.len().checked_div(d).unwrap_or(0);
-        for dim in 0..d {
-            let values = column(dim);
-            for (col, &v) in values.iter().enumerate().take(n) {
-                data[dim * block + packed_col_offset(cap, col) + (n - col)] = v;
-            }
-            data[dim * block + packed_col_offset(cap, n)] = T::from_f64(0.0);
+        for (dim, buffer) in rows.iter_mut().enumerate() {
+            buffer.extend_from_slice(&column(dim)[..n]);
+            buffer.push(T::from_f64(0.0));
         }
         self.n = n + 1;
         Ok(())
     }
 
-    /// Removes point `index` in place: the rows and the column of `index`
-    /// go, and the later points move up one. Nothing is allocated, except
-    /// that dense tables are first packed (as [`Self::reserve_point`]).
+    /// Removes point `index` in place: row `index` goes, each later row
+    /// loses its column `index`, and the later points move up one. One
+    /// forward pass over the rows past `index`; rows before it stay put.
+    /// A cache of column runs or dense tables becomes row runs first.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::IndexOutOfRange`] when `index ≥ n`, and
-    /// [`GprError::SizeOverflow`] when dense tables cannot be packed.
+    /// [`GprError::SizeOverflow`] when the cache cannot be laid out as row
+    /// runs.
     pub(crate) fn remove_point(&mut self, index: usize) -> Result<(), GprError> {
         let n = self.n;
         if index >= n {
@@ -573,30 +647,28 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
                 reason: format!("point index {index} is out of range for n={n}"),
             });
         }
-        if matches!(self.data, ArdStore::Dense(_)) {
-            self.reserve_point()?;
-        }
-        let d = self.d;
-        let ArdStore::Packed { data, cap } = &mut self.data else {
+        self.into_rows()?;
+        let ArdStore::Rows(rows) = &mut self.data else {
             return Err(GprError::SizeOverflow);
         };
-        let cap = *cap;
-        let block = data.len().checked_div(d).unwrap_or(0);
-        for dim in 0..d {
-            let base = dim * block;
-            for col in 0..n - 1 {
-                let start = base + packed_col_offset(cap, col);
-                if col < index {
-                    // Row `index` leaves the run; the rows below move up.
-                    let at = start + (index - col);
-                    data.copy_within(at + 1..start + (n - col), at);
-                } else {
-                    // Column `col + 1` (rows `col + 1..n`) becomes column
-                    // `col`; its run starts past this column's room.
-                    let from = base + packed_col_offset(cap, col + 1);
-                    data.copy_within(from..from + (n - col - 1), start);
-                }
+        let compact = |buffer: &mut Vec<T>| {
+            let mut write = row_offset(index);
+            for i in index + 1..n {
+                let start = row_offset(i);
+                // Columns `0..index`, then `index + 1..=i`.
+                buffer.copy_within(start..start + index, write);
+                write += index;
+                buffer.copy_within(start + index + 1..start + i + 1, write);
+                write += i - index;
             }
+            buffer.truncate(write);
+        };
+        // From inside the pool (a delete beside the factor's update), the
+        // dimensions' buffers move side by side.
+        if rows.len() > 1 && rayon::current_thread_index().is_some() {
+            rows.par_iter_mut().for_each(compact);
+        } else {
+            rows.iter_mut().for_each(compact);
         }
         self.n = n - 1;
         Ok(())
@@ -612,8 +684,8 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     #[cfg(test)]
     pub(crate) fn stored_len(&self) -> usize {
         match &self.data {
-            ArdStore::Packed { data, .. } => data.len(),
-            ArdStore::Dense(tables) => tables.iter().map(Vec::len).sum(),
+            ArdStore::Packed(data) => data.len(),
+            ArdStore::Dense(tables) | ArdStore::Rows(tables) => tables.iter().map(Vec::len).sum(),
         }
     }
 
@@ -627,17 +699,20 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     #[cfg(test)]
     pub(crate) fn poison(&mut self, value: T) {
         match &mut self.data {
-            ArdStore::Packed { data, .. } => data.fill(value),
-            ArdStore::Dense(tables) => tables.iter_mut().for_each(|t| t.fill(value)),
+            ArdStore::Packed(data) => data.fill(value),
+            ArdStore::Dense(tables) | ArdStore::Rows(tables) => {
+                tables.iter_mut().for_each(|t| t.fill(value));
+            }
         }
     }
 
     pub(crate) fn view(&self) -> ArdSqDiff<'_, T> {
         let data = match &self.data {
-            ArdStore::Packed { data, cap } => {
-                StoreRef::Packed(data, data.len().checked_div(self.d).unwrap_or(0), *cap)
+            ArdStore::Packed(data) => {
+                StoreRef::Packed(data, data.len().checked_div(self.d).unwrap_or(0))
             }
             ArdStore::Dense(tables) => StoreRef::Dense(tables),
+            ArdStore::Rows(rows) => StoreRef::Rows(rows),
         };
         ArdSqDiff {
             data,
@@ -649,8 +724,9 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
 
 /// Borrowed raw `(Δx_d)²` cache of [`ArdSqDiffBuf`].
 ///
-/// [`Self::get`] reads any pair, in either order. [`Self::column`] is the
-/// contiguous stored part of one column: rows `col..n`.
+/// [`Self::get`] reads any pair, in either order. A cache of column runs
+/// hands out [`Self::lower`], one of row runs [`Self::rows`]: the loops
+/// that read whole runs take the layout's own.
 #[derive(Clone, Copy, Debug)]
 pub struct ArdSqDiff<'a, T> {
     data: StoreRef<'a, T>,
@@ -661,11 +737,72 @@ pub struct ArdSqDiff<'a, T> {
 /// The borrowed layout of an [`ArdSqDiff`].
 #[derive(Clone, Copy, Debug)]
 enum StoreRef<'a, T> {
-    /// Packed lower triangles of order `cap`, with the entries per
-    /// dimension (`cap(cap+1)/2`), and `cap`.
-    Packed(&'a [T], usize, usize),
+    /// Packed lower triangles, with the entries per dimension.
+    Packed(&'a [T], usize),
     /// Dense `n × n` tables, one per dimension.
     Dense(&'a [Vec<T>]),
+    /// Row runs, one buffer per dimension.
+    Rows(&'a [Vec<T>]),
+}
+
+/// The column runs of a cache: column `col` holds rows `col..n`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LowerRuns<'a, T> {
+    data: StoreRef<'a, T>,
+    n: usize,
+}
+
+/// The row runs of a cache: row `i` holds columns `0..=i`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowRuns<'a, T> {
+    rows: &'a [Vec<T>],
+    n: usize,
+}
+
+impl<'a, T> LowerRuns<'a, T> {
+    /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
+    #[inline]
+    pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => {
+                let start = dim * block + packed_col_offset(n, col);
+                &data[start..start + (n - col)]
+            }
+            StoreRef::Dense(tables) => &tables[dim][col * n + col..(col + 1) * n],
+            StoreRef::Rows(_) => &[],
+        }
+    }
+
+    /// Every stored value of dimension `dim`, when the cache is packed:
+    /// the lower triangle, column by column.
+    #[inline]
+    pub(crate) fn packed_block(&self, dim: usize) -> Option<&'a [T]> {
+        match self.data {
+            StoreRef::Packed(data, block) => Some(&data[dim * block..(dim + 1) * block]),
+            StoreRef::Dense(_) | StoreRef::Rows(_) => None,
+        }
+    }
+}
+
+impl<'a, T> RowRuns<'a, T> {
+    /// Number of points.
+    pub(crate) fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Every stored value of dimension `dim`: row after row.
+    #[inline]
+    pub(crate) fn buffer(&self, dim: usize) -> &'a [T] {
+        &self.rows[dim][..row_offset(self.n)]
+    }
+
+    /// `(x_i,dim − x_col,dim)²` for columns `0..=i`, in column order.
+    #[inline]
+    pub(crate) fn row(&self, dim: usize, i: usize) -> &'a [T] {
+        let start = row_offset(i);
+        &self.rows[dim][start..start + i + 1]
+    }
 }
 
 impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
@@ -679,28 +816,23 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         self.d
     }
 
-    /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
+    /// The column runs, when the cache holds them (packed or dense).
     #[inline]
-    pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
-        let n = self.n;
+    pub(crate) fn lower(&self) -> Option<LowerRuns<'a, T>> {
         match self.data {
-            StoreRef::Packed(data, block, cap) => {
-                let start = dim * block + packed_col_offset(cap, col);
-                &data[start..start + (n - col)]
-            }
-            StoreRef::Dense(tables) => &tables[dim][col * n + col..(col + 1) * n],
+            StoreRef::Packed(..) | StoreRef::Dense(_) => Some(LowerRuns {
+                data: self.data,
+                n: self.n,
+            }),
+            StoreRef::Rows(_) => None,
         }
     }
 
-    /// Every stored value of dimension `dim`, when the cache is packed
-    /// with no room to spare: the lower triangle, column by column (column
-    /// `col` holds rows `col..n`).
+    /// The row runs, when the cache holds them.
     #[inline]
-    pub(crate) fn packed_block(&self, dim: usize) -> Option<&'a [T]> {
+    pub(crate) fn rows(&self) -> Option<RowRuns<'a, T>> {
         match self.data {
-            StoreRef::Packed(data, block, cap) if cap == self.n => {
-                Some(&data[dim * block..(dim + 1) * block])
-            }
+            StoreRef::Rows(rows) => Some(RowRuns { rows, n: self.n }),
             StoreRef::Packed(..) | StoreRef::Dense(_) => None,
         }
     }
@@ -709,16 +841,43 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
     #[inline]
     pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
         let (row, col) = if row >= col { (row, col) } else { (col, row) };
-        self.column(dim, col)[row - col]
+        match self.data {
+            StoreRef::Rows(rows) => rows[dim][row_offset(row) + col],
+            StoreRef::Packed(..) | StoreRef::Dense(_) => LowerRuns {
+                data: self.data,
+                n: self.n,
+            }
+            .column(dim, col)[row - col],
+        }
+    }
+
+    /// The first stored pair `(row, col)`, `row ≥ col`, of dimension `dim`
+    /// whose value `bad` picks, in the layout's own order.
+    pub(crate) fn position(&self, dim: usize, bad: impl Fn(T) -> bool) -> Option<(usize, usize)> {
+        if let Some(rows) = self.rows() {
+            return (0..self.n).find_map(|i| {
+                rows.row(dim, i)
+                    .iter()
+                    .position(|&v| bad(v))
+                    .map(|j| (i, j))
+            });
+        }
+        let lower = self.lower()?;
+        (0..self.n).find_map(|j| {
+            lower
+                .column(dim, j)
+                .iter()
+                .position(|&v| bad(v))
+                .map(|k| (j + k, j))
+        })
     }
 
     /// The same cache as `f64` when `T` is `f64`, for the SIMD paths.
     pub(crate) fn as_f64(self) -> Option<ArdSqDiff<'a, f64>> {
         let data = match self.data {
-            StoreRef::Packed(data, block, cap) => {
-                StoreRef::Packed(T::as_f64_slice(data)?, block, cap)
-            }
+            StoreRef::Packed(data, block) => StoreRef::Packed(T::as_f64_slice(data)?, block),
             StoreRef::Dense(tables) => StoreRef::Dense(T::as_f64_vecs(tables)?),
+            StoreRef::Rows(rows) => StoreRef::Rows(T::as_f64_vecs(rows)?),
         };
         Some(ArdSqDiff {
             data,
@@ -1237,6 +1396,7 @@ mod tests {
         ArdSqDiffBuf, col_chunk, fill_squared_euclidean, fill_squared_euclidean_cross,
         par_lower_fold, worker_count,
     };
+    use crate::error::GprError;
     use faer::Mat;
 
     fn sequential_sq(x: faer::MatRef<'_, f64>) -> Mat<f64> {
@@ -1440,7 +1600,7 @@ mod tests {
         assert_eq!(cache.stored_len(), d * n * (n + 1) / 2);
         for dim in 0..d {
             for col in 0..n {
-                assert_eq!(view.column(dim, col).len(), n - col);
+                assert_eq!(view.lower().expect("lower").column(dim, col).len(), n - col);
                 for row in 0..n {
                     let diff = x[(row, dim)] - x[(col, dim)];
                     assert!((view.get(dim, row, col) - diff * diff).abs() <= 1e-15);
@@ -1457,5 +1617,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Coordinate `k` of pool point `p`, and the pair of two pool points.
+    fn pool_pair(k: usize, a: usize, b: usize) -> f64 {
+        let at = |p: usize| (p as f64 * (0.41 + 0.17 * k as f64)).sin() * (1.0 + k as f64);
+        let diff = at(a) - at(b);
+        diff * diff
+    }
+
+    /// Every pair of `cache` is the pair of the pool points `live` names.
+    fn assert_holds(cache: &ArdSqDiffBuf<f64>, live: &[usize], d: usize) {
+        let view = cache.view();
+        assert_eq!((view.n(), view.d()), (live.len(), d));
+        for k in 0..d {
+            for (i, &a) in live.iter().enumerate() {
+                for (j, &b) in live.iter().enumerate() {
+                    assert_eq!(
+                        view.get(k, i, j).to_bits(),
+                        pool_pair(k, a, b).to_bits(),
+                        "{k} ({i}, {j})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Inserts grow the row runs in their reserved room, and deletes at
+    /// the head, the middle, and the tail compact them in place, from a
+    /// cache of column runs and from dense tables.
+    #[test]
+    fn row_runs_grow_and_shrink_in_place() {
+        let d = 3;
+        let start: Vec<usize> = (0..5).collect();
+        let packed =
+            ArdSqDiffBuf::<f64>::from_pairs(5, d, |k, i, j| pool_pair(k, i, j)).expect("cache");
+        let tables: Vec<Vec<f64>> = (0..d)
+            .map(|k| (0..25).map(|at| pool_pair(k, at % 5, at / 5)).collect())
+            .collect();
+        let dense = ArdSqDiffBuf::<f64>::from_tables(tables, 5);
+        for mut cache in [packed, dense] {
+            let mut live = start.clone();
+            assert_holds(&cache, &live, d);
+            let mut next = 5;
+            for step in 0..12 {
+                if step % 3 == 2 {
+                    let index = [0, live.len() / 2, live.len() - 1][step % 9 / 3];
+                    cache.remove_point(index).expect("remove");
+                    live.remove(index);
+                } else {
+                    cache.reserve_point().expect("room");
+                    let columns: Vec<Vec<f64>> = (0..d)
+                        .map(|k| live.iter().map(|&a| pool_pair(k, a, next)).collect())
+                        .collect();
+                    cache.push_point(|k| &columns[k]).expect("push");
+                    live.push(next);
+                    next += 1;
+                }
+                assert!(cache.view().rows().is_some());
+                assert_holds(&cache, &live, d);
+            }
+        }
+    }
+
+    /// A clone keeps the room its original reserved; a push without room
+    /// and a delete out of range are refused, leaving the cache as it was.
+    #[test]
+    fn row_runs_refuse_a_push_without_room_and_clone_their_room() {
+        let mut cache =
+            ArdSqDiffBuf::<f64>::from_pairs(4, 2, |k, i, j| pool_pair(k, i, j)).expect("cache");
+        let column: Vec<f64> = (0..4).map(|a| pool_pair(0, a, 4)).collect();
+        assert!(matches!(
+            cache.push_point(|_| &column),
+            Err(GprError::SizeOverflow)
+        ));
+        assert!(matches!(
+            cache.remove_point(4),
+            Err(GprError::IndexOutOfRange { .. })
+        ));
+        cache.reserve_point().expect("room");
+        let mut copy = cache.clone();
+        let columns: Vec<Vec<f64>> = (0..2)
+            .map(|k| (0..4).map(|a| pool_pair(k, a, 4)).collect())
+            .collect();
+        copy.push_point(|k| &columns[k])
+            .expect("the clone has room");
+        assert_holds(&copy, &[0, 1, 2, 3, 4], 2);
+        assert_holds(&cache, &[0, 1, 2, 3], 2);
+        // A cast keeps the row runs.
+        let cast = copy.map(|v| v as f32);
+        assert!(cast.view().rows().is_some());
+        assert_eq!(cast.view().get(1, 4, 2), pool_pair(1, 4, 2) as f32);
+        assert_eq!(
+            copy.view().position(1, |v| v == pool_pair(1, 4, 2)),
+            Some((4, 2))
+        );
     }
 }

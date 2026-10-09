@@ -15,7 +15,7 @@ use super::{
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
 use crate::kernel::dist::{ArdBlocks, BlockState, GATE_DIMS, Gate};
-use crate::kernel::dist::{ArdSqDiff, col_chunk, par_lower_cols, worker_count};
+use crate::kernel::dist::{ArdSqDiff, LowerRuns, col_chunk, par_lower_cols, worker_count};
 use crate::kernel::{Triangle, finite_dist};
 use crate::math::KernelMath;
 use faer::linalg::matmul::matmul;
@@ -351,7 +351,7 @@ fn grad_from_cache_in_place<M: KernelMath>(
 /// Where `(Δx_d)²` of the square output comes from.
 #[derive(Clone, Copy)]
 enum Square<'a> {
-    Cache(ArdSqDiff<'a, f64>),
+    Cache(LowerRuns<'a, f64>),
     Points(MatRef<'a, f64>),
 }
 
@@ -453,7 +453,16 @@ pub(crate) fn try_apply_cache<M: KernelMath>(
     if uplo != Triangle::Lower || !unit_row_stride(out.as_ref()) {
         return Ok(false);
     }
-    fill_square::<M>(Square::Cache(cache), out, uplo, inv_ell_sq, None)?;
+    if let Some(rows) = cache.rows() {
+        let half = f64x4::splat(-0.5);
+        return super::rows::try_fill_lower(rows, out, inv_ell_sq, None, &|r2, _| {
+            M::exp_f64x4(r2 * half)
+        });
+    }
+    let Some(lower) = cache.lower() else {
+        return Ok(false);
+    };
+    fill_square::<M>(Square::Cache(lower), out, uplo, inv_ell_sq, None)?;
     Ok(true)
 }
 
@@ -492,7 +501,16 @@ pub(crate) fn try_grad_cache<M: KernelMath>(
     if uplo != Triangle::Lower || !unit_row_stride(d_k.as_ref()) {
         return Ok(false);
     }
-    fill_square::<M>(Square::Cache(cache), d_k, uplo, inv_ell_sq, Some(param_idx))?;
+    if let Some(rows) = cache.rows() {
+        let half = f64x4::splat(-0.5);
+        return super::rows::try_fill_lower(rows, d_k, inv_ell_sq, Some(param_idx), &|r2, t| {
+            M::d1_f64x4(r2 * half) * t
+        });
+    }
+    let Some(lower) = cache.lower() else {
+        return Ok(false);
+    };
+    fill_square::<M>(Square::Cache(lower), d_k, uplo, inv_ell_sq, Some(param_idx))?;
     Ok(true)
 }
 

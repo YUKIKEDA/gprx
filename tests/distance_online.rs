@@ -36,9 +36,8 @@ fn target(i: usize) -> f64 {
     (i as f64 * 0.7).cos()
 }
 
-/// Column-major `rows.len() × cols.len()` squared differences of coordinate `k`.
-fn sq(k: usize, rows: &[f64], cols: &[f64]) -> Vec<f64> {
-    let _ = k;
+/// Column-major `rows.len() × cols.len()` squared differences.
+fn sq(rows: &[f64], cols: &[f64]) -> Vec<f64> {
     let mut out = Vec::with_capacity(rows.len() * cols.len());
     for c in cols {
         for r in rows {
@@ -63,7 +62,7 @@ fn blocks(rows: &[usize], cols: Option<&[usize]>) -> Vec<Vec<f64>> {
         .map(|k| {
             let r = coords(k, rows);
             let c = cols.map_or_else(|| queries(k), |c| coords(k, c));
-            sq(k, &r, &c)
+            sq(&r, &c)
         })
         .collect()
 }
@@ -366,7 +365,7 @@ fn with_points_insert_and_delete_match_a_fresh_factor() {
         let r2 = coords(2, rows);
         let c0 = ck(0);
         let c2 = ck(2);
-        summed(&[sq(0, &r0, &c0), sq(2, &r2, &c2)])
+        summed(&[sq(&r0, &c0), sq(&r2, &c2)])
             .into_iter()
             .take(rows.len() * cols.len())
             .collect::<Vec<f64>>()
@@ -476,4 +475,58 @@ fn an_invalid_column_is_refused_and_leaves_the_model_as_it_was() {
             .expect("insert");
         check(&case, &mut online, &[0, 1, 2, START], 1e-10);
     }
+}
+
+/// A model on a scalar slot and an ARD slot, large enough that a delete
+/// moves its training squares beside the factor's update (on a pool of
+/// more than one worker): deletes at the head, the middle, and the tail,
+/// and an insert after, match a fresh factor.
+#[test]
+fn a_large_two_slot_model_deletes_beside_the_factor() {
+    let n = 320;
+    let image = ScalarDistance::new();
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.1, 1.7]).expect("ell"));
+    let kernel = image.kernel(RbfKernel::new(1.3).expect("ell")) * ard;
+    // The scalar slot reads coordinate 0; the ARD slot coordinates 1 and 2.
+    let bind = |rows: &[usize], cols: &[usize]| {
+        let block = |k: usize| sq(&coords(k, rows), &coords(k, cols));
+        (block(0), vec![block(1), block(2)])
+    };
+    let fit = |live: &[usize]| {
+        let (scalar, ard) = bind(live, live);
+        let y: Vec<f64> = live.iter().map(|&i| target(i)).collect();
+        Gpr::new(kernel.clone(), lik())
+            .with_optimizer(Fixed)
+            .factor(
+                [image.from_vec(scalar), bands.from_vecs(ard)],
+                live.len(),
+                &y,
+            )
+            .map_err(|(_, e)| e)
+            .expect("fit")
+    };
+    let mut live: Vec<usize> = (0..n).collect();
+    let mut online = fit(&live).into_online().expect("online");
+    let queries: Vec<usize> = (n..n + M).collect();
+    let check = |online: &OnlineGpr<Fixed, DoublePrecision, DistanceKernel>, live: &[usize]| {
+        let (scalar, ard) = bind(live, &queries);
+        let refs: Vec<&[f64]> = ard.iter().map(Vec::as_slice).collect();
+        let cross = || [image.borrow(&scalar), bands.borrow(&refs)];
+        let got = online.predict(cross(), M).expect("online");
+        let want = fit(live).predict(cross(), M).expect("fresh");
+        assert_pred(&got, &want, 1e-9);
+    };
+    for index in [0, n / 2, n - 3] {
+        online.delete(online.point_ids()[index]).expect("delete");
+        live.remove(index);
+        check(&online, &live);
+    }
+    let new = [n + M];
+    let (scalar, ard) = bind(&live, &new);
+    let refs: Vec<&[f64]> = ard.iter().map(Vec::as_slice).collect();
+    online
+        .insert([image.borrow(&scalar), bands.borrow(&refs)], target(n + M))
+        .expect("insert");
+    live.push(n + M);
+    check(&online, &live);
 }

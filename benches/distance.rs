@@ -108,8 +108,28 @@ fn exact(c: &mut Criterion) {
                 BatchSize::LargeInput,
             );
         });
+        online_mll_and_grad(&mut group, &format!("{name}/online_mll_and_grad"), base);
     }
     group.finish();
+}
+
+/// The NLML and its gradient of an online model that has grown and shrunk
+/// once (an ARD slot of a distance model then reads its row runs).
+fn online_mll_and_grad<K: gprx::kernel::ModelKernel>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    id: &str,
+    mut online: OnlineGpr<Fixed, gprx::DoublePrecision, K>,
+) {
+    let mut theta = vec![0.0; online.num_params()];
+    online.get_params(&mut theta).expect("theta");
+    let mut grad = vec![0.0; theta.len()];
+    group.bench_function(id, |b| {
+        b.iter(|| {
+            online
+                .value_and_gradient_into(&theta, &mut grad)
+                .expect("mll")
+        });
+    });
 }
 
 fn sparse(c: &mut Criterion) {
@@ -267,6 +287,11 @@ fn exact_supplied(c: &mut Criterion) {
                 BatchSize::LargeInput,
             );
         });
+        online_mll_and_grad(
+            &mut group,
+            &format!("{name}/dist_online_mll_and_grad"),
+            base,
+        );
     }
     // The coordinate refit of a `FittedGpr`, beside `dist_refit`.
     for (name, kernel) in kernels() {

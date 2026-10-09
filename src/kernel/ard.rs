@@ -290,7 +290,34 @@ pub(crate) fn write_from_cache<T: KernelScalar>(
 ) -> Result<(), GprError> {
     let n = require_square_out(out.as_ref())?;
     super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-    write_square(out, uplo, pair)
+    write_cached(cache, out, uplo, pair)
+}
+
+/// Writes `pair(row, col)` over `uplo` of the square `out`, in the order a
+/// cache reads best: the lower triangle of a cache of row runs four rows
+/// at a time (each row's run read along its columns, each output column
+/// written four rows at once), and every other case as [`write_square`].
+pub(crate) fn write_cached<T: KernelScalar>(
+    cache: ArdSqDiff<'_, T>,
+    mut out: MatMut<'_, T>,
+    uplo: Triangle,
+    mut pair: impl FnMut(usize, usize) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    if cache.rows().is_none() || uplo != Triangle::Lower {
+        return write_square(out, uplo, pair);
+    }
+    let n = require_square_out(out.as_ref())?;
+    let mut r0 = 0;
+    while r0 < n {
+        let r1 = (r0 + 4).min(n);
+        for col in 0..r1 {
+            for row in r0.max(col)..r1 {
+                out[(row, col)] = pair(row, col)?;
+            }
+        }
+        r0 = r1;
+    }
+    Ok(())
 }
 
 /// [`write_from_points`] through the vectorized loop of `profile` when the
@@ -349,7 +376,7 @@ pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::simd::ard::Profil
     {
         return Ok(());
     }
-    write_square(out, uplo, |row, col| pair(n, row, col))
+    write_cached(cache, out, uplo, |row, col| pair(n, row, col))
 }
 
 /// A rectangular `out` (train × test, checked by [`require_cross`]) through

@@ -26,8 +26,9 @@ pub(crate) enum Source<'a> {
         x: MatRef<'a, f64>,
         y: MatRef<'a, f64>,
     },
-    /// Packed lower triangle of `(Δx_d)²`. Only [`Rows::Square`]
-    /// [`Triangle::Lower`] reads it; other triangles fall back to the scalar loop.
+    /// The `(Δx_d)²` cache, as column runs or row runs. Only
+    /// [`Rows::Square`] [`Triangle::Lower`] reads it; other triangles fall
+    /// back to the scalar loop.
     Cache { cache: ArdSqDiff<'a, f64> },
 }
 
@@ -42,7 +43,7 @@ pub(crate) enum Rows {
 
 /// The value of four pairs from `r²` and the picked term `t = w_d Δ_d²`
 /// (zero when no dimension is picked).
-pub(crate) trait Profile {
+pub(crate) trait Profile: Sync {
     fn eval(&self, r2: f64x4, t: f64x4) -> f64x4;
 }
 
@@ -68,9 +69,14 @@ pub(crate) fn try_fill<P: Profile>(
                 return Ok(false);
             }
         }
-        Source::Cache { .. } => {
+        Source::Cache { cache } => {
             if !matches!(rows, Rows::Square(Triangle::Lower)) {
                 return Ok(false);
+            }
+            if let Some(runs) = cache.rows() {
+                return super::rows::try_fill_lower(runs, out, inv_ell_sq, pick, &|r2, t| {
+                    profile.eval(r2, t)
+                });
             }
         }
     }
@@ -100,7 +106,10 @@ pub(crate) fn try_fill<P: Profile>(
                         add_weighted(xs, |v| (v - z) * (v - z), w, r2, picked.then_some(&mut *t));
                     }
                     Source::Cache { cache } => {
-                        let stored = cache.column(dim, col);
+                        let Some(lower) = cache.lower() else {
+                            return Ok(false);
+                        };
+                        let stored = lower.column(dim, col);
                         let offset = start - col;
                         let sq = &stored[offset..offset + len];
                         add_weighted(sq, |v| v, w, r2, picked.then_some(&mut *t));
