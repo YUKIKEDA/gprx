@@ -2058,13 +2058,17 @@ impl<T: KernelScalar> BlockStore<T> {
 
     /// Every block, as [`Self::push_row`] and [`Self::push_col`] name them.
     pub(crate) fn block_ids(&self) -> Vec<BlockAt> {
+        self.block_at().collect()
+    }
+
+    /// [`Self::block_ids`] without collecting them.
+    fn block_at(&self) -> impl Iterator<Item = BlockAt> + '_ {
         let stride = self.stride;
-        (0..self.scalar.len())
-            .map(BlockAt::Scalar)
-            .chain(self.ard.iter().enumerate().flat_map(move |(at, slot)| {
+        (0..self.scalar.len()).map(BlockAt::Scalar).chain(
+            self.ard.iter().enumerate().flat_map(move |(at, slot)| {
                 (0..slot.count(stride)).map(move |k| BlockAt::Ard(at, k))
-            }))
-            .collect()
+            }),
+        )
     }
 
     /// Every value `(block, row, col)` in [`Self::block_ids`] order, with
@@ -2140,7 +2144,7 @@ impl<T: KernelScalar> BlockStore<T> {
             return Ok(());
         }
         let ld = self.ld.max(1);
-        for (at, block) in self.block_ids().into_iter().zip(self.blocks()) {
+        for (at, block) in self.block_at().zip(self.blocks()) {
             if let Some(i) = block
                 .iter()
                 .position(|v| !U::from_f64(v.to_f64()).to_f64().is_finite())

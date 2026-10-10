@@ -17,6 +17,6 @@ pub fn inducing_places<O, P: gprx::GpScalar, C: gprx::kernel::PointUse>(
     let ids = online.point_ids();
     online
         .inducing_points()
-        .map(|id| ids.iter().position(|&p| p == id).expect("a training point"))
+        .filter_map(|id| ids.iter().position(|&p| p == id))
         .collect()
 }

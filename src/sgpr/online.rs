@@ -1824,7 +1824,7 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// inducing points.
     ///
     /// `sources` binds, per slot, the `m × 1` column from the `m` inducing
-    /// points (in [`Self::inducing`] order) to the new point; an ARD slot
+    /// points (in [`Self::inducing_points`] order) to the new point; an ARD slot
     /// binds one such column per dimension. A table may be borrowed, owned,
     /// or filled. Every value is checked (finite, `≥ 0`; see
     /// [`DistanceSource::tidy`]) and the column is kept as the point's row
@@ -2026,7 +2026,7 @@ distance_predict!(
     count = q,
     cross = {
         /// the `m × q` squared distances from the `m` inducing points (in
-        /// [`Self::inducing`] order) to the `q` queries.
+        /// [`Self::inducing_points`] order) to the `q` queries.
     },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
@@ -2050,7 +2050,7 @@ distance_predict!(
     count = q,
     cross = {
         /// the `m × q` squared distances from the `m` inducing points (in
-        /// [`Self::inducing`] order) to the `q` queries.
+        /// [`Self::inducing_points`] order) to the `q` queries.
     },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
