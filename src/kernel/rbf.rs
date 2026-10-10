@@ -282,6 +282,35 @@ impl RbfKernel {
         })
     }
 
+    /// Rectangular `∂K/∂θ` from squared distances.
+    pub(crate) fn grad_cross_dist<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        require_rbf_param_idx(param_idx)?;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        write_dense(dist, d_k, |d| {
+            rbf_grad_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from squared distances.
+    pub(crate) fn hess_cross_dist<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_rbf_hess_idx(i, j)?;
+        let (inv_two_ell_sq, inv_ell_sq) = self.inv_scales_t::<T>();
+        write_dense(dist, d2_k, |d| {
+            rbf_hess_from_sq_dist::<M, _>(d, inv_two_ell_sq, inv_ell_sq)
+        })
+    }
+
     pub(crate) fn apply_from_coords<M: KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,
@@ -449,7 +478,7 @@ impl RbfKernel {
         Ok(value)
     }
 
-    /// [`Self::inv_scales`] for the lanes of [`super::stationary_simd`].
+    /// [`Self::inv_scales`] for the lanes of [`super::simd::stationary`].
     fn lane_scales(&self) -> RbfScales {
         let (half_inv_ell_sq, inv_ell_sq) = self.inv_scales();
         RbfScales {

@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load.
 
-`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.1.0** is the default-feature public API. The MSRV is 1.85. A 0.x minor may break that API. `internals` (`bench-internals` and `insert-stages`) is outside that contract.
+`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.1.0** (tag `v0.1.0`) is the default-feature public API. This README follows `main`, which is unreleased: supplied distances (`ScalarDistance`, `ArdDistance`, and their save/load) arrive with 0.2.0. The MSRV of `main` is 1.88 (1.85 at 0.1.0). A 0.x minor may break that API. `internals` (`bench-internals` and `insert-stages`) is outside that contract.
 
 ```toml
 [dependencies]
@@ -371,6 +371,255 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+### Supplied distances (`ScalarDistance`, `ArdDistance`)
+
+A kernel leaf can read squared distances you supply instead of coordinates: a geodesic or graph distance, or a distance from another program. `ScalarDistance::new()` is a slot of one `d²` per pair; `kernel(leaf)` takes an `RbfKernel`, `MaternKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, or a `KernelTerm` (the `ScalarDistanceLeaf` bound). `ArdDistance::from_leaf(leaf)` takes an `RbfArdKernel`, `MaternArdKernel`, or `RationalQuadraticArdKernel` (the `ArdDistanceLeaf` bound) and returns a slot of `d` blocks, one `(Δ_k)²` per dimension, where `d` is the leaf's lengthscale count, with the leaf on it. A further leaf on the same slot comes from `kernel(leaf)`, which returns `DimensionMismatch` when its lengthscale count is not `d`. Every leaf of one slot reads the same supply. `ConstantKernel`, `WhiteKernel`, and `LinearKernel` stay `KernelSpec` leaves.
+
+The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` on its right is `WithPoints`. For a coordinate term on the left, write `DistanceKernel::from(spec)` (a `DistanceKernel<WithPoints>` with no slot): `KernelSpec + DistanceKernel` is not implemented, so `KernelSpec + leaf.into()` still infers a coordinate sum. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use. `KernelSpec<S>` and `CompiledKernel<T, S>` take a sealed `Supply` kind `S` as their last type parameter. The default, `NoSupply`, is a coordinate tree: it has no value, so `KernelSpec` and `CompiledKernel<T>` name the same types as before, and only a `DistanceKernel` holds the other kind.
+
+`Gpr::new` takes any `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`). `with_input_transform` is on the `PointKernel` models only (`KernelSpec` and `DistanceKernel<WithPoints>`). Each slot gets one `DistanceSource` per call:
+
+| Source | Copy |
+| --- | --- |
+| `from_vec(d2)` / `from_vecs(blocks)` | moved into the call. An `f64` model keeps the tables as its store, so the fit copies nothing, and an ARD slot then holds `d · n²` values instead of its packed `d · n(n+1)/2` (an ARD table that `tidy` repairs is packed instead). An `f32` model casts them into a buffer of its own, packed for ARD; a `MixedPrecision` model keeps the `f64` tables and adds that cast |
+| `from_slice(d2)` / `from_slices(blocks)` | copied at the call, then handled as `from_vec` / `from_vecs`: an `f64` model keeps the copy (`d · n²` for an ARD slot). `borrow` fits without that copy |
+| `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model, and copied by `fit` (an ARD square straight into its packed triangles) |
+| `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` writes `d²(i, col)` for each row `i` of `rows`; an ARD fill writes its `d` runs one after another. A square asks only for the rows `col..n` of each column |
+
+Tables are column-major `dist[i + j * n_rows]`. Every value must be finite and non-negative, and a training square (and a query square) must have a zero diagonal and be symmetric, exactly. Otherwise the call returns `InvalidDistance { slot, dim, pair, reason }` at the first value that is not: the slot's place in `slots()`, the ARD dimension, and the `(row, col)` in the block passed. A table that rounding leaves slightly off (one from `‖a‖² + ‖b‖² − 2a·b`) is accepted when its source asks for it: `source.tidy(rel_tol)` sets a negative value or a diagonal within `rel_tol` times the table's largest value to `0.0` and a mirror pair within it to its mean, and refuses anything past it (a borrowed table that the repair changes is copied, not written). A slot with no source, two sources, or a source of a slot the kernel does not have is `DistanceSlot { kind, slot }` (`SlotErrorKind::Missing`, `Duplicate`, `NotRead`); a loaded model reads new slots, so a slot from before the save is `NotRead`. A training fill is called once per fit, whatever the `DistanceCachePolicy`: the model keeps the squares it wrote. A `MixedPrecision` model keeps the training `d²` in `f64` next to its `f32` copy, so the `f64` refinement reads the values the caller gave. `predict_into` binds the sources on buffers the model keeps, so a call allocates nothing once a call of the same shape has run.
+
+| Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
+| --- | --- | --- | --- |
+| `Gpr`, `DistanceOnly` | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
+| `Gpr`, `WithPoints` | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+| `Sgpr` / `Svgp`, `DistanceOnly` | `(sources, n, y, inducing)` | `(sources, q)` | `(cross, square, q)` |
+| `Sgpr` / `Svgp`, `WithPoints` | `(sources, n, x, n_cols, y, inducing)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+
+`cross` is the `n × q` block from the training points to the queries and `square` the `q × q` block between the queries. On a distance model, `to_kernel()` returns a copy of the `DistanceKernel` and `slots()` its slots; `d` and `x` exist only for `WithPoints`. `into_online` converts a distance model too. Its `insert` takes, per slot, the `n × 1` column of squared distances from the current points, in `point_ids` order, to the new point (`d` such columns for an ARD slot), from any source above: `insert(sources, y_new)` for `DistanceOnly`, `insert(sources, x_new, y_new)` for `WithPoints`. The column is checked as a training square is (or repaired by `tidy`) and kept, and `delete(id)` removes the point from the kept squares in place. The online model predicts with the same arguments as the fitted one. Neither allocates once the model has grown once (a scalar square grows by a quarter, an ARD slot by doubling), except that a large delete on a Rayon pool of more than one worker queues one job beside the factor's update.
+
+A sparse model on supplied distances names its inducing points by training index: `inducing` lists them, without repeats, and each source of `fit` / `factor` is the `n × m` block from the training points to them (column `a` is the training point `inducing[a]`); `K_mm` reads their rows of it. The model keeps the blocks as they were handed over (a moved table without a copy, a borrowed one copied once). A prediction's `cross` is the `m × q` block from the inducing points, in `inducing()` order (on `OnlineSgpr`, `inducing_points()`: their `PointId`s, which a delete does not shift), to the queries; `square` is as above. `FreeInducing` needs coordinates to move, so a distance model keeps its inducing points. `into_online` keeps the blocks: `insert` takes, per slot, the `m × 1` squared distances from the inducing points to the new point; `insert_inducing` names a training point by its `PointId` and takes its `n × 1` squared distances to the training points, checked against the stored pairs; an inducing point cannot be `delete`d until `delete_inducing` removes it. A factor reads the `d · n · m` supplied values a coordinate model computes from `n · d` coordinates, so it costs more for an ARD slot than the coordinate factor; the gradient and the predictions cost no more ([design §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.md#56-supplied-squared-distances-requirements-470)).
+
+```rust
+use gprx::kernel::{
+    ArdDistance, ArdDistanceLeaf, ConstantKernel, DistanceFill, DistanceKernel, DistanceOnly,
+    DistanceSlot, DistanceSource, JoinPoints, KernelSpec, ModelKernel, NoSupply, PointKernel,
+    PointUse, RbfArdKernel, RbfKernel, ScalarDistance, ScalarDistanceLeaf, Supply, WithPoints,
+};
+use gprx::{Fixed, GaussianLikelihood, Gpr, Sgpr, Svgp};
+
+/// Squared distances of points 0, 1, 2, … on a line.
+struct Line;
+
+impl DistanceFill for Line {
+    fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]) {
+        for (slot, i) in out.iter_mut().zip(rows) {
+            *slot = (i as f64 - col as f64).powi(2);
+        }
+    }
+}
+
+fn scalar_leaf(leaf: impl ScalarDistanceLeaf, slot: ScalarDistance) -> DistanceKernel {
+    slot.kernel(leaf)
+}
+
+fn takes<K: ModelKernel>(_: &K) {}
+fn supply_of<S: Supply>(_: &KernelSpec<S>) {}
+fn takes_points<K: PointKernel>(_: &K) {}
+fn joined<A: JoinPoints<B>, B: PointUse>(_: DistanceKernel<A>, _: DistanceKernel<B>) {}
+
+fn main() -> Result<(), gprx::GprError> {
+    // A coordinate tree is `KernelSpec<NoSupply>`, the default.
+    let coords: KernelSpec<NoSupply> = KernelSpec::from(RbfKernel::new(1.0)?);
+    supply_of(&coords);
+    let image = ScalarDistance::default();
+    let other = ScalarDistance::new();
+    let kernel = scalar_leaf(RbfKernel::new(1.0)?, image) * ConstantKernel::new(0.8)?;
+    assert_eq!(kernel.slots(), vec![DistanceSlot::Scalar(image)]);
+    let mut theta = vec![0.0; kernel.num_params()];
+    kernel.get_params(&mut theta)?;
+    let _ = kernel.parameter_bindings();
+    takes(&kernel);
+    joined(image.kernel(RbfKernel::new(1.0)?), other.kernel(RbfKernel::new(2.0)?));
+
+    // Four points 0, 1, 2, 3: d²[i + j·4] = (i − j)².
+    let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let fitted = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2.clone())], 4, &y)?;
+    // Two queries at 0.5 and 1.5.
+    let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+    let square = [0.0, 1.0, 1.0, 0.0];
+    let pred = fitted.predict([image.borrow(&cross)], 2)?;
+    let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&square)], 2)?;
+    assert_eq!((pred.mean.len(), cov.covariance.len()), (2, 4));
+    let by_fill = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.fill(&Line)], 4, &y)?;
+    let source: DistanceSource<'_> = image.from_slice(&cross);
+    assert_eq!(by_fill.predict([source], 2)?, pred);
+    // A table the Gram trick rounded: repaired on request, refused without.
+    let rounded = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, -1e-15];
+    assert!(fitted.predict([image.borrow(&rounded)], 2).is_err());
+    let _ = fitted.predict([image.borrow(&rounded).tidy(1e-12)?], 2)?;
+
+    // ARD: one block per dimension, here two copies of the line. The slot
+    // takes its dimensions from its first leaf.
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
+    assert_eq!(bands.dims(), 2);
+    let ard: DistanceKernel<DistanceOnly> = ard;
+    let blocks: [&[f64]; 2] = [&d2, &d2];
+    let fitted = Gpr::new(ard, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([bands.from_slices(&blocks)], 4, &y)?;
+    let cross_blocks: [&[f64]; 2] = [&cross, &cross];
+    let _ = fitted.predict([bands.borrow(&cross_blocks)], 2)?;
+    let _ = (bands.from_vecs(vec![d2.clone(), d2.clone()]), bands.fill(&Line));
+
+    // A distance leaf times a coordinate leaf.
+    let mixed: DistanceKernel<WithPoints> =
+        image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+    takes_points(&mixed);
+    let x = [0.0, 1.0, 2.0, 3.0];
+    let fitted = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
+    assert_eq!((fitted.d(), fitted.x()), (1, &x[..]));
+    let _ = fitted.predict([image.borrow(&cross)], &[0.5, 1.5], 2, 1)?;
+    let _ = (fitted.to_kernel(), fitted.slots());
+
+    // Sgpr and Svgp: the inducing points are training points 0 and 2, and a
+    // source is the 4 × 2 block from the training points to them.
+    let train_z = [0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    let sgpr = Sgpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&train_z)], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    assert_eq!(sgpr.inducing(), &[0, 2]);
+    // The 2 × 2 block from the inducing points to the queries at 0.5 and 1.5.
+    let cross_z = [0.25, 2.25, 2.25, 0.25];
+    let _ = sgpr.predict([image.borrow(&cross_z)], 2)?;
+    // OnlineSgpr: a point at 4 (its squared distances to the inducing
+    // points), then training point 1 as a third inducing point (its squared
+    // distances to the five training points).
+    let mut online = sgpr.clone().into_online();
+    online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
+    let point = online.point_ids()[1];
+    online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0, 9.0])])?;
+    let ids = online.point_ids();
+    assert_eq!(online.inducing_points().collect::<Vec<_>>(), [ids[0], ids[2], point]);
+    let _ = online.predict([image.from_vec(vec![0.25, 2.25, 0.25])], 1)?;
+    let _ = (online.to_kernel(), online.slots());
+    online.delete_inducing(online.inducing_ids()[2])?;
+    let svgp = Svgp::new(kernel, GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(train_z.to_vec())], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    let cov = svgp.predict_covariance([image.borrow(&cross_z)], [image.borrow(&square)], 2)?;
+    assert_eq!(cov.covariance.len(), 4);
+    Ok(())
+}
+
+fn _ard_bound(leaf: impl ArdDistanceLeaf, slot: ArdDistance) -> Result<DistanceKernel, gprx::GprError> {
+    slot.kernel(leaf)
+}
+```
+
+The rest of a distance model's surface, on the same four points: `fit`, the `predict` family, `sample`, the online `insert` / `delete`, an `InvalidDistance` match, an ARD slot in `slots()`, an input transform on a model with points, and save and load of the sparse models.
+
+```rust
+use gprx::kernel::{
+    ArdDistance, DistanceOnly, DistanceSlot, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
+};
+use gprx::persist::{LoadedDistanceSgpr, LoadedDistanceSvgp, PersistRegistry};
+use gprx::transform::MinMaxInput;
+use gprx::{
+    Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, Prediction, Sgpr, Svgp,
+    VarianceKind,
+};
+
+fn main() -> Result<(), GprError> {
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(1.0)?);
+    // Four points 0, 1, 2, 3 and two queries at 0.5 and 1.5, as above.
+    let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+    let square = [0.0, 1.0, 1.0, 0.0];
+
+    // `fit` searches θ (L-BFGS by default) on the supplied training square.
+    let trainer = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?);
+    assert_eq!(trainer.to_kernel().slots(), vec![DistanceSlot::Scalar(image)]);
+    let mut fitted = trainer
+        .fit([image.from_vec(d2.clone())], 4, &y)
+        .map_err(|(_, e)| e)?;
+    let latent = PredictOptions {
+        variance_kind: VarianceKind::Latent,
+    };
+    let _ = fitted.predict_with([image.borrow(&cross)], 2, latent)?;
+    let mut out = Prediction::default();
+    fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+    let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&square)], 2, latent)?;
+    // Three draws, column-major 2 × 3, from seed 7.
+    let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&square)], 2, 3, 7)?;
+    assert_eq!(draws.len(), 6);
+
+    // A value that is not a squared distance names its slot and pair.
+    let negative = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, -2.25];
+    match fitted.predict([image.borrow(&negative)], 2) {
+        Err(GprError::InvalidDistance { slot, pair, .. }) => {
+            assert_eq!((slot, pair), (Some(0), Some((3, 1))));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // OnlineGpr: a point at 4 (its squared distances to the live points, in
+    // `point_ids` order), then its delete.
+    let mut online = fitted.into_online()?;
+    let id = online.insert([image.from_vec(vec![16.0, 9.0, 4.0, 1.0])], 0.3)?;
+    online.delete(id)?;
+    let _ = online.predict([image.borrow(&cross)], 2)?;
+
+    // An ARD kernel lists its slot as `DistanceSlot::Ard`.
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
+    assert_eq!(ard.slots(), vec![DistanceSlot::Ard(bands)]);
+
+    // A kernel with points maps its coordinates with an input transform.
+    let mixed = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+    let x = [0.0, 10.0, 20.0, 30.0];
+    let _ = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
+
+    // Svgp and OnlineSgpr save; a loaded model binds its new slots.
+    let train_z = vec![0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    let cross_z = [0.25, 2.25, 2.25, 0.25];
+    let svgp = Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(train_z.clone())], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    assert_eq!((svgp.inducing(), svgp.slots()), (&[0, 2][..], vec![DistanceSlot::Scalar(image)]));
+    let _ = svgp.to_kernel();
+    let dir = std::env::temp_dir().join("gprx-readme-distance-svgp");
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    assert_eq!((loaded.n(), loaded.inducing()), (4, &[0, 2][..]));
+    let _ = loaded.to_kernel();
+    let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+        return Err(GprError::EmptyInput);
+    };
+    let _ = loaded.predict([slot.borrow(&cross_z)], 2)?;
+    let online = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train_z)], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .into_online();
+    let dir = std::env::temp_dir().join("gprx-readme-distance-online-sgpr");
+    online.save(&dir)?;
+    let _ = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    Ok(())
+}
+```
+
 ### Likelihood
 
 `GaussianLikelihood::new(noise_variance)` stores `σn²` as a log parameter. `from_log_noise_variance`, `noise_variance`, `log_noise_variance`, `bounds`, `with_bounds`, `num_params`, `get_params`, `set_params`. `add_noise_diag` adds `σn²` to a kernel diagonal. `noise_grad_diag` is the derivative of that diagonal with respect to one parameter. `InvalidNoiseVariance` is a noise value outside its domain.
@@ -548,7 +797,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FORMAT_VERSION` is `1`. `RESERVED_PREFIX` is `"gprx."`. A caller `persist_id` must not use that prefix.
 
-`LoadedGpr::load(dir, registry)`, `LoadedSgpr::load`, and `LoadedSvgp::load` read the directory. `PersistRegistry::new` is empty. Built-ins need no registration. Register a custom kernel or transform before load:
+`LoadedGpr::load(dir, registry)`, `LoadedSgpr::load`, and `LoadedSvgp::load` read the directory of a coordinate model; `LoadedDistanceGpr::<C>::load`, `LoadedDistanceSgpr::<C>::load`, and `LoadedDistanceSvgp::<C>::load` read that of a model on supplied distances (below). `PersistRegistry::new` is empty. Built-ins need no registration. Register a custom kernel or transform before load:
 
 - `register_kernel`
 - `register_unfitted_input`, `register_fitted_input`
@@ -639,6 +888,95 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+A model on supplied distances saves with the same `save` / `save_with_factor`. The file also holds the training `d²` the model owns (an Exact model's lower triangles, a sparse model's `n × m` blocks and its inducing indices) and the kernel's slot table. The loader is typed by the kernel's marker (`DistanceOnly` or `WithPoints`); a coordinate file, or one of the other marker, is `WrongModel`. A loaded kernel has new slots: a `ScalarDistance` or `ArdDistance` from before the save names none of them, so take them from `slots()` (in the saved kernel's order) and bind the queries to those. The format: [persist-format.md §10](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md#10-models-on-supplied-distances).
+
+```rust
+use gprx::kernel::{
+    DistanceOnly, DistanceSlot, KernelSpec, RbfKernel, ScalarDistance, WithPoints,
+};
+use gprx::persist::{LoadedDistanceGpr, LoadedDistanceSgpr, LoadedDistanceSvgp, PersistRegistry};
+use gprx::{Fixed, GaussianLikelihood, GprError, Gpr, Sgpr, Svgp};
+
+/// The one scalar slot of a loaded kernel.
+fn scalar(slots: &[DistanceSlot]) -> Result<ScalarDistance, GprError> {
+    match slots {
+        [DistanceSlot::Scalar(slot)] => Ok(*slot),
+        _ => Err(GprError::InvalidConfig {
+            reason: "expected one scalar slot".into(),
+        }),
+    }
+}
+
+fn main() -> Result<(), GprError> {
+    let registry = PersistRegistry::new();
+    let dir = std::env::temp_dir().join("gprx-readme-distance");
+    let _ = std::fs::remove_dir_all(&dir);
+    let image = ScalarDistance::new();
+    // Three samples at 0, 1, 2: their 3 × 3 squared distances.
+    let train = [0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5];
+    // The three samples × one query at 0.5.
+    let cross = [0.25, 0.25, 2.25];
+
+    let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&train)], 3, &y)
+        .map_err(|(_, e)| e)?;
+    fitted.save(&dir)?;
+    // The marker is part of the loaded type: name it.
+    let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &registry)?;
+    assert_eq!((loaded.n(), loaded.is_online()), (3, false));
+    // The loaded kernel has new slots: bind the query to them.
+    let slot = scalar(&loaded.slots())?;
+    assert_eq!(loaded.to_kernel().slots(), loaded.slots());
+    let pred = loaded.predict([slot.borrow(&cross)], 1)?;
+    assert_eq!(pred.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+
+    // A kernel with coordinate leaves is `WithPoints`: the query adds its coordinates.
+    let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+    Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&train)], 3, &[0.0, 1.0, 2.0], 1, &y)
+        .map_err(|(_, e)| e)?
+        .save(&dir)?;
+    let loaded = LoadedDistanceGpr::<WithPoints>::load(&dir, &registry)?;
+    assert_eq!(loaded.d(), 1);
+    let slot = scalar(&loaded.slots())?;
+    let _ = loaded.predict_with([slot.borrow(&cross)], &[0.5], 1, 1, gprx::PredictOptions::default())?;
+
+    // Sparse: the blocks from the three samples to the inducing samples 0 and 2.
+    let blocks = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+    Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&blocks)], 3, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
+    assert_eq!((loaded.m(), loaded.inducing()), (2, Some(&[0, 2][..])));
+    // A loaded online model names its inducing points by `PointId` instead.
+    assert!(loaded.inducing_points().is_none());
+    let slot = scalar(&loaded.slots())?;
+    // The inducing samples × the query at 0.5.
+    let _ = loaded.predict([slot.borrow(&[2.25, 0.25])], 1)?;
+    let LoadedDistanceSgpr::Double(model) = loaded else {
+        return Err(GprError::InvalidConfig {
+            reason: "expected Double".into(),
+        });
+    };
+    let _online = model.into_online();
+
+    Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        .factor([image.borrow(&blocks)], 3, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &registry)?;
+    let slot = scalar(&loaded.slots())?;
+    let _ = loaded.predict([slot.borrow(&[2.25, 0.25])], 1)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+```
+
 `predict` and `predict_with` on a loaded model return `f64`, including when the file was `f32`. `n`, `d`, and (sparse) `m`. `is_online` is true for an `ldlt` exact or SGPR file. Match the variant for the typed model:
 
 | Enum | Variants |
@@ -646,6 +984,9 @@ fn main() -> Result<(), gprx::GprError> {
 | `LoadedGpr` | `Double`, `Single`, `Mixed`, `Reevaluate`, `OnlineDouble`, `OnlineSingle`, `OnlineMixed`, `OnlineReevaluate` |
 | `LoadedSgpr` | the same eight names. `Double` is `FittedSgpr<Fixed>`. Online variants are `OnlineSgpr<Fixed, _>` |
 | `LoadedSvgp` | `Double`, `Single`, `Mixed`, `Reevaluate`. No online variant |
+| `LoadedDistanceGpr<C>` | the eight names of `LoadedGpr`, over `FittedGpr<Fixed, _, DistanceKernel<C>>` / `OnlineGpr<Fixed, _, DistanceKernel<C>>`. `C` is `DistanceOnly` or `WithPoints`, named at `load` |
+| `LoadedDistanceSgpr<C>` | the eight names of `LoadedSgpr`, over the models of `DistanceKernel<C>` |
+| `LoadedDistanceSvgp<C>` | the four names of `LoadedSvgp`, over `FittedSvgp<_, DistanceKernel<C>>` |
 
 A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not store a solver. Call `with_optimizer` on the matched model, then `refit`, to search again. A file written with `save` and no factor is factored on load. `save_with_factor` keeps `L` memory-mapped.
 
@@ -666,6 +1007,8 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 | `OptimizationNotConverged { iterations }` | the solver stopped short of its test |
 | `InvalidHyperparameter { reason }` | a kernel parameter is outside its domain |
 | `ShapeMismatch { reason }` | a matrix has the wrong shape |
+| `InvalidDistance { slot, dim, pair, reason }` | a supplied squared distance is not finite, is negative, or breaks a square's zero diagonal or symmetry. `slot` is the table's place in the kernel's `slots()`, `dim` its ARD dimension, `pair` the `(row, col)` in the block passed; each is `None` when unknown |
+| `DistanceSlot { kind, slot }` | the sources do not match the kernel's slots: `SlotErrorKind::NotRead` (a slot the kernel does not read, such as one from before a save), `Duplicate`, or `Missing`; `slot` is the place in `slots()` of the slot with two sources or none, and `None` for `NotRead` |
 | `LengthMismatch { reason }` | a slice has the wrong length |
 | `IndexOutOfRange { reason }` | a parameter, leaf, or dimension index |
 | `InvalidConfig { reason }` | an optimizer, jitter, or transform setting |

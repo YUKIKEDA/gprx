@@ -1,7 +1,54 @@
 //! Saves and loads a fitted GPR directory (`config.json` + `model.safetensors`).
 
+/// Runs `$call` in the arm of the precision `$kind`, with `$fitted` (and
+/// `$online`) the variants of `$loaded` of that precision. Each arm names
+/// its own precision type, so the call stays in the arm.
+macro_rules! by_precision {
+    ($kind:expr, $loaded:ident, |$fitted:ident, $online:ident| $call:expr) => {
+        match $kind {
+            $crate::precision::PersistKind::Double => {
+                let ($fitted, $online) = ($loaded::Double, $loaded::OnlineDouble);
+                $call
+            }
+            $crate::precision::PersistKind::Single => {
+                let ($fitted, $online) = ($loaded::Single, $loaded::OnlineSingle);
+                $call
+            }
+            $crate::precision::PersistKind::MixedPromote => {
+                let ($fitted, $online) = ($loaded::Mixed, $loaded::OnlineMixed);
+                $call
+            }
+            $crate::precision::PersistKind::MixedReevaluate => {
+                let ($fitted, $online) = ($loaded::Reevaluate, $loaded::OnlineReevaluate);
+                $call
+            }
+        }
+    };
+    ($kind:expr, $loaded:ident, |$fitted:ident| $call:expr) => {
+        match $kind {
+            $crate::precision::PersistKind::Double => {
+                let $fitted = $loaded::Double;
+                $call
+            }
+            $crate::precision::PersistKind::Single => {
+                let $fitted = $loaded::Single;
+                $call
+            }
+            $crate::precision::PersistKind::MixedPromote => {
+                let $fitted = $loaded::Mixed;
+                $call
+            }
+            $crate::precision::PersistKind::MixedReevaluate => {
+                let $fitted = $loaded::Reevaluate;
+                $call
+            }
+        }
+    };
+}
+
 mod atomic;
 mod config;
+mod distance;
 mod kernel;
 mod registry;
 mod sparse;
@@ -12,23 +59,26 @@ use std::path::Path;
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
-use crate::gpr::{FittedGpr, OnlineGpr, Policies};
-use crate::kernel::KernelSpec;
+use crate::gpr::{FittedGpr, GprCore, OnlineGpr, Policies};
+use crate::kernel::{DistanceSlot, KernelSpec, ModelKernel, ModelKernelParts, SourceStore};
 use crate::optimizer::Fixed;
+use crate::precision::GpScalar;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
 use crate::{GaussianLikelihood, PredictOptions, Prediction};
 
 use crate::kernel::ScalarOps;
 use crate::precision::PersistKind;
 use config::{
-    DistanceCacheJson, FactorKind, JitterJson, LikelihoodJson, MathJson, ModelConfig,
-    PrecisionJson, ResidualJson,
+    DistanceCacheJson, DistanceJson, FactorKind, JitterJson, LikelihoodJson, MathJson, ModelConfig,
+    PointsJson, PrecisionJson, ResidualJson, d2_tensor,
 };
 use kernel::KernelJson;
 use tensors::{
-    FactorBytes, pack_lower, read_matrix, read_scalars, read_xy, scalar_bytes, write_tensors,
+    FactorBytes, RawTensor, pack_lower, read_matrix, read_scalars, read_xy, scalar_bytes,
+    write_tensors,
 };
 
+pub use distance::{LoadedDistanceGpr, LoadedDistanceSgpr, LoadedDistanceSvgp};
 pub use sparse::{LoadedSgpr, LoadedSvgp};
 pub(crate) use sparse::{save_online_sgpr, save_sgpr, save_svgp};
 pub(crate) use tensors::MappedTensors;
@@ -132,9 +182,10 @@ impl LoadedGpr {
     ///
     /// Returns [`GprError::UnsupportedPersistVersion`] when `format_version`
     /// is not [`FORMAT_VERSION`], or [`GprError::PersistFailed`] when the
-    /// directory, JSON, tensors, or registry lookup is invalid. Factorization
-    /// errors from a file written without `L` use the same variants as
-    /// [`crate::Gpr<Fixed>::factor`].
+    /// directory, JSON, tensors, or registry lookup is invalid, and
+    /// [`GprError::NonFiniteInput`] when the saved maps send the training
+    /// data past `f64`. Factorization errors from a file written without `L`
+    /// use the same variants as [`crate::Gpr<Fixed>::factor`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
@@ -284,9 +335,11 @@ fn widen<T: crate::kernel::KernelScalar>(pred: Prediction<T>) -> Prediction<f64>
     }
 }
 
-pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precision::DoublePrecision>
-{
-    pub kernel: KernelSpec,
+pub(crate) struct PersistedModel<
+    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+    K: crate::kernel::ModelKernel = KernelSpec,
+> {
+    pub kernel: crate::kernel::SpecOf<K>,
     pub likelihood: GaussianLikelihood,
     pub x_unfitted: Box<dyn UnfittedTransform>,
     pub y_unfitted: Box<dyn UnfittedTarget>,
@@ -295,7 +348,11 @@ pub(crate) struct PersistedModel<P: crate::precision::GpScalar = crate::precisio
     pub policies: Policies,
     pub x_obs: Vec<f64>,
     pub y_obs: Vec<f64>,
-    pub alpha: Vec<P::Refine>,
+    /// `α` with `L` (owned or mapped); `None` when the file holds no factor,
+    /// and the model factors again at the saved `θ`.
+    pub alpha: Option<Vec<P::Refine>>,
+    /// The training `d²` of a kernel on supplied distances.
+    pub supplied: crate::kernel::Held<K, crate::gpr::ExactSupplied<P>>,
     pub owned_l: Option<faer::Mat<P::Storage>>,
     pub mapped: Option<MappedTensors>,
     /// Diagonal jitter the saved factor was built with.
@@ -340,6 +397,80 @@ where
     })
 }
 
+/// The scalar a model's training `d²` is saved in.
+type SavedScalar<P> = <<P as crate::precision::ModelPrecision>::Sources as SourceStore<
+    <P as crate::precision::PrecisionPolicy>::Storage,
+>>::Saved;
+
+/// The kernel of a model's core as a save writes it: the tree, the distance
+/// part of the config (none for a coordinate kernel), and each slot's
+/// training `d²` (tensor `d2.<k>` for slot `k` of the table).
+struct KernelSave<'a, T: Clone> {
+    kernel: KernelJson,
+    distance: Option<DistanceJson>,
+    d2: Vec<(String, Vec<usize>, std::borrow::Cow<'a, [T]>)>,
+}
+
+impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
+    /// The `d²` tensors as the tensor writer takes them.
+    fn tensors(&self) -> Vec<RawTensor<'_>> {
+        self.d2
+            .iter()
+            .map(|(name, shape, values)| RawTensor {
+                name: name.as_str(),
+                dtype: <T as ScalarOps>::DTYPE,
+                shape: shape.clone(),
+                bytes: scalar_bytes(values),
+            })
+            .collect()
+    }
+}
+
+/// [`KernelSave`] of `core`'s kernel and training `d²`.
+fn kernel_save<P: GpScalar, K: ModelKernel>(
+    core: &GprCore<P, K>,
+) -> Result<KernelSave<'_, SavedScalar<P>>, GprError> {
+    let Some(held) = <K::Supply as crate::kernel::SupplyViews>::held(&core.supplied) else {
+        return Ok(KernelSave {
+            kernel: KernelJson::encode(&core.kernel, &[])?,
+            distance: None,
+            d2: Vec::new(),
+        });
+    };
+    let slots = &held.slots;
+    let kernel = KernelJson::encode(&core.kernel, slots)?;
+    let points = PointsJson::of::<K>();
+    let tri = crate::kernel::packed_len(core.n)?;
+    let saved = held.sources.saved();
+    let d2 = slots
+        .iter()
+        .enumerate()
+        .map(|(k, slot)| {
+            let values = saved.packed(slot.id()).ok_or_else(|| {
+                persist_err(
+                    PersistErrorKind::Tensor,
+                    format!("distance slot {k} has no training squared distances"),
+                )
+            })?;
+            Ok((d2_tensor(k), d2_shape(*slot, tri), values))
+        })
+        .collect::<Result<_, GprError>>()?;
+    Ok(KernelSave {
+        kernel,
+        distance: Some(DistanceJson::encode(points, slots)),
+        d2,
+    })
+}
+
+/// The tensor shape of a slot's `len` values per block: `[len]` for a
+/// scalar slot, `[dims, len]` for an ARD slot.
+fn d2_shape(slot: DistanceSlot, len: usize) -> Vec<usize> {
+    match slot.shape() {
+        crate::kernel::SlotShape::Scalar => vec![len],
+        crate::kernel::SlotShape::Ard(dims) => vec![dims, len],
+    }
+}
+
 /// What an Exact save writes, read from either Exact model. The two models
 /// differ only in the factor kind, the point ids, and where the factor lives.
 struct ExactSave<'a> {
@@ -348,7 +479,9 @@ struct ExactSave<'a> {
     kind: PersistKind,
     factor_kind: FactorKind,
     policies: Policies,
-    kernel: &'a KernelSpec,
+    kernel: KernelJson,
+    distance: Option<DistanceJson>,
+    d2: Vec<RawTensor<'a>>,
     likelihood: &'a GaussianLikelihood,
     factor_jitter: f64,
     x_unfitted: &'a dyn UnfittedTransform,
@@ -378,7 +511,7 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         precision: PrecisionJson::from_persist(save.kind),
         residual: ResidualJson::from_persist(save.kind),
         math: MathJson::encode(save.policies.math),
-        kernel: KernelJson::encode(save.kernel)?,
+        kernel: save.kernel,
         likelihood: LikelihoodJson::encode(save.likelihood),
         jitter: JitterJson::encode(save.policies.jitter),
         factor_jitter: save.factor_jitter,
@@ -389,6 +522,7 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         y_transform: encode_fitted_target(save.y_transform)?,
         point_ids,
         next_point_id,
+        distance: save.distance,
     };
     let json = serde_json::to_vec_pretty(&config).map_err(|err| {
         persist_err(
@@ -402,32 +536,37 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         alpha_dtype: packed.alpha_dtype,
         alpha: packed.alpha.as_slice(),
     });
-    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs)?;
+    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs, &save.d2)?;
     write_config(dir, &json)
 }
 
-pub(crate) fn save_fitted<O, P>(
-    model: &FittedGpr<O, P>,
+pub(crate) fn save_fitted<O, P, K>(
+    model: &FittedGpr<O, P, K>,
     dir: &Path,
     with_factor: bool,
 ) -> Result<(), GprError>
 where
-    P: crate::precision::GpScalar,
+    P: GpScalar,
+    K: ModelKernel,
 {
     let factor = if with_factor {
         Some(pack_saved_factor(model.chol_l(), model.alpha())?)
     } else {
         None
     };
+    let core = model.core();
+    let kernel = kernel_save(core)?;
     save_exact(
         dir,
         ExactSave {
-            n: model.n(),
-            d: model.d(),
+            n: core.n,
+            d: core.d,
             kind: P::persist_kind(),
             factor_kind: FactorKind::Llt,
             policies: model.policies(),
-            kernel: model.kernel(),
+            kernel: kernel.kernel.clone(),
+            distance: kernel.distance.clone(),
+            d2: kernel.tensors(),
             likelihood: model.likelihood(),
             factor_jitter: model.factor_jitter(),
             x_unfitted: model.x_unfitted(),
@@ -435,35 +574,40 @@ where
             x_transform: model.x_transform(),
             y_transform: model.y_transform(),
             point_ids: None,
-            x: model.x(),
+            x: &core.x_obs,
             y: model.y(),
             factor,
         },
     )
 }
 
-pub(crate) fn save_online<O, P>(
-    model: &OnlineGpr<O, P>,
+pub(crate) fn save_online<O, P, K>(
+    model: &OnlineGpr<O, P, K>,
     dir: &Path,
     with_factor: bool,
 ) -> Result<(), GprError>
 where
-    P: crate::precision::GpScalar,
+    P: GpScalar,
+    K: ModelKernel,
 {
     let factor = if with_factor {
         Some(pack_saved_factor(model.ld_factor(), model.alpha()?)?)
     } else {
         None
     };
+    let core = &model.core;
+    let kernel = kernel_save(core)?;
     save_exact(
         dir,
         ExactSave {
-            n: model.n(),
-            d: model.d(),
+            n: core.n,
+            d: core.d,
             kind: P::persist_kind(),
             factor_kind: FactorKind::Ldlt,
             policies: model.policies(),
-            kernel: model.kernel(),
+            kernel: kernel.kernel.clone(),
+            distance: kernel.distance.clone(),
+            d2: kernel.tensors(),
             likelihood: model.likelihood(),
             factor_jitter: model.factor_jitter(),
             x_unfitted: model.x_unfitted(),
@@ -471,19 +615,20 @@ where
             x_transform: model.x_transform(),
             y_transform: model.y_transform(),
             point_ids: Some((model.persist_point_ids(), model.persist_next_point_id())),
-            x: model.x(),
+            x: &core.x_obs,
             y: model.y(),
             factor,
         },
     )
 }
 
-fn apply_online_ids<O, P>(
-    online: &mut OnlineGpr<O, P>,
+fn apply_online_ids<O, P, K>(
+    online: &mut OnlineGpr<O, P, K>,
     ids: &Option<(Vec<u64>, u64)>,
 ) -> Result<(), GprError>
 where
-    P: crate::precision::GpScalar,
+    P: GpScalar,
+    K: ModelKernel,
 {
     let (ids, next_id) = ids
         .as_ref()
@@ -492,33 +637,38 @@ where
 }
 
 /// The stored tensors of an Exact model, from one open of `model.safetensors`.
-struct ExactTensors<P: crate::precision::GpScalar> {
+struct ExactTensors<P: GpScalar, K: ModelKernel> {
     x_obs: Vec<f64>,
     y_obs: Vec<f64>,
     /// `α` in the precision's refine scalar, when the factor is stored.
     alpha: Option<Vec<P::Refine>>,
     owned_l: Option<faer::Mat<P::Storage>>,
     mapped: Option<MappedTensors>,
+    /// The training `d²` of a distance kernel, bound from the tensors
+    /// [`kernel_save`] wrote.
+    supplied: crate::kernel::Held<K, crate::gpr::ExactSupplied<P>>,
 }
 
-/// Reads `x`, `y`, and the factor `α` / `L` in one open of the file.
+/// Reads `x`, `y`, the training `d²` of `slots`, and the factor `α` / `L`
+/// in one open of the file.
 ///
-/// An `f64` factor stays memory-mapped, so the file is mapped and the small
-/// tensors are copied out of the same map; otherwise it is read once.
-fn read_exact_tensors<P: crate::precision::GpScalar>(
+/// An `f64` factor stays memory-mapped, and a file with training `d²` is
+/// mapped too: each slot is read in place into its store, one copy. The
+/// small tensors are copied out of the map; a file of neither is read once.
+fn read_exact_tensors<P: GpScalar, K: ModelKernel>(
     dir: &Path,
-    n: usize,
-    d: usize,
-    has_factor: bool,
-) -> Result<ExactTensors<P>, GprError> {
+    config: &ModelConfig,
+    slots: Vec<DistanceSlot>,
+) -> Result<ExactTensors<P, K>, GprError> {
+    let (n, d, has_factor) = (config.n, config.d, config.has_factor);
     let storage = <P::Storage as ScalarOps>::DTYPE;
     let map_l = has_factor && storage == safetensors::Dtype::F64;
-    let file = if map_l {
+    let file = if map_l || !slots.is_empty() {
         tensors::TensorFile::map(dir)?
     } else {
         tensors::TensorFile::read(dir)?
     };
-    let (x_obs, y_obs, alpha, owned_l) = {
+    let (x_obs, y_obs, alpha, owned_l, supplied) = {
         let tensors = file.tensors()?;
         let (x_obs, y_obs) = read_xy(&tensors, n, d)?;
         let alpha = if has_factor {
@@ -536,7 +686,25 @@ fn read_exact_tensors<P: crate::precision::GpScalar>(
         } else {
             None
         };
-        (x_obs, y_obs, alpha, owned_l)
+        let supplied = <K::Supply as crate::kernel::SupplyViews>::try_hold(|| {
+            let tri = crate::kernel::packed_len(n)?;
+            // Read in place: the store checks every value as it copies it.
+            let d2 = slots
+                .iter()
+                .enumerate()
+                .map(|(k, slot)| {
+                    tensors::finite_tensor::<SavedScalar<P>>(
+                        &tensors,
+                        &d2_tensor(k),
+                        &d2_shape(*slot, tri),
+                        <SavedScalar<P> as ScalarOps>::DTYPE,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let sources = P::Sources::from_saved(&slots, &d2, n)?;
+            Ok::<_, GprError>(crate::gpr::ExactSupplied::new(sources, slots))
+        })?;
+        (x_obs, y_obs, alpha, owned_l, supplied)
     };
     let mapped = if map_l {
         Some(file.into_mapped_l(n)?)
@@ -549,70 +717,104 @@ fn read_exact_tensors<P: crate::precision::GpScalar>(
         alpha,
         owned_l,
         mapped,
+        supplied,
     })
 }
 
-/// The [`LoadedGpr`] variants that hold precision `P`.
-struct Variants<P: crate::precision::GpScalar> {
-    fitted: fn(FittedGpr<Fixed, P>) -> LoadedGpr,
-    online: fn(OnlineGpr<Fixed, P>) -> LoadedGpr,
+/// The variants of a loaded Exact enum `L` that hold precision `P` and
+/// kernel `K`.
+struct Variants<P: GpScalar, K: ModelKernel, L> {
+    fitted: fn(FittedGpr<Fixed, P, K>) -> L,
+    online: fn(OnlineGpr<Fixed, P, K>) -> L,
 }
 
-fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
+/// Reads and checks `config.json` of an Exact model with distance marker
+/// `points` (`None` for a coordinate model).
+fn read_exact_config(dir: &Path, points: Option<PointsJson>) -> Result<ModelConfig, GprError> {
+    let bytes = read_model_bytes(dir, &[config::ModelJson::Exact], points)?;
+    config::parse_config(&bytes)
+}
+
+/// The bytes of `dir/config.json`, once its `model` is one of `expected`
+/// and its distance marker is `points` ([`config::parse_model`]).
+fn read_model_bytes(
+    dir: &Path,
+    expected: &[config::ModelJson],
+    points: Option<PointsJson>,
+) -> Result<Vec<u8>, GprError> {
     let config_path = dir.join(CONFIG_FILE);
     let bytes = std::fs::read(&config_path)
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
-    config::parse_model(&bytes, &[config::ModelJson::Exact])?;
-    let config = config::parse_config(&bytes)?;
-    // Each arm names its own precision type, so the call stays in the arm.
-    match config.persist_kind() {
-        PersistKind::Double => load_precision(
-            dir,
-            registry,
-            config,
-            Variants {
-                fitted: LoadedGpr::Double,
-                online: LoadedGpr::OnlineDouble,
-            },
-        ),
-        PersistKind::Single => load_precision(
-            dir,
-            registry,
-            config,
-            Variants {
-                fitted: LoadedGpr::Single,
-                online: LoadedGpr::OnlineSingle,
-            },
-        ),
-        PersistKind::MixedPromote => load_precision(
-            dir,
-            registry,
-            config,
-            Variants {
-                fitted: LoadedGpr::Mixed,
-                online: LoadedGpr::OnlineMixed,
-            },
-        ),
-        PersistKind::MixedReevaluate => load_precision(
-            dir,
-            registry,
-            config,
-            Variants {
-                fitted: LoadedGpr::Reevaluate,
-                online: LoadedGpr::OnlineReevaluate,
-            },
-        ),
+    config::parse_model(&bytes, expected, points)?;
+    Ok(bytes)
+}
+
+fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
+    let config = read_exact_config(dir, None)?;
+    by_precision!(config.persist_kind(), LoadedGpr, |fitted, online| {
+        load_precision(dir, registry, config, Variants { fitted, online })
+    })
+}
+
+/// The slots of a config's table, checked against the decoded kernel: the
+/// tree reads every slot of the table, in the table's order.
+fn decode_kernel<K: ModelKernel>(
+    kernel: &KernelJson,
+    distance: Option<&DistanceJson>,
+    registry: &PersistRegistry,
+) -> Result<(crate::kernel::SpecOf<K>, Vec<DistanceSlot>), GprError> {
+    let slots = match distance {
+        Some(distance) => distance.decode_slots()?,
+        None => Vec::new(),
+    };
+    let spec = kernel.clone().decode_tree::<K::Supply>(registry, &slots)?;
+    // Numbers the leaves in their tree, as a kernel built by hand is.
+    let spec = <K as ModelKernelParts>::from_spec(spec).into_spec();
+    let read = crate::kernel::spec_slots(&spec);
+    if read
+        .iter()
+        .map(|slot| slot.id())
+        .ne(slots.iter().map(|slot| slot.id()))
+    {
+        return Err(persist_err(
+            PersistErrorKind::Config,
+            "the kernel does not read the slot table's slots in the table's order",
+        ));
+    }
+    // A `DistanceOnly` kernel holds no leaf that reads coordinates: its
+    // model has none to give it.
+    if !<K as ModelKernelParts>::POINTS && reads_coordinates(&spec) {
+        return Err(persist_err(
+            PersistErrorKind::Config,
+            "a distance_only kernel holds a leaf that reads coordinates",
+        ));
+    }
+    Ok((spec, slots))
+}
+
+/// Whether `spec` holds a leaf that reads coordinates: every coordinate
+/// leaf but [`crate::kernel::ConstantKernel`] and
+/// [`crate::kernel::WhiteKernel`], which a [`crate::kernel::DistanceOnly`]
+/// kernel may hold.
+fn reads_coordinates<S: crate::kernel::Supply>(spec: &KernelSpec<S>) -> bool {
+    match spec {
+        KernelSpec::Sum(left, right) | KernelSpec::Product(left, right) => {
+            reads_coordinates(left) || reads_coordinates(right)
+        }
+        KernelSpec::Constant(_) | KernelSpec::White(_) | KernelSpec::Supplied(_) => false,
+        _ => true,
     }
 }
 
-fn load_precision<P>(
+fn load_precision<P, K, L>(
     dir: &Path,
     registry: &PersistRegistry,
     config: ModelConfig,
-    variants: Variants<P>,
-) -> Result<LoadedGpr, GprError>
+    variants: Variants<P, K, L>,
+) -> Result<L, GprError>
 where
-    P: crate::precision::GpScalar,
+    P: GpScalar,
+    K: ModelKernel,
 {
     let ldlt_ids = match config.factor_kind {
         FactorKind::Ldlt => {
@@ -621,7 +823,7 @@ where
         }
         FactorKind::Llt => None,
     };
-    let kernel = config.kernel.decode(registry)?;
+    let (kernel, slots) = decode_kernel::<K>(&config.kernel, config.distance.as_ref(), registry)?;
     let likelihood = config.likelihood.decode()?;
     let policies = Policies {
         distance_cache: config
@@ -632,54 +834,47 @@ where
         math: config.math.decode(),
         jitter: config.jitter.decode()?,
     };
-    let x_unfitted = config.x_unfitted.decode(registry)?;
-    let y_unfitted = config.y_unfitted.decode(registry)?;
-    let x_transform = config.x_transform.decode(registry)?;
-    let y_transform = config.y_transform.decode(registry)?;
+    let x_unfitted = config.x_unfitted.clone().decode(registry)?;
+    let y_unfitted = config.y_unfitted.clone().decode(registry)?;
+    let x_transform = config.x_transform.clone().decode(registry)?;
+    let y_transform = config.y_transform.clone().decode(registry)?;
     let ExactTensors {
         x_obs,
         y_obs,
         alpha,
         owned_l,
         mapped,
-    } = read_exact_tensors::<P>(dir, config.n, config.d, config.has_factor)?;
-    if let Some(alpha) = alpha {
-        let parts = PersistedModel {
-            kernel,
-            likelihood,
-            x_unfitted,
-            y_unfitted,
-            x_transform,
-            y_transform,
-            policies,
-            x_obs,
-            y_obs,
-            alpha,
-            owned_l,
-            mapped,
-            factor_jitter: config.factor_jitter,
-        };
-        match config.factor_kind {
-            FactorKind::Llt => Ok((variants.fitted)(FittedGpr::from_persisted(parts)?)),
-            FactorKind::Ldlt => {
-                let mut online = OnlineGpr::from_persisted(parts)?;
-                apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok((variants.online)(online))
-            }
-        }
-    } else {
-        let fitted = crate::Gpr::<Fixed, P>::from_owned(
-            kernel, likelihood, x_unfitted, y_unfitted, Fixed, policies,
-        )
-        .factor(&x_obs, config.n, config.d, &y_obs)
-        .map_err(|(_, err)| err)?;
-        match config.factor_kind {
-            FactorKind::Llt => Ok((variants.fitted)(fitted)),
-            FactorKind::Ldlt => {
-                let mut online = fitted.into_online()?;
-                apply_online_ids(&mut online, &ldlt_ids)?;
-                Ok((variants.online)(online))
-            }
+        supplied,
+    } = read_exact_tensors::<P, K>(dir, &config, slots)?;
+    let parts = PersistedModel {
+        kernel,
+        likelihood,
+        x_unfitted,
+        y_unfitted,
+        x_transform,
+        y_transform,
+        policies,
+        x_obs,
+        y_obs,
+        alpha,
+        supplied,
+        owned_l,
+        mapped,
+        factor_jitter: config.factor_jitter,
+    };
+    let saved_factor = parts.alpha.is_some();
+    match config.factor_kind {
+        FactorKind::Llt => Ok((variants.fitted)(FittedGpr::from_persisted(parts)?)),
+        FactorKind::Ldlt => {
+            // A saved factor is the packed LDLT; without one the model is
+            // factored again as LLT and turned into LDLT.
+            let mut online = if saved_factor {
+                OnlineGpr::from_persisted(parts)?
+            } else {
+                FittedGpr::from_persisted(parts)?.into_online()?
+            };
+            apply_online_ids(&mut online, &ldlt_ids)?;
+            Ok((variants.online)(online))
         }
     }
 }

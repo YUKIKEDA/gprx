@@ -1,7 +1,7 @@
 //! ARD rational quadratic kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::ArdSqDiff;
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState};
 use super::finite_kernel;
 use super::rq::{rq_d2k_ard, rq_dk_dtheta_alpha, rq_dk_dtheta_ard_dim, rq_from_r2};
 use super::simd::ard::Profile;
@@ -10,6 +10,7 @@ use super::{
     write_rect,
 };
 use crate::error::GprError;
+use crate::math::KernelMath;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 use wide::f64x4;
@@ -294,7 +295,8 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    pub(crate) fn apply_from_sq_diff<T: KernelScalar>(
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
+    pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
         out: MatMut<'_, T>,
@@ -309,7 +311,60 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    pub(crate) fn grad_from_sq_diff<T: KernelScalar>(
+    /// Rectangular `K` from `(Δ_d)²` blocks.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        let d = self.lengthscales.num_params();
+        ard::write_from_blocks(blocks, out, d, |row, col| {
+            rq_value(ard::r2_from_blocks(blocks, row, col, w, Pick::NONE)?, alpha)
+        })
+    }
+
+    /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        ard::require_param(NAME, param_idx, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_blocks(blocks, d_k, d, |row, col| {
+            let t = ard::r2_from_blocks(blocks, row, col, w, Pick::one(param_idx))?;
+            rq_grad(t, alpha, param_idx == d)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        let d = self.lengthscales.num_params();
+        ard::require_param_pair(NAME, i, j, d + 1)?;
+        let w = self.lengthscales.inv_ell_sq();
+        let alpha = T::from_f64(self.alpha());
+        ard::write_from_blocks(blocks, d2_k, d, |row, col| {
+            let t = ard::r2_from_blocks(blocks, row, col, w, Pick::pair(i, j))?;
+            rq_hess(t, alpha, (i, j), d)
+        })
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
+    pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
         d_k: MatMut<'_, T>,
@@ -355,7 +410,8 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    pub(crate) fn hess_from_sq_diff<T: KernelScalar>(
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
+    pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,
@@ -430,7 +486,7 @@ enum RqOutput {
 }
 
 /// The RQ-ARD value or derivative of four pairs from `r²`
-/// ([`ard_simd`](super::ard_simd)), with `u^{−α} = exp(−α ln u)` for
+/// ([`simd::ard`](super::simd::ard)), with `u^{−α} = exp(−α ln u)` for
 /// `u = 1 + r² / (2α)`.
 struct RqProfile {
     alpha: f64,

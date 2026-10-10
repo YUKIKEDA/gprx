@@ -12,7 +12,7 @@ use faer::{Mat, MatRef};
 
 use crate::data::pack_points;
 use crate::error::GprError;
-use crate::kernel::{KernelScalar, ScalarOps};
+use crate::kernel::{KernelScalar, ScalarOps, Supply};
 use crate::linalg::solve_lower;
 use crate::policy::with_kernel_exp;
 use crate::precision::{InverseBuffers, ModelPrecision};
@@ -32,8 +32,8 @@ use super::assemble_vfe;
 ///
 /// Returns [`GprError::NonPositiveDefiniteMatrix`] when `1 − h` is not
 /// positive and finite for some point, or the error of the `f64` assembly.
-pub(crate) fn vfe_loo<P: ModelPrecision>(
-    core: &SparseCore,
+pub(crate) fn vfe_loo<P: ModelPrecision, U: Supply>(
+    core: &SparseCore<U>,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
     w: &[P::Storage],
@@ -41,16 +41,11 @@ pub(crate) fn vfe_loo<P: ModelPrecision>(
 ) -> Result<Prediction<P::Refine>, GprError> {
     let (n, m, d) = (core.n, core.m, core.d);
     let (a64, b_l64, w64) = if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let state = with_kernel_exp!(core.math, M => assemble_vfe::<M, f64>(
+        let state = with_kernel_exp!(core.math, M => assemble_vfe::<M, f64, U>(
             &core.kernel,
             core.jitter,
             core.likelihood,
-            &core.x_train,
-            n,
-            d,
-            &core.y_train,
-            &core.z_train,
-            m,
+            core.data(),
             &mut KernelScratch::new(),
             &mut KernelScratch::new(),
         ))?;
@@ -68,7 +63,7 @@ pub(crate) fn vfe_loo<P: ModelPrecision>(
     let mut k_diag = vec![0.0; n];
     core.kernel
         .compile()
-        .fill_diag_points(x.as_ref(), &mut k_diag)?;
+        .fill_diag_rows(x.as_ref(), &mut k_diag)?;
     let noise = core.likelihood.noise_variance();
     let zero = P::Refine::from_f64(0.0);
     let mut out = Prediction {

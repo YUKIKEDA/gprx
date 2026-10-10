@@ -1,6 +1,10 @@
 //! SVGP predictive mean and variance.
 
 use crate::error::GprError;
+use crate::kernel::{
+    BlockStore, CrossViews, DistanceSlot, DistanceSource, NoSupply, QueryScratch, QuerySources,
+    Supply, SupplyViews,
+};
 use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, KernelSpec, ScalarOps, Triangle};
 use crate::linalg::solve_lower;
 use crate::policy::{JitterPolicy, with_kernel_exp};
@@ -13,10 +17,13 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use faer::{Mat, MatRef};
 
 /// The fitted SVGP a prediction reads, in transformed units.
-pub(crate) struct SvgpSystem<'a, P: ModelPrecision> {
-    pub(crate) kernel: &'a KernelSpec,
+pub(crate) struct SvgpSystem<'a, P: ModelPrecision, U: Supply = NoSupply> {
+    pub(crate) kernel: &'a KernelSpec<U>,
     pub(crate) k_mm_jitter: JitterPolicy,
     pub(crate) z: &'a [f64],
+    /// The kernel's slots, and the `f64` squares among the inducing points.
+    pub(crate) slots: &'a [DistanceSlot],
+    pub(crate) zz: Option<&'a BlockStore<f64>>,
     pub(crate) k_mm_l: MatRef<'a, P::Storage>,
     pub(crate) q_mean: &'a [f64],
     pub(crate) q_l: MatRef<'a, f64>,
@@ -25,9 +32,9 @@ pub(crate) struct SvgpSystem<'a, P: ModelPrecision> {
     pub(crate) d: usize,
 }
 
-impl<'a, P: ModelPrecision> SvgpSystem<'a, P> {
+impl<'a, P: ModelPrecision, U: Supply> SvgpSystem<'a, P, U> {
     pub(crate) fn new(
-        core: &'a SparseCore,
+        core: &'a SparseCore<U>,
         k_mm_l: MatRef<'a, P::Storage>,
         q_mean: &'a [f64],
         q_l: MatRef<'a, f64>,
@@ -36,6 +43,8 @@ impl<'a, P: ModelPrecision> SvgpSystem<'a, P> {
             kernel: &core.kernel,
             k_mm_jitter: core.jitter,
             z: &core.z_train,
+            slots: core.slots(),
+            zz: core.supply().map(|supply| &supply.exact().zz),
             k_mm_l,
             q_mean,
             q_l,
@@ -57,22 +66,23 @@ impl<'a, P: ModelPrecision> SvgpSystem<'a, P> {
 /// [`GprError::CholeskyFailed`] when a rounding storage cannot factor
 /// `K_mm` in `f64`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn predict_svgp_into<P: ModelPrecision>(
-    core: &SparseCore,
-    sys: &SvgpSystem<'_, P>,
+pub(crate) fn predict_svgp_into<'s, P: ModelPrecision, U: Supply>(
+    core: &SparseCore<U>,
+    sys: &SvgpSystem<'_, P, U>,
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
+    cross: impl IntoIterator<Item = DistanceSource<'s>>,
     options: PredictOptions,
-    scratch: &mut PredictScratch<P::Storage>,
+    scratch: &mut PredictScratch<P::Storage, U>,
     out: &mut Prediction<P::Refine>,
 ) -> Result<(), GprError> {
     let mut mapped = std::mem::take(&mut scratch.xs);
     let result = core
         .map_query_into(xs, n_rows, n_cols, &mut mapped)
         .and_then(|()| {
-            with_kernel_exp!(core.math, M => svgp_predict_into::<M, P>(
-                sys, &mapped, n_rows, options, scratch, out
+            with_kernel_exp!(core.math, M => svgp_predict_into::<M, P, U>(
+                sys, &mapped, n_rows, cross, options, scratch, out
             ))
         });
     scratch.xs = mapped;
@@ -84,13 +94,16 @@ pub(crate) fn predict_svgp_into<P: ModelPrecision>(
 /// (`n_rows × d`, column-major) into `out`, in transformed units.
 ///
 /// A rounding storage (`f32`) predicts in `f64`, as the other sparse models
-/// do: `K_mm` factored again in `f64`; `q` is `f64` already.
-pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
-    sys: &SvgpSystem<'_, P>,
+/// do: `K_mm` factored again in `f64`; `q` is `f64` already. The supplied
+/// `d²` of `cross` (`m × n_rows`) are bound at the scalar the prediction
+/// runs in.
+pub(crate) fn svgp_predict_into<'s, M: crate::math::KernelMath, P: ModelPrecision, U: Supply>(
+    sys: &SvgpSystem<'_, P, U>,
     xs: &[f64],
     n_rows: usize,
+    cross: impl IntoIterator<Item = DistanceSource<'s>>,
     options: PredictOptions,
-    scratch: &mut PredictScratch<P::Storage>,
+    scratch: &mut PredictScratch<P::Storage, U>,
     out: &mut Prediction<P::Refine>,
 ) -> Result<(), GprError> {
     reset_prediction(out, n_rows, options.variance_kind);
@@ -101,32 +114,61 @@ pub(crate) fn svgp_predict_into<M: crate::math::KernelMath, P: ModelPrecision>(
         out.variance[col] = P::Refine::from_f64(predictive_variance(latent, sys.noise, kind));
     };
     if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
-        let F64System {
-            compiled,
-            bufs,
-            k_mm_l,
-            ..
-        } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.k_mm_jitter)?;
-        return svgp_latent::<M, f64>(compiled, bufs, sys, xs, n_rows, k_mm_l, &mut write);
+        let mut query = std::mem::take(&mut scratch.query64);
+        let result = (|| {
+            let bound = QuerySources::<f64>::bind_rect(sys.slots, cross, (m, n_rows), &mut query)?;
+            let F64System {
+                compiled,
+                bufs,
+                k_mm_l,
+                ..
+            } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.zz, sys.k_mm_jitter)?;
+            svgp_latent::<M, f64, U>(
+                compiled,
+                bufs,
+                sys,
+                xs,
+                n_rows,
+                U::rects(&bound),
+                k_mm_l,
+                &mut write,
+            )
+        })();
+        scratch.query64 = query;
+        return result;
     }
     let PredictScratch {
         plan,
         storage: bufs,
+        query_storage,
         ..
     } = scratch;
     let compiled = plan.get(sys.kernel);
-    svgp_latent::<M, P::Storage>(compiled, bufs, sys, xs, n_rows, sys.k_mm_l, &mut write)
+    let bound =
+        QuerySources::<P::Storage>::bind_rect(sys.slots, cross, (m, n_rows), query_storage)?;
+    svgp_latent::<M, P::Storage, U>(
+        compiled,
+        bufs,
+        sys,
+        xs,
+        n_rows,
+        U::rects(&bound),
+        sys.k_mm_l,
+        &mut write,
+    )
 }
 
 /// For each query column: `a* = L_mm⁻¹ k(Z, x*)`, the mean `a*ᵀ q_mean`,
 /// and the latent variance `k(x*, x*) − ‖a*‖² + ‖L_qᵀ a*‖²` clamped at zero,
 /// passed to `write(col, mean, latent)`, all in `S`.
-fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar>(
-    compiled: &CompiledKernel<S>,
+#[allow(clippy::too_many_arguments)]
+fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar, U: Supply>(
+    compiled: &CompiledKernel<S, U>,
     bufs: &mut PredictBuffers<S>,
-    sys: &SvgpSystem<'_, impl ModelPrecision>,
+    sys: &SvgpSystem<'_, impl ModelPrecision, U>,
     xs: &[f64],
     n_rows: usize,
+    cross: <U as SupplyViews>::Rects<'_, S>,
     k_mm_l: MatRef<'_, S>,
     write: &mut impl FnMut(usize, f64, f64),
 ) -> Result<(), GprError> {
@@ -143,11 +185,20 @@ fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar>(
     let z_mat = pack_into(z_buf, sys.z, m, d);
     let q_mat = pack_into(query, xs, n_rows, d);
     let mut a_star = view(k_sz, m, n_rows);
-    kernel.cross_into::<M>(compiled, z_mat.as_ref(), q_mat.as_ref(), a_star.as_mut())?;
+    kernel.cross_into::<M, U>(
+        compiled,
+        CrossViews {
+            x1: z_mat.as_ref(),
+            x2: q_mat.as_ref(),
+            dist: None,
+            slots: U::shorter_rects(cross),
+        },
+        a_star.as_mut(),
+    )?;
     solve_lower(k_mm_l, a_star.as_mut());
     kss.clear();
     kss.resize(n_rows, zero);
-    compiled.fill_diag_points(q_mat.as_ref(), kss)?;
+    compiled.fill_diag_rows(q_mat.as_ref(), kss)?;
     for col in 0..n_rows {
         let (mut mean, mut a_norm, mut lt_norm) = (zero, zero, zero);
         for j in 0..m {
@@ -177,28 +228,39 @@ fn svgp_latent<M: crate::math::KernelMath, S: KernelScalar>(
 /// # Errors
 ///
 /// Same as [`predict_svgp_into`].
-pub(crate) fn predict_svgp_covariance<P: ModelPrecision>(
-    core: &SparseCore,
-    sys: &SvgpSystem<'_, P>,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predict_svgp_covariance<'s, P: ModelPrecision, U: Supply>(
+    core: &SparseCore<U>,
+    sys: &SvgpSystem<'_, P, U>,
     xs: &[f64],
     n_rows: usize,
     n_cols: usize,
+    cross: impl IntoIterator<Item = DistanceSource<'s>>,
+    square: impl IntoIterator<Item = DistanceSource<'s>>,
     options: PredictOptions,
 ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-    let mut scratch = PredictScratch::<P::Storage>::default();
+    let mut scratch = PredictScratch::<P::Storage, U>::default();
     let mut mapped = Vec::new();
     core.map_query_into(xs, n_rows, n_cols, &mut mapped)?;
     let mut pred = Prediction::default();
     with_kernel_exp!(core.math, M => {
-        svgp_predict_into::<M, P>(sys, &mapped, n_rows, options, &mut scratch, &mut pred)?;
+        svgp_predict_into::<M, P, U>(sys, &mapped, n_rows, cross, options, &mut scratch, &mut pred)?;
         if <P::Storage as ScalarOps>::ROUNDS_FROM_F64 {
+            let mut squares = QueryScratch::<f64>::new();
+            let bound = QuerySources::<f64>::bind_square(sys.slots, square, n_rows, &mut squares)?;
             let compiled = scratch.plan64.get(sys.kernel);
-            let latent = svgp_latent_covariance::<M, f64>(compiled, &mut scratch.f64, sys, n_rows)?;
+            let latent = svgp_latent_covariance::<M, f64, U>(
+                compiled, &mut scratch.f64, sys, n_rows, U::squares(&bound),
+            )?;
             core.finish_covariance::<P, f64>(latent.as_ref(), pred)
         } else {
+            let mut squares = QueryScratch::<P::Storage>::new();
+            let bound =
+                QuerySources::<P::Storage>::bind_square(sys.slots, square, n_rows, &mut squares)?;
             let compiled = scratch.plan.get(sys.kernel);
-            let latent =
-                svgp_latent_covariance::<M, P::Storage>(compiled, &mut scratch.storage, sys, n_rows)?;
+            let latent = svgp_latent_covariance::<M, P::Storage, U>(
+                compiled, &mut scratch.storage, sys, n_rows, U::squares(&bound),
+            )?;
             core.finish_covariance::<P, P::Storage>(latent.as_ref(), pred)
         }
     })
@@ -206,11 +268,12 @@ pub(crate) fn predict_svgp_covariance<P: ModelPrecision>(
 
 /// `K** − AᵀA + UᵀU` (`q × q`) from the buffers [`svgp_predict_into`] left:
 /// the packed queries and `A`.
-fn svgp_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
-    compiled: &CompiledKernel<S>,
+fn svgp_latent_covariance<M: crate::math::KernelMath, S: KernelScalar, U: Supply>(
+    compiled: &CompiledKernel<S, U>,
     bufs: &mut PredictBuffers<S>,
-    sys: &SvgpSystem<'_, impl ModelPrecision>,
+    sys: &SvgpSystem<'_, impl ModelPrecision, U>,
     q: usize,
+    square: <U as SupplyViews>::Squares<'_, S>,
 ) -> Result<Mat<S>, GprError> {
     let (m, d) = (sys.m, sys.d);
     let zero = S::from_f64(0.0);
@@ -222,9 +285,9 @@ fn svgp_latent_covariance<M: crate::math::KernelMath, S: KernelScalar>(
     } = bufs;
     let queries = view(query, q, d);
     let mut cov = Mat::<S>::zeros(q, q);
-    kernel.gram::<M>(
+    kernel.gram::<M, U>(
         compiled,
-        GramInputs::points(queries.as_ref()),
+        GramInputs::supplied(queries.as_ref(), U::shorter_squares(square)),
         cov.as_mut(),
         Triangle::Full,
     )?;

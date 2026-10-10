@@ -4,7 +4,7 @@
 //! `r² = Σ_d w_d Δ_d²` (`w_d = 1/ℓ_d²`). The shape checks, the `r²` sums from
 //! coordinates or from the `(Δx_d)²` cache, and the matrix loops live here.
 
-use super::dist::ArdSqDiff;
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState, PairAt};
 use super::{KernelScalar, Triangle, write_square};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
@@ -119,14 +119,80 @@ pub(crate) fn r2_from_cache<T: KernelScalar>(
     inv_ell_sq: &[f64],
     pick: Pick,
 ) -> Result<ArdR2<T>, GprError> {
-    sum_r2(inv_ell_sq, pick, |dim| {
-        let v = cache.get(dim, row, col);
+    let finite = |v: T| {
         if v.is_finite() {
             Ok(v)
         } else {
             Err(GprError::NonFiniteInput)
         }
-    })
+    };
+    // The layout is matched once per pair, so the loop over the dimensions
+    // only indexes.
+    match cache.pair(row, col) {
+        PairAt::Strided { data, stride, at } => {
+            sum_r2(inv_ell_sq, pick, |dim| finite(data[dim * stride + at]))
+        }
+        PairAt::Tables { tables, at } => sum_r2(inv_ell_sq, pick, |dim| finite(tables[dim][at])),
+    }
+}
+
+/// [`ArdR2`] of the pair `(row, col)` from rectangular `(Δ_d)²` blocks.
+/// Each value is checked as it is read: an `f64` model's prediction blocks
+/// are checked here, not when they are bound
+/// ([`crate::kernel::QuerySources::bind_rect`]).
+///
+/// # Errors
+///
+/// Returns [`GprError::InvalidDistance`] if a block value is not finite or
+/// is negative (at its place in the caller's table), or
+/// [`GprError::NonFiniteKernelValue`] if `r²` is not finite.
+#[inline]
+pub(crate) fn r2_from_blocks<T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
+    row: usize,
+    col: usize,
+    inv_ell_sq: &[f64],
+    pick: Pick,
+) -> Result<ArdR2<T>, GprError> {
+    sum_r2(inv_ell_sq, pick, |dim| blocks.read(dim, row, col))
+}
+
+/// Writes every entry of the rectangular `out` from `(Δ_d)²` blocks.
+/// `pair(row, col)` is the value.
+pub(crate) fn write_from_blocks<T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
+    out: MatMut<'_, T>,
+    d: usize,
+    pair: impl FnMut(usize, usize) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    require_blocks(blocks, out.as_ref(), d)?;
+    super::write_rect(out, pair)
+}
+
+/// Checks that `blocks` has `d` dimensions and the shape of `out`.
+pub(crate) fn require_blocks<T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
+    out: MatRef<'_, T>,
+    d: usize,
+) -> Result<(), GprError> {
+    if blocks.d() != d {
+        return Err(GprError::DimensionMismatch {
+            x_dim: blocks.d(),
+            expected_dim: d,
+        });
+    }
+    if out.nrows() != blocks.rows() || out.ncols() != blocks.cols() {
+        return Err(GprError::ShapeMismatch {
+            reason: format!(
+                "output is {}x{}, expected {}x{}",
+                out.nrows(),
+                out.ncols(),
+                blocks.rows(),
+                blocks.cols()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Rejects an empty `x` or one whose column count is not `expected_d`.
@@ -231,7 +297,34 @@ pub(crate) fn write_from_cache<T: KernelScalar>(
 ) -> Result<(), GprError> {
     let n = require_square_out(out.as_ref())?;
     super::dist::require_ard_sq_diff_shape(cache, n, d)?;
-    write_square(out, uplo, pair)
+    write_cached(cache, out, uplo, pair)
+}
+
+/// Writes `pair(row, col)` over `uplo` of the square `out`, in the order a
+/// cache reads best: the lower triangle of a cache of row runs four rows
+/// at a time (each row's run read along its columns, each output column
+/// written four rows at once), and every other case as [`write_square`].
+pub(crate) fn write_cached<T: KernelScalar>(
+    cache: ArdSqDiff<'_, T>,
+    mut out: MatMut<'_, T>,
+    uplo: Triangle,
+    mut pair: impl FnMut(usize, usize) -> Result<T, GprError>,
+) -> Result<(), GprError> {
+    if cache.rows().is_none() || uplo != Triangle::Lower {
+        return write_square(out, uplo, pair);
+    }
+    let n = require_square_out(out.as_ref())?;
+    let mut r0 = 0;
+    while r0 < n {
+        let r1 = (r0 + 4).min(n);
+        for col in 0..r1 {
+            for row in r0.max(col)..r1 {
+                out[(row, col)] = pair(row, col)?;
+            }
+        }
+        r0 = r1;
+    }
+    Ok(())
 }
 
 /// [`write_from_points`] through the vectorized loop of `profile` when the
@@ -290,7 +383,7 @@ pub(crate) fn write_from_cache_simd<T: KernelScalar, P: super::simd::ard::Profil
     {
         return Ok(());
     }
-    write_square(out, uplo, |row, col| pair(n, row, col))
+    write_cached(cache, out, uplo, |row, col| pair(n, row, col))
 }
 
 /// A rectangular `out` (train × test, checked by [`require_cross`]) through

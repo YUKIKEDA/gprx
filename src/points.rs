@@ -116,13 +116,13 @@ impl<I: RegistryId> IdRegistry<I> {
             index_to_id.push(id);
             max_id = Some(max_id.map_or(raw, |seen: u64| seen.max(raw)));
         }
-        if let Some(max_id) = max_id {
-            if next_id <= max_id {
-                return Err(persist_err(
-                    PersistErrorKind::Config,
-                    format!("config next id must exceed every stored value of {key}"),
-                ));
-            }
+        if let Some(max_id) = max_id
+            && next_id <= max_id
+        {
+            return Err(persist_err(
+                PersistErrorKind::Config,
+                format!("config next id must exceed every stored value of {key}"),
+            ));
         }
         Ok(Self {
             id_to_index,

@@ -11,8 +11,12 @@ use super::{ExactFit, LeafCache};
 ///
 /// Does not own hyperparameters. After a successful evaluation, the fitted
 /// model's kernel and likelihood match `params`.
-pub struct GprObjective<'a, P: crate::precision::GpScalar = crate::precision::DoublePrecision> {
-    model: ExactFit<'a, P>,
+pub struct GprObjective<
+    'a,
+    P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+    K: crate::kernel::ModelKernel = crate::kernel::KernelSpec,
+> {
+    model: ExactFit<'a, P, K>,
     scratch: Vec<f64>,
     leaves: LeafCache<P::Storage>,
     /// Rebuild only dirty leaves in [`Objective::value`] /
@@ -21,11 +25,12 @@ pub struct GprObjective<'a, P: crate::precision::GpScalar = crate::precision::Do
     incremental: bool,
 }
 
-impl<'a, P> GprObjective<'a, P>
+impl<'a, P, K> GprObjective<'a, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
-    pub(crate) fn new(model: ExactFit<'a, P>) -> Self {
+    pub(crate) fn new(model: ExactFit<'a, P, K>) -> Self {
         let scratch = vec![0.0; model.num_params()];
         Self {
             model,
@@ -63,9 +68,10 @@ where
     }
 }
 
-impl<P> Objective for GprObjective<'_, P>
+impl<P, K> Objective for GprObjective<'_, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn num_params(&self) -> usize {
         self.model.num_params()
@@ -94,18 +100,20 @@ where
     }
 }
 
-impl<P> IncrementalObjective for GprObjective<'_, P>
+impl<P, K> IncrementalObjective for GprObjective<'_, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
         self.leaf_value(params, Some(indices))
     }
 }
 
-impl<P> Differentiable for GprObjective<'_, P>
+impl<P, K> Differentiable for GprObjective<'_, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         crate::objective::count_joint_call!();
@@ -124,9 +132,10 @@ where
     }
 }
 
-impl<P> TwiceDifferentiable for GprObjective<'_, P>
+impl<P, K> TwiceDifferentiable for GprObjective<'_, P, K>
 where
     P: crate::precision::GpScalar,
+    K: crate::kernel::ModelKernel,
 {
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
         self.model.hessian_into_fit(params, out)

@@ -132,7 +132,7 @@ pub(crate) fn validate_inducing(z: &[f64], m: usize, d: usize) -> Result<(), Gpr
     if m == 0 || d == 0 {
         return Err(GprError::EmptyInput);
     }
-    if z.len() % m == 0 {
+    if z.len().is_multiple_of(m) {
         let z_dim = z.len() / m;
         if z_dim != d {
             return Err(GprError::DimensionMismatch {

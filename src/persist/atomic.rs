@@ -20,8 +20,35 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// a new file and leaves the mapped one untouched. On failure `path` is
 /// unchanged and the temporary file is removed.
 pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GprError> {
+    write_atomic_with(path, |file, temp| {
+        file.write_all(bytes)
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}")))
+    })
+}
+
+/// [`write_atomic`] of what `write` writes to the temporary file (handed
+/// over open, with its path for messages), so a large file is written as it
+/// is formed rather than built in memory first. The temporary file is made
+/// new (an existing path or link there is refused) and synced through the
+/// handle that wrote it before the rename.
+pub(super) fn write_atomic_with(
+    path: &Path,
+    write: impl FnOnce(&mut File, &Path) -> Result<(), GprError>,
+) -> Result<(), GprError> {
     let temp = temp_path(path)?;
-    let written = write_synced(&temp, bytes).and_then(|()| {
+    let mut file: File = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {temp:?}: {err}")))?;
+    let synced = write(&mut file, &temp).and_then(|()| {
+        file.sync_all()
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("sync {temp:?}: {err}")))
+    });
+    // Closed before the rename or the removal, which Windows refuses on an
+    // open file.
+    drop(file);
+    let written = synced.and_then(|()| {
         std::fs::rename(&temp, path)
             .map_err(|err| persist_err(PersistErrorKind::Io, format!("replace {path:?}: {err}")))
     });
@@ -45,20 +72,10 @@ fn temp_path(path: &Path) -> Result<PathBuf, GprError> {
     Ok(path.with_file_name(temp_name))
 }
 
-fn write_synced(temp: &Path, bytes: &[u8]) -> Result<(), GprError> {
-    let mut file: File = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp)
-        .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {temp:?}: {err}")))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|err| persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}")))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::write_atomic;
+    use super::{write_atomic, write_atomic_with};
+    use crate::error::{GprError, PersistErrorKind};
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("gprx_atomic_{name}_{}", std::process::id()));
@@ -101,6 +118,25 @@ mod tests {
         std::fs::create_dir_all(path.join("inner")).expect("dir");
         assert!(write_atomic(&path, b"bytes").is_err());
         assert!(path.join("inner").is_dir());
+        assert_eq!(entries(&dir), ["model.safetensors"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_target_and_removes_the_temporary() {
+        let dir = scratch_dir("write_fails");
+        let path = dir.join("model.safetensors");
+        write_atomic(&path, b"old").expect("first");
+        let failed = write_atomic_with(&path, |file, _| {
+            use std::io::Write;
+            file.write_all(b"partial").expect("write");
+            Err(GprError::PersistFailed {
+                kind: PersistErrorKind::Tensor,
+                reason: "stop".into(),
+            })
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&path).expect("read"), b"old");
         assert_eq!(entries(&dir), ["model.safetensors"]);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -27,7 +27,9 @@
 | `online_sgpr` | `OnlineSgpr::save` | `LoadedSgpr::load` | `m`、`point_ids`、`next_point_id`、`inducing_ids`、`next_inducing_id` | `x`、`y`、`z`、`z_train` |
 | `svgp` | `FittedSvgp::save` | `LoadedSvgp::load` | `m` | `x`、`y`、`z`、`z_train`、`q_mean`、`q_l` |
 
-間違ったローダーで読むと、`GprError::PersistFailed`（`kind: WrongModel`）で断られ、メッセージに正しいローダーの名前が入る（例: "config.json holds a svgp model; load it with LoadedSvgp::load"）。`LoadedGpr::load` も同じ。
+`DistanceKernel`（呼び出し側が渡す二乗距離）のモデルは、同じ `model` の値に `distance` キーを足す。読むのは、そのマーカーの `LoadedDistanceGpr`、`LoadedDistanceSgpr`、`LoadedDistanceSvgp`（10 節）。
+
+間違ったローダーで読むと、`GprError::PersistFailed`（`kind: WrongModel`）で断られ、メッセージに正しいローダーの名前が入る（例: "config.json holds a svgp model; load it with LoadedSvgp::load"）。`LoadedGpr::load` も同じで、座標のファイルを距離のローダーで読んだとき、その逆のときも同じ。
 
 ## 3. Exact の `config.json`
 
@@ -37,7 +39,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 | --- | --- | --- | --- |
 | `format_version` | 整数 | 必須 | `1`。最初に検査する（8 節） |
 | `n` | 整数 | 必須 | 学習点の数。`0` は `EmptyInput` |
-| `d` | 整数 | 必須 | 特徴の数。`0` は `EmptyInput` |
+| `d` | 整数 | 必須 | 特徴の数。`0` は `EmptyInput`。ただし `distance_only` のモデルでは `d` は `0`（10 節） |
 | `has_factor` | bool | 必須 | `l` と `alpha` がテンソルのファイルにあるか（7 節） |
 | `factor_kind` | `"llt"` か `"ldlt"` | 必須 | `llt` は `FittedGpr`、`ldlt` は `OnlineGpr` として読む |
 | `precision` | `"double"`、`"single"`、`"mixed"` | `double` なら省略 | 格納と予測のスカラー |
@@ -54,6 +56,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 | `y_transform` | オブジェクトか文字列 | 必須 | 学習後の目的変数の変換（5.4 節） |
 | `point_ids` | 整数の配列 | `ldlt` では必須、それ以外は無し | 各行の `PointId`。行の順。長さは `n` に等しい |
 | `next_point_id` | 整数 | `ldlt` では必須、それ以外は無し | 次に `insert` が返す id |
+| `distance` | オブジェクト | `DistanceKernel` のモデルだけ | マーカーと slot 表（10 節） |
 
 `Constant × RBF`、`MinMaxInput`、`StandardizeTarget` のモデルを `FittedGpr::save` した例:
 
@@ -95,6 +98,7 @@ JSON のオブジェクトで、整形して書く。未知のキーは読むと
 | `jitter` | `K_mm` を分解するときの方針（Sparse の既定は adaptive: `initial` 1e-8、`multiplier` 10、`max_retries` 5、`max_jitter` 1e-3） |
 | `has_factor`、`factor_kind`、`factor_jitter`、`distance_cache` | 書かない。因子は保存しない（7 節） |
 | `inducing_ids`、`next_inducing_id` | 追加。`online_sgpr` では必須、それ以外は無し。`online_sgpr` では `point_ids` と `next_point_id` も必須 |
+| `distance` | `DistanceKernel` のモデルで追加、それ以外は無し。Sparse のものは `inducing` も持つ（10 節） |
 
 `precision`、`residual`、`math`、`kernel`、`likelihood`、4 つの変換のキーは、3 節と同じ形。例（`svgp`、同じカーネルと変換、誘導点 2 つ）:
 
@@ -137,6 +141,7 @@ enum は serde の外部タグで、名前は `snake_case`。フィールドの�
 | `white` | `variance`（区間つき） |
 | `sum`、`product` | `left`、`right`: それぞれカーネル |
 | `custom` | `persist_id`（文字列）、`state`（任意の JSON） |
+| `distance` | `slot`（整数: slot 表での位置）、`leaf`: スカラーの slot なら `rbf`、`matern`、`periodic`、`rational_quadratic`、`custom` のカーネル。ARD の slot なら次元ごとに長さスケールを 1 つ持つ `rbf_ard`、`matern_ard`、`rational_quadratic_ard` のカーネル（10 節） |
 
 `sum` と `product` の深さに、フォーマットは上限を置かない（8 節）。`lengthscales` が空の配列なら `EmptyInput`。
 
@@ -220,6 +225,8 @@ enum は serde の外部タグで、名前は `snake_case`。フィールドの�
 | `q_mean` | `[m]` | `svgp` のみ | whitened な `q(u)` の平均 |
 | `q_l` | `[m, m]` | `svgp` のみ | whitened な `q(u)` の共分散の下三角の Cholesky 因子。対角より上は 0、対角は正 |
 
+`DistanceKernel` のモデルは slot ごとにテンソル `d2.<k>` を 1 つ足す（10 節）。
+
 ### 6.3 保存しないもの
 
 Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保存しない。読み込みで組み直す。保存できるのは、Exact の因子 `l` と `alpha` だけ（7 節）。
@@ -263,7 +270,8 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 | 同じ種類に同じ `persist_id` を 2 回登録した | `GprError::PersistFailed { kind: InvalidPersistId, reason }` |
 | `persist_id` を実装していない `custom` のカーネルや変換の保存 | `GprError::PersistFailed { kind: NotPersistable, reason }` |
 | `format_version` が `1` でない | `GprError::UnsupportedPersistVersion` |
-| `n`、`d`、（Sparse の）`m` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
+| `n`、`d`（`distance_only` を除く）、（Sparse の）`m` が `0`、`lengthscales` が空 | `GprError::EmptyInput` |
+| 保存された `d²` が有限でない、負、または対角が 0 でない。Sparse のブロックの誘導点の行が対称な正方行列でない | `GprError::InvalidDistance` |
 | コンストラクタが断る保存値（境界、ジッター、カーネルのパラメータ） | そのコンストラクタ自身のエラー |
 
 ディレクトリは、信頼できる入力として扱う。JSON パーサーの上限（配列とオブジェクトの入れ子 128 段）より深い `sum` / `product` / `pipeline` / `columnwise` の木は、デコードの前に `PersistFailed` になる。読み込みが検査するのは、形と dtype、保存したテンソルがすべて有限であること（`NaN` や `±∞` は `PersistFailed`）、および `q` の有限性と下三角であること。
@@ -299,3 +307,80 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 ```
 
 `order="F"` が、`x[i, j]` を「点 `i` の特徴 `j` の値」にする。既定の行優先で読むと、`d > 1` のときは、同じバイト列が入れ替わった行列になる。
+
+## 10. 供給された距離のモデル
+
+`DistanceKernel` のモデル（カーネルが、呼び出し側が渡す二乗距離を読む: `ScalarDistance`、`ArdDistance`）も、同じ `save` / `save_with_factor` で同じ 2 つのファイルに保存する。足すのは、モデルが持つ学習の `d²` と slot の表である。読み込むと、カーネルは**新しい slot** を持つ。保存前の `ScalarDistance` や `ArdDistance` は、そのどれも指さない。読み込んだモデルの `slots()`（保存したカーネルの `DistanceKernel::slots` の順）か `to_kernel()` から slot を取り、予測の source をそれに結び付ける。
+
+| モデル | 読むもの | マーカーの型 |
+| --- | --- | --- |
+| `DistanceKernel<C>` の `FittedGpr` / `OnlineGpr` | `LoadedDistanceGpr::<C>::load` | `C` は `DistanceOnly` か `WithPoints` |
+| `DistanceKernel<C>` の `FittedSgpr` / `OnlineSgpr` | `LoadedDistanceSgpr::<C>::load` | 同上 |
+| `DistanceKernel<C>` の `FittedSvgp` | `LoadedDistanceSvgp::<C>::load` | 同上 |
+
+座標のローダー（`LoadedGpr`、`LoadedSgpr`、`LoadedSvgp`）は変わらず、距離のファイルを断る。距離のローダーは、座標のファイルと、もう一方のマーカーのファイルを断る。どれも `WrongModel` である。
+
+### 10.1 `config.json` の `distance`
+
+```json
+"distance": {
+  "points": "distance_only",
+  "slots": [ { "kind": "scalar" }, { "kind": "ard", "dims": 2 } ]
+}
+```
+
+- `points`: `"distance_only"`（カーネルは渡された距離だけを読む。`d` は `0` で、`x`、`z`、`z_train` は空）か `"with_points"`（カーネルは `x` を読む座標の葉も持つ）。
+- `slots`: slot の表。カーネルの `DistanceKernel::slots` の順（深さ優先、最初に現れた順）。slot は `scalar`（組ごとに `d²` が 1 つ）か、`dims` を持つ `ard`（組ごと、次元ごとに `d²` が 1 つ）。カーネルの木は表のすべての slot を表の順に読まなければならない。そうでなければ読み込みは `PersistFailed`（`kind: Config`）で失敗する。slot の無い距離カーネル（`DistanceKernel::from` で包んだ座標の木）では表は空で、`d2.<k>` のテンソルは書かない。
+- slot の上のカーネルの葉は `{"distance": {"slot": k, "leaf": <kernel>}}`（5.1 節）。`custom` の葉は 5.5 節と同じく `PersistRegistry` で戻す。
+- `inducing`（Sparse だけ。`distance` の中にあり、そこでは必須）: 誘導点である学習点を、ブロックの列の順に並べたもの。`m` 個で、どれも `n` 未満、重複なし。読み込みは、`n` 以上の添字を `IndexOutOfRange`、重複を `InvalidConfig`、個数の違いを `PersistFailed`（`kind: Config`）で断る。`with_points` のモデルでは、`z` と `z_train` が、`inducing` の指す `x` の行と変換後の `x` の行に、fit が作るとおりビットで一致しなければならない。そうでなければ `PersistFailed`（`kind: Config`）。
+- `distance_only` のカーネルは座標を読む葉を持たない（`constant` と `white` は持てる）。木にそれがあるファイルは `PersistFailed`（`kind: Config`）。
+
+実際の例（3 点で、スカラーの RBF と 2 次元の ARD RBF の和を `FittedGpr::save` したもの）:
+
+```json
+{
+  "format_version": 1,
+  "n": 3,
+  "d": 0,
+  "has_factor": false,
+  "factor_kind": "llt",
+  "kernel": {
+    "sum": {
+      "left":  { "distance": { "slot": 0, "leaf": { "rbf": { "lengthscale": { "value": 1.0, "lo": 0.00001, "hi": 100000.0 } } } } },
+      "right": { "distance": { "slot": 1, "leaf": { "rbf_ard": { "lengthscales": [
+        { "value": 1.0, "lo": 0.00001, "hi": 100000.0 },
+        { "value": 2.0, "lo": 0.00001, "hi": 100000.0 }
+      ] } } } }
+    }
+  },
+  "likelihood": { "noise_variance": { "value": 0.1, "lo": 0.00001, "hi": 100000.0 } },
+  "jitter": { "fixed": { "jitter": 0.0 } },
+  "distance_cache": "always",
+  "x_unfitted": "identity",
+  "y_unfitted": "identity",
+  "x_transform": "identity",
+  "y_transform": "identity",
+  "distance": {
+    "points": "distance_only",
+    "slots": [ { "kind": "scalar" }, { "kind": "ard", "dims": 2 } ]
+  }
+}
+```
+
+テンソルは `x`（`[3, 0]`）、`y`、`d2.0`（`[6]`）、`d2.1`（`[2, 6]`）。スカラーの slot だけで誘導点 `[0, 2]` の `FittedSgpr::save` は、`"model": "sgpr"`、`"m": 2`、`"distance": {"points": "distance_only", "slots": [{"kind": "scalar"}], "inducing": [0, 2]}` を書き、`d2.0` の形は `[3, 2]`。（どちらも `save` の実際の出力で、キーは全部ある。ファイルは 1 行 1 キーで、ここでは収めるために畳んだ。）
+
+### 10.2 テンソル
+
+`d2.<k>` は slot `k` の学習の `d²` を持つ。
+
+| モデル | 形（スカラーの slot） | 形（ARD の slot） | 並び | dtype |
+| --- | --- | --- | --- | --- |
+| Exact（`model` キー無し） | `[n(n+1)/2]` | `[dims, n(n+1)/2]` | 下三角を列ごとに: 列 `j` が行 `j..n`（対角を含む）を持ち、次に列 `j + 1`。ARD の slot は次元を順に並べる | `single` は `F32`、`double` と `mixed` は `F64` |
+| Sparse（`sgpr`、`online_sgpr`、`svgp`） | `[n, m]` | `[dims, n, m]` | ブロックごとに列優先。`n` 個の学習点 × `m` 個の誘導点。ARD の slot は次元を順に並べる | `F64` |
+
+- 値は、モデルが持っているもの（`tidy` の修復の後）で、モデルの点の順（online のモデルなら生きている点を `point_ids` の順）。更新のために ARD の slot を行の並びに置き直した online のモデルも、上の正規の並びで書く。
+- `single` の Exact は `f32` のストアをそのまま書く。`mixed` の Exact は呼び出し側の `f64` の値（`f32` の写しの横に持っている）を書き、読み込みでもう一度丸める。Sparse のモデルはどの精度でもブロックを `f64` で持つので、そのまま書く。
+- 読み込みは表の各 slot `k` の `d2.<k>` だけを読む。どの slot も指さないテンソルは読まない。`has_factor` が `false` のときの `l` と `alpha` も読まない（座標のファイルと同じ）。
+- 読み込みでは、fit が source を検査するのと同じく値を検査する。有限、非負、対角が 0（Exact）。ブロックも同じで、誘導点の行が対角 0 の対称な正方行列であること（Sparse）。違反は `GprError::InvalidDistance`。
+- Exact の `has_factor: false` は、保存した `d²` から保存した `θ` でもう一度分解する。`has_factor: true` は 7 節のとおり `l` と `alpha` を読む。Sparse のモデルは 7 節のとおり、保存したブロックからもう一度分解する。
+

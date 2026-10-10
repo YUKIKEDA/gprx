@@ -2,9 +2,28 @@
 #![allow(dead_code)]
 
 pub mod check;
+pub mod distance;
 pub mod problems;
 #[path = "../../src/rng.rs"]
 pub mod rng;
 
 #[allow(unused_imports)]
 pub use check::*;
+
+/// The places of the inducing points of `online` among its training
+/// points ([`gprx::OnlineSgpr::point_ids`]).
+pub fn inducing_places<O, P: gprx::GpScalar, C: gprx::kernel::PointUse>(
+    online: &gprx::OnlineSgpr<O, P, gprx::kernel::DistanceKernel<C>>,
+) -> Vec<usize> {
+    let ids = online.point_ids();
+    let places: Vec<usize> = online
+        .inducing_points()
+        .filter_map(|id| ids.iter().position(|&p| p == id))
+        .collect();
+    assert_eq!(
+        places.len(),
+        online.inducing_ids().len(),
+        "every inducing point is live"
+    );
+    places
+}

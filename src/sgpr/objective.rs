@@ -1,6 +1,7 @@
 //! [`SgprObjective`]: the negative VFE bound as an optimizer objective.
 
 use crate::error::GprError;
+use crate::kernel::ModelKernel;
 use crate::objective::{Differentiable, Objective, TwiceDifferentiable};
 use crate::param::Interval;
 
@@ -9,27 +10,28 @@ use super::{FittedSgpr, InducingLayout};
 /// Sparse VFE objective. Parameters are kernel `θ` followed by likelihood `θ`.
 ///
 /// Does not own hyperparameters. After a successful evaluation,
-/// [`FittedSgpr`]'s kernel and likelihood match `params`. [`FreeInducing`]
+/// [`FittedSgpr`]'s kernel and likelihood match `params`. [`crate::FreeInducing`]
 /// also treats column-major `Z` as parameters.
 pub struct SgprObjective<
     'a,
     O,
     I = crate::FixedInducing,
     P: crate::precision::GpScalar = crate::precision::DoublePrecision,
+    K: ModelKernel = crate::kernel::KernelSpec,
 > {
-    model: &'a mut FittedSgpr<O, I, P>,
+    model: &'a mut FittedSgpr<O, I, P, K>,
 }
 
-impl<'a, O, I, P> SgprObjective<'a, O, I, P>
+impl<'a, O, I, P, K: ModelKernel> SgprObjective<'a, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
-    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, P>) -> Self {
+    pub(crate) fn new(model: &'a mut FittedSgpr<O, I, P, K>) -> Self {
         Self { model }
     }
 }
 
-impl<O, I: InducingLayout, P> Objective for SgprObjective<'_, O, I, P>
+impl<O, I: InducingLayout<K::Supply>, P, K: ModelKernel> Objective for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
@@ -51,7 +53,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P> Differentiable for SgprObjective<'_, O, I, P>
+impl<O, I: InducingLayout<K::Supply>, P, K: ModelKernel> Differentiable
+    for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
@@ -70,7 +73,8 @@ where
     }
 }
 
-impl<O, I: InducingLayout, P> TwiceDifferentiable for SgprObjective<'_, O, I, P>
+impl<O, I: InducingLayout<K::Supply>, P, K: ModelKernel> TwiceDifferentiable
+    for SgprObjective<'_, O, I, P, K>
 where
     P: crate::precision::GpScalar,
 {
