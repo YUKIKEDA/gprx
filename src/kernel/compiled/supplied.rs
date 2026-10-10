@@ -114,33 +114,6 @@ pub(crate) fn unbound() -> GprError {
     }
 }
 
-/// No supplied squared distances: what the view of a model reads whose
-/// kernel reads none. Every read is [`unbound`].
-pub(crate) struct NoSlots;
-
-/// The one [`NoSlots`].
-pub(crate) static NO_SLOTS: NoSlots = NoSlots;
-
-impl<T> SquareSlots<T> for NoSlots {
-    fn scalar(&self, _at: usize) -> Result<MatRef<'_, T>, GprError> {
-        Err(unbound())
-    }
-
-    fn ard(&self, _at: usize) -> Result<ArdSquare<'_, T>, GprError> {
-        Err(unbound())
-    }
-}
-
-impl<T> RectSlots<T> for NoSlots {
-    fn scalar(&self, _at: usize) -> Result<MatRef<'_, T>, GprError> {
-        Err(unbound())
-    }
-
-    fn ard(&self, _at: usize) -> Result<ArdRect<'_, T>, GprError> {
-        Err(unbound())
-    }
-}
-
 /// The compiled leaf of a [`SuppliedLeaf`], typed by its slot's shape.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SuppliedCompiled<T: KernelScalar> {

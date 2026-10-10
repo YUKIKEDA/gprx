@@ -425,13 +425,14 @@ impl<C: PointUse> LoadedDistanceSgpr<C> {
     ///
     /// See the example on [`LoadedDistanceSgpr`].
     pub fn inducing_points(&self) -> Option<impl Iterator<Item = PointId> + '_> {
-        match self {
-            Self::OnlineDouble(model) => Some(model.inducing_point_iter()),
-            Self::OnlineSingle(model) => Some(model.inducing_point_iter()),
-            Self::OnlineMixed(model) => Some(model.inducing_point_iter()),
-            Self::OnlineReevaluate(model) => Some(model.inducing_point_iter()),
+        let ids = match self {
+            Self::OnlineDouble(model) => Some(model.inducing_point_ids()),
+            Self::OnlineSingle(model) => Some(model.inducing_point_ids()),
+            Self::OnlineMixed(model) => Some(model.inducing_point_ids()),
+            Self::OnlineReevaluate(model) => Some(model.inducing_point_ids()),
             Self::Double(_) | Self::Single(_) | Self::Mixed(_) | Self::Reevaluate(_) => None,
-        }
+        };
+        ids.map(|ids| ids.iter().copied())
     }
 
     /// Returns `true` for an [`OnlineSgpr`] variant.

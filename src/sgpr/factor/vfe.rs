@@ -27,7 +27,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
     w: &[P::Storage],
-    data: SparseData<'_>,
+    data: SparseData<'_, U>,
     noise: f64,
 ) -> Result<Vec<P::Refine>, GprError> {
     let reference = || {
@@ -35,7 +35,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
             kernel,
             k_mm_jitter,
             noise_likelihood(noise)?,
-            data,
+            data.clone(),
             &mut KernelScratch::new(),
             &mut KernelScratch::new(),
         )?;
@@ -80,11 +80,13 @@ where
         &core.kernel,
         core.jitter,
         core.likelihood,
-        data,
+        data.clone(),
         &mut scratch.storage,
         &mut scratch.f64,
     )?;
+    // `data` borrows `core` until here, whichever branch reads it.
     let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, w64) {
+        drop(data);
         w64.into_iter().map(P::Refine::from_f64).collect()
     } else if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64, K::Supply>(
@@ -130,7 +132,7 @@ pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T, U: Supply>(
     kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
-    data: SparseData<'_>,
+    data: SparseData<'_, U>,
     ks: &mut KernelScratch<T>,
     ks64: &mut KernelScratch<f64>,
 ) -> Result<VfeState<T>, GprError>
@@ -162,9 +164,7 @@ where
     let sets = SparseSets::<T, U>::new(
         x_mat,
         z_mat,
-        data.supply
-            .map(crate::sparse::SparseSupply::at::<T>)
-            .transpose()?,
+        U::try_map_held(data.supply.clone(), crate::sparse::SparseSupply::at::<T>)?,
     );
     // A rounding scalar returned above, so `T` is evaluated as stored below.
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
@@ -233,7 +233,7 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
     kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
-    data: SparseData<'_>,
+    data: SparseData<'_, U>,
     ks: &mut KernelScratch<T>,
     ks64: &mut KernelScratch<f64>,
 ) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {

@@ -23,7 +23,7 @@ pub(crate) struct SvgpSystem<'a, P: ModelPrecision, U: Supply = NoSupply> {
     pub(crate) z: &'a [f64],
     /// The kernel's slots, and the `f64` squares among the inducing points.
     pub(crate) slots: &'a [DistanceSlot],
-    pub(crate) zz: Option<&'a BlockStore<f64>>,
+    pub(crate) zz: <U as crate::kernel::SupplyViews>::Held<&'a BlockStore<f64>>,
     pub(crate) k_mm_l: MatRef<'a, P::Storage>,
     pub(crate) q_mean: &'a [f64],
     pub(crate) q_l: MatRef<'a, f64>,
@@ -44,7 +44,7 @@ impl<'a, P: ModelPrecision, U: Supply> SvgpSystem<'a, P, U> {
             k_mm_jitter: core.jitter,
             z: &core.z_train,
             slots: core.slots(),
-            zz: core.supply().map(|supply| &supply.exact().zz),
+            zz: U::map_held(core.supply_held(), |supply| &supply.exact().zz),
             k_mm_l,
             q_mean,
             q_l,
@@ -122,7 +122,14 @@ pub(crate) fn svgp_predict_into<'s, M: crate::math::KernelMath, P: ModelPrecisio
                 bufs,
                 k_mm_l,
                 ..
-            } = scratch.f64_system::<M>(sys.kernel, sys.z, m, d, sys.zz, sys.k_mm_jitter)?;
+            } = scratch.f64_system::<M>(
+                sys.kernel,
+                sys.z,
+                m,
+                d,
+                sys.zz.clone(),
+                sys.k_mm_jitter,
+            )?;
             svgp_latent::<M, f64, U>(
                 compiled,
                 bufs,

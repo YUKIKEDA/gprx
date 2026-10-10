@@ -18,7 +18,7 @@ use faer::{Mat, MatMut, MatRef};
 pub(crate) use self::core::*;
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
-use crate::kernel::{BlockStore, KernelSpec, RectSlots, SquareSlots, Supply, SupplyViews};
+use crate::kernel::{BlockStore, KernelSpec, Supply, SupplyViews};
 use crate::kernel::{
     CompiledKernel, CrossViews, DiagAccum, GramInputs, KernelScalar, NoSupply, Triangle,
     WeightedWalk,
