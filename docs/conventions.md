@@ -61,7 +61,7 @@ src/svgp/                  model.rs fitted.rs distance.rs tests.rs
 src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not split into leaves
 tests/                     integration tests. Goldens only under compare/goldens/
 tests/common/               check.rs (tolerance asserts) and problems.rs (Forrester / sphere, the distance baseline). Unit tests and benches include them with #[path]
-tests/alloc.rs             harness = false: its checks run one after another (#494); a new check goes in CHECKS
+tests/alloc.rs             harness = false: its checks run one after another (#494); a new check goes in CHECKS. test = false: release only (just alloc, CI)
 benches/exact.rs           criterion
 benches/distance.rs        supplied distances beside the coordinate path, at the same problem
 compare/                   one Python environment (pyproject.toml, uv.lock; group `perf`). Run from here
