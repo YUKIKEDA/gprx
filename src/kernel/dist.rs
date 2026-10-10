@@ -278,7 +278,7 @@ fn partition_count(thread_scratch: &[Mat<f64>]) -> usize {
 ///
 /// Lower triangle is filled in parallel. The upper triangle is copied afterwards
 /// so [`crate::kernel::Triangle::Full`] readers stay valid. `thread_scratch` is
-/// the detached per-worker slice from [`crate::workspace::Workspace`]; an empty
+/// the detached per-worker slice from [`crate::workspace::WorkspaceCore`]; an empty
 /// slice still parallelizes with [`worker_count`].
 pub(crate) fn fill_squared_euclidean(
     x: MatRef<'_, f64>,
@@ -753,6 +753,20 @@ enum StoreRef<'a, T> {
     Rows(&'a [Vec<T>]),
 }
 
+/// One pair of a cache in every dimension ([`ArdSqDiff::pair`]): dimension
+/// `dim` is `data[dim * stride + at]`, or `tables[dim][at]`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PairAt<'a, T> {
+    /// One buffer, the dimensions `stride` values apart.
+    Strided {
+        data: &'a [T],
+        stride: usize,
+        at: usize,
+    },
+    /// One buffer per dimension.
+    Tables { tables: &'a [Vec<T>], at: usize },
+}
+
 /// The column runs of a cache: column `col` holds rows `col..n`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LowerRuns<'a, T> {
@@ -897,13 +911,50 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         }
     }
 
-    /// `(x_row,dim − x_col,dim)²` for any pair.
+    /// Where the pair `(row, col)` sits in every dimension, the layout
+    /// read once: a loop over the dimensions then only indexes.
+    #[inline(always)]
+    pub(crate) fn pair(&self, row: usize, col: usize) -> PairAt<'a, T> {
+        let (row, col) = if row >= col { (row, col) } else { (col, row) };
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => PairAt::Strided {
+                data,
+                stride: block,
+                at: packed_col_offset(n, col) + row - col,
+            },
+            StoreRef::Flat(data) => PairAt::Strided {
+                data,
+                stride: n * n,
+                at: col * n + row,
+            },
+            StoreRef::Dense(tables) => PairAt::Tables {
+                tables,
+                at: col * n + row,
+            },
+            StoreRef::Rows(rows) => PairAt::Tables {
+                tables: rows,
+                at: row_offset(row) + col,
+            },
+        }
+    }
+
+    /// `(x_row,dim − x_col,dim)²` for any pair. A loop over the dimensions
+    /// of one pair reads [`Self::pair`] instead, which matches the layout
+    /// once.
     #[inline]
     pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
         let (row, col) = if row >= col { (row, col) } else { (col, row) };
-        match self.runs() {
-            Runs::Rows(rows) => rows.row(dim, row)[col],
-            Runs::Lower(lower) => lower.column(dim, col)[row - col],
+        // One flat match on the layout, the packed cache of a fit first: a
+        // read per pair and dimension sits in the kernels' inner loops.
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => {
+                data[dim * block + packed_col_offset(n, col) + row - col]
+            }
+            StoreRef::Rows(rows) => rows[dim][row_offset(row) + col],
+            StoreRef::Dense(tables) => tables[dim][col * n + row],
+            StoreRef::Flat(data) => data[dim * n * n + col * n + row],
         }
     }
 
@@ -1130,7 +1181,7 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
     }
 
     /// Whether every block is a dense `f64` block holding all the view's
-    /// columns, as [`Self::column`] and [`Self::gate`] read them.
+    /// columns, as [`Self::column`] and [`Gates::gate`] read them.
     pub(crate) fn dense_f64(&self) -> bool {
         let end = match self.cols {
             0 => 0,

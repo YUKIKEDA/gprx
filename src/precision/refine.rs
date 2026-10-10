@@ -253,7 +253,7 @@ pub(crate) fn refine_alpha<M: crate::math::KernelMath, R: ResidualFormula, S: Su
 
 /// Whether `α` also meets the stop test on the `f64` system.
 ///
-/// [`PromoteStorage`] converges to the solution of the rounded `f32` system.
+/// [`crate::PromoteStorage`] converges to the solution of the rounded `f32` system.
 /// When `κ(A) u_f32` is large that solution is far from the `f64` one, so the
 /// converged `α` is checked once against `K_f64 + diag · I` before it is kept.
 fn meets_f64_system<M: crate::math::KernelMath, S: Supply>(

@@ -48,8 +48,8 @@ pub(crate) fn fit_buffers<P: GpScalar, S: Supply>(
 /// Borrowed fit state: the shared core plus the LLT buffers.
 ///
 /// Every hyperparameter write (`set_params`, gradient, Hessian, `fit`,
-/// `refit`) runs here. [`FittedGpr`] lends its own buffers.
-/// [`OnlineGpr`] lends temporary ones filled from its LDLT.
+/// `refit`) runs here. [`crate::FittedGpr`] lends its own buffers.
+/// [`crate::OnlineGpr`] lends temporary ones filled from its LDLT.
 pub(crate) struct ExactFit<'a, P: GpScalar, K: ModelKernel> {
     pub(crate) core: &'a mut GprCore<P, K>,
     pub(crate) store: &'a mut LltStore<P>,

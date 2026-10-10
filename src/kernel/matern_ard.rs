@@ -496,7 +496,7 @@ impl MaternArdKernel {
 
 const NAME: &str = "Matern";
 
-/// `k` of four pairs from `r²` ([`ard_simd`](super::ard_simd)).
+/// `k` of four pairs from `r²` ([`simd::ard`](super::simd::ard)).
 struct MaternValue4<M> {
     nu: MaternNu,
     _math: PhantomData<M>,

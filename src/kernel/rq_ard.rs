@@ -479,7 +479,7 @@ enum RqOutput {
 }
 
 /// The RQ-ARD value or derivative of four pairs from `r²`
-/// ([`ard_simd`](super::ard_simd)), with `u^{−α} = exp(−α ln u)` for
+/// ([`simd::ard`](super::simd::ard)), with `u^{−α} = exp(−α ln u)` for
 /// `u = 1 + r² / (2α)`.
 struct RqProfile {
     alpha: f64,

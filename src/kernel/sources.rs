@@ -833,8 +833,8 @@ impl<T: KernelScalar> TrainSources<T> {
         Ok(())
     }
 
-    /// Makes room for one more point, so [`Self::push_point`] writes in
-    /// place: a full scalar square grows its leading dimension by a
+    /// Makes room for one more point, so [`Self::check_push`] passes and
+    /// [`Self::write_point`] writes in place: a full scalar square grows its leading dimension by a
     /// quarter, and each
     /// ARD slot reserves its own ([`ArdSqDiffBuf::reserve_point`]). The
     /// values read stay the same.
@@ -1003,7 +1003,12 @@ impl<T: KernelScalar> TrainSources<T> {
     ///
     /// # Errors
     ///
-    /// The errors of [`bind`] for a square.
+    /// Returns [`GprError::EmptyInput`] when `n` is zero,
+    /// [`GprError::LengthMismatch`] for a source of a slot the kernel does
+    /// not read, two sources of one slot, a slot without a source, or a
+    /// table of the wrong length or count, [`GprError::SizeOverflow`] when
+    /// a store does not fit, and [`GprError::InvalidDistance`] for a value
+    /// the source's check refuses.
     pub(crate) fn bind<'a>(
         slots: &[DistanceSlot],
         sources: impl IntoIterator<Item = DistanceSource<'a>>,

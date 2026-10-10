@@ -61,8 +61,8 @@ pub struct FittedSgpr<
     pub(super) b_l: Mat<P::Storage>,
     /// Storage solve `B w = A y`. Marginal likelihood uses this.
     pub(super) w: Vec<P::Storage>,
-    /// Predict weights. [`DoublePrecision`] and [`SinglePrecision`] promote `w`.
-    /// [`MixedPrecision`] stores the refined `f64` weights.
+    /// Predict weights. [`DoublePrecision`] and [`crate::SinglePrecision`]
+    /// promote `w`. [`crate::MixedPrecision`] stores the refined `f64` weights.
     pub(super) predict_w: Vec<P::Refine>,
     pub(super) k_diag_sum: P::Storage,
     pub(super) a_frobenius2: P::Storage,

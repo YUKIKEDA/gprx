@@ -625,7 +625,14 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
         Ok(Some(value))
     }
 
-    /// [`Self::weighted_cross_grads`] of the block `views` describes.
+    /// Writes `⟨weight, ∂K/∂θ_p⟩_F` for every parameter into `out`, over the
+    /// block `views` describes (two point sets, or the supplied distances
+    /// between them).
+    ///
+    /// The rectangle is full, not a triangle. A product evaluates each
+    /// non-constant factor once and hands the others down in the weight, as
+    /// [`Self::weighted_grads`] does for a square Gram. `out` is replaced.
+    /// `bufs` holds [`Self::contraction_buffers`] matrices of `weight`'s shape.
     // The block, the weight, the output, and three scratch kinds.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn weighted_cross_grads_views<M: crate::math::KernelMath>(
@@ -1254,12 +1261,7 @@ impl<'k> FastLeaf<'k> {
 
 /// Coordinate entry points of a coordinate tree.
 impl<T: KernelScalar> CompiledKernel<T> {
-    /// Writes `⟨weight, ∂K(x1, x2)/∂θ_p⟩_F` for every parameter into `out`.
-    ///
-    /// The rectangle is full, not a triangle. A product evaluates each
-    /// non-constant factor once and hands the others down in the weight, as
-    /// [`Self::weighted_grads`] does for a square Gram. `out` is replaced.
-    /// `bufs` holds [`Self::contraction_buffers`] matrices of `weight`'s shape.
+    /// [`Self::weighted_cross_grads_views`] of the two point sets `x1`, `x2`.
     // The two point sets, the weight, the output, and three scratch kinds.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]

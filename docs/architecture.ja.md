@@ -67,7 +67,7 @@ flowchart TB
 
 | Module | 責務 | 公開 / 主な型 | Imports |
 | --- | --- | --- | --- |
-| `kernel` | カーネルの言語: 組み込みのカーネルの葉と `Custom` の木 `KernelSpec` を、静的ディスパッチの `CompiledKernel<T>` に平らにする。値、勾配、Hessian、座標微分。スカラーの trait `KernelScalar` | pub mod。`KernelSpec`, `CompiledKernel`, カーネルの葉（`RbfKernel`, `MaternKernel`, `PeriodicKernel`, …）, `KernelTerm`, `CustomKernel`, `KernelScalar` | `data`, `error`, `linalg`, `math`, `param` |
+| `kernel` | カーネルの言語: 組み込みのカーネルの葉と `Custom` の木 `KernelSpec` を、静的ディスパッチの `CompiledKernel<T>` に平らにする。値、勾配、Hessian、座標微分。スカラーの trait `KernelScalar`。与えられた二乗距離を読む葉: スロット、`DistanceKernel` の木、呼び出し側の表の結び付けと検査、学習の `d²` のストア（`supply.rs`、`sources.rs`、`compiled/supplied.rs`） | pub mod。`KernelSpec`, `CompiledKernel`, カーネルの葉（`RbfKernel`, `MaternKernel`, `PeriodicKernel`, …）, `KernelTerm`, `CustomKernel`, `KernelScalar`。`DistanceKernel`, `DistanceOnly`, `WithPoints`, `ScalarDistance`, `ArdDistance`, `DistanceSlot`, `DistanceSource`, `DistanceFill`, `ModelKernel`, `PointKernel`, `Supply`, `NoSupply` | `data`, `error`, `linalg`, `math`, `param` |
 | `likelihood` | ガウスの観測ノイズ `σn²`。ジッターとは別の、独立したパラメータ | 公開: `GaussianLikelihood` | `data`, `error`, `param` |
 | `transform` | 入力の変換（identity、standardize、min-max、列ごと、pipeline）と目的変数の変換。それぞれ学習前と学習後の型を持つ。予測で平均と分散を戻す | pub mod: `Transform`, `UnfittedTransform`, `TargetTransform`, `UnfittedTarget`, `MinMaxInput`, `StandardizeTarget`, `Pipeline`, … | `data`, `error` |
 | `precision` | 格納と予測のスカラーを 1 つの方針にまとめる。混合精度の反復改善 | 公開: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
@@ -80,10 +80,10 @@ flowchart TB
 
 | Module | 責務 | 公開 / 主な型 | Imports |
 | --- | --- | --- | --- |
-| `gpr` | Exact GPR: `K + σn²I` の分解、fit / refit のための NLML とその微分、予測、共分散、標本、leave-one-out、LDLT の因子の上のオンライン insert / delete | 公開: `Gpr`, `FittedGpr`, `OnlineGpr` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `transform`, `workspace` |
-| `sparse` | `sgpr` と `svgp` が共有するもの: trainer の設定、学習データ、`Z`、カーネルと尤度にまたがる `θ` | crate: `SparseSpec`, `SparseCore` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `param`, `policy`, `precision`, `prediction`, `transform` |
-| `sgpr` | collapsed VFE の下限を使う Sparse GPR: 固定または自由な誘導点 `Z`、rank-1 のオンライン更新、点と誘導点の insert / delete、予測、共分散、標本、leave-one-out | 公開: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `sparse`, `transform` |
-| `svgp` | SVGP: whitened な `q(u)`、ELBO、1 ステップの計算量が `n` に依らないミニバッチ Adam、予測、共分散、標本 | 公開: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `rng`, `sparse`, `transform` |
+| `gpr` | Exact GPR: `K + σn²I` の分解、fit / refit のための NLML とその微分、予測、共分散、標本、leave-one-out、LDLT の因子の上のオンライン insert / delete。与えられた距離の上の同じもの（`distance.rs`） | 公開: `Gpr`, `FittedGpr`, `OnlineGpr` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `prediction`, `transform`, `workspace` |
+| `sparse` | `sgpr` と `svgp` が共有するもの: trainer の設定、学習データ、`Z`、カーネルと尤度にまたがる `θ`、距離のモデルが持つ与えられた `n × m` のブロック | crate: `SparseSpec`, `SparseCore`, `SparseSupply` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `param`, `policy`, `precision`, `prediction`, `transform` |
+| `sgpr` | collapsed VFE の下限を使う Sparse GPR: 固定または自由な誘導点 `Z`、rank-1 のオンライン更新、点と誘導点の insert / delete、予測、共分散、標本、leave-one-out。与えられた距離の上の同じもの（`distance.rs`、`online.rs`） | 公開: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `prediction`, `sparse`, `transform` |
+| `svgp` | SVGP: whitened な `q(u)`、ELBO、1 ステップの計算量が `n` に依らないミニバッチ Adam、予測、共分散、標本。与えられた距離の上の同じもの（`distance.rs`） | 公開: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `prediction`, `rng`, `sparse`, `transform` |
 | `persist` | モデル 1 つにつき 1 ディレクトリ: `config.json` と `model.safetensors`。`Custom` のカーネルと呼び出し側の変換の復元表 | pub mod: `LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`, `LoadedDistanceGpr`, `LoadedDistanceSgpr`, `LoadedDistanceSvgp`, `PersistRegistry`, `FORMAT_VERSION` | `error`, `gpr`, `kernel`, `optimizer`, `param`, `points`, `policy`, `precision`, `sgpr`, `sparse`, `svgp`, `transform` |
 | `internals` | ベンチマークと `compare/perf` のためのフック。`bench-internals` または `insert-stages` の feature のときだけ | pub mod、feature つき | `gpr`, `kernel`, `objective` |
 
@@ -94,16 +94,19 @@ flowchart TB
 ```mermaid
 flowchart TB
     gpr --> objective
+    gpr --> prediction
     gpr --> optimizer
     gpr --> persist
     gpr --> points
     gpr --> workspace
     sgpr --> objective
+    sgpr --> prediction
     sgpr --> optimizer
     sgpr --> persist
     sgpr --> points
     sgpr --> sparse
     svgp --> optimizer
+    svgp --> prediction
     svgp --> persist
     svgp --> sparse
     sparse --> prediction
@@ -155,8 +158,8 @@ flowchart TB
 | モデル | Trainer | Fitted | Online | ディスクから読んだもの |
 | --- | --- | --- | --- | --- |
 | Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>`（`insert`, `delete`） | `LoadedGpr`（8 variant）。`DistanceKernel<C>` なら `LoadedDistanceGpr<C>`（8） |
-| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`） | `LoadedSgpr`（8 variant）。`LoadedDistanceSgpr<C>`（8） |
-| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | なし | `LoadedSvgp`（4 variant）。`LoadedDistanceSvgp<C>`（4） |
+| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P, K>`（`insert`, `delete`, `insert_inducing`, `delete_inducing`） | `LoadedSgpr`（8 variant）。`LoadedDistanceSgpr<C>`（8） |
+| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | なし | `LoadedSvgp`（4 variant）。`LoadedDistanceSvgp<C>`（4） |
 
 型パラメータ:
 
@@ -164,8 +167,8 @@ flowchart TB
 | --- | --- | --- |
 | `O` | 最適化器の枠 | `Lbfgs`（Exact と Sparse の既定）, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, 利用者の `Optimizer`。`factor` だけなら `Fixed`。`Svgp::fit` は `Adam`（`Svgp` の既定は `Fixed`） |
 | `P` | 精度。コンパイル時の選択 | `DoublePrecision`（既定）, `SinglePrecision`, `MixedPrecision`（残差は `PromoteStorage` か `ReevaluateKernel`） |
-| `I` | 誘導点 `Z` の置き場 | `FixedInducing`（既定。`Z` はパラメータに入らない）, `FreeInducing`（`Z` を `θ` と一緒に最適化する） |
-| `K` | Exact のカーネルが読むもの（[design §5.1](design.ja.md#51-仕様と評価器精度ジェネリクス)） | `KernelSpec`（既定。座標）, `DistanceKernel<DistanceOnly>`（与えられた距離だけ）, `DistanceKernel<WithPoints>`（与えられた距離と座標） |
+| `I` | 誘導点 `Z` の置き場 | `FixedInducing`（既定。`Z` はパラメータに入らない）, `FreeInducing`（`Z` を `θ` と一緒に最適化する。座標のカーネルだけ） |
+| `K` | どのモデルでも、そのカーネルが読むもの（[design §5.1](design.ja.md#51-仕様と評価器精度ジェネリクス)） | `KernelSpec`（既定。座標）, `DistanceKernel<DistanceOnly>`（与えられた距離だけ）, `DistanceKernel<WithPoints>`（与えられた距離と座標） |
 
 ## 6. モデルの状態の移り方
 
@@ -188,6 +191,8 @@ flowchart LR
     D -- "LoadedSgpr::load" --> LS["LoadedSgpr"]
     D -- "LoadedSvgp::load" --> LV["LoadedSvgp"]
 ```
+
+`DistanceKernel<C>` のモデルも同じように動き、`LoadedDistanceGpr<C>` / `LoadedDistanceSgpr<C>` / `LoadedDistanceSvgp<C>` で読む（[persist-format.ja.md 10 節](persist-format.ja.md#10-供給された距離のモデル)）。
 
 読み込んだモデルは予測できる状態で、`Fixed` を持つので、探索は保存しない。もう一度学習するには、型のついたモデルで `with_optimizer` を呼んでから `refit` する。各 `save` が書くものは [persist-format.ja.md](persist-format.ja.md)。
 
@@ -213,5 +218,6 @@ flowchart LR
 2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める分岐
 3. `kernel/compiled/`: `CompiledKernel` の variant、それに対応する `LeafRef` の variant（`term`）、コンパイラが求める分岐。すべてのカーネルの葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む。座標の経路の葉の分岐は `LeafRef` のメソッドで、座標の木と葉ごとの混合経路が共有する
 4. `persist/kernel.rs`: JSON のタグ。古い版の保存ファイルも読めること（persist-format.md）
+5. 与えられた距離も読める葉なら: `ScalarLeafSpec` か `ArdLeafSpec` の variant と `scalar_leaf!` / `ard_leaf!` の一覧（`kernel/supply.rs`）、与えられた距離の葉の arm（`kernel/compiled/supplied.rs`）、保存の `distance` タグのための `KernelSpec` の葉との対応（`persist/kernel.rs`）
 5. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互のブロック、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す
 6. design §5 と、`kernel/mod.rs`・`lib.rs` の公開の再エクスポート

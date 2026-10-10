@@ -11,7 +11,7 @@
 //!
 //! Depend on crates.io with `gprx = "0.1"`. The 0.1.0 contract is the default-feature public API: [`Gpr`], [`Sgpr`],
 //! and [`Svgp`], online updates, and directory save/load. A 0.x minor may
-//! break that API. The MSRV is 1.85. The `internals` module
+//! break that API. The MSRV is 1.88. The `internals` module
 //! (`bench-internals`, `insert-stages`) is outside semantic versioning.
 //!
 //! Distance fills and lower-triangle kernel writes use the process-wide thread pool (shared

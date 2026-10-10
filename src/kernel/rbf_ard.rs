@@ -915,8 +915,6 @@ mod tests {
 
     use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, points_2d};
 
-    /// A weight that overflowed gives an error, as the coordinate
-    /// contraction does, not a `NaN` gradient.
     /// The contraction over dense tables kept as they are matches the one
     /// over the packed triangles, and the cache reads the same pairs.
     #[test]
@@ -973,6 +971,8 @@ mod tests {
         );
     }
 
+    /// A weight that overflowed gives an error, as the coordinate
+    /// contraction does, not a `NaN` gradient.
     #[test]
     fn contraction_from_sq_diff_refuses_a_non_finite_sum() {
         use crate::kernel::dist::ArdSqDiffBuf;

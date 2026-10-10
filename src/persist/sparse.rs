@@ -241,7 +241,7 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
         Some(distance) => read_supply::<S>(tensors, config, &slots, &distance.inducing)?,
         None => SparseSupply::default(),
     };
-    SparseCore::from_persisted(PersistedSparse {
+    let core = SparseCore::from_persisted(PersistedSparse {
         spec,
         x_transform: config.x_transform.clone().decode(registry)?,
         y_transform: config.y_transform.clone().decode(registry)?,
@@ -254,7 +254,52 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
         d,
         supply,
         slots,
-    })
+    })?;
+    // The coordinate leaves and the supplied blocks read the same points.
+    if core.supply.is_supplied() {
+        let inducing = &core.supply.inducing;
+        same_rows(&core.z_obs, &core.x_obs, (n, d), inducing, TENSOR_Z)?;
+        same_rows(
+            &core.z_train,
+            &core.x_train,
+            (n, d),
+            inducing,
+            TENSOR_Z_TRAIN,
+        )?;
+    }
+    Ok(core)
+}
+
+/// Checks that the `m × d` inducing points `z` of a model on supplied
+/// distances are the rows `inducing` of the `n × d` training points `x`, to
+/// the bit, as a fit makes them: the coordinate leaves and the supplied
+/// blocks read the same points.
+///
+/// # Errors
+///
+/// Returns [`GprError::PersistFailed`] with
+/// [`crate::PersistErrorKind::Config`] at the first value that differs.
+fn same_rows(
+    z: &[f64],
+    x: &[f64],
+    (n, d): (usize, usize),
+    inducing: &[usize],
+    name: &str,
+) -> Result<(), GprError> {
+    let m = inducing.len();
+    for j in 0..d {
+        for (a, &i) in inducing.iter().enumerate() {
+            if z[j * m + a].to_bits() != x[j * n + i].to_bits() {
+                return Err(persist_err(
+                    PersistErrorKind::Config,
+                    format!(
+                        "{name} row {a} is not training point {i}, the inducing point the blocks name"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The training blocks of `slots` (tensors `d2.<k>`) at the training

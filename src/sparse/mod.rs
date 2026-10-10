@@ -384,10 +384,6 @@ impl<U: Supply> SparseCore<U> {
         crate::data::require_finite(&x_train)?;
         crate::data::require_finite(&y_train)?;
         crate::data::require_finite(&z_train)?;
-        if supply.is_supplied() {
-            same_rows(&z_obs, &x_obs, (n, d), &supply.inducing, "z")?;
-            same_rows(&z_train, &x_train, (n, d), &supply.inducing, "z_train")?;
-        }
         Ok(Self {
             kernel: spec.kernel,
             likelihood: spec.likelihood,
@@ -1446,38 +1442,6 @@ pub(crate) struct SparseSupply {
     /// that runs in `f64` (an `f32` SGPR's) never makes it. Checked to fit
     /// when the supply is made.
     f32: std::sync::OnceLock<Result<SupplyAt<f32>, GprError>>,
-}
-
-/// Checks that the `m × d` inducing points `z` of a model on supplied
-/// distances are the rows `inducing` of the `n × d` training points `x`, to
-/// the bit, as a fit makes them: the coordinate leaves and the supplied
-/// blocks read the same points.
-///
-/// # Errors
-///
-/// Returns [`GprError::PersistFailed`] with
-/// [`crate::PersistErrorKind::Config`] at the first value that differs.
-fn same_rows(
-    z: &[f64],
-    x: &[f64],
-    (n, d): (usize, usize),
-    inducing: &[usize],
-    name: &str,
-) -> Result<(), GprError> {
-    let m = inducing.len();
-    for j in 0..d {
-        for (a, &i) in inducing.iter().enumerate() {
-            if z[j * m + a].to_bits() != x[j * n + i].to_bits() {
-                return Err(crate::persist::persist_err(
-                    crate::error::PersistErrorKind::Config,
-                    format!(
-                        "{name} row {a} is not training point {i}, the inducing point the blocks name"
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Checks the inducing indices of a model on supplied distances: each

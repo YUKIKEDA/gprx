@@ -478,7 +478,7 @@ impl RbfKernel {
         Ok(value)
     }
 
-    /// [`Self::inv_scales`] for the lanes of [`super::stationary_simd`].
+    /// [`Self::inv_scales`] for the lanes of [`super::simd::stationary`].
     fn lane_scales(&self) -> RbfScales {
         let (half_inv_ell_sq, inv_ell_sq) = self.inv_scales();
         RbfScales {

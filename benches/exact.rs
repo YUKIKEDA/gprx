@@ -16,7 +16,7 @@ use faer::{Mat, MatMut, Par};
 use gprx::internals::{
     apply_from_ard_cache, fill_ard_squared_diff, fill_pairwise_sq_euclidean, grad_from_ard_cache,
 };
-use gprx::kernel::{KernelSpec, RbfArdKernel, RbfKernel, Triangle};
+use gprx::kernel::{KernelSpec, MaternArdKernel, MaternNu, RbfArdKernel, RbfKernel, Triangle};
 use gprx::transform::StandardizeTarget;
 use gprx::{
     FastSimulatedAnnealing, FittedGpr, Fixed, GaussianLikelihood, Gpr, KernelExp, MixedPrecision,
@@ -569,6 +569,63 @@ fn fit_lbfgs_ard(c: &mut Criterion) {
     group.finish();
 }
 
+/// Features of the wide ARD cases, read from the `(Δ_d)²` cache one
+/// dimension at a time on every path that is not SIMD: the Hessian, and an
+/// `f32` storage.
+const D_WIDE: usize = 8;
+
+/// Training points of the wide ARD Hessian: it forms one `n×n` matrix per
+/// parameter pair.
+const N_HESSIAN: usize = 200;
+
+/// A Matérn 5/2 ARD model of `n` points with `D_WIDE` features, precision
+/// `P`.
+fn fitted_wide_ard<P: gprx::GpScalar>(n: usize) -> FittedGpr<Fixed, P> {
+    let x: Vec<f64> = (0..n * D_WIDE).map(|i| (i as f64 * 0.7311).sin()).collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).cos()).collect();
+    let kernel = KernelSpec::from(
+        MaternArdKernel::new(&[0.9; D_WIDE], MaternNu::FiveHalves).expect("valid lengthscale"),
+    );
+    Gpr::new(kernel, GaussianLikelihood::new(NOISE).expect("valid noise"))
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&x, n, D_WIDE, &y)
+        .expect("training Cholesky")
+}
+
+/// The ARD reads of the `(Δ_d)²` cache that the SIMD paths do not cover:
+/// the `f64` Hessian and the `f32` gradient.
+fn ard_cache_reads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ard_cache_reads");
+    group.sample_size(20);
+    let mut hessian = fitted_wide_ard::<gprx::DoublePrecision>(N_HESSIAN);
+    let mut params = vec![0.0; hessian.num_params()];
+    hessian.get_params(&mut params).expect("param length");
+    let mut out = vec![0.0; params.len() * params.len()];
+    group.bench_function("hessian_f64", |b| {
+        b.iter(|| {
+            hessian
+                .hessian_into(
+                    std::hint::black_box(&params),
+                    std::hint::black_box(&mut out),
+                )
+                .expect("hessian");
+        });
+    });
+    let mut single = fitted_wide_ard::<gprx::SinglePrecision>(N);
+    let mut grad = vec![0.0; params.len()];
+    group.bench_function("mll_and_grad_f32", |b| {
+        b.iter(|| {
+            let value = single.value_and_gradient_into(
+                std::hint::black_box(&params),
+                std::hint::black_box(&mut grad),
+            );
+            std::hint::black_box(value)
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     exact,
     kernel_rbf,
@@ -581,6 +638,7 @@ criterion_group!(
     fit_lbfgs,
     fit_fsa,
     mll_and_grad_ard,
-    fit_lbfgs_ard
+    fit_lbfgs_ard,
+    ard_cache_reads
 );
 criterion_main!(exact);

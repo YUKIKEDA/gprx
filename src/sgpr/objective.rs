@@ -10,7 +10,7 @@ use super::{FittedSgpr, InducingLayout};
 /// Sparse VFE objective. Parameters are kernel `θ` followed by likelihood `θ`.
 ///
 /// Does not own hyperparameters. After a successful evaluation,
-/// [`FittedSgpr`]'s kernel and likelihood match `params`. [`FreeInducing`]
+/// [`FittedSgpr`]'s kernel and likelihood match `params`. [`crate::FreeInducing`]
 /// also treats column-major `Z` as parameters.
 pub struct SgprObjective<
     'a,

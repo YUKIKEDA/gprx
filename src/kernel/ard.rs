@@ -4,7 +4,7 @@
 //! `r² = Σ_d w_d Δ_d²` (`w_d = 1/ℓ_d²`). The shape checks, the `r²` sums from
 //! coordinates or from the `(Δx_d)²` cache, and the matrix loops live here.
 
-use super::dist::{ArdBlocks, ArdSqDiff, BlockState};
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState, PairAt};
 use super::{KernelScalar, Triangle, write_square};
 use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
@@ -119,14 +119,21 @@ pub(crate) fn r2_from_cache<T: KernelScalar>(
     inv_ell_sq: &[f64],
     pick: Pick,
 ) -> Result<ArdR2<T>, GprError> {
-    sum_r2(inv_ell_sq, pick, |dim| {
-        let v = cache.get(dim, row, col);
+    let finite = |v: T| {
         if v.is_finite() {
             Ok(v)
         } else {
             Err(GprError::NonFiniteInput)
         }
-    })
+    };
+    // The layout is matched once per pair, so the loop over the dimensions
+    // only indexes.
+    match cache.pair(row, col) {
+        PairAt::Strided { data, stride, at } => {
+            sum_r2(inv_ell_sq, pick, |dim| finite(data[dim * stride + at]))
+        }
+        PairAt::Tables { tables, at } => sum_r2(inv_ell_sq, pick, |dim| finite(tables[dim][at])),
+    }
 }
 
 /// [`ArdR2`] of the pair `(row, col)` from rectangular `(Δ_d)²` blocks.

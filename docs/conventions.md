@@ -32,26 +32,34 @@ src/gpr/                   one responsibility per file, no #[path]. Models impor
   objective.rs             GprObjective
   factor_store.rs          LltStore (FittedGpr) and LdltStore (OnlineGpr)
   shared.rs factor.rs      GprCore, Policies, and the shared predict body; Gram assembly and Cholesky
+  distance.rs              fit, factor, predict, and online insert / delete of a DistanceKernel
   tests.rs
 src/kernel/                leaves live here, not in src/*.rs
-  compiled/                mod.rs, apply.rs, grad.rs, hess.rs, gram.rs. One dispatch over T: KernelScalar
-    tests/                 one file per concern (compose, coord_mode, custom, fast_math, params, scalar)
+  compiled/                mod.rs, apply.rs, grad.rs, hess.rs, gram.rs, weighted.rs, coord.rs, leaf_table.rs. One dispatch over T: KernelScalar
+                           supplied.rs: the compiled leaves on supplied distances
+    tests/                 one file per concern (columns, compose, coord_deriv, coord_mode, cross, custom, fast_math, params, scalar, supplied)
   constant.rs linear.rs white.rs
   rbf.rs rbf_ard.rs matern.rs matern_ard.rs periodic.rs rq.rs rq_ard.rs    leaves: formulas over T, scans in mod.rs / ard.rs
   ard.rs                   shared checks and r² sums of the ARD leaves
-  spec.rs term.rs dist.rs lengthscale.rs scalar.rs radial.rs
-  simd/                    mod.rs (the lane helpers), stationary.rs, rbf_ard.rs, ard.rs, dist.rs. Every f64x4 loop of the leaves
+  spec.rs term.rs dist.rs lengthscale.rs scalar.rs radial.rs leaf_params.rs
+  tree.rs                  the Supply kind of a tree: NoSupply (coordinates) or supplied leaves
+  supply.rs                slots, DistanceKernel, DistanceSource, the model kernels (ModelKernel, PointKernel)
+  sources.rs               binding and checking supplied tables; the training d² stores; the sparse blocks
+  simd/                    mod.rs (the lane helpers), stationary.rs, rbf_ard.rs, ard.rs, dist.rs, rows.rs. Every f64x4 loop of the leaves
 src/optimizer/             mod.rs, logit.rs. lbfgs.rs neldermead.rs trust_region.rs fsa.rs. adam.rs does not implement Optimizer
 src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs sparse.rs (save / load of Sgpr, OnlineSgpr, Svgp)
+                           distance.rs (the loaded models of a DistanceKernel)
 src/sparse/                crate-private: SparseSpec / SparseCore and the inducing-point helpers Sgpr and Svgp share. Sgpr and Svgp do not import each other
-src/sgpr/                  model.rs fitted.rs online.rs objective.rs tests.rs
+src/sgpr/                  model.rs fitted.rs online.rs objective.rs distance.rs tests.rs
   factor/                  vfe.rs (assembly, weights, bound) derivatives.rs predict.rs loo.rs updates.rs (rank-1, inducing)
-src/svgp/                  model.rs fitted.rs tests.rs
+src/svgp/                  model.rs fitted.rs distance.rs tests.rs
   factor/                  assemble.rs (K_mm, A, q, ELBO) gradient.rs predict.rs adam.rs
 src/transform/             target.rs input.rs pipeline.rs columnwise.rs. Do not split into leaves
 tests/                     integration tests. Goldens only under compare/goldens/
-tests/common/               check.rs (tolerance asserts) and problems.rs (Forrester / sphere). Unit tests and benches include them with #[path]
+tests/common/               check.rs (tolerance asserts) and problems.rs (Forrester / sphere, the distance baseline). Unit tests and benches include them with #[path]
+tests/alloc.rs             harness = false: its checks run one after another (#494); a new check goes in CHECKS
 benches/exact.rs           criterion
+benches/distance.rs        supplied distances beside the coordinate path, at the same problem
 compare/                   one Python environment (pyproject.toml, uv.lock; group `perf`). Run from here
   common/                  problems.py ops.py harness.py records.py timing.py rss.py, shared by the generators and perf/
   generate*.py             sklearn / GPyTorch / libgp goldens into goldens/
