@@ -15,8 +15,14 @@ pub fn inducing_places<O, P: gprx::GpScalar, C: gprx::kernel::PointUse>(
     online: &gprx::OnlineSgpr<O, P, gprx::kernel::DistanceKernel<C>>,
 ) -> Vec<usize> {
     let ids = online.point_ids();
-    online
+    let places: Vec<usize> = online
         .inducing_points()
         .filter_map(|id| ids.iter().position(|&p| p == id))
-        .collect()
+        .collect();
+    assert_eq!(
+        places.len(),
+        online.inducing_ids().len(),
+        "every inducing point is live"
+    );
+    places
 }
