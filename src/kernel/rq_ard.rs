@@ -295,6 +295,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
@@ -311,6 +312,7 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `K` from `(Δ_d)²` blocks.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
         blocks: ArdBlocks<'_, T, S>,
@@ -325,6 +327,7 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
         blocks: ArdBlocks<'_, T, S>,
@@ -342,6 +345,7 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
         blocks: ArdBlocks<'_, T, S>,
@@ -359,6 +363,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
@@ -405,6 +410,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,

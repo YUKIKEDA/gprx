@@ -385,6 +385,7 @@ impl RationalQuadraticKernel {
     }
 
     /// Rectangular `∂K/∂θ` from squared distances.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn grad_cross_dist<M: KernelMath, T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -409,6 +410,7 @@ impl RationalQuadraticKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from squared distances.
+    #[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature; RQ calls no `exp`
     pub(crate) fn hess_cross_dist<M: KernelMath, T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
@@ -501,6 +503,7 @@ impl RationalQuadraticKernel {
 /// The names the stationary leaves share in a dispatch over leaves
 /// ([`super::compiled::supplied`]): an RQ leaf calls no `exp`, so the
 /// `exp` path `M` is not read.
+#[allow(clippy::extra_unused_type_parameters)] // the leaves' shared signature
 impl RationalQuadraticKernel {
     /// [`Self::apply`].
     pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
