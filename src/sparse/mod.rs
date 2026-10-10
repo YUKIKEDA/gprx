@@ -11,7 +11,10 @@ use std::fmt;
 use dyn_stack::MemBuffer;
 use faer::{Mat, MatMut, MatRef};
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use self::core::*;
 use crate::data::{validate_inducing, validate_query, validate_training};
 use crate::error::GprError;
@@ -29,9 +32,15 @@ use crate::prediction::{Prediction, PredictiveCovariance};
 use crate::transform::{
     IdentityInput, IdentityTarget, TargetTransform, Transform, UnfittedTarget, UnfittedTransform,
 };
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use scratch::*;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use supply::*;
 
 /// Public read accessors of a fitted sparse model, from its `core:

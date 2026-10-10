@@ -1,7 +1,10 @@
 //! Where a source's slot is among the kernel's slots, and the errors that
 //! name it.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// Where a source's slot is among the kernel's slots.
