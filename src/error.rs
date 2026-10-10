@@ -281,7 +281,10 @@ pub enum GprError {
     /// The sources of a call do not match the slots of the kernel: one names
     /// a slot the kernel does not read, two name one slot, or a slot has
     /// none. See [`SlotErrorKind`] for an example.
-    #[error("distance slot mismatch: {kind}")]
+    #[error(
+        "distance slot mismatch{}: {kind}",
+        DistancePlace { slot, dim: &None, pair: &None }
+    )]
     DistanceSlot {
         /// Records what is wrong.
         kind: SlotErrorKind,
@@ -497,7 +500,15 @@ mod tests {
                 slot: Some(0)
             }
             .to_string(),
-            "distance slot mismatch: two sources were supplied for one distance slot"
+            "distance slot mismatch in slot 0: two sources were supplied for one distance slot"
+        );
+        assert_eq!(
+            GprError::DistanceSlot {
+                kind: SlotErrorKind::NotRead,
+                slot: None
+            }
+            .to_string(),
+            format!("distance slot mismatch: {}", SlotErrorKind::NotRead)
         );
     }
 

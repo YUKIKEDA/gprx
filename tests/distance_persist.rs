@@ -364,7 +364,8 @@ fn sparse_round_trip<P: GpScalar>(
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
     assert!(!loaded.is_online());
     assert_eq!((loaded.n(), loaded.m()), (N, INDUCING.len()));
-    assert_eq!(loaded.inducing(), &INDUCING);
+    assert_eq!(loaded.inducing(), Some(&INDUCING[..]));
+    assert!(loaded.inducing_points().is_none());
     assert_eq!(loaded.to_kernel().slots(), loaded.slots());
     let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), M)?);
     assert_same(&format!("sgpr {label}"), &got, &want, tol);
@@ -397,7 +398,9 @@ fn sparse_round_trip<P: GpScalar>(
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
     assert!(loaded.is_online());
     assert_eq!(loaded.n(), live.len());
-    assert_eq!(loaded.inducing(), common::inducing_places(&online));
+    assert_eq!(loaded.inducing(), None);
+    let points: Option<Vec<_>> = loaded.inducing_points().map(Iterator::collect);
+    assert_eq!(points, Some(online.inducing_points().collect()));
     let got = widen(loaded.predict(sources(&loaded.slots(), &z_live, &q), M)?);
     assert_same(&format!("online sgpr {label}"), &got, &want, refactored);
     let (LoadedDistanceSgpr::OnlineDouble(_)

@@ -213,16 +213,48 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
     ///
     /// See the example on [`Self::insert_inducing`].
     pub fn inducing_points(&self) -> impl Iterator<Item = PointId> + '_ {
-        let ids = self.point_ids();
-        self.inducing()
-            .iter()
-            .filter_map(move |&place| ids.get(place).copied())
+        self.inducing_point_iter()
+    }
+
+    /// [`Self::inducing_points`] as a named type, the same for every
+    /// precision.
+    pub(crate) fn inducing_point_iter(&self) -> InducingPoints<'_> {
+        InducingPoints {
+            ids: self.point_ids(),
+            places: self.inducing().iter(),
+        }
     }
 
     /// The places of the inducing points in [`Self::point_ids`]: the rows
     /// of the training blocks they are. A delete shifts them.
     pub(crate) fn inducing(&self) -> &[usize] {
         &self.state.core.supply.inducing
+    }
+}
+
+/// The [`PointId`]s of an online model's inducing points, from their places
+/// among its training points. Every place is a live row: the model keeps
+/// them in step with its deletes.
+pub(crate) struct InducingPoints<'a> {
+    ids: &'a [PointId],
+    places: std::slice::Iter<'a, usize>,
+}
+
+impl Iterator for InducingPoints<'_> {
+    type Item = PointId;
+
+    fn next(&mut self) -> Option<PointId> {
+        let place = *self.places.next()?;
+        debug_assert!(
+            place < self.ids.len(),
+            "inducing place {place} past {} live points",
+            self.ids.len()
+        );
+        self.ids.get(place).copied()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.places.len()))
     }
 }
 
