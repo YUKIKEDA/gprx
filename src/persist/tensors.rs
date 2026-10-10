@@ -6,7 +6,7 @@ use std::path::Path;
 use faer::MatRef;
 use memmap2::Mmap;
 use safetensors::tensor::{Dtype, TensorView};
-use safetensors::{SafeTensors, serialize};
+use safetensors::{SafeTensors, serialize_to_file};
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
@@ -192,6 +192,22 @@ pub(super) fn pack_lower<T: crate::kernel::KernelScalar>(l: MatRef<'_, T>, out: 
     }
 }
 
+/// Writes `views` as `dir/model.safetensors`, tensor by tensor into a
+/// temporary file that replaces the old one: the file is never built in
+/// memory.
+fn write_views(dir: &Path, views: Vec<(&str, TensorView<'_>)>) -> Result<(), GprError> {
+    let path = dir.join(TENSOR_FILE);
+    super::atomic::write_atomic_with(&path, |temp| {
+        serialize_to_file(views, None, temp).map_err(|err| {
+            let kind = match err {
+                safetensors::SafeTensorError::IoError(_) => PersistErrorKind::Io,
+                _ => PersistErrorKind::Tensor,
+            };
+            persist_err(kind, format!("write {temp:?}: {err}"))
+        })
+    })
+}
+
 pub(super) fn write_tensors(
     dir: &Path,
     x: &[f64],
@@ -269,14 +285,7 @@ pub(super) fn write_tensors(
     for tensor in extra {
         views.push(tensor.view()?);
     }
-    let bytes = serialize(views, None).map_err(|err| {
-        persist_err(
-            PersistErrorKind::Tensor,
-            format!("serialize safetensors: {err}"),
-        )
-    })?;
-    let path = dir.join(TENSOR_FILE);
-    super::atomic::write_atomic(&path, &bytes)
+    write_views(dir, views)
 }
 
 pub(super) fn read_xy(
@@ -295,6 +304,30 @@ pub(super) fn read_scalars<T: crate::kernel::KernelScalar>(
     shape: &[usize],
     dtype: Dtype,
 ) -> Result<Vec<T>, GprError> {
+    Ok(finite_tensor::<T>(tensors, name, shape, dtype)?.to_vec())
+}
+
+/// Tensor `name` of `shape` and `dtype`, read in place; a non-finite
+/// value is [`PersistErrorKind::Tensor`].
+pub(super) fn finite_tensor<'a, T: crate::kernel::KernelScalar>(
+    tensors: &SafeTensors<'a>,
+    name: &str,
+    shape: &[usize],
+    dtype: Dtype,
+) -> Result<&'a [T], GprError> {
+    let data = scalar_tensor::<T>(tensors, name, shape, dtype)?;
+    require_finite_tensor(data, name)?;
+    Ok(data)
+}
+
+/// Tensor `name` of `shape` and `dtype`, read in place. Its values are
+/// not checked.
+fn scalar_tensor<'a, T: crate::kernel::KernelScalar>(
+    tensors: &SafeTensors<'a>,
+    name: &str,
+    shape: &[usize],
+    dtype: Dtype,
+) -> Result<&'a [T], GprError> {
     let tensor = tensors.tensor(name).map_err(|err| {
         persist_err(
             PersistErrorKind::Tensor,
@@ -302,9 +335,7 @@ pub(super) fn read_scalars<T: crate::kernel::KernelScalar>(
         )
     })?;
     validate_shape(&tensor, shape, name, dtype)?;
-    let data = scalar_slice::<T>(tensor.data())?;
-    require_finite_tensor(data, name)?;
-    Ok(data.to_vec())
+    scalar_slice::<T>(tensor.data())
 }
 
 pub(super) fn read_matrix<T: crate::kernel::KernelScalar>(
@@ -470,14 +501,7 @@ pub(super) fn write_f64_tensors(
     for tensor in extra {
         views.push(tensor.view()?);
     }
-    let bytes = serialize(views, None).map_err(|err| {
-        persist_err(
-            PersistErrorKind::Tensor,
-            format!("serialize safetensors: {err}"),
-        )
-    })?;
-    let path = dir.join(TENSOR_FILE);
-    super::atomic::write_atomic(&path, &bytes)
+    write_views(dir, views)
 }
 
 /// The `f64` tensor `name` of shape `shape`, read in place.

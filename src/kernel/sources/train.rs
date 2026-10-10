@@ -73,7 +73,7 @@ pub(super) const MIRROR_TILE: usize = 32;
 /// onto its upper triangle, a tile at a time: each destination row of a
 /// tile is written contiguously while the tile's source columns are in
 /// cache, not one strided store per pair.
-pub(super) fn mirror_lower(square: &mut [f64], n: usize) {
+pub(super) fn mirror_lower<T: Copy>(square: &mut [T], n: usize) {
     for j0 in (0..n).step_by(MIRROR_TILE) {
         let j1 = (j0 + MIRROR_TILE).min(n);
         for i0 in (j0..n).step_by(MIRROR_TILE) {
@@ -539,12 +539,11 @@ impl<T: KernelScalar> TrainSources<T> {
     pub(crate) fn packed(&self, slot: SlotId) -> Option<Cow<'_, [T]>> {
         let (n, cap) = (self.n, self.cap.max(1));
         if let Some((_, square)) = self.scalar.iter().find(|(id, _)| *id == slot) {
-            return Some(Cow::Owned(
-                (0..n)
-                    .flat_map(|col| &square[col * cap + col..col * cap + n])
-                    .copied()
-                    .collect(),
-            ));
+            let mut packed = Vec::with_capacity(packed_len(n).unwrap_or(0));
+            for col in 0..n {
+                packed.extend_from_slice(&square[col * cap + col..col * cap + n]);
+            }
+            return Some(Cow::Owned(packed));
         }
         self.ard
             .iter()
@@ -554,9 +553,12 @@ impl<T: KernelScalar> TrainSources<T> {
 
     /// The store of `n` points of `slots` (the kernel's slots, in order)
     /// from their [`Self::packed`] values, one entry per slot. A scalar
-    /// slot is unpacked into its square; an ARD slot keeps its values as
-    /// they are. Every value must be finite and non-negative and every
-    /// diagonal zero: a persisted store was checked when it was bound.
+    /// slot is unpacked into its square (its lower triangle column by
+    /// column, then mirrored a tile at a time); an ARD slot keeps a copy of
+    /// its values as they are. Every value must be finite and non-negative
+    /// and every diagonal zero: a persisted store was checked when it was
+    /// bound. `values` may be read in place from a file: each is copied
+    /// once.
     ///
     /// # Errors
     ///
@@ -567,7 +569,7 @@ impl<T: KernelScalar> TrainSources<T> {
     /// value that is not valid.
     pub(crate) fn from_packed(
         slots: &[DistanceSlot],
-        values: Vec<Vec<T>>,
+        values: &[&[T]],
         n: usize,
     ) -> Result<Self, GprError> {
         crate::data::require_nonempty(n)?;
@@ -575,29 +577,30 @@ impl<T: KernelScalar> TrainSources<T> {
         let tri = packed_len(n)?;
         let mut scalar = Vec::new();
         let mut ard = Vec::new();
-        for (place, (slot, values)) in slots.iter().zip(values).enumerate() {
+        for (place, (slot, &values)) in slots.iter().zip(values).enumerate() {
             let len = tri
                 .checked_mul(slot.shape().blocks())
                 .ok_or(GprError::SizeOverflow)?;
             crate::data::require_count(values.len(), len, "persisted squared distances")?;
-            check_packed(&values, n, slot.shape()).map_err(|err| err.in_slot(place))?;
+            check_packed(values, n, slot.shape()).map_err(|err| err.in_slot(place))?;
             match slot.shape() {
                 SlotShape::Scalar => {
                     let mut square =
                         vec![T::from_f64(0.0); n.checked_mul(n).ok_or(GprError::SizeOverflow)?];
                     let mut at = 0;
                     for col in 0..n {
-                        for row in col..n {
-                            let v = values[at];
-                            square[row + col * n] = v;
-                            square[col + row * n] = v;
-                            at += 1;
-                        }
+                        let run = n - col;
+                        square[col * n + col..(col + 1) * n].copy_from_slice(&values[at..at + run]);
+                        at += run;
                     }
+                    mirror_lower(&mut square, n);
                     scalar.push((slot.id(), square));
                 }
                 SlotShape::Ard(dims) => {
-                    ard.push((slot.id(), ArdSqDiffBuf::from_packed(values, n, dims)));
+                    ard.push((
+                        slot.id(),
+                        ArdSqDiffBuf::from_packed(values.to_vec(), n, dims),
+                    ));
                 }
             }
         }

@@ -310,6 +310,23 @@ pub(crate) fn packed_len(n: usize) -> Result<usize, GprError> {
         .ok_or(GprError::SizeOverflow)
 }
 
+/// The lower triangles of the dense column-major `n × n` `tables`, packed
+/// column run by column run and mapped by `f`, into one buffer of their
+/// exact length.
+fn pack_dense<T: Copy, U>(tables: &[Vec<T>], n: usize, f: impl Fn(T) -> U) -> Vec<U> {
+    let len = packed_len(n)
+        .ok()
+        .and_then(|tri| tri.checked_mul(tables.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(len);
+    for table in tables {
+        for col in 0..n {
+            out.extend(table[col * n + col..(col + 1) * n].iter().map(|&v| f(v)));
+        }
+    }
+    out
+}
+
 /// Offset of column `col` in a column-packed lower triangle of order `n`.
 #[inline]
 fn packed_col_offset(n: usize, col: usize) -> usize {
@@ -497,23 +514,26 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
         let n = self.n;
         match &self.data {
             ArdStore::Packed(data) => Cow::Borrowed(data),
-            ArdStore::Dense(tables) => Cow::Owned(
-                tables
-                    .iter()
-                    .flat_map(|t| (0..n).flat_map(move |col| &t[col * n + col..(col + 1) * n]))
-                    .copied()
-                    .collect(),
-            ),
-            ArdStore::Rows(rows) => Cow::Owned(
-                rows.iter()
-                    .flat_map(|dim| {
-                        (0..n).flat_map(move |col| {
-                            (col..n).map(move |row| dim[row * (row + 1) / 2 + col])
-                        })
-                    })
-                    .collect(),
-            ),
+            ArdStore::Dense(tables) => Cow::Owned(pack_dense(tables, n, |v| v)),
+            ArdStore::Rows(rows) => {
+                let mut out = Vec::with_capacity(self.stored_capacity_hint());
+                for dim in rows {
+                    for col in 0..n {
+                        out.extend((col..n).map(|row| dim[row * (row + 1) / 2 + col]));
+                    }
+                }
+                Cow::Owned(out)
+            }
         }
+    }
+
+    /// `d · n(n+1)/2`, the packed length of every dimension: a capacity
+    /// hint, `0` when it does not fit (a `Vec` then grows as it fills).
+    fn stored_capacity_hint(&self) -> usize {
+        packed_len(self.n)
+            .ok()
+            .and_then(|tri| tri.checked_mul(self.d))
+            .unwrap_or(0)
     }
 
     /// A cache of `n` points from `d` dense column-major `n × n` tables,
@@ -541,16 +561,7 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
                     .map(|dim| dim.iter().map(|&v| f(v)).collect())
                     .collect(),
             ),
-            ArdStore::Dense(tables) => {
-                let n = self.n;
-                ArdStore::Packed(
-                    tables
-                        .iter()
-                        .flat_map(|t| (0..n).flat_map(move |col| &t[col * n + col..(col + 1) * n]))
-                        .map(|&v| f(v))
-                        .collect(),
-                )
-            }
+            ArdStore::Dense(tables) => ArdStore::Packed(pack_dense(tables, self.n, f)),
         };
         ArdSqDiffBuf {
             data,

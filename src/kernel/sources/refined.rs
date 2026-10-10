@@ -27,7 +27,7 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     /// when a value does not fit the storage scalar.
     fn from_saved(
         slots: &[DistanceSlot],
-        values: Vec<Vec<Self::Saved>>,
+        values: &[&[Self::Saved]],
         n: usize,
     ) -> Result<Self, GprError>;
 
@@ -115,7 +115,7 @@ impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
         self
     }
 
-    fn from_saved(slots: &[DistanceSlot], values: Vec<Vec<S>>, n: usize) -> Result<Self, GprError> {
+    fn from_saved(slots: &[DistanceSlot], values: &[&[S]], n: usize) -> Result<Self, GprError> {
         Self::from_packed(slots, values, n)
     }
 
@@ -183,11 +183,7 @@ impl SourceStore<f32> for RefinedSources {
         &self.exact
     }
 
-    fn from_saved(
-        slots: &[DistanceSlot],
-        values: Vec<Vec<f64>>,
-        n: usize,
-    ) -> Result<Self, GprError> {
+    fn from_saved(slots: &[DistanceSlot], values: &[&[f64]], n: usize) -> Result<Self, GprError> {
         let exact = TrainSources::from_packed(slots, values, n)?;
         Ok(Self {
             storage: exact.cast(slots)?,

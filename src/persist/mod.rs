@@ -637,36 +637,38 @@ where
 }
 
 /// The stored tensors of an Exact model, from one open of `model.safetensors`.
-struct ExactTensors<P: GpScalar> {
+struct ExactTensors<P: GpScalar, K: ModelKernel> {
     x_obs: Vec<f64>,
     y_obs: Vec<f64>,
     /// `α` in the precision's refine scalar, when the factor is stored.
     alpha: Option<Vec<P::Refine>>,
     owned_l: Option<faer::Mat<P::Storage>>,
     mapped: Option<MappedTensors>,
-    /// Each slot's training `d²` as [`kernel_save`] wrote it.
-    d2: Vec<Vec<SavedScalar<P>>>,
+    /// The training `d²` of a distance kernel, bound from the tensors
+    /// [`kernel_save`] wrote.
+    supplied: crate::kernel::Held<K, crate::gpr::ExactSupplied<P>>,
 }
 
 /// Reads `x`, `y`, the training `d²` of `slots`, and the factor `α` / `L`
 /// in one open of the file.
 ///
-/// An `f64` factor stays memory-mapped, so the file is mapped and the small
-/// tensors are copied out of the same map; otherwise it is read once.
-fn read_exact_tensors<P: GpScalar>(
+/// An `f64` factor stays memory-mapped, and a file with training `d²` is
+/// mapped too: each slot is read in place into its store, one copy. The
+/// small tensors are copied out of the map; a file of neither is read once.
+fn read_exact_tensors<P: GpScalar, K: ModelKernel>(
     dir: &Path,
     config: &ModelConfig,
-    slots: &[DistanceSlot],
-) -> Result<ExactTensors<P>, GprError> {
+    slots: Vec<DistanceSlot>,
+) -> Result<ExactTensors<P, K>, GprError> {
     let (n, d, has_factor) = (config.n, config.d, config.has_factor);
     let storage = <P::Storage as ScalarOps>::DTYPE;
     let map_l = has_factor && storage == safetensors::Dtype::F64;
-    let file = if map_l {
+    let file = if map_l || !slots.is_empty() {
         tensors::TensorFile::map(dir)?
     } else {
         tensors::TensorFile::read(dir)?
     };
-    let (x_obs, y_obs, alpha, owned_l, d2) = {
+    let (x_obs, y_obs, alpha, owned_l, supplied) = {
         let tensors = file.tensors()?;
         let (x_obs, y_obs) = read_xy(&tensors, n, d)?;
         let alpha = if has_factor {
@@ -684,20 +686,25 @@ fn read_exact_tensors<P: GpScalar>(
         } else {
             None
         };
-        let tri = crate::kernel::packed_len(n)?;
-        let d2 = slots
-            .iter()
-            .enumerate()
-            .map(|(k, slot)| {
-                read_scalars::<SavedScalar<P>>(
-                    &tensors,
-                    &d2_tensor(k),
-                    &d2_shape(*slot, tri),
-                    <SavedScalar<P> as ScalarOps>::DTYPE,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        (x_obs, y_obs, alpha, owned_l, d2)
+        let supplied = <K::Supply as crate::kernel::SupplyViews>::try_hold(|| {
+            let tri = crate::kernel::packed_len(n)?;
+            // Read in place: the store checks every value as it copies it.
+            let d2 = slots
+                .iter()
+                .enumerate()
+                .map(|(k, slot)| {
+                    tensors::finite_tensor::<SavedScalar<P>>(
+                        &tensors,
+                        &d2_tensor(k),
+                        &d2_shape(*slot, tri),
+                        <SavedScalar<P> as ScalarOps>::DTYPE,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let sources = P::Sources::from_saved(&slots, &d2, n)?;
+            Ok::<_, GprError>(crate::gpr::ExactSupplied::new(sources, slots))
+        })?;
+        (x_obs, y_obs, alpha, owned_l, supplied)
     };
     let mapped = if map_l {
         Some(file.into_mapped_l(n)?)
@@ -710,7 +717,7 @@ fn read_exact_tensors<P: GpScalar>(
         alpha,
         owned_l,
         mapped,
-        d2,
+        supplied,
     })
 }
 
@@ -837,12 +844,8 @@ where
         alpha,
         owned_l,
         mapped,
-        d2,
-    } = read_exact_tensors::<P>(dir, &config, &slots)?;
-    let supplied = <K::Supply as crate::kernel::SupplyViews>::try_hold(|| {
-        let sources = P::Sources::from_saved(&slots, d2, config.n)?;
-        Ok::<_, GprError>(crate::gpr::ExactSupplied::new(sources, slots))
-    })?;
+        supplied,
+    } = read_exact_tensors::<P, K>(dir, &config, slots)?;
     let parts = PersistedModel {
         kernel,
         likelihood,

@@ -20,11 +20,28 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// a new file and leaves the mapped one untouched. On failure `path` is
 /// unchanged and the temporary file is removed.
 pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GprError> {
+    write_atomic_with(path, |temp| write_new(temp, bytes))
+}
+
+/// [`write_atomic`] of the file `write` makes at the temporary path it is
+/// given, so a large file is written as it is formed rather than built in
+/// memory first. The file is synced before the rename.
+pub(super) fn write_atomic_with(
+    path: &Path,
+    write: impl FnOnce(&Path) -> Result<(), GprError>,
+) -> Result<(), GprError> {
     let temp = temp_path(path)?;
-    let written = write_synced(&temp, bytes).and_then(|()| {
-        std::fs::rename(&temp, path)
-            .map_err(|err| persist_err(PersistErrorKind::Io, format!("replace {path:?}: {err}")))
-    });
+    let written = write(&temp)
+        .and_then(|()| {
+            File::open(&temp)
+                .and_then(|file| file.sync_all())
+                .map_err(|err| persist_err(PersistErrorKind::Io, format!("sync {temp:?}: {err}")))
+        })
+        .and_then(|()| {
+            std::fs::rename(&temp, path).map_err(|err| {
+                persist_err(PersistErrorKind::Io, format!("replace {path:?}: {err}"))
+            })
+        });
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
@@ -45,14 +62,13 @@ fn temp_path(path: &Path) -> Result<PathBuf, GprError> {
     Ok(path.with_file_name(temp_name))
 }
 
-fn write_synced(temp: &Path, bytes: &[u8]) -> Result<(), GprError> {
+fn write_new(temp: &Path, bytes: &[u8]) -> Result<(), GprError> {
     let mut file: File = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temp)
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("create {temp:?}: {err}")))?;
     file.write_all(bytes)
-        .and_then(|()| file.sync_all())
         .map_err(|err| persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}")))
 }
 

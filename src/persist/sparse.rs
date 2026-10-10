@@ -69,7 +69,8 @@ fn supply_tensors(
         .iter()
         .enumerate()
         .map(|(k, slot)| {
-            let mut values = Vec::new();
+            let blocks = slot.shape().blocks();
+            let mut values = Vec::with_capacity(n.saturating_mul(m).saturating_mul(blocks));
             let at = crate::kernel::place_in_shape(slots, k);
             let shape = match slot.shape() {
                 SlotShape::Scalar => {
@@ -300,6 +301,16 @@ fn same_rows(
     Ok(())
 }
 
+/// The tensors of `dir`: mapped when the model holds supplied blocks, so
+/// each block is copied once, from the map into its store; read otherwise.
+fn open_tensors(dir: &Path, config: &SparseConfig) -> Result<TensorFile, GprError> {
+    if config.distance.is_some() {
+        TensorFile::map(dir)
+    } else {
+        TensorFile::read(dir)
+    }
+}
+
 /// The training blocks of `slots` (tensors `d2.<k>`) at the training
 /// points `inducing`, bound as a fit binds its sources
 /// ([`crate::kernel::bind_inducing`]): the same checks of the indices (`m`
@@ -464,7 +475,7 @@ pub(super) fn load_sgpr_as<P: GpScalar, K: ModelKernel, L>(
 ) -> Result<L, GprError> {
     let fitted =
         FittedSgpr::<Fixed, FixedInducing, P, K>::from_persisted(read_core::<P::Storage, K>(
-            &TensorFile::read(dir)?.tensors()?,
+            &open_tensors(dir, config)?.tensors()?,
             config,
             registry,
         )?)?;
@@ -628,7 +639,7 @@ pub(super) fn load_svgp_as<P: GpScalar, K: ModelKernel, L>(
     registry: &PersistRegistry,
     variant: fn(FittedSvgp<P, K>) -> L,
 ) -> Result<L, GprError> {
-    let file = TensorFile::read(dir)?;
+    let file = open_tensors(dir, config)?;
     let tensors = file.tensors()?;
     let core = read_core::<P::Storage, K>(&tensors, config, registry)?;
     let (q_mean, q_l) = read_q(&tensors, config.m)?;
