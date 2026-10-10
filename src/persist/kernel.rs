@@ -8,10 +8,9 @@ use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::kernel::ArdLengthscales;
 use crate::kernel::{
-    ArdLeafSpec, ConstantKernel, CustomKernel, DistanceSlot, KernelSpec, LinearKernel,
-    MaternArdKernel, MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel,
-    RationalQuadraticKernel, RbfArdKernel, RbfKernel, ScalarLeafSpec, SlotShape, SuppliedLeafSpec,
-    SuppliedSpec, Supply, WhiteKernel,
+    ConstantKernel, CustomKernel, DistanceSlot, KernelSpec, LinearKernel, MaternArdKernel,
+    MaternKernel, MaternNu, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
+    RbfArdKernel, RbfKernel, SlotShape, SuppliedLeafSpec, SuppliedSpec, Supply, WhiteKernel,
 };
 use crate::param::BoundedParam;
 
@@ -283,20 +282,7 @@ fn encode_supplied(leaf: &SuppliedSpec, slots: &[DistanceSlot]) -> Result<Kernel
                 "a distance leaf reads a slot the kernel does not list",
             )
         })?;
-    let inner: KernelSpec = match &leaf.leaf {
-        SuppliedLeafSpec::Scalar(ScalarLeafSpec::Rbf(k)) => KernelSpec::Rbf(*k),
-        SuppliedLeafSpec::Scalar(ScalarLeafSpec::Matern(k)) => KernelSpec::Matern(*k),
-        SuppliedLeafSpec::Scalar(ScalarLeafSpec::Periodic(k)) => KernelSpec::Periodic(*k),
-        SuppliedLeafSpec::Scalar(ScalarLeafSpec::RationalQuadratic(k)) => {
-            KernelSpec::RationalQuadratic(*k)
-        }
-        SuppliedLeafSpec::Scalar(ScalarLeafSpec::Custom(k)) => KernelSpec::Custom(k.clone()),
-        SuppliedLeafSpec::Ard(ArdLeafSpec::Rbf(k)) => KernelSpec::RbfArd(k.clone()),
-        SuppliedLeafSpec::Ard(ArdLeafSpec::Matern(k)) => KernelSpec::MaternArd(k.clone()),
-        SuppliedLeafSpec::Ard(ArdLeafSpec::RationalQuadratic(k)) => {
-            KernelSpec::RationalQuadraticArd(k.clone())
-        }
-    };
+    let inner = leaf.leaf.clone().into_coordinate();
     Ok(KernelJson::Distance {
         slot,
         leaf: Box::new(KernelJson::encode(&inner, &[])?),
@@ -320,32 +306,11 @@ fn decode_supplied(
         ))
     })?;
     let inner = leaf.decode_leaf(registry)?;
-    let leaf = match (table.shape(), inner) {
-        (SlotShape::Scalar, KernelSpec::Rbf(k)) => SuppliedLeafSpec::Scalar(ScalarLeafSpec::Rbf(k)),
-        (SlotShape::Scalar, KernelSpec::Matern(k)) => {
-            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Matern(k))
-        }
-        (SlotShape::Scalar, KernelSpec::Periodic(k)) => {
-            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Periodic(k))
-        }
-        (SlotShape::Scalar, KernelSpec::RationalQuadratic(k)) => {
-            SuppliedLeafSpec::Scalar(ScalarLeafSpec::RationalQuadratic(k))
-        }
-        (SlotShape::Scalar, KernelSpec::Custom(k)) => {
-            SuppliedLeafSpec::Scalar(ScalarLeafSpec::Custom(k))
-        }
-        (SlotShape::Ard(_), KernelSpec::RbfArd(k)) => SuppliedLeafSpec::Ard(ArdLeafSpec::Rbf(k)),
-        (SlotShape::Ard(_), KernelSpec::MaternArd(k)) => {
-            SuppliedLeafSpec::Ard(ArdLeafSpec::Matern(k))
-        }
-        (SlotShape::Ard(_), KernelSpec::RationalQuadraticArd(k)) => {
-            SuppliedLeafSpec::Ard(ArdLeafSpec::RationalQuadratic(k))
-        }
-        (shape, _) => {
-            return Err(config(format!(
-                "distance leaf of slot {slot} does not fit a {shape:?} slot"
-            )));
-        }
+    let shape = table.shape();
+    let Some(leaf) = SuppliedLeafSpec::from_coordinate(shape, inner) else {
+        return Err(config(format!(
+            "distance leaf of slot {slot} does not fit a {shape:?} slot"
+        )));
     };
     if let (SlotShape::Ard(dims), SuppliedLeafSpec::Ard(ard)) = (table.shape(), &leaf)
         && ard.dims() != dims

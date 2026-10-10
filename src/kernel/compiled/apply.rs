@@ -611,7 +611,7 @@ impl<T: KernelScalar> LeafRef<'_, T> {
         match self {
             Self::RbfArd(leaf) => leaf.apply_from_sq_diff::<M, _>(cache, out, uplo),
             Self::MaternArd(leaf) => leaf.apply_from_sq_diff::<M, _>(cache, out, uplo),
-            Self::RationalQuadraticArd(leaf) => leaf.apply_from_sq_diff(cache, out, uplo),
+            Self::RationalQuadraticArd(leaf) => leaf.apply_from_sq_diff::<M, _>(cache, out, uplo),
             Self::Constant(leaf) => leaf.apply_rows(x, out, uplo),
             Self::White(leaf) => leaf.apply_rows(x, out, uplo),
             _ => self.apply_points::<M>(x, out, uplo, scratch),

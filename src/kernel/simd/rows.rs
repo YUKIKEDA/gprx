@@ -273,10 +273,16 @@ mod tests {
                     .hess_from_sq_diff::<Accurate, _>(c, o, 1, 1, Triangle::Lower)
                     .expect("matern")
             }),
-            Box::new(|c, o| rq.apply_from_sq_diff(c, o, Triangle::Lower).expect("rq")),
-            Box::new(|c, o| rq.grad_from_sq_diff(c, o, 0, Triangle::Lower).expect("rq")),
             Box::new(|c, o| {
-                rq.hess_from_sq_diff(c, o, 0, 3, Triangle::Lower)
+                rq.apply_from_sq_diff::<Accurate, _>(c, o, Triangle::Lower)
+                    .expect("rq")
+            }),
+            Box::new(|c, o| {
+                rq.grad_from_sq_diff::<Accurate, _>(c, o, 0, Triangle::Lower)
+                    .expect("rq")
+            }),
+            Box::new(|c, o| {
+                rq.hess_from_sq_diff::<Accurate, _>(c, o, 0, 3, Triangle::Lower)
                     .expect("rq")
             }),
         ];

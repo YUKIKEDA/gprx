@@ -218,6 +218,9 @@ Leaves are dispatched statically: every operation on `KernelSpec` and `CompiledK
 2. `kernel/spec.rs`: the `KernelSpec` variant, its `From`, and the arms the compiler asks for.
 3. `kernel/compiled/`: the `CompiledKernel` variant, its `LeafRef` variant (`term`), and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf. The leaf arms of the coordinate paths are methods of `LeafRef`, shared by a coordinate tree and the per-leaf mixed path.
 4. `persist/kernel.rs`: its JSON tag; a saved file from an older version must still read (persist-format.md).
-5. A leaf that can read supplied distances as well: its `ScalarLeafSpec` or `ArdLeafSpec` variant and the `scalar_leaf!` / `ard_leaf!` list (`kernel/supply.rs`), its arms of the supplied leaves (`kernel/compiled/supplied.rs`), and its mapping to and from a `KernelSpec` leaf for the saved `distance` tag (`persist/kernel.rs`).
-5. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load.
-6. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.
+5. A leaf that can read supplied distances as well:
+   - `kernel/supply.rs`: its `ScalarLeafSpec` or `ArdLeafSpec` variant, the `scalar_leaf!` / `ard_leaf!` list, and one pair in `with_distance_leaves!`. The mapping to and from a `KernelSpec` leaf, which a save and a load use, follows from that pair.
+   - `kernel/compiled/supplied.rs`: its `ScalarLeaf` or `ArdLeaf` variant, its compile arm, and one arm in `each_scalar_leaf!` or `each_ard_leaf!`. The built-in leaves share their method names (`apply_math`, `grad_from_sq_diff`, …), so one body serves every leaf.
+   - Its name in `DISTANCE_LEAVES` (`kernel/compiled/leaf_table.rs`).
+6. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load. A distance leaf also runs through its Gram and `∂K/∂θ` on supplied distances.
+7. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.

@@ -89,6 +89,56 @@ pub(crate) enum SuppliedLeafSpec {
     Ard(ArdLeafSpec),
 }
 
+/// Calls `$on` with the pairs of every leaf that reads supplied distances:
+/// `scalar` leaves as `ScalarLeafSpec` variant = `KernelSpec` variant, then
+/// `ard` leaves as `ArdLeafSpec` variant = `KernelSpec` variant. A new
+/// distance leaf is added here once; the maps below follow.
+macro_rules! with_distance_leaves {
+    ($on:ident) => {
+        $on! {
+            scalar: Rbf = Rbf, Matern = Matern, Periodic = Periodic,
+                RationalQuadratic = RationalQuadratic, Custom = Custom;
+            ard: Rbf = RbfArd, Matern = MaternArd, RationalQuadratic = RationalQuadraticArd;
+        }
+    };
+}
+
+macro_rules! leaf_maps {
+    (
+        scalar: $($s:ident = $sk:ident),+;
+        ard: $($a:ident = $ak:ident),+;
+    ) => {
+        impl SuppliedLeafSpec {
+            /// The coordinate leaf of the same parameters: what a save
+            /// writes for this leaf.
+            pub(crate) fn into_coordinate(self) -> KernelSpec {
+                match self {
+                    $(Self::Scalar(ScalarLeafSpec::$s(k)) => KernelSpec::$sk(k),)+
+                    $(Self::Ard(ArdLeafSpec::$a(k)) => KernelSpec::$ak(k),)+
+                }
+            }
+
+            /// The leaf of a slot of `shape` with the parameters of the
+            /// coordinate leaf `spec`; `None` when a slot of that shape
+            /// holds no such leaf. An ARD leaf's lengthscale count is not
+            /// checked against the slot's dimensions.
+            pub(crate) fn from_coordinate(shape: SlotShape, spec: KernelSpec) -> Option<Self> {
+                match (shape, spec) {
+                    $((SlotShape::Scalar, KernelSpec::$sk(k)) => {
+                        Some(Self::Scalar(ScalarLeafSpec::$s(k)))
+                    })+
+                    $((SlotShape::Ard(_), KernelSpec::$ak(k)) => {
+                        Some(Self::Ard(ArdLeafSpec::$a(k)))
+                    })+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+with_distance_leaves!(leaf_maps);
+
 /// A leaf on one `d²` per pair.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScalarLeafSpec {

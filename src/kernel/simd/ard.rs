@@ -330,7 +330,11 @@ mod tests {
                         .apply(x.as_ref(), out.as_mut(), Triangle::Lower)
                         .expect("apply");
                     kernel
-                        .apply_from_sq_diff(cache.view(), from_cache.as_mut(), Triangle::Lower)
+                        .apply_from_sq_diff::<crate::math::Accurate, _>(
+                            cache.view(),
+                            from_cache.as_mut(),
+                            Triangle::Lower,
+                        )
                         .expect("cache");
                     kernel
                         .apply_cross(x.as_ref(), xs.as_ref(), cross.as_mut())
@@ -341,7 +345,12 @@ mod tests {
                         .grad(x.as_ref(), out.as_mut(), idx, Triangle::Lower)
                         .expect("grad");
                     kernel
-                        .grad_from_sq_diff(cache.view(), from_cache.as_mut(), idx, Triangle::Lower)
+                        .grad_from_sq_diff::<crate::math::Accurate, _>(
+                            cache.view(),
+                            from_cache.as_mut(),
+                            idx,
+                            Triangle::Lower,
+                        )
                         .expect("cache");
                     kernel
                         .grad_cross_from_coords(x.as_ref(), xs.as_ref(), cross.as_mut(), idx)

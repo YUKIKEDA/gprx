@@ -1,5 +1,51 @@
 //! Saves and loads a fitted GPR directory (`config.json` + `model.safetensors`).
 
+/// Runs `$call` in the arm of the precision `$kind`, with `$fitted` (and
+/// `$online`) the variants of `$loaded` of that precision. Each arm names
+/// its own precision type, so the call stays in the arm.
+macro_rules! by_precision {
+    ($kind:expr, $loaded:ident, |$fitted:ident, $online:ident| $call:expr) => {
+        match $kind {
+            $crate::precision::PersistKind::Double => {
+                let ($fitted, $online) = ($loaded::Double, $loaded::OnlineDouble);
+                $call
+            }
+            $crate::precision::PersistKind::Single => {
+                let ($fitted, $online) = ($loaded::Single, $loaded::OnlineSingle);
+                $call
+            }
+            $crate::precision::PersistKind::MixedPromote => {
+                let ($fitted, $online) = ($loaded::Mixed, $loaded::OnlineMixed);
+                $call
+            }
+            $crate::precision::PersistKind::MixedReevaluate => {
+                let ($fitted, $online) = ($loaded::Reevaluate, $loaded::OnlineReevaluate);
+                $call
+            }
+        }
+    };
+    ($kind:expr, $loaded:ident, |$fitted:ident| $call:expr) => {
+        match $kind {
+            $crate::precision::PersistKind::Double => {
+                let $fitted = $loaded::Double;
+                $call
+            }
+            $crate::precision::PersistKind::Single => {
+                let $fitted = $loaded::Single;
+                $call
+            }
+            $crate::precision::PersistKind::MixedPromote => {
+                let $fitted = $loaded::Mixed;
+                $call
+            }
+            $crate::precision::PersistKind::MixedReevaluate => {
+                let $fitted = $loaded::Reevaluate;
+                $call
+            }
+        }
+    };
+}
+
 mod atomic;
 mod config;
 mod distance;
@@ -393,12 +439,8 @@ fn kernel_save<P: GpScalar, K: ModelKernel>(
             d2: Vec::new(),
         });
     }
-    let points = if <K as ModelKernelParts>::POINTS {
-        PointsJson::WithPoints
-    } else {
-        PointsJson::DistanceOnly
-    };
-    let tri = core.n * (core.n + 1) / 2;
+    let points = PointsJson::of::<K>();
+    let tri = crate::kernel::packed_len(core.n)?;
     let saved = core.sources.saved();
     let d2 = slots
         .iter()
@@ -642,11 +684,7 @@ fn read_exact_tensors<P: GpScalar>(
         } else {
             None
         };
-        let tri = n
-            .checked_add(1)
-            .and_then(|n1| n.checked_mul(n1))
-            .map(|cells| cells / 2)
-            .ok_or(GprError::SizeOverflow)?;
+        let tri = crate::kernel::packed_len(n)?;
         let d2 = slots
             .iter()
             .enumerate()
@@ -686,62 +724,29 @@ struct Variants<P: GpScalar, K: ModelKernel, L> {
 /// Reads and checks `config.json` of an Exact model with distance marker
 /// `points` (`None` for a coordinate model).
 fn read_exact_config(dir: &Path, points: Option<PointsJson>) -> Result<ModelConfig, GprError> {
-    let config_path = dir.join(CONFIG_FILE);
-    let bytes = std::fs::read(&config_path)
-        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
-    config::parse_model(&bytes, &[config::ModelJson::Exact], points)?;
+    let bytes = read_model_bytes(dir, &[config::ModelJson::Exact], points)?;
     config::parse_config(&bytes)
 }
 
-/// Loads an Exact directory into the loaded enum of `$loaded`: one arm per
-/// precision, each naming its own precision type.
-macro_rules! load_exact {
-    ($dir:expr, $registry:expr, $config:expr, $loaded:ident) => {{
-        let (dir, registry, config) = ($dir, $registry, $config);
-        match config.persist_kind() {
-            PersistKind::Double => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: $loaded::Double,
-                    online: $loaded::OnlineDouble,
-                },
-            ),
-            PersistKind::Single => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: $loaded::Single,
-                    online: $loaded::OnlineSingle,
-                },
-            ),
-            PersistKind::MixedPromote => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: $loaded::Mixed,
-                    online: $loaded::OnlineMixed,
-                },
-            ),
-            PersistKind::MixedReevaluate => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: $loaded::Reevaluate,
-                    online: $loaded::OnlineReevaluate,
-                },
-            ),
-        }
-    }};
+/// The bytes of `dir/config.json`, once its `model` is one of `expected`
+/// and its distance marker is `points` ([`config::parse_model`]).
+fn read_model_bytes(
+    dir: &Path,
+    expected: &[config::ModelJson],
+    points: Option<PointsJson>,
+) -> Result<Vec<u8>, GprError> {
+    let config_path = dir.join(CONFIG_FILE);
+    let bytes = std::fs::read(&config_path)
+        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
+    config::parse_model(&bytes, expected, points)?;
+    Ok(bytes)
 }
 
 fn load_dir(dir: &Path, registry: &PersistRegistry) -> Result<LoadedGpr, GprError> {
     let config = read_exact_config(dir, None)?;
-    load_exact!(dir, registry, config, LoadedGpr)
+    by_precision!(config.persist_kind(), LoadedGpr, |fitted, online| {
+        load_precision(dir, registry, config, Variants { fitted, online })
+    })
 }
 
 /// The slots of a config's table, checked against the decoded kernel: the

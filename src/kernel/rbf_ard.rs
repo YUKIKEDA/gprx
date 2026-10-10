@@ -2,7 +2,8 @@
 
 use super::ard::{self, ArdR2, Pick};
 use super::dist::{
-    ArdBlocks, ArdSqDiff, BlockState, RowRuns, Runs, require_ard_sq_diff_shape, walk_row_runs,
+    ArdBlocks, ArdSqDiff, BlockState, RowRuns, Runs, packed_len, require_ard_sq_diff_shape,
+    walk_row_runs,
 };
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
@@ -386,11 +387,7 @@ impl RbfArdKernel {
                 });
             }
         }
-        let len = n
-            .checked_add(1)
-            .and_then(|n1| n.checked_mul(n1))
-            .map(|cells| cells / 2)
-            .ok_or(GprError::SizeOverflow)?;
+        let len = packed_len(n)?;
         if fold.len() < len {
             fold.resize(len, 0.0);
         }

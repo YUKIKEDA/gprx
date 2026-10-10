@@ -14,10 +14,10 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
-use crate::kernel::{BlockAt, DistanceSlot, ModelKernel, ModelKernelParts, SlotShape};
+use crate::kernel::{BlockAt, DistanceSlot, ModelKernel, SlotShape};
 use crate::optimizer::Fixed;
 use crate::points::{IdRegistry, PointRegistry};
-use crate::precision::{GpScalar, PersistKind};
+use crate::precision::GpScalar;
 use crate::sgpr::{FittedSgpr, FixedInducing, InducingRegistry, OnlineSgpr};
 use crate::sparse::{PersistedSparse, SparseCore, SparseSpec, SparseSupply};
 use crate::svgp::FittedSvgp;
@@ -25,14 +25,14 @@ use crate::{PredictOptions, Prediction};
 
 use super::config::{
     DistanceJson, JitterJson, LikelihoodJson, MathJson, ModelJson, PointsJson, PrecisionJson,
-    ResidualJson, SparseConfig, SparseDistanceJson, d2_tensor, parse_model, parse_sparse_config,
+    ResidualJson, SparseConfig, SparseDistanceJson, d2_tensor, parse_sparse_config,
 };
 use super::kernel::KernelJson;
 use super::tensors::{TensorFile, f64_tensor, read_f64, write_f64_tensors};
 use super::transform::{
     encode_fitted_input, encode_fitted_target, encode_unfitted_input, encode_unfitted_target,
 };
-use super::{CONFIG_FILE, FORMAT_VERSION, PersistRegistry, decode_kernel, persist_err, widen};
+use super::{FORMAT_VERSION, PersistRegistry, decode_kernel, persist_err, widen};
 use safetensors::SafeTensors;
 
 const TENSOR_X: &str = "x";
@@ -53,13 +53,7 @@ struct OnlineIds {
 /// The distance marker of a model of kernel `K` with `slots`: none for a
 /// coordinate kernel.
 fn points_of<K: ModelKernel>(slots: &[DistanceSlot]) -> Option<PointsJson> {
-    if slots.is_empty() {
-        None
-    } else if <K as ModelKernelParts>::POINTS {
-        Some(PointsJson::WithPoints)
-    } else {
-        Some(PointsJson::DistanceOnly)
-    }
+    (!slots.is_empty()).then(PointsJson::of::<K>)
 }
 
 /// Each slot's `n × m` training blocks, as tensor `d2.<k>` for slot `k`:
@@ -71,23 +65,21 @@ fn supply_tensors(
     (n, m): (usize, usize),
 ) -> Vec<(String, Vec<usize>, Vec<f64>)> {
     let xz = &supply.exact().xz;
-    let (mut scalar, mut ard) = (0, 0);
     slots
         .iter()
         .enumerate()
         .map(|(k, slot)| {
             let mut values = Vec::new();
+            let at = crate::kernel::place_in_shape(slots, k);
             let shape = match slot.shape() {
                 SlotShape::Scalar => {
-                    xz.block_into(BlockAt::Scalar(scalar), &mut values);
-                    scalar += 1;
+                    xz.block_into(BlockAt::Scalar(at), &mut values);
                     vec![n, m]
                 }
                 SlotShape::Ard(dims) => {
                     for dim in 0..dims {
-                        xz.block_into(BlockAt::Ard(ard, dim), &mut values);
+                        xz.block_into(BlockAt::Ard(at, dim), &mut values);
                     }
-                    ard += 1;
                     vec![dims, n, m]
                 }
             };
@@ -209,10 +201,7 @@ pub(super) fn read_config(
     expected: &[ModelJson],
     points: Option<PointsJson>,
 ) -> Result<SparseConfig, GprError> {
-    let config_path = dir.join(CONFIG_FILE);
-    let bytes = std::fs::read(&config_path)
-        .map_err(|err| persist_err(PersistErrorKind::Io, format!("read {config_path:?}: {err}")))?;
-    parse_model(&bytes, expected, points)?;
+    let bytes = super::read_model_bytes(dir, expected, points)?;
     parse_sparse_config(&bytes)
 }
 
@@ -323,9 +312,6 @@ fn read_supply<S: crate::kernel::KernelScalar>(
             ),
         ));
     }
-    // Each below `n` and none twice, as a fit checks them: the binding
-    // reads the blocks at these rows.
-    crate::sparse::check_inducing(inducing, n)?;
     let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
     let sources = slots
         .iter()
@@ -348,8 +334,7 @@ fn read_supply<S: crate::kernel::KernelScalar>(
             })
         })
         .collect::<Result<Vec<_>, GprError>>()?;
-    let (zz, xz) = crate::kernel::bind_inducing(slots, sources, n, inducing)?;
-    SparseSupply::new::<S>(slots, inducing.to_vec(), zz, xz)
+    SparseSupply::bind::<S>(slots, sources, n, inducing)
 }
 
 /// The saved online identifiers.
@@ -500,44 +485,9 @@ impl LoadedSgpr {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let config = read_config(dir, &[ModelJson::Sgpr, ModelJson::OnlineSgpr], None)?;
-        match config.persist_kind() {
-            PersistKind::Double => load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Double,
-                    online: Self::OnlineDouble,
-                },
-            ),
-            PersistKind::Single => load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Single,
-                    online: Self::OnlineSingle,
-                },
-            ),
-            PersistKind::MixedPromote => load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Mixed,
-                    online: Self::OnlineMixed,
-                },
-            ),
-            PersistKind::MixedReevaluate => load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Reevaluate,
-                    online: Self::OnlineReevaluate,
-                },
-            ),
-        }
+        by_precision!(config.persist_kind(), Self, |fitted, online| {
+            load_sgpr_as(dir, &config, registry, SgprVariants { fitted, online })
+        })
     }
 
     /// Holds the number of training points.
@@ -689,12 +639,9 @@ impl LoadedSvgp {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let config = read_config(dir, &[ModelJson::Svgp], None)?;
-        match config.persist_kind() {
-            PersistKind::Double => load_svgp_as(dir, &config, registry, Self::Double),
-            PersistKind::Single => load_svgp_as(dir, &config, registry, Self::Single),
-            PersistKind::MixedPromote => load_svgp_as(dir, &config, registry, Self::Mixed),
-            PersistKind::MixedReevaluate => load_svgp_as(dir, &config, registry, Self::Reevaluate),
-        }
+        by_precision!(config.persist_kind(), Self, |fitted| {
+            load_svgp_as(dir, &config, registry, fitted)
+        })
     }
 
     /// Holds the number of training points.

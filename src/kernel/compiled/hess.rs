@@ -446,7 +446,9 @@ impl<T: KernelScalar> LeafRef<'_, T> {
         match self {
             Self::RbfArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
             Self::MaternArd(leaf) => leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo),
-            Self::RationalQuadraticArd(leaf) => leaf.hess_from_sq_diff(cache, d2_k, i, j, uplo),
+            Self::RationalQuadraticArd(leaf) => {
+                leaf.hess_from_sq_diff::<M, _>(cache, d2_k, i, j, uplo)
+            }
             Self::Constant(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
             Self::White(leaf) => leaf.hess_rows(x, d2_k, i, j, uplo),
             _ => self.hess_points::<M>(x, d2_k, pair, uplo),

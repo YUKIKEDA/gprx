@@ -218,6 +218,9 @@ flowchart LR
 2. `kernel/spec.rs`: `KernelSpec` の variant、`From`、コンパイラが求める分岐
 3. `kernel/compiled/`: `CompiledKernel` の variant、それに対応する `LeafRef` の variant（`term`）、コンパイラが求める分岐。すべてのカーネルの葉を名指しする `coord_mode`、`needs_ard_sq_diff`、`needs_grad_scratch` を含む。座標の経路の葉の分岐は `LeafRef` のメソッドで、座標の木と葉ごとの混合経路が共有する
 4. `persist/kernel.rs`: JSON のタグ。古い版の保存ファイルも読めること（persist-format.md）
-5. 与えられた距離も読める葉なら: `ScalarLeafSpec` か `ArdLeafSpec` の variant と `scalar_leaf!` / `ard_leaf!` の一覧（`kernel/supply.rs`）、与えられた距離の葉の arm（`kernel/compiled/supplied.rs`）、保存の `distance` タグのための `KernelSpec` の葉との対応（`persist/kernel.rs`）
-5. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互のブロック、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す
-6. design §5 と、`kernel/mod.rs`・`lib.rs` の公開の再エクスポート
+5. 与えられた距離も読める葉なら:
+   - `kernel/supply.rs`: `ScalarLeafSpec` か `ArdLeafSpec` の variant、`scalar_leaf!` / `ard_leaf!` の一覧、`with_distance_leaves!` の 1 組。保存と読み込みが使う `KernelSpec` の葉との対応は、その 1 組から生成される
+   - `kernel/compiled/supplied.rs`: `ScalarLeaf` か `ArdLeaf` の variant、compile の分岐、`each_scalar_leaf!` か `each_ard_leaf!` の 1 行。組み込みの葉はメソッド名（`apply_math`、`grad_from_sq_diff` など）をそろえているので、1 つの本体ですべての葉に対応できる
+   - `DISTANCE_LEAVES`（`kernel/compiled/leaf_table.rs`）への名前の追加
+6. `kernel/compiled/leaf_table.rs`: `leaf_index` の番号（コンパイラが求める）と表の実例。表のテストが、パラメータ、座標と距離からの Gram、相互のブロック、対角、`∂K/∂θ` と `∂²K/∂θ∂θ` の中心差分、座標微分、保存と読み込みを通す。距離の葉は、与えられた距離からの Gram と `∂K/∂θ` も通す
+7. design §5 と、`kernel/mod.rs`・`lib.rs` の公開の再エクスポート

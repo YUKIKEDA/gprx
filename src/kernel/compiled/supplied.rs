@@ -139,6 +139,32 @@ pub(crate) enum ArdLeaf {
     RationalQuadratic(RationalQuadraticArdKernel),
 }
 
+/// `$body` with `$k` the kernel of the scalar leaf `$leaf`, or `$custom`
+/// with `$c` a custom leaf's term. The built-in leaves share their method
+/// names, so one body serves them all.
+macro_rules! each_scalar_leaf {
+    ($leaf:expr, |$k:ident| $body:expr; custom |$c:ident| $custom:expr) => {
+        match $leaf {
+            ScalarLeaf::Rbf($k) => $body,
+            ScalarLeaf::Matern($k) => $body,
+            ScalarLeaf::Periodic($k) => $body,
+            ScalarLeaf::RationalQuadratic($k) => $body,
+            ScalarLeaf::Custom($c) => $custom,
+        }
+    };
+}
+
+/// `$body` with `$k` the kernel of the ARD leaf `$leaf`.
+macro_rules! each_ard_leaf {
+    ($leaf:expr, |$k:ident| $body:expr) => {
+        match $leaf {
+            ArdLeaf::Rbf($k) => $body,
+            ArdLeaf::Matern($k) => $body,
+            ArdLeaf::RationalQuadratic($k) => $body,
+        }
+    };
+}
+
 impl<T: KernelScalar> SuppliedLeaf<T> {
     /// Compiles `spec` for the scalar `T`.
     pub(crate) fn compile(spec: &SuppliedSpec) -> Self {
@@ -178,20 +204,16 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
                 let d = slots.scalar(self.at)?;
-                match leaf {
-                    ScalarLeaf::Rbf(k) => k.apply_math::<M, _>(d, out, uplo),
-                    ScalarLeaf::Matern(k) => k.apply_math::<M, _>(d, out, uplo),
-                    ScalarLeaf::Periodic(k) => k.apply_math::<M, _>(d, out, uplo),
-                    ScalarLeaf::RationalQuadratic(k) => k.apply(d, out, uplo),
-                    ScalarLeaf::Custom(k) => k.apply(d, out, uplo),
-                }
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.apply_math::<M, _>(d, out, uplo);
+                    custom |k| k.apply(d, out, uplo)
+                )
             }
             SuppliedCompiled::Ard(leaf) => match slots.ard(self.at)? {
-                ArdSquare::Packed(c) => match leaf {
-                    ArdLeaf::Rbf(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
-                    ArdLeaf::Matern(k) => k.apply_from_sq_diff::<M, _>(c, out, uplo),
-                    ArdLeaf::RationalQuadratic(k) => k.apply_from_sq_diff(c, out, uplo),
-                },
+                ArdSquare::Packed(c) => {
+                    each_ard_leaf!(leaf, |k| k.apply_from_sq_diff::<M, _>(c, out, uplo))
+                }
                 // Every entry of a dense square, whatever `uplo` asks.
                 ArdSquare::Dense(b) => ard_cross::<M, T>(leaf, ArdRect::Checked(b), out),
             },
@@ -209,20 +231,16 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
                 let d = slots.scalar(self.at)?;
-                match leaf {
-                    ScalarLeaf::Rbf(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
-                    ScalarLeaf::Matern(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
-                    ScalarLeaf::Periodic(k) => k.grad_math::<M, _>(d, d_k, p, uplo),
-                    ScalarLeaf::RationalQuadratic(k) => k.grad(d, d_k, p, uplo),
-                    ScalarLeaf::Custom(k) => k.grad(d, d_k, p, uplo),
-                }
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.grad_math::<M, _>(d, d_k, p, uplo);
+                    custom |k| k.grad(d, d_k, p, uplo)
+                )
             }
             SuppliedCompiled::Ard(leaf) => match slots.ard(self.at)? {
-                ArdSquare::Packed(c) => match leaf {
-                    ArdLeaf::Rbf(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
-                    ArdLeaf::Matern(k) => k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo),
-                    ArdLeaf::RationalQuadratic(k) => k.grad_from_sq_diff(c, d_k, p, uplo),
-                },
+                ArdSquare::Packed(c) => {
+                    each_ard_leaf!(leaf, |k| k.grad_from_sq_diff::<M, _>(c, d_k, p, uplo))
+                }
                 ArdSquare::Dense(b) => ard_grad_cross::<M, T>(leaf, ArdRect::Checked(b), d_k, p),
             },
         }
@@ -239,20 +257,16 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
                 let d = slots.scalar(self.at)?;
-                match leaf {
-                    ScalarLeaf::Rbf(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
-                    ScalarLeaf::Matern(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
-                    ScalarLeaf::Periodic(k) => k.hess_math::<M, _>(d, d2_k, i, j, uplo),
-                    ScalarLeaf::RationalQuadratic(k) => k.hess(d, d2_k, i, j, uplo),
-                    ScalarLeaf::Custom(k) => k.hess(d, d2_k, i, j, uplo),
-                }
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.hess_math::<M, _>(d, d2_k, i, j, uplo);
+                    custom |k| k.hess(d, d2_k, i, j, uplo)
+                )
             }
             SuppliedCompiled::Ard(leaf) => match slots.ard(self.at)? {
-                ArdSquare::Packed(c) => match leaf {
-                    ArdLeaf::Rbf(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
-                    ArdLeaf::Matern(k) => k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo),
-                    ArdLeaf::RationalQuadratic(k) => k.hess_from_sq_diff(c, d2_k, i, j, uplo),
-                },
+                ArdSquare::Packed(c) => {
+                    each_ard_leaf!(leaf, |k| k.hess_from_sq_diff::<M, _>(c, d2_k, i, j, uplo))
+                }
                 ArdSquare::Dense(b) => {
                     ard_hess_cross::<M, T>(leaf, ArdRect::Checked(b), d2_k, (i, j))
                 }
@@ -269,13 +283,11 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
                 let d = slots.scalar(self.at)?;
-                match leaf {
-                    ScalarLeaf::Rbf(k) => k.apply_cross_math::<M, _>(d, out),
-                    ScalarLeaf::Matern(k) => k.apply_cross_math::<M, _>(d, out),
-                    ScalarLeaf::Periodic(k) => k.apply_cross_math::<M, _>(d, out),
-                    ScalarLeaf::RationalQuadratic(k) => k.apply_cross(d, out),
-                    ScalarLeaf::Custom(k) => k.apply_cross(d, out),
-                }
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.apply_cross_math::<M, _>(d, out);
+                    custom |k| k.apply_cross(d, out)
+                )
             }
             SuppliedCompiled::Ard(leaf) => {
                 let b = slots.ard(self.at)?;
@@ -294,13 +306,11 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         match &self.leaf {
             SuppliedCompiled::Scalar(leaf) => {
                 let d = slots.scalar(self.at)?;
-                match leaf {
-                    ScalarLeaf::Rbf(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
-                    ScalarLeaf::Matern(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
-                    ScalarLeaf::Periodic(k) => k.grad_cross_dist::<M, T>(d, d_k, p),
-                    ScalarLeaf::RationalQuadratic(k) => k.grad_cross_dist(d, d_k, p),
-                    ScalarLeaf::Custom(k) => k.grad_cross(d, d_k, p),
-                }
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.grad_cross_dist::<M, T>(d, d_k, p);
+                    custom |k| k.grad_cross(d, d_k, p)
+                )
             }
             SuppliedCompiled::Ard(leaf) => {
                 let b = slots.ard(self.at)?;
@@ -350,12 +360,12 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         p: usize,
     ) -> Result<(), GprError> {
         let value = self.at_zero(
-            |leaf, d, cell| match leaf {
-                ScalarLeaf::Rbf(k) => k.grad_math::<M, _>(d, cell, p, Triangle::Lower),
-                ScalarLeaf::Matern(k) => k.grad_math::<M, _>(d, cell, p, Triangle::Lower),
-                ScalarLeaf::Periodic(k) => k.grad_math::<M, _>(d, cell, p, Triangle::Lower),
-                ScalarLeaf::RationalQuadratic(k) => k.grad(d, cell, p, Triangle::Lower),
-                ScalarLeaf::Custom(k) => k.grad(d, cell, p, Triangle::Lower),
+            |leaf, d, cell| {
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.grad_math::<M, _>(d, cell, p, Triangle::Lower);
+                    custom |k| k.grad(d, cell, p, Triangle::Lower)
+                )
             },
             |leaf, b, cell| ard_grad_cross::<M, T>(leaf, b, cell, p),
         )?;
@@ -370,12 +380,12 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
         (i, j): (usize, usize),
     ) -> Result<(), GprError> {
         let value = self.at_zero(
-            |leaf, d, cell| match leaf {
-                ScalarLeaf::Rbf(k) => k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower),
-                ScalarLeaf::Matern(k) => k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower),
-                ScalarLeaf::Periodic(k) => k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower),
-                ScalarLeaf::RationalQuadratic(k) => k.hess(d, cell, i, j, Triangle::Lower),
-                ScalarLeaf::Custom(k) => k.hess(d, cell, i, j, Triangle::Lower),
+            |leaf, d, cell| {
+                each_scalar_leaf!(
+                    leaf,
+                    |k| k.hess_math::<M, _>(d, cell, i, j, Triangle::Lower);
+                    custom |k| k.hess(d, cell, i, j, Triangle::Lower)
+                )
             },
             |leaf, b, cell| ard_hess_cross::<M, T>(leaf, b, cell, (i, j)),
         )?;
@@ -415,11 +425,7 @@ impl<T: KernelScalar> SuppliedLeaf<T> {
 impl ArdLeaf {
     /// Number of lengthscales, one per dimension of the slot.
     fn dims(&self) -> usize {
-        match self {
-            Self::Rbf(k) => k.lengthscales().num_params(),
-            Self::Matern(k) => k.lengthscales().num_params(),
-            Self::RationalQuadratic(k) => k.lengthscales().num_params(),
-        }
+        each_ard_leaf!(self, |k| k.lengthscales().num_params())
     }
 }
 
@@ -438,11 +444,8 @@ fn ard_cross<M: crate::math::KernelMath, T: KernelScalar>(
     b: ArdRect<'_, T>,
     out: MatMut<'_, T>,
 ) -> Result<(), GprError> {
-    on_state!(b, |b| match leaf {
-        ArdLeaf::Rbf(k) => k.apply_cross_from_blocks::<M, T, _>(b, out),
-        ArdLeaf::Matern(k) => k.apply_cross_from_blocks::<M, T, _>(b, out),
-        ArdLeaf::RationalQuadratic(k) => k.apply_cross_from_blocks(b, out),
-    })
+    on_state!(b, |b| each_ard_leaf!(leaf, |k| k
+        .apply_cross_from_blocks::<M, T, _>(b, out)))
 }
 
 fn ard_grad_cross<M: crate::math::KernelMath, T: KernelScalar>(
@@ -451,11 +454,8 @@ fn ard_grad_cross<M: crate::math::KernelMath, T: KernelScalar>(
     d_k: MatMut<'_, T>,
     p: usize,
 ) -> Result<(), GprError> {
-    on_state!(b, |b| match leaf {
-        ArdLeaf::Rbf(k) => k.grad_cross_from_blocks::<M, T, _>(b, d_k, p),
-        ArdLeaf::Matern(k) => k.grad_cross_from_blocks::<M, T, _>(b, d_k, p),
-        ArdLeaf::RationalQuadratic(k) => k.grad_cross_from_blocks(b, d_k, p),
-    })
+    on_state!(b, |b| each_ard_leaf!(leaf, |k| k
+        .grad_cross_from_blocks::<M, T, _>(b, d_k, p)))
 }
 
 fn ard_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
@@ -464,11 +464,8 @@ fn ard_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
     d2_k: MatMut<'_, T>,
     (i, j): (usize, usize),
 ) -> Result<(), GprError> {
-    on_state!(b, |b| match leaf {
-        ArdLeaf::Rbf(k) => k.hess_cross_from_blocks::<M, T, _>(b, d2_k, i, j),
-        ArdLeaf::Matern(k) => k.hess_cross_from_blocks::<M, T, _>(b, d2_k, i, j),
-        ArdLeaf::RationalQuadratic(k) => k.hess_cross_from_blocks(b, d2_k, i, j),
-    })
+    on_state!(b, |b| each_ard_leaf!(leaf, |k| k
+        .hess_cross_from_blocks::<M, T, _>(b, d2_k, i, j)))
 }
 
 fn scalar_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
@@ -477,13 +474,11 @@ fn scalar_hess_cross<M: crate::math::KernelMath, T: KernelScalar>(
     d2_k: MatMut<'_, T>,
     (i, j): (usize, usize),
 ) -> Result<(), GprError> {
-    match leaf {
-        ScalarLeaf::Rbf(k) => k.hess_cross_dist::<M, T>(d, d2_k, i, j),
-        ScalarLeaf::Matern(k) => k.hess_cross_dist::<M, T>(d, d2_k, i, j),
-        ScalarLeaf::Periodic(k) => k.hess_cross_dist::<M, T>(d, d2_k, i, j),
-        ScalarLeaf::RationalQuadratic(k) => k.hess_cross_dist(d, d2_k, i, j),
-        ScalarLeaf::Custom(k) => k.hess_cross(d, d2_k, i, j),
-    }
+    each_scalar_leaf!(
+        leaf,
+        |k| k.hess_cross_dist::<M, T>(d, d2_k, i, j);
+        custom |k| k.hess_cross(d, d2_k, i, j)
+    )
 }
 
 /// Every variant of a compiled supplied leaf, with the leaf bound to `$leaf`.

@@ -7,7 +7,8 @@
 //! calls: parameters, the Gram from coordinates and from distances, the
 //! rectangular cross, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central
 //! differences, the coordinate derivative where the leaf has one, and a save
-//! and load. See docs/architecture.md §7 (adding a leaf).
+//! and load. A leaf that reads supplied distances also runs through its
+//! Gram and `∂K/∂θ` on them. See docs/architecture.md §7 (adding a leaf).
 
 use crate::kernel::GramInputs;
 use crate::kernel::{
@@ -350,4 +351,113 @@ fn every_builtin_leaf_runs_every_core_operation() {
             other => panic!("{name}: loaded {other:?}"),
         }
     }
+}
+
+/// The built-in leaves that read supplied squared distances
+/// ([`crate::kernel::SuppliedLeafSpec::from_coordinate`]); the others read
+/// coordinates alone.
+const DISTANCE_LEAVES: [&str; 7] = [
+    "rbf",
+    "rbf_ard",
+    "matern",
+    "matern_ard",
+    "periodic",
+    "rational_quadratic",
+    "rational_quadratic_ard",
+];
+
+/// Every leaf of the table that reads supplied distances gives, on the
+/// `d²` of the table's points, its coordinate Gram and `∂K/∂θ`. A leaf that
+/// [`crate::kernel::SuppliedLeafSpec::from_coordinate`] takes, and only
+/// such a leaf, is in [`DISTANCE_LEAVES`], so a new one runs here.
+#[test]
+fn every_distance_leaf_on_supplied_distances_matches_its_coordinates() {
+    use crate::kernel::compiled::supplied::{ArdSquare, SquareTable};
+    use crate::kernel::dist::{ArdBlocks, BlockList};
+    use crate::kernel::{SlotId, SlotShape, SuppliedLeafSpec, SuppliedSpec};
+
+    let x = points();
+    let (n, d) = (x.nrows(), x.ncols());
+    let mut sq = Mat::zeros(n, n);
+    crate::kernel::fill_squared_euclidean(x.as_ref(), sq.as_mut(), &mut []);
+    let per_dim: Vec<Vec<f64>> = (0..d)
+        .map(|k| {
+            (0..n * n)
+                .map(|at| (x[(at % n, k)] - x[(at / n, k)]).powi(2))
+                .collect()
+        })
+        .collect();
+    let squares = SquareTable {
+        scalar: vec![sq.as_ref()],
+        ard: vec![ArdSquare::Dense(ArdBlocks::new(
+            BlockList::Vecs(&per_dim),
+            n,
+            n,
+            0,
+        ))],
+    };
+    let inputs = GramInputs::<_, SuppliedSpec>::supplied(x.as_ref(), &squares);
+    let mut readers = 0;
+    for spec in table() {
+        let name = LEAVES[leaf_index(&spec).expect("a built-in leaf")];
+        let leaf = SuppliedLeafSpec::from_coordinate(SlotShape::Scalar, spec.clone())
+            .or_else(|| SuppliedLeafSpec::from_coordinate(SlotShape::Ard(d), spec.clone()));
+        assert_eq!(leaf.is_some(), DISTANCE_LEAVES.contains(&name), "{name}");
+        let Some(leaf) = leaf else {
+            continue;
+        };
+        readers += 1;
+        let supplied = KernelSpec::<SuppliedSpec>::Supplied(SuppliedSpec {
+            slot: SlotId::fresh(),
+            at: 0,
+            leaf,
+        })
+        .compile();
+        let coordinate = spec.compile();
+        let mut got = Mat::zeros(n, n);
+        let mut scratch = Mat::zeros(n, n);
+        supplied
+            .eval_gram::<Accurate>(
+                inputs,
+                got.as_mut(),
+                Triangle::Full,
+                scratch.as_mut(),
+                &mut Vec::new(),
+            )
+            .expect("gram");
+        let want = gram(&spec, &x);
+        for j in 0..n {
+            for i in 0..n {
+                assert!(close(got[(i, j)], want[(i, j)], 1e-12), "{name} gram");
+            }
+        }
+        for p in 0..coordinate.num_params() {
+            supplied
+                .grad_gram::<Accurate>(
+                    inputs,
+                    got.as_mut(),
+                    p,
+                    Triangle::Full,
+                    scratch.as_mut(),
+                    &mut Vec::new(),
+                )
+                .expect("grad");
+            let mut want = Mat::zeros(n, n);
+            coordinate
+                .grad_points::<Accurate>(
+                    x.as_ref(),
+                    want.as_mut(),
+                    p,
+                    Triangle::Full,
+                    scratch.as_mut(),
+                )
+                .expect("grad");
+            for j in 0..n {
+                for i in 0..n {
+                    assert!(close(got[(i, j)], want[(i, j)], 1e-10), "{name} grad {p}");
+                }
+            }
+        }
+    }
+    assert_eq!(readers, DISTANCE_LEAVES.len());
 }

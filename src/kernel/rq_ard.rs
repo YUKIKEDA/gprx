@@ -10,6 +10,7 @@ use super::{
     write_rect,
 };
 use crate::error::GprError;
+use crate::math::KernelMath;
 use crate::param::{BoundedParam, Interval};
 use faer::{MatMut, MatRef};
 use wide::f64x4;
@@ -294,7 +295,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    pub(crate) fn apply_from_sq_diff<T: KernelScalar>(
+    pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
         out: MatMut<'_, T>,
@@ -310,7 +311,7 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `K` from `(Δ_d)²` blocks.
-    pub(crate) fn apply_cross_from_blocks<T: KernelScalar, S: BlockState>(
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
         blocks: ArdBlocks<'_, T, S>,
         out: MatMut<'_, T>,
@@ -324,7 +325,7 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
-    pub(crate) fn grad_cross_from_blocks<T: KernelScalar, S: BlockState>(
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
         blocks: ArdBlocks<'_, T, S>,
         d_k: MatMut<'_, T>,
@@ -341,7 +342,7 @@ impl RationalQuadraticArdKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
-    pub(crate) fn hess_cross_from_blocks<T: KernelScalar, S: BlockState>(
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
         &self,
         blocks: ArdBlocks<'_, T, S>,
         d2_k: MatMut<'_, T>,
@@ -358,7 +359,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    pub(crate) fn grad_from_sq_diff<T: KernelScalar>(
+    pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
         d_k: MatMut<'_, T>,
@@ -404,7 +405,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    pub(crate) fn hess_from_sq_diff<T: KernelScalar>(
+    pub(crate) fn hess_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
         d2_k: MatMut<'_, T>,

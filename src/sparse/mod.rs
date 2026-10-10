@@ -416,11 +416,9 @@ impl<U: Supply> SparseCore<U> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] if `n` or `inducing` is empty,
-    /// [`GprError::IndexOutOfRange`] for an index past `n`,
-    /// [`GprError::InvalidConfig`] for an index listed twice, the errors of
-    /// [`crate::kernel::bind_inducing`], and the input errors of
-    /// [`Self::prepare`].
+    /// Returns [`GprError::EmptyInput`] if `n` or `inducing` is empty, the
+    /// input errors of [`Self::prepare`], and the errors of
+    /// [`SparseSupply::bind`].
     pub(crate) fn prepare_supplied<'s, S: KernelScalar>(
         spec: &SparseSpec<U>,
         sources: impl IntoIterator<Item = crate::kernel::DistanceSource<'s>>,
@@ -431,7 +429,6 @@ impl<U: Supply> SparseCore<U> {
     ) -> Result<Self, GprError> {
         crate::data::require_nonempty(n)?;
         crate::data::require_nonempty(inducing.len())?;
-        check_inducing(inducing, n)?;
         let m = inducing.len();
         if n_cols == 0 {
             crate::data::require_count(x.len(), 0, "feature values")?;
@@ -441,8 +438,7 @@ impl<U: Supply> SparseCore<U> {
             validate_training(x, n, n_cols, y)?;
         }
         let slots = crate::kernel::spec_slots(&spec.kernel);
-        let (zz, xz) = crate::kernel::bind_inducing(&slots, sources, n, inducing)?;
-        let supply = SparseSupply::new::<S>(&slots, inducing.to_vec(), zz, xz)?;
+        let supply = SparseSupply::bind::<S>(&slots, sources, n, inducing)?;
         let mut z_obs = Vec::with_capacity(m * n_cols);
         for j in 0..n_cols {
             z_obs.extend(inducing.iter().map(|&i| x[j * n + i]));
@@ -1474,6 +1470,27 @@ pub(crate) struct SupplyAt<T: KernelScalar> {
 }
 
 impl SparseSupply {
+    /// The supply of the inducing points `inducing` (training indices) of
+    /// `n` training points from `sources`, one per slot of `slots` (the
+    /// kernel's): what a fit binds and a load binds again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::IndexOutOfRange`] for an index not below `n`,
+    /// [`GprError::InvalidConfig`] for an index listed twice, and the
+    /// errors of [`crate::kernel::bind_inducing`] and [`Self::new`].
+    pub(crate) fn bind<'s, S: KernelScalar>(
+        slots: &[crate::kernel::DistanceSlot],
+        sources: impl IntoIterator<Item = crate::kernel::DistanceSource<'s>>,
+        n: usize,
+        inducing: &[usize],
+    ) -> Result<Self, GprError> {
+        // The binding reads the blocks at these rows.
+        check_inducing(inducing, n)?;
+        let (zz, xz) = crate::kernel::bind_inducing(slots, sources, n, inducing)?;
+        Self::new::<S>(slots, inducing.to_vec(), zz, xz)
+    }
+
     /// The supply of `inducing` from its `f64` squares and blocks, cast
     /// once for an `f32` storage `S`.
     ///
@@ -1481,7 +1498,7 @@ impl SparseSupply {
     ///
     /// Returns [`GprError::InvalidDistance`] for a value past the range of
     /// `S`.
-    pub(crate) fn new<S: KernelScalar>(
+    fn new<S: KernelScalar>(
         slots: &[crate::kernel::DistanceSlot],
         inducing: Vec<usize>,
         zz: BlockStore<f64>,

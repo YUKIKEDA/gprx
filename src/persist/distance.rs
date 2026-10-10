@@ -6,11 +6,9 @@ use std::path::Path;
 use crate::error::GprError;
 use crate::gpr::{FittedGpr, OnlineGpr};
 use crate::kernel::{
-    DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, ModelKernelParts, PointUse,
-    WithPoints,
+    DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource, PointUse, WithPoints,
 };
 use crate::optimizer::Fixed;
-use crate::precision::PersistKind;
 use crate::sgpr::{FittedSgpr, FixedInducing, OnlineSgpr};
 use crate::svgp::FittedSvgp;
 use crate::{
@@ -106,12 +104,8 @@ macro_rules! each_model {
 }
 
 /// The distance marker the config of a model of `C` records.
-pub(super) fn points_of<C: PointUse>() -> PointsJson {
-    if <DistanceKernel<C> as ModelKernelParts>::POINTS {
-        PointsJson::WithPoints
-    } else {
-        PointsJson::DistanceOnly
-    }
+fn points_of<C: PointUse>() -> PointsJson {
+    PointsJson::of::<DistanceKernel<C>>()
 }
 
 impl<C: PointUse> LoadedDistanceGpr<C> {
@@ -141,45 +135,9 @@ impl<C: PointUse> LoadedDistanceGpr<C> {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let config = read_exact_config(dir, Some(points_of::<C>()))?;
-        // Each arm names its own precision type, so the call stays in the arm.
-        match config.persist_kind() {
-            PersistKind::Double => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: Self::Double,
-                    online: Self::OnlineDouble,
-                },
-            ),
-            PersistKind::Single => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: Self::Single,
-                    online: Self::OnlineSingle,
-                },
-            ),
-            PersistKind::MixedPromote => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: Self::Mixed,
-                    online: Self::OnlineMixed,
-                },
-            ),
-            PersistKind::MixedReevaluate => load_precision(
-                dir,
-                registry,
-                config,
-                Variants {
-                    fitted: Self::Reevaluate,
-                    online: Self::OnlineReevaluate,
-                },
-            ),
-        }
+        by_precision!(config.persist_kind(), Self, |fitted, online| {
+            load_precision(dir, registry, config, Variants { fitted, online })
+        })
     }
 
     /// Returns the number of training points.
@@ -413,45 +371,9 @@ impl<C: PointUse> LoadedDistanceSgpr<C> {
             &[ModelJson::Sgpr, ModelJson::OnlineSgpr],
             Some(points_of::<C>()),
         )?;
-        // Each arm names its own precision type, so the call stays in the arm.
-        match config.persist_kind() {
-            PersistKind::Double => sparse::load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Double,
-                    online: Self::OnlineDouble,
-                },
-            ),
-            PersistKind::Single => sparse::load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Single,
-                    online: Self::OnlineSingle,
-                },
-            ),
-            PersistKind::MixedPromote => sparse::load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Mixed,
-                    online: Self::OnlineMixed,
-                },
-            ),
-            PersistKind::MixedReevaluate => sparse::load_sgpr_as(
-                dir,
-                &config,
-                registry,
-                SgprVariants {
-                    fitted: Self::Reevaluate,
-                    online: Self::OnlineReevaluate,
-                },
-            ),
-        }
+        by_precision!(config.persist_kind(), Self, |fitted, online| {
+            sparse::load_sgpr_as(dir, &config, registry, SgprVariants { fitted, online })
+        })
     }
 
     /// Returns the number of training points.
@@ -663,14 +585,9 @@ impl<C: PointUse> LoadedDistanceSvgp<C> {
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         let dir = dir.as_ref();
         let config = sparse::read_config(dir, &[ModelJson::Svgp], Some(points_of::<C>()))?;
-        match config.persist_kind() {
-            PersistKind::Double => sparse::load_svgp_as(dir, &config, registry, Self::Double),
-            PersistKind::Single => sparse::load_svgp_as(dir, &config, registry, Self::Single),
-            PersistKind::MixedPromote => sparse::load_svgp_as(dir, &config, registry, Self::Mixed),
-            PersistKind::MixedReevaluate => {
-                sparse::load_svgp_as(dir, &config, registry, Self::Reevaluate)
-            }
-        }
+        by_precision!(config.persist_kind(), Self, |fitted| {
+            sparse::load_svgp_as(dir, &config, registry, fitted)
+        })
     }
 
     /// Returns the number of training points.

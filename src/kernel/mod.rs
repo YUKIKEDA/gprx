@@ -51,6 +51,7 @@ pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use dist::fill_squared_euclidean;
+pub(crate) use dist::packed_len;
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};
@@ -65,12 +66,12 @@ pub(crate) use scalar::sealed::ScalarOps;
 pub(crate) use sources::BlockAt;
 pub(crate) use sources::{
     BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
-    bind_inducing, column_into, new_inducing_column, widened,
+    bind_inducing, column_into, new_inducing_column, place_in_shape, widened,
 };
 pub use spec::{KernelSpec, ParameterBinding};
 pub(crate) use supply::{
-    ArdData, ArdLeafSpec, CompiledOf, ModelKernelParts, ScalarData, ScalarLeafSpec, SlotId,
-    SlotShape, SourceData, SpecOf, SuppliedLeafSpec, SuppliedSpec, Tidy, spec_slots,
+    ArdData, CompiledOf, ModelKernelParts, ScalarData, SlotId, SlotShape, SourceData, SpecOf,
+    SuppliedLeafSpec, SuppliedSpec, Tidy, spec_slots,
 };
 pub use supply::{
     ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,

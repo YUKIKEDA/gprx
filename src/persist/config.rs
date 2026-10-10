@@ -347,6 +347,15 @@ pub(crate) enum PointsJson {
 }
 
 impl PointsJson {
+    /// The marker the config of a model of kernel `K` records.
+    pub(crate) fn of<K: crate::kernel::ModelKernelParts>() -> Self {
+        if K::POINTS {
+            Self::WithPoints
+        } else {
+            Self::DistanceOnly
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::DistanceOnly => "DistanceOnly",

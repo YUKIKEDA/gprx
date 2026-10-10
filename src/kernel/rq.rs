@@ -9,6 +9,7 @@ use super::{
 };
 use crate::error::GprError;
 use crate::kernel::KernelScalar;
+use crate::math::KernelMath;
 use crate::param::{BoundedParam, Interval};
 use faer::reborrow::ReborrowMut;
 use faer::{MatMut, MatRef};
@@ -384,7 +385,7 @@ impl RationalQuadraticKernel {
     }
 
     /// Rectangular `∂K/∂θ` from squared distances.
-    pub(crate) fn grad_cross_dist<T: KernelScalar>(
+    pub(crate) fn grad_cross_dist<M: KernelMath, T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
         d_k: MatMut<'_, T>,
@@ -408,7 +409,7 @@ impl RationalQuadraticKernel {
     }
 
     /// Rectangular `∂²K/∂θ_i ∂θ_j` from squared distances.
-    pub(crate) fn hess_cross_dist<T: KernelScalar>(
+    pub(crate) fn hess_cross_dist<M: KernelMath, T: KernelScalar>(
         &self,
         dist: MatRef<'_, T>,
         d2_k: MatMut<'_, T>,
@@ -494,6 +495,53 @@ impl RationalQuadraticKernel {
             let r2 = scaled_r2(d, ell_sq)?;
             finite_kernel(rq_d2k(r2, alpha, i, j))
         })
+    }
+}
+
+/// The names the stationary leaves share in a dispatch over leaves
+/// ([`super::compiled::supplied`]): an RQ leaf calls no `exp`, so the
+/// `exp` path `M` is not read.
+impl RationalQuadraticKernel {
+    /// [`Self::apply`].
+    pub(crate) fn apply_math<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.apply(dist, out, uplo)
+    }
+
+    /// [`Self::apply_cross`].
+    pub(crate) fn apply_cross_math<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        self.apply_cross(dist, out)
+    }
+
+    /// [`Self::grad`].
+    pub(crate) fn grad_math<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.grad(dist, d_k, param_idx, uplo)
+    }
+
+    /// [`Self::hess`].
+    pub(crate) fn hess_math<M: KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+        uplo: Triangle,
+    ) -> Result<(), GprError> {
+        self.hess(dist, d2_k, i, j, uplo)
     }
 }
 
