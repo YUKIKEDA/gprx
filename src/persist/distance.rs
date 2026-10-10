@@ -14,7 +14,8 @@ use crate::precision::PersistKind;
 use crate::sgpr::{FittedSgpr, FixedInducing, OnlineSgpr};
 use crate::svgp::FittedSvgp;
 use crate::{
-    DoublePrecision, MixedPrecision, PredictOptions, Prediction, ReevaluateKernel, SinglePrecision,
+    DoublePrecision, MixedPrecision, PointId, PredictOptions, Prediction, ReevaluateKernel,
+    SinglePrecision,
 };
 
 use super::config::{ModelJson, PointsJson};
@@ -333,7 +334,8 @@ impl LoadedDistanceGpr<WithPoints> {
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
-/// assert_eq!(loaded.inducing(), &[0, 2]);
+/// assert_eq!(loaded.inducing(), Some(&[0, 2][..]));
+/// assert!(loaded.inducing_points().is_none());
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
 /// };
@@ -341,6 +343,14 @@ impl LoadedDistanceGpr<WithPoints> {
 /// let cross = [2.25, 0.25];
 /// let got = loaded.predict([slot.borrow(&cross)], 1)?;
 /// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+/// // An online model names its inducing points by `PointId`.
+/// let online = fitted.into_online();
+/// let ids = online.point_ids().to_vec();
+/// online.save(&dir)?;
+/// let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!(loaded.inducing(), None);
+/// let points: Option<Vec<_>> = loaded.inducing_points().map(Iterator::collect);
+/// assert_eq!(points, Some(vec![ids[0], ids[2]]));
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -468,12 +478,38 @@ impl<C: PointUse> LoadedDistanceSgpr<C> {
         each_sgpr!(self, model => model.m())
     }
 
-    /// Returns the training samples that are the inducing points, in the
-    /// order of the rows of a prediction's blocks.
+    /// Returns the training samples that are the inducing points of a
+    /// fitted variant, in the order of the rows of a prediction's blocks,
+    /// or `None` for an [`OnlineSgpr`] variant: its points are named by
+    /// [`Self::inducing_points`], since a delete shifts their places.
     ///
     /// See the example on [`LoadedDistanceSgpr`].
-    pub fn inducing(&self) -> &[usize] {
-        each_sgpr!(self, model => model.inducing())
+    pub fn inducing(&self) -> Option<&[usize]> {
+        match self {
+            Self::Double(model) => Some(model.inducing()),
+            Self::Single(model) => Some(model.inducing()),
+            Self::Mixed(model) => Some(model.inducing()),
+            Self::Reevaluate(model) => Some(model.inducing()),
+            Self::OnlineDouble(_)
+            | Self::OnlineSingle(_)
+            | Self::OnlineMixed(_)
+            | Self::OnlineReevaluate(_) => None,
+        }
+    }
+
+    /// Returns the [`PointId`]s of the inducing points of an
+    /// [`OnlineSgpr`] variant, as [`OnlineSgpr::inducing_points`], or
+    /// `None` for a fitted variant (see [`Self::inducing`]).
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
+    pub fn inducing_points(&self) -> Option<impl Iterator<Item = PointId> + '_> {
+        match self {
+            Self::OnlineDouble(model) => Some(model.inducing_point_iter()),
+            Self::OnlineSingle(model) => Some(model.inducing_point_iter()),
+            Self::OnlineMixed(model) => Some(model.inducing_point_iter()),
+            Self::OnlineReevaluate(model) => Some(model.inducing_point_iter()),
+            Self::Double(_) | Self::Single(_) | Self::Mixed(_) | Self::Reevaluate(_) => None,
+        }
     }
 
     /// Returns `true` for an [`OnlineSgpr`] variant.

@@ -871,7 +871,9 @@ fn main() -> Result<(), GprError> {
         .map_err(|(_, e)| e)?
         .save(&dir)?;
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
-    assert_eq!((loaded.m(), loaded.inducing()), (2, &[0, 2][..]));
+    assert_eq!((loaded.m(), loaded.inducing()), (2, Some(&[0, 2][..])));
+    // A loaded online model names its inducing points by `PointId` instead.
+    assert!(loaded.inducing_points().is_none());
     let slot = scalar(&loaded.slots())?;
     // The inducing samples × the query at 0.5.
     let _ = loaded.predict([slot.borrow(&[2.25, 0.25])], 1)?;
@@ -925,7 +927,7 @@ fn main() -> Result<(), GprError> {
 | `InvalidHyperparameter { reason }` | カーネルパラメータが定義域の外 |
 | `ShapeMismatch { reason }` | 行列の形が違う |
 | `InvalidDistance { slot, dim, pair, reason }` | 与えた二乗距離が有限でない、負、または正方行列の対角が 0 でない・対称でない。`slot` は表の `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの `(row, col)`。分からないものは `None` |
-| `DistanceSlot { kind, slot }` | 供給がカーネルのスロットと合わない。`SlotErrorKind::NotRead`（カーネルが読まないスロット。保存前のスロットなど）、`Duplicate`、`Missing`。`slot` は `slots()` での位置 |
+| `DistanceSlot { kind, slot }` | 供給がカーネルのスロットと合わない。`SlotErrorKind::NotRead`（カーネルが読まないスロット。保存前のスロットなど）、`Duplicate`、`Missing`。`slot` は、供給が 2 つか無いスロットの `slots()` での位置で、`NotRead` では `None` |
 | `LengthMismatch { reason }` | スライスの長さが違う |
 | `IndexOutOfRange { reason }` | パラメータ、カーネルの葉、次元の添字 |
 | `InvalidConfig { reason }` | 最適化、ジッタ、変換の設定 |
