@@ -243,21 +243,19 @@ impl LeafParams for SuppliedLeafSpec {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ScalarDistance {
     slot: SlotId,
-}
-
-impl Default for ScalarDistance {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ScalarDistance {
     /// Returns a new slot, distinct from every other slot.
     ///
     /// See the example on [`ScalarDistance`].
+    #[allow(
+        clippy::new_without_default,
+        reason = "every call makes a new slot, which a `Default` would hide"
+    )]
     pub fn new() -> Self {
         Self {
             slot: SlotId::fresh(),
@@ -366,7 +364,7 @@ impl ScalarDistance {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ArdDistance {
     slot: SlotId,
     dims: usize,
@@ -513,10 +511,14 @@ impl ArdDistance {
 /// let image = ScalarDistance::new();
 /// let kernel = image.kernel(RbfKernel::new(1.0)?);
 /// assert_eq!(kernel.slots(), vec![DistanceSlot::Scalar(image)]);
+/// // A slot is a key: here, the tables to bind to each slot.
+/// let tables: std::collections::HashMap<DistanceSlot, Vec<f64>> =
+///     kernel.slots().into_iter().map(|slot| (slot, vec![0.0])).collect();
+/// assert!(tables.contains_key(&DistanceSlot::Scalar(image)));
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
 pub enum DistanceSlot {
     /// Marks a slot of one `d²` per pair.
@@ -1240,7 +1242,7 @@ mod tests {
 
     #[test]
     fn sources_and_kernels_describe_themselves() {
-        let a = ScalarDistance::default();
+        let a = ScalarDistance::new();
         let b = ArdDistance::of_dims(2);
         let (b0, b1) = ([0.0, 1.0], [0.0, 4.0]);
         let shown = [

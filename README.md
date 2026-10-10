@@ -431,7 +431,7 @@ fn main() -> Result<(), gprx::GprError> {
     // A coordinate tree is `KernelSpec<NoSupply>`, the default.
     let coords: KernelSpec<NoSupply> = KernelSpec::from(RbfKernel::new(1.0)?);
     supply_of(&coords);
-    let image = ScalarDistance::default();
+    let image = ScalarDistance::new();
     let other = ScalarDistance::new();
     let kernel = scalar_leaf(RbfKernel::new(1.0)?, image) * ConstantKernel::new(0.8)?;
     assert_eq!(kernel.slots(), vec![DistanceSlot::Scalar(image)]);
