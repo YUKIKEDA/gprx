@@ -1,7 +1,7 @@
 //! ARD Matérn kernel for `ν = 1/2`, `3/2`, and `5/2`.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::ArdSqDiff;
+use super::dist::{ArdBlocks, ArdSqDiff, BlockState};
 use super::finite_kernel;
 use super::matern::{MaternNu, matern_d2k_dtheta_ard, matern_dk_dtheta_ard, matern_from_r};
 use super::simd::ard::Profile;
@@ -320,6 +320,52 @@ impl MaternArdKernel {
         )
     }
 
+    /// Rectangular `K` from `(Δ_d)²` blocks.
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let nu = self.nu;
+        ard::write_from_blocks(blocks, out, self.num_params(), |row, col| {
+            matern_value::<M, T>(nu, ard::r2_from_blocks(blocks, row, col, w, Pick::NONE)?)
+        })
+    }
+
+    /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        let nu = self.nu;
+        ard::write_from_blocks(blocks, d_k, self.num_params(), |row, col| {
+            let t = ard::r2_from_blocks(blocks, row, col, w, Pick::one(param_idx))?;
+            matern_grad::<M, T>(nu, t)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        let nu = self.nu;
+        ard::write_from_blocks(blocks, d2_k, self.num_params(), |row, col| {
+            let t = ard::r2_from_blocks(blocks, row, col, w, Pick::pair(i, j))?;
+            matern_hess::<M, T>(nu, t, i == j)
+        })
+    }
+
     pub(crate) fn grad_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
@@ -450,7 +496,7 @@ impl MaternArdKernel {
 
 const NAME: &str = "Matern";
 
-/// `k` of four pairs from `r²` ([`ard_simd`](super::ard_simd)).
+/// `k` of four pairs from `r²` ([`simd::ard`](super::simd::ard)).
 struct MaternValue4<M> {
     nu: MaternNu,
     _math: PhantomData<M>,

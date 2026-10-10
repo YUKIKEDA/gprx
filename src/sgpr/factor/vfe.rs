@@ -1,10 +1,9 @@
 //! VFE assembly: `K_mm`, `A`, `B`, the weights, and the bound.
 
 use super::lit;
-use crate::data::{pack_points, validate_inducing, validate_training};
+use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::GramInputs;
-use crate::kernel::{KernelScalar, KernelSpec, Triangle};
+use crate::kernel::{KernelScalar, KernelSpec, Supply, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower_with_retries, dot_ay, frobenius2, gram_aat_plus_noise, llt_scratch,
@@ -15,38 +14,28 @@ use crate::policy::JitterPolicy;
 use crate::precision::{F64Vfe, ModelPrecision};
 use crate::sgpr::FittedSgpr;
 use crate::sgpr::InducingLayout;
-use crate::sparse::{KernelScratch, SparseCore, SparseScratch};
+use crate::sparse::{KernelScratch, SparseCore, SparseData, SparseScratch, SparseSets};
 use faer::{Mat, MatRef};
 use std::marker::PhantomData;
 
 /// Predict weights after a factor or an online update. See
 /// [`ModelPrecision::publish_weights`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision>(
-    kernel: &KernelSpec,
+pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     a: MatRef<'_, P::Storage>,
     b_l: MatRef<'_, P::Storage>,
     w: &[P::Storage],
-    x: &[f64],
-    y: &[f64],
-    z: &[f64],
+    data: SparseData<'_>,
     noise: f64,
-    n: usize,
-    m: usize,
-    d: usize,
 ) -> Result<Vec<P::Refine>, GprError> {
     let reference = || {
-        let state = assemble_vfe::<M, f64>(
+        let state = assemble_vfe::<M, f64, U>(
             kernel,
             k_mm_jitter,
             noise_likelihood(noise)?,
-            x,
-            n,
-            d,
-            y,
-            z,
-            m,
+            data,
             &mut KernelScratch::new(),
             &mut KernelScratch::new(),
         )?;
@@ -55,7 +44,7 @@ pub(crate) fn publish_sgpr_weights<M: crate::math::KernelMath, P: ModelPrecision
             w: state.w,
         })
     };
-    P::publish_weights(a, b_l, w, y, noise, &reference)
+    P::publish_weights(a, b_l, w, data.y, noise, &reference)
 }
 
 pub(super) fn noise_likelihood(noise: f64) -> Result<GaussianLikelihood, GprError> {
@@ -77,41 +66,32 @@ pub(crate) struct VfeState<T: KernelScalar> {
     pub(crate) a_frobenius2: T,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_fitted<O, I: InducingLayout, M: crate::math::KernelMath, P>(
-    core: SparseCore,
+pub(crate) fn assemble_fitted<O, I: InducingLayout<K::Supply>, M: crate::math::KernelMath, P, K>(
+    core: SparseCore<K::Supply>,
     optimizer: O,
-) -> Result<FittedSgpr<O, I, P>, GprError>
+) -> Result<FittedSgpr<O, I, P, K>, GprError>
 where
     P: ModelPrecision,
+    K: crate::kernel::ModelKernel,
 {
-    let mut scratch = SparseScratch::<P::Storage>::default();
-    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage>(
+    let mut scratch = SparseScratch::<P::Storage, K::Supply>::default();
+    let data = core.data();
+    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage, K::Supply>(
         &core.kernel,
         core.jitter,
         core.likelihood,
-        &core.x_train,
-        core.n,
-        core.d,
-        &core.y_train,
-        &core.z_train,
-        core.m,
+        data,
         &mut scratch.storage,
         &mut scratch.f64,
     )?;
     let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, w64) {
         w64.into_iter().map(P::Refine::from_f64).collect()
     } else if P::REFINES_IN_F64 {
-        assemble_vfe::<M, f64>(
+        assemble_vfe::<M, f64, K::Supply>(
             &core.kernel,
             core.jitter,
             core.likelihood,
-            &core.x_train,
-            core.n,
-            core.d,
-            &core.y_train,
-            &core.z_train,
-            core.m,
+            data,
             &mut scratch.f64,
             &mut KernelScratch::new(),
         )?
@@ -120,19 +100,14 @@ where
         .map(P::Refine::from_f64)
         .collect()
     } else {
-        publish_sgpr_weights::<M, P>(
+        publish_sgpr_weights::<M, P, K::Supply>(
             &core.kernel,
             core.jitter,
             state.a.as_ref(),
             state.b_l.as_ref(),
             &state.w,
-            &core.x_train,
-            &core.y_train,
-            &core.z_train,
+            data,
             core.likelihood.noise_variance(),
-            core.n,
-            core.m,
-            core.d,
         )?
     };
     Ok(FittedSgpr {
@@ -140,6 +115,7 @@ where
         scratch,
         optimizer,
         inducing: PhantomData,
+        _kernel: PhantomData,
         k_mm_l: state.k_mm_l,
         a: state.a,
         b_l: state.b_l,
@@ -150,58 +126,49 @@ where
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_vfe<M: crate::math::KernelMath, T, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-    z: &[f64],
-    n_inducing: usize,
+    data: SparseData<'_>,
     ks: &mut KernelScratch<T>,
     ks64: &mut KernelScratch<f64>,
 ) -> Result<VfeState<T>, GprError>
 where
     T: KernelScalar,
 {
-    validate_training(x, n_rows, n_cols, y)?;
-    validate_inducing(z, n_inducing, n_cols)?;
+    data.validate()?;
     if T::ROUNDS_FROM_F64 {
-        let state = assemble_vfe::<M, f64>(
+        let state = assemble_vfe::<M, f64, U>(
             kernel,
             k_mm_jitter,
             likelihood,
-            x,
-            n_rows,
-            n_cols,
-            y,
-            z,
-            n_inducing,
+            data,
             ks64,
             &mut KernelScratch::new(),
         )?;
         return Ok(round_vfe(&state));
     }
+    let (n_rows, n_inducing) = (data.n, data.m);
     let compiled = kernel.compile_as::<T>();
-    let x64 = pack_points(x, n_rows, n_cols);
-    let z64 = pack_points(z, n_inducing, n_cols);
+    let x64 = pack_points(data.x, n_rows, data.d);
+    let z64 = pack_points(data.z, n_inducing, data.d);
     let mut x_cast = T::empty_cols();
     let mut z_cast = T::empty_cols();
     let mut y_cast = T::empty_rows();
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
-    let y_s = T::storage_rows(y, &mut y_cast);
+    let y_s = T::storage_rows(data.y, &mut y_cast);
+    let sets = SparseSets::<T, U>::new(
+        x_mat,
+        z_mat,
+        data.supply
+            .map(crate::sparse::SparseSupply::at::<T>)
+            .transpose()?,
+    );
     // A rounding scalar returned above, so `T` is evaluated as stored below.
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
-    ks.gram::<M>(
-        &compiled,
-        GramInputs::points(z_mat.as_ref()),
-        k_mm.as_mut(),
-        Triangle::Lower,
-    )?;
+    ks.gram::<M, U>(&compiled, sets.k_mm(), k_mm.as_mut(), Triangle::Lower)?;
     let mut chol_scratch = llt_scratch::<T>(n_inducing);
     cholesky_lower_with_retries(
         &mut k_mm,
@@ -212,7 +179,7 @@ where
     // `K(Z, X)` is the rectangular cross covariance whatever the values of
     // `Z` and `X`: a White leaf adds nothing to it, so the objective does not
     // jump when a free `Z` leaves `X` (docs/design.md §5).
-    let mut a = ks.cross::<M>(&compiled, z_mat.as_ref(), x_mat.as_ref())?;
+    let mut a = ks.cross_mn::<M, U>(&compiled, sets)?;
     solve_lower(k_mm.as_ref(), a.as_mut());
     let noise = likelihood.noise_variance();
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);
@@ -224,7 +191,7 @@ where
         CholeskyStage::Fit,
     )?;
     let mut k_diag = vec![lit::<T>(0.0); n_rows];
-    compiled.fill_diag_points(x_mat.as_ref(), &mut k_diag)?;
+    compiled.fill_diag_rows(x_mat.as_ref(), &mut k_diag)?;
     let k_diag_sum = k_diag.iter().fold(lit::<T>(0.0), |acc, v| acc + *v);
     let a_frobenius2 = frobenius2(a.as_ref());
     let mut ay = Mat::zeros(n_inducing, 1);
@@ -262,50 +229,28 @@ fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
 /// A refining precision publishes those `f64` weights as its predict
 /// weights. Taking them from the same `f64` assembly saves assembling the
 /// whole system a second time. A scalar that is not rounded returns `None`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar>(
-    kernel: &KernelSpec,
+pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar, U: Supply>(
+    kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
     likelihood: GaussianLikelihood,
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    y: &[f64],
-    z: &[f64],
-    n_inducing: usize,
+    data: SparseData<'_>,
     ks: &mut KernelScratch<T>,
     ks64: &mut KernelScratch<f64>,
 ) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {
     if T::ROUNDS_FROM_F64 {
-        let state = assemble_vfe::<M, f64>(
+        data.validate()?;
+        let state = assemble_vfe::<M, f64, U>(
             kernel,
             k_mm_jitter,
             likelihood,
-            x,
-            n_rows,
-            n_cols,
-            y,
-            z,
-            n_inducing,
+            data,
             ks64,
             &mut KernelScratch::new(),
         )?;
         let rounded = round_vfe(&state);
         return Ok((rounded, Some(state.w)));
     }
-    let state = assemble_vfe::<M, T>(
-        kernel,
-        k_mm_jitter,
-        likelihood,
-        x,
-        n_rows,
-        n_cols,
-        y,
-        z,
-        n_inducing,
-        ks,
-        ks64,
-    )?;
+    let state = assemble_vfe::<M, T, U>(kernel, k_mm_jitter, likelihood, data, ks, ks64)?;
     Ok((state, None))
 }
 

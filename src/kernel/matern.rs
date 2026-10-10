@@ -287,6 +287,43 @@ impl MaternKernel {
         })
     }
 
+    /// Rectangular `∂K/∂θ` from squared distances.
+    pub(crate) fn grad_cross_dist<M: crate::math::KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        if param_idx != 0 {
+            return Err(GprError::IndexOutOfRange {
+                reason: "Matern has a single parameter at index 0".to_owned(),
+            });
+        }
+        let ell = T::from_f64(self.lengthscale());
+        let nu = self.nu;
+        write_dense(dist, d_k, |d| {
+            let r = scaled_distance(d, ell)?;
+            finite_kernel(matern_dk_dtheta_iso::<M, _>(nu, r))
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ²` from squared distances.
+    pub(crate) fn hess_cross_dist<M: crate::math::KernelMath, T: KernelScalar>(
+        &self,
+        dist: MatRef<'_, T>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        require_matern_hess_idx(i, j)?;
+        let ell = T::from_f64(self.lengthscale());
+        let nu = self.nu;
+        write_dense(dist, d2_k, |d| {
+            let r = scaled_distance(d, ell)?;
+            finite_kernel(matern_d2k_dtheta2_iso::<M, _>(nu, r))
+        })
+    }
+
     pub(crate) fn apply_from_coords<M: crate::math::KernelMath, T: KernelScalar>(
         &self,
         x: MatRef<'_, T>,

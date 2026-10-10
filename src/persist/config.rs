@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
+use crate::kernel::{DistanceSlot, SlotId, SlotShape};
 use crate::param::{BoundedParam, Interval};
 use crate::policy::{DistanceCachePolicy, KernelExp};
 use crate::precision::PersistKind;
@@ -47,6 +48,10 @@ pub(super) struct ModelConfig {
     pub point_ids: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub next_point_id: Option<u64>,
+    /// Present for a model on supplied distances; omitted on disk means a
+    /// coordinate model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub distance: Option<DistanceJson>,
 }
 
 impl ModelConfig {
@@ -331,39 +336,198 @@ impl ModelJson {
     }
 }
 
+/// Whether a distance model reads coordinates too.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PointsJson {
+    /// [`crate::kernel::DistanceOnly`].
+    DistanceOnly,
+    /// [`crate::kernel::WithPoints`].
+    WithPoints,
+}
+
+impl PointsJson {
+    /// The marker the config of a model of kernel `K` records.
+    pub(crate) fn of<K: crate::kernel::ModelKernelParts>() -> Self {
+        if K::POINTS {
+            Self::WithPoints
+        } else {
+            Self::DistanceOnly
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::DistanceOnly => "DistanceOnly",
+            Self::WithPoints => "WithPoints",
+        }
+    }
+}
+
+/// What a slot of the table supplies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum SlotJson {
+    /// One `d²` per pair.
+    Scalar,
+    /// One `d²` per dimension per pair.
+    Ard { dims: usize },
+}
+
+/// The distance part of a config: which marker the model has and its slot
+/// table, in the order of the kernel's slots. A kernel leaf names its slot
+/// by its place in the table, and tensor `d2.<k>` holds slot `k`'s `d²`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct DistanceJson {
+    pub points: PointsJson,
+    pub slots: Vec<SlotJson>,
+}
+
+impl DistanceJson {
+    pub(super) fn encode(points: PointsJson, slots: &[DistanceSlot]) -> Self {
+        Self {
+            points,
+            slots: slots
+                .iter()
+                .map(|slot| match slot.shape() {
+                    SlotShape::Scalar => SlotJson::Scalar,
+                    SlotShape::Ard(dims) => SlotJson::Ard { dims },
+                })
+                .collect(),
+        }
+    }
+
+    /// The slots of the table, each with a new identity: a handle from
+    /// before the save names none of them. An empty table is a distance
+    /// kernel with no slot, such as a coordinate tree as
+    /// `DistanceKernel::from`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] with [`PersistErrorKind::Config`]
+    /// for an ARD slot of no dimension.
+    pub(super) fn decode_slots(&self) -> Result<Vec<DistanceSlot>, GprError> {
+        self.slots
+            .iter()
+            .map(|slot| {
+                let shape = match *slot {
+                    SlotJson::Scalar => SlotShape::Scalar,
+                    SlotJson::Ard { dims: 0 } => {
+                        return Err(persist_err(
+                            PersistErrorKind::Config,
+                            "an ARD slot has no dimension",
+                        ));
+                    }
+                    SlotJson::Ard { dims } => SlotShape::Ard(dims),
+                };
+                Ok(DistanceSlot::from_parts(SlotId::fresh(), shape))
+            })
+            .collect()
+    }
+}
+
+/// The distance part of a sparse config: [`DistanceJson`] and the
+/// training points that are the inducing points, in the order of the
+/// columns of the blocks. A sparse distance model has both or neither.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct SparseDistanceJson {
+    #[serde(flatten)]
+    pub table: DistanceJson,
+    pub inducing: Vec<usize>,
+}
+
+/// The name of tensor of slot `k`'s training `d²`.
+pub(super) fn d2_tensor(k: usize) -> String {
+    format!("d2.{k}")
+}
+
+#[derive(Deserialize)]
+struct PointsTag {
+    points: PointsJson,
+}
+
 #[derive(Deserialize)]
 struct ModelTag {
     #[serde(default)]
     model: ModelJson,
+    #[serde(default)]
+    distance: Option<PointsTag>,
 }
 
-/// Reads only the `model` key of `config.json` and checks it is one of
-/// `expected`.
+/// The loader of `model` with distance marker `points`, for the error of a
+/// wrong one.
+fn loader(model: ModelJson, points: Option<PointsJson>) -> String {
+    match points {
+        None => model.loader().to_owned(),
+        Some(points) => {
+            let name = match model {
+                ModelJson::Exact => "LoadedDistanceGpr",
+                ModelJson::Sgpr | ModelJson::OnlineSgpr => "LoadedDistanceSgpr",
+                ModelJson::Svgp => "LoadedDistanceSvgp",
+            };
+            format!("{name}::<{}>::load", points.name())
+        }
+    }
+}
+
+/// Reads only the `model` key and the distance marker of `config.json`, and
+/// checks the model is one of `expected` with marker `points` (`None` for a
+/// coordinate model).
 ///
 /// Every parse of `config.json` goes through `serde_json::from_slice`, whose
 /// recursion limit (128 nested arrays or objects) rejects a deeply nested
 /// `sum` / `product` / `pipeline` / `columnwise` tree as invalid JSON before
 /// any recursive decode runs. Keep that limit: do not parse `config.json`
 /// with the `unbounded_depth` feature or `disable_recursion_limit`.
-pub(super) fn parse_model(bytes: &[u8], expected: &[ModelJson]) -> Result<ModelJson, GprError> {
+pub(super) fn parse_model(
+    bytes: &[u8],
+    expected: &[ModelJson],
+    points: Option<PointsJson>,
+) -> Result<ModelJson, GprError> {
     let tag: ModelTag = serde_json::from_slice(bytes).map_err(|err| {
         persist_err(
             PersistErrorKind::Config,
             format!("config.json is not valid JSON: {err}"),
         )
     })?;
-    if expected.contains(&tag.model) {
+    let found = tag.distance.map(|tag| tag.points);
+    if expected.contains(&tag.model) && found == points {
         Ok(tag.model)
     } else {
+        let kind = match found {
+            None => String::new(),
+            Some(points) => format!(" {} distance", points.name()),
+        };
         Err(persist_err(
             PersistErrorKind::WrongModel,
             format!(
-                "config.json holds a {} model; load it with {}",
+                "config.json holds a{kind} {} model; load it with {}",
                 tag.model.name(),
-                tag.model.loader()
+                loader(tag.model, found)
             ),
         ))
     }
+}
+
+/// Checks `n`, `m`, and `d` of a config: `n` and `m` positive, and `d`
+/// zero exactly when the model reads no coordinates.
+fn check_sizes(
+    n: usize,
+    m: usize,
+    d: usize,
+    distance: Option<&DistanceJson>,
+) -> Result<(), GprError> {
+    let points = distance.is_none_or(|distance| distance.points == PointsJson::WithPoints);
+    if n == 0 || m == 0 || (points && d == 0) {
+        return Err(GprError::EmptyInput);
+    }
+    if !points && d != 0 {
+        return Err(persist_err(
+            PersistErrorKind::Config,
+            format!("a DistanceOnly model reads no coordinates, but d = {d}"),
+        ));
+    }
+    Ok(())
 }
 
 /// `config.json` of a sparse model ([`ModelJson::Sgpr`],
@@ -397,6 +561,9 @@ pub(super) struct SparseConfig {
     pub inducing_ids: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub next_inducing_id: Option<u64>,
+    /// As [`ModelConfig::distance`], with the inducing indices.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub distance: Option<SparseDistanceJson>,
 }
 
 impl SparseConfig {
@@ -419,9 +586,12 @@ pub(super) fn parse_sparse_config(bytes: &[u8]) -> Result<SparseConfig, GprError
             supported: FORMAT_VERSION,
         });
     }
-    if config.n == 0 || config.m == 0 || config.d == 0 {
-        return Err(GprError::EmptyInput);
-    }
+    check_sizes(
+        config.n,
+        config.m,
+        config.d,
+        config.distance.as_ref().map(|distance| &distance.table),
+    )?;
     Ok(config)
 }
 
@@ -433,9 +603,7 @@ pub(super) fn parse_config(bytes: &[u8]) -> Result<ModelConfig, GprError> {
         )
     })?;
     config.validate_version()?;
-    if config.n == 0 || config.d == 0 {
-        return Err(GprError::EmptyInput);
-    }
+    check_sizes(config.n, 1, config.d, config.distance.as_ref())?;
     Ok(config)
 }
 

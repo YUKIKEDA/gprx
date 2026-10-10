@@ -22,17 +22,19 @@
 //! `∂k(x_i, x_i)/∂θ`.
 
 use super::gram::GramInputs;
-use super::{CompiledKernel, add_triangle};
+use super::supplied::{ArdLeaf, ArdRect, ArdSquare, ScalarLeaf, SuppliedCompiled, SuppliedLeaf};
+use super::{CompiledKernel, CrossViews, add_triangle};
 use crate::error::GprError;
 use crate::kernel::dist::{for_each_lower_col, lower_fold_infallible};
+use crate::kernel::tree::{NoSupply, Supply};
 use crate::kernel::{KernelScalar, Triangle};
 use faer::{Mat, MatMut, MatRef};
 use std::ops::Range;
 
 /// Where the walk is: the inputs, the scratch it shares, and the kept
 /// factor Grams with the number of products allowed to read them.
-pub(crate) struct WeightedWalk<'a, 'b, T> {
-    pub(crate) inputs: GramInputs<'a, T>,
+pub(crate) struct WeightedWalk<'a, 'b, T: KernelScalar, S: Supply = NoSupply> {
+    pub(crate) inputs: GramInputs<'a, T, S>,
     pub(crate) scratch: MatMut<'b, T>,
     pub(crate) nested: &'b mut Vec<Mat<T>>,
     /// The Grams [`CompiledKernel::eval_gram_keeping`] wrote, in walk order.
@@ -44,7 +46,7 @@ pub(crate) struct WeightedWalk<'a, 'b, T> {
     pub(crate) fold: &'b mut Vec<f64>,
 }
 
-impl<T: KernelScalar> CompiledKernel<T> {
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Factors of this product that are not [`Self::Constant`].
     fn varying_factors(terms: &[Self]) -> usize {
         terms
@@ -193,7 +195,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_gram_keeping<M: crate::math::KernelMath>(
         &self,
-        inputs: GramInputs<'_, T>,
+        inputs: GramInputs<'_, T, S>,
         mut out: MatMut<'_, T>,
         mut scratch: MatMut<'_, T>,
         mut term: MatMut<'_, T>,
@@ -201,6 +203,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         kept: &mut [Mat<T>],
         products: usize,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(inputs.x)?;
         if products == 0 {
             return self.eval_gram::<M>(inputs, out, Triangle::Lower, scratch, nested);
         }
@@ -244,7 +247,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Evaluates every non-constant factor into its kept Gram.
     fn keep_factor_grams<M: crate::math::KernelMath>(
         factors: &[Self],
-        inputs: GramInputs<'_, T>,
+        inputs: GramInputs<'_, T, S>,
         grams: &mut [Mat<T>],
         mut scratch: MatMut<'_, T>,
         nested: &mut Vec<Mat<T>>,
@@ -270,11 +273,12 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// are overwritten.
     pub(crate) fn weighted_grads<M: crate::math::KernelMath>(
         &self,
-        walk: &mut WeightedWalk<'_, '_, T>,
+        walk: &mut WeightedWalk<'_, '_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
     ) -> Result<(), GprError> {
+        self.require_tree_columns(walk.inputs.x)?;
         let kept = walk.kept;
         let mut offset = 0;
         for (t, slot) in self.keep_plan(walk.kept_products) {
@@ -299,7 +303,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// `node.value` asks for it (else whatever the pass found on the way).
     fn walk<M: crate::math::KernelMath>(
         &self,
-        walk: &mut WeightedWalk<'_, '_, T>,
+        walk: &mut WeightedWalk<'_, '_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -339,7 +343,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     fn walk_product<M: crate::math::KernelMath>(
         &self,
         terms: &[Self],
-        walk: &mut WeightedWalk<'_, '_, T>,
+        walk: &mut WeightedWalk<'_, '_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -457,37 +461,90 @@ impl<T: KernelScalar> CompiledKernel<T> {
 
     fn walk_leaf<M: crate::math::KernelMath>(
         &self,
-        walk: &mut WeightedWalk<'_, '_, T>,
+        walk: &mut WeightedWalk<'_, '_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
         node: Node<'_, T>,
     ) -> Result<f64, GprError> {
         // Leaves whose parameters share each entry's transcendental work:
-        // one pass, no `∂K` matrix.
-        match (self, walk.inputs.dist) {
-            (Self::Periodic(leaf), Some(dist)) => {
-                return leaf.weighted_grads_dist::<M, T>(dist, node.own, weight, out);
+        // one pass, no `∂K` matrix. A scalar supplied leaf takes the same
+        // paths on its slot's distances; anything else takes the `∂K` path
+        // below, which reads the slot itself.
+        let (leaf, dist) = match (self, walk.inputs.dist) {
+            (Self::Supplied(supplied), _) => match S::square_leaf(supplied, walk.inputs.slots) {
+                (
+                    SuppliedLeaf {
+                        at,
+                        leaf: SuppliedCompiled::Scalar(leaf),
+                        ..
+                    },
+                    slots,
+                ) => (FastLeaf::from_scalar(leaf), Some(slots.scalar(*at)?)),
+                (SuppliedLeaf { .. }, _) => (FastLeaf::None, None),
+            },
+            (Self::Periodic(leaf), dist) => (FastLeaf::Periodic(leaf), dist),
+            (Self::RationalQuadratic(leaf), dist) => (FastLeaf::RationalQuadratic(leaf), dist),
+            (Self::Rbf(leaf), dist) => (FastLeaf::Rbf(leaf), dist),
+            _ => (FastLeaf::None, None),
+        };
+        if let Some(dist) = dist {
+            match leaf {
+                FastLeaf::Periodic(leaf) => {
+                    return leaf.weighted_grads_dist::<M, T>(dist, node.own, weight, out);
+                }
+                FastLeaf::RationalQuadratic(leaf) => {
+                    return leaf.weighted_grads_dist(dist, node.own, weight, out);
+                }
+                // From `k` when the leaf has it or must form it for `⟨V, K⟩`
+                // anyway; otherwise the `∂K` path below, one `exp` per entry too.
+                FastLeaf::Rbf(leaf) if M::ACCURATE && (node.own.is_some() || node.value) => {
+                    let k = match node.own {
+                        Some(k) => k,
+                        None => {
+                            let Some(gram) = bufs.first_mut() else {
+                                return Err(too_few_buffers());
+                            };
+                            leaf.apply_math::<M, _>(dist, gram.as_mut(), Triangle::Lower)?;
+                            gram.as_ref()
+                        }
+                    };
+                    return leaf.weighted_grads_from_gram(dist, k, weight, out);
+                }
+                FastLeaf::Rbf(_) | FastLeaf::None => {}
             }
-            (Self::RationalQuadratic(leaf), Some(dist)) => {
-                return leaf.weighted_grads_dist(dist, node.own, weight, out);
-            }
-            // From `k` when the leaf has it or must form it for `⟨V, K⟩`
-            // anyway; otherwise the `∂K` path below, one `exp` per entry too.
-            (Self::Rbf(leaf), Some(dist)) if M::ACCURATE && (node.own.is_some() || node.value) => {
-                let k = match node.own {
-                    Some(k) => k,
-                    None => {
-                        let Some(gram) = bufs.first_mut() else {
-                            return Err(too_few_buffers());
-                        };
-                        leaf.apply_math::<M, _>(dist, gram.as_mut(), Triangle::Lower)?;
-                        gram.as_ref()
-                    }
-                };
-                return leaf.weighted_grads_from_gram(dist, k, weight, out);
-            }
-            _ => {}
+        }
+        // An accurate ARD RBF on a supplied slot's packed `(Δ_d)²` (the
+        // training store): the same one Gram, then every lengthscale from
+        // the triangles. Dense blocks take the `∂K` path below.
+        if M::ACCURATE
+            && let Self::Supplied(supplied) = self
+            && let (
+                SuppliedLeaf {
+                    at,
+                    leaf: SuppliedCompiled::Ard(ArdLeaf::Rbf(rbf)),
+                    ..
+                },
+                slots,
+            ) = S::square_leaf(supplied, walk.inputs.slots)
+            && let ArdSquare::Packed(cache) = slots.ard(*at)?
+        {
+            let k = match node.own {
+                Some(k) => k,
+                None => {
+                    let Some(gram) = bufs.first_mut() else {
+                        return Err(too_few_buffers());
+                    };
+                    rbf.apply_from_sq_diff::<M, T>(cache, gram.as_mut(), Triangle::Lower)?;
+                    gram.as_ref()
+                }
+            };
+            rbf.contract_square_from_sq_diff(weight, k, cache, out, walk.fold)?;
+            return Ok(if node.own.is_some() || node.value {
+                lower_dot(weight, k)
+            } else {
+                0.0
+            });
         }
         // Accurate ARD RBF: `∂k/∂θ_d = k · w_d (Δ_d)²`, so one Gram covers
         // every lengthscale and the sum is one matrix product. `FastApprox`
@@ -533,7 +590,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Accurate square ARD RBF: one Gram, then every lengthscale from `k`.
     fn contract_ard_square<M: crate::math::KernelMath>(
         &self,
-        walk: &mut WeightedWalk<'_, '_, T>,
+        walk: &mut WeightedWalk<'_, '_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -568,18 +625,19 @@ impl<T: KernelScalar> CompiledKernel<T> {
         Ok(Some(value))
     }
 
-    /// Writes `⟨weight, ∂K(x1, x2)/∂θ_p⟩_F` for every parameter into `out`.
+    /// Writes `⟨weight, ∂K/∂θ_p⟩_F` for every parameter into `out`, over the
+    /// block `views` describes (two point sets, or the supplied distances
+    /// between them).
     ///
     /// The rectangle is full, not a triangle. A product evaluates each
     /// non-constant factor once and hands the others down in the weight, as
     /// [`Self::weighted_grads`] does for a square Gram. `out` is replaced.
     /// `bufs` holds [`Self::contraction_buffers`] matrices of `weight`'s shape.
-    // The two point sets, the weight, the output, and three scratch kinds.
+    // The block, the weight, the output, and three scratch kinds.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn weighted_cross_grads<M: crate::math::KernelMath>(
+    pub(crate) fn weighted_cross_grads_views<M: crate::math::KernelMath>(
         &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
+        views: CrossViews<'_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -587,13 +645,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
         nested: &mut [Mat<T>],
         jobs: &mut Vec<f64>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(views.x1)?;
+        self.require_tree_columns(views.x2)?;
         out.fill(0.0);
         let mut offset = 0;
         for (t, _) in self.keep_plan(0) {
             let count = t.num_params();
             t.cross_walk::<M>(
-                x1,
-                x2,
+                views,
                 weight,
                 &mut out[offset..offset + count],
                 bufs,
@@ -613,8 +672,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     #[allow(clippy::too_many_arguments)]
     fn cross_walk<M: crate::math::KernelMath>(
         &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
+        views: CrossViews<'_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -630,8 +688,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 for t in terms {
                     let count = t.num_params();
                     value += t.cross_walk::<M>(
-                        x1,
-                        x2,
+                        views,
                         weight,
                         &mut out[offset..offset + count],
                         bufs,
@@ -645,14 +702,14 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 Ok(value)
             }
             Self::Product(terms) => self.cross_product::<M>(
-                terms, x1, x2, weight, out, bufs, scratch, nested, jobs, want_value,
+                terms, views, weight, out, bufs, scratch, nested, jobs, want_value,
             ),
             Self::Constant(leaf) => {
                 let value = leaf.constant() * rect_sum(weight);
                 out[0] = value;
                 Ok(value)
             }
-            _ => self.cross_leaf::<M>(x1, x2, weight, out, bufs, scratch, nested, jobs, want_value),
+            _ => self.cross_leaf::<M>(views, weight, out, bufs, scratch, nested, jobs, want_value),
         }
     }
 
@@ -661,8 +718,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     fn cross_product<M: crate::math::KernelMath>(
         &self,
         terms: &[Self],
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
+        views: CrossViews<'_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -685,8 +741,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     if !matches!(t, Self::Constant(_)) {
                         let slot = &mut out[offset..offset + count];
                         let inner = t.cross_walk::<M>(
-                            x1,
-                            x2,
+                            views,
                             weight,
                             slot,
                             bufs,
@@ -714,9 +769,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 };
                 let factors = terms.iter().filter(|t| !matches!(t, Self::Constant(_)));
                 for (factor, gram) in factors.zip(grams.iter_mut()) {
-                    factor.apply_cross_points_with::<M>(
-                        x1,
-                        x2,
+                    factor.apply_cross_mixed::<M>(
+                        views,
                         gram.as_mut(),
                         scratch.as_mut(),
                         nested,
@@ -734,8 +788,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                     write_handed_rect(handed.as_mut(), weight, scale, grams, c);
                     let leaf = !matches!(t, Self::Sum(_) | Self::Product(_));
                     let inner = t.cross_walk::<M>(
-                        x1,
-                        x2,
+                        views,
                         handed.as_ref(),
                         &mut out[offset..offset + count],
                         deeper,
@@ -771,8 +824,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     #[allow(clippy::too_many_arguments)]
     fn cross_leaf<M: crate::math::KernelMath>(
         &self,
-        x1: MatRef<'_, T>,
-        x2: MatRef<'_, T>,
+        views: CrossViews<'_, T, S>,
         weight: MatRef<'_, T>,
         out: &mut [f64],
         bufs: &mut [Mat<T>],
@@ -782,19 +834,45 @@ impl<T: KernelScalar> CompiledKernel<T> {
         want_value: bool,
     ) -> Result<f64, GprError> {
         if let Self::RbfArd(leaf) = self {
-            return leaf.contract_cross::<M, T>(x1, x2, weight, out, jobs, want_value);
+            return leaf.contract_cross::<M, T>(views.x1, views.x2, weight, out, jobs, want_value);
         }
         let Some(d_k) = bufs.first_mut() else {
             return Err(too_few_buffers());
         };
+        // An accurate ARD RBF on a supplied slot's `(Δ_d)²` blocks: one
+        // Gram, then every lengthscale from the blocks, as the square's
+        // packed path. `FastApprox` stays on the per-parameter loop.
+        if M::ACCURATE
+            && let Self::Supplied(supplied) = self
+            && let (
+                SuppliedLeaf {
+                    at,
+                    leaf: SuppliedCompiled::Ard(ArdLeaf::Rbf(rbf)),
+                    ..
+                },
+                slots,
+            ) = S::rect_leaf(supplied, views.slots)
+        {
+            self.apply_cross_mixed::<M>(views, d_k.as_mut(), scratch.as_mut(), nested)?;
+            let k = d_k.as_ref();
+            match slots.ard(*at)? {
+                ArdRect::Checked(blocks) => {
+                    rbf.contract_cross_from_blocks(weight, k, blocks, out, jobs)?;
+                }
+                ArdRect::Unchecked(blocks) => {
+                    rbf.contract_cross_from_blocks(weight, k, blocks, out, jobs)?;
+                }
+            }
+            return Ok(if want_value { rect_dot(weight, k) } else { 0.0 });
+        }
         let value = if want_value {
-            self.apply_cross_points_with::<M>(x1, x2, d_k.as_mut(), scratch.as_mut(), nested)?;
+            self.apply_cross_mixed::<M>(views, d_k.as_mut(), scratch.as_mut(), nested)?;
             rect_dot(weight, d_k.as_ref())
         } else {
             0.0
         };
         for (p, slot) in out.iter_mut().enumerate() {
-            self.grad_cross_points_with::<M>(x1, x2, d_k.as_mut(), p, scratch.as_mut(), nested)?;
+            self.grad_cross_views::<M>(views, d_k.as_mut(), p, scratch.as_mut(), nested)?;
             *slot = rect_dot(weight, d_k.as_ref());
         }
         Ok(value)
@@ -810,6 +888,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         out: &mut [f64],
         accum: &mut DiagAccum<T>,
     ) -> Result<(), GprError> {
+        self.require_tree_columns(x)?;
         out.fill(0.0);
         let mut cursor = 0;
         let mut offset = 0;
@@ -888,7 +967,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
                 continue;
             }
             let start = saved + k * n;
-            t.fill_diag_points(x, &mut accum.flat[start..start + n])?;
+            t.fill_diag_rows(x, &mut accum.flat[start..start + n])?;
             k += 1;
         }
         *cursor = saved + n_varying * n;
@@ -1161,6 +1240,54 @@ fn too_few_buffers() -> GprError {
     GprError::WorkspaceTooSmall
 }
 
+/// A leaf with a one-pass weighted walk on a distance matrix.
+enum FastLeaf<'k> {
+    Periodic(&'k crate::kernel::PeriodicKernel),
+    RationalQuadratic(&'k crate::kernel::RationalQuadraticKernel),
+    Rbf(&'k crate::kernel::RbfKernel),
+    None,
+}
+
+impl<'k> FastLeaf<'k> {
+    fn from_scalar<T: KernelScalar>(leaf: &'k ScalarLeaf<T>) -> Self {
+        match leaf {
+            ScalarLeaf::Periodic(leaf) => Self::Periodic(leaf),
+            ScalarLeaf::RationalQuadratic(leaf) => Self::RationalQuadratic(leaf),
+            ScalarLeaf::Rbf(leaf) => Self::Rbf(leaf),
+            ScalarLeaf::Matern(_) | ScalarLeaf::Custom(_) => Self::None,
+        }
+    }
+}
+
+/// Coordinate entry points of a coordinate tree.
+impl<T: KernelScalar> CompiledKernel<T> {
+    /// [`Self::weighted_cross_grads_views`] of the two point sets `x1`, `x2`.
+    // The two point sets, the weight, the output, and three scratch kinds.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn weighted_cross_grads<M: crate::math::KernelMath>(
+        &self,
+        x1: MatRef<'_, T>,
+        x2: MatRef<'_, T>,
+        weight: MatRef<'_, T>,
+        out: &mut [f64],
+        bufs: &mut [Mat<T>],
+        scratch: MatMut<'_, T>,
+        nested: &mut [Mat<T>],
+        jobs: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
+        self.weighted_cross_grads_views::<M>(
+            CrossViews::points(x1, x2),
+            weight,
+            out,
+            bufs,
+            scratch,
+            nested,
+            jobs,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CompiledKernel, WeightedWalk};
@@ -1209,6 +1336,7 @@ mod tests {
             x: x.as_ref(),
             dist: Some(dist.as_ref()),
             ard: None,
+            slots: (),
         };
         let weight = Mat::from_fn(n, n, |i, j| {
             let (a, b) = (i.max(j) as f64, i.min(j) as f64);
@@ -1265,6 +1393,7 @@ mod tests {
                     x: x.as_ref(),
                     dist: Some(dist.as_ref()),
                     ard: None,
+                    slots: (),
                 },
                 plain.as_mut(),
                 Triangle::Lower,
@@ -1317,6 +1446,7 @@ mod tests {
             x: z.as_ref(),
             dist: Some(dist.as_ref()),
             ard: None,
+            slots: (),
         };
         let n_params = compiled.num_params();
         let mut got = vec![0.0; n_params];

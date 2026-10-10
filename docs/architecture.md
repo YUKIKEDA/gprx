@@ -67,12 +67,12 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 
 | Module | Responsibility | Visibility / main types | Imports |
 | --- | --- | --- | --- |
-| `kernel` | The kernel language: a `KernelSpec` tree of built-in leaves and `Custom`, flattened into a `CompiledKernel<T>` with static dispatch; value, gradient, Hessian, and coordinate derivatives; the scalar trait `KernelScalar` | Public mod. `KernelSpec`, `CompiledKernel`, the leaves (`RbfKernel`, `MaternKernel`, `PeriodicKernel`, …), `KernelTerm`, `CustomKernel`, `KernelScalar` | `data`, `error`, `linalg`, `math`, `param` |
+| `kernel` | The kernel language: a `KernelSpec` tree of built-in leaves and `Custom`, flattened into a `CompiledKernel<T>` with static dispatch; value, gradient, Hessian, and coordinate derivatives; the scalar trait `KernelScalar`. Leaves on supplied squared distances: slots, the `DistanceKernel` tree, binding and checking a caller's tables, and the training `d²` stores (`supply.rs`, `sources/`, `compiled/supplied.rs`) | Public mod. `KernelSpec`, `CompiledKernel`, the leaves (`RbfKernel`, `MaternKernel`, `PeriodicKernel`, …), `KernelTerm`, `CustomKernel`, `KernelScalar`; `DistanceKernel`, `DistanceOnly`, `WithPoints`, `ScalarDistance`, `ArdDistance`, `DistanceSlot`, `DistanceSource`, `DistanceFill`, `ModelKernel`, `PointKernel`, `Supply`, `NoSupply` | `data`, `error`, `linalg`, `math`, `param` |
 | `likelihood` | Gaussian observation noise `σn²` as a parameter of its own (not jitter) | Public: `GaussianLikelihood` | `data`, `error`, `param` |
 | `transform` | Input maps (identity, standardize, min-max, per column, pipeline) and target maps, each as an unfitted and a fitted type; inverts mean and variance at predict | Public mod: `Transform`, `UnfittedTransform`, `TargetTransform`, `UnfittedTarget`, `MinMaxInput`, `StandardizeTarget`, `Pipeline`, … | `data`, `error` |
 | `precision` | Storage and predict scalars as one policy; mixed-precision refinement | Public: `PrecisionPolicy`, `DoublePrecision`, `SinglePrecision`, `MixedPrecision`, `PromoteStorage`, `ReevaluateKernel` | `error`, `kernel`, `linalg`, `math`, `policy`, `transform` |
 | `workspace` | Reusable buffers: Gram, `W`, distance cache, `exp` buffer, faer scratch; the per-query buffers | Crate: `WorkspaceCore`, `FitBuffers`, `QueryWorkspace` | `error`, `kernel`, `linalg`, `policy`, `precision` |
-| `prediction` | What a predict call returns, and drawing posterior samples from a covariance | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind` | `error`, `kernel`, `linalg`, `policy`, `rng` |
+| `prediction` | What a predict call returns, drawing posterior samples from a covariance, and the predict methods every model of a `DistanceKernel` shares | Public: `Prediction`, `PredictiveCovariance`, `PredictOptions`, `VarianceKind`. Crate: `DistanceQuery`, `QueryPoints`, `distance_predict!` | `error`, `kernel`, `linalg`, `policy`, `rng` |
 | `objective` | The traits a model's fit objective implements, so a solver needs no model | Public: `Objective`, `Differentiable`, `TwiceDifferentiable`, `IncrementalObjective` | `error`, `param` |
 | `optimizer` | Solvers over those traits: argmin adapters, the homemade annealing, and the `Fixed` marker; Adam for SVGP (not an `Optimizer`) | Public: `Optimizer`, `Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`, `Adam`, `OptResult`, `BoundaryPolicy` | `error`, `objective`, `param`, `rng` |
 
@@ -80,11 +80,11 @@ Solid arrows are imports that follow the layering. Dashed arrows are the one pla
 
 | Module | Responsibility | Visibility / main types | Imports |
 | --- | --- | --- | --- |
-| `gpr` | Exact GPR: factor `K + σn²I`, the NLML and its derivatives for fit / refit, predict, covariance, samples, leave-one-out, and online insert / delete on an LDLT factor | Public: `Gpr`, `FittedGpr`, `OnlineGpr` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `transform`, `workspace` |
-| `sparse` | What `sgpr` and `svgp` share: the trainer settings, the training data, `Z`, and `θ` over kernel and likelihood | Crate: `SparseSpec`, `SparseCore` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `param`, `policy`, `precision`, `prediction`, `transform` |
-| `sgpr` | Sparse GPR with the collapsed VFE bound: fixed or free inducing points `Z`, rank-1 online updates, insert / delete of points and of inducing points, predict, covariance, samples, leave-one-out | Public: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `sparse`, `transform` |
-| `svgp` | SVGP: whitened `q(u)`, the ELBO, minibatch Adam whose step cost does not grow with `n`, predict, covariance, samples | Public: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `rng`, `sparse`, `transform` |
-| `persist` | One directory per model: `config.json` and `model.safetensors`; the restore table for `Custom` kernels and caller transforms | Public mod: `LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`, `PersistRegistry`, `FORMAT_VERSION` | `error`, `gpr`, `kernel`, `optimizer`, `param`, `points`, `policy`, `precision`, `sgpr`, `sparse`, `svgp`, `transform` |
+| `gpr` | Exact GPR: factor `K + σn²I`, the NLML and its derivatives for fit / refit, predict, covariance, samples, leave-one-out, and online insert / delete on an LDLT factor; the same on supplied distances (`distance.rs`) | Public: `Gpr`, `FittedGpr`, `OnlineGpr` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `prediction`, `transform`, `workspace` |
+| `sparse` | What `sgpr` and `svgp` share: the trainer settings, the training data, `Z`, `θ` over kernel and likelihood, and the supplied `n × m` blocks of a model on distances | Crate: `SparseSpec`, `SparseCore`, `SparseSupply` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `param`, `policy`, `precision`, `prediction`, `transform` |
+| `sgpr` | Sparse GPR with the collapsed VFE bound: fixed or free inducing points `Z`, rank-1 online updates, insert / delete of points and of inducing points, predict, covariance, samples, leave-one-out; the same on supplied distances (`distance.rs`, `online/distance.rs`) | Public: `Sgpr`, `FittedSgpr`, `OnlineSgpr`, `FixedInducing`, `FreeInducing`, `InducingId` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `objective`, `optimizer`, `param`, `persist`, `points`, `policy`, `precision`, `prediction`, `sparse`, `transform` |
+| `svgp` | SVGP: whitened `q(u)`, the ELBO, minibatch Adam whose step cost does not grow with `n`, predict, covariance, samples; the same on supplied distances (`distance.rs`) | Public: `Svgp`, `FittedSvgp` | `data`, `error`, `kernel`, `likelihood`, `linalg`, `math`, `optimizer`, `param`, `persist`, `policy`, `precision`, `prediction`, `rng`, `sparse`, `transform` |
+| `persist` | One directory per model: `config.json` and `model.safetensors`; the restore table for `Custom` kernels and caller transforms | Public mod: `LoadedGpr`, `LoadedSgpr`, `LoadedSvgp`, `LoadedDistanceGpr`, `LoadedDistanceSgpr`, `LoadedDistanceSvgp`, `PersistRegistry`, `FORMAT_VERSION` | `error`, `gpr`, `kernel`, `optimizer`, `param`, `points`, `policy`, `precision`, `sgpr`, `sparse`, `svgp`, `transform` |
 | `internals` | Hooks for benchmarks and `compare/perf`. Exists only with the `bench-internals` or `insert-stages` feature | Public mod, feature-gated | `gpr`, `kernel`, `objective` |
 
 ## 3. Dependencies among the building blocks and models
@@ -94,16 +94,19 @@ Every module also uses the foundation (`error`, `param`, `data`, `linalg`, `math
 ```mermaid
 flowchart TB
     gpr --> objective
+    gpr --> prediction
     gpr --> optimizer
     gpr --> persist
     gpr --> points
     gpr --> workspace
     sgpr --> objective
+    sgpr --> prediction
     sgpr --> optimizer
     sgpr --> persist
     sgpr --> points
     sgpr --> sparse
     svgp --> optimizer
+    svgp --> prediction
     svgp --> persist
     svgp --> sparse
     sparse --> prediction
@@ -138,7 +141,7 @@ What the picture shows:
 Held at this commit (`use crate::…` outside `#[cfg(test)]`):
 
 1. **Models do not import one another.** `gpr`, `sgpr`, and `svgp` have no import among them. Shared code goes down a layer (`sparse` for the two sparse families; the building blocks for all three).
-2. **`persist` is the one module that imports models**, in `persist/mod.rs` (Exact) and `persist/sparse.rs` (Sparse, SVGP). It is the only place that names all the concrete model types, so `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` can hold one variant per precision.
+2. **`persist` is the one module that imports models**, in `persist/mod.rs` (Exact), `persist/sparse.rs` (Sparse, SVGP), and `persist/distance.rs` (the loaded types of a `DistanceKernel`). It is the only place that names all the concrete model types, so `LoadedGpr` / `LoadedSgpr` / `LoadedSvgp` and `LoadedDistanceGpr` / `LoadedDistanceSgpr` / `LoadedDistanceSvgp` can hold one variant per precision.
 3. **The crossing is narrow the other way.** Models call `persist::save_*`, and `gpr` also uses `PersistedModel` (the parts a loaded Exact model is rebuilt from) and `MappedTensors` (the memory-mapped `L`). `gpr`, `sgpr`, and `points` use `persist_err` to build the error. Nothing else of `persist` is used by a model.
 4. **`optimizer`, `objective`, `precision`, and `transform` do not import a model.** The unit tests of `optimizer` build a `Gpr`; that is test code only.
 5. **`Workspace`, `QueryWorkspace`, `LltStore`, `LdltStore`, and faer types are crate-private** ([layout rule](../.cursor/rules/layout.mdc)).
@@ -154,9 +157,9 @@ The three families follow the same typestate: a trainer, `fit` (or `factor`), a 
 
 | Family | Trainer | Fitted | Online | Loaded from disk |
 | --- | --- | --- | --- | --- |
-| Exact | `Gpr<O, P>` | `FittedGpr<O, P>` | `OnlineGpr<O, P>` (`insert`, `delete`) | `LoadedGpr` (8 variants) |
-| Sparse (VFE) | `Sgpr<O, I, P>` | `FittedSgpr<O, I, P>` | `OnlineSgpr<O, P>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants) |
-| SVGP | `Svgp<O, P>` | `FittedSvgp<P>` | none | `LoadedSvgp` (4 variants) |
+| Exact | `Gpr<O, P, K>` | `FittedGpr<O, P, K>` | `OnlineGpr<O, P, K>` (`insert`, `delete`) | `LoadedGpr` (8 variants); `LoadedDistanceGpr<C>` (8) for a `DistanceKernel<C>` |
+| Sparse (VFE) | `Sgpr<O, I, P, K>` | `FittedSgpr<O, I, P, K>` | `OnlineSgpr<O, P, K>` (`insert`, `delete`, `insert_inducing`, `delete_inducing`) | `LoadedSgpr` (8 variants); `LoadedDistanceSgpr<C>` (8) |
+| SVGP | `Svgp<O, P, K>` | `FittedSvgp<P, K>` | none | `LoadedSvgp` (4 variants); `LoadedDistanceSvgp<C>` (4) |
 
 The type parameters:
 
@@ -164,7 +167,8 @@ The type parameters:
 | --- | --- | --- |
 | `O` | The optimizer slot | `Lbfgs` (default for Exact and Sparse), `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, a user `Optimizer`; `Fixed` for `factor` only; `Adam` for `Svgp::fit` (`Svgp` defaults to `Fixed`) |
 | `P` | Precision, a compile-time choice | `DoublePrecision` (default), `SinglePrecision`, `MixedPrecision` (residual `PromoteStorage` or `ReevaluateKernel`) |
-| `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`) |
+| `I` | Where the inducing points `Z` live | `FixedInducing` (default; `Z` is not in the parameters), `FreeInducing` (`Z` is optimized with `θ`; a coordinate kernel only) |
+| `K` | What the model's kernel reads, in every family ([design §5.1](design.md#51-spec-versus-evaluator-and-precision-generics)) | `KernelSpec` (default; coordinates), `DistanceKernel<DistanceOnly>` (supplied distances only), `DistanceKernel<WithPoints>` (supplied distances and coordinates) |
 
 ## 6. How a model moves between states
 
@@ -188,6 +192,8 @@ flowchart LR
     D -- "LoadedSvgp::load" --> LV["LoadedSvgp"]
 ```
 
+A model of a `DistanceKernel<C>` moves the same way and loads through `LoadedDistanceGpr<C>` / `LoadedDistanceSgpr<C>` / `LoadedDistanceSvgp<C>` ([persist-format.md §10](persist-format.md#10-models-on-supplied-distances)).
+
 A loaded model is prediction-ready and carries `Fixed`, so it does not store a search. To train it again, call `with_optimizer` and then `refit` on the typed model. What each `save` writes is in [persist-format.md](persist-format.md).
 
 Inside one call, the order is fixed: input map → target map → kernel and likelihood at `θ` → factor → `α` → predict. A fitted model keeps the `X` and `y` you passed, untransformed, together with the fitted transforms, and applies the transforms again to each query ([design §2](design.md#2-architecture), [§5.5](design.md#55-preprocessing-pipeline)).
@@ -210,7 +216,11 @@ Leaves are dispatched statically: every operation on `KernelSpec` and `CompiledK
 
 1. `kernel/<leaf>.rs`: the parameters (`θ` and their `Interval`s), and the value, `∂K/∂θ`, and `∂²K/∂θ∂θ` from distances or coordinates, square and rectangular, and the diagonal. The coordinate derivatives (`grad_wrt_coord_dim` and the mixed Hessians) if `FreeInducing` should move it; otherwise it returns `CoordGradientUnsupported`.
 2. `kernel/spec.rs`: the `KernelSpec` variant, its `From`, and the arms the compiler asks for.
-3. `kernel/compiled/`: the `CompiledKernel` variant and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf.
+3. `kernel/compiled/`: the `CompiledKernel` variant, its `LeafRef` variant (`term`), and the arms the compiler asks for, including `coord_mode`, `needs_ard_sq_diff`, and `needs_grad_scratch`, which name every leaf. The leaf arms of the coordinate paths are methods of `LeafRef`, shared by a coordinate tree and the per-leaf mixed path.
 4. `persist/kernel.rs`: its JSON tag; a saved file from an older version must still read (persist-format.md).
-5. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load.
-6. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.
+5. A leaf that can read supplied distances as well:
+   - `kernel/supply.rs`: its `ScalarLeafSpec` or `ArdLeafSpec` variant, the `scalar_leaf!` / `ard_leaf!` list, and one pair in `with_distance_leaves!`. The mapping to and from a `KernelSpec` leaf, which a save and a load use, follows from that pair.
+   - `kernel/compiled/supplied.rs`: its `ScalarLeaf` or `ArdLeaf` variant, its compile arm, and one arm in `each_scalar_leaf!` or `each_ard_leaf!`. The built-in leaves share their method names (`apply_math`, `grad_from_sq_diff`, …), so one body serves every leaf.
+   - Its name in `DISTANCE_LEAVES` (`kernel/compiled/leaf_table.rs`).
+6. `kernel/compiled/leaf_table.rs`: its index in `leaf_index` (the compiler asks for it) and an instance in the table. The table test then runs it through the parameters, the Gram from coordinates and from distances, the cross block, the diagonal, `∂K/∂θ` and `∂²K/∂θ∂θ` against central differences, the coordinate derivative, and a save and load. A distance leaf also runs through its Gram and `∂K/∂θ` on supplied distances.
+7. design §5 and the public re-exports in `kernel/mod.rs` and `lib.rs`.

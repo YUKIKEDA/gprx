@@ -34,18 +34,24 @@ mod rq;
 mod rq_ard;
 mod scalar;
 mod simd;
+mod sources;
 mod spec;
+mod supply;
 mod term;
+mod tree;
 mod white;
 
 pub use compiled::CompiledKernel;
+pub(crate) use compiled::CrossViews;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
+pub(crate) use compiled::supplied::{NO_SLOTS, RectSlots, SquareSlots, unbound};
 pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use dist::fill_squared_euclidean;
+pub(crate) use dist::packed_len;
 pub use lengthscale::ArdLengthscales;
 pub use linear::LinearKernel;
 pub use matern::{MaternKernel, MaternNu};
@@ -57,8 +63,28 @@ pub use rq::RationalQuadraticKernel;
 pub use rq_ard::RationalQuadraticArdKernel;
 pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
+pub(crate) use sources::BlockAt;
+pub(crate) use sources::{
+    BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
+    bind_inducing, column_into, new_inducing_column, place_in_shape, widened,
+};
 pub use spec::{KernelSpec, ParameterBinding};
+pub(crate) use supply::{
+    ArdData, CompiledOf, ModelKernelParts, ScalarData, SlotId, SlotShape, SourceData, SpecOf,
+    SuppliedLeafSpec, SuppliedSpec, Tidy, spec_slots,
+};
+pub use supply::{
+    ArdDistance, ArdDistanceLeaf, DistanceFill, DistanceKernel, DistanceOnly, DistanceSlot,
+    DistanceSource, JoinPoints, ModelKernel, PointKernel, PointUse, ScalarDistance,
+    ScalarDistanceLeaf, WithPoints,
+};
 pub use term::{CustomKernel, KernelTerm};
+pub(crate) use tree::sealed::Supply as SupplyViews;
+
+/// What a model of kernel `K` holds only when `K` reads supplied distances
+/// ([`SupplyViews::Held`]): `X`, or nothing for a coordinate kernel.
+pub(crate) type Held<K, X> = <<K as ModelKernelParts>::Supply as SupplyViews>::Held<X>;
+pub use tree::{NoSupply, Supply};
 pub use white::WhiteKernel;
 
 use crate::error::GprError;

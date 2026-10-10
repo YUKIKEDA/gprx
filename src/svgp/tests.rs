@@ -598,7 +598,7 @@ fn batch_value_and_grad(
     let mut out = vec![0.0; params.len()];
     let value = crate::policy::with_kernel_exp!(
         model.core.math,
-        M => super::factor::svgp_value_and_gradient::<M, _>(model, &mut out, batch, &mut scratch)
+        M => super::factor::svgp_value_and_gradient::<M, _, KernelSpec>(model, &mut out, batch, &mut scratch)
     )
     .expect("gradient");
     model.scratch = scratch;

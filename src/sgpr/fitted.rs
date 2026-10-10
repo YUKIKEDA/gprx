@@ -8,9 +8,12 @@ use faer::MatRef;
 
 use crate::error::GprError;
 use crate::policy::with_kernel_exp;
-use crate::sparse::{PredictScratch, SparseCore, SparseScratch, sparse_core_accessors};
+use crate::sparse::{
+    PredictScratch, SparseCore, SparseScratch, sparse_core_accessors, sparse_kernel_accessor,
+    sparse_point_accessors,
+};
 
-use crate::kernel::KernelScalar;
+use crate::kernel::{KernelScalar, KernelSpec, ModelKernel};
 use crate::optimizer::{Fixed, Lbfgs, OptResult, Optimizer};
 use crate::param::Interval;
 use crate::precision::{DoublePrecision, ModelPrecision};
@@ -25,6 +28,7 @@ use super::factor::{
 use super::model::Sgpr;
 use super::online::OnlineSgpr;
 use super::{FixedInducing, InducingLayout};
+use crate::kernel::NoSupply;
 
 /// Represents the factored collapsed variational SGPR at the `θ` used by [`Sgpr::fit`] or [`Sgpr<Fixed>::factor`].
 ///
@@ -37,12 +41,18 @@ use super::{FixedInducing, InducingLayout};
 ///
 /// See the example on [`Self::predict`].
 #[derive(Clone, Debug)]
-pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePrecision> {
-    pub(super) core: SparseCore,
+pub struct FittedSgpr<
+    O = Lbfgs,
+    I = FixedInducing,
+    P: ModelPrecision = DoublePrecision,
+    K: ModelKernel = KernelSpec,
+> {
+    pub(super) core: SparseCore<K::Supply>,
     /// Kernel scratch kept between `&mut self` calls.
-    pub(super) scratch: SparseScratch<P::Storage>,
+    pub(super) scratch: SparseScratch<P::Storage, K::Supply>,
     pub(super) optimizer: O,
     pub(super) inducing: PhantomData<I>,
+    pub(super) _kernel: PhantomData<K>,
     /// Lower `L` from `K_mm = L Lᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
@@ -51,16 +61,17 @@ pub struct FittedSgpr<O = Lbfgs, I = FixedInducing, P: ModelPrecision = DoublePr
     pub(super) b_l: Mat<P::Storage>,
     /// Storage solve `B w = A y`. Marginal likelihood uses this.
     pub(super) w: Vec<P::Storage>,
-    /// Predict weights. [`DoublePrecision`] and [`SinglePrecision`] promote `w`.
-    /// [`MixedPrecision`] stores the refined `f64` weights.
+    /// Predict weights. [`DoublePrecision`] and [`crate::SinglePrecision`]
+    /// promote `w`. [`crate::MixedPrecision`] stores the refined `f64` weights.
     pub(super) predict_w: Vec<P::Refine>,
     pub(super) k_diag_sum: P::Storage,
     pub(super) a_frobenius2: P::Storage,
 }
 
-impl<O, I: InducingLayout, P> FittedSgpr<O, I, P>
+impl<O, I: InducingLayout<K::Supply>, P, K> FittedSgpr<O, I, P, K>
 where
     P: crate::precision::GpScalar,
+    K: ModelKernel,
 {
     sparse_core_accessors!();
 
@@ -152,16 +163,15 @@ where
         } else {
             self.core.z_obs.clone()
         };
-        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _>(
+        let data = crate::sparse::SparseData {
+            z: &z,
+            ..self.core.data()
+        };
+        let state = with_kernel_exp!(self.core.math, M => assemble_vfe::<M, _, K::Supply>(
             &kernel,
             self.core.jitter,
             likelihood,
-            &self.core.x_train,
-            self.core.n,
-            self.core.d,
-            &self.core.y_train,
-            &z,
-            self.core.m,
+            data,
             &mut self.scratch.storage,
             &mut self.scratch.f64,
         ))?;
@@ -239,10 +249,9 @@ where
         crate::data::require_count(out.len(), n_params, "parameters")?;
         self.set_params(params)?;
         let value = self.neg_log_marginal_likelihood()?;
-        let include_z = I::z_params(self.core.m, self.core.d) > 0;
         let mut ks = std::mem::take(&mut self.scratch.storage);
-        let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _>(
-            self, out, include_z, &mut ks
+        let result = with_kernel_exp!(self.core.math, M => analytic_gradient::<M, _, _, _, _>(
+            self, out, &mut ks
         ));
         self.scratch.storage = ks;
         result?;
@@ -287,107 +296,24 @@ where
         crate::data::require_count(params.len(), n_params, "parameters")?;
         crate::data::require_count(out.len(), n_params * n_params, "parameters")?;
         self.set_params(params)?;
-        let include_z = I::z_params(self.core.m, self.core.d) > 0;
         let mut ks = std::mem::take(&mut self.scratch.storage);
-        let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _>(
-            self, out, include_z, &mut ks
+        let result = with_kernel_exp!(self.core.math, M => analytic_hessian::<M, _, _, _, _>(
+            self, out, &mut ks
         ));
         self.scratch.storage = ks;
         result?;
         Ok(())
     }
 
-    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
-    ///
-    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
-    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
-    /// and `Z`, and `Z` in transformed coordinates. The factors are
-    /// not stored; [`crate::LoadedSgpr::load`] factors the system again at the saved `θ`
-    /// and `Z`. Caller-defined kernels and transforms need their
-    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
-    /// The optimizer and the inducing-point search are not stored.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::PersistFailed`] when the directory cannot be
-    /// written or a kernel or transform has no persist form.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let model = Sgpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
-    ///     .with_optimizer(Fixed)
-    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
-    ///     .map_err(|(_, e)| e)?;
-    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-sgpr-{}", std::process::id()));
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// model.save(&dir)?;
-    /// let loaded = gprx::LoadedSgpr::load(&dir, &gprx::PersistRegistry::new())?;
-    /// assert_eq!(loaded.n(), model.n());
-    /// let _ = std::fs::remove_dir_all(&dir);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
-        crate::persist::save_sgpr(self, dir.as_ref())
-    }
-
-    /// Converts this model into an online sparse GPR.
-    ///
-    /// [`OnlineSgpr`] can append or drop training points and inducing
-    /// points. [`FixedInducing`] and [`FreeInducing`](crate::FreeInducing) both produce
-    /// [`OnlineSgpr<O>`] whose parameters are kernel then likelihood
-    /// `θ`. The stored VFE factors are reused.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(
-    ///     &[0.0, 1.0, 2.0, 3.0],
-    ///     4,
-    ///     1,
-    ///     &[0.0, 1.0, 0.5, 0.25],
-    ///     &[0.5, 2.5],
-    ///     2,
-    /// )
-    /// .map_err(|(_, e)| e)?;
-    /// let mut online = fitted.into_online();
-    /// online.insert(&[4.0], 0.1)?;
-    /// assert_eq!(online.n(), 5);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn into_online(self) -> OnlineSgpr<O, P> {
-        OnlineSgpr::from_fitted(self)
-    }
-
     pub(crate) fn refresh_predict_w(&mut self) -> Result<(), GprError> {
-        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P>(
+        self.predict_w = with_kernel_exp!(self.core.math, M => publish_sgpr_weights::<M, P, K::Supply>(
             &self.core.kernel,
             self.core.jitter,
             self.a.as_ref(),
             self.b_l.as_ref(),
             &self.w,
-            &self.core.x_train,
-            &self.core.y_train,
-            &self.core.z_train,
+            self.core.data(),
             self.core.likelihood.noise_variance(),
-            self.core.n,
-            self.core.m,
-            self.core.d,
         ))?;
         Ok(())
     }
@@ -409,22 +335,23 @@ where
     }
 
     /// The training data, settings, and fitted transforms.
-    pub(crate) fn core(&self) -> &SparseCore {
+    pub(crate) fn core(&self) -> &SparseCore<K::Supply> {
         &self.core
     }
 
-    pub(crate) fn into_trainer(self) -> Sgpr<O, I, P> {
+    pub(crate) fn into_trainer(self) -> Sgpr<O, I, P, K> {
         Sgpr {
             spec: self.core.spec(),
             optimizer: self.optimizer,
             inducing: PhantomData,
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 
     pub(crate) fn optimize_hyperparameters(&mut self) -> Result<(), GprError>
     where
-        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I, P>>,
+        O: Clone + for<'a> Optimizer<SgprObjective<'a, O, I, P, K>>,
     {
         let mut init = vec![0.0; self.num_params()];
         self.get_params(&mut init)?;
@@ -517,6 +444,163 @@ where
         )
     }
 
+    /// Returns the leave-one-out mean and observation variance at every training point.
+    ///
+    /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
+    /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
+    /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
+    /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
+    /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
+    /// inverse-transformed like [`Self::predict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a downdated `B` is
+    /// not positive definite, or [`GprError::CholeskyFailed`] if an `f32` storage cannot factor `K_mm` again in `f64`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    /// .map_err(|(_, e)| e)?;
+    /// let loo = fitted.loo_predict()?;
+    /// assert_eq!(loo.mean.len(), fitted.n());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
+        self.loo_predict_with(PredictOptions::default())
+    }
+
+    /// Returns leave-one-out mean and variance with an explicit variance kind.
+    ///
+    /// Latent variance is the VFE variance of `f(x_i)` without point `i`;
+    /// observation variance adds `σn²`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::loo_predict`].
+    ///
+    /// See the example on [`Self::predict`].
+    pub fn loo_predict_with(
+        &self,
+        options: PredictOptions,
+    ) -> Result<Prediction<P::Refine>, GprError> {
+        vfe_loo::<P, K::Supply>(
+            &self.core,
+            self.a.as_ref(),
+            self.b_l.as_ref(),
+            &self.w,
+            options,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn k_mm_l(&self) -> MatRef<'_, P::Storage> {
+        self.k_mm_l.as_ref()
+    }
+}
+
+impl<O, I, P, K> FittedSgpr<O, I, P, K>
+where
+    P: crate::precision::GpScalar,
+    K: crate::kernel::PointKernel,
+{
+    sparse_point_accessors!();
+}
+
+impl<O, I: InducingLayout<NoSupply>, P> FittedSgpr<O, I, P>
+where
+    P: crate::precision::GpScalar,
+{
+    sparse_kernel_accessor!();
+
+    /// Writes this model to `dir` as `config.json` and `model.safetensors`.
+    ///
+    /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
+    /// precision, transforms (unfitted and fitted), the original `X`, `y`,
+    /// and `Z`, and `Z` in transformed coordinates. The factors are
+    /// not stored; [`crate::LoadedSgpr::load`] factors the system again at the saved `θ`
+    /// and `Z`. Caller-defined kernels and transforms need their
+    /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
+    /// The optimizer and the inducing-point search are not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] when the directory cannot be
+    /// written or a kernel or transform has no persist form.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let model = Sgpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
+    ///     .map_err(|(_, e)| e)?;
+    /// let dir = std::env::temp_dir().join(format!("gprx-doctest-save-sgpr-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// model.save(&dir)?;
+    /// let loaded = gprx::LoadedSgpr::load(&dir, &gprx::PersistRegistry::new())?;
+    /// assert_eq!(loaded.n(), model.n());
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<(), GprError> {
+        crate::persist::save_sgpr(self, dir.as_ref())
+    }
+
+    /// Converts this model into an online sparse GPR.
+    ///
+    /// [`OnlineSgpr`] can append or drop training points and inducing
+    /// points. [`FixedInducing`] and [`FreeInducing`](crate::FreeInducing) both produce
+    /// [`OnlineSgpr<O>`] whose parameters are kernel then likelihood
+    /// `θ`. The stored VFE factors are reused.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{KernelSpec, RbfKernel};
+    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let fitted = Sgpr::new(
+    ///     KernelSpec::from(RbfKernel::new(1.0)?),
+    ///     GaussianLikelihood::new(0.1)?,
+    /// )
+    /// .with_optimizer(Fixed)
+    /// .factor(
+    ///     &[0.0, 1.0, 2.0, 3.0],
+    ///     4,
+    ///     1,
+    ///     &[0.0, 1.0, 0.5, 0.25],
+    ///     &[0.5, 2.5],
+    ///     2,
+    /// )
+    /// .map_err(|(_, e)| e)?;
+    /// let mut online = fitted.into_online();
+    /// online.insert(&[4.0], 0.1)?;
+    /// assert_eq!(online.n(), 5);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn into_online(self) -> OnlineSgpr<O, P> {
+        OnlineSgpr::from_fitted(self)
+    }
+
     /// Predicts at `xs` with [`PredictOptions::default`] (observation variance).
     ///
     /// `xs` is column-major with `n_rows` query points and `n_cols` features.
@@ -598,7 +682,7 @@ where
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
         let mut out = Prediction::default();
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, crate::kernel::NoSupply>(
             &self.core,
             &VfeSystem::new(
                 &self.core,
@@ -609,6 +693,7 @@ where
             xs,
             n_rows,
             n_cols,
+            std::iter::empty(),
             options,
             &mut PredictScratch::default(),
             &mut out,
@@ -676,7 +761,7 @@ where
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        predict_vfe_covariance::<P>(
+        predict_vfe_covariance::<P, crate::kernel::NoSupply>(
             &self.core,
             &VfeSystem::new(
                 &self.core,
@@ -687,6 +772,8 @@ where
             xs,
             n_rows,
             n_cols,
+            std::iter::empty(),
+            std::iter::empty(),
             options,
         )
     }
@@ -736,66 +823,6 @@ where
     ) -> Result<Vec<P::Refine>, GprError> {
         self.predict_covariance_with(xs, n_rows, n_cols, options)?
             .draw(n_draws, seed, self.core.jitter)
-    }
-
-    /// Returns the leave-one-out mean and observation variance at every training point.
-    ///
-    /// `p(y_i | X, y_{-i}, θ, Z)` of the collapsed VFE posterior: the
-    /// optimal `q(u)` without point `i` at fixed `θ` and `Z`, predicted at
-    /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
-    /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
-    /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
-    /// inverse-transformed like [`Self::predict`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GprError::NonPositiveDefiniteMatrix`] if a downdated `B` is
-    /// not positive definite, or [`GprError::CholeskyFailed`] if an `f32` storage cannot factor `K_mm` again in `f64`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use gprx::kernel::{KernelSpec, RbfKernel};
-    /// use gprx::{Fixed, GaussianLikelihood, Sgpr};
-    ///
-    /// # fn main() -> Result<(), gprx::GprError> {
-    /// let fitted = Sgpr::new(
-    ///     KernelSpec::from(RbfKernel::new(1.0)?),
-    ///     GaussianLikelihood::new(0.1)?,
-    /// )
-    /// .with_optimizer(Fixed)
-    /// .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5], &[0.5, 1.5], 2)
-    /// .map_err(|(_, e)| e)?;
-    /// let loo = fitted.loo_predict()?;
-    /// assert_eq!(loo.mean.len(), fitted.n());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn loo_predict(&self) -> Result<Prediction<P::Refine>, GprError> {
-        self.loo_predict_with(PredictOptions::default())
-    }
-
-    /// Returns leave-one-out mean and variance with an explicit variance kind.
-    ///
-    /// Latent variance is the VFE variance of `f(x_i)` without point `i`;
-    /// observation variance adds `σn²`.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::loo_predict`].
-    ///
-    /// See the example on [`Self::predict`].
-    pub fn loo_predict_with(
-        &self,
-        options: PredictOptions,
-    ) -> Result<Prediction<P::Refine>, GprError> {
-        vfe_loo::<P>(
-            &self.core,
-            self.a.as_ref(),
-            self.b_l.as_ref(),
-            &self.w,
-            options,
-        )
     }
 
     /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
@@ -856,7 +883,7 @@ where
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        predict_vfe_into::<P>(
+        predict_vfe_into::<P, crate::kernel::NoSupply>(
             &self.core,
             &VfeSystem::new(
                 &self.core,
@@ -867,27 +894,23 @@ where
             xs,
             n_rows,
             n_cols,
+            std::iter::empty(),
             options,
             &mut self.scratch.predict,
             out,
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn k_mm_l(&self) -> MatRef<'_, P::Storage> {
-        self.k_mm_l.as_ref()
-    }
 }
 
-impl<P: crate::precision::GpScalar> FittedSgpr<Fixed, FixedInducing, P> {
+impl<P: crate::precision::GpScalar, K: ModelKernel> FittedSgpr<Fixed, FixedInducing, P, K> {
     /// The model of a persist directory: the VFE system factored at the
     /// saved `θ` and `Z`, as [`Sgpr<Fixed>::factor`] does.
     ///
     /// # Errors
     ///
     /// Same as [`Sgpr<Fixed>::factor`].
-    pub(crate) fn from_persisted(core: SparseCore) -> Result<Self, GprError> {
-        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<Fixed, FixedInducing, M, P>(
+    pub(crate) fn from_persisted(core: SparseCore<K::Supply>) -> Result<Self, GprError> {
+        with_kernel_exp!(core.math, M => super::factor::assemble_fitted::<Fixed, FixedInducing, M, P, K>(
             core, Fixed
         ))
     }

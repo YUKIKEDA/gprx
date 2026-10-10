@@ -8,6 +8,7 @@ use super::{
 use crate::error::GprError;
 use crate::kernel::dist::{ArdSqDiff, for_each_lower_col, lower_col};
 use crate::kernel::leaf_params::LeafParams;
+use crate::kernel::tree::{NoSupply, Supply};
 use crate::kernel::{KernelScalar, KernelSpec};
 use faer::reborrow::ReborrowMut;
 use faer::{Mat, MatMut, MatRef};
@@ -17,6 +18,7 @@ mod coord;
 mod grad;
 pub(crate) mod gram;
 mod hess;
+pub(crate) mod supplied;
 pub(crate) mod weighted;
 
 #[cfg(test)]
@@ -37,20 +39,63 @@ pub(crate) enum CoordMode {
     Mixed,
 }
 
-/// Distance matrix, coordinates, and optional ARD `(Δx_d)²` for a Mixed tree.
-#[derive(Clone, Copy)]
-pub(crate) struct MixedKernelViews<'a, T = f64> {
-    pub(crate) dist: MatRef<'a, T>,
+/// Distance matrix, coordinates, optional ARD `(Δx_d)²`, and the supplied
+/// distances of a Mixed tree (nothing for a coordinate tree, `S` =
+/// [`NoSupply`]). Without `dist`, a distance leaf computes its distances
+/// from `x`.
+pub(crate) struct MixedKernelViews<'a, T: KernelScalar, S: Supply = NoSupply> {
+    pub(crate) dist: Option<MatRef<'a, T>>,
     pub(crate) x: MatRef<'a, T>,
     pub(crate) ard_cache: Option<ArdSqDiff<'a, T>>,
+    pub(crate) slots: S::Squares<'a, T>,
 }
 
-impl<'a, T> MixedKernelViews<'a, T> {
+impl<T: KernelScalar, S: Supply> Clone for MixedKernelViews<'_, T, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: KernelScalar, S: Supply> Copy for MixedKernelViews<'_, T, S> {}
+
+#[cfg(test)]
+impl<'a, T: KernelScalar> MixedKernelViews<'a, T> {
     pub(crate) fn new(dist: MatRef<'a, T>, x: MatRef<'a, T>) -> Self {
         Self {
-            dist,
+            dist: Some(dist),
             x,
             ard_cache: None,
+            slots: (),
+        }
+    }
+}
+
+/// The views of a rectangular block `K(x1, x2)`: coordinates, the
+/// coordinate distances when the caller filled them, and the supplied
+/// distances (nothing for a coordinate tree).
+pub(crate) struct CrossViews<'a, T: KernelScalar, S: Supply = NoSupply> {
+    pub(crate) x1: MatRef<'a, T>,
+    pub(crate) x2: MatRef<'a, T>,
+    pub(crate) dist: Option<MatRef<'a, T>>,
+    pub(crate) slots: S::Rects<'a, T>,
+}
+
+impl<T: KernelScalar, S: Supply> Clone for CrossViews<'_, T, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: KernelScalar, S: Supply> Copy for CrossViews<'_, T, S> {}
+
+impl<'a, T: KernelScalar> CrossViews<'a, T> {
+    /// Coordinates only.
+    pub(crate) fn points(x1: MatRef<'a, T>, x2: MatRef<'a, T>) -> Self {
+        Self {
+            x1,
+            x2,
+            dist: None,
+            slots: (),
         }
     }
 }
@@ -80,7 +125,7 @@ impl<'a, T> MixedKernelViews<'a, T> {
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum CompiledKernel<T: KernelScalar = f64> {
+pub enum CompiledKernel<T: KernelScalar = f64, S: Supply = NoSupply> {
     /// Marks an isotropic RBF.
     Rbf(RbfKernel),
     /// Marks an ARD RBF (`θ_d = log(ℓ_d)`).
@@ -104,13 +149,66 @@ pub enum CompiledKernel<T: KernelScalar = f64> {
     /// Marks a user-defined distance leaf ([`super::KernelTerm`]).
     Custom(CustomKernel<T>),
     /// Marks a flattened sum of compiled terms.
-    Sum(Vec<CompiledKernel<T>>),
+    Sum(Vec<CompiledKernel<T, S>>),
     /// Marks a flattened Hadamard product of compiled terms.
-    Product(Vec<CompiledKernel<T>>),
+    Product(Vec<CompiledKernel<T, S>>),
+    /// A leaf that reads supplied squared distances. A coordinate tree
+    /// ([`NoSupply`]) cannot hold one.
+    #[doc(hidden)]
+    Supplied(S::Compiled<T>),
 }
 
-impl<T: KernelScalar> CompiledKernel<T> {
-    pub(crate) fn from_spec(spec: &KernelSpec) -> Self {
+/// A coordinate leaf of a compiled tree, borrowed.
+///
+/// The leaf arms of the coordinate paths live here, so a path that picks
+/// a mode per leaf (the mixed and supplied-distance paths) and a whole
+/// coordinate tree share them.
+#[derive(Clone, Copy)]
+pub(crate) enum LeafRef<'a, T: KernelScalar> {
+    Rbf(&'a RbfKernel),
+    RbfArd(&'a RbfArdKernel),
+    Matern(&'a MaternKernel),
+    MaternArd(&'a MaternArdKernel),
+    Periodic(&'a PeriodicKernel),
+    RationalQuadratic(&'a RationalQuadraticKernel),
+    RationalQuadraticArd(&'a RationalQuadraticArdKernel),
+    Constant(&'a ConstantKernel),
+    Linear(&'a LinearKernel),
+    White(&'a WhiteKernel),
+    Custom(&'a CustomKernel<T>),
+}
+
+/// One node of a compiled tree, borrowed: a coordinate leaf, a supplied
+/// leaf, or a sum / product of terms.
+pub(crate) enum Term<'a, T: KernelScalar, S: Supply> {
+    Leaf(LeafRef<'a, T>),
+    Supplied(&'a S::Compiled<T>),
+    Sum(&'a [CompiledKernel<T, S>]),
+    Product(&'a [CompiledKernel<T, S>]),
+}
+
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
+    /// This node, with its coordinate leaves in one arm.
+    pub(crate) fn term(&self) -> Term<'_, T, S> {
+        match self {
+            Self::Rbf(leaf) => Term::Leaf(LeafRef::Rbf(leaf)),
+            Self::RbfArd(leaf) => Term::Leaf(LeafRef::RbfArd(leaf)),
+            Self::Matern(leaf) => Term::Leaf(LeafRef::Matern(leaf)),
+            Self::MaternArd(leaf) => Term::Leaf(LeafRef::MaternArd(leaf)),
+            Self::Periodic(leaf) => Term::Leaf(LeafRef::Periodic(leaf)),
+            Self::RationalQuadratic(leaf) => Term::Leaf(LeafRef::RationalQuadratic(leaf)),
+            Self::RationalQuadraticArd(leaf) => Term::Leaf(LeafRef::RationalQuadraticArd(leaf)),
+            Self::Constant(leaf) => Term::Leaf(LeafRef::Constant(leaf)),
+            Self::Linear(leaf) => Term::Leaf(LeafRef::Linear(leaf)),
+            Self::White(leaf) => Term::Leaf(LeafRef::White(leaf)),
+            Self::Custom(leaf) => Term::Leaf(LeafRef::Custom(leaf)),
+            Self::Supplied(leaf) => Term::Supplied(leaf),
+            Self::Sum(terms) => Term::Sum(terms),
+            Self::Product(terms) => Term::Product(terms),
+        }
+    }
+
+    pub(crate) fn from_spec(spec: &KernelSpec<S>) -> Self {
         match spec {
             KernelSpec::Rbf(leaf) => Self::Rbf(*leaf),
             KernelSpec::RbfArd(leaf) => Self::RbfArd(leaf.clone()),
@@ -123,6 +221,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             KernelSpec::Linear(leaf) => Self::Linear(*leaf),
             KernelSpec::White(leaf) => Self::White(*leaf),
             KernelSpec::Custom(leaf) => Self::Custom(leaf.with_scalar()),
+            KernelSpec::Supplied(leaf) => Self::Supplied(S::compile(leaf)),
             KernelSpec::Sum(left, right) => {
                 let mut terms = Vec::new();
                 flatten_sum(left, &mut terms);
@@ -154,6 +253,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.num_params(),
             Self::White(leaf) => leaf.num_params(),
             Self::Custom(leaf) => leaf.num_params(),
+            Self::Supplied(leaf) => S::compiled(leaf).leaf.leaf_num_params(),
             Self::Sum(terms) | Self::Product(terms) => terms.iter().map(Self::num_params).sum(),
         }
     }
@@ -293,6 +393,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
         // its answer is chosen (docs/architecture.md, adding a leaf).
         match self {
             Self::Product(_) | Self::Custom(_) => true,
+            Self::Supplied(leaf) => S::compiled(leaf).needs_grad_scratch(),
             Self::Sum(terms) => terms.iter().any(Self::needs_grad_scratch),
             Self::Rbf(_)
             | Self::RbfArd(_)
@@ -393,6 +494,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::MaternArd(_)
             | Self::RationalQuadraticArd(_) => Ok(CoordMode::Points),
             Self::Constant(_) | Self::White(_) => Ok(CoordMode::Either),
+            Self::Supplied(_) => Ok(CoordMode::Mixed),
             Self::Sum(terms) | Self::Product(terms) => {
                 let (first, rest) = split_terms(terms)?;
                 let mut mode = first.coord_mode()?;
@@ -416,7 +518,27 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::Constant(_)
             | Self::Linear(_)
             | Self::White(_)
-            | Self::Custom(_) => false,
+            | Self::Custom(_)
+            | Self::Supplied(_) => false,
+        }
+    }
+
+    /// Whether a leaf outside the supplied ones reads coordinate distances.
+    pub(crate) fn has_coord_dist_leaf(&self) -> bool {
+        match self {
+            Self::Rbf(_)
+            | Self::Matern(_)
+            | Self::Periodic(_)
+            | Self::RationalQuadratic(_)
+            | Self::Custom(_) => true,
+            Self::Sum(terms) | Self::Product(terms) => terms.iter().any(Self::has_coord_dist_leaf),
+            Self::RbfArd(_)
+            | Self::MaternArd(_)
+            | Self::RationalQuadraticArd(_)
+            | Self::Constant(_)
+            | Self::Linear(_)
+            | Self::White(_)
+            | Self::Supplied(_) => false,
         }
     }
 
@@ -433,6 +555,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.write_leaf_params(out, offset),
             Self::White(leaf) => leaf.write_leaf_params(out, offset),
             Self::Custom(leaf) => leaf.write_leaf_params(out, offset),
+            Self::Supplied(leaf) => S::compiled(leaf).leaf.write_leaf_params(out, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.write_params(out, offset)?;
@@ -455,6 +578,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             Self::Linear(leaf) => leaf.apply_leaf_params(params, offset),
             Self::White(leaf) => leaf.apply_leaf_params(params, offset),
             Self::Custom(leaf) => leaf.apply_leaf_params(params, offset),
+            Self::Supplied(leaf) => S::compiled_mut(leaf).leaf.apply_leaf_params(params, offset),
             Self::Sum(terms) | Self::Product(terms) => {
                 for term in terms {
                     term.apply_params(params, offset)?;
@@ -496,7 +620,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
             | Self::Constant(_)
             | Self::Linear(_)
             | Self::White(_)
-            | Self::Custom(_) => false,
+            | Self::Custom(_)
+            | Self::Supplied(_) => false,
             Self::Sum(terms) | Self::Product(terms) => {
                 terms.len() > 1 || terms.iter().any(Self::needs_internal_scratch)
             }
@@ -504,23 +629,29 @@ impl<T: KernelScalar> CompiledKernel<T> {
     }
 }
 
-fn flatten_sum<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
+fn flatten_sum<T: KernelScalar, S: Supply>(
+    spec: &KernelSpec<S>,
+    out: &mut Vec<CompiledKernel<T, S>>,
+) {
     match spec {
         KernelSpec::Sum(left, right) => {
             flatten_sum(left, out);
             flatten_sum(right, out);
         }
-        other => out.push(CompiledKernel::<T>::from_spec(other)),
+        other => out.push(CompiledKernel::<T, S>::from_spec(other)),
     }
 }
 
-fn flatten_product<T: KernelScalar>(spec: &KernelSpec, out: &mut Vec<CompiledKernel<T>>) {
+fn flatten_product<T: KernelScalar, S: Supply>(
+    spec: &KernelSpec<S>,
+    out: &mut Vec<CompiledKernel<T, S>>,
+) {
     match spec {
         KernelSpec::Product(left, right) => {
             flatten_product(left, out);
             flatten_product(right, out);
         }
-        other => out.push(CompiledKernel::<T>::from_spec(other)),
+        other => out.push(CompiledKernel::<T, S>::from_spec(other)),
     }
 }
 
@@ -532,9 +663,9 @@ pub(crate) type Nested<T> = [Mat<T>];
 /// Grows `levels` to `depth` buffers of at least `rows × cols`. Allocates
 /// only when a level is missing or too small.
 /// [`ensure_nested`] at the depth `compiled` needs.
-pub(crate) fn ensure_nested_levels<T: KernelScalar>(
+pub(crate) fn ensure_nested_levels<T: KernelScalar, S: Supply>(
     levels: &mut Vec<Mat<T>>,
-    compiled: &CompiledKernel<T>,
+    compiled: &CompiledKernel<T, S>,
     rows: usize,
     cols: usize,
 ) {
@@ -561,8 +692,8 @@ pub(crate) fn ensure_nested<T: KernelScalar>(
 ///
 /// A multi-term sum / product takes the first [`Nested`] level as its
 /// scratch; any other term reads `fallback` (distinct from its output).
-fn term_scratch<'a, T: KernelScalar>(
-    term: &CompiledKernel<T>,
+fn term_scratch<'a, T: KernelScalar, S: Supply>(
+    term: &CompiledKernel<T, S>,
     rows: usize,
     cols: usize,
     fallback: MatMut<'a, T>,
@@ -578,6 +709,29 @@ fn term_scratch<'a, T: KernelScalar>(
         return Err(GprError::WorkspaceTooSmall);
     }
     Ok((level.as_mut().submatrix_mut(0, 0, rows, cols), deeper))
+}
+
+impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
+    /// [`CompiledKernel::require_columns`] for a coordinate tree; a tree of
+    /// supplied distances may read no coordinates. The leaves read only the
+    /// rows of `x` (Constant and White), so the entry points check here.
+    pub(crate) fn require_tree_columns(&self, x: MatRef<'_, T>) -> Result<(), GprError> {
+        match S::coordinates(self) {
+            Some(tree) => tree.require_columns(x),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<T: KernelScalar> CompiledKernel<T> {
+    /// Rejects coordinates without a column ([`GprError::EmptyInput`]): a
+    /// coordinate tree reads at least one.
+    pub(crate) fn require_columns(&self, x: MatRef<'_, T>) -> Result<(), GprError> {
+        if x.ncols() == 0 {
+            return Err(GprError::EmptyInput);
+        }
+        Ok(())
+    }
 }
 
 fn require_scratch_shape<T>(out: MatRef<'_, T>, scratch: MatRef<'_, T>) -> Result<(), GprError> {
@@ -604,9 +758,12 @@ fn merge_coord_mode(a: CoordMode, b: CoordMode) -> CoordMode {
     }
 }
 
-fn split_terms<T: KernelScalar>(
-    terms: &[CompiledKernel<T>],
-) -> Result<(&CompiledKernel<T>, &[CompiledKernel<T>]), GprError> {
+/// The first term of a sum / product and the rest.
+type Split<'a, T, S> = (&'a CompiledKernel<T, S>, &'a [CompiledKernel<T, S>]);
+
+fn split_terms<T: KernelScalar, S: Supply>(
+    terms: &[CompiledKernel<T, S>],
+) -> Result<Split<'_, T, S>, GprError> {
     terms
         .split_first()
         .ok_or_else(|| GprError::UnsupportedKernelOperation {
@@ -623,9 +780,9 @@ struct CachedFold<'g, 'n, T> {
 }
 
 impl<T: KernelScalar> CachedFold<'_, '_, T> {
-    fn run(
+    fn run<S: Supply>(
         self,
-        terms: &[CompiledKernel<T>],
+        terms: &[CompiledKernel<T, S>],
         mut dest: MatMut<'_, T>,
         mut scratch: MatMut<'_, T>,
         combine: fn(MatMut<'_, T>, MatRef<'_, T>, Triangle),

@@ -54,3 +54,117 @@ pub fn sphere_xy(side: usize, seed: u64, noise_std: f64) -> (Vec<f64>, Vec<f64>)
         .collect();
     (x, y)
 }
+
+/// The fixed problem of the supplied-distance baseline (design §5.6, §15):
+/// `n` training points, `q` queries, and the first `m` training points as
+/// inducing points, uniform on `[0, 1]^d`. Matrices are column-major.
+pub struct DistanceBaseline {
+    pub n: usize,
+    pub d: usize,
+    pub q: usize,
+    pub m: usize,
+    /// `n × d` training coordinates.
+    pub x: Vec<f64>,
+    /// `n` targets: `Σ_k sin(2π x_k)` plus `0.1 · N(0, 1)`.
+    pub y: Vec<f64>,
+    /// `q × d` query coordinates.
+    pub xq: Vec<f64>,
+    /// `m × d` inducing coordinates (rows `0..m` of `x`).
+    pub z: Vec<f64>,
+    /// One more point (`1 × d`) and its target, for online inserts.
+    pub x_new: Vec<f64>,
+    pub y_new: f64,
+}
+
+/// [`DistanceBaseline`] at `n = 512`, `d = 4`, `q = 100`, `m = 64`, seed 0.
+pub fn distance_baseline() -> DistanceBaseline {
+    let (n, d, q, m) = (512, 4, 100, 64);
+    let mut rng = seeded_rng(0);
+    // Column-major `rows × d`: dimension `k` is entries `k * rows .. (k + 1) * rows`.
+    let mut points = |rows: usize| -> Vec<f64> { (0..rows * d).map(|_| rng.unit()).collect() };
+    let x = points(n + 1);
+    let xq = points(q);
+    let target = |x: &[f64], rows: usize, i: usize| -> f64 {
+        (0..d)
+            .map(|k| (2.0 * std::f64::consts::PI * x[i + k * rows]).sin())
+            .sum()
+    };
+    let mut noise = seeded_rng(1);
+    let y_all: Vec<f64> = (0..=n)
+        .map(|i| target(&x, n + 1, i) + 0.1 * unit_normal(&mut noise))
+        .collect();
+    let rows_of = |x: &[f64], rows: usize, range: std::ops::Range<usize>| -> Vec<f64> {
+        (0..d)
+            .flat_map(|k| range.clone().map(move |i| x[i + k * rows]))
+            .collect()
+    };
+    DistanceBaseline {
+        n,
+        d,
+        q,
+        m,
+        x: rows_of(&x, n + 1, 0..n),
+        y: y_all[..n].to_vec(),
+        xq,
+        z: rows_of(&x, n + 1, 0..m),
+        x_new: rows_of(&x, n + 1, n..n + 1),
+        y_new: y_all[n],
+    }
+}
+
+/// [`DistanceBaseline`] as supplied distances: per-dimension `(Δ_k)²`
+/// blocks (column-major), training square and train × query.
+pub struct Supplied {
+    pub train: Vec<Vec<f64>>,
+    pub cross: Vec<Vec<f64>>,
+    /// The `n × 1` blocks from the training points to `x_new`.
+    pub new: Vec<Vec<f64>>,
+    /// The `m × q` blocks from the inducing points (training points
+    /// `0..m`) to the queries. The `n × m` training blocks of a sparse
+    /// model are the first `m` columns of `train`.
+    pub sparse_cross: Vec<Vec<f64>>,
+    /// `Σ_k` of the blocks: the squared Euclidean distance.
+    pub train_sum: Vec<f64>,
+    pub cross_sum: Vec<f64>,
+    pub new_sum: Vec<f64>,
+    pub sparse_cross_sum: Vec<f64>,
+}
+
+impl DistanceBaseline {
+    /// The training square, the train × query block, and the training
+    /// points' column to `x_new` of the problem.
+    pub fn supplied(&self) -> Supplied {
+        let block = |a: &[f64], ra: usize, b: &[f64], rb: usize, k: usize| -> Vec<f64> {
+            (0..rb)
+                .flat_map(|j| (0..ra).map(move |i| (a[i + k * ra] - b[j + k * rb]).powi(2)))
+                .collect()
+        };
+        let train: Vec<Vec<f64>> = (0..self.d)
+            .map(|k| block(&self.x, self.n, &self.x, self.n, k))
+            .collect();
+        let cross: Vec<Vec<f64>> = (0..self.d)
+            .map(|k| block(&self.x, self.n, &self.xq, self.q, k))
+            .collect();
+        let new: Vec<Vec<f64>> = (0..self.d)
+            .map(|k| block(&self.x, self.n, &self.x_new, 1, k))
+            .collect();
+        let sparse_cross: Vec<Vec<f64>> = (0..self.d)
+            .map(|k| block(&self.z, self.m, &self.xq, self.q, k))
+            .collect();
+        let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
+            (0..blocks[0].len())
+                .map(|at| blocks.iter().map(|b| b[at]).sum())
+                .collect()
+        };
+        Supplied {
+            train_sum: sum(&train),
+            cross_sum: sum(&cross),
+            new_sum: sum(&new),
+            sparse_cross_sum: sum(&sparse_cross),
+            train,
+            cross,
+            new,
+            sparse_cross,
+        }
+    }
+}

@@ -4,7 +4,9 @@ use super::assemble::unpack_q_into;
 use super::gradient::GradBuffers;
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{CompiledKernel, GramInputs, KernelScalar, Triangle};
+use crate::kernel::{
+    CompiledKernel, GramInputs, KernelScalar, ModelKernel, NoSupply, Supply, Triangle,
+};
 use crate::linalg::{cholesky_lower_with_backup, llt_scratch};
 use crate::precision::GpScalar;
 use crate::sparse::KernelScratch;
@@ -17,11 +19,11 @@ use faer::Mat;
 /// factor of `K_mm` and `q` (swapped with the model's on commit), and the
 /// gradient's [`GradBuffers`]. Built once per fit, so a step allocates
 /// nothing after the first one (see [`GradBuffers`] for the one exception).
-pub(crate) struct AdamStep<S: KernelScalar> {
+pub(crate) struct AdamStep<S: KernelScalar, U: Supply = NoSupply> {
     theta: Vec<f64>,
     theta_prev: Vec<f64>,
-    compiled_storage: CompiledKernel<S>,
-    pub(crate) compiled: CompiledKernel<f64>,
+    compiled_storage: CompiledKernel<S, U>,
+    pub(crate) compiled: CompiledKernel<f64, U>,
     z: Mat<S>,
     k_mm: Mat<S>,
     backup: Mat<S>,
@@ -32,10 +34,11 @@ pub(crate) struct AdamStep<S: KernelScalar> {
     pub(crate) grad: GradBuffers,
 }
 
-impl<S: KernelScalar> AdamStep<S> {
-    pub(crate) fn new<P>(model: &FittedSvgp<P>) -> Self
+impl<S: KernelScalar, U: Supply> AdamStep<S, U> {
+    pub(crate) fn new<P, K>(model: &FittedSvgp<P, K>) -> Self
     where
         P: GpScalar<Storage = S>,
+        K: ModelKernel<Supply = U>,
     {
         let core = &model.core;
         let m = core.m;
@@ -59,7 +62,7 @@ impl<S: KernelScalar> AdamStep<S> {
     }
 }
 
-impl<P> FittedSvgp<P>
+impl<P, K: ModelKernel> FittedSvgp<P, K>
 where
     P: GpScalar,
 {
@@ -70,7 +73,7 @@ where
     pub(crate) fn set_params_step<M: crate::math::KernelMath>(
         &mut self,
         params: &[f64],
-        step: &mut AdamStep<P::Storage>,
+        step: &mut AdamStep<P::Storage, K::Supply>,
     ) -> Result<(), GprError> {
         crate::data::require_count(params.len(), self.num_params(), "parameters")?;
         let core = &mut self.core;
@@ -86,9 +89,16 @@ where
         core.kernel.set_params_in_place(new_k, prev_k)?;
         let factored = (|| {
             step.compiled_storage.set_params_in_place(new_k, prev_k)?;
-            step.ks.gram::<M>(
+            let at = core
+                .supply()
+                .map(crate::sparse::SparseSupply::at::<P::Storage>)
+                .transpose()?;
+            step.ks.gram::<M, K::Supply>(
                 &step.compiled_storage,
-                GramInputs::points(step.z.as_ref()),
+                GramInputs::supplied(
+                    step.z.as_ref(),
+                    crate::sparse::squares_of::<P::Storage, K::Supply>(at.map(|at| &at.zz)),
+                ),
                 step.k_mm.as_mut(),
                 Triangle::Lower,
             )?;

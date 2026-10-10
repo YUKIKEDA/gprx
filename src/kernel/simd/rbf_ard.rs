@@ -13,7 +13,9 @@ use super::{
     finite_slice, load4, rows_checked, store4, unit_row_stride,
 };
 use crate::error::GprError;
-use crate::kernel::dist::{ArdSqDiff, col_chunk, par_lower_cols, worker_count};
+use crate::kernel::KernelScalar;
+use crate::kernel::dist::{ArdBlocks, BlockState, GATE_DIMS, Gate};
+use crate::kernel::dist::{ArdSqDiff, LowerRuns, Runs, col_chunk, par_lower_cols, worker_count};
 use crate::kernel::{Triangle, finite_dist};
 use crate::math::KernelMath;
 use faer::linalg::matmul::matmul;
@@ -64,6 +66,95 @@ pub(crate) fn try_apply_cross<M: KernelMath>(
     Ok(true)
 }
 
+/// Writes rectangular ARD RBF `k` from `(Δ_d)²` blocks when `out` is
+/// column-major and the blocks are dense `f64` columns; `Ok(false)`
+/// otherwise.
+///
+/// Every value comes out of `blocks` through a check ([`ArdBlocks::gates`],
+/// [`ArdBlocks::column`]), so [`Unchecked`](crate::kernel::dist::Unchecked)
+/// blocks are checked as they are read, once. Up to [`GATE_DIMS`]
+/// dimensions the loop is software-pipelined over columns: one pass writes
+/// `exp(−r²/2)` of column `j` while it reads and sums column `j + 1` into
+/// `r²`, so the reads overlap the `exp` of the column before.
+///
+/// # Errors
+///
+/// Returns [`GprError::InvalidDistance`] for a value that is not finite or
+/// is negative, at its place in the caller's table, and
+/// [`GprError::NonFiniteKernelValue`] when an `r²` overflows.
+pub(crate) fn try_apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+    blocks: ArdBlocks<'_, T, S>,
+    mut out: MatMut<'_, f64>,
+    inv_ell_sq: &[f64],
+) -> Result<bool, GprError> {
+    let m = out.ncols();
+    let d = inv_ell_sq.len();
+    if !unit_row_stride(out.as_ref())
+        || blocks.d() != d
+        || blocks.rows() != out.nrows()
+        || blocks.cols() != m
+        || !blocks.dense_f64()
+    {
+        return Ok(false);
+    }
+    let chunk = |start: usize, mut part: MatMut<'_, f64>| -> Result<(), GprError> {
+        let len = part.ncols();
+        if len == 0 {
+            return Ok(());
+        }
+        if d > GATE_DIMS {
+            for local in 0..len {
+                let dest = col_slice_mut_checked(part.rb_mut(), local)?;
+                dest.fill(0.0);
+                for (dim, &w) in inv_ell_sq.iter().enumerate() {
+                    let run = blocks.column(dim, start + local)?.ok_or_else(not_dense)?;
+                    scale_add_checked(run, w, dest);
+                }
+                exp_half_in_place::<M>(dest)?;
+            }
+            return Ok(());
+        }
+        let gates = blocks.gates().ok_or_else(not_dense)?;
+        let mut gate = gates.gate(start);
+        weighted_sum(
+            &mut gate,
+            inv_ell_sq,
+            col_slice_mut_checked(part.rb_mut(), 0)?,
+        );
+        gate.verdict().map_err(|err| blocks.locate(err))?;
+        for local in 0..len {
+            let finite = if local + 1 < len {
+                let mut gate = gates.gate(start + local + 1);
+                let (left, right) = part.rb_mut().split_at_col_mut(local + 1);
+                let finite = exp_half_then_sum::<M, S>(
+                    col_slice_mut_checked(left, local)?,
+                    &mut gate,
+                    inv_ell_sq,
+                    col_slice_mut_checked(right, 0)?,
+                );
+                gate.verdict().map_err(|err| blocks.locate(err))?;
+                finite
+            } else {
+                exp_half_finite::<M>(col_slice_mut_checked(part.rb_mut(), local)?)
+            };
+            if !finite {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+        }
+        Ok(())
+    };
+    if m == 1 {
+        chunk(0, out)?;
+        return Ok(true);
+    }
+    let n_parts = worker_count();
+    out.rb_mut()
+        .par_col_partition_mut(n_parts)
+        .enumerate()
+        .try_for_each(|(chunk_idx, part)| chunk(col_chunk(m, chunk_idx, n_parts).0, part))?;
+    Ok(true)
+}
+
 /// Offset of row `row_start` in the cached column `col`, which stores rows
 /// `col..n` only. Rows above the diagonal are not cached.
 fn cached_rows_offset(row_start: usize, col: usize) -> Result<usize, GprError> {
@@ -92,6 +183,92 @@ fn scale_add(src: &[f64], scale: f64, acc: &mut [f64]) -> Result<(), GprError> {
         i += 1;
     }
     Ok(())
+}
+
+fn not_dense() -> GprError {
+    GprError::UnsupportedKernelOperation {
+        reason: "the ARD blocks are not dense f64 columns".to_owned(),
+    }
+}
+
+/// `dest = Σ_d w_d src_d` (`r²`) of one column, every value read through
+/// `gate`.
+fn weighted_sum<S: BlockState>(gate: &mut Gate<'_, S>, w: &[f64], dest: &mut [f64]) {
+    let mut i = 0;
+    while i + LANES <= dest.len() {
+        store4(dest, i, gate.weighted4(w, i));
+        i += LANES;
+    }
+    while i < dest.len() {
+        dest[i] = gate.weighted1(w, i);
+        i += 1;
+    }
+}
+
+/// `cur = exp(−cur / 2)` and `next = Σ_d w_d src_d` in one pass, every
+/// value of the next column read through `gate`, so the reads overlap the
+/// `exp`. Returns whether every `cur` was finite.
+fn exp_half_then_sum<M: KernelMath, S: BlockState>(
+    cur: &mut [f64],
+    gate: &mut Gate<'_, S>,
+    w: &[f64],
+    next: &mut [f64],
+) -> bool {
+    let half = f64x4::splat(-0.5);
+    // `r² · 0` stays `0` unless an `r²` is infinite.
+    let mut overflow = f64x4::ZERO;
+    let mut i = 0;
+    while i + LANES <= cur.len() {
+        store4(next, i, gate.weighted4(w, i));
+        let c = load4(cur, i);
+        overflow += c * f64x4::ZERO;
+        store4(cur, i, M::exp_f64x4(c * half));
+        i += LANES;
+    }
+    let mut tail = 0.0;
+    while i < cur.len() {
+        next[i] = gate.weighted1(w, i);
+        tail += cur[i] * 0.0;
+        cur[i] = M::exp(-cur[i] * 0.5);
+        i += 1;
+    }
+    overflow.reduce_add() + tail == 0.0
+}
+
+/// `cur = exp(−cur / 2)`; whether every `cur` was finite.
+fn exp_half_finite<M: KernelMath>(cur: &mut [f64]) -> bool {
+    let half = f64x4::splat(-0.5);
+    let mut overflow = f64x4::ZERO;
+    let mut i = 0;
+    while i + LANES <= cur.len() {
+        let c = load4(cur, i);
+        overflow += c * f64x4::ZERO;
+        store4(cur, i, M::exp_f64x4(c * half));
+        i += LANES;
+    }
+    let mut tail = 0.0;
+    while i < cur.len() {
+        tail += cur[i] * 0.0;
+        cur[i] = M::exp(-cur[i] * 0.5);
+        i += 1;
+    }
+    overflow.reduce_add() + tail == 0.0
+}
+
+/// `acc += scale · src` for values already checked (finite, not
+/// negative): supplied blocks. The sum is checked by the `exp` pass.
+fn scale_add_checked(src: &[f64], scale: f64, acc: &mut [f64]) {
+    debug_assert_eq!(src.len(), acc.len());
+    let sv = f64x4::splat(scale);
+    let mut i = 0;
+    while i + LANES <= src.len() {
+        store4(acc, i, load4(acc, i) + load4(src, i) * sv);
+        i += LANES;
+    }
+    while i < src.len() {
+        acc[i] += src[i] * scale;
+        i += 1;
+    }
 }
 
 /// `buf = exp(−buf / 2)`, checking that `buf` is finite.
@@ -174,7 +351,7 @@ fn grad_from_cache_in_place<M: KernelMath>(
 /// Where `(Δx_d)²` of the square output comes from.
 #[derive(Clone, Copy)]
 enum Square<'a> {
-    Cache(ArdSqDiff<'a, f64>),
+    Cache(LowerRuns<'a, f64>),
     Points(MatRef<'a, f64>),
 }
 
@@ -276,7 +453,16 @@ pub(crate) fn try_apply_cache<M: KernelMath>(
     if uplo != Triangle::Lower || !unit_row_stride(out.as_ref()) {
         return Ok(false);
     }
-    fill_square::<M>(Square::Cache(cache), out, uplo, inv_ell_sq, None)?;
+    let lower = match cache.runs() {
+        Runs::Rows(rows) => {
+            let half = f64x4::splat(-0.5);
+            return super::rows::try_fill_lower(rows, out, inv_ell_sq, None, &|r2, _| {
+                M::exp_f64x4(r2 * half)
+            });
+        }
+        Runs::Lower(lower) => lower,
+    };
+    fill_square::<M>(Square::Cache(lower), out, uplo, inv_ell_sq, None)?;
     Ok(true)
 }
 
@@ -315,7 +501,20 @@ pub(crate) fn try_grad_cache<M: KernelMath>(
     if uplo != Triangle::Lower || !unit_row_stride(d_k.as_ref()) {
         return Ok(false);
     }
-    fill_square::<M>(Square::Cache(cache), d_k, uplo, inv_ell_sq, Some(param_idx))?;
+    let lower = match cache.runs() {
+        Runs::Rows(rows) => {
+            let half = f64x4::splat(-0.5);
+            return super::rows::try_fill_lower(
+                rows,
+                d_k,
+                inv_ell_sq,
+                Some(param_idx),
+                &|r2, t| M::d1_f64x4(r2 * half) * t,
+            );
+        }
+        Runs::Lower(lower) => lower,
+    };
+    fill_square::<M>(Square::Cache(lower), d_k, uplo, inv_ell_sq, Some(param_idx))?;
     Ok(true)
 }
 

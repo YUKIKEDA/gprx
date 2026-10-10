@@ -6,11 +6,27 @@
 //! `predict_into` after warmup). User kernels are excluded. P2B-22 (#143)
 //! pins `RAYON_NUM_THREADS=1` in this binary so faer `Par::rayon(1)` does
 //! not allocate worker scratch that a multi-thread pool would.
+//!
+//! `stats_alloc` counts the whole process, so this binary has no libtest
+//! harness (`harness = false` in `Cargo.toml`, #494): [`main`] runs the
+//! checks of [`CHECKS`] one after another on its own thread, and no harness
+//! thread (reporting a test, starting the next, capturing output) can
+//! allocate inside a count. It reads the libtest arguments a `cargo test`
+//! run passes: name filters, `--exact`, `--skip`, `--list`, `--ignored`;
+//! `--test-threads` and the output flags change nothing here.
+
+// The checks are this binary's test bodies, and `harness = false` builds
+// them without `cfg(test)`, so clippy.toml's allowance for test bodies does
+// not reach them.
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
 use common::rng::{open_unit, seeded_rng};
 use gprx::Adam;
-use gprx::kernel::{ConstantKernel, KernelSpec, RbfArdKernel, RbfKernel};
+use gprx::kernel::{
+    ArdDistance, ConstantKernel, DistanceSource, KernelSpec, RbfArdKernel, RbfKernel,
+    ScalarDistance,
+};
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, KernelExp,
     MixedPrecision, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
@@ -18,6 +34,7 @@ use gprx::{
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::process::ExitCode;
 use std::sync::{Mutex, OnceLock};
 
 #[global_allocator]
@@ -148,13 +165,15 @@ fn fitted_model() -> Result<(FittedGpr<Fixed>, Vec<f64>), GprError> {
     Ok((gpr, xs))
 }
 
-fn alloc_lock() -> std::sync::MutexGuard<'static, ()> {
-    // `stats_alloc` counts the process, not the calling thread.
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// The allocations of one run of `f`. `stats_alloc` counts the process,
+/// and this binary runs its checks one after another on one thread, so
+/// the count is `f`'s and its Rayon worker's.
+fn allocs_in(f: impl FnMut()) -> usize {
+    allocs_once(f)
 }
 
-fn allocs_in(f: impl FnOnce()) -> usize {
+/// The allocations of one run of `f`.
+fn allocs_once(f: impl FnOnce()) -> usize {
     let region = Region::new(GLOBAL);
     f();
     let stats = region.change();
@@ -169,9 +188,7 @@ fn assert_alloc_cap(label: &str, count: usize, cap: usize) {
     );
 }
 
-#[test]
 fn mll_and_grad_allocs_after_workspace() {
-    let _guard = alloc_lock();
     let (mut gpr, _) = fitted_model().expect("spd");
     let mut params = vec![0.0; gpr.num_params()];
     gpr.get_params(&mut params).expect("len");
@@ -185,9 +202,7 @@ fn mll_and_grad_allocs_after_workspace() {
     assert_alloc_cap("mll_and_grad", count, MAX_MLL_AND_GRAD_ALLOCS);
 }
 
-#[test]
 fn fast_approx_mll_and_grad_allocs_after_workspace() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
@@ -212,9 +227,7 @@ fn fast_approx_mll_and_grad_allocs_after_workspace() {
     let _typed: FittedGpr<Fixed> = gpr;
 }
 
-#[test]
 fn predict_100_allocs_after_workspace() {
-    let _guard = alloc_lock();
     let (mut gpr, xs) = fitted_model().expect("spd");
     let mut pred = Prediction::default();
     gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
@@ -246,20 +259,19 @@ where
     Ok((gpr, xs))
 }
 
-fn bytes_in(f: impl FnOnce()) -> usize {
+/// The bytes one run of `f` allocates (see [`allocs_in`]).
+fn bytes_in(mut f: impl FnMut()) -> usize {
     let region = Region::new(GLOBAL);
     f();
     let stats = region.change();
     stats.bytes_allocated + stats.bytes_reallocated.max(0) as usize
 }
 
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn assert_mixed_predict_bytes<R>(label: &str)
 where
     MixedPrecision<R>: gprx::GpScalar,
     R: gprx::ResidualFormula,
 {
-    let _guard = alloc_lock();
     let (mut gpr, xs) = fitted_mixed::<R>().expect("spd");
     let mut pred = Prediction::default();
     gpr.predict_into(&xs, M, D, &mut pred).expect("warmup");
@@ -273,12 +285,10 @@ where
     );
 }
 
-#[test]
 fn mixed_promote_predict_100_bytes_after_workspace() {
     assert_mixed_predict_bytes::<gprx::PromoteStorage>("mixed_promote_predict_100");
 }
 
-#[test]
 fn mixed_reevaluate_predict_100_bytes_after_workspace() {
     assert_mixed_predict_bytes::<ReevaluateKernel>("mixed_reevaluate_predict_100");
 }
@@ -314,9 +324,7 @@ impl<P: gprx::Objective> gprx::Optimizer<P> for LeafStepProbe {
     }
 }
 
-#[test]
 fn incremental_leaf_step_allocs_after_warmup() {
-    let _guard = alloc_lock();
     ensure_one_rayon_worker();
     let kernel = KernelSpec::from(RbfKernel::new(ELL).expect("ell"))
         + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell"));
@@ -335,7 +343,6 @@ fn incremental_leaf_step_allocs_after_warmup() {
 
 /// Flat sums and products, one ARD leaf, and a sum / product nested in
 /// another in distance mode and in mixed coordinate mode.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn composite_kernels() -> [(&'static str, KernelSpec); 6] {
     let rbf = |ell: f64| KernelSpec::from(RbfKernel::new(ell).expect("ell"));
     let ard = || KernelSpec::from(RbfArdKernel::new(&[ELL; D]).expect("ell"));
@@ -356,7 +363,6 @@ fn composite_kernels() -> [(&'static str, KernelSpec); 6] {
     ]
 }
 
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
     ensure_one_rayon_worker();
     let likelihood = GaussianLikelihood::new(NOISE).expect("noise");
@@ -371,9 +377,7 @@ fn fitted_with(kernel: KernelSpec, n: usize) -> FittedGpr<Fixed> {
 }
 
 /// `value_and_gradient_into` on composite kernels after a warmup call.
-#[test]
 fn composite_mll_and_grad_allocs_after_workspace() {
-    let _guard = alloc_lock();
     for ((label, cap), (name, kernel)) in MAX_COMPOSITE_MLL_AND_GRAD_ALLOCS
         .into_iter()
         .zip(composite_kernels())
@@ -394,9 +398,7 @@ fn composite_mll_and_grad_allocs_after_workspace() {
 }
 
 /// `hessian_into` on the RBF leaf and the composite kernels after a warmup call.
-#[test]
 fn hessian_allocs_after_warmup() {
-    let _guard = alloc_lock();
     let kernels = std::iter::once(("rbf", KernelSpec::from(RbfKernel::new(ELL).expect("ell"))))
         .chain(composite_kernels());
     for ((label, cap), (name, kernel)) in MAX_HESSIAN_ALLOCS.into_iter().zip(kernels) {
@@ -414,9 +416,7 @@ fn hessian_allocs_after_warmup() {
 }
 
 /// `predict_into` of 100 points on the composite kernels after a warmup call.
-#[test]
 fn composite_predict_100_allocs_after_workspace() {
-    let _guard = alloc_lock();
     let xs = fill_column_major(M, D, SEED.wrapping_add(1));
     for ((label, cap), (name, kernel)) in MAX_COMPOSITE_PREDICT_100_ALLOCS
         .into_iter()
@@ -433,7 +433,6 @@ fn composite_predict_100_allocs_after_workspace() {
     }
 }
 
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
     ensure_one_rayon_worker();
     let x = fill_column_major(N, D, SEED);
@@ -500,9 +499,7 @@ fn sparse_allocs(label: &str, kernel: KernelSpec) -> Vec<(String, usize)> {
 
 /// One call on each sparse path after a warmup call. The nested kernel (a
 /// product of sums) covers the nested scratch levels on the insert path.
-#[test]
 fn sparse_allocs_after_warmup() {
-    let _guard = alloc_lock();
     let rbf = || KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let constant = |v: f64| KernelSpec::from(ConstantKernel::new(v).expect("constant"));
     let nested = (rbf() + KernelSpec::from(RbfKernel::new(2.0 * ELL).expect("ell")))
@@ -523,7 +520,6 @@ fn sparse_allocs_after_warmup() {
 /// `M` points after a warmup call on a [`gprx::FittedSgpr`], the
 /// [`gprx::OnlineSgpr`] after one insert, and a [`gprx::FittedSvgp`], at
 /// precision `P`.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn sparse_predict_counts<P: GpScalar>(
     kernel: KernelSpec,
     count: fn(&mut dyn FnMut()) -> usize,
@@ -569,9 +565,7 @@ fn bytes_in_dyn(f: &mut dyn FnMut()) -> usize {
 
 /// Sparse `predict_into` after a warmup call: every model, a leaf and a
 /// nested kernel, `f64` and `f32` storage, and mixed precision.
-#[test]
 fn sparse_predict_into_allocs_after_warmup() {
-    let _guard = alloc_lock();
     let rbf = || KernelSpec::from(RbfKernel::new(ELL).expect("ell"));
     let constant = |v: f64| KernelSpec::from(ConstantKernel::new(v).expect("constant"));
     let nested = || {
@@ -658,7 +652,6 @@ const MAX_SVGP_STEP_BYTES_GROWTH: f64 = 1.25;
 const SVGP_STEP_BYTES_SLACK: f64 = 1024.0;
 
 /// Bytes of one `Svgp::fit` with `epochs` epochs of mini-batches of 32.
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
 fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
     ensure_one_rayon_worker();
     let x = fill_column_major(n, D, SEED);
@@ -671,10 +664,14 @@ fn svgp_fit_bytes(n: usize, epochs: u64) -> usize {
         .with_epochs(NonZeroU64::new(epochs).expect("epochs"));
     let trainer =
         Svgp::new(kernel, GaussianLikelihood::new(NOISE).expect("noise")).with_optimizer(adam);
+    // One trainer per counted run, made before the count.
+    let mut trainers = vec![trainer.clone(), trainer];
     let mut fitted = None;
     let bytes = bytes_in(|| {
         fitted = Some(
-            trainer
+            trainers
+                .pop()
+                .expect("one trainer per run")
                 .fit(&x, n, D, &y, &z, M_SPARSE)
                 .map_err(|(_, e)| e)
                 .expect("fit"),
@@ -691,9 +688,7 @@ fn svgp_step_bytes(n: usize) -> f64 {
     extra / (n / 32) as f64
 }
 
-#[test]
 fn svgp_adam_step_bytes_do_not_grow_with_n() {
-    let _guard = alloc_lock();
     let _ = svgp_fit_bytes(64, 1); // one-time allocations (thread pool, statics)
     let small = svgp_step_bytes(512);
     let large = svgp_step_bytes(4096);
@@ -709,9 +704,7 @@ fn svgp_adam_step_bytes_do_not_grow_with_n() {
 const MAX_SVGP_ADAM_EPOCH_ALLOCS: [(&str, usize); 3] =
     [("rbf", 0), ("rbf_ard", 0), ("constant_times_rbf", 0)];
 
-#[test]
 fn svgp_adam_epoch_allocs() {
-    let _guard = alloc_lock();
     let n = 64;
     let x: Vec<f64> = (0..n * 2)
         .map(|i| (i % n) as f64 / 8.0 + (i / n) as f64)
@@ -749,4 +742,882 @@ fn svgp_adam_epoch_allocs() {
             .unwrap_or(usize::MAX);
         assert_alloc_cap(&format!("svgp_adam_epoch_{label}"), per_epoch, *cap);
     }
+}
+
+/// Allocations of the coordinate path on the supplied-distance baseline
+/// problem (`common::problems::distance_baseline`, design §5.6), by kernel
+/// and operation. Each operation runs once on a warmed model, except
+/// `factor` and `sgpr_factor`, which count one whole call. A model on
+/// supplied distances must not allocate more than these (D1-3 onwards).
+/// Do not raise without an Issue.
+const DISTANCE_BASELINE_ALLOCS: [(&str, usize); 22] = [
+    ("rbf/factor", 17),
+    ("rbf/mll_and_grad", 3),
+    ("rbf/predict_into", 0),
+    ("rbf/online_insert", 4),
+    ("rbf/online_delete_first", 1),
+    ("rbf/online_delete_middle", 1),
+    ("rbf/online_delete_last", 1),
+    ("rbf/online_refit", 12),
+    ("rbf/sgpr_factor", 22),
+    ("rbf/sgpr_predict_into", 0),
+    ("rbf/svgp_predict_into", 0),
+    ("rbf_ard/factor", 24),
+    ("rbf_ard/mll_and_grad", 3),
+    ("rbf_ard/predict_into", 0),
+    ("rbf_ard/online_insert", 4),
+    ("rbf_ard/online_delete_first", 1),
+    ("rbf_ard/online_delete_middle", 1),
+    ("rbf_ard/online_delete_last", 1),
+    ("rbf_ard/online_refit", 13),
+    ("rbf_ard/sgpr_factor", 31),
+    ("rbf_ard/sgpr_predict_into", 0),
+    ("rbf_ard/svgp_predict_into", 0),
+];
+
+/// The coordinate path's allocations on the baseline problem in double
+/// precision, in the order of [`DISTANCE_BASELINE_ALLOCS`]: measured once,
+/// for this check and as the caps of the supplied path.
+fn distance_baseline_allocs() -> Vec<(String, usize)> {
+    static COUNTS: OnceLock<Vec<(String, usize)>> = OnceLock::new();
+    COUNTS
+        .get_or_init(coordinate_allocs::<DoublePrecision>)
+        .clone()
+}
+
+fn distance_baseline_coordinate_allocs() {
+    ensure_one_rayon_worker();
+    let measured = distance_baseline_allocs();
+    assert_eq!(measured.len(), DISTANCE_BASELINE_ALLOCS.len());
+    for ((label, count), (expected, cap)) in measured.iter().zip(DISTANCE_BASELINE_ALLOCS) {
+        assert_eq!(label, expected);
+        assert_alloc_cap(&format!("distance_baseline/{label}"), *count, cap);
+    }
+}
+
+/// One supplied-distance slot of the baseline problem, as the bench's.
+enum BaselineSlot {
+    Scalar(ScalarDistance),
+    Ard(ArdDistance),
+}
+
+impl BaselineSlot {
+    fn borrow<'a>(&self, sum: &'a [f64], refs: &'a [&'a [f64]]) -> DistanceSource<'a> {
+        match self {
+            Self::Scalar(slot) => slot.borrow(sum),
+            Self::Ard(slot) => slot.borrow(refs),
+        }
+    }
+}
+
+/// The exact and online operations of [`DISTANCE_BASELINE_ALLOCS`] on
+/// supplied distances, measured as the coordinate ones are, at `P`.
+fn supplied_allocs<P: GpScalar>() -> Vec<(String, usize)> {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
+    let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let new_refs: Vec<&[f64]> = s.new.iter().map(Vec::as_slice).collect();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let image = ScalarDistance::new();
+    let (bands, ard) =
+        ArdDistance::from_leaf(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8][..p.d]).expect("ell"));
+    let kernels = [
+        (
+            "rbf",
+            BaselineSlot::Scalar(image),
+            image.kernel(RbfKernel::new(0.5).expect("ell")),
+        ),
+        ("rbf_ard", BaselineSlot::Ard(bands), ard),
+    ];
+    let mut out = Vec::new();
+    for (name, slot, kernel) in kernels {
+        let fit = || {
+            Gpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([slot.borrow(&s.train_sum, &train_refs)], p.n, &p.y)
+                .map_err(|(_, e)| e)
+                .expect("factor")
+        };
+        let _warm = fit();
+        let mut model = None;
+        let count = allocs_in(|| model = Some(fit()));
+        out.push((format!("{name}/factor"), count));
+        let mut model = model.expect("model");
+        let mut theta = vec![0.0; model.num_params()];
+        model.get_params(&mut theta).expect("theta");
+        let mut grad = vec![0.0; theta.len()];
+        model
+            .value_and_gradient_into(&theta, &mut grad)
+            .expect("warmup");
+        let count = {
+            allocs_in(|| {
+                model
+                    .value_and_gradient_into(&theta, &mut grad)
+                    .expect("counted");
+            })
+        };
+        out.push((format!("{name}/mll_and_grad"), count));
+        let mut pred = Prediction::default();
+        let cross = || slot.borrow(&s.cross_sum, &cross_refs);
+        model
+            .predict_into([cross()], p.q, &mut pred)
+            .expect("warmup");
+        let count = {
+            allocs_in(|| {
+                model
+                    .predict_into([cross()], p.q, &mut pred)
+                    .expect("counted")
+            })
+        };
+        out.push((format!("{name}/predict_into"), count));
+        // Room for one more point, as the coordinate model.
+        let new = || slot.borrow(&s.new_sum, &new_refs);
+        let mut base = model.into_online().expect("online");
+        let id = base.insert([new()], p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        // The insert on the warm model itself: a clone starts without the
+        // query buffers.
+        let count = {
+            let count = allocs_once(|| {
+                base.insert([new()], p.y_new).expect("counted");
+            });
+            let id = base.point_ids()[p.n];
+            base.delete(id).expect("shrink");
+            count
+        };
+        out.push((format!("{name}/online_insert"), count));
+        online_deletes_and_refit(name, &base, p.n, &mut out);
+        // The sparse models on the first `m` training points.
+        let inducing: Vec<usize> = (0..p.m).collect();
+        let nm = p.n * p.m;
+        let sparse_refs: Vec<&[f64]> = s.train.iter().map(|b| &b[..nm]).collect();
+        let sparse_train = || slot.borrow(&s.train_sum[..nm], &sparse_refs);
+        let sgpr = || {
+            Sgpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([sparse_train()], p.n, &p.y, &inducing)
+                .map_err(|(_, e)| e)
+                .expect("sgpr")
+        };
+        let _warm = sgpr();
+        let mut sparse = None;
+        out.push((
+            format!("{name}/sgpr_factor"),
+            allocs_in(|| sparse = Some(sgpr())),
+        ));
+        let mut sparse = sparse.expect("sgpr");
+        let cross_refs: Vec<&[f64]> = s.sparse_cross.iter().map(Vec::as_slice).collect();
+        let cross = || slot.borrow(&s.sparse_cross_sum, &cross_refs);
+        sparse
+            .predict_into([cross()], p.q, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/sgpr_predict_into"),
+            allocs_in(|| {
+                sparse
+                    .predict_into([cross()], p.q, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+        let mut svgp = Svgp::new(kernel.clone(), lik())
+            .with_precision::<P>()
+            .factor([sparse_train()], p.n, &p.y, &inducing)
+            .map_err(|(_, e)| e)
+            .expect("svgp");
+        svgp.predict_into([cross()], p.q, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/svgp_predict_into"),
+            allocs_in(|| {
+                svgp.predict_into([cross()], p.q, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+    }
+    out
+}
+
+/// The deletes and refit of [`DISTANCE_BASELINE_ALLOCS`] on clones of
+/// `base`, an online model with room for one more point.
+fn online_deletes_and_refit<P: GpScalar, K: gprx::kernel::ModelKernel>(
+    name: &str,
+    base: &gprx::OnlineGpr<Fixed, P, K>,
+    n: usize,
+    out: &mut Vec<(String, usize)>,
+) {
+    for (label, index) in [("first", 0), ("middle", n / 2), ("last", n - 1)] {
+        let id = base.point_ids()[index];
+        let count = {
+            let mut online = base.clone();
+            allocs_once(|| online.delete(id).expect("counted"))
+        };
+        out.push((format!("{name}/online_delete_{label}"), count));
+    }
+    let count = {
+        let mut online = base.clone();
+        allocs_once(|| online.refit().expect("counted"))
+    };
+    out.push((format!("{name}/online_refit"), count));
+}
+
+/// [`supplied_allocs`] on the coordinate path at `P`.
+fn coordinate_allocs<P: GpScalar>() -> Vec<(String, usize)> {
+    let p = common::problems::distance_baseline();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let kernels = [
+        ("rbf", KernelSpec::from(RbfKernel::new(0.5).expect("ell"))),
+        (
+            "rbf_ard",
+            KernelSpec::from(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell")),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (name, kernel) in kernels {
+        let fit = || {
+            Gpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor(&p.x, p.n, p.d, &p.y)
+                .map_err(|(_, e)| e)
+                .expect("factor")
+        };
+        let _warm = fit();
+        let mut model = None;
+        let count = allocs_in(|| model = Some(fit()));
+        out.push((format!("{name}/factor"), count));
+        let mut model = model.expect("model");
+        let mut theta = vec![0.0; model.num_params()];
+        model.get_params(&mut theta).expect("theta");
+        let mut grad = vec![0.0; theta.len()];
+        model
+            .value_and_gradient_into(&theta, &mut grad)
+            .expect("warmup");
+        let count = {
+            allocs_in(|| {
+                model
+                    .value_and_gradient_into(&theta, &mut grad)
+                    .expect("counted");
+            })
+        };
+        out.push((format!("{name}/mll_and_grad"), count));
+        let mut pred = Prediction::default();
+        model
+            .predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        let count = {
+            allocs_in(|| {
+                model
+                    .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            })
+        };
+        out.push((format!("{name}/predict_into"), count));
+        let mut base = model.into_online().expect("online");
+        let id = base.insert(&p.x_new, p.y_new).expect("grow");
+        base.delete(id).expect("shrink");
+        let count = {
+            let count = allocs_once(|| {
+                base.insert(&p.x_new, p.y_new).expect("counted");
+            });
+            let id = base.point_ids()[p.n];
+            base.delete(id).expect("shrink");
+            count
+        };
+        out.push((format!("{name}/online_insert"), count));
+        online_deletes_and_refit(name, &base, p.n, &mut out);
+        let sgpr = || {
+            Sgpr::new(kernel.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+                .map_err(|(_, e)| e)
+                .expect("sgpr")
+        };
+        let _warm = sgpr();
+        let mut sparse = None;
+        out.push((
+            format!("{name}/sgpr_factor"),
+            allocs_in(|| sparse = Some(sgpr())),
+        ));
+        let mut sparse = sparse.expect("sgpr");
+        sparse
+            .predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/sgpr_predict_into"),
+            allocs_in(|| {
+                sparse
+                    .predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+        let mut svgp = Svgp::new(kernel.clone(), lik())
+            .with_precision::<P>()
+            .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+            .map_err(|(_, e)| e)
+            .expect("svgp");
+        svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
+            .expect("warmup");
+        out.push((
+            format!("{name}/svgp_predict_into"),
+            allocs_in(|| {
+                svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
+                    .expect("counted")
+            }),
+        ));
+    }
+    out
+}
+
+/// Allocations of each change of an online model, `[insert, delete,
+/// insert_inducing, delete_inducing]`, each on a copy of `base` that a
+/// first insert and delete (`settle`) made its own, as a model is after
+/// its first changes: the model has room for one more point and one more
+/// inducing point, so most changes write in place.
+fn online_change_allocs<M: Clone>(
+    base: &M,
+    settle: &dyn Fn(&mut M),
+    changes: [&dyn Fn(&mut M); 4],
+) -> [usize; 4] {
+    changes.map(|change| {
+        let mut model = base.clone();
+        settle(&mut model);
+        allocs_once(|| change(&mut model))
+    })
+}
+
+/// [`online_change_allocs`] of `OnlineSgpr` on supplied distances and on
+/// coordinates at `P`, rbf and rbf_ard, on the baseline problem with the
+/// first `m` training points inducing: `(label, supplied, coordinate)`.
+fn online_sparse_allocs<P: GpScalar>() -> Vec<(String, usize, usize)> {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let (n, m) = (p.n, p.m);
+    let inducing: Vec<usize> = (0..m).collect();
+    let nm = n * m;
+    // The new point's squared distances to the inducing points, and
+    // training point `m`'s to every training point.
+    let row: Vec<Vec<f64>> = s.new.iter().map(|b| b[..m].to_vec()).collect();
+    let column: Vec<Vec<f64>> = s
+        .train
+        .iter()
+        .map(|b| b[m * n..(m + 1) * n].to_vec())
+        .collect();
+    let sum = |blocks: &[Vec<f64>]| -> Vec<f64> {
+        (0..blocks[0].len())
+            .map(|i| blocks.iter().map(|b| b[i]).sum())
+            .collect()
+    };
+    let (row_sum, column_sum) = (sum(&row), sum(&column));
+    let z_new: Vec<f64> = (0..p.d).map(|k| p.x[m + k * n]).collect();
+    let image = ScalarDistance::new();
+    let ell = [0.5, 0.6, 0.7, 0.8];
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&ell[..p.d]).expect("ell"));
+    let mut out = Vec::new();
+    for name in ["rbf", "rbf_ard"] {
+        let scalar = name == "rbf";
+        let coords = Sgpr::new(
+            if scalar {
+                KernelSpec::from(RbfKernel::new(0.5).expect("ell"))
+            } else {
+                KernelSpec::from(RbfArdKernel::new(&ell[..p.d]).expect("ell"))
+            },
+            lik(),
+        )
+        .with_precision::<P>()
+        .with_optimizer(Fixed)
+        .factor(&p.x, n, p.d, &p.y, &p.z, m)
+        .map_err(|(_, e)| e)
+        .expect("coords");
+        let train: Vec<&[f64]> = s.train.iter().map(|b| &b[..nm]).collect();
+        let train_sum = &s.train_sum[..nm];
+        let supplied = if scalar {
+            Sgpr::new(image.kernel(RbfKernel::new(0.5).expect("ell")), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([image.borrow(train_sum)], n, &p.y, &inducing)
+        } else {
+            Sgpr::new(ard.clone(), lik())
+                .with_precision::<P>()
+                .with_optimizer(Fixed)
+                .factor([bands.borrow(&train)], n, &p.y, &inducing)
+        }
+        .map_err(|(_, e)| e)
+        .expect("supplied");
+        let row_refs: Vec<&[f64]> = row.iter().map(Vec::as_slice).collect();
+        let column_refs: Vec<&[f64]> = column.iter().map(Vec::as_slice).collect();
+        let row_src = || {
+            if scalar {
+                image.borrow(&row_sum)
+            } else {
+                bands.borrow(&row_refs)
+            }
+        };
+        let column_src = || {
+            if scalar {
+                image.borrow(&column_sum)
+            } else {
+                bands.borrow(&column_refs)
+            }
+        };
+        // Room for a point and an inducing point, as after the first changes.
+        let mut coords = coords.into_online();
+        let id = coords.insert(&p.x_new, p.y_new).expect("insert");
+        coords.delete(id).expect("delete");
+        let id = coords.insert_inducing(&z_new).expect("insert_inducing");
+        coords.delete_inducing(id).expect("delete_inducing");
+        let mut supplied = supplied.into_online();
+        let id = supplied.insert([row_src()], p.y_new).expect("insert");
+        supplied.delete(id).expect("delete");
+        let point = supplied.point_ids()[m];
+        let id = supplied
+            .insert_inducing(point, [column_src()])
+            .expect("insert_inducing");
+        supplied.delete_inducing(id).expect("delete_inducing");
+        let coordinate = online_change_allocs(
+            &coords,
+            &|model| {
+                let id = model.insert(&p.x_new, p.y_new).expect("settle");
+                model.delete(id).expect("settle");
+            },
+            [
+                &|model| {
+                    model.insert(&p.x_new, p.y_new).expect("insert");
+                },
+                &|model| model.delete(model.point_ids()[n / 2]).expect("delete"),
+                &|model| {
+                    model.insert_inducing(&z_new).expect("insert_inducing");
+                },
+                &|model| {
+                    model
+                        .delete_inducing(model.inducing_ids()[m / 2])
+                        .expect("delete_inducing");
+                },
+            ],
+        );
+        let on_supplied = online_change_allocs(
+            &supplied,
+            &|model| {
+                let id = model.insert([row_src()], p.y_new).expect("settle");
+                model.delete(id).expect("settle");
+            },
+            [
+                &|model| {
+                    model.insert([row_src()], p.y_new).expect("insert");
+                },
+                &|model| model.delete(model.point_ids()[n / 2]).expect("delete"),
+                &|model| {
+                    let point = model.point_ids()[m];
+                    model
+                        .insert_inducing(point, [column_src()])
+                        .expect("insert_inducing");
+                },
+                &|model| {
+                    model
+                        .delete_inducing(model.inducing_ids()[m / 2])
+                        .expect("delete_inducing");
+                },
+            ],
+        );
+        for ((label, got), cap) in ["insert", "delete", "insert_inducing", "delete_inducing"]
+            .iter()
+            .zip(on_supplied)
+            .zip(coordinate)
+        {
+            out.push((format!("{name}/online_sgpr_{label}"), got, cap));
+        }
+    }
+    out
+}
+
+/// An `OnlineSgpr` on supplied distances allocates no more than the
+/// coordinate one for each change, at each precision (#493).
+fn online_sgpr_on_supplied_distances_allocates_no_more_than_coordinates() {
+    ensure_one_rayon_worker();
+    let mut over = Vec::new();
+    for (precision, rows) in [
+        ("f64", online_sparse_allocs::<DoublePrecision>()),
+        ("f32", online_sparse_allocs::<SinglePrecision>()),
+        (
+            "mixed",
+            online_sparse_allocs::<MixedPrecision<ReevaluateKernel>>(),
+        ),
+    ] {
+        for (label, count, cap) in rows {
+            let label = format!("supplied/{precision}/{label}");
+            eprintln!("{label}: allocations={count} cap={cap}");
+            if count > cap {
+                over.push(label);
+            }
+        }
+    }
+    assert!(over.is_empty(), "over the coordinate path: {over:?}");
+}
+
+/// A model on supplied distances allocates no more than the coordinate
+/// path on the baseline problem at the same precision (design §5.6): a
+/// borrowed table is read in place, so `predict_into` of an `f64` model
+/// allocates nothing, as the coordinate one.
+fn supplied_distances_allocate_no_more_than_coordinates() {
+    ensure_one_rayon_worker();
+    let mut over = Vec::new();
+    for (precision, supplied, coordinate) in [
+        (
+            "f64",
+            supplied_allocs::<DoublePrecision>(),
+            distance_baseline_allocs(),
+        ),
+        (
+            "f32",
+            supplied_allocs::<SinglePrecision>(),
+            coordinate_allocs::<SinglePrecision>(),
+        ),
+        (
+            "mixed",
+            supplied_allocs::<MixedPrecision<ReevaluateKernel>>(),
+            coordinate_allocs::<MixedPrecision<ReevaluateKernel>>(),
+        ),
+    ] {
+        assert_eq!(supplied.len(), coordinate.len());
+        for ((label, count), (expected, cap)) in supplied.into_iter().zip(coordinate) {
+            assert_eq!(label, expected);
+            let label = format!("supplied/{precision}/{label}");
+            eprintln!("{label}: allocations={count} cap={cap}");
+            if count > cap {
+                over.push(label);
+            }
+        }
+    }
+    assert!(over.is_empty(), "over the coordinate path: {over:?}");
+}
+
+/// Allocations of one `value_and_gradient(theta, grad)` after a warmup call.
+fn grad_allocs(theta: Vec<f64>, mut value_and_gradient: impl FnMut(&[f64], &mut [f64])) -> usize {
+    let mut grad = vec![0.0; theta.len()];
+    value_and_gradient(&theta, &mut grad);
+    allocs_in(|| value_and_gradient(&theta, &mut grad))
+}
+
+/// One SVGP `value_and_gradient_into` after a warmup, on a slot next to a
+/// coordinate leaf (`k_slot(Δ²) · k(x)`), and on the coordinate kernel of
+/// the same shape (`k(x) · k(x)`), at `P`.
+fn svgp_with_points_grad_allocs<P: GpScalar>() -> (usize, usize) {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let rbf = |ell: f64| RbfKernel::new(ell).expect("ell");
+    let image = ScalarDistance::new();
+    let inducing: Vec<usize> = (0..p.m).collect();
+    let mut supplied = Svgp::new(image.kernel(rbf(0.5)) * KernelSpec::from(rbf(0.7)), lik())
+        .with_precision::<P>()
+        .factor(
+            [image.borrow(&s.train_sum[..p.n * p.m])],
+            p.n,
+            &p.x,
+            p.d,
+            &p.y,
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("supplied");
+    let mut theta = vec![0.0; supplied.num_params()];
+    supplied.get_params(&mut theta).expect("theta");
+    let with_points = grad_allocs(theta, |t, g| {
+        supplied.value_and_gradient_into(t, g).expect("grad");
+    });
+    let mut coords = Svgp::new(
+        KernelSpec::from(rbf(0.5)) * KernelSpec::from(rbf(0.7)),
+        lik(),
+    )
+    .with_precision::<P>()
+    .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
+    .map_err(|(_, e)| e)
+    .expect("coords");
+    let mut theta = vec![0.0; coords.num_params()];
+    coords.get_params(&mut theta).expect("theta");
+    let coordinate = grad_allocs(theta, |t, g| {
+        coords.value_and_gradient_into(t, g).expect("grad");
+    });
+    (with_points, coordinate)
+}
+
+/// The SVGP gradient on a slot next to a coordinate leaf, which reads the
+/// coordinate distances into a buffer of its own, allocates no more than
+/// the coordinate kernel of the same shape (design §5.6).
+fn svgp_gradient_with_points_allocates_no_more_than_coordinates() {
+    ensure_one_rayon_worker();
+    for (precision, (with_points, coordinate)) in [
+        ("f64", svgp_with_points_grad_allocs::<DoublePrecision>()),
+        ("f32", svgp_with_points_grad_allocs::<SinglePrecision>()),
+        (
+            "mixed",
+            svgp_with_points_grad_allocs::<MixedPrecision<ReevaluateKernel>>(),
+        ),
+    ] {
+        eprintln!(
+            "svgp_with_points/{precision}/mll_and_grad: allocations={with_points} cap={coordinate}"
+        );
+        assert!(
+            with_points <= coordinate,
+            "{precision}: {with_points} allocations, the coordinate path {coordinate}"
+        );
+    }
+}
+
+/// Bytes a covariance on supplied distances allocates against the same
+/// covariance on coordinates, on the baseline problem: the query square is
+/// read where it was bound, so no copy of its `q² · d` values is made.
+fn covariance_bytes() -> Vec<(String, usize, usize)> {
+    let p = common::problems::distance_baseline();
+    let s = p.supplied();
+    let lik = || GaussianLikelihood::new(0.1).expect("noise");
+    let block = |k: usize| -> Vec<f64> {
+        (0..p.q)
+            .flat_map(|j| (0..p.q).map(move |i| (i, j)))
+            .map(|(i, j)| (p.xq[i + k * p.q] - p.xq[j + k * p.q]).powi(2))
+            .collect()
+    };
+    let squares: Vec<Vec<f64>> = (0..p.d).map(block).collect();
+    let square_sum: Vec<f64> = (0..p.q * p.q)
+        .map(|at| squares.iter().map(|b| b[at]).sum())
+        .collect();
+    let square_refs: Vec<&[f64]> = squares.iter().map(Vec::as_slice).collect();
+    let train_refs: Vec<&[f64]> = s.train.iter().map(Vec::as_slice).collect();
+    let cross_refs: Vec<&[f64]> = s.cross.iter().map(Vec::as_slice).collect();
+    let image = ScalarDistance::new();
+    let ell = [0.5, 0.6, 0.7, 0.8];
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&ell).expect("ell"));
+    let mut out = Vec::new();
+    let coords = |kernel: KernelSpec| {
+        Gpr::new(kernel, lik())
+            .with_optimizer(Fixed)
+            .factor(&p.x, p.n, p.d, &p.y)
+            .expect("factor")
+    };
+    // Scalar slot.
+    let c = coords(KernelSpec::from(RbfKernel::new(0.5).expect("ell")));
+    let d = Gpr::new(image.kernel(RbfKernel::new(0.5).expect("ell")), lik())
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&s.train_sum)], p.n, &p.y)
+        .expect("factor");
+    let cb = bytes_in(|| {
+        c.predict_covariance(&p.xq, p.q, p.d).expect("covariance");
+    });
+    let db = bytes_in(|| {
+        d.predict_covariance(
+            [image.borrow(&s.cross_sum)],
+            [image.borrow(&square_sum)],
+            p.q,
+        )
+        .expect("covariance");
+    });
+    out.push(("rbf".to_owned(), db, cb));
+    // ARD slot.
+    let c = coords(KernelSpec::from(RbfArdKernel::new(&ell).expect("ell")));
+    let d = Gpr::new(ard, lik())
+        .with_optimizer(Fixed)
+        .factor([bands.borrow(&train_refs)], p.n, &p.y)
+        .expect("factor");
+    let cb = bytes_in(|| {
+        c.predict_covariance(&p.xq, p.q, p.d).expect("covariance");
+    });
+    let db = bytes_in(|| {
+        d.predict_covariance(
+            [bands.borrow(&cross_refs)],
+            [bands.borrow(&square_refs)],
+            p.q,
+        )
+        .expect("covariance");
+    });
+    out.push(("rbf_ard".to_owned(), db, cb));
+    out
+}
+
+fn a_covariance_on_supplied_distances_copies_no_query_square() {
+    ensure_one_rayon_worker();
+    for (label, supplied, coordinate) in covariance_bytes() {
+        eprintln!("covariance/{label}: supplied={supplied} coordinate={coordinate} bytes");
+        assert!(
+            supplied <= coordinate,
+            "covariance/{label}: {supplied} bytes on supplied distances, {coordinate} on coordinates"
+        );
+    }
+}
+
+/// The checks `$name`, each paired with its name.
+macro_rules! checks {
+    ($($name:ident),* $(,)?) => {
+        [$((stringify!($name), $name as fn())),*]
+    };
+}
+
+/// Every check of this binary, in the order [`main`] runs them. A new
+/// check goes in this list: without the harness `#[test]` runs nothing, and
+/// a check left out is dead code, which `clippy -D warnings` refuses.
+const CHECKS: [(&str, fn()); 19] = checks![
+    mll_and_grad_allocs_after_workspace,
+    fast_approx_mll_and_grad_allocs_after_workspace,
+    predict_100_allocs_after_workspace,
+    mixed_promote_predict_100_bytes_after_workspace,
+    mixed_reevaluate_predict_100_bytes_after_workspace,
+    incremental_leaf_step_allocs_after_warmup,
+    composite_mll_and_grad_allocs_after_workspace,
+    hessian_allocs_after_warmup,
+    composite_predict_100_allocs_after_workspace,
+    sparse_allocs_after_warmup,
+    sparse_predict_into_allocs_after_warmup,
+    svgp_adam_step_bytes_do_not_grow_with_n,
+    svgp_adam_epoch_allocs,
+    distance_baseline_coordinate_allocs,
+    online_sgpr_on_supplied_distances_allocates_no_more_than_coordinates,
+    supplied_distances_allocate_no_more_than_coordinates,
+    svgp_gradient_with_points_allocates_no_more_than_coordinates,
+    a_covariance_on_supplied_distances_copies_no_query_square,
+    arguments_select_as_libtest_does,
+];
+
+/// What a `cargo test` run asks of this binary: the libtest arguments it
+/// reads.
+#[derive(Default)]
+struct Args {
+    filters: Vec<String>,
+    skip: Vec<String>,
+    exact: bool,
+    list: bool,
+    ignored: bool,
+}
+
+impl Args {
+    fn parse(mut args: impl Iterator<Item = String>) -> Self {
+        let mut out = Self::default();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--exact" => out.exact = true,
+                "--list" => out.list = true,
+                // No check is ignored, so `--ignored` runs none of them.
+                "--ignored" => out.ignored = true,
+                "--skip" => out.skip.extend(args.next()),
+                // Flags that take a value in the next argument.
+                "--test-threads" | "--color" | "--format" | "-Z" | "--logfile"
+                | "--shuffle-seed" => {
+                    let _ = args.next();
+                }
+                // A flag with its value after `=`.
+                flag if flag.starts_with("--skip=") => {
+                    out.skip.push(flag["--skip=".len()..].to_owned());
+                }
+                flag if flag.starts_with('-') => {}
+                filter => out.filters.push(filter.to_owned()),
+            }
+        }
+        out
+    }
+
+    fn selects(&self, name: &str) -> bool {
+        let matches = |pattern: &String| {
+            if self.exact {
+                name == pattern
+            } else {
+                name.contains(pattern.as_str())
+            }
+        };
+        !self.ignored
+            && (self.filters.is_empty() || self.filters.iter().any(matches))
+            && !self.skip.iter().any(matches)
+    }
+}
+
+/// Runs the selected checks one after another and reports them as libtest
+/// does.
+fn main() -> ExitCode {
+    ensure_one_rayon_worker();
+    let args = Args::parse(std::env::args().skip(1));
+    let selected: Vec<_> = CHECKS
+        .iter()
+        .filter(|(name, _)| args.selects(name))
+        .collect();
+    if args.list {
+        for (name, _) in &selected {
+            println!("{name}: test");
+        }
+        return ExitCode::SUCCESS;
+    }
+    println!("\nrunning {} tests", selected.len());
+    let mut failed = Vec::new();
+    for (name, check) in &selected {
+        let passed = std::panic::catch_unwind(*check).is_ok();
+        println!("test {name} ... {}", if passed { "ok" } else { "FAILED" });
+        if !passed {
+            failed.push(*name);
+        }
+    }
+    if !failed.is_empty() {
+        println!("\nfailures:");
+        for name in &failed {
+            println!("    {name}");
+        }
+    }
+    println!(
+        "\ntest result: {}. {} passed; {} failed; 0 ignored; 0 measured; {} filtered out\n",
+        if failed.is_empty() { "ok" } else { "FAILED" },
+        selected.len() - failed.len(),
+        failed.len(),
+        CHECKS.len() - selected.len(),
+    );
+    if failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(101)
+    }
+}
+
+/// The arguments a `cargo test` run passes select the checks as libtest
+/// selects tests.
+fn arguments_select_as_libtest_does() {
+    let parse = |args: &[&str]| Args::parse(args.iter().map(|arg| (*arg).to_owned()));
+    let names = ["hessian_allocs_after_warmup", "sparse_allocs_after_warmup"];
+    let picked = |args: &Args| -> Vec<&str> {
+        names
+            .iter()
+            .copied()
+            .filter(|name| args.selects(name))
+            .collect()
+    };
+    assert_eq!(picked(&parse(&[])), names);
+    assert_eq!(
+        picked(&parse(&["hessian"])),
+        ["hessian_allocs_after_warmup"]
+    );
+    assert_eq!(picked(&parse(&["--exact", "hessian"])), Vec::<&str>::new());
+    assert_eq!(
+        picked(&parse(&["--exact", "sparse_allocs_after_warmup"])),
+        ["sparse_allocs_after_warmup"]
+    );
+    for skip in [&["--skip", "hessian"][..], &["--skip=hessian"]] {
+        assert_eq!(
+            picked(&parse(skip)),
+            ["sparse_allocs_after_warmup"],
+            "{skip:?}"
+        );
+    }
+    assert_eq!(picked(&parse(&["--ignored"])), Vec::<&str>::new());
+    // A flag's value is not a filter, in either form.
+    for flags in [
+        &[
+            "--test-threads",
+            "4",
+            "--shuffle-seed",
+            "7",
+            "--color",
+            "never",
+        ][..],
+        &["--test-threads=4", "--nocapture", "-q", "--format=terse"],
+    ] {
+        assert_eq!(picked(&parse(flags)), names, "{flags:?}");
+    }
+    assert!(parse(&["--list"]).list);
 }

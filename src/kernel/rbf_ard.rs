@@ -1,7 +1,10 @@
 //! ARD squared-exponential (RBF) kernel.
 
 use super::ard::{self, ArdR2, Pick};
-use super::dist::{ArdSqDiff, require_ard_sq_diff_shape};
+use super::dist::{
+    ArdBlocks, ArdSqDiff, BlockState, RowRuns, Runs, packed_len, require_ard_sq_diff_shape,
+    walk_row_runs,
+};
 use super::scalar::f64_pair;
 use super::simd::rbf_ard::{self as lanes, Which};
 use super::{ArdLengthscales, KernelScalar, Triangle, finite_kernel, write_square};
@@ -347,6 +350,89 @@ impl RbfArdKernel {
         lanes::fold_square_lengthscales(x64, s, w, row_sum, prod, out)
     }
 
+    /// Writes `⟨weight, ∂K/∂θ_d⟩_F` for every lengthscale into `out`, from
+    /// the Gram `k` and the packed `(Δ_d)²` of a supplied ARD slot, as
+    /// [`Self::contract_square`] does from coordinates. With
+    /// `∂k/∂θ_d = k · w_d (Δ_d)²`, `S = weight ∘ k` is packed once into `fold`
+    /// in the cache's layout (the lower triangle, column by column), so each
+    /// lengthscale is one contiguous dot product: `2 w_d ⟨S, (Δ_d)²⟩` over
+    /// the strict lower triangle (the diagonal `(Δ_d)²` is zero).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`] when `out` is not one entry per
+    /// lengthscale, and [`GprError::ShapeMismatch`] when `weight`, `k`, or
+    /// the cache is not of the same `n` points.
+    pub(crate) fn contract_square_from_sq_diff<T: KernelScalar>(
+        &self,
+        weight: MatRef<'_, T>,
+        k: MatRef<'_, T>,
+        cache: ArdSqDiff<'_, T>,
+        out: &mut [f64],
+        fold: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let d = w.len();
+        if out.len() != d {
+            return Err(GprError::LengthMismatch {
+                reason: format!("gradient has {} entries, expected {d}", out.len()),
+            });
+        }
+        let n = cache.n();
+        require_ard_sq_diff_shape(cache, n, d)?;
+        for (name, m) in [("weight", weight), ("k", k)] {
+            if m.nrows() != n || m.ncols() != n {
+                return Err(GprError::ShapeMismatch {
+                    reason: format!("{name} is {}x{}, expected {n}x{n}", m.nrows(), m.ncols()),
+                });
+            }
+        }
+        let len = packed_len(n)?;
+        if fold.len() < len {
+            fold.resize(len, 0.0);
+        }
+        let s = &mut fold[..len];
+        let cache = match cache.runs() {
+            Runs::Rows(rows) => return contract_rows(rows, weight, k, w, s, out),
+            Runs::Lower(lower) => lower,
+        };
+        let mut at = 0;
+        for col in 0..n {
+            // The diagonal's `(Δ_d)²` is `0`, so its term is `0`, as the
+            // coordinate contraction leaves it, whatever the weight there
+            // (an overflowed `A⁻¹ − ααᵀ` would make `w · k · 0` a `NaN`).
+            s[at] = 0.0;
+            at += 1;
+            for row in col + 1..n {
+                s[at] = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
+                at += 1;
+            }
+        }
+        for (dim, slot) in out.iter_mut().enumerate() {
+            let sum = match cache.packed_block(dim) {
+                Some(block) => lane_dot(s, block),
+                // Dense tables: the same products, one column run at a time.
+                None => {
+                    let mut at = 0;
+                    let mut sum = 0.0;
+                    for col in 0..n {
+                        let run = cache.column(dim, col);
+                        sum += lane_dot(&s[at..at + run.len()], run);
+                        at += run.len();
+                    }
+                    sum
+                }
+            };
+            *slot = 2.0 * w[dim] * sum;
+            // As the coordinate contraction: a weight or a Gram that
+            // overflowed is an error, not a `NaN` gradient.
+            if !slot.is_finite() {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply_from_sq_diff<M: KernelMath, T: KernelScalar>(
         &self,
         cache: ArdSqDiff<'_, T>,
@@ -361,8 +447,135 @@ impl RbfArdKernel {
         {
             return Ok(());
         }
-        write_square(out, uplo, |row, col| {
+        ard::write_cached(cache, out, uplo, |row, col| {
             rbf_value::<M, T>(ard::r2_from_cache(cache, row, col, w, Pick::NONE)?)
+        })
+    }
+
+    /// Rectangular `K` from `(Δ_d)²` blocks.
+    pub(crate) fn apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        mut out: MatMut<'_, T>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        ard::require_blocks(blocks, out.as_ref(), self.num_params())?;
+        if let Some(of) = T::as_f64_mut(out.rb_mut())
+            && lanes::try_apply_cross_from_blocks::<M, T, S>(blocks, of, w)?
+        {
+            return Ok(());
+        }
+        ard::write_from_blocks(blocks, out, self.num_params(), |row, col| {
+            rbf_value::<M, T>(ard::r2_from_blocks(blocks, row, col, w, Pick::NONE)?)
+        })
+    }
+
+    /// `⟨weight, ∂K/∂θ_d⟩` of a rectangle for every lengthscale, from its
+    /// `(Δ_d)²` blocks and its Gram `k`: `∂k/∂θ_d = k · w_d (Δ_d)²`, so the
+    /// Gram is formed once and each lengthscale is one pass over its block
+    /// (the rectangle's [`Self::contract_square_from_sq_diff`]). `fold`
+    /// holds `weight ∘ k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::LengthMismatch`], [`GprError::DimensionMismatch`],
+    /// or [`GprError::ShapeMismatch`] for a wrong `out`, `blocks`, `weight`,
+    /// or `k`, [`GprError::InvalidDistance`] for an unchecked block value that is not finite or is negative, and
+    /// [`GprError::NonFiniteKernelValue`] for an overflowed sum.
+    pub(crate) fn contract_cross_from_blocks<T: KernelScalar, S: BlockState>(
+        &self,
+        weight: MatRef<'_, T>,
+        k: MatRef<'_, T>,
+        blocks: ArdBlocks<'_, T, S>,
+        out: &mut [f64],
+        fold: &mut Vec<f64>,
+    ) -> Result<(), GprError> {
+        let w = self.lengthscales.inv_ell_sq();
+        let d = w.len();
+        if out.len() != d {
+            return Err(GprError::LengthMismatch {
+                reason: format!("gradient has {} entries, expected {d}", out.len()),
+            });
+        }
+        ard::require_blocks(blocks, k, d)?;
+        let (rows, cols) = (blocks.rows(), blocks.cols());
+        if weight.nrows() != rows || weight.ncols() != cols {
+            return Err(GprError::ShapeMismatch {
+                reason: format!(
+                    "weight is {}x{}, expected {rows}x{cols}",
+                    weight.nrows(),
+                    weight.ncols()
+                ),
+            });
+        }
+        let len = rows.checked_mul(cols).ok_or(GprError::SizeOverflow)?;
+        if fold.len() < len {
+            fold.resize(len, 0.0);
+        }
+        let s = &mut fold[..len];
+        for col in 0..cols {
+            for row in 0..rows {
+                s[col * rows + row] = weight[(row, col)].to_f64() * k[(row, col)].to_f64();
+            }
+        }
+        for (dim, slot) in out.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for col in 0..cols {
+                let run = &s[col * rows..(col + 1) * rows];
+                sum += match blocks.column(dim, col)? {
+                    Some(values) => lane_dot(run, values),
+                    None => {
+                        let mut part = 0.0;
+                        for (row, &v) in run.iter().enumerate() {
+                            part += v * blocks.read(dim, row, col)?.to_f64();
+                        }
+                        part
+                    }
+                };
+            }
+            *slot = w[dim] * sum;
+            if !slot.is_finite() {
+                return Err(GprError::NonFiniteKernelValue);
+            }
+        }
+        Ok(())
+    }
+
+    /// Rectangular `∂K/∂θ` from `(Δ_d)²` blocks.
+    pub(crate) fn grad_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        d_k: MatMut<'_, T>,
+        param_idx: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param(NAME, param_idx, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_blocks(blocks, d_k, self.num_params(), |row, col| {
+            rbf_grad::<M, T>(ard::r2_from_blocks(
+                blocks,
+                row,
+                col,
+                w,
+                Pick::one(param_idx),
+            )?)
+        })
+    }
+
+    /// Rectangular `∂²K/∂θ_i ∂θ_j` from `(Δ_d)²` blocks.
+    pub(crate) fn hess_cross_from_blocks<M: KernelMath, T: KernelScalar, S: BlockState>(
+        &self,
+        blocks: ArdBlocks<'_, T, S>,
+        d2_k: MatMut<'_, T>,
+        i: usize,
+        j: usize,
+    ) -> Result<(), GprError> {
+        ard::require_param_pair(NAME, i, j, self.num_params())?;
+        let w = self.lengthscales.inv_ell_sq();
+        ard::write_from_blocks(blocks, d2_k, self.num_params(), |row, col| {
+            rbf_hess::<M, T>(
+                ard::r2_from_blocks(blocks, row, col, w, Pick::pair(i, j))?,
+                i == j,
+            )
         })
     }
 
@@ -382,7 +595,7 @@ impl RbfArdKernel {
         {
             return Ok(());
         }
-        write_square(d_k, uplo, |row, col| {
+        ard::write_cached(cache, d_k, uplo, |row, col| {
             rbf_grad::<M, T>(ard::r2_from_cache(
                 cache,
                 row,
@@ -640,6 +853,54 @@ fn rbf_hess<M: KernelMath, T: KernelScalar>(t: ArdR2<T>, same: bool) -> Result<T
     finite_kernel(ard_hess_terms::<M, T>(t.r2, t.dim_i, t.dim_j, same))
 }
 
+/// `Σ s_i · b_i` in four running sums, folded in a fixed order, then the
+/// tail.
+fn lane_dot<T: KernelScalar>(s: &[f64], b: &[T]) -> f64 {
+    let mut acc = [0.0f64; 4];
+    for (a, b) in s.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
+        for lane in 0..4 {
+            acc[lane] += a[lane] * b[lane].to_f64();
+        }
+    }
+    let tail = s.len().min(b.len()) / 4 * 4;
+    let rest: f64 = s[tail..]
+        .iter()
+        .zip(&b[tail..])
+        .map(|(a, b)| a * b.to_f64())
+        .sum();
+    ((acc[0] + acc[1]) + (acc[2] + acc[3])) + rest
+}
+
+/// [`RbfArdKernel::contract_square_from_sq_diff`] on a cache of row runs:
+/// `S = weight ∘ k` is laid out in `s` as the cache is (row `i` holds the
+/// columns `0..=i`, the diagonal `0`), a tile of columns at a time so the
+/// lower triangle of `weight` and `k` is read down its columns, and each
+/// lengthscale is one contiguous dot product with its dimension's buffer.
+fn contract_rows<T: KernelScalar>(
+    rows: RowRuns<'_, T>,
+    weight: MatRef<'_, T>,
+    k: MatRef<'_, T>,
+    w: &[f64],
+    s: &mut [f64],
+    out: &mut [f64],
+) -> Result<(), GprError> {
+    // As the column runs: the diagonal's term is `0`.
+    walk_row_runs(rows.n(), |i, at, j| {
+        s[at] = if j == i {
+            0.0
+        } else {
+            weight[(i, j)].to_f64() * k[(i, j)].to_f64()
+        };
+    });
+    for (dim, slot) in out.iter_mut().enumerate() {
+        *slot = 2.0 * w[dim] * lane_dot(s, rows.buffer(dim));
+        if !slot.is_finite() {
+            return Err(GprError::NonFiniteKernelValue);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::RbfArdKernel;
@@ -650,6 +911,110 @@ mod tests {
     const TOL: f64 = 1e-10;
 
     use crate::test_check::{assert_close, assert_lower_close, assert_send_sync, fill, points_2d};
+
+    /// The contraction over dense tables kept as they are matches the one
+    /// over the packed triangles, and the cache reads the same pairs.
+    #[test]
+    fn contraction_over_dense_tables_matches_the_packed_cache() {
+        use crate::kernel::dist::ArdSqDiffBuf;
+        let (n, d) = (7, 2);
+        let pair =
+            |dim: usize, i: usize, j: usize| ((i as f64) - (j as f64)).powi(2) * (0.5 + dim as f64);
+        let packed = ArdSqDiffBuf::<f64>::from_pairs(n, d, pair).expect("packed");
+        let tables = (0..d)
+            .map(|dim| (0..n * n).map(|at| pair(dim, at % n, at / n)).collect())
+            .collect();
+        let dense = ArdSqDiffBuf::<f64>::from_tables(tables, n);
+        assert!(dense.is_dense() && !packed.is_dense());
+        assert_eq!(dense.stored_len(), d * n * n);
+        let k = RbfArdKernel::new(&[1.0, 2.0]).expect("ell");
+        let gram = Mat::from_fn(n, n, |i, j| (-0.1 * (i as f64 - j as f64).powi(2)).exp());
+        let weight = Mat::from_fn(n, n, |i, j| 0.3 + 0.01 * (i * n + j) as f64);
+        let (mut a, mut b) = ([0.0; 2], [0.0; 2]);
+        let mut fold = Vec::new();
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            packed.view(),
+            &mut a,
+            &mut fold,
+        )
+        .expect("packed");
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            dense.view(),
+            &mut b,
+            &mut fold,
+        )
+        .expect("dense");
+        for (a, b) in a.iter().zip(&b) {
+            assert!((a - b).abs() <= 1e-12 * a.abs().max(1.0));
+        }
+        let (pv, dv) = (packed.view(), dense.view());
+        for dim in 0..d {
+            for i in 0..n {
+                for j in 0..n {
+                    assert_eq!(pv.get(dim, i, j).to_bits(), dv.get(dim, i, j).to_bits());
+                }
+            }
+        }
+        // A cast packs the dense tables.
+        let narrow = dense.map(|v| v as f32);
+        assert!(!narrow.is_dense());
+        assert_eq!(
+            narrow.view().get(1, 5, 2).to_bits(),
+            (pair(1, 5, 2) as f32).to_bits()
+        );
+    }
+
+    /// A weight that overflowed gives an error, as the coordinate
+    /// contraction does, not a `NaN` gradient.
+    #[test]
+    fn contraction_from_sq_diff_refuses_a_non_finite_sum() {
+        use crate::kernel::dist::ArdSqDiffBuf;
+        let k = RbfArdKernel::new(&[1.0, 2.0]).expect("ell");
+        let cache = ArdSqDiffBuf::<f64>::from_pairs(3, 2, |dim, i, j| {
+            ((i as f64) - (j as f64)).powi(2) * (1.0 + dim as f64)
+        })
+        .expect("cache");
+        let gram = Mat::from_fn(3, 3, |i, j| if i == j { 1.0 } else { 0.5 });
+        let mut weight = Mat::from_fn(3, 3, |_, _| 1.0);
+        let mut out = [0.0; 2];
+        let mut fold = Vec::new();
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            cache.view(),
+            &mut out,
+            &mut fold,
+        )
+        .expect("finite");
+        assert!(out.iter().all(|g| g.is_finite()));
+        // An infinite weight on the diagonal multiplies `(Δ_d)² = 0` and is
+        // left out, as the coordinate contraction does.
+        weight[(1, 1)] = f64::INFINITY;
+        k.contract_square_from_sq_diff(
+            weight.as_ref(),
+            gram.as_ref(),
+            cache.view(),
+            &mut out,
+            &mut fold,
+        )
+        .expect("diagonal left out");
+        assert!(out.iter().all(|g| g.is_finite()));
+        weight[(2, 0)] = f64::INFINITY;
+        assert!(matches!(
+            k.contract_square_from_sq_diff(
+                weight.as_ref(),
+                gram.as_ref(),
+                cache.view(),
+                &mut out,
+                &mut fold
+            ),
+            Err(GprError::NonFiniteKernelValue)
+        ));
+    }
 
     fn sq_dist(x: MatRef<'_, f64>) -> Mat<f64> {
         let n = x.nrows();

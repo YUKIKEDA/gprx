@@ -56,9 +56,29 @@ pub(crate) mod sealed {
         /// [`Self::as_f64_slice`] for a mutable slice.
         fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]>;
 
+        /// `f64` values as this scalar when it is `f64`: a supplied table
+        /// is read in place.
+        fn from_f64_slice(values: &[f64]) -> Option<&[Self]>;
+
+        /// [`Self::from_f64_slice`] for a list of borrowed tables.
+        fn from_f64_slices<'a>(values: &'a [&'a [f64]]) -> Option<&'a [&'a [Self]]>;
+
+        /// [`Self::from_f64_slice`] for a list of owned tables.
+        fn from_f64_vecs(values: &[Vec<f64>]) -> Option<&[Vec<Self>]>;
+
+        /// Owned `f64` tables as this scalar when it is `f64`, moved as
+        /// they are; otherwise handed back.
+        fn vecs_from_f64(values: Vec<Vec<f64>>) -> Result<Vec<Vec<Self>>, Vec<Vec<f64>>>;
+
+        /// [`Self::as_f64_slice`] for a list of owned tables.
+        fn as_f64_vecs(values: &[Vec<Self>]) -> Option<&[Vec<f64>]>;
+
         fn empty_rows() -> Self::RowCast;
 
         fn empty_cols() -> Self::ColCast;
+
+        /// `values` as this scalar. `f64` takes the buffer as is.
+        fn vec_from_f64(values: Vec<f64>) -> Vec<Self>;
 
         /// Views `y` as this scalar. `f64` returns `y`. `f32` fills `cast`.
         fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self];
@@ -317,6 +337,26 @@ impl sealed::ScalarOps for f64 {
         Some(values)
     }
 
+    fn from_f64_slice(values: &[f64]) -> Option<&[Self]> {
+        Some(values)
+    }
+
+    fn from_f64_slices<'a>(values: &'a [&'a [f64]]) -> Option<&'a [&'a [Self]]> {
+        Some(values)
+    }
+
+    fn from_f64_vecs(values: &[Vec<f64>]) -> Option<&[Vec<Self>]> {
+        Some(values)
+    }
+
+    fn vecs_from_f64(values: Vec<Vec<f64>>) -> Result<Vec<Vec<Self>>, Vec<Vec<f64>>> {
+        Ok(values)
+    }
+
+    fn as_f64_vecs(values: &[Vec<Self>]) -> Option<&[Vec<f64>]> {
+        Some(values)
+    }
+
     fn as_f64_slice_mut(values: &mut [Self]) -> Option<&mut [f64]> {
         Some(values)
     }
@@ -324,6 +364,10 @@ impl sealed::ScalarOps for f64 {
     fn empty_rows() -> Self::RowCast {}
 
     fn empty_cols() -> Self::ColCast {}
+
+    fn vec_from_f64(values: Vec<f64>) -> Vec<Self> {
+        values
+    }
 
     fn storage_rows<'a>(y: &'a [f64], _cast: &'a mut Self::RowCast) -> &'a [Self] {
         y
@@ -444,6 +488,26 @@ impl sealed::ScalarOps for f32 {
         None
     }
 
+    fn from_f64_slice(_values: &[f64]) -> Option<&[Self]> {
+        None
+    }
+
+    fn from_f64_slices<'a>(_values: &'a [&'a [f64]]) -> Option<&'a [&'a [Self]]> {
+        None
+    }
+
+    fn from_f64_vecs(_values: &[Vec<f64>]) -> Option<&[Vec<Self>]> {
+        None
+    }
+
+    fn vecs_from_f64(values: Vec<Vec<f64>>) -> Result<Vec<Vec<Self>>, Vec<Vec<f64>>> {
+        Err(values)
+    }
+
+    fn as_f64_vecs(_values: &[Vec<Self>]) -> Option<&[Vec<f64>]> {
+        None
+    }
+
     fn as_f64_slice_mut(_values: &mut [Self]) -> Option<&mut [f64]> {
         None
     }
@@ -454,6 +518,10 @@ impl sealed::ScalarOps for f32 {
 
     fn empty_cols() -> Self::ColCast {
         Mat::zeros(0, 0)
+    }
+
+    fn vec_from_f64(values: Vec<f64>) -> Vec<Self> {
+        values.into_iter().map(|v| v as f32).collect()
     }
 
     fn storage_rows<'a>(y: &'a [f64], cast: &'a mut Self::RowCast) -> &'a [Self] {

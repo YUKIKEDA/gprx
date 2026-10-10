@@ -25,6 +25,7 @@ C1-4 → C1-7
 C1-5 → C1-7
 C1-6 → C1-7
 C1-7 → C2-1
+D1-1 → D1-2 → D1-3 → D1-3a → D1-3b → D1-3c → D1-4 → D1-5 → D1-5a → D1-6
 ```
 
 Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done. C2-1 follows C1-7.
@@ -216,7 +217,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
 | C1-1 | Task | Publish rules and bring crates.io, MSRV, and coverage into scope | [#419](https://github.com/YUKIKEDA/gprx/issues/419) | done |
-| C1-2 | Task | Run CI on Rust 1.85 and stable | [#420](https://github.com/YUKIKEDA/gprx/issues/420) | done |
+| C1-2 | Task | Run CI on Rust 1.88 (the MSRV) and stable | [#420](https://github.com/YUKIKEDA/gprx/issues/420) | done |
 | C1-3 | Task | Line-coverage floor on stable CI | [#421](https://github.com/YUKIKEDA/gprx/issues/421) | done |
 | C1-4 | Task | Fix the files in the published package | [#422](https://github.com/YUKIKEDA/gprx/issues/422) | done |
 | C1-5 | Docs | Document the 0.1.0 contract in the README and crate docs | [#423](https://github.com/YUKIKEDA/gprx/issues/423) | done |
@@ -228,6 +229,29 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
 | C2-1 | Task | Make `cargo publish` the only step left for 0.1.0 | [#450](https://github.com/YUKIKEDA/gprx/issues/450) | open |
+
+## C3 (crates.io 0.2.0, [#491](https://github.com/YUKIKEDA/gprx/issues/491))
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | Set after Grill on #491 |
+
+## D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470))
+
+Requirements: design §5.6. Every row meets them and pastes its benches.
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| D1-1 | Docs | Requirements for supplied distances (design §5.6) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
+| D1-2 | Task | Benches and allocation checks against the coordinate path, before the implementation | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
+| D1-3 | Feat | `DistanceKernel`, sources, the strict table check, and the exact models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
+| D1-3a | Task | Unchecked and checked ARD prediction blocks as types | [#485](https://github.com/YUKIKEDA/gprx/issues/485) | open |
+| D1-3b | Task | Covariance query squares read without a second copy | [#486](https://github.com/YUKIKEDA/gprx/issues/486) | open |
+| D1-3c | Task | Supply presence in the model's type, not a runtime `Option` | [#487](https://github.com/YUKIKEDA/gprx/issues/487) | open |
+| D1-4 | Feat | Online insert and delete on supplied distances (compacted in place; ARD slots grow as row runs) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | open |
+| D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances (train × inducing `n × m` blocks, inducing points by training index) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
+| D1-5a | Feat | `OnlineSgpr` on supplied distances | [#493](https://github.com/YUKIKEDA/gprx/issues/493) | open |
+| D1-6 | Feat | Save and load of distance models, exact and sparse (`LoadedDistanceGpr`) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
 
 ## Intentionally out of scope
 

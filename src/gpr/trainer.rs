@@ -5,14 +5,16 @@ use std::marker::PhantomData;
 
 use crate::error::GprError;
 use crate::gpr::GprObjective;
-use crate::kernel::KernelSpec;
+use crate::kernel::{
+    DistanceKernel, KernelSpec, ModelKernel, ModelKernelParts, PointKernel, PointUse, SpecOf,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::{Fixed, Lbfgs, Optimizer};
 use crate::param::write_params;
 use crate::precision::{DoublePrecision, GpScalar};
 use crate::transform::{IdentityInput, IdentityTarget, UnfittedTarget, UnfittedTransform};
 
-use super::{ExactFit, FittedGpr, Policies};
+use super::{ExactFit, FittedGpr, Policies, TrainInput};
 use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp};
 
 /// Trains an Exact GPR from a kernel, a likelihood, transforms, an optimizer, and a recompute strategy.
@@ -55,17 +57,18 @@ use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp
 /// # Ok(())
 /// # }
 /// ```
-pub struct Gpr<O = Lbfgs, P = DoublePrecision> {
-    pub(super) kernel: KernelSpec,
+pub struct Gpr<O = Lbfgs, P = DoublePrecision, K: ModelKernel = KernelSpec> {
+    pub(super) kernel: SpecOf<K>,
     pub(super) likelihood: GaussianLikelihood,
     pub(super) x_transform: Box<dyn UnfittedTransform>,
     pub(super) y_transform: Box<dyn UnfittedTarget>,
     pub(super) optimizer: O,
     pub(super) policies: Policies,
     pub(super) _precision: PhantomData<P>,
+    pub(super) _kernel: PhantomData<K>,
 }
 
-impl<O, P> fmt::Debug for Gpr<O, P>
+impl<O, P, K: ModelKernel> fmt::Debug for Gpr<O, P, K>
 where
     O: fmt::Debug,
 {
@@ -82,7 +85,7 @@ where
     }
 }
 
-impl<O: Clone, P> Clone for Gpr<O, P> {
+impl<O: Clone, P, K: ModelKernel> Clone for Gpr<O, P, K> {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -92,11 +95,12 @@ impl<O: Clone, P> Clone for Gpr<O, P> {
             optimizer: self.optimizer.clone(),
             policies: self.policies,
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 }
 
-impl Gpr {
+impl<K: ModelKernel> Gpr<Lbfgs, DoublePrecision, K> {
     /// Builds an unfitted trainer that owns the kernel and observation noise.
     ///
     /// Input and target maps default to identity. The optimizer is [`Lbfgs`].
@@ -109,23 +113,28 @@ impl Gpr {
     /// does not read pairwise distances (standalone Linear, Constant, White)
     /// never allocates the distance cache.
     ///
+    /// The kernel is a coordinate [`KernelSpec`] or a
+    /// [`DistanceKernel`](crate::kernel::DistanceKernel) on supplied squared
+    /// distances; its type selects the data `fit` and `predict` take.
+    ///
     /// See the example on [`Gpr`].
-    pub fn new(kernel: KernelSpec, likelihood: GaussianLikelihood) -> Self {
+    pub fn new(kernel: K, likelihood: GaussianLikelihood) -> Self {
         Self {
-            kernel,
+            kernel: <K as ModelKernelParts>::into_spec(kernel),
             likelihood,
             x_transform: Box::new(IdentityInput),
             y_transform: Box::new(IdentityTarget),
             optimizer: Lbfgs::new(),
             policies: Policies::default(),
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 }
 
-impl<O, P> Gpr<O, P> {
+impl<O, P, K: ModelKernel> Gpr<O, P, K> {
     /// The one place a trainer changes its type parameters.
-    fn retype<O2, P2>(self, optimizer: O2) -> (Gpr<O2, P2>, O) {
+    fn retype<O2, P2>(self, optimizer: O2) -> (Gpr<O2, P2, K>, O) {
         (
             Gpr {
                 kernel: self.kernel,
@@ -135,23 +144,10 @@ impl<O, P> Gpr<O, P> {
                 optimizer,
                 policies: self.policies,
                 _precision: PhantomData,
+                _kernel: PhantomData,
             },
             self.optimizer,
         )
-    }
-
-    /// Replaces the input (`X`) transform.
-    ///
-    /// Intended to be called before fit.
-    ///
-    /// A single map, a [`crate::transform::Pipeline`], or
-    /// [`crate::transform::ColumnwiseInput`]. One-step maps still use this
-    /// method.
-    ///
-    /// See the example on [`Gpr`].
-    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
-        self.x_transform = Box::new(transform);
-        self
     }
 
     /// Selects the storage precision.
@@ -159,7 +155,7 @@ impl<O, P> Gpr<O, P> {
     /// Omitting it leaves [`DoublePrecision`].
     ///
     /// See the example on [`Gpr`].
-    pub fn with_precision<P2: GpScalar>(self) -> Gpr<O, P2> {
+    pub fn with_precision<P2: GpScalar>(self) -> Gpr<O, P2, K> {
         let (trainer, optimizer) = self.retype::<(), P2>(());
         trainer.retype(optimizer).0
     }
@@ -208,7 +204,7 @@ impl<O, P> Gpr<O, P> {
     }
 
     pub(crate) fn from_owned(
-        kernel: KernelSpec,
+        kernel: SpecOf<K>,
         likelihood: GaussianLikelihood,
         x_transform: Box<dyn UnfittedTransform>,
         y_transform: Box<dyn UnfittedTarget>,
@@ -223,6 +219,7 @@ impl<O, P> Gpr<O, P> {
             optimizer,
             policies,
             _precision: PhantomData,
+            _kernel: PhantomData,
         }
     }
 
@@ -285,7 +282,7 @@ impl<O, P> Gpr<O, P> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_optimizer<O2>(self, optimizer: O2) -> Gpr<O2, P> {
+    pub fn with_optimizer<O2>(self, optimizer: O2) -> Gpr<O2, P, K> {
         self.retype(optimizer).0
     }
 
@@ -386,13 +383,6 @@ impl<O, P> Gpr<O, P> {
         self.policies.jitter
     }
 
-    /// Returns the kernel whose hyperparameters this trainer owns.
-    ///
-    /// See the example on [`Gpr`].
-    pub fn kernel(&self) -> &KernelSpec {
-        &self.kernel
-    }
-
     /// Returns the observation-noise model.
     ///
     /// See the example on [`Gpr`].
@@ -417,6 +407,40 @@ impl<O, P> Gpr<O, P> {
     /// See the example on [`Gpr`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         write_params(&self.kernel, &self.likelihood, out)
+    }
+}
+
+impl<O, P, K: PointKernel> Gpr<O, P, K> {
+    /// Replaces the input (`X`) transform.
+    ///
+    /// Intended to be called before fit.
+    ///
+    /// A single map, a [`crate::transform::Pipeline`], or
+    /// [`crate::transform::ColumnwiseInput`]. One-step maps still use this
+    /// method.
+    ///
+    /// See the example on [`Gpr`].
+    pub fn with_input_transform(mut self, transform: impl UnfittedTransform + 'static) -> Self {
+        self.x_transform = Box::new(transform);
+        self
+    }
+}
+
+impl<O, P> Gpr<O, P> {
+    /// Returns the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`Gpr`].
+    pub fn kernel(&self) -> &KernelSpec {
+        &self.kernel
+    }
+}
+
+impl<O, P, C: PointUse> Gpr<O, P, DistanceKernel<C>> {
+    /// Returns a copy of the kernel whose hyperparameters this trainer owns.
+    ///
+    /// See the example on [`DistanceKernel`].
+    pub fn to_kernel(&self) -> DistanceKernel<C> {
+        <DistanceKernel<C> as ModelKernelParts>::from_spec(self.kernel.clone())
     }
 }
 
@@ -470,15 +494,7 @@ where
         n_cols: usize,
         y: &[f64],
     ) -> Result<FittedGpr<O, P>, (Self, GprError)> {
-        let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
-        let mut view = ExactFit {
-            core: &mut model.core,
-            store: &mut model.store,
-        };
-        match view.optimize(&model.optimizer) {
-            Ok(()) => Ok(model),
-            Err(err) => Err((model.into_trainer(), err)),
-        }
+        self.fit_input(TrainInput::points(x, n_rows, n_cols, y))
     }
 }
 
@@ -518,8 +534,47 @@ impl<P: GpScalar> Gpr<Fixed, P> {
         n_cols: usize,
         y: &[f64],
     ) -> Result<FittedGpr<Fixed, P>, (Self, GprError)> {
-        let mut model = FittedGpr::prepare(self, x, n_rows, n_cols, y)?;
-        match model.fit_view().refactor() {
+        self.factor_input(TrainInput::points(x, n_rows, n_cols, y))
+    }
+}
+
+impl<O, P, K> Gpr<O, P, K>
+where
+    P: GpScalar,
+    K: ModelKernel,
+    O: for<'a> Optimizer<GprObjective<'a, P, K>>,
+{
+    /// [`Gpr::fit`] on any training input.
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
+    pub(super) fn fit_input(
+        self,
+        input: TrainInput<'_>,
+    ) -> Result<FittedGpr<O, P, K>, (Self, GprError)> {
+        let mut model = FittedGpr::prepare(self, input)?;
+        let mut view = ExactFit {
+            core: &mut model.core,
+            store: &mut model.store,
+        };
+        match view.optimize(&model.optimizer) {
+            Ok(()) => Ok(model),
+            Err(err) => Err((model.into_trainer(), err)),
+        }
+    }
+}
+
+impl<P: GpScalar, K: ModelKernel> Gpr<Fixed, P, K> {
+    /// [`Gpr::factor`] on any training input.
+    #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
+    pub(crate) fn factor_input(
+        self,
+        input: TrainInput<'_>,
+    ) -> Result<FittedGpr<Fixed, P, K>, (Self, GprError)> {
+        let mut model = FittedGpr::prepare(self, input)?;
+        let mut view = ExactFit {
+            core: &mut model.core,
+            store: &mut model.store,
+        };
+        match view.refactor() {
             Ok(()) => Ok(model),
             Err(err) => Err((model.into_trainer(), err)),
         }
@@ -527,8 +582,8 @@ impl<P: GpScalar> Gpr<Fixed, P> {
 }
 
 /// Drops the trainer and keeps the error so `?` works in `Result<_, GprError>`.
-impl<O, P> From<(Gpr<O, P>, GprError)> for GprError {
-    fn from((_, err): (Gpr<O, P>, GprError)) -> Self {
+impl<O, P, K: ModelKernel> From<(Gpr<O, P, K>, GprError)> for GprError {
+    fn from((_, err): (Gpr<O, P, K>, GprError)) -> Self {
         err
     }
 }

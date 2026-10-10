@@ -6,7 +6,11 @@ use crate::error::GprError;
 use faer::reborrow::ReborrowMut;
 use faer::{ColMut, Mat, MatMut, MatRef};
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::convert::Infallible;
+use std::fmt;
+use std::marker::PhantomData;
+use wide::f64x4;
 
 /// Returns the Rayon pool size, at least 1.
 pub(crate) fn worker_count() -> usize {
@@ -274,7 +278,7 @@ fn partition_count(thread_scratch: &[Mat<f64>]) -> usize {
 ///
 /// Lower triangle is filled in parallel. The upper triangle is copied afterwards
 /// so [`crate::kernel::Triangle::Full`] readers stay valid. `thread_scratch` is
-/// the detached per-worker slice from [`crate::workspace::Workspace`]; an empty
+/// the detached per-worker slice from [`crate::workspace::WorkspaceCore`]; an empty
 /// slice still parallelizes with [`worker_count`].
 pub(crate) fn fill_squared_euclidean(
     x: MatRef<'_, f64>,
@@ -299,11 +303,28 @@ pub(crate) fn fill_squared_euclidean(
 
 /// Number of entries in the lower triangle (diagonal included) of an
 /// `n × n` matrix.
-fn packed_len(n: usize) -> Result<usize, GprError> {
+pub(crate) fn packed_len(n: usize) -> Result<usize, GprError> {
     n.checked_add(1)
         .and_then(|n1| n.checked_mul(n1))
         .map(|cells| cells / 2)
         .ok_or(GprError::SizeOverflow)
+}
+
+/// The lower triangles of the dense column-major `n × n` `tables`, packed
+/// column run by column run and mapped by `f`, into one buffer of their
+/// exact length.
+fn pack_dense<T: Copy, U>(tables: &[Vec<T>], n: usize, f: impl Fn(T) -> U) -> Vec<U> {
+    let len = packed_len(n)
+        .ok()
+        .and_then(|tri| tri.checked_mul(tables.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(len);
+    for table in tables {
+        for col in 0..n {
+            out.extend(table[col * n + col..(col + 1) * n].iter().map(|&v| f(v)));
+        }
+    }
+    out
 }
 
 /// Offset of column `col` in a column-packed lower triangle of order `n`.
@@ -315,14 +336,87 @@ fn packed_col_offset(n: usize, col: usize) -> usize {
 
 /// Raw `(Δx_d)²` for every pair of rows of `x`, owned.
 ///
-/// Only the lower triangle (diagonal included) of each dimension is stored,
-/// column by column, so the cache holds `d · n(n+1)/2` values instead of
-/// `d · n²`. Read it through [`Self::view`].
+/// Each dimension keeps one triangle (diagonal included) in one of three
+/// layouts ([`ArdStore`]): the lower triangle packed as column runs
+/// (column `col` holds rows `col..n`), the dense `n × n` tables a caller
+/// handed over (kept as they are so a fit copies nothing), or, once an
+/// online model grows or shrinks the cache, row runs (row `i` holds
+/// columns `0..=i`), to which a new point is one contiguous run. Read it
+/// through [`Self::view`].
 #[derive(Clone, Debug)]
 pub(crate) struct ArdSqDiffBuf<T> {
-    data: Vec<T>,
+    data: ArdStore<T>,
     n: usize,
     d: usize,
+}
+
+/// The layout of an [`ArdSqDiffBuf`].
+#[derive(Debug)]
+enum ArdStore<T> {
+    /// The lower triangles, dimension after dimension, column by column:
+    /// column `col` holds rows `col..n`.
+    Packed(Vec<T>),
+    /// One dense column-major `n × n` table per dimension; only the lower
+    /// triangle is read.
+    Dense(Vec<Vec<T>>),
+    /// One buffer per dimension, row by row: row `i` holds columns
+    /// `0..=i` and starts at `i(i+1)/2`. A buffer's spare capacity is the
+    /// room for later points.
+    Rows(Vec<Vec<T>>),
+}
+
+/// The range of column `col`'s rows `col..n` of dimension `dim` in packed
+/// lower triangles of order `n`.
+pub(crate) fn packed_run(n: usize, dim: usize, col: usize) -> std::ops::Range<usize> {
+    let start = dim * (n * (n + 1) / 2) + packed_col_offset(n, col);
+    start..start + (n - col)
+}
+
+/// A clone keeps the room the row runs reserved, so a cloned online model
+/// grows as the original does.
+impl<T: Clone> Clone for ArdStore<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Packed(data) => Self::Packed(data.clone()),
+            Self::Dense(tables) => Self::Dense(tables.clone()),
+            Self::Rows(rows) => Self::Rows(
+                rows.iter()
+                    .map(|dim| {
+                        let mut copy = Vec::with_capacity(dim.capacity());
+                        copy.extend_from_slice(dim);
+                        copy
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Offset of row `i` in a row-packed lower triangle.
+#[inline]
+fn row_offset(i: usize) -> usize {
+    i * (i + 1) / 2
+}
+
+/// Columns of a lower triangle walked together into row runs.
+const ROW_RUN_TILE: usize = 16;
+
+/// Walks the lower triangle of order `n` (diagonal included) into row
+/// runs, a tile of columns at a time, so a column-major source is read
+/// down its columns: `f(i, row_offset(i) + j, j)` for each pair `j ≤ i`.
+/// Every place that lays pairs out as row runs takes this one walk.
+pub(crate) fn walk_row_runs(n: usize, mut f: impl FnMut(usize, usize, usize)) {
+    let mut j0 = 0;
+    while j0 < n {
+        let j1 = (j0 + ROW_RUN_TILE).min(n);
+        for i in j0..n {
+            let base = row_offset(i);
+            for j in j0..j1.min(i + 1) {
+                f(i, base + j, j);
+            }
+        }
+        j0 = j1;
+    }
 }
 
 impl<T: KernelScalar> ArdSqDiffBuf<T> {
@@ -339,7 +433,262 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
             .ok_or(GprError::SizeOverflow)?;
         let mut data = vec![T::from_f64(0.0); len];
         T::write_ard(x, &mut data);
-        Ok(Self { data, n, d })
+        Ok(Self::from_packed(data, n, d))
+    }
+
+    /// Packs the lower triangles of `d` dense `n × n` blocks; `pair(k, i, j)`
+    /// is `(Δ_k)²` of the pair `(i, j)`, `i ≥ j`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    #[cfg(test)]
+    pub(crate) fn from_pairs(
+        n: usize,
+        d: usize,
+        pair: impl Fn(usize, usize, usize) -> T,
+    ) -> Result<Self, GprError> {
+        let len = packed_len(n)?
+            .checked_mul(d)
+            .ok_or(GprError::SizeOverflow)?;
+        let mut data = Vec::with_capacity(len);
+        for k in 0..d {
+            for col in 0..n {
+                for row in col..n {
+                    data.push(pair(k, row, col));
+                }
+            }
+        }
+        Ok(Self::from_packed(data, n, d))
+    }
+
+    /// Packs the lower triangles of `d` dense, column-major `n × n` blocks
+    /// (`block(k)` is dimension `k`), one contiguous run per column.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when `d · n(n+1)/2` overflows.
+    pub(crate) fn from_dense<'b>(
+        n: usize,
+        d: usize,
+        block: impl Fn(usize) -> &'b [f64],
+    ) -> Result<Self, GprError> {
+        let len = packed_len(n)?
+            .checked_mul(d)
+            .ok_or(GprError::SizeOverflow)?;
+        let mut data = Vec::with_capacity(len);
+        for k in 0..d {
+            let block = block(k);
+            for col in 0..n {
+                data.extend(
+                    block[col * n + col..(col + 1) * n]
+                        .iter()
+                        .map(|&v| T::from_f64(v)),
+                );
+            }
+        }
+        Ok(Self::from_packed(data, n, d))
+    }
+
+    /// A cache of `n` points and `d` dimensions from its packed values:
+    /// dimension after dimension, each the lower triangle column by column.
+    pub(crate) fn from_packed(data: Vec<T>, n: usize, d: usize) -> Self {
+        debug_assert_eq!(
+            Some(data.len()),
+            packed_len(n).ok().and_then(|l| l.checked_mul(d))
+        );
+        Self {
+            data: ArdStore::Packed(data),
+            n,
+            d,
+        }
+    }
+
+    /// The lower triangles in their persist order, whatever the layout:
+    /// dimension after dimension, each column by column (column `col`
+    /// holds rows `col..n`). A packed cache is read in place.
+    pub(crate) fn packed(&self) -> Cow<'_, [T]>
+    where
+        T: Copy,
+    {
+        let n = self.n;
+        match &self.data {
+            ArdStore::Packed(data) => Cow::Borrowed(data),
+            ArdStore::Dense(tables) => Cow::Owned(pack_dense(tables, n, |v| v)),
+            ArdStore::Rows(rows) => {
+                let mut out = Vec::with_capacity(self.stored_capacity_hint());
+                for dim in rows {
+                    for col in 0..n {
+                        out.extend((col..n).map(|row| dim[row * (row + 1) / 2 + col]));
+                    }
+                }
+                Cow::Owned(out)
+            }
+        }
+    }
+
+    /// `d · n(n+1)/2`, the packed length of every dimension: a capacity
+    /// hint, `0` when it does not fit (a `Vec` then grows as it fills).
+    fn stored_capacity_hint(&self) -> usize {
+        packed_len(self.n)
+            .ok()
+            .and_then(|tri| tri.checked_mul(self.d))
+            .unwrap_or(0)
+    }
+
+    /// A cache of `n` points from `d` dense column-major `n × n` tables,
+    /// kept as they are (one per dimension).
+    pub(crate) fn from_tables(tables: Vec<Vec<T>>, n: usize) -> Self {
+        debug_assert!(tables.iter().all(|t| Some(t.len()) == n.checked_mul(n)));
+        Self {
+            d: tables.len(),
+            data: ArdStore::Dense(tables),
+            n,
+        }
+    }
+
+    /// The same cache with every value mapped by `f` (a cast), in one pass
+    /// over the stored triangles: row runs stay row runs, and the other
+    /// layouts are packed as column runs.
+    pub(crate) fn map<U>(&self, f: impl Fn(T) -> U) -> ArdSqDiffBuf<U>
+    where
+        T: Copy,
+    {
+        let data = match &self.data {
+            ArdStore::Packed(data) => ArdStore::Packed(data.iter().map(|&v| f(v)).collect()),
+            ArdStore::Rows(rows) => ArdStore::Rows(
+                rows.iter()
+                    .map(|dim| dim.iter().map(|&v| f(v)).collect())
+                    .collect(),
+            ),
+            ArdStore::Dense(tables) => ArdStore::Packed(pack_dense(tables, self.n, f)),
+        };
+        ArdSqDiffBuf {
+            data,
+            n: self.n,
+            d: self.d,
+        }
+    }
+
+    /// Makes room for one more point: the cache becomes row runs (once,
+    /// for a cache of column runs or dense tables), and each dimension's
+    /// buffer reserves the new row, so [`Self::push_point`] does not
+    /// allocate. A buffer grows as a `Vec` does, by doubling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when the grown cache does not fit.
+    pub(crate) fn reserve_point(&mut self) -> Result<(), GprError> {
+        self.lay_out_rows()?;
+        let n = self.n;
+        if let ArdStore::Rows(rows) = &mut self.data {
+            let more = n.checked_add(1).ok_or(GprError::SizeOverflow)?;
+            for dim in rows {
+                dim.try_reserve(more).map_err(|_| GprError::SizeOverflow)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lays the cache out as row runs, unless it is already, so a later
+    /// [`Self::remove_point`] does not fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::SizeOverflow`] when the row runs do not fit.
+    pub(crate) fn ready_to_change(&mut self) -> Result<(), GprError> {
+        self.lay_out_rows()
+    }
+
+    /// Lays the cache out as row runs, unless it is already.
+    fn lay_out_rows(&mut self) -> Result<(), GprError> {
+        if matches!(self.data, ArdStore::Rows(_)) {
+            return Ok(());
+        }
+        let n = self.n;
+        let len = packed_len(n)?;
+        let view = self.view();
+        let Runs::Lower(lower) = view.runs() else {
+            return Ok(());
+        };
+        let mut rows = Vec::with_capacity(self.d);
+        for dim in 0..self.d {
+            let mut out = Vec::new();
+            out.try_reserve_exact(packed_len(n + 1)?)
+                .map_err(|_| GprError::SizeOverflow)?;
+            out.resize(len, T::from_f64(0.0));
+            walk_row_runs(n, |i, at, j| out[at] = lower.column(dim, j)[i - j]);
+            rows.push(out);
+        }
+        self.data = ArdStore::Rows(rows);
+        Ok(())
+    }
+
+    /// Whether [`Self::push_point`] has its row runs and their room: after
+    /// [`Self::reserve_point`].
+    pub(crate) fn can_push(&self) -> bool {
+        let n = self.n;
+        matches!(&self.data, ArdStore::Rows(rows)
+            if rows.iter().all(|dim| dim.capacity() - dim.len() > n))
+    }
+
+    /// Whether [`Self::remove_point`] has its row runs: after
+    /// [`Self::ready_to_change`].
+    pub(crate) fn can_remove(&self) -> bool {
+        matches!(self.data, ArdStore::Rows(_))
+    }
+
+    /// Appends point `n`: `column(dim)` holds its `(Δ_dim)²` to the points
+    /// `0..n` (at least `n` values); its own diagonal is zero. Each
+    /// dimension's buffer takes one contiguous run, in the room
+    /// [`Self::reserve_point`] made ([`Self::can_push`]).
+    pub(crate) fn push_point<'c>(&mut self, column: impl Fn(usize) -> &'c [T])
+    where
+        T: 'c,
+    {
+        debug_assert!(self.can_push(), "push_point before reserve_point");
+        let n = self.n;
+        let ArdStore::Rows(rows) = &mut self.data else {
+            return;
+        };
+        for (dim, buffer) in rows.iter_mut().enumerate() {
+            buffer.extend_from_slice(&column(dim)[..n]);
+            buffer.push(T::from_f64(0.0));
+        }
+        self.n = n + 1;
+    }
+
+    /// Removes point `index` (`< n`) in place: row `index` goes, each later
+    /// row loses its column `index`, and the later points move up one. One
+    /// forward pass over the rows past `index`; rows before it stay put.
+    /// The cache holds row runs ([`Self::can_remove`]).
+    pub(crate) fn remove_point(&mut self, index: usize) {
+        let n = self.n;
+        debug_assert!(index < n, "remove_point past the points");
+        debug_assert!(self.can_remove(), "remove_point before ready_to_change");
+        let ArdStore::Rows(rows) = &mut self.data else {
+            return;
+        };
+        let compact = |buffer: &mut Vec<T>| {
+            let mut write = row_offset(index);
+            for i in index + 1..n {
+                let start = row_offset(i);
+                // Columns `0..index`, then `index + 1..=i`.
+                buffer.copy_within(start..start + index, write);
+                write += index;
+                buffer.copy_within(start + index + 1..start + i + 1, write);
+                write += i - index;
+            }
+            buffer.truncate(write);
+        };
+        // From inside the pool (a delete beside the factor's update), the
+        // dimensions' buffers move side by side.
+        if rows.len() > 1 && rayon::current_thread_index().is_some() {
+            rows.par_iter_mut().for_each(compact);
+        } else {
+            rows.iter_mut().for_each(compact);
+        }
+        self.n = n - 1;
     }
 
     /// `(points, dimensions)` the cache was filled for.
@@ -351,39 +700,179 @@ impl<T: KernelScalar> ArdSqDiffBuf<T> {
     /// Number of stored values.
     #[cfg(test)]
     pub(crate) fn stored_len(&self) -> usize {
-        self.data.len()
+        match &self.data {
+            ArdStore::Packed(data) => data.len(),
+            ArdStore::Dense(tables) | ArdStore::Rows(tables) => tables.iter().map(Vec::len).sum(),
+        }
+    }
+
+    /// Whether the cache keeps the caller's dense tables.
+    #[cfg(test)]
+    pub(crate) fn is_dense(&self) -> bool {
+        matches!(self.data, ArdStore::Dense(_))
     }
 
     /// Overwrites every cached value, to show that a reader uses the cache.
     #[cfg(test)]
     pub(crate) fn poison(&mut self, value: T) {
-        self.data.fill(value);
+        match &mut self.data {
+            ArdStore::Packed(data) => data.fill(value),
+            ArdStore::Dense(tables) | ArdStore::Rows(tables) => {
+                tables.iter_mut().for_each(|t| t.fill(value));
+            }
+        }
     }
 
     pub(crate) fn view(&self) -> ArdSqDiff<'_, T> {
+        let data = match &self.data {
+            ArdStore::Packed(data) => {
+                StoreRef::Packed(data, data.len().checked_div(self.d).unwrap_or(0))
+            }
+            ArdStore::Dense(tables) => StoreRef::Dense(tables),
+            ArdStore::Rows(rows) => StoreRef::Rows(rows),
+        };
         ArdSqDiff {
-            data: &self.data,
+            data,
             n: self.n,
             d: self.d,
-            block: self.data.len().checked_div(self.d).unwrap_or(0),
         }
     }
 }
 
 /// Borrowed raw `(Δx_d)²` cache of [`ArdSqDiffBuf`].
 ///
-/// [`Self::get`] reads any pair, in either order. [`Self::column`] is the
-/// contiguous stored part of one column: rows `col..n`.
+/// [`Self::get`] reads any pair, in either order. A cache of column runs
+/// hands out [`Self::lower`], one of row runs [`Self::rows`]: the loops
+/// that read whole runs take the layout's own.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ArdSqDiff<'a, T> {
-    data: &'a [T],
+pub struct ArdSqDiff<'a, T> {
+    data: StoreRef<'a, T>,
     n: usize,
     d: usize,
-    /// Entries per dimension, `n(n+1)/2`.
-    block: usize,
+}
+
+/// The borrowed layout of an [`ArdSqDiff`].
+#[derive(Clone, Copy, Debug)]
+enum StoreRef<'a, T> {
+    /// Packed lower triangles, with the entries per dimension.
+    Packed(&'a [T], usize),
+    /// Dense `n × n` tables, one per dimension.
+    Dense(&'a [Vec<T>]),
+    /// Dense `n × n` tables, one per dimension, one after another.
+    Flat(&'a [T]),
+    /// Row runs, one buffer per dimension.
+    Rows(&'a [Vec<T>]),
+}
+
+/// One pair of a cache in every dimension ([`ArdSqDiff::pair`]): dimension
+/// `dim` is `data[dim * stride + at]`, or `tables[dim][at]`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PairAt<'a, T> {
+    /// One buffer, the dimensions `stride` values apart.
+    Strided {
+        data: &'a [T],
+        stride: usize,
+        at: usize,
+    },
+    /// One buffer per dimension.
+    Tables { tables: &'a [Vec<T>], at: usize },
+}
+
+/// The column runs of a cache: column `col` holds rows `col..n`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LowerRuns<'a, T> {
+    data: ColumnRef<'a, T>,
+    n: usize,
+}
+
+/// The layouts that hold column runs.
+#[derive(Clone, Copy, Debug)]
+enum ColumnRef<'a, T> {
+    /// Packed lower triangles, with the entries per dimension.
+    Packed(&'a [T], usize),
+    /// Dense `n × n` tables, one per dimension.
+    Dense(&'a [Vec<T>]),
+    /// Dense `n × n` tables, one per dimension, one after another.
+    Flat(&'a [T]),
+}
+
+/// The runs a cache holds, in its own order: a loop over whole runs takes
+/// the arm of its layout, so no layout is read as another.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Runs<'a, T> {
+    /// Column runs (packed triangles or dense tables).
+    Lower(LowerRuns<'a, T>),
+    /// Row runs (an online model's).
+    Rows(RowRuns<'a, T>),
+}
+
+/// The row runs of a cache: row `i` holds columns `0..=i`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowRuns<'a, T> {
+    rows: &'a [Vec<T>],
+    n: usize,
+}
+
+impl<'a, T> LowerRuns<'a, T> {
+    /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
+    #[inline]
+    pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
+        let n = self.n;
+        match self.data {
+            ColumnRef::Packed(data, block) => {
+                let start = dim * block + packed_col_offset(n, col);
+                &data[start..start + (n - col)]
+            }
+            ColumnRef::Dense(tables) => &tables[dim][col * n + col..(col + 1) * n],
+            ColumnRef::Flat(data) => {
+                &data[dim * n * n + col * n + col..dim * n * n + (col + 1) * n]
+            }
+        }
+    }
+
+    /// Every stored value of dimension `dim`, when the cache is packed:
+    /// the lower triangle, column by column.
+    #[inline]
+    pub(crate) fn packed_block(&self, dim: usize) -> Option<&'a [T]> {
+        match self.data {
+            ColumnRef::Packed(data, block) => Some(&data[dim * block..(dim + 1) * block]),
+            ColumnRef::Dense(_) | ColumnRef::Flat(_) => None,
+        }
+    }
+}
+
+impl<'a, T> RowRuns<'a, T> {
+    /// Number of points.
+    pub(crate) fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Every stored value of dimension `dim`: row after row.
+    #[inline]
+    pub(crate) fn buffer(&self, dim: usize) -> &'a [T] {
+        &self.rows[dim][..row_offset(self.n)]
+    }
+
+    /// `(x_i,dim − x_col,dim)²` for columns `0..=i`, in column order.
+    #[inline]
+    pub(crate) fn row(&self, dim: usize, i: usize) -> &'a [T] {
+        let start = row_offset(i);
+        &self.rows[dim][start..start + i + 1]
+    }
 }
 
 impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
+    /// The `d` dense checked `n × n` squares of `data`, one after another
+    /// (only the lower triangles are read).
+    pub(crate) fn flat(data: &'a [T], n: usize) -> Self {
+        let d = data.len().checked_div(n * n).unwrap_or(0);
+        Self {
+            data: StoreRef::Flat(data),
+            n,
+            d,
+        }
+    }
+
     /// Number of points.
     pub(crate) fn n(&self) -> usize {
         self.n
@@ -394,28 +883,493 @@ impl<'a, T: KernelScalar> ArdSqDiff<'a, T> {
         self.d
     }
 
-    /// `(x_row,dim − x_col,dim)²` for rows `col..n`, in row order.
+    /// The runs the cache holds.
     #[inline]
-    pub(crate) fn column(&self, dim: usize, col: usize) -> &'a [T] {
-        let start = dim * self.block + packed_col_offset(self.n, col);
-        &self.data[start..start + (self.n - col)]
+    pub(crate) fn runs(&self) -> Runs<'a, T> {
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => Runs::Lower(LowerRuns {
+                data: ColumnRef::Packed(data, block),
+                n,
+            }),
+            StoreRef::Dense(tables) => Runs::Lower(LowerRuns {
+                data: ColumnRef::Dense(tables),
+                n,
+            }),
+            StoreRef::Flat(data) => Runs::Lower(LowerRuns {
+                data: ColumnRef::Flat(data),
+                n,
+            }),
+            StoreRef::Rows(rows) => Runs::Rows(RowRuns { rows, n }),
+        }
     }
 
-    /// `(x_row,dim − x_col,dim)²` for any pair.
+    /// The column runs, when the cache holds them (packed or dense).
+    #[inline]
+    pub(crate) fn lower(&self) -> Option<LowerRuns<'a, T>> {
+        match self.runs() {
+            Runs::Lower(lower) => Some(lower),
+            Runs::Rows(_) => None,
+        }
+    }
+
+    /// The row runs, when the cache holds them.
+    #[inline]
+    pub(crate) fn rows(&self) -> Option<RowRuns<'a, T>> {
+        match self.runs() {
+            Runs::Rows(rows) => Some(rows),
+            Runs::Lower(_) => None,
+        }
+    }
+
+    /// Where the pair `(row, col)` sits in every dimension, the layout
+    /// read once: a loop over the dimensions then only indexes.
+    #[inline(always)]
+    pub(crate) fn pair(&self, row: usize, col: usize) -> PairAt<'a, T> {
+        let (row, col) = if row >= col { (row, col) } else { (col, row) };
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => PairAt::Strided {
+                data,
+                stride: block,
+                at: packed_col_offset(n, col) + row - col,
+            },
+            StoreRef::Flat(data) => PairAt::Strided {
+                data,
+                stride: n * n,
+                at: col * n + row,
+            },
+            StoreRef::Dense(tables) => PairAt::Tables {
+                tables,
+                at: col * n + row,
+            },
+            StoreRef::Rows(rows) => PairAt::Tables {
+                tables: rows,
+                at: row_offset(row) + col,
+            },
+        }
+    }
+
+    /// `(x_row,dim − x_col,dim)²` for any pair. A loop over the dimensions
+    /// of one pair reads [`Self::pair`] instead, which matches the layout
+    /// once.
     #[inline]
     pub(crate) fn get(&self, dim: usize, row: usize, col: usize) -> T {
         let (row, col) = if row >= col { (row, col) } else { (col, row) };
-        self.column(dim, col)[row - col]
+        // One flat match on the layout, the packed cache of a fit first: a
+        // read per pair and dimension sits in the kernels' inner loops.
+        let n = self.n;
+        match self.data {
+            StoreRef::Packed(data, block) => {
+                data[dim * block + packed_col_offset(n, col) + row - col]
+            }
+            StoreRef::Rows(rows) => rows[dim][row_offset(row) + col],
+            StoreRef::Dense(tables) => tables[dim][col * n + row],
+            StoreRef::Flat(data) => data[dim * n * n + col * n + row],
+        }
+    }
+
+    /// The first stored pair `(row, col)`, `row ≥ col`, of dimension `dim`
+    /// whose value `bad` picks, in the layout's own order.
+    pub(crate) fn position(&self, dim: usize, bad: impl Fn(T) -> bool) -> Option<(usize, usize)> {
+        match self.runs() {
+            Runs::Rows(rows) => (0..self.n).find_map(|i| {
+                rows.row(dim, i)
+                    .iter()
+                    .position(|&v| bad(v))
+                    .map(|j| (i, j))
+            }),
+            Runs::Lower(lower) => (0..self.n).find_map(|j| {
+                lower
+                    .column(dim, j)
+                    .iter()
+                    .position(|&v| bad(v))
+                    .map(|k| (j + k, j))
+            }),
+        }
     }
 
     /// The same cache as `f64` when `T` is `f64`, for the SIMD paths.
     pub(crate) fn as_f64(self) -> Option<ArdSqDiff<'a, f64>> {
+        let data = match self.data {
+            StoreRef::Packed(data, block) => StoreRef::Packed(T::as_f64_slice(data)?, block),
+            StoreRef::Dense(tables) => StoreRef::Dense(T::as_f64_vecs(tables)?),
+            StoreRef::Flat(data) => StoreRef::Flat(T::as_f64_slice(data)?),
+            StoreRef::Rows(rows) => StoreRef::Rows(T::as_f64_vecs(rows)?),
+        };
         Some(ArdSqDiff {
-            data: T::as_f64_slice(self.data)?,
+            data,
             n: self.n,
             d: self.d,
-            block: self.block,
         })
+    }
+}
+
+/// Whether the values of an [`ArdBlocks`] were checked when they were bound.
+///
+/// [`Checked`] blocks (the training triangles, a cast, a repaired or
+/// filled table) are read as they are. [`Unchecked`] blocks (a caller's
+/// prediction block that an `f64` model reads in place) are checked as
+/// they are read, so the caller's values are read once: their values come
+/// out only through [`ArdBlocks::read`], [`ArdBlocks::column`], and
+/// [`ArdBlocks::gates`], each of which checks what it hands out.
+pub trait BlockState: Copy + fmt::Debug + Send + Sync + 'static + sealed::Sealed {
+    /// Whether the values were checked when bound.
+    const CHECKED: bool;
+}
+
+/// Blocks whose values were checked when bound.
+#[derive(Clone, Copy, Debug)]
+pub enum Checked {}
+
+/// Blocks whose values are checked as they are read.
+#[derive(Clone, Copy, Debug)]
+pub enum Unchecked {}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Checked {}
+    impl Sealed for super::Unchecked {}
+}
+
+impl BlockState for Checked {
+    const CHECKED: bool = true;
+}
+
+impl BlockState for Unchecked {
+    const CHECKED: bool = false;
+}
+
+/// Raw `(Δ_d)²` of a rectangular block (`rows × cols`), one dense
+/// column-major block per dimension: `(row, col)` of dimension `k` is
+/// `block(k)[row + col * rows]`. `S` says whether the values were checked
+/// when bound ([`BlockState`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ArdBlocks<'a, T, S = Checked> {
+    /// One block per dimension.
+    blocks: BlockList<'a, T>,
+    rows: usize,
+    cols: usize,
+    /// First column of the stored blocks this view starts at.
+    col0: usize,
+    /// Distance between the starts of two columns of a block: `rows`, or
+    /// more for a block with room for more rows (an online sparse model's).
+    ld: usize,
+    /// The slot's place in the kernel's slots, which an error of an
+    /// unchecked value names ([`Self::of_slot`]).
+    slot: Option<usize>,
+    state: PhantomData<S>,
+}
+
+/// The per-dimension blocks of an [`ArdBlocks`]: a caller's borrowed or
+/// moved blocks, blocks packed one after another (a fill, a repair, or a
+/// cast), or one block repeated.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BlockList<'a, T> {
+    Slices(&'a [&'a [T]]),
+    /// Owned blocks a caller moved in.
+    Vecs(&'a [Vec<T>]),
+    /// `dims` blocks of `len` values each, one after another.
+    Packed(&'a [T], usize, usize),
+    /// One block for each of `dims` dimensions.
+    Repeat(&'a [T], usize),
+    /// The packed training triangles: pair `(row, col)` of the square,
+    /// read in either order. No dense block exists.
+    Triangles(ArdSqDiff<'a, T>),
+}
+
+impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
+    /// `blocks` of `rows × cols` pairs in the state `S`. The type does not
+    /// prove the state: only binding code makes a `Checked` block, from
+    /// values it checked, cast, or packed.
+    pub(crate) fn new(blocks: BlockList<'a, T>, rows: usize, cols: usize, col0: usize) -> Self {
+        Self::strided(blocks, rows, cols, col0, rows)
+    }
+
+    /// As [`Self::new`], with column `c` of each block starting at `c · ld`
+    /// (`ld ≥ rows`).
+    pub(crate) fn strided(
+        blocks: BlockList<'a, T>,
+        rows: usize,
+        cols: usize,
+        col0: usize,
+        ld: usize,
+    ) -> Self {
+        Self {
+            blocks,
+            rows,
+            cols,
+            col0,
+            ld,
+            slot: None,
+            state: PhantomData,
+        }
+    }
+
+    /// These blocks as those of the slot at `place` in the kernel's slots.
+    pub(crate) fn of_slot(self, place: usize) -> Self {
+        Self {
+            slot: Some(place),
+            ..self
+        }
+    }
+
+    /// `err` of these blocks, named by their slot when it is known.
+    pub(crate) fn locate(&self, err: GprError) -> GprError {
+        match self.slot {
+            Some(place) => err.in_slot(place),
+            None => err,
+        }
+    }
+
+    /// Columns `start..start + len` of these blocks.
+    pub(crate) fn subcols(self, start: usize, len: usize) -> Self {
+        Self {
+            cols: len,
+            col0: self.col0 + start,
+            ..self
+        }
+    }
+
+    /// Number of dimensions.
+    pub(crate) fn d(&self) -> usize {
+        match self.blocks {
+            BlockList::Slices(blocks) => blocks.len(),
+            BlockList::Vecs(blocks) => blocks.len(),
+            BlockList::Packed(_, _, dims) | BlockList::Repeat(_, dims) => dims,
+            BlockList::Triangles(cache) => cache.d(),
+        }
+    }
+
+    /// Rows of the view.
+    pub(crate) fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Columns of the view.
+    pub(crate) fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// The dense block of dimension `dim`, or an empty slice when the
+    /// blocks are packed triangles. Raw: only [`Checked`] blocks expose it.
+    fn raw_block(&self, dim: usize) -> &'a [T] {
+        match self.blocks {
+            BlockList::Slices(blocks) => blocks[dim],
+            BlockList::Vecs(blocks) => &blocks[dim],
+            BlockList::Packed(all, len, _) => &all[dim * len..(dim + 1) * len],
+            BlockList::Repeat(block, _) => block,
+            BlockList::Triangles(_) => &[],
+        }
+    }
+
+    fn raw_get(&self, dim: usize, row: usize, col: usize) -> T {
+        match self.blocks {
+            BlockList::Triangles(cache) => cache.get(dim, row, col + self.col0),
+            _ => self.raw_block(dim)[row + (col + self.col0) * self.ld],
+        }
+    }
+
+    /// `(Δ_dim)²` of the pair `(row, col)`, checked unless the blocks were.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] if the value is not finite or
+    /// is negative, at its place in the caller's table.
+    #[inline]
+    pub(crate) fn read(&self, dim: usize, row: usize, col: usize) -> Result<T, GprError> {
+        let v = self.raw_get(dim, row, col);
+        if S::CHECKED || super::sources::valid(v.to_f64()) {
+            Ok(v)
+        } else {
+            let err = super::sources::invalid_value(v.to_f64(), row, col + self.col0);
+            Err(self.locate(err.in_dim(dim)))
+        }
+    }
+
+    /// Column `col` of dimension `dim` (every row) as an `f64` slice,
+    /// checked unless the blocks were; `None` when the blocks are not dense
+    /// `f64` columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] at the first invalid value.
+    pub(crate) fn column(&self, dim: usize, col: usize) -> Result<Option<&'a [f64]>, GprError> {
+        let Some(run) = self.f64_column(dim, col) else {
+            return Ok(None);
+        };
+        if !S::CHECKED && !super::simd::all_valid_distances(run) {
+            let err = super::sources::first_invalid_from(run, self.rows, self.col0 + col);
+            return Err(self.locate(err.in_dim(dim)));
+        }
+        Ok(Some(run))
+    }
+
+    /// Whether every block is a dense `f64` block holding all the view's
+    /// columns, as [`Self::column`] and [`Gates::gate`] read them.
+    pub(crate) fn dense_f64(&self) -> bool {
+        let end = match self.cols {
+            0 => 0,
+            cols => (self.col0 + cols - 1) * self.ld + self.rows,
+        };
+        !matches!(self.blocks, BlockList::Triangles(_))
+            && T::as_f64_slice(&[]).is_some()
+            && (0..self.d()).all(|dim| self.raw_block(dim).len() >= end)
+    }
+
+    fn f64_column(&self, dim: usize, col: usize) -> Option<&'a [f64]> {
+        if matches!(self.blocks, BlockList::Triangles(_)) {
+            return None;
+        }
+        let start = (self.col0 + col) * self.ld;
+        T::as_f64_slice(self.raw_block(dim).get(start..start + self.rows)?)
+    }
+
+    /// The dense `f64` blocks of every dimension, from which a SIMD loop
+    /// takes one [`Gate`] per column; `None` when the blocks are not dense
+    /// `f64` columns or have more than [`GATE_DIMS`] dimensions.
+    pub(crate) fn gates(&self) -> Option<Gates<'a, S>> {
+        let d = self.d();
+        if d > GATE_DIMS || !self.dense_f64() {
+            return None;
+        }
+        let mut blocks: [&'a [f64]; GATE_DIMS] = [&[]; GATE_DIMS];
+        for (dim, block) in blocks.iter_mut().enumerate().take(d) {
+            *block = T::as_f64_slice(self.raw_block(dim))?;
+        }
+        Some(Gates {
+            blocks,
+            d,
+            rows: self.rows,
+            col0: self.col0,
+            ld: self.ld,
+            state: PhantomData,
+        })
+    }
+}
+
+impl<'a, T: KernelScalar> ArdBlocks<'a, T, Checked> {
+    /// The dense block of dimension `dim` (`rows` rows per column), or an
+    /// empty slice when the blocks are packed triangles. Only a block whose
+    /// columns lie back to back ([`Self::new`]) reads this way.
+    pub(crate) fn block(&self, dim: usize) -> &'a [T] {
+        self.raw_block(dim)
+    }
+}
+
+/// The dense `f64` blocks of an [`ArdBlocks`] ([`ArdBlocks::gates`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Gates<'a, S> {
+    blocks: [&'a [f64]; GATE_DIMS],
+    d: usize,
+    rows: usize,
+    col0: usize,
+    /// Column stride of the blocks ([`ArdBlocks::strided`]).
+    ld: usize,
+    state: PhantomData<S>,
+}
+
+impl<'a, S: BlockState> Gates<'a, S> {
+    /// The column `col` of every dimension, for one pass of a SIMD loop that
+    /// reads each value once: a [`Gate`] folds the check of every value it
+    /// sums (unless the blocks were checked), and [`Gate::verdict`] gives
+    /// the result.
+    #[inline]
+    pub(crate) fn gate(&self, col: usize) -> Gate<'a, S> {
+        let start = (self.col0 + col) * self.ld;
+        let mut runs: [&'a [f64]; GATE_DIMS] = [&[]; GATE_DIMS];
+        for (run, block) in runs.iter_mut().zip(&self.blocks[..self.d]) {
+            *run = &block[start..start + self.rows];
+        }
+        Gate {
+            runs,
+            d: self.d,
+            nonfinite: f64x4::ZERO,
+            least: f64x4::ZERO,
+            rows: self.rows,
+            col: self.col0 + col,
+            state: PhantomData,
+        }
+    }
+}
+
+/// Dimensions a [`Gate`] holds.
+pub(crate) const GATE_DIMS: usize = 16;
+
+/// One column of every dimension of an [`ArdBlocks`], handed to a SIMD loop
+/// that reads each value once. The loop gets only weighted sums of the
+/// values ([`Self::weighted4`], [`Self::weighted1`]); for [`Unchecked`]
+/// blocks each value is folded into the check as it is summed (two lane
+/// sums without a branch: `v · 0`, which stays `0` unless a value is `NaN`
+/// or infinite, and the least value, which stays `≥ 0` unless one is
+/// negative), and [`Self::verdict`] reports the result.
+#[must_use = "a gate's sums are valid only once its verdict is Ok"]
+pub(crate) struct Gate<'a, S> {
+    runs: [&'a [f64]; GATE_DIMS],
+    d: usize,
+    nonfinite: f64x4,
+    least: f64x4,
+    rows: usize,
+    col: usize,
+    state: PhantomData<S>,
+}
+
+impl<S: BlockState> Gate<'_, S> {
+    /// `Σ_d w_d src_d` of rows `i..i + 4`.
+    #[inline(always)]
+    pub(crate) fn weighted4(&mut self, w: &[f64], i: usize) -> f64x4 {
+        let mut r2 = f64x4::ZERO;
+        for (run, &wd) in self.runs[..self.d].iter().zip(w) {
+            let v = super::simd::load4(run, i);
+            if !S::CHECKED {
+                self.nonfinite += v * f64x4::ZERO;
+                self.least = self.least.fast_min(v);
+            }
+            r2 += v * f64x4::splat(wd);
+        }
+        r2
+    }
+
+    /// `Σ_d w_d src_d` of row `i`.
+    #[inline(always)]
+    pub(crate) fn weighted1(&mut self, w: &[f64], i: usize) -> f64 {
+        let mut r2 = 0.0;
+        for (run, &wd) in self.runs[..self.d].iter().zip(w) {
+            let v = run[i];
+            if !S::CHECKED {
+                self.nonfinite += f64x4::splat(v * 0.0);
+                self.least = self.least.fast_min(f64x4::splat(v));
+            }
+            r2 += v * wd;
+        }
+        r2
+    }
+
+    /// Whether every value summed was valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::InvalidDistance`] at the first invalid value of
+    /// the column, when one was summed.
+    pub(crate) fn verdict(self) -> Result<(), GprError> {
+        if S::CHECKED {
+            return Ok(());
+        }
+        // Exact, not a tolerance: a sum of `v · 0` is `0` or `NaN`.
+        let valid =
+            self.nonfinite.reduce_add() == 0.0 && self.least.to_array().iter().all(|&l| l >= 0.0);
+        if valid {
+            return Ok(());
+        }
+        for (dim, run) in self.runs[..self.d].iter().enumerate() {
+            if !super::simd::all_valid_distances(run) {
+                let err = super::sources::first_invalid_from(run, self.rows, self.col);
+                return Err(err.in_dim(dim));
+            }
+        }
+        // The lanes failed, yet no run holds an invalid value: the two
+        // checks disagree. Refuse without claiming a place.
+        Err(super::sources::unlocated())
     }
 }
 
@@ -801,7 +1755,7 @@ mod tests {
         assert_eq!(cache.stored_len(), d * n * (n + 1) / 2);
         for dim in 0..d {
             for col in 0..n {
-                assert_eq!(view.column(dim, col).len(), n - col);
+                assert_eq!(view.lower().expect("lower").column(dim, col).len(), n - col);
                 for row in 0..n {
                     let diff = x[(row, dim)] - x[(col, dim)];
                     assert!((view.get(dim, row, col) - diff * diff).abs() <= 1e-15);
@@ -818,5 +1772,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Coordinate `k` of pool point `p`, and the pair of two pool points.
+    fn pool_pair(k: usize, a: usize, b: usize) -> f64 {
+        let at = |p: usize| (p as f64 * (0.41 + 0.17 * k as f64)).sin() * (1.0 + k as f64);
+        let diff = at(a) - at(b);
+        diff * diff
+    }
+
+    /// Every pair of `cache` is the pair of the pool points `live` names.
+    fn assert_holds(cache: &ArdSqDiffBuf<f64>, live: &[usize], d: usize) {
+        let view = cache.view();
+        assert_eq!((view.n(), view.d()), (live.len(), d));
+        for k in 0..d {
+            for (i, &a) in live.iter().enumerate() {
+                for (j, &b) in live.iter().enumerate() {
+                    assert_eq!(
+                        view.get(k, i, j).to_bits(),
+                        pool_pair(k, a, b).to_bits(),
+                        "{k} ({i}, {j})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Inserts grow the row runs in their reserved room, and deletes at
+    /// the head, the middle, and the tail compact them in place, from a
+    /// cache of column runs and from dense tables.
+    #[test]
+    fn row_runs_grow_and_shrink_in_place() {
+        let d = 3;
+        let start: Vec<usize> = (0..5).collect();
+        let packed = ArdSqDiffBuf::<f64>::from_pairs(5, d, pool_pair).expect("cache");
+        let tables: Vec<Vec<f64>> = (0..d)
+            .map(|k| (0..25).map(|at| pool_pair(k, at % 5, at / 5)).collect())
+            .collect();
+        let dense = ArdSqDiffBuf::<f64>::from_tables(tables, 5);
+        for mut cache in [packed, dense] {
+            let mut live = start.clone();
+            assert_holds(&cache, &live, d);
+            let mut next = 5;
+            for step in 0..12 {
+                if step % 3 == 2 {
+                    let index = [0, live.len() / 2, live.len() - 1][step % 9 / 3];
+                    cache.ready_to_change().expect("rows");
+                    assert!(cache.can_remove());
+                    cache.remove_point(index);
+                    live.remove(index);
+                } else {
+                    cache.reserve_point().expect("room");
+                    let columns: Vec<Vec<f64>> = (0..d)
+                        .map(|k| live.iter().map(|&a| pool_pair(k, a, next)).collect())
+                        .collect();
+                    assert!(cache.can_push());
+                    cache.push_point(|k| &columns[k]);
+                    live.push(next);
+                    next += 1;
+                }
+                assert!(cache.view().rows().is_some());
+                assert_holds(&cache, &live, d);
+            }
+        }
+    }
+
+    /// A clone keeps the room its original reserved; a cache not yet laid
+    /// out as row runs with room says so before anything is written.
+    #[test]
+    fn row_runs_report_their_room_and_clone_it() {
+        let mut cache = ArdSqDiffBuf::<f64>::from_pairs(4, 2, pool_pair).expect("cache");
+        assert!(!cache.can_push());
+        assert!(!cache.can_remove());
+        cache.reserve_point().expect("room");
+        assert!(cache.can_push() && cache.can_remove());
+        let mut copy = cache.clone();
+        let columns: Vec<Vec<f64>> = (0..2)
+            .map(|k| (0..4).map(|a| pool_pair(k, a, 4)).collect())
+            .collect();
+        assert!(copy.can_push(), "the clone has room");
+        copy.push_point(|k| &columns[k]);
+        assert_holds(&copy, &[0, 1, 2, 3, 4], 2);
+        assert_holds(&cache, &[0, 1, 2, 3], 2);
+        // A cast keeps the row runs.
+        let cast = copy.map(|v| v as f32);
+        assert!(cast.view().rows().is_some());
+        assert_eq!(
+            cast.view().get(1, 4, 2).to_bits(),
+            (pool_pair(1, 4, 2) as f32).to_bits()
+        );
+        assert_eq!(
+            copy.view()
+                .position(1, |v| v.to_bits() == pool_pair(1, 4, 2).to_bits()),
+            Some((4, 2))
+        );
     }
 }

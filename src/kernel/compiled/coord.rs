@@ -334,7 +334,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
             let mut v = Mat::zeros(rows, cols);
             let scratch = Mat::zeros(rows, cols);
             let mut scratch = scratch;
-            term.apply_cross_points::<M>(x1, x2, v.as_mut(), scratch.as_mut())?;
+            term.apply_cross_rows::<M>(x1, x2, v.as_mut(), scratch.as_mut())?;
             let first = |dir: Dir| term.first_dir::<M>(x1, x2, dir, local);
             let jet = TermJet {
                 v,
