@@ -15,9 +15,6 @@ pub trait SourceStore<S: KernelScalar>: Clone + fmt::Debug + Send + Sync + 'stat
     /// that keeps the caller's values.
     type Saved: KernelScalar;
 
-    /// A coordinate model's: no slots.
-    fn empty() -> Self;
-
     /// The copy a save writes, in [`Self::Saved`].
     fn saved(&self) -> &TrainSources<Self::Saved>;
 
@@ -114,10 +111,6 @@ pub(crate) fn widened<'a, S: KernelScalar>(
 impl<S: KernelScalar> SourceStore<S> for TrainSources<S> {
     type Saved = S;
 
-    fn empty() -> Self {
-        Self::empty()
-    }
-
     fn saved(&self) -> &TrainSources<S> {
         self
     }
@@ -185,10 +178,6 @@ pub struct RefinedSources {
 
 impl SourceStore<f32> for RefinedSources {
     type Saved = f64;
-
-    fn empty() -> Self {
-        Self::default()
-    }
 
     fn saved(&self) -> &TrainSources<f64> {
         &self.exact

@@ -122,6 +122,62 @@ pub(crate) mod sealed {
         /// A decoded supplied leaf in this kind of tree; `None` when this
         /// kind holds none.
         fn from_spec(leaf: SuppliedSpec) -> Option<Self>;
+
+        /// What a model of this kind holds only when its kernel reads
+        /// supplied distances: `X` for such a tree, nothing (`()`) for a
+        /// coordinate tree, so a coordinate model has no such field.
+        type Held<X: Clone + fmt::Debug + Send + Sync>: Clone + fmt::Debug + Send + Sync;
+
+        /// `make()` for a tree that reads supplied distances; nothing (and
+        /// `make` is not called) for a coordinate tree.
+        fn hold<X: Clone + fmt::Debug + Send + Sync>(make: impl FnOnce() -> X) -> Self::Held<X>;
+
+        /// [`Self::hold`] of a value that may fail to be made.
+        fn try_hold<X: Clone + fmt::Debug + Send + Sync, E>(
+            make: impl FnOnce() -> Result<X, E>,
+        ) -> Result<Self::Held<X>, E>;
+
+        /// The held value; `None` for a coordinate tree.
+        fn held<X: Clone + fmt::Debug + Send + Sync>(held: &Self::Held<X>) -> Option<&X>;
+
+        /// The held value, to change; `None` for a coordinate tree.
+        fn held_mut<X: Clone + fmt::Debug + Send + Sync>(
+            held: &mut Self::Held<X>,
+        ) -> Option<&mut X>;
+
+        /// The held value, borrowed.
+        fn held_ref<X: Clone + fmt::Debug + Send + Sync>(held: &Self::Held<X>) -> Self::Held<&X>;
+
+        /// The held value, leaving its default in its place.
+        fn take_held<X: Clone + fmt::Debug + Send + Sync + Default>(
+            held: &mut Self::Held<X>,
+        ) -> Self::Held<X>;
+
+        /// `f` of the held value.
+        fn map_held<X: Clone + fmt::Debug + Send + Sync, Y: Clone + fmt::Debug + Send + Sync>(
+            held: Self::Held<X>,
+            f: impl FnOnce(X) -> Y,
+        ) -> Self::Held<Y>;
+
+        /// `f` of the held value, which may fail.
+        fn try_map_held<
+            X: Clone + fmt::Debug + Send + Sync,
+            Y: Clone + fmt::Debug + Send + Sync,
+            E,
+        >(
+            held: Self::Held<X>,
+            f: impl FnOnce(X) -> Result<Y, E>,
+        ) -> Result<Self::Held<Y>, E>;
+
+        /// The squares a held store reads, as this kind reads them.
+        fn held_squares<'a, T: KernelScalar, X: SquareSlots<T> + fmt::Debug + Sync + 'a>(
+            held: Self::Held<&'a X>,
+        ) -> Self::Squares<'a, T>;
+
+        /// The rectangles a held store reads, as this kind reads them.
+        fn held_rects<'a, T: KernelScalar, X: RectSlots<T> + fmt::Debug + Sync + 'a>(
+            held: Self::Held<&'a X>,
+        ) -> Self::Rects<'a, T>;
     }
 
     impl Supply for NoSupply {
@@ -197,6 +253,49 @@ pub(crate) mod sealed {
         fn from_spec(_leaf: SuppliedSpec) -> Option<Self> {
             None
         }
+
+        type Held<X: Clone + fmt::Debug + Send + Sync> = ();
+
+        fn hold<X: Clone + fmt::Debug + Send + Sync>(_make: impl FnOnce() -> X) {}
+
+        fn try_hold<X: Clone + fmt::Debug + Send + Sync, E>(
+            _make: impl FnOnce() -> Result<X, E>,
+        ) -> Result<(), E> {
+            Ok(())
+        }
+
+        fn held<X: Clone + fmt::Debug + Send + Sync>((): &()) -> Option<&X> {
+            None
+        }
+
+        fn held_mut<X: Clone + fmt::Debug + Send + Sync>((): &mut ()) -> Option<&mut X> {
+            None
+        }
+
+        fn held_ref<X: Clone + fmt::Debug + Send + Sync>((): &()) {}
+
+        fn take_held<X: Clone + fmt::Debug + Send + Sync + Default>((): &mut ()) {}
+
+        fn map_held<X: Clone + fmt::Debug + Send + Sync, Y: Clone + fmt::Debug + Send + Sync>(
+            (): (),
+            _f: impl FnOnce(X) -> Y,
+        ) {
+        }
+
+        fn try_map_held<
+            X: Clone + fmt::Debug + Send + Sync,
+            Y: Clone + fmt::Debug + Send + Sync,
+            E,
+        >(
+            (): (),
+            _f: impl FnOnce(X) -> Result<Y, E>,
+        ) -> Result<(), E> {
+            Ok(())
+        }
+
+        fn held_squares<'a, T: KernelScalar, X: SquareSlots<T> + fmt::Debug + Sync + 'a>((): ()) {}
+
+        fn held_rects<'a, T: KernelScalar, X: RectSlots<T> + fmt::Debug + Sync + 'a>((): ()) {}
     }
 
     impl Supply for SuppliedSpec {
@@ -281,6 +380,64 @@ pub(crate) mod sealed {
 
         fn from_spec(leaf: SuppliedSpec) -> Option<Self> {
             Some(leaf)
+        }
+
+        type Held<X: Clone + fmt::Debug + Send + Sync> = X;
+
+        fn hold<X: Clone + fmt::Debug + Send + Sync>(make: impl FnOnce() -> X) -> X {
+            make()
+        }
+
+        fn try_hold<X: Clone + fmt::Debug + Send + Sync, E>(
+            make: impl FnOnce() -> Result<X, E>,
+        ) -> Result<X, E> {
+            make()
+        }
+
+        fn held<X: Clone + fmt::Debug + Send + Sync>(held: &X) -> Option<&X> {
+            Some(held)
+        }
+
+        fn held_mut<X: Clone + fmt::Debug + Send + Sync>(held: &mut X) -> Option<&mut X> {
+            Some(held)
+        }
+
+        fn held_ref<X: Clone + fmt::Debug + Send + Sync>(held: &X) -> &X {
+            held
+        }
+
+        fn take_held<X: Clone + fmt::Debug + Send + Sync + Default>(held: &mut X) -> X {
+            std::mem::take(held)
+        }
+
+        fn map_held<X: Clone + fmt::Debug + Send + Sync, Y: Clone + fmt::Debug + Send + Sync>(
+            held: X,
+            f: impl FnOnce(X) -> Y,
+        ) -> Y {
+            f(held)
+        }
+
+        fn try_map_held<
+            X: Clone + fmt::Debug + Send + Sync,
+            Y: Clone + fmt::Debug + Send + Sync,
+            E,
+        >(
+            held: X,
+            f: impl FnOnce(X) -> Result<Y, E>,
+        ) -> Result<Y, E> {
+            f(held)
+        }
+
+        fn held_squares<'a, T: KernelScalar, X: SquareSlots<T> + fmt::Debug + Sync + 'a>(
+            held: &'a X,
+        ) -> &'a dyn SquareSlots<T> {
+            held
+        }
+
+        fn held_rects<'a, T: KernelScalar, X: RectSlots<T> + fmt::Debug + Sync + 'a>(
+            held: &'a X,
+        ) -> &'a dyn RectSlots<T> {
+            held
         }
     }
 }

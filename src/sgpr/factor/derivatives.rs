@@ -304,7 +304,15 @@ where
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let sets = SparseSets::<P::Storage, K::Supply>::new(x, z, model.core.supply.at()?);
+    let sets = SparseSets::<P::Storage, K::Supply>::new(
+        x,
+        z,
+        model
+            .core
+            .supply()
+            .map(crate::sparse::SparseSupply::at)
+            .transpose()?,
+    );
     let adjoint = engine.adjoint();
     let n_kernel = model.core.kernel.num_params();
     // One walk per matrix. The Hessian still forms each ∂K in `kernel_theta_var`.
@@ -412,7 +420,15 @@ where
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let sets = SparseSets::<P::Storage, K::Supply>::new(x, z, model.core.supply.at()?);
+    let sets = SparseSets::<P::Storage, K::Supply>::new(
+        x,
+        z,
+        model
+            .core
+            .supply()
+            .map(crate::sparse::SparseSupply::at)
+            .transpose()?,
+    );
     let n_kernel = model.core.kernel.num_params();
     let n_theta = n_kernel + model.core.likelihood.num_params();
     let mut vars = Vec::with_capacity(n_theta + I::z_params(model.core.m, model.core.d));
@@ -545,7 +561,15 @@ where
     let mut z_cast = P::Storage::empty_cols();
     let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
     let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-    let sets = SparseSets::<P::Storage, K::Supply>::new(x, z, model.core.supply.at()?);
+    let sets = SparseSets::<P::Storage, K::Supply>::new(
+        x,
+        z,
+        model
+            .core
+            .supply()
+            .map(crate::sparse::SparseSupply::at)
+            .transpose()?,
+    );
     let m = model.core.m;
     let n = model.core.n;
     let z_index = |idx: usize| -> Option<(usize, usize)> {
@@ -913,11 +937,8 @@ mod adjoint_tests {
         let zm = pack_points(&model.core.z_train, 3, 2);
         let mut ks = KernelScratch::new();
         for i in 0..model.core.kernel.num_params() {
-            let sets = SparseSets::<f64, crate::kernel::NoSupply>::new(
-                xm.as_ref(),
-                zm.as_ref(),
-                model.core.supply.exact(),
-            );
+            let sets =
+                SparseSets::<f64, crate::kernel::NoSupply>::new(xm.as_ref(), zm.as_ref(), None);
             let var =
                 kernel_theta_var::<Accurate, f64, _>(&compiled, &mut ks, sets, 6, i).expect("var");
             let via_adjoint = adjoint.contract(var.d_kmm.as_ref(), var.d_kmn.as_ref(), var.d_kdiag);

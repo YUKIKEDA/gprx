@@ -93,11 +93,17 @@ where
     let z64 = pack_points(data.z, n_inducing, data.d);
     let mut z_cast = T::empty_cols();
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
-    let at = data.supply.at::<T>()?;
+    let at = data
+        .supply
+        .map(crate::sparse::SparseSupply::at::<T>)
+        .transpose()?;
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M, U>(
         &compiled,
-        GramInputs::supplied(z_mat, U::squares(&at.zz)),
+        GramInputs::supplied(
+            z_mat,
+            crate::sparse::squares_of::<T, U>(at.map(|at| &at.zz)),
+        ),
         k_mm.as_mut(),
         Triangle::Lower,
     )?;
@@ -129,7 +135,13 @@ where
     let mut z_cast = T::empty_cols();
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
-    let sets = SparseSets::<T, U>::new(x_mat, z_mat, data.supply.at::<T>()?);
+    let sets = SparseSets::<T, U>::new(
+        x_mat,
+        z_mat,
+        data.supply
+            .map(crate::sparse::SparseSupply::at::<T>)
+            .transpose()?,
+    );
     // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
     let mut a = ks.cross_mn::<M, U>(&compiled, sets)?;
     solve_lower(k_mm_l, a.as_mut());

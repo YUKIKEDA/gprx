@@ -238,9 +238,9 @@ where
     {
         // The training blocks are lent, not copied; `with_snapshot` takes
         // them back whatever the call returns.
-        let supply = std::mem::take(&mut self.state.core.supply);
+        let supplied = <K::Supply>::take_held(&mut self.state.core.supplied);
         let mut core = self.state.core.clone();
-        core.supply = supply;
+        core.supplied = supplied;
         FittedSgpr {
             core,
             // Lent for the call; `adopt_fitted` takes it back.
@@ -275,7 +275,7 @@ where
                 Ok(value)
             }
             Err(err) => {
-                self.state.core.supply = fitted.core.supply;
+                self.state.core.supplied = fitted.core.supplied;
                 self.scratch = fitted.scratch;
                 Err(err)
             }
@@ -316,14 +316,14 @@ where
         }
         // The training blocks are not copied: an update that changes them
         // undoes its own change when it fails.
-        let supply = std::mem::take(&mut self.state.core.supply);
+        let supplied = <K::Supply>::take_held(&mut self.state.core.supplied);
         let undo = self.state.clone();
-        self.state.core.supply = supply;
+        self.state.core.supplied = supplied;
         let result = update(self);
         if result.is_err() {
-            let supply = std::mem::take(&mut self.state.core.supply);
+            let supplied = <K::Supply>::take_held(&mut self.state.core.supplied);
             self.state = undo;
-            self.state.core.supply = supply;
+            self.state.core.supplied = supplied;
         }
         result
     }
@@ -623,7 +623,12 @@ where
             });
         }
         let idx = self.state.registry.index_of(id)?;
-        if let Some(at) = self.state.core.supply.inducing_at(idx) {
+        if let Some(at) = self
+            .state
+            .core
+            .supply()
+            .and_then(|supply| supply.inducing_at(idx))
+        {
             return Err(GprError::InvalidConfig {
                 reason: format!(
                     "the point is inducing point {at}: delete it with delete_inducing first"
@@ -683,17 +688,18 @@ where
             self.state.b_l = b_trial;
             // Only a precision whose weights can still fail keeps the row.
             let mut saved = Vec::new();
-            self.state
-                .core
-                .supply
-                .remove_point(idx, P::REFINES_IN_F64.then_some(&mut saved));
+            if let Some(supply) = self.state.core.supply_mut() {
+                supply.remove_point(idx, P::REFINES_IN_F64.then_some(&mut saved));
+            }
             self.state.core.x_train = x_next;
             self.state.core.y_train = y_next;
             self.state.core.x_obs = x_obs_next;
             self.state.core.y_obs = y_obs_next;
             self.state.core.n -= 1;
             if let Err(err) = self.recompute_w() {
-                self.state.core.supply.restore_point(idx, &saved);
+                if let Some(supply) = self.state.core.supply_mut() {
+                    supply.restore_point(idx, &saved);
+                }
                 return Err(err);
             }
         } else {
@@ -715,10 +721,14 @@ where
         idx: usize,
     ) -> Result<(), GprError> {
         let mut saved = Vec::new();
-        self.state.core.supply.remove_point(idx, Some(&mut saved));
+        if let Some(supply) = self.state.core.supply_mut() {
+            supply.remove_point(idx, Some(&mut saved));
+        }
         let result = self.reassemble_without(x_next, y_next, x_obs_next, y_obs_next);
-        if result.is_err() {
-            self.state.core.supply.restore_point(idx, &saved);
+        if result.is_err()
+            && let Some(supply) = self.state.core.supply_mut()
+        {
+            supply.restore_point(idx, &saved);
         }
         result
     }
@@ -768,8 +778,10 @@ where
         undo: impl FnOnce(&mut SparseSupply),
     ) -> Result<(), GprError> {
         let result = self.factor_inducing(z_train, z_obs, m);
-        if result.is_err() {
-            undo(&mut self.state.core.supply);
+        if result.is_err()
+            && let Some(supply) = self.state.core.supply_mut()
+        {
+            undo(supply);
         }
         result
     }
@@ -875,12 +887,14 @@ where
         let z_obs = remove_point(&self.state.core.z_obs, m, d, idx);
         // The training point of a model on supplied distances, kept to put
         // its column back if the smaller system does not factor.
-        let supply = &mut self.state.core.supply;
         let mut saved = Vec::new();
-        let point = supply.inducing.get(idx).copied();
-        if point.is_some() {
-            supply.remove_inducing(idx, &mut saved);
-        }
+        let point = self.state.core.supply_mut().and_then(|supply| {
+            let point = supply.inducing.get(idx).copied();
+            if point.is_some() {
+                supply.remove_inducing(idx, &mut saved);
+            }
+            point
+        });
         self.commit_inducing(z_train, z_obs, m - 1, |supply| {
             if let Some(point) = point {
                 supply.undo_remove_inducing(idx, point, &saved);
@@ -1315,10 +1329,14 @@ where
         );
         self.state.core.y_train.push(y_new);
         self.state.core.y_obs.push(y_obs);
-        supply(&mut self.state.core.supply);
+        if let Some(store) = self.state.core.supply_mut() {
+            supply(store);
+        }
         self.state.core.n += 1;
         if let Err(err) = self.recompute_w() {
-            self.state.core.supply.pop_point();
+            if let Some(store) = self.state.core.supply_mut() {
+                store.pop_point();
+            }
             return Err(err);
         }
         Ok(self.state.registry.insert())

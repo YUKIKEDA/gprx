@@ -305,7 +305,7 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
     ///
     /// See the example on [`Svgp::factor`] of a [`DistanceKernel<DistanceOnly>`].
     pub fn inducing(&self) -> &[usize] {
-        &self.core.supply.inducing
+        &self.core.supplied.supply.inducing
     }
 
     /// The factors and `q(u)` a prediction reads.

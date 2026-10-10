@@ -22,5 +22,5 @@ pub(crate) use objective::GprObjective;
 pub use online::OnlineGpr;
 #[cfg(feature = "insert-stages")]
 pub use online::take_insert_stages;
-pub(crate) use shared::{GprCore, Policies};
+pub(crate) use shared::{ExactSupplied, GprCore, Policies};
 pub use trainer::Gpr;

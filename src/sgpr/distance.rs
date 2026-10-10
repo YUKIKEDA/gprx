@@ -292,7 +292,7 @@ impl<O, I, P: GpScalar, C: PointUse> FittedSgpr<O, I, P, DistanceKernel<C>> {
     ///
     /// See the example on [`Sgpr::fit`] of a [`DistanceKernel<DistanceOnly>`].
     pub fn inducing(&self) -> &[usize] {
-        &self.core.supply.inducing
+        &self.core.supplied.supply.inducing
     }
 }
 

@@ -275,7 +275,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
-            &self.core.sources,
+            &self.core.supplied,
         );
         let policy = FactorPolicy {
             jitter: self.core.policies.jitter,
@@ -427,7 +427,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
                     &self.core.x,
                     (self.core.n, self.core.d),
                     &mut self.core.x_cast,
-                    &self.core.sources,
+                    &self.core.supplied,
                 );
                 with_kernel_exp!(self.core.policies.math, M => apply_compiled_to::<_, _, M, _>(
                     self.core.compiled.leaf_at(i)?,
@@ -615,7 +615,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
-            &self.core.sources,
+            &self.core.supplied,
         );
         let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
@@ -641,7 +641,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
-            &self.core.sources,
+            &self.core.supplied,
         );
         let (core, dist) = self.store.buffers.split_fit();
         let WorkspaceCore {
@@ -702,7 +702,7 @@ impl<P: GpScalar, K: ModelKernel> ExactFit<'_, P, K> {
             &self.core.x,
             (self.core.n, self.core.d),
             &mut self.core.x_cast,
-            &self.core.sources,
+            &self.core.supplied,
         );
         let compiled = &self.core.compiled;
         let views = self.store.buffers.split_gradient();

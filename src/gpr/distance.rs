@@ -247,7 +247,7 @@ impl<O, P: GpScalar, C: PointUse> DistanceQuery for FittedGpr<O, P, DistanceKern
         m: usize,
         options: PredictOptions,
     ) -> Result<Prediction<P::Refine>, GprError> {
-        let slots = &self.core.slots;
+        let slots = &self.core.supplied.slots;
         let alpha = &self.core.alpha[..];
         let mut out = Prediction::default();
         let mut scratch = QueryScratch::new();
@@ -270,14 +270,19 @@ impl<O, P: GpScalar, C: PointUse> DistanceQuery for FittedGpr<O, P, DistanceKern
         // The model's buffers, taken for the call: the blocks borrow
         // them while the predict borrows the model. They hold no
         // state, so a panic that loses them loses only capacity.
-        let mut scratch = std::mem::take(&mut self.core.query_sources);
-        let result =
-            bind_cross(&self.core.slots, (self.core.n, m), cross, &mut scratch).and_then(|cross| {
-                run(&cross, points, m, |q| {
-                    self.predict_query_into(q, options, out)
-                })
-            });
-        self.core.query_sources = scratch;
+        let mut scratch = std::mem::take(&mut self.core.supplied.query);
+        let result = bind_cross(
+            &self.core.supplied.slots,
+            (self.core.n, m),
+            cross,
+            &mut scratch,
+        )
+        .and_then(|cross| {
+            run(&cross, points, m, |q| {
+                self.predict_query_into(q, options, out)
+            })
+        });
+        self.core.supplied.query = scratch;
         result
     }
 
@@ -289,7 +294,7 @@ impl<O, P: GpScalar, C: PointUse> DistanceQuery for FittedGpr<O, P, DistanceKern
         m: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
-        let slots = &self.core.slots;
+        let slots = &self.core.supplied.slots;
         let alpha = &self.core.alpha[..];
         let mut scratch = QueryScratch::new();
         let mut square_scratch = QueryScratch::new();
@@ -419,9 +424,9 @@ impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
         y_new: f64,
     ) -> Result<PointId, GprError> {
         // The model's buffers, taken for the call as a predict takes them.
-        let mut scratch = std::mem::take(&mut self.core.query_sources);
+        let mut scratch = std::mem::take(&mut self.core.supplied.query);
         let result = self.insert_bound(sources, x_new, y_new, &mut scratch);
-        self.core.query_sources = scratch;
+        self.core.supplied.query = scratch;
         result
     }
 
@@ -436,15 +441,16 @@ impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
         // makes room; a pivot the factor refuses after that leaves only the
         // room, which reads nothing.
         self.check_new_point(x_new, y_new)?;
-        let cols = QuerySources::bind_column(&self.core.slots, sources, self.core.n, scratch)?;
+        let cols =
+            QuerySources::bind_column(&self.core.supplied.slots, sources, self.core.n, scratch)?;
         let exact = cols.f64_view();
-        self.core.sources.reserve_point()?;
+        self.core.supplied.sources.reserve_point()?;
         self.insert_with(
             x_new,
             y_new,
             &cols,
-            |store| store.check_push(&cols, &exact),
-            |store| store.write_point(&cols, &exact),
+            |held| held.sources.check_push(&cols, &exact),
+            |held| held.sources.write_point(&cols, &exact),
         )
     }
 
@@ -580,7 +586,12 @@ impl<O, P: GpScalar, C: PointUse> DistanceQuery for OnlineGpr<O, P, DistanceKern
         let alpha = self.alpha()?;
         let mut out = Prediction::default();
         let mut scratch = QueryScratch::new();
-        let cross = bind_cross(&self.core.slots, (self.core.n, m), cross, &mut scratch)?;
+        let cross = bind_cross(
+            &self.core.supplied.slots,
+            (self.core.n, m),
+            cross,
+            &mut scratch,
+        )?;
         run(&cross, points, m, |q| {
             self.core
                 .write_prediction(self.factor(), alpha, q, options, &mut out)
@@ -596,14 +607,19 @@ impl<O, P: GpScalar, C: PointUse> DistanceQuery for OnlineGpr<O, P, DistanceKern
         options: PredictOptions,
         out: &mut Prediction<P::Refine>,
     ) -> Result<(), GprError> {
-        let mut scratch = std::mem::take(&mut self.core.query_sources);
-        let result =
-            bind_cross(&self.core.slots, (self.core.n, m), cross, &mut scratch).and_then(|cross| {
-                run(&cross, points, m, |q| {
-                    self.predict_query_into(q, options, out)
-                })
-            });
-        self.core.query_sources = scratch;
+        let mut scratch = std::mem::take(&mut self.core.supplied.query);
+        let result = bind_cross(
+            &self.core.supplied.slots,
+            (self.core.n, m),
+            cross,
+            &mut scratch,
+        )
+        .and_then(|cross| {
+            run(&cross, points, m, |q| {
+                self.predict_query_into(q, options, out)
+            })
+        });
+        self.core.supplied.query = scratch;
         result
     }
 
@@ -616,7 +632,7 @@ impl<O, P: GpScalar, C: PointUse> DistanceQuery for OnlineGpr<O, P, DistanceKern
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<P::Refine>, GprError> {
         let alpha = self.alpha()?;
-        let slots = &self.core.slots;
+        let slots = &self.core.supplied.slots;
         let mut scratch = QueryScratch::new();
         let mut square_scratch = QueryScratch::new();
         let cross = bind_cross(slots, (self.core.n, m), cross, &mut scratch)?;

@@ -84,17 +84,46 @@ pub(crate) struct PersistedSparse<U: Supply = NoSupply> {
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
-    /// The supplied `d²` and the inducing indices (empty for a coordinate
-    /// kernel).
+    /// The supplied `d²`, the inducing indices, and the slots of a kernel
+    /// on supplied distances; nothing for a coordinate kernel.
+    pub(crate) supplied: <U as SupplyViews>::Held<SparseSupplied>,
+}
+
+/// The squares `store` holds as kind `U` reads them: none for a
+/// coordinate kernel, which has no store.
+pub(crate) fn squares_of<T: KernelScalar, U: Supply>(
+    store: Option<&BlockStore<T>>,
+) -> U::Squares<'_, T> {
+    U::squares(
+        store.map_or(&crate::kernel::NO_SLOTS as &dyn SquareSlots<T>, |store| {
+            store
+        }),
+    )
+}
+
+/// The blocks `store` holds as kind `U` reads them: none for a coordinate
+/// kernel, which has no store.
+pub(crate) fn rects_of<T: KernelScalar, U: Supply>(
+    store: Option<&BlockStore<T>>,
+) -> U::Rects<'_, T> {
+    U::rects(store.map_or(&crate::kernel::NO_SLOTS as &dyn RectSlots<T>, |store| store))
+}
+
+/// What a sparse model of a kernel on supplied distances holds beside its
+/// kernel ([`SparseCore::supplied`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SparseSupplied {
+    /// The supplied `d²` and the inducing indices.
     pub(crate) supply: SparseSupply,
-    /// The kernel's slots, in its order (none for a coordinate kernel).
+    /// The kernel's slots, in the order of
+    /// [`crate::kernel::DistanceKernel::slots`].
     pub(crate) slots: Vec<crate::kernel::DistanceSlot>,
 }
 
 /// The transformed training data a sparse model's kernel and objective
 /// read: `x` (`n × d`, column-major; `d` is `0` for a kernel on supplied
 /// distances alone), `y`, the inducing points `z` (`m × d`), and the
-/// supplied `d²` (empty for a coordinate kernel).
+/// supplied `d²` (none for a coordinate kernel).
 #[derive(Clone, Copy)]
 pub(crate) struct SparseData<'a> {
     pub(crate) x: &'a [f64],
@@ -103,7 +132,9 @@ pub(crate) struct SparseData<'a> {
     pub(crate) y: &'a [f64],
     pub(crate) z: &'a [f64],
     pub(crate) m: usize,
-    pub(crate) supply: &'a SparseSupply,
+    /// The supply of a kernel on supplied distances; `None` for a
+    /// coordinate kernel.
+    pub(crate) supply: Option<&'a SparseSupply>,
 }
 
 impl SparseData<'_> {
@@ -115,7 +146,7 @@ impl SparseData<'_> {
     /// no feature (`d = 0`, a kernel on supplied distances alone), only
     /// `n`, `m`, and `y` are checked.
     pub(crate) fn validate(&self) -> Result<(), GprError> {
-        if self.d == 0 && !self.supply.inducing.is_empty() {
+        if self.d == 0 && self.supply.is_some() {
             crate::data::require_nonempty(self.n)?;
             crate::data::require_nonempty(self.m)?;
             crate::data::require_count(self.x.len(), 0, "feature values")?;
@@ -133,7 +164,7 @@ impl SparseData<'_> {
     ///
     /// The errors of [`validate_inducing`]; with no feature, only `m`.
     pub(crate) fn validate_inducing(&self) -> Result<(), GprError> {
-        if self.d == 0 && !self.supply.inducing.is_empty() {
+        if self.d == 0 && self.supply.is_some() {
             crate::data::require_nonempty(self.m)?;
             return crate::data::require_count(self.z.len(), 0, "inducing feature values");
         }
@@ -161,13 +192,14 @@ impl<T: KernelScalar, U: Supply> Clone for SparseSets<'_, T, U> {
 impl<T: KernelScalar, U: Supply> Copy for SparseSets<'_, T, U> {}
 
 impl<'a, T: KernelScalar, U: Supply> SparseSets<'a, T, U> {
-    /// The sets `x` and `z` with the supply `at`.
-    pub(crate) fn new(x: MatRef<'a, T>, z: MatRef<'a, T>, at: &'a SupplyAt<T>) -> Self {
+    /// The sets `x` and `z` with the supply `at`; a coordinate kernel has
+    /// none.
+    pub(crate) fn new(x: MatRef<'a, T>, z: MatRef<'a, T>, at: Option<&'a SupplyAt<T>>) -> Self {
         Self {
             x,
             z,
-            zz: U::squares(&at.zz),
-            xz: U::rects(&at.xz),
+            zz: squares_of::<T, U>(at.map(|at| &at.zz)),
+            xz: rects_of::<T, U>(at.map(|at| &at.xz)),
         }
     }
 
@@ -213,11 +245,9 @@ pub(crate) struct SparseCore<U: Supply = NoSupply> {
     pub(crate) n: usize,
     pub(crate) m: usize,
     pub(crate) d: usize,
-    /// The supplied `d²` the kernel reads (empty for a coordinate kernel).
-    pub(crate) supply: SparseSupply,
-    /// The kernel's slots, in the order of
-    /// [`crate::kernel::DistanceKernel::slots`] (none for a coordinate kernel).
-    pub(crate) slots: Vec<crate::kernel::DistanceSlot>,
+    /// The supplied `d²` the kernel reads and its slots; nothing for a
+    /// coordinate kernel.
+    pub(crate) supplied: <U as SupplyViews>::Held<SparseSupplied>,
 }
 
 impl<U: Supply> Clone for SparseCore<U> {
@@ -240,8 +270,7 @@ impl<U: Supply> Clone for SparseCore<U> {
             n: self.n,
             m: self.m,
             d: self.d,
-            supply: self.supply.clone(),
-            slots: self.slots.clone(),
+            supplied: self.supplied.clone(),
         }
     }
 }
@@ -308,8 +337,7 @@ impl SparseCore {
             n: n_rows,
             m: n_inducing,
             d: n_cols,
-            supply: SparseSupply::default(),
-            slots: Vec::new(),
+            supplied: (),
         })
     }
 }
@@ -338,8 +366,7 @@ impl<U: Supply> SparseCore<U> {
             n,
             m,
             d,
-            supply,
-            slots,
+            supplied,
         } = parts;
         if d == 0 {
             crate::data::require_nonempty(n)?;
@@ -383,8 +410,7 @@ impl<U: Supply> SparseCore<U> {
             n,
             m,
             d,
-            supply,
-            slots,
+            supplied,
         })
     }
 
@@ -418,8 +444,11 @@ impl<U: Supply> SparseCore<U> {
         } else {
             validate_training(x, n, n_cols, y)?;
         }
-        let slots = crate::kernel::spec_slots(&spec.kernel);
-        let supply = SparseSupply::bind::<S>(&slots, sources, n, inducing)?;
+        let supplied = U::try_hold(|| {
+            let slots = crate::kernel::spec_slots(&spec.kernel);
+            let supply = SparseSupply::bind::<S>(&slots, sources, n, inducing)?;
+            Ok::<_, GprError>(SparseSupplied { supply, slots })
+        })?;
         let mut z_obs = Vec::with_capacity(m * n_cols);
         for j in 0..n_cols {
             z_obs.extend(inducing.iter().map(|&i| x[j * n + i]));
@@ -456,8 +485,7 @@ impl<U: Supply> SparseCore<U> {
             n,
             m,
             d: n_cols,
-            supply,
-            slots,
+            supplied,
         })
     }
 
@@ -470,8 +498,24 @@ impl<U: Supply> SparseCore<U> {
             y: &self.y_train,
             z: &self.z_train,
             m: self.m,
-            supply: &self.supply,
+            supply: self.supply(),
         }
+    }
+
+    /// The supplied `d²` of a kernel on supplied distances; `None` for a
+    /// coordinate kernel.
+    pub(crate) fn supply(&self) -> Option<&SparseSupply> {
+        U::held(&self.supplied).map(|held| &held.supply)
+    }
+
+    /// [`Self::supply`], to change.
+    pub(crate) fn supply_mut(&mut self) -> Option<&mut SparseSupply> {
+        U::held_mut(&mut self.supplied).map(|held| &mut held.supply)
+    }
+
+    /// The kernel's slots, in its order; none for a coordinate kernel.
+    pub(crate) fn slots(&self) -> &[crate::kernel::DistanceSlot] {
+        U::held(&self.supplied).map_or(&[], |held| &held.slots)
     }
 
     /// Kernel `θ` then likelihood `θ`.

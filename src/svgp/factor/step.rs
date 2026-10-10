@@ -5,7 +5,7 @@ use super::gradient::GradBuffers;
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, GramInputs, KernelScalar, ModelKernel, NoSupply, Supply, SupplyViews, Triangle,
+    CompiledKernel, GramInputs, KernelScalar, ModelKernel, NoSupply, Supply, Triangle,
 };
 use crate::linalg::{cholesky_lower_with_backup, llt_scratch};
 use crate::precision::GpScalar;
@@ -89,10 +89,16 @@ where
         core.kernel.set_params_in_place(new_k, prev_k)?;
         let factored = (|| {
             step.compiled_storage.set_params_in_place(new_k, prev_k)?;
-            let zz = &core.supply.at::<P::Storage>()?.zz;
+            let at = core
+                .supply()
+                .map(crate::sparse::SparseSupply::at::<P::Storage>)
+                .transpose()?;
             step.ks.gram::<M, K::Supply>(
                 &step.compiled_storage,
-                GramInputs::supplied(step.z.as_ref(), <K::Supply as SupplyViews>::squares(zz)),
+                GramInputs::supplied(
+                    step.z.as_ref(),
+                    crate::sparse::squares_of::<P::Storage, K::Supply>(at.map(|at| &at.zz)),
+                ),
                 step.k_mm.as_mut(),
                 Triangle::Lower,
             )?;

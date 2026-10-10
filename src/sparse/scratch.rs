@@ -591,7 +591,7 @@ impl<S: KernelScalar, U: Supply> PredictScratch<S, U> {
         z: &[f64],
         m: usize,
         d: usize,
-        zz: &'a BlockStore<f64>,
+        zz: Option<&'a BlockStore<f64>>,
         jitter: JitterPolicy,
     ) -> Result<F64System<'a, U>, GprError> {
         let Self {
@@ -611,7 +611,7 @@ impl<S: KernelScalar, U: Supply> PredictScratch<S, U> {
         let z64 = pack_into(&mut bufs.z, z, m, d);
         bufs.kernel.gram::<M, U>(
             compiled,
-            GramInputs::supplied(z64.as_ref(), U::squares(zz)),
+            GramInputs::supplied(z64.as_ref(), squares_of::<f64, U>(zz)),
             k_mm64.as_mut(),
             Triangle::Lower,
         )?;

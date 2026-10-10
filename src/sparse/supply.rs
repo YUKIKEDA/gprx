@@ -7,8 +7,8 @@ use super::*;
 
 /// The training `d²` of a sparse model on supplied distances, at `f64` and,
 /// for an `f32` storage, cast once: the `m × m` squares among the inducing
-/// points and the `n × m` blocks from the training points to them. Empty
-/// for a coordinate kernel.
+/// points and the `n × m` blocks from the training points to them. Only a
+/// model on supplied distances holds one ([`super::SparseSupplied`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SparseSupply {
     /// The training points that are the inducing points, in order.
@@ -99,11 +99,6 @@ impl SparseSupply {
         &self.f64
     }
 
-    /// Whether training blocks are held (a model on supplied distances).
-    pub(crate) fn is_supplied(&self) -> bool {
-        !self.f64.xz.block_ids().is_empty()
-    }
-
     /// Where training point `index` is an inducing point, if it is one.
     pub(crate) fn inducing_at(&self, index: usize) -> Option<usize> {
         self.inducing.iter().position(|&i| i == index)
@@ -163,12 +158,10 @@ impl SparseSupply {
 
     /// Removes the last training point (the undo of [`Self::push_point`]).
     pub(crate) fn pop_point(&mut self) {
-        if self.is_supplied() {
-            let (f64, f32) = self.copies_mut();
-            f64.xz.pop_row();
-            if let Some(f32) = f32 {
-                f32.xz.pop_row();
-            }
+        let (f64, f32) = self.copies_mut();
+        f64.xz.pop_row();
+        if let Some(f32) = f32 {
+            f32.xz.pop_row();
         }
     }
 
@@ -177,15 +170,13 @@ impl SparseSupply {
     /// `saved`, its row is appended there for [`Self::restore_point`].
     pub(crate) fn remove_point(&mut self, index: usize, saved: Option<&mut Vec<f64>>) {
         debug_assert!(self.inducing_at(index).is_none(), "an inducing point");
-        if self.is_supplied() {
-            if let Some(saved) = saved {
-                self.f64.xz.row_into(index, saved);
-            }
-            let (f64, f32) = self.copies_mut();
-            f64.xz.remove_row(index);
-            if let Some(f32) = f32 {
-                f32.xz.remove_row(index);
-            }
+        if let Some(saved) = saved {
+            self.f64.xz.row_into(index, saved);
+        }
+        let (f64, f32) = self.copies_mut();
+        f64.xz.remove_row(index);
+        if let Some(f32) = f32 {
+            f32.xz.remove_row(index);
         }
         for i in &mut self.inducing {
             if *i > index {
@@ -202,12 +193,10 @@ impl SparseSupply {
                 *i += 1;
             }
         }
-        if self.is_supplied() {
-            let (f64, f32) = self.copies_mut();
-            f64.xz.insert_row(index, saved);
-            if let Some(f32) = f32 {
-                f32.xz.insert_row(index, saved);
-            }
+        let (f64, f32) = self.copies_mut();
+        f64.xz.insert_row(index, saved);
+        if let Some(f32) = f32 {
+            f32.xz.insert_row(index, saved);
         }
     }
 

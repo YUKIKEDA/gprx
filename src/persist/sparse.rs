@@ -14,12 +14,12 @@ use faer::Mat;
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
-use crate::kernel::{BlockAt, DistanceSlot, ModelKernel, SlotShape};
+use crate::kernel::{BlockAt, DistanceSlot, ModelKernel, SlotShape, SupplyViews};
 use crate::optimizer::Fixed;
 use crate::points::{IdRegistry, PointRegistry};
 use crate::precision::GpScalar;
 use crate::sgpr::{FittedSgpr, FixedInducing, InducingRegistry, OnlineSgpr};
-use crate::sparse::{PersistedSparse, SparseCore, SparseSpec, SparseSupply};
+use crate::sparse::{PersistedSparse, SparseCore, SparseSpec, SparseSupplied, SparseSupply};
 use crate::svgp::FittedSvgp;
 use crate::{PredictOptions, Prediction};
 
@@ -107,7 +107,7 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
         ),
         None => (None, None, None, None),
     };
-    let slots = &core.slots;
+    let slots = core.slots();
     let points = points_of::<K>(slots);
     let config = SparseConfig {
         format_version: FORMAT_VERSION,
@@ -129,10 +129,12 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
         next_point_id,
         inducing_ids,
         next_inducing_id,
-        distance: points.map(|points| SparseDistanceJson {
-            table: DistanceJson::encode(points, slots),
-            inducing: core.supply.inducing.clone(),
-        }),
+        distance: points
+            .zip(core.supply())
+            .map(|(points, supply)| SparseDistanceJson {
+                table: DistanceJson::encode(points, slots),
+                inducing: supply.inducing.clone(),
+            }),
     };
     let json = serde_json::to_vec_pretty(&config).map_err(|err| {
         persist_err(
@@ -156,7 +158,9 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
         tensors.push((TENSOR_Q_MEAN, vec![m], q_mean));
         tensors.push((TENSOR_Q_L, vec![m, m], &q_l_values));
     }
-    let d2 = supply_tensors(&core.supply, slots, (n, m));
+    let d2 = core
+        .supply()
+        .map_or_else(Vec::new, |supply| supply_tensors(supply, slots, (n, m)));
     for (name, shape, values) in &d2 {
         tensors.push((name.as_str(), shape.clone(), values));
     }
@@ -226,10 +230,16 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
         y_transform: config.y_unfitted.clone().decode(registry)?,
     };
     // `decode_kernel` makes slots only from the config's distance part.
-    let supply = match &config.distance {
-        Some(distance) => read_supply::<S>(tensors, config, &slots, &distance.inducing)?,
-        None => SparseSupply::default(),
-    };
+    let supplied = <K::Supply as SupplyViews>::try_hold(|| {
+        let distance = config.distance.as_ref().ok_or_else(|| {
+            persist_err(
+                PersistErrorKind::Config,
+                "the config of a model on supplied distances has no `distance`",
+            )
+        })?;
+        let supply = read_supply::<S>(tensors, config, &slots, &distance.inducing)?;
+        Ok::<_, GprError>(SparseSupplied { supply, slots })
+    })?;
     let core = SparseCore::from_persisted(PersistedSparse {
         spec,
         x_transform: config.x_transform.clone().decode(registry)?,
@@ -241,12 +251,11 @@ fn read_core<S: crate::kernel::KernelScalar, K: ModelKernel>(
         n,
         m,
         d,
-        supply,
-        slots,
+        supplied,
     })?;
     // The coordinate leaves and the supplied blocks read the same points.
-    if core.supply.is_supplied() {
-        let inducing = &core.supply.inducing;
+    if let Some(supply) = core.supply() {
+        let inducing = &supply.inducing;
         same_rows(&core.z_obs, &core.x_obs, (n, d), inducing, TENSOR_Z)?;
         same_rows(
             &core.z_train,

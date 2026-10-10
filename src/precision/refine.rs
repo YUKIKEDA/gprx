@@ -10,7 +10,7 @@ use faer::{Mat, MatMut, MatRef};
 use super::ResidualFormula;
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, GramInputs, KernelScalar, KernelSpec, NoSupply, ScalarOps, Supply,
+    CompiledKernel, GramInputs, KernelScalar, KernelSpec, NoSupply, ScalarOps, Supply, SupplyViews,
     TrainSources, Triangle,
 };
 use crate::linalg::{cholesky_lower_owned, inf_norm, symmetrize_lower};
@@ -123,8 +123,9 @@ pub struct TrainSystem<'a, T: KernelScalar, S: Supply = NoSupply> {
     pub compiled: &'a CompiledKernel<T, S>,
     /// Transformed training inputs (`n × d`).
     pub x: MatRef<'a, f64>,
-    /// Training squared distances of a distance model (empty otherwise).
-    pub sources: &'a TrainSources<T>,
+    /// Training squared distances of a distance model; nothing for a
+    /// coordinate model.
+    pub sources: <S as SupplyViews>::Held<&'a TrainSources<T>>,
     /// The same squares at `f64` without rounding, when the model keeps
     /// them ([`MixedPrecision`](super::MixedPrecision)).
     pub exact: Option<&'a TrainSources<f64>>,
@@ -234,7 +235,12 @@ impl<M: crate::math::KernelMath, R: ResidualFormula, S: Supply> RefineSystem
 pub(super) fn exact_sources<'a, S: Supply>(
     sys: &TrainSystem<'a, f32, S>,
 ) -> Result<Cow<'a, TrainSources<f64>>, GprError> {
-    crate::kernel::widened(sys.exact, sys.sources)
+    match S::held(&sys.sources) {
+        Some(storage) => crate::kernel::widened(sys.exact, storage),
+        // A coordinate model reads no squares; an empty store allocates
+        // nothing.
+        None => Ok(Cow::Owned(TrainSources::empty())),
+    }
 }
 
 /// Refined predict `α` for [`MixedPrecision`](super::MixedPrecision).
@@ -285,7 +291,10 @@ fn storage_system<M: crate::math::KernelMath, S: Supply>(
     let mut a = Mat::<f32>::zeros(n, n);
     let mut scratch = Mat::<f32>::zeros(n, n);
     sys.compiled.eval_gram::<M>(
-        GramInputs::supplied(x32.as_ref(), S::squares(sys.sources)),
+        GramInputs::supplied(
+            x32.as_ref(),
+            S::held_squares(S::map_held(S::held_ref(&sys.sources), |storage| *storage)),
+        ),
         a.as_mut(),
         Triangle::Lower,
         scratch.as_mut(),

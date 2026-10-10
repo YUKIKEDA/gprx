@@ -159,7 +159,13 @@ where
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let y_s = T::storage_rows(data.y, &mut y_cast);
-    let sets = SparseSets::<T, U>::new(x_mat, z_mat, data.supply.at::<T>()?);
+    let sets = SparseSets::<T, U>::new(
+        x_mat,
+        z_mat,
+        data.supply
+            .map(crate::sparse::SparseSupply::at::<T>)
+            .transpose()?,
+    );
     // A rounding scalar returned above, so `T` is evaluated as stored below.
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M, U>(&compiled, sets.k_mm(), k_mm.as_mut(), Triangle::Lower)?;

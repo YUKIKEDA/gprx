@@ -14,7 +14,7 @@ use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
 use crate::kernel::{
     DistanceKernel, DistanceSlot, DistanceSource, KernelScalar, KernelSpec, ModelKernel,
-    ModelKernelParts, PointKernel, PointUse, QueryScratch, spec_slots,
+    ModelKernelParts, PointKernel, PointUse, SupplyViews, spec_slots,
 };
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{faer_par_dims, solve_llt_in_place};
@@ -26,7 +26,7 @@ use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTrans
 use crate::workspace::{FitWorkspace, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
-use super::shared::{Query, bind_training};
+use super::shared::{ExactSupplied, Query};
 use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fit_buffers};
 
 /// Stores a fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
@@ -166,9 +166,15 @@ where
             y,
             sources,
         } = input;
-        let slots = spec_slots(&gpr.kernel);
-        let sources = match bind_training::<P::Storage, P::Sources>(&slots, sources, n_rows) {
-            Ok(bound) => bound,
+        let supplied = <K::Supply as SupplyViews>::try_hold(|| {
+            let slots = spec_slots(&gpr.kernel);
+            let bound = <P::Sources as crate::kernel::SourceStore<P::Storage>>::bind(
+                &slots, sources, n_rows,
+            )?;
+            Ok(ExactSupplied::new(bound, slots))
+        });
+        let supplied = match supplied {
+            Ok(supplied) => supplied,
             Err(err) => return Err((gpr, err)),
         };
         let mut x_buf = x.to_vec();
@@ -200,7 +206,7 @@ where
         };
         Ok(Self {
             core: GprCore {
-                slots,
+                supplied,
                 kernel: gpr.kernel,
                 compiled,
                 likelihood: gpr.likelihood,
@@ -210,7 +216,6 @@ where
                 y_transform: y_fitted,
                 policies: gpr.policies,
                 query: QueryWorkspace::new(),
-                query_sources: QueryScratch::new(),
                 x_obs: x.to_vec(),
                 y_obs: y.to_vec(),
                 x: pack_points(&x_buf, n_rows, n_cols),
@@ -219,7 +224,6 @@ where
                 alpha: vec![P::Refine::from_f64(0.0); n_rows],
                 x_cast: P::Storage::empty_cols(),
                 y_cast: P::Storage::empty_rows(),
-                sources,
                 n: n_rows,
                 d: n_cols,
             },
@@ -1119,8 +1123,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         // data past `f64` is refused here, not later in a factor.
         crate::data::require_finite(&x_buf)?;
         crate::data::require_finite(&y_buf)?;
-        let slots = spec_slots(&parts.kernel);
-        let sources = parts.sources;
+        let supplied = parts.supplied;
         let compiled = parts.kernel.compile_as::<P::Storage>();
         let mut workspace = fit_buffers::<P, _>(n, parts.policies, &compiled)?;
         workspace.core_mut().factor_jitter = parts.factor_jitter;
@@ -1146,7 +1149,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
         };
         let mut model = Self {
             core: GprCore {
-                slots,
+                supplied,
                 kernel: parts.kernel,
                 compiled,
                 likelihood: parts.likelihood,
@@ -1156,7 +1159,6 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
                 y_transform: parts.y_transform,
                 policies: parts.policies,
                 query: QueryWorkspace::new(),
-                query_sources: QueryScratch::new(),
                 x_obs: parts.x_obs,
                 y_obs: parts.y_obs,
                 x: pack_points(&x_buf, n, d),
@@ -1165,7 +1167,6 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
                 alpha,
                 x_cast: P::Storage::empty_cols(),
                 y_cast: P::Storage::empty_rows(),
-                sources,
                 n,
                 d,
             },

@@ -45,7 +45,7 @@ pub use compiled::CompiledKernel;
 pub(crate) use compiled::CrossViews;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
-pub(crate) use compiled::supplied::unbound;
+pub(crate) use compiled::supplied::{NO_SLOTS, RectSlots, SquareSlots, unbound};
 pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;
@@ -80,6 +80,10 @@ pub use supply::{
 };
 pub use term::{CustomKernel, KernelTerm};
 pub(crate) use tree::sealed::Supply as SupplyViews;
+
+/// What a model of kernel `K` holds only when `K` reads supplied distances
+/// ([`SupplyViews::Held`]): `X`, or nothing for a coordinate kernel.
+pub(crate) type Held<K, X> = <<K as ModelKernelParts>::Supply as SupplyViews>::Held<X>;
 pub use tree::{NoSupply, Supply};
 pub use white::WhiteKernel;
 

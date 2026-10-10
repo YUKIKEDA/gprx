@@ -5,6 +5,8 @@
 //! predict `α` are written once here against a [`StoredFactor`] view, which
 //! is the LLT of a batch fit or the LDLT of an online model.
 
+use std::fmt;
+
 use dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt;
 use faer::{Mat, MatMut, MatRef};
@@ -13,7 +15,7 @@ use super::factor::TrainPoints;
 use crate::data::{pack_storage, validate_query};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{
-    CompiledKernel, CompiledOf, DistanceSlot, DistanceSource, GramInputs, KernelScalar, KernelSpec,
+    CompiledKernel, CompiledOf, DistanceSlot, GramInputs, Held, KernelScalar, KernelSpec,
     ModelKernel, NoSupply, QueryScratch, ScalarOps, SourceStore, SpecOf, Supply, SupplyViews,
     Triangle,
 };
@@ -39,6 +41,48 @@ pub(crate) struct Policies {
     pub(crate) cholesky_buffer: CholeskyBuffer,
     pub(crate) math: KernelExp,
     pub(crate) jitter: JitterPolicy,
+}
+
+/// What an Exact model of a kernel on supplied distances holds beside its
+/// kernel ([`GprCore::supplied`]).
+pub(crate) struct ExactSupplied<P: GpScalar> {
+    /// Training squared distances.
+    pub(crate) sources: P::Sources,
+    /// The distance slots of the kernel, in order. Fixed with the kernel's
+    /// tree.
+    pub(crate) slots: Vec<DistanceSlot>,
+    /// Buffers a prediction on supplied distances binds its blocks on.
+    pub(crate) query: QueryScratch<P::Storage>,
+}
+
+impl<P: GpScalar> ExactSupplied<P> {
+    /// The training squares `sources` of `slots`, with empty query buffers.
+    pub(crate) fn new(sources: P::Sources, slots: Vec<DistanceSlot>) -> Self {
+        Self {
+            sources,
+            slots,
+            query: QueryScratch::new(),
+        }
+    }
+}
+
+impl<P: GpScalar> Clone for ExactSupplied<P> {
+    fn clone(&self) -> Self {
+        Self {
+            sources: self.sources.clone(),
+            slots: self.slots.clone(),
+            query: self.query.clone(),
+        }
+    }
+}
+
+impl<P: GpScalar> fmt::Debug for ExactSupplied<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExactSupplied")
+            .field("sources", &self.sources)
+            .field("slots", &self.slots)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Everything a fitted Exact GPR holds except its training factor.
@@ -68,13 +112,9 @@ pub(crate) struct GprCore<P: GpScalar, K: ModelKernel> {
     pub(crate) alpha: Vec<P::Refine>,
     pub(crate) x_cast: <P::Storage as ScalarOps>::ColCast,
     pub(crate) y_cast: <P::Storage as ScalarOps>::RowCast,
-    /// Training squared distances of a distance model; empty otherwise.
-    pub(crate) sources: P::Sources,
-    /// The distance slots of `kernel`, in order (empty for a coordinate
-    /// kernel). Fixed with the kernel's tree.
-    pub(crate) slots: Vec<DistanceSlot>,
-    /// Buffers a prediction on supplied distances binds its blocks on.
-    pub(crate) query_sources: QueryScratch<P::Storage>,
+    /// What a model of a kernel on supplied distances holds; nothing for a
+    /// coordinate kernel.
+    pub(crate) supplied: Held<K, ExactSupplied<P>>,
     pub(crate) n: usize,
     pub(crate) d: usize,
 }
@@ -99,9 +139,7 @@ impl<P: GpScalar, K: ModelKernel> Clone for GprCore<P, K> {
             alpha: self.alpha.clone(),
             x_cast: self.x_cast.clone(),
             y_cast: self.y_cast.clone(),
-            sources: self.sources.clone(),
-            slots: self.slots.clone(),
-            query_sources: self.query_sources.clone(),
+            supplied: self.supplied.clone(),
             n: self.n,
             d: self.d,
         }
@@ -114,24 +152,13 @@ pub(crate) fn train_points<'a, P: GpScalar, S: Supply>(
     x: &'a Mat<f64>,
     (n, d): (usize, usize),
     x_cast: &'a mut <P::Storage as ScalarOps>::ColCast,
-    sources: &'a P::Sources,
+    supplied: &'a <S as SupplyViews>::Held<ExactSupplied<P>>,
 ) -> TrainPoints<'a, P::Storage, S> {
+    let sources = S::map_held(S::held_ref(supplied), |held| held.sources.storage());
     TrainPoints {
         x: P::Storage::storage_cols(x.as_ref().submatrix(0, 0, n, d), x_cast),
-        slots: S::squares(sources.storage()),
+        slots: S::held_squares(sources),
     }
-}
-
-/// Binds the training squares of `slots` (the kernel's), `n × n` each.
-pub(crate) fn bind_training<T: KernelScalar, Store: SourceStore<T>>(
-    slots: &[DistanceSlot],
-    sources: Vec<DistanceSource<'_>>,
-    n: usize,
-) -> Result<Store, GprError> {
-    if slots.is_empty() && sources.is_empty() {
-        return Ok(Store::empty());
-    }
-    Store::bind(slots, sources, n)
 }
 
 impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {
@@ -199,8 +226,10 @@ impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {
             kernel: &self.kernel,
             compiled: &self.compiled,
             x: self.x_active(),
-            sources: self.sources.storage(),
-            exact: self.sources.exact(),
+            sources: <K::Supply>::map_held(<K::Supply>::held_ref(&self.supplied), |held| {
+                held.sources.storage()
+            }),
+            exact: <K::Supply>::held(&self.supplied).and_then(|held| held.sources.exact()),
             y: &self.y_train,
             noise: self.likelihood.noise_variance(),
             jitter,
@@ -550,10 +579,14 @@ impl<P: GpScalar, K: ModelKernel> GprCore<P, K> {
         // model holds, while this call already allocates two `n × n`
         // matrices and does `O(n³)` work, which the `O(n²)` widening does
         // not change.
-        let sources = self.sources.to_f64()?;
-        let sources = sources.as_ref();
+        let held = <K::Supply>::held_ref(&self.supplied);
+        let sources = <K::Supply>::try_map_held(held, |held| held.sources.to_f64())?;
+        let squares = <K::Supply>::held_squares(<K::Supply>::map_held(
+            <K::Supply>::held_ref(&sources),
+            AsRef::as_ref,
+        ));
         with_kernel_exp!(self.policies.math, M => kernel.eval_gram::<M>(
-            GramInputs::supplied(self.x_active(), <K::Supply>::squares(sources)),
+            GramInputs::supplied(self.x_active(), squares),
             a.as_mut(),
             Triangle::Lower,
             scratch_k.as_mut(),

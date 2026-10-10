@@ -13,7 +13,9 @@ use crate::error::PersistErrorKind;
 use crate::error::{CholeskyStage, GprError};
 use crate::gpr::GprObjective;
 use crate::kernel::ScalarOps;
-use crate::kernel::{KernelScalar, KernelSpec, ModelKernel, PointKernel, SourceStore, SupplyViews};
+use crate::kernel::{
+    Held, KernelScalar, KernelSpec, ModelKernel, PointKernel, SourceStore, SupplyViews,
+};
 use crate::likelihood::GaussianLikelihood;
 use crate::optimizer::Lbfgs;
 use crate::optimizer::{Fixed, Optimizer};
@@ -24,7 +26,9 @@ use crate::workspace::{FitWorkspace, QueryCols, QueryWorkspace};
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::shared::Query;
-use super::{ExactFit, FittedGpr, Gpr, GprCore, LdltStore, LltStore, Policies, fit_buffers};
+use super::{
+    ExactFit, ExactSupplied, FittedGpr, Gpr, GprCore, LdltStore, LltStore, Policies, fit_buffers,
+};
 use crate::points::{PointId, PointRegistry};
 use crate::policy::with_kernel_exp;
 
@@ -494,18 +498,31 @@ where
         // and checks `index`; the factor's update fails only for `n ≤ 1`
         // or `index ≥ n`, both refused above. Then the factor and the store
         // drop the point, neither failing, so they never disagree.
-        self.core.sources.ready_to_change()?;
-        self.core.sources.check_remove(index)?;
-        if self.core.sources.remove_work(index) < BESIDE_WORK {
-            // Little to move: waking a worker would cost more than the move.
-            self.workspace.delete_index(index)?;
-            self.core.sources.remove_point(index);
-        } else {
-            let (workspace, sources) = (&mut self.workspace, &mut self.core.sources);
-            beside(
-                || workspace.delete_index(index),
-                || sources.remove_point(index),
-            )?;
+        let mut store =
+            <K::Supply>::held_mut(&mut self.core.supplied).map(|held| &mut held.sources);
+        let work = match store.as_deref_mut() {
+            Some(sources) => {
+                sources.ready_to_change()?;
+                sources.check_remove(index)?;
+                sources.remove_work(index)
+            }
+            None => 0,
+        };
+        match store {
+            Some(sources) if work >= BESIDE_WORK => {
+                let workspace = &mut self.workspace;
+                beside(
+                    || workspace.delete_index(index),
+                    || sources.remove_point(index),
+                )?;
+            }
+            store => {
+                // Little to move: waking a worker would cost more than the move.
+                self.workspace.delete_index(index)?;
+                if let Some(sources) = store {
+                    sources.remove_point(index);
+                }
+            }
         }
         remove_colmajor(&mut self.core.x_obs, self.core.n, self.core.d, index);
         self.core.y_obs.remove(index);
@@ -704,10 +721,10 @@ impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
         x_new: &[f64],
         y_new: f64,
         cols: <K::Supply as SupplyViews>::Rects<'_, P::Storage>,
-        check: impl FnOnce(&P::Sources) -> Result<(), GprError>,
-        write: impl FnOnce(&mut P::Sources),
+        check: impl FnOnce(&Held<K, ExactSupplied<P>>) -> Result<(), GprError>,
+        write: impl FnOnce(&mut Held<K, ExactSupplied<P>>),
     ) -> Result<PointId, GprError> {
-        check(&self.core.sources)?;
+        check(&self.core.supplied)?;
         #[cfg(feature = "insert-stages")]
         let kernel_start = Instant::now();
         let n = self.core.n;
@@ -772,7 +789,7 @@ impl<O, P: GpScalar, K: ModelKernel> OnlineGpr<O, P, K> {
         #[cfg(feature = "insert-stages")]
         let border_start = Instant::now();
         self.workspace.append_border(k_new)?;
-        write(&mut self.core.sources);
+        write(&mut self.core.supplied);
         #[cfg(feature = "insert-stages")]
         insert_stages::add_border(border_start.elapsed().as_secs_f64());
         #[cfg(feature = "insert-stages")]

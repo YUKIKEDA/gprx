@@ -15,7 +15,7 @@
 
 use super::assemble::q_param_len;
 use crate::error::GprError;
-use crate::kernel::{BlockStore, CompiledKernel, KernelScalar, ModelKernel, SupplyViews};
+use crate::kernel::{BlockStore, CompiledKernel, KernelScalar, ModelKernel};
 use crate::linalg::{dot_f64x4, gemm, norm2_f64x4, solve_lower, solve_lower_transpose};
 use crate::precision::ModelPrecision;
 use crate::sparse::{KernelScratch, SparseScratch, SparseSets, view};
@@ -138,16 +138,18 @@ where
         xz,
         ks,
     } = bufs;
-    let supply = core.supply.exact();
+    let supply = core.supply().map(crate::sparse::SparseSupply::exact);
     // Every point in order reads the stored blocks; a batch reads its rows.
-    let xz: &BlockStore<f64> = if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
-        &supply.xz
-    } else {
-        supply.xz.rows_into(batch, xz);
-        xz
-    };
-    let xz = <K::Supply as SupplyViews>::rects(xz);
-    let zz = <K::Supply as SupplyViews>::squares(&supply.zz);
+    let xz: Option<&BlockStore<f64>> = supply.map(|supply| {
+        if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
+            &supply.xz
+        } else {
+            supply.xz.rows_into(batch, xz);
+            &*xz
+        }
+    });
+    let xz = crate::sparse::rects_of::<f64, K::Supply>(xz);
+    let zz = crate::sparse::squares_of::<f64, K::Supply>(supply.map(|supply| &supply.zz));
     let mut k_mm_l = view(k_mm_l, m, m);
     for j in 0..m {
         for i in j..m {

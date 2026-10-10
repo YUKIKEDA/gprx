@@ -351,8 +351,8 @@ pub(crate) struct PersistedModel<
     /// `α` with `L` (owned or mapped); `None` when the file holds no factor,
     /// and the model factors again at the saved `θ`.
     pub alpha: Option<Vec<P::Refine>>,
-    /// The training `d²` (empty for a coordinate kernel).
-    pub sources: P::Sources,
+    /// The training `d²` of a kernel on supplied distances.
+    pub supplied: crate::kernel::Held<K, crate::gpr::ExactSupplied<P>>,
     pub owned_l: Option<faer::Mat<P::Storage>>,
     pub mapped: Option<MappedTensors>,
     /// Diagonal jitter the saved factor was built with.
@@ -430,18 +430,18 @@ impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
 fn kernel_save<P: GpScalar, K: ModelKernel>(
     core: &GprCore<P, K>,
 ) -> Result<KernelSave<'_, SavedScalar<P>>, GprError> {
-    let slots = &core.slots;
-    let kernel = KernelJson::encode(&core.kernel, slots)?;
-    if slots.is_empty() {
+    let Some(held) = <K::Supply as crate::kernel::SupplyViews>::held(&core.supplied) else {
         return Ok(KernelSave {
-            kernel,
+            kernel: KernelJson::encode(&core.kernel, &[])?,
             distance: None,
             d2: Vec::new(),
         });
-    }
+    };
+    let slots = &held.slots;
+    let kernel = KernelJson::encode(&core.kernel, slots)?;
     let points = PointsJson::of::<K>();
     let tri = crate::kernel::packed_len(core.n)?;
-    let saved = core.sources.saved();
+    let saved = held.sources.saved();
     let d2 = slots
         .iter()
         .enumerate()
@@ -839,11 +839,10 @@ where
         mapped,
         d2,
     } = read_exact_tensors::<P>(dir, &config, &slots)?;
-    let sources = if slots.is_empty() {
-        P::Sources::empty()
-    } else {
-        P::Sources::from_saved(&slots, d2, config.n)?
-    };
+    let supplied = <K::Supply as crate::kernel::SupplyViews>::try_hold(|| {
+        let sources = P::Sources::from_saved(&slots, d2, config.n)?;
+        Ok::<_, GprError>(crate::gpr::ExactSupplied::new(sources, slots))
+    })?;
     let parts = PersistedModel {
         kernel,
         likelihood,
@@ -855,7 +854,7 @@ where
         x_obs,
         y_obs,
         alpha,
-        sources,
+        supplied,
         owned_l,
         mapped,
         factor_jitter: config.factor_jitter,

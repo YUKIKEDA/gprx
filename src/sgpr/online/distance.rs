@@ -68,7 +68,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         scratch: &mut QueryScratch<P::Storage>,
     ) -> Result<PointId, GprError> {
         let (m, d) = (self.state.core.m, self.state.core.d);
-        let cols = QuerySources::bind_column(&self.state.core.slots, sources, m, scratch)?;
+        let cols = QuerySources::bind_column(&self.state.core.supplied.slots, sources, m, scratch)?;
         let mut mapped = std::mem::take(&mut self.scratch.point);
         let result = (|| {
             self.state.core.map_point(x_obs, &mut mapped)?;
@@ -94,12 +94,12 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             // The new row of every training block, read before anything
             // changes: the columns are checked, so nothing below fails.
             let exact = cols.f64_view();
-            let blocks = self.state.core.supply.exact().xz.block_ids();
+            let blocks = self.state.core.supplied.supply.exact().xz.block_ids();
             let mut row = Vec::with_capacity(blocks.len() * m);
             for &at in &blocks {
                 column_into(&exact, at, m, &mut row)?;
             }
-            self.state.core.supply.reserve_point()?;
+            self.state.core.supplied.supply.reserve_point()?;
             self.atomically(|model| {
                 let point = NewPoint {
                     x: &mapped,
@@ -125,7 +125,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
     ) -> Result<InducingId, GprError> {
         let row = self.state.registry.index_of(point)?;
-        if let Some(at) = self.state.core.supply.inducing_at(row) {
+        if let Some(at) = self.state.core.supplied.supply.inducing_at(row) {
             return Err(GprError::InvalidConfig {
                 reason: format!("the point is inducing point {at} already"),
             });
@@ -144,8 +144,8 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         scratch: &mut QueryScratch<P::Storage>,
     ) -> Result<InducingId, GprError> {
         let (n, m, d) = (self.state.core.n, self.state.core.m, self.state.core.d);
-        let cols = QuerySources::bind_column(&self.state.core.slots, sources, n, scratch)?;
-        let supply = &self.state.core.supply;
+        let cols = QuerySources::bind_column(&self.state.core.supplied.slots, sources, n, scratch)?;
+        let supply = &self.state.core.supplied.supply;
         let exact = cols.f64_view();
         let (column, mirror) = new_inducing_column(
             &supply.exact().xz,
@@ -171,10 +171,10 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             d,
             &point_at(&self.state.core.x_obs, n, d, row),
         );
-        self.state.core.supply.reserve_inducing()?;
+        self.state.core.supplied.supply.reserve_inducing()?;
         self.atomically(|model| {
             let mut saved = Vec::new();
-            model.state.core.supply.add_inducing(
+            model.state.core.supplied.supply.add_inducing(
                 row,
                 |b, i| column[b * n + i],
                 |b, col| mirror[b * m + col],
@@ -222,7 +222,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
     /// The places of the inducing points in [`Self::point_ids`]: the rows
     /// of the training blocks they are. A delete shifts them.
     pub(crate) fn inducing(&self) -> &[usize] {
-        &self.state.core.supply.inducing
+        &self.state.core.supplied.supply.inducing
     }
 }
 
