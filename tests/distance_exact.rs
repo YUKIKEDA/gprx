@@ -1620,3 +1620,45 @@ fn an_invalid_distance_names_its_slot_dimension_and_pair() {
         "{got:?}"
     );
 }
+
+/// An input transform maps the coordinate part of an Exact model with
+/// points: fitted on raw coordinates with `MinMaxInput`, it predicts as the
+/// same model fitted on the mapped coordinates.
+#[test]
+fn an_input_transform_maps_the_coordinates_of_an_exact_model_with_points() {
+    use gprx::transform::{MinMaxInput, Transform};
+    let (c0, c1) = (coord(0, N, 0.0), coord(1, N, 0.0));
+    let (q0, q1) = (coord(0, M, 0.5), coord(1, M, 0.5));
+    let y = targets();
+    let image = ScalarDistance::new();
+    let kernel = || {
+        image.kernel(RbfKernel::new(0.7).expect("ell"))
+            * KernelSpec::from(RbfKernel::new(1.3).expect("ell"))
+    };
+    // Raw coordinates far from the unit box, so the map matters.
+    let raw = |c: &[f64]| c.iter().map(|v| 10.0 * v + 3.0).collect::<Vec<_>>();
+    let (x, xq) = (raw(&c1), raw(&q1));
+    let map = MinMaxInput::new().fit(&x, N, 1).expect("map");
+    let (mut mx, mut mq) = (x.clone(), xq.clone());
+    map.apply(&mut mx, N, 1).expect("apply");
+    map.apply(&mut mq, M, 1).expect("apply");
+    let fitted = Gpr::new(kernel(), lik())
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor([image.from_vec(sq(&c0, &c0))], N, &x, 1, &y)
+        .expect("transformed");
+    let reference = Gpr::new(kernel(), lik())
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(sq(&c0, &c0))], N, &mx, 1, &y)
+        .expect("mapped");
+    assert_pred(
+        &fitted
+            .predict([image.borrow(&sq(&c0, &q0))], &xq, M, 1)
+            .expect("predict"),
+        &reference
+            .predict([image.borrow(&sq(&c0, &q0))], &mq, M, 1)
+            .expect("predict"),
+        TOL,
+    );
+    assert_slice_close(fitted.x(), &x, 0.0);
+}

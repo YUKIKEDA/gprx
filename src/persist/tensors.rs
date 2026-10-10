@@ -5,8 +5,10 @@ use std::path::Path;
 
 use faer::MatRef;
 use memmap2::Mmap;
+use std::io::Write;
+
 use safetensors::tensor::{Dtype, TensorView};
-use safetensors::{SafeTensors, serialize_to_file};
+use safetensors::{SafeTensors, View, serialize};
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
@@ -53,11 +55,26 @@ impl TensorFile {
         let path = dir.join(TENSOR_FILE);
         let file = File::open(&path)
             .map_err(|err| persist_err(PersistErrorKind::Io, format!("open {path:?}: {err}")))?;
-        // SAFETY: this map stays alive on `MappedTensors` and is not written
-        // through. gprx never writes into an existing `model.safetensors`:
-        // a save renames a new file over the path (`atomic::write_atomic`),
-        // so this mapping keeps the old file. Another program that truncates
-        // or rewrites the file in place is outside what gprx can guard.
+        // An empty file has no header to read (and cannot be mapped): the
+        // same `Tensor` error a read of it gives.
+        let len = file
+            .metadata()
+            .map_err(|err| persist_err(PersistErrorKind::Io, format!("stat {path:?}: {err}")))?
+            .len();
+        if len == 0 {
+            return Err(persist_err(
+                PersistErrorKind::Tensor,
+                format!("{path:?} is empty: no safetensors header"),
+            ));
+        }
+        // SAFETY: the map is not written through, and lives as long as this
+        // `TensorFile` (a load that copies what it needs drops it before it
+        // returns; `MappedTensors` keeps it for a model's `f64` factor).
+        // gprx never writes into an existing `model.safetensors`: a save
+        // renames a new file over the path (`atomic::write_atomic_with`), so
+        // the mapping keeps the old file. Another program that truncates the
+        // file in place while it is mapped makes a read of the lost pages
+        // fault (SIGBUS on Unix); that is outside what gprx can guard.
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|err| persist_err(PersistErrorKind::Io, format!("mmap {path:?}: {err}")))?;
         Ok(Self {
@@ -194,18 +211,62 @@ pub(super) fn pack_lower<T: crate::kernel::KernelScalar>(l: MatRef<'_, T>, out: 
 
 /// Writes `views` as `dir/model.safetensors`, tensor by tensor into a
 /// temporary file that replaces the old one: the file is never built in
-/// memory.
+/// memory. The bytes are those of [`safetensors::serialize`].
 fn write_views(dir: &Path, views: Vec<(&str, TensorView<'_>)>) -> Result<(), GprError> {
     let path = dir.join(TENSOR_FILE);
-    super::atomic::write_atomic_with(&path, |temp| {
-        serialize_to_file(views, None, temp).map_err(|err| {
-            let kind = match err {
-                safetensors::SafeTensorError::IoError(_) => PersistErrorKind::Io,
-                _ => PersistErrorKind::Tensor,
-            };
-            persist_err(kind, format!("write {temp:?}: {err}"))
-        })
+    super::atomic::write_atomic_with(&path, |file, temp| {
+        let io = |err: std::io::Error| {
+            persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}"))
+        };
+        let (header, views) = safetensors_header(views).map_err(|err| {
+            persist_err(PersistErrorKind::Tensor, format!("write {temp:?}: {err}"))
+        })?;
+        let mut out = std::io::BufWriter::new(file);
+        out.write_all(&header).map_err(io)?;
+        for (_, view) in &views {
+            out.write_all(view.data()).map_err(io)?;
+        }
+        out.flush().map_err(io)
     })
+}
+
+/// The header of a safetensors file of `views` (its length, then the JSON
+/// padded to 8 bytes), and `views` in the order their data follows it:
+/// descending dtype alignment, then name, as `safetensors` lays them out.
+/// The header is `safetensors::serialize` of views that report their
+/// lengths but carry no bytes, so it is the crate's own.
+fn safetensors_header<'a, 'v>(
+    mut views: Vec<(&'a str, TensorView<'v>)>,
+) -> Result<(Vec<u8>, Vec<(&'a str, TensorView<'v>)>), safetensors::SafeTensorError> {
+    views.sort_by(|(lname, left), (rname, right)| {
+        right.dtype().cmp(&left.dtype()).then(lname.cmp(rname))
+    });
+    let header = serialize(
+        views.iter().map(|(name, view)| (*name, HeaderOnly(view))),
+        None,
+    )?;
+    Ok((header, views))
+}
+
+/// A tensor's dtype, shape, and length without its bytes.
+struct HeaderOnly<'a, 'v>(&'a TensorView<'v>);
+
+impl View for HeaderOnly<'_, '_> {
+    fn dtype(&self) -> Dtype {
+        self.0.dtype()
+    }
+
+    fn shape(&self) -> &[usize] {
+        self.0.shape()
+    }
+
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        std::borrow::Cow::Borrowed(&[])
+    }
+
+    fn data_len(&self) -> usize {
+        self.0.data_len()
+    }
 }
 
 pub(super) fn write_tensors(
@@ -529,4 +590,62 @@ pub(super) fn read_f64(
     shape: &[usize],
 ) -> Result<Vec<f64>, GprError> {
     read_scalars::<f64>(tensors, name, shape, Dtype::F64)
+}
+
+#[cfg(test)]
+mod tests {
+    use safetensors::tensor::{Dtype, TensorView};
+
+    use super::{TENSOR_FILE, TensorFile, write_views};
+    use crate::error::{GprError, PersistErrorKind};
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gprx_tensors_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn bytes_of(values: &[f64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_streamed_file_has_the_bytes_of_serialize() {
+        let dir = scratch_dir("stream");
+        let (a, b) = (bytes_of(&[1.0, 2.0, 3.0]), bytes_of(&[4.0]));
+        let small: Vec<u8> = [1.5_f32, 2.5]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let views = || {
+            vec![
+                ("y", TensorView::new(Dtype::F64, vec![3], &a).expect("y")),
+                (
+                    "s",
+                    TensorView::new(Dtype::F32, vec![2], &small).expect("s"),
+                ),
+                ("x", TensorView::new(Dtype::F64, vec![1, 1], &b).expect("x")),
+            ]
+        };
+        write_views(&dir, views()).expect("write");
+        let want = safetensors::serialize(views(), None).expect("serialize");
+        assert_eq!(std::fs::read(dir.join(TENSOR_FILE)).expect("read"), want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_file_is_a_tensor_error_mapped_or_read() {
+        let dir = scratch_dir("empty");
+        std::fs::write(dir.join(TENSOR_FILE), b"").expect("write");
+        let kind = |result: Result<(), GprError>| match result {
+            Err(GprError::PersistFailed { kind, .. }) => Some(kind),
+            _ => None,
+        };
+        let mapped = TensorFile::map(&dir).and_then(|file| file.tensors().map(drop));
+        let read = TensorFile::read(&dir).and_then(|file| file.tensors().map(drop));
+        assert_eq!(kind(mapped), Some(PersistErrorKind::Tensor));
+        assert_eq!(kind(read), Some(PersistErrorKind::Tensor));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
