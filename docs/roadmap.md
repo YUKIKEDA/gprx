@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-C2-1 ([#450](https://github.com/YUKIKEDA/gprx/issues/450), `cargo publish` is the only step left for 0.1.0) is open. It follows C1-7.
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) is done. Next: decide each item of [#503](https://github.com/YUKIKEDA/gprx/issues/503) (left over from the D1 review), then C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0).
 
 ## Dependencies
 
@@ -228,7 +228,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| C2-1 | Task | Make `cargo publish` the only step left for 0.1.0 | [#450](https://github.com/YUKIKEDA/gprx/issues/450) | open |
+| C2-1 | Task | Make `cargo publish` the only step left for 0.1.0 | [#450](https://github.com/YUKIKEDA/gprx/issues/450) | done |
 
 ## C3 (crates.io 0.2.0, [#491](https://github.com/YUKIKEDA/gprx/issues/491))
 
@@ -242,16 +242,16 @@ Requirements: design §5.6. Every row meets them and pastes its benches.
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| D1-1 | Docs | Requirements for supplied distances (design §5.6) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
-| D1-2 | Task | Benches and allocation checks against the coordinate path, before the implementation | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
-| D1-3 | Feat | `DistanceKernel`, sources, the strict table check, and the exact models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
-| D1-3a | Task | Unchecked and checked ARD prediction blocks as types | [#485](https://github.com/YUKIKEDA/gprx/issues/485) | open |
-| D1-3b | Task | Covariance query squares read without a second copy | [#486](https://github.com/YUKIKEDA/gprx/issues/486) | open |
-| D1-3c | Task | Supply presence in the model's type, not a runtime `Option` | [#487](https://github.com/YUKIKEDA/gprx/issues/487) | open |
-| D1-4 | Feat | Online insert and delete on supplied distances (compacted in place; ARD slots grow as row runs) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | open |
-| D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances (train × inducing `n × m` blocks, inducing points by training index) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
-| D1-5a | Feat | `OnlineSgpr` on supplied distances | [#493](https://github.com/YUKIKEDA/gprx/issues/493) | open |
-| D1-6 | Feat | Save and load of distance models, exact and sparse (`LoadedDistanceGpr`) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | open |
+| D1-1 | Docs | Requirements for supplied distances (design §5.6) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
+| D1-2 | Task | Benches and allocation checks against the coordinate path, before the implementation | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
+| D1-3 | Feat | `DistanceKernel`, sources, the strict table check, and the exact models | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
+| D1-3a | Task | Unchecked and checked ARD prediction blocks as types | [#485](https://github.com/YUKIKEDA/gprx/issues/485) | done |
+| D1-3b | Task | Covariance query squares read without a second copy | [#486](https://github.com/YUKIKEDA/gprx/issues/486) | done |
+| D1-3c | Task | Supply presence in the model's type, not a runtime `Option` | [#487](https://github.com/YUKIKEDA/gprx/issues/487) | done |
+| D1-4 | Feat | Online insert and delete on supplied distances (compacted in place; ARD slots grow as row runs) | [#473](https://github.com/YUKIKEDA/gprx/issues/473) | done |
+| D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances (train × inducing `n × m` blocks, inducing points by training index) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
+| D1-5a | Feat | `OnlineSgpr` on supplied distances | [#493](https://github.com/YUKIKEDA/gprx/issues/493) | done |
+| D1-6 | Feat | Save and load of distance models, exact and sparse (`LoadedDistanceGpr`) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
 
 ## Intentionally out of scope
 
