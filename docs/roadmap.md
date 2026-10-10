@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) is done. Next: decide each item of [#503](https://github.com/YUKIKEDA/gprx/issues/503) (left over from the D1 review), then C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0).
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) is done. D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) is open, D2-1 first. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0) follows D2.
 
 ## Dependencies
 
@@ -26,6 +26,7 @@ C1-5 → C1-7
 C1-6 → C1-7
 C1-7 → C2-1
 D1-1 → D1-2 → D1-3 → D1-3a → D1-3b → D1-3c → D1-4 → D1-5 → D1-5a → D1-6
+D1-6 → D2-1 → D2-2 → D2-3 → D2-4 → D2-5 → C3-1
 ```
 
 Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done. C2-1 follows C1-7.
@@ -252,6 +253,18 @@ Requirements: design §5.6. Every row meets them and pastes its benches.
 | D1-5 | Feat | `Sgpr` / `Svgp` on supplied distances (train × inducing `n × m` blocks, inducing points by training index) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
 | D1-5a | Feat | `OnlineSgpr` on supplied distances | [#493](https://github.com/YUKIKEDA/gprx/issues/493) | done |
 | D1-6 | Feat | Save and load of distance models, exact and sparse (`LoadedDistanceGpr`) | [#470](https://github.com/YUKIKEDA/gprx/issues/470) | done |
+
+## D2 (after the D1 review, [#503](https://github.com/YUKIKEDA/gprx/issues/503))
+
+The decision for each item is on the Issue.
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| D2-1 | Task | `ScalarDistance` without `Default`; `Hash` on the distance handles | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
+| D2-2 | Task | Online SGPR inducing points held as `PointId`; the sparse views typed by `Held` | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-1 |
+| D2-3 | Task | Persist memory: no `f64` copy kept by an `f32` load, scalar saves streamed, no ARD copy on a sparse load | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-2 |
+| D2-4 | Docs | README code blocks as doctests; Japanese terms made consistent | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-3 |
+| D2-5 | Task | `tests/alloc.rs` as its own release CI job | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-4 |
 
 ## Intentionally out of scope
 
