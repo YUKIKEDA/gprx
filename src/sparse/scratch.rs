@@ -2,7 +2,10 @@
 //! ([`KernelScratch`]), prediction ([`PredictScratch`]), and both together
 //! ([`SparseScratch`]).
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// Kernel-evaluation buffers of one sparse operation: the output-shaped

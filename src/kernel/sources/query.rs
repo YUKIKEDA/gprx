@@ -2,7 +2,10 @@
 //! sources bound on a model's [`QueryScratch`], checked or left to be checked
 //! as the kernel reads them.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// A source's `d²`, checked: `shape.blocks()` dense blocks of `rows × cols`.

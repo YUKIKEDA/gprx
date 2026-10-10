@@ -2,7 +2,10 @@
 //! non-negative values, and for a square a zero diagonal and equal mirror
 //! entries, exactly or within a source's tolerance.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// What a block must satisfy beyond its length and finite values.

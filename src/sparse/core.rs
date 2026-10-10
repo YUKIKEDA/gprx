@@ -2,7 +2,10 @@
 //! data and `θ` every fitted sparse model holds ([`SparseCore`]), and the
 //! kernel + likelihood `θ` over both.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// Kernel, likelihood, kernel `exp`, and the unfitted input / target

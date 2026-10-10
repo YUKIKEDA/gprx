@@ -2,7 +2,10 @@
 //! model on distances ([`SparseSupply`]), in `f64` and, for an `f32` model,
 //! cast once.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// The training `d²` of a sparse model on supplied distances, at `f64` and,

@@ -2,7 +2,10 @@
 //! predict family, and the insert and delete of points and of inducing
 //! points, each with the caller's `d²` per slot.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKernel<C>> {
