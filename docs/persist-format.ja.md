@@ -330,7 +330,7 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 ```
 
 - `points`: `"distance_only"`（カーネルは渡された距離だけを読む。`d` は `0` で、`x`、`z`、`z_train` は空）か `"with_points"`（カーネルは `x` を読む座標の葉も持つ）。
-- `slots`: slot の表。カーネルの `DistanceKernel::slots` の順（深さ優先、最初に現れた順）。slot は `scalar`（組ごとに `d²` が 1 つ）か、`dims` を持つ `ard`（組ごと、次元ごとに `d²` が 1 つ）。カーネルの木は表のすべての slot を表の順に読まなければならない。そうでなければ読み込みは `PersistFailed`（`kind: Config`）で失敗する。
+- `slots`: slot の表。カーネルの `DistanceKernel::slots` の順（深さ優先、最初に現れた順）。slot は `scalar`（組ごとに `d²` が 1 つ）か、`dims` を持つ `ard`（組ごと、次元ごとに `d²` が 1 つ）。カーネルの木は表のすべての slot を表の順に読まなければならない。そうでなければ読み込みは `PersistFailed`（`kind: Config`）で失敗する。slot の無い距離カーネル（`DistanceKernel::from` で包んだ座標の木）では表は空で、`d2.<k>` のテンソルは書かない。
 - slot の上のカーネルの葉は `{"distance": {"slot": k, "leaf": <kernel>}}`（5.1 節）。`custom` の葉は 5.5 節と同じく `PersistRegistry` で戻す。
 - `inducing`（Sparse だけ。`distance` の中にあり、そこでは必須）: 誘導点である学習点を、ブロックの列の順に並べたもの。`m` 個で、どれも `n` 未満、重複なし。読み込みは、`n` 以上の添字を `IndexOutOfRange`、重複を `InvalidConfig`、個数の違いを `PersistFailed`（`kind: Config`）で断る。`with_points` のモデルでは、`z` と `z_train` が、`inducing` の指す `x` の行と変換後の `x` の行に、fit が作るとおりビットで一致しなければならない。そうでなければ `PersistFailed`（`kind: Config`）。
 - `distance_only` のカーネルは座標を読む葉を持たない（`constant` と `white` は持てる）。木にそれがあるファイルは `PersistFailed`（`kind: Config`）。

@@ -281,6 +281,56 @@ fn with_points_round_trips() -> Result<(), GprError> {
     Ok(())
 }
 
+/// A distance kernel with no slot (a coordinate tree as
+/// `DistanceKernel::from`) saves and loads, Exact and sparse.
+#[test]
+fn a_distance_kernel_with_no_slot_round_trips() -> Result<(), GprError> {
+    let kernel = || -> Result<DistanceKernel<WithPoints>, GprError> {
+        Ok(DistanceKernel::from(KernelSpec::from(RbfKernel::new(0.7)?)))
+    };
+    let rows = train_idx(N);
+    let (x, y) = (coords(0, &rows), targets(N));
+    let q = query_idx();
+    let xq = coords(0, &q);
+    let registry = PersistRegistry::new();
+    let fitted = Gpr::new(kernel()?, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor(Vec::new(), N, &x, 1, &y)?;
+    let want = widen(fitted.predict(Vec::new(), &xq, M, 1)?);
+    let dir = temp_dir("no-slot-exact");
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceGpr::<WithPoints>::load(&dir, &registry)?;
+    assert!(loaded.slots().is_empty());
+    let got = widen(loaded.predict(Vec::new(), &xq, M, 1)?);
+    assert_same("no slot exact", &got, &want, 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let sgpr = Sgpr::new(kernel()?, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor(Vec::new(), N, &x, 1, &y, &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(sgpr.predict(Vec::new(), &xq, M, 1)?);
+    let dir = temp_dir("no-slot-sgpr");
+    sgpr.save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<WithPoints>::load(&dir, &registry)?;
+    assert_eq!(loaded.inducing(), Some(&INDUCING[..]));
+    let got = widen(loaded.predict(Vec::new(), &xq, M, 1)?);
+    assert_same("no slot sgpr", &got, &want, 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let svgp = Svgp::new(kernel()?, GaussianLikelihood::new(0.1)?)
+        .factor(Vec::new(), N, &x, 1, &y, &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(svgp.predict(Vec::new(), &xq, M, 1)?);
+    let dir = temp_dir("no-slot-svgp");
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<WithPoints>::load(&dir, &registry)?;
+    let got = widen(loaded.predict(Vec::new(), &xq, M, 1)?);
+    assert_same("no slot svgp", &got, &want, 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 /// The training points that start as inducing points.
 const INDUCING: [usize; 3] = [0, 3, 5];
 
@@ -317,7 +367,8 @@ fn sparse_round_trip<P: GpScalar>(
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
     assert!(!loaded.is_online());
     assert_eq!((loaded.n(), loaded.m()), (N, INDUCING.len()));
-    assert_eq!(loaded.inducing(), &INDUCING);
+    assert_eq!(loaded.inducing(), Some(&INDUCING[..]));
+    assert!(loaded.inducing_points().is_none());
     assert_eq!(loaded.to_kernel().slots(), loaded.slots());
     let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), M)?);
     assert_same(&format!("sgpr {label}"), &got, &want, tol);
@@ -350,7 +401,9 @@ fn sparse_round_trip<P: GpScalar>(
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
     assert!(loaded.is_online());
     assert_eq!(loaded.n(), live.len());
-    assert_eq!(loaded.inducing(), common::inducing_places(&online));
+    assert_eq!(loaded.inducing(), None);
+    let points: Option<Vec<_>> = loaded.inducing_points().map(Iterator::collect);
+    assert_eq!(points, Some(online.inducing_points().collect()));
     let got = widen(loaded.predict(sources(&loaded.slots(), &z_live, &q), M)?);
     assert_same(&format!("online sgpr {label}"), &got, &want, refactored);
     let (LoadedDistanceSgpr::OnlineDouble(_)

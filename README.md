@@ -952,7 +952,9 @@ fn main() -> Result<(), GprError> {
         .map_err(|(_, e)| e)?
         .save(&dir)?;
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
-    assert_eq!((loaded.m(), loaded.inducing()), (2, &[0, 2][..]));
+    assert_eq!((loaded.m(), loaded.inducing()), (2, Some(&[0, 2][..])));
+    // A loaded online model names its inducing points by `PointId` instead.
+    assert!(loaded.inducing_points().is_none());
     let slot = scalar(&loaded.slots())?;
     // The inducing samples × the query at 0.5.
     let _ = loaded.predict([slot.borrow(&[2.25, 0.25])], 1)?;
@@ -1006,7 +1008,7 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 | `InvalidHyperparameter { reason }` | a kernel parameter is outside its domain |
 | `ShapeMismatch { reason }` | a matrix has the wrong shape |
 | `InvalidDistance { slot, dim, pair, reason }` | a supplied squared distance is not finite, is negative, or breaks a square's zero diagonal or symmetry. `slot` is the table's place in the kernel's `slots()`, `dim` its ARD dimension, `pair` the `(row, col)` in the block passed; each is `None` when unknown |
-| `DistanceSlot { kind, slot }` | the sources do not match the kernel's slots: `SlotErrorKind::NotRead` (a slot the kernel does not read, such as one from before a save), `Duplicate`, or `Missing`; `slot` is the place in `slots()` |
+| `DistanceSlot { kind, slot }` | the sources do not match the kernel's slots: `SlotErrorKind::NotRead` (a slot the kernel does not read, such as one from before a save), `Duplicate`, or `Missing`; `slot` is the place in `slots()` of the slot with two sources or none, and `None` for `NotRead` |
 | `LengthMismatch { reason }` | a slice has the wrong length |
 | `IndexOutOfRange { reason }` | a parameter, leaf, or dimension index |
 | `InvalidConfig { reason }` | an optimizer, jitter, or transform setting |

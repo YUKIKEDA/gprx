@@ -209,15 +209,15 @@ pub(crate) trait DistanceQuery {
     /// The predict scalar.
     type Refine;
 
-    /// Mean and variance at `m` queries: `cross` is one source per slot of
-    /// the squared distances from the model's points to the queries (`n × m`
+    /// Mean and variance at `q` queries: `cross` is one source per slot of
+    /// the squared distances from the model's points to the queries (`n × q`
     /// from the training points for an Exact model, from the inducing
     /// points for a sparse one).
     fn query_distances<'s>(
         &self,
         cross: impl IntoIterator<Item = DistanceSource<'s>>,
         points: QueryPoints<'_>,
-        m: usize,
+        q: usize,
         options: PredictOptions,
     ) -> Result<Prediction<Self::Refine>, GprError>;
 
@@ -226,19 +226,19 @@ pub(crate) trait DistanceQuery {
         &mut self,
         cross: impl IntoIterator<Item = DistanceSource<'s>>,
         points: QueryPoints<'_>,
-        m: usize,
+        q: usize,
         options: PredictOptions,
         out: &mut Prediction<Self::Refine>,
     ) -> Result<(), GprError>;
 
     /// Mean and query × query covariance: `square` is one source per slot
-    /// of the `m × m` query squares.
+    /// of the `q × q` query squares.
     fn query_distance_covariance<'s>(
         &self,
         cross: impl IntoIterator<Item = DistanceSource<'s>>,
         square: impl IntoIterator<Item = DistanceSource<'s>>,
         points: QueryPoints<'_>,
-        m: usize,
+        q: usize,
         options: PredictOptions,
     ) -> Result<PredictiveCovariance<Self::Refine>, GprError>;
 
@@ -284,8 +284,8 @@ macro_rules! distance_predict {
             #[doc = concat!("Returns [`GprError::EmptyInput`] if `", stringify!($count), "` is zero,")]
             /// [`GprError::LengthMismatch`] if a table has the wrong length,
             /// [`GprError::DistanceSlot`] if a source names a slot the kernel
-            /// does not read (a model's slots before a save are not those of
-            /// the loaded model), two name one slot, or a slot has none,
+            /// does not read (on a loaded model, a slot of the model that was
+            /// saved), two name one slot, or a slot has none,
             /// [`GprError::InvalidDistance`] for a value that is not finite or
             /// is negative (see [`crate::kernel::DistanceSource::tidy`]), and
             /// the query errors of the coordinate model's `predict`.

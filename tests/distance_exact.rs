@@ -196,9 +196,33 @@ fn two_slots_read_their_own_supplies_and_one_slot_twice_reads_one() {
         .predict([a.borrow(&sq(&c0, &q0)), b.borrow(&sq(&c1, &q1))], M)
         .expect("predict");
     let expect = reference
-        .predict(&[q0.clone(), q1].concat(), M, 2)
+        .predict(&[q0.clone(), q1.clone()].concat(), M, 2)
         .expect("predict");
     assert_pred(&got, &expect, TOL);
+    // The second slot (`b`, place 1) with no source, then with two.
+    let only_a = model.predict([a.borrow(&sq(&c0, &q0))], M);
+    assert_eq!(
+        only_a.map(drop),
+        Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::Missing,
+            slot: Some(1)
+        })
+    );
+    let b_twice = model.predict(
+        [
+            a.borrow(&sq(&c0, &q0)),
+            b.borrow(&sq(&c1, &q1)),
+            b.borrow(&sq(&c1, &q1)),
+        ],
+        M,
+    );
+    assert_eq!(
+        b_twice.map(drop),
+        Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::Duplicate,
+            slot: Some(1)
+        })
+    );
     // One slot used twice is one supply.
     let image = ScalarDistance::new();
     let sum_kernel = image.kernel(RbfKernel::new(1.0).expect("ell"))
@@ -244,7 +268,7 @@ fn two_slots_read_their_own_supplies_and_one_slot_twice_reads_one() {
     assert_eq!(none.map(drop), Err(missing.clone()));
     assert_eq!(
         missing.to_string(),
-        "distance slot mismatch: a distance slot of the kernel has no source"
+        "distance slot mismatch in slot 0: a distance slot of the kernel has no source"
     );
 }
 
