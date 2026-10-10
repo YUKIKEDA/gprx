@@ -4,7 +4,7 @@
 
 Rust のガウス過程回帰。Exact、スパース（VFE）、SVGP を含む。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。
 
-`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0**（タグ `v0.1.0`）は既定フィーチャの公開 API である。この README は未リリースの `main` に従う。供給する距離（`ScalarDistance`、`ArdDistance` とその保存・読み込み）は 0.2.0 で入る。`main` の MSRV は 1.88（0.1.0 では 1.85）。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
+`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0**（タグ `v0.1.0`）は既定フィーチャの公開 API である。この README は未リリースの `main` に従う。与えられた二乗距離（`ScalarDistance`、`ArdDistance` とその保存・読み込み）は 0.2.0 で入る。`main` の MSRV は 1.88（0.1.0 では 1.85）。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
 
 ```toml
 [dependencies]
@@ -387,9 +387,9 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-### 与えられた距離（`ScalarDistance`、`ArdDistance`）
+### 与えられた二乗距離（`ScalarDistance`、`ArdDistance`）
 
-カーネルの葉は、座標の代わりに、与えた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
+カーネルの葉は、座標の代わりに、与えられた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
 
 結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。右に `KernelSpec` を置いた `DistanceKernel` は `WithPoints`。座標の項を左に置くときは `DistanceKernel::from(spec)`（スロットの無い `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないので、`KernelSpec + leaf.into()` は座標の和として推論される。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
 
@@ -812,7 +812,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FORMAT_VERSION` は `1`。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
 
-`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` は座標のモデルのディレクトリを読み込む。供給された距離のモデルのディレクトリは `LoadedDistanceGpr::<C>::load`、`LoadedDistanceSgpr::<C>::load`、`LoadedDistanceSvgp::<C>::load` が読む（下）。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
+`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` は座標のモデルのディレクトリを読み込む。与えられた二乗距離のモデルのディレクトリは `LoadedDistanceGpr::<C>::load`、`LoadedDistanceSgpr::<C>::load`、`LoadedDistanceSvgp::<C>::load` が読む（下）。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
 
 - `register_kernel`
 - `register_unfitted_input`、`register_fitted_input`
@@ -903,7 +903,7 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-供給された距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-供給された距離のモデル)。
+与えられた二乗距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-与えられた二乗距離のモデル)。
 
 ```rust
 use gprx::kernel::{
@@ -1022,7 +1022,7 @@ fn main() -> Result<(), GprError> {
 | `OptimizationNotConverged { iterations }` | ソルバが判定の前に止まった |
 | `InvalidHyperparameter { reason }` | カーネルパラメータが定義域の外 |
 | `ShapeMismatch { reason }` | 行列の形が違う |
-| `InvalidDistance { slot, dim, pair, reason }` | 与えた二乗距離が有限でない、負、または正方行列の対角が 0 でない・対称でない。`slot` は表の `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの `(row, col)`。分からないものは `None` |
+| `InvalidDistance { slot, dim, pair, reason }` | 与えられた二乗距離が有限でない、負、または正方行列の対角が 0 でない・対称でない。`slot` は表の `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの `(row, col)`。分からないものは `None` |
 | `DistanceSlot { kind, slot }` | 供給がカーネルのスロットと合わない。`SlotErrorKind::NotRead`（カーネルが読まないスロット。保存前のスロットなど）、`Duplicate`、`Missing`。`slot` は、供給が 2 つか無いスロットの `slots()` での位置で、`NotRead` では `None` |
 | `LengthMismatch { reason }` | スライスの長さが違う |
 | `IndexOutOfRange { reason }` | パラメータ、カーネルの葉、次元の添字 |
