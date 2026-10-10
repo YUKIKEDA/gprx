@@ -2,7 +2,10 @@
 //! caller's sources, kept in the storage scalar, grown and shrunk by an
 //! online model, and saved and loaded packed.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// The packed training triangles of an ARD slot of `d` dimensions from its

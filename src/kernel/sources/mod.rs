@@ -27,17 +27,35 @@ use super::simd::SquareOut;
 use super::{ArdData, DistanceFill, ScalarData, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
 use crate::error::{GprError, SlotErrorKind};
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use blocks::*;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use check::*;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use query::*;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use refined::*;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use slot::*;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the parent re-exports the whole split file; each user reads some"
+)]
 pub(crate) use train::*;
 
 /// Whether `T` reads `f64` tables in place.

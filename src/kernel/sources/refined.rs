@@ -2,7 +2,10 @@
 //! scalar's, and for a model that refines in `f64` the caller's values next
 //! to it ([`RefinedSources`]).
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// The training `d²` a model of one precision keeps.

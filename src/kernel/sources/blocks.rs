@@ -2,7 +2,10 @@
 //! ([`BlockStore`]): bound from the caller's sources, and edited as an online
 //! model inserts and deletes points and inducing points.
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "a split file takes its parent's imports whole; each uses some"
+)]
 use super::*;
 
 /// Training `d²` a sparse model keeps: per slot, a checked column-major
