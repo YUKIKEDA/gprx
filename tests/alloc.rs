@@ -1561,8 +1561,10 @@ macro_rules! checks {
     };
 }
 
-/// Every check of this binary, in the order [`main`] runs them.
-const CHECKS: [(&str, fn()); 18] = checks![
+/// Every check of this binary, in the order [`main`] runs them. A new
+/// check goes in this list: without the harness `#[test]` runs nothing, and
+/// a check left out is dead code, which `clippy -D warnings` refuses.
+const CHECKS: [(&str, fn()); 19] = checks![
     mll_and_grad_allocs_after_workspace,
     fast_approx_mll_and_grad_allocs_after_workspace,
     predict_100_allocs_after_workspace,
@@ -1581,6 +1583,7 @@ const CHECKS: [(&str, fn()); 18] = checks![
     supplied_distances_allocate_no_more_than_coordinates,
     svgp_gradient_with_points_allocates_no_more_than_coordinates,
     a_covariance_on_supplied_distances_copies_no_query_square,
+    arguments_select_as_libtest_does,
 ];
 
 /// What a `cargo test` run asks of this binary: the libtest arguments it
@@ -1605,8 +1608,13 @@ impl Args {
                 "--ignored" => out.ignored = true,
                 "--skip" => out.skip.extend(args.next()),
                 // Flags that take a value in the next argument.
-                "--test-threads" | "--color" | "--format" | "-Z" | "--logfile" => {
+                "--test-threads" | "--color" | "--format" | "-Z" | "--logfile"
+                | "--shuffle-seed" => {
                     let _ = args.next();
+                }
+                // A flag with its value after `=`.
+                flag if flag.starts_with("--skip=") => {
+                    out.skip.push(flag["--skip=".len()..].to_owned());
                 }
                 flag if flag.starts_with('-') => {}
                 filter => out.filters.push(filter.to_owned()),
@@ -1671,4 +1679,51 @@ fn main() -> ExitCode {
     } else {
         ExitCode::from(101)
     }
+}
+
+/// The arguments a `cargo test` run passes select the checks as libtest
+/// selects tests.
+fn arguments_select_as_libtest_does() {
+    let parse = |args: &[&str]| Args::parse(args.iter().map(|arg| (*arg).to_owned()));
+    let names = ["hessian_allocs_after_warmup", "sparse_allocs_after_warmup"];
+    let picked = |args: &Args| -> Vec<&str> {
+        names
+            .iter()
+            .copied()
+            .filter(|name| args.selects(name))
+            .collect()
+    };
+    assert_eq!(picked(&parse(&[])), names);
+    assert_eq!(
+        picked(&parse(&["hessian"])),
+        ["hessian_allocs_after_warmup"]
+    );
+    assert_eq!(picked(&parse(&["--exact", "hessian"])), Vec::<&str>::new());
+    assert_eq!(
+        picked(&parse(&["--exact", "sparse_allocs_after_warmup"])),
+        ["sparse_allocs_after_warmup"]
+    );
+    for skip in [&["--skip", "hessian"][..], &["--skip=hessian"]] {
+        assert_eq!(
+            picked(&parse(skip)),
+            ["sparse_allocs_after_warmup"],
+            "{skip:?}"
+        );
+    }
+    assert_eq!(picked(&parse(&["--ignored"])), Vec::<&str>::new());
+    // A flag's value is not a filter, in either form.
+    for flags in [
+        &[
+            "--test-threads",
+            "4",
+            "--shuffle-seed",
+            "7",
+            "--color",
+            "never",
+        ][..],
+        &["--test-threads=4", "--nocapture", "-q", "--format=terse"],
+    ] {
+        assert_eq!(picked(&parse(flags)), names, "{flags:?}");
+    }
+    assert!(parse(&["--list"]).list);
 }
