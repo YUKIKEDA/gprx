@@ -3,14 +3,16 @@
 
 mod common;
 
+use common::distance::{assert_pred, lik, sq};
+
 use common::assert_close;
 use gprx::kernel::{
     ArdDistance, DistanceFill, DistanceKernel, DistanceSource, KernelScalar, KernelSpec,
     RbfArdKernel, RbfKernel, ScalarDistance, WithPoints,
 };
 use gprx::{
-    DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, MixedPrecision,
-    OnlineGpr, Prediction, PromoteStorage, ReevaluateKernel, SinglePrecision, SlotErrorKind,
+    DoublePrecision, FittedGpr, Fixed, GpScalar, Gpr, GprError, MixedPrecision, OnlineGpr,
+    Prediction, PromoteStorage, ReevaluateKernel, SinglePrecision, SlotErrorKind,
 };
 
 /// Points in the pool; the model starts on the first `START`.
@@ -34,17 +36,6 @@ fn query(k: usize, q: usize) -> f64 {
 
 fn target(i: usize) -> f64 {
     (i as f64 * 0.7).cos()
-}
-
-/// Column-major `rows.len() × cols.len()` squared differences.
-fn sq(rows: &[f64], cols: &[f64]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(rows.len() * cols.len());
-    for c in cols {
-        for r in rows {
-            out.push((r - c) * (r - c));
-        }
-    }
-    out
 }
 
 fn coords(k: usize, live: &[usize]) -> Vec<f64> {
@@ -100,21 +91,6 @@ impl DistanceFill for Pool<'_> {
                     .sum();
             }
         }
-    }
-}
-
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
-fn lik() -> GaussianLikelihood {
-    GaussianLikelihood::new(0.05).expect("noise")
-}
-
-fn assert_pred<T: KernelScalar>(got: &Prediction<T>, expect: &Prediction<T>, tol: f64) {
-    assert_eq!(got.mean.len(), expect.mean.len());
-    for (g, e) in got.mean.iter().zip(&expect.mean) {
-        assert_close(g.to_f64(), e.to_f64(), tol);
-    }
-    for (g, e) in got.variance.iter().zip(&expect.variance) {
-        assert_close(g.to_f64(), e.to_f64(), tol);
     }
 }
 

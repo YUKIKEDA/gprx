@@ -3,57 +3,24 @@
 
 mod common;
 
+use common::distance::{assert_pred, coord, lik, sq, sum};
+
 use common::{assert_close, assert_slice_close};
 use gprx::kernel::{
     ArdDistance, DistanceFill, KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel,
     ScalarDistance,
 };
 use gprx::{
-    DistanceCachePolicy, Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, Prediction,
-    SinglePrecision, SlotErrorKind, VarianceKind,
+    DistanceCachePolicy, Fixed, Gpr, GprError, PredictOptions, Prediction, SinglePrecision,
+    SlotErrorKind, VarianceKind,
 };
 
 const N: usize = 6;
 const M: usize = 3;
 const TOL: f64 = 1e-10;
 
-/// Coordinate `k` of the training (`N`) or query (`M`) samples.
-fn coord(k: usize, rows: usize, offset: f64) -> Vec<f64> {
-    (0..rows)
-        .map(|i| ((i as f64 + offset) * (0.41 + 0.17 * k as f64)).sin() * (1.0 + 0.5 * k as f64))
-        .collect()
-}
-
-/// Column-major `a.len() × b.len()` squared differences.
-fn sq(a: &[f64], b: &[f64]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(a.len() * b.len());
-    for bj in b {
-        for ai in a {
-            out.push((ai - bj) * (ai - bj));
-        }
-    }
-    out
-}
-
-/// `Σ_k` of the blocks of `sq`.
-fn sum(blocks: &[Vec<f64>]) -> Vec<f64> {
-    (0..blocks[0].len())
-        .map(|i| blocks.iter().map(|b| b[i]).sum())
-        .collect()
-}
-
 fn targets() -> Vec<f64> {
     (0..N).map(|i| (i as f64 * 0.7).cos()).collect()
-}
-
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
-fn lik() -> GaussianLikelihood {
-    GaussianLikelihood::new(0.05).expect("noise")
-}
-
-fn assert_pred(a: &Prediction, b: &Prediction, tol: f64) {
-    assert_slice_close(&a.mean, &b.mean, tol);
-    assert_slice_close(&a.variance, &b.variance, tol);
 }
 
 #[test]
@@ -701,9 +668,18 @@ fn a_tidied_borrowed_ard_query_square_is_repaired_on_a_copy() {
     let before = skewed.clone();
     let exact: Vec<&[f64]> = exact.iter().map(Vec::as_slice).collect();
     let skewed_refs: Vec<&[f64]> = skewed.iter().map(Vec::as_slice).collect();
+    let skew = dist.predict_covariance([bands.borrow(&cross)], [bands.borrow(&skewed_refs)], M);
     assert!(
-        dist.predict_covariance([bands.borrow(&cross)], [bands.borrow(&skewed_refs)], M)
-            .is_err()
+        matches!(
+            skew,
+            Err(GprError::InvalidDistance {
+                slot: Some(0),
+                dim: Some(1),
+                pair: Some((1, 0)),
+                ..
+            })
+        ),
+        "{skew:?}"
     );
     let want = dist
         .predict_covariance([bands.borrow(&cross)], [bands.borrow(&exact)], M)
@@ -895,7 +871,10 @@ fn rounding_is_refused_exactly_and_repaired_on_request() {
         image.borrow(&cross).tidy(-1.0),
         Err(GprError::InvalidConfig { .. })
     ));
-    assert!(image.borrow(&cross).tidy(f64::NAN).is_err());
+    assert!(matches!(
+        image.borrow(&cross).tidy(f64::NAN),
+        Err(GprError::InvalidConfig { .. })
+    ));
     // At `1` and past it any table would pass as rounding.
     for rel_tol in [1.0, 2.0, f64::INFINITY] {
         assert!(matches!(

@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod check;
+pub mod distance;
 pub mod problems;
 #[path = "../../src/rng.rs"]
 pub mod rng;

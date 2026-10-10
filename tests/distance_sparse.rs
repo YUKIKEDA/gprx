@@ -4,56 +4,18 @@
 
 mod common;
 
+use common::distance::{assert_pred, coord, lik, sq, sum, to64};
+
 use common::{assert_close, assert_slice_close};
 use gprx::kernel::{
-    ArdDistance, DistanceFill, DistanceSource, KernelScalar, KernelSpec, RbfArdKernel, RbfKernel,
-    ScalarDistance,
+    ArdDistance, DistanceFill, DistanceSource, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
 };
+use gprx::transform::{MinMaxInput, Transform};
 use gprx::{
-    Adam, DoublePrecision, Fixed, GaussianLikelihood, GpScalar, GprError, MixedPrecision,
-    PredictOptions, Prediction, PromoteStorage, Sgpr, SinglePrecision, SlotErrorKind, Svgp,
-    VarianceKind,
+    Adam, DoublePrecision, Fixed, GpScalar, GprError, MixedPrecision, PredictOptions, Prediction,
+    PromoteStorage, Sgpr, SinglePrecision, SlotErrorKind, Svgp, VarianceKind,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
-
-/// Coordinate `k` of `rows` samples.
-fn coord(k: usize, rows: usize, offset: f64) -> Vec<f64> {
-    (0..rows)
-        .map(|i| ((i as f64 + offset) * (0.41 + 0.17 * k as f64)).sin() * (1.0 + 0.5 * k as f64))
-        .collect()
-}
-
-/// Column-major `a.len() × b.len()` squared differences.
-fn sq(a: &[f64], b: &[f64]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(a.len() * b.len());
-    for bj in b {
-        for ai in a {
-            out.push((ai - bj) * (ai - bj));
-        }
-    }
-    out
-}
-
-/// `Σ_k` of the blocks of `sq`.
-fn sum(blocks: &[Vec<f64>]) -> Vec<f64> {
-    (0..blocks[0].len())
-        .map(|i| blocks.iter().map(|b| b[i]).sum())
-        .collect()
-}
-
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
-fn lik() -> GaussianLikelihood {
-    GaussianLikelihood::new(0.05).expect("noise")
-}
-
-fn to64<T: KernelScalar>(values: &[T]) -> Vec<f64> {
-    values.iter().map(|v| v.to_f64()).collect()
-}
-
-fn assert_pred<T: KernelScalar>(got: &Prediction<T>, expect: &Prediction<T>, tol: f64) {
-    assert_slice_close(&to64(&got.mean), &to64(&expect.mean), tol);
-    assert_slice_close(&to64(&got.variance), &to64(&expect.variance), tol);
-}
 
 /// One problem: `n` training samples of `d` coordinates, the inducing
 /// points (training indices), and `q` queries.
@@ -1038,4 +1000,71 @@ fn a_tidied_table_is_the_table_repaired_by_hand() {
         .predict([bands.borrow(&refs)], q)
         .expect("predict");
     assert_pred(&got, &expect, 1e-13);
+}
+
+/// An input transform maps the coordinate part of a model with points:
+/// fitted on raw coordinates with `MinMaxInput`, an SGPR and an SVGP
+/// predict as the same models fitted on the mapped coordinates, and report
+/// the inducing points in raw coordinates.
+#[test]
+fn an_input_transform_maps_the_coordinates_of_a_model_with_points() {
+    let case = Case::standard(2);
+    let (n, q, y) = (case.n, case.q, case.y());
+    let image = ScalarDistance::new();
+    let kernel = || {
+        image.kernel(RbfKernel::new(0.7).expect("ell"))
+            * KernelSpec::from(RbfKernel::new(1.3).expect("ell"))
+    };
+    let (train, cross, _) = case.blocks(0);
+    let (x, xq) = (&case.cols[1], &case.qcols[1]);
+    let map = MinMaxInput::new().fit(x, n, 1).expect("map");
+    let (mut mx, mut mq) = (x.clone(), xq.clone());
+    map.apply(&mut mx, n, 1).expect("apply");
+    map.apply(&mut mq, q, 1).expect("apply");
+    let raw_z = case.at_inducing(x);
+
+    let fitted = Sgpr::new(kernel(), lik())
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor([image.from_vec(train.clone())], n, x, 1, &y, &case.inducing)
+        .expect("transformed");
+    let reference = Sgpr::new(kernel(), lik())
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(train.clone())],
+            n,
+            &mx,
+            1,
+            &y,
+            &case.inducing,
+        )
+        .expect("mapped");
+    assert_pred(
+        &fitted
+            .predict([image.borrow(&cross)], xq, q, 1)
+            .expect("predict"),
+        &reference
+            .predict([image.borrow(&cross)], &mq, q, 1)
+            .expect("predict"),
+        1e-12,
+    );
+    assert_slice_close(fitted.z(), &raw_z, 1e-12);
+
+    let fitted = Svgp::new(kernel(), lik())
+        .with_input_transform(MinMaxInput::new())
+        .factor([image.from_vec(train.clone())], n, x, 1, &y, &case.inducing)
+        .expect("transformed");
+    let reference = Svgp::new(kernel(), lik())
+        .factor([image.from_vec(train)], n, &mx, 1, &y, &case.inducing)
+        .expect("mapped");
+    assert_pred(
+        &fitted
+            .predict([image.borrow(&cross)], xq, q, 1)
+            .expect("predict"),
+        &reference
+            .predict([image.borrow(&cross)], &mq, q, 1)
+            .expect("predict"),
+        1e-12,
+    );
+    assert_slice_close(fitted.z(), &raw_z, 1e-12);
 }

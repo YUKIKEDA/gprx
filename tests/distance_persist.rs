@@ -4,6 +4,8 @@
 
 mod common;
 
+use common::distance::{sum, to64};
+
 use gprx::kernel::{
     ArdDistance, ConstantKernel, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource,
     KernelScalar, KernelSpec, MaternKernel, MaternNu, RationalQuadraticArdKernel, RbfArdKernel,
@@ -13,6 +15,7 @@ use gprx::persist::{
     LoadedDistanceGpr, LoadedDistanceSgpr, LoadedDistanceSvgp, LoadedGpr, LoadedSgpr, LoadedSvgp,
     PersistRegistry,
 };
+use gprx::transform::MinMaxInput;
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, MixedPrecision,
     PersistErrorKind, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, SlotErrorKind, Svgp,
@@ -45,21 +48,11 @@ fn targets(n: usize) -> Vec<f64> {
 
 /// Column-major `rows × cols` squared differences of dimension `k`.
 fn sq(k: usize, rows: &[f64], cols: &[f64]) -> Vec<f64> {
-    let (r, c) = (coords(k, rows), coords(k, cols));
-    let mut out = Vec::with_capacity(r.len() * c.len());
-    for cv in &c {
-        for rv in &r {
-            out.push((rv - cv) * (rv - cv));
-        }
-    }
-    out
+    common::distance::sq(&coords(k, rows), &coords(k, cols))
 }
 
 fn summed(rows: &[f64], cols: &[f64]) -> Vec<f64> {
-    let blocks: Vec<_> = (0..DIMS).map(|k| sq(k, rows, cols)).collect();
-    (0..blocks[0].len())
-        .map(|i| blocks.iter().map(|b| b[i]).sum())
-        .collect()
+    sum(&ard(rows, cols))
 }
 
 fn ard(rows: &[f64], cols: &[f64]) -> Vec<Vec<f64>> {
@@ -111,10 +104,7 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
 type Widened = (Vec<f64>, Vec<f64>);
 
 fn widen<T: KernelScalar>(pred: Prediction<T>) -> Widened {
-    (
-        pred.mean.iter().map(|v| v.to_f64()).collect(),
-        pred.variance.iter().map(|v| v.to_f64()).collect(),
-    )
+    (to64(&pred.mean), to64(&pred.variance))
 }
 
 fn assert_same(label: &str, got: &Widened, want: &Widened, tol: f64) {
@@ -287,43 +277,6 @@ fn with_points_round_trips() -> Result<(), GprError> {
         &dir, &registry
     )));
     assert!(is_wrong_model(&LoadedGpr::load(&dir, &registry)));
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
-}
-
-#[test]
-fn coordinate_and_distance_files_refuse_the_other_loader() -> Result<(), GprError> {
-    let rows = train_idx(N);
-    let kernel = scalar_only()?;
-    let slots = kernel.slots();
-    let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
-        .with_optimizer(Fixed)
-        .factor(sources(&slots, &rows, &rows), N, &targets(N))?;
-    let registry = PersistRegistry::new();
-    let dir = temp_dir("mixup-distance");
-    fitted.save(&dir)?;
-    assert!(is_wrong_model(&LoadedGpr::load(&dir, &registry)));
-    assert!(is_wrong_model(&gprx::persist::LoadedSgpr::load(
-        &dir, &registry
-    )));
-    assert!(is_wrong_model(&LoadedDistanceGpr::<WithPoints>::load(
-        &dir, &registry
-    )));
-    let _ = std::fs::remove_dir_all(&dir);
-
-    let coordinate = Gpr::new(
-        KernelSpec::from(RbfKernel::new(1.0)?),
-        GaussianLikelihood::new(0.1)?,
-    )
-    .fit(&coords(0, &rows), N, 1, &targets(N))?;
-    let dir = temp_dir("mixup-coordinate");
-    coordinate.save(&dir)?;
-    assert!(is_wrong_model(&LoadedDistanceGpr::<DistanceOnly>::load(
-        &dir, &registry
-    )));
-    assert!(is_wrong_model(&LoadedDistanceGpr::<WithPoints>::load(
-        &dir, &registry
-    )));
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -502,6 +455,66 @@ fn sparse_with_points_round_trips() -> Result<(), GprError> {
     Ok(())
 }
 
+/// A model with points fitted with an input transform saves the map: the
+/// loaded Exact, SGPR and SVGP models take raw coordinates and predict as
+/// the saved ones did.
+#[test]
+fn with_points_input_transforms_round_trip() -> Result<(), GprError> {
+    let rows = train_idx(N);
+    let z = pick(&rows, &INDUCING);
+    let q = query_idx();
+    let (x, xq, y) = (coords(0, &rows), coords(0, &q), targets(N));
+    let kernel = || -> Result<DistanceKernel<WithPoints>, GprError> {
+        Ok(ScalarDistance::new().kernel(RbfKernel::new(1.2)?)
+            * KernelSpec::from(RbfKernel::new(0.7)?))
+    };
+    let registry = PersistRegistry::new();
+
+    let first = kernel()?;
+    let slots = first.slots();
+    let fitted = Gpr::new(first, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor(sources(&slots, &rows, &rows), N, &x, 1, &y)?;
+    let want = widen(fitted.predict(sources(&slots, &rows, &q), &xq, M, 1)?);
+    let dir = temp_dir("gpr-points-map");
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceGpr::<WithPoints>::load(&dir, &registry)?;
+    let got = widen(loaded.predict(sources(&loaded.slots(), &rows, &q), &xq, M, 1)?);
+    assert_same("gpr points map", &got, &want, 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let second = kernel()?;
+    let slots = second.slots();
+    let fitted = Sgpr::new(second, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor(sources(&slots, &rows, &z), N, &x, 1, &y, &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(fitted.predict(sources(&slots, &z, &q), &xq, M, 1)?);
+    let dir = temp_dir("sgpr-points-map");
+    fitted.save(&dir)?;
+    let loaded = LoadedDistanceSgpr::<WithPoints>::load(&dir, &registry)?;
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), &xq, M, 1)?);
+    assert_same("sgpr points map", &got, &want, 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let third = kernel()?;
+    let slots = third.slots();
+    let svgp = Svgp::new(third, GaussianLikelihood::new(0.1)?)
+        .with_input_transform(MinMaxInput::new())
+        .factor(sources(&slots, &rows, &z), N, &x, 1, &y, &INDUCING)
+        .map_err(|(_, e)| e)?;
+    let want = widen(svgp.predict(sources(&slots, &z, &q), &xq, M, 1)?);
+    let dir = temp_dir("svgp-points-map");
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<WithPoints>::load(&dir, &registry)?;
+    let got = widen(loaded.predict(sources(&loaded.slots(), &z, &q), &xq, M, 1)?);
+    assert_same("svgp points map", &got, &want, 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 // ---- Files edited by hand: load refuses them with the right error. ----
 
 /// One tensor of a file: its scalar, shape, and bytes.
@@ -672,7 +685,15 @@ fn edited_exact_tensors_are_refused() -> Result<(), GprError> {
         }
         write_tensors(dir, &tensors)
     })?;
-    assert!(extra.is_ok(), "{extra:?}");
+    let plain = load_edited("plain", |_| Ok(()))??;
+    let extra = extra?;
+    let (rows, q) = (train_idx(N), query_idx());
+    assert_same(
+        "extra",
+        &widen(extra.predict(sources(&extra.slots(), &rows, &q), M)?),
+        &widen(plain.predict(sources(&plain.slots(), &rows, &q), M)?),
+        0.0,
+    );
     // A value that is not finite, a negative one, a non-zero diagonal.
     let nan = load_edited("nan", |dir| {
         edit_tensor(dir, "d2.0", |(_, _, data)| {
@@ -1168,11 +1189,40 @@ fn every_other_loader_refuses_the_file() -> Result<(), GprError> {
                 LoadedDistanceSvgp::<WithPoints>::load(dir, &registry).map(|_| ()),
             ),
         ];
+        // The loader the refusal names.
+        let want = match own {
+            "gpr" => "LoadedGpr::load".to_owned(),
+            "sgpr" => "LoadedSgpr::load".to_owned(),
+            "svgp" => "LoadedSvgp::load".to_owned(),
+            distance => {
+                let (model, points) = distance.split_once('-').unwrap_or((distance, ""));
+                let name = match model {
+                    "dgpr" => "LoadedDistanceGpr",
+                    "dsgpr" => "LoadedDistanceSgpr",
+                    _ => "LoadedDistanceSvgp",
+                };
+                let marker = if points.is_empty() {
+                    "DistanceOnly"
+                } else {
+                    "WithPoints"
+                };
+                format!("{name}::<{marker}>::load")
+            }
+        };
         for (name, result) in results {
             if name == own {
                 assert!(result.is_ok(), "{own}: its own loader: {result:?}");
             } else {
-                assert!(is_wrong_model(&result), "{own} read by {name}: {result:?}");
+                assert!(
+                    matches!(
+                        &result,
+                        Err(GprError::PersistFailed {
+                            kind: PersistErrorKind::WrongModel,
+                            reason,
+                        }) if reason.contains(&want)
+                    ),
+                    "{own} read by {name}: {result:?}"
+                );
             }
         }
     };

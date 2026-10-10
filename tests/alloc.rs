@@ -775,120 +775,14 @@ const DISTANCE_BASELINE_ALLOCS: [(&str, usize); 22] = [
     ("rbf_ard/svgp_predict_into", 0),
 ];
 
-/// The coordinate path's allocations on the baseline problem, in the order
-/// of [`DISTANCE_BASELINE_ALLOCS`].
+/// The coordinate path's allocations on the baseline problem in double
+/// precision, in the order of [`DISTANCE_BASELINE_ALLOCS`]: measured once,
+/// for this check and as the caps of the supplied path.
 fn distance_baseline_allocs() -> Vec<(String, usize)> {
-    let p = common::problems::distance_baseline();
-    let lik = || GaussianLikelihood::new(0.1).expect("noise");
-    let kernels = [
-        ("rbf", KernelSpec::from(RbfKernel::new(0.5).expect("ell"))),
-        (
-            "rbf_ard",
-            KernelSpec::from(RbfArdKernel::new(&[0.5, 0.6, 0.7, 0.8]).expect("ell")),
-        ),
-    ];
-    let mut out = Vec::new();
-    for (name, kernel) in kernels {
-        let fit = || {
-            Gpr::new(kernel.clone(), lik())
-                .with_optimizer(Fixed)
-                .factor(&p.x, p.n, p.d, &p.y)
-                .expect("factor")
-        };
-        let _warm = fit();
-        let mut model = None;
-        out.push((format!("{name}/factor"), allocs_in(|| model = Some(fit()))));
-        let mut model = model.expect("model");
-        let mut theta = vec![0.0; model.num_params()];
-        model.get_params(&mut theta).expect("theta");
-        let mut grad = vec![0.0; theta.len()];
-        model
-            .value_and_gradient_into(&theta, &mut grad)
-            .expect("warmup");
-        out.push((
-            format!("{name}/mll_and_grad"),
-            allocs_in(|| {
-                model
-                    .value_and_gradient_into(&theta, &mut grad)
-                    .expect("counted");
-            }),
-        ));
-        let mut pred = Prediction::default();
-        model
-            .predict_into(&p.xq, p.q, p.d, &mut pred)
-            .expect("warmup");
-        out.push((
-            format!("{name}/predict_into"),
-            allocs_in(|| {
-                model
-                    .predict_into(&p.xq, p.q, p.d, &mut pred)
-                    .expect("counted")
-            }),
-        ));
-        // Room for one more point, as the bench.
-        let mut base = model.into_online().expect("online");
-        let id = base.insert(&p.x_new, p.y_new).expect("grow");
-        base.delete(id).expect("shrink");
-        let count = {
-            let mut online = base.clone();
-            allocs_once(|| {
-                online.insert(&p.x_new, p.y_new).expect("counted");
-            })
-        };
-        out.push((format!("{name}/online_insert"), count));
-        for (label, index) in [("first", 0), ("middle", p.n / 2), ("last", p.n - 1)] {
-            let id = base.point_ids()[index];
-            let count = {
-                let mut online = base.clone();
-                allocs_once(|| online.delete(id).expect("counted"))
-            };
-            out.push((format!("{name}/online_delete_{label}"), count));
-        }
-        let mut online = base.clone();
-        out.push((
-            format!("{name}/online_refit"),
-            allocs_once(|| online.refit().expect("counted")),
-        ));
-        let sgpr = || {
-            Sgpr::new(kernel.clone(), lik())
-                .with_optimizer(Fixed)
-                .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
-                .map_err(|(_, e)| e)
-                .expect("sgpr")
-        };
-        let _warm = sgpr();
-        let mut sparse = None;
-        out.push((
-            format!("{name}/sgpr_factor"),
-            allocs_in(|| sparse = Some(sgpr())),
-        ));
-        let mut sparse = sparse.expect("sgpr");
-        sparse
-            .predict_into(&p.xq, p.q, p.d, &mut pred)
-            .expect("warmup");
-        out.push((
-            format!("{name}/sgpr_predict_into"),
-            allocs_in(|| {
-                sparse
-                    .predict_into(&p.xq, p.q, p.d, &mut pred)
-                    .expect("counted")
-            }),
-        ));
-        let mut svgp = Svgp::new(kernel.clone(), lik())
-            .factor(&p.x, p.n, p.d, &p.y, &p.z, p.m)
-            .map_err(|(_, e)| e)
-            .expect("svgp");
-        svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
-            .expect("warmup");
-        out.push((
-            format!("{name}/svgp_predict_into"),
-            allocs_in(|| {
-                svgp.predict_into(&p.xq, p.q, p.d, &mut pred)
-                    .expect("counted")
-            }),
-        ));
-    }
-    out
+    static COUNTS: OnceLock<Vec<(String, usize)>> = OnceLock::new();
+    COUNTS
+        .get_or_init(coordinate_allocs::<DoublePrecision>)
+        .clone()
 }
 
 fn distance_baseline_coordinate_allocs() {
@@ -1375,7 +1269,7 @@ fn supplied_distances_allocate_no_more_than_coordinates() {
         (
             "f64",
             supplied_allocs::<DoublePrecision>(),
-            coordinate_allocs::<DoublePrecision>(),
+            distance_baseline_allocs(),
         ),
         (
             "f32",

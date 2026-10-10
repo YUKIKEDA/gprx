@@ -4,14 +4,16 @@
 
 mod common;
 
+use common::distance::{coord, lik, to64};
+
 use common::{assert_close, assert_slice_close};
 use gprx::kernel::{
     ArdDistance, DistanceFill, DistanceKernel, DistanceOnly, DistanceSource, KernelScalar,
     KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
 };
 use gprx::{
-    DoublePrecision, Fixed, GaussianLikelihood, GpScalar, GprError, MixedPrecision, OnlineSgpr,
-    PromoteStorage, Sgpr, SinglePrecision, SlotErrorKind,
+    DoublePrecision, Fixed, GpScalar, GprError, MixedPrecision, OnlineSgpr, PromoteStorage, Sgpr,
+    SinglePrecision, SlotErrorKind,
 };
 
 /// Points the test can insert, and queries.
@@ -19,13 +21,6 @@ const TOTAL: usize = 16;
 const Q: usize = 5;
 const D: usize = 2;
 const ELL: [f64; 2] = [0.8, 1.4];
-
-/// Coordinate `k` of `rows` samples.
-fn coord(k: usize, rows: usize, offset: f64) -> Vec<f64> {
-    (0..rows)
-        .map(|i| ((i as f64 + offset) * (0.41 + 0.17 * k as f64)).sin() * (1.0 + 0.5 * k as f64))
-        .collect()
-}
 
 /// Every sample's coordinates and target, and the queries.
 struct World {
@@ -85,15 +80,6 @@ impl World {
     fn y(&self, rows: &[usize]) -> Vec<f64> {
         rows.iter().map(|&i| self.y[i]).collect()
     }
-}
-
-#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
-fn lik() -> GaussianLikelihood {
-    GaussianLikelihood::new(0.05).expect("noise")
-}
-
-fn to64<T: KernelScalar>(values: &[T]) -> Vec<f64> {
-    values.iter().map(|v| v.to_f64()).collect()
 }
 
 /// The points and inducing points (sample indices) the online model holds,
