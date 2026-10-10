@@ -71,6 +71,8 @@ stats_alloc = "0.1.10"
 # another without the libtest harness's threads (#494).
 name = "alloc"
 harness = false
+# Counted in release, as its own CI job (`just alloc`); `cargo test` skips it.
+test = false
 
 [[bench]]
 name = "exact"

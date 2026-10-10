@@ -1007,7 +1007,7 @@ golden は `compare/goldens/` にあり、`just gen-goldens`、`gen-online-golde
 | 系統 | 道具 | いつ回す | 見るもの |
 |---|---|---|---|
 | 時間 | criterion、`benches/exact.rs`、`benches/distance.rs` | `just bench`（ローカル）。既定 CI では回さない（ノイズ） | 壁時計。グループを分けて測る |
-| 確保 | `tests/alloc.rs` | `just test`（必須） | Workspace 確保**後**の新規確保回数。上限は ratchet（減ることはあっても、Issue なしに増えない）。計測はプロセス全体の確保を数えるので、このバイナリは libtest のハーネスを持たず（`harness = false`）、1 本のスレッドで検査を順に走らせる（#494） |
+| 確保 | `tests/alloc.rs` | `just test` と CI の `alloc (release)` ジョブ（必須。素の `cargo test` は走らせない） | Workspace 確保**後**の新規確保回数。上限は ratchet（減ることはあっても、Issue なしに増えない）。計測はプロセス全体の確保を数えるので、このバイナリは libtest のハーネスを持たず（`harness = false`）、1 本のスレッドで検査を順に走らせる（#494） |
 | ライブラリ横断の時間と RSS | `compare/perf/` | `just perf`、`perf-online`、`perf-online-stages`、`perf-online-delete`、`perf-sparse`、`perf-sparse-online`（手動、CI なし） | gprx と sklearn / libgp / friedrich（Exact）、libgp（オンライン insert）、GPyTorch / GPy（Sparse）、GPyTorch（Sparse オンライン）。正しさのゲートは置かない |
 
 時間と確保を一つの数字に混ぜない。L-BFGS 全体と「MLL+勾配 1回」も混ぜない。Sparse とオンラインのグループは criterion に足さず、`compare/perf/` で測る。

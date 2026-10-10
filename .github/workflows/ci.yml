@@ -26,6 +26,14 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  alloc:
+    name: alloc (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --test alloc
+
   coverage:
     name: coverage (stable)
     runs-on: ubuntu-latest
