@@ -72,7 +72,7 @@ mod test_problems;
 pub mod transform;
 mod workspace;
 
-pub use error::{CholeskyStage, GprError, PersistErrorKind};
+pub use error::{CholeskyStage, GprError, PersistErrorKind, SlotErrorKind};
 pub use gpr::{FittedGpr, Gpr, OnlineGpr};
 pub use likelihood::GaussianLikelihood;
 pub use math::{Accurate, FastApprox, KernelMath};

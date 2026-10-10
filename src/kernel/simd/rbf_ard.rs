@@ -121,7 +121,7 @@ pub(crate) fn try_apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: Blo
             inv_ell_sq,
             col_slice_mut_checked(part.rb_mut(), 0)?,
         );
-        gate.verdict()?;
+        gate.verdict().map_err(|err| blocks.locate(err))?;
         for local in 0..len {
             let finite = if local + 1 < len {
                 let mut gate = gates.gate(start + local + 1);
@@ -132,7 +132,7 @@ pub(crate) fn try_apply_cross_from_blocks<M: KernelMath, T: KernelScalar, S: Blo
                     inv_ell_sq,
                     col_slice_mut_checked(right, 0)?,
                 );
-                gate.verdict()?;
+                gate.verdict().map_err(|err| blocks.locate(err))?;
                 finite
             } else {
                 exp_half_finite::<M>(col_slice_mut_checked(part.rb_mut(), local)?)

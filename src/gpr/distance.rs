@@ -24,7 +24,7 @@ use crate::points::PointId;
 
 use super::{FittedGpr, Gpr, OnlineGpr, TrainInput};
 
-/// Binds the `n × m` train × query blocks of `cross` on `scratch`. The
+/// Binds the `n × q` train × query blocks of `cross` on `scratch`. The
 /// result borrows the scratch and the caller's tables, not `slots`, so the
 /// model can be borrowed again to run it.
 fn bind_cross<'a, 's: 'a, T: KernelScalar>(
@@ -72,8 +72,9 @@ where
     ///
     /// Returns [`GprError::EmptyInput`] if `n` is zero,
     /// [`GprError::LengthMismatch`] if a table or `y` has the wrong length,
-    /// a slot has no source or two, or a source names a slot the kernel does
-    /// not read, [`GprError::InvalidDistance`] for a value that is not
+    /// [`GprError::DistanceSlot`] if a source names a slot the kernel does
+    /// not read, two name one slot, or a slot has none,
+    /// [`GprError::InvalidDistance`] for a value that is not
     /// finite or is negative, or a training square whose diagonal is not
     /// zero or that is not symmetric (see
     /// [`crate::kernel::DistanceSource::tidy`]), and the errors of the
@@ -313,10 +314,10 @@ distance_predict!(
     args = (),
     tail = (),
     points = QueryPoints::NONE,
-    count = m,
+    count = q,
     cross = {
-        /// the `n × m` squared distances from the training samples to the
-        /// `m` queries.
+        /// the `n × q` squared distances from the training samples to the
+        /// `q` queries.
     },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
@@ -363,10 +364,10 @@ distance_predict!(
     args = (xs: &[f64]),
     tail = (n_cols: usize),
     points = QueryPoints { xs, n_cols },
-    count = m,
+    count = q,
     cross = {
-        /// the `n × m` squared distances from the training samples to the
-        /// `m` queries.
+        /// the `n × q` squared distances from the training samples to the
+        /// `q` queries.
     },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
@@ -480,9 +481,10 @@ impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {
     ///
     /// Returns [`GprError::NonFiniteInput`] if `y_new` is `NaN` or `Inf`,
     /// [`GprError::InvalidDistance`] for a negative or non-finite distance,
-    /// [`GprError::LengthMismatch`] for a column whose length is not `n`, a
-    /// source of a slot the kernel does not read, a slot without a source,
-    /// or two sources of one slot, [`GprError::IndexOutOfRange`] if no new
+    /// [`GprError::LengthMismatch`] for a column whose length is not `n`,
+    /// [`GprError::DistanceSlot`] if a source names a slot the kernel does
+    /// not read, two name one slot, or a slot has none,
+    /// [`GprError::IndexOutOfRange`] if no new
     /// [`PointId`] is left, [`GprError::SizeOverflow`] if the kept squares
     /// cannot grow by a point (their memory cannot be reserved), or
     /// [`GprError::CholeskyFailed`] if the new pivot is not positive. On an
@@ -636,10 +638,10 @@ distance_predict!(
     args = (),
     tail = (),
     points = QueryPoints::NONE,
-    count = m,
+    count = q,
     cross = {
-        /// the `n × m` squared distances from the training samples to the
-        /// `m` queries.
+        /// the `n × q` squared distances from the training samples to the
+        /// `q` queries.
     },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it
@@ -689,10 +691,10 @@ distance_predict!(
     args = (xs: &[f64]),
     tail = (n_cols: usize),
     points = QueryPoints { xs, n_cols },
-    count = m,
+    count = q,
     cross = {
-        /// the `n × m` squared distances from the training samples to the
-        /// `m` queries.
+        /// the `n × q` squared distances from the training samples to the
+        /// `q` queries.
     },
     reads = {
         /// A table is read in place for this call (an `f32` model reads it

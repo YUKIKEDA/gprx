@@ -221,9 +221,9 @@ impl<C: PointUse> LoadedDistanceGpr<C> {
 }
 
 impl LoadedDistanceGpr<DistanceOnly> {
-    /// Returns the predictive mean and variance at `m` queries (observation
+    /// Returns the predictive mean and variance at `q` queries (observation
     /// variance), in `f64` whatever the stored precision. `sources` holds
-    /// one source per slot of [`Self::slots`]: the `n × m` squared
+    /// one source per slot of [`Self::slots`]: the `n × q` squared
     /// distances from the training points to the queries.
     ///
     /// # Errors
@@ -234,9 +234,9 @@ impl LoadedDistanceGpr<DistanceOnly> {
     pub fn predict<'s>(
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        m: usize,
+        q: usize,
     ) -> Result<Prediction<f64>, GprError> {
-        self.predict_with(sources, m, PredictOptions::default())
+        self.predict_with(sources, q, PredictOptions::default())
     }
 
     /// Returns [`Self::predict`] with [`PredictOptions`].
@@ -249,10 +249,10 @@ impl LoadedDistanceGpr<DistanceOnly> {
     pub fn predict_with<'s>(
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        m: usize,
+        q: usize,
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
-        each_model!(self, model => model.predict_with(sources, m, options).map(widen))
+        each_model!(self, model => model.predict_with(sources, q, options).map(widen))
     }
 }
 
@@ -264,9 +264,9 @@ impl LoadedDistanceGpr<WithPoints> {
         each_model!(self, model => model.d())
     }
 
-    /// Returns the predictive mean and variance at the `m` queries `xs`
-    /// (column-major `m × n_cols`), in `f64` whatever the stored precision.
-    /// `sources` holds one source per slot of [`Self::slots`]: the `n × m`
+    /// Returns the predictive mean and variance at the `q` queries `xs`
+    /// (column-major `q × n_cols`), in `f64` whatever the stored precision.
+    /// `sources` holds one source per slot of [`Self::slots`]: the `n × q`
     /// squared distances from the training points to the queries.
     ///
     /// # Errors
@@ -278,10 +278,10 @@ impl LoadedDistanceGpr<WithPoints> {
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         xs: &[f64],
-        m: usize,
+        q: usize,
         n_cols: usize,
     ) -> Result<Prediction<f64>, GprError> {
-        self.predict_with(sources, xs, m, n_cols, PredictOptions::default())
+        self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
     /// Returns [`Self::predict`] with [`PredictOptions`].
@@ -295,11 +295,11 @@ impl LoadedDistanceGpr<WithPoints> {
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         xs: &[f64],
-        m: usize,
+        q: usize,
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
-        each_model!(self, model => model.predict_with(sources, xs, m, n_cols, options).map(widen))
+        each_model!(self, model => model.predict_with(sources, xs, q, n_cols, options).map(widen))
     }
 }
 
@@ -506,9 +506,9 @@ impl<C: PointUse> LoadedDistanceSgpr<C> {
 }
 
 impl LoadedDistanceSgpr<DistanceOnly> {
-    /// Returns the predictive mean and observation variance at `m` queries,
+    /// Returns the predictive mean and observation variance at `q` queries,
     /// in `f64` whatever the stored precision. `sources` holds one source
-    /// per slot of [`Self::slots`]: the `m_inducing × m` squared distances
+    /// per slot of [`Self::slots`]: the `m × q` squared distances
     /// from the inducing points ([`Self::inducing`]) to the queries.
     ///
     /// # Errors
@@ -519,9 +519,9 @@ impl LoadedDistanceSgpr<DistanceOnly> {
     pub fn predict<'s>(
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        m: usize,
+        q: usize,
     ) -> Result<Prediction<f64>, GprError> {
-        self.predict_with(sources, m, PredictOptions::default())
+        self.predict_with(sources, q, PredictOptions::default())
     }
 
     /// Returns [`Self::predict`] with [`PredictOptions`].
@@ -534,10 +534,10 @@ impl LoadedDistanceSgpr<DistanceOnly> {
     pub fn predict_with<'s>(
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        m: usize,
+        q: usize,
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
-        each_sgpr!(self, model => model.predict_with(sources, m, options).map(widen))
+        each_sgpr!(self, model => model.predict_with(sources, q, options).map(widen))
     }
 }
 
@@ -549,8 +549,8 @@ impl LoadedDistanceSgpr<WithPoints> {
         each_sgpr!(self, model => model.d())
     }
 
-    /// Returns the predictive mean and observation variance at the `m`
-    /// queries `xs` (column-major `m × n_cols`), in `f64` whatever the
+    /// Returns the predictive mean and observation variance at the `q`
+    /// queries `xs` (column-major `q × n_cols`), in `f64` whatever the
     /// stored precision. `sources` holds one source per slot of
     /// [`Self::slots`], from the inducing points to the queries.
     ///
@@ -563,10 +563,10 @@ impl LoadedDistanceSgpr<WithPoints> {
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         xs: &[f64],
-        m: usize,
+        q: usize,
         n_cols: usize,
     ) -> Result<Prediction<f64>, GprError> {
-        self.predict_with(sources, xs, m, n_cols, PredictOptions::default())
+        self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
     /// Returns [`Self::predict`] with [`PredictOptions`].
@@ -580,11 +580,11 @@ impl LoadedDistanceSgpr<WithPoints> {
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         xs: &[f64],
-        m: usize,
+        q: usize,
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
-        each_sgpr!(self, model => model.predict_with(sources, xs, m, n_cols, options).map(widen))
+        each_sgpr!(self, model => model.predict_with(sources, xs, q, n_cols, options).map(widen))
     }
 }
 
@@ -711,7 +711,7 @@ impl<C: PointUse> LoadedDistanceSvgp<C> {
 }
 
 impl LoadedDistanceSvgp<DistanceOnly> {
-    /// Returns the predictive mean and observation variance at `m` queries,
+    /// Returns the predictive mean and observation variance at `q` queries,
     /// in `f64` whatever the stored precision; `sources` as
     /// [`LoadedDistanceSgpr::predict`] takes them.
     ///
@@ -723,9 +723,9 @@ impl LoadedDistanceSvgp<DistanceOnly> {
     pub fn predict<'s>(
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        m: usize,
+        q: usize,
     ) -> Result<Prediction<f64>, GprError> {
-        self.predict_with(sources, m, PredictOptions::default())
+        self.predict_with(sources, q, PredictOptions::default())
     }
 
     /// Returns [`Self::predict`] with [`PredictOptions`].
@@ -738,10 +738,10 @@ impl LoadedDistanceSvgp<DistanceOnly> {
     pub fn predict_with<'s>(
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        m: usize,
+        q: usize,
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
-        each_svgp!(self, model => model.predict_with(sources, m, options).map(widen))
+        each_svgp!(self, model => model.predict_with(sources, q, options).map(widen))
     }
 }
 
@@ -753,8 +753,8 @@ impl LoadedDistanceSvgp<WithPoints> {
         each_svgp!(self, model => model.d())
     }
 
-    /// Returns the predictive mean and observation variance at the `m`
-    /// queries `xs` (column-major `m × n_cols`); `sources` as
+    /// Returns the predictive mean and observation variance at the `q`
+    /// queries `xs` (column-major `q × n_cols`); `sources` as
     /// [`LoadedDistanceSgpr::predict`] takes them.
     ///
     /// # Errors
@@ -766,10 +766,10 @@ impl LoadedDistanceSvgp<WithPoints> {
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         xs: &[f64],
-        m: usize,
+        q: usize,
         n_cols: usize,
     ) -> Result<Prediction<f64>, GprError> {
-        self.predict_with(sources, xs, m, n_cols, PredictOptions::default())
+        self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
     /// Returns [`Self::predict`] with [`PredictOptions`].
@@ -783,10 +783,10 @@ impl LoadedDistanceSvgp<WithPoints> {
         &self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         xs: &[f64],
-        m: usize,
+        q: usize,
         n_cols: usize,
         options: PredictOptions,
     ) -> Result<Prediction<f64>, GprError> {
-        each_svgp!(self, model => model.predict_with(sources, xs, m, n_cols, options).map(widen))
+        each_svgp!(self, model => model.predict_with(sources, xs, q, n_cols, options).map(widen))
     }
 }

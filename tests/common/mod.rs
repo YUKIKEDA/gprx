@@ -8,3 +8,15 @@ pub mod rng;
 
 #[allow(unused_imports)]
 pub use check::*;
+
+/// The places of the inducing points of `online` among its training
+/// points ([`gprx::OnlineSgpr::point_ids`]).
+pub fn inducing_places<O, P: gprx::GpScalar, C: gprx::kernel::PointUse>(
+    online: &gprx::OnlineSgpr<O, P, gprx::kernel::DistanceKernel<C>>,
+) -> Vec<usize> {
+    let ids = online.point_ids();
+    online
+        .inducing_points()
+        .map(|id| ids.iter().position(|&p| p == id).expect("a training point"))
+        .collect()
+}

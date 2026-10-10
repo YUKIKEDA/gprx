@@ -387,7 +387,7 @@ pub trait TargetTransform: Send + Sync {
 
 - 既定の検査は厳密である。違反は、検査が表を読む順で最初に失敗した組（並列の帯で検査する正方行列では、最初に失敗した帯の組）とその値を示すエラーになる。修復の許容誤差で判定するフィルは、正方行列が揃ってからしか判定できないので、最悪の組を示す。
 - 丸めの出る作り方（Gram trick）で表を作る呼び出し側は、その供給に、自分で選んだ許容量で修正を指定する。許容量以内なら負の値と対角は `0.0` に、鏡像の組はその平均にする。超えれば表を断る。
-- 不正な値は専用のエラーの variant（行、列、理由）にし、`ShapeMismatch` は形のためだけに残す。スロットの欠落・重複・未知は `LengthMismatch` のまま。
+- 不正な値は専用のエラーの variant（slot、ARD の次元、組、理由）にし、`ShapeMismatch` は形のためだけに残す。スロットの欠落・重複・未知も専用の variant（`DistanceSlot`、種類は `SlotErrorKind`）にする。
 - 検査は方針によらず、正方行列ごとに表を 1 回読む（`O(n²)`）。ARD の訓練の正方行列は、三角へ詰めながら検査する。ARD の予測ブロック（訓練 × クエリ）は、カーネルが `r²` を足すループで読みながら検査するので、呼び出し側の値を読むのは 1 回だけになる（`f64` のモデルはカーネルが、`f32` のモデルは型変換が読む）。ブロックは検査済みかどうかを型（`Checked` / `Unchecked`）で持つ。未検査のブロックの値は検査つきの読み出しからしか取り出せないので、`Unchecked` のブロックを読む葉や SIMD の経路は、検査を飛ばせない。どちらの状態でブロックを作るかは束ねる側のコードが決める（`ArdBlocks::new` はどちらも作れる）。`Checked` のブロックを作るのは束ねるコードだけで、検査した値、型変換した値、詰めた値から作る。スカラーの予測ブロックは束ねるときに、CPU で使える最も広い SIMD（`pulp` の実行時の切り替え）で検査する。
 
 **供給は型で表す。** 木の `Supply` の種類が、評価で読むものを決める。座標の木（`NoSupply`）は供給を持たない。ビューは `()` を持つので、経路には供給の引数も、それによる分岐もない。供給した距離の葉を持つ木は、すべてのスロットの供給を必須の引数として受け取る。供給した距離の葉は、同じ形状のスロットの中での自分のスロットの番号を持つ。番号は木を組んだときに一度だけ振る。どの供給（訓練の保存、束ねた予測、列の範囲）もスロットをその順に持つので、その木のために束ねた供給は、葉が読む番号をすべて持つ。別のカーネルのために束ねた供給を渡すと、引いた時点で `UnsupportedKernelOperation` を返し、範囲外を読むことはない。
@@ -801,7 +801,8 @@ pub enum GprError {
     OptimizationNotConverged { iterations: usize },
     InvalidHyperparameter { reason: String },
     ShapeMismatch { reason: String },
-    InvalidDistance { row: usize, col: usize, reason: String },
+    InvalidDistance { slot: Option<usize>, dim: Option<usize>, pair: Option<(usize, usize)>, reason: String },
+    DistanceSlot { kind: SlotErrorKind, slot: Option<usize> },
     LengthMismatch { reason: String },
     IndexOutOfRange { reason: String },
     InvalidConfig { reason: String },
@@ -821,7 +822,7 @@ pub enum CholeskyStage { Fit, Predict, OnlineInsert, OnlineDelete }
 
 表示文は英語（`src/error.rs`）。
 
-`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。供給した二乗距離が有限でない、負、対角が 0 でない、鏡像の要素と食い違う（ソースの修復が許す範囲を超えて）ときは `InvalidDistance` で、表の中の組の `row` と `col` を持つ。距離のスロットの欠け・重複・未知は `LengthMismatch` のまま。保存・読み込みの失敗は `PersistFailed`（どこで失敗したかを `kind`（`PersistErrorKind`、non_exhaustive）で示し、呼び出し側は `reason` を読まずに分岐できる）、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
+`InvalidHyperparameter` はハイパーパラメータの値が定義域の外にあるときだけに使う。行列の形状・スライス長・添字の誤りは `ShapeMismatch`・`LengthMismatch`・`IndexOutOfRange`。最適化器・jitter ポリシー・変換の設定値は `InvalidConfig`。サイズの積の `usize` オーバーフローは `EmptyInput` ではなく `SizeOverflow`。値を含まない区間は `InvalidInterval`。供給した二乗距離が有限でない、負、対角が 0 でない、鏡像の要素と食い違う（ソースの修復が許す範囲を超えて）ときは `InvalidDistance`。表の slot（カーネルの `slots()` での位置）、ARD の次元、呼び出し側が渡したブロックの中の組 `(row, col)` を持ち、検査で分からなかったものは `None` になる。カーネルが読まない slot の供給（保存前の slot など）、1 つの slot への 2 つの供給、供給の無い slot は `DistanceSlot` で、`kind`（`SlotErrorKind`、non_exhaustive）でどれかを示し、位置があれば slot の位置を持つ。保存・読み込みの失敗は `PersistFailed`（どこで失敗したかを `kind`（`PersistErrorKind`、non_exhaustive）で示し、呼び出し側は `reason` を読まずに分岐できる）、別の形式バージョンのファイルは `UnsupportedPersistVersion`。
 
 **Error/panicの線引き**: ユーザー入力起因(`DimensionMismatch`等)、モデル/データ起因(`CholeskyFailed`等)は`Result`で返し回復可能にする。`CoordGradientUnsupported`はライブラリ内部panic対象ではないため`unimplemented!()`ではなく本Errorを返す。`NotFitted` の variant は無い。未学習の呼び出しは書けない。
 

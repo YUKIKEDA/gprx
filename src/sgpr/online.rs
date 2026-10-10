@@ -1667,6 +1667,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             row,
             &exact,
             |at| cols.tidy(at),
+            |at, err| cols.locate(at, err),
         )?;
         // A kernel that also reads coordinates takes the point's as `z`.
         let mut z_train = self.state.core.z_train.clone();
@@ -1718,12 +1719,22 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         crate::kernel::spec_slots(&self.state.core.kernel)
     }
 
-    /// Returns the training points that are the inducing points, as indices
-    /// into [`Self::point_ids`], in the order of the columns of the
-    /// training blocks and the rows of a prediction's blocks.
+    /// Returns the training points that are the inducing points, in the
+    /// order of the columns of the training blocks and the rows of a
+    /// prediction's blocks. An id stays the same across inserts and
+    /// deletes; [`Self::insert_inducing`] appends one.
     ///
     /// See the example on [`Self::insert_inducing`].
-    pub fn inducing(&self) -> &[usize] {
+    pub fn inducing_points(&self) -> impl Iterator<Item = PointId> + '_ {
+        let ids = self.point_ids();
+        self.inducing()
+            .iter()
+            .filter_map(move |&place| ids.get(place).copied())
+    }
+
+    /// The places of the inducing points in [`Self::point_ids`]: the rows
+    /// of the training blocks they are. A delete shifts them.
+    pub(crate) fn inducing(&self) -> &[usize] {
         &self.state.core.supply.inducing
     }
 }
@@ -1826,9 +1837,10 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     ///
     /// Returns [`GprError::NonFiniteInput`] if `y_new` is `NaN` or `Inf`,
     /// [`GprError::InvalidDistance`] for a negative or non-finite distance,
-    /// [`GprError::LengthMismatch`] for a column whose length is not `m`, a
-    /// source of a slot the kernel does not read, a slot without a source,
-    /// or two sources of one slot, [`GprError::IndexOutOfRange`] if no new
+    /// [`GprError::LengthMismatch`] for a column whose length is not `m`,
+    /// [`GprError::DistanceSlot`] if a source names a slot the kernel does
+    /// not read, two name one slot, or a slot has none,
+    /// [`GprError::IndexOutOfRange`] if no new
     /// [`PointId`] is left, [`GprError::SizeOverflow`] if the training
     /// blocks cannot grow, or [`GprError::CholeskyFailed`] if a precision
     /// that refines in `f64` cannot factor its predict weights again. On an
@@ -1892,8 +1904,9 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// deleted, [`GprError::InvalidConfig`] if it is an inducing point
     /// already, [`GprError::InvalidDistance`] for a value the check refuses
     /// (located in the caller's column), [`GprError::LengthMismatch`] for a
-    /// column whose length is not `n` or a slot without a source or with
-    /// two, [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left,
+    /// column whose length is not `n`, [`GprError::DistanceSlot`] if a
+    /// source names a slot the kernel does not read, two name one slot, or a
+    /// slot has none, [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left,
     /// [`GprError::SizeOverflow`] if the training blocks cannot grow, or
     /// [`GprError::CholeskyFailed`] if the enlarged system does not factor.
     /// On an error the model holds the same inducing points.
@@ -1917,7 +1930,9 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// // to the four training points.
     /// let point = online.point_ids()[1];
     /// let id = online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0])])?;
-    /// assert_eq!(online.inducing(), &[0, 2, 1]);
+    /// let ids = online.point_ids();
+    /// let inducing: Vec<_> = online.inducing_points().collect();
+    /// assert_eq!(inducing, [ids[0], ids[2], point]);
     /// // A query at x = 0.5: the three inducing points × query.
     /// let pred = online.predict([image.from_vec(vec![0.25, 2.25, 0.25])], 1)?;
     /// assert_eq!(pred.mean.len(), 1);

@@ -10,7 +10,7 @@ use gprx::kernel::{
 };
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, MixedPrecision,
-    OnlineGpr, Prediction, PromoteStorage, ReevaluateKernel, SinglePrecision,
+    OnlineGpr, Prediction, PromoteStorage, ReevaluateKernel, SinglePrecision, SlotErrorKind,
 };
 
 /// Points in the pool; the model starts on the first `START`.
@@ -465,7 +465,16 @@ fn an_invalid_column_is_refused_and_leaves_the_model_as_it_was() {
             .expect_err("nan target");
         assert!(matches!(err, GprError::NonFiniteInput), "{err:?}");
         let err = online.insert([], 0.5).expect_err("no slot");
-        assert!(matches!(err, GprError::LengthMismatch { .. }), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                GprError::DistanceSlot {
+                    kind: SlotErrorKind::Missing,
+                    slot: Some(0)
+                }
+            ),
+            "{err:?}"
+        );
         assert_eq!(online.n(), START);
         online
             .insert(

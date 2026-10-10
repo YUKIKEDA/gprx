@@ -442,7 +442,7 @@ impl<U: Supply> SparseCore<U> {
         }
         let slots = crate::kernel::spec_slots(&spec.kernel);
         let (zz, xz) = crate::kernel::bind_inducing(&slots, sources, n, inducing)?;
-        let supply = SparseSupply::new::<S>(inducing.to_vec(), zz, xz)?;
+        let supply = SparseSupply::new::<S>(&slots, inducing.to_vec(), zz, xz)?;
         let mut z_obs = Vec::with_capacity(m * n_cols);
         for j in 0..n_cols {
             z_obs.extend(inducing.iter().map(|&i| x[j * n + i]));
@@ -1482,13 +1482,14 @@ impl SparseSupply {
     /// Returns [`GprError::InvalidDistance`] for a value past the range of
     /// `S`.
     pub(crate) fn new<S: KernelScalar>(
+        slots: &[crate::kernel::DistanceSlot],
         inducing: Vec<usize>,
         zz: BlockStore<f64>,
         xz: BlockStore<f64>,
     ) -> Result<Self, GprError> {
         // The squares are the blocks' inducing rows (a repaired pair is the
         // mean of two values in range), so the blocks are the values to check.
-        xz.require_in_range::<S>()?;
+        xz.require_in_range::<S>(slots)?;
         Ok(Self {
             inducing,
             f64: SupplyAt { zz, xz },
@@ -1791,7 +1792,7 @@ mod tests {
             inducing,
         )
         .expect("bind");
-        let supply = SparseSupply::new::<f32>(inducing.to_vec(), zz, xz).expect("supply");
+        let supply = SparseSupply::new::<f32>(&[], inducing.to_vec(), zz, xz).expect("supply");
         supply.at::<f32>().expect("f32");
         (supply, coords)
     }

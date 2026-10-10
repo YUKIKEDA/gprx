@@ -66,6 +66,79 @@ impl std::fmt::Display for PersistErrorKind {
     }
 }
 
+/// What is wrong with how a call's [`crate::kernel::DistanceSource`]s match
+/// the slots of the kernel ([`GprError::DistanceSlot`]).
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{RbfKernel, ScalarDistance};
+/// use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, SlotErrorKind};
+///
+/// # fn main() -> Result<(), GprError> {
+/// let image = ScalarDistance::new();
+/// let other = ScalarDistance::new();
+/// let train = [0.0, 1.0, 1.0, 0.0];
+/// let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .with_optimizer(Fixed)
+///     .factor([image.borrow(&train)], 2, &[0.0, 1.0])
+///     .map_err(|(_, e)| e)?;
+/// // `other` is not a slot of the kernel.
+/// let refused = fitted.predict([other.from_vec(vec![0.25, 0.25])], 1);
+/// assert!(matches!(
+///     refused,
+///     Err(GprError::DistanceSlot { kind: SlotErrorKind::NotRead, slot: None })
+/// ));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SlotErrorKind {
+    /// A source names a slot the kernel does not read. A loaded model reads
+    /// new slots ([`crate::persist::LoadedDistanceGpr::slots`] and its
+    /// twins), so a slot of the model before it was saved is one.
+    NotRead,
+    /// Two sources name the same slot.
+    Duplicate,
+    /// A slot of the kernel has no source.
+    Missing,
+}
+
+impl std::fmt::Display for SlotErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotRead => "squared distances were supplied for a slot the kernel does not read",
+            Self::Duplicate => "two sources were supplied for one distance slot",
+            Self::Missing => "a distance slot of the kernel has no source",
+        })
+    }
+}
+
+/// Where an [`GprError::InvalidDistance`] is, as its message shows it: the
+/// parts that are known, in the order slot, dimension, pair.
+struct DistancePlace<'a> {
+    slot: &'a Option<usize>,
+    dim: &'a Option<usize>,
+    pair: &'a Option<(usize, usize)>,
+}
+
+impl std::fmt::Display for DistancePlace<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(slot) = self.slot {
+            write!(f, " in slot {slot}")?;
+        }
+        if let Some(dim) = self.dim {
+            let lead = if self.slot.is_some() { "," } else { " in" };
+            write!(f, "{lead} dimension {dim}")?;
+        }
+        if let Some((row, col)) = self.pair {
+            write!(f, " at ({row}, {col})")?;
+        }
+        Ok(())
+    }
+}
+
 /// Reports a recoverable failure from a gprx operation.
 ///
 /// Recoverable failures from user input (for example
@@ -168,16 +241,53 @@ pub enum GprError {
     },
     /// A supplied squared distance is not finite, is negative, is a
     /// non-zero diagonal, or differs from its mirror entry, past what the
-    /// source's repair (if any) allows. `row` and `col` locate the pair in
-    /// its table.
-    #[error("invalid squared distance at ({row}, {col}): {reason}")]
+    /// source's repair (if any) allows.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr, GprError};
+    ///
+    /// # fn main() -> Result<(), GprError> {
+    /// let image = ScalarDistance::new();
+    /// // The pair (1, 0) is negative.
+    /// let train = [0.0, -1.0, 1.0, 0.0];
+    /// let refused = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.borrow(&train)], 2, &[0.0, 1.0]);
+    /// assert!(matches!(
+    ///     refused,
+    ///     Err((_, GprError::InvalidDistance { slot: Some(0), dim: None, pair: Some((1, 0)), .. }))
+    /// ));
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[error("invalid squared distance{}: {reason}", DistancePlace { slot, dim, pair })]
     InvalidDistance {
-        /// Holds the row of the pair in its table.
-        row: usize,
-        /// Holds the column of the pair in its table.
-        col: usize,
+        /// Holds the slot of the table: its place in the kernel's `slots()`.
+        /// `None` when the check that refused the value could not name it.
+        slot: Option<usize>,
+        /// Holds the dimension of the table in an ARD slot; `None` for a
+        /// scalar slot.
+        dim: Option<usize>,
+        /// Holds the pair `(row, col)` in its table: the row and column of
+        /// the block the caller passed. `None` when a check refused the
+        /// table without locating a value.
+        pair: Option<(usize, usize)>,
         /// Holds what is wrong with it.
         reason: String,
+    },
+    /// The sources of a call do not match the slots of the kernel: one names
+    /// a slot the kernel does not read, two name one slot, or a slot has
+    /// none. See [`SlotErrorKind`] for an example.
+    #[error("distance slot mismatch: {kind}")]
+    DistanceSlot {
+        /// Records what is wrong.
+        kind: SlotErrorKind,
+        /// Holds the slot with two sources or none: its place in the
+        /// kernel's `slots()`. `None` for [`SlotErrorKind::NotRead`].
+        slot: Option<usize>,
     },
     /// A slice argument has the wrong length.
     #[error("length mismatch: {reason}")]
@@ -242,10 +352,31 @@ pub enum GprError {
     },
 }
 
+impl GprError {
+    /// Names the slot (its place in the kernel's slots) of an
+    /// [`Self::InvalidDistance`] that does not name one yet; any other
+    /// error as it is.
+    pub(crate) fn in_slot(mut self, place: usize) -> Self {
+        if let Self::InvalidDistance { slot, .. } = &mut self {
+            slot.get_or_insert(place);
+        }
+        self
+    }
+
+    /// Names the ARD dimension of an [`Self::InvalidDistance`] that does
+    /// not name one yet; any other error as it is.
+    pub(crate) fn in_dim(mut self, k: usize) -> Self {
+        if let Self::InvalidDistance { dim, .. } = &mut self {
+            dim.get_or_insert(k);
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PersistErrorKind;
     use super::{CholeskyStage, GprError};
+    use super::{PersistErrorKind, SlotErrorKind};
 
     use crate::test_check::assert_send_sync;
 
@@ -320,6 +451,54 @@ mod tests {
             "invalid configuration: expected 2 values, got 1"
         );
         assert_eq!(GprError::SizeOverflow.to_string(), "size overflows usize");
+    }
+
+    #[test]
+    fn a_distance_error_shows_the_parts_of_its_place_it_knows() {
+        let at = |slot, dim, pair| {
+            GprError::InvalidDistance {
+                slot,
+                dim,
+                pair,
+                reason: "-1 is negative".to_owned(),
+            }
+            .to_string()
+        };
+        assert_eq!(
+            at(Some(1), Some(2), Some((3, 0))),
+            "invalid squared distance in slot 1, dimension 2 at (3, 0): -1 is negative"
+        );
+        assert_eq!(
+            at(None, Some(2), None),
+            "invalid squared distance in dimension 2: -1 is negative"
+        );
+        assert_eq!(
+            at(None, None, None),
+            "invalid squared distance: -1 is negative"
+        );
+        let err = GprError::InvalidDistance {
+            slot: None,
+            dim: None,
+            pair: Some((3, 0)),
+            reason: String::new(),
+        };
+        assert_eq!(err.in_dim(2).in_slot(1).in_slot(4), {
+            GprError::InvalidDistance {
+                slot: Some(1),
+                dim: Some(2),
+                pair: Some((3, 0)),
+                reason: String::new(),
+            }
+        });
+        assert_eq!(GprError::EmptyInput.in_slot(0), GprError::EmptyInput);
+        assert_eq!(
+            GprError::DistanceSlot {
+                kind: SlotErrorKind::Duplicate,
+                slot: Some(0)
+            }
+            .to_string(),
+            "distance slot mismatch: two sources were supplied for one distance slot"
+        );
     }
 
     #[test]

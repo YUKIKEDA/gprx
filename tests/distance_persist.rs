@@ -2,6 +2,8 @@
 //! predicts as the saved one did, on its own slots, at every precision and
 //! factor kind. Public API only.
 
+mod common;
+
 use gprx::kernel::{
     ArdDistance, ConstantKernel, DistanceKernel, DistanceOnly, DistanceSlot, DistanceSource,
     KernelScalar, KernelSpec, MaternKernel, MaternNu, RationalQuadraticArdKernel, RbfArdKernel,
@@ -13,7 +15,7 @@ use gprx::persist::{
 };
 use gprx::{
     DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, GpScalar, Gpr, GprError, MixedPrecision,
-    PersistErrorKind, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, Svgp,
+    PersistErrorKind, Prediction, ReevaluateKernel, Sgpr, SinglePrecision, SlotErrorKind, Svgp,
 };
 
 const N: usize = 7;
@@ -238,6 +240,14 @@ fn saved_factor_predicts_the_same_bits() -> Result<(), GprError> {
     {
         assert_eq!(g.to_bits(), w.to_bits());
     }
+    // The slots of the model before the save are not the loaded model's.
+    assert_eq!(
+        loaded.predict(sources(&slots, &rows, &q), M).map(drop),
+        Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::NotRead,
+            slot: None
+        })
+    );
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -380,14 +390,14 @@ fn sparse_round_trip<P: GpScalar>(
     let gone = online.point_ids()[2];
     online.delete(gone)?;
     live.remove(2);
-    let z_live = pick(&live, online.inducing());
+    let z_live = pick(&live, &common::inducing_places(&online));
     let want = widen(online.predict(sources(&slots, &z_live, &q), M)?);
     let dir = temp_dir(&format!("online-sgpr-{label}"));
     online.save(&dir)?;
     let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &registry)?;
     assert!(loaded.is_online());
     assert_eq!(loaded.n(), live.len());
-    assert_eq!(loaded.inducing(), online.inducing());
+    assert_eq!(loaded.inducing(), common::inducing_places(&online));
     let got = widen(loaded.predict(sources(&loaded.slots(), &z_live, &q), M)?);
     assert_same(&format!("online sgpr {label}"), &got, &want, refactored);
     let (LoadedDistanceSgpr::OnlineDouble(_)
@@ -1267,7 +1277,7 @@ fn loaded_online_sgpr_keeps_its_ids_and_updates() -> Result<(), GprError> {
     assert_eq!(loaded.point_ids(), online.point_ids());
     assert_eq!(loaded.inducing_ids(), online.inducing_ids());
     let fresh = loaded.slots();
-    let z_live = pick(&live, online.inducing());
+    let z_live = pick(&live, &common::inducing_places(&online));
     let new = [N as f64];
     let a = online.insert(sources(&slots, &z_live, &new), 0.3)?;
     let b = loaded.insert(sources(&fresh, &z_live, &new), 0.3)?;
@@ -1278,8 +1288,8 @@ fn loaded_online_sgpr_keeps_its_ids_and_updates() -> Result<(), GprError> {
     let a = online.insert_inducing(point, sources(&slots, &live, &[live[1]]))?;
     let b = loaded.insert_inducing(point, sources(&fresh, &live, &[live[1]]))?;
     assert_eq!(a, b, "the next inducing id is the saved model's");
-    assert_eq!(loaded.inducing(), online.inducing());
-    let z_live = pick(&live, online.inducing());
+    assert!(loaded.inducing_points().eq(online.inducing_points()));
+    let z_live = pick(&live, &common::inducing_places(&online));
     let q = query_idx();
     let want = widen(online.predict(sources(&slots, &z_live, &q), M)?);
     let got = widen(loaded.predict(sources(&fresh, &z_live, &q), M)?);

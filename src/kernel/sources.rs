@@ -19,11 +19,13 @@ use super::dist::{ArdBlocks, ArdSqDiff, ArdSqDiffBuf, BlockList, Checked, packed
 use super::simd::SquareOut;
 use super::{ArdData, DistanceFill, ScalarData, ScalarOps, SourceData, Tidy};
 use super::{DistanceSlot, DistanceSource, KernelScalar, SlotId, SlotShape};
-use crate::error::GprError;
+use crate::error::{GprError, SlotErrorKind};
 
 /// A source's `d²`, checked: `shape.blocks()` dense blocks of `rows × cols`.
 pub(crate) struct RawSlot<'a> {
     pub(crate) id: SlotId,
+    /// The slot's place in the kernel's slots, which an error names.
+    place: usize,
     pub(crate) shape: SlotShape,
     data: RawData<'a>,
     rows: usize,
@@ -71,34 +73,83 @@ pub(crate) enum BlockKind {
     Rect,
 }
 
-/// The slot of `slots` (the kernel's) that `source` is for; `bound` are
-/// the slots that already have a source.
+/// The slot of `slots` (the kernel's) that `source` is for, and its place
+/// in `slots`; `bound` are the slots that already have a source.
 ///
 /// # Errors
 ///
-/// Returns [`GprError::LengthMismatch`] for a source of a slot the kernel
+/// Returns [`GprError::DistanceSlot`] for a source of a slot the kernel
 /// does not read, or a second source of one slot.
 fn slot_of<'k>(
     slots: &'k [DistanceSlot],
     source: &DistanceSource<'_>,
     mut bound: impl Iterator<Item = SlotId>,
-) -> Result<&'k DistanceSlot, GprError> {
-    let Some(slot) = slots.iter().find(|slot| slot.id() == source.slot) else {
-        return Err(GprError::LengthMismatch {
-            reason: "squared distances were supplied for a slot the kernel does not read"
-                .to_owned(),
+) -> Result<(usize, &'k DistanceSlot), GprError> {
+    let Some(place) = slots.iter().position(|slot| slot.id() == source.slot) else {
+        return Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::NotRead,
+            slot: None,
         });
     };
     if bound.any(|id| id == source.slot) {
-        return Err(GprError::LengthMismatch {
-            reason: "two sources were supplied for one distance slot".to_owned(),
+        return Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::Duplicate,
+            slot: Some(place),
         });
     }
+    let slot = &slots[place];
     // A source is made by the slot it names (`ScalarDistance`,
     // `ArdDistance`), which gives it data of its own shape, so the two
     // cannot disagree.
     debug_assert_eq!(slot.shape(), source.data.shape());
-    Ok(slot)
+    Ok((place, slot))
+}
+
+/// The error of the first slot of `slots` (the kernel's) that `bound` says
+/// has no source.
+fn missing(slots: &[DistanceSlot], bound: impl Fn(usize, &DistanceSlot) -> bool) -> GprError {
+    GprError::DistanceSlot {
+        kind: SlotErrorKind::Missing,
+        slot: slots
+            .iter()
+            .enumerate()
+            .position(|(place, slot)| !bound(place, slot)),
+    }
+}
+
+/// `err` of block `k` of a slot of shape `shape`: the dimension of an ARD
+/// slot is named; a scalar slot has one block and no dimension.
+fn in_block(err: GprError, shape: SlotShape, k: usize) -> GprError {
+    match shape {
+        SlotShape::Ard(_) => err.in_dim(k),
+        SlotShape::Scalar => err,
+    }
+}
+
+/// `err` of the block `at` of a store in the order of `slots` (the
+/// kernel's): its ARD dimension, and its slot when `slots` has it.
+fn locate_block(slots: &[DistanceSlot], at: BlockAt, err: GprError) -> GprError {
+    let (ard, nth, err) = match at {
+        BlockAt::Scalar(nth) => (false, nth, err),
+        BlockAt::Ard(nth, k) => (true, nth, err.in_dim(k)),
+    };
+    let place = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| matches!(slot.shape(), SlotShape::Ard(_)) == ard)
+        .nth(nth);
+    match place {
+        Some((place, _)) => err.in_slot(place),
+        None => err,
+    }
+}
+
+/// `err` in the slot `id` of `slots` (the kernel's), when `slots` has it.
+fn in_slot_of(err: GprError, slots: &[DistanceSlot], id: SlotId) -> GprError {
+    match slots.iter().position(|slot| slot.id() == id) {
+        Some(place) => err.in_slot(place),
+        None => err,
+    }
 }
 
 /// Where `id` sorts among the bound supplies: its place in `slots` (the
@@ -119,31 +170,24 @@ fn no_room() -> GprError {
     }
 }
 
-/// A slot of the kernel was given no source (every source names a distinct
-/// slot of the kernel, and fewer sources than slots arrived).
-fn no_source() -> GprError {
-    GprError::LengthMismatch {
-        reason: "a distance slot of the kernel has no source".to_owned(),
+/// A check of a table failed, yet the scan that locates a violation found
+/// none (the two checks disagree). The table is refused with no pair.
+pub(crate) fn unlocated() -> GprError {
+    GprError::InvalidDistance {
+        slot: None,
+        dim: None,
+        pair: None,
+        reason: "the table failed its check, but no value could be located".to_owned(),
     }
 }
 
-/// A check of a table failed, yet the scan that locates a violation found
-/// none (the two checks disagree). The table is refused; `(0, 0)` stands
-/// for an unknown place, as the reason says.
-pub(crate) fn unlocated() -> GprError {
-    invalid(
-        0,
-        0,
-        "the table failed its check, but no value could be located \
-         (the position (0, 0) is a placeholder)",
-    )
-}
-
-/// An invalid pair `(row, col)` of a table.
+/// An invalid pair `(row, col)` of a table; the caller names its slot and
+/// dimension ([`GprError::in_slot`], [`GprError::in_dim`]).
 fn invalid(row: usize, col: usize, reason: impl Into<String>) -> GprError {
     GprError::InvalidDistance {
-        row,
-        col,
+        slot: None,
+        dim: None,
+        pair: Some((row, col)),
         reason: reason.into(),
     }
 }
@@ -334,7 +378,7 @@ fn pack_exact_ard<'b, T: KernelScalar>(
     };
     if !ok {
         for k in 0..d {
-            exact_block(block(k), n, n, BlockKind::Square)?;
+            exact_block(block(k), n, n, BlockKind::Square).map_err(|err| err.in_dim(k))?;
         }
         return Err(unlocated());
     }
@@ -357,8 +401,8 @@ fn keep_exact_ard<T: KernelScalar>(
     if !reads_in_place::<T>() {
         return pack_exact_ard(n, d, |k| &tables[k]);
     }
-    for table in &tables {
-        exact_block(table, n, n, BlockKind::Square)?;
+    for (k, table) in tables.iter().enumerate() {
+        exact_block(table, n, n, BlockKind::Square).map_err(|err| err.in_dim(k))?;
     }
     match T::vecs_from_f64(tables) {
         Ok(tables) => Ok(ArdSqDiffBuf::from_tables(tables, n)),
@@ -582,9 +626,9 @@ fn train_ard<T: KernelScalar>(
         }
         ArdData::Blocks(mut tables) => {
             require_tables(tables.len(), d)?;
-            for table in &mut tables {
+            for (k, table) in tables.iter_mut().enumerate() {
                 crate::data::require_count(table.len(), len, "squared distances")?;
-                if check_block(table, n, n, BlockKind::Square, tidy)? {
+                if check_block(table, n, n, BlockKind::Square, tidy).map_err(|err| err.in_dim(k))? {
                     repair_block(table, n, n, BlockKind::Square);
                 }
             }
@@ -595,7 +639,7 @@ fn train_ard<T: KernelScalar>(
             let mut repaired: Vec<Option<Vec<f64>>> = (0..d).map(|_| None).collect();
             for (k, table) in tables.iter().enumerate() {
                 crate::data::require_count(table.len(), len, "squared distances")?;
-                if check_block(table, n, n, BlockKind::Square, tidy)? {
+                if check_block(table, n, n, BlockKind::Square, tidy).map_err(|err| err.in_dim(k))? {
                     let mut copy = table.to_vec();
                     repair_block(&mut copy, n, n, BlockKind::Square);
                     repaired[k] = Some(copy);
@@ -687,12 +731,13 @@ fn fill_ard_square<T: KernelScalar>(
                 |at, v| {
                     column[at] = T::from_f64(v);
                 },
-            )?;
+            )
+            .map_err(|err| err.in_dim(k))?;
         }
     }
     if let Tidy::Within(rel) = tidy {
-        for rounding in &rounding {
-            rounding.judge(rel)?;
+        for (k, rounding) in rounding.iter().enumerate() {
+            rounding.judge(rel).map_err(|err| err.in_dim(k))?;
         }
     }
     Ok(ArdSqDiffBuf::from_packed(packed, n, d))
@@ -1004,9 +1049,10 @@ impl<T: KernelScalar> TrainSources<T> {
     /// # Errors
     ///
     /// Returns [`GprError::EmptyInput`] when `n` is zero,
-    /// [`GprError::LengthMismatch`] for a source of a slot the kernel does
-    /// not read, two sources of one slot, a slot without a source, or a
-    /// table of the wrong length or count, [`GprError::SizeOverflow`] when
+    /// [`GprError::DistanceSlot`] for a source of a slot the kernel does
+    /// not read, two sources of one slot, or a slot without a source,
+    /// [`GprError::LengthMismatch`] for a table of the wrong length or
+    /// count, [`GprError::SizeOverflow`] when
     /// a store does not fit, and [`GprError::InvalidDistance`] for a value
     /// the source's check refuses.
     pub(crate) fn bind<'a>(
@@ -1024,26 +1070,37 @@ impl<T: KernelScalar> TrainSources<T> {
         let mut ard = Vec::with_capacity(ards);
         for source in sources {
             let bound = scalar.iter().map(|(id, _)| *id);
-            let slot = slot_of(slots, &source, bound.chain(ard.iter().map(|(id, _)| *id)))?;
+            let (place, slot) =
+                slot_of(slots, &source, bound.chain(ard.iter().map(|(id, _)| *id)))?;
             let tidy = source.tidy;
             let id = slot.id();
+            let at_slot = |err: GprError| err.in_slot(place);
             match source.data {
                 SourceData::Scalar(ScalarData::Values(values)) => {
                     crate::data::require_count(values.len(), len, "squared distances")?;
                     let mut values = values;
-                    if check_block(&values, n, n, BlockKind::Square, tidy)? {
+                    if check_block(&values, n, n, BlockKind::Square, tidy).map_err(at_slot)? {
                         repair_block(values.to_mut(), n, n, BlockKind::Square);
                     }
                     scalar.push((id, T::vec_from_f64(values.into_owned())));
                 }
                 SourceData::Scalar(ScalarData::Fill(filler)) => {
-                    scalar.push((id, T::vec_from_f64(fill_scalar_square(filler, n, tidy)?)));
+                    let square = fill_scalar_square(filler, n, tidy).map_err(at_slot)?;
+                    scalar.push((id, T::vec_from_f64(square)));
                 }
-                SourceData::Ard(d, data) => ard.push((id, train_ard(data, n, d, tidy)?)),
+                SourceData::Ard(d, data) => {
+                    ard.push((id, train_ard(data, n, d, tidy).map_err(at_slot)?));
+                }
             }
         }
         if scalar.len() + ard.len() != slots.len() {
-            return Err(no_source());
+            let has = |id: SlotId| {
+                let scalars = scalar.iter().map(|(bound, _)| *bound);
+                scalars
+                    .chain(ard.iter().map(|(bound, _)| *bound))
+                    .any(|bound| bound == id)
+            };
+            return Err(missing(slots, |_, slot| has(slot.id())));
         }
         scalar.sort_unstable_by_key(|(id, _)| slot_rank(slots, *id));
         ard.sort_unstable_by_key(|(id, _)| slot_rank(slots, *id));
@@ -1053,7 +1110,7 @@ impl<T: KernelScalar> TrainSources<T> {
             scalar,
             ard,
         };
-        store.require_in_range()?;
+        store.require_in_range(slots)?;
         Ok(store)
     }
 
@@ -1065,24 +1122,24 @@ impl<T: KernelScalar> TrainSources<T> {
     ///
     /// Returns [`GprError::InvalidDistance`] at the first value that did
     /// not fit.
-    fn require_in_range(&self) -> Result<(), GprError> {
+    fn require_in_range(&self, slots: &[DistanceSlot]) -> Result<(), GprError> {
         if reads_in_place::<T>() {
             return Ok(());
         }
         let (n, cap) = (self.n, self.cap.max(1));
-        for (_, square) in &self.scalar {
+        for (id, square) in &self.scalar {
             for j in 0..n {
                 let column = &square[j * cap..j * cap + n];
                 if let Some(i) = column.iter().position(|v| !v.is_finite()) {
-                    return Err(out_of_range(i, j));
+                    return Err(in_slot_of(out_of_range(i, j), slots, *id));
                 }
             }
         }
-        for (_, cache) in &self.ard {
+        for (id, cache) in &self.ard {
             let view = cache.view();
             for dim in 0..view.d() {
                 if let Some((row, col)) = view.position(dim, |v| !v.is_finite()) {
-                    return Err(out_of_range(row, col));
+                    return Err(in_slot_of(out_of_range(row, col).in_dim(dim), slots, *id));
                 }
             }
         }
@@ -1132,12 +1189,12 @@ impl<T: KernelScalar> TrainSources<T> {
         let tri = packed_len(n)?;
         let mut scalar = Vec::new();
         let mut ard = Vec::new();
-        for (slot, values) in slots.iter().zip(values) {
+        for (place, (slot, values)) in slots.iter().zip(values).enumerate() {
             let len = tri
                 .checked_mul(slot.shape().blocks())
                 .ok_or(GprError::SizeOverflow)?;
             crate::data::require_count(values.len(), len, "persisted squared distances")?;
-            check_packed(&values, n)?;
+            check_packed(&values, n, slot.shape()).map_err(|err| err.in_slot(place))?;
             match slot.shape() {
                 SlotShape::Scalar => {
                     let mut square =
@@ -1166,9 +1223,9 @@ impl<T: KernelScalar> TrainSources<T> {
         })
     }
 
-    /// The same squares in `f64`.
+    /// The same squares in `f64`: every value fits, so no slot is named.
     pub(crate) fn to_f64(&self) -> Result<TrainSources<f64>, GprError> {
-        self.cast()
+        self.cast(&[])
     }
 
     #[cfg(test)]
@@ -1207,8 +1264,12 @@ impl<T: KernelScalar> TrainSources<T> {
 
     /// The same squares at the scalar `U`: a scalar square column by
     /// column (contiguous runs past the leading dimension), an ARD cache in
-    /// one pass over its packed values.
-    pub(crate) fn cast<U: KernelScalar>(&self) -> Result<TrainSources<U>, GprError> {
+    /// one pass over its packed values. `slots` (the kernel's) name the
+    /// slot of a value past the range of `U`.
+    pub(crate) fn cast<U: KernelScalar>(
+        &self,
+        slots: &[DistanceSlot],
+    ) -> Result<TrainSources<U>, GprError> {
         let (n, cap) = (self.n, self.cap.max(1));
         let cast = |v: T| U::from_f64(v.to_f64());
         let scalar = self
@@ -1233,28 +1294,32 @@ impl<T: KernelScalar> TrainSources<T> {
             scalar,
             ard,
         };
-        store.require_in_range()?;
+        store.require_in_range(slots)?;
         Ok(store)
     }
 }
 
-/// Checks persisted lower triangles of order `n`, block after block:
-/// every value finite and non-negative, every diagonal zero.
-fn check_packed<T: KernelScalar>(values: &[T], n: usize) -> Result<(), GprError> {
+/// Checks persisted lower triangles of order `n` of a slot of `shape`,
+/// block after block: every value finite and non-negative, every diagonal
+/// zero.
+fn check_packed<T: KernelScalar>(values: &[T], n: usize, shape: SlotShape) -> Result<(), GprError> {
     let mut at = 0;
+    let mut k = 0;
     while at < values.len() {
         for col in 0..n {
             for row in col..n {
                 let v = values[at].to_f64();
                 if !valid(v) {
-                    return Err(invalid_value(v, row, col));
+                    return Err(in_block(invalid_value(v, row, col), shape, k));
                 }
                 if row == col && v != 0.0 {
-                    return Err(invalid(row, col, format!("the diagonal is {v}, not zero")));
+                    let err = invalid(row, col, format!("the diagonal is {v}, not zero"));
+                    return Err(in_block(err, shape, k));
                 }
                 at += 1;
             }
         }
+        k += 1;
     }
     Ok(())
 }
@@ -1455,7 +1520,7 @@ impl SourceStore<f32> for RefinedSources {
     ) -> Result<Self, GprError> {
         let exact = TrainSources::from_packed(slots, values, n)?;
         Ok(Self {
-            storage: exact.cast()?,
+            storage: exact.cast(slots)?,
             exact,
         })
     }
@@ -1467,7 +1532,7 @@ impl SourceStore<f32> for RefinedSources {
     ) -> Result<Self, GprError> {
         let exact = TrainSources::<f64>::bind(slots, sources, n)?;
         Ok(Self {
-            storage: exact.cast()?,
+            storage: exact.cast(slots)?,
             exact,
         })
     }
@@ -2035,7 +2100,7 @@ impl<T: KernelScalar> BlockStore<T> {
     /// Returns [`GprError::InvalidDistance`] for a value that is not
     /// finite at `U`.
     pub(crate) fn cast<U: KernelScalar>(&self) -> Result<BlockStore<U>, GprError> {
-        self.require_in_range::<U>()?;
+        self.require_in_range::<U>(&[])?;
         let stride = self.stride;
         let cast =
             |block: &[T]| -> Vec<U> { block.iter().map(|v| U::from_f64(v.to_f64())).collect() };
@@ -2065,18 +2130,22 @@ impl<T: KernelScalar> BlockStore<T> {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidDistance`] at the first value past the
-    /// range of `U`, located in its block.
-    pub(crate) fn require_in_range<U: KernelScalar>(&self) -> Result<(), GprError> {
+    /// range of `U`, located in its block and, when `slots` (the kernel's)
+    /// has it, in its slot.
+    pub(crate) fn require_in_range<U: KernelScalar>(
+        &self,
+        slots: &[DistanceSlot],
+    ) -> Result<(), GprError> {
         if !U::ROUNDS_FROM_F64 {
             return Ok(());
         }
         let ld = self.ld.max(1);
-        for block in self.blocks() {
-            if let Some(at) = block
+        for (at, block) in self.block_ids().into_iter().zip(self.blocks()) {
+            if let Some(i) = block
                 .iter()
                 .position(|v| !U::from_f64(v.to_f64()).to_f64().is_finite())
             {
-                return Err(out_of_range(at % ld, at / ld));
+                return Err(locate_block(slots, at, out_of_range(i % ld, i / ld)));
             }
         }
         Ok(())
@@ -2179,9 +2248,9 @@ impl<T: KernelScalar> RectSlots<T> for BlockStore<T> {
 /// # Errors
 ///
 /// Returns [`GprError::EmptyInput`] when `n` or `inducing` is empty,
-/// [`GprError::LengthMismatch`] for a source of a slot the kernel does not
-/// read, a slot without a source, two sources of one slot, or a block of
-/// the wrong length or count, and [`GprError::InvalidDistance`] for a value
+/// [`GprError::DistanceSlot`] for a source of a slot the kernel does not
+/// read, a slot without a source, or two sources of one slot,
+/// [`GprError::LengthMismatch`] for a block of the wrong length or count, and [`GprError::InvalidDistance`] for a value
 /// the source's check refuses, or inducing rows that are not a square with
 /// a zero diagonal and equal mirror entries (located in the caller's
 /// block).
@@ -2194,8 +2263,6 @@ pub(crate) fn bind_inducing<'s>(
     let m = inducing.len();
     crate::data::require_nonempty(n)?;
     crate::data::require_nonempty(m)?;
-    let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
-    let square_len = m.checked_mul(m).ok_or(GprError::SizeOverflow)?;
     let is_ard = |slot: &DistanceSlot| matches!(slot.shape(), SlotShape::Ard(_));
     let ards = slots.iter().filter(|slot| is_ard(slot)).count();
     let store = |rows, cols| {
@@ -2208,27 +2275,64 @@ pub(crate) fn bind_inducing<'s>(
     };
     let (mut zz, mut xz) = (store(m, m), store(n, m));
     let mut column = Vec::new();
-    for source in sources {
-        let slot = slot_of(slots, &source, std::iter::empty())?;
-        let Some(at) = slots.iter().position(|s| s.id() == slot.id()) else {
-            return Err(unbound());
-        };
-        // Each store in the kernel's slot order: a slot's place among the
-        // slots of its shape.
-        let place = slots[..at]
+    // Each store in the kernel's slot order: a slot's place among the
+    // slots of its shape.
+    let place_in_shape = |at: usize| {
+        slots[..at]
             .iter()
-            .filter(|other| is_ard(other) == is_ard(slot))
-            .count();
-        let bound = if is_ard(slot) {
+            .filter(|other| is_ard(other) == is_ard(&slots[at]))
+            .count()
+    };
+    let is_bound = |xz: &BlockStore<f64>, at: usize| {
+        let place = place_in_shape(at);
+        if is_ard(&slots[at]) {
             !matches!(&xz.ard[place], SlotBlocks::Flat(all) if all.is_empty())
         } else {
             !xz.scalar[place].is_empty()
-        };
-        if bound {
-            return Err(GprError::LengthMismatch {
-                reason: "two sources were supplied for one distance slot".to_owned(),
+        }
+    };
+    for source in sources {
+        let (at, _) = slot_of(slots, &source, std::iter::empty())?;
+        if is_bound(&xz, at) {
+            return Err(GprError::DistanceSlot {
+                kind: SlotErrorKind::Duplicate,
+                slot: Some(at),
             });
         }
+        let place = place_in_shape(at);
+        bind_inducing_slot(
+            source,
+            (n, m),
+            inducing,
+            &mut column,
+            (&mut xz, &mut zz),
+            place,
+        )
+        .map_err(|err| err.in_slot(at))?;
+    }
+    if let Some(at) = (0..slots.len()).find(|&at| !is_bound(&xz, at)) {
+        return Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::Missing,
+            slot: Some(at),
+        });
+    }
+    Ok((zz, xz))
+}
+
+/// Binds the `n × m` block `source` of the slot at `place` among the slots
+/// of its shape into `xz`, and the `m × m` square of its inducing rows into
+/// `zz` ([`bind_inducing`]).
+fn bind_inducing_slot(
+    source: DistanceSource<'_>,
+    (n, m): (usize, usize),
+    inducing: &[usize],
+    column: &mut Vec<f64>,
+    (xz, zz): (&mut BlockStore<f64>, &mut BlockStore<f64>),
+    place: usize,
+) -> Result<(), GprError> {
+    let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
+    let square_len = m.checked_mul(m).ok_or(GprError::SizeOverflow)?;
+    {
         let tidy = source.tidy;
         match source.data {
             SourceData::Scalar(data) => {
@@ -2239,7 +2343,7 @@ pub(crate) fn bind_inducing<'s>(
                     }
                     ScalarData::Fill(filler) => {
                         let mut filled = Vec::new();
-                        fill_dense(filler, (n, m), 1, BlockKind::Rect, &mut filled, &mut column)?;
+                        fill_dense(filler, (n, m), 1, BlockKind::Rect, &mut filled, column)?;
                         Cow::Owned(filled)
                     }
                 };
@@ -2258,7 +2362,8 @@ pub(crate) fn bind_inducing<'s>(
                             crate::data::require_count(table.len(), len, "squared distances")?;
                             let square = &mut squares[k * square_len..(k + 1) * square_len];
                             let mut block = Cow::Borrowed(table.as_slice());
-                            inducing_parts(&mut block, n, inducing, tidy, square)?;
+                            inducing_parts(&mut block, n, inducing, tidy, square)
+                                .map_err(|err| err.in_dim(k))?;
                             if let Cow::Owned(repaired) = block {
                                 *table = repaired;
                             }
@@ -2273,18 +2378,20 @@ pub(crate) fn bind_inducing<'s>(
                             crate::data::require_count(table.len(), len, "squared distances")?;
                             let square = &mut squares[k * square_len..(k + 1) * square_len];
                             let mut block = Cow::Borrowed(*table);
-                            inducing_parts(&mut block, n, inducing, tidy, square)?;
+                            inducing_parts(&mut block, n, inducing, tidy, square)
+                                .map_err(|err| err.in_dim(k))?;
                             all.extend_from_slice(&block);
                         }
                         SlotBlocks::Flat(all)
                     }
                     ArdData::Fill(filler) => {
                         let mut all = Vec::new();
-                        fill_dense(filler, (n, m), d, BlockKind::Rect, &mut all, &mut column)?;
+                        fill_dense(filler, (n, m), d, BlockKind::Rect, &mut all, column)?;
                         for k in 0..d {
                             let square = &mut squares[k * square_len..(k + 1) * square_len];
                             let mut block = Cow::Borrowed(&all[k * len..(k + 1) * len]);
-                            inducing_parts(&mut block, n, inducing, tidy, square)?;
+                            inducing_parts(&mut block, n, inducing, tidy, square)
+                                .map_err(|err| err.in_dim(k))?;
                             if let Cow::Owned(repaired) = block {
                                 all[k * len..(k + 1) * len].copy_from_slice(&repaired);
                             }
@@ -2297,15 +2404,7 @@ pub(crate) fn bind_inducing<'s>(
             }
         }
     }
-    let unbound_slot = xz.scalar.iter().any(Vec::is_empty)
-        || xz
-            .ard
-            .iter()
-            .any(|slot| matches!(slot, SlotBlocks::Flat(all) if all.is_empty()));
-    if unbound_slot {
-        return Err(no_source());
-    }
-    Ok((zz, xz))
+    Ok(())
 }
 
 /// One `n × m` block (training points × inducing points `inducing`),
@@ -2344,10 +2443,16 @@ fn inducing_parts(
             }
         }
         Ok(false) => {}
-        Err(GprError::InvalidDistance { row, col, reason }) => {
+        Err(GprError::InvalidDistance {
+            slot,
+            dim,
+            pair,
+            reason,
+        }) => {
             return Err(GprError::InvalidDistance {
-                row: inducing.get(row).copied().unwrap_or(row),
-                col,
+                slot,
+                dim,
+                pair: pair.map(|(row, col)| (inducing.get(row).copied().unwrap_or(row), col)),
                 reason,
             });
         }
@@ -2386,9 +2491,10 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::LengthMismatch`] for a source of a slot the
-    /// kernel does not read, a slot without a source, two sources of one
-    /// slot, or a block of the wrong length or count;
+    /// Returns [`GprError::DistanceSlot`] for a source of a slot the kernel
+    /// does not read, a slot without a source, or two sources of one slot;
+    /// [`GprError::LengthMismatch`] for a block of the wrong length or
+    /// count;
     /// [`GprError::EmptyInput`] when `rows` or `cols` is zero;
     /// [`GprError::InvalidDistance`] for a value the source's check refuses.
     pub(crate) fn bind_rect<'s: 'a>(
@@ -2459,7 +2565,7 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
         };
         this.scratch.written.clear();
         for source in sources {
-            let slot = slot_of(slots, &source, this.raw.iter().map(|raw| raw.id))?;
+            let (place, slot) = slot_of(slots, &source, this.raw.iter().map(|raw| raw.id))?;
             let shape = slot.shape();
             let blocks = shape.blocks();
             let tidy = source.tidy;
@@ -2479,6 +2585,7 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
             };
             let mut raw_slot = RawSlot {
                 id: slot.id(),
+                place,
                 shape,
                 data,
                 rows,
@@ -2499,12 +2606,16 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
                 check_counts(&raw_slot, blocks, len, written)?;
                 raw_slot.unchecked = true;
             } else {
-                check_slot(&mut raw_slot, blocks, len, kind, tidy, written)?;
+                check_slot(&mut raw_slot, blocks, len, kind, tidy, written)
+                    .map_err(|err| err.in_slot(place))?;
             }
             this.raw.push(raw_slot);
         }
         if this.raw.len() != slots.len() {
-            return Err(no_source());
+            let raw = &this.raw;
+            return Err(missing(slots, |place, _| {
+                raw.iter().any(|raw| raw.place == place)
+            }));
         }
         this.raw.sort_unstable_by_key(|raw| {
             let ard = matches!(raw.shape, SlotShape::Ard(_));
@@ -2523,17 +2634,18 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
                 slot.cast_at = cast.len();
                 for k in 0..slot.shape.blocks() {
                     let block = slot.block(k, written);
+                    let place = |err| in_block(err, slot.shape, k).in_slot(slot.place);
                     // An unchecked block is checked a tile at a time as it
                     // is cast, while the tile is in cache.
                     for tile in block.chunks(CAST_TILE) {
                         if slot.unchecked && !super::simd::all_valid_distances(tile) {
-                            return Err(first_invalid_from(block, slot.rows, 0));
+                            return Err(place(first_invalid_from(block, slot.rows, 0)));
                         }
                         let at = cast.len();
                         cast.extend(tile.iter().map(|&v| T::from_f64(v)));
                         if let Some(i) = cast[at..].iter().position(|v| !v.is_finite()) {
                             let pos = (at - slot.cast_at) % len + i;
-                            return Err(out_of_range(pos % slot.rows, pos / slot.rows));
+                            return Err(place(out_of_range(pos % slot.rows, pos / slot.rows)));
                         }
                     }
                 }
@@ -2566,11 +2678,29 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
     /// Returns [`GprError::UnsupportedKernelOperation`] for a slot these
     /// sources do not bind.
     pub(crate) fn tidy(&self, block: BlockAt) -> Result<Tidy, GprError> {
+        self.raw_of(block).map(|raw| raw.tidy)
+    }
+
+    /// `err` of `block`, named by its slot (its place in the kernel's
+    /// slots) and, for an ARD slot, its dimension.
+    pub(crate) fn locate(&self, block: BlockAt, err: GprError) -> GprError {
+        let err = match block {
+            BlockAt::Scalar(_) => err,
+            BlockAt::Ard(_, k) => err.in_dim(k),
+        };
+        match self.raw_of(block) {
+            Ok(raw) => err.in_slot(raw.place),
+            Err(_) => err,
+        }
+    }
+
+    /// The bound slot of `block`.
+    fn raw_of(&self, block: BlockAt) -> Result<&RawSlot<'a>, GprError> {
         let at = match block {
             BlockAt::Scalar(at) => at,
             BlockAt::Ard(at, _) => self.scalars + at,
         };
-        self.raw.get(at).map(|raw| raw.tidy).ok_or_else(unbound)
+        self.raw.get(at).ok_or_else(unbound)
     }
 }
 
@@ -2632,7 +2762,8 @@ pub(crate) fn column_into(
 ///
 /// Returns [`GprError::InvalidDistance`] for a square the source's check
 /// refuses, located in the caller's column, and the errors of reading
-/// `cols`.
+/// `cols`. `locate` names the slot and dimension of a block's error
+/// ([`QuerySources::locate`]).
 pub(crate) fn new_inducing_column(
     xz: &BlockStore<f64>,
     zz: &BlockStore<f64>,
@@ -2640,6 +2771,7 @@ pub(crate) fn new_inducing_column(
     point: usize,
     cols: &dyn RectSlots<f64>,
     tidy: impl Fn(BlockAt) -> Result<Tidy, GprError>,
+    locate: impl Fn(BlockAt, GprError) -> GprError,
 ) -> Result<(Vec<f64>, Vec<f64>), GprError> {
     let (n, m) = (xz.rows, inducing.len());
     let side = m + 1;
@@ -2649,7 +2781,7 @@ pub(crate) fn new_inducing_column(
     let mut square = vec![0.0; side * side];
     for &at in &blocks {
         let start = column.len();
-        column_into(cols, at, n, &mut column)?;
+        column_into(cols, at, n, &mut column).map_err(|err| locate(at, err))?;
         let new = &mut column[start..];
         for b in 0..m {
             for a in 0..m {
@@ -2665,13 +2797,23 @@ pub(crate) fn new_inducing_column(
         match check_block(&square, side, side, BlockKind::Square, tidy(at)?) {
             Ok(true) => repair_block(&mut square, side, side, BlockKind::Square),
             Ok(false) => {}
-            Err(GprError::InvalidDistance { row, col, reason }) => {
-                let row = if row == m { row_of(col) } else { row_of(row) };
-                return Err(GprError::InvalidDistance {
-                    row,
-                    col: 0,
-                    reason,
+            Err(GprError::InvalidDistance {
+                slot,
+                dim,
+                pair,
+                reason,
+            }) => {
+                let pair = pair.map(|(row, col)| {
+                    let row = if row == m { row_of(col) } else { row_of(row) };
+                    (row, 0)
                 });
+                let err = GprError::InvalidDistance {
+                    slot,
+                    dim,
+                    pair,
+                    reason,
+                };
+                return Err(locate(at, err));
             }
             Err(err) => return Err(err),
         }
@@ -2759,7 +2901,7 @@ impl<'v> BoundBlocks<'v> {
         let raw = self.ard_slot(at)?;
         let (list, in_place) = block_list(self, cast, raw);
         Ok(if raw.unchecked && in_place {
-            ArdRect::Unchecked(ArdBlocks::new(list, raw.rows, raw.cols, 0))
+            ArdRect::Unchecked(ArdBlocks::new(list, raw.rows, raw.cols, 0).of_slot(raw.place))
         } else {
             ArdRect::Checked(ArdBlocks::new(list, raw.rows, raw.cols, 0))
         })
@@ -2883,7 +3025,8 @@ fn check_slot(
     // Every length first: a repaired copy packs the blocks one after another.
     check_counts(slot, blocks, len, written)?;
     for k in 0..blocks {
-        if !check_block(slot.block(k, written), rows, cols, kind, tidy)? {
+        let checked = check_block(slot.block(k, written), rows, cols, kind, tidy);
+        if !checked.map_err(|err| in_block(err, slot.shape, k))? {
             continue;
         }
         // An owned table is repaired in place. A borrowed one is copied
@@ -3097,8 +3240,7 @@ mod tests {
             matches!(
                 &refused,
                 Err(GprError::InvalidDistance {
-                    row: 140,
-                    col: 3,
+                    pair: Some((140, 3)),
                     ..
                 })
             ),
@@ -3117,8 +3259,7 @@ mod tests {
         assert!(matches!(
             check_block(&block, n, n, BlockKind::Square, within),
             Err(GprError::InvalidDistance {
-                row: 140,
-                col: 3,
+                pair: Some((140, 3)),
                 ..
             })
         ));

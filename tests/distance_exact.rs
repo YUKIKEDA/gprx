@@ -10,7 +10,7 @@ use gprx::kernel::{
 };
 use gprx::{
     DistanceCachePolicy, Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, Prediction,
-    SinglePrecision, VarianceKind,
+    SinglePrecision, SlotErrorKind, VarianceKind,
 };
 
 const N: usize = 6;
@@ -264,12 +264,21 @@ fn two_slots_read_their_own_supplies_and_one_slot_twice_reads_one() {
             N,
             &y,
         );
-    assert!(matches!(twice, Err((_, GprError::LengthMismatch { .. }))));
+    let slot = |kind, slot| GprError::DistanceSlot { kind, slot };
+    assert_eq!(
+        twice.map(drop).map_err(|(_, e)| e),
+        Err(slot(SlotErrorKind::Duplicate, Some(0)))
+    );
     let foreign = ScalarDistance::new();
     let wrong = fitted.predict([foreign.borrow(&sq(&c0, &q0))], M);
-    assert!(matches!(wrong, Err(GprError::LengthMismatch { .. })));
+    assert_eq!(wrong.map(drop), Err(slot(SlotErrorKind::NotRead, None)));
     let none = fitted.predict(Vec::new(), M);
-    assert!(matches!(none, Err(GprError::LengthMismatch { .. })));
+    let missing = slot(SlotErrorKind::Missing, Some(0));
+    assert_eq!(none.map(drop), Err(missing.clone()));
+    assert_eq!(
+        missing.to_string(),
+        "distance slot mismatch: a distance slot of the kernel has no source"
+    );
 }
 
 /// Writes `d²` between two one-dimensional sample sets.
@@ -350,7 +359,13 @@ fn a_fill_matches_the_same_table_and_squares_are_checked() {
         .factor([image.from_vec(bad)], N, &y);
     assert!(matches!(
         diag,
-        Err((_, GprError::InvalidDistance { row: 0, col: 0, .. }))
+        Err((
+            _,
+            GprError::InvalidDistance {
+                pair: Some((0, 0)),
+                ..
+            }
+        ))
     ));
     let mut bad = sq(&c0, &c0);
     bad[1] += 0.25;
@@ -359,13 +374,22 @@ fn a_fill_matches_the_same_table_and_squares_are_checked() {
         .factor([image.from_vec(bad)], N, &y);
     assert!(matches!(
         asym,
-        Err((_, GprError::InvalidDistance { row: 1, col: 0, .. }))
+        Err((
+            _,
+            GprError::InvalidDistance {
+                pair: Some((1, 0)),
+                ..
+            }
+        ))
     ));
     let mut nan = sq(&c0, &q0);
     nan[2] = f64::NAN;
     assert!(matches!(
         table.predict([image.borrow(&nan)], M),
-        Err(GprError::InvalidDistance { row: 2, col: 0, .. })
+        Err(GprError::InvalidDistance {
+            pair: Some((2, 0)),
+            ..
+        })
     ));
     assert!(matches!(
         table.predict([image.borrow(&nan[..4])], M),
@@ -375,7 +399,10 @@ fn a_fill_matches_the_same_table_and_squares_are_checked() {
     query[1] += 1.0;
     assert!(matches!(
         table.predict_covariance([image.borrow(&sq(&c0, &q0))], [image.borrow(&query)], M),
-        Err(GprError::InvalidDistance { row: 1, col: 0, .. })
+        Err(GprError::InvalidDistance {
+            pair: Some((1, 0)),
+            ..
+        })
     ));
 }
 
@@ -707,7 +734,13 @@ fn a_negative_squared_distance_is_rejected() {
         .factor([image.from_vec(train)], N, &y);
     assert!(matches!(
         fit,
-        Err((_, GprError::InvalidDistance { row: 1, col: 0, .. }))
+        Err((
+            _,
+            GprError::InvalidDistance {
+                pair: Some((1, 0)),
+                ..
+            }
+        ))
     ));
     let fitted = Gpr::new(kernel, lik())
         .with_optimizer(Fixed)
@@ -717,7 +750,10 @@ fn a_negative_squared_distance_is_rejected() {
     cross[0] = -0.5;
     assert!(matches!(
         fitted.predict([image.borrow(&cross)], M),
-        Err(GprError::InvalidDistance { row: 0, col: 0, .. })
+        Err(GprError::InvalidDistance {
+            pair: Some((0, 0)),
+            ..
+        })
     ));
 }
 
@@ -846,7 +882,13 @@ fn rounding_is_refused_exactly_and_repaired_on_request() {
         Gpr::new(image.kernel(RbfKernel::new(1.0).expect("ell")), lik())
             .with_optimizer(Fixed)
             .factor([image.from_vec(wrong).tidy(1e-6).expect("tol")], N, &y),
-        Err((_, GprError::InvalidDistance { row: 1, col: 0, .. }))
+        Err((
+            _,
+            GprError::InvalidDistance {
+                pair: Some((1, 0)),
+                ..
+            }
+        ))
     ));
     // A tolerance is finite and non-negative.
     assert!(matches!(
@@ -893,7 +935,7 @@ fn ard_query_value_is_reported<P: gprx::GpScalar>(
         assert!(
             matches!(
                 result,
-                Err(GprError::InvalidDistance { row: r, col: c, .. }) if (r, c) == (row, col)
+                Err(GprError::InvalidDistance { pair: Some((r, c)), .. }) if (r, c) == (row, col)
             ),
             "{call} of {bad} at {:?}: {result:?}",
             (row, col)
@@ -1116,7 +1158,7 @@ fn a_value_past_the_storage_range_is_reported_where_it_is() {
         let at = |r: Result<(), GprError>, row: usize, col: usize, what: &str| {
             if narrow {
                 assert!(
-                    matches!(r, Err(GprError::InvalidDistance { row: a, col: b, .. }) if (a, b) == (row, col)),
+                    matches!(r, Err(GprError::InvalidDistance { pair: Some((a, b)), .. }) if (a, b) == (row, col)),
                     "{what}: {r:?}"
                 );
             } else {
@@ -1246,7 +1288,10 @@ fn a_rounded_square_is_repaired_alike_from_every_source() {
     let t = fill(rounded, 1);
     assert!(matches!(
         fit(&scalar, image.fill(&t), &y),
-        Err(GprError::InvalidDistance { row: 4, col: 4, .. })
+        Err(GprError::InvalidDistance {
+            pair: Some((4, 4)),
+            ..
+        })
     ));
     let got = fit(&scalar, image.fill(&t).tidy(1e-6).expect("tol"), &y)
         .expect("repaired fill")
@@ -1257,7 +1302,7 @@ fn a_rounded_square_is_repaired_alike_from_every_source() {
         let t = fill(bad, 1);
         assert!(matches!(
             fit(&scalar, image.fill(&t).tidy(1e-6).expect("tol"), &y),
-            Err(GprError::InvalidDistance { row: r, col: c, .. }) if (r, c) == (row, col)
+            Err(GprError::InvalidDistance { pair: Some((r, c)), .. }) if (r, c) == (row, col)
         ));
         assert!(matches!(
             fit(&scalar, image.fill(&t), &y),
@@ -1292,7 +1337,10 @@ fn a_rounded_square_is_repaired_alike_from_every_source() {
     ] {
         assert!(matches!(
             fit(&ard, source.tidy(1e-6).expect("tol"), &y),
-            Err(GprError::InvalidDistance { row: 1, col: 0, .. })
+            Err(GprError::InvalidDistance {
+                pair: Some((1, 0)),
+                ..
+            })
         ));
     }
     assert!(rounded[4 + 4 * N] > 0.0, "a borrowed table is not written");
@@ -1382,8 +1430,7 @@ fn ard_predictions_match_coordinates_at_many_dimensions_and_queries() {
         assert!(matches!(
             dist.predict_into([bands.borrow(&refs)], m, &mut got),
             Err(GprError::InvalidDistance {
-                row: 4,
-                col: 17,
+                pair: Some((4, 17)),
                 ..
             })
         ));
@@ -1503,4 +1550,70 @@ fn a_covariance_reads_its_query_square_where_it_was_bound() {
     covariance_from_every_square::<DoublePrecision>(1e-9);
     covariance_from_every_square::<SinglePrecision>(1e-4);
     covariance_from_every_square::<MixedPrecision<ReevaluateKernel>>(1e-4);
+}
+
+/// An invalid value names its slot (its place in `slots()`), its ARD
+/// dimension, and its pair: in a training square, in a prediction's block
+/// read unchecked as the kernel reads it, and in the message.
+#[test]
+fn an_invalid_distance_names_its_slot_dimension_and_pair() {
+    let image = ScalarDistance::new();
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[0.9, 1.6]).expect("ell"));
+    let kernel = image.kernel(RbfKernel::new(1.0).expect("ell")) * ard;
+    assert_eq!(kernel.slots().len(), 2);
+    let (a, b) = ([0.0, 1.0, 2.5], [0.5, -1.0, 2.0]);
+    let y = [0.1, 0.4, -0.2];
+    let trainer = Gpr::new(kernel, lik()).with_optimizer(Fixed);
+    let train = |second: Vec<f64>| {
+        [
+            image.from_vec(sq(&a, &a)),
+            bands.from_vecs(vec![sq(&b, &b), second]),
+        ]
+    };
+    let mut bad = sq(&a, &a);
+    bad[2 + 3] = -1.0;
+    let refused = trainer.clone().factor(train(bad), 3, &y);
+    let Err((_, err)) = refused else {
+        panic!("a negative distance was accepted");
+    };
+    assert!(
+        matches!(
+            &err,
+            GprError::InvalidDistance {
+                slot: Some(1),
+                dim: Some(1),
+                pair: Some((2, 1)),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .starts_with("invalid squared distance in slot 1, dimension 1 at (2, 1): "),
+        "{err}"
+    );
+    let fitted = trainer
+        .factor(train(sq(&a, &a)), 3, &y)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    // A prediction's ARD block is borrowed and checked as it is read.
+    let q = [0.25, 1.5];
+    let mut cross = sq(&a, &q);
+    cross[4] = f64::NAN;
+    let (first, second) = (sq(&b, &q), cross);
+    let tables: [&[f64]; 2] = [&first, &second];
+    let got = fitted.predict([image.from_vec(sq(&a, &q)), bands.from_slices(&tables)], 2);
+    assert!(
+        matches!(
+            got,
+            Err(GprError::InvalidDistance {
+                slot: Some(1),
+                dim: Some(1),
+                pair: Some((1, 1)),
+                ..
+            })
+        ),
+        "{got:?}"
+    );
 }

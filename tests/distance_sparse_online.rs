@@ -11,7 +11,7 @@ use gprx::kernel::{
 };
 use gprx::{
     DoublePrecision, Fixed, GaussianLikelihood, GpScalar, GprError, MixedPrecision, OnlineSgpr,
-    PromoteStorage, Sgpr, SinglePrecision,
+    PromoteStorage, Sgpr, SinglePrecision, SlotErrorKind,
 };
 
 /// Points the test can insert, and queries.
@@ -327,8 +327,9 @@ macro_rules! check {
     ($p:ty, $online:ident, $live:expr, $world:expr, $src:ident, $coords:ident, $tol:expr) => {{
         let (live, world): (&Live, &World) = (&$live, $world);
         let tol: f64 = $tol;
-        let places: Vec<usize> = live.inducing.iter().map(|&i| live.at(i)).collect();
-        assert_eq!($online.inducing(), places.as_slice());
+        let ids = $online.point_ids();
+        let want: Vec<_> = live.inducing.iter().map(|&i| ids[live.at(i)]).collect();
+        assert_eq!($online.inducing_points().collect::<Vec<_>>(), want);
         assert_eq!($online.n(), live.points.len());
         assert_eq!($online.m(), live.inducing.len());
         let (kernel, dims) = &$coords;
@@ -703,7 +704,10 @@ fn inserts_check_their_columns_and_change_nothing_on_an_error() {
     unchanged(&online);
     assert!(matches!(
         online.insert(Vec::<DistanceSource<'_>>::new(), 0.1),
-        Err(GprError::LengthMismatch { .. })
+        Err(GprError::DistanceSlot {
+            kind: SlotErrorKind::Missing,
+            ..
+        })
     ));
     unchanged(&online);
     // Refused inducing points: one already inducing, a column whose own
@@ -729,7 +733,10 @@ fn inserts_check_their_columns_and_change_nothing_on_an_error() {
     let mut pair = column.clone();
     pair[live.at(7)] += 1e-9;
     match online.insert_inducing(id, [image.from_vec(pair.clone())]) {
-        Err(GprError::InvalidDistance { row, .. }) => assert_eq!(row, live.at(7)),
+        Err(GprError::InvalidDistance {
+            pair: Some((row, _)),
+            ..
+        }) => assert_eq!(row, live.at(7)),
         other => panic!("expected InvalidDistance, got {other:?}"),
     }
     unchanged(&online);
@@ -802,7 +809,7 @@ fn an_inducing_point_that_does_not_factor_changes_nothing() {
             Err(GprError::CholeskyFailed { .. })
         ));
         assert_eq!(online.m(), live.inducing.len());
-        assert_eq!(online.inducing(), &[7, 0, 4, 9]);
+        assert_eq!(common::inducing_places(&online), [7, 0, 4, 9]);
         let after = online.predict([image.borrow(&query)], Q).expect("predict");
         assert_eq!(bits(&after.mean), bits(&before.mean));
         assert_eq!(bits(&after.variance), bits(&before.variance));
@@ -811,7 +818,7 @@ fn an_inducing_point_that_does_not_factor_changes_nothing() {
         online
             .insert_inducing(id, [image.from_vec(block(&points, &[3]))])
             .expect("insert_inducing");
-        assert_eq!(online.inducing(), &[7, 0, 4, 9, 3]);
+        assert_eq!(common::inducing_places(&online), [7, 0, 4, 9, 3]);
     }
     run::<DoublePrecision>();
     run::<SinglePrecision>();

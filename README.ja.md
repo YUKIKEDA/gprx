@@ -391,7 +391,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 カーネルの葉は、座標の代わりに、与えた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
 
-結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。`DistanceKernel` と `KernelSpec` は `WithPoints`。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
+結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。右に `KernelSpec` を置いた `DistanceKernel` は `WithPoints`。座標の項を左に置くときは `DistanceKernel::from(spec)`（スロットの無い `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないので、`KernelSpec + leaf.into()` は座標の和として推論される。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
 
 `Gpr::new` は任意の `ModelKernel`（`KernelSpec` か `DistanceKernel<C>`）を受ける。`with_input_transform` は `PointKernel` のモデル（`KernelSpec` と `DistanceKernel<WithPoints>`）だけにある。各スロットは、呼び出しごとに `DistanceSource` を 1 つ受ける。
 
@@ -402,7 +402,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `borrow(d2)` / `borrow(blocks)` | `f64` のモデルの `predict` はその場で読む。`f32` のモデルは 1 回だけ型変換する。`fit` はコピーする（ARD の正方行列は詰めた三角へ直接） |
 | `fill(&filler)` | `DistanceFill::fill_column(col, rows, out)` が `rows` の各行 `i` の `d²(i, col)` を書く。ARD の fill は `d` 本の列を続けて書く。正方行列では各列の `col..n` 行だけを求める |
 
-表は列優先の `dist[i + j * n_rows]`。値はすべて有限で負でなく、学習の正方行列（とクエリの正方行列）は対角がちょうど 0 で、ちょうど対称でなければならない。そうでなければ、最初に外れた値の位置で `InvalidDistance { row, col, reason }` を返す。丸めで少しずれた表（`‖a‖² + ‖b‖² − 2a·b` で作った表）は、その供給が求めたときだけ受け付ける。`source.tidy(rel_tol)` は、表の最大値の `rel_tol` 倍以内の負の値と対角を `0.0` に、その範囲の鏡像の組を平均にそろえ、それを超えるものは拒む（直す借用の表は書き換えずにコピーする）。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `LengthMismatch`。学習の fill は `DistanceCachePolicy` によらず、1 回の学習で 1 回だけ呼ぶ。モデルはそれが書いた二乗距離を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。`predict_into` はモデルが持つバッファの上で供給を束ねるので、同じ形の呼び出しを一度したあとは確保しない。
+表は列優先の `dist[i + j * n_rows]`。値はすべて有限で負でなく、学習の正方行列（とクエリの正方行列）は対角がちょうど 0 で、ちょうど対称でなければならない。そうでなければ、最初に外れた値の位置で `InvalidDistance { slot, dim, pair, reason }` を返す。`slot` は `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの中の `(row, col)`。丸めで少しずれた表（`‖a‖² + ‖b‖² − 2a·b` で作った表）は、その供給が求めたときだけ受け付ける。`source.tidy(rel_tol)` は、表の最大値の `rel_tol` 倍以内の負の値と対角を `0.0` に、その範囲の鏡像の組を平均にそろえ、それを超えるものは拒む（直す借用の表は書き換えずにコピーする）。供給の無いスロット、供給が 2 つのスロット、カーネルに無いスロットの供給は `DistanceSlot { kind, slot }`（`SlotErrorKind::Missing`、`Duplicate`、`NotRead`）。読み込んだモデルは新しいスロットを読むので、保存前のスロットは `NotRead` になる。学習の fill は `DistanceCachePolicy` によらず、1 回の学習で 1 回だけ呼ぶ。モデルはそれが書いた二乗距離を持つ。`MixedPrecision` のモデルは学習の `d²` を `f32` の写しと並べて `f64` でも持つので、`f64` のリファインメントは呼び出し側が渡した値を読む。`predict_into` はモデルが持つバッファの上で供給を束ねるので、同じ形の呼び出しを一度したあとは確保しない。
 
 | モデル | `fit` / `factor` | `predict` 系 | 共分散と `sample` |
 | --- | --- | --- | --- |
@@ -413,7 +413,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は距離のモデルも変換する。その `insert` はスロットごとに、今の点から新しい点への二乗距離の `n × 1` の列（`point_ids` の順）を、上のどのソースからでも受け取る。ARD のスロットはこの列を `d` 本受け取る。`DistanceOnly` は `insert(sources, y_new)`、`WithPoints` は `insert(sources, x_new, y_new)`。列は学習の正方行列と同じく検査し（`tidy` なら直し）、保持する。`delete(id)` は、保持した二乗距離からその点をその場で除く。オンラインのモデルは、学習済みのモデルと同じ引数で予測する。モデルが一度伸びた後は、どちらも確保しない（scalar の正方行列は 4 分の 1 ずつ、ARD のスロットは倍々に伸びる）。ただし、ワーカーが 2 つ以上の Rayon のプールで大きな削除をするときは、因子の更新の横で動かすジョブを 1 つ積む。
 
-距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`into_online` はブロックを持ったまま変換する。`insert` はスロットごとに、誘導点から新しい点への `m × 1` の二乗距離を受け取る。`insert_inducing` は学習点を `PointId` で指定し、学習点からその点への `n × 1` の二乗距離を受け取って、持っている組と照らして検査する。誘導点である点は、`delete_inducing` で外すまで `delete` できない。factor は、座標のモデルが `n · d` 個の座標から計算する組を、供給された `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
+距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順。`OnlineSgpr` では `inducing_points()` が返す `PointId` の順で、削除してもずれない）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`into_online` はブロックを持ったまま変換する。`insert` はスロットごとに、誘導点から新しい点への `m × 1` の二乗距離を受け取る。`insert_inducing` は学習点を `PointId` で指定し、学習点からその点への `n × 1` の二乗距離を受け取って、持っている組と照らして検査する。誘導点である点は、`delete_inducing` で外すまで `delete` できない。factor は、座標のモデルが `n · d` 個の座標から計算する組を、供給された `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{
@@ -521,7 +521,8 @@ fn main() -> Result<(), gprx::GprError> {
     online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
     let point = online.point_ids()[1];
     online.insert_inducing(point, [image.from_vec(vec![1.0, 0.0, 1.0, 4.0, 9.0])])?;
-    assert_eq!(online.inducing(), &[0, 2, 1]);
+    let ids = online.point_ids();
+    assert_eq!(online.inducing_points().collect::<Vec<_>>(), [ids[0], ids[2], point]);
     let _ = online.predict([image.from_vec(vec![0.25, 2.25, 0.25])], 1)?;
     let _ = (online.to_kernel(), online.slots());
     online.delete_inducing(online.inducing_ids()[2])?;
@@ -923,7 +924,8 @@ fn main() -> Result<(), GprError> {
 | `OptimizationNotConverged { iterations }` | ソルバが判定の前に止まった |
 | `InvalidHyperparameter { reason }` | カーネルパラメータが定義域の外 |
 | `ShapeMismatch { reason }` | 行列の形が違う |
-| `InvalidDistance { row, col, reason }` | 与えた二乗距離の `(row, col)` が有限でない、負、または正方行列の対角が 0 でない・対称でない |
+| `InvalidDistance { slot, dim, pair, reason }` | 与えた二乗距離が有限でない、負、または正方行列の対角が 0 でない・対称でない。`slot` は表の `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの `(row, col)`。分からないものは `None` |
+| `DistanceSlot { kind, slot }` | 供給がカーネルのスロットと合わない。`SlotErrorKind::NotRead`（カーネルが読まないスロット。保存前のスロットなど）、`Duplicate`、`Missing`。`slot` は `slots()` での位置 |
 | `LengthMismatch { reason }` | スライスの長さが違う |
 | `IndexOutOfRange { reason }` | パラメータ、カーネルの葉、次元の添字 |
 | `InvalidConfig { reason }` | 最適化、ジッタ、変換の設定 |

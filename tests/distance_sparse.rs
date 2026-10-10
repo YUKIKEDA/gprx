@@ -11,7 +11,8 @@ use gprx::kernel::{
 };
 use gprx::{
     Adam, DoublePrecision, Fixed, GaussianLikelihood, GpScalar, GprError, MixedPrecision,
-    PredictOptions, Prediction, PromoteStorage, Sgpr, SinglePrecision, Svgp, VarianceKind,
+    PredictOptions, Prediction, PromoteStorage, Sgpr, SinglePrecision, SlotErrorKind, Svgp,
+    VarianceKind,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -734,26 +735,27 @@ fn bad_inputs_are_refused_and_the_trainer_comes_back_unchanged() {
     ));
     // No source, two sources of one slot, a source of another slot.
     let other = ScalarDistance::new();
-    assert!(matches!(
+    let slot = |kind, slot| GprError::DistanceSlot { kind, slot };
+    assert_eq!(
         err(Vec::new(), &y, &ind),
-        GprError::LengthMismatch { .. }
-    ));
-    assert!(matches!(
+        slot(SlotErrorKind::Missing, Some(0))
+    );
+    assert_eq!(
         err(
             Vec::from([image.borrow(&good), image.borrow(&good)]),
             &y,
             &ind
         ),
-        GprError::LengthMismatch { .. }
-    ));
-    assert!(matches!(
+        slot(SlotErrorKind::Duplicate, Some(0))
+    );
+    assert_eq!(
         err(
             Vec::from([image.borrow(&good), other.borrow(&good)]),
             &y,
             &ind
         ),
-        GprError::LengthMismatch { .. }
-    ));
+        slot(SlotErrorKind::NotRead, None)
+    );
     // Targets of the wrong length or not finite.
     assert!(matches!(
         err(Vec::from([image.borrow(&good)]), &y[1..], &ind),

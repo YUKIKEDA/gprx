@@ -79,8 +79,9 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<DistanceOnly>> {
     /// [`GprError::IndexOutOfRange`] for an inducing index not below `n`,
     /// [`GprError::InvalidConfig`] for an inducing index listed twice,
     /// [`GprError::LengthMismatch`] if a table or `y` has the wrong length,
-    /// a slot has no source or two, or a source names a slot the kernel does
-    /// not read, [`GprError::InvalidDistance`] for a value that is not
+    /// [`GprError::DistanceSlot`] if a source names a slot the kernel does
+    /// not read, two name one slot, or a slot has none,
+    /// [`GprError::InvalidDistance`] for a value that is not
     /// finite or is negative, or for inducing rows that are not a square
     /// with a zero diagonal and equal mirror entries (see
     /// [`crate::kernel::DistanceSource::tidy`]), and the errors of the

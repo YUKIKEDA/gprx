@@ -349,7 +349,7 @@ fn read_supply<S: crate::kernel::KernelScalar>(
         })
         .collect::<Result<Vec<_>, GprError>>()?;
     let (zz, xz) = crate::kernel::bind_inducing(slots, sources, n, inducing)?;
-    SparseSupply::new::<S>(inducing.to_vec(), zz, xz)
+    SparseSupply::new::<S>(slots, inducing.to_vec(), zz, xz)
 }
 
 /// The saved online identifiers.

@@ -657,8 +657,9 @@ impl JoinPoints<WithPoints> for WithPoints {
 /// Leaves come from [`ScalarDistance::kernel`] and [`ArdDistance::kernel`].
 /// `+` and `*` combine them with each other, with [`ConstantKernel`] and
 /// [`WhiteKernel`] (still [`DistanceOnly`]), and with a coordinate
-/// [`KernelSpec`] (then [`WithPoints`]). Parameters follow the leaves in
-/// depth-first, left-to-right order, as in [`KernelSpec`].
+/// [`KernelSpec`] on the right (then [`WithPoints`]). A coordinate term
+/// goes on the left through `DistanceKernel::from`. Parameters follow the
+/// leaves in depth-first, left-to-right order, as in [`KernelSpec`].
 ///
 /// # Examples
 ///
@@ -676,6 +677,8 @@ impl JoinPoints<WithPoints> for WithPoints {
 /// assert_eq!(only.num_params(), 4);
 /// let mixed: DistanceKernel<WithPoints> = only * KernelSpec::from(RbfKernel::new(0.5)?);
 /// assert_eq!(mixed.slots().len(), 2);
+/// let left = DistanceKernel::from(KernelSpec::from(RbfKernel::new(0.5)?)) + mixed;
+/// assert_eq!(left.num_params(), 6);
 /// # Ok(())
 /// # }
 /// ```
@@ -843,6 +846,16 @@ fn number_leaves(spec: &mut KernelSpec<SuppliedSpec>, seen: &mut [Vec<SlotId>; 2
     }
 }
 
+/// A coordinate kernel as a [`DistanceKernel`] with no slot, to put a
+/// coordinate term on the left of `+` or `*`: `KernelSpec + DistanceKernel`
+/// is not implemented, so `KernelSpec + leaf.into()` infers the
+/// coordinate `KernelSpec` sum.
+impl From<KernelSpec> for DistanceKernel<WithPoints> {
+    fn from(spec: KernelSpec) -> Self {
+        Self::from_spec(spec.widen())
+    }
+}
+
 macro_rules! distance_ops {
     ($trait:ident, $method:ident, $variant:ident) => {
         impl<C1, C2> $trait<DistanceKernel<C2>> for DistanceKernel<C1>
@@ -867,17 +880,6 @@ macro_rules! distance_ops {
                 DistanceKernel::from_spec(KernelSpec::$variant(
                     Box::new(self.spec),
                     Box::new(rhs.widen()),
-                ))
-            }
-        }
-
-        impl<C: PointUse> $trait<DistanceKernel<C>> for KernelSpec {
-            type Output = DistanceKernel<WithPoints>;
-
-            fn $method(self, rhs: DistanceKernel<C>) -> Self::Output {
-                DistanceKernel::from_spec(KernelSpec::$variant(
-                    Box::new(self.widen()),
-                    Box::new(rhs.spec),
                 ))
             }
         }
@@ -1205,9 +1207,13 @@ mod tests {
         assert!(format!("{k:?}").starts_with("DistanceKernel"));
         assert_eq!(k.parameter_bindings().len(), k.num_params());
         // A coordinate kernel on the left makes a `WithPoints` kernel too.
-        let mixed: DistanceKernel<WithPoints> = KernelSpec::from(rbf) * k.clone();
+        let mixed = DistanceKernel::from(KernelSpec::from(rbf)) * k.clone();
         assert_eq!(mixed.slots(), k.slots());
-        let summed: DistanceKernel<WithPoints> = KernelSpec::from(rbf) + k;
+        let summed = DistanceKernel::from(KernelSpec::from(rbf)) + k;
         assert_eq!(summed.num_params(), 2);
+        // `KernelSpec + x.into()` still infers the coordinate sum: no
+        // `KernelSpec + DistanceKernel` competes with it.
+        let coordinate: KernelSpec = KernelSpec::from(rbf) + rbf.into();
+        assert_eq!(coordinate.num_params(), 2);
     }
 }

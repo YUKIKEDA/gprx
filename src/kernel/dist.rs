@@ -1044,6 +1044,9 @@ pub struct ArdBlocks<'a, T, S = Checked> {
     /// Distance between the starts of two columns of a block: `rows`, or
     /// more for a block with room for more rows (an online sparse model's).
     ld: usize,
+    /// The slot's place in the kernel's slots, which an error of an
+    /// unchecked value names ([`Self::of_slot`]).
+    slot: Option<usize>,
     state: PhantomData<S>,
 }
 
@@ -1087,7 +1090,24 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
             cols,
             col0,
             ld,
+            slot: None,
             state: PhantomData,
+        }
+    }
+
+    /// These blocks as those of the slot at `place` in the kernel's slots.
+    pub(crate) fn of_slot(self, place: usize) -> Self {
+        Self {
+            slot: Some(place),
+            ..self
+        }
+    }
+
+    /// `err` of these blocks, named by their slot when it is known.
+    pub(crate) fn locate(&self, err: GprError) -> GprError {
+        match self.slot {
+            Some(place) => err.in_slot(place),
+            None => err,
         }
     }
 
@@ -1151,11 +1171,8 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
         if S::CHECKED || super::sources::valid(v.to_f64()) {
             Ok(v)
         } else {
-            Err(super::sources::invalid_value(
-                v.to_f64(),
-                row,
-                col + self.col0,
-            ))
+            let err = super::sources::invalid_value(v.to_f64(), row, col + self.col0);
+            Err(self.locate(err.in_dim(dim)))
         }
     }
 
@@ -1171,11 +1188,8 @@ impl<'a, T: KernelScalar, S: BlockState> ArdBlocks<'a, T, S> {
             return Ok(None);
         };
         if !S::CHECKED && !super::simd::all_valid_distances(run) {
-            return Err(super::sources::first_invalid_from(
-                run,
-                self.rows,
-                self.col0 + col,
-            ));
+            let err = super::sources::first_invalid_from(run, self.rows, self.col0 + col);
+            return Err(self.locate(err.in_dim(dim)));
         }
         Ok(Some(run))
     }
@@ -1336,9 +1350,10 @@ impl<S: BlockState> Gate<'_, S> {
         if valid {
             return Ok(());
         }
-        for run in &self.runs[..self.d] {
+        for (dim, run) in self.runs[..self.d].iter().enumerate() {
             if !super::simd::all_valid_distances(run) {
-                return Err(super::sources::first_invalid_from(run, self.rows, self.col));
+                let err = super::sources::first_invalid_from(run, self.rows, self.col);
+                return Err(err.in_dim(dim));
             }
         }
         // The lanes failed, yet no run holds an invalid value: the two

@@ -282,8 +282,10 @@ macro_rules! distance_predict {
             /// # Errors
             ///
             #[doc = concat!("Returns [`GprError::EmptyInput`] if `", stringify!($count), "` is zero,")]
-            /// [`GprError::LengthMismatch`] if a table has the wrong length
-            /// or a slot has no source or two,
+            /// [`GprError::LengthMismatch`] if a table has the wrong length,
+            /// [`GprError::DistanceSlot`] if a source names a slot the kernel
+            /// does not read (a model's slots before a save are not those of
+            /// the loaded model), two name one slot, or a slot has none,
             /// [`GprError::InvalidDistance`] for a value that is not finite or
             /// is negative (see [`crate::kernel::DistanceSource::tidy`]), and
             /// the query errors of the coordinate model's `predict`.
