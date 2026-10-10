@@ -304,6 +304,12 @@ fn open_tensors(dir: &Path, config: &SparseConfig) -> Result<TensorFile, GprErro
     }
 }
 
+/// A slot's saved blocks, borrowed from the file's map.
+enum SavedBlocks<'a> {
+    Scalar(crate::kernel::ScalarDistance, &'a [f64]),
+    Ard(crate::kernel::ArdDistance, Vec<&'a [f64]>),
+}
+
 /// The training blocks of `slots` (tensors `d2.<k>`) at the training
 /// points `inducing`, bound as a fit binds its sources
 /// ([`crate::kernel::bind_inducing`]): the same checks of the indices (`m`
@@ -326,27 +332,30 @@ fn read_supply<S: crate::kernel::KernelScalar>(
         ));
     }
     let len = n.checked_mul(m).ok_or(GprError::SizeOverflow)?;
-    let sources = slots
+    // Each slot's tensor, borrowed from the map, an ARD one as its `dims`
+    // blocks: the bind copies them into the store, the one copy a load makes.
+    let tables = slots
         .iter()
         .enumerate()
         .map(|(k, slot)| {
             let name = d2_tensor(k);
             Ok(match slot {
-                DistanceSlot::Ard(ard) => {
-                    let values = f64_tensor(tensors, &name, &[ard.dims(), n, m])?;
-                    ard.from_vecs(
-                        values
-                            .chunks_exact(len.max(1))
-                            .map(<[f64]>::to_vec)
-                            .collect(),
-                    )
-                }
+                DistanceSlot::Ard(ard) => SavedBlocks::Ard(
+                    *ard,
+                    f64_tensor(tensors, &name, &[ard.dims(), n, m])?
+                        .chunks_exact(len.max(1))
+                        .collect(),
+                ),
                 DistanceSlot::Scalar(scalar) => {
-                    scalar.from_slice(f64_tensor(tensors, &name, &[n, m])?)
+                    SavedBlocks::Scalar(*scalar, f64_tensor(tensors, &name, &[n, m])?)
                 }
             })
         })
         .collect::<Result<Vec<_>, GprError>>()?;
+    let sources = tables.iter().map(|table| match table {
+        SavedBlocks::Ard(ard, blocks) => ard.borrow(blocks),
+        SavedBlocks::Scalar(scalar, block) => scalar.borrow(block),
+    });
     SparseSupply::bind::<S>(slots, sources, n, inducing)
 }
 
