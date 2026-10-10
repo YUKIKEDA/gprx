@@ -44,13 +44,17 @@ src/kernel/                leaves live here, not in src/*.rs
   spec.rs term.rs dist.rs lengthscale.rs scalar.rs radial.rs leaf_params.rs
   tree.rs                  the Supply kind of a tree: NoSupply (coordinates) or supplied leaves
   supply.rs                slots, DistanceKernel, DistanceSource, the model kernels (ModelKernel, PointKernel)
-  sources.rs               binding and checking supplied tables; the training d² stores; the sparse blocks
+  sources/                 supplied tables: mod.rs (shared imports), slot.rs (a source's slot and its errors),
+                           check.rs (checks and repairs), train.rs (TrainSources), refined.rs (SourceStore,
+                           RefinedSources), blocks.rs (the sparse blocks, BlockStore), query.rs (QuerySources), tests.rs
   simd/                    mod.rs (the lane helpers), stationary.rs, rbf_ard.rs, ard.rs, dist.rs, rows.rs. Every f64x4 loop of the leaves
 src/optimizer/             mod.rs, logit.rs. lbfgs.rs neldermead.rs trust_region.rs fsa.rs. adam.rs does not implement Optimizer
 src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.rs sparse.rs (save / load of Sgpr, OnlineSgpr, Svgp)
                            distance.rs (the loaded models of a DistanceKernel)
-src/sparse/                crate-private: SparseSpec / SparseCore and the inducing-point helpers Sgpr and Svgp share. Sgpr and Svgp do not import each other
-src/sgpr/                  model.rs fitted.rs online.rs objective.rs distance.rs tests.rs
+src/sparse/                crate-private, what Sgpr and Svgp share: mod.rs (the accessor macros), core.rs (SparseSpec, SparseCore),
+                           scratch.rs (the operation buffers), supply.rs (SparseSupply), tests.rs. Sgpr and Svgp do not import each other
+src/sgpr/                  model.rs fitted.rs objective.rs distance.rs tests.rs
+  online/                  mod.rs (OnlineSgpr), distance.rs (OnlineSgpr of a DistanceKernel)
   factor/                  vfe.rs (assembly, weights, bound) derivatives.rs predict.rs loo.rs updates.rs (rank-1, inducing)
 src/svgp/                  model.rs fitted.rs distance.rs tests.rs
   factor/                  assemble.rs (K_mm, A, q, ELBO) gradient.rs predict.rs adam.rs
