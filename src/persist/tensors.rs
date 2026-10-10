@@ -212,13 +212,13 @@ pub(super) fn pack_lower<T: crate::kernel::KernelScalar>(l: MatRef<'_, T>, out: 
 /// Writes `views` as `dir/model.safetensors`, tensor by tensor into a
 /// temporary file that replaces the old one: the file is never built in
 /// memory. The bytes are those of [`safetensors::serialize`].
-fn write_views(dir: &Path, views: Vec<(&str, TensorView<'_>)>) -> Result<(), GprError> {
+fn write_views(dir: &Path, mut views: Vec<(&str, TensorView<'_>)>) -> Result<(), GprError> {
     let path = dir.join(TENSOR_FILE);
     super::atomic::write_atomic_with(&path, |file, temp| {
         let io = |err: std::io::Error| {
             persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}"))
         };
-        let (header, views) = safetensors_header(views).map_err(|err| {
+        let header = safetensors_header(&mut views).map_err(|err| {
             persist_err(PersistErrorKind::Tensor, format!("write {temp:?}: {err}"))
         })?;
         let mut out = std::io::BufWriter::new(file);
@@ -231,21 +231,20 @@ fn write_views(dir: &Path, views: Vec<(&str, TensorView<'_>)>) -> Result<(), Gpr
 }
 
 /// The header of a safetensors file of `views` (its length, then the JSON
-/// padded to 8 bytes), and `views` in the order their data follows it:
-/// descending dtype alignment, then name, as `safetensors` lays them out.
-/// The header is `safetensors::serialize` of views that report their
-/// lengths but carry no bytes, so it is the crate's own.
-fn safetensors_header<'a, 'v>(
-    mut views: Vec<(&'a str, TensorView<'v>)>,
-) -> Result<(Vec<u8>, Vec<(&'a str, TensorView<'v>)>), safetensors::SafeTensorError> {
+/// padded to 8 bytes), with `views` sorted into the order their data
+/// follows it: descending dtype alignment, then name, as `safetensors`
+/// lays them out. The header is `safetensors::serialize` of views that
+/// report their lengths but carry no bytes, so it is the crate's own.
+fn safetensors_header(
+    views: &mut [(&str, TensorView<'_>)],
+) -> Result<Vec<u8>, safetensors::SafeTensorError> {
     views.sort_by(|(lname, left), (rname, right)| {
         right.dtype().cmp(&left.dtype()).then(lname.cmp(rname))
     });
-    let header = serialize(
+    serialize(
         views.iter().map(|(name, view)| (*name, HeaderOnly(view))),
         None,
-    )?;
-    Ok((header, views))
+    )
 }
 
 /// A tensor's dtype, shape, and length without its bytes.
