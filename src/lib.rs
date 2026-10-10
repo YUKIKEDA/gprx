@@ -9,9 +9,12 @@
 //! [`kernel::WhiteKernel`] is opt-in composition; using both at large
 //! values double-counts noise.
 //!
-//! Depend on crates.io with `gprx = "0.1"`. The 0.1.0 contract is the default-feature public API: [`Gpr`], [`Sgpr`],
-//! and [`Svgp`], online updates, and directory save/load. A 0.x minor may
-//! break that API. The MSRV is 1.88. The `internals` module
+//! Depend on crates.io with `gprx = "0.1"`. The 0.1.0 contract (tag
+//! `v0.1.0`) is the default-feature public API: [`Gpr`], [`Sgpr`], and
+//! [`Svgp`], online updates, and directory save/load. These docs follow
+//! the unreleased `main`: supplied distances ([`kernel::ScalarDistance`],
+//! [`kernel::ArdDistance`]) arrive with 0.2.0. A 0.x minor may break that
+//! API. The MSRV of `main` is 1.88 (1.85 at 0.1.0). The `internals` module
 //! (`bench-internals`, `insert-stages`) is outside semantic versioning.
 //!
 //! Distance fills and lower-triangle kernel writes use the process-wide thread pool (shared

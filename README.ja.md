@@ -4,7 +4,7 @@
 
 Rust のガウス過程回帰。Exact、スパース（VFE）、SVGP を含む。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。
 
-`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0** は既定フィーチャの公開 API である。MSRV は 1.88。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
+`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0**（タグ `v0.1.0`）は既定フィーチャの公開 API である。この README は未リリースの `main` に従う。供給する距離（`ScalarDistance`、`ArdDistance` とその保存・読み込み）は 0.2.0 で入る。`main` の MSRV は 1.88（0.1.0 では 1.85）。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
 
 ```toml
 [dependencies]
@@ -536,6 +536,102 @@ fn main() -> Result<(), gprx::GprError> {
 
 fn _ard_bound(leaf: impl ArdDistanceLeaf, slot: ArdDistance) -> Result<DistanceKernel, gprx::GprError> {
     slot.kernel(leaf)
+}
+```
+
+距離のモデルの残りの使い方を同じ 4 点で示す。`fit`、`predict` の仲間、`sample`、online の `insert` / `delete`、`InvalidDistance` の照合、`slots()` の ARD の slot、座標を持つモデルの入力変換、疎なモデルの保存と読み込み。
+
+```rust
+use gprx::kernel::{
+    ArdDistance, DistanceOnly, DistanceSlot, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
+};
+use gprx::persist::{LoadedDistanceSgpr, LoadedDistanceSvgp, PersistRegistry};
+use gprx::transform::MinMaxInput;
+use gprx::{
+    Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, Prediction, Sgpr, Svgp,
+    VarianceKind,
+};
+
+fn main() -> Result<(), GprError> {
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(1.0)?);
+    // Four points 0, 1, 2, 3 and two queries at 0.5 and 1.5, as above.
+    let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+    let square = [0.0, 1.0, 1.0, 0.0];
+
+    // `fit` searches θ (L-BFGS by default) on the supplied training square.
+    let trainer = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?);
+    assert_eq!(trainer.to_kernel().slots(), vec![DistanceSlot::Scalar(image)]);
+    let mut fitted = trainer
+        .fit([image.from_vec(d2.clone())], 4, &y)
+        .map_err(|(_, e)| e)?;
+    let latent = PredictOptions {
+        variance_kind: VarianceKind::Latent,
+    };
+    let _ = fitted.predict_with([image.borrow(&cross)], 2, latent)?;
+    let mut out = Prediction::default();
+    fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+    let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&square)], 2, latent)?;
+    // Three draws, column-major 2 × 3, from seed 7.
+    let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&square)], 2, 3, 7)?;
+    assert_eq!(draws.len(), 6);
+
+    // A value that is not a squared distance names its slot and pair.
+    let negative = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, -2.25];
+    match fitted.predict([image.borrow(&negative)], 2) {
+        Err(GprError::InvalidDistance { slot, pair, .. }) => {
+            assert_eq!((slot, pair), (Some(0), Some((3, 1))));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // OnlineGpr: a point at 4 (its squared distances to the live points, in
+    // `point_ids` order), then its delete.
+    let mut online = fitted.into_online()?;
+    let id = online.insert([image.from_vec(vec![16.0, 9.0, 4.0, 1.0])], 0.3)?;
+    online.delete(id)?;
+    let _ = online.predict([image.borrow(&cross)], 2)?;
+
+    // An ARD kernel lists its slot as `DistanceSlot::Ard`.
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
+    assert_eq!(ard.slots(), vec![DistanceSlot::Ard(bands)]);
+
+    // A kernel with points maps its coordinates with an input transform.
+    let mixed = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+    let x = [0.0, 10.0, 20.0, 30.0];
+    let _ = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
+
+    // Svgp and OnlineSgpr save; a loaded model binds its new slots.
+    let train_z = vec![0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    let cross_z = [0.25, 2.25, 2.25, 0.25];
+    let svgp = Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(train_z.clone())], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    assert_eq!((svgp.inducing(), svgp.slots()), (&[0, 2][..], vec![DistanceSlot::Scalar(image)]));
+    let _ = svgp.to_kernel();
+    let dir = std::env::temp_dir().join("gprx-readme-distance-svgp");
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    assert_eq!((loaded.n(), loaded.inducing()), (4, &[0, 2][..]));
+    let _ = loaded.to_kernel();
+    let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+        return Err(GprError::EmptyInput);
+    };
+    let _ = loaded.predict([slot.borrow(&cross_z)], 2)?;
+    let online = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train_z)], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .into_online();
+    let dir = std::env::temp_dir().join("gprx-readme-distance-online-sgpr");
+    online.save(&dir)?;
+    let _ = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    Ok(())
 }
 ```
 

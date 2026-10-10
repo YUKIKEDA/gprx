@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load.
 
-`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.1.0** is the default-feature public API. The MSRV is 1.88. A 0.x minor may break that API. `internals` (`bench-internals` and `insert-stages`) is outside that contract.
+`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.1.0** (tag `v0.1.0`) is the default-feature public API. This README follows `main`, which is unreleased: supplied distances (`ScalarDistance`, `ArdDistance`, and their save/load) arrive with 0.2.0. The MSRV of `main` is 1.88 (1.85 at 0.1.0). A 0.x minor may break that API. `internals` (`bench-internals` and `insert-stages`) is outside that contract.
 
 ```toml
 [dependencies]
@@ -521,6 +521,102 @@ fn main() -> Result<(), gprx::GprError> {
 
 fn _ard_bound(leaf: impl ArdDistanceLeaf, slot: ArdDistance) -> Result<DistanceKernel, gprx::GprError> {
     slot.kernel(leaf)
+}
+```
+
+The rest of a distance model's surface, on the same four points: `fit`, the `predict` family, `sample`, the online `insert` / `delete`, an `InvalidDistance` match, an ARD slot in `slots()`, an input transform on a model with points, and save and load of the sparse models.
+
+```rust
+use gprx::kernel::{
+    ArdDistance, DistanceOnly, DistanceSlot, KernelSpec, RbfArdKernel, RbfKernel, ScalarDistance,
+};
+use gprx::persist::{LoadedDistanceSgpr, LoadedDistanceSvgp, PersistRegistry};
+use gprx::transform::MinMaxInput;
+use gprx::{
+    Fixed, GaussianLikelihood, Gpr, GprError, PredictOptions, Prediction, Sgpr, Svgp,
+    VarianceKind,
+};
+
+fn main() -> Result<(), GprError> {
+    let image = ScalarDistance::new();
+    let kernel = image.kernel(RbfKernel::new(1.0)?);
+    // Four points 0, 1, 2, 3 and two queries at 0.5 and 1.5, as above.
+    let d2 = vec![0.0, 1.0, 4.0, 9.0, 1.0, 0.0, 1.0, 4.0, 4.0, 1.0, 0.0, 1.0, 9.0, 4.0, 1.0, 0.0];
+    let y = [0.0, 1.0, 0.5, 0.25];
+    let cross = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, 2.25];
+    let square = [0.0, 1.0, 1.0, 0.0];
+
+    // `fit` searches θ (L-BFGS by default) on the supplied training square.
+    let trainer = Gpr::new(kernel.clone(), GaussianLikelihood::new(0.1)?);
+    assert_eq!(trainer.to_kernel().slots(), vec![DistanceSlot::Scalar(image)]);
+    let mut fitted = trainer
+        .fit([image.from_vec(d2.clone())], 4, &y)
+        .map_err(|(_, e)| e)?;
+    let latent = PredictOptions {
+        variance_kind: VarianceKind::Latent,
+    };
+    let _ = fitted.predict_with([image.borrow(&cross)], 2, latent)?;
+    let mut out = Prediction::default();
+    fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+    let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&square)], 2, latent)?;
+    // Three draws, column-major 2 × 3, from seed 7.
+    let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&square)], 2, 3, 7)?;
+    assert_eq!(draws.len(), 6);
+
+    // A value that is not a squared distance names its slot and pair.
+    let negative = [0.25, 0.25, 2.25, 6.25, 2.25, 0.25, 0.25, -2.25];
+    match fitted.predict([image.borrow(&negative)], 2) {
+        Err(GprError::InvalidDistance { slot, pair, .. }) => {
+            assert_eq!((slot, pair), (Some(0), Some((3, 1))));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // OnlineGpr: a point at 4 (its squared distances to the live points, in
+    // `point_ids` order), then its delete.
+    let mut online = fitted.into_online()?;
+    let id = online.insert([image.from_vec(vec![16.0, 9.0, 4.0, 1.0])], 0.3)?;
+    online.delete(id)?;
+    let _ = online.predict([image.borrow(&cross)], 2)?;
+
+    // An ARD kernel lists its slot as `DistanceSlot::Ard`.
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
+    assert_eq!(ard.slots(), vec![DistanceSlot::Ard(bands)]);
+
+    // A kernel with points maps its coordinates with an input transform.
+    let mixed = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+    let x = [0.0, 10.0, 20.0, 30.0];
+    let _ = Gpr::new(mixed, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(MinMaxInput::new())
+        .factor([image.from_vec(d2)], 4, &x, 1, &y)?;
+
+    // Svgp and OnlineSgpr save; a loaded model binds its new slots.
+    let train_z = vec![0.0, 1.0, 4.0, 9.0, 4.0, 1.0, 0.0, 1.0];
+    let cross_z = [0.25, 2.25, 2.25, 0.25];
+    let svgp = Svgp::new(kernel.clone(), GaussianLikelihood::new(0.1)?)
+        .factor([image.from_vec(train_z.clone())], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?;
+    assert_eq!((svgp.inducing(), svgp.slots()), (&[0, 2][..], vec![DistanceSlot::Scalar(image)]));
+    let _ = svgp.to_kernel();
+    let dir = std::env::temp_dir().join("gprx-readme-distance-svgp");
+    svgp.save(&dir)?;
+    let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    assert_eq!((loaded.n(), loaded.inducing()), (4, &[0, 2][..]));
+    let _ = loaded.to_kernel();
+    let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+        return Err(GprError::EmptyInput);
+    };
+    let _ = loaded.predict([slot.borrow(&cross_z)], 2)?;
+    let online = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .factor([image.from_vec(train_z)], 4, &y, &[0, 2])
+        .map_err(|(_, e)| e)?
+        .into_online();
+    let dir = std::env::temp_dir().join("gprx-readme-distance-online-sgpr");
+    online.save(&dir)?;
+    let _ = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    Ok(())
 }
 ```
 
