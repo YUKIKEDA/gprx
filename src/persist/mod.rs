@@ -408,7 +408,7 @@ type SavedScalar<P> = <<P as crate::precision::ModelPrecision>::Sources as Sourc
 struct KernelSave<'a, T: Clone> {
     kernel: KernelJson,
     distance: Option<DistanceJson>,
-    d2: Vec<(String, Vec<usize>, std::borrow::Cow<'a, [T]>)>,
+    d2: Vec<(String, Vec<usize>, crate::kernel::PackedRuns<'a, T>)>,
 }
 
 impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
@@ -420,7 +420,7 @@ impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
                 name: name.as_str(),
                 dtype: <T as ScalarOps>::DTYPE,
                 shape: shape.clone(),
-                bytes: scalar_bytes(values),
+                runs: values.runs().into_iter().map(scalar_bytes).collect(),
             })
             .collect()
     }

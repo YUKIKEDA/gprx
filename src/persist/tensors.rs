@@ -7,8 +7,8 @@ use faer::MatRef;
 use memmap2::Mmap;
 use std::io::Write;
 
-use safetensors::tensor::{Dtype, TensorView};
-use safetensors::{SafeTensors, View, serialize};
+use safetensors::SafeTensors;
+use safetensors::tensor::{Dtype, Metadata, TensorInfo, TensorView};
 
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
@@ -169,23 +169,73 @@ pub(super) struct FactorBytes<'a> {
 }
 
 /// One more tensor a save writes beside `x` / `y` (and the factor): its
-/// name, scalar, shape, and bytes.
+/// name, scalar, shape, and bytes as runs written one after another.
 pub(super) struct RawTensor<'a> {
     pub name: &'a str,
     pub dtype: Dtype,
     pub shape: Vec<usize>,
-    pub bytes: &'a [u8],
+    pub runs: Vec<&'a [u8]>,
 }
 
 impl<'a> RawTensor<'a> {
-    fn view(&self) -> Result<(&'a str, TensorView<'a>), GprError> {
-        let view = TensorView::new(self.dtype, self.shape.clone(), self.bytes).map_err(|err| {
-            persist_err(
+    fn body(&self) -> Result<(&'a str, Body<'a>), GprError> {
+        Ok((
+            self.name,
+            Body::new(self.name, self.dtype, self.shape.clone(), self.runs.clone())?,
+        ))
+    }
+}
+
+/// A tensor a save writes: dtype, shape, and its bytes as runs that follow
+/// one another, so a value laid out in pieces is written without joining
+/// it first.
+pub(super) struct Body<'a> {
+    dtype: Dtype,
+    shape: Vec<usize>,
+    runs: Vec<&'a [u8]>,
+    len: usize,
+}
+
+impl<'a> Body<'a> {
+    /// The tensor `name` of `runs`, whose bytes must be the shape's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GprError::PersistFailed`] with [`PersistErrorKind::Tensor`]
+    /// when the bytes are not `shape`'s count of `dtype` values.
+    fn new(
+        name: &str,
+        dtype: Dtype,
+        shape: Vec<usize>,
+        runs: Vec<&'a [u8]>,
+    ) -> Result<Self, GprError> {
+        let len = runs.iter().map(|run| run.len()).sum();
+        let want = shape
+            .iter()
+            .try_fold(dtype.bitsize() / 8, |acc, &dim| acc.checked_mul(dim))
+            .ok_or(GprError::SizeOverflow)?;
+        if len != want {
+            return Err(persist_err(
                 PersistErrorKind::Tensor,
-                format!("{} tensor: {err}", self.name),
-            )
-        })?;
-        Ok((self.name, view))
+                format!("{name} tensor has {len} bytes, expected {want} for shape {shape:?}"),
+            ));
+        }
+        Ok(Self {
+            dtype,
+            shape,
+            runs,
+            len,
+        })
+    }
+
+    /// The tensor of `view`, one run.
+    fn of_view(view: &TensorView<'a>) -> Self {
+        Self {
+            dtype: view.dtype(),
+            shape: view.shape().to_vec(),
+            runs: vec![view.data()],
+            len: view.data().len(),
+        }
     }
 }
 
@@ -212,60 +262,62 @@ pub(super) fn pack_lower<T: crate::kernel::KernelScalar>(l: MatRef<'_, T>, out: 
 /// Writes `views` as `dir/model.safetensors`, tensor by tensor into a
 /// temporary file that replaces the old one: the file is never built in
 /// memory. The bytes are those of [`safetensors::serialize`].
-fn write_views(dir: &Path, mut views: Vec<(&str, TensorView<'_>)>) -> Result<(), GprError> {
+fn write_views(dir: &Path, mut views: Vec<(&str, Body<'_>)>) -> Result<(), GprError> {
     let path = dir.join(TENSOR_FILE);
     super::atomic::write_atomic_with(&path, |file, temp| {
         let io = |err: std::io::Error| {
             persist_err(PersistErrorKind::Io, format!("write {temp:?}: {err}"))
         };
-        let header = safetensors_header(&mut views).map_err(|err| {
-            persist_err(PersistErrorKind::Tensor, format!("write {temp:?}: {err}"))
-        })?;
+        let header = safetensors_header(&mut views)?;
         let mut out = std::io::BufWriter::new(file);
         out.write_all(&header).map_err(io)?;
-        for (_, view) in &views {
-            out.write_all(view.data()).map_err(io)?;
+        for (_, body) in &views {
+            for run in &body.runs {
+                out.write_all(run).map_err(io)?;
+            }
         }
         out.flush().map_err(io)
     })
 }
 
 /// The header of a safetensors file of `views` (its length, then the JSON
-/// padded to 8 bytes), with `views` sorted into the order their data
-/// follows it: descending dtype alignment, then name, as `safetensors`
-/// lays them out. The header is `safetensors::serialize` of views that
-/// report their lengths but carry no bytes, so it is the crate's own.
-fn safetensors_header(
-    views: &mut [(&str, TensorView<'_>)],
-) -> Result<Vec<u8>, safetensors::SafeTensorError> {
+/// padded to 8 bytes with spaces), with `views` sorted into the order their
+/// data follows it: descending dtype alignment, then name. This is the
+/// layout `safetensors::serialize` writes, from the crate's own `Metadata`
+/// and `TensorInfo`; `serialize` itself reserves the whole file up front.
+fn safetensors_header(views: &mut [(&str, Body<'_>)]) -> Result<Vec<u8>, GprError> {
     views.sort_by(|(lname, left), (rname, right)| {
-        right.dtype().cmp(&left.dtype()).then(lname.cmp(rname))
+        right.dtype.cmp(&left.dtype).then(lname.cmp(rname))
     });
-    serialize(
-        views.iter().map(|(name, view)| (*name, HeaderOnly(view))),
-        None,
-    )
-}
-
-/// A tensor's dtype, shape, and length without its bytes.
-struct HeaderOnly<'a, 'v>(&'a TensorView<'v>);
-
-impl View for HeaderOnly<'_, '_> {
-    fn dtype(&self) -> Dtype {
-        self.0.dtype()
-    }
-
-    fn shape(&self) -> &[usize] {
-        self.0.shape()
-    }
-
-    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-        std::borrow::Cow::Borrowed(&[])
-    }
-
-    fn data_len(&self) -> usize {
-        self.0.data_len()
-    }
+    let mut offset = 0;
+    let infos = views
+        .iter()
+        .map(|(name, body)| {
+            let start = offset;
+            offset += body.len;
+            (
+                (*name).to_owned(),
+                TensorInfo {
+                    dtype: body.dtype,
+                    shape: body.shape.clone(),
+                    data_offsets: (start, offset),
+                },
+            )
+        })
+        .collect();
+    let tensor_err = |err: &dyn std::fmt::Display| {
+        persist_err(
+            PersistErrorKind::Tensor,
+            format!("safetensors header: {err}"),
+        )
+    };
+    let metadata = Metadata::new(None, infos).map_err(|err| tensor_err(&err))?;
+    let mut json = serde_json::to_vec(&metadata).map_err(|err| tensor_err(&err))?;
+    json.resize(json.len().next_multiple_of(8), b' ');
+    let mut header = Vec::with_capacity(8 + json.len());
+    header.extend_from_slice(&(json.len() as u64).to_le_bytes());
+    header.extend_from_slice(&json);
+    Ok(header)
 }
 
 pub(super) fn write_tensors(
@@ -333,17 +385,20 @@ pub(super) fn write_tensors(
         let alpha_view = TensorView::new(factor.alpha_dtype, vec![n], factor.alpha)
             .map_err(|err| persist_err(PersistErrorKind::Tensor, format!("alpha tensor: {err}")))?;
         vec![
-            (TENSOR_X, x_view),
-            (TENSOR_Y, y_view),
-            (TENSOR_L, l_view),
-            (TENSOR_ALPHA, alpha_view),
+            (TENSOR_X, Body::of_view(&x_view)),
+            (TENSOR_Y, Body::of_view(&y_view)),
+            (TENSOR_L, Body::of_view(&l_view)),
+            (TENSOR_ALPHA, Body::of_view(&alpha_view)),
         ]
     } else {
-        vec![(TENSOR_X, x_view), (TENSOR_Y, y_view)]
+        vec![
+            (TENSOR_X, Body::of_view(&x_view)),
+            (TENSOR_Y, Body::of_view(&y_view)),
+        ]
     };
     let mut views = views;
     for tensor in extra {
-        views.push(tensor.view()?);
+        views.push(tensor.body()?);
     }
     write_views(dir, views)
 }
@@ -556,10 +611,10 @@ pub(super) fn write_f64_tensors(
             TensorView::new(Dtype::F64, shape.clone(), f64_as_bytes(values)).map_err(|err| {
                 persist_err(PersistErrorKind::Tensor, format!("{name} tensor: {err}"))
             })?;
-        views.push((*name, view));
+        views.push((*name, Body::of_view(&view)));
     }
     for tensor in extra {
-        views.push(tensor.view()?);
+        views.push(tensor.body()?);
     }
     write_views(dir, views)
 }
@@ -595,7 +650,7 @@ pub(super) fn read_f64(
 mod tests {
     use safetensors::tensor::{Dtype, TensorView};
 
-    use super::{TENSOR_FILE, TensorFile, write_views};
+    use super::{Body, TENSOR_FILE, TensorFile, write_views};
     use crate::error::{GprError, PersistErrorKind};
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
@@ -627,10 +682,26 @@ mod tests {
                 ("x", TensorView::new(Dtype::F64, vec![1, 1], &b).expect("x")),
             ]
         };
-        write_views(&dir, views()).expect("write");
+        // `y` written as two runs, the others whole.
+        let (y0, y1) = a.split_at(8);
+        let bodies = vec![
+            (
+                "y",
+                Body::new("y", Dtype::F64, vec![3], vec![y0, y1]).expect("y"),
+            ),
+            ("s", Body::of_view(&views()[1].1)),
+            ("x", Body::of_view(&views()[2].1)),
+        ];
+        write_views(&dir, bodies).expect("write");
         let want = safetensors::serialize(views(), None).expect("serialize");
         assert_eq!(std::fs::read(dir.join(TENSOR_FILE)).expect("read"), want);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runs_that_miss_the_shape_are_refused() {
+        let a = bytes_of(&[1.0, 2.0]);
+        assert!(Body::new("t", Dtype::F64, vec![3], vec![&a]).is_err());
     }
 
     #[test]

@@ -215,6 +215,26 @@ impl<T: KernelScalar> Default for TrainSources<T> {
     }
 }
 
+/// A slot's packed values ([`TrainSources::packed`]) as runs that follow
+/// one another: a scalar square's column runs read in place, or an ARD
+/// slot's values whole.
+pub(crate) enum PackedRuns<'a, T: Clone> {
+    /// The lower triangle of a square, column by column.
+    Columns(Vec<&'a [T]>),
+    /// Every value in one run.
+    Whole(Cow<'a, [T]>),
+}
+
+impl<T: Clone> PackedRuns<'_, T> {
+    /// The runs, in order.
+    pub(crate) fn runs(&self) -> Vec<&[T]> {
+        match self {
+            Self::Columns(runs) => runs.clone(),
+            Self::Whole(all) => vec![all.as_ref()],
+        }
+    }
+}
+
 impl<T: KernelScalar> TrainSources<T> {
     /// A coordinate model's: no slots.
     pub(crate) fn empty() -> Self {
@@ -539,19 +559,21 @@ impl<T: KernelScalar> TrainSources<T> {
     /// triangle column by column (column `col` holds rows `col..n`), an ARD
     /// slot dimension after dimension. `None` when the store has no such
     /// slot. A packed ARD slot is read in place.
-    pub(crate) fn packed(&self, slot: SlotId) -> Option<Cow<'_, [T]>> {
+    pub(crate) fn packed(&self, slot: SlotId) -> Option<PackedRuns<'_, T>> {
         let (n, cap) = (self.n, self.cap.max(1));
         if let Some((_, square)) = self.scalar.iter().find(|(id, _)| *id == slot) {
-            let mut packed = Vec::with_capacity(packed_len(n).unwrap_or(0));
-            for col in 0..n {
-                packed.extend_from_slice(&square[col * cap + col..col * cap + n]);
-            }
-            return Some(Cow::Owned(packed));
+            // The column runs of the square, read in place: a save writes
+            // them one after another, with no packed copy.
+            return Some(PackedRuns::Columns(
+                (0..n)
+                    .map(|col| &square[col * cap + col..col * cap + n])
+                    .collect(),
+            ));
         }
         self.ard
             .iter()
             .find(|(id, _)| *id == slot)
-            .map(|(_, cache)| cache.packed())
+            .map(|(_, cache)| PackedRuns::Whole(cache.packed()))
     }
 
     /// The store of `n` points of `slots` (the kernel's slots, in order)
