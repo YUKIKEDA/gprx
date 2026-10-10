@@ -404,13 +404,9 @@ impl DistanceJson {
     ///
     /// Returns [`GprError::PersistFailed`] with [`PersistErrorKind::Config`]
     /// for an empty table or an ARD slot of no dimension.
+    /// The table's slots, new ones. An empty table is a distance kernel
+    /// with no slot, such as a coordinate tree as `DistanceKernel::from`.
     pub(super) fn decode_slots(&self) -> Result<Vec<DistanceSlot>, GprError> {
-        if self.slots.is_empty() {
-            return Err(persist_err(
-                PersistErrorKind::Config,
-                "a distance model's slot table is empty",
-            ));
-        }
         self.slots
             .iter()
             .map(|slot| {

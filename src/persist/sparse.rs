@@ -50,12 +50,6 @@ struct OnlineIds {
     next_inducing: u64,
 }
 
-/// The distance marker of a model of kernel `K` with `slots`: none for a
-/// coordinate kernel.
-fn points_of<K: ModelKernel>(slots: &[DistanceSlot]) -> Option<PointsJson> {
-    (!slots.is_empty()).then(PointsJson::of::<K>)
-}
-
 /// Each slot's `n × m` training blocks, as tensor `d2.<k>` for slot `k`:
 /// `[n, m]` for a scalar slot, `[dims, n, m]` for an ARD slot, each block
 /// column-major.
@@ -108,7 +102,6 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
         None => (None, None, None, None),
     };
     let slots = core.slots();
-    let points = points_of::<K>(slots);
     let config = SparseConfig {
         format_version: FORMAT_VERSION,
         model,
@@ -129,12 +122,12 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
         next_point_id,
         inducing_ids,
         next_inducing_id,
-        distance: points
-            .zip(core.supply())
-            .map(|(points, supply)| SparseDistanceJson {
-                table: DistanceJson::encode(points, slots),
-                inducing: supply.inducing.clone(),
-            }),
+        // A model on supplied distances, even one with no slot, writes
+        // its table and inducing indices; a coordinate model has none.
+        distance: core.supply().map(|supply| SparseDistanceJson {
+            table: DistanceJson::encode(PointsJson::of::<K>(), slots),
+            inducing: supply.inducing.clone(),
+        }),
     };
     let json = serde_json::to_vec_pretty(&config).map_err(|err| {
         persist_err(
